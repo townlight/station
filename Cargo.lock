@@ -3,6 +3,14 @@
 version = 4
 
 [[package]]
+name = "channel-worker"
+version = "0.1.0"
+dependencies = [
+ "station-media-journal",
+ "station-media-protocol",
+]
+
+[[package]]
 name = "itoa"
 version = "1.0.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -90,6 +98,13 @@ name = "station-domain"
 version = "0.1.0"
 dependencies = [
  "serde",
+]
+
+[[package]]
+name = "station-media-journal"
+version = "0.1.0"
+dependencies = [
+ "station-media-protocol",
 ]
 
 [[package]]

@@ -26,6 +26,8 @@ The domain crate has no storage, HTTP, media, or Windows-service dependencies. S
 
 `station-media-protocol` is independent of the control-plane crates. It defines bounded length-prefixed command and event envelopes, explicit protocol versions, command identifiers, expected worker sequences, and durable event sequences. See [ADR 0001](../adr/0001-media-worker-protocol.md).
 
+`station-media-journal` owns the append-only per-channel record. `channel-worker` is its sole writer. Every record has a journal magic/version header, bounded length, CRC-32 checksum, worker/channel identity, and strict monotonic event sequence. Writes are flushed and synchronized before the corresponding event is emitted. Restart scans the complete journal and resumes at the next sequence; corruption and partial tails prevent a false clean recovery. See [ADR 0002](../adr/0002-durable-channel-journal.md).
+
 ## Authority rules
 
 | Truth | Owner |
@@ -54,4 +56,6 @@ Rust is used for native services, workers, command-line tools, and installation 
 
 ## Current vertical slice
 
-The first slice commissions a station profile through `PUT /api/v1/station`, protects updates with an expected revision, persists it transactionally in SQLite with WAL and foreign-key enforcement, reads it after restart, and exposes database readiness through `GET /health`. It establishes the API-to-domain-to-storage path that subsequent commissioning capabilities will extend.
+The current spine commissions a station profile through `PUT /api/v1/station`, protects updates with an expected revision, persists it transactionally in SQLite with WAL and foreign-key enforcement, reads it after restart, and exposes database readiness through `GET /health`.
+
+The first channel worker now runs as an independent process. It records readiness, heartbeat, applied-plan revision, rejected-command, and shutdown events durably before emitting them, and resumes its event sequence after restart. Its current standard-input/output transport is a testable bridge to the planned ACL-protected named pipe; it is not the final service supervision path. The persistent GStreamer graph and real output remain the next media milestone.

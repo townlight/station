@@ -1,9 +1,11 @@
 [workspace]
 resolver = "3"
 members = [
+    "bins/channel-worker",
     "bins/stationd",
     "crates/station-api",
     "crates/station-domain",
+    "crates/station-media-journal",
     "crates/station-media-protocol",
     "crates/station-storage",
 ]
@@ -18,6 +20,7 @@ serde = { version = "=1.0.228", features = ["derive"] }
 serde_json = "=1.0.150"
 station-api = { path = "crates/station-api" }
 station-domain = { path = "crates/station-domain" }
+station-media-journal = { path = "crates/station-media-journal" }
 station-media-protocol = { path = "crates/station-media-protocol" }
 station-storage = { path = "crates/station-storage" }
 

@@ -1,0 +1,13 @@
+[package]
+name = "channel-worker"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+station-media-journal.workspace = true
+station-media-protocol.workspace = true
+
+[dev-dependencies]
+station-media-journal.workspace = true
+station-media-protocol.workspace = true
