@@ -1587,6 +1587,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "station-feed-fetch"
+version = "0.1.0"
+dependencies = [
+ "station-cg",
+ "station-feed-normalization",
+ "station-schedule",
+ "station-storage",
+ "ureq",
+ "url",
+]
+
+[[package]]
 name = "station-feed-normalization"
 version = "0.1.0"
 dependencies = [

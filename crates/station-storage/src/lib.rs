@@ -1830,6 +1830,14 @@ impl StationStore {
         }
     }
 
+    pub fn list_all_cg_feed_sources(&self) -> Result<Vec<CgFeedSource>, String> {
+        let mut feeds = Vec::new();
+        for channel in self.list_channels()? {
+            feeds.extend(self.list_cg_feed_sources(&channel.channel_id)?);
+        }
+        Ok(feeds)
+    }
+
     pub fn replace_cg_feed_cache(
         &self,
         feed_source_id: &str,
@@ -1838,32 +1846,12 @@ impl StationStore {
         etag: Option<&str>,
         last_modified: Option<&str>,
     ) -> Result<CgFeedCacheEntry, CgWriteError> {
-        let feed_source_id_value = feed_source_id.to_string();
-        let feed = self
-            .read_cg_feed_source(feed_source_id)
-            .map_err(CgWriteError::Storage)?
-            .ok_or(CgWriteError::NotFound)?;
-        if !feed.enabled {
+        if fetched_at_unix_ms < 0 {
             return Err(CgWriteError::Invalid(
-                "CG feed cache cannot be replaced for a disabled source.",
+                "CG feed-cache time cannot be negative.",
             ));
         }
-        let refresh_seconds = feed.refresh_seconds;
-        let expires_at_unix_ms = fetched_at_unix_ms
-            .checked_add(i64::from(refresh_seconds) * 1_000)
-            .ok_or(CgWriteError::Invalid(
-                "CG feed-cache expiry exceeds the supported range.",
-            ))?;
-        let entry = CgFeedCacheEntry {
-            feed_source_id: feed_source_id_value.clone(),
-            fetched_at_unix_ms,
-            expires_at_unix_ms,
-            etag: etag.map(str::to_string),
-            last_modified: last_modified.map(str::to_string),
-            last_error: None,
-            items: items.to_vec(),
-        };
-        entry.validate().map_err(CgWriteError::Invalid)?;
+        let feed_source_id_value = feed_source_id.to_string();
         self.execute("BEGIN IMMEDIATE")
             .map_err(CgWriteError::Storage)?;
         let outcome = (|| {
@@ -1876,6 +1864,30 @@ impl StationStore {
                     "CG feed cache cannot be replaced for a disabled source.",
                 ));
             }
+            if fetched_at_unix_ms < current.created_at_unix_ms
+                || current
+                    .last_fetched_at_unix_ms
+                    .is_some_and(|last| fetched_at_unix_ms < last)
+            {
+                return Err(CgWriteError::Invalid(
+                    "CG feed-cache time cannot move backward.",
+                ));
+            }
+            let expires_at_unix_ms = fetched_at_unix_ms
+                .checked_add(i64::from(current.refresh_seconds) * 1_000)
+                .ok_or(CgWriteError::Invalid(
+                    "CG feed-cache expiry exceeds the supported range.",
+                ))?;
+            let entry = CgFeedCacheEntry {
+                feed_source_id: feed_source_id_value.clone(),
+                fetched_at_unix_ms,
+                expires_at_unix_ms,
+                etag: etag.map(str::to_string),
+                last_modified: last_modified.map(str::to_string),
+                last_error: None,
+                items: items.to_vec(),
+            };
+            entry.validate().map_err(CgWriteError::Invalid)?;
             let source = c_string(feed_source_id, "CG feed-cache source identity")
                 .map_err(CgWriteError::Storage)?;
             let delete_items = self
@@ -1963,6 +1975,84 @@ impl StationStore {
         finish_cg_transaction(self, outcome)
     }
 
+    pub fn refresh_cg_feed_cache(
+        &self,
+        feed_source_id: &str,
+        fetched_at_unix_ms: i64,
+    ) -> Result<CgFeedCacheEntry, CgWriteError> {
+        if fetched_at_unix_ms < 0 {
+            return Err(CgWriteError::Invalid(
+                "CG feed-cache refresh time cannot be negative.",
+            ));
+        }
+        self.execute("BEGIN IMMEDIATE")
+            .map_err(CgWriteError::Storage)?;
+        let outcome = (|| {
+            let feed = self
+                .read_cg_feed_source(feed_source_id)
+                .map_err(CgWriteError::Storage)?
+                .ok_or(CgWriteError::NotFound)?;
+            if !feed.enabled {
+                return Err(CgWriteError::Invalid(
+                    "CG feed cache cannot be refreshed for a disabled source.",
+                ));
+            }
+            if fetched_at_unix_ms < feed.created_at_unix_ms
+                || feed
+                    .last_fetched_at_unix_ms
+                    .is_some_and(|last| fetched_at_unix_ms < last)
+            {
+                return Err(CgWriteError::Invalid(
+                    "CG feed-cache refresh time cannot move backward.",
+                ));
+            }
+            let current = self
+                .read_cg_feed_cache(feed_source_id)
+                .map_err(CgWriteError::Storage)?
+                .ok_or(CgWriteError::NotFound)?;
+            let expires_at_unix_ms = fetched_at_unix_ms
+                .checked_add(i64::from(feed.refresh_seconds) * 1_000)
+                .ok_or(CgWriteError::Invalid(
+                    "CG feed-cache expiry exceeds the supported range.",
+                ))?;
+            let source = c_string(feed_source_id, "CG feed-cache source identity")
+                .map_err(CgWriteError::Storage)?;
+            let meta = self
+                .prepare(
+                    "UPDATE cg_feed_cache_meta SET fetched_at_unix_ms=?1, \
+                     expires_at_unix_ms=?2, last_error='' WHERE feed_source_id=?3",
+                )
+                .map_err(CgWriteError::Storage)?;
+            bind_i64(self.database, meta.raw, 1, fetched_at_unix_ms)
+                .map_err(CgWriteError::Storage)?;
+            bind_i64(self.database, meta.raw, 2, expires_at_unix_ms)
+                .map_err(CgWriteError::Storage)?;
+            bind_text(self.database, meta.raw, 3, &source).map_err(CgWriteError::Storage)?;
+            expect_done(self.database, meta.raw).map_err(CgWriteError::Storage)?;
+            let source_update = self
+                .prepare(
+                    "UPDATE cg_feed_sources SET last_fetched_at_unix_ms=?1, last_fetch_error='' \
+                     WHERE feed_source_id=?2",
+                )
+                .map_err(CgWriteError::Storage)?;
+            bind_i64(self.database, source_update.raw, 1, fetched_at_unix_ms)
+                .map_err(CgWriteError::Storage)?;
+            bind_text(self.database, source_update.raw, 2, &source)
+                .map_err(CgWriteError::Storage)?;
+            expect_done(self.database, source_update.raw).map_err(CgWriteError::Storage)?;
+            Ok(CgFeedCacheEntry {
+                feed_source_id: feed_source_id.into(),
+                fetched_at_unix_ms,
+                expires_at_unix_ms,
+                etag: current.etag,
+                last_modified: current.last_modified,
+                last_error: None,
+                items: current.items,
+            })
+        })();
+        finish_cg_transaction(self, outcome)
+    }
+
     pub fn record_cg_feed_fetch_failure(
         &self,
         feed_source_id: &str,
@@ -1977,9 +2067,19 @@ impl StationStore {
         self.execute("BEGIN IMMEDIATE")
             .map_err(CgWriteError::Storage)?;
         let outcome = (|| {
-            self.read_cg_feed_source(feed_source_id)
+            let feed = self
+                .read_cg_feed_source(feed_source_id)
                 .map_err(CgWriteError::Storage)?
                 .ok_or(CgWriteError::NotFound)?;
+            if failed_at_unix_ms < feed.created_at_unix_ms
+                || feed
+                    .last_fetched_at_unix_ms
+                    .is_some_and(|last| failed_at_unix_ms < last)
+            {
+                return Err(CgWriteError::Invalid(
+                    "CG feed-fetch time cannot move backward.",
+                ));
+            }
             let statement = self
                 .prepare(
                     "UPDATE cg_feed_sources SET last_fetched_at_unix_ms=?1, last_fetch_error=?2 \
