@@ -1,7 +1,9 @@
 use std::io::{ErrorKind, Read, Write};
+use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::time::Instant;
 
+use station_media_engine::SyntheticPlayout;
 use station_media_journal::JournalWriter;
 use station_media_protocol::{
     ChannelCommand, CommandEnvelope, MAX_FRAME_BYTES, PROTOCOL_VERSION, WorkerEvent,
@@ -10,15 +12,20 @@ use station_media_protocol::{
 use station_windows_ipc::PipeStream;
 
 fn main() {
-    let (worker_id, channel_id, journal_path, pipe_name) = arguments().unwrap_or_else(|message| {
-        eprintln!("{message}");
-        std::process::exit(2);
-    });
+    let (worker_id, channel_id, journal_path, pipe_name, udp_destination) = arguments()
+        .unwrap_or_else(|message| {
+            eprintln!("{message}");
+            std::process::exit(2);
+        });
     let mut journal = JournalWriter::open(journal_path, &worker_id, &channel_id)
         .unwrap_or_else(|error| fatal(3, "open its journal", &format!("{error:?}")));
     let started = Instant::now();
     let mut pipe = PipeStream::connect(&pipe_name)
         .unwrap_or_else(|error| fatal(5, "connect to its control pipe", &format!("{error:?}")));
+    let mut media = Some(
+        SyntheticPlayout::start_udp(udp_destination)
+            .unwrap_or_else(|error| fatal(8, "start its fallback graph", &format!("{error:?}"))),
+    );
 
     record_and_emit(
         &mut journal,
@@ -43,6 +50,13 @@ fn main() {
             journal.next_sequence(),
             started.elapsed().as_millis() as u64,
         );
+        if should_stop {
+            media
+                .take()
+                .expect("a running worker owns its media graph")
+                .stop()
+                .unwrap_or_else(|error| fatal(9, "stop its media graph", &format!("{error:?}")));
+        }
         record_and_emit(&mut journal, &mut pipe, &worker_id, &channel_id, event)
             .unwrap_or_else(|error| fatal(7, "record and emit an event", &error));
         if should_stop {
@@ -51,24 +65,37 @@ fn main() {
     }
 }
 
-fn arguments() -> Result<(String, String, PathBuf, String), &'static str> {
+fn arguments() -> Result<(String, String, PathBuf, String, SocketAddr), String> {
+    const USAGE: &str = "usage: channel-worker <worker-id> <channel-id> <journal-path> <pipe-name> <udp-destination>";
     let mut arguments = std::env::args_os().skip(1);
     let Some(worker_id) = arguments.next().and_then(|value| value.into_string().ok()) else {
-        return Err("usage: channel-worker <worker-id> <channel-id> <journal-path> <pipe-name>");
+        return Err(USAGE.into());
     };
     let Some(channel_id) = arguments.next().and_then(|value| value.into_string().ok()) else {
-        return Err("usage: channel-worker <worker-id> <channel-id> <journal-path> <pipe-name>");
+        return Err(USAGE.into());
     };
     let Some(journal_path) = arguments.next().map(PathBuf::from) else {
-        return Err("usage: channel-worker <worker-id> <channel-id> <journal-path> <pipe-name>");
+        return Err(USAGE.into());
     };
     let Some(pipe_name) = arguments.next().and_then(|value| value.into_string().ok()) else {
-        return Err("usage: channel-worker <worker-id> <channel-id> <journal-path> <pipe-name>");
+        return Err(USAGE.into());
     };
+    let Some(udp_destination) = arguments.next().and_then(|value| value.into_string().ok()) else {
+        return Err(USAGE.into());
+    };
+    let udp_destination = udp_destination
+        .parse()
+        .map_err(|_| "udp-destination must be an IP address and port".to_string())?;
     if arguments.next().is_some() {
-        return Err("usage: channel-worker <worker-id> <channel-id> <journal-path> <pipe-name>");
+        return Err(USAGE.into());
     }
-    Ok((worker_id, channel_id, journal_path, pipe_name))
+    Ok((
+        worker_id,
+        channel_id,
+        journal_path,
+        pipe_name,
+        udp_destination,
+    ))
 }
 
 fn read_command_frame(input: &mut impl Read) -> Result<Option<Vec<u8>>, String> {

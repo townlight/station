@@ -1,3 +1,4 @@
+use std::net::UdpSocket;
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -19,11 +20,16 @@ fn journal_path() -> PathBuf {
 #[test]
 fn launches_handshakes_commands_and_cleanly_stops_the_real_worker() {
     let journal = journal_path();
+    let output = UdpSocket::bind("127.0.0.1:0").unwrap();
+    output
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
     let launched = WorkerSupervisor::launch(
         PathBuf::from(env!("CARGO_BIN_EXE_channel-worker")).as_path(),
         WORKER_ID,
         CHANNEL_ID,
         &journal,
+        output.local_addr().unwrap(),
         Duration::from_secs(2),
     );
     assert!(
@@ -38,6 +44,11 @@ fn launches_handshakes_commands_and_cleanly_stops_the_real_worker() {
         ready.event,
         WorkerEvent::Ready { graph_revision: 0 }
     ));
+    let mut datagram = [0_u8; 65_536];
+    let received = output.recv(&mut datagram).unwrap();
+    assert!(received >= 188);
+    assert_eq!(received % 188, 0);
+    assert_eq!(datagram[0], 0x47);
 
     let heartbeat = supervisor
         .command("ping-1", ChannelCommand::Ping, Duration::from_secs(1))
@@ -72,6 +83,7 @@ fn launches_handshakes_commands_and_cleanly_stops_the_real_worker() {
         WORKER_ID,
         CHANNEL_ID,
         &journal,
+        output.local_addr().unwrap(),
         Duration::from_secs(2),
     )
     .unwrap();

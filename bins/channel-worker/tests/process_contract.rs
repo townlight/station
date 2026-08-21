@@ -1,4 +1,5 @@
 use std::io::{Read, Write};
+use std::net::UdpSocket;
 use std::path::PathBuf;
 use std::process::{Command, Output, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -54,10 +55,12 @@ fn run_worker(
         .replace('.', "-");
     let server = PipeServer::bind(&suffix).unwrap();
     let pipe_name = server.name().to_string();
+    let udp = UdpSocket::bind("127.0.0.1:0").unwrap();
     let child = Command::new(env!("CARGO_BIN_EXE_channel-worker"))
         .args([WORKER_ID, CHANNEL_ID])
         .arg(journal)
         .arg(pipe_name)
+        .arg(udp.local_addr().unwrap().to_string())
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

@@ -1,4 +1,5 @@
 use std::io::{Read, Write};
+use std::net::SocketAddr;
 use std::path::Path;
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -55,6 +56,7 @@ impl WorkerSupervisor {
         worker_id: &str,
         channel_id: &str,
         journal_path: &Path,
+        udp_destination: SocketAddr,
         timeout: Duration,
     ) -> Result<Self, SupervisorError> {
         let started = Instant::now();
@@ -68,6 +70,7 @@ impl WorkerSupervisor {
             .args([worker_id, channel_id])
             .arg(journal_path)
             .arg(server.name())
+            .arg(udp_destination.to_string())
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())

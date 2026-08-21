@@ -53,7 +53,7 @@ The response includes the new `revision`. Send that value as `expected_revision`
 
 ## Channel worker
 
-`channel-worker <worker-id> <channel-id> <journal-path> <pipe-name>` connects to the station service through its private duplex Windows named pipe. The pipe is restricted to the creating user, Administrators, and SYSTEM, rejects remote clients, and permits only one server instance. The worker emits framed events only after appending and synchronizing them to the channel journal; protocol traffic never uses standard input or output. `Ping`, `ApplyPlan`, and `Shutdown` are executable; live transitions are explicitly rejected until `station-media-engine` is integrated into the worker.
+`channel-worker <worker-id> <channel-id> <journal-path> <pipe-name> <udp-destination>` connects to the station service through its private duplex Windows named pipe and owns the channel media graph. It reports `Ready` only after fallback output starts, and reports `ShutdownComplete` only after the graph stops. The pipe is restricted to the creating user, Administrators, and SYSTEM, rejects remote clients, and permits only one server instance. `Ping`, `ApplyPlan`, and `Shutdown` are executable; live transitions remain explicitly rejected.
 
 ## Media engine
 
