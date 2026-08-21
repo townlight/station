@@ -1,6 +1,8 @@
 /target/
+/target-*/
 /dist/
 /installer/.build/
+/.build-tools/
 **/node_modules/
 *.db
 *.db-shm

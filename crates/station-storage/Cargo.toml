@@ -7,6 +7,7 @@ publish.workspace = true
 [dependencies]
 serde_json.workspace = true
 sha2.workspace = true
+station-cg.workspace = true
 station-domain.workspace = true
 station-media-lifecycle.workspace = true
 station-schedule.workspace = true

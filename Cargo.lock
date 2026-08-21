@@ -1551,6 +1551,7 @@ dependencies = [
  "serde",
  "serde_json",
  "station-alerting",
+ "station-cg",
  "station-domain",
  "station-ingest",
  "station-media-lifecycle",
@@ -1560,6 +1561,13 @@ dependencies = [
  "station-update",
  "station-update-coordinator",
  "zip",
+]
+
+[[package]]
+name = "station-cg"
+version = "0.1.0"
+dependencies = [
+ "serde",
 ]
 
 [[package]]
@@ -1668,6 +1676,7 @@ version = "0.1.0"
 dependencies = [
  "serde_json",
  "sha2",
+ "station-cg",
  "station-domain",
  "station-media-lifecycle",
  "station-schedule",

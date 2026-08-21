@@ -8,6 +8,7 @@ publish.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 station-alerting.workspace = true
+station-cg.workspace = true
 station-domain.workspace = true
 station-media-lifecycle.workspace = true
 station-schedule.workspace = true

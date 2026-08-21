@@ -6,6 +6,7 @@ members = [
     "bins/stationd",
     "crates/station-api",
     "crates/station-alerting",
+    "crates/station-cg",
     "crates/station-domain",
     "crates/station-media-journal",
     "crates/station-media-lifecycle",
@@ -43,6 +44,7 @@ semver = "=1.0.28"
 sha2 = "=0.10.9"
 station-api = { path = "crates/station-api" }
 station-alerting = { path = "crates/station-alerting" }
+station-cg = { path = "crates/station-cg" }
 station-domain = { path = "crates/station-domain" }
 station-media-journal = { path = "crates/station-media-journal" }
 station-media-lifecycle = { path = "crates/station-media-lifecycle" }

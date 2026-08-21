@@ -1,9 +1,14 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::ffi::{CStr, CString, c_char, c_int, c_longlong, c_void};
 use std::path::{Path, PathBuf};
 use std::ptr;
 
 use sha2::{Digest, Sha256};
+use station_cg::{
+    CgAuditEvent, CgAuditEventKind, CgBoard, CgBulletin, CgBulletinContent, CgBulletinState,
+    CgContentSource, CgFeedItemApproval, CgFeedKind, CgFeedSource, CgFeedTrustTier, CgZoneConfig,
+    CgZoneKind, built_in_template,
+};
 use station_domain::{
     AlertChannel, AlertChannelKind, AlertConditionKind, AlertDelivery, AlertDeliveryPayload,
     AlertDeliveryState, AlertEvent, AlertEventState, AlertNotificationKind, AlertRule,
@@ -141,6 +146,14 @@ pub enum ProfileWriteError {
 pub enum CommitWriteError {
     NotFound,
     GateFailed(Box<CommitPlan>),
+    Invalid(&'static str),
+    Storage(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CgWriteError {
+    NotFound,
+    Conflict(u64),
     Invalid(&'static str),
     Storage(String),
 }
@@ -515,6 +528,7 @@ impl StationStore {
         store.migrate_channel_output_profile()?;
         store.migrate_channel_output_sink_kinds()?;
         store.migrate_channel_output_sinks()?;
+        store.initialize_cg_schema()?;
         store.execute(
             "CREATE TABLE IF NOT EXISTS srt_output_secrets (\
                channel_id TEXT NOT NULL,\
@@ -1303,6 +1317,1062 @@ impl StationStore {
                 _ => return Err(sqlite_error(self.database)),
             }
         }
+    }
+
+    pub fn write_cg_board(
+        &self,
+        board: &CgBoard,
+        expected_revision: u64,
+        audit: &CgAuditEvent,
+    ) -> Result<CgBoard, CgWriteError> {
+        board.validate().map_err(CgWriteError::Invalid)?;
+        audit.validate().map_err(CgWriteError::Invalid)?;
+        if audit.channel_id != board.channel_id
+            || audit.board_id.as_deref() != Some(board.board_id.as_str())
+            || audit.operator_id.trim().is_empty()
+        {
+            return Err(CgWriteError::Invalid(
+                "CG board audit evidence does not identify the proposed board.",
+            ));
+        }
+        self.execute("BEGIN IMMEDIATE")
+            .map_err(CgWriteError::Storage)?;
+        let outcome = (|| {
+            let current = self
+                .read_cg_board(&board.channel_id)
+                .map_err(CgWriteError::Storage)?;
+            let current_revision = current.as_ref().map_or(0, |value| value.revision);
+            if current_revision != expected_revision {
+                return Err(CgWriteError::Conflict(current_revision));
+            }
+            if board.revision != expected_revision.saturating_add(1) {
+                return Err(CgWriteError::Invalid(
+                    "CG board revision must be exactly one greater than the expected revision.",
+                ));
+            }
+            match current {
+                None if audit.event_kind != CgAuditEventKind::BoardCreated => {
+                    return Err(CgWriteError::Invalid(
+                        "A new CG board requires a board-created audit event.",
+                    ));
+                }
+                Some(existing)
+                    if audit.event_kind != CgAuditEventKind::BoardUpdated
+                        || existing.board_id != board.board_id
+                        || existing.created_at_unix_ms != board.created_at_unix_ms
+                        || existing.created_by != board.created_by
+                        || board.updated_at_unix_ms < existing.updated_at_unix_ms =>
+                {
+                    return Err(CgWriteError::Invalid(
+                        "A CG board update cannot replace identity, provenance, or move time backward.",
+                    ));
+                }
+                _ => {}
+            }
+            if let Some(asset_id) = &board.background_audio_asset_id {
+                let asset = self
+                    .read_media_asset(asset_id)
+                    .map_err(CgWriteError::Storage)?
+                    .ok_or(CgWriteError::NotFound)?;
+                if asset.readiness != AssetReadiness::Ready {
+                    return Err(CgWriteError::Invalid(
+                        "CG background audio must identify an air-ready managed asset.",
+                    ));
+                }
+            }
+            let template = built_in_template(&board.template_id).ok_or(CgWriteError::Invalid(
+                "CG board refers to an unavailable template.",
+            ))?;
+            for zone in self
+                .list_cg_zones(&board.board_id)
+                .map_err(CgWriteError::Storage)?
+            {
+                let Some(template_zone) = template
+                    .zones
+                    .iter()
+                    .find(|candidate| candidate.template_zone_key == zone.template_zone_key)
+                else {
+                    return Err(CgWriteError::Invalid(
+                        "The selected CG template does not contain an existing configured zone.",
+                    ));
+                };
+                if template_zone.zone_kind != zone.zone_kind {
+                    return Err(CgWriteError::Invalid(
+                        "The selected CG template changes an existing zone kind.",
+                    ));
+                }
+            }
+            self.upsert_cg_board(board).map_err(CgWriteError::Storage)?;
+            self.insert_cg_audit(audit).map_err(CgWriteError::Storage)?;
+            Ok(board.clone())
+        })();
+        finish_cg_transaction(self, outcome)
+    }
+
+    pub fn read_cg_board(&self, channel_id: &str) -> Result<Option<CgBoard>, String> {
+        let statement = self.prepare(
+            "SELECT board_id, channel_id, template_id, active, background_audio_asset_id, revision, \
+             created_at_unix_ms, updated_at_unix_ms, created_by FROM cg_boards WHERE channel_id=?1",
+        )?;
+        let channel_id = c_string(channel_id, "CG board channel identity")?;
+        bind_text(self.database, statement.raw, 1, &channel_id)?;
+        match unsafe { sqlite3_step(statement.raw) } {
+            SQLITE_ROW => Ok(Some(read_cg_board_row(statement.raw)?)),
+            SQLITE_DONE => Ok(None),
+            _ => Err(sqlite_error(self.database)),
+        }
+    }
+
+    pub fn write_cg_zone(
+        &self,
+        zone: &CgZoneConfig,
+        expected_revision: u64,
+        audit: &CgAuditEvent,
+    ) -> Result<CgZoneConfig, CgWriteError> {
+        zone.validate().map_err(CgWriteError::Invalid)?;
+        audit.validate().map_err(CgWriteError::Invalid)?;
+        if audit.board_id.as_deref() != Some(zone.board_id.as_str()) {
+            return Err(CgWriteError::Invalid(
+                "CG zone audit evidence does not identify the proposed board.",
+            ));
+        }
+        self.execute("BEGIN IMMEDIATE")
+            .map_err(CgWriteError::Storage)?;
+        let outcome = (|| {
+            let board = self
+                .read_cg_board_by_id(&zone.board_id)
+                .map_err(CgWriteError::Storage)?
+                .ok_or(CgWriteError::NotFound)?;
+            if audit.channel_id != board.channel_id {
+                return Err(CgWriteError::Invalid(
+                    "CG zone audit evidence identifies the wrong channel.",
+                ));
+            }
+            let template = built_in_template(&board.template_id).ok_or(CgWriteError::Invalid(
+                "CG board refers to an unavailable template.",
+            ))?;
+            let template_zone = template
+                .zones
+                .iter()
+                .find(|candidate| candidate.template_zone_key == zone.template_zone_key)
+                .ok_or(CgWriteError::Invalid(
+                    "CG zone does not belong to the board template.",
+                ))?;
+            if template_zone.zone_kind != zone.zone_kind {
+                return Err(CgWriteError::Invalid(
+                    "CG zone kind does not match its template region.",
+                ));
+            }
+            match &zone.content_source {
+                CgContentSource::Feed { feed_source_id } => {
+                    let feed = self
+                        .read_cg_feed_source(feed_source_id)
+                        .map_err(CgWriteError::Storage)?
+                        .ok_or(CgWriteError::NotFound)?;
+                    if feed.channel_id != board.channel_id || !feed.enabled {
+                        return Err(CgWriteError::Invalid(
+                            "CG zone feed must be enabled and belong to the board channel.",
+                        ));
+                    }
+                }
+                CgContentSource::Image { asset_id } => {
+                    let asset = self
+                        .read_media_asset(asset_id)
+                        .map_err(CgWriteError::Storage)?
+                        .ok_or(CgWriteError::NotFound)?;
+                    if asset.readiness != AssetReadiness::Ready {
+                        return Err(CgWriteError::Invalid(
+                            "CG zone image must identify a ready managed asset.",
+                        ));
+                    }
+                }
+                _ => {}
+            }
+            let current = self
+                .read_cg_zone(&zone.zone_id)
+                .map_err(CgWriteError::Storage)?;
+            let current_revision = current.as_ref().map_or(0, |value| value.revision);
+            if current_revision != expected_revision {
+                return Err(CgWriteError::Conflict(current_revision));
+            }
+            if zone.revision != expected_revision.saturating_add(1) {
+                return Err(CgWriteError::Invalid(
+                    "CG zone revision must be exactly one greater than the expected revision.",
+                ));
+            }
+            match current {
+                None if audit.event_kind != CgAuditEventKind::ZoneCreated => {
+                    return Err(CgWriteError::Invalid(
+                        "A new CG zone requires a zone-created audit event.",
+                    ));
+                }
+                Some(existing)
+                    if audit.event_kind != CgAuditEventKind::ZoneUpdated
+                        || existing.board_id != zone.board_id
+                        || existing.created_at_unix_ms != zone.created_at_unix_ms
+                        || zone.updated_at_unix_ms < existing.updated_at_unix_ms =>
+                {
+                    return Err(CgWriteError::Invalid(
+                        "A CG zone update cannot replace identity, provenance, or move time backward.",
+                    ));
+                }
+                _ => {}
+            }
+            self.upsert_cg_zone(zone).map_err(CgWriteError::Storage)?;
+            self.insert_cg_audit(audit).map_err(CgWriteError::Storage)?;
+            Ok(zone.clone())
+        })();
+        finish_cg_transaction(self, outcome)
+    }
+
+    pub fn read_cg_zone(&self, zone_id: &str) -> Result<Option<CgZoneConfig>, String> {
+        let statement = self.prepare(
+            "SELECT zone_id, board_id, template_zone_key, zone_kind, content_source_json, \
+             rotation_seconds, approval_required, allowed_tags_json, revision, created_at_unix_ms, \
+             updated_at_unix_ms FROM cg_zone_configs WHERE zone_id=?1",
+        )?;
+        let zone_id = c_string(zone_id, "CG zone identity")?;
+        bind_text(self.database, statement.raw, 1, &zone_id)?;
+        match unsafe { sqlite3_step(statement.raw) } {
+            SQLITE_ROW => Ok(Some(read_cg_zone_row(statement.raw)?)),
+            SQLITE_DONE => Ok(None),
+            _ => Err(sqlite_error(self.database)),
+        }
+    }
+
+    pub fn list_cg_zones(&self, board_id: &str) -> Result<Vec<CgZoneConfig>, String> {
+        let statement = self.prepare(
+            "SELECT zone_id, board_id, template_zone_key, zone_kind, content_source_json, \
+             rotation_seconds, approval_required, allowed_tags_json, revision, created_at_unix_ms, \
+             updated_at_unix_ms FROM cg_zone_configs WHERE board_id=?1 \
+             ORDER BY template_zone_key, zone_id",
+        )?;
+        let board_id = c_string(board_id, "CG board identity")?;
+        bind_text(self.database, statement.raw, 1, &board_id)?;
+        let mut zones = Vec::new();
+        loop {
+            match unsafe { sqlite3_step(statement.raw) } {
+                SQLITE_ROW => zones.push(read_cg_zone_row(statement.raw)?),
+                SQLITE_DONE => return Ok(zones),
+                _ => return Err(sqlite_error(self.database)),
+            }
+        }
+    }
+
+    pub fn delete_cg_zone(
+        &self,
+        zone_id: &str,
+        expected_revision: u64,
+        audit: &CgAuditEvent,
+    ) -> Result<(), CgWriteError> {
+        audit.validate().map_err(CgWriteError::Invalid)?;
+        if audit.event_kind != CgAuditEventKind::ZoneRemoved {
+            return Err(CgWriteError::Invalid(
+                "CG zone deletion requires zone-removed audit evidence.",
+            ));
+        }
+        self.execute("BEGIN IMMEDIATE")
+            .map_err(CgWriteError::Storage)?;
+        let outcome = (|| {
+            let zone = self
+                .read_cg_zone(zone_id)
+                .map_err(CgWriteError::Storage)?
+                .ok_or(CgWriteError::NotFound)?;
+            if zone.revision != expected_revision {
+                return Err(CgWriteError::Conflict(zone.revision));
+            }
+            let board = self
+                .read_cg_board_by_id(&zone.board_id)
+                .map_err(CgWriteError::Storage)?
+                .ok_or(CgWriteError::NotFound)?;
+            if audit.board_id.as_deref() != Some(zone.board_id.as_str())
+                || audit.channel_id != board.channel_id
+                || audit.occurred_at_unix_ms < zone.updated_at_unix_ms
+            {
+                return Err(CgWriteError::Invalid(
+                    "CG zone deletion audit evidence does not match the current zone.",
+                ));
+            }
+            let statement = self
+                .prepare("DELETE FROM cg_zone_configs WHERE zone_id=?1 AND revision=?2")
+                .map_err(CgWriteError::Storage)?;
+            let zone_id = c_string(zone_id, "CG zone identity").map_err(CgWriteError::Storage)?;
+            bind_text(self.database, statement.raw, 1, &zone_id).map_err(CgWriteError::Storage)?;
+            bind_i64(
+                self.database,
+                statement.raw,
+                2,
+                checked_i64(expected_revision, "CG zone revision")
+                    .map_err(CgWriteError::Storage)?,
+            )
+            .map_err(CgWriteError::Storage)?;
+            expect_done(self.database, statement.raw).map_err(CgWriteError::Storage)?;
+            drop(statement);
+            if self.changes() != 1 {
+                return Err(CgWriteError::Conflict(zone.revision));
+            }
+            self.insert_cg_audit(audit).map_err(CgWriteError::Storage)
+        })();
+        finish_cg_transaction(self, outcome)
+    }
+
+    pub fn list_cg_audit_events(
+        &self,
+        channel_id: &str,
+        limit: u32,
+    ) -> Result<Vec<CgAuditEvent>, String> {
+        if !(1..=1_000).contains(&limit) {
+            return Err("CG audit limit must be between 1 and 1000".into());
+        }
+        let statement = self.prepare(
+            "SELECT audit_id, board_id, channel_id, event_kind, operator_id, occurred_at_unix_ms, \
+             details_json FROM cg_audit_events WHERE channel_id=?1 \
+             ORDER BY occurred_at_unix_ms DESC, audit_id DESC LIMIT ?2",
+        )?;
+        let channel_id = c_string(channel_id, "CG audit channel identity")?;
+        bind_text(self.database, statement.raw, 1, &channel_id)?;
+        bind_i64(self.database, statement.raw, 2, i64::from(limit))?;
+        let mut events = Vec::new();
+        loop {
+            match unsafe { sqlite3_step(statement.raw) } {
+                SQLITE_ROW => events.push(read_cg_audit_row(statement.raw)?),
+                SQLITE_DONE => return Ok(events),
+                _ => return Err(sqlite_error(self.database)),
+            }
+        }
+    }
+
+    pub fn write_cg_feed_source(
+        &self,
+        feed: &CgFeedSource,
+        expected_revision: u64,
+        audit: &CgAuditEvent,
+    ) -> Result<CgFeedSource, CgWriteError> {
+        feed.validate().map_err(CgWriteError::Invalid)?;
+        audit.validate().map_err(CgWriteError::Invalid)?;
+        if audit.channel_id != feed.channel_id {
+            return Err(CgWriteError::Invalid(
+                "CG feed audit evidence identifies the wrong channel.",
+            ));
+        }
+        self.execute("BEGIN IMMEDIATE")
+            .map_err(CgWriteError::Storage)?;
+        let outcome = (|| {
+            let current = self
+                .read_cg_feed_source(&feed.feed_source_id)
+                .map_err(CgWriteError::Storage)?;
+            let current_revision = current.as_ref().map_or(0, |value| value.revision);
+            if current_revision != expected_revision {
+                return Err(CgWriteError::Conflict(current_revision));
+            }
+            if feed.revision != expected_revision.saturating_add(1) {
+                return Err(CgWriteError::Invalid(
+                    "CG feed revision must be exactly one greater than the expected revision.",
+                ));
+            }
+            match current {
+                None if audit.event_kind != CgAuditEventKind::FeedCreated => {
+                    return Err(CgWriteError::Invalid(
+                        "A new CG feed requires a feed-created audit event.",
+                    ));
+                }
+                Some(existing)
+                    if !matches!(
+                        audit.event_kind,
+                        CgAuditEventKind::FeedUpdated | CgAuditEventKind::FeedRemoved
+                    ) || (audit.event_kind == CgAuditEventKind::FeedRemoved && feed.enabled)
+                        || existing.channel_id != feed.channel_id
+                        || existing.created_at_unix_ms != feed.created_at_unix_ms
+                        || existing.created_by != feed.created_by
+                        || feed.updated_at_unix_ms < existing.updated_at_unix_ms =>
+                {
+                    return Err(CgWriteError::Invalid(
+                        "A CG feed update cannot replace identity, provenance, move time backward, or forge removal.",
+                    ));
+                }
+                _ => {}
+            }
+            self.upsert_cg_feed_source(feed)
+                .map_err(CgWriteError::Storage)?;
+            self.insert_cg_audit(audit).map_err(CgWriteError::Storage)?;
+            Ok(feed.clone())
+        })();
+        finish_cg_transaction(self, outcome)
+    }
+
+    pub fn read_cg_feed_source(
+        &self,
+        feed_source_id: &str,
+    ) -> Result<Option<CgFeedSource>, String> {
+        let statement = self.prepare(
+            "SELECT feed_source_id, channel_id, kind, label, source_url, trust_tier, refresh_seconds, \
+             enabled, revision, created_at_unix_ms, updated_at_unix_ms, created_by, \
+             last_fetched_at_unix_ms, last_fetch_error FROM cg_feed_sources WHERE feed_source_id=?1",
+        )?;
+        let feed_source_id = c_string(feed_source_id, "CG feed identity")?;
+        bind_text(self.database, statement.raw, 1, &feed_source_id)?;
+        match unsafe { sqlite3_step(statement.raw) } {
+            SQLITE_ROW => Ok(Some(read_cg_feed_source_row(statement.raw)?)),
+            SQLITE_DONE => Ok(None),
+            _ => Err(sqlite_error(self.database)),
+        }
+    }
+
+    pub fn list_cg_feed_sources(&self, channel_id: &str) -> Result<Vec<CgFeedSource>, String> {
+        let statement = self.prepare(
+            "SELECT feed_source_id, channel_id, kind, label, source_url, trust_tier, refresh_seconds, \
+             enabled, revision, created_at_unix_ms, updated_at_unix_ms, created_by, \
+             last_fetched_at_unix_ms, last_fetch_error FROM cg_feed_sources WHERE channel_id=?1 \
+             ORDER BY label COLLATE NOCASE, feed_source_id",
+        )?;
+        let channel_id = c_string(channel_id, "CG feed channel identity")?;
+        bind_text(self.database, statement.raw, 1, &channel_id)?;
+        let mut feeds = Vec::new();
+        loop {
+            match unsafe { sqlite3_step(statement.raw) } {
+                SQLITE_ROW => feeds.push(read_cg_feed_source_row(statement.raw)?),
+                SQLITE_DONE => return Ok(feeds),
+                _ => return Err(sqlite_error(self.database)),
+            }
+        }
+    }
+
+    pub fn delete_cg_feed_source(
+        &self,
+        feed_source_id: &str,
+        expected_revision: u64,
+        audit: &CgAuditEvent,
+    ) -> Result<(), CgWriteError> {
+        audit.validate().map_err(CgWriteError::Invalid)?;
+        if audit.event_kind != CgAuditEventKind::FeedRemoved {
+            return Err(CgWriteError::Invalid(
+                "CG feed deletion requires feed-removed audit evidence.",
+            ));
+        }
+        self.execute("BEGIN IMMEDIATE")
+            .map_err(CgWriteError::Storage)?;
+        let outcome = (|| {
+            let feed = self
+                .read_cg_feed_source(feed_source_id)
+                .map_err(CgWriteError::Storage)?
+                .ok_or(CgWriteError::NotFound)?;
+            if feed.revision != expected_revision {
+                return Err(CgWriteError::Conflict(feed.revision));
+            }
+            if audit.channel_id != feed.channel_id
+                || audit.occurred_at_unix_ms < feed.updated_at_unix_ms
+            {
+                return Err(CgWriteError::Invalid(
+                    "CG feed deletion audit evidence does not match the current feed.",
+                ));
+            }
+            if let Some(board) = self
+                .read_cg_board(&feed.channel_id)
+                .map_err(CgWriteError::Storage)?
+            {
+                if audit.board_id.as_deref() != Some(board.board_id.as_str()) {
+                    return Err(CgWriteError::Invalid(
+                        "CG feed deletion audit evidence identifies the wrong board.",
+                    ));
+                }
+                if self
+                    .list_cg_zones(&board.board_id)
+                    .map_err(CgWriteError::Storage)?
+                    .iter()
+                    .any(|zone| {
+                        matches!(
+                            &zone.content_source,
+                            CgContentSource::Feed { feed_source_id: used_id }
+                                if used_id == feed_source_id
+                        )
+                    })
+                {
+                    return Err(CgWriteError::Invalid(
+                        "CG feed cannot be removed while a board zone still uses it.",
+                    ));
+                }
+            } else if audit.board_id.is_some() {
+                return Err(CgWriteError::Invalid(
+                    "CG feed deletion audit evidence identifies an unavailable board.",
+                ));
+            }
+            let statement = self
+                .prepare("DELETE FROM cg_feed_sources WHERE feed_source_id=?1 AND revision=?2")
+                .map_err(CgWriteError::Storage)?;
+            let feed_source_id =
+                c_string(feed_source_id, "CG feed identity").map_err(CgWriteError::Storage)?;
+            bind_text(self.database, statement.raw, 1, &feed_source_id)
+                .map_err(CgWriteError::Storage)?;
+            bind_i64(
+                self.database,
+                statement.raw,
+                2,
+                checked_i64(expected_revision, "CG feed revision")
+                    .map_err(CgWriteError::Storage)?,
+            )
+            .map_err(CgWriteError::Storage)?;
+            expect_done(self.database, statement.raw).map_err(CgWriteError::Storage)?;
+            drop(statement);
+            if self.changes() != 1 {
+                return Err(CgWriteError::Conflict(feed.revision));
+            }
+            self.insert_cg_audit(audit).map_err(CgWriteError::Storage)
+        })();
+        finish_cg_transaction(self, outcome)
+    }
+
+    pub fn write_cg_bulletin(
+        &self,
+        bulletin: &CgBulletin,
+        expected_revision: u64,
+        audit: &CgAuditEvent,
+    ) -> Result<CgBulletin, CgWriteError> {
+        bulletin.validate().map_err(CgWriteError::Invalid)?;
+        audit.validate().map_err(CgWriteError::Invalid)?;
+        if audit.channel_id != bulletin.channel_id {
+            return Err(CgWriteError::Invalid(
+                "CG bulletin audit evidence identifies the wrong channel.",
+            ));
+        }
+        self.execute("BEGIN IMMEDIATE")
+            .map_err(CgWriteError::Storage)?;
+        let outcome = (|| {
+            let mut asset_ids = Vec::new();
+            match &bulletin.content {
+                CgBulletinContent::UploadedImage { asset_id, .. }
+                | CgBulletinContent::FullscreenSlide { asset_id, .. } => {
+                    asset_ids.push(asset_id.as_str());
+                }
+                _ => {}
+            }
+            if let Some(asset_id) = bulletin.audio_asset_id.as_deref() {
+                asset_ids.push(asset_id);
+            }
+            for asset_id in asset_ids {
+                let asset = self
+                    .read_media_asset(asset_id)
+                    .map_err(CgWriteError::Storage)?
+                    .ok_or(CgWriteError::NotFound)?;
+                if asset.readiness != AssetReadiness::Ready {
+                    return Err(CgWriteError::Invalid(
+                        "CG bulletin media must identify ready managed assets.",
+                    ));
+                }
+            }
+            let current = self
+                .read_cg_bulletin(&bulletin.bulletin_id)
+                .map_err(CgWriteError::Storage)?;
+            let current_revision = current.as_ref().map_or(0, |value| value.revision);
+            if current_revision != expected_revision {
+                return Err(CgWriteError::Conflict(current_revision));
+            }
+            if bulletin.revision != expected_revision.saturating_add(1) {
+                return Err(CgWriteError::Invalid(
+                    "CG bulletin revision must be exactly one greater than the expected revision.",
+                ));
+            }
+            match current {
+                None if bulletin.state != CgBulletinState::Submitted
+                    || audit.event_kind != CgAuditEventKind::BulletinSubmitted =>
+                {
+                    return Err(CgWriteError::Invalid(
+                        "A new CG bulletin must begin submitted with submission audit evidence.",
+                    ));
+                }
+                Some(existing)
+                    if existing.channel_id != bulletin.channel_id
+                        || existing.created_at_unix_ms != bulletin.created_at_unix_ms
+                        || existing.submitted_by != bulletin.submitted_by
+                        || bulletin.updated_at_unix_ms < existing.updated_at_unix_ms
+                        || !valid_cg_bulletin_transition(existing.state, bulletin.state)
+                        || !audit_matches_cg_bulletin_state(audit.event_kind, bulletin.state) =>
+                {
+                    return Err(CgWriteError::Invalid(
+                        "CG bulletin transition, identity, provenance, time, or audit evidence is invalid.",
+                    ));
+                }
+                _ => {}
+            }
+            self.upsert_cg_bulletin(bulletin)
+                .map_err(CgWriteError::Storage)?;
+            self.insert_cg_audit(audit).map_err(CgWriteError::Storage)?;
+            Ok(bulletin.clone())
+        })();
+        finish_cg_transaction(self, outcome)
+    }
+
+    pub fn read_cg_bulletin(&self, bulletin_id: &str) -> Result<Option<CgBulletin>, String> {
+        let statement = self.prepare(
+            "SELECT bulletin_id, channel_id, content_json, state, tags_json, \
+             requested_start_at_unix_ms, requested_end_at_unix_ms, display_seconds, audio_asset_id, \
+             submitted_by, moderation_notes, moderated_by, revision, created_at_unix_ms, updated_at_unix_ms \
+             FROM cg_bulletins WHERE bulletin_id=?1",
+        )?;
+        let bulletin_id = c_string(bulletin_id, "CG bulletin identity")?;
+        bind_text(self.database, statement.raw, 1, &bulletin_id)?;
+        match unsafe { sqlite3_step(statement.raw) } {
+            SQLITE_ROW => Ok(Some(read_cg_bulletin_row(statement.raw)?)),
+            SQLITE_DONE => Ok(None),
+            _ => Err(sqlite_error(self.database)),
+        }
+    }
+
+    pub fn list_cg_bulletins(&self, channel_id: &str) -> Result<Vec<CgBulletin>, String> {
+        let statement = self.prepare(
+            "SELECT bulletin_id, channel_id, content_json, state, tags_json, \
+             requested_start_at_unix_ms, requested_end_at_unix_ms, display_seconds, audio_asset_id, \
+             submitted_by, moderation_notes, moderated_by, revision, created_at_unix_ms, updated_at_unix_ms \
+             FROM cg_bulletins WHERE channel_id=?1 ORDER BY updated_at_unix_ms DESC, bulletin_id",
+        )?;
+        let channel_id = c_string(channel_id, "CG bulletin channel identity")?;
+        bind_text(self.database, statement.raw, 1, &channel_id)?;
+        let mut bulletins = Vec::new();
+        loop {
+            match unsafe { sqlite3_step(statement.raw) } {
+                SQLITE_ROW => bulletins.push(read_cg_bulletin_row(statement.raw)?),
+                SQLITE_DONE => return Ok(bulletins),
+                _ => return Err(sqlite_error(self.database)),
+            }
+        }
+    }
+
+    pub fn list_airable_cg_bulletins(
+        &self,
+        channel_id: &str,
+        now_unix_ms: i64,
+    ) -> Result<Vec<CgBulletin>, String> {
+        if now_unix_ms < 0 {
+            return Err("CG bulletin resolution time must be nonnegative".into());
+        }
+        Ok(self
+            .list_cg_bulletins(channel_id)?
+            .into_iter()
+            .filter(|bulletin| bulletin.is_airable_at(now_unix_ms))
+            .collect())
+    }
+
+    pub fn approve_cg_feed_item(
+        &self,
+        approval: &CgFeedItemApproval,
+        audit: &CgAuditEvent,
+    ) -> Result<CgFeedItemApproval, CgWriteError> {
+        approval.validate().map_err(CgWriteError::Invalid)?;
+        audit.validate().map_err(CgWriteError::Invalid)?;
+        if audit.event_kind != CgAuditEventKind::FeedItemApproved {
+            return Err(CgWriteError::Invalid(
+                "CG feed-item approval requires matching audit evidence.",
+            ));
+        }
+        self.execute("BEGIN IMMEDIATE")
+            .map_err(CgWriteError::Storage)?;
+        let outcome = (|| {
+            let feed = self
+                .read_cg_feed_source(&approval.feed_source_id)
+                .map_err(CgWriteError::Storage)?
+                .ok_or(CgWriteError::NotFound)?;
+            if feed.channel_id != audit.channel_id || approval.approved_by != audit.operator_id {
+                return Err(CgWriteError::Invalid(
+                    "CG feed-item approval and audit identities disagree.",
+                ));
+            }
+            if let Some(existing) = self
+                .read_cg_feed_item_approval(&approval.feed_source_id, &approval.item_id)
+                .map_err(CgWriteError::Storage)?
+            {
+                if existing != *approval {
+                    return Err(CgWriteError::Invalid(
+                        "A CG feed-item approval is immutable once recorded.",
+                    ));
+                }
+                return Ok(existing);
+            }
+            let statement = self
+                .prepare(
+                    "INSERT INTO cg_feed_item_approvals(feed_source_id, item_id, approved_by, \
+                     approved_at_unix_ms) VALUES(?1, ?2, ?3, ?4)",
+                )
+                .map_err(CgWriteError::Storage)?;
+            let values = [
+                c_string(&approval.feed_source_id, "CG approval feed identity")
+                    .map_err(CgWriteError::Storage)?,
+                c_string(&approval.item_id, "CG approval item identity")
+                    .map_err(CgWriteError::Storage)?,
+                c_string(&approval.approved_by, "CG approval operator")
+                    .map_err(CgWriteError::Storage)?,
+            ];
+            for (index, value) in values.iter().enumerate() {
+                bind_text(self.database, statement.raw, (index + 1) as c_int, value)
+                    .map_err(CgWriteError::Storage)?;
+            }
+            bind_i64(
+                self.database,
+                statement.raw,
+                4,
+                approval.approved_at_unix_ms,
+            )
+            .map_err(CgWriteError::Storage)?;
+            expect_done(self.database, statement.raw).map_err(CgWriteError::Storage)?;
+            drop(statement);
+            self.insert_cg_audit(audit).map_err(CgWriteError::Storage)?;
+            Ok(approval.clone())
+        })();
+        finish_cg_transaction(self, outcome)
+    }
+
+    pub fn read_cg_feed_item_approval(
+        &self,
+        feed_source_id: &str,
+        item_id: &str,
+    ) -> Result<Option<CgFeedItemApproval>, String> {
+        let statement = self.prepare(
+            "SELECT feed_source_id, item_id, approved_by, approved_at_unix_ms \
+             FROM cg_feed_item_approvals WHERE feed_source_id=?1 AND item_id=?2",
+        )?;
+        let feed_source_id = c_string(feed_source_id, "CG approval feed identity")?;
+        let item_id = c_string(item_id, "CG approval item identity")?;
+        bind_text(self.database, statement.raw, 1, &feed_source_id)?;
+        bind_text(self.database, statement.raw, 2, &item_id)?;
+        match unsafe { sqlite3_step(statement.raw) } {
+            SQLITE_ROW => Ok(Some(read_cg_feed_item_approval_row(statement.raw)?)),
+            SQLITE_DONE => Ok(None),
+            _ => Err(sqlite_error(self.database)),
+        }
+    }
+
+    fn read_cg_board_by_id(&self, board_id: &str) -> Result<Option<CgBoard>, String> {
+        let statement = self.prepare(
+            "SELECT board_id, channel_id, template_id, active, background_audio_asset_id, revision, \
+             created_at_unix_ms, updated_at_unix_ms, created_by FROM cg_boards WHERE board_id=?1",
+        )?;
+        let board_id = c_string(board_id, "CG board identity")?;
+        bind_text(self.database, statement.raw, 1, &board_id)?;
+        match unsafe { sqlite3_step(statement.raw) } {
+            SQLITE_ROW => Ok(Some(read_cg_board_row(statement.raw)?)),
+            SQLITE_DONE => Ok(None),
+            _ => Err(sqlite_error(self.database)),
+        }
+    }
+
+    fn upsert_cg_board(&self, board: &CgBoard) -> Result<(), String> {
+        let statement = self.prepare(
+            "INSERT INTO cg_boards(board_id, channel_id, template_id, active, background_audio_asset_id, \
+             revision, created_at_unix_ms, updated_at_unix_ms, created_by) \
+             VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9) \
+             ON CONFLICT(board_id) DO UPDATE SET template_id=excluded.template_id, active=excluded.active, \
+             background_audio_asset_id=excluded.background_audio_asset_id, revision=excluded.revision, \
+             updated_at_unix_ms=excluded.updated_at_unix_ms \
+             WHERE cg_boards.channel_id=excluded.channel_id AND cg_boards.revision=?10",
+        )?;
+        let values = [
+            c_string(&board.board_id, "CG board identity")?,
+            c_string(&board.channel_id, "CG board channel identity")?,
+            c_string(&board.template_id, "CG board template identity")?,
+            c_string(
+                board
+                    .background_audio_asset_id
+                    .as_deref()
+                    .unwrap_or_default(),
+                "CG board background audio identity",
+            )?,
+            c_string(&board.created_by, "CG board creator")?,
+        ];
+        bind_text(self.database, statement.raw, 1, &values[0])?;
+        bind_text(self.database, statement.raw, 2, &values[1])?;
+        bind_text(self.database, statement.raw, 3, &values[2])?;
+        bind_i64(self.database, statement.raw, 4, i64::from(board.active))?;
+        bind_text(self.database, statement.raw, 5, &values[3])?;
+        bind_i64(
+            self.database,
+            statement.raw,
+            6,
+            checked_i64(board.revision, "CG board revision")?,
+        )?;
+        bind_i64(self.database, statement.raw, 7, board.created_at_unix_ms)?;
+        bind_i64(self.database, statement.raw, 8, board.updated_at_unix_ms)?;
+        bind_text(self.database, statement.raw, 9, &values[4])?;
+        bind_i64(
+            self.database,
+            statement.raw,
+            10,
+            checked_i64(board.revision - 1, "prior CG board revision")?,
+        )?;
+        expect_done(self.database, statement.raw)?;
+        if self.changes() == 1 {
+            Ok(())
+        } else {
+            Err("CG board write lost its revision authority".into())
+        }
+    }
+
+    fn upsert_cg_zone(&self, zone: &CgZoneConfig) -> Result<(), String> {
+        let statement = self.prepare(
+            "INSERT INTO cg_zone_configs(zone_id, board_id, template_zone_key, zone_kind, \
+             content_source_json, rotation_seconds, approval_required, allowed_tags_json, revision, \
+             created_at_unix_ms, updated_at_unix_ms) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11) \
+             ON CONFLICT(zone_id) DO UPDATE SET template_zone_key=excluded.template_zone_key, \
+             zone_kind=excluded.zone_kind, content_source_json=excluded.content_source_json, \
+             rotation_seconds=excluded.rotation_seconds, approval_required=excluded.approval_required, \
+             allowed_tags_json=excluded.allowed_tags_json, revision=excluded.revision, \
+             updated_at_unix_ms=excluded.updated_at_unix_ms \
+             WHERE cg_zone_configs.board_id=excluded.board_id AND cg_zone_configs.revision=?12",
+        )?;
+        let values = [
+            c_string(&zone.zone_id, "CG zone identity")?,
+            c_string(&zone.board_id, "CG zone board identity")?,
+            c_string(&zone.template_zone_key, "CG template zone key")?,
+            c_string(cg_zone_kind_name(zone.zone_kind), "CG zone kind")?,
+            c_string(
+                &serde_json::to_string(&zone.content_source)
+                    .map_err(|error| format!("could not serialize CG content source: {error}"))?,
+                "CG content source",
+            )?,
+            c_string(
+                &serde_json::to_string(&zone.allowed_tags)
+                    .map_err(|error| format!("could not serialize CG zone tags: {error}"))?,
+                "CG zone tags",
+            )?,
+        ];
+        for (index, value) in values[..5].iter().enumerate() {
+            bind_text(self.database, statement.raw, (index + 1) as c_int, value)?;
+        }
+        bind_i64(
+            self.database,
+            statement.raw,
+            6,
+            zone.rotation_seconds.map_or(-1, i64::from),
+        )?;
+        bind_i64(
+            self.database,
+            statement.raw,
+            7,
+            i64::from(zone.approval_required),
+        )?;
+        bind_text(self.database, statement.raw, 8, &values[5])?;
+        bind_i64(
+            self.database,
+            statement.raw,
+            9,
+            checked_i64(zone.revision, "CG zone revision")?,
+        )?;
+        bind_i64(self.database, statement.raw, 10, zone.created_at_unix_ms)?;
+        bind_i64(self.database, statement.raw, 11, zone.updated_at_unix_ms)?;
+        bind_i64(
+            self.database,
+            statement.raw,
+            12,
+            checked_i64(zone.revision - 1, "prior CG zone revision")?,
+        )?;
+        expect_done(self.database, statement.raw)?;
+        if self.changes() == 1 {
+            Ok(())
+        } else {
+            Err("CG zone write lost its revision authority".into())
+        }
+    }
+
+    fn upsert_cg_feed_source(&self, feed: &CgFeedSource) -> Result<(), String> {
+        let statement = self.prepare(
+            "INSERT INTO cg_feed_sources(feed_source_id, channel_id, kind, label, source_url, \
+             trust_tier, refresh_seconds, enabled, revision, created_at_unix_ms, updated_at_unix_ms, \
+             created_by, last_fetched_at_unix_ms, last_fetch_error) \
+             VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14) \
+             ON CONFLICT(feed_source_id) DO UPDATE SET kind=excluded.kind, label=excluded.label, \
+             source_url=excluded.source_url, trust_tier=excluded.trust_tier, \
+             refresh_seconds=excluded.refresh_seconds, enabled=excluded.enabled, \
+             revision=excluded.revision, updated_at_unix_ms=excluded.updated_at_unix_ms, \
+             last_fetched_at_unix_ms=excluded.last_fetched_at_unix_ms, \
+             last_fetch_error=excluded.last_fetch_error \
+             WHERE cg_feed_sources.channel_id=excluded.channel_id AND cg_feed_sources.revision=?15",
+        )?;
+        let values = [
+            c_string(&feed.feed_source_id, "CG feed identity")?,
+            c_string(&feed.channel_id, "CG feed channel identity")?,
+            c_string(cg_feed_kind_name(feed.kind), "CG feed kind")?,
+            c_string(&feed.label, "CG feed label")?,
+            c_string(&feed.source_url, "CG feed source URL")?,
+            c_string(
+                cg_feed_trust_tier_name(feed.trust_tier),
+                "CG feed trust tier",
+            )?,
+            c_string(&feed.created_by, "CG feed creator")?,
+            c_string(
+                feed.last_fetch_error.as_deref().unwrap_or_default(),
+                "CG feed fetch error",
+            )?,
+        ];
+        for (index, value) in values[..6].iter().enumerate() {
+            bind_text(self.database, statement.raw, (index + 1) as c_int, value)?;
+        }
+        bind_i64(
+            self.database,
+            statement.raw,
+            7,
+            i64::from(feed.refresh_seconds),
+        )?;
+        bind_i64(self.database, statement.raw, 8, i64::from(feed.enabled))?;
+        bind_i64(
+            self.database,
+            statement.raw,
+            9,
+            checked_i64(feed.revision, "CG feed revision")?,
+        )?;
+        bind_i64(self.database, statement.raw, 10, feed.created_at_unix_ms)?;
+        bind_i64(self.database, statement.raw, 11, feed.updated_at_unix_ms)?;
+        bind_text(self.database, statement.raw, 12, &values[6])?;
+        bind_i64(
+            self.database,
+            statement.raw,
+            13,
+            feed.last_fetched_at_unix_ms.unwrap_or(-1),
+        )?;
+        bind_text(self.database, statement.raw, 14, &values[7])?;
+        bind_i64(
+            self.database,
+            statement.raw,
+            15,
+            checked_i64(feed.revision - 1, "prior CG feed revision")?,
+        )?;
+        expect_done(self.database, statement.raw)?;
+        if self.changes() == 1 {
+            Ok(())
+        } else {
+            Err("CG feed write lost its revision authority".into())
+        }
+    }
+
+    fn upsert_cg_bulletin(&self, bulletin: &CgBulletin) -> Result<(), String> {
+        let statement = self.prepare(
+            "INSERT INTO cg_bulletins(bulletin_id, channel_id, content_json, state, tags_json, \
+             requested_start_at_unix_ms, requested_end_at_unix_ms, display_seconds, audio_asset_id, \
+             submitted_by, moderation_notes, moderated_by, revision, created_at_unix_ms, updated_at_unix_ms) \
+             VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15) \
+             ON CONFLICT(bulletin_id) DO UPDATE SET content_json=excluded.content_json, \
+             state=excluded.state, tags_json=excluded.tags_json, \
+             requested_start_at_unix_ms=excluded.requested_start_at_unix_ms, \
+             requested_end_at_unix_ms=excluded.requested_end_at_unix_ms, \
+             display_seconds=excluded.display_seconds, audio_asset_id=excluded.audio_asset_id, \
+             moderation_notes=excluded.moderation_notes, moderated_by=excluded.moderated_by, \
+             revision=excluded.revision, updated_at_unix_ms=excluded.updated_at_unix_ms \
+             WHERE cg_bulletins.channel_id=excluded.channel_id AND cg_bulletins.revision=?16",
+        )?;
+        let values = [
+            c_string(&bulletin.bulletin_id, "CG bulletin identity")?,
+            c_string(&bulletin.channel_id, "CG bulletin channel identity")?,
+            c_string(
+                &serde_json::to_string(&bulletin.content)
+                    .map_err(|error| format!("could not serialize CG bulletin content: {error}"))?,
+                "CG bulletin content",
+            )?,
+            c_string(cg_bulletin_state_name(bulletin.state), "CG bulletin state")?,
+            c_string(
+                &serde_json::to_string(&bulletin.tags)
+                    .map_err(|error| format!("could not serialize CG bulletin tags: {error}"))?,
+                "CG bulletin tags",
+            )?,
+            c_string(
+                bulletin.audio_asset_id.as_deref().unwrap_or_default(),
+                "CG bulletin audio identity",
+            )?,
+            c_string(&bulletin.submitted_by, "CG bulletin submitter")?,
+            c_string(
+                bulletin.moderation_notes.as_deref().unwrap_or_default(),
+                "CG bulletin moderation notes",
+            )?,
+            c_string(
+                bulletin.moderated_by.as_deref().unwrap_or_default(),
+                "CG bulletin moderator",
+            )?,
+        ];
+        for (index, value) in values[..5].iter().enumerate() {
+            bind_text(self.database, statement.raw, (index + 1) as c_int, value)?;
+        }
+        bind_i64(
+            self.database,
+            statement.raw,
+            6,
+            bulletin.requested_start_at_unix_ms.unwrap_or(-1),
+        )?;
+        bind_i64(
+            self.database,
+            statement.raw,
+            7,
+            bulletin.requested_end_at_unix_ms.unwrap_or(-1),
+        )?;
+        bind_i64(
+            self.database,
+            statement.raw,
+            8,
+            i64::from(bulletin.display_seconds),
+        )?;
+        for (parameter, value) in [
+            (9, &values[5]),
+            (10, &values[6]),
+            (11, &values[7]),
+            (12, &values[8]),
+        ] {
+            bind_text(self.database, statement.raw, parameter, value)?;
+        }
+        bind_i64(
+            self.database,
+            statement.raw,
+            13,
+            checked_i64(bulletin.revision, "CG bulletin revision")?,
+        )?;
+        bind_i64(
+            self.database,
+            statement.raw,
+            14,
+            bulletin.created_at_unix_ms,
+        )?;
+        bind_i64(
+            self.database,
+            statement.raw,
+            15,
+            bulletin.updated_at_unix_ms,
+        )?;
+        bind_i64(
+            self.database,
+            statement.raw,
+            16,
+            checked_i64(bulletin.revision - 1, "prior CG bulletin revision")?,
+        )?;
+        expect_done(self.database, statement.raw)?;
+        if self.changes() == 1 {
+            Ok(())
+        } else {
+            Err("CG bulletin write lost its revision authority".into())
+        }
+    }
+
+    fn insert_cg_audit(&self, audit: &CgAuditEvent) -> Result<(), String> {
+        let statement = self.prepare(
+            "INSERT INTO cg_audit_events(audit_id, board_id, channel_id, event_kind, operator_id, \
+             occurred_at_unix_ms, details_json) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        )?;
+        let values = [
+            c_string(&audit.audit_id, "CG audit identity")?,
+            c_string(
+                audit.board_id.as_deref().unwrap_or_default(),
+                "CG audit board identity",
+            )?,
+            c_string(&audit.channel_id, "CG audit channel identity")?,
+            c_string(
+                cg_audit_event_kind_name(audit.event_kind),
+                "CG audit event kind",
+            )?,
+            c_string(&audit.operator_id, "CG audit operator identity")?,
+            c_string(
+                &serde_json::to_string(&audit.details)
+                    .map_err(|error| format!("could not serialize CG audit details: {error}"))?,
+                "CG audit details",
+            )?,
+        ];
+        for (index, value) in values[..5].iter().enumerate() {
+            bind_text(self.database, statement.raw, (index + 1) as c_int, value)?;
+        }
+        bind_i64(self.database, statement.raw, 6, audit.occurred_at_unix_ms)?;
+        bind_text(self.database, statement.raw, 7, &values[5])?;
+        expect_done(self.database, statement.raw)
     }
 
     fn list_channel_output_sinks(
@@ -3640,6 +4710,95 @@ impl StationStore {
         }
     }
 
+    fn initialize_cg_schema(&self) -> Result<(), String> {
+        self.execute(
+            "CREATE TABLE IF NOT EXISTS cg_boards (\
+               board_id TEXT PRIMARY KEY,\
+               channel_id TEXT NOT NULL UNIQUE,\
+               template_id TEXT NOT NULL,\
+               active INTEGER NOT NULL CHECK (active IN (0,1)),\
+               background_audio_asset_id TEXT NOT NULL DEFAULT '',\
+               revision INTEGER NOT NULL CHECK (revision >= 1),\
+               created_at_unix_ms INTEGER NOT NULL CHECK (created_at_unix_ms >= 0),\
+               updated_at_unix_ms INTEGER NOT NULL CHECK (updated_at_unix_ms >= created_at_unix_ms),\
+               created_by TEXT NOT NULL,\
+               FOREIGN KEY(channel_id) REFERENCES channels(channel_id) ON DELETE CASCADE\
+             );\
+             CREATE TABLE IF NOT EXISTS cg_zone_configs (\
+               zone_id TEXT PRIMARY KEY,\
+               board_id TEXT NOT NULL,\
+               template_zone_key TEXT NOT NULL,\
+               zone_kind TEXT NOT NULL,\
+               content_source_json TEXT NOT NULL,\
+               rotation_seconds INTEGER NOT NULL DEFAULT -1 CHECK (rotation_seconds BETWEEN -1 AND 3600),\
+               approval_required INTEGER NOT NULL CHECK (approval_required IN (0,1)),\
+               allowed_tags_json TEXT NOT NULL,\
+               revision INTEGER NOT NULL CHECK (revision >= 1),\
+               created_at_unix_ms INTEGER NOT NULL CHECK (created_at_unix_ms >= 0),\
+               updated_at_unix_ms INTEGER NOT NULL CHECK (updated_at_unix_ms >= created_at_unix_ms),\
+               UNIQUE(board_id, template_zone_key),\
+               FOREIGN KEY(board_id) REFERENCES cg_boards(board_id) ON DELETE CASCADE\
+             );\
+             CREATE TABLE IF NOT EXISTS cg_feed_sources (\
+               feed_source_id TEXT PRIMARY KEY,\
+               channel_id TEXT NOT NULL,\
+               kind TEXT NOT NULL CHECK (kind IN ('rss','ical','caldav','weather','social')),\
+               label TEXT NOT NULL,\
+               source_url TEXT NOT NULL,\
+               trust_tier TEXT NOT NULL CHECK (trust_tier IN ('station','trusted','moderated')),\
+               refresh_seconds INTEGER NOT NULL CHECK (refresh_seconds BETWEEN 60 AND 86400),\
+               enabled INTEGER NOT NULL CHECK (enabled IN (0,1)),\
+               revision INTEGER NOT NULL CHECK (revision >= 1),\
+               created_at_unix_ms INTEGER NOT NULL CHECK (created_at_unix_ms >= 0),\
+               updated_at_unix_ms INTEGER NOT NULL CHECK (updated_at_unix_ms >= created_at_unix_ms),\
+               created_by TEXT NOT NULL,\
+               last_fetched_at_unix_ms INTEGER NOT NULL DEFAULT -1 CHECK (last_fetched_at_unix_ms >= -1),\
+               last_fetch_error TEXT NOT NULL DEFAULT '',\
+               UNIQUE(channel_id, label COLLATE NOCASE),\
+               FOREIGN KEY(channel_id) REFERENCES channels(channel_id) ON DELETE CASCADE\
+             );\
+             CREATE TABLE IF NOT EXISTS cg_bulletins (\
+               bulletin_id TEXT PRIMARY KEY,\
+               channel_id TEXT NOT NULL,\
+               content_json TEXT NOT NULL,\
+               state TEXT NOT NULL CHECK (state IN ('submitted','needs_changes','accepted','scheduled','declined','expired')),\
+               tags_json TEXT NOT NULL,\
+               requested_start_at_unix_ms INTEGER NOT NULL DEFAULT -1 CHECK (requested_start_at_unix_ms >= -1),\
+               requested_end_at_unix_ms INTEGER NOT NULL DEFAULT -1 CHECK (requested_end_at_unix_ms >= -1),\
+               display_seconds INTEGER NOT NULL CHECK (display_seconds BETWEEN 3 AND 300),\
+               audio_asset_id TEXT NOT NULL DEFAULT '',\
+               submitted_by TEXT NOT NULL,\
+               moderation_notes TEXT NOT NULL DEFAULT '',\
+               moderated_by TEXT NOT NULL DEFAULT '',\
+               revision INTEGER NOT NULL CHECK (revision >= 1),\
+               created_at_unix_ms INTEGER NOT NULL CHECK (created_at_unix_ms >= 0),\
+               updated_at_unix_ms INTEGER NOT NULL CHECK (updated_at_unix_ms >= created_at_unix_ms),\
+               FOREIGN KEY(channel_id) REFERENCES channels(channel_id) ON DELETE CASCADE\
+             );\
+             CREATE INDEX IF NOT EXISTS cg_bulletins_channel_state_time \
+               ON cg_bulletins(channel_id, state, requested_start_at_unix_ms, requested_end_at_unix_ms);\
+             CREATE TABLE IF NOT EXISTS cg_feed_item_approvals (\
+               feed_source_id TEXT NOT NULL,\
+               item_id TEXT NOT NULL,\
+               approved_by TEXT NOT NULL,\
+               approved_at_unix_ms INTEGER NOT NULL CHECK (approved_at_unix_ms >= 0),\
+               PRIMARY KEY(feed_source_id, item_id),\
+               FOREIGN KEY(feed_source_id) REFERENCES cg_feed_sources(feed_source_id) ON DELETE CASCADE\
+             );\
+             CREATE TABLE IF NOT EXISTS cg_audit_events (\
+               audit_id TEXT PRIMARY KEY,\
+               board_id TEXT NOT NULL DEFAULT '',\
+               channel_id TEXT NOT NULL,\
+               event_kind TEXT NOT NULL,\
+               operator_id TEXT NOT NULL,\
+               occurred_at_unix_ms INTEGER NOT NULL CHECK (occurred_at_unix_ms >= 0),\
+               details_json TEXT NOT NULL\
+             );\
+             CREATE INDEX IF NOT EXISTS cg_audit_events_channel_time \
+               ON cg_audit_events(channel_id, occurred_at_unix_ms DESC, audit_id);",
+        )
+    }
+
     fn migrate_commit_report_statuses(&self) -> Result<(), String> {
         let statement = self.prepare(
             "SELECT sql FROM sqlite_master WHERE type='table' AND name='commit_reports'",
@@ -3988,6 +5147,25 @@ impl Drop for StationStore {
     }
 }
 
+fn finish_cg_transaction<T>(
+    store: &StationStore,
+    outcome: Result<T, CgWriteError>,
+) -> Result<T, CgWriteError> {
+    match outcome {
+        Ok(value) => match store.execute("COMMIT") {
+            Ok(()) => Ok(value),
+            Err(error) => {
+                let _ = store.execute("ROLLBACK");
+                Err(CgWriteError::Storage(error))
+            }
+        },
+        Err(error) => {
+            let _ = store.execute("ROLLBACK");
+            Err(error)
+        }
+    }
+}
+
 struct Statement {
     raw: *mut SqliteStatement,
 }
@@ -4092,6 +5270,135 @@ fn read_channel_runtime_row(
     };
     observation.validate().map_err(str::to_string)?;
     Ok(observation)
+}
+
+fn read_cg_board_row(statement: *mut SqliteStatement) -> Result<CgBoard, String> {
+    let background_audio = column_text(statement, 4)?;
+    let board = CgBoard {
+        board_id: column_text(statement, 0)?,
+        channel_id: column_text(statement, 1)?,
+        template_id: column_text(statement, 2)?,
+        active: unsafe { sqlite3_column_int64(statement, 3) } == 1,
+        background_audio_asset_id: (!background_audio.is_empty()).then_some(background_audio),
+        revision: column_u64(statement, 5, "CG board revision")?,
+        created_at_unix_ms: unsafe { sqlite3_column_int64(statement, 6) },
+        updated_at_unix_ms: unsafe { sqlite3_column_int64(statement, 7) },
+        created_by: column_text(statement, 8)?,
+    };
+    board.validate().map_err(str::to_string)?;
+    Ok(board)
+}
+
+fn read_cg_zone_row(statement: *mut SqliteStatement) -> Result<CgZoneConfig, String> {
+    let content_source_json = column_text(statement, 4)?;
+    let tags_json = column_text(statement, 7)?;
+    let rotation = unsafe { sqlite3_column_int64(statement, 5) };
+    let zone = CgZoneConfig {
+        zone_id: column_text(statement, 0)?,
+        board_id: column_text(statement, 1)?,
+        template_zone_key: column_text(statement, 2)?,
+        zone_kind: parse_cg_zone_kind(&column_text(statement, 3)?)?,
+        content_source: serde_json::from_str::<CgContentSource>(&content_source_json)
+            .map_err(|error| format!("database returned an invalid CG content source: {error}"))?,
+        rotation_seconds: (rotation >= 0)
+            .then(|| u32::try_from(rotation))
+            .transpose()
+            .map_err(|_| "database returned an invalid CG rotation interval".to_string())?,
+        approval_required: unsafe { sqlite3_column_int64(statement, 6) } == 1,
+        allowed_tags: serde_json::from_str(&tags_json)
+            .map_err(|error| format!("database returned invalid CG zone tags: {error}"))?,
+        revision: column_u64(statement, 8, "CG zone revision")?,
+        created_at_unix_ms: unsafe { sqlite3_column_int64(statement, 9) },
+        updated_at_unix_ms: unsafe { sqlite3_column_int64(statement, 10) },
+    };
+    zone.validate().map_err(str::to_string)?;
+    Ok(zone)
+}
+
+fn read_cg_feed_source_row(statement: *mut SqliteStatement) -> Result<CgFeedSource, String> {
+    let last_fetch_error = column_text(statement, 13)?;
+    let last_fetched = unsafe { sqlite3_column_int64(statement, 12) };
+    let feed = CgFeedSource {
+        feed_source_id: column_text(statement, 0)?,
+        channel_id: column_text(statement, 1)?,
+        kind: parse_cg_feed_kind(&column_text(statement, 2)?)?,
+        label: column_text(statement, 3)?,
+        source_url: column_text(statement, 4)?,
+        trust_tier: parse_cg_feed_trust_tier(&column_text(statement, 5)?)?,
+        refresh_seconds: u32::try_from(unsafe { sqlite3_column_int64(statement, 6) })
+            .map_err(|_| "database returned an invalid CG feed refresh interval".to_string())?,
+        enabled: unsafe { sqlite3_column_int64(statement, 7) } == 1,
+        revision: column_u64(statement, 8, "CG feed revision")?,
+        created_at_unix_ms: unsafe { sqlite3_column_int64(statement, 9) },
+        updated_at_unix_ms: unsafe { sqlite3_column_int64(statement, 10) },
+        created_by: column_text(statement, 11)?,
+        last_fetched_at_unix_ms: (last_fetched >= 0).then_some(last_fetched),
+        last_fetch_error: (!last_fetch_error.is_empty()).then_some(last_fetch_error),
+    };
+    feed.validate().map_err(str::to_string)?;
+    Ok(feed)
+}
+
+fn read_cg_bulletin_row(statement: *mut SqliteStatement) -> Result<CgBulletin, String> {
+    let content_json = column_text(statement, 2)?;
+    let tags_json = column_text(statement, 4)?;
+    let requested_start = unsafe { sqlite3_column_int64(statement, 5) };
+    let requested_end = unsafe { sqlite3_column_int64(statement, 6) };
+    let audio_asset_id = column_text(statement, 8)?;
+    let moderation_notes = column_text(statement, 10)?;
+    let moderated_by = column_text(statement, 11)?;
+    let bulletin = CgBulletin {
+        bulletin_id: column_text(statement, 0)?,
+        channel_id: column_text(statement, 1)?,
+        content: serde_json::from_str::<CgBulletinContent>(&content_json)
+            .map_err(|error| format!("database returned invalid CG bulletin content: {error}"))?,
+        state: parse_cg_bulletin_state(&column_text(statement, 3)?)?,
+        tags: serde_json::from_str(&tags_json)
+            .map_err(|error| format!("database returned invalid CG bulletin tags: {error}"))?,
+        requested_start_at_unix_ms: (requested_start >= 0).then_some(requested_start),
+        requested_end_at_unix_ms: (requested_end >= 0).then_some(requested_end),
+        display_seconds: u32::try_from(unsafe { sqlite3_column_int64(statement, 7) })
+            .map_err(|_| "database returned an invalid CG bulletin duration".to_string())?,
+        audio_asset_id: (!audio_asset_id.is_empty()).then_some(audio_asset_id),
+        submitted_by: column_text(statement, 9)?,
+        moderation_notes: (!moderation_notes.is_empty()).then_some(moderation_notes),
+        moderated_by: (!moderated_by.is_empty()).then_some(moderated_by),
+        revision: column_u64(statement, 12, "CG bulletin revision")?,
+        created_at_unix_ms: unsafe { sqlite3_column_int64(statement, 13) },
+        updated_at_unix_ms: unsafe { sqlite3_column_int64(statement, 14) },
+    };
+    bulletin.validate().map_err(str::to_string)?;
+    Ok(bulletin)
+}
+
+fn read_cg_feed_item_approval_row(
+    statement: *mut SqliteStatement,
+) -> Result<CgFeedItemApproval, String> {
+    let approval = CgFeedItemApproval {
+        feed_source_id: column_text(statement, 0)?,
+        item_id: column_text(statement, 1)?,
+        approved_by: column_text(statement, 2)?,
+        approved_at_unix_ms: unsafe { sqlite3_column_int64(statement, 3) },
+    };
+    approval.validate().map_err(str::to_string)?;
+    Ok(approval)
+}
+
+fn read_cg_audit_row(statement: *mut SqliteStatement) -> Result<CgAuditEvent, String> {
+    let board_id = column_text(statement, 1)?;
+    let details_json = column_text(statement, 6)?;
+    let audit = CgAuditEvent {
+        audit_id: column_text(statement, 0)?,
+        board_id: (!board_id.is_empty()).then_some(board_id),
+        channel_id: column_text(statement, 2)?,
+        event_kind: parse_cg_audit_event_kind(&column_text(statement, 3)?)?,
+        operator_id: column_text(statement, 4)?,
+        occurred_at_unix_ms: unsafe { sqlite3_column_int64(statement, 5) },
+        details: serde_json::from_str::<BTreeMap<String, String>>(&details_json)
+            .map_err(|error| format!("database returned invalid CG audit details: {error}"))?,
+    };
+    audit.validate().map_err(str::to_string)?;
+    Ok(audit)
 }
 
 fn read_system_resource_sample_row(
@@ -4527,6 +5834,175 @@ fn output_sink_kind_name(value: OutputSinkKind) -> &'static str {
     match value {
         OutputSinkKind::UdpTs => "udp-ts",
         OutputSinkKind::Srt => "srt",
+    }
+}
+
+fn cg_zone_kind_name(value: CgZoneKind) -> &'static str {
+    match value {
+        CgZoneKind::Primary => "primary",
+        CgZoneKind::Sidebar => "sidebar",
+        CgZoneKind::LowerThird => "lower_third",
+        CgZoneKind::Ticker => "ticker",
+        CgZoneKind::Schedule => "schedule",
+        CgZoneKind::Sponsor => "sponsor",
+        CgZoneKind::Logo => "logo",
+        CgZoneKind::Alert => "alert",
+        CgZoneKind::Clock => "clock",
+        CgZoneKind::LiveVideo => "live_video",
+    }
+}
+
+fn parse_cg_zone_kind(value: &str) -> Result<CgZoneKind, String> {
+    match value {
+        "primary" => Ok(CgZoneKind::Primary),
+        "sidebar" => Ok(CgZoneKind::Sidebar),
+        "lower_third" => Ok(CgZoneKind::LowerThird),
+        "ticker" => Ok(CgZoneKind::Ticker),
+        "schedule" => Ok(CgZoneKind::Schedule),
+        "sponsor" => Ok(CgZoneKind::Sponsor),
+        "logo" => Ok(CgZoneKind::Logo),
+        "alert" => Ok(CgZoneKind::Alert),
+        "clock" => Ok(CgZoneKind::Clock),
+        "live_video" => Ok(CgZoneKind::LiveVideo),
+        _ => Err(format!("database returned unknown CG zone kind: {value}")),
+    }
+}
+
+fn cg_feed_kind_name(value: CgFeedKind) -> &'static str {
+    match value {
+        CgFeedKind::Rss => "rss",
+        CgFeedKind::Ical => "ical",
+        CgFeedKind::Caldav => "caldav",
+        CgFeedKind::Weather => "weather",
+        CgFeedKind::Social => "social",
+    }
+}
+
+fn parse_cg_feed_kind(value: &str) -> Result<CgFeedKind, String> {
+    match value {
+        "rss" => Ok(CgFeedKind::Rss),
+        "ical" => Ok(CgFeedKind::Ical),
+        "caldav" => Ok(CgFeedKind::Caldav),
+        "weather" => Ok(CgFeedKind::Weather),
+        "social" => Ok(CgFeedKind::Social),
+        _ => Err(format!("database returned unknown CG feed kind: {value}")),
+    }
+}
+
+fn cg_feed_trust_tier_name(value: CgFeedTrustTier) -> &'static str {
+    match value {
+        CgFeedTrustTier::Station => "station",
+        CgFeedTrustTier::Trusted => "trusted",
+        CgFeedTrustTier::Moderated => "moderated",
+    }
+}
+
+fn parse_cg_feed_trust_tier(value: &str) -> Result<CgFeedTrustTier, String> {
+    match value {
+        "station" => Ok(CgFeedTrustTier::Station),
+        "trusted" => Ok(CgFeedTrustTier::Trusted),
+        "moderated" => Ok(CgFeedTrustTier::Moderated),
+        _ => Err(format!(
+            "database returned unknown CG feed trust tier: {value}"
+        )),
+    }
+}
+
+fn cg_bulletin_state_name(value: CgBulletinState) -> &'static str {
+    match value {
+        CgBulletinState::Submitted => "submitted",
+        CgBulletinState::NeedsChanges => "needs_changes",
+        CgBulletinState::Accepted => "accepted",
+        CgBulletinState::Scheduled => "scheduled",
+        CgBulletinState::Declined => "declined",
+        CgBulletinState::Expired => "expired",
+    }
+}
+
+fn parse_cg_bulletin_state(value: &str) -> Result<CgBulletinState, String> {
+    match value {
+        "submitted" => Ok(CgBulletinState::Submitted),
+        "needs_changes" => Ok(CgBulletinState::NeedsChanges),
+        "accepted" => Ok(CgBulletinState::Accepted),
+        "scheduled" => Ok(CgBulletinState::Scheduled),
+        "declined" => Ok(CgBulletinState::Declined),
+        "expired" => Ok(CgBulletinState::Expired),
+        _ => Err(format!(
+            "database returned unknown CG bulletin state: {value}"
+        )),
+    }
+}
+
+fn valid_cg_bulletin_transition(from: CgBulletinState, to: CgBulletinState) -> bool {
+    matches!(
+        (from, to),
+        (CgBulletinState::Submitted, CgBulletinState::Submitted)
+            | (CgBulletinState::Submitted, CgBulletinState::NeedsChanges)
+            | (CgBulletinState::Submitted, CgBulletinState::Accepted)
+            | (CgBulletinState::Submitted, CgBulletinState::Scheduled)
+            | (CgBulletinState::Submitted, CgBulletinState::Declined)
+            | (CgBulletinState::NeedsChanges, CgBulletinState::Submitted)
+            | (CgBulletinState::Accepted, CgBulletinState::Accepted)
+            | (CgBulletinState::Accepted, CgBulletinState::Scheduled)
+            | (CgBulletinState::Accepted, CgBulletinState::Declined)
+            | (CgBulletinState::Accepted, CgBulletinState::Expired)
+            | (CgBulletinState::Scheduled, CgBulletinState::Accepted)
+            | (CgBulletinState::Scheduled, CgBulletinState::Scheduled)
+            | (CgBulletinState::Scheduled, CgBulletinState::Declined)
+            | (CgBulletinState::Scheduled, CgBulletinState::Expired)
+    )
+}
+
+fn audit_matches_cg_bulletin_state(event_kind: CgAuditEventKind, state: CgBulletinState) -> bool {
+    matches!(
+        (event_kind, state),
+        (
+            CgAuditEventKind::BulletinSubmitted,
+            CgBulletinState::Submitted
+        ) | (
+            CgAuditEventKind::BulletinModerated,
+            CgBulletinState::NeedsChanges
+                | CgBulletinState::Accepted
+                | CgBulletinState::Scheduled
+                | CgBulletinState::Declined
+        ) | (CgAuditEventKind::BulletinExpired, CgBulletinState::Expired)
+    )
+}
+
+fn cg_audit_event_kind_name(value: CgAuditEventKind) -> &'static str {
+    match value {
+        CgAuditEventKind::BoardCreated => "board_created",
+        CgAuditEventKind::BoardUpdated => "board_updated",
+        CgAuditEventKind::ZoneCreated => "zone_created",
+        CgAuditEventKind::ZoneUpdated => "zone_updated",
+        CgAuditEventKind::ZoneRemoved => "zone_removed",
+        CgAuditEventKind::FeedCreated => "feed_created",
+        CgAuditEventKind::FeedUpdated => "feed_updated",
+        CgAuditEventKind::FeedRemoved => "feed_removed",
+        CgAuditEventKind::BulletinSubmitted => "bulletin_submitted",
+        CgAuditEventKind::BulletinModerated => "bulletin_moderated",
+        CgAuditEventKind::BulletinExpired => "bulletin_expired",
+        CgAuditEventKind::FeedItemApproved => "feed_item_approved",
+    }
+}
+
+fn parse_cg_audit_event_kind(value: &str) -> Result<CgAuditEventKind, String> {
+    match value {
+        "board_created" => Ok(CgAuditEventKind::BoardCreated),
+        "board_updated" => Ok(CgAuditEventKind::BoardUpdated),
+        "zone_created" => Ok(CgAuditEventKind::ZoneCreated),
+        "zone_updated" => Ok(CgAuditEventKind::ZoneUpdated),
+        "zone_removed" => Ok(CgAuditEventKind::ZoneRemoved),
+        "feed_created" => Ok(CgAuditEventKind::FeedCreated),
+        "feed_updated" => Ok(CgAuditEventKind::FeedUpdated),
+        "feed_removed" => Ok(CgAuditEventKind::FeedRemoved),
+        "bulletin_submitted" => Ok(CgAuditEventKind::BulletinSubmitted),
+        "bulletin_moderated" => Ok(CgAuditEventKind::BulletinModerated),
+        "bulletin_expired" => Ok(CgAuditEventKind::BulletinExpired),
+        "feed_item_approved" => Ok(CgAuditEventKind::FeedItemApproved),
+        _ => Err(format!(
+            "database returned unknown CG audit event kind: {value}"
+        )),
     }
 }
 

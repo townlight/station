@@ -10,6 +10,10 @@ use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::Deserialize;
+use station_cg::{
+    CgAuditEvent, CgBoard, CgBulletin, CgFeedItemApproval, CgFeedSource, CgZoneConfig,
+    built_in_templates,
+};
 use station_domain::{
     AlertChannel, AlertChannelKind, AlertConditionKind, AlertEventState, AlertRule, AlertSeverity,
     SelfTestKind, SelfTestSchedule, SelfTestTrigger, StationProfile, derive_runtime_safe_to_air,
@@ -23,7 +27,9 @@ use station_media_lifecycle::{
 use station_schedule::{
     AssetReadiness, ChannelConfiguration, MediaAsset, OUTPUT_PROFILES, ScheduleItem,
 };
-use station_storage::{AlertChannelSecret, CommitWriteError, ProfileWriteError, StationStore};
+use station_storage::{
+    AlertChannelSecret, CgWriteError, CommitWriteError, ProfileWriteError, StationStore,
+};
 use station_update::UpdateCheckTrigger;
 use station_update_coordinator::CoordinatorError;
 
@@ -131,6 +137,52 @@ struct PutSelfTestSchedule {
 struct ApplyUpdate {
     requested_by: String,
     confirmation: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WriteCgBoard {
+    board: CgBoard,
+    expected_revision: u64,
+    audit: CgAuditEvent,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WriteCgZone {
+    zone: CgZoneConfig,
+    expected_revision: u64,
+    audit: CgAuditEvent,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DeleteCgResource {
+    expected_revision: u64,
+    audit: CgAuditEvent,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WriteCgFeedSource {
+    feed: CgFeedSource,
+    expected_revision: u64,
+    audit: CgAuditEvent,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WriteCgBulletin {
+    bulletin: CgBulletin,
+    expected_revision: u64,
+    audit: CgAuditEvent,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ApproveCgFeedItem {
+    approval: CgFeedItemApproval,
+    audit: CgAuditEvent,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -251,6 +303,29 @@ impl Api {
             }
             ("PUT", "/api/v1/watch-folders") => self.put_watch_folder(body),
             ("GET", "/api/v1/watch-folders") => self.list_watch_folders(),
+            ("GET", "/api/v1/cg/templates") => json_response(
+                200,
+                serde_json::to_vec(&built_in_templates())
+                    .expect("serializing built-in CG templates cannot fail"),
+            ),
+            ("GET", path) if path.starts_with("/api/v1/cg/board?") => self.read_cg_board(path),
+            ("PUT", "/api/v1/cg/board") => self.write_cg_board(body),
+            ("GET", path) if path.starts_with("/api/v1/cg/zones?") => self.list_cg_zones(path),
+            ("PUT", "/api/v1/cg/zones") => self.write_cg_zone(body),
+            ("DELETE", path) if path.starts_with("/api/v1/cg/zones/") => {
+                self.delete_cg_zone(path, body)
+            }
+            ("GET", path) if path.starts_with("/api/v1/cg/feeds?") => self.list_cg_feeds(path),
+            ("PUT", "/api/v1/cg/feeds") => self.write_cg_feed(body),
+            ("DELETE", path) if path.starts_with("/api/v1/cg/feeds/") => {
+                self.delete_cg_feed(path, body)
+            }
+            ("POST", "/api/v1/cg/feed-items/approve") => self.approve_cg_feed_item(body),
+            ("GET", path) if path.starts_with("/api/v1/cg/bulletins?") => {
+                self.list_cg_bulletins(path)
+            }
+            ("PUT", "/api/v1/cg/bulletins") => self.write_cg_bulletin(body),
+            ("GET", path) if path.starts_with("/api/v1/cg/audit?") => self.list_cg_audit(path),
             ("PUT", "/api/v1/schedule/items") => self.put_schedule_item(body),
             ("POST", "/api/v1/schedule/prepare") => self.prepare_schedule_commit(body),
             ("POST", "/api/v1/schedule/commit") => self.commit_schedule(body),
@@ -1419,6 +1494,210 @@ impl Api {
         }
     }
 
+    fn read_cg_board(&self, path: &str) -> ApiResponse {
+        let Some(query) = cg_query(path, "/api/v1/cg/board?") else {
+            return error_response(400, "invalid_query", "The CG board query is invalid.");
+        };
+        let Some(channel_id) = exact_cg_query_parameter(&query, "channel_id") else {
+            return error_response(400, "invalid_query", "channel_id is required.");
+        };
+        match self.storage.read_cg_board(channel_id) {
+            Ok(Some(board)) => json_response(
+                200,
+                serde_json::to_vec(&board).expect("serializing a CG board cannot fail"),
+            ),
+            Ok(None) => error_response(404, "cg_board_not_found", "The CG board does not exist."),
+            Err(message) => error_response(500, "storage_error", &message),
+        }
+    }
+
+    fn write_cg_board(&self, body: Option<&[u8]>) -> ApiResponse {
+        let Some(command) = parse_body::<WriteCgBoard>(body) else {
+            return error_response(400, "invalid_json", "A CG board write body is required.");
+        };
+        cg_write_response(self.storage.write_cg_board(
+            &command.board,
+            command.expected_revision,
+            &command.audit,
+        ))
+    }
+
+    fn list_cg_zones(&self, path: &str) -> ApiResponse {
+        let Some(query) = cg_query(path, "/api/v1/cg/zones?") else {
+            return error_response(400, "invalid_query", "The CG zone query is invalid.");
+        };
+        let Some(board_id) = exact_cg_query_parameter(&query, "board_id") else {
+            return error_response(400, "invalid_query", "board_id is required.");
+        };
+        match self.storage.list_cg_zones(board_id) {
+            Ok(zones) => json_response(
+                200,
+                serde_json::to_vec(&zones).expect("serializing CG zones cannot fail"),
+            ),
+            Err(message) => error_response(500, "storage_error", &message),
+        }
+    }
+
+    fn write_cg_zone(&self, body: Option<&[u8]>) -> ApiResponse {
+        let Some(command) = parse_body::<WriteCgZone>(body) else {
+            return error_response(400, "invalid_json", "A CG zone write body is required.");
+        };
+        cg_write_response(self.storage.write_cg_zone(
+            &command.zone,
+            command.expected_revision,
+            &command.audit,
+        ))
+    }
+
+    fn delete_cg_zone(&self, path: &str, body: Option<&[u8]>) -> ApiResponse {
+        let Some(zone_id) = cg_resource_id(path, "/api/v1/cg/zones/") else {
+            return error_response(400, "invalid_path", "The CG zone identity is invalid.");
+        };
+        let Some(command) = parse_body::<DeleteCgResource>(body) else {
+            return error_response(400, "invalid_json", "A CG zone deletion body is required.");
+        };
+        cg_delete_response(self.storage.delete_cg_zone(
+            zone_id,
+            command.expected_revision,
+            &command.audit,
+        ))
+    }
+
+    fn list_cg_feeds(&self, path: &str) -> ApiResponse {
+        let Some(query) = cg_query(path, "/api/v1/cg/feeds?") else {
+            return error_response(400, "invalid_query", "The CG feed query is invalid.");
+        };
+        let Some(channel_id) = exact_cg_query_parameter(&query, "channel_id") else {
+            return error_response(400, "invalid_query", "channel_id is required.");
+        };
+        match self.storage.list_cg_feed_sources(channel_id) {
+            Ok(feeds) => json_response(
+                200,
+                serde_json::to_vec(&feeds).expect("serializing CG feeds cannot fail"),
+            ),
+            Err(message) => error_response(500, "storage_error", &message),
+        }
+    }
+
+    fn write_cg_feed(&self, body: Option<&[u8]>) -> ApiResponse {
+        let Some(command) = parse_body::<WriteCgFeedSource>(body) else {
+            return error_response(400, "invalid_json", "A CG feed write body is required.");
+        };
+        cg_write_response(self.storage.write_cg_feed_source(
+            &command.feed,
+            command.expected_revision,
+            &command.audit,
+        ))
+    }
+
+    fn delete_cg_feed(&self, path: &str, body: Option<&[u8]>) -> ApiResponse {
+        let Some(feed_id) = cg_resource_id(path, "/api/v1/cg/feeds/") else {
+            return error_response(400, "invalid_path", "The CG feed identity is invalid.");
+        };
+        let Some(command) = parse_body::<DeleteCgResource>(body) else {
+            return error_response(400, "invalid_json", "A CG feed deletion body is required.");
+        };
+        cg_delete_response(self.storage.delete_cg_feed_source(
+            feed_id,
+            command.expected_revision,
+            &command.audit,
+        ))
+    }
+
+    fn approve_cg_feed_item(&self, body: Option<&[u8]>) -> ApiResponse {
+        let Some(command) = parse_body::<ApproveCgFeedItem>(body) else {
+            return error_response(
+                400,
+                "invalid_json",
+                "A CG feed-item approval body is required.",
+            );
+        };
+        cg_write_response(
+            self.storage
+                .approve_cg_feed_item(&command.approval, &command.audit),
+        )
+    }
+
+    fn list_cg_bulletins(&self, path: &str) -> ApiResponse {
+        let Some(query) = cg_query(path, "/api/v1/cg/bulletins?") else {
+            return error_response(400, "invalid_query", "The CG bulletin query is invalid.");
+        };
+        if query
+            .keys()
+            .any(|key| !matches!(key.as_str(), "channel_id" | "airable_at_unix_ms"))
+        {
+            return error_response(400, "invalid_query", "The CG bulletin query is invalid.");
+        }
+        let Some(channel_id) = query.get("channel_id").map(String::as_str) else {
+            return error_response(400, "invalid_query", "channel_id is required.");
+        };
+        let result = match query.get("airable_at_unix_ms") {
+            Some(value) => match value.parse::<i64>() {
+                Ok(now) => self.storage.list_airable_cg_bulletins(channel_id, now),
+                Err(_) => {
+                    return error_response(
+                        400,
+                        "invalid_query",
+                        "airable_at_unix_ms must be an integer.",
+                    );
+                }
+            },
+            None => self.storage.list_cg_bulletins(channel_id),
+        };
+        match result {
+            Ok(bulletins) => json_response(
+                200,
+                serde_json::to_vec(&bulletins).expect("serializing CG bulletins cannot fail"),
+            ),
+            Err(message) => error_response(500, "storage_error", &message),
+        }
+    }
+
+    fn write_cg_bulletin(&self, body: Option<&[u8]>) -> ApiResponse {
+        let Some(command) = parse_body::<WriteCgBulletin>(body) else {
+            return error_response(400, "invalid_json", "A CG bulletin write body is required.");
+        };
+        cg_write_response(self.storage.write_cg_bulletin(
+            &command.bulletin,
+            command.expected_revision,
+            &command.audit,
+        ))
+    }
+
+    fn list_cg_audit(&self, path: &str) -> ApiResponse {
+        let Some(query) = cg_query(path, "/api/v1/cg/audit?") else {
+            return error_response(400, "invalid_query", "The CG audit query is invalid.");
+        };
+        if query
+            .keys()
+            .any(|key| !matches!(key.as_str(), "channel_id" | "limit"))
+        {
+            return error_response(400, "invalid_query", "The CG audit query is invalid.");
+        }
+        let Some(channel_id) = query.get("channel_id").map(String::as_str) else {
+            return error_response(400, "invalid_query", "channel_id is required.");
+        };
+        let limit = match query.get("limit") {
+            Some(value) => match value.parse::<u32>() {
+                Ok(limit) => limit,
+                Err(_) => {
+                    return error_response(400, "invalid_query", "limit must be an integer.");
+                }
+            },
+            None => 100,
+        };
+        match self.storage.list_cg_audit_events(channel_id, limit) {
+            Ok(events) => json_response(
+                200,
+                serde_json::to_vec(&events).expect("serializing CG audit events cannot fail"),
+            ),
+            Err(message) if message.contains("limit") => {
+                error_response(422, "validation_failed", &message)
+            }
+            Err(message) => error_response(500, "storage_error", &message),
+        }
+    }
+
     fn list_schedule(&self, path: &str) -> ApiResponse {
         let Some(channel_id) = path.strip_prefix("/api/v1/schedule/items?channel_id=") else {
             return error_response(400, "invalid_query", "channel_id is required.");
@@ -1539,6 +1818,93 @@ fn parse_window_query(query: &str) -> Option<(i64, i64)> {
 
 fn parse_body<T: serde::de::DeserializeOwned>(body: Option<&[u8]>) -> Option<T> {
     body.and_then(|body| serde_json::from_slice(body).ok())
+}
+
+fn cg_query(path: &str, prefix: &str) -> Option<HashMap<String, String>> {
+    let query = path.strip_prefix(prefix)?;
+    if query.is_empty() || query.len() > 1_000 {
+        return None;
+    }
+    let mut values = HashMap::new();
+    for pair in query.split('&') {
+        let (name, value) = pair.split_once('=')?;
+        if name.is_empty()
+            || value.is_empty()
+            || name.len() > 80
+            || value.len() > 500
+            || !name
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte == b'_')
+            || value
+                .bytes()
+                .any(|byte| byte.is_ascii_control() || matches!(byte, b'/' | b'%' | b'\\'))
+            || values.insert(name.to_string(), value.to_string()).is_some()
+        {
+            return None;
+        }
+    }
+    Some(values)
+}
+
+fn exact_cg_query_parameter<'a>(query: &'a HashMap<String, String>, name: &str) -> Option<&'a str> {
+    (query.len() == 1)
+        .then(|| query.get(name).map(String::as_str))
+        .flatten()
+}
+
+fn cg_resource_id<'a>(path: &'a str, prefix: &str) -> Option<&'a str> {
+    let identity = path.strip_prefix(prefix)?;
+    (!identity.is_empty()
+        && identity.len() <= 128
+        && !identity.contains('/')
+        && !identity
+            .bytes()
+            .any(|byte| byte.is_ascii_control() || byte == b'%'))
+    .then_some(identity)
+}
+
+fn cg_write_response<T: serde::Serialize>(result: Result<T, CgWriteError>) -> ApiResponse {
+    match result {
+        Ok(value) => json_response(
+            200,
+            serde_json::to_vec(&value).expect("serializing a CG write result cannot fail"),
+        ),
+        Err(CgWriteError::NotFound) => error_response(
+            404,
+            "cg_dependency_not_found",
+            "A required CG resource does not exist.",
+        ),
+        Err(CgWriteError::Conflict(current_revision)) => error_response(
+            409,
+            "revision_conflict",
+            &format!("The CG resource changed; current revision is {current_revision}."),
+        ),
+        Err(CgWriteError::Invalid(message)) => error_response(422, "validation_failed", message),
+        Err(CgWriteError::Storage(message)) => error_response(500, "storage_error", &message),
+    }
+}
+
+fn cg_delete_response(result: Result<(), CgWriteError>) -> ApiResponse {
+    match result {
+        Ok(()) => ApiResponse {
+            status: 204,
+            content_type: "application/json",
+            attachment_name: None,
+            body: Vec::new(),
+        },
+        Err(CgWriteError::NotFound) => error_response(
+            404,
+            "cg_dependency_not_found",
+            "The requested CG resource does not exist.",
+        ),
+        Err(CgWriteError::Conflict(current_revision)) => error_response(
+            409,
+            "revision_conflict",
+            &format!("The CG resource changed; current revision is {current_revision}."),
+        ),
+        Err(CgWriteError::Invalid(message)) => error_response(422, "validation_failed", message),
+        Err(CgWriteError::Storage(message)) => error_response(500, "storage_error", &message),
+    }
 }
 
 fn system_time_millis() -> Result<i64, String> {
