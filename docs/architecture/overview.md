@@ -64,8 +64,10 @@ resolved snapshot is handed to the worker with `ApplyCgSnapshot`/`ClearCgSnapsho
 snapshot equality controls deduplication, and invalid updates retain the last valid visible state.
 The implemented scope is manual/bulletin text, clock, and static lower-third, ticker-region, and
 bug-region geometry. Feed normalization has offline hostile-input coverage, and the focused decoded
-UDP pixel apply/change/clear gate passes; live feed transport, installed operation, and field soak
-remain separate gates. See [ADR 0030](../adr/0030-fixed-cg-overlay-compositor.md), [hostile feed proof](../proof/2026-08-21-feed-hostile-normalization.md), and [decoded CG proof record](../proof/2026-08-21-cg-udp-decoded-pixel.md).
+UDP pixel apply/change/clear gate passes. The service also runs bounded direct-HTTPS feed fetching;
+the channel orchestration cadence atomically expires due scheduled bulletins before resolving the
+same timestamp's snapshot. External-provider compatibility, installed operation, and field soak
+remain separate gates. See [ADR 0030](../adr/0030-fixed-cg-overlay-compositor.md), [hostile feed proof](../proof/2026-08-21-feed-hostile-normalization.md), [feed lifecycle proof](../proof/2026-08-21-cg-feed-fetch-lifecycle.md), [bulletin expiration proof](../proof/2026-08-21-cg-bulletin-expiration.md), and [decoded CG proof record](../proof/2026-08-21-cg-udp-decoded-pixel.md).
 
 ## Authority rules
 

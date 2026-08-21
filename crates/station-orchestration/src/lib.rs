@@ -18,10 +18,28 @@ use station_media_protocol::{
 };
 use station_runtime::{SupervisorError, WorkerSupervisor};
 use station_schedule::{ChannelConfiguration, DispatchStatus, OutputSinkKind};
-use station_storage::StationStore;
+use station_storage::{CgWriteError, StationStore};
 
 static ALERT_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 const HEARTBEAT_INTERVAL_MS: i64 = 5_000;
+const CG_EXPIRER_OPERATOR_ID: &str = "stationd-cg-expirer";
+const CG_SYNC_INTERVAL_MS: i64 = 1_000;
+
+fn expire_due_bulletins(
+    store: &StationStore,
+    channel_id: &str,
+    now_unix_ms: i64,
+) -> Result<(), OrchestrationError> {
+    match store.expire_due_cg_bulletins(channel_id, now_unix_ms, CG_EXPIRER_OPERATOR_ID) {
+        Ok(_) | Err(CgWriteError::NotFound) | Err(CgWriteError::Conflict(_)) => Ok(()),
+        Err(CgWriteError::Invalid(message)) => Err(OrchestrationError::Storage(format!(
+            "CG bulletin expiration rejected: {message}"
+        ))),
+        Err(CgWriteError::Storage(message)) => Err(OrchestrationError::Storage(format!(
+            "CG bulletin expiration storage failure: {message}"
+        ))),
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DispatchTransition {
@@ -401,7 +419,8 @@ impl ChannelController {
             .map_err(OrchestrationError::Worker)?;
         let store = StationStore::open(&self.database_path).map_err(OrchestrationError::Storage)?;
         if now_unix_ms >= self.next_cg_sync_at_unix_ms {
-            self.next_cg_sync_at_unix_ms = now_unix_ms.saturating_add(1_000);
+            self.next_cg_sync_at_unix_ms = now_unix_ms.saturating_add(CG_SYNC_INTERVAL_MS);
+            expire_due_bulletins(&store, &self.channel_id, now_unix_ms)?;
             self.sync_cg(&store, now_unix_ms)?;
         }
         let Some(job) = store
@@ -975,13 +994,336 @@ fn system_time_millis() -> Result<i64, OrchestrationError> {
 #[cfg(test)]
 mod tests {
     use super::{
-        CgSnapshotState, OrchestrationError, OutputExpectation, resolved_snapshot_to_protocol,
-        stalled_required_output,
+        CgSnapshotState, OrchestrationError, OutputExpectation, expire_due_bulletins,
+        resolved_snapshot_to_protocol, stalled_required_output,
+    };
+    use station_cg::{
+        CgAuditEvent, CgAuditEventKind, CgBoard, CgBulletin, CgBulletinContent, CgBulletinState,
+        CgZoneConfig,
     };
     use station_cg::{
         CgContentSource, CgRect, CgResolvedContent, CgResolvedSnapshot, CgResolvedZone,
         CgTemplateKind, CgZoneKind,
     };
+    use station_schedule::{ChannelConfiguration, OutputProfileId, OutputSinkConfiguration};
+    use station_storage::StationStore;
+    use std::collections::BTreeMap;
+    use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    const CHANNEL_ID: &str = "5d85189a-cd1f-43dc-a619-66a2aeb09ac4";
+    const OTHER_CHANNEL_ID: &str = "9d85189a-cd1f-43dc-a619-66a2aeb09ac4";
+    const BOARD_ID: &str = "94a0dc01-d314-4b55-b2e4-cba39cc3f1dc";
+    const ZONE_ID: &str = "8f4f0f70-5c30-48c6-819a-fb22b34353c5";
+    const BULLETIN_ID: &str = "597f52ae-f16c-4ff8-ab32-60379cd950c4";
+    const OTHER_BULLETIN_ID: &str = "697f52ae-f16c-48f8-ab32-60379cd950c4";
+
+    fn database_path(label: &str) -> PathBuf {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!("townlight-orchestration-{label}-{nonce}.db"))
+    }
+
+    fn remove_database(path: &std::path::Path) {
+        for suffix in ["", "-wal", "-shm"] {
+            let _ = std::fs::remove_file(format!("{}{}", path.display(), suffix));
+        }
+    }
+
+    fn put_channel(store: &StationStore, channel_id: &str) {
+        store
+            .put_channel(&ChannelConfiguration {
+                channel_id: channel_id.into(),
+                display_name: channel_id.into(),
+                output_profile: OutputProfileId::Proof360p30,
+                output_sinks: vec![OutputSinkConfiguration::required_udp(
+                    "f103968a-640b-42dc-8084-3fe9e847ff7f",
+                    "Proof output",
+                    "127.0.0.1:5500",
+                    -16.0,
+                )],
+                enabled: false,
+            })
+            .unwrap();
+    }
+
+    fn audit(
+        audit_id: &str,
+        channel_id: &str,
+        event_kind: CgAuditEventKind,
+        occurred_at_unix_ms: i64,
+    ) -> CgAuditEvent {
+        CgAuditEvent {
+            audit_id: audit_id.into(),
+            board_id: Some(BOARD_ID.into()),
+            channel_id: channel_id.into(),
+            event_kind,
+            operator_id: "operator".into(),
+            occurred_at_unix_ms,
+            details: BTreeMap::new(),
+        }
+    }
+
+    fn seed_scheduled_cg(store: &StationStore, end_at_unix_ms: i64) {
+        let board = CgBoard {
+            board_id: BOARD_ID.into(),
+            channel_id: CHANNEL_ID.into(),
+            template_id: "fullscreen".into(),
+            active: true,
+            background_audio_asset_id: None,
+            revision: 1,
+            created_at_unix_ms: 0,
+            updated_at_unix_ms: 0,
+            created_by: "operator".into(),
+        };
+        store
+            .write_cg_board(
+                &board,
+                0,
+                &audit(
+                    "7bb32e14-fe69-47cb-a921-dc3fc84499bf",
+                    CHANNEL_ID,
+                    CgAuditEventKind::BoardCreated,
+                    0,
+                ),
+            )
+            .unwrap();
+        let zone = CgZoneConfig {
+            zone_id: ZONE_ID.into(),
+            board_id: BOARD_ID.into(),
+            template_zone_key: "primary".into(),
+            zone_kind: CgZoneKind::Primary,
+            content_source: CgContentSource::BulletinRotation,
+            rotation_seconds: Some(3),
+            approval_required: false,
+            allowed_tags: Vec::new(),
+            revision: 1,
+            created_at_unix_ms: 0,
+            updated_at_unix_ms: 0,
+        };
+        store
+            .write_cg_zone(
+                &zone,
+                0,
+                &audit(
+                    "31086e51-b940-450d-a9c2-5a31807ecc02",
+                    CHANNEL_ID,
+                    CgAuditEventKind::ZoneCreated,
+                    0,
+                ),
+            )
+            .unwrap();
+        let submitted = CgBulletin {
+            bulletin_id: BULLETIN_ID.into(),
+            channel_id: CHANNEL_ID.into(),
+            content: CgBulletinContent::Text {
+                title: "Town notice".into(),
+                body: "Scheduled notice".into(),
+            },
+            state: CgBulletinState::Submitted,
+            tags: Vec::new(),
+            requested_start_at_unix_ms: Some(0),
+            requested_end_at_unix_ms: Some(end_at_unix_ms),
+            display_seconds: 3,
+            audio_asset_id: None,
+            submitted_by: "operator".into(),
+            moderation_notes: None,
+            moderated_by: None,
+            revision: 1,
+            created_at_unix_ms: 0,
+            updated_at_unix_ms: 0,
+        };
+        store
+            .write_cg_bulletin(
+                &submitted,
+                0,
+                &audit(
+                    "42086e51-b940-450d-a9c2-5a31807ecc02",
+                    CHANNEL_ID,
+                    CgAuditEventKind::BulletinSubmitted,
+                    0,
+                ),
+            )
+            .unwrap();
+        let scheduled = CgBulletin {
+            state: CgBulletinState::Scheduled,
+            moderated_by: Some("operator".into()),
+            revision: 2,
+            updated_at_unix_ms: 500,
+            ..submitted
+        };
+        store
+            .write_cg_bulletin(
+                &scheduled,
+                1,
+                &audit(
+                    "53086e51-b940-450d-a9c2-5a31807ecc02",
+                    CHANNEL_ID,
+                    CgAuditEventKind::BulletinModerated,
+                    500,
+                ),
+            )
+            .unwrap();
+    }
+
+    fn seed_unrelated_scheduled_bulletin(
+        store: &StationStore,
+        bulletin_id: &str,
+        channel_id: &str,
+        end_at_unix_ms: i64,
+    ) {
+        let submitted = CgBulletin {
+            bulletin_id: bulletin_id.into(),
+            channel_id: channel_id.into(),
+            content: CgBulletinContent::Text {
+                title: "Other notice".into(),
+                body: "Other scheduled notice".into(),
+            },
+            state: CgBulletinState::Submitted,
+            tags: Vec::new(),
+            requested_start_at_unix_ms: Some(0),
+            requested_end_at_unix_ms: Some(end_at_unix_ms),
+            display_seconds: 3,
+            audio_asset_id: None,
+            submitted_by: "operator".into(),
+            moderation_notes: None,
+            moderated_by: None,
+            revision: 1,
+            created_at_unix_ms: 0,
+            updated_at_unix_ms: 0,
+        };
+        store
+            .write_cg_bulletin(
+                &submitted,
+                0,
+                &audit(
+                    "64086e51-b940-450d-a9c2-5a31807ecc02",
+                    channel_id,
+                    CgAuditEventKind::BulletinSubmitted,
+                    0,
+                ),
+            )
+            .unwrap();
+        store
+            .write_cg_bulletin(
+                &CgBulletin {
+                    state: CgBulletinState::Scheduled,
+                    moderated_by: Some("operator".into()),
+                    revision: 2,
+                    updated_at_unix_ms: 500,
+                    ..submitted
+                },
+                1,
+                &audit(
+                    "75086e51-b940-450d-a9c2-5a31807ecc02",
+                    channel_id,
+                    CgAuditEventKind::BulletinModerated,
+                    500,
+                ),
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn expiration_precedes_same_timestamp_snapshot_and_is_restart_idempotent() {
+        let path = database_path("cg-expiration-orchestration");
+        let store = StationStore::open(&path).unwrap();
+        put_channel(&store, CHANNEL_ID);
+        put_channel(&store, OTHER_CHANNEL_ID);
+        seed_scheduled_cg(&store, 1_000);
+        seed_unrelated_scheduled_bulletin(&store, OTHER_BULLETIN_ID, OTHER_CHANNEL_ID, 1_000);
+
+        expire_due_bulletins(&store, CHANNEL_ID, 1_000).unwrap();
+        let expired = store.read_cg_bulletin(BULLETIN_ID).unwrap().unwrap();
+        assert_eq!(expired.state, CgBulletinState::Expired);
+        assert_eq!(expired.revision, 3);
+        assert_eq!(expired.updated_at_unix_ms, 1_000);
+        let unrelated = store.read_cg_bulletin(OTHER_BULLETIN_ID).unwrap().unwrap();
+        assert_eq!(unrelated.state, CgBulletinState::Scheduled);
+        assert_eq!(unrelated.revision, 2);
+
+        let snapshot = store
+            .load_cg_snapshot_inputs(CHANNEL_ID, 1_000)
+            .unwrap()
+            .resolve()
+            .unwrap();
+        assert!(matches!(
+            snapshot.zones[0].content,
+            CgResolvedContent::Placeholder {
+                reason: station_cg::CgPlaceholderReason::NoAirableBulletins,
+                ..
+            }
+        ));
+        assert!(
+            resolved_snapshot_to_protocol(&snapshot)
+                .unwrap()
+                .overlays
+                .is_empty()
+        );
+        assert_eq!(
+            store
+                .list_cg_audit_events(CHANNEL_ID, 100)
+                .unwrap()
+                .into_iter()
+                .filter(|event| event.event_kind == CgAuditEventKind::BulletinExpired)
+                .count(),
+            1
+        );
+
+        drop(store);
+        let reopened = StationStore::open(&path).unwrap();
+        expire_due_bulletins(&reopened, CHANNEL_ID, 1_000).unwrap();
+        assert_eq!(
+            reopened
+                .list_cg_audit_events(CHANNEL_ID, 100)
+                .unwrap()
+                .into_iter()
+                .filter(|event| event.event_kind == CgAuditEventKind::BulletinExpired)
+                .count(),
+            1
+        );
+        drop(reopened);
+        remove_database(&path);
+    }
+
+    #[test]
+    fn expiration_leaves_not_yet_due_bulletin_airable() {
+        let path = database_path("cg-expiration-not-due");
+        let store = StationStore::open(&path).unwrap();
+        put_channel(&store, CHANNEL_ID);
+        seed_scheduled_cg(&store, 2_000);
+
+        expire_due_bulletins(&store, CHANNEL_ID, 1_000).unwrap();
+        assert_eq!(
+            store.read_cg_bulletin(BULLETIN_ID).unwrap().unwrap().state,
+            CgBulletinState::Scheduled
+        );
+        let snapshot = store
+            .load_cg_snapshot_inputs(CHANNEL_ID, 1_000)
+            .unwrap()
+            .resolve()
+            .unwrap();
+        assert!(matches!(
+            snapshot.zones[0].content,
+            CgResolvedContent::Bulletin { ref bulletin_id, .. }
+                if bulletin_id == BULLETIN_ID
+        ));
+        remove_database(&path);
+    }
+
+    #[test]
+    fn expiration_rejects_clock_regression_as_an_observable_tick_error() {
+        let path = database_path("cg-expiration-clock-regression");
+        let store = StationStore::open(&path).unwrap();
+        put_channel(&store, CHANNEL_ID);
+        let error = expire_due_bulletins(&store, CHANNEL_ID, -1).unwrap_err();
+        assert!(
+            matches!(error, OrchestrationError::Storage(message) if message.contains("expiration rejected"))
+        );
+        remove_database(&path);
+    }
 
     fn output(required: bool) -> OutputExpectation {
         OutputExpectation {
