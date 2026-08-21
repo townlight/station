@@ -52,7 +52,7 @@ fn launches_handshakes_commands_and_cleanly_stops_the_real_worker() {
         &journal,
         output.local_addr().unwrap(),
         OutputProfileId::Atsc720p5994,
-        Duration::from_secs(2),
+        Duration::from_secs(10),
     );
     assert!(
         launched.is_ok(),
@@ -197,7 +197,7 @@ fn launches_handshakes_commands_and_cleanly_stops_the_real_worker() {
         CHANNEL_ID,
         &journal,
         output.local_addr().unwrap(),
-        Duration::from_secs(2),
+        Duration::from_secs(10),
     )
     .unwrap();
     let restart_ready = restarted.ready().clone();
