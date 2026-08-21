@@ -277,6 +277,45 @@ pub enum AlertChannelKind {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AlertRule {
+    pub rule_id: String,
+    pub condition: AlertConditionKind,
+    pub enabled: bool,
+    pub severity: AlertSeverity,
+    pub channel_ids: Vec<String>,
+    pub dedupe_window_seconds: u32,
+    pub re_alert_after_seconds: u32,
+    pub scope_channel_id: Option<String>,
+    pub notify_on_resolve: bool,
+    pub updated_at_unix_ms: i64,
+    pub updated_by: String,
+}
+
+impl AlertRule {
+    pub fn validate(&self) -> Result<(), &'static str> {
+        let mut unique_channels = std::collections::HashSet::new();
+        if !visible_text(&self.rule_id, 120)
+            || !visible_text(&self.updated_by, 120)
+            || self.updated_at_unix_ms < 0
+            || self.dedupe_window_seconds > 86_400
+            || self.re_alert_after_seconds > 604_800
+            || self.channel_ids.len() > 64
+            || self
+                .channel_ids
+                .iter()
+                .any(|channel_id| !is_uuid(channel_id) || !unique_channels.insert(channel_id))
+            || self
+                .scope_channel_id
+                .as_deref()
+                .is_some_and(|channel_id| !is_uuid(channel_id))
+        {
+            return Err("alert rule fields are invalid.");
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AlertChannel {
     pub channel_id: String,
     pub kind: AlertChannelKind,
@@ -485,6 +524,7 @@ impl AlertEvent {
 #[serde(rename_all = "snake_case")]
 pub enum AlertNotificationKind {
     Firing,
+    Realert,
     Resolved,
     Test,
 }
@@ -597,6 +637,7 @@ impl AlertDeliveryPayload {
         event.validate()?;
         match (notification_kind, event.state) {
             (AlertNotificationKind::Firing, AlertEventState::Firing)
+            | (AlertNotificationKind::Realert, AlertEventState::Firing)
             | (AlertNotificationKind::Resolved, AlertEventState::Resolved)
             | (AlertNotificationKind::Test, AlertEventState::Resolved) => {}
             _ => return Err("alert notification kind does not match the event state."),
@@ -619,7 +660,9 @@ impl AlertDeliveryPayload {
 
     pub fn validate(&self) -> Result<(), &'static str> {
         let state = match self.notification_kind {
-            AlertNotificationKind::Firing => AlertEventState::Firing,
+            AlertNotificationKind::Firing | AlertNotificationKind::Realert => {
+                AlertEventState::Firing
+            }
             AlertNotificationKind::Resolved => AlertEventState::Resolved,
             AlertNotificationKind::Test => AlertEventState::Resolved,
         };
@@ -683,6 +726,32 @@ fn is_utc_clock(value: &str) -> bool {
 #[cfg(test)]
 mod runtime_tests {
     use super::*;
+
+    #[test]
+    fn alert_rule_enforces_bounded_realert_and_destination_identity() {
+        let valid = AlertRule {
+            rule_id: "off-air-default".into(),
+            condition: AlertConditionKind::OffAir,
+            enabled: true,
+            severity: AlertSeverity::Critical,
+            channel_ids: vec!["406798db-38d1-4f2f-b447-1f6558135ba0".into()],
+            dedupe_window_seconds: 900,
+            re_alert_after_seconds: 3_600,
+            scope_channel_id: None,
+            notify_on_resolve: true,
+            updated_at_unix_ms: 1_000,
+            updated_by: "system-seed".into(),
+        };
+        assert!(valid.validate().is_ok());
+
+        let mut invalid = valid.clone();
+        invalid.re_alert_after_seconds = 604_801;
+        assert_eq!(invalid.validate(), Err("alert rule fields are invalid."));
+
+        invalid = valid;
+        invalid.channel_ids.push("not-a-uuid".into());
+        assert_eq!(invalid.validate(), Err("alert rule fields are invalid."));
+    }
 
     const CHANNEL_ID: &str = "8ea48bc4-7f2e-4f89-9bbc-2c58472f0e8e";
 

@@ -14,8 +14,8 @@ use gstreamer as gst;
 use station_api::{Api, serve_one, serve_until};
 use station_domain::{
     AlertConditionKind, AlertDelivery, AlertDeliveryState, AlertEvent, AlertEventState,
-    AlertNotificationKind, AlertSeverity, ChannelRuntimeObservation, ChannelRuntimeState,
-    RuntimeSafeToAirStatus, SafeToAirColor, StationProfile,
+    AlertNotificationKind, AlertRule, AlertSeverity, ChannelRuntimeObservation,
+    ChannelRuntimeState, RuntimeSafeToAirStatus, SafeToAirColor, StationProfile,
 };
 use station_ingest::{IngestOutcome, IngestWorker, TranscodeOutcome, TranscodeWorker};
 use station_media_lifecycle::WatchFolderConfig;
@@ -452,6 +452,48 @@ fn queues_a_visible_send_test_without_exposing_destination_secrets() {
     assert_eq!(events.len(), 1);
     assert_eq!(events[0].state, AlertEventState::Resolved);
     assert_eq!(events[0].severity, AlertSeverity::Info);
+    let _ = std::fs::remove_file(database);
+}
+
+#[test]
+fn lists_seeded_alert_rules_and_persists_an_operator_policy_edit() {
+    let database = temporary_database("alert-rule-edit");
+    let api = Api::open(&database).unwrap();
+    let listed = api.handle("GET", "/api/v1/alert-rules", None);
+    assert_eq!(listed.status, 200);
+    let rules: Vec<AlertRule> = serde_json::from_slice(&listed.body).unwrap();
+    let rule = rules
+        .iter()
+        .find(|rule| rule.condition == AlertConditionKind::OffAir)
+        .unwrap();
+    assert_eq!(rule.severity, AlertSeverity::Critical);
+    assert_eq!(rule.re_alert_after_seconds, 3_600);
+
+    let edited = api.handle(
+        "PUT",
+        &format!("/api/v1/alert-rules/{}", rule.rule_id),
+        Some(
+            br#"{"condition":"off-air","enabled":true,"severity":"critical","channel_ids":[],"dedupe_window_seconds":300,"re_alert_after_seconds":1800,"scope_channel_id":null,"notify_on_resolve":false,"updated_by":"station-operator"}"#,
+        ),
+    );
+    assert_eq!(
+        edited.status,
+        200,
+        "{}",
+        String::from_utf8_lossy(&edited.body)
+    );
+    let edited: AlertRule = serde_json::from_slice(&edited.body).unwrap();
+    assert_eq!(edited.rule_id, rule.rule_id);
+    assert_eq!(edited.dedupe_window_seconds, 300);
+    assert_eq!(edited.re_alert_after_seconds, 1_800);
+    assert!(!edited.notify_on_resolve);
+    assert_eq!(edited.updated_by, "station-operator");
+    assert!(edited.updated_at_unix_ms > 0);
+
+    let reopened = Api::open(&database).unwrap();
+    let persisted: Vec<AlertRule> =
+        serde_json::from_slice(&reopened.handle("GET", "/api/v1/alert-rules", None).body).unwrap();
+    assert!(persisted.contains(&edited));
     let _ = std::fs::remove_file(database);
 }
 

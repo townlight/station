@@ -3,7 +3,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use station_domain::{
     AlertChannel, AlertChannelKind, AlertConditionKind, AlertDeliveryState, AlertEvent,
-    AlertEventState, AlertNotificationKind, AlertSeverity, ChannelRuntimeObservation,
+    AlertEventState, AlertNotificationKind, AlertRule, AlertSeverity, ChannelRuntimeObservation,
     ChannelRuntimeState, redact_alert_channel_target,
 };
 use station_schedule::ChannelConfiguration;
@@ -368,6 +368,95 @@ fn holds_noncritical_alerts_until_quiet_hours_end() {
             .unwrap()
             .is_some()
     );
+    drop(store);
+    remove_database(&database);
+}
+
+#[test]
+fn seeds_editable_rules_and_routes_bounded_realerts_to_selected_destinations() {
+    let database = database_path("alert-rules-realert");
+    let store = StationStore::open(&database).unwrap();
+    let defaults = store.list_alert_rules().unwrap();
+    let default = defaults
+        .iter()
+        .find(|rule| rule.condition == AlertConditionKind::EncoderDeath)
+        .unwrap();
+    assert_eq!(default.severity, AlertSeverity::Critical);
+    assert_eq!(default.re_alert_after_seconds, 3_600);
+
+    let selected_channel = "70c12dc7-b29e-426f-a26d-8678102ffb10";
+    let excluded_channel = "bf45c318-27a9-4c6c-82f6-d35f430cfaeb";
+    put_webhook_channel(&store, selected_channel);
+    put_webhook_channel(&store, excluded_channel);
+    let rule = AlertRule {
+        rule_id: default.rule_id.clone(),
+        condition: AlertConditionKind::EncoderDeath,
+        enabled: true,
+        severity: AlertSeverity::Warning,
+        channel_ids: vec![selected_channel.into()],
+        dedupe_window_seconds: 900,
+        re_alert_after_seconds: 60,
+        scope_channel_id: Some(CHANNEL_ID.into()),
+        notify_on_resolve: false,
+        updated_at_unix_ms: 900,
+        updated_by: "station-operator".into(),
+    };
+    assert_eq!(store.put_alert_rule(&rule).unwrap(), rule);
+
+    let event = store
+        .observe_alert_and_route(&alert("rule-owned-event", 1_000))
+        .unwrap();
+    assert_eq!(event.severity, AlertSeverity::Warning);
+    let initial = store.list_alert_deliveries().unwrap();
+    assert_eq!(initial.len(), 1);
+    assert_eq!(initial[0].alert_channel_id, selected_channel);
+    let leased = store
+        .claim_due_alert_delivery(1_000, 5_000)
+        .unwrap()
+        .unwrap();
+    store
+        .complete_alert_delivery(&leased.delivery_id, 1_001, None)
+        .unwrap();
+
+    store
+        .observe_alert_and_route(&alert("suppressed-repeat", 60_999))
+        .unwrap();
+    assert_eq!(store.list_alert_deliveries().unwrap().len(), 1);
+    store
+        .observe_alert_and_route(&alert("due-repeat", 61_001))
+        .unwrap();
+    let deliveries = store.list_alert_deliveries().unwrap();
+    assert_eq!(deliveries.len(), 2);
+    assert_eq!(
+        deliveries[1].notification_kind,
+        AlertNotificationKind::Realert
+    );
+    assert_eq!(deliveries[1].alert_channel_id, selected_channel);
+    store
+        .observe_alert_and_route(&alert("repeat-while-page-pending", 121_001))
+        .unwrap();
+    assert_eq!(store.list_alert_deliveries().unwrap().len(), 2);
+    let leased_realert = store
+        .claim_due_alert_delivery(121_001, 5_000)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        leased_realert.notification_kind,
+        AlertNotificationKind::Realert
+    );
+    store
+        .complete_alert_delivery(&leased_realert.delivery_id, 121_002, None)
+        .unwrap();
+    store
+        .observe_alert_and_route(&alert("next-window-realert", 181_002))
+        .unwrap();
+    assert_eq!(store.list_alert_deliveries().unwrap().len(), 3);
+
+    store
+        .resolve_alert(AlertConditionKind::EncoderDeath, CHANNEL_ID, 182_000)
+        .unwrap()
+        .unwrap();
+    assert_eq!(store.list_alert_deliveries().unwrap().len(), 3);
     drop(store);
     remove_database(&database);
 }

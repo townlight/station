@@ -11,8 +11,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::Deserialize;
 use station_domain::{
-    AlertChannel, AlertChannelKind, AlertEventState, AlertSeverity, StationProfile,
-    derive_runtime_safe_to_air, redact_alert_channel_target, validate_alert_channel_target,
+    AlertChannel, AlertChannelKind, AlertConditionKind, AlertEventState, AlertRule, AlertSeverity,
+    StationProfile, derive_runtime_safe_to_air, redact_alert_channel_target,
+    validate_alert_channel_target,
 };
 use station_media_lifecycle::{
     AssetLoudnessAnalysis, AssetReadinessView, IngestJobStatus, IngestSourceKind,
@@ -84,6 +85,21 @@ struct PutAlertChannel {
     quiet_hours_end_utc: Option<String>,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PutAlertRule {
+    condition: AlertConditionKind,
+    enabled: bool,
+    severity: AlertSeverity,
+    channel_ids: Vec<String>,
+    dedupe_window_seconds: u32,
+    re_alert_after_seconds: u32,
+    #[serde(default)]
+    scope_channel_id: Option<String>,
+    notify_on_resolve: bool,
+    updated_by: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ApiResponse {
     pub status: u16,
@@ -139,6 +155,10 @@ impl Api {
             ("GET", "/api/v1/runtime-safe-to-air") => self.runtime_safe_to_air(),
             ("PUT", "/api/v1/alert-channels") => self.put_alert_channel(body),
             ("GET", "/api/v1/alert-channels") => self.list_alert_channels(),
+            ("GET", "/api/v1/alert-rules") => self.list_alert_rules(),
+            ("PUT", path) if path.starts_with("/api/v1/alert-rules/") => {
+                self.put_alert_rule(path, body)
+            }
             ("GET", "/api/v1/alert-deliveries") => self.list_alert_deliveries(),
             ("POST", path)
                 if path.starts_with("/api/v1/alert-channels/") && path.ends_with("/test") =>
@@ -670,6 +690,59 @@ impl Api {
                 serde_json::to_vec(&channels).expect("serializing alert channels cannot fail"),
             ),
             Err(message) => error_response(500, "storage_error", &message),
+        }
+    }
+
+    fn list_alert_rules(&self) -> ApiResponse {
+        match self.storage.list_alert_rules() {
+            Ok(rules) => json_response(
+                200,
+                serde_json::to_vec(&rules).expect("serializing alert rules cannot fail"),
+            ),
+            Err(message) => error_response(500, "storage_error", &message),
+        }
+    }
+
+    fn put_alert_rule(&self, path: &str, body: Option<&[u8]>) -> ApiResponse {
+        let Some(rule_id) = path.strip_prefix("/api/v1/alert-rules/") else {
+            unreachable!("the alert-rule route was checked")
+        };
+        if rule_id.is_empty() || rule_id.contains('/') {
+            return error_response(400, "invalid_path", "The alert rule identity is invalid.");
+        }
+        let Some(command) = parse_body::<PutAlertRule>(body) else {
+            return error_response(
+                400,
+                "invalid_json",
+                "An alert rule configuration body is required.",
+            );
+        };
+        let now = match system_time_millis() {
+            Ok(value) => value,
+            Err(message) => return error_response(500, "clock_error", &message),
+        };
+        let rule = AlertRule {
+            rule_id: rule_id.into(),
+            condition: command.condition,
+            enabled: command.enabled,
+            severity: command.severity,
+            channel_ids: command.channel_ids,
+            dedupe_window_seconds: command.dedupe_window_seconds,
+            re_alert_after_seconds: command.re_alert_after_seconds,
+            scope_channel_id: command.scope_channel_id,
+            notify_on_resolve: command.notify_on_resolve,
+            updated_at_unix_ms: now,
+            updated_by: command.updated_by,
+        };
+        if let Err(message) = rule.validate() {
+            return error_response(422, "validation_failed", message);
+        }
+        match self.storage.put_alert_rule(&rule) {
+            Ok(stored) => json_response(
+                200,
+                serde_json::to_vec(&stored).expect("serializing an alert rule cannot fail"),
+            ),
+            Err(message) => error_response(422, "validation_failed", &message),
         }
     }
 

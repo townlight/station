@@ -276,6 +276,7 @@ impl AlertTransport for EmailTransport {
         );
         let state = match envelope.payload.notification_kind {
             station_domain::AlertNotificationKind::Firing => "FIRING",
+            station_domain::AlertNotificationKind::Realert => "STILL FIRING",
             station_domain::AlertNotificationKind::Resolved => "RESOLVED",
             station_domain::AlertNotificationKind::Test => "TEST",
         };

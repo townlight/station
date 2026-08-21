@@ -5,9 +5,10 @@ use std::ptr;
 use sha2::{Digest, Sha256};
 use station_domain::{
     AlertChannel, AlertChannelKind, AlertConditionKind, AlertDelivery, AlertDeliveryPayload,
-    AlertDeliveryState, AlertEvent, AlertEventState, AlertNotificationKind, AlertSeverity,
-    ChannelRuntimeObservation, ChannelRuntimeState, StationProfile, StationProfileDocument,
-    redact_alert_channel_target, validate_alert_channel_target, validate_secure_url,
+    AlertDeliveryState, AlertEvent, AlertEventState, AlertNotificationKind, AlertRule,
+    AlertSeverity, ChannelRuntimeObservation, ChannelRuntimeState, StationProfile,
+    StationProfileDocument, redact_alert_channel_target, validate_alert_channel_target,
+    validate_secure_url,
 };
 use station_media_lifecycle::{
     AssetLoudnessAnalysis, IngestJobStatus, IngestSourceKind, LoudnessGateStatus, MediaIngestJob,
@@ -336,6 +337,19 @@ impl StationStore {
                ON alert_events(condition, resource_ref) WHERE state='firing';\
              CREATE INDEX IF NOT EXISTS alert_events_state_severity_time \
                ON alert_events(state, severity, last_observed_at_unix_ms DESC);\
+             CREATE TABLE IF NOT EXISTS alert_rules (\
+               rule_id TEXT PRIMARY KEY,\
+               condition TEXT NOT NULL UNIQUE,\
+               enabled INTEGER NOT NULL CHECK (enabled IN (0,1)),\
+               severity TEXT NOT NULL CHECK (severity IN ('critical','warning','info')),\
+               channel_ids_json TEXT NOT NULL,\
+               dedupe_window_seconds INTEGER NOT NULL CHECK (dedupe_window_seconds BETWEEN 0 AND 86400),\
+               re_alert_after_seconds INTEGER NOT NULL CHECK (re_alert_after_seconds BETWEEN 0 AND 604800),\
+               scope_channel_id TEXT NOT NULL DEFAULT '',\
+               notify_on_resolve INTEGER NOT NULL CHECK (notify_on_resolve IN (0,1)),\
+               updated_at_unix_ms INTEGER NOT NULL CHECK (updated_at_unix_ms >= 0),\
+               updated_by TEXT NOT NULL\
+             );\
              CREATE TABLE IF NOT EXISTS alert_channels (\
                channel_id TEXT PRIMARY KEY,\
                kind TEXT NOT NULL CHECK (kind IN ('email','sms','webhook')),\
@@ -353,7 +367,7 @@ impl StationStore {
                delivery_id TEXT PRIMARY KEY,\
                event_id TEXT NOT NULL,\
                alert_channel_id TEXT NOT NULL,\
-               notification_kind TEXT NOT NULL CHECK (notification_kind IN ('firing','resolved','test')),\
+               notification_kind TEXT NOT NULL CHECK (notification_kind IN ('firing','realert','resolved','test')),\
                state TEXT NOT NULL CHECK (state IN ('pending','leased','sent','dead_letter')),\
                attempts INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),\
                next_attempt_at_unix_ms INTEGER NOT NULL CHECK (next_attempt_at_unix_ms >= 0),\
@@ -364,10 +378,12 @@ impl StationStore {
                created_at_unix_ms INTEGER NOT NULL CHECK (created_at_unix_ms >= 0),\
                updated_at_unix_ms INTEGER NOT NULL CHECK (updated_at_unix_ms >= created_at_unix_ms),\
                sent_at_unix_ms INTEGER NOT NULL DEFAULT -1 CHECK (sent_at_unix_ms >= -1),\
-               UNIQUE(event_id, alert_channel_id, notification_kind),\
                FOREIGN KEY(event_id) REFERENCES alert_events(event_id),\
                FOREIGN KEY(alert_channel_id) REFERENCES alert_channels(channel_id)\
              );\
+             CREATE UNIQUE INDEX IF NOT EXISTS alert_deliveries_one_initial_kind \
+               ON alert_deliveries(event_id, alert_channel_id, notification_kind) \
+               WHERE notification_kind IN ('firing','resolved','test');\
              CREATE INDEX IF NOT EXISTS alert_deliveries_due \
                ON alert_deliveries(state, next_attempt_at_unix_ms, created_at_unix_ms);\
              CREATE TABLE IF NOT EXISTS schedule_items (\
@@ -398,6 +414,8 @@ impl StationStore {
         store.migrate_ingest_retry_schedule()?;
         store.migrate_ingest_transcode_status()?;
         store.migrate_commit_report_statuses()?;
+        store.migrate_alert_delivery_realerts()?;
+        store.seed_default_alert_rules()?;
         Ok(store)
     }
 
@@ -1142,6 +1160,126 @@ impl StationStore {
         }
     }
 
+    pub fn put_alert_rule(&self, rule: &AlertRule) -> Result<AlertRule, String> {
+        rule.validate().map_err(str::to_string)?;
+        for channel_id in &rule.channel_ids {
+            if self.read_alert_channel(channel_id)?.is_none() {
+                return Err(format!(
+                    "alert rule references missing destination {channel_id}"
+                ));
+            }
+        }
+        if let Some(existing) = self.read_alert_rule(&rule.rule_id)? {
+            if existing.condition != rule.condition {
+                return Err("an alert rule condition cannot be changed".into());
+            }
+            if rule.updated_at_unix_ms < existing.updated_at_unix_ms {
+                return Err("alert rule update time moved backward".into());
+            }
+        }
+        let channel_ids_json = serde_json::to_string(&rule.channel_ids)
+            .map_err(|error| format!("could not encode alert rule destinations: {error}"))?;
+        let statement = self.prepare(
+            "INSERT INTO alert_rules(rule_id, condition, enabled, severity, channel_ids_json, \
+             dedupe_window_seconds, re_alert_after_seconds, scope_channel_id, notify_on_resolve, \
+             updated_at_unix_ms, updated_by) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11) \
+             ON CONFLICT(rule_id) DO UPDATE SET enabled=excluded.enabled, severity=excluded.severity, \
+             channel_ids_json=excluded.channel_ids_json, dedupe_window_seconds=excluded.dedupe_window_seconds, \
+             re_alert_after_seconds=excluded.re_alert_after_seconds, scope_channel_id=excluded.scope_channel_id, \
+             notify_on_resolve=excluded.notify_on_resolve, updated_at_unix_ms=excluded.updated_at_unix_ms, \
+             updated_by=excluded.updated_by",
+        )?;
+        let values = [
+            c_string(&rule.rule_id, "alert rule identity")?,
+            c_string(alert_condition_name(rule.condition), "alert rule condition")?,
+            c_string(alert_severity_name(rule.severity), "alert rule severity")?,
+            c_string(&channel_ids_json, "alert rule destinations")?,
+            c_string(
+                rule.scope_channel_id.as_deref().unwrap_or_default(),
+                "alert rule scope",
+            )?,
+            c_string(&rule.updated_by, "alert rule operator")?,
+        ];
+        bind_text(self.database, statement.raw, 1, &values[0])?;
+        bind_text(self.database, statement.raw, 2, &values[1])?;
+        bind_i64(self.database, statement.raw, 3, i64::from(rule.enabled))?;
+        bind_text(self.database, statement.raw, 4, &values[2])?;
+        bind_text(self.database, statement.raw, 5, &values[3])?;
+        bind_i64(
+            self.database,
+            statement.raw,
+            6,
+            i64::from(rule.dedupe_window_seconds),
+        )?;
+        bind_i64(
+            self.database,
+            statement.raw,
+            7,
+            i64::from(rule.re_alert_after_seconds),
+        )?;
+        bind_text(self.database, statement.raw, 8, &values[4])?;
+        bind_i64(
+            self.database,
+            statement.raw,
+            9,
+            i64::from(rule.notify_on_resolve),
+        )?;
+        bind_i64(self.database, statement.raw, 10, rule.updated_at_unix_ms)?;
+        bind_text(self.database, statement.raw, 11, &values[5])?;
+        expect_done(self.database, statement.raw)?;
+        self.read_alert_rule(&rule.rule_id)?
+            .ok_or_else(|| "stored alert rule disappeared".into())
+    }
+
+    pub fn read_alert_rule(&self, rule_id: &str) -> Result<Option<AlertRule>, String> {
+        let statement = self.prepare(
+            "SELECT rule_id, condition, enabled, severity, channel_ids_json, dedupe_window_seconds, \
+             re_alert_after_seconds, scope_channel_id, notify_on_resolve, updated_at_unix_ms, updated_by \
+             FROM alert_rules WHERE rule_id=?1",
+        )?;
+        let rule_id = c_string(rule_id, "alert rule identity")?;
+        bind_text(self.database, statement.raw, 1, &rule_id)?;
+        match unsafe { sqlite3_step(statement.raw) } {
+            SQLITE_ROW => Ok(Some(read_alert_rule_row(statement.raw)?)),
+            SQLITE_DONE => Ok(None),
+            _ => Err(sqlite_error(self.database)),
+        }
+    }
+
+    pub fn list_alert_rules(&self) -> Result<Vec<AlertRule>, String> {
+        let statement = self.prepare(
+            "SELECT rule_id, condition, enabled, severity, channel_ids_json, dedupe_window_seconds, \
+             re_alert_after_seconds, scope_channel_id, notify_on_resolve, updated_at_unix_ms, updated_by \
+             FROM alert_rules ORDER BY condition, rule_id",
+        )?;
+        let mut rules = Vec::new();
+        loop {
+            match unsafe { sqlite3_step(statement.raw) } {
+                SQLITE_ROW => rules.push(read_alert_rule_row(statement.raw)?),
+                SQLITE_DONE => return Ok(rules),
+                _ => return Err(sqlite_error(self.database)),
+            }
+        }
+    }
+
+    fn alert_rule_for_condition(
+        &self,
+        condition: AlertConditionKind,
+    ) -> Result<Option<AlertRule>, String> {
+        let statement = self.prepare(
+            "SELECT rule_id, condition, enabled, severity, channel_ids_json, dedupe_window_seconds, \
+             re_alert_after_seconds, scope_channel_id, notify_on_resolve, updated_at_unix_ms, updated_by \
+             FROM alert_rules WHERE condition=?1",
+        )?;
+        let condition = c_string(alert_condition_name(condition), "alert rule condition")?;
+        bind_text(self.database, statement.raw, 1, &condition)?;
+        match unsafe { sqlite3_step(statement.raw) } {
+            SQLITE_ROW => Ok(Some(read_alert_rule_row(statement.raw)?)),
+            SQLITE_DONE => Ok(None),
+            _ => Err(sqlite_error(self.database)),
+        }
+    }
+
     pub fn put_alert_channel(
         &self,
         channel: &AlertChannel,
@@ -1638,13 +1776,30 @@ impl StationStore {
         self.execute("BEGIN IMMEDIATE")?;
         let mut recorded = None;
         let outcome = (|| {
-            let (event, is_first_observation) = self.observe_alert_locked(proposed)?;
+            let rule = self
+                .alert_rule_for_condition(proposed.condition)?
+                .ok_or_else(|| "alert condition has no configured rule".to_string())?;
+            if !rule.enabled
+                || rule
+                    .scope_channel_id
+                    .as_deref()
+                    .is_some_and(|scope| scope != proposed.resource_ref)
+            {
+                recorded = Some(proposed.clone());
+                return Ok(());
+            }
+            let mut ruled = proposed.clone();
+            ruled.severity = rule.severity;
+            let (event, is_first_observation) = self.observe_alert_locked(&ruled)?;
             if is_first_observation {
                 self.route_alert_locked(
                     &event,
+                    &rule,
                     AlertNotificationKind::Firing,
                     event.first_observed_at_unix_ms,
                 )?;
+            } else if rule.re_alert_after_seconds > 0 {
+                self.route_due_realerts_locked(&event, &rule, event.last_observed_at_unix_ms)?;
             }
             recorded = Some(event);
             Ok(())
@@ -1699,20 +1854,21 @@ impl StationStore {
     fn route_alert_locked(
         &self,
         event: &AlertEvent,
+        rule: &AlertRule,
         notification_kind: AlertNotificationKind,
         observed_at_unix_ms: i64,
     ) -> Result<(), String> {
-        for channel in self
-            .list_alert_channels()?
-            .into_iter()
-            .filter(|channel| channel.enabled)
-        {
+        for channel in self.list_alert_channels()?.into_iter().filter(|channel| {
+            channel.enabled
+                && (rule.channel_ids.is_empty() || rule.channel_ids.contains(&channel.channel_id))
+        }) {
             let not_before_unix_ms =
                 quiet_hours_release(&channel, event.severity, observed_at_unix_ms)?;
             let delivery_id = deterministic_alert_delivery_id(
                 &event.event_id,
                 &channel.channel_id,
                 notification_kind,
+                observed_at_unix_ms,
             );
             self.enqueue_alert_delivery(
                 &delivery_id,
@@ -1724,6 +1880,81 @@ impl StationStore {
             )?;
         }
         Ok(())
+    }
+
+    fn route_due_realerts_locked(
+        &self,
+        event: &AlertEvent,
+        rule: &AlertRule,
+        observed_at_unix_ms: i64,
+    ) -> Result<(), String> {
+        let interval_ms = i64::from(rule.re_alert_after_seconds) * 1_000;
+        for channel in self.list_alert_channels()?.into_iter().filter(|channel| {
+            channel.enabled
+                && (rule.channel_ids.is_empty() || rule.channel_ids.contains(&channel.channel_id))
+        }) {
+            if !self.realert_is_due(
+                &event.event_id,
+                &channel.channel_id,
+                observed_at_unix_ms,
+                interval_ms,
+            )? {
+                continue;
+            }
+            let not_before_unix_ms =
+                quiet_hours_release(&channel, event.severity, observed_at_unix_ms)?;
+            let delivery_id = deterministic_alert_delivery_id(
+                &event.event_id,
+                &channel.channel_id,
+                AlertNotificationKind::Realert,
+                observed_at_unix_ms,
+            );
+            self.enqueue_alert_delivery(
+                &delivery_id,
+                event,
+                &channel.channel_id,
+                AlertNotificationKind::Realert,
+                not_before_unix_ms,
+                observed_at_unix_ms,
+            )?;
+        }
+        Ok(())
+    }
+
+    fn realert_is_due(
+        &self,
+        event_id: &str,
+        alert_channel_id: &str,
+        observed_at_unix_ms: i64,
+        interval_ms: i64,
+    ) -> Result<bool, String> {
+        let statement = self.prepare(
+            "SELECT state, sent_at_unix_ms, updated_at_unix_ms FROM alert_deliveries \
+             WHERE event_id=?1 AND alert_channel_id=?2 AND notification_kind IN ('firing','realert') \
+             ORDER BY created_at_unix_ms DESC, delivery_id DESC LIMIT 1",
+        )?;
+        let event_id = c_string(event_id, "alert event identity")?;
+        let channel_id = c_string(alert_channel_id, "alert channel identity")?;
+        bind_text(self.database, statement.raw, 1, &event_id)?;
+        bind_text(self.database, statement.raw, 2, &channel_id)?;
+        match unsafe { sqlite3_step(statement.raw) } {
+            SQLITE_ROW => {
+                let state = parse_alert_delivery_state(&column_text(statement.raw, 0)?)?;
+                let sent_at = unsafe { sqlite3_column_int64(statement.raw, 1) };
+                let updated_at = unsafe { sqlite3_column_int64(statement.raw, 2) };
+                let anchor = match state {
+                    AlertDeliveryState::Sent if sent_at >= 0 => Some(sent_at),
+                    AlertDeliveryState::DeadLetter => Some(updated_at),
+                    AlertDeliveryState::Pending | AlertDeliveryState::Leased => None,
+                    AlertDeliveryState::Sent => None,
+                };
+                Ok(anchor.is_some_and(|anchor| {
+                    observed_at_unix_ms.saturating_sub(anchor) >= interval_ms
+                }))
+            }
+            SQLITE_DONE => Ok(false),
+            _ => Err(sqlite_error(self.database)),
+        }
     }
 
     pub fn acknowledge_alert(
@@ -1789,7 +2020,21 @@ impl StationStore {
                 SQLITE_ROW => read_alert_event_row(statement.raw)?,
                 _ => return Err("resolved alert disappeared".into()),
             };
-            self.route_alert_locked(&event, AlertNotificationKind::Resolved, resolved_at_unix_ms)?;
+            if let Some(rule) = self.alert_rule_for_condition(event.condition)?
+                && rule.enabled
+                && rule.notify_on_resolve
+                && !rule
+                    .scope_channel_id
+                    .as_deref()
+                    .is_some_and(|scope| scope != event.resource_ref)
+            {
+                self.route_alert_locked(
+                    &event,
+                    &rule,
+                    AlertNotificationKind::Resolved,
+                    resolved_at_unix_ms,
+                )?;
+            }
             resolved = Some(event);
             Ok(())
         })();
@@ -2577,6 +2822,64 @@ impl StationStore {
         })
     }
 
+    fn migrate_alert_delivery_realerts(&self) -> Result<(), String> {
+        let statement = self.prepare(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='alert_deliveries'",
+        )?;
+        let definition = match unsafe { sqlite3_step(statement.raw) } {
+            SQLITE_ROW => column_text(statement.raw, 0)?,
+            SQLITE_DONE => return Err("alert_deliveries schema is missing".into()),
+            _ => return Err(sqlite_error(self.database)),
+        };
+        drop(statement);
+        if definition.contains("'realert'") {
+            return Ok(());
+        }
+        self.execute(
+            "BEGIN IMMEDIATE;\
+             DROP INDEX IF EXISTS alert_deliveries_due;\
+             ALTER TABLE alert_deliveries RENAME TO alert_deliveries_legacy;\
+             CREATE TABLE alert_deliveries (\
+               delivery_id TEXT PRIMARY KEY,\
+               event_id TEXT NOT NULL,\
+               alert_channel_id TEXT NOT NULL,\
+               notification_kind TEXT NOT NULL CHECK (notification_kind IN ('firing','realert','resolved','test')),\
+               state TEXT NOT NULL CHECK (state IN ('pending','leased','sent','dead_letter')),\
+               attempts INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),\
+               next_attempt_at_unix_ms INTEGER NOT NULL CHECK (next_attempt_at_unix_ms >= 0),\
+               lease_expires_at_unix_ms INTEGER NOT NULL DEFAULT -1 CHECK (lease_expires_at_unix_ms >= -1),\
+               last_error TEXT NOT NULL DEFAULT '',\
+               signature TEXT NOT NULL DEFAULT '',\
+               payload_json TEXT NOT NULL,\
+               created_at_unix_ms INTEGER NOT NULL CHECK (created_at_unix_ms >= 0),\
+               updated_at_unix_ms INTEGER NOT NULL CHECK (updated_at_unix_ms >= created_at_unix_ms),\
+               sent_at_unix_ms INTEGER NOT NULL DEFAULT -1 CHECK (sent_at_unix_ms >= -1),\
+               FOREIGN KEY(event_id) REFERENCES alert_events(event_id),\
+               FOREIGN KEY(alert_channel_id) REFERENCES alert_channels(channel_id)\
+             );\
+             INSERT INTO alert_deliveries SELECT * FROM alert_deliveries_legacy;\
+             DROP TABLE alert_deliveries_legacy;\
+             CREATE UNIQUE INDEX alert_deliveries_one_initial_kind \
+               ON alert_deliveries(event_id, alert_channel_id, notification_kind) \
+               WHERE notification_kind IN ('firing','resolved','test');\
+             CREATE INDEX alert_deliveries_due \
+               ON alert_deliveries(state, next_attempt_at_unix_ms, created_at_unix_ms);\
+             COMMIT;",
+        )
+        .inspect_err(|_| {
+            let _ = self.execute("ROLLBACK");
+        })
+    }
+
+    fn seed_default_alert_rules(&self) -> Result<(), String> {
+        for rule in default_alert_rules() {
+            if self.read_alert_rule(&rule.rule_id)?.is_none() {
+                self.put_alert_rule(&rule)?;
+            }
+        }
+        Ok(())
+    }
+
     fn migrate_ingest_retry_schedule(&self) -> Result<(), String> {
         if self.ingest_retry_column_exists()? {
             return Ok(());
@@ -2865,6 +3168,30 @@ fn read_alert_event_row(statement: *mut SqliteStatement) -> Result<AlertEvent, S
     Ok(event)
 }
 
+fn read_alert_rule_row(statement: *mut SqliteStatement) -> Result<AlertRule, String> {
+    let channel_ids_json = column_text(statement, 4)?;
+    let channel_ids = serde_json::from_str(&channel_ids_json)
+        .map_err(|error| format!("database returned invalid alert rule destinations: {error}"))?;
+    let scope_channel_id = column_text(statement, 7)?;
+    let rule = AlertRule {
+        rule_id: column_text(statement, 0)?,
+        condition: parse_alert_condition(&column_text(statement, 1)?)?,
+        enabled: unsafe { sqlite3_column_int64(statement, 2) } == 1,
+        severity: parse_alert_severity(&column_text(statement, 3)?)?,
+        channel_ids,
+        dedupe_window_seconds: u32::try_from(unsafe { sqlite3_column_int64(statement, 5) })
+            .map_err(|_| "database returned an invalid alert-rule dedupe window".to_string())?,
+        re_alert_after_seconds: u32::try_from(unsafe { sqlite3_column_int64(statement, 6) })
+            .map_err(|_| "database returned an invalid alert-rule re-alert window".to_string())?,
+        scope_channel_id: (!scope_channel_id.is_empty()).then_some(scope_channel_id),
+        notify_on_resolve: unsafe { sqlite3_column_int64(statement, 8) } == 1,
+        updated_at_unix_ms: unsafe { sqlite3_column_int64(statement, 9) },
+        updated_by: column_text(statement, 10)?,
+    };
+    rule.validate().map_err(str::to_string)?;
+    Ok(rule)
+}
+
 fn read_alert_channel_row(statement: *mut SqliteStatement) -> Result<AlertChannel, String> {
     let quiet_start = column_text(statement, 6)?;
     let quiet_end = column_text(statement, 7)?;
@@ -2925,6 +3252,7 @@ fn deterministic_alert_delivery_id(
     event_id: &str,
     alert_channel_id: &str,
     notification_kind: AlertNotificationKind,
+    observed_at_unix_ms: i64,
 ) -> String {
     let mut digest = Sha256::new();
     digest.update(event_id.as_bytes());
@@ -2932,6 +3260,10 @@ fn deterministic_alert_delivery_id(
     digest.update(alert_channel_id.as_bytes());
     digest.update([0]);
     digest.update(alert_notification_kind_name(notification_kind).as_bytes());
+    if notification_kind == AlertNotificationKind::Realert {
+        digest.update([0]);
+        digest.update(observed_at_unix_ms.to_le_bytes());
+    }
     format!("alert-delivery-{:x}", digest.finalize())
 }
 
@@ -3170,6 +3502,7 @@ fn parse_alert_channel_kind(value: &str) -> Result<AlertChannelKind, String> {
 fn alert_notification_kind_name(value: AlertNotificationKind) -> &'static str {
     match value {
         AlertNotificationKind::Firing => "firing",
+        AlertNotificationKind::Realert => "realert",
         AlertNotificationKind::Resolved => "resolved",
         AlertNotificationKind::Test => "test",
     }
@@ -3178,6 +3511,7 @@ fn alert_notification_kind_name(value: AlertNotificationKind) -> &'static str {
 fn parse_alert_notification_kind(value: &str) -> Result<AlertNotificationKind, String> {
     match value {
         "firing" => Ok(AlertNotificationKind::Firing),
+        "realert" => Ok(AlertNotificationKind::Realert),
         "resolved" => Ok(AlertNotificationKind::Resolved),
         "test" => Ok(AlertNotificationKind::Test),
         _ => Err(format!(
@@ -3248,6 +3582,77 @@ fn parse_alert_condition(value: &str) -> Result<AlertConditionKind, String> {
         "service-down" => Ok(AlertConditionKind::ServiceDown),
         _ => Err(format!("database returned invalid alert condition {value}")),
     }
+}
+
+fn default_alert_rules() -> Vec<AlertRule> {
+    let definitions = [
+        (AlertConditionKind::OffAir, AlertSeverity::Critical, 3_600),
+        (
+            AlertConditionKind::EncoderDeath,
+            AlertSeverity::Critical,
+            3_600,
+        ),
+        (AlertConditionKind::ServerCrash, AlertSeverity::Critical, 0),
+        (
+            AlertConditionKind::SchemaDrift,
+            AlertSeverity::Warning,
+            21_600,
+        ),
+        (
+            AlertConditionKind::RelayBlocked,
+            AlertSeverity::Critical,
+            1_800,
+        ),
+        (
+            AlertConditionKind::ComplianceProbeFail,
+            AlertSeverity::Warning,
+            3_600,
+        ),
+        (AlertConditionKind::MissingMedia, AlertSeverity::Critical, 0),
+        (
+            AlertConditionKind::CommitFailure,
+            AlertSeverity::Warning,
+            1_800,
+        ),
+        (
+            AlertConditionKind::TakeoverStuck2h,
+            AlertSeverity::Warning,
+            7_200,
+        ),
+        (
+            AlertConditionKind::AiRuntimeDown,
+            AlertSeverity::Info,
+            21_600,
+        ),
+        (AlertConditionKind::DiskLow, AlertSeverity::Warning, 3_600),
+        (AlertConditionKind::ClockSkew, AlertSeverity::Warning, 3_600),
+        (
+            AlertConditionKind::DatabaseUnreachable,
+            AlertSeverity::Critical,
+            1_800,
+        ),
+        (
+            AlertConditionKind::ServiceDown,
+            AlertSeverity::Critical,
+            1_800,
+        ),
+    ];
+    definitions
+        .into_iter()
+        .map(|(condition, severity, re_alert_after_seconds)| AlertRule {
+            rule_id: format!("default-{}", alert_condition_name(condition)),
+            condition,
+            enabled: true,
+            severity,
+            channel_ids: Vec::new(),
+            dedupe_window_seconds: 900,
+            re_alert_after_seconds,
+            scope_channel_id: None,
+            notify_on_resolve: true,
+            updated_at_unix_ms: 0,
+            updated_by: "system-seed".into(),
+        })
+        .collect()
 }
 
 fn alert_severity_name(value: AlertSeverity) -> &'static str {
@@ -3670,6 +4075,57 @@ mod tests {
             .unwrap();
         assert_eq!(job.source_kind, IngestSourceKind::WatchFolder);
         assert_eq!(job.next_attempt_at_unix_ms, None);
+        drop(migrated);
+        for candidate in [
+            database.clone(),
+            PathBuf::from(format!("{}-wal", database.display())),
+            PathBuf::from(format!("{}-shm", database.display())),
+        ] {
+            let _ = std::fs::remove_file(candidate);
+        }
+    }
+
+    #[test]
+    fn migrates_existing_alert_deliveries_and_seeds_rules_without_losing_history() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let database =
+            std::env::temp_dir().join(format!("townlight-alert-rule-migration-{nonce}.db"));
+        let store = StationStore::open(&database).unwrap();
+        store
+            .execute(
+                "INSERT INTO alert_events VALUES(\
+                   'legacy-event','off-air','critical','resolved','legacy-channel','Legacy alert','Kept','S8',1,2,2,1,-1,'');\
+                 INSERT INTO alert_channels VALUES(\
+                   '5eb469af-f3c7-4cc5-b26e-865807b3e934','webhook','Legacy pager',0,\
+                   'https://alerts.example.org/…',1,'','',X'01',1,1);\
+                 DROP INDEX alert_deliveries_due;\
+                 DROP TABLE alert_deliveries;\
+                 CREATE TABLE alert_deliveries (\
+                   delivery_id TEXT PRIMARY KEY, event_id TEXT NOT NULL, alert_channel_id TEXT NOT NULL,\
+                   notification_kind TEXT NOT NULL CHECK (notification_kind IN ('firing','resolved','test')),\
+                   state TEXT NOT NULL CHECK (state IN ('pending','leased','sent','dead_letter')), attempts INTEGER NOT NULL,\
+                   next_attempt_at_unix_ms INTEGER NOT NULL, lease_expires_at_unix_ms INTEGER NOT NULL,\
+                   last_error TEXT NOT NULL, signature TEXT NOT NULL, payload_json TEXT NOT NULL,\
+                   created_at_unix_ms INTEGER NOT NULL, updated_at_unix_ms INTEGER NOT NULL, sent_at_unix_ms INTEGER NOT NULL,\
+                   UNIQUE(event_id, alert_channel_id, notification_kind));\
+                 INSERT INTO alert_deliveries VALUES(\
+                   'legacy-delivery','legacy-event','5eb469af-f3c7-4cc5-b26e-865807b3e934','resolved','sent',1,2,-1,'','proof',\
+                   '{\"notification_kind\":\"resolved\",\"event_id\":\"legacy-event\",\"condition\":\"off-air\",\"severity\":\"critical\",\"resource_ref\":\"legacy-channel\",\"summary\":\"Legacy alert\",\"detail\":\"Kept\",\"source_section\":\"S8\",\"first_observed_at_unix_ms\":1,\"last_observed_at_unix_ms\":2,\"resolved_at_unix_ms\":2,\"occurrence_count\":1}',2,2,2);",
+            )
+            .unwrap();
+        drop(store);
+
+        let migrated = StationStore::open(&database).unwrap();
+        let delivery = migrated
+            .read_alert_delivery("legacy-delivery")
+            .unwrap()
+            .unwrap();
+        assert_eq!(delivery.notification_kind, AlertNotificationKind::Resolved);
+        assert_eq!(delivery.state, AlertDeliveryState::Sent);
+        assert_eq!(migrated.list_alert_rules().unwrap().len(), 14);
         drop(migrated);
         for candidate in [
             database.clone(),
