@@ -42,6 +42,7 @@ fn run_console(config: DaemonConfig) -> Result<(), String> {
     initialize_database(&config.database)?;
     let worker_executable = worker_executable()?;
     let update_application = application_directory()?;
+    let api_application = update_application.clone();
     let stop = Arc::new(AtomicBool::new(false));
     let orchestration_database = config.database.clone();
     let orchestration_stop = Arc::clone(&stop);
@@ -71,7 +72,12 @@ fn run_console(config: DaemonConfig) -> Result<(), String> {
         "TownLight Station is listening on http://{}",
         config.address
     );
-    let result = station_api::serve_until(listener, &config.database, Arc::clone(&stop));
+    let result = station_api::serve_until_with_application_directory(
+        listener,
+        &config.database,
+        api_application,
+        Arc::clone(&stop),
+    );
     stop.store(true, Ordering::Release);
     let orchestration_result = orchestration
         .join()
@@ -169,6 +175,7 @@ fn run_service(config: DaemonConfig) -> Result<(), String> {
     initialize_database(&config.database)?;
     let worker_executable = worker_executable()?;
     let update_application = application_directory()?;
+    let api_application = update_application.clone();
     let orchestration_database = config.database.clone();
     let orchestration_stop = Arc::clone(&stop);
     let orchestration_receipt = config.database.with_file_name("orchestration-error.txt");
@@ -227,7 +234,12 @@ fn run_service(config: DaemonConfig) -> Result<(), String> {
             ServiceExitCode::NO_ERROR,
         ))
         .map_err(|error| error.to_string())?;
-    let result = station_api::serve_until(listener, &config.database, Arc::clone(&stop));
+    let result = station_api::serve_until_with_application_directory(
+        listener,
+        &config.database,
+        api_application,
+        Arc::clone(&stop),
+    );
     stop.store(true, Ordering::Release);
     let orchestration_result = orchestration
         .join()

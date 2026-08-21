@@ -18,9 +18,10 @@ $listener = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, $Port)
 try {
     [byte[]]$feedBody = [IO.File]::ReadAllBytes($FeedPath)
     [byte[]]$packageBody = [IO.File]::ReadAllBytes($PackagePath)
+    $packageRequest = 'GET /' + [IO.Path]::GetFileName($PackagePath) + ' HTTP/1.1'
     $listener.Start()
     Set-Content -LiteralPath $ReadyPath -Value "127.0.0.1:$Port" -Encoding ascii
-    $deadline = [DateTime]::UtcNow.AddSeconds(90)
+    $deadline = [DateTime]::UtcNow.AddSeconds(300)
     while (-not (Test-Path -LiteralPath $StopPath) -and [DateTime]::UtcNow -lt $deadline) {
         if (-not $listener.Pending()) {
             Start-Sleep -Milliseconds 25
@@ -41,7 +42,7 @@ try {
                 $stream.Write($headers, 0, $headers.Length)
                 $stream.Write($feedBody, 0, $feedBody.Length)
             }
-            elseif ($requestLine -eq 'GET /TownLight-Station-0.2.0.tlu HTTP/1.1') {
+            elseif ($requestLine -eq $packageRequest) {
                 $headers = [Text.Encoding]::ASCII.GetBytes(
                     "HTTP/1.1 200 OK`r`nContent-Type: application/octet-stream`r`nContent-Length: $($packageBody.Length)`r`nConnection: close`r`n`r`n"
                 )

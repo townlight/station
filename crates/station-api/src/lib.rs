@@ -1456,8 +1456,22 @@ pub fn serve_until(
     database_path: impl AsRef<Path>,
     stop: Arc<AtomicBool>,
 ) -> Result<(), String> {
+    let application_directory = std::env::current_exe()
+        .ok()
+        .and_then(|path| path.parent().map(Path::to_path_buf))
+        .ok_or_else(|| "the station application directory is unavailable".to_string())?;
+    serve_until_with_application_directory(listener, database_path, application_directory, stop)
+}
+
+pub fn serve_until_with_application_directory(
+    listener: TcpListener,
+    database_path: impl AsRef<Path>,
+    application_directory: impl AsRef<Path>,
+    stop: Arc<AtomicBool>,
+) -> Result<(), String> {
     let database_path = database_path.as_ref().to_path_buf();
-    Api::open(&database_path)?;
+    let application_directory = application_directory.as_ref().to_path_buf();
+    Api::open_with_application_directory(&database_path, &application_directory)?;
     let active_requests = Arc::new(AtomicUsize::new(0));
     listener
         .set_nonblocking(true)
@@ -1482,11 +1496,15 @@ pub fn serve_until(
                     continue;
                 }
                 let request_database = database_path.clone();
+                let request_application = application_directory.clone();
                 let request_count = Arc::clone(&active_requests);
                 std::thread::spawn(move || {
                     let _guard = ActiveRequestGuard(request_count);
-                    let result = Api::open(&request_database)
-                        .and_then(|api| serve_stream(&mut stream, &api));
+                    let result = Api::open_with_application_directory(
+                        &request_database,
+                        &request_application,
+                    )
+                    .and_then(|api| serve_stream(&mut stream, &api));
                     if let Err(error) = result {
                         eprintln!("TownLight Station request failed: {error}");
                     }
