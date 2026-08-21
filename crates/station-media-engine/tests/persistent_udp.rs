@@ -9,6 +9,7 @@ use gstreamer as gst;
 use gstreamer_pbutils as gst_pbutils;
 use station_media_assets::ingest_media;
 use station_media_engine::{EngineError, PersistentPlayout, SourceRole, TransportOutput};
+use station_media_protocol::{CgOverlay, CgOverlayContent, CgRect, CgSnapshot};
 use station_schedule::OutputProfileId;
 
 #[test]
@@ -366,6 +367,309 @@ fn keeps_one_pipeline_running_while_switching_sources_and_emits_mpeg_ts() {
         continuity.max_av_delta_ticks * 1_000 / 90_000
     );
     playout.stop().unwrap();
+}
+
+#[test]
+fn applies_and_clears_cg_while_transport_counters_continue() {
+    let receiver = UdpSocket::bind("127.0.0.1:0").unwrap();
+    receiver
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    let mut playout = PersistentPlayout::start_udp_with_profile(
+        receiver.local_addr().unwrap(),
+        OutputProfileId::Proof360p30,
+    )
+    .unwrap();
+    let snapshot = CgSnapshot {
+        board_id: "board-proof".into(),
+        board_revision: 1,
+        overlays: vec![CgOverlay {
+            slot: 0,
+            rect: CgRect {
+                x: 10,
+                y: 700,
+                width: 800,
+                height: 200,
+            },
+            z_index: 1,
+            content: CgOverlayContent::Text {
+                text: "on-air proof".into(),
+            },
+        }],
+    };
+    let before = playout.output_bytes_sent().unwrap()[0];
+    playout.apply_cg_snapshot(&snapshot).unwrap();
+    std::thread::sleep(Duration::from_millis(500));
+    let after_apply = playout.output_bytes_sent().unwrap()[0];
+    assert!(after_apply > before);
+    playout.clear_cg_snapshot();
+    std::thread::sleep(Duration::from_millis(500));
+    let after_clear = playout.output_bytes_sent().unwrap()[0];
+    assert!(after_clear > after_apply);
+    playout.stop().unwrap();
+}
+
+#[test]
+fn cg_text_overlay_changes_pixels_in_its_declared_region() {
+    let reservation = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let port = reservation.local_addr().unwrap().port();
+    drop(reservation);
+    gst::init().unwrap();
+    let (decoder, sink) = start_udp_decoder(port);
+    decoder.set_state(gst::State::Playing).unwrap();
+    let mut playout = PersistentPlayout::start_udp_with_profile(
+        format!("127.0.0.1:{port}").parse().unwrap(),
+        OutputProfileId::Proof360p30,
+    )
+    .unwrap();
+    let without_text = pull_decoded_frame(&sink);
+    playout
+        .apply_cg_snapshot(&CgSnapshot {
+            board_id: "pixel-proof".into(),
+            board_revision: 1,
+            overlays: vec![CgOverlay {
+                slot: 0,
+                rect: CgRect {
+                    x: 10,
+                    y: 700,
+                    width: 800,
+                    height: 200,
+                },
+                z_index: 1,
+                content: CgOverlayContent::Text {
+                    text: "VISIBLE".into(),
+                },
+            }],
+        })
+        .unwrap();
+    std::thread::sleep(Duration::from_millis(500));
+    let with_text = pull_decoded_frame(&sink);
+    playout.clear_cg_snapshot();
+    std::thread::sleep(Duration::from_millis(500));
+    let after_clear = pull_decoded_frame(&sink);
+    playout.stop().unwrap();
+    decoder.set_state(gst::State::Null).unwrap();
+    assert_eq!(
+        (without_text.width, without_text.height),
+        (with_text.width, with_text.height)
+    );
+    assert_eq!(without_text.stride, without_text.width as usize * 4);
+    let rect = (6, 252, 518, 324);
+    let changed_pixels = without_text
+        .bytes
+        .chunks_exact(4)
+        .zip(with_text.bytes.chunks_exact(4))
+        .enumerate()
+        .filter(|(index, (before, after))| {
+            let x = index % without_text.width as usize;
+            let y = index / without_text.width as usize;
+            (rect.0..=rect.2).contains(&(x as u32))
+                && (rect.1..=rect.3).contains(&(y as u32))
+                && before[..3] != after[..3]
+        })
+        .count();
+    let all_changed_pixels = without_text
+        .bytes
+        .chunks_exact(4)
+        .zip(with_text.bytes.chunks_exact(4))
+        .filter(|(before, after)| before[..3] != after[..3])
+        .count();
+    assert!(
+        changed_pixels > 20,
+        "decoded CG output changed too few region pixels: {changed_pixels}; all changed: {all_changed_pixels}"
+    );
+    let restored_pixels = without_text
+        .bytes
+        .chunks_exact(4)
+        .zip(after_clear.bytes.chunks_exact(4))
+        .enumerate()
+        .filter(|(index, (before, after))| {
+            let x = index % without_text.width as usize;
+            let y = index / without_text.width as usize;
+            (rect.0..=rect.2).contains(&(x as u32))
+                && (rect.1..=rect.3).contains(&(y as u32))
+                && before[..3] != after[..3]
+        })
+        .count();
+    assert!(
+        restored_pixels < changed_pixels / 2,
+        "CG clear did not restore the region sufficiently: {restored_pixels} vs {changed_pixels}"
+    );
+}
+
+fn start_udp_decoder(port: u16) -> (gst::Pipeline, gst::Element) {
+    let pipeline = gst::Pipeline::new();
+    let source = gst::ElementFactory::make("udpsrc")
+        .property("port", i32::from(port))
+        .property(
+            "caps",
+            gst::Caps::builder("video/mpegts")
+                .field("systemstream", true)
+                .field("packetsize", 188_i32)
+                .build(),
+        )
+        .build()
+        .unwrap();
+    let demux = gst::ElementFactory::make("tsdemux")
+        .name("cg-demux")
+        .build()
+        .unwrap();
+    let queue = gst::ElementFactory::make("queue")
+        .name("cg-decode-queue")
+        .build()
+        .unwrap();
+    let audio_queue = gst::ElementFactory::make("queue")
+        .name("cg-audio-discard-queue")
+        .build()
+        .unwrap();
+    let audio_sink = gst::ElementFactory::make("fakesink")
+        .name("cg-audio-discard-sink")
+        .property("sync", false)
+        .property("async", false)
+        .build()
+        .unwrap();
+    let parser = gst::ElementFactory::make("h264parse").build().unwrap();
+    let decoder = gst::ElementFactory::make("openh264dec").build().unwrap();
+    let convert = gst::ElementFactory::make("videoconvert").build().unwrap();
+    let caps = gst::ElementFactory::make("capsfilter")
+        .property(
+            "caps",
+            gst::Caps::builder("video/x-raw")
+                .field("format", "BGRA")
+                .build(),
+        )
+        .build()
+        .unwrap();
+    let sink = gst::ElementFactory::make("appsink")
+        .name("frame-sink")
+        .property("sync", false)
+        .property("max-buffers", 1_u32)
+        .property("drop", true)
+        .build()
+        .unwrap();
+    pipeline
+        .add_many([
+            &source,
+            &demux,
+            &queue,
+            &parser,
+            &decoder,
+            &convert,
+            &caps,
+            &sink,
+            &audio_queue,
+            &audio_sink,
+        ])
+        .unwrap();
+    source.link(&demux).unwrap();
+    gst::Element::link_many([&queue, &parser, &decoder, &convert, &caps, &sink]).unwrap();
+    audio_queue.link(&audio_sink).unwrap();
+    let queue_sink = queue.static_pad("sink").unwrap();
+    let audio_queue_sink = audio_queue.static_pad("sink").unwrap();
+    demux.connect_pad_added(move |_, pad| {
+        let caps = pad.current_caps().unwrap_or_else(|| pad.query_caps(None));
+        let media_type = caps
+            .structure(0)
+            .map(|structure| structure.name().to_string())
+            .unwrap_or_default();
+        let pad_name = pad.name();
+        if (media_type.starts_with("video/") || pad_name.starts_with("video_"))
+            && !queue_sink.is_linked()
+        {
+            let _ = pad.link(&queue_sink);
+        } else if (media_type.starts_with("audio/") || pad_name.starts_with("audio_"))
+            && !audio_queue_sink.is_linked()
+        {
+            let _ = pad.link(&audio_queue_sink);
+        }
+    });
+    (pipeline, sink)
+}
+
+#[test]
+fn invalid_cg_update_keeps_the_last_valid_revision_active() {
+    let receiver = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let mut playout = PersistentPlayout::start_udp_with_profile(
+        receiver.local_addr().unwrap(),
+        OutputProfileId::Proof360p30,
+    )
+    .unwrap();
+    let valid = CgSnapshot {
+        board_id: "board-valid".into(),
+        board_revision: 1,
+        overlays: vec![CgOverlay {
+            slot: 0,
+            rect: CgRect {
+                x: 10,
+                y: 700,
+                width: 800,
+                height: 200,
+            },
+            z_index: 1,
+            content: CgOverlayContent::Text {
+                text: "valid".into(),
+            },
+        }],
+    };
+    playout.apply_cg_snapshot(&valid).unwrap();
+    let mut changed = valid.clone();
+    changed.overlays[0].content = CgOverlayContent::Text {
+        text: "changed".into(),
+    };
+    playout.apply_cg_snapshot(&changed).unwrap();
+    assert_eq!(playout.current_cg_snapshot(), Some(&changed));
+    let invalid = CgSnapshot {
+        board_id: "board-invalid".into(),
+        board_revision: 2,
+        overlays: vec![CgOverlay {
+            slot: 0,
+            rect: valid.overlays[0].rect.clone(),
+            z_index: 1,
+            content: CgOverlayContent::Text {
+                text: "bad\u{0000}text".into(),
+            },
+        }],
+    };
+    assert!(playout.apply_cg_snapshot(&invalid).is_err());
+    assert_eq!(playout.current_cg_revision(), Some(("board-valid", 1)));
+    playout.stop().unwrap();
+}
+
+struct DecodedFrame {
+    bytes: Vec<u8>,
+    width: u32,
+    height: u32,
+    stride: usize,
+}
+
+fn pull_decoded_frame(sink: &gst::Element) -> DecodedFrame {
+    let sample = (0..50)
+        .find_map(|_| {
+            sink.emit_by_name::<Option<gst::Sample>>("try-pull-sample", &[&100_000_000_u64])
+        })
+        .unwrap_or_else(|| {
+            let detail = sink
+                .parent()
+                .and_then(|parent| parent.downcast::<gst::Pipeline>().ok())
+                .and_then(|pipeline| pipeline.bus())
+                .and_then(|bus| bus.pop_filtered(&[gst::MessageType::Error]))
+                .map(|message| format!("{message:?}"))
+                .unwrap_or_else(|| "no GStreamer bus error".into());
+            panic!("decoded CG output did not produce a frame: {detail}");
+        });
+    let caps = sample.caps().expect("decoded frame has no caps");
+    let structure = caps.structure(0).expect("decoded frame has no video caps");
+    let width = structure.get::<i32>("width").unwrap() as u32;
+    let height = structure.get::<i32>("height").unwrap() as u32;
+    let map = sample.buffer().unwrap().map_readable().unwrap();
+    let bytes = map.as_slice().to_vec();
+    let stride = bytes.len() / height as usize;
+    DecodedFrame {
+        bytes,
+        width,
+        height,
+        stride,
+    }
 }
 
 #[test]

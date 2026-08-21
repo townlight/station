@@ -1,7 +1,40 @@
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 pub const MAX_FRAME_BYTES: usize = 65_536;
-pub const PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion { major: 1, minor: 4 };
+pub const PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion { major: 1, minor: 5 };
+
+pub const MAX_CG_SLOTS: usize = 8;
+pub const MAX_CG_TEXT_BYTES: usize = 2048;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CgRect {
+    pub x: u16,
+    pub y: u16,
+    pub width: u16,
+    pub height: u16,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum CgOverlayContent {
+    Text { text: String },
+    Clock { format: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CgOverlay {
+    pub slot: u8,
+    pub rect: CgRect,
+    pub z_index: i16,
+    pub content: CgOverlayContent,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CgSnapshot {
+    pub board_id: String,
+    pub board_revision: u64,
+    pub overlays: Vec<CgOverlay>,
+}
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(transparent)]
@@ -75,6 +108,10 @@ pub enum ChannelCommand {
         plan_id: String,
         revision: u64,
     },
+    ApplyCgSnapshot {
+        snapshot: CgSnapshot,
+    },
+    ClearCgSnapshot,
     LoadAsset {
         asset_id: String,
         media_path: String,
@@ -121,6 +158,11 @@ pub enum WorkerEvent {
     AssetLoaded {
         asset_id: String,
     },
+    CgApplied {
+        board_id: String,
+        board_revision: u64,
+    },
+    CgCleared,
     CommandRejected {
         command_id: String,
         code: String,
@@ -131,6 +173,42 @@ pub enum WorkerEvent {
         outputs: Vec<OutputTransportObservation>,
     },
     ShutdownComplete,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn round_trips_cg_snapshot_command() {
+        let command = CommandEnvelope {
+            version: PROTOCOL_VERSION,
+            channel_id: "channel-1".into(),
+            command_id: "command-1".into(),
+            expected_sequence: 4,
+            command: ChannelCommand::ApplyCgSnapshot {
+                snapshot: CgSnapshot {
+                    board_id: "board-1".into(),
+                    board_revision: 7,
+                    overlays: vec![CgOverlay {
+                        slot: 0,
+                        rect: CgRect {
+                            x: 10,
+                            y: 700,
+                            width: 800,
+                            height: 200,
+                        },
+                        z_index: 1,
+                        content: CgOverlayContent::Text {
+                            text: "hello".into(),
+                        },
+                    }],
+                },
+            },
+        };
+        let decoded = decode_command_frame(&encode_command_frame(&command).unwrap()).unwrap();
+        assert_eq!(decoded, command);
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

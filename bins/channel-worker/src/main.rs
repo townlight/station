@@ -259,6 +259,27 @@ fn decide_event(
             },
             false,
         ),
+        ChannelCommand::ApplyCgSnapshot { snapshot } => match media.apply_cg_snapshot(snapshot) {
+            Ok(()) => (
+                WorkerEvent::CgApplied {
+                    board_id: snapshot.board_id.clone(),
+                    board_revision: snapshot.board_revision,
+                },
+                false,
+            ),
+            Err(error) => (
+                rejection(
+                    command,
+                    "cg_apply_failed",
+                    &format!("The CG snapshot could not be applied: {error:?}"),
+                ),
+                false,
+            ),
+        },
+        ChannelCommand::ClearCgSnapshot => {
+            media.clear_cg_snapshot();
+            (WorkerEvent::CgCleared, false)
+        }
         ChannelCommand::LoadAsset {
             asset_id,
             media_path,

@@ -1195,6 +1195,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "quick-xml"
+version = "0.39.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cdcc8dd4e2f670d309a5f0e83fe36dfdc05af317008fea29144da1a2ac858e5e"
+dependencies = [
+ "memchr",
+]
+
+[[package]]
 name = "quote"
 version = "1.0.45"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1578,6 +1587,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "station-feed-normalization"
+version = "0.1.0"
+dependencies = [
+ "httpdate",
+ "jiff",
+ "quick-xml",
+ "sha2",
+ "station-cg",
+ "url",
+]
+
+[[package]]
 name = "station-ingest"
 version = "0.1.0"
 dependencies = [
@@ -1617,7 +1638,9 @@ version = "0.1.0"
 dependencies = [
  "gstreamer",
  "gstreamer-pbutils",
+ "serde_json",
  "station-media-assets",
+ "station-media-protocol",
  "station-schedule",
 ]
 

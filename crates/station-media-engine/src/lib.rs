@@ -8,6 +8,7 @@ use std::time::{Duration, Instant};
 
 use gst::prelude::*;
 use gstreamer as gst;
+use station_media_protocol::{CgOverlayContent, CgSnapshot, MAX_CG_SLOTS, MAX_CG_TEXT_BYTES};
 use station_schedule::{OutputProfile, OutputProfileId};
 
 static FILE_PROGRAM_SEQUENCE: AtomicU64 = AtomicU64::new(1);
@@ -64,6 +65,7 @@ pub enum EngineError {
         audio_ready: bool,
     },
     LoadRequiresFallback,
+    CgInvalid(String),
 }
 
 pub struct PersistentPlayout {
@@ -77,7 +79,15 @@ pub struct PersistentPlayout {
     output_counters: Vec<OutputCounter>,
     output_profile: OutputProfileId,
     file_program: Option<FileProgram>,
+    cg_slots: Vec<CgSlot>,
+    cg_revision: Option<CgSnapshot>,
     stopped: bool,
+}
+
+struct CgSlot {
+    text_overlay: gst::Element,
+    clock_overlay: gst::Element,
+    pad: gst::Pad,
 }
 
 enum OutputCounter {
@@ -197,6 +207,92 @@ impl PersistentPlayout {
             .property("config-interval", 1_i32)
             .build()
             .map_err(|error| build_error("h264parse", error))?;
+        let cg_input_convert = element("videoconvert", "cg-input-convert")?;
+        let cg_input_caps = gst::ElementFactory::make("capsfilter")
+            .name("cg-input-caps")
+            .property("caps", &cg_video_caps(profile)?)
+            .build()
+            .map_err(|error| build_error("capsfilter", error))?;
+        let cg_compositor = gst::ElementFactory::make("compositor")
+            .name("cg-compositor")
+            .property("ignore-inactive-pads", true)
+            .build()
+            .map_err(|error| build_error("compositor", error))?;
+        pipeline
+            .add_many([&cg_input_convert, &cg_input_caps, &cg_compositor])
+            .map_err(|error| EngineError::Pipeline(error.to_string()))?;
+        let cg_base_pad = connect_to_compositor(&cg_input_caps, &cg_compositor, 0)?;
+        cg_base_pad.set_property("alpha", 1.0_f64);
+        let mut cg_slots = Vec::with_capacity(MAX_CG_SLOTS);
+        for slot in 0..MAX_CG_SLOTS {
+            let source = gst::ElementFactory::make("videotestsrc")
+                .name(format!("cg-source-{slot}"))
+                .property("is-live", true)
+                .property_from_str("pattern", "black")
+                .build()
+                .map_err(|error| build_error("videotestsrc", error))?;
+            let caps = gst::ElementFactory::make("capsfilter")
+                .name(format!("cg-caps-{slot}"))
+                .property("caps", &cg_video_caps(profile)?)
+                .build()
+                .map_err(|error| build_error("capsfilter", error))?;
+            let alpha = gst::ElementFactory::make("alpha")
+                .name(format!("cg-alpha-{slot}"))
+                .property("alpha", 1.0_f64)
+                .property_from_str("method", "custom")
+                .property("target-r", 0_u32)
+                .property("target-g", 0_u32)
+                .property("target-b", 0_u32)
+                .build()
+                .map_err(|error| build_error("alpha", error))?;
+            let text_overlay = gst::ElementFactory::make("textoverlay")
+                .name(format!("cg-text-overlay-{slot}"))
+                .property("text", "")
+                .property("silent", true)
+                .property("shaded-background", false)
+                .property_from_str("halignment", "position")
+                .property_from_str("valignment", "position")
+                .build()
+                .map_err(|error| build_error("textoverlay", error))?;
+            let clock_overlay = gst::ElementFactory::make("clockoverlay")
+                .name(format!("cg-clock-overlay-{slot}"))
+                .property("time-format", "%H:%M:%S")
+                .property("silent", true)
+                .property("shaded-background", false)
+                .property_from_str("halignment", "position")
+                .property_from_str("valignment", "position")
+                .build()
+                .map_err(|error| build_error("clockoverlay", error))?;
+            let queue = element("queue", format!("cg-queue-{slot}"))?;
+            pipeline
+                .add_many([
+                    &source,
+                    &caps,
+                    &alpha,
+                    &text_overlay,
+                    &clock_overlay,
+                    &queue,
+                ])
+                .map_err(|error| EngineError::Pipeline(error.to_string()))?;
+            gst::Element::link_many([
+                &source,
+                &caps,
+                &text_overlay,
+                &clock_overlay,
+                &alpha,
+                &queue,
+            ])
+            .map_err(|_| EngineError::Link {
+                from: "cg-source",
+                to: "cg-queue",
+            })?;
+            let pad = connect_to_compositor(&queue, &cg_compositor, 1 + slot)?;
+            cg_slots.push(CgSlot {
+                text_overlay,
+                clock_overlay,
+                pad,
+            });
+        }
         let fallback_audio = gst::ElementFactory::make("audiotestsrc")
             .name("fallback-audio-source")
             .property("is-live", true)
@@ -361,6 +457,15 @@ impl PersistentPlayout {
             &video_selector,
             &video_timeline,
             &video_rate,
+            &cg_input_convert,
+            &cg_input_caps,
+        ])
+        .map_err(|_| EngineError::Link {
+            from: "input-selector",
+            to: "cg-input-caps",
+        })?;
+        gst::Element::link_many([
+            &cg_compositor,
             &convert,
             &caps_filter,
             &encoder,
@@ -369,7 +474,7 @@ impl PersistentPlayout {
             &transport_fanout,
         ])
         .map_err(|_| EngineError::Link {
-            from: "input-selector",
+            from: "cg-compositor",
             to: "transport-fanout",
         })?;
         for (queue, sink) in &output_branches {
@@ -438,9 +543,14 @@ impl PersistentPlayout {
             output_counters,
             output_profile,
             file_program,
+            cg_slots,
+            cg_revision: None,
             stopped: false,
         };
         playout.wait_for_source(SourceRole::Fallback, Duration::from_secs(2))?;
+        for slot in &playout.cg_slots {
+            slot.pad.set_property("alpha", 0.0_f64);
+        }
         Ok(playout)
     }
 
@@ -470,6 +580,72 @@ impl PersistentPlayout {
                     }),
             })
             .collect()
+    }
+
+    pub fn apply_cg_snapshot(
+        &mut self,
+        snapshot: &station_media_protocol::CgSnapshot,
+    ) -> Result<(), EngineError> {
+        validate_cg_snapshot(snapshot)?;
+        if self.cg_revision.as_ref() == Some(snapshot) {
+            return Ok(());
+        }
+        for slot in &self.cg_slots {
+            slot.pad.set_property("alpha", 0.0_f64);
+        }
+        for overlay in &snapshot.overlays {
+            let slot = &self.cg_slots[usize::from(overlay.slot)];
+            configure_overlay_geometry(&slot.text_overlay, &overlay.rect)?;
+            configure_overlay_geometry(&slot.clock_overlay, &overlay.rect)?;
+            match &overlay.content {
+                CgOverlayContent::Text { text } => {
+                    slot.text_overlay.set_property("text", sanitize_text(text)?);
+                    slot.text_overlay.set_property("silent", false);
+                    slot.clock_overlay.set_property("silent", true);
+                    slot.pad.set_property(
+                        "zorder",
+                        u32::try_from(overlay.z_index)
+                            .unwrap_or(0)
+                            .saturating_add(1),
+                    );
+                    slot.pad.set_property("alpha", 1.0_f64);
+                }
+                CgOverlayContent::Clock { format } => {
+                    slot.clock_overlay
+                        .set_property("time-format", sanitize_text(format)?);
+                    slot.text_overlay.set_property("silent", true);
+                    slot.clock_overlay.set_property("silent", false);
+                    slot.pad.set_property(
+                        "zorder",
+                        u32::try_from(overlay.z_index)
+                            .unwrap_or(0)
+                            .saturating_add(1),
+                    );
+                    slot.pad.set_property("alpha", 1.0_f64);
+                }
+            }
+        }
+        self.cg_revision = Some(snapshot.clone());
+        Ok(())
+    }
+
+    pub fn clear_cg_snapshot(&mut self) {
+        for slot in &self.cg_slots {
+            slot.pad.set_property("alpha", 0.0_f64);
+            slot.text_overlay.set_property("silent", true);
+            slot.clock_overlay.set_property("silent", true);
+        }
+        self.cg_revision = None;
+    }
+
+    pub fn current_cg_revision(&self) -> Option<(&str, u64)> {
+        self.cg_revision
+            .as_ref()
+            .map(|snapshot| (snapshot.board_id.as_str(), snapshot.board_revision))
+    }
+
+    pub fn current_cg_snapshot(&self) -> Option<&CgSnapshot> {
+        self.cg_revision.as_ref()
     }
 
     pub fn active_source(&self) -> Result<SourceRole, EngineError> {
@@ -968,6 +1144,132 @@ fn video_caps(profile: &OutputProfile) -> Result<gst::Caps, EngineError> {
         .field("height", height)
         .field("framerate", gst::Fraction::new(numerator, denominator))
         .build())
+}
+
+fn cg_video_caps(profile: &OutputProfile) -> Result<gst::Caps, EngineError> {
+    let width = i32::try_from(profile.width)
+        .map_err(|_| EngineError::Pipeline("CG width exceeds GStreamer range".into()))?;
+    let height = i32::try_from(profile.height)
+        .map_err(|_| EngineError::Pipeline("CG height exceeds GStreamer range".into()))?;
+    let numerator = i32::try_from(profile.frame_rate_numerator)
+        .map_err(|_| EngineError::Pipeline("CG frame-rate numerator exceeds range".into()))?;
+    let denominator = i32::try_from(profile.frame_rate_denominator)
+        .map_err(|_| EngineError::Pipeline("CG frame-rate denominator exceeds range".into()))?;
+    Ok(gst::Caps::builder("video/x-raw")
+        .field("format", "BGRA")
+        .field("width", width)
+        .field("height", height)
+        .field("framerate", gst::Fraction::new(numerator, denominator))
+        .build())
+}
+
+fn connect_to_compositor(
+    source: &gst::Element,
+    compositor: &gst::Element,
+    index: usize,
+) -> Result<gst::Pad, EngineError> {
+    let source_pad = source.static_pad("src").ok_or(EngineError::MissingPad {
+        element: "cg-overlay-queue",
+        pad: "src",
+    })?;
+    let sink = compositor
+        .request_pad_simple("sink_%u")
+        .ok_or(EngineError::MissingPad {
+            element: "cg-compositor",
+            pad: "sink_%u",
+        })?;
+    sink.set_property("zorder", u32::try_from(index).unwrap_or(0));
+    sink.set_property("alpha", 0.0_f64);
+    source_pad
+        .link(&sink)
+        .map_err(|error| EngineError::PadLink(format!("{error:?}")))?;
+    Ok(sink)
+}
+
+fn validate_cg_snapshot(snapshot: &CgSnapshot) -> Result<(), EngineError> {
+    if snapshot.board_id.is_empty() || snapshot.board_id.len() > 128 {
+        return Err(EngineError::CgInvalid(
+            "board id is empty or too long".into(),
+        ));
+    }
+    if snapshot.board_revision == 0 {
+        return Err(EngineError::CgInvalid(
+            "board revision must be positive".into(),
+        ));
+    }
+    if snapshot.overlays.len() > MAX_CG_SLOTS {
+        return Err(EngineError::CgInvalid("too many CG overlay slots".into()));
+    }
+    let mut seen = [false; MAX_CG_SLOTS];
+    for overlay in &snapshot.overlays {
+        let slot = usize::from(overlay.slot);
+        if slot >= MAX_CG_SLOTS || seen[slot] {
+            return Err(EngineError::CgInvalid(
+                "overlay slot is invalid or duplicated".into(),
+            ));
+        }
+        seen[slot] = true;
+        if overlay.z_index < 0 {
+            return Err(EngineError::CgInvalid(
+                "overlay z-index must be nonnegative".into(),
+            ));
+        }
+        let rect = &overlay.rect;
+        if rect.width == 0
+            || rect.height == 0
+            || u32::from(rect.x) + u32::from(rect.width) > 1000
+            || u32::from(rect.y) + u32::from(rect.height) > 1000
+        {
+            return Err(EngineError::CgInvalid(
+                "overlay rectangle is outside 0..1000".into(),
+            ));
+        }
+        let text_len = match &overlay.content {
+            CgOverlayContent::Text { text } => sanitize_text(text)?.len(),
+            CgOverlayContent::Clock { format } => sanitize_text(format)?.len(),
+        };
+        if text_len > MAX_CG_TEXT_BYTES {
+            return Err(EngineError::CgInvalid("overlay text is too long".into()));
+        }
+    }
+    let encoded = serde_json::to_vec(snapshot).map_err(|error| {
+        EngineError::CgInvalid(format!("snapshot is not serializable: {error}"))
+    })?;
+    if encoded.len() > 48 * 1024 {
+        return Err(EngineError::CgInvalid(
+            "snapshot exceeds the bounded CG payload".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn sanitize_text(text: &str) -> Result<String, EngineError> {
+    if text.is_empty() {
+        return Err(EngineError::CgInvalid(
+            "overlay text cannot be empty".into(),
+        ));
+    }
+    if text.chars().any(|character| {
+        character.is_control() && character != '\n' && character != '\r' && character != '\t'
+    }) {
+        return Err(EngineError::CgInvalid(
+            "overlay text contains control characters".into(),
+        ));
+    }
+    Ok(text.replace("\r\n", "\n").replace('\r', "\n"))
+}
+
+fn configure_overlay_geometry(
+    overlay: &gst::Element,
+    rect: &station_media_protocol::CgRect,
+) -> Result<(), EngineError> {
+    overlay.set_property("x-absolute", f64::from(rect.x + rect.width / 2) / 1000.0);
+    overlay.set_property("y-absolute", f64::from(rect.y + rect.height / 2) / 1000.0);
+    overlay.set_property(
+        "font-desc",
+        format!("Sans Bold {}", (rect.height / 8).clamp(16, 96)),
+    );
+    Ok(())
 }
 
 fn video_caps_filter(

@@ -6,9 +6,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use station_media_journal::read_events;
 use station_media_protocol::{
-    ChannelCommand, CommandEnvelope, PROTOCOL_VERSION, WorkerBootstrapEnvelope, WorkerEvent,
-    WorkerEventEnvelope, WorkerOutputConfiguration, decode_event_frame, encode_bootstrap_frame,
-    encode_command_frame,
+    CgOverlay, CgOverlayContent, CgRect, CgSnapshot, ChannelCommand, CommandEnvelope,
+    PROTOCOL_VERSION, WorkerBootstrapEnvelope, WorkerEvent, WorkerEventEnvelope,
+    WorkerOutputConfiguration, decode_event_frame, encode_bootstrap_frame, encode_command_frame,
 };
 use station_windows_ipc::PipeServer;
 
@@ -167,5 +167,60 @@ fn rejects_a_stale_command_and_durably_records_the_rejection() {
     assert!(matches!(emitted[2].event, WorkerEvent::ShutdownComplete));
     assert_eq!(read_events(&journal).unwrap(), emitted);
 
+    let _ = std::fs::remove_file(journal);
+}
+
+#[test]
+fn applies_and_clears_cg_without_restarting_the_worker_graph() {
+    let journal = journal_path("cg-lifecycle");
+    let snapshot = CgSnapshot {
+        board_id: "board-1".into(),
+        board_revision: 4,
+        overlays: vec![CgOverlay {
+            slot: 0,
+            rect: CgRect {
+                x: 10,
+                y: 700,
+                width: 800,
+                height: 200,
+            },
+            z_index: 1,
+            content: CgOverlayContent::Text {
+                text: "worker CG proof".into(),
+            },
+        }],
+    };
+    let mut input = Vec::new();
+    input.extend_from_slice(
+        &encode_command_frame(&command(
+            "cg-apply",
+            2,
+            ChannelCommand::ApplyCgSnapshot { snapshot },
+        ))
+        .unwrap(),
+    );
+    input.extend_from_slice(
+        &encode_command_frame(&command("cg-clear", 3, ChannelCommand::ClearCgSnapshot)).unwrap(),
+    );
+    input.extend_from_slice(
+        &encode_command_frame(&command("shutdown", 4, ChannelCommand::Shutdown)).unwrap(),
+    );
+
+    let (output, emitted) = run_worker(&journal, &input, 4);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(matches!(
+        &emitted[1].event,
+        WorkerEvent::CgApplied {
+            board_id,
+            board_revision: 4
+        } if board_id == "board-1"
+    ));
+    assert!(matches!(&emitted[2].event, WorkerEvent::CgCleared));
+    assert!(matches!(emitted[3].event, WorkerEvent::ShutdownComplete));
+    assert_eq!(read_events(&journal).unwrap(), emitted);
     let _ = std::fs::remove_file(journal);
 }
