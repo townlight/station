@@ -2,8 +2,10 @@ use std::ffi::{CStr, CString, c_char, c_int, c_longlong, c_void};
 use std::path::Path;
 use std::ptr;
 
+use sha2::{Digest, Sha256};
 use station_domain::{
-    AlertChannel, AlertChannelKind, AlertConditionKind, AlertEvent, AlertEventState, AlertSeverity,
+    AlertChannel, AlertChannelKind, AlertConditionKind, AlertDelivery, AlertDeliveryPayload,
+    AlertDeliveryState, AlertEvent, AlertEventState, AlertNotificationKind, AlertSeverity,
     ChannelRuntimeObservation, ChannelRuntimeState, StationProfile, StationProfileDocument,
     redact_alert_channel_target, validate_alert_channel_target, validate_secure_url,
 };
@@ -347,6 +349,27 @@ impl StationStore {
                created_at_unix_ms INTEGER NOT NULL CHECK (created_at_unix_ms >= 0),\
                updated_at_unix_ms INTEGER NOT NULL CHECK (updated_at_unix_ms >= created_at_unix_ms)\
              );\
+             CREATE TABLE IF NOT EXISTS alert_deliveries (\
+               delivery_id TEXT PRIMARY KEY,\
+               event_id TEXT NOT NULL,\
+               alert_channel_id TEXT NOT NULL,\
+               notification_kind TEXT NOT NULL CHECK (notification_kind IN ('firing','resolved','test')),\
+               state TEXT NOT NULL CHECK (state IN ('pending','leased','sent','dead_letter')),\
+               attempts INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),\
+               next_attempt_at_unix_ms INTEGER NOT NULL CHECK (next_attempt_at_unix_ms >= 0),\
+               lease_expires_at_unix_ms INTEGER NOT NULL DEFAULT -1 CHECK (lease_expires_at_unix_ms >= -1),\
+               last_error TEXT NOT NULL DEFAULT '',\
+               signature TEXT NOT NULL DEFAULT '',\
+               payload_json TEXT NOT NULL,\
+               created_at_unix_ms INTEGER NOT NULL CHECK (created_at_unix_ms >= 0),\
+               updated_at_unix_ms INTEGER NOT NULL CHECK (updated_at_unix_ms >= created_at_unix_ms),\
+               sent_at_unix_ms INTEGER NOT NULL DEFAULT -1 CHECK (sent_at_unix_ms >= -1),\
+               UNIQUE(event_id, alert_channel_id, notification_kind),\
+               FOREIGN KEY(event_id) REFERENCES alert_events(event_id),\
+               FOREIGN KEY(alert_channel_id) REFERENCES alert_channels(channel_id)\
+             );\
+             CREATE INDEX IF NOT EXISTS alert_deliveries_due \
+               ON alert_deliveries(state, next_attempt_at_unix_ms, created_at_unix_ms);\
              CREATE TABLE IF NOT EXISTS schedule_items (\
                item_id TEXT PRIMARY KEY,\
                channel_id TEXT NOT NULL,\
@@ -1253,63 +1276,383 @@ impl StationStore {
         Ok(Some(secret))
     }
 
-    pub fn observe_alert(&self, proposed: &AlertEvent) -> Result<AlertEvent, String> {
-        proposed.validate().map_err(str::to_string)?;
-        if proposed.state != AlertEventState::Firing
-            || proposed.occurrence_count != 1
-            || proposed.first_observed_at_unix_ms != proposed.last_observed_at_unix_ms
-            || proposed.acknowledged_at_unix_ms.is_some()
-        {
-            return Err("a new alert observation must be an unacknowledged first firing".into());
+    pub fn enqueue_alert_delivery(
+        &self,
+        delivery_id: &str,
+        event: &AlertEvent,
+        alert_channel_id: &str,
+        notification_kind: AlertNotificationKind,
+        not_before_unix_ms: i64,
+        created_at_unix_ms: i64,
+    ) -> Result<AlertDelivery, String> {
+        event.validate().map_err(str::to_string)?;
+        if self.read_alert_event(&event.event_id)?.as_ref() != Some(event) {
+            return Err("alert delivery event is not the current durable event".into());
         }
+        let channel = self
+            .read_alert_channel(alert_channel_id)?
+            .ok_or_else(|| "alert delivery channel does not exist".to_string())?;
+        if !channel.enabled {
+            return Err("alert delivery channel is disabled".into());
+        }
+        let payload =
+            AlertDeliveryPayload::from_event(notification_kind, event).map_err(str::to_string)?;
+        let delivery = AlertDelivery {
+            delivery_id: delivery_id.into(),
+            event_id: event.event_id.clone(),
+            alert_channel_id: alert_channel_id.into(),
+            notification_kind,
+            state: AlertDeliveryState::Pending,
+            attempts: 0,
+            next_attempt_at_unix_ms: not_before_unix_ms,
+            lease_expires_at_unix_ms: None,
+            last_error: String::new(),
+            signature: None,
+            created_at_unix_ms,
+            updated_at_unix_ms: created_at_unix_ms,
+            sent_at_unix_ms: None,
+        };
+        delivery.validate().map_err(str::to_string)?;
+        let payload_json = serde_json::to_string(&payload)
+            .map_err(|error| format!("could not encode alert delivery payload: {error}"))?;
+        let statement = self.prepare(
+            "INSERT INTO alert_deliveries(delivery_id, event_id, alert_channel_id, notification_kind, \
+             state, attempts, next_attempt_at_unix_ms, lease_expires_at_unix_ms, last_error, \
+             signature, payload_json, created_at_unix_ms, updated_at_unix_ms, sent_at_unix_ms) \
+             VALUES(?1, ?2, ?3, ?4, 'pending', 0, ?5, -1, '', '', ?6, ?7, ?7, -1)",
+        )?;
+        let values = [
+            c_string(delivery_id, "alert delivery identity")?,
+            c_string(&event.event_id, "alert event identity")?,
+            c_string(alert_channel_id, "alert channel identity")?,
+            c_string(
+                alert_notification_kind_name(notification_kind),
+                "alert notification kind",
+            )?,
+            c_string(&payload_json, "alert delivery payload")?,
+        ];
+        bind_text(self.database, statement.raw, 1, &values[0])?;
+        bind_text(self.database, statement.raw, 2, &values[1])?;
+        bind_text(self.database, statement.raw, 3, &values[2])?;
+        bind_text(self.database, statement.raw, 4, &values[3])?;
+        bind_i64(self.database, statement.raw, 5, not_before_unix_ms)?;
+        bind_text(self.database, statement.raw, 6, &values[4])?;
+        bind_i64(self.database, statement.raw, 7, created_at_unix_ms)?;
+        expect_done(self.database, statement.raw)?;
+        self.read_alert_delivery(delivery_id)?
+            .ok_or_else(|| "queued alert delivery disappeared".into())
+    }
+
+    pub fn read_alert_delivery(&self, delivery_id: &str) -> Result<Option<AlertDelivery>, String> {
+        let statement = self.prepare(
+            "SELECT delivery_id, event_id, alert_channel_id, notification_kind, state, attempts, \
+             next_attempt_at_unix_ms, lease_expires_at_unix_ms, last_error, signature, \
+             created_at_unix_ms, updated_at_unix_ms, sent_at_unix_ms \
+             FROM alert_deliveries WHERE delivery_id=?1",
+        )?;
+        let delivery_id = c_string(delivery_id, "alert delivery identity")?;
+        bind_text(self.database, statement.raw, 1, &delivery_id)?;
+        match unsafe { sqlite3_step(statement.raw) } {
+            SQLITE_ROW => Ok(Some(read_alert_delivery_row(statement.raw)?)),
+            SQLITE_DONE => Ok(None),
+            _ => Err(sqlite_error(self.database)),
+        }
+    }
+
+    pub fn list_alert_deliveries(&self) -> Result<Vec<AlertDelivery>, String> {
+        let statement = self.prepare(
+            "SELECT delivery_id, event_id, alert_channel_id, notification_kind, state, attempts, \
+             next_attempt_at_unix_ms, lease_expires_at_unix_ms, last_error, signature, \
+             created_at_unix_ms, updated_at_unix_ms, sent_at_unix_ms \
+             FROM alert_deliveries ORDER BY created_at_unix_ms, delivery_id",
+        )?;
+        let mut deliveries = Vec::new();
+        loop {
+            match unsafe { sqlite3_step(statement.raw) } {
+                SQLITE_ROW => deliveries.push(read_alert_delivery_row(statement.raw)?),
+                SQLITE_DONE => return Ok(deliveries),
+                _ => return Err(sqlite_error(self.database)),
+            }
+        }
+    }
+
+    pub fn read_alert_delivery_payload(
+        &self,
+        delivery_id: &str,
+    ) -> Result<Option<AlertDeliveryPayload>, String> {
+        let statement =
+            self.prepare("SELECT payload_json FROM alert_deliveries WHERE delivery_id=?1")?;
+        let delivery_id = c_string(delivery_id, "alert delivery identity")?;
+        bind_text(self.database, statement.raw, 1, &delivery_id)?;
+        match unsafe { sqlite3_step(statement.raw) } {
+            SQLITE_ROW => {
+                let payload: AlertDeliveryPayload =
+                    serde_json::from_str(&column_text(statement.raw, 0)?).map_err(|error| {
+                        format!("stored alert delivery payload is invalid: {error}")
+                    })?;
+                payload.validate().map_err(str::to_string)?;
+                Ok(Some(payload))
+            }
+            SQLITE_DONE => Ok(None),
+            _ => Err(sqlite_error(self.database)),
+        }
+    }
+
+    pub fn claim_due_alert_delivery(
+        &self,
+        now_unix_ms: i64,
+        lease_duration_ms: i64,
+    ) -> Result<Option<AlertDelivery>, String> {
+        if now_unix_ms < 0 || !(1_000..=300_000).contains(&lease_duration_ms) {
+            return Err("alert delivery lease request is invalid".into());
+        }
+        let lease_expires_at_unix_ms = now_unix_ms
+            .checked_add(lease_duration_ms)
+            .ok_or_else(|| "alert delivery lease time overflowed".to_string())?;
+        self.execute("BEGIN IMMEDIATE")?;
+        let mut claimed = None;
+        let outcome = (|| {
+            let recovery = self.prepare(
+                "UPDATE alert_deliveries SET state='pending', lease_expires_at_unix_ms=-1, \
+                 last_error=CASE WHEN last_error='' THEN 'delivery lease expired before completion' \
+                 ELSE substr(last_error || '; delivery lease expired before completion', 1, 1000) END, \
+                 updated_at_unix_ms=?1 WHERE state='leased' AND lease_expires_at_unix_ms<=?1",
+            )?;
+            bind_i64(self.database, recovery.raw, 1, now_unix_ms)?;
+            expect_done(self.database, recovery.raw)?;
+
+            let due = self.prepare(
+                "SELECT delivery_id FROM alert_deliveries WHERE state='pending' \
+                 AND next_attempt_at_unix_ms<=?1 ORDER BY next_attempt_at_unix_ms, created_at_unix_ms, \
+                 delivery_id LIMIT 1",
+            )?;
+            bind_i64(self.database, due.raw, 1, now_unix_ms)?;
+            if unsafe { sqlite3_step(due.raw) } == SQLITE_DONE {
+                return Ok(());
+            }
+            let delivery_id = column_text(due.raw, 0)?;
+            let update = self.prepare(
+                "UPDATE alert_deliveries SET state='leased', attempts=attempts+1, \
+                 lease_expires_at_unix_ms=?1, updated_at_unix_ms=?2 \
+                 WHERE delivery_id=?3 AND state='pending' AND next_attempt_at_unix_ms<=?2",
+            )?;
+            let delivery_id_value = c_string(&delivery_id, "alert delivery identity")?;
+            bind_i64(self.database, update.raw, 1, lease_expires_at_unix_ms)?;
+            bind_i64(self.database, update.raw, 2, now_unix_ms)?;
+            bind_text(self.database, update.raw, 3, &delivery_id_value)?;
+            expect_done(self.database, update.raw)?;
+            if self.changes() != 1 {
+                return Err("due alert delivery could not be leased".into());
+            }
+            claimed = self.read_alert_delivery(&delivery_id)?;
+            Ok(())
+        })();
+        self.finish_transaction(outcome)?;
+        Ok(claimed)
+    }
+
+    pub fn complete_alert_delivery(
+        &self,
+        delivery_id: &str,
+        sent_at_unix_ms: i64,
+        signature: Option<&str>,
+    ) -> Result<AlertDelivery, String> {
+        if sent_at_unix_ms < 0
+            || signature.is_some_and(|value| {
+                value.is_empty() || value.len() > 200 || value.chars().any(char::is_control)
+            })
+        {
+            return Err("alert delivery completion is invalid".into());
+        }
+        let statement = self.prepare(
+            "UPDATE alert_deliveries SET state='sent', lease_expires_at_unix_ms=-1, signature=?1, \
+             updated_at_unix_ms=?2, sent_at_unix_ms=?2 WHERE delivery_id=?3 AND state='leased' \
+             AND updated_at_unix_ms<=?2",
+        )?;
+        let signature = c_string(signature.unwrap_or_default(), "alert delivery signature")?;
+        let delivery_id = c_string(delivery_id, "alert delivery identity")?;
+        bind_text(self.database, statement.raw, 1, &signature)?;
+        bind_i64(self.database, statement.raw, 2, sent_at_unix_ms)?;
+        bind_text(self.database, statement.raw, 3, &delivery_id)?;
+        expect_done(self.database, statement.raw)?;
+        if self.changes() != 1 {
+            return Err("only a leased alert delivery can be completed".into());
+        }
+        self.read_alert_delivery(delivery_id.to_str().map_err(|_| "invalid alert identity")?)?
+            .ok_or_else(|| "completed alert delivery disappeared".into())
+    }
+
+    pub fn fail_alert_delivery(
+        &self,
+        delivery_id: &str,
+        failed_at_unix_ms: i64,
+        error: &str,
+        maximum_attempts: u32,
+        base_backoff_ms: i64,
+    ) -> Result<AlertDelivery, String> {
+        if failed_at_unix_ms < 0
+            || error.trim().is_empty()
+            || error.len() > 1_000
+            || error.chars().any(char::is_control)
+            || !(1..=20).contains(&maximum_attempts)
+            || !(1_000..=86_400_000).contains(&base_backoff_ms)
+        {
+            return Err("alert delivery failure is invalid".into());
+        }
+        let current = self
+            .read_alert_delivery(delivery_id)?
+            .ok_or_else(|| "alert delivery does not exist".to_string())?;
+        if current.state != AlertDeliveryState::Leased
+            || current.attempts == 0
+            || failed_at_unix_ms < current.updated_at_unix_ms
+        {
+            return Err("only a current leased alert delivery can fail".into());
+        }
+        let dead_letter = current.attempts >= maximum_attempts;
+        let exponent = current.attempts.saturating_sub(1).min(20);
+        let backoff_ms = base_backoff_ms
+            .saturating_mul(1_i64 << exponent)
+            .min(86_400_000);
+        let next_attempt_at_unix_ms = if dead_letter {
+            current.next_attempt_at_unix_ms
+        } else {
+            failed_at_unix_ms
+                .checked_add(backoff_ms)
+                .ok_or_else(|| "alert delivery retry time overflowed".to_string())?
+        };
+        let statement = self.prepare(
+            "UPDATE alert_deliveries SET state=?1, next_attempt_at_unix_ms=?2, \
+             lease_expires_at_unix_ms=-1, last_error=?3, updated_at_unix_ms=?4 \
+             WHERE delivery_id=?5 AND state='leased' AND attempts=?6",
+        )?;
+        let state = c_string(
+            if dead_letter {
+                "dead_letter"
+            } else {
+                "pending"
+            },
+            "alert delivery state",
+        )?;
+        let error = c_string(error, "alert delivery error")?;
+        let delivery_id = c_string(delivery_id, "alert delivery identity")?;
+        bind_text(self.database, statement.raw, 1, &state)?;
+        bind_i64(self.database, statement.raw, 2, next_attempt_at_unix_ms)?;
+        bind_text(self.database, statement.raw, 3, &error)?;
+        bind_i64(self.database, statement.raw, 4, failed_at_unix_ms)?;
+        bind_text(self.database, statement.raw, 5, &delivery_id)?;
+        bind_i64(self.database, statement.raw, 6, i64::from(current.attempts))?;
+        expect_done(self.database, statement.raw)?;
+        if self.changes() != 1 {
+            return Err("alert delivery lease changed before failure was recorded".into());
+        }
+        self.read_alert_delivery(delivery_id.to_str().map_err(|_| "invalid alert identity")?)?
+            .ok_or_else(|| "failed alert delivery disappeared".into())
+    }
+
+    pub fn observe_alert(&self, proposed: &AlertEvent) -> Result<AlertEvent, String> {
+        validate_new_alert_observation(proposed)?;
         self.execute("BEGIN IMMEDIATE")?;
         let mut recorded = None;
         let outcome = (|| {
-            if let Some(mut current) =
-                self.read_firing_alert(proposed.condition, &proposed.resource_ref)?
-            {
-                if proposed.last_observed_at_unix_ms < current.last_observed_at_unix_ms {
-                    return Err("alert observation time moved backward".into());
-                }
-                let statement = self.prepare(
-                    "UPDATE alert_events SET severity=?1, summary=?2, detail=?3, source_section=?4, \
-                     last_observed_at_unix_ms=?5, occurrence_count=occurrence_count+1 WHERE event_id=?6 AND state='firing'",
-                )?;
-                let severity = c_string(alert_severity_name(proposed.severity), "alert severity")?;
-                let summary = c_string(&proposed.summary, "alert summary")?;
-                let detail = c_string(&proposed.detail, "alert detail")?;
-                let source = c_string(&proposed.source_section, "alert source")?;
-                let event_id = c_string(&current.event_id, "alert identity")?;
-                bind_text(self.database, statement.raw, 1, &severity)?;
-                bind_text(self.database, statement.raw, 2, &summary)?;
-                bind_text(self.database, statement.raw, 3, &detail)?;
-                bind_text(self.database, statement.raw, 4, &source)?;
-                bind_i64(
-                    self.database,
-                    statement.raw,
-                    5,
-                    proposed.last_observed_at_unix_ms,
-                )?;
-                bind_text(self.database, statement.raw, 6, &event_id)?;
-                expect_done(self.database, statement.raw)?;
-                current.severity = proposed.severity;
-                current.summary.clone_from(&proposed.summary);
-                current.detail.clone_from(&proposed.detail);
-                current.source_section.clone_from(&proposed.source_section);
-                current.last_observed_at_unix_ms = proposed.last_observed_at_unix_ms;
-                current.occurrence_count = current
-                    .occurrence_count
-                    .checked_add(1)
-                    .ok_or_else(|| "alert occurrence count overflowed".to_string())?;
-                recorded = Some(current);
-                return Ok(());
-            }
-            self.insert_alert(proposed)?;
-            recorded = Some(proposed.clone());
+            let (event, _) = self.observe_alert_locked(proposed)?;
+            recorded = Some(event);
             Ok(())
         })();
         self.finish_transaction(outcome)?;
         recorded.ok_or_else(|| "alert transaction produced no event".into())
+    }
+
+    pub fn observe_alert_and_route(&self, proposed: &AlertEvent) -> Result<AlertEvent, String> {
+        validate_new_alert_observation(proposed)?;
+        self.execute("BEGIN IMMEDIATE")?;
+        let mut recorded = None;
+        let outcome = (|| {
+            let (event, is_first_observation) = self.observe_alert_locked(proposed)?;
+            if is_first_observation {
+                self.route_alert_locked(
+                    &event,
+                    AlertNotificationKind::Firing,
+                    event.first_observed_at_unix_ms,
+                )?;
+            }
+            recorded = Some(event);
+            Ok(())
+        })();
+        self.finish_transaction(outcome)?;
+        recorded.ok_or_else(|| "alert routing transaction produced no event".into())
+    }
+
+    fn observe_alert_locked(&self, proposed: &AlertEvent) -> Result<(AlertEvent, bool), String> {
+        if let Some(mut current) =
+            self.read_firing_alert(proposed.condition, &proposed.resource_ref)?
+        {
+            if proposed.last_observed_at_unix_ms < current.last_observed_at_unix_ms {
+                return Err("alert observation time moved backward".into());
+            }
+            let statement = self.prepare(
+                "UPDATE alert_events SET severity=?1, summary=?2, detail=?3, source_section=?4, \
+                 last_observed_at_unix_ms=?5, occurrence_count=occurrence_count+1 WHERE event_id=?6 AND state='firing'",
+            )?;
+            let severity = c_string(alert_severity_name(proposed.severity), "alert severity")?;
+            let summary = c_string(&proposed.summary, "alert summary")?;
+            let detail = c_string(&proposed.detail, "alert detail")?;
+            let source = c_string(&proposed.source_section, "alert source")?;
+            let event_id = c_string(&current.event_id, "alert identity")?;
+            bind_text(self.database, statement.raw, 1, &severity)?;
+            bind_text(self.database, statement.raw, 2, &summary)?;
+            bind_text(self.database, statement.raw, 3, &detail)?;
+            bind_text(self.database, statement.raw, 4, &source)?;
+            bind_i64(
+                self.database,
+                statement.raw,
+                5,
+                proposed.last_observed_at_unix_ms,
+            )?;
+            bind_text(self.database, statement.raw, 6, &event_id)?;
+            expect_done(self.database, statement.raw)?;
+            current.severity = proposed.severity;
+            current.summary.clone_from(&proposed.summary);
+            current.detail.clone_from(&proposed.detail);
+            current.source_section.clone_from(&proposed.source_section);
+            current.last_observed_at_unix_ms = proposed.last_observed_at_unix_ms;
+            current.occurrence_count = current
+                .occurrence_count
+                .checked_add(1)
+                .ok_or_else(|| "alert occurrence count overflowed".to_string())?;
+            return Ok((current, false));
+        }
+        self.insert_alert(proposed)?;
+        Ok((proposed.clone(), true))
+    }
+
+    fn route_alert_locked(
+        &self,
+        event: &AlertEvent,
+        notification_kind: AlertNotificationKind,
+        observed_at_unix_ms: i64,
+    ) -> Result<(), String> {
+        for channel in self
+            .list_alert_channels()?
+            .into_iter()
+            .filter(|channel| channel.enabled)
+        {
+            let not_before_unix_ms =
+                quiet_hours_release(&channel, event.severity, observed_at_unix_ms)?;
+            let delivery_id = deterministic_alert_delivery_id(
+                &event.event_id,
+                &channel.channel_id,
+                notification_kind,
+            );
+            self.enqueue_alert_delivery(
+                &delivery_id,
+                event,
+                &channel.channel_id,
+                notification_kind,
+                not_before_unix_ms,
+                observed_at_unix_ms,
+            )?;
+        }
+        Ok(())
     }
 
     pub fn acknowledge_alert(
@@ -1346,32 +1689,41 @@ impl StationStore {
         if resolved_at_unix_ms < 0 {
             return Err("alert resolution time must be nonnegative".into());
         }
-        let statement = self.prepare(
-            "UPDATE alert_events SET state='resolved', resolved_at_unix_ms=?1 \
-             WHERE condition=?2 AND resource_ref=?3 AND state='firing' AND last_observed_at_unix_ms<=?1",
-        )?;
-        let condition = c_string(alert_condition_name(condition), "alert condition")?;
-        let resource_ref = c_string(resource_ref, "alert resource")?;
-        bind_i64(self.database, statement.raw, 1, resolved_at_unix_ms)?;
-        bind_text(self.database, statement.raw, 2, &condition)?;
-        bind_text(self.database, statement.raw, 3, &resource_ref)?;
-        expect_done(self.database, statement.raw)?;
-        if self.changes() == 0 {
-            return Ok(None);
-        }
-        let statement = self.prepare(
-            "SELECT event_id, condition, severity, state, resource_ref, summary, detail, source_section, \
-             first_observed_at_unix_ms, last_observed_at_unix_ms, resolved_at_unix_ms, occurrence_count, \
-             acknowledged_at_unix_ms, acknowledged_by FROM alert_events \
-             WHERE condition=?1 AND resource_ref=?2 AND resolved_at_unix_ms=?3 ORDER BY rowid DESC LIMIT 1",
-        )?;
-        bind_text(self.database, statement.raw, 1, &condition)?;
-        bind_text(self.database, statement.raw, 2, &resource_ref)?;
-        bind_i64(self.database, statement.raw, 3, resolved_at_unix_ms)?;
-        match unsafe { sqlite3_step(statement.raw) } {
-            SQLITE_ROW => Ok(Some(read_alert_event_row(statement.raw)?)),
-            _ => Err("resolved alert disappeared".into()),
-        }
+        self.execute("BEGIN IMMEDIATE")?;
+        let mut resolved = None;
+        let outcome = (|| {
+            let statement = self.prepare(
+                "UPDATE alert_events SET state='resolved', resolved_at_unix_ms=?1 \
+                 WHERE condition=?2 AND resource_ref=?3 AND state='firing' AND last_observed_at_unix_ms<=?1",
+            )?;
+            let condition = c_string(alert_condition_name(condition), "alert condition")?;
+            let resource_ref = c_string(resource_ref, "alert resource")?;
+            bind_i64(self.database, statement.raw, 1, resolved_at_unix_ms)?;
+            bind_text(self.database, statement.raw, 2, &condition)?;
+            bind_text(self.database, statement.raw, 3, &resource_ref)?;
+            expect_done(self.database, statement.raw)?;
+            if self.changes() == 0 {
+                return Ok(());
+            }
+            let statement = self.prepare(
+                "SELECT event_id, condition, severity, state, resource_ref, summary, detail, source_section, \
+                 first_observed_at_unix_ms, last_observed_at_unix_ms, resolved_at_unix_ms, occurrence_count, \
+                 acknowledged_at_unix_ms, acknowledged_by FROM alert_events \
+                 WHERE condition=?1 AND resource_ref=?2 AND resolved_at_unix_ms=?3 ORDER BY rowid DESC LIMIT 1",
+            )?;
+            bind_text(self.database, statement.raw, 1, &condition)?;
+            bind_text(self.database, statement.raw, 2, &resource_ref)?;
+            bind_i64(self.database, statement.raw, 3, resolved_at_unix_ms)?;
+            let event = match unsafe { sqlite3_step(statement.raw) } {
+                SQLITE_ROW => read_alert_event_row(statement.raw)?,
+                _ => return Err("resolved alert disappeared".into()),
+            };
+            self.route_alert_locked(&event, AlertNotificationKind::Resolved, resolved_at_unix_ms)?;
+            resolved = Some(event);
+            Ok(())
+        })();
+        self.finish_transaction(outcome)?;
+        Ok(resolved)
     }
 
     pub fn read_alert_event(&self, event_id: &str) -> Result<Option<AlertEvent>, String> {
@@ -2461,6 +2813,108 @@ fn read_alert_channel_row(statement: *mut SqliteStatement) -> Result<AlertChanne
     Ok(channel)
 }
 
+fn read_alert_delivery_row(statement: *mut SqliteStatement) -> Result<AlertDelivery, String> {
+    let lease_expires = unsafe { sqlite3_column_int64(statement, 7) };
+    let signature = column_text(statement, 9)?;
+    let sent_at = unsafe { sqlite3_column_int64(statement, 12) };
+    let delivery = AlertDelivery {
+        delivery_id: column_text(statement, 0)?,
+        event_id: column_text(statement, 1)?,
+        alert_channel_id: column_text(statement, 2)?,
+        notification_kind: parse_alert_notification_kind(&column_text(statement, 3)?)?,
+        state: parse_alert_delivery_state(&column_text(statement, 4)?)?,
+        attempts: u32::try_from(unsafe { sqlite3_column_int64(statement, 5) })
+            .map_err(|_| "database returned an invalid alert delivery attempt count".to_string())?,
+        next_attempt_at_unix_ms: unsafe { sqlite3_column_int64(statement, 6) },
+        lease_expires_at_unix_ms: (lease_expires >= 0).then_some(lease_expires),
+        last_error: column_text(statement, 8)?,
+        signature: (!signature.is_empty()).then_some(signature),
+        created_at_unix_ms: unsafe { sqlite3_column_int64(statement, 10) },
+        updated_at_unix_ms: unsafe { sqlite3_column_int64(statement, 11) },
+        sent_at_unix_ms: (sent_at >= 0).then_some(sent_at),
+    };
+    delivery.validate().map_err(str::to_string)?;
+    Ok(delivery)
+}
+
+fn validate_new_alert_observation(proposed: &AlertEvent) -> Result<(), String> {
+    proposed.validate().map_err(str::to_string)?;
+    if proposed.state != AlertEventState::Firing
+        || proposed.occurrence_count != 1
+        || proposed.first_observed_at_unix_ms != proposed.last_observed_at_unix_ms
+        || proposed.acknowledged_at_unix_ms.is_some()
+        || proposed.acknowledged_by.is_some()
+    {
+        return Err("a new alert observation must be an unacknowledged first firing".into());
+    }
+    Ok(())
+}
+
+fn deterministic_alert_delivery_id(
+    event_id: &str,
+    alert_channel_id: &str,
+    notification_kind: AlertNotificationKind,
+) -> String {
+    let mut digest = Sha256::new();
+    digest.update(event_id.as_bytes());
+    digest.update([0]);
+    digest.update(alert_channel_id.as_bytes());
+    digest.update([0]);
+    digest.update(alert_notification_kind_name(notification_kind).as_bytes());
+    format!("alert-delivery-{:x}", digest.finalize())
+}
+
+fn quiet_hours_release(
+    channel: &AlertChannel,
+    severity: AlertSeverity,
+    observed_at_unix_ms: i64,
+) -> Result<i64, String> {
+    if severity == AlertSeverity::Critical {
+        return Ok(observed_at_unix_ms);
+    }
+    let (Some(start), Some(end)) = (
+        channel.quiet_hours_start_utc.as_deref(),
+        channel.quiet_hours_end_utc.as_deref(),
+    ) else {
+        return Ok(observed_at_unix_ms);
+    };
+    let start_ms = i64::from(parse_utc_minutes(start)?) * 60_000;
+    let end_ms = i64::from(parse_utc_minutes(end)?) * 60_000;
+    const DAY_MS: i64 = 86_400_000;
+    let current_ms = observed_at_unix_ms.rem_euclid(DAY_MS);
+    let release_delta = if start_ms < end_ms && (start_ms..end_ms).contains(&current_ms) {
+        Some(end_ms - current_ms)
+    } else if start_ms > end_ms && current_ms >= start_ms {
+        Some(DAY_MS - current_ms + end_ms)
+    } else if start_ms > end_ms && current_ms < end_ms {
+        Some(end_ms - current_ms)
+    } else {
+        None
+    };
+    match release_delta {
+        Some(delta) => observed_at_unix_ms
+            .checked_add(delta)
+            .ok_or_else(|| "quiet-hours release time overflowed".to_string()),
+        None => Ok(observed_at_unix_ms),
+    }
+}
+
+fn parse_utc_minutes(value: &str) -> Result<u16, String> {
+    let (hours, minutes) = value
+        .split_once(':')
+        .ok_or_else(|| "quiet-hours clock is invalid".to_string())?;
+    let hours = hours
+        .parse::<u16>()
+        .map_err(|_| "quiet-hours clock is invalid".to_string())?;
+    let minutes = minutes
+        .parse::<u16>()
+        .map_err(|_| "quiet-hours clock is invalid".to_string())?;
+    if hours >= 24 || minutes >= 60 {
+        return Err("quiet-hours clock is invalid".into());
+    }
+    Ok(hours * 60 + minutes)
+}
+
 fn read_asset_loudness_row(
     statement: *mut SqliteStatement,
 ) -> Result<AssetLoudnessAnalysis, String> {
@@ -2638,6 +3092,37 @@ fn parse_alert_channel_kind(value: &str) -> Result<AlertChannelKind, String> {
         "webhook" => Ok(AlertChannelKind::Webhook),
         _ => Err(format!(
             "database returned invalid alert channel kind {value}"
+        )),
+    }
+}
+
+fn alert_notification_kind_name(value: AlertNotificationKind) -> &'static str {
+    match value {
+        AlertNotificationKind::Firing => "firing",
+        AlertNotificationKind::Resolved => "resolved",
+        AlertNotificationKind::Test => "test",
+    }
+}
+
+fn parse_alert_notification_kind(value: &str) -> Result<AlertNotificationKind, String> {
+    match value {
+        "firing" => Ok(AlertNotificationKind::Firing),
+        "resolved" => Ok(AlertNotificationKind::Resolved),
+        "test" => Ok(AlertNotificationKind::Test),
+        _ => Err(format!(
+            "database returned invalid alert notification kind {value}"
+        )),
+    }
+}
+
+fn parse_alert_delivery_state(value: &str) -> Result<AlertDeliveryState, String> {
+    match value {
+        "pending" => Ok(AlertDeliveryState::Pending),
+        "leased" => Ok(AlertDeliveryState::Leased),
+        "sent" => Ok(AlertDeliveryState::Sent),
+        "dead_letter" => Ok(AlertDeliveryState::DeadLetter),
+        _ => Err(format!(
+            "database returned invalid alert delivery state {value}"
         )),
     }
 }
@@ -3005,7 +3490,10 @@ fn valid_smtp_endpoint(value: &str) -> bool {
     } else {
         return false;
     };
-    let authority = remainder.split('/').next().unwrap_or_default();
+    if remainder.contains(['/', '?', '#']) {
+        return false;
+    }
+    let authority = remainder;
     let host = authority.split(':').next().unwrap_or_default();
     !authority.is_empty()
         && !authority.contains('@')

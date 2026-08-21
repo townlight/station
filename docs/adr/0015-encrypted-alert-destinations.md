@@ -24,4 +24,4 @@ Remote webhook and SMS-provider URLs require HTTPS. Plain HTTP is accepted only 
 - The installed LocalSystem service can use credentials configured before or after installation on the same PC.
 - Copying only the station database to another computer does not copy usable plaintext credentials.
 - Administrators on the same Windows machine remain inside the trust boundary; filesystem ACLs and Windows machine protection work together rather than pretending to defend against the machine owner.
-- This ADR proves configuration storage, validation, redaction, and recovery. It does not claim that email, SMS, or webhook dispatch has occurred; durable delivery jobs, retry, dead-letter, and send-test are the next boundary.
+- This ADR proves configuration storage, validation, redaction, and recovery. Durable dispatch is a separate boundary governed by [ADR 0016](0016-durable-operator-alert-delivery.md); send-test and operator delivery-status surfaces remain unclaimed here.

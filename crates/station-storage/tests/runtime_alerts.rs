@@ -2,13 +2,15 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use station_domain::{
-    AlertConditionKind, AlertEvent, AlertEventState, AlertSeverity, ChannelRuntimeObservation,
-    ChannelRuntimeState,
+    AlertChannel, AlertChannelKind, AlertConditionKind, AlertDeliveryState, AlertEvent,
+    AlertEventState, AlertNotificationKind, AlertSeverity, ChannelRuntimeObservation,
+    ChannelRuntimeState, redact_alert_channel_target,
 };
 use station_schedule::ChannelConfiguration;
-use station_storage::StationStore;
+use station_storage::{AlertChannelSecret, StationStore};
 
 const CHANNEL_ID: &str = "8ea48bc4-7f2e-4f89-9bbc-2c58472f0e8e";
+const ALERT_CHANNEL_ID: &str = "5eb469af-f3c7-4cc5-b26e-865807b3e934";
 
 fn database_path(label: &str) -> PathBuf {
     let nonce = SystemTime::now()
@@ -45,6 +47,43 @@ fn alert(event_id: &str, observed_at_unix_ms: i64) -> AlertEvent {
         acknowledged_at_unix_ms: None,
         acknowledged_by: None,
     }
+}
+
+fn put_webhook_channel(store: &StationStore, channel_id: &str) {
+    put_webhook_channel_with_quiet_hours(store, channel_id, None, None);
+}
+
+fn put_webhook_channel_with_quiet_hours(
+    store: &StationStore,
+    channel_id: &str,
+    quiet_hours_start_utc: Option<&str>,
+    quiet_hours_end_utc: Option<&str>,
+) {
+    let target = "https://alerts.example.org/townlight";
+    store
+        .put_alert_channel(
+            &AlertChannel {
+                channel_id: channel_id.into(),
+                kind: AlertChannelKind::Webhook,
+                label: "Station pager".into(),
+                enabled: true,
+                target_redacted: redact_alert_channel_target(AlertChannelKind::Webhook, target)
+                    .unwrap(),
+                credential_configured: true,
+                quiet_hours_start_utc: quiet_hours_start_utc.map(str::to_owned),
+                quiet_hours_end_utc: quiet_hours_end_utc.map(str::to_owned),
+                created_at_unix_ms: 500,
+                updated_at_unix_ms: 500,
+            },
+            &AlertChannelSecret {
+                target: target.into(),
+                endpoint: None,
+                sender: None,
+                identity: None,
+                credential: "delivery-signing-secret".into(),
+            },
+        )
+        .unwrap();
 }
 
 #[test]
@@ -114,6 +153,221 @@ fn deduplicates_acknowledges_and_resolves_alerts_durably() {
     let fresh = store.observe_alert(&alert("alert-fresh", 4_000)).unwrap();
     assert_eq!(fresh.event_id, "alert-fresh");
     assert_eq!(store.list_alert_events().unwrap().len(), 2);
+    drop(store);
+    remove_database(&database);
+}
+
+#[test]
+fn leases_retries_and_dead_letters_alert_delivery_durably() {
+    let database = database_path("alert-delivery-retry");
+    let store = StationStore::open(&database).unwrap();
+    put_webhook_channel(&store, ALERT_CHANNEL_ID);
+    let event = store
+        .observe_alert(&alert("alert-delivery", 1_000))
+        .unwrap();
+    let queued = store
+        .enqueue_alert_delivery(
+            "delivery-alert-pager-firing",
+            &event,
+            ALERT_CHANNEL_ID,
+            AlertNotificationKind::Firing,
+            1_100,
+            1_100,
+        )
+        .unwrap();
+    assert_eq!(queued.state, AlertDeliveryState::Pending);
+    assert_eq!(queued.attempts, 0);
+    assert!(
+        store
+            .claim_due_alert_delivery(1_099, 5_000)
+            .unwrap()
+            .is_none()
+    );
+
+    let first = store
+        .claim_due_alert_delivery(1_100, 5_000)
+        .unwrap()
+        .unwrap();
+    assert_eq!(first.state, AlertDeliveryState::Leased);
+    assert_eq!(first.attempts, 1);
+    assert_eq!(first.lease_expires_at_unix_ms, Some(6_100));
+    assert!(
+        store
+            .claim_due_alert_delivery(2_000, 5_000)
+            .unwrap()
+            .is_none()
+    );
+    drop(store);
+
+    let reopened = StationStore::open(&database).unwrap();
+    let recovered = reopened
+        .claim_due_alert_delivery(6_101, 5_000)
+        .unwrap()
+        .unwrap();
+    assert_eq!(recovered.delivery_id, first.delivery_id);
+    assert_eq!(recovered.attempts, 2);
+    assert!(recovered.last_error.contains("lease expired"));
+    let payload = reopened
+        .read_alert_delivery_payload(&recovered.delivery_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(payload.event_id, event.event_id);
+    assert_eq!(payload.summary, event.summary);
+    assert_eq!(payload.notification_kind, AlertNotificationKind::Firing);
+
+    let retry = reopened
+        .fail_alert_delivery(
+            &recovered.delivery_id,
+            6_200,
+            "provider unavailable",
+            3,
+            120_000,
+        )
+        .unwrap();
+    assert_eq!(retry.state, AlertDeliveryState::Pending);
+    assert_eq!(retry.next_attempt_at_unix_ms, 246_200);
+    assert!(
+        reopened
+            .claim_due_alert_delivery(246_199, 5_000)
+            .unwrap()
+            .is_none()
+    );
+    let final_attempt = reopened
+        .claim_due_alert_delivery(246_200, 5_000)
+        .unwrap()
+        .unwrap();
+    assert_eq!(final_attempt.attempts, 3);
+    let dead_letter = reopened
+        .fail_alert_delivery(
+            &final_attempt.delivery_id,
+            246_300,
+            "still unavailable",
+            3,
+            120_000,
+        )
+        .unwrap();
+    assert_eq!(dead_letter.state, AlertDeliveryState::DeadLetter);
+    assert!(dead_letter.next_attempt_at_unix_ms == 246_200);
+    assert!(
+        reopened
+            .claim_due_alert_delivery(1_000_000, 5_000)
+            .unwrap()
+            .is_none()
+    );
+    drop(reopened);
+    remove_database(&database);
+}
+
+#[test]
+fn prevents_duplicate_delivery_and_records_sent_terminal_state() {
+    let database = database_path("alert-delivery-sent");
+    let store = StationStore::open(&database).unwrap();
+    put_webhook_channel(&store, ALERT_CHANNEL_ID);
+    let event = store.observe_alert(&alert("alert-sent", 2_000)).unwrap();
+    store
+        .enqueue_alert_delivery(
+            "delivery-one",
+            &event,
+            ALERT_CHANNEL_ID,
+            AlertNotificationKind::Firing,
+            2_100,
+            2_100,
+        )
+        .unwrap();
+    assert!(
+        store
+            .enqueue_alert_delivery(
+                "delivery-two",
+                &event,
+                ALERT_CHANNEL_ID,
+                AlertNotificationKind::Firing,
+                2_100,
+                2_100,
+            )
+            .is_err()
+    );
+    let leased = store
+        .claim_due_alert_delivery(2_100, 5_000)
+        .unwrap()
+        .unwrap();
+    let sent = store
+        .complete_alert_delivery(&leased.delivery_id, 2_200, Some("sha256=proof"))
+        .unwrap();
+    assert_eq!(sent.state, AlertDeliveryState::Sent);
+    assert_eq!(sent.sent_at_unix_ms, Some(2_200));
+    assert_eq!(sent.signature.as_deref(), Some("sha256=proof"));
+    assert!(
+        store
+            .fail_alert_delivery(&leased.delivery_id, 2_300, "late failure", 3, 120_000)
+            .is_err()
+    );
+    drop(store);
+
+    let reopened = StationStore::open(&database).unwrap();
+    assert_eq!(reopened.list_alert_deliveries().unwrap(), vec![sent]);
+    drop(reopened);
+    remove_database(&database);
+}
+
+#[test]
+fn atomically_routes_first_failure_and_resolution_without_duplicate_pages() {
+    let database = database_path("alert-routing-lifecycle");
+    let store = StationStore::open(&database).unwrap();
+    put_webhook_channel_with_quiet_hours(&store, ALERT_CHANNEL_ID, Some("22:00"), Some("07:00"));
+    let first = alert("alert-routed", 82_800_000);
+    let recorded = store.observe_alert_and_route(&first).unwrap();
+    assert_eq!(recorded.event_id, first.event_id);
+    let firing = store.list_alert_deliveries().unwrap();
+    assert_eq!(firing.len(), 1);
+    assert_eq!(firing[0].notification_kind, AlertNotificationKind::Firing);
+    assert_eq!(firing[0].next_attempt_at_unix_ms, 82_800_000);
+
+    let repeated = store
+        .observe_alert_and_route(&alert("ignored-duplicate-id", 82_801_000))
+        .unwrap();
+    assert_eq!(repeated.event_id, first.event_id);
+    assert_eq!(repeated.occurrence_count, 2);
+    assert_eq!(store.list_alert_deliveries().unwrap().len(), 1);
+
+    let resolved = store
+        .resolve_alert(AlertConditionKind::EncoderDeath, CHANNEL_ID, 82_802_000)
+        .unwrap()
+        .unwrap();
+    assert_eq!(resolved.state, AlertEventState::Resolved);
+    let deliveries = store.list_alert_deliveries().unwrap();
+    assert_eq!(deliveries.len(), 2);
+    assert_eq!(
+        deliveries[1].notification_kind,
+        AlertNotificationKind::Resolved
+    );
+    assert_eq!(deliveries[1].next_attempt_at_unix_ms, 82_802_000);
+    drop(store);
+    remove_database(&database);
+}
+
+#[test]
+fn holds_noncritical_alerts_until_quiet_hours_end() {
+    let database = database_path("alert-routing-quiet-hours");
+    let store = StationStore::open(&database).unwrap();
+    put_webhook_channel_with_quiet_hours(&store, ALERT_CHANNEL_ID, Some("22:00"), Some("07:00"));
+    let mut warning = alert("warning-routed", 82_800_000);
+    warning.condition = AlertConditionKind::CommitFailure;
+    warning.severity = AlertSeverity::Warning;
+    store.observe_alert_and_route(&warning).unwrap();
+    let delivery = store.list_alert_deliveries().unwrap().pop().unwrap();
+    assert_eq!(delivery.next_attempt_at_unix_ms, 111_600_000);
+    assert!(
+        store
+            .claim_due_alert_delivery(111_599_999, 5_000)
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        store
+            .claim_due_alert_delivery(111_600_000, 5_000)
+            .unwrap()
+            .is_some()
+    );
     drop(store);
     remove_database(&database);
 }

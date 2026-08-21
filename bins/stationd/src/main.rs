@@ -57,6 +57,10 @@ fn run_console(config: DaemonConfig) -> Result<(), String> {
     let ingest = std::thread::spawn(move || {
         station_ingest::run_until(&ingest_database, &ingest_library, ingest_stop)
     });
+    let alerting_database = config.database.clone();
+    let alerting_stop = Arc::clone(&stop);
+    let alerting =
+        std::thread::spawn(move || station_alerting::run_until(&alerting_database, alerting_stop));
     println!(
         "TownLight Station is listening on http://{}",
         config.address
@@ -71,7 +75,14 @@ fn run_console(config: DaemonConfig) -> Result<(), String> {
         .join()
         .map_err(|_| "media ingest thread panicked".to_string())?
         .map_err(|error| format!("media ingest stopped: {error:?}"));
-    result.and(orchestration_result).and(ingest_result)
+    let alerting_result = alerting
+        .join()
+        .map_err(|_| "operator alerting thread panicked".to_string())?
+        .map_err(|error| format!("operator alerting stopped: {error}"));
+    result
+        .and(orchestration_result)
+        .and(ingest_result)
+        .and(alerting_result)
 }
 
 fn run_dispatcher(config: DaemonConfig) -> Result<(), String> {
@@ -171,6 +182,16 @@ fn run_service(config: DaemonConfig) -> Result<(), String> {
         }
         result
     });
+    let alerting_database = config.database.clone();
+    let alerting_stop = Arc::clone(&stop);
+    let alerting_receipt = config.database.with_file_name("alerting-error.txt");
+    let alerting = std::thread::spawn(move || {
+        let result = station_alerting::run_until(&alerting_database, alerting_stop);
+        if let Err(error) = &result {
+            let _ = std::fs::write(&alerting_receipt, error);
+        }
+        result
+    });
     status
         .set_service_status(service_status(
             ServiceState::Running,
@@ -190,7 +211,14 @@ fn run_service(config: DaemonConfig) -> Result<(), String> {
         .join()
         .map_err(|_| "media ingest thread panicked".to_string())?
         .map_err(|error| format!("media ingest stopped: {error:?}"));
-    let result = result.and(orchestration_result).and(ingest_result);
+    let alerting_result = alerting
+        .join()
+        .map_err(|_| "operator alerting thread panicked".to_string())?
+        .map_err(|error| format!("operator alerting stopped: {error}"));
+    let result = result
+        .and(orchestration_result)
+        .and(ingest_result)
+        .and(alerting_result);
     let exit_code = if result.is_ok() {
         ServiceExitCode::NO_ERROR
     } else {

@@ -5,6 +5,7 @@ edition.workspace = true
 publish.workspace = true
 
 [dependencies]
+station-alerting.workspace = true
 station-api.workspace = true
 station-ingest.workspace = true
 station-orchestration.workspace = true

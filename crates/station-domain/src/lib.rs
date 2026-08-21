@@ -300,6 +300,10 @@ impl AlertChannel {
             || self.quiet_hours_start_utc.is_some() != self.quiet_hours_end_utc.is_some()
             || self
                 .quiet_hours_start_utc
+                .as_ref()
+                .is_some_and(|start| self.quiet_hours_end_utc.as_ref() == Some(start))
+            || self
+                .quiet_hours_start_utc
                 .as_deref()
                 .is_some_and(|value| !is_utc_clock(value))
             || self
@@ -434,15 +438,16 @@ pub struct AlertEvent {
 
 impl AlertEvent {
     pub fn validate(&self) -> Result<(), &'static str> {
-        if self.event_id.trim().is_empty()
-            || self.event_id.len() > 160
-            || self.resource_ref.trim().is_empty()
-            || self.resource_ref.len() > 200
-            || self.summary.trim().is_empty()
-            || self.summary.len() > 300
+        if !visible_text(&self.event_id, 160)
+            || !visible_text(&self.resource_ref, 200)
+            || !visible_text(&self.summary, 300)
             || self.detail.len() > 2_000
+            || self
+                .detail
+                .chars()
+                .any(|character| character.is_control() && !matches!(character, '\r' | '\n' | '\t'))
+            || !visible_text(&self.source_section, 8)
             || self.source_section.len() < 2
-            || self.source_section.len() > 8
             || self.first_observed_at_unix_ms < 0
             || self.last_observed_at_unix_ms < self.first_observed_at_unix_ms
             || self.occurrence_count == 0
@@ -465,7 +470,180 @@ impl AlertEvent {
         if self.acknowledged_at_unix_ms.is_some() != self.acknowledged_by.is_some() {
             return Err("alert acknowledgment time and operator must be recorded together.");
         }
+        if self
+            .acknowledged_by
+            .as_deref()
+            .is_some_and(|value| !visible_text(value, 120))
+        {
+            return Err("alert acknowledgment operator is invalid.");
+        }
         Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AlertNotificationKind {
+    Firing,
+    Resolved,
+    Test,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AlertDeliveryState {
+    Pending,
+    Leased,
+    Sent,
+    DeadLetter,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AlertDelivery {
+    pub delivery_id: String,
+    pub event_id: String,
+    pub alert_channel_id: String,
+    pub notification_kind: AlertNotificationKind,
+    pub state: AlertDeliveryState,
+    pub attempts: u32,
+    pub next_attempt_at_unix_ms: i64,
+    pub lease_expires_at_unix_ms: Option<i64>,
+    pub last_error: String,
+    pub signature: Option<String>,
+    pub created_at_unix_ms: i64,
+    pub updated_at_unix_ms: i64,
+    pub sent_at_unix_ms: Option<i64>,
+}
+
+impl AlertDelivery {
+    pub fn validate(&self) -> Result<(), &'static str> {
+        if self.delivery_id.trim().is_empty()
+            || self.delivery_id.len() > 160
+            || self.event_id.trim().is_empty()
+            || self.event_id.len() > 160
+            || self.alert_channel_id.trim().is_empty()
+            || self.alert_channel_id.len() > 160
+            || self.last_error.len() > 1_000
+            || self.last_error.chars().any(char::is_control)
+            || self.signature.as_ref().is_some_and(|value| {
+                value.is_empty() || value.len() > 200 || value.chars().any(char::is_control)
+            })
+            || self.created_at_unix_ms < 0
+            || self.updated_at_unix_ms < self.created_at_unix_ms
+            || self.next_attempt_at_unix_ms < self.created_at_unix_ms
+        {
+            return Err("alert delivery fields are invalid.");
+        }
+        match self.state {
+            AlertDeliveryState::Pending => {
+                if self.lease_expires_at_unix_ms.is_some() || self.sent_at_unix_ms.is_some() {
+                    return Err("a pending alert delivery cannot be leased or sent.");
+                }
+            }
+            AlertDeliveryState::Leased => {
+                if self.attempts == 0
+                    || self
+                        .lease_expires_at_unix_ms
+                        .is_none_or(|value| value <= self.updated_at_unix_ms)
+                    || self.sent_at_unix_ms.is_some()
+                {
+                    return Err("a leased alert delivery needs a future lease.");
+                }
+            }
+            AlertDeliveryState::Sent => {
+                if self.lease_expires_at_unix_ms.is_some()
+                    || self
+                        .sent_at_unix_ms
+                        .is_none_or(|value| value < self.created_at_unix_ms)
+                {
+                    return Err("a sent alert delivery needs a valid sent time.");
+                }
+            }
+            AlertDeliveryState::DeadLetter => {
+                if self.attempts == 0
+                    || self.lease_expires_at_unix_ms.is_some()
+                    || self.sent_at_unix_ms.is_some()
+                    || self.last_error.is_empty()
+                {
+                    return Err("a dead-letter alert delivery needs a recorded failure.");
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AlertDeliveryPayload {
+    pub notification_kind: AlertNotificationKind,
+    pub event_id: String,
+    pub condition: AlertConditionKind,
+    pub severity: AlertSeverity,
+    pub resource_ref: String,
+    pub summary: String,
+    pub detail: String,
+    pub source_section: String,
+    pub first_observed_at_unix_ms: i64,
+    pub last_observed_at_unix_ms: i64,
+    pub resolved_at_unix_ms: Option<i64>,
+    pub occurrence_count: u64,
+}
+
+impl AlertDeliveryPayload {
+    pub fn from_event(
+        notification_kind: AlertNotificationKind,
+        event: &AlertEvent,
+    ) -> Result<Self, &'static str> {
+        event.validate()?;
+        match (notification_kind, event.state) {
+            (AlertNotificationKind::Firing, AlertEventState::Firing)
+            | (AlertNotificationKind::Resolved, AlertEventState::Resolved) => {}
+            (AlertNotificationKind::Test, _) => {
+                return Err("test notifications require a dedicated test payload.");
+            }
+            _ => return Err("alert notification kind does not match the event state."),
+        }
+        Ok(Self {
+            notification_kind,
+            event_id: event.event_id.clone(),
+            condition: event.condition,
+            severity: event.severity,
+            resource_ref: event.resource_ref.clone(),
+            summary: event.summary.clone(),
+            detail: event.detail.clone(),
+            source_section: event.source_section.clone(),
+            first_observed_at_unix_ms: event.first_observed_at_unix_ms,
+            last_observed_at_unix_ms: event.last_observed_at_unix_ms,
+            resolved_at_unix_ms: event.resolved_at_unix_ms,
+            occurrence_count: event.occurrence_count,
+        })
+    }
+
+    pub fn validate(&self) -> Result<(), &'static str> {
+        let state = match self.notification_kind {
+            AlertNotificationKind::Firing => AlertEventState::Firing,
+            AlertNotificationKind::Resolved => AlertEventState::Resolved,
+            AlertNotificationKind::Test => {
+                return Err("test notifications require a dedicated test payload.");
+            }
+        };
+        AlertEvent {
+            event_id: self.event_id.clone(),
+            condition: self.condition,
+            severity: self.severity,
+            state,
+            resource_ref: self.resource_ref.clone(),
+            summary: self.summary.clone(),
+            detail: self.detail.clone(),
+            source_section: self.source_section.clone(),
+            first_observed_at_unix_ms: self.first_observed_at_unix_ms,
+            last_observed_at_unix_ms: self.last_observed_at_unix_ms,
+            resolved_at_unix_ms: self.resolved_at_unix_ms,
+            occurrence_count: self.occurrence_count,
+            acknowledged_at_unix_ms: None,
+            acknowledged_by: None,
+        }
+        .validate()
     }
 }
 

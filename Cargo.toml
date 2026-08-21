@@ -4,6 +4,7 @@ members = [
     "bins/channel-worker",
     "bins/stationd",
     "crates/station-api",
+    "crates/station-alerting",
     "crates/station-domain",
     "crates/station-media-journal",
     "crates/station-media-lifecycle",
@@ -24,12 +25,16 @@ edition = "2024"
 publish = false
 
 [workspace.dependencies]
+base64 = "=0.23.1"
 gstreamer = { version = "=0.25.3", features = ["v1_28"] }
 gstreamer-pbutils = { version = "=0.25.2", features = ["v1_28"] }
+hmac = "=0.12.1"
+lettre = "=0.11.23"
 serde = { version = "=1.0.228", features = ["derive"] }
 serde_json = "=1.0.150"
 sha2 = "=0.10.9"
 station-api = { path = "crates/station-api" }
+station-alerting = { path = "crates/station-alerting" }
 station-domain = { path = "crates/station-domain" }
 station-media-journal = { path = "crates/station-media-journal" }
 station-media-lifecycle = { path = "crates/station-media-lifecycle" }
@@ -42,6 +47,7 @@ station-runtime = { path = "crates/station-runtime" }
 station-schedule = { path = "crates/station-schedule" }
 station-storage = { path = "crates/station-storage" }
 station-windows-ipc = { path = "crates/station-windows-ipc" }
+ureq = { version = "=3.4.0", features = ["platform-verifier"] }
 windows-service = "=0.8.1"
 
 [profile.release]

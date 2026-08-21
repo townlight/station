@@ -478,7 +478,7 @@ fn record_channel_failure(
         ),
     ] {
         store
-            .observe_alert(&AlertEvent {
+            .observe_alert_and_route(&AlertEvent {
                 event_id: format!(
                     "alert-{observed_at_unix_ms}-{}",
                     ALERT_SEQUENCE.fetch_add(1, Ordering::Relaxed)
