@@ -123,10 +123,19 @@ fn persists_monotonic_channel_runtime_truth() {
         store.read_channel_runtime(CHANNEL_ID).unwrap(),
         Some(fallback.clone())
     );
+    let live = ChannelRuntimeObservation {
+        channel_id: CHANNEL_ID.into(),
+        state: ChannelRuntimeState::Live,
+        on_air_asset_id: None,
+        state_started_at_unix_ms: 2_500,
+        heartbeat_at_unix_ms: 3_000,
+        detail: Some("Verified live takeover is on air.".into()),
+    };
+    store.put_channel_runtime(&live).unwrap();
     drop(store);
 
     let reopened = StationStore::open(&database).unwrap();
-    assert_eq!(reopened.list_channel_runtime().unwrap(), vec![fallback]);
+    assert_eq!(reopened.list_channel_runtime().unwrap(), vec![live]);
     drop(reopened);
     remove_database(&database);
 }

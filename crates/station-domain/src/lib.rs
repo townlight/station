@@ -40,6 +40,7 @@ pub enum ChannelRuntimeState {
     Starting,
     HealthyFallback,
     OnAir,
+    Live,
     Error,
     Stopped,
 }
@@ -310,6 +311,10 @@ pub fn derive_runtime_safe_to_air(
                         ChannelRuntimeState::OnAir => {
                             (SafeToAirColor::Green, "Scheduled media is on air.".into())
                         }
+                        ChannelRuntimeState::Live => (
+                            SafeToAirColor::Green,
+                            "Verified live takeover is on air.".into(),
+                        ),
                         ChannelRuntimeState::Starting => (
                             SafeToAirColor::Yellow,
                             "Channel worker is starting; fallback is not yet confirmed.".into(),
@@ -331,7 +336,10 @@ pub fn derive_runtime_safe_to_air(
                     channel_id: channel_id.clone(),
                     display_name: display_name.clone(),
                     state: observation.state,
-                    on_air: observation.state == ChannelRuntimeState::OnAir && !heartbeat_stale,
+                    on_air: matches!(
+                        observation.state,
+                        ChannelRuntimeState::OnAir | ChannelRuntimeState::Live
+                    ) && !heartbeat_stale,
                     on_healthy_fallback: observation.state == ChannelRuntimeState::HealthyFallback
                         && !heartbeat_stale,
                     seconds_in_state: u64::try_from(state_age_ms / 1_000).unwrap_or(u64::MAX),
@@ -357,7 +365,7 @@ pub fn derive_runtime_safe_to_air(
     let (label, operator_message) = match color {
         SafeToAirColor::Green => (
             "On air — all channels healthy.",
-            "Every enabled channel is on scheduled media or verified fallback.",
+            "Every enabled channel is on scheduled media, verified live input, or healthy fallback.",
         ),
         SafeToAirColor::Yellow => (
             "Station needs attention.",
@@ -1025,6 +1033,25 @@ mod runtime_tests {
         .unwrap();
         assert_eq!(stale.color, SafeToAirColor::Red);
         assert!(!stale.channels[0].on_healthy_fallback);
+
+        let live = derive_runtime_safe_to_air(
+            10_000,
+            &[(
+                CHANNEL_ID.into(),
+                "Government Channel".into(),
+                Some(observation(ChannelRuntimeState::Live, 9_000)),
+            )],
+            0,
+            0,
+        )
+        .unwrap();
+        assert_eq!(live.color, SafeToAirColor::Green);
+        assert!(live.channels[0].on_air);
+        assert!(!live.channels[0].on_healthy_fallback);
+        assert_eq!(
+            live.channels[0].operator_message,
+            "Verified live takeover is on air."
+        );
     }
 
     #[test]

@@ -1,9 +1,9 @@
-import React, { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
+import React, { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import "./styles.css";
 import { CgOperator, CG_ROUTES, CgRoute } from "./cg";
 
-type CoreView = "overview" | "media" | "channels" | "schedule" | "health" | "commissioning";
+type CoreView = "overview" | "media" | "channels" | "schedule" | "live" | "health" | "commissioning";
 type View = CoreView | CgRoute;
 type JobStatus = "pending" | "running" | "awaiting_transcode" | "completed" | "failed" | "cancelled";
 
@@ -71,6 +71,49 @@ interface Channel {
   output_profile: "proof-360p30" | "atsc-720p5994";
   output_sinks: OutputSink[];
   enabled: boolean;
+}
+
+type LiveTakeoverState = "arming" | "armed" | "take_requested" | "on_air" | "return_requested" | "returning" | "completed" | "failed";
+
+interface LiveSource {
+  source_id: string;
+  channel_id: string;
+  label: string;
+  enabled: boolean;
+  endpoint: { UdpMpegTs: { bind_ip: string; port: number } };
+  revision: number;
+}
+
+interface LiveAuthority {
+  channel_id: string;
+  authority_revision: number;
+}
+
+interface LiveTakeoverSession {
+  session_id: string;
+  channel_id: string;
+  source_id: string;
+  source_revision: number;
+  authority_revision: number;
+  operator_id: string;
+  reason: string | null;
+  requested_at_unix_ms: number;
+  expires_at_unix_ms: number;
+  taken_at_unix_ms: number | null;
+  returned_at_unix_ms: number | null;
+  state: LiveTakeoverState;
+  failure_detail: string | null;
+}
+
+interface LiveAuditEvent {
+  audit_id: string;
+  session_id: string;
+  channel_id: string;
+  source_id: string;
+  operator_id: string;
+  state: LiveTakeoverState;
+  occurred_at_unix_ms: number;
+  detail: string | null;
 }
 
 interface OutputSink {
@@ -317,7 +360,7 @@ interface MaintenanceStatus {
 
 function initialView(): View {
   const requested = new URLSearchParams(window.location.search).get("view");
-  return ["overview", "media", "channels", "schedule", "health", "commissioning", ...CG_ROUTES.map((item) => item.id)].includes(requested ?? "")
+  return ["overview", "media", "channels", "schedule", "live", "health", "commissioning", ...CG_ROUTES.map((item) => item.id)].includes(requested ?? "")
     ? requested as View
     : "overview";
 }
@@ -377,6 +420,7 @@ function Icon({ name }: { name: CoreView }) {
     media: <><rect x="3" y="5" width="18" height="14" rx="2" /><path d="m10 9 5 3-5 3z" /></>,
     channels: <><path d="M5 8.5a10 10 0 0 0 0 7M19 8.5a10 10 0 0 1 0 7M8.5 10.5a5 5 0 0 0 0 3M15.5 10.5a5 5 0 0 1 0 3" /><circle cx="12" cy="12" r="1.5" /></>,
     schedule: <><rect x="3" y="5" width="18" height="16" rx="2" /><path d="M8 3v4M16 3v4M3 10h18M8 14h3M8 17h7" /></>,
+    live: <><circle cx="12" cy="12" r="8" /><circle cx="12" cy="12" r="3" /><path d="M12 2v2M12 20v2M2 12h2M20 12h2" /></>,
     health: <><path d="M3 12h4l2-5 4 10 2-5h6" /><path d="M4 5a10 10 0 1 1-1 11" /></>,
     commissioning: <><path d="M12 3 4 7v5c0 5 3.4 8 8 9 4.6-1 8-4 8-9V7z" /><path d="m9 12 2 2 4-4" /></>,
   };
@@ -814,6 +858,232 @@ function Commissioning({ station, dashboard, channels, runtime, onNavigate }: { 
     </section></>;
 }
 
+function liveEndpoint(source: LiveSource | null): { bindIp: string; port: string } {
+  const endpoint = source?.endpoint?.UdpMpegTs;
+  return { bindIp: endpoint?.bind_ip ?? "0.0.0.0", port: endpoint ? String(endpoint.port) : "5000" };
+}
+
+function liveStateLabel(state: LiveTakeoverState): string {
+  return state.replaceAll("_", " ");
+}
+
+function Live({ channels }: { channels: Channel[] }) {
+  const [selectedChannelId, setSelectedChannelId] = useState(channels[0]?.channel_id ?? "");
+  const [sources, setSources] = useState<LiveSource[]>([]);
+  const [authority, setAuthority] = useState<LiveAuthority | null>(null);
+  const [sessionId, setSessionId] = useState<string | null>(null);
+  const [session, setSession] = useState<LiveTakeoverSession | null>(null);
+  const [audit, setAudit] = useState<LiveAuditEvent[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [conflict, setConflict] = useState(false);
+  const [notice, setNotice] = useState<string | null>(null);
+  const [operatorId, setOperatorId] = useState(() => window.localStorage.getItem("townlight.operator_id") ?? "");
+  const [reason, setReason] = useState("");
+  const [selectedSourceId, setSelectedSourceId] = useState("");
+  const [confirmAction, setConfirmAction] = useState<"take" | "return" | null>(null);
+  const [editingSource, setEditingSource] = useState<LiveSource | null>(null);
+  const [sourceEditorOpen, setSourceEditorOpen] = useState(false);
+  const [sourceLabel, setSourceLabel] = useState("");
+  const [sourceBindIp, setSourceBindIp] = useState("0.0.0.0");
+  const [sourcePort, setSourcePort] = useState("5000");
+  const [sourceEnabled, setSourceEnabled] = useState(true);
+  const channelLoadRef = useRef(0);
+  const sessionPollRef = useRef(0);
+
+  const selectedChannel = channels.find((channel) => channel.channel_id === selectedChannelId) ?? null;
+  const selectedSource = sources.find((source) => source.source_id === selectedSourceId) ?? null;
+  const sourceName = (sourceId: string) => sources.find((source) => source.source_id === sourceId)?.label ?? sourceId;
+  const isTerminal = session?.state === "completed" || session?.state === "failed";
+
+  const loadChannel = useCallback(async (channelId: string, resetSession: boolean) => {
+    if (!channelId) return;
+    const loadToken = ++channelLoadRef.current;
+    setLoading(true);
+    setError(null);
+    if (resetSession) {
+      sessionPollRef.current += 1;
+      setSessionId(null);
+      setSession(null);
+      setAudit([]);
+      setNotice(null);
+    }
+    try {
+      const [nextSources, nextAuthority, active] = await Promise.all([
+        request<LiveSource[]>(`/api/v1/channels/${channelId}/live-sources`),
+        request<LiveAuthority>(`/api/v1/channels/${channelId}/live-authority`),
+        request<LiveTakeoverSession | null>(`/api/v1/channels/${channelId}/active-live-takeover`),
+      ]);
+      if (loadToken !== channelLoadRef.current) return;
+      setSources(nextSources);
+      setAuthority(nextAuthority);
+      setSelectedSourceId((current) => nextSources.some((source) => source.source_id === current) ? current : nextSources.find((source) => source.enabled)?.source_id ?? nextSources[0]?.source_id ?? "");
+      if (active) {
+        setSessionId(active.session_id);
+        setSession(active);
+      }
+      setConflict(false);
+    } catch (problem) {
+      if (loadToken !== channelLoadRef.current) return;
+      if (problem instanceof ApiError && problem.status === 409) setConflict(true);
+      setError(problem instanceof Error ? problem.message : "Live state could not be loaded.");
+    } finally {
+      if (loadToken !== channelLoadRef.current) return;
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!channels.some((channel) => channel.channel_id === selectedChannelId)) setSelectedChannelId(channels[0]?.channel_id ?? "");
+  }, [channels, selectedChannelId]);
+
+  useEffect(() => {
+    if (selectedChannelId) void loadChannel(selectedChannelId, true);
+  }, [loadChannel, selectedChannelId]);
+
+  const pollSession = useCallback(async (id: string) => {
+    const pollToken = sessionPollRef.current;
+    try {
+      const [nextSession, nextAudit] = await Promise.all([
+        request<LiveTakeoverSession>(`/api/v1/live-takeovers/${id}`),
+        request<LiveAuditEvent[]>(`/api/v1/live-takeovers/${id}/audit`),
+      ]);
+      if (pollToken !== sessionPollRef.current) return;
+      setSession(nextSession);
+      setAuthority((current) => current ? { ...current, authority_revision: nextSession.authority_revision } : { channel_id: nextSession.channel_id, authority_revision: nextSession.authority_revision });
+      setAudit(nextAudit);
+      setError(null);
+    } catch (problem) {
+      if (pollToken !== sessionPollRef.current) return;
+      if (problem instanceof ApiError && problem.status === 409) setConflict(true);
+      setError(problem instanceof Error ? problem.message : "The live session could not be read.");
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!sessionId || isTerminal) return;
+    const pollToken = ++sessionPollRef.current;
+    void pollSession(sessionId);
+    const timer = window.setInterval(() => void pollSession(sessionId), 1200);
+    return () => {
+      if (pollToken === sessionPollRef.current) sessionPollRef.current += 1;
+      window.clearInterval(timer);
+    };
+  }, [isTerminal, pollSession, sessionId]);
+
+  function beginSource(source: LiveSource | null) {
+    const endpoint = liveEndpoint(source);
+    setEditingSource(source);
+    setSourceEditorOpen(true);
+    setSourceLabel(source?.label ?? "");
+    setSourceBindIp(endpoint.bindIp);
+    setSourcePort(endpoint.port);
+    setSourceEnabled(source?.enabled ?? true);
+    setError(null);
+  }
+
+  async function saveSource(event: FormEvent) {
+    event.preventDefault();
+    if (!selectedChannelId || conflict) return;
+    const port = Number(sourcePort);
+    if (!sourceLabel.trim() || !sourceBindIp.trim() || !Number.isInteger(port) || port < 1 || port > 65535) {
+      setError("Enter a label, a station-local bind IP, and a UDP port from 1 to 65535.");
+      return;
+    }
+    setBusy(true); setError(null); setConflict(false); setNotice(null);
+    const expectedRevision = editingSource?.revision ?? 0;
+    const source: LiveSource = {
+      source_id: editingSource?.source_id ?? crypto.randomUUID(),
+      channel_id: selectedChannelId,
+      label: sourceLabel.trim(),
+      enabled: sourceEnabled,
+      endpoint: { UdpMpegTs: { bind_ip: sourceBindIp.trim(), port } },
+      revision: expectedRevision + 1,
+    };
+    try {
+      await request<LiveSource>(`/api/v1/live-sources/${source.source_id}`, { method: "PUT", body: JSON.stringify({ ...source, expected_revision: expectedRevision }) });
+      setEditingSource(null);
+      setSourceEditorOpen(false);
+      setNotice("Source configuration saved. The revision is now authoritative.");
+      await loadChannel(selectedChannelId, false);
+    } catch (problem) {
+      if (problem instanceof ApiError && problem.status === 409) setConflict(true);
+      setError(problem instanceof Error ? problem.message : "Live source could not be saved.");
+    } finally { setBusy(false); }
+  }
+
+  async function requestArm(event: FormEvent) {
+    event.preventDefault();
+    if (!selectedChannelId || !selectedSource || !authority || conflict) return;
+    const operator = operatorId.trim();
+    const takeoverReason = reason.trim();
+    if (!operator || !takeoverReason) { setError("Operator identity and a reason are required before arming."); return; }
+    setBusy(true); setError(null); setConflict(false); setNotice(null); setConfirmAction(null);
+    window.localStorage.setItem("townlight.operator_id", operator);
+    try {
+      const requested = await request<LiveTakeoverSession>("/api/v1/live-takeovers", {
+        method: "POST",
+        body: JSON.stringify({ session_id: crypto.randomUUID(), channel_id: selectedChannelId, source_id: selectedSource.source_id, operator_id: operator, reason: takeoverReason, expires_at_unix_ms: Date.now() + 5 * 60 * 1000, expected_authority_revision: authority.authority_revision }),
+      });
+      setReason("");
+      setSession(null);
+      setSessionId(requested.session_id);
+      setNotice("Arm request submitted. Waiting for the authoritative worker state to become Armed…");
+    } catch (problem) {
+      if (problem instanceof ApiError && problem.status === 409) setConflict(true);
+      setError(problem instanceof Error ? problem.message : "The live arm request could not be submitted.");
+    } finally { setBusy(false); }
+  }
+
+  async function confirmTake() {
+    if (!session || session.state !== "armed" || conflict) return;
+    setBusy(true); setError(null); setConflict(false); setConfirmAction(null);
+    try {
+      await request<LiveTakeoverSession>(`/api/v1/live-takeovers/${session.session_id}/take`, { method: "POST", body: JSON.stringify({ actor_id: operatorId.trim(), expected_authority_revision: session.authority_revision }) });
+      setNotice("Take Live command submitted. Waiting for the authoritative OnAir state…");
+    } catch (problem) {
+      if (problem instanceof ApiError && problem.status === 409) setConflict(true);
+      setError(problem instanceof Error ? problem.message : "Take Live could not be submitted.");
+    } finally { setBusy(false); }
+  }
+
+  async function confirmReturn() {
+    if (!session || session.state !== "on_air" || conflict) return;
+    setBusy(true); setError(null); setConflict(false); setConfirmAction(null);
+    try {
+      await request<LiveTakeoverSession>(`/api/v1/live-takeovers/${session.session_id}/return`, { method: "POST", body: JSON.stringify({ actor_id: operatorId.trim(), expected_authority_revision: session.authority_revision }) });
+      setNotice("Return to Schedule command submitted. Waiting for completion…");
+    } catch (problem) {
+      if (problem instanceof ApiError && problem.status === 409) setConflict(true);
+      setError(problem instanceof Error ? problem.message : "Return to Schedule could not be submitted.");
+    } finally { setBusy(false); }
+  }
+
+  const duration = session?.taken_at_unix_ms ? Math.max(0, Date.now() - session.taken_at_unix_ms) : 0;
+  return <>
+    <header className="page-header"><div><p className="eyebrow">Live operations</p><h1>Live operator console</h1><p>Arm a verified UDP MPEG-TS source, then make a deliberate on-air transition.</p></div><div className="header-actions"><label className="live-channel-picker">Channel<select aria-label="Live channel" value={selectedChannelId} onChange={(event) => setSelectedChannelId(event.target.value)} disabled={!channels.length || busy}>{channels.length ? channels.map((channel) => <option key={channel.channel_id} value={channel.channel_id}>{channel.display_name}</option>) : <option value="">No channels configured</option>}</select></label><button className="secondary" onClick={() => void loadChannel(selectedChannelId, false)} disabled={loading || busy || !selectedChannelId}>{loading ? "Reading…" : "Refresh"}</button></div></header>
+    {conflict && <div className="live-conflict" role="alert"><strong>Live authority changed elsewhere.</strong><span>This console has a stale revision. Refresh before sending another source or takeover command.</span><button className="secondary" onClick={() => { setConflict(false); setEditingSource(null); setSourceEditorOpen(false); void loadChannel(selectedChannelId, false); }}>Refresh authority</button></div>}
+    {error && <div className="error-box" role="alert">{error}</div>}
+    {notice && <div className="notice" role="status">{notice}</div>}
+    {!selectedChannel ? <section className="panel"><div className="live-empty"><strong>No channel is configured yet.</strong><p>Create and enable a channel before configuring a live source.</p></div></section> : <>
+      <section className="panel"><div className="panel-head"><div><p className="eyebrow">Input inventory</p><h2>Live sources</h2></div><div className="live-panel-actions"><span className="count">Authority rev {authority?.authority_revision ?? "—"}</span><button className="secondary" onClick={() => beginSource(null)} disabled={sourceEditorOpen}>Add source</button></div></div><p className="muted">Sources are revisioned independently. Saving a source never arms it or takes it on air.</p>
+        {!sources.length && !sourceEditorOpen ? <div className="live-empty"><strong>No live sources configured.</strong><p>Add a station-local UDP MPEG-TS endpoint to begin.</p><button className="secondary" onClick={() => beginSource(null)}>Configure first source</button></div> : <div className="live-source-list">{sources.map((source) => { const endpoint = liveEndpoint(source); return <article className={`live-source-card ${source.source_id === selectedSourceId ? "selected" : ""}`} key={source.source_id}><div><strong>{source.label}</strong><small>{endpoint.bindIp}:{endpoint.port} · revision {source.revision}</small></div><StatusPill status={source.enabled ? "enabled" : "disabled"} /><div className="live-source-actions"><button className="text-button" aria-pressed={source.source_id === selectedSourceId} onClick={() => setSelectedSourceId(source.source_id)}>Use for arm</button><button className="secondary" onClick={() => beginSource(source)}>Edit</button></div></article>; })}</div>}
+        {sourceEditorOpen && <form className="live-source-form" onSubmit={saveSource}><div className="panel-head"><div><p className="eyebrow">{editingSource ? `Revision ${editingSource.revision} → ${editingSource.revision + 1}` : "New source"}</p><h2>{editingSource ? "Edit source" : "Configure UDP MPEG-TS"}</h2></div><button type="button" className="text-button" onClick={() => { setEditingSource(null); setSourceEditorOpen(false); }}>Cancel</button></div><div className="form-pair"><label>Source label<input required maxLength={120} value={sourceLabel} onChange={(event) => setSourceLabel(event.target.value)} placeholder="Council chamber feed" /></label><label>Bind IP<input required value={sourceBindIp} onChange={(event) => setSourceBindIp(event.target.value)} placeholder="239.1.2.3" /><small>Must be station-local, private, loopback, or multicast.</small></label></div><div className="form-pair"><label>UDP port<input required type="number" min="1" max="65535" value={sourcePort} onChange={(event) => setSourcePort(event.target.value)} /></label><label className="live-checkbox"><span>Enabled<input type="checkbox" checked={sourceEnabled} onChange={(event) => setSourceEnabled(event.target.checked)} /></span><small>Disabled sources cannot be armed.</small></label></div><button className="primary" disabled={busy || conflict}>{conflict ? "Refresh before saving" : busy ? "Saving…" : "Save source revision"}</button></form>}
+      </section>
+      <section className={`panel live-session-panel ${session?.state === "on_air" ? "live-on-air-panel" : ""}`}><div className="panel-head"><div><p className="eyebrow">Takeover authority</p><h2>Live session</h2></div>{session && <StatusPill status={session.state} />}</div>
+        {!session ? <form onSubmit={requestArm}><div className="live-arm-intro"><strong>Request an arm window</strong><p>The worker will validate the source and report Armed. This five-minute intent expires automatically; it does not take the channel live.</p></div><div className="form-pair"><label>Operator identity<input required maxLength={120} value={operatorId} onChange={(event) => setOperatorId(event.target.value)} placeholder="j.smith" /></label><label>Source<select required value={selectedSourceId} onChange={(event) => setSelectedSourceId(event.target.value)} disabled={!sources.length || conflict}>{sources.length ? sources.map((source) => <option key={source.source_id} value={source.source_id} disabled={!source.enabled}>{source.label}{source.enabled ? "" : " (disabled)"}</option>) : <option value="">Configure a source first</option>}</select></label></div><label>Reason<textarea className="live-reason" required maxLength={500} value={reason} onChange={(event) => setReason(event.target.value)} placeholder="Scheduled council meeting live feed" /></label><div className="button-row"><span className="muted live-expiry-note">Arm window: 5 minutes after submission</span><button className="primary" disabled={busy || conflict || !selectedSource?.enabled || !authority}>{conflict ? "Refresh before arming" : busy ? "Submitting…" : "Request arm"}</button></div></form> : <>
+          <div className={`live-state-banner live-state-${session.state}`} role={session.state === "on_air" ? "status" : undefined}><span className="live-state-light" aria-hidden="true" /> <div><strong>{session.state === "on_air" ? "ON AIR" : liveStateLabel(session.state)}</strong><small>{session.state === "on_air" ? `Live source: ${sourceName(session.source_id)}` : session.failure_detail ?? `Operator ${session.operator_id} · requested ${formatTime(session.requested_at_unix_ms)}`}</small></div>{session.state === "on_air" && <div className="live-duration"><span>Duration</span><strong>{formatDuration(duration)}</strong></div>}</div>
+          <dl className="live-session-details"><div><dt>Source</dt><dd>{sourceName(session.source_id)}</dd></div><div><dt>Operator</dt><dd>{session.operator_id}</dd></div><div><dt>Reason</dt><dd>{session.reason ?? "—"}</dd></div><div><dt>Authority revision</dt><dd>{session.authority_revision}</dd></div><div><dt>Requested</dt><dd>{formatTime(session.requested_at_unix_ms)}</dd></div>{session.expires_at_unix_ms && <div><dt>Arm expiry</dt><dd>{formatTime(session.expires_at_unix_ms)}</dd></div>}</dl>
+          {!isTerminal && <div className="live-session-actions">{session.state === "armed" && (confirmAction === "take" ? <div className="live-confirm"><strong>Take this source live?</strong><span>The schedule will be interrupted. Confirm only when the source and reason are correct.</span><div className="button-row"><button className="secondary" onClick={() => setConfirmAction(null)}>Cancel</button><button className="danger" onClick={() => void confirmTake()} disabled={busy || conflict}>{conflict ? "Refresh before taking live" : "Confirm Take Live"}</button></div></div> : <button className="danger" onClick={() => setConfirmAction("take")} disabled={busy || conflict}>Take Live</button>)}{session.state === "on_air" && (confirmAction === "return" ? <div className="live-confirm"><strong>Return to Schedule?</strong><span>This ends the live takeover and hands control back to the schedule.</span><div className="button-row"><button className="secondary" onClick={() => setConfirmAction(null)}>Cancel</button><button className="primary" onClick={() => void confirmReturn()} disabled={busy || conflict}>{conflict ? "Refresh before returning" : "Confirm Return to Schedule"}</button></div></div> : <button className="primary" onClick={() => setConfirmAction("return")} disabled={busy || conflict}>Return to Schedule</button>)}</div>}
+          {isTerminal && <div className={`notice ${session.state === "failed" ? "live-failure" : ""}`}><span>{session.state === "failed" ? `Live session failed: ${session.failure_detail ?? "The worker reported a failure."}` : "Live session completed and schedule authority has been restored."}</span><button className="secondary" onClick={() => void loadChannel(selectedChannelId, true)}>Start another session</button></div>}
+        </>}
+      </section>
+      {session && <section className="panel"><div className="panel-head"><div><p className="eyebrow">Durable record</p><h2>Live audit</h2></div><span className="count">{audit.length} events</span></div>{!audit.length ? <p className="muted">Waiting for the authoritative audit trail…</p> : <div className="live-audit">{audit.map((event) => <article key={event.audit_id}><span className="live-audit-dot" /><div><strong>{liveStateLabel(event.state)}</strong><small>{formatTime(event.occurred_at_unix_ms)} · {event.operator_id}</small>{event.detail && <p>{event.detail}</p>}</div></article>)}</div>}</section>}
+    </>}
+  </>;
+}
+
 function App() {
   const [station, setStation] = useState<StationDocument | null | undefined>(undefined);
   const [dashboard, setDashboard] = useState<Dashboard | null>(null);
@@ -838,11 +1108,17 @@ function App() {
   }, []);
   useEffect(() => { void request<StationDocument>("/api/v1/station").then((value) => { setStation(value); void refresh(); }).catch((problem) => { if (problem instanceof ApiError && problem.status === 404) setStation(null); else { setStation(null); setError(problem instanceof Error ? problem.message : "Station profile could not be read."); } }); }, [refresh]);
   useEffect(() => { if (!station) return; const timer = window.setInterval(() => void refresh(), 5_000); return () => window.clearInterval(timer); }, [refresh, station]);
-  const nav = useMemo(() => ([{ id: "overview" as CoreView, label: "Overview" }, { id: "media" as CoreView, label: "Media" }, { id: "channels" as CoreView, label: "Channels" }, { id: "schedule" as CoreView, label: "Schedule" }, { id: "health" as CoreView, label: "Health" }, { id: "commissioning" as CoreView, label: "Commission" }]), []);
+  const nav = useMemo(() => ([{ id: "overview" as CoreView, label: "Overview" }, { id: "media" as CoreView, label: "Media" }, { id: "channels" as CoreView, label: "Channels" }, { id: "schedule" as CoreView, label: "Schedule" }, { id: "live" as CoreView, label: "Live" }, { id: "health" as CoreView, label: "Health" }, { id: "commissioning" as CoreView, label: "Commission" }]), []);
   const cgNav = useMemo(() => CG_ROUTES.map((item) => ({ id: item.id as View, label: item.shortLabel })), []);
+  const navigate = useCallback((next: View) => {
+    setView(next);
+    const url = new URL(window.location.href);
+    url.searchParams.set("view", next);
+    window.history.replaceState({}, "", url);
+  }, []);
   if (station === undefined) return <div className="boot"><div className="mark">TL</div><div className="boot-line"><i /></div><p>Connecting to TownLight Station…</p></div>;
   if (!station) return <SetupWizard onComplete={(value) => { setStation(value); void refresh(); }} />;
-  return <div className="app-shell"><aside className="sidebar"><div className="brand-lockup"><div className="mark small">TL</div><div><strong>TownLight</strong><span>Station</span></div></div><nav>{nav.map((item) => <button key={item.id} className={view === item.id ? "selected" : ""} onClick={() => setView(item.id)}><Icon name={item.id} /><span>{item.label}</span>{item.id === "media" && Boolean(dashboard?.failed_ingest_count) && <b>{dashboard?.failed_ingest_count}</b>}{item.id === "health" && Boolean(runtime?.active_critical_alerts || runtime?.active_warning_alerts) && <b>{(runtime?.active_critical_alerts ?? 0) + (runtime?.active_warning_alerts ?? 0)}</b>}</button>)}<p className="nav-section-label">CG authoring</p>{cgNav.map((item) => <button key={item.id} className={`cg-nav-item ${view === item.id ? "selected" : ""}`} onClick={() => setView(item.id)}><span className="cg-nav-mark">CG</span><span>{item.label}</span></button>)}</nav><div className="station-card"><span className={`live-dot runtime-${runtime?.color ?? "yellow"}`} /><div><strong>{station.display_name}</strong><small>{runtime?.label ?? station.timezone}</small></div></div></aside><main className="workspace">{error && <div className="global-error" role="alert">{error}<button onClick={() => void refresh()}>Retry</button></div>}{view === "overview" && <Overview station={station} dashboard={dashboard} channels={channels} runtime={runtime} onNavigate={setView} />}{view === "media" && <Media dashboard={dashboard} onRefresh={refresh} />}{view === "channels" && <Channels channels={channels} outputProfiles={outputProfiles} onRefresh={refresh} />}{view === "schedule" && <Schedule dashboard={dashboard} channels={channels} />}{view === "health" && <Health runtime={runtime} resources={resources} selfTests={selfTests} selfTestSchedules={selfTestSchedules} updateStatus={updateStatus} alerts={alerts} alertChannels={alertChannels} deliveries={deliveries} rules={rules} outputChannels={channels} onRefresh={refresh} />}{view === "commissioning" && <Commissioning station={station} dashboard={dashboard} channels={channels} runtime={runtime} onNavigate={setView} />}{view.startsWith("cg-") && <CgOperator channelId={channels[0]?.channel_id} channels={channels.map((channel) => ({ channel_id: channel.channel_id, display_name: channel.display_name }))} route={view as CgRoute} onNavigate={(route) => setView(route)} />}</main><nav className="mobile-nav">{[...nav, { id: "cg-moderation" as View, label: "CG" }].map((item) => <button key={item.id} aria-label={item.label} className={view === item.id || (item.id === "cg-moderation" && view.startsWith("cg-")) ? "selected" : ""} onClick={() => setView(item.id)}>{"id" in item && item.id.startsWith("cg-") ? <span className="cg-nav-mark">CG</span> : <Icon name={item.id as CoreView} />}<span>{item.label}</span></button>)}</nav></div>;
+  return <div className="app-shell"><aside className="sidebar"><div className="brand-lockup"><div className="mark small">TL</div><div><strong>TownLight</strong><span>Station</span></div></div><nav>{nav.map((item) => <button key={item.id} className={view === item.id ? "selected" : ""} onClick={() => navigate(item.id)}><Icon name={item.id} /><span>{item.label}</span>{item.id === "media" && Boolean(dashboard?.failed_ingest_count) && <b>{dashboard?.failed_ingest_count}</b>}{item.id === "health" && Boolean(runtime?.active_critical_alerts || runtime?.active_warning_alerts) && <b>{(runtime?.active_critical_alerts ?? 0) + (runtime?.active_warning_alerts ?? 0)}</b>}</button>)}<p className="nav-section-label">CG authoring</p>{cgNav.map((item) => <button key={item.id} className={`cg-nav-item ${view === item.id ? "selected" : ""}`} onClick={() => navigate(item.id)}><span className="cg-nav-mark">CG</span><span>{item.label}</span></button>)}</nav><div className="station-card"><span className={`live-dot runtime-${runtime?.color ?? "yellow"}`} /><div><strong>{station.display_name}</strong><small>{runtime?.label ?? station.timezone}</small></div></div></aside><main className="workspace">{error && <div className="global-error" role="alert">{error}<button onClick={() => void refresh()}>Retry</button></div>}{view === "overview" && <Overview station={station} dashboard={dashboard} channels={channels} runtime={runtime} onNavigate={navigate} />}{view === "media" && <Media dashboard={dashboard} onRefresh={refresh} />}{view === "channels" && <Channels channels={channels} outputProfiles={outputProfiles} onRefresh={refresh} />}{view === "schedule" && <Schedule dashboard={dashboard} channels={channels} />}{view === "live" && <Live channels={channels} />}{view === "health" && <Health runtime={runtime} resources={resources} selfTests={selfTests} selfTestSchedules={selfTestSchedules} updateStatus={updateStatus} alerts={alerts} alertChannels={alertChannels} deliveries={deliveries} rules={rules} outputChannels={channels} onRefresh={refresh} />}{view === "commissioning" && <Commissioning station={station} dashboard={dashboard} channels={channels} runtime={runtime} onNavigate={navigate} />}{view.startsWith("cg-") && <CgOperator channelId={channels[0]?.channel_id} channels={channels.map((channel) => ({ channel_id: channel.channel_id, display_name: channel.display_name }))} route={view as CgRoute} onNavigate={(route) => navigate(route)} />}</main><nav className="mobile-nav">{[...nav, { id: "cg-moderation" as View, label: "CG" }].map((item) => <button key={item.id} aria-label={item.label} className={view === item.id || (item.id === "cg-moderation" && view.startsWith("cg-")) ? "selected" : ""} onClick={() => navigate(item.id)}>{"id" in item && item.id.startsWith("cg-") ? <span className="cg-nav-mark">CG</span> : <Icon name={item.id as CoreView} />}<span>{item.label}</span></button>)}</nav></div>;
 }
 
 createRoot(document.getElementById("root")!).render(<React.StrictMode><App /></React.StrictMode>);

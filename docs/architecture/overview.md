@@ -81,6 +81,63 @@ identity, then receive a repeating weighted timeline from each bulletin's `displ
 explicit zone `rotation_seconds` remains a uniform-slot override. Exact cumulative boundaries are
 half-open, and checked integer arithmetic yields an explicit placeholder instead of wrapping.
 
+## Live takeover boundary
+
+Live input is deliberately a separate authority path from scheduled media. `station-live` exposes
+only a typed `LiveEndpoint::UdpMpegTs { bind_ip, port }` today. Validation accepts station-local,
+private, loopback, link-local, or multicast addresses, requires a nonzero port, and persists the
+endpoint kind and revision; callers cannot submit a pipeline string. Additional live transports are
+future work.
+
+SQLite is the authority for one active takeover per channel. `takeover_authority` holds a monotonic
+channel revision. A request transaction validates the enabled channel, source identity, source
+revision, and expected authority revision, then inserts an `arming` session and its first audit
+event. Every later transition uses the expected state and expected authority revision in the same
+write transaction as the updated session and append-only audit row. The legal lifecycle is:
+
+```text
+request → arming → armed → take_requested → OnAir → return_requested → returning → completed
+                                      \                                      /
+                                       └────────────── failed ───────────────┘
+```
+
+The orchestration loop reconciles this durable state with one channel worker. `arming` sends the
+typed endpoint and session/source revisions through the protected worker protocol. The worker
+installs and decodes the candidate branch before acknowledging `LiveArmed`. `take_requested` sends
+the exact session and a short-lived bearer arm token; the worker accepts the token once, selects
+the live video and audio pads together, and emits `LiveOnAir`. While `OnAir`, schedule dispatch is
+blocked. Return selects the source that was active before the take; only after `LiveReturned` does
+the controller send `DisarmLive` and complete the durable session. The worker protocol is private
+to stationd and the worker: the duplex named pipe has a protected ACL, rejects remote clients, and
+validates channel identity, command sequence, session identity, source identity, and source
+revision. Token debug formatting is redacted.
+
+The live branch is persistent in the running graph, not a second output engine. GStreamer uses
+`udpsrc` with 188-byte MPEG-TS caps, `tsdemux`, H.264/AAC decode, canonical conversion/rate stages,
+and a running-time offset before connecting the decoded legs to the existing selectors. The
+encoder, mux, CG canvas, and required output branches remain continuous. Arm requires both decoded
+audio and video; take requires both legs to be active and restores the prior source if that check
+fails. The worker counts decoded video and audio buffers while live. Two consecutive non-advancing
+observations or two seconds without progress produces a live-input stall; stationd stops the
+worker, fails the takeover, raises the existing output-stall/off-air authority, and retries worker
+startup with bounded backoff. This is distinct from required-output heartbeat stalls, which use
+output byte counters.
+
+Failure is fail-closed. An expired pre-air arm is disarmed and failed. A worker restart while live
+is on air cannot recreate uncertain live authority: the session is failed and the worker returns
+to its safe startup source. A channel disable fails any active session before stopping its worker.
+An interrupted return or disarm is failed rather than marked complete. CG state is independent of
+the live source selection: the fixed compositor keeps its canvas in the persistent graph, and the
+controller retains/reseeds the last valid snapshot across worker recovery rather than treating a
+live transition as a CG reset.
+
+The operator console presents source revision and enabled state, channel authority revision, the
+current session state, expiry, operator/reason, and the append-only audit trail. Take Live and
+Return to Schedule require explicit confirmation; stale authority is surfaced as a conflict and
+the operator must refresh. The current slice supports UDP MPEG-TS only. It does not claim exact
+schedule catch-up after a long takeover, additional live transports, or installed decoded proof of
+the complete takeover path.
+
 ## Authority rules
 
 | Truth | Owner |

@@ -1,4 +1,6 @@
 use std::collections::{HashMap, HashSet};
+use std::fmt::Write as _;
+use std::num::NonZeroU16;
 use std::path::{Path, PathBuf};
 use std::sync::{
     Arc,
@@ -12,9 +14,11 @@ use station_domain::{
     AlertConditionKind, AlertEvent, AlertEventState, AlertSeverity, ChannelRuntimeObservation,
     ChannelRuntimeState,
 };
+use station_live::{LiveEndpoint, TakeoverSession, TakeoverState};
 use station_media_protocol::{
-    CgImageFormat, CgOverlay, CgOverlayContent, CgRect, CgSnapshot, ChannelCommand, MAX_CG_SLOTS,
-    MAX_CG_TEXT_BYTES, SrtPassphrase, WorkerEvent, WorkerOutputConfiguration,
+    CgImageFormat, CgOverlay, CgOverlayContent, CgRect, CgSnapshot, ChannelCommand, LiveArmToken,
+    LiveInputConfiguration, MAX_CG_SLOTS, MAX_CG_TEXT_BYTES, SrtPassphrase, WorkerEvent,
+    WorkerOutputConfiguration,
 };
 use station_runtime::{SupervisorError, WorkerSupervisor};
 use station_schedule::{ChannelConfiguration, DispatchStatus, OutputSinkKind};
@@ -22,6 +26,7 @@ use station_storage::{CgSnapshotReadError, CgWriteError, StationStore};
 
 static ALERT_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 const HEARTBEAT_INTERVAL_MS: i64 = 5_000;
+const MINIMUM_WORKER_BOOTSTRAP_TIMEOUT: Duration = Duration::from_secs(15);
 const CG_EXPIRER_OPERATOR_ID: &str = "stationd-cg-expirer";
 const CG_SYNC_INTERVAL_MS: i64 = 1_000;
 pub fn managed_cg_image_root(database_path: &Path) -> PathBuf {
@@ -65,6 +70,9 @@ pub enum DispatchTransition {
     Loaded { report_id: String },
     OnAir { report_id: String },
     Completed { report_id: String },
+    LiveArmed { session_id: String },
+    LiveOnAir { session_id: String },
+    LiveCompleted { session_id: String },
 }
 
 #[derive(Debug)]
@@ -82,6 +90,10 @@ pub enum OrchestrationError {
     OutputGraphUnhealthy {
         detail: String,
     },
+    LiveInputStalled {
+        detail: String,
+    },
+    LiveControl(String),
     Clock(String),
     InvalidCgSnapshot(String),
 }
@@ -304,6 +316,16 @@ struct OutputExpectation {
     required: bool,
 }
 
+struct LiveControlState {
+    session_id: String,
+    arm_token: Option<LiveArmToken>,
+}
+
+struct LiveRunOutcome {
+    block_schedule: bool,
+    transition: Option<DispatchTransition>,
+}
+
 pub struct ChannelController {
     supervisor: WorkerSupervisor,
     database_path: PathBuf,
@@ -318,6 +340,7 @@ pub struct ChannelController {
     last_output_bytes: Option<Vec<u64>>,
     cg_state: CgSnapshotState,
     next_cg_sync_at_unix_ms: i64,
+    live_control: Option<LiveControlState>,
 }
 
 impl ChannelController {
@@ -382,7 +405,7 @@ impl ChannelController {
             &outputs,
             &managed_cg_image_root(database_path),
             channel.output_profile,
-            timeout,
+            timeout.max(MINIMUM_WORKER_BOOTSTRAP_TIMEOUT),
         )
         .map_err(OrchestrationError::Worker)?;
         let started_at_unix_ms = system_time_millis()?;
@@ -400,6 +423,7 @@ impl ChannelController {
             last_output_bytes: None,
             cg_state: CgSnapshotState::default(),
             next_cg_sync_at_unix_ms: 0,
+            live_control: None,
         })
     }
 
@@ -447,6 +471,15 @@ impl ChannelController {
             {
                 return Err(OrchestrationError::OutputGraphUnhealthy { detail: message });
             }
+            WorkerEvent::CommandRejected { code, .. } if code == "live_input_stalling" => {
+                // One unadvanced interval is a bounded grace observation. The
+                // worker retains the baseline and escalates a repeated/aged
+                // stall; do not report output health from this grace poll.
+                return Ok(());
+            }
+            WorkerEvent::CommandRejected { code, message, .. } if code == "live_input_stalled" => {
+                return Err(OrchestrationError::LiveInputStalled { detail: message });
+            }
             _ => return Err(OrchestrationError::UnexpectedWorkerEvent),
         };
         if outputs.len() != self.output_expectations.len()
@@ -478,6 +511,350 @@ impl ChannelController {
         Ok(())
     }
 
+    fn ensure_live_armed(
+        &mut self,
+        store: &StationStore,
+        session: &TakeoverSession,
+    ) -> Result<(), OrchestrationError> {
+        if let Some(control) = &self.live_control {
+            if control.session_id == session.session_id && control.arm_token.is_some() {
+                return Ok(());
+            }
+            return Err(OrchestrationError::LiveControl(
+                "The worker live-input authority does not match the durable takeover session."
+                    .into(),
+            ));
+        }
+        let source = store
+            .read_live_source(&session.source_id)
+            .map_err(OrchestrationError::Storage)?
+            .ok_or_else(|| {
+                OrchestrationError::LiveControl(
+                    "The durable takeover references a live source that no longer exists.".into(),
+                )
+            })?;
+        if !source.enabled
+            || source.channel_id != self.channel_id
+            || source.revision != session.source_revision
+        {
+            return Err(OrchestrationError::LiveControl(
+                "The live source changed, was disabled, or belongs to another channel.".into(),
+            ));
+        }
+        let (bind_address, port) = match source.endpoint {
+            LiveEndpoint::UdpMpegTs { bind_ip, port } => (bind_ip, port),
+        };
+        let port = NonZeroU16::new(port).ok_or_else(|| {
+            OrchestrationError::LiveControl("The live source port is invalid.".into())
+        })?;
+        let arm_token = generate_live_arm_token()?;
+        let input = LiveInputConfiguration::new(
+            session.session_id.clone(),
+            session.source_id.clone(),
+            session.source_revision,
+            bind_address,
+            port,
+        )
+        .map_err(|message| OrchestrationError::LiveControl(message.into()))?;
+        let response = self
+            .supervisor
+            .command(
+                &format!("live-arm-{}", session.session_id),
+                ChannelCommand::ArmLive {
+                    input,
+                    arm_token: arm_token.clone(),
+                },
+                self.command_timeout,
+            )
+            .map_err(OrchestrationError::Worker)?;
+        if !matches!(
+            response.event,
+            WorkerEvent::LiveArmed {
+                ref session_id,
+                ref source_id,
+                source_revision,
+            } if session_id == &session.session_id
+                && source_id == &session.source_id
+                && source_revision == session.source_revision
+        ) {
+            return Err(OrchestrationError::UnexpectedWorkerEvent);
+        }
+        self.live_control = Some(LiveControlState {
+            session_id: session.session_id.clone(),
+            arm_token: Some(arm_token),
+        });
+        Ok(())
+    }
+
+    fn reconcile_live(
+        &mut self,
+        store: &StationStore,
+        now_unix_ms: i64,
+    ) -> Result<LiveRunOutcome, OrchestrationError> {
+        let Some(session) = store
+            .read_active_takeover(&self.channel_id)
+            .map_err(OrchestrationError::Storage)?
+        else {
+            if self.live_control.is_some() {
+                return Err(OrchestrationError::LiveControl(
+                    "The worker retains live-input authority without an active durable session."
+                        .into(),
+                ));
+            }
+            return Ok(LiveRunOutcome {
+                block_schedule: false,
+                transition: None,
+            });
+        };
+        if matches!(
+            session.state,
+            TakeoverState::Arming | TakeoverState::Armed | TakeoverState::TakeRequested
+        ) && now_unix_ms >= session.expires_at_unix_ms
+        {
+            if self
+                .live_control
+                .as_ref()
+                .is_some_and(|control| control.session_id == session.session_id)
+            {
+                let response = self
+                    .supervisor
+                    .command(
+                        &format!("live-expired-disarm-{}", session.session_id),
+                        ChannelCommand::DisarmLive {
+                            session_id: session.session_id.clone(),
+                        },
+                        self.command_timeout,
+                    )
+                    .map_err(OrchestrationError::Worker)?;
+                if !matches!(response.event, WorkerEvent::LiveDisarmed { ref session_id } if session_id == &session.session_id)
+                {
+                    return Err(OrchestrationError::UnexpectedWorkerEvent);
+                }
+                self.live_control = None;
+            }
+            store
+                .transition_takeover(
+                    &session.session_id,
+                    session.state,
+                    TakeoverState::Failed,
+                    now_unix_ms,
+                    Some("The live takeover intent expired before going on air."),
+                    "stationd-live-controller",
+                    session.authority_revision,
+                )
+                .map_err(OrchestrationError::Storage)?;
+            return Ok(LiveRunOutcome {
+                block_schedule: false,
+                transition: None,
+            });
+        }
+        match session.state {
+            TakeoverState::Arming => {
+                self.ensure_live_armed(store, &session)?;
+                store
+                    .transition_takeover(
+                        &session.session_id,
+                        TakeoverState::Arming,
+                        TakeoverState::Armed,
+                        now_unix_ms,
+                        None,
+                        "stationd-live-controller",
+                        session.authority_revision,
+                    )
+                    .map_err(OrchestrationError::Storage)?;
+                Ok(LiveRunOutcome {
+                    block_schedule: false,
+                    transition: Some(DispatchTransition::LiveArmed {
+                        session_id: session.session_id,
+                    }),
+                })
+            }
+            TakeoverState::Armed => {
+                self.ensure_live_armed(store, &session)?;
+                Ok(LiveRunOutcome {
+                    block_schedule: false,
+                    transition: None,
+                })
+            }
+            TakeoverState::TakeRequested => {
+                self.ensure_live_armed(store, &session)?;
+                let arm_token = self
+                    .live_control
+                    .as_ref()
+                    .and_then(|control| control.arm_token.clone())
+                    .ok_or_else(|| {
+                        OrchestrationError::LiveControl(
+                            "The live take capability has already been consumed.".into(),
+                        )
+                    })?;
+                let response = self
+                    .supervisor
+                    .command(
+                        &format!("live-take-{}", session.session_id),
+                        ChannelCommand::TakeLive {
+                            session_id: session.session_id.clone(),
+                            arm_token,
+                        },
+                        self.command_timeout,
+                    )
+                    .map_err(OrchestrationError::Worker)?;
+                if !matches!(
+                    response.event,
+                    WorkerEvent::LiveOnAir {
+                        ref session_id,
+                        ref source_id,
+                        source_revision,
+                    } if session_id == &session.session_id
+                        && source_id == &session.source_id
+                        && source_revision == session.source_revision
+                ) {
+                    return Err(OrchestrationError::UnexpectedWorkerEvent);
+                }
+                if let Some(control) = self.live_control.as_mut() {
+                    control.arm_token = None;
+                }
+                store
+                    .transition_takeover(
+                        &session.session_id,
+                        TakeoverState::TakeRequested,
+                        TakeoverState::OnAir,
+                        now_unix_ms,
+                        None,
+                        "stationd-live-controller",
+                        session.authority_revision,
+                    )
+                    .map_err(OrchestrationError::Storage)?;
+                self.mark_state(ChannelRuntimeState::Live, now_unix_ms);
+                Ok(LiveRunOutcome {
+                    block_schedule: true,
+                    transition: Some(DispatchTransition::LiveOnAir {
+                        session_id: session.session_id,
+                    }),
+                })
+            }
+            TakeoverState::OnAir => {
+                if !self.live_control.as_ref().is_some_and(|control| {
+                    control.session_id == session.session_id && control.arm_token.is_none()
+                }) {
+                    store
+                        .transition_takeover(
+                            &session.session_id,
+                            TakeoverState::OnAir,
+                            TakeoverState::Failed,
+                            now_unix_ms,
+                            Some("The channel worker restarted while live was on air; output returned to its safe startup source."),
+                            "stationd-live-controller",
+                            session.authority_revision,
+                        )
+                        .map_err(OrchestrationError::Storage)?;
+                    return Err(OrchestrationError::LiveControl(
+                        "The live on-air session could not survive a worker restart.".into(),
+                    ));
+                }
+                self.mark_state(ChannelRuntimeState::Live, now_unix_ms);
+                Ok(LiveRunOutcome {
+                    block_schedule: true,
+                    transition: None,
+                })
+            }
+            TakeoverState::ReturnRequested => {
+                if !self.live_control.as_ref().is_some_and(|control| {
+                    control.session_id == session.session_id && control.arm_token.is_none()
+                }) {
+                    return Err(OrchestrationError::LiveControl(
+                        "The return request has no matching on-air worker authority.".into(),
+                    ));
+                }
+                let returning = store
+                    .transition_takeover(
+                        &session.session_id,
+                        TakeoverState::ReturnRequested,
+                        TakeoverState::Returning,
+                        now_unix_ms,
+                        None,
+                        "stationd-live-controller",
+                        session.authority_revision,
+                    )
+                    .map_err(OrchestrationError::Storage)?;
+                let response = self
+                    .supervisor
+                    .command(
+                        &format!("live-return-{}", session.session_id),
+                        ChannelCommand::ReturnFromLive {
+                            session_id: session.session_id.clone(),
+                        },
+                        self.command_timeout,
+                    )
+                    .map_err(OrchestrationError::Worker)?;
+                if !matches!(response.event, WorkerEvent::LiveReturned { ref session_id } if session_id == &session.session_id)
+                {
+                    return Err(OrchestrationError::UnexpectedWorkerEvent);
+                }
+                let response = self
+                    .supervisor
+                    .command(
+                        &format!("live-disarm-{}", session.session_id),
+                        ChannelCommand::DisarmLive {
+                            session_id: session.session_id.clone(),
+                        },
+                        self.command_timeout,
+                    )
+                    .map_err(OrchestrationError::Worker)?;
+                if !matches!(response.event, WorkerEvent::LiveDisarmed { ref session_id } if session_id == &session.session_id)
+                {
+                    return Err(OrchestrationError::UnexpectedWorkerEvent);
+                }
+                self.live_control = None;
+                store
+                    .transition_takeover(
+                        &session.session_id,
+                        TakeoverState::Returning,
+                        TakeoverState::Completed,
+                        now_unix_ms,
+                        None,
+                        "stationd-live-controller",
+                        returning.authority_revision,
+                    )
+                    .map_err(OrchestrationError::Storage)?;
+                self.mark_state(
+                    if self.on_air_asset_id.is_some() {
+                        ChannelRuntimeState::OnAir
+                    } else {
+                        ChannelRuntimeState::HealthyFallback
+                    },
+                    now_unix_ms,
+                );
+                Ok(LiveRunOutcome {
+                    block_schedule: false,
+                    transition: Some(DispatchTransition::LiveCompleted {
+                        session_id: session.session_id,
+                    }),
+                })
+            }
+            TakeoverState::Returning => {
+                store
+                    .transition_takeover(
+                        &session.session_id,
+                        TakeoverState::Returning,
+                        TakeoverState::Failed,
+                        now_unix_ms,
+                        Some("The channel worker restarted before the live return completed."),
+                        "stationd-live-controller",
+                        session.authority_revision,
+                    )
+                    .map_err(OrchestrationError::Storage)?;
+                Err(OrchestrationError::LiveControl(
+                    "The live return did not survive a worker restart.".into(),
+                ))
+            }
+            TakeoverState::Completed | TakeoverState::Failed => {
+                Err(OrchestrationError::LiveControl(
+                    "Storage returned a terminal takeover as active.".into(),
+                ))
+            }
+        }
+    }
+
     pub fn run_once(
         &mut self,
         now_unix_ms: i64,
@@ -491,13 +868,18 @@ impl ChannelController {
             expire_due_bulletins(&store, &self.channel_id, now_unix_ms)?;
             self.sync_cg(&store, now_unix_ms)?;
         }
+        let live = self.reconcile_live(&store, now_unix_ms)?;
+        if live.block_schedule {
+            return Ok(live.transition);
+        }
+        let live_transition = live.transition;
         let Some(job) = store
             .list_dispatch_jobs(&self.channel_id)
             .map_err(OrchestrationError::Storage)?
             .into_iter()
             .next()
         else {
-            return Ok(None);
+            return Ok(live_transition);
         };
         let report_id = job.report.report_id.clone();
         if matches!(
@@ -643,7 +1025,7 @@ impl ChannelController {
             DispatchStatus::Queued | DispatchStatus::Acknowledged => None,
             _ => None,
         };
-        Ok(transition)
+        Ok(transition.or(live_transition))
     }
 
     fn sync_cg(
@@ -800,6 +1182,20 @@ fn stalled_required_output(
         .map(|(index, _)| index)
 }
 
+fn generate_live_arm_token() -> Result<LiveArmToken, OrchestrationError> {
+    let mut bytes = [0_u8; 32];
+    getrandom::fill(&mut bytes).map_err(|error| {
+        OrchestrationError::LiveControl(format!(
+            "The operating system could not generate a live arm capability: {error:?}"
+        ))
+    })?;
+    let mut encoded = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        write!(&mut encoded, "{byte:02x}").expect("writing hexadecimal to a String cannot fail");
+    }
+    LiveArmToken::new(encoded).map_err(|message| OrchestrationError::LiveControl(message.into()))
+}
+
 pub fn run_until(
     database_path: &Path,
     worker_executable: &Path,
@@ -822,6 +1218,16 @@ pub fn run_until(
         let now = system_time_millis()?;
         let store = StationStore::open(database_path).map_err(OrchestrationError::Storage)?;
         let channels = store.list_channels().map_err(OrchestrationError::Storage)?;
+        for channel in channels.iter().filter(|channel| !channel.enabled) {
+            fail_active_takeover(
+                &store,
+                &channel.channel_id,
+                now,
+                &OrchestrationError::LiveControl(
+                    "The channel was disabled while a live takeover was active.".into(),
+                ),
+            )?;
+        }
         let enabled: HashSet<_> = channels
             .iter()
             .filter(|channel| channel.enabled)
@@ -866,6 +1272,7 @@ pub fn run_until(
                 ) {
                     Ok(controller) => controller,
                     Err(error) => {
+                        fail_active_takeover(&store, &channel.channel_id, now, &error)?;
                         record_channel_failure(&store, &channel.channel_id, now, &error)?;
                         let attempts = restart_attempts
                             .entry(channel.channel_id.clone())
@@ -912,6 +1319,7 @@ pub fn run_until(
                     }
                 }
                 Err(error) => {
+                    fail_active_takeover(&store, channel_id, dispatch_now, &error)?;
                     record_channel_failure(&store, channel_id, dispatch_now, &error)?;
                     let attempts = restart_attempts.entry(channel_id.clone()).or_default();
                     *attempts = attempts.saturating_add(1);
@@ -949,6 +1357,33 @@ pub fn run_until(
     Ok(())
 }
 
+fn fail_active_takeover(
+    store: &StationStore,
+    channel_id: &str,
+    observed_at_unix_ms: i64,
+    error: &OrchestrationError,
+) -> Result<(), OrchestrationError> {
+    let Some(session) = store
+        .read_active_takeover(channel_id)
+        .map_err(OrchestrationError::Storage)?
+    else {
+        return Ok(());
+    };
+    let detail = operator_failure_detail(error);
+    store
+        .transition_takeover(
+            &session.session_id,
+            session.state,
+            TakeoverState::Failed,
+            observed_at_unix_ms,
+            Some(&detail),
+            "stationd-live-controller",
+            session.authority_revision,
+        )
+        .map(|_| ())
+        .map_err(OrchestrationError::Storage)
+}
+
 fn record_channel_failure(
     store: &StationStore,
     channel_id: &str,
@@ -977,6 +1412,7 @@ fn record_channel_failure(
         error,
         OrchestrationError::RequiredOutputStalled { .. }
             | OrchestrationError::OutputGraphUnhealthy { .. }
+            | OrchestrationError::LiveInputStalled { .. }
     ) {
         vec![
             (
@@ -985,7 +1421,7 @@ fn record_channel_failure(
             ),
             (
                 AlertConditionKind::OffAir,
-                "Enabled channel output is not on verified fallback or scheduled media.",
+                "Enabled channel output is not on verified fallback, scheduled media, or live input.",
             ),
         ]
     } else {
@@ -996,7 +1432,7 @@ fn record_channel_failure(
             ),
             (
                 AlertConditionKind::OffAir,
-                "Enabled channel output is not on verified fallback or scheduled media.",
+                "Enabled channel output is not on verified fallback, scheduled media, or live input.",
             ),
         ]
     };
@@ -1050,6 +1486,12 @@ fn operator_failure_detail(error: &OrchestrationError) -> String {
         OrchestrationError::OutputGraphUnhealthy { detail } => format!(
             "The output graph reported an unhealthy transport; the worker was stopped and automatic restart attempts are active. {detail}"
         ),
+        OrchestrationError::LiveInputStalled { detail } => format!(
+            "The selected live input stopped delivering decoded audio or video; the worker was stopped and the takeover was failed safely. {detail}"
+        ),
+        OrchestrationError::LiveControl(detail) => format!(
+            "The live takeover could not be reconciled safely; the worker was stopped rather than accept uncertain on-air authority. {detail}"
+        ),
         OrchestrationError::Clock(_) =>
             "The station clock could not provide a valid dispatch time; verify Windows time service before returning this output to service.".into(),
         OrchestrationError::InvalidCgSnapshot(detail) => {
@@ -1096,7 +1538,8 @@ fn system_time_millis() -> Result<i64, OrchestrationError> {
 mod tests {
     use super::{
         CgSnapshotState, OrchestrationError, OutputExpectation, expire_due_bulletins,
-        managed_cg_image_root, resolved_snapshot_to_protocol, stalled_required_output,
+        generate_live_arm_token, managed_cg_image_root, resolved_snapshot_to_protocol,
+        stalled_required_output,
     };
     use station_cg::{
         CgAuditEvent, CgAuditEventKind, CgBoard, CgBulletin, CgBulletinContent, CgBulletinState,
@@ -1134,6 +1577,15 @@ mod tests {
             managed_cg_image_root(&database),
             PathBuf::from(r"C:\ProgramData\TownLight Station\cg-images")
         );
+    }
+
+    #[test]
+    fn live_arm_capabilities_are_random_bounded_and_redacted() {
+        let first = generate_live_arm_token().unwrap();
+        let second = generate_live_arm_token().unwrap();
+        assert_ne!(first, second);
+        assert_eq!(first.expose().len(), 64);
+        assert_eq!(format!("{first:?}"), "LiveArmToken([REDACTED])");
     }
 
     fn remove_database(path: &std::path::Path) {

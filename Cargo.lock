@@ -1670,6 +1670,7 @@ dependencies = [
  "station-cg",
  "station-domain",
  "station-ingest",
+ "station-live",
  "station-media-lifecycle",
  "station-schedule",
  "station-storage",
@@ -1729,6 +1730,13 @@ dependencies = [
  "station-media-lifecycle",
  "station-schedule",
  "station-storage",
+]
+
+[[package]]
+name = "station-live"
+version = "0.1.0"
+dependencies = [
+ "serde",
 ]
 
 [[package]]
@@ -1794,10 +1802,12 @@ dependencies = [
 name = "station-orchestration"
 version = "0.1.0"
 dependencies = [
+ "getrandom 0.4.3",
  "serde_json",
  "sha2",
  "station-cg",
  "station-domain",
+ "station-live",
  "station-media-protocol",
  "station-runtime",
  "station-schedule",
@@ -1829,6 +1839,7 @@ dependencies = [
  "sha2",
  "station-cg",
  "station-domain",
+ "station-live",
  "station-media-lifecycle",
  "station-schedule",
  "station-update",

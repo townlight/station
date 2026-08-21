@@ -19,6 +19,7 @@ use station_domain::{
     SafeToAirColor, SelfTestKind, SelfTestSchedule, SelfTestTrigger, StationProfile,
     derive_runtime_safe_to_air, redact_alert_channel_target, validate_alert_channel_target,
 };
+use station_live::{LiveSource, LiveSourceWriteError, TakeoverSession, TakeoverState};
 use station_media_lifecycle::{
     AssetLoudnessAnalysis, AssetReadinessView, IngestJobStatus, IngestSourceKind,
     LoudnessGateStatus, MediaIngestJob, MissingMediaAlert, ReadinessDashboard, ReadinessState,
@@ -84,6 +85,40 @@ struct PutChannel {
     srt_passphrases: HashMap<String, String>,
     #[serde(default)]
     clear_srt_passphrases: Vec<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PutLiveSource {
+    #[serde(flatten)]
+    source: LiveSource,
+    expected_revision: u64,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RequestLiveTakeover {
+    session_id: String,
+    channel_id: String,
+    source_id: String,
+    operator_id: String,
+    #[serde(default)]
+    reason: Option<String>,
+    expires_at_unix_ms: i64,
+    expected_authority_revision: u64,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ConfirmLiveTransition {
+    actor_id: String,
+    expected_authority_revision: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct LiveAuthorityRead {
+    channel_id: String,
+    authority_revision: u64,
 }
 
 #[derive(Deserialize)]
@@ -333,6 +368,49 @@ impl Api {
             }
             ("PUT", "/api/v1/channels") => self.put_channel(body),
             ("GET", "/api/v1/channels") => self.list_channels(),
+            ("GET", path)
+                if path.starts_with("/api/v1/channels/") && path.ends_with("/live-sources") =>
+            {
+                self.list_live_sources(path)
+            }
+            ("GET", path)
+                if path.starts_with("/api/v1/channels/") && path.ends_with("/live-authority") =>
+            {
+                self.read_live_authority(path)
+            }
+            ("GET", path)
+                if path.starts_with("/api/v1/channels/")
+                    && path.ends_with("/active-live-takeover") =>
+            {
+                self.read_active_live_takeover(path)
+            }
+            ("PUT", path) if path.starts_with("/api/v1/live-sources/") => {
+                self.put_live_source(path, body)
+            }
+            ("POST", "/api/v1/live-takeovers") => self.request_live_takeover(body),
+            ("GET", path)
+                if path.starts_with("/api/v1/live-takeovers/")
+                    && !path.ends_with("/take")
+                    && !path.ends_with("/return")
+                    && !path.ends_with("/audit") =>
+            {
+                self.read_live_takeover(path)
+            }
+            ("POST", path)
+                if path.starts_with("/api/v1/live-takeovers/") && path.ends_with("/take") =>
+            {
+                self.confirm_live_take(path, body)
+            }
+            ("POST", path)
+                if path.starts_with("/api/v1/live-takeovers/") && path.ends_with("/return") =>
+            {
+                self.request_live_return(path, body)
+            }
+            ("GET", path)
+                if path.starts_with("/api/v1/live-takeovers/") && path.ends_with("/audit") =>
+            {
+                self.list_live_audit(path)
+            }
             ("GET", "/api/v1/output-profiles") => json_response(
                 200,
                 serde_json::to_vec(&OUTPUT_PROFILES)
@@ -896,6 +974,374 @@ impl Api {
                 200,
                 serde_json::to_vec(&channels)
                     .expect("serializing channel configurations cannot fail"),
+            ),
+            Err(message) => error_response(500, "storage_error", &message),
+        }
+    }
+
+    fn list_live_sources(&self, path: &str) -> ApiResponse {
+        let Some(channel_id) = path_identity(path, "/api/v1/channels/", "/live-sources") else {
+            return error_response(400, "invalid_path", "The live channel identity is invalid.");
+        };
+        if !is_api_uuid(channel_id) {
+            return error_response(400, "invalid_path", "The live channel identity is invalid.");
+        }
+        match self.storage.list_channels() {
+            Ok(channels)
+                if !channels
+                    .iter()
+                    .any(|channel| channel.channel_id == channel_id) =>
+            {
+                error_response(404, "channel_not_found", "The channel does not exist.")
+            }
+            Ok(_) => match self.storage.list_channel_live_sources(channel_id) {
+                Ok(sources) => json_response(
+                    200,
+                    serde_json::to_vec(&sources).expect("serializing live sources cannot fail"),
+                ),
+                Err(message) => error_response(500, "storage_error", &message),
+            },
+            Err(message) => error_response(500, "storage_error", &message),
+        }
+    }
+
+    fn read_live_authority(&self, path: &str) -> ApiResponse {
+        let Some(channel_id) = path_identity(path, "/api/v1/channels/", "/live-authority") else {
+            return error_response(400, "invalid_path", "The live channel identity is invalid.");
+        };
+        if !is_api_uuid(channel_id) {
+            return error_response(400, "invalid_path", "The live channel identity is invalid.");
+        }
+        match self.storage.list_channels() {
+            Ok(channels)
+                if !channels
+                    .iter()
+                    .any(|channel| channel.channel_id == channel_id) =>
+            {
+                error_response(404, "channel_not_found", "The channel does not exist.")
+            }
+            Ok(_) => match self.storage.read_takeover_authority_revision(channel_id) {
+                Ok(authority_revision) => json_response(
+                    200,
+                    serde_json::to_vec(&LiveAuthorityRead {
+                        channel_id: channel_id.to_string(),
+                        authority_revision,
+                    })
+                    .expect("serializing live authority cannot fail"),
+                ),
+                Err(message) => error_response(500, "storage_error", &message),
+            },
+            Err(message) => error_response(500, "storage_error", &message),
+        }
+    }
+
+    fn read_active_live_takeover(&self, path: &str) -> ApiResponse {
+        let Some(channel_id) = path_identity(path, "/api/v1/channels/", "/active-live-takeover")
+        else {
+            return error_response(400, "invalid_path", "The live channel identity is invalid.");
+        };
+        if !is_api_uuid(channel_id) {
+            return error_response(400, "invalid_path", "The live channel identity is invalid.");
+        }
+        match self.storage.list_channels() {
+            Ok(channels)
+                if !channels
+                    .iter()
+                    .any(|channel| channel.channel_id == channel_id) =>
+            {
+                error_response(404, "channel_not_found", "The channel does not exist.")
+            }
+            Ok(_) => match self.storage.read_active_takeover(channel_id) {
+                Ok(session) => json_response(
+                    200,
+                    serde_json::to_vec(&session).expect("serializing active takeover cannot fail"),
+                ),
+                Err(message) => error_response(500, "storage_error", &message),
+            },
+            Err(message) => error_response(500, "storage_error", &message),
+        }
+    }
+
+    fn put_live_source(&self, path: &str, body: Option<&[u8]>) -> ApiResponse {
+        let Some(source_id) = path.strip_prefix("/api/v1/live-sources/") else {
+            return error_response(400, "invalid_path", "The live source identity is invalid.");
+        };
+        if !is_api_uuid(source_id) {
+            return error_response(400, "invalid_path", "The live source identity is invalid.");
+        }
+        let Some(command) = parse_body::<PutLiveSource>(body) else {
+            return error_response(400, "invalid_json", "A live source body is required.");
+        };
+        if command.source.source_id != source_id {
+            return error_response(
+                422,
+                "identity_mismatch",
+                "The live source path identity must match the body identity.",
+            );
+        }
+        if let Err(message) = command.source.validate() {
+            return error_response(422, "validation_failed", &message);
+        }
+        match self.storage.list_channels() {
+            Ok(channels)
+                if !channels
+                    .iter()
+                    .any(|channel| channel.channel_id == command.source.channel_id) =>
+            {
+                return error_response(
+                    404,
+                    "channel_not_found",
+                    "The source channel does not exist.",
+                );
+            }
+            Ok(_) => {}
+            Err(message) => return error_response(500, "storage_error", &message),
+        }
+        match self
+            .storage
+            .write_live_source(&command.source, command.expected_revision)
+        {
+            Ok(source) => json_response(
+                200,
+                serde_json::to_vec(&source).expect("serializing live source cannot fail"),
+            ),
+            Err(LiveSourceWriteError::Conflict(current_revision)) => error_response(
+                409,
+                "revision_conflict",
+                &format!(
+                    "The live source changed; expected revision {}, current revision {}.",
+                    command.expected_revision, current_revision
+                ),
+            ),
+            Err(LiveSourceWriteError::Invalid(message)) => {
+                error_response(422, "validation_failed", &message)
+            }
+            Err(LiveSourceWriteError::Storage(message)) => live_storage_error(&message),
+        }
+    }
+
+    fn request_live_takeover(&self, body: Option<&[u8]>) -> ApiResponse {
+        let Some(command) = parse_body::<RequestLiveTakeover>(body) else {
+            return error_response(
+                400,
+                "invalid_json",
+                "A live takeover request body is required.",
+            );
+        };
+        for (value, field) in [
+            (&command.session_id, "session"),
+            (&command.channel_id, "channel"),
+            (&command.source_id, "source"),
+        ] {
+            if !is_api_uuid(value) {
+                return error_response(
+                    422,
+                    "validation_failed",
+                    &format!("The live {field} identity is invalid."),
+                );
+            }
+        }
+        let now = match system_time_millis() {
+            Ok(value) => value,
+            Err(message) => return error_response(500, "clock_error", &message),
+        };
+        let source = match self.storage.read_live_source(&command.source_id) {
+            Ok(Some(source)) => source,
+            Ok(None) => {
+                return error_response(
+                    404,
+                    "live_source_not_found",
+                    "The live source does not exist.",
+                );
+            }
+            Err(message) => return error_response(500, "storage_error", &message),
+        };
+        if source.channel_id != command.channel_id {
+            return error_response(
+                422,
+                "identity_mismatch",
+                "The takeover channel must match the source channel.",
+            );
+        }
+        let session = TakeoverSession {
+            session_id: command.session_id,
+            channel_id: command.channel_id,
+            source_id: command.source_id,
+            source_revision: source.revision,
+            authority_revision: command.expected_authority_revision.saturating_add(1),
+            operator_id: command.operator_id,
+            reason: command.reason,
+            requested_at_unix_ms: now,
+            expires_at_unix_ms: command.expires_at_unix_ms,
+            taken_at_unix_ms: None,
+            returned_at_unix_ms: None,
+            state: TakeoverState::Arming,
+            failure_detail: None,
+        };
+        if let Err(message) = session.validate() {
+            return error_response(422, "validation_failed", &message);
+        }
+        match self
+            .storage
+            .request_takeover(&session, command.expected_authority_revision)
+        {
+            Ok(()) => json_response(
+                201,
+                serde_json::to_vec(&session).expect("serializing takeover session cannot fail"),
+            ),
+            Err(message) => live_storage_error(&message),
+        }
+    }
+
+    fn read_live_takeover(&self, path: &str) -> ApiResponse {
+        let Some(session_id) = path.strip_prefix("/api/v1/live-takeovers/") else {
+            return error_response(
+                400,
+                "invalid_path",
+                "The takeover session identity is invalid.",
+            );
+        };
+        if !is_api_uuid(session_id) {
+            return error_response(
+                400,
+                "invalid_path",
+                "The takeover session identity is invalid.",
+            );
+        }
+        match self.storage.read_takeover_session(session_id) {
+            Ok(Some(session)) => json_response(
+                200,
+                serde_json::to_vec(&session).expect("serializing takeover session cannot fail"),
+            ),
+            Ok(None) => error_response(
+                404,
+                "takeover_not_found",
+                "The takeover session does not exist.",
+            ),
+            Err(message) => error_response(500, "storage_error", &message),
+        }
+    }
+
+    fn confirm_live_take(&self, path: &str, body: Option<&[u8]>) -> ApiResponse {
+        self.transition_live_takeover(
+            path,
+            body,
+            TakeoverState::Armed,
+            TakeoverState::TakeRequested,
+        )
+    }
+
+    fn request_live_return(&self, path: &str, body: Option<&[u8]>) -> ApiResponse {
+        self.transition_live_takeover(
+            path,
+            body,
+            TakeoverState::OnAir,
+            TakeoverState::ReturnRequested,
+        )
+    }
+
+    fn transition_live_takeover(
+        &self,
+        path: &str,
+        body: Option<&[u8]>,
+        expected: TakeoverState,
+        next: TakeoverState,
+    ) -> ApiResponse {
+        let Some(session_id) = path
+            .strip_prefix("/api/v1/live-takeovers/")
+            .and_then(|value| {
+                value.strip_suffix(if next == TakeoverState::TakeRequested {
+                    "/take"
+                } else {
+                    "/return"
+                })
+            })
+        else {
+            return error_response(
+                400,
+                "invalid_path",
+                "The takeover session identity is invalid.",
+            );
+        };
+        if !is_api_uuid(session_id) {
+            return error_response(
+                400,
+                "invalid_path",
+                "The takeover session identity is invalid.",
+            );
+        }
+        let Some(command) = parse_body::<ConfirmLiveTransition>(body) else {
+            return error_response(
+                400,
+                "invalid_json",
+                "A takeover transition body is required.",
+            );
+        };
+        if command.actor_id.trim().is_empty()
+            || command.actor_id.trim() != command.actor_id
+            || command.actor_id.chars().any(char::is_control)
+            || command.actor_id.len() > 120
+        {
+            return error_response(
+                422,
+                "validation_failed",
+                "The takeover actor identity is invalid.",
+            );
+        }
+        let now = match system_time_millis() {
+            Ok(value) => value,
+            Err(message) => return error_response(500, "clock_error", &message),
+        };
+        match self.storage.transition_takeover(
+            session_id,
+            expected,
+            next,
+            now,
+            None,
+            &command.actor_id,
+            command.expected_authority_revision,
+        ) {
+            Ok(session) => json_response(
+                200,
+                serde_json::to_vec(&session).expect("serializing takeover session cannot fail"),
+            ),
+            Err(message) => live_storage_error(&message),
+        }
+    }
+
+    fn list_live_audit(&self, path: &str) -> ApiResponse {
+        let Some(session_id) = path
+            .strip_prefix("/api/v1/live-takeovers/")
+            .and_then(|value| value.strip_suffix("/audit"))
+        else {
+            return error_response(
+                400,
+                "invalid_path",
+                "The takeover session identity is invalid.",
+            );
+        };
+        if !is_api_uuid(session_id) {
+            return error_response(
+                400,
+                "invalid_path",
+                "The takeover session identity is invalid.",
+            );
+        }
+        match self.storage.read_takeover_session(session_id) {
+            Ok(Some(_)) => {}
+            Ok(None) => {
+                return error_response(
+                    404,
+                    "takeover_not_found",
+                    "The takeover session does not exist.",
+                );
+            }
+            Err(message) => return error_response(500, "storage_error", &message),
+        }
+        match self.storage.list_takeover_audit(session_id) {
+            Ok(events) => json_response(
+                200,
+                serde_json::to_vec(&events).expect("serializing takeover audit cannot fail"),
             ),
             Err(message) => error_response(500, "storage_error", &message),
         }
@@ -2390,6 +2836,45 @@ fn parse_window_query(query: &str) -> Option<(i64, i64)> {
 
 fn parse_body<T: serde::de::DeserializeOwned>(body: Option<&[u8]>) -> Option<T> {
     body.and_then(|body| serde_json::from_slice(body).ok())
+}
+
+fn path_identity<'a>(path: &'a str, prefix: &str, suffix: &str) -> Option<&'a str> {
+    let identity = path.strip_prefix(prefix)?.strip_suffix(suffix)?;
+    (!identity.is_empty() && !identity.contains('/') && !identity.contains(['?', '%', '\\']))
+        .then_some(identity)
+}
+
+fn is_api_uuid(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    bytes.len() == 36
+        && [8, 13, 18, 23].iter().all(|&index| bytes[index] == b'-')
+        && bytes
+            .iter()
+            .enumerate()
+            .all(|(index, byte)| matches!(index, 8 | 13 | 18 | 23) || byte.is_ascii_hexdigit())
+}
+
+fn live_storage_error(message: &str) -> ApiResponse {
+    if message.contains("does not exist") {
+        return error_response(404, "not_found", message);
+    }
+    if message.contains("conflict")
+        || message.contains("already")
+        || message.contains("stale")
+        || message.contains("disabled")
+        || message.contains("expired")
+        || message.contains("constraint")
+    {
+        return error_response(409, "revision_conflict", message);
+    }
+    if message.contains("invalid")
+        || message.contains("must ")
+        || message.contains("not enabled")
+        || message.contains("contains invalid")
+    {
+        return error_response(422, "validation_failed", message);
+    }
+    error_response(500, "storage_error", message)
 }
 
 fn cg_query(path: &str, prefix: &str) -> Option<HashMap<String, String>> {

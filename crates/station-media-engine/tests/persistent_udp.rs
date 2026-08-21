@@ -876,6 +876,85 @@ fn start_udp_decoder(port: u16) -> (gst::Pipeline, gst::Element) {
     (pipeline, sink)
 }
 
+fn start_udp_live_sender(port: u16) -> gst::Pipeline {
+    gst::init().unwrap();
+    let pipeline = gst::Pipeline::new();
+    let video = gst::ElementFactory::make("videotestsrc")
+        .property("is-live", true)
+        .property_from_str("pattern", "snow")
+        .build()
+        .unwrap();
+    let video_convert = gst::ElementFactory::make("videoconvert").build().unwrap();
+    let video_caps = gst::ElementFactory::make("capsfilter")
+        .property(
+            "caps",
+            gst::Caps::builder("video/x-raw")
+                .field("format", "I420")
+                .field("width", 320_i32)
+                .field("height", 180_i32)
+                .field("framerate", gst::Fraction::new(30, 1))
+                .build(),
+        )
+        .build()
+        .unwrap();
+    let video_encoder = gst::ElementFactory::make("openh264enc").build().unwrap();
+    let video_parser = gst::ElementFactory::make("h264parse").build().unwrap();
+    let audio = gst::ElementFactory::make("audiotestsrc")
+        .property("is-live", true)
+        .property_from_str("wave", "sine")
+        .build()
+        .unwrap();
+    let audio_convert = gst::ElementFactory::make("audioconvert").build().unwrap();
+    let audio_resample = gst::ElementFactory::make("audioresample").build().unwrap();
+    let audio_encoder = gst::ElementFactory::make("voaacenc").build().unwrap();
+    let audio_parser = gst::ElementFactory::make("aacparse").build().unwrap();
+    let mux = gst::ElementFactory::make("mpegtsmux").build().unwrap();
+    let sink = gst::ElementFactory::make("udpsink")
+        .property("host", "127.0.0.1")
+        .property("port", i32::from(port))
+        .property("sync", true)
+        .property("async", false)
+        .build()
+        .unwrap();
+    pipeline
+        .add_many([
+            &video,
+            &video_convert,
+            &video_caps,
+            &video_encoder,
+            &video_parser,
+            &audio,
+            &audio_convert,
+            &audio_resample,
+            &audio_encoder,
+            &audio_parser,
+            &mux,
+            &sink,
+        ])
+        .unwrap();
+    gst::Element::link_many([
+        &video,
+        &video_convert,
+        &video_caps,
+        &video_encoder,
+        &video_parser,
+        &mux,
+        &sink,
+    ])
+    .unwrap();
+    gst::Element::link_many([
+        &audio,
+        &audio_convert,
+        &audio_resample,
+        &audio_encoder,
+        &audio_parser,
+        &mux,
+    ])
+    .unwrap();
+    pipeline.set_state(gst::State::Playing).unwrap();
+    pipeline
+}
+
 #[test]
 fn invalid_cg_update_keeps_the_last_valid_revision_active() {
     let receiver = UdpSocket::bind("127.0.0.1:0").unwrap();
@@ -962,6 +1041,15 @@ fn pull_decoded_frame(sink: &gst::Element) -> DecodedFrame {
     }
 }
 
+fn frame_signature(frame: &DecodedFrame) -> u64 {
+    frame
+        .bytes
+        .chunks_exact(4)
+        .step_by(97)
+        .map(|pixel| u64::from(pixel[0]) + u64::from(pixel[1]) + u64::from(pixel[2]))
+        .sum()
+}
+
 #[test]
 fn plays_a_validated_ingested_file_without_rebuilding_the_output_graph() {
     let root = test_root("file-playout");
@@ -1010,6 +1098,105 @@ fn plays_a_validated_ingested_file_without_rebuilding_the_output_graph() {
 
     playout.stop().unwrap();
     fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn arms_udp_live_av_takes_it_without_rebuilding_output_and_returns_to_fallback() {
+    gst::init().unwrap();
+    let output_probe = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let output_port = output_probe.local_addr().unwrap().port();
+    drop(output_probe);
+    let (decoder, frame_sink) = start_udp_decoder(output_port);
+    decoder.set_state(gst::State::Playing).unwrap();
+    let mut playout = PersistentPlayout::start_udp_with_profile(
+        ([127, 0, 0, 1], output_port).into(),
+        OutputProfileId::Proof360p30,
+    )
+    .unwrap();
+    std::thread::sleep(Duration::from_millis(750));
+    let fallback = pull_decoded_frame(&frame_sink);
+
+    let unavailable = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let unavailable_port = unavailable.local_addr().unwrap().port();
+    drop(unavailable);
+    assert!(
+        playout
+            .arm_live_udp(([127, 0, 0, 1], unavailable_port).into())
+            .is_err()
+    );
+    assert_eq!(playout.active_source().unwrap(), SourceRole::Fallback);
+    assert!(matches!(
+        playout.select(SourceRole::Live),
+        Err(EngineError::LiveNotArmed)
+    ));
+
+    let input_probe = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let input_port = input_probe.local_addr().unwrap().port();
+    drop(input_probe);
+    let sender = start_udp_live_sender(input_port);
+    playout
+        .arm_live_udp(([127, 0, 0, 1], input_port).into())
+        .expect("live UDP arm must wait for decoded video and audio");
+    assert_eq!(playout.active_source().unwrap(), SourceRole::Fallback);
+
+    playout
+        .select(SourceRole::Live)
+        .expect("a successfully armed live source must be takeable");
+    std::thread::sleep(Duration::from_millis(900));
+    let live = pull_decoded_frame(&frame_sink);
+    assert_ne!(frame_signature(&fallback), frame_signature(&live));
+    assert!(playout.output_bytes_sent().unwrap()[0] > 0);
+
+    let failed_replacement = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let failed_replacement_port = failed_replacement.local_addr().unwrap().port();
+    drop(failed_replacement);
+    assert!(
+        playout
+            .arm_live_udp(([127, 0, 0, 1], failed_replacement_port).into())
+            .is_err()
+    );
+    assert_eq!(playout.active_source().unwrap(), SourceRole::Live);
+
+    playout
+        .select(SourceRole::Fallback)
+        .expect("fallback must remain takeable after live");
+    std::thread::sleep(Duration::from_millis(750));
+    let returned = pull_decoded_frame(&frame_sink);
+    assert_eq!(frame_signature(&fallback), frame_signature(&returned));
+    sender.set_state(gst::State::Null).unwrap();
+    sender.state(gst::ClockTime::from_seconds(5)).0.unwrap();
+    let drain_deadline = Instant::now() + Duration::from_secs(10);
+    let mut last_counts = playout.live_buffer_counts().unwrap();
+    let mut stable_since = Instant::now();
+    loop {
+        std::thread::sleep(Duration::from_millis(100));
+        let counts = playout.live_buffer_counts().unwrap();
+        if counts != last_counts {
+            last_counts = counts;
+            stable_since = Instant::now();
+        } else if stable_since.elapsed() >= Duration::from_millis(500) {
+            break;
+        }
+        assert!(
+            Instant::now() < drain_deadline,
+            "live decoder buffers did not quiesce after sender stop"
+        );
+    }
+    let stalled_take = playout.select(SourceRole::Live);
+    assert!(
+        matches!(stalled_take, Err(EngineError::LiveInputStalled { .. })),
+        "unexpected stalled-take result: {stalled_take:?}"
+    );
+    assert_eq!(playout.active_source().unwrap(), SourceRole::Fallback);
+    assert!(playout.disarm_live().is_ok());
+    assert_eq!(playout.live_buffer_counts(), None);
+    assert!(matches!(
+        playout.select(SourceRole::Live),
+        Err(EngineError::LiveNotArmed)
+    ));
+
+    decoder.set_state(gst::State::Null).unwrap();
+    playout.stop().unwrap();
 }
 
 fn assert_discovered_video_contract(

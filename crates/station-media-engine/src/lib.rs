@@ -17,11 +17,13 @@ use station_media_protocol::{
 use station_schedule::{OutputProfile, OutputProfileId};
 
 static FILE_PROGRAM_SEQUENCE: AtomicU64 = AtomicU64::new(1);
+static LIVE_PROGRAM_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SourceRole {
     Fallback,
     Program,
+    Live,
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -55,6 +57,7 @@ pub enum EngineError {
         actual: Option<String>,
         fallback: String,
         program: String,
+        live: Option<String>,
     },
     SourceSelectorsDisagree {
         video: SourceRole,
@@ -70,6 +73,12 @@ pub enum EngineError {
         audio_ready: bool,
     },
     LoadRequiresFallback,
+    LiveNotArmed,
+    LiveActive,
+    LiveInputStalled {
+        video_buffers: u64,
+        audio_buffers: u64,
+    },
     CgInvalid(String),
 }
 
@@ -84,6 +93,7 @@ pub struct PersistentPlayout {
     output_counters: Vec<OutputCounter>,
     output_profile: OutputProfileId,
     file_program: Option<FileProgram>,
+    live_program: Option<LiveProgram>,
     cg_slots: Vec<CgSlot>,
     cg_canvas_pad: gst::Pad,
     cg_image_root: Option<PathBuf>,
@@ -510,6 +520,7 @@ impl PersistentPlayout {
             output_counters,
             output_profile,
             file_program,
+            live_program: None,
             cg_slots,
             cg_canvas_pad,
             cg_image_root: cg_image_root.map(Path::to_path_buf),
@@ -667,11 +678,13 @@ impl PersistentPlayout {
             &self.video_selector,
             &self.video_fallback_pad,
             &self.video_program_pad,
+            self.live_program.as_ref().map(|program| &program.video_pad),
         )?;
         let audio = active_role(
             &self.audio_selector,
             &self.audio_fallback_pad,
             &self.audio_program_pad,
+            self.live_program.as_ref().map(|program| &program.audio_pad),
         )?;
         if video == audio {
             Ok(video)
@@ -681,19 +694,166 @@ impl PersistentPlayout {
     }
 
     pub fn select(&mut self, role: SourceRole) -> Result<(), EngineError> {
+        if role == SourceRole::Live {
+            let before = self.live_buffer_counts().ok_or(EngineError::LiveNotArmed)?;
+            self.wait_for_live_activity(before, Duration::from_secs(2))?;
+        }
+        let previous_video: Option<gst::Pad> = self.video_selector.property("active-pad");
+        let previous_audio: Option<gst::Pad> = self.audio_selector.property("active-pad");
         let (video_pad, audio_pad) = match role {
             SourceRole::Fallback => (&self.video_fallback_pad, &self.audio_fallback_pad),
             SourceRole::Program => (&self.video_program_pad, &self.audio_program_pad),
+            SourceRole::Live => {
+                let program = self
+                    .live_program
+                    .as_ref()
+                    .ok_or(EngineError::LiveNotArmed)?;
+                (&program.video_pad, &program.audio_pad)
+            }
         };
-        self.video_selector
-            .set_property("active-pad", Some(video_pad.clone()));
-        self.audio_selector
-            .set_property("active-pad", Some(audio_pad.clone()));
-        self.wait_for_source(role, Duration::from_secs(2))
+        self.set_active_pads(video_pad, audio_pad)?;
+        if let Err(error) = self.wait_for_source(role, Duration::from_secs(2)) {
+            self.restore_active_pads(previous_video, previous_audio);
+            return Err(error);
+        }
+        Ok(())
     }
 
     pub fn load_file(&mut self, media_path: impl AsRef<Path>) -> Result<(), EngineError> {
         self.load_validated_file(media_path)
+    }
+
+    /// Arms a typed UDP MPEG-TS input without taking it to air. The branch is
+    /// admitted only after both decoded A/V legs have produced buffers; any
+    /// failure tears down only the candidate branch and leaves the existing
+    /// fallback/program/live selection untouched.
+    pub fn arm_live_udp(&mut self, source: SocketAddr) -> Result<(), EngineError> {
+        let candidate = install_live_program(
+            &self.pipeline,
+            source,
+            &self.video_selector,
+            &self.audio_selector,
+            self.output_profile.profile(),
+        )?;
+        let running_time = match self.pipeline.current_running_time() {
+            Some(value) => value,
+            None => {
+                remove_live_program(
+                    &self.pipeline,
+                    &self.video_selector,
+                    &self.audio_selector,
+                    &candidate,
+                );
+                return Err(EngineError::State(
+                    "the running pipeline has no clock time".into(),
+                ));
+            }
+        };
+        let offset = match i64::try_from(running_time.nseconds()) {
+            Ok(value) => value,
+            Err(_) => {
+                remove_live_program(
+                    &self.pipeline,
+                    &self.video_selector,
+                    &self.audio_selector,
+                    &candidate,
+                );
+                return Err(EngineError::State(
+                    "pipeline running time exceeded i64".into(),
+                ));
+            }
+        };
+        candidate.video_source_pad.set_offset(offset);
+        candidate.audio_source_pad.set_offset(offset);
+        for element in &candidate.elements {
+            if let Err(error) = element.sync_state_with_parent() {
+                remove_live_program(
+                    &self.pipeline,
+                    &self.video_selector,
+                    &self.audio_selector,
+                    &candidate,
+                );
+                return Err(EngineError::State(error.to_string()));
+            }
+        }
+        if let Err(error) = wait_for_live_decode(&candidate, Duration::from_secs(5)) {
+            remove_live_program(
+                &self.pipeline,
+                &self.video_selector,
+                &self.audio_selector,
+                &candidate,
+            );
+            return Err(error);
+        }
+
+        let was_live = match self.active_source() {
+            Ok(role) => role == SourceRole::Live,
+            Err(error) => {
+                cleanup_live_install(
+                    &self.pipeline,
+                    &self.video_selector,
+                    &self.audio_selector,
+                    LiveInstallParts::from_program(&candidate),
+                );
+                return Err(error);
+            }
+        };
+        let candidate_video_pad = candidate.video_pad.clone();
+        let candidate_audio_pad = candidate.audio_pad.clone();
+        let previous = self.live_program.replace(candidate);
+        if was_live
+            && let Err(error) = self.set_active_pads(&candidate_video_pad, &candidate_audio_pad)
+        {
+            let failed = self
+                .live_program
+                .take()
+                .expect("candidate live branch is installed");
+            self.live_program = previous;
+            remove_live_program(
+                &self.pipeline,
+                &self.video_selector,
+                &self.audio_selector,
+                &failed,
+            );
+            return Err(error);
+        }
+        if let Some(previous) = previous {
+            remove_live_program(
+                &self.pipeline,
+                &self.video_selector,
+                &self.audio_selector,
+                &previous,
+            );
+        }
+        Ok(())
+    }
+
+    /// Removes the armed live branch. The caller must take fallback or
+    /// program first so removing a selected pad can never blank the output.
+    pub fn disarm_live(&mut self) -> Result<(), EngineError> {
+        if self.active_source()? == SourceRole::Live {
+            return Err(EngineError::LiveActive);
+        }
+        if let Some(program) = self.live_program.take() {
+            remove_live_program(
+                &self.pipeline,
+                &self.video_selector,
+                &self.audio_selector,
+                &program,
+            );
+        }
+        Ok(())
+    }
+
+    /// Returns decoded live video/audio buffer counts for worker health and
+    /// take evidence. Counts are monotonic for one armed branch.
+    pub fn live_buffer_counts(&self) -> Option<(u64, u64)> {
+        self.live_program.as_ref().map(|program| {
+            (
+                program.video_buffers.load(Ordering::Acquire),
+                program.audio_buffers.load(Ordering::Acquire),
+            )
+        })
     }
 
     pub fn load_asset(
@@ -782,6 +942,70 @@ impl PersistentPlayout {
                 return Err(EngineError::SwitchTimedOut {
                     requested,
                     actual: self.active_source().ok(),
+                });
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+    }
+
+    fn set_active_pads(
+        &self,
+        video_pad: &gst::Pad,
+        audio_pad: &gst::Pad,
+    ) -> Result<(), EngineError> {
+        let previous_video: Option<gst::Pad> = self.video_selector.property("active-pad");
+        let previous_audio: Option<gst::Pad> = self.audio_selector.property("active-pad");
+        self.video_selector
+            .set_property("active-pad", Some(video_pad.clone()));
+        self.audio_selector
+            .set_property("active-pad", Some(audio_pad.clone()));
+        let result = (|| {
+            let video = active_role(
+                &self.video_selector,
+                &self.video_fallback_pad,
+                &self.video_program_pad,
+                self.live_program.as_ref().map(|program| &program.video_pad),
+            )?;
+            let audio = active_role(
+                &self.audio_selector,
+                &self.audio_fallback_pad,
+                &self.audio_program_pad,
+                self.live_program.as_ref().map(|program| &program.audio_pad),
+            )?;
+            if video != audio {
+                return Err(EngineError::SourceSelectorsDisagree { video, audio });
+            }
+            Ok(())
+        })();
+        if result.is_err() {
+            self.video_selector
+                .set_property("active-pad", previous_video);
+            self.audio_selector
+                .set_property("active-pad", previous_audio);
+        }
+        result
+    }
+
+    fn restore_active_pads(&self, video: Option<gst::Pad>, audio: Option<gst::Pad>) {
+        self.video_selector.set_property("active-pad", video);
+        self.audio_selector.set_property("active-pad", audio);
+    }
+
+    fn wait_for_live_activity(
+        &self,
+        before: (u64, u64),
+        timeout: Duration,
+    ) -> Result<(), EngineError> {
+        let started = Instant::now();
+        loop {
+            let current = self.live_buffer_counts().unwrap_or((0, 0));
+            if current.0 > before.0 && current.1 > before.1 {
+                return Ok(());
+            }
+            if started.elapsed() >= timeout {
+                return Err(EngineError::LiveInputStalled {
+                    video_buffers: current.0,
+                    audio_buffers: current.1,
                 });
             }
             std::thread::sleep(Duration::from_millis(2));
@@ -952,6 +1176,328 @@ fn wait_for_srt_connections(
         ));
     }
     Ok(())
+}
+
+struct LiveProgram {
+    video_pad: gst::Pad,
+    audio_pad: gst::Pad,
+    video_ready: Arc<AtomicBool>,
+    audio_ready: Arc<AtomicBool>,
+    video_buffers: Arc<AtomicU64>,
+    audio_buffers: Arc<AtomicU64>,
+    video_source_pad: gst::Pad,
+    audio_source_pad: gst::Pad,
+    elements: Vec<gst::Element>,
+}
+
+fn install_live_program(
+    pipeline: &gst::Pipeline,
+    source: SocketAddr,
+    video_selector: &gst::Element,
+    audio_selector: &gst::Element,
+    profile: &OutputProfile,
+) -> Result<LiveProgram, EngineError> {
+    let sequence = LIVE_PROGRAM_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let name = |component: &str| format!("program-live-{component}-{sequence}");
+    let source_element = gst::ElementFactory::make("udpsrc")
+        .name(name("udp-source"))
+        .property("address", source.ip().to_string())
+        .property("port", i32::from(source.port()))
+        .property(
+            "caps",
+            gst::Caps::builder("video/mpegts")
+                .field("systemstream", true)
+                .field("packetsize", 188_i32)
+                .build(),
+        )
+        .build()
+        .map_err(|error| build_error("udpsrc", error))?;
+    let demux = gst::ElementFactory::make("tsdemux")
+        .name(name("demux"))
+        .build()
+        .map_err(|error| build_error("tsdemux", error))?;
+
+    let video_decode_queue = element("queue", name("video-decode-queue"))?;
+    let video_parse = element("h264parse", name("video-parse"))?;
+    let video_decode = element("openh264dec", name("video-decode"))?;
+    let video_convert = element("videoconvert", name("video-convert"))?;
+    let video_scale = element("videoscale", name("video-scale"))?;
+    let video_rate = element("videorate", name("video-rate"))?;
+    let video_caps = video_caps_filter(name("canonical-video"), profile)?;
+    let video_clock = gst::ElementFactory::make("clocksync")
+        .name(name("video-clock"))
+        .property("sync-to-first", true)
+        .build()
+        .map_err(|error| build_error("clocksync", error))?;
+    let video_output_queue = element("queue", name("video-output-queue"))?;
+
+    let audio_decode_queue = element("queue", name("audio-decode-queue"))?;
+    let audio_parse = element("aacparse", name("audio-parse"))?;
+    let audio_decode = element("avdec_aac", name("audio-decode"))?;
+    let audio_convert = element("audioconvert", name("audio-convert"))?;
+    let audio_resample = element("audioresample", name("audio-resample"))?;
+    let audio_caps = audio_caps_filter(name("canonical-audio"), profile)?;
+    let audio_rate = element("audiorate", name("audio-rate"))?;
+    let audio_clock = gst::ElementFactory::make("clocksync")
+        .name(name("audio-clock"))
+        .property("sync-to-first", true)
+        .build()
+        .map_err(|error| build_error("clocksync", error))?;
+    let audio_output_queue = element("queue", name("audio-output-queue"))?;
+
+    let elements = vec![
+        source_element.clone(),
+        demux.clone(),
+        video_decode_queue.clone(),
+        video_parse.clone(),
+        video_decode.clone(),
+        video_convert.clone(),
+        video_scale.clone(),
+        video_rate.clone(),
+        video_caps.clone(),
+        video_clock.clone(),
+        video_output_queue.clone(),
+        audio_decode_queue.clone(),
+        audio_parse.clone(),
+        audio_decode.clone(),
+        audio_convert.clone(),
+        audio_resample.clone(),
+        audio_caps.clone(),
+        audio_rate.clone(),
+        audio_clock.clone(),
+        audio_output_queue.clone(),
+    ];
+    let element_refs = elements.iter().collect::<Vec<_>>();
+    if let Err(error) = pipeline.add_many(element_refs.as_slice()) {
+        for element in elements.iter().rev() {
+            let _ = element.set_state(gst::State::Null);
+            let _ = pipeline.remove(element);
+        }
+        return Err(EngineError::Pipeline(error.to_string()));
+    }
+    let video_source_pad = match video_output_queue.static_pad("src") {
+        Some(pad) => pad,
+        None => {
+            for element in elements.iter().rev() {
+                let _ = element.set_state(gst::State::Null);
+                let _ = pipeline.remove(element);
+            }
+            return Err(EngineError::MissingPad {
+                element: "live-video-output-queue",
+                pad: "src",
+            });
+        }
+    };
+    let audio_source_pad = match audio_output_queue.static_pad("src") {
+        Some(pad) => pad,
+        None => {
+            for element in elements.iter().rev() {
+                let _ = element.set_state(gst::State::Null);
+                let _ = pipeline.remove(element);
+            }
+            return Err(EngineError::MissingPad {
+                element: "live-audio-output-queue",
+                pad: "src",
+            });
+        }
+    };
+    let mut video_selector_pad = None;
+    let mut audio_selector_pad = None;
+    let install_result = (|| -> Result<LiveProgram, EngineError> {
+        link(&source_element, &demux, "udpsrc", "tsdemux")?;
+        gst::Element::link_many([
+            &video_decode_queue,
+            &video_parse,
+            &video_decode,
+            &video_convert,
+            &video_scale,
+            &video_rate,
+            &video_caps,
+            &video_clock,
+            &video_output_queue,
+        ])
+        .map_err(|_| EngineError::Link {
+            from: "live-video-decode-queue",
+            to: "live-video-output-queue",
+        })?;
+        gst::Element::link_many([
+            &audio_decode_queue,
+            &audio_parse,
+            &audio_decode,
+            &audio_convert,
+            &audio_resample,
+            &audio_caps,
+            &audio_rate,
+            &audio_clock,
+            &audio_output_queue,
+        ])
+        .map_err(|_| EngineError::Link {
+            from: "live-audio-decode-queue",
+            to: "live-audio-output-queue",
+        })?;
+
+        let video_sink = video_decode_queue
+            .static_pad("sink")
+            .ok_or(EngineError::MissingPad {
+                element: "live-video-decode-queue",
+                pad: "sink",
+            })?;
+        let audio_sink = audio_decode_queue
+            .static_pad("sink")
+            .ok_or(EngineError::MissingPad {
+                element: "live-audio-decode-queue",
+                pad: "sink",
+            })?;
+        demux.connect_pad_added(move |_, source_pad| {
+            let caps = source_pad
+                .current_caps()
+                .unwrap_or_else(|| source_pad.query_caps(None));
+            let media_type = caps
+                .structure(0)
+                .map(|value| value.name().to_string())
+                .unwrap_or_default();
+            if media_type.starts_with("video/") && !video_sink.is_linked() {
+                let _ = source_pad.link(&video_sink);
+            } else if media_type.starts_with("audio/") && !audio_sink.is_linked() {
+                let _ = source_pad.link(&audio_sink);
+            }
+        });
+
+        let video_pad = connect_source(
+            &video_output_queue,
+            video_selector,
+            "live-video-output-queue",
+        )?;
+        video_selector_pad = Some(video_pad.clone());
+        let audio_pad = connect_source(
+            &audio_output_queue,
+            audio_selector,
+            "live-audio-output-queue",
+        )?;
+        audio_selector_pad = Some(audio_pad.clone());
+        let video_ready = Arc::new(AtomicBool::new(false));
+        let audio_ready = Arc::new(AtomicBool::new(false));
+        let video_buffers = Arc::new(AtomicU64::new(0));
+        let audio_buffers = Arc::new(AtomicU64::new(0));
+        let video_signal = Arc::clone(&video_ready);
+        let video_count = Arc::clone(&video_buffers);
+        video_source_pad.add_probe(gst::PadProbeType::BUFFER, move |_, _| {
+            video_signal.store(true, Ordering::Release);
+            video_count.fetch_add(1, Ordering::AcqRel);
+            gst::PadProbeReturn::Ok
+        });
+        let audio_signal = Arc::clone(&audio_ready);
+        let audio_count = Arc::clone(&audio_buffers);
+        audio_source_pad.add_probe(gst::PadProbeType::BUFFER, move |_, _| {
+            audio_signal.store(true, Ordering::Release);
+            audio_count.fetch_add(1, Ordering::AcqRel);
+            gst::PadProbeReturn::Ok
+        });
+
+        Ok(LiveProgram {
+            video_pad,
+            audio_pad,
+            video_ready,
+            audio_ready,
+            video_buffers,
+            audio_buffers,
+            video_source_pad: video_source_pad.clone(),
+            audio_source_pad: audio_source_pad.clone(),
+            elements: elements.clone(),
+        })
+    })();
+    if install_result.is_err() {
+        cleanup_live_install(
+            pipeline,
+            video_selector,
+            audio_selector,
+            LiveInstallParts {
+                elements: &elements,
+                video_source_pad: &video_source_pad,
+                audio_source_pad: &audio_source_pad,
+                video_selector_pad: video_selector_pad.as_ref(),
+                audio_selector_pad: audio_selector_pad.as_ref(),
+            },
+        );
+    }
+    install_result
+}
+
+fn wait_for_live_decode(program: &LiveProgram, timeout: Duration) -> Result<(), EngineError> {
+    let started = Instant::now();
+    loop {
+        let video_ready = program.video_ready.load(Ordering::Acquire);
+        let audio_ready = program.audio_ready.load(Ordering::Acquire);
+        if video_ready && audio_ready {
+            return Ok(());
+        }
+        if started.elapsed() >= timeout {
+            return Err(EngineError::ProgramDecodeTimedOut {
+                video_ready,
+                audio_ready,
+            });
+        }
+        std::thread::sleep(Duration::from_millis(2));
+    }
+}
+
+fn remove_live_program(
+    pipeline: &gst::Pipeline,
+    video_selector: &gst::Element,
+    audio_selector: &gst::Element,
+    program: &LiveProgram,
+) {
+    cleanup_live_install(
+        pipeline,
+        video_selector,
+        audio_selector,
+        LiveInstallParts::from_program(program),
+    );
+}
+
+struct LiveInstallParts<'a> {
+    elements: &'a [gst::Element],
+    video_source_pad: &'a gst::Pad,
+    audio_source_pad: &'a gst::Pad,
+    video_selector_pad: Option<&'a gst::Pad>,
+    audio_selector_pad: Option<&'a gst::Pad>,
+}
+
+impl<'a> LiveInstallParts<'a> {
+    fn from_program(program: &'a LiveProgram) -> Self {
+        Self {
+            elements: &program.elements,
+            video_source_pad: &program.video_source_pad,
+            audio_source_pad: &program.audio_source_pad,
+            video_selector_pad: Some(&program.video_pad),
+            audio_selector_pad: Some(&program.audio_pad),
+        }
+    }
+}
+
+fn cleanup_live_install(
+    pipeline: &gst::Pipeline,
+    video_selector: &gst::Element,
+    audio_selector: &gst::Element,
+    parts: LiveInstallParts<'_>,
+) {
+    for element in parts.elements {
+        let _ = element.set_state(gst::State::Null);
+    }
+    for element in parts.elements {
+        let _ = element.state(gst::ClockTime::from_seconds(5));
+    }
+    if let Some(pad) = parts.video_selector_pad {
+        let _ = parts.video_source_pad.unlink(pad);
+        video_selector.release_request_pad(pad);
+    }
+    if let Some(pad) = parts.audio_selector_pad {
+        let _ = parts.audio_source_pad.unlink(pad);
+        audio_selector.release_request_pad(pad);
+    }
+    for element in parts.elements.iter().rev() {
+        let _ = pipeline.remove(element);
+    }
 }
 
 struct FileProgram {
@@ -1200,6 +1746,7 @@ fn active_role(
     selector: &gst::Element,
     fallback_pad: &gst::Pad,
     program_pad: &gst::Pad,
+    live_pad: Option<&gst::Pad>,
 ) -> Result<SourceRole, EngineError> {
     let active: Option<gst::Pad> = selector.property("active-pad");
     let actual = active.as_ref().map(|pad| pad.name().to_string());
@@ -1209,11 +1756,14 @@ fn active_role(
         Ok(SourceRole::Fallback)
     } else if actual.as_ref() == Some(&program) {
         Ok(SourceRole::Program)
+    } else if live_pad.is_some_and(|pad| actual.as_ref() == Some(&pad.name().to_string())) {
+        Ok(SourceRole::Live)
     } else {
         Err(EngineError::UnknownActivePad {
             actual,
             fallback,
             program,
+            live: live_pad.map(|pad| pad.name().to_string()),
         })
     }
 }

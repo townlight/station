@@ -28,6 +28,9 @@ use station_domain::{
     SystemSelfTest, redact_alert_channel_target, validate_alert_channel_target,
     validate_secure_url,
 };
+use station_live::{
+    LiveSource, LiveSourceWriteError, TakeoverAuditEvent, TakeoverSession, TakeoverState,
+};
 use station_media_lifecycle::{
     AssetLoudnessAnalysis, IngestJobStatus, IngestSourceKind, LoudnessGateStatus, MediaIngestJob,
     TranscodeFormat, TranscodeJob, TranscodeJobStatus, WatchFileObservation, WatchFolderConfig,
@@ -397,7 +400,7 @@ impl StationStore {
              );\
              CREATE TABLE IF NOT EXISTS channel_runtime (\
                channel_id TEXT PRIMARY KEY,\
-               state TEXT NOT NULL CHECK (state IN ('starting','healthy_fallback','on_air','error','stopped')),\
+               state TEXT NOT NULL CHECK (state IN ('starting','healthy_fallback','on_air','live','error','stopped')),\
                on_air_asset_id TEXT NOT NULL DEFAULT '',\
                state_started_at_unix_ms INTEGER NOT NULL CHECK (state_started_at_unix_ms >= 0),\
                heartbeat_at_unix_ms INTEGER NOT NULL CHECK (heartbeat_at_unix_ms >= state_started_at_unix_ms),\
@@ -575,11 +578,61 @@ impl StationStore {
                operator_notes TEXT NOT NULL\
              );\
              CREATE INDEX IF NOT EXISTS commit_reports_channel_time \
-               ON commit_reports(channel_id, approved_at_unix_ms);",
+               ON commit_reports(channel_id, approved_at_unix_ms);\
+             CREATE TABLE IF NOT EXISTS live_sources (\
+               source_id TEXT PRIMARY KEY,\
+               channel_id TEXT NOT NULL,\
+               label TEXT NOT NULL,\
+               enabled INTEGER NOT NULL CHECK (enabled IN (0,1)),\
+               endpoint_kind TEXT NOT NULL CHECK (endpoint_kind IN ('udp_mpeg_ts')),\
+               bind_ip TEXT NOT NULL,\
+               port INTEGER NOT NULL CHECK (port BETWEEN 1 AND 65535),\
+               revision INTEGER NOT NULL CHECK (revision >= 1),\
+               FOREIGN KEY(channel_id) REFERENCES channels(channel_id)\
+             );\
+             CREATE TABLE IF NOT EXISTS takeover_sessions (\
+               session_id TEXT PRIMARY KEY,\
+               channel_id TEXT NOT NULL,\
+               source_id TEXT NOT NULL,\
+               operator_id TEXT NOT NULL,\
+               reason TEXT,\
+               requested_at_unix_ms INTEGER NOT NULL CHECK (requested_at_unix_ms >= 0),\
+               taken_at_unix_ms INTEGER,\
+               returned_at_unix_ms INTEGER,\
+               source_revision INTEGER NOT NULL CHECK (source_revision >= 1),\
+               authority_revision INTEGER NOT NULL CHECK (authority_revision >= 1),\
+               expires_at_unix_ms INTEGER NOT NULL CHECK (expires_at_unix_ms > requested_at_unix_ms),\
+               state TEXT NOT NULL CHECK (state IN ('arming','armed','take_requested','on_air','return_requested','returning','completed','failed')),\
+               failure_detail TEXT,\
+               FOREIGN KEY(source_id) REFERENCES live_sources(source_id)\
+             );\
+             CREATE UNIQUE INDEX IF NOT EXISTS takeover_sessions_one_active_channel \
+               ON takeover_sessions(channel_id)\
+               WHERE state IN ('arming','armed','take_requested','on_air','return_requested','returning');\
+             CREATE INDEX IF NOT EXISTS takeover_sessions_channel_time \
+               ON takeover_sessions(channel_id, requested_at_unix_ms DESC);\
+             CREATE TABLE IF NOT EXISTS takeover_audit_events (\
+               audit_id TEXT PRIMARY KEY,\
+               session_id TEXT NOT NULL,\
+               channel_id TEXT NOT NULL,\
+               source_id TEXT NOT NULL,\
+               operator_id TEXT NOT NULL,\
+               state TEXT NOT NULL CHECK (state IN ('arming','armed','take_requested','on_air','return_requested','returning','completed','failed')),\
+               occurred_at_unix_ms INTEGER NOT NULL CHECK (occurred_at_unix_ms >= 0),\
+               detail TEXT,\
+               FOREIGN KEY(session_id) REFERENCES takeover_sessions(session_id) ON DELETE CASCADE\
+             );\
+             CREATE INDEX IF NOT EXISTS takeover_audit_session_time \
+               ON takeover_audit_events(session_id, occurred_at_unix_ms, audit_id);\
+             CREATE TABLE IF NOT EXISTS takeover_authority (\
+               channel_id TEXT PRIMARY KEY,\
+               revision INTEGER NOT NULL CHECK (revision >= 0)\
+             );",
         )?;
         store.migrate_ingest_retry_schedule()?;
         store.migrate_ingest_transcode_status()?;
         store.migrate_commit_report_statuses()?;
+        store.migrate_channel_runtime_live_state()?;
         store.migrate_alert_delivery_realerts()?;
         store.migrate_channel_output_profile()?;
         store.migrate_channel_output_sink_kinds()?;
@@ -634,6 +687,504 @@ impl StationStore {
                 Err(error)
             }
         }
+    }
+
+    pub fn read_live_source(&self, source_id: &str) -> Result<Option<LiveSource>, String> {
+        let statement = self.prepare(
+            "SELECT source_id, channel_id, label, enabled, endpoint_kind, bind_ip, port, revision \
+             FROM live_sources WHERE source_id=?1",
+        )?;
+        let source_id = c_string(source_id, "live source identity")?;
+        bind_text(self.database, statement.raw, 1, &source_id)?;
+        match unsafe { sqlite3_step(statement.raw) } {
+            SQLITE_ROW => Ok(Some(read_live_source_row(statement.raw)?)),
+            SQLITE_DONE => Ok(None),
+            _ => Err(sqlite_error(self.database)),
+        }
+    }
+
+    pub fn list_live_sources(&self) -> Result<Vec<LiveSource>, String> {
+        let statement = self.prepare(
+            "SELECT source_id, channel_id, label, enabled, endpoint_kind, bind_ip, port, revision \
+             FROM live_sources ORDER BY label, source_id",
+        )?;
+        let mut sources = Vec::new();
+        loop {
+            match unsafe { sqlite3_step(statement.raw) } {
+                SQLITE_ROW => sources.push(read_live_source_row(statement.raw)?),
+                SQLITE_DONE => return Ok(sources),
+                _ => return Err(sqlite_error(self.database)),
+            }
+        }
+    }
+
+    pub fn list_channel_live_sources(&self, channel_id: &str) -> Result<Vec<LiveSource>, String> {
+        let statement = self.prepare(
+            "SELECT source_id, channel_id, label, enabled, endpoint_kind, bind_ip, port, revision \
+             FROM live_sources WHERE channel_id=?1 ORDER BY label, source_id",
+        )?;
+        let channel_id = c_string(channel_id, "live source channel identity")?;
+        bind_text(self.database, statement.raw, 1, &channel_id)?;
+        let mut sources = Vec::new();
+        loop {
+            match unsafe { sqlite3_step(statement.raw) } {
+                SQLITE_ROW => sources.push(read_live_source_row(statement.raw)?),
+                SQLITE_DONE => return Ok(sources),
+                _ => return Err(sqlite_error(self.database)),
+            }
+        }
+    }
+
+    pub fn write_live_source(
+        &self,
+        source: &LiveSource,
+        expected_revision: u64,
+    ) -> Result<LiveSource, LiveSourceWriteError> {
+        source.validate().map_err(LiveSourceWriteError::Invalid)?;
+        self.execute("BEGIN IMMEDIATE")
+            .map_err(LiveSourceWriteError::Storage)?;
+        let outcome = (|| {
+            let current = self
+                .read_live_source(&source.source_id)
+                .map_err(LiveSourceWriteError::Storage)?;
+            let current_revision = current.as_ref().map_or(0, |value| value.revision);
+            if current_revision != expected_revision {
+                return Err(LiveSourceWriteError::Conflict(current_revision));
+            }
+            if source.revision != expected_revision.saturating_add(1) {
+                return Err(LiveSourceWriteError::Invalid(
+                    "live source revision must be exactly one greater than expected".into(),
+                ));
+            }
+            let (kind, bind_ip, port) = source.endpoint.storage_fields();
+            let statement = self
+                .prepare(
+                    "INSERT INTO live_sources(source_id,channel_id,label,enabled,endpoint_kind,bind_ip,port,revision) \
+                     VALUES(?1,?2,?3,?4,?5,?6,?7,?8) \
+                     ON CONFLICT(source_id) DO UPDATE SET channel_id=excluded.channel_id, label=excluded.label, enabled=excluded.enabled, \
+                     endpoint_kind=excluded.endpoint_kind, bind_ip=excluded.bind_ip, port=excluded.port, revision=excluded.revision",
+                )
+                .map_err(LiveSourceWriteError::Storage)?;
+            let source_id = c_string(&source.source_id, "live source identity")
+                .map_err(LiveSourceWriteError::Invalid)?;
+            let label = c_string(&source.label, "live source label")
+                .map_err(LiveSourceWriteError::Invalid)?;
+            let channel_id = c_string(&source.channel_id, "live source channel identity")
+                .map_err(LiveSourceWriteError::Invalid)?;
+            let kind =
+                c_string(kind, "live endpoint kind").map_err(LiveSourceWriteError::Invalid)?;
+            let bind_ip =
+                c_string(bind_ip, "live source bind IP").map_err(LiveSourceWriteError::Invalid)?;
+            bind_text(self.database, statement.raw, 1, &source_id)
+                .map_err(LiveSourceWriteError::Storage)?;
+            bind_text(self.database, statement.raw, 2, &channel_id)
+                .map_err(LiveSourceWriteError::Storage)?;
+            bind_text(self.database, statement.raw, 3, &label)
+                .map_err(LiveSourceWriteError::Storage)?;
+            bind_i64(self.database, statement.raw, 4, i64::from(source.enabled))
+                .map_err(LiveSourceWriteError::Storage)?;
+            bind_text(self.database, statement.raw, 5, &kind)
+                .map_err(LiveSourceWriteError::Storage)?;
+            bind_text(self.database, statement.raw, 6, &bind_ip)
+                .map_err(LiveSourceWriteError::Storage)?;
+            bind_i64(self.database, statement.raw, 7, i64::from(port))
+                .map_err(LiveSourceWriteError::Storage)?;
+            bind_i64(
+                self.database,
+                statement.raw,
+                8,
+                checked_i64(source.revision, "live source revision")
+                    .map_err(LiveSourceWriteError::Invalid)?,
+            )
+            .map_err(LiveSourceWriteError::Storage)?;
+            expect_done(self.database, statement.raw).map_err(LiveSourceWriteError::Storage)?;
+            Ok(source.clone())
+        })();
+        match outcome {
+            Ok(source) => match self.execute("COMMIT") {
+                Ok(()) => Ok(source),
+                Err(message) => {
+                    let _ = self.execute("ROLLBACK");
+                    Err(LiveSourceWriteError::Storage(message))
+                }
+            },
+            Err(error) => {
+                let _ = self.execute("ROLLBACK");
+                Err(error)
+            }
+        }
+    }
+
+    pub fn request_takeover(
+        &self,
+        session: &TakeoverSession,
+        expected_authority_revision: u64,
+    ) -> Result<(), String> {
+        session.validate()?;
+        if session.state != TakeoverState::Arming {
+            return Err("new takeover sessions must begin in arming state".into());
+        }
+        if session.authority_revision != expected_authority_revision.saturating_add(1) {
+            return Err(
+                "takeover authority revision must be exactly one greater than expected".into(),
+            );
+        }
+        self.execute("BEGIN IMMEDIATE")?;
+        let outcome = (|| {
+            let source = self
+                .read_live_source(&session.source_id)?
+                .ok_or_else(|| "takeover source does not exist".to_string())?;
+            if !source.enabled
+                || source.channel_id != session.channel_id
+                || source.revision != session.source_revision
+            {
+                return Err("takeover source is disabled, channel-mismatched, or stale".into());
+            }
+            let channel = self.prepare("SELECT enabled FROM channels WHERE channel_id=?1")?;
+            let channel_id = c_string(&session.channel_id, "takeover channel identity")?;
+            bind_text(self.database, channel.raw, 1, &channel_id)?;
+            match unsafe { sqlite3_step(channel.raw) } {
+                SQLITE_ROW if unsafe { sqlite3_column_int64(channel.raw, 0) } != 0 => {}
+                SQLITE_ROW | SQLITE_DONE => return Err("takeover channel is not enabled".into()),
+                _ => return Err(sqlite_error(self.database)),
+            }
+            let authority =
+                self.prepare("SELECT revision FROM takeover_authority WHERE channel_id=?1")?;
+            bind_text(self.database, authority.raw, 1, &channel_id)?;
+            let current_authority = match unsafe { sqlite3_step(authority.raw) } {
+                SQLITE_ROW => u64::try_from(unsafe { sqlite3_column_int64(authority.raw, 0) })
+                    .map_err(|_| "invalid takeover authority revision".to_string())?,
+                SQLITE_DONE => 0,
+                _ => return Err(sqlite_error(self.database)),
+            };
+            if current_authority != expected_authority_revision {
+                return Err("takeover authority compare-and-set conflict".into());
+            }
+            let authority_write = self.prepare(
+                "INSERT INTO takeover_authority(channel_id,revision) VALUES(?1,?2) \
+                 ON CONFLICT(channel_id) DO UPDATE SET revision=excluded.revision",
+            )?;
+            bind_text(self.database, authority_write.raw, 1, &channel_id)?;
+            bind_i64(
+                self.database,
+                authority_write.raw,
+                2,
+                checked_i64(session.authority_revision, "takeover authority revision")?,
+            )?;
+            expect_done(self.database, authority_write.raw)?;
+            self.insert_takeover_session(session)?;
+            self.insert_takeover_audit(&TakeoverAuditEvent {
+                audit_id: session.session_id.clone(),
+                session_id: session.session_id.clone(),
+                channel_id: session.channel_id.clone(),
+                source_id: session.source_id.clone(),
+                operator_id: session.operator_id.clone(),
+                state: session.state,
+                occurred_at_unix_ms: session.requested_at_unix_ms,
+                detail: session.reason.clone(),
+            })
+        })();
+        match outcome {
+            Ok(()) => self.execute("COMMIT"),
+            Err(error) => {
+                let _ = self.execute("ROLLBACK");
+                Err(error)
+            }
+        }
+    }
+
+    pub fn read_takeover_session(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<TakeoverSession>, String> {
+        let statement = self.prepare(
+            "SELECT session_id, channel_id, source_id, operator_id, reason, requested_at_unix_ms, \
+             taken_at_unix_ms, returned_at_unix_ms, source_revision, authority_revision, expires_at_unix_ms, state, failure_detail \
+             FROM takeover_sessions WHERE session_id=?1",
+        )?;
+        let session_id = c_string(session_id, "takeover session identity")?;
+        bind_text(self.database, statement.raw, 1, &session_id)?;
+        match unsafe { sqlite3_step(statement.raw) } {
+            SQLITE_ROW => Ok(Some(read_takeover_session_row(statement.raw)?)),
+            SQLITE_DONE => Ok(None),
+            _ => Err(sqlite_error(self.database)),
+        }
+    }
+
+    pub fn read_takeover_authority_revision(&self, channel_id: &str) -> Result<u64, String> {
+        let statement =
+            self.prepare("SELECT revision FROM takeover_authority WHERE channel_id=?1")?;
+        let channel_id = c_string(channel_id, "takeover channel identity")?;
+        bind_text(self.database, statement.raw, 1, &channel_id)?;
+        match unsafe { sqlite3_step(statement.raw) } {
+            SQLITE_ROW => u64::try_from(unsafe { sqlite3_column_int64(statement.raw, 0) })
+                .map_err(|_| "invalid takeover authority revision".to_string()),
+            SQLITE_DONE => Ok(0),
+            _ => Err(sqlite_error(self.database)),
+        }
+    }
+
+    pub fn read_active_takeover(
+        &self,
+        channel_id: &str,
+    ) -> Result<Option<TakeoverSession>, String> {
+        let statement = self.prepare(
+            "SELECT session_id, channel_id, source_id, operator_id, reason, requested_at_unix_ms, \
+             taken_at_unix_ms, returned_at_unix_ms, source_revision, authority_revision, expires_at_unix_ms, state, failure_detail \
+             FROM takeover_sessions WHERE channel_id=?1 AND state IN \
+             ('arming','armed','take_requested','on_air','return_requested','returning') \
+             ORDER BY requested_at_unix_ms DESC LIMIT 1",
+        )?;
+        let channel_id = c_string(channel_id, "takeover channel identity")?;
+        bind_text(self.database, statement.raw, 1, &channel_id)?;
+        match unsafe { sqlite3_step(statement.raw) } {
+            SQLITE_ROW => Ok(Some(read_takeover_session_row(statement.raw)?)),
+            SQLITE_DONE => Ok(None),
+            _ => Err(sqlite_error(self.database)),
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn transition_takeover(
+        &self,
+        session_id: &str,
+        expected: TakeoverState,
+        next: TakeoverState,
+        occurred_at_unix_ms: i64,
+        detail: Option<&str>,
+        actor_id: &str,
+        expected_authority_revision: u64,
+    ) -> Result<TakeoverSession, String> {
+        if occurred_at_unix_ms < 0 || !expected.can_transition_to(next) {
+            return Err("invalid takeover state transition or timestamp".into());
+        }
+        if detail.is_some_and(|value| value.trim() != value || value.chars().any(char::is_control))
+        {
+            return Err("takeover detail contains invalid text".into());
+        }
+        let current = self
+            .read_takeover_session(session_id)?
+            .ok_or_else(|| "takeover session does not exist".to_string())?;
+        if current.state != expected {
+            return Err("takeover state compare-and-set conflict".into());
+        }
+        if current.state != TakeoverState::OnAir
+            && current.state != TakeoverState::ReturnRequested
+            && occurred_at_unix_ms >= current.expires_at_unix_ms
+            && next != TakeoverState::Failed
+        {
+            return Err("takeover intent has expired".into());
+        }
+        let mut updated = current.clone();
+        updated.state = next;
+        if next == TakeoverState::OnAir {
+            updated.taken_at_unix_ms = Some(occurred_at_unix_ms);
+        }
+        if next == TakeoverState::Completed {
+            updated.returned_at_unix_ms = Some(occurred_at_unix_ms);
+        }
+        if next == TakeoverState::Failed {
+            updated.failure_detail = detail.map(str::to_owned);
+        }
+        updated.validate()?;
+        if current.authority_revision != expected_authority_revision {
+            return Err("takeover authority compare-and-set conflict".into());
+        }
+        updated.authority_revision = expected_authority_revision.saturating_add(1);
+        updated.operator_id = current.operator_id.clone();
+        if actor_id.trim().is_empty()
+            || actor_id.chars().any(char::is_control)
+            || actor_id.len() > 120
+        {
+            return Err("takeover actor identity is invalid".into());
+        }
+        let audit = TakeoverAuditEvent {
+            audit_id: format!("{}-{}", session_id, updated.authority_revision),
+            session_id: updated.session_id.clone(),
+            channel_id: updated.channel_id.clone(),
+            source_id: updated.source_id.clone(),
+            operator_id: actor_id.into(),
+            state: next,
+            occurred_at_unix_ms,
+            detail: detail.map(str::to_owned),
+        };
+        audit.validate()?;
+        self.execute("BEGIN IMMEDIATE")?;
+        let outcome = (|| {
+            let statement = self.prepare(
+                "UPDATE takeover_sessions SET taken_at_unix_ms=?1, returned_at_unix_ms=?2, authority_revision=?3, state=?4, failure_detail=?5 \
+                 WHERE session_id=?6 AND state=?7 AND authority_revision=?8",
+            )?;
+            bind_i64(
+                self.database,
+                statement.raw,
+                1,
+                updated.taken_at_unix_ms.unwrap_or(-1),
+            )?;
+            bind_i64(
+                self.database,
+                statement.raw,
+                2,
+                updated.returned_at_unix_ms.unwrap_or(-1),
+            )?;
+            bind_i64(
+                self.database,
+                statement.raw,
+                3,
+                checked_i64(updated.authority_revision, "authority revision")?,
+            )?;
+            let next_text = c_string(next.as_str(), "takeover state")?;
+            bind_text(self.database, statement.raw, 4, &next_text)?;
+            let failure = c_string(
+                updated.failure_detail.as_deref().unwrap_or(""),
+                "takeover failure",
+            )?;
+            bind_text(self.database, statement.raw, 5, &failure)?;
+            let id = c_string(session_id, "takeover session identity")?;
+            bind_text(self.database, statement.raw, 6, &id)?;
+            let expected_text = c_string(expected.as_str(), "takeover state")?;
+            bind_text(self.database, statement.raw, 7, &expected_text)?;
+            bind_i64(
+                self.database,
+                statement.raw,
+                8,
+                checked_i64(expected_authority_revision, "authority revision")?,
+            )?;
+            expect_done(self.database, statement.raw)?;
+            if self.changes() != 1 {
+                return Err("takeover state compare-and-set conflict".into());
+            }
+            let authority = self.prepare(
+                "UPDATE takeover_authority SET revision=?1 WHERE channel_id=?2 AND revision=?3",
+            )?;
+            bind_i64(
+                self.database,
+                authority.raw,
+                1,
+                checked_i64(updated.authority_revision, "authority revision")?,
+            )?;
+            let channel_id = c_string(&updated.channel_id, "takeover channel identity")?;
+            bind_text(self.database, authority.raw, 2, &channel_id)?;
+            bind_i64(
+                self.database,
+                authority.raw,
+                3,
+                checked_i64(expected_authority_revision, "authority revision")?,
+            )?;
+            expect_done(self.database, authority.raw)?;
+            if self.changes() != 1 {
+                return Err("takeover authority compare-and-set conflict".into());
+            }
+            self.insert_takeover_audit(&audit)?;
+            Ok(())
+        })();
+        match outcome {
+            Ok(()) => {
+                self.execute("COMMIT")?;
+                Ok(updated)
+            }
+            Err(error) => {
+                let _ = self.execute("ROLLBACK");
+                Err(error)
+            }
+        }
+    }
+
+    pub fn list_takeover_audit(&self, session_id: &str) -> Result<Vec<TakeoverAuditEvent>, String> {
+        let statement = self.prepare(
+            "SELECT audit_id, session_id, channel_id, source_id, operator_id, state, occurred_at_unix_ms, detail \
+             FROM takeover_audit_events WHERE session_id=?1 ORDER BY occurred_at_unix_ms, audit_id",
+        )?;
+        let session_id = c_string(session_id, "takeover session identity")?;
+        bind_text(self.database, statement.raw, 1, &session_id)?;
+        let mut events = Vec::new();
+        loop {
+            match unsafe { sqlite3_step(statement.raw) } {
+                SQLITE_ROW => events.push(read_takeover_audit_row(statement.raw)?),
+                SQLITE_DONE => return Ok(events),
+                _ => return Err(sqlite_error(self.database)),
+            }
+        }
+    }
+
+    fn insert_takeover_session(&self, session: &TakeoverSession) -> Result<(), String> {
+        let statement = self.prepare(
+            "INSERT INTO takeover_sessions(session_id,channel_id,source_id,operator_id,reason,requested_at_unix_ms,\
+             taken_at_unix_ms,returned_at_unix_ms,source_revision,authority_revision,expires_at_unix_ms,state,failure_detail) \
+             VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)",
+        )?;
+        let session_id = c_string(&session.session_id, "takeover session identity")?;
+        let channel_id = c_string(&session.channel_id, "takeover channel identity")?;
+        let source_id = c_string(&session.source_id, "takeover source identity")?;
+        let operator_id = c_string(&session.operator_id, "takeover operator")?;
+        let reason = c_string(session.reason.as_deref().unwrap_or(""), "takeover reason")?;
+        let state = c_string(session.state.as_str(), "takeover state")?;
+        bind_text(self.database, statement.raw, 1, &session_id)?;
+        bind_text(self.database, statement.raw, 2, &channel_id)?;
+        bind_text(self.database, statement.raw, 3, &source_id)?;
+        bind_text(self.database, statement.raw, 4, &operator_id)?;
+        bind_text(self.database, statement.raw, 5, &reason)?;
+        bind_i64(
+            self.database,
+            statement.raw,
+            6,
+            session.requested_at_unix_ms,
+        )?;
+        bind_i64(
+            self.database,
+            statement.raw,
+            7,
+            session.taken_at_unix_ms.unwrap_or(-1),
+        )?;
+        bind_i64(
+            self.database,
+            statement.raw,
+            8,
+            session.returned_at_unix_ms.unwrap_or(-1),
+        )?;
+        bind_i64(
+            self.database,
+            statement.raw,
+            9,
+            checked_i64(session.source_revision, "source revision")?,
+        )?;
+        bind_i64(
+            self.database,
+            statement.raw,
+            10,
+            checked_i64(session.authority_revision, "authority revision")?,
+        )?;
+        bind_i64(self.database, statement.raw, 11, session.expires_at_unix_ms)?;
+        bind_text(self.database, statement.raw, 12, &state)?;
+        let failure = c_string(
+            session.failure_detail.as_deref().unwrap_or(""),
+            "takeover failure",
+        )?;
+        bind_text(self.database, statement.raw, 13, &failure)?;
+        expect_done(self.database, statement.raw)
+    }
+
+    fn insert_takeover_audit(&self, audit: &TakeoverAuditEvent) -> Result<(), String> {
+        let statement = self.prepare(
+            "INSERT INTO takeover_audit_events(audit_id,session_id,channel_id,source_id,operator_id,state,occurred_at_unix_ms,detail) \
+             VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",
+        )?;
+        let audit_id = c_string(&audit.audit_id, "takeover audit identity")?;
+        let session_id = c_string(&audit.session_id, "takeover session identity")?;
+        let channel_id = c_string(&audit.channel_id, "takeover channel identity")?;
+        let source_id = c_string(&audit.source_id, "takeover source identity")?;
+        let operator_id = c_string(&audit.operator_id, "takeover operator")?;
+        let state = c_string(audit.state.as_str(), "takeover state")?;
+        bind_text(self.database, statement.raw, 1, &audit_id)?;
+        bind_text(self.database, statement.raw, 2, &session_id)?;
+        bind_text(self.database, statement.raw, 3, &channel_id)?;
+        bind_text(self.database, statement.raw, 4, &source_id)?;
+        bind_text(self.database, statement.raw, 5, &operator_id)?;
+        bind_text(self.database, statement.raw, 6, &state)?;
+        bind_i64(self.database, statement.raw, 7, audit.occurred_at_unix_ms)?;
+        let detail = c_string(audit.detail.as_deref().unwrap_or(""), "takeover detail")?;
+        bind_text(self.database, statement.raw, 8, &detail)?;
+        expect_done(self.database, statement.raw)
     }
 
     pub fn read_profile(&self) -> Result<Option<StationProfileDocument>, String> {
@@ -5846,6 +6397,40 @@ impl StationStore {
         })
     }
 
+    fn migrate_channel_runtime_live_state(&self) -> Result<(), String> {
+        let statement = self.prepare(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='channel_runtime'",
+        )?;
+        let definition = match unsafe { sqlite3_step(statement.raw) } {
+            SQLITE_ROW => column_text(statement.raw, 0)?,
+            SQLITE_DONE => return Err("channel_runtime schema is missing".into()),
+            _ => return Err(sqlite_error(self.database)),
+        };
+        drop(statement);
+        if definition.contains("'live'") {
+            return Ok(());
+        }
+        self.execute(
+            "BEGIN IMMEDIATE;\
+             ALTER TABLE channel_runtime RENAME TO channel_runtime_legacy;\
+             CREATE TABLE channel_runtime (\
+               channel_id TEXT PRIMARY KEY,\
+               state TEXT NOT NULL CHECK (state IN ('starting','healthy_fallback','on_air','live','error','stopped')),\
+               on_air_asset_id TEXT NOT NULL DEFAULT '',\
+               state_started_at_unix_ms INTEGER NOT NULL CHECK (state_started_at_unix_ms >= 0),\
+               heartbeat_at_unix_ms INTEGER NOT NULL CHECK (heartbeat_at_unix_ms >= state_started_at_unix_ms),\
+               detail TEXT NOT NULL DEFAULT '',\
+               FOREIGN KEY(channel_id) REFERENCES channels(channel_id) ON DELETE CASCADE\
+             );\
+             INSERT INTO channel_runtime SELECT * FROM channel_runtime_legacy;\
+             DROP TABLE channel_runtime_legacy;\
+             COMMIT;",
+        )
+        .inspect_err(|_| {
+            let _ = self.execute("ROLLBACK");
+        })
+    }
+
     fn migrate_alert_delivery_realerts(&self) -> Result<(), String> {
         let statement = self.prepare(
             "SELECT sql FROM sqlite_master WHERE type='table' AND name='alert_deliveries'",
@@ -6864,6 +7449,70 @@ fn read_schedule_item_row(statement: *mut SqliteStatement) -> Result<ScheduleIte
     })
 }
 
+fn read_live_source_row(statement: *mut SqliteStatement) -> Result<LiveSource, String> {
+    let source = LiveSource {
+        source_id: column_text(statement, 0)?,
+        channel_id: column_text(statement, 1)?,
+        label: column_text(statement, 2)?,
+        enabled: unsafe { sqlite3_column_int64(statement, 3) } != 0,
+        endpoint: station_live::LiveEndpoint::from_storage(
+            &column_text(statement, 4)?,
+            column_text(statement, 5)?,
+            u16::try_from(unsafe { sqlite3_column_int64(statement, 6) })
+                .map_err(|_| "database returned invalid live source port".to_string())?,
+        )?,
+        revision: u64::try_from(unsafe { sqlite3_column_int64(statement, 7) })
+            .map_err(|_| "database returned invalid live source revision".to_string())?,
+    };
+    source.validate()?;
+    Ok(source)
+}
+
+fn read_takeover_session_row(statement: *mut SqliteStatement) -> Result<TakeoverSession, String> {
+    let reason = column_text(statement, 4)?;
+    let failure_detail = column_text(statement, 12)?;
+    let session = TakeoverSession {
+        session_id: column_text(statement, 0)?,
+        channel_id: column_text(statement, 1)?,
+        source_id: column_text(statement, 2)?,
+        operator_id: column_text(statement, 3)?,
+        reason: (!reason.is_empty()).then_some(reason),
+        requested_at_unix_ms: unsafe { sqlite3_column_int64(statement, 5) },
+        taken_at_unix_ms: optional_i64(statement, 6),
+        returned_at_unix_ms: optional_i64(statement, 7),
+        source_revision: u64::try_from(unsafe { sqlite3_column_int64(statement, 8) })
+            .map_err(|_| "database returned invalid source revision".to_string())?,
+        authority_revision: u64::try_from(unsafe { sqlite3_column_int64(statement, 9) })
+            .map_err(|_| "database returned invalid authority revision".to_string())?,
+        expires_at_unix_ms: unsafe { sqlite3_column_int64(statement, 10) },
+        state: TakeoverState::parse(&column_text(statement, 11)?)?,
+        failure_detail: (!failure_detail.is_empty()).then_some(failure_detail),
+    };
+    session.validate()?;
+    Ok(session)
+}
+
+fn read_takeover_audit_row(statement: *mut SqliteStatement) -> Result<TakeoverAuditEvent, String> {
+    let detail = column_text(statement, 7)?;
+    let audit = TakeoverAuditEvent {
+        audit_id: column_text(statement, 0)?,
+        session_id: column_text(statement, 1)?,
+        channel_id: column_text(statement, 2)?,
+        source_id: column_text(statement, 3)?,
+        operator_id: column_text(statement, 4)?,
+        state: TakeoverState::parse(&column_text(statement, 5)?)?,
+        occurred_at_unix_ms: unsafe { sqlite3_column_int64(statement, 6) },
+        detail: (!detail.is_empty()).then_some(detail),
+    };
+    audit.validate()?;
+    Ok(audit)
+}
+
+fn optional_i64(statement: *mut SqliteStatement, column: c_int) -> Option<i64> {
+    let value = unsafe { sqlite3_column_int64(statement, column) };
+    (value >= 0).then_some(value)
+}
+
 fn read_commit_report_row(statement: *mut SqliteStatement) -> Result<CommitReport, String> {
     Ok(CommitReport {
         report_id: column_text(statement, 0)?,
@@ -7100,6 +7749,7 @@ fn channel_runtime_state_name(value: ChannelRuntimeState) -> &'static str {
         ChannelRuntimeState::Starting => "starting",
         ChannelRuntimeState::HealthyFallback => "healthy_fallback",
         ChannelRuntimeState::OnAir => "on_air",
+        ChannelRuntimeState::Live => "live",
         ChannelRuntimeState::Error => "error",
         ChannelRuntimeState::Stopped => "stopped",
     }
@@ -7162,6 +7812,7 @@ fn parse_channel_runtime_state(value: &str) -> Result<ChannelRuntimeState, Strin
         "starting" => Ok(ChannelRuntimeState::Starting),
         "healthy_fallback" => Ok(ChannelRuntimeState::HealthyFallback),
         "on_air" => Ok(ChannelRuntimeState::OnAir),
+        "live" => Ok(ChannelRuntimeState::Live),
         "error" => Ok(ChannelRuntimeState::Error),
         "stopped" => Ok(ChannelRuntimeState::Stopped),
         _ => Err(format!(
