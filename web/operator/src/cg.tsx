@@ -134,6 +134,7 @@ export const cgApi = {
   deleteZone: (zoneId: string, body: { expected_revision: number; audit: CgAuditEvent }) => cgRequest<void>(`/api/v1/cg/zones/${encodeURIComponent(zoneId)}`, { method: "DELETE", body: JSON.stringify(body) }),
   writeFeed: (body: { feed: CgFeed; expected_revision: number; audit: CgAuditEvent }) => cgRequest<CgFeed>("/api/v1/cg/feeds", { method: "PUT", body: JSON.stringify(body) }),
   deleteFeed: (feedId: string, body: { expected_revision: number; audit: CgAuditEvent }) => cgRequest<void>(`/api/v1/cg/feeds/${encodeURIComponent(feedId)}`, { method: "DELETE", body: JSON.stringify(body) }),
+  writeBulletin: (body: { bulletin: CgBulletin; expected_revision: number; audit: CgAuditEvent }) => cgRequest<CgBulletin>("/api/v1/cg/bulletins", { method: "PUT", body: JSON.stringify(body) }),
 };
 
 export const CG_ROUTES: Array<{ id: CgRoute; label: string; shortLabel: string }> = [
@@ -146,6 +147,13 @@ export const CG_ROUTES: Array<{ id: CgRoute; label: string; shortLabel: string }
 
 function formatCgTime(value: number): string {
   return new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" }).format(value);
+}
+
+function toLocalDateTime(value: number | null): string {
+  if (value === null) return "";
+  const date = new Date(value);
+  const pad = (part: number) => String(part).padStart(2, "0");
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
 }
 
 function displayKind(value: string): string {
@@ -213,11 +221,161 @@ function CgTabs({ route, onNavigate }: { route: CgRoute; onNavigate: (route: CgR
   return <nav className="cg-tabs" aria-label="CG operator screens">{CG_ROUTES.map((item) => <button key={item.id} className={route === item.id ? "selected" : ""} onClick={() => onNavigate(item.id)}>{item.label}</button>)}</nav>;
 }
 
-function ModerationQueue({ data }: { data: CgData }) {
+function ModerationQueue({ data, channelId, operatorId, onRefresh }: { data: CgData; channelId: string; operatorId: string; onRefresh: () => Promise<void> }) {
   const counts = useMemo(() => data.bulletins.reduce<Record<string, number>>((result, bulletin) => ({ ...result, [bulletin.state]: (result[bulletin.state] ?? 0) + 1 }), {}), [data.bulletins]);
+  const [title, setTitle] = useState("");
+  const [body, setBody] = useState("");
+  const [tags, setTags] = useState("");
+  const [displaySeconds, setDisplaySeconds] = useState("12");
+  const [notesById, setNotesById] = useState<Record<string, string>>({});
+  const [schedulingId, setSchedulingId] = useState<string | null>(null);
+  const [scheduleStart, setScheduleStart] = useState("");
+  const [scheduleEnd, setScheduleEnd] = useState("");
+  const [busy, setBusy] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [message, setMessage] = useState<string | null>(null);
+
+  function clearResult() {
+    setError(null);
+    setMessage(null);
+  }
+
+  function parseTags(value: string): string[] | null {
+    const parsed = value.split(/[\s,]+/).map((tag) => tag.trim().toLowerCase()).filter(Boolean);
+    if (parsed.some((tag) => !/^[a-z0-9_-]{1,40}$/.test(tag)) || new Set(parsed).size !== parsed.length || parsed.length > 32) return null;
+    return parsed;
+  }
+
+  async function submitTextBulletin() {
+    clearResult();
+    const parsedTags = parseTags(tags);
+    const seconds = Number(displaySeconds);
+    if (!operatorId.trim()) {
+      setError("Enter an operator name before submitting a bulletin.");
+      return;
+    }
+    if (!title.trim() || !body.trim() || !parsedTags || !Number.isInteger(seconds) || seconds < 3 || seconds > 300) {
+      setError("Enter a title, body, valid tags, and a display duration from 3 to 300 seconds.");
+      return;
+    }
+    setBusy("submit");
+    try {
+      const now = Date.now();
+      const bulletin: CgBulletin = {
+        bulletin_id: newUuid(),
+        channel_id: channelId,
+        content: { kind: "text", title: title.trim(), body: body.trim() },
+        state: "submitted",
+        tags: parsedTags,
+        requested_start_at_unix_ms: null,
+        requested_end_at_unix_ms: null,
+        display_seconds: seconds,
+        audio_asset_id: null,
+        submitted_by: operatorId.trim(),
+        moderation_notes: null,
+        moderated_by: null,
+        revision: 1,
+        created_at_unix_ms: now,
+        updated_at_unix_ms: now,
+      };
+      await cgApi.writeBulletin({ bulletin, expected_revision: 0, audit: buildAudit(channelId, data.board?.board_id ?? null, "bulletin_submitted", operatorId, { content_kind: "text" }, bulletin.updated_at_unix_ms) });
+      await onRefresh();
+      setTitle("");
+      setBody("");
+      setTags("");
+      setDisplaySeconds("12");
+      setMessage("Text bulletin submitted and audit evidence recorded.");
+    } catch (problem) {
+      setError(problem instanceof Error ? problem.message : "The text bulletin could not be submitted.");
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function moderateBulletin(bulletin: CgBulletin, nextState: "needs_changes" | "accepted" | "declined") {
+    clearResult();
+    const note = notesById[bulletin.bulletin_id]?.trim() ?? "";
+    if (!operatorId.trim()) {
+      setError("Enter an operator name before moderating a bulletin.");
+      return;
+    }
+    if ((nextState === "needs_changes" || nextState === "declined") && !note) {
+      setError(nextState === "declined" ? "A decline reason is required." : "A request-changes note is required.");
+      return;
+    }
+    if (nextState === "declined" && !window.confirm(`Decline “${bulletin.content.title ?? "this bulletin"}”? This is a terminal moderation state.`)) return;
+    setBusy(`${nextState}-${bulletin.bulletin_id}`);
+    try {
+      const now = Math.max(Date.now(), bulletin.updated_at_unix_ms);
+      const updated: CgBulletin = {
+        ...bulletin,
+        state: nextState,
+        requested_start_at_unix_ms: nextState === "accepted" ? null : bulletin.requested_start_at_unix_ms,
+        requested_end_at_unix_ms: nextState === "accepted" ? null : bulletin.requested_end_at_unix_ms,
+        moderation_notes: note || bulletin.moderation_notes,
+        moderated_by: operatorId.trim(),
+        revision: bulletin.revision + 1,
+        updated_at_unix_ms: now,
+      };
+      await cgApi.writeBulletin({ bulletin: updated, expected_revision: bulletin.revision, audit: buildAudit(channelId, data.board?.board_id ?? null, "bulletin_moderated", operatorId, { state: nextState }, updated.updated_at_unix_ms) });
+      await onRefresh();
+      setMessage(`Bulletin ${displayKind(nextState)} and audit evidence recorded.`);
+    } catch (problem) {
+      setError(problem instanceof Error ? problem.message : "The bulletin moderation change could not be saved.");
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  function beginSchedule(bulletin: CgBulletin) {
+    clearResult();
+    setSchedulingId(bulletin.bulletin_id);
+    setScheduleStart(toLocalDateTime(bulletin.requested_start_at_unix_ms));
+    setScheduleEnd(toLocalDateTime(bulletin.requested_end_at_unix_ms));
+  }
+
+  async function scheduleBulletin(bulletin: CgBulletin) {
+    clearResult();
+    if (!operatorId.trim()) {
+      setError("Enter an operator name before scheduling a bulletin.");
+      return;
+    }
+    const start = new Date(scheduleStart).getTime();
+    const end = new Date(scheduleEnd).getTime();
+    if (!scheduleStart || !scheduleEnd || !Number.isFinite(start) || !Number.isFinite(end) || end <= start) {
+      setError("Choose a valid start and end time; the end must be after the start.");
+      return;
+    }
+    setBusy(`schedule-${bulletin.bulletin_id}`);
+    try {
+      const now = Math.max(Date.now(), bulletin.updated_at_unix_ms);
+      const updated: CgBulletin = {
+        ...bulletin,
+        state: "scheduled",
+        requested_start_at_unix_ms: start,
+        requested_end_at_unix_ms: end,
+        moderated_by: operatorId.trim(),
+        moderation_notes: notesById[bulletin.bulletin_id]?.trim() || bulletin.moderation_notes,
+        revision: bulletin.revision + 1,
+        updated_at_unix_ms: now,
+      };
+      await cgApi.writeBulletin({ bulletin: updated, expected_revision: bulletin.revision, audit: buildAudit(channelId, data.board?.board_id ?? null, "bulletin_moderated", operatorId, { state: "scheduled" }, updated.updated_at_unix_ms) });
+      await onRefresh();
+      setSchedulingId(null);
+      setMessage("Bulletin scheduled and audit evidence recorded.");
+    } catch (problem) {
+      setError(problem instanceof Error ? problem.message : "The bulletin schedule could not be saved.");
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  const textBulletins = data.bulletins.filter((bulletin) => bulletin.content.kind === "text");
   return <>
     <div className="cg-stat-strip">{["submitted", "needs_changes", "accepted", "scheduled", "declined"].map((state) => <div key={state}><span>{displayKind(state)}</span><strong>{counts[state] ?? 0}</strong></div>)}</div>
-    <section className="panel"><div className="panel-head"><div><p className="eyebrow">Durable bulletin lifecycle</p><h2>Review queue</h2></div><span className="count">{data.bulletins.length}</span></div><MutationNotice>Approve, request changes, and decline controls are withheld until the operator identity and moderation mutation contract are wired into this console.</MutationNotice>{data.bulletins.length === 0 ? <CgEmpty title="No bulletins in the queue" detail="Submissions will appear here after the bulletin intake path is connected." /> : <div className="cg-list">{data.bulletins.map((bulletin) => <article className="cg-card" key={bulletin.bulletin_id}><div className="cg-card-top"><div><strong>{bulletin.content.title ?? displayKind(bulletin.content.kind)}</strong><small>{bulletin.submitted_by} · {formatCgTime(bulletin.created_at_unix_ms)}</small></div><span className={`cg-state-pill cg-state-${bulletin.state}`}>{displayKind(bulletin.state)}</span></div><p>{bulletin.content.body ?? bulletin.content.alt_text ?? "Media bulletin; renderer details remain in the source contract."}</p><div className="cg-tags">{bulletin.tags.length ? bulletin.tags.map((tag) => <span key={tag}>{tag}</span>) : <span>untagged</span>}<small>{bulletin.display_seconds}s · revision {bulletin.revision}</small></div></article>)}</div>}</section>
+    <section className="panel"><div className="panel-head"><div><p className="eyebrow">Text bulletin intake</p><h2>Submit for review</h2></div><span className="cg-state-pill cg-state-submitted">submitted</span></div><MutationNotice>Only text bulletins are admitted here. Media uploads, live-video sources, deletion, and role authentication are not offered.</MutationNotice><div className="cg-editor-grid"><label>Title<input maxLength={160} value={title} onChange={(event) => setTitle(event.target.value)} placeholder="Library board meeting" /></label><label>Display seconds<input type="number" min={3} max={300} value={displaySeconds} onChange={(event) => setDisplaySeconds(event.target.value)} /></label><label>Tags <span className="cg-form-help">comma-separated slugs</span><input value={tags} onChange={(event) => setTags(event.target.value)} placeholder="community, public-safety" /></label><label>Body<textarea maxLength={4000} value={body} onChange={(event) => setBody(event.target.value)} placeholder="Tuesday at 6 PM in the community room." /></label></div><button className="primary" disabled={busy !== null || !operatorId.trim()} onClick={() => void submitTextBulletin()}>{busy === "submit" ? "Submitting…" : "Submit text bulletin"}</button><MutationResult error={error} message={message} /></section>
+    <section className="panel"><div className="panel-head"><div><p className="eyebrow">Durable bulletin lifecycle</p><h2>Review queue</h2></div><span className="count">{data.bulletins.length}</span></div>{data.bulletins.length === 0 ? <CgEmpty title="No bulletins in the queue" detail="Submit the first text bulletin above." /> : <div className="cg-list">{data.bulletins.map((bulletin) => { const isText = bulletin.content.kind === "text"; const note = notesById[bulletin.bulletin_id] ?? bulletin.moderation_notes ?? ""; const busyAction = busy?.endsWith(bulletin.bulletin_id) ?? false; return <article className="cg-card" key={bulletin.bulletin_id}><div className="cg-card-top"><div><strong>{bulletin.content.title ?? displayKind(bulletin.content.kind)}</strong><small>{bulletin.submitted_by} · {formatCgTime(bulletin.created_at_unix_ms)}</small></div><span className={`cg-state-pill cg-state-${bulletin.state}`}>{displayKind(bulletin.state)}</span></div><p>{bulletin.content.body ?? bulletin.content.alt_text ?? "Media bulletin; this screen only mutates text submissions."}</p><div className="cg-tags">{bulletin.tags.length ? bulletin.tags.map((tag) => <span key={tag}>{tag}</span>) : <span>untagged</span>}<small>{bulletin.display_seconds}s · revision {bulletin.revision}</small></div>{isText ? <>{bulletin.state === "needs_changes" && <div className="cg-notice"><span aria-hidden="true">i</span><p>Resubmission is not exposed here; this item remains in needs-changes until the submitter resubmits through a supported intake path.</p></div>}{bulletin.state === "declined" && <div className="cg-notice"><span aria-hidden="true">i</span><p>Declined is terminal in the current lifecycle; no revival control is offered.</p></div>}<label>Moderation note <textarea maxLength={2000} value={note} onChange={(event) => setNotesById((previous) => ({ ...previous, [bulletin.bulletin_id]: event.target.value }))} placeholder="Required for request changes or decline" /></label><div className="cg-inline-actions cg-moderation-actions">{bulletin.state === "submitted" && <><button className="secondary" disabled={busyAction || !operatorId.trim()} onClick={() => void moderateBulletin(bulletin, "needs_changes")}>Request changes</button><button className="primary" disabled={busyAction || !operatorId.trim()} onClick={() => void moderateBulletin(bulletin, "accepted")}>Accept</button></>}{(bulletin.state === "submitted" || bulletin.state === "accepted" || bulletin.state === "scheduled") && <button className="secondary" disabled={busyAction || !operatorId.trim()} onClick={() => beginSchedule(bulletin)}>Schedule</button>}{(bulletin.state === "submitted" || bulletin.state === "accepted" || bulletin.state === "scheduled") && <button className="secondary danger-button" disabled={busyAction || !operatorId.trim()} onClick={() => void moderateBulletin(bulletin, "declined")}>Decline</button>}</div>{schedulingId === bulletin.bulletin_id && <div className="cg-schedule-editor"><label>Start<input type="datetime-local" value={scheduleStart} onChange={(event) => setScheduleStart(event.target.value)} /></label><label>End<input type="datetime-local" value={scheduleEnd} onChange={(event) => setScheduleEnd(event.target.value)} /></label><div className="cg-inline-actions"><button className="primary" disabled={busyAction || !operatorId.trim()} onClick={() => void scheduleBulletin(bulletin)}>{busy === `schedule-${bulletin.bulletin_id}` ? "Scheduling…" : "Save schedule"}</button><button className="secondary" onClick={() => setSchedulingId(null)}>Cancel</button></div></div>}</> : <div className="cg-notice"><span aria-hidden="true">i</span><p>Media and live-video bulletin moderation is not enabled in this text-only screen.</p></div>}</article>; })}</div>}</section>
+    {textBulletins.length === 0 && data.bulletins.length > 0 && <section className="panel"><CgEmpty title="No text bulletins available" detail="Existing non-text bulletins remain visible but cannot be changed by this text-only workflow." /></section>}
   </>;
 }
 
@@ -484,6 +642,6 @@ export function CgOperator({ channelId, channels, route, onNavigate }: { channel
   return <>
     <header className="page-header"><div><p className="eyebrow">CG / Bulletin board</p><h1>{CG_ROUTES.find((item) => item.id === route)?.label ?? "Operator tools"}</h1><p>Authoring and management contract</p></div><div className="header-actions"><OperatorIdentity value={operatorId} onChange={updateOperatorId} /><label className="cg-channel-picker">Channel<select value={activeChannelId} onChange={(event) => setSelectedChannelId(event.target.value)}>{channels.map((channel) => <option key={channel.channel_id} value={channel.channel_id}>{channel.display_name}</option>)}</select></label><span className="cg-channel-badge">{data?.board?.active ? "Board active" : "Board not configured"}</span><button className="secondary" onClick={() => void load()} disabled={refreshing}>{refreshing ? "Reading…" : "Refresh"}</button></div></header>
     <CgTabs route={route} onNavigate={onNavigate} />
-    {error ? <CgError error={error} onRetry={() => void load()} /> : !data ? <CgLoading /> : route === "cg-moderation" ? <ModerationQueue data={data} /> : route === "cg-board" ? <BoardDesigner data={data} channelId={activeChannelId} operatorId={operatorId} onRefresh={load} /> : route === "cg-feeds" ? <FeedManager data={data} channelId={activeChannelId} operatorId={operatorId} onRefresh={load} /> : route === "cg-preview" ? <LivePreview data={data} /> : <SettingsHistory data={data} />}
+    {error ? <CgError error={error} onRetry={() => void load()} /> : !data ? <CgLoading /> : route === "cg-moderation" ? <ModerationQueue data={data} channelId={activeChannelId} operatorId={operatorId} onRefresh={load} /> : route === "cg-board" ? <BoardDesigner data={data} channelId={activeChannelId} operatorId={operatorId} onRefresh={load} /> : route === "cg-feeds" ? <FeedManager data={data} channelId={activeChannelId} operatorId={operatorId} onRefresh={load} /> : route === "cg-preview" ? <LivePreview data={data} /> : <SettingsHistory data={data} />}
   </>;
 }
