@@ -5,11 +5,108 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use gst::prelude::*;
 use gstreamer as gst;
 use station_ingest::{
-    IngestOutcome, IngestWorker, WatchFolderMonitor, pending_job, pending_job_with_source,
+    IngestOutcome, IngestWorker, TranscodeOutcome, TranscodeWorker, WatchFolderMonitor,
+    pending_job, pending_job_with_source,
 };
-use station_media_lifecycle::{IngestJobStatus, IngestSourceKind, WatchFolderConfig};
+use station_media_lifecycle::{
+    IngestJobStatus, IngestSourceKind, TranscodeJobStatus, WatchFolderConfig,
+};
 use station_schedule::AssetReadiness;
 use station_storage::StationStore;
+
+#[test]
+fn publishes_only_a_verified_canonical_derivative_after_durable_handoff() {
+    let root = test_root();
+    let database = root.join("station.db");
+    let library = root.join("media");
+    let source = root.join("meeting.ts");
+    fs::create_dir_all(&root).unwrap();
+    generate_fixture(&source);
+    let ingest_job_id = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+    StationStore::open(&database)
+        .unwrap()
+        .create_ingest_job(&pending_job(
+            ingest_job_id.into(),
+            source.to_string_lossy().into_owned(),
+            1,
+        ))
+        .unwrap();
+
+    let handed_off = IngestWorker::new(&database, &library)
+        .run_once()
+        .unwrap()
+        .unwrap();
+    let (transcode_job_id, source_asset_id) = match handed_off {
+        IngestOutcome::AwaitingTranscode {
+            job_id,
+            transcode_job_id,
+            source_asset_id,
+        } => {
+            assert_eq!(job_id, ingest_job_id);
+            (transcode_job_id, source_asset_id)
+        }
+        other => panic!("ingest did not hand off to transcode: {other:?}"),
+    };
+    let store = StationStore::open(&database).unwrap();
+    assert!(store.list_media_assets().unwrap().is_empty());
+    assert_eq!(
+        store
+            .read_ingest_job(ingest_job_id)
+            .unwrap()
+            .unwrap()
+            .status,
+        IngestJobStatus::AwaitingTranscode
+    );
+    assert_eq!(
+        store
+            .read_transcode_job(&transcode_job_id)
+            .unwrap()
+            .unwrap()
+            .status,
+        TranscodeJobStatus::Pending
+    );
+    drop(store);
+
+    let completed = TranscodeWorker::new(&database, &library)
+        .run_once()
+        .unwrap()
+        .unwrap();
+    let output_asset_id = match completed {
+        TranscodeOutcome::Completed {
+            job_id,
+            ingest_job_id: completed_ingest_id,
+            asset_id,
+        } => {
+            assert_eq!(job_id, transcode_job_id);
+            assert_eq!(completed_ingest_id, ingest_job_id);
+            asset_id
+        }
+        other => panic!("canonical transcode did not complete: {other:?}"),
+    };
+    assert_ne!(source_asset_id, output_asset_id);
+    let store = StationStore::open(&database).unwrap();
+    let output = store.read_media_asset(&output_asset_id).unwrap().unwrap();
+    assert_eq!(output.readiness, AssetReadiness::Ready);
+    assert_eq!(
+        store
+            .read_asset_loudness(&output_asset_id)
+            .unwrap()
+            .unwrap()
+            .status,
+        station_media_lifecycle::LoudnessGateStatus::Ok
+    );
+    assert!(store.read_media_asset(&source_asset_id).unwrap().is_none());
+    assert_eq!(
+        store
+            .read_ingest_job(ingest_job_id)
+            .unwrap()
+            .unwrap()
+            .asset_id,
+        Some(output_asset_id)
+    );
+    drop(store);
+    remove_directory(&root);
+}
 
 #[test]
 fn completes_real_media_fails_invalid_media_and_recovers_an_interrupted_job() {
@@ -39,13 +136,24 @@ fn completes_real_media_fails_invalid_media_and_recovers_an_interrupted_job() {
     drop(store);
 
     let worker = IngestWorker::new(&database, &library);
-    let completed = worker.run_once().unwrap().unwrap();
-    let asset_id = match completed {
-        IngestOutcome::Completed { job_id, asset_id } => {
+    let transcode_worker = TranscodeWorker::new(&database, &library);
+    let handed_off = worker.run_once().unwrap().unwrap();
+    match handed_off {
+        IngestOutcome::AwaitingTranscode { job_id, .. } => {
             assert_eq!(job_id, "11111111-2222-4333-8444-555555555555");
+        }
+        other => panic!("valid media did not reach transcode: {other:?}"),
+    }
+    let asset_id = match transcode_worker.run_once().unwrap().unwrap() {
+        TranscodeOutcome::Completed {
+            ingest_job_id,
+            asset_id,
+            ..
+        } => {
+            assert_eq!(ingest_job_id, "11111111-2222-4333-8444-555555555555");
             asset_id
         }
-        other => panic!("valid media did not complete: {other:?}"),
+        other => panic!("valid media did not complete canonical transcode: {other:?}"),
     };
     let store = StationStore::open(&database).unwrap();
     let completed_job = store
@@ -107,8 +215,13 @@ fn completes_real_media_fails_invalid_media_and_recovers_an_interrupted_job() {
     assert_eq!(worker.recover_interrupted().unwrap(), 1);
     assert!(matches!(
         worker.run_once().unwrap(),
-        Some(IngestOutcome::Completed { ref job_id, .. })
+        Some(IngestOutcome::AwaitingTranscode { ref job_id, .. })
             if job_id == "33333333-4444-4555-8666-777777777777"
+    ));
+    assert!(matches!(
+        transcode_worker.run_once().unwrap(),
+        Some(TranscodeOutcome::Completed { ref ingest_job_id, .. })
+            if ingest_job_id == "33333333-4444-4555-8666-777777777777"
     ));
     let recovered = StationStore::open(&database)
         .unwrap()
@@ -196,7 +309,11 @@ fn waits_for_a_stable_watch_file_queues_it_once_and_surfaces_an_offline_share() 
     assert!(after_restart.queued_job_ids.is_empty());
     assert!(matches!(
         IngestWorker::new(&database, &library).run_once().unwrap(),
-        Some(IngestOutcome::Completed { job_id: ref completed, .. }) if completed == job_id
+        Some(IngestOutcome::AwaitingTranscode { job_id: ref completed, .. }) if completed == job_id
+    ));
+    assert!(matches!(
+        TranscodeWorker::new(&database, &library).run_once().unwrap(),
+        Some(TranscodeOutcome::Completed { ingest_job_id: ref completed, .. }) if completed == job_id
     ));
     assert_eq!(
         StationStore::open(&database)

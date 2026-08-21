@@ -7,18 +7,20 @@ use std::sync::{
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use sha2::{Digest, Sha256};
-use station_media_assets::{AssetError, ingest_media, measure_loudness};
+use station_media_assets::{AssetError, ingest_media, measure_loudness, transcode_playout_asset};
 use station_media_lifecycle::{
-    AssetLoudnessAnalysis, IngestSourceKind, LoudnessGateStatus, MediaIngestJob, WatchFolderConfig,
+    AssetLoudnessAnalysis, IngestSourceKind, LoudnessGateStatus, MediaIngestJob, TranscodeFormat,
+    TranscodeJob, TranscodeJobStatus, WatchFolderConfig,
 };
 use station_schedule::{AssetReadiness, MediaAsset};
 use station_storage::StationStore;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IngestOutcome {
-    Completed {
+    AwaitingTranscode {
         job_id: String,
-        asset_id: String,
+        transcode_job_id: String,
+        source_asset_id: String,
     },
     RetryScheduled {
         job_id: String,
@@ -32,12 +34,36 @@ pub enum IngestOutcome {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TranscodeOutcome {
+    Completed {
+        job_id: String,
+        ingest_job_id: String,
+        asset_id: String,
+    },
+    RetryScheduled {
+        job_id: String,
+        next_attempt_at_unix_ms: i64,
+        detail: String,
+    },
+    Failed {
+        job_id: String,
+        ingest_job_id: String,
+        detail: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IngestWorkerError {
     Storage(String),
     Clock(String),
 }
 
 pub struct IngestWorker {
+    database_path: PathBuf,
+    source_library: PathBuf,
+}
+
+pub struct TranscodeWorker {
     database_path: PathBuf,
     media_library: PathBuf,
 }
@@ -54,9 +80,14 @@ pub struct WatchScanOutcome {
 
 impl IngestWorker {
     pub fn new(database_path: impl Into<PathBuf>, media_library: impl Into<PathBuf>) -> Self {
+        let media_library = media_library.into();
+        let source_library = media_library
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join("sources");
         Self {
             database_path: database_path.into(),
-            media_library: media_library.into(),
+            source_library,
         }
     }
 
@@ -76,25 +107,38 @@ impl IngestWorker {
             return Ok(None);
         };
         drop(store);
-        let result = ingest_media(&job.source_path, &self.media_library);
+        let result = ingest_media(&job.source_path, &self.source_library);
         let completed_at = system_time_millis()?;
         match result {
             Ok(ingested) => {
-                let asset = MediaAsset {
-                    asset_id: ingested.asset_id.clone(),
-                    media_path: ingested.stored_path.to_string_lossy().into_owned(),
-                    duration_ms: (ingested.metadata.duration_ns / 1_000_000).max(1),
-                    readiness: AssetReadiness::Ready,
+                let transcode_job_id = deterministic_transcode_job_id(
+                    &job.job_id,
+                    &ingested.asset_id,
+                    &ingested.stored_path,
+                );
+                let transcode_job = TranscodeJob {
+                    job_id: transcode_job_id.clone(),
+                    ingest_job_id: job.job_id.clone(),
+                    source_asset_id: ingested.asset_id.clone(),
+                    source_path: ingested.stored_path.to_string_lossy().into_owned(),
+                    output_format: TranscodeFormat::H264_720p4mbpsAac192kTs,
+                    status: TranscodeJobStatus::Pending,
+                    progress_percent: 0,
+                    created_at_unix_ms: completed_at,
+                    started_at_unix_ms: None,
+                    completed_at_unix_ms: None,
+                    output_asset_id: None,
+                    error_detail: None,
+                    attempts: 0,
+                    next_attempt_at_unix_ms: None,
                 };
-                let loudness = analyze_loudness(&asset);
                 StationStore::open(&self.database_path)
-                    .and_then(|store| {
-                        store.complete_ingest_job(&job.job_id, &asset, &loudness, completed_at)
-                    })
+                    .and_then(|store| store.handoff_ingest_to_transcode(&transcode_job))
                     .map_err(IngestWorkerError::Storage)?;
-                Ok(Some(IngestOutcome::Completed {
+                Ok(Some(IngestOutcome::AwaitingTranscode {
                     job_id: job.job_id,
-                    asset_id: ingested.asset_id,
+                    transcode_job_id,
+                    source_asset_id: ingested.asset_id,
                 }))
             }
             Err(error) => {
@@ -125,6 +169,108 @@ impl IngestWorker {
                 }))
             }
         }
+    }
+}
+
+impl TranscodeWorker {
+    pub fn new(database_path: impl Into<PathBuf>, media_library: impl Into<PathBuf>) -> Self {
+        Self {
+            database_path: database_path.into(),
+            media_library: media_library.into(),
+        }
+    }
+
+    pub fn recover_interrupted(&self) -> Result<u64, IngestWorkerError> {
+        StationStore::open(&self.database_path)
+            .and_then(|store| store.recover_interrupted_transcode_jobs())
+            .map_err(IngestWorkerError::Storage)
+    }
+
+    pub fn run_once(&self) -> Result<Option<TranscodeOutcome>, IngestWorkerError> {
+        let started_at = system_time_millis()?;
+        let store = StationStore::open(&self.database_path).map_err(IngestWorkerError::Storage)?;
+        let Some(job) = store
+            .claim_next_transcode_job(started_at)
+            .map_err(IngestWorkerError::Storage)?
+        else {
+            return Ok(None);
+        };
+        drop(store);
+        let result = transcode_playout_asset(&job.source_path, &self.media_library);
+        let completed_at = system_time_millis()?;
+        match result {
+            Ok(transcoded) => {
+                let asset = MediaAsset {
+                    asset_id: transcoded.asset_id.clone(),
+                    media_path: transcoded.stored_path.to_string_lossy().into_owned(),
+                    duration_ms: (transcoded.metadata.duration_ns / 1_000_000).max(1),
+                    readiness: AssetReadiness::Ready,
+                };
+                let loudness = analyze_loudness(&asset);
+                if loudness.status != LoudnessGateStatus::Ok {
+                    let detail = loudness.detail.clone().unwrap_or_else(|| {
+                        "Canonical output did not pass loudness verification.".into()
+                    });
+                    return self.record_failure(job, completed_at, detail);
+                }
+                StationStore::open(&self.database_path)
+                    .and_then(|store| {
+                        store.complete_transcode_and_ingest(
+                            &job.job_id,
+                            &asset,
+                            &loudness,
+                            completed_at,
+                        )
+                    })
+                    .map_err(IngestWorkerError::Storage)?;
+                Ok(Some(TranscodeOutcome::Completed {
+                    job_id: job.job_id,
+                    ingest_job_id: job.ingest_job_id,
+                    asset_id: transcoded.asset_id,
+                }))
+            }
+            Err(error) => self.record_failure(job, completed_at, operator_error(&error)),
+        }
+    }
+
+    fn record_failure(
+        &self,
+        job: TranscodeJob,
+        completed_at_unix_ms: i64,
+        detail: String,
+    ) -> Result<Option<TranscodeOutcome>, IngestWorkerError> {
+        if job.attempts < 3 {
+            let next_attempt_at_unix_ms =
+                completed_at_unix_ms.saturating_add(retry_delay(job.attempts));
+            StationStore::open(&self.database_path)
+                .and_then(|store| {
+                    store.retry_transcode_job(
+                        &job.job_id,
+                        next_attempt_at_unix_ms,
+                        &bounded_detail(&detail),
+                    )
+                })
+                .map_err(IngestWorkerError::Storage)?;
+            return Ok(Some(TranscodeOutcome::RetryScheduled {
+                job_id: job.job_id,
+                next_attempt_at_unix_ms,
+                detail,
+            }));
+        }
+        StationStore::open(&self.database_path)
+            .and_then(|store| {
+                store.fail_transcode_and_ingest(
+                    &job.job_id,
+                    completed_at_unix_ms,
+                    &bounded_detail(&detail),
+                )
+            })
+            .map_err(IngestWorkerError::Storage)?;
+        Ok(Some(TranscodeOutcome::Failed {
+            job_id: job.job_id,
+            ingest_job_id: job.ingest_job_id,
+            detail,
+        }))
     }
 }
 
@@ -246,8 +392,10 @@ pub fn run_until(
     stop: Arc<AtomicBool>,
 ) -> Result<(), IngestWorkerError> {
     let worker = IngestWorker::new(database_path, media_library);
+    let transcode_worker = TranscodeWorker::new(database_path, media_library);
     let watch_folders = WatchFolderMonitor::new(database_path);
     worker.recover_interrupted()?;
+    transcode_worker.recover_interrupted()?;
     let mut next_watch_scan = Instant::now();
     while !stop.load(Ordering::Acquire) {
         if Instant::now() >= next_watch_scan {
@@ -256,7 +404,9 @@ pub fn run_until(
                 .map_err(IngestWorkerError::Storage)?;
             next_watch_scan = Instant::now() + Duration::from_secs(5);
         }
-        if worker.run_once()?.is_none() {
+        let ingest_idle = worker.run_once()?.is_none();
+        let transcode_idle = transcode_worker.run_once()?.is_none();
+        if ingest_idle && transcode_idle {
             std::thread::sleep(Duration::from_millis(100));
         }
     }
@@ -404,6 +554,47 @@ fn deterministic_watch_job_id(
         source_path.as_bytes(),
         &size_bytes.to_le_bytes(),
         &modified_at_unix_ms.to_le_bytes(),
+    ] {
+        digest.update((value.len() as u64).to_le_bytes());
+        digest.update(value);
+    }
+    let mut bytes: [u8; 16] = digest.finalize()[..16]
+        .try_into()
+        .expect("a SHA-256 digest contains sixteen bytes");
+    bytes[6] = (bytes[6] & 0x0f) | 0x50;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    format!(
+        "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+        bytes[0],
+        bytes[1],
+        bytes[2],
+        bytes[3],
+        bytes[4],
+        bytes[5],
+        bytes[6],
+        bytes[7],
+        bytes[8],
+        bytes[9],
+        bytes[10],
+        bytes[11],
+        bytes[12],
+        bytes[13],
+        bytes[14],
+        bytes[15]
+    )
+}
+
+fn deterministic_transcode_job_id(
+    ingest_job_id: &str,
+    source_asset_id: &str,
+    source_path: &Path,
+) -> String {
+    let mut digest = Sha256::new();
+    let source_path = source_path.to_string_lossy();
+    for value in [
+        ingest_job_id.as_bytes(),
+        source_asset_id.as_bytes(),
+        source_path.as_bytes(),
     ] {
         digest.update((value.len() as u64).to_le_bytes());
         digest.update(value);

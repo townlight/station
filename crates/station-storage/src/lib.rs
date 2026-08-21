@@ -779,8 +779,13 @@ impl StationStore {
     ) -> Result<(), String> {
         output.validate().map_err(|error| format!("{error:?}"))?;
         loudness.validate().map_err(|error| format!("{error:?}"))?;
-        if output.readiness != AssetReadiness::Ready || loudness.asset_id != output.asset_id {
-            return Err("transcode output and loudness identities must match and be ready".into());
+        if output.readiness != AssetReadiness::Ready
+            || loudness.asset_id != output.asset_id
+            || loudness.status != LoudnessGateStatus::Ok
+        {
+            return Err(
+                "transcode output and passing loudness identities must match and be ready".into(),
+            );
         }
         self.execute("BEGIN IMMEDIATE")?;
         let outcome = (|| {
@@ -802,6 +807,38 @@ impl StationStore {
             let ingest_job_id = c_string(&job.ingest_job_id, "transcode ingest identity")?;
             bind_i64(self.database, statement.raw, 1, completed_at_unix_ms)?;
             bind_text(self.database, statement.raw, 2, &output_asset_id)?;
+            bind_text(self.database, statement.raw, 3, &ingest_job_id)?;
+            expect_done(self.database, statement.raw)?;
+            if self.changes() == 1 {
+                Ok(())
+            } else {
+                Err("ingest job is not awaiting this transcode".into())
+            }
+        })();
+        self.finish_transaction(outcome)
+    }
+
+    pub fn fail_transcode_and_ingest(
+        &self,
+        transcode_job_id: &str,
+        completed_at_unix_ms: i64,
+        error_detail: &str,
+    ) -> Result<(), String> {
+        self.execute("BEGIN IMMEDIATE")?;
+        let outcome = (|| {
+            let job = self
+                .read_transcode_job(transcode_job_id)?
+                .ok_or_else(|| "transcode job does not exist".to_string())?;
+            self.fail_transcode_job(transcode_job_id, completed_at_unix_ms, error_detail)?;
+            let statement = self.prepare(
+                "UPDATE media_ingest_jobs SET status='failed', completed_at_unix_ms=?1, \
+                 error_detail=?2, asset_id='', next_attempt_at_unix_ms=-1 \
+                 WHERE job_id=?3 AND status='awaiting_transcode' AND started_at_unix_ms<=?1",
+            )?;
+            let detail = c_string(error_detail, "transcode error detail")?;
+            let ingest_job_id = c_string(&job.ingest_job_id, "transcode ingest identity")?;
+            bind_i64(self.database, statement.raw, 1, completed_at_unix_ms)?;
+            bind_text(self.database, statement.raw, 2, &detail)?;
             bind_text(self.database, statement.raw, 3, &ingest_job_id)?;
             expect_done(self.database, statement.raw)?;
             if self.changes() == 1 {

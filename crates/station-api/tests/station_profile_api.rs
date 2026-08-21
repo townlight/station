@@ -13,7 +13,7 @@ use gst::prelude::*;
 use gstreamer as gst;
 use station_api::{Api, serve_one, serve_until};
 use station_domain::StationProfile;
-use station_ingest::{IngestOutcome, IngestWorker};
+use station_ingest::{IngestOutcome, IngestWorker, TranscodeOutcome, TranscodeWorker};
 use station_media_lifecycle::WatchFolderConfig;
 use station_schedule::{
     AssetReadiness, ChannelConfiguration, CommitPlan, CommitReport, DispatchStatus, MediaAsset,
@@ -238,9 +238,14 @@ fn admits_real_media_into_the_managed_library_and_refuses_declared_readiness() {
         .run_once()
         .unwrap()
         .unwrap();
-    let asset_id = match outcome {
-        IngestOutcome::Completed { asset_id, .. } => asset_id,
-        other => panic!("real media did not complete: {other:?}"),
+    assert!(matches!(outcome, IngestOutcome::AwaitingTranscode { .. }));
+    let asset_id = match TranscodeWorker::new(&database, &library)
+        .run_once()
+        .unwrap()
+        .unwrap()
+    {
+        TranscodeOutcome::Completed { asset_id, .. } => asset_id,
+        other => panic!("real media did not complete canonical transcode: {other:?}"),
     };
     let completed = api.handle(
         "GET",
@@ -259,7 +264,7 @@ fn admits_real_media_into_the_managed_library_and_refuses_declared_readiness() {
     let readiness = api.handle("GET", &format!("/api/v1/assets/{asset_id}/readiness"), None);
     assert_eq!(readiness.status, 200);
     let readiness: serde_json::Value = serde_json::from_slice(&readiness.body).unwrap();
-    assert_eq!(readiness["loudness_status"], "failed");
+    assert_eq!(readiness["loudness_status"], "ok");
     assert!(readiness["measured_lufs"].as_f64().is_some());
     assert_eq!(readiness["target_lufs"], -24.0);
 
