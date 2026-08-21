@@ -11,4 +11,8 @@
 
 ## Boundary
 
-This is source-level contract, persistence, API, migration, and production-UI evidence. It does not claim the rule/re-alert slice is installed until an exact candidate upgrades the existing station database and an installed LocalSystem failure exercise crosses a shortened re-alert window.
+Candidate commit `1c77c98f9436d4097af4e2d6017259e12c27dfae` produced installer SHA-256 `D16169C343F3520F902C1EBF7344941960016531BA0F49C8EB86124122FF0BC0`. Installed verification matched that source receipt and both binary hashes, reported the automatic LocalSystem service and database ready, and loaded every required media factory. The existing station database upgraded in place, exposed all 14 seeded rules, and retained its prior alert/delivery history.
+
+The installed fault harness shortened only `encoder-death` and `off-air` to a one-second re-alert window, routed them to one temporary signed loopback webhook, enabled one isolated output, and used an elevated helper that verified the exact installed executable path and channel command line before repeatedly terminating only that worker for eight seconds. The installed LocalSystem service emitted five correctly signed notifications spanning `firing`, two distinct durable `realert` rows, and `resolved` across both conditions. Automatic worker recovery resolved every proof event. Cleanup restored both rules to their 3600-second defaults, disabled the proof output and destination, left zero proof events firing, and `/health` remained ready.
+
+This proves the rule/re-alert slice on the installed candidate and migrated operating database. It does not claim a credentialed external-provider round trip, human receipt, resource sampling, scheduled self-tests, or update alerting.
