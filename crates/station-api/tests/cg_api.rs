@@ -452,6 +452,43 @@ fn manages_cg_authority_through_the_operator_api() {
 }
 
 #[test]
+fn manages_cg_images_through_raw_upload_and_list_routes() {
+    let database = database_path("cg-image-api");
+    let api = Api::open(&database).unwrap();
+    let png: &[u8] = &[
+        137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 1, 0, 0, 0, 1, 8, 6,
+        0, 0, 0, 31, 21, 196, 137, 0, 0, 0, 13, 73, 68, 65, 84, 120, 156, 99, 248, 207, 192, 240,
+        31, 0, 5, 0, 1, 255, 137, 153, 61, 29, 0, 0, 0, 0, 73, 69, 78, 68, 174, 66, 96, 130,
+    ];
+    let uploaded = api.handle("POST", "/api/v1/cg/images", Some(png));
+    assert_eq!(uploaded.status, 200, "{}", body_text(&uploaded.body));
+    let asset: station_cg::CgImageAsset = serde_json::from_slice(&uploaded.body).unwrap();
+    assert_eq!(asset.mime_type, "image/png");
+    assert_eq!(asset.width, 1);
+    assert_eq!(asset.height, 1);
+    let duplicate = api.handle("POST", "/api/v1/cg/images", Some(png));
+    assert_eq!(duplicate.status, 200);
+    assert_eq!(duplicate.body, uploaded.body);
+    let listed = api.handle("GET", "/api/v1/cg/images", None);
+    assert_eq!(listed.status, 200);
+    let images: Vec<station_cg::CgImageAsset> = serde_json::from_slice(&listed.body).unwrap();
+    assert_eq!(images, vec![asset]);
+    assert_eq!(
+        api.handle("POST", "/api/v1/cg/images", Some(b"not-an-image"))
+            .status,
+        400
+    );
+    let oversized = vec![0_u8; 8 * 1024 * 1024 + 1];
+    assert_eq!(
+        api.handle("POST", "/api/v1/cg/images", Some(&oversized))
+            .status,
+        413
+    );
+    assert_eq!(api.handle("POST", "/api/v1/cg/images", None).status, 400);
+    remove_database(&database);
+}
+
+#[test]
 fn expires_due_bulletins_through_idempotent_local_command() {
     let database = database_path("cg-expiration-api");
     put_channel(&database);

@@ -5018,6 +5018,18 @@ impl StationStore {
         }
     }
 
+    /// List the managed CG image library with current filesystem readiness rather than trusting
+    /// the last database state. This is the operator-facing view; snapshot loading remains scoped
+    /// to only the identities referenced by the active board.
+    pub fn list_verified_cg_image_assets(&self) -> Result<Vec<CgImageAsset>, String> {
+        self.list_cg_image_assets().map(|assets| {
+            assets
+                .into_iter()
+                .map(|asset| self.verify_cg_image_asset(asset))
+                .collect()
+        })
+    }
+
     pub fn list_media_assets(&self) -> Result<Vec<MediaAsset>, String> {
         let statement = self.prepare(
             "SELECT asset_id, media_path, duration_ms, readiness FROM media_assets ORDER BY asset_id",

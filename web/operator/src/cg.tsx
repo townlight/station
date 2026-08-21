@@ -43,6 +43,15 @@ export interface CgZone {
 }
 
 export type CgScheduleDisplayMode = "next_three" | "coming_up_next" | "just_watched";
+export type CgImageReadiness = "ready" | "missing" | "rejected" | "processing";
+export interface CgImageAsset {
+  asset_id: string;
+  mime_type: string;
+  byte_size: number;
+  width: number;
+  height: number;
+  readiness: CgImageReadiness;
+}
 export type CgContentSource =
   | { kind: "manual"; text: string }
   | { kind: "bulletin_rotation" }
@@ -199,6 +208,7 @@ export interface CgData {
   feedItems: CgFeedItemsRead;
   bulletins: CgBulletin[];
   audit: CgAuditEvent[];
+  imageAssets: CgImageAsset[];
 }
 
 export interface CgChannelOption {
@@ -226,6 +236,24 @@ async function cgRequest<T>(path: string, init?: RequestInit): Promise<T> {
   return body as T;
 }
 
+async function cgUploadImage(file: File): Promise<CgImageAsset> {
+  const response = await fetch("/api/v1/cg/images", {
+    method: "POST",
+    headers: { "Content-Type": file.type },
+    body: file,
+  });
+  const body = await response.json().catch(() => null) as { message?: string; error?: { message?: string } } | CgImageAsset | null;
+  if (!response.ok) {
+    const message = body && typeof body === "object" && "message" in body
+      ? String(body.message)
+      : body && typeof body === "object" && "error" in body && body.error && typeof body.error === "object" && "message" in body.error
+        ? String(body.error.message)
+        : `CG image upload failed with HTTP ${response.status}.`;
+    throw new CgApiError(response.status, message);
+  }
+  return body as CgImageAsset;
+}
+
 export const cgApi = {
   templates: () => cgRequest<CgTemplate[]>("/api/v1/cg/templates"),
   board: (channelId: string) => cgRequest<CgBoard>(`/api/v1/cg/board?channel_id=${encodeURIComponent(channelId)}`),
@@ -235,6 +263,8 @@ export const cgApi = {
   preview: (channelId: string, atUnixMs: number) => cgRequest<CgResolvedSnapshot>(`/api/v1/cg/preview?channel_id=${encodeURIComponent(channelId)}&at_unix_ms=${atUnixMs}`),
   bulletins: (channelId: string) => cgRequest<CgBulletin[]>(`/api/v1/cg/bulletins?channel_id=${encodeURIComponent(channelId)}`),
   audit: (channelId: string) => cgRequest<CgAuditEvent[]>(`/api/v1/cg/audit?channel_id=${encodeURIComponent(channelId)}&limit=50`),
+  imageAssets: () => cgRequest<CgImageAsset[]>("/api/v1/cg/images"),
+  uploadImage: cgUploadImage,
   writeBoard: (body: { board: CgBoard; expected_revision: number; audit: CgAuditEvent }) => cgRequest<CgBoard>("/api/v1/cg/board", { method: "PUT", body: JSON.stringify(body) }),
   writeZone: (body: { zone: CgZone; expected_revision: number; audit: CgAuditEvent }) => cgRequest<CgZone>("/api/v1/cg/zones", { method: "PUT", body: JSON.stringify(body) }),
   deleteZone: (zoneId: string, body: { expected_revision: number; audit: CgAuditEvent }) => cgRequest<void>(`/api/v1/cg/zones/${encodeURIComponent(zoneId)}`, { method: "DELETE", body: JSON.stringify(body) }),
@@ -287,6 +317,38 @@ const CG_SCHEDULE_MODES: Array<{ value: CgScheduleDisplayMode; label: string }> 
 
 const DEFAULT_CLOCK_FORMAT = "%H:%M";
 const SAFE_STRFTIME_DIRECTIVES = new Set("aAbBcCdDeFgGhHIjkmMpPrRsSuUVwWxXyYzZ%".split(""));
+
+const MAX_CG_IMAGE_BYTES = 8 * 1024 * 1024;
+const MAX_CG_IMAGE_DIMENSION = 4_096;
+
+function isSupportedImageMime(value: string): boolean {
+  return value === "image/png" || value === "image/jpeg";
+}
+
+function isUsableCgImageAsset(asset: CgImageAsset): boolean {
+  return asset.readiness === "ready"
+    && isSupportedImageMime(asset.mime_type)
+    && Number.isInteger(asset.byte_size)
+    && asset.byte_size > 0
+    && asset.byte_size <= MAX_CG_IMAGE_BYTES
+    && Number.isInteger(asset.width)
+    && Number.isInteger(asset.height)
+    && asset.width > 0
+    && asset.height > 0
+    && asset.width <= MAX_CG_IMAGE_DIMENSION
+    && asset.height <= MAX_CG_IMAGE_DIMENSION;
+}
+
+function formatCgImageBytes(value: number): string {
+  if (!Number.isFinite(value) || value < 0) return "unknown size";
+  if (value < 1024) return `${value} B`;
+  if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB`;
+  return `${(value / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function formatCgImageAsset(asset: CgImageAsset): string {
+  return `${asset.mime_type.replace("image/", "").toUpperCase()} · ${asset.width}×${asset.height} · ${formatCgImageBytes(asset.byte_size)} · ${displayKind(asset.readiness)}`;
+}
 
 function isCanonicalUuid(value: string): boolean {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(value);
@@ -612,6 +674,7 @@ function BoardDesigner({ data, channelId, operatorId, onRefresh }: { data: CgDat
   const [rotationSeconds, setRotationSeconds] = useState("");
   const [approvalRequired, setApprovalRequired] = useState(false);
   const [editingZoneId, setEditingZoneId] = useState<string | null>(null);
+  const [uploadingImage, setUploadingImage] = useState(false);
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
@@ -619,6 +682,7 @@ function BoardDesigner({ data, channelId, operatorId, onRefresh }: { data: CgDat
   const usedZoneKeys = new Set(data.zones.map((zone) => zone.template_zone_key));
   const availableZoneKeys = selectedTemplate?.zones.filter((item) => !usedZoneKeys.has(item.template_zone_key)) ?? [];
   const editableZoneOptions = editingZoneId ? selectedTemplate?.zones.filter((item) => item.template_zone_key === zoneKey) ?? [] : availableZoneKeys;
+  const selectedImageAsset = data.imageAssets.find((asset) => asset.asset_id === imageAssetId);
 
   const sourceUsesApproval = sourceKind === "feed" || sourceKind === "bulletin_rotation";
 
@@ -667,6 +731,31 @@ function BoardDesigner({ data, channelId, operatorId, onRefresh }: { data: CgDat
     clearResult();
   }
 
+  async function uploadImage(file: File | undefined) {
+    if (!file) return;
+    clearResult();
+    if (!isSupportedImageMime(file.type)) {
+      setError("Choose a PNG or JPEG image. The file MIME type must be image/png or image/jpeg.");
+      return;
+    }
+    if (file.size < 1 || file.size > MAX_CG_IMAGE_BYTES) {
+      setError("Choose an image between 1 byte and 8 MiB.");
+      return;
+    }
+    setUploadingImage(true);
+    try {
+      const asset = await cgApi.uploadImage(file);
+      setSourceKind("image");
+      setImageAssetId(asset.asset_id);
+      await onRefresh();
+      setMessage(`Image uploaded: ${formatCgImageAsset(asset)}. It is selected for this zone; save the zone to bind it.`);
+    } catch (problem) {
+      setError(problem instanceof Error ? problem.message : "The image could not be uploaded.");
+    } finally {
+      setUploadingImage(false);
+    }
+  }
+
   async function saveBoard() {
     clearResult();
     if (!operatorId.trim()) {
@@ -711,6 +800,10 @@ function BoardDesigner({ data, channelId, operatorId, onRefresh }: { data: CgDat
     }
     if (sourceKind === "feed" && !data.feeds.some((feed) => feed.feed_source_id === feedSourceId)) {
       setError("Choose a feed source configured for this channel.");
+      return;
+    }
+    if (sourceKind === "image" && (!selectedImageAsset || !isUsableCgImageAsset(selectedImageAsset))) {
+      setError("Choose a ready PNG or JPEG from the managed image library before saving this zone.");
       return;
     }
     const parsedTags = parseZoneTags(zoneTags);
@@ -779,7 +872,7 @@ function BoardDesigner({ data, channelId, operatorId, onRefresh }: { data: CgDat
 
   return <>
     <section className="panel"><div className="panel-head"><div><p className="eyebrow">Board configuration</p><h2>Layout designer</h2></div><span className={`cg-state-pill ${data.board?.active ? "cg-state-accepted" : "cg-state-declined"}`}>{data.board ? (data.board.active ? "active" : "inactive") : "not configured"}</span></div><div className="cg-editor-grid"><label>Built-in template<select value={templateId} onChange={(event) => setTemplateId(event.target.value)}>{data.templates.map((item) => <option key={item.template_id} value={item.template_id}>{item.display_name}</option>)}</select></label><label className="cg-checkbox"><input type="checkbox" checked={active} onChange={(event) => setActive(event.target.checked)} />Board active</label></div><p className="cg-form-help">Writes use the current revision and append a {data.board ? "board-updated" : "board-created"} audit event. The operator name below is session-local and is not authentication.</p><button className="primary" disabled={busy !== null || !operatorId.trim() || !templateId} onClick={() => void saveBoard()}>{busy === "board" ? "Saving board…" : data.board ? "Save board" : "Create board"}</button><MutationResult error={error} message={message} />{!data.board && <CgEmpty title="No CG board configured" detail="Create a board from one of the six built-in templates to unlock zones." />}{data.board && <><div className="cg-board-meta"><div><span>Template</span><strong>{template?.display_name ?? data.board.template_id}</strong><small>{data.board.template_id} · revision {data.board.revision}</small></div><div><span>Created by</span><strong>{data.board.created_by}</strong><small>Updated {formatCgTime(data.board.updated_at_unix_ms)}</small></div></div><div className="cg-zone-list">{data.zones.length ? data.zones.map((zone) => <article className="cg-zone-row" key={zone.zone_id}><div className="cg-zone-index">{zone.template_zone_key.slice(0, 2).toUpperCase()}</div><div><strong>{displayKind(zone.template_zone_key)}</strong><small>{displayKind(zone.zone_kind)} · {displayKind(zone.content_source.kind)}{zone.approval_required ? " · approval gate" : ""}</small>{zone.allowed_tags.length > 0 && <small>Tags: {zone.allowed_tags.join(", ")}</small>}</div><span className="cg-zone-dim"><button className="text-button" onClick={() => editZone(zone)}>Edit</button><button className="text-button danger-text" disabled={busy === zone.zone_id || !operatorId.trim()} onClick={() => void removeZone(zone)}>{busy === zone.zone_id ? "Deleting…" : "Delete"}</button></span></article>) : <CgEmpty title="No zones configured" detail="Add the first source binding below." />}</div></>}</section>
-    {data.board && <section className="panel"><div className="panel-head"><div><p className="eyebrow">Zone source binding</p><h2>{editingZoneId ? "Edit zone source" : "Add a zone source"}</h2></div><span className="count">{availableZoneKeys.length}</span></div><MutationNotice>All source kinds are stored as typed bindings. Feed and bulletin tags filter content; readiness, network fetching, schedule data, emergency state, image assets, and live sources are resolved elsewhere and remain visibly unresolved until proven.</MutationNotice><div className="cg-editor-grid"><label>Template zone<select value={zoneKey} disabled={Boolean(editingZoneId)} onChange={(event) => setZoneKey(event.target.value)}><option value="">Choose a built-in zone key</option>{editableZoneOptions.map((item) => <option key={item.template_zone_key} value={item.template_zone_key}>{item.template_zone_key} · {displayKind(item.zone_kind)}</option>)}</select></label><label>Content source<select value={sourceKind} onChange={(event) => { const next = event.target.value as CgContentSource["kind"]; setSourceKind(next); if (next !== "feed" && next !== "bulletin_rotation") setApprovalRequired(false); }}>{CG_SOURCE_KINDS.map((item) => <option key={item.kind} value={item.kind}>{item.label}</option>)}</select></label>{sourceKind === "manual" && <label>Manual text<textarea value={manualText} maxLength={2000} onChange={(event) => setManualText(event.target.value)} placeholder="Text shown in this zone" /></label>}{sourceKind === "clock" && <label>Clock format<input maxLength={80} value={clockFormat} onChange={(event) => setClockFormat(event.target.value)} placeholder={DEFAULT_CLOCK_FORMAT} /><span className="cg-form-help">Uses strftime syntax, for example %H:%M or %I:%M %p. The renderer supplies the actual time.</span></label>}{sourceKind === "feed" && <label>Feed source<select value={feedSourceId} onChange={(event) => setFeedSourceId(event.target.value)}><option value="">Choose a configured feed</option>{data.feeds.map((feed) => <option key={feed.feed_source_id} value={feed.feed_source_id}>{feed.label} · {feed.feed_source_id}</option>)}</select>{data.feeds.length === 0 && <span className="cg-form-help">No configured feeds are available. Register one in Feed manager first.</span>}</label>}{sourceKind === "schedule" && <label>Schedule field<select value={scheduleMode} onChange={(event) => setScheduleMode(event.target.value as CgScheduleDisplayMode)}>{CG_SCHEDULE_MODES.map((mode) => <option key={mode.value} value={mode.value}>{mode.label}</option>)}</select><span className="cg-form-help">Schedule data is not fabricated in this configuration screen.</span></label>}{sourceKind === "image" && <label>Image asset ID<input value={imageAssetId} onChange={(event) => setImageAssetId(event.target.value)} placeholder="64-character lowercase SHA-256" /><span className="cg-form-help">Readiness is checked by the runtime; this screen does not claim an asset is ready.</span></label>}{sourceKind === "live_video" && <label>Live source ID<input value={liveSourceId} onChange={(event) => setLiveSourceId(event.target.value)} placeholder="00000000-0000-0000-0000-000000000000" /><span className="cg-form-help">Source readiness and on-air output are not claimed here.</span></label>}{(sourceKind === "feed" || sourceKind === "bulletin_rotation") && <label>Allowed tags <span className="cg-form-help">comma-separated slugs; empty means no tag filter</span><input value={zoneTags} onChange={(event) => setZoneTags(event.target.value)} placeholder="public-safety, community" /></label>}<label>Rotation seconds <span className="cg-form-help">optional; 3–3,600</span><input type="number" min={3} max={3600} value={rotationSeconds} onChange={(event) => setRotationSeconds(event.target.value)} placeholder="No rotation" /></label>{sourceUsesApproval && <label className="cg-checkbox"><input type="checkbox" checked={approvalRequired} onChange={(event) => setApprovalRequired(event.target.checked)} />Require approval for this source</label>}</div><div className="button-row"><button className="primary" disabled={busy !== null || !operatorId.trim() || !zoneKey} onClick={() => void saveZone()}>{busy === "zone" ? "Saving zone…" : editingZoneId ? "Save source binding" : "Add source binding"}</button>{editingZoneId && <button className="secondary" onClick={clearZoneForm}>Cancel</button>}</div><MutationResult error={error} message={message} /></section>}
+    {data.board && <section className="panel"><div className="panel-head"><div><p className="eyebrow">Zone source binding</p><h2>{editingZoneId ? "Edit zone source" : "Add a zone source"}</h2></div><span className="count">{availableZoneKeys.length}</span></div><MutationNotice>All source kinds are stored as typed bindings. Feed and bulletin tags filter content; readiness, network fetching, schedule data, emergency state, image assets, and live sources are resolved elsewhere and remain visibly unresolved until proven.</MutationNotice><div className="cg-editor-grid"><label>Template zone<select value={zoneKey} disabled={Boolean(editingZoneId)} onChange={(event) => setZoneKey(event.target.value)}><option value="">Choose a built-in zone key</option>{editableZoneOptions.map((item) => <option key={item.template_zone_key} value={item.template_zone_key}>{item.template_zone_key} · {displayKind(item.zone_kind)}</option>)}</select></label><label>Content source<select value={sourceKind} onChange={(event) => { const next = event.target.value as CgContentSource["kind"]; setSourceKind(next); if (next !== "feed" && next !== "bulletin_rotation") setApprovalRequired(false); }}>{CG_SOURCE_KINDS.map((item) => <option key={item.kind} value={item.kind}>{item.label}</option>)}</select></label>{sourceKind === "manual" && <label>Manual text<textarea value={manualText} maxLength={2000} onChange={(event) => setManualText(event.target.value)} placeholder="Text shown in this zone" /></label>}{sourceKind === "clock" && <label>Clock format<input maxLength={80} value={clockFormat} onChange={(event) => setClockFormat(event.target.value)} placeholder={DEFAULT_CLOCK_FORMAT} /><span className="cg-form-help">Uses strftime syntax, for example %H:%M or %I:%M %p. The renderer supplies the actual time.</span></label>}{sourceKind === "feed" && <label>Feed source<select value={feedSourceId} onChange={(event) => setFeedSourceId(event.target.value)}><option value="">Choose a configured feed</option>{data.feeds.map((feed) => <option key={feed.feed_source_id} value={feed.feed_source_id}>{feed.label} · {feed.feed_source_id}</option>)}</select>{data.feeds.length === 0 && <span className="cg-form-help">No configured feeds are available. Register one in Feed manager first.</span>}</label>}{sourceKind === "schedule" && <label>Schedule field<select value={scheduleMode} onChange={(event) => setScheduleMode(event.target.value as CgScheduleDisplayMode)}>{CG_SCHEDULE_MODES.map((mode) => <option key={mode.value} value={mode.value}>{mode.label}</option>)}</select><span className="cg-form-help">Schedule data is not fabricated in this configuration screen.</span></label>}{sourceKind === "image" && <div className="cg-field"><label htmlFor="cg-image-asset">Managed image asset</label><select id="cg-image-asset" value={imageAssetId} onChange={(event) => setImageAssetId(event.target.value)} aria-describedby="cg-image-asset-help"><option value="">Choose a ready image</option>{imageAssetId && !selectedImageAsset && <option value={imageAssetId} disabled>Configured asset is not in the managed library</option>}{data.imageAssets.map((asset) => <option key={asset.asset_id} value={asset.asset_id} disabled={!isUsableCgImageAsset(asset)}>{asset.asset_id.slice(0, 12)}… · {formatCgImageAsset(asset)}</option>)}</select><span id="cg-image-asset-help" className="cg-form-help">Only ready, bounded PNG/JPEG assets can be saved. Select an existing asset or upload one below.</span>{selectedImageAsset && <span className={`cg-form-help ${isUsableCgImageAsset(selectedImageAsset) ? "" : "danger-text"}`} role={!isUsableCgImageAsset(selectedImageAsset) ? "alert" : undefined}>{isUsableCgImageAsset(selectedImageAsset) ? `Selected: ${formatCgImageAsset(selectedImageAsset)}` : `Selected asset is not ready or has invalid metadata (${displayKind(selectedImageAsset.readiness)}).`}</span>}{data.imageAssets.length === 0 && <span className="cg-form-help">No managed images exist yet.</span>}<label htmlFor="cg-image-upload">Upload PNG or JPEG</label><input id="cg-image-upload" type="file" accept="image/png,image/jpeg" disabled={uploadingImage || busy !== null} onChange={(event) => { void uploadImage(event.target.files?.[0]); event.currentTarget.value = ""; }} />{uploadingImage && <span className="cg-form-help">Uploading and validating image…</span>}</div>}{sourceKind === "live_video" && <label>Live source ID<input value={liveSourceId} onChange={(event) => setLiveSourceId(event.target.value)} placeholder="00000000-0000-0000-0000-000000000000" /><span className="cg-form-help">Source readiness and on-air output are not claimed here.</span></label>}{(sourceKind === "feed" || sourceKind === "bulletin_rotation") && <label>Allowed tags <span className="cg-form-help">comma-separated slugs; empty means no tag filter</span><input value={zoneTags} onChange={(event) => setZoneTags(event.target.value)} placeholder="public-safety, community" /></label>}<label>Rotation seconds <span className="cg-form-help">optional; 3–3,600</span><input type="number" min={3} max={3600} value={rotationSeconds} onChange={(event) => setRotationSeconds(event.target.value)} placeholder="No rotation" /></label>{sourceUsesApproval && <label className="cg-checkbox"><input type="checkbox" checked={approvalRequired} onChange={(event) => setApprovalRequired(event.target.checked)} />Require approval for this source</label>}</div><div className="button-row"><button className="primary" disabled={busy !== null || uploadingImage || !operatorId.trim() || !zoneKey} onClick={() => void saveZone()}>{busy === "zone" ? "Saving zone…" : editingZoneId ? "Save source binding" : "Add source binding"}</button>{editingZoneId && <button className="secondary" onClick={clearZoneForm}>Cancel</button>}</div><MutationResult error={error} message={message} /></section>}
     <section className="panel"><div className="panel-head"><div><p className="eyebrow">Built-in library</p><h2>Templates</h2></div><span className="count">{data.templates.length}</span></div><div className="cg-template-grid">{data.templates.map((item) => <article className={`cg-template-card ${item.template_id === data.board?.template_id ? "selected" : ""}`} key={item.template_id}><div className="cg-template-mini" data-kind={item.kind}><span>{item.zones.length} zones</span></div><strong>{item.display_name}</strong><small>{item.template_id} · {displayKind(item.kind)}</small></article>)}</div></section>
   </>;
 }
@@ -975,12 +1068,13 @@ function SettingsHistory({ data }: { data: CgData }) {
 }
 
 async function loadCgData(channelId: string): Promise<CgData> {
-  const [templates, feeds, feedItems, bulletins, audit] = await Promise.all([
+  const [templates, feeds, feedItems, bulletins, audit, imageAssets] = await Promise.all([
     cgApi.templates(),
     cgApi.feeds(channelId),
     cgApi.feedItems(channelId),
     cgApi.bulletins(channelId),
     cgApi.audit(channelId),
+    cgApi.imageAssets(),
   ]);
   let board: CgBoard | null = null;
   try {
@@ -989,7 +1083,7 @@ async function loadCgData(channelId: string): Promise<CgData> {
     if (!(error instanceof CgApiError && error.status === 404)) throw error;
   }
   const zones = board ? await cgApi.zones(board.board_id) : [];
-  return { templates, board, zones, feeds, feedItems, bulletins, audit };
+  return { templates, board, zones, feeds, feedItems, bulletins, audit, imageAssets };
 }
 
 export function CgOperator({ channelId, channels, route, onNavigate }: { channelId: string | undefined; channels: CgChannelOption[]; route: CgRoute; onNavigate: (route: CgRoute) => void }) {

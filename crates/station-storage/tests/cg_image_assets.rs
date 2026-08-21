@@ -183,6 +183,8 @@ fn snapshot_downgrades_deleted_and_corrupt_ready_files() {
         .join("cg-images")
         .join(format!("{}.png", asset.asset_id));
     std::fs::remove_file(&image_path).unwrap();
+    let library = store.list_verified_cg_image_assets().unwrap();
+    assert_eq!(library[0].readiness, CgImageReadiness::Missing);
     let missing_inputs = store.load_cg_snapshot_inputs(CHANNEL_ID, 2_001).unwrap();
     assert_eq!(
         missing_inputs.image_assets[0].readiness,

@@ -38,6 +38,8 @@ const OPERATOR_HTML: &[u8] = include_bytes!("../../../web/operator/dist/index.ht
 const OPERATOR_SCRIPT: &[u8] = include_bytes!("../../../web/operator/dist/operator.js");
 const OPERATOR_STYLES: &[u8] = include_bytes!("../../../web/operator/dist/operator.css");
 const MAX_CONCURRENT_REQUESTS: usize = 16;
+const MAX_SMALL_REQUEST_BODY: usize = 65_536;
+const MAX_CG_IMAGE_BODY: usize = 8 * 1024 * 1024;
 
 #[derive(Deserialize)]
 struct PutStationProfile {
@@ -357,6 +359,8 @@ impl Api {
                 serde_json::to_vec(&built_in_templates())
                     .expect("serializing built-in CG templates cannot fail"),
             ),
+            ("GET", "/api/v1/cg/images") => self.list_cg_images(),
+            ("POST", "/api/v1/cg/images") => self.upload_cg_image(body),
             ("GET", path) if path.starts_with("/api/v1/cg/board?") => self.read_cg_board(path),
             ("GET", path)
                 if path == "/api/v1/cg/preview" || path.starts_with("/api/v1/cg/preview?") =>
@@ -1961,6 +1965,40 @@ impl Api {
         }
     }
 
+    fn list_cg_images(&self) -> ApiResponse {
+        match self.storage.list_verified_cg_image_assets() {
+            Ok(images) => json_response(
+                200,
+                serde_json::to_vec(&images).expect("serializing CG image assets cannot fail"),
+            ),
+            Err(message) => error_response(500, "storage_error", &message),
+        }
+    }
+
+    fn upload_cg_image(&self, body: Option<&[u8]>) -> ApiResponse {
+        let Some(body) = body else {
+            return error_response(
+                400,
+                "cg_image_invalid",
+                "A PNG or JPEG image body is required.",
+            );
+        };
+        if body.len() > MAX_CG_IMAGE_BODY {
+            return error_response(
+                413,
+                "request_too_large",
+                "CG image uploads may not exceed 8 MiB.",
+            );
+        }
+        match self.storage.admit_cg_image_asset(body) {
+            Ok(image) => json_response(
+                200,
+                serde_json::to_vec(&image).expect("serializing a CG image asset cannot fail"),
+            ),
+            Err(message) => error_response(400, "cg_image_invalid", &message),
+        }
+    }
+
     fn list_schedule(&self, path: &str) -> ApiResponse {
         let Some(channel_id) = path.strip_prefix("/api/v1/schedule/items?channel_id=") else {
             return error_response(400, "invalid_query", "channel_id is required.");
@@ -2342,7 +2380,9 @@ fn read_http_request(stream: &mut TcpStream) -> Result<Vec<u8>, ApiResponse> {
             Err(error) => return Err(error_response(400, "read_failed", &error.to_string())),
         };
         request.extend_from_slice(&chunk[..count]);
-        if request.len() > 65_536 {
+        if request.len() > MAX_SMALL_REQUEST_BODY
+            && !request.windows(4).any(|window| window == b"\r\n\r\n")
+        {
             return Err(error_response(
                 413,
                 "request_too_large",
@@ -2355,6 +2395,38 @@ fn read_http_request(stream: &mut TcpStream) -> Result<Vec<u8>, ApiResponse> {
         };
         let headers = std::str::from_utf8(&request[..header_end])
             .map_err(|_| error_response(400, "malformed_request", "HTTP headers must be UTF-8."))?;
+        let header_bytes = header_end + 4;
+        if header_bytes > MAX_SMALL_REQUEST_BODY {
+            return Err(error_response(
+                413,
+                "request_too_large",
+                "HTTP headers may not exceed 64 KiB.",
+            ));
+        }
+        let mut request_parts = headers
+            .split("\r\n")
+            .next()
+            .unwrap_or_default()
+            .split_whitespace();
+        let (Some(method), Some(path), Some(version), None) = (
+            request_parts.next(),
+            request_parts.next(),
+            request_parts.next(),
+            request_parts.next(),
+        ) else {
+            return Err(error_response(
+                400,
+                "malformed_request",
+                "The request line is invalid.",
+            ));
+        };
+        if version != "HTTP/1.1" {
+            return Err(error_response(
+                400,
+                "malformed_request",
+                "Only HTTP/1.1 is supported.",
+            ));
+        }
         let mut content_length = None;
         let mut expects_continue = false;
         for line in headers.split("\r\n").skip(1) {
@@ -2389,14 +2461,22 @@ fn read_http_request(stream: &mut TcpStream) -> Result<Vec<u8>, ApiResponse> {
                 }
             }
         }
-        let expected_length = header_end + 4 + content_length.unwrap_or(0);
-        if expected_length > 65_536 {
+        let content_length = content_length.unwrap_or(0);
+        let body_limit = request_body_limit(method, path);
+        if content_length > body_limit {
             return Err(error_response(
                 413,
                 "request_too_large",
-                "Requests may not exceed 64 KiB.",
+                request_too_large_message(method, path),
             ));
         }
+        let Some(expected_length) = header_bytes.checked_add(content_length) else {
+            return Err(error_response(
+                400,
+                "malformed_request",
+                "Content-Length is invalid.",
+            ));
+        };
         if expects_continue && !continue_sent && request.len() < expected_length {
             stream
                 .write_all(b"HTTP/1.1 100 Continue\r\n\r\n")
@@ -2460,7 +2540,31 @@ fn dispatch_http(api: &Api, request: &[u8]) -> ApiResponse {
             "Content-Length does not match the request body.",
         );
     }
+    let body_limit = request_body_limit(method, path);
+    if body.len() > body_limit {
+        return error_response(
+            413,
+            "request_too_large",
+            request_too_large_message(method, path),
+        );
+    }
     api.handle(method, path, (!body.is_empty()).then_some(body))
+}
+
+fn request_body_limit(method: &str, path: &str) -> usize {
+    if method == "POST" && path == "/api/v1/cg/images" {
+        MAX_CG_IMAGE_BODY
+    } else {
+        MAX_SMALL_REQUEST_BODY
+    }
+}
+
+fn request_too_large_message(method: &str, path: &str) -> &'static str {
+    if request_body_limit(method, path) == MAX_CG_IMAGE_BODY {
+        "CG image uploads may not exceed 8 MiB."
+    } else {
+        "Requests may not exceed 64 KiB."
+    }
 }
 
 fn json_response(status: u16, body: Vec<u8>) -> ApiResponse {
@@ -2550,4 +2654,61 @@ fn error_response(status: u16, code: &str, message: &str) -> ApiResponse {
         serde_json::to_vec(&serde_json::json!({ "error": { "code": code, "message": message } }))
             .expect("serializing an error response cannot fail"),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::TcpListener;
+    use std::thread;
+
+    const PNG_1X1: &[u8] = &[
+        137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 1, 0, 0, 0, 1, 8, 6,
+        0, 0, 0, 31, 21, 196, 137, 0, 0, 0, 13, 73, 68, 65, 84, 120, 156, 99, 248, 207, 192, 240,
+        31, 0, 5, 0, 1, 255, 137, 153, 61, 29, 0, 0, 0, 0, 73, 69, 78, 68, 174, 66, 96, 130,
+    ];
+
+    fn read_request_over_tcp(request: Vec<u8>) -> Result<Vec<u8>, ApiResponse> {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let address = listener.local_addr().unwrap();
+        let sender = thread::spawn(move || {
+            let mut stream = TcpStream::connect(address).unwrap();
+            stream.write_all(&request).unwrap();
+        });
+        let (mut stream, _) = listener.accept().unwrap();
+        let result = read_http_request(&mut stream);
+        sender.join().unwrap();
+        result
+    }
+
+    #[test]
+    fn http_parser_allows_large_body_only_for_the_image_upload_route() {
+        let mut image = PNG_1X1.to_vec();
+        image.resize(MAX_SMALL_REQUEST_BODY + 1, 0);
+        let request = format!(
+            "POST /api/v1/cg/images HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\n\r\n",
+            image.len()
+        )
+        .into_bytes();
+        let mut image_request = request;
+        image_request.extend_from_slice(&image);
+        let parsed = read_request_over_tcp(image_request).expect("image request should parse");
+        assert!(parsed.len() > MAX_SMALL_REQUEST_BODY);
+
+        let database =
+            std::env::temp_dir().join(format!("townlight-api-parser-{}.db", std::process::id()));
+        let api = Api::open(&database).unwrap();
+        let image_response = dispatch_http(&api, &parsed);
+        assert_ne!(image_response.status, 413);
+
+        let mut unrelated = format!(
+            "POST /api/v1/station HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\n\r\n",
+            image.len()
+        )
+        .into_bytes();
+        unrelated.extend_from_slice(&image);
+        let rejection = read_request_over_tcp(unrelated).unwrap_err();
+        assert_eq!(rejection.status, 413);
+        let _ = std::fs::remove_file(&database);
+    }
 }
