@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { ReactNode, useCallback, useEffect, useMemo, useState } from "react";
 
 export type CgRoute = "cg-moderation" | "cg-board" | "cg-feeds" | "cg-preview" | "cg-settings";
 
@@ -161,6 +161,8 @@ export interface CgResolvedSnapshot {
   zones: CgResolvedZone[];
 }
 
+export type CgBulletinExpirationResponse = CgBulletin[];
+
 export interface CgBulletin {
   bulletin_id: string;
   channel_id: string;
@@ -239,6 +241,7 @@ export const cgApi = {
   writeFeed: (body: { feed: CgFeed; expected_revision: number; audit: CgAuditEvent }) => cgRequest<CgFeed>("/api/v1/cg/feeds", { method: "PUT", body: JSON.stringify(body) }),
   deleteFeed: (feedId: string, body: { expected_revision: number; audit: CgAuditEvent }) => cgRequest<void>(`/api/v1/cg/feeds/${encodeURIComponent(feedId)}`, { method: "DELETE", body: JSON.stringify(body) }),
   writeBulletin: (body: { bulletin: CgBulletin; expected_revision: number; audit: CgAuditEvent }) => cgRequest<CgBulletin>("/api/v1/cg/bulletins", { method: "PUT", body: JSON.stringify(body) }),
+  expireBulletins: (body: { channel_id: string; now_unix_ms: number; operator_id: string }) => cgRequest<CgBulletinExpirationResponse>("/api/v1/cg/bulletins/expire", { method: "POST", body: JSON.stringify(body) }),
   approveFeedItem: (body: { approval: CgFeedItemApproval; audit: CgAuditEvent }) => cgRequest<CgFeedItemApproval>("/api/v1/cg/feed-items/approve", { method: "POST", body: JSON.stringify(body) }),
 };
 
@@ -379,7 +382,7 @@ function CgEmpty({ title, detail }: { title: string; detail: string }) {
   return <div className="cg-empty"><div className="empty-orbit">+</div><strong>{title}</strong><p>{detail}</p></div>;
 }
 
-function MutationNotice({ children = "Editing is read-only in this slice." }: { children?: string }) {
+function MutationNotice({ children = "Editing is read-only in this slice." }: { children?: ReactNode }) {
   return <div className="cg-notice"><span aria-hidden="true">i</span><p>{children} The station API requires an explicit revision and append-only audit payload; no un-audited changes are offered here.</p></div>;
 }
 
@@ -393,6 +396,45 @@ function MutationResult({ error, message }: { error: string | null; message: str
 
 function CgTabs({ route, onNavigate }: { route: CgRoute; onNavigate: (route: CgRoute) => void }) {
   return <nav className="cg-tabs" aria-label="CG operator screens">{CG_ROUTES.map((item) => <button key={item.id} className={route === item.id ? "selected" : ""} onClick={() => onNavigate(item.id)}>{item.label}</button>)}</nav>;
+}
+
+function BulletinExpirationAction({ channelId, operatorId, onRefresh }: { channelId: string; operatorId: string; onRefresh: () => Promise<void> }) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [message, setMessage] = useState<string | null>(null);
+
+  async function expireDueBulletins() {
+    setError(null);
+    setMessage(null);
+    if (!operatorId.trim()) {
+      setError("Enter an operator name before expiring bulletins.");
+      return;
+    }
+    if (!window.confirm("Expire due bulletins now? Only Scheduled bulletins whose end time is at or before the current station observation time will be affected. This is a manual command; it does not create automatic scheduling.")) return;
+    const now = Date.now();
+    setBusy(true);
+    try {
+      const expired = await cgApi.expireBulletins({ channel_id: channelId, now_unix_ms: now, operator_id: operatorId.trim() });
+      try {
+        await onRefresh();
+      } catch (refreshProblem) {
+        const refreshedDetail = refreshProblem instanceof Error ? refreshProblem.message : "the durable list and audit history could not be refreshed";
+        setError(`Expiration completed for ${expired.length} bulletin${expired.length === 1 ? "" : "s"}${expired.length > 0 ? ` (${expired.map((bulletin) => bulletin.bulletin_id).join(", ")})` : ""}, but ${refreshedDetail}.`);
+        return;
+      }
+      if (expired.length === 0) {
+        setMessage(`No scheduled bulletins were due at ${formatCgTime(now)}. No changes were made.`);
+      } else {
+        setMessage(`Expired ${expired.length} bulletin${expired.length === 1 ? "" : "s"}: ${expired.map((bulletin) => bulletin.bulletin_id).join(", ")}. Durable list and audit history refreshed.`);
+      }
+    } catch (problem) {
+      setError(problem instanceof Error ? problem.message : "Due bulletins could not be expired.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return <section className="panel cg-expiration-panel"><div className="panel-head"><div><p className="eyebrow">Manual lifecycle command</p><h2>Expire due bulletins</h2></div><span className="cg-state-pill cg-state-submitted">operator action</span></div><MutationNotice>This is an explicit audited command for channel <code>{channelId}</code>. It does not imply an automatic scheduler exists.</MutationNotice><button className="secondary" disabled={busy || !operatorId.trim()} onClick={() => void expireDueBulletins()}>{busy ? "Expiring due bulletins…" : "Expire due bulletins now"}</button><MutationResult error={error} message={message} /></section>;
 }
 
 function ModerationQueue({ data, channelId, operatorId, onRefresh }: { data: CgData; channelId: string; operatorId: string; onRefresh: () => Promise<void> }) {
@@ -547,6 +589,7 @@ function ModerationQueue({ data, channelId, operatorId, onRefresh }: { data: CgD
   const textBulletins = data.bulletins.filter((bulletin) => bulletin.content.kind === "text");
   return <>
     <div className="cg-stat-strip">{["submitted", "needs_changes", "accepted", "scheduled", "declined"].map((state) => <div key={state}><span>{displayKind(state)}</span><strong>{counts[state] ?? 0}</strong></div>)}</div>
+    <BulletinExpirationAction channelId={channelId} operatorId={operatorId} onRefresh={onRefresh} />
     <section className="panel"><div className="panel-head"><div><p className="eyebrow">Text bulletin intake</p><h2>Submit for review</h2></div><span className="cg-state-pill cg-state-submitted">submitted</span></div><MutationNotice>Only text bulletins are admitted here. Media uploads, live-video sources, deletion, and role authentication are not offered.</MutationNotice><div className="cg-editor-grid"><label>Title<input maxLength={160} value={title} onChange={(event) => setTitle(event.target.value)} placeholder="Library board meeting" /></label><label>Display seconds<input type="number" min={3} max={300} value={displaySeconds} onChange={(event) => setDisplaySeconds(event.target.value)} /></label><label>Tags <span className="cg-form-help">comma-separated slugs</span><input value={tags} onChange={(event) => setTags(event.target.value)} placeholder="community, public-safety" /></label><label>Body<textarea maxLength={4000} value={body} onChange={(event) => setBody(event.target.value)} placeholder="Tuesday at 6 PM in the community room." /></label></div><button className="primary" disabled={busy !== null || !operatorId.trim()} onClick={() => void submitTextBulletin()}>{busy === "submit" ? "Submitting…" : "Submit text bulletin"}</button><MutationResult error={error} message={message} /></section>
     <section className="panel"><div className="panel-head"><div><p className="eyebrow">Durable bulletin lifecycle</p><h2>Review queue</h2></div><span className="count">{data.bulletins.length}</span></div>{data.bulletins.length === 0 ? <CgEmpty title="No bulletins in the queue" detail="Submit the first text bulletin above." /> : <div className="cg-list">{data.bulletins.map((bulletin) => { const isText = bulletin.content.kind === "text"; const note = notesById[bulletin.bulletin_id] ?? bulletin.moderation_notes ?? ""; const busyAction = busy?.endsWith(bulletin.bulletin_id) ?? false; return <article className="cg-card" key={bulletin.bulletin_id}><div className="cg-card-top"><div><strong>{bulletin.content.title ?? displayKind(bulletin.content.kind)}</strong><small>{bulletin.submitted_by} · {formatCgTime(bulletin.created_at_unix_ms)}</small></div><span className={`cg-state-pill cg-state-${bulletin.state}`}>{displayKind(bulletin.state)}</span></div><p>{bulletin.content.body ?? bulletin.content.alt_text ?? "Media bulletin; this screen only mutates text submissions."}</p><div className="cg-tags">{bulletin.tags.length ? bulletin.tags.map((tag) => <span key={tag}>{tag}</span>) : <span>untagged</span>}<small>{bulletin.display_seconds}s · revision {bulletin.revision}</small></div>{isText ? <>{bulletin.state === "needs_changes" && <div className="cg-notice"><span aria-hidden="true">i</span><p>Resubmission is not exposed here; this item remains in needs-changes until the submitter resubmits through a supported intake path.</p></div>}{bulletin.state === "declined" && <div className="cg-notice"><span aria-hidden="true">i</span><p>Declined is terminal in the current lifecycle; no revival control is offered.</p></div>}<label>Moderation note <textarea maxLength={2000} value={note} onChange={(event) => setNotesById((previous) => ({ ...previous, [bulletin.bulletin_id]: event.target.value }))} placeholder="Required for request changes or decline" /></label><div className="cg-inline-actions cg-moderation-actions">{bulletin.state === "submitted" && <><button className="secondary" disabled={busyAction || !operatorId.trim()} onClick={() => void moderateBulletin(bulletin, "needs_changes")}>Request changes</button><button className="primary" disabled={busyAction || !operatorId.trim()} onClick={() => void moderateBulletin(bulletin, "accepted")}>Accept</button></>}{(bulletin.state === "submitted" || bulletin.state === "accepted" || bulletin.state === "scheduled") && <button className="secondary" disabled={busyAction || !operatorId.trim()} onClick={() => beginSchedule(bulletin)}>Schedule</button>}{(bulletin.state === "submitted" || bulletin.state === "accepted" || bulletin.state === "scheduled") && <button className="secondary danger-button" disabled={busyAction || !operatorId.trim()} onClick={() => void moderateBulletin(bulletin, "declined")}>Decline</button>}</div>{schedulingId === bulletin.bulletin_id && <div className="cg-schedule-editor"><label>Start<input type="datetime-local" value={scheduleStart} onChange={(event) => setScheduleStart(event.target.value)} /></label><label>End<input type="datetime-local" value={scheduleEnd} onChange={(event) => setScheduleEnd(event.target.value)} /></label><div className="cg-inline-actions"><button className="primary" disabled={busyAction || !operatorId.trim()} onClick={() => void scheduleBulletin(bulletin)}>{busy === `schedule-${bulletin.bulletin_id}` ? "Scheduling…" : "Save schedule"}</button><button className="secondary" onClick={() => setSchedulingId(null)}>Cancel</button></div></div>}</> : <div className="cg-notice"><span aria-hidden="true">i</span><p>Media and live-video bulletin moderation is not enabled in this text-only screen.</p></div>}</article>; })}</div>}</section>
     {textBulletins.length === 0 && data.bulletins.length > 0 && <section className="panel"><CgEmpty title="No text bulletins available" detail="Existing non-text bulletins remain visible but cannot be changed by this text-only workflow." /></section>}
