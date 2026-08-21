@@ -1683,6 +1683,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "ureq",
+ "zip",
 ]
 
 [[package]]
@@ -1698,6 +1699,7 @@ dependencies = [
  "station-domain",
  "station-storage",
  "station-update",
+ "zip",
 ]
 
 [[package]]

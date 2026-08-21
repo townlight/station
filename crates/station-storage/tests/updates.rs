@@ -2,7 +2,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use station_storage::StationStore;
 use station_update::{
-    ReleaseManifest, StagedPackageRecord, UpdateCheckOutcome, UpdateCheckRecord, UpdateCheckTrigger,
+    PreparedSlotRecord, ReleaseManifest, StagedPackageRecord, UpdateCheckOutcome,
+    UpdateCheckRecord, UpdateCheckTrigger,
 };
 
 fn record(checked_at_unix_ms: i64, version: &str) -> UpdateCheckRecord {
@@ -120,6 +121,40 @@ fn persists_only_the_newest_valid_staged_package_record() {
     assert!(reopened.write_staged_package(&stale).is_err());
     reopened.clear_staged_package().unwrap();
     assert_eq!(reopened.read_staged_package().unwrap(), None);
+    drop(reopened);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn persists_only_the_newest_valid_prepared_slot_record() {
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!("townlight-update-prepare-store-{nonce}"));
+    std::fs::create_dir_all(&root).unwrap();
+    let database = root.join("station.db");
+    let store = StationStore::open(&database).unwrap();
+    let manifest = record(1_800_000_000_000, "0.2.0").offered_release.unwrap();
+    let prepared = PreparedSlotRecord {
+        prepared_at_unix_ms: 1_800_000_001_000,
+        package_file_name: format!("{}.tlu", manifest.package_sha256.to_ascii_lowercase()),
+        slot_directory_name: format!("slot-{}-{}", manifest.version, manifest.source_commit),
+        manifest,
+    };
+    assert_eq!(store.write_prepared_slot(&prepared).unwrap(), prepared);
+    drop(store);
+
+    let reopened = StationStore::open(&database).unwrap();
+    assert_eq!(
+        reopened.read_prepared_slot().unwrap(),
+        Some(prepared.clone())
+    );
+    let mut stale = prepared.clone();
+    stale.prepared_at_unix_ms -= 1;
+    assert!(reopened.write_prepared_slot(&stale).is_err());
+    reopened.clear_prepared_slot().unwrap();
+    assert_eq!(reopened.read_prepared_slot().unwrap(), None);
     drop(reopened);
     std::fs::remove_dir_all(root).unwrap();
 }

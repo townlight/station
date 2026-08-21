@@ -11,6 +11,13 @@ use std::time::Duration;
 use ureq::Agent;
 use ureq::tls::{RootCerts, TlsConfig};
 
+mod package;
+
+pub use package::{
+    PreparedSlotRecord, UpdatePackageFile, UpdatePackageManifest, prepare_release_slot,
+    prepared_slot_path, verify_prepared_slot,
+};
+
 pub const RELEASE_SCHEMA_VERSION: u32 = 1;
 pub const MAX_ENVELOPE_BYTES: usize = 256 * 1024;
 pub const MAX_MANIFEST_BYTES: usize = 128 * 1024;
@@ -433,9 +440,12 @@ fn create_quarantine_file(directory: &Path, staged_at_unix_ms: i64) -> Result<Pa
 }
 
 fn verify_package_file(path: &Path, manifest: &ReleaseManifest) -> Result<(), String> {
-    let metadata = std::fs::metadata(path)
+    let metadata = std::fs::symlink_metadata(path)
         .map_err(|error| format!("could not inspect staged update package: {error}"))?;
-    if !metadata.is_file() || metadata.len() != manifest.package_size_bytes {
+    if !metadata.is_file()
+        || metadata.file_type().is_symlink()
+        || metadata.len() != manifest.package_size_bytes
+    {
         return Err("staged update package size does not match signed metadata".into());
     }
     let mut file = File::open(path)

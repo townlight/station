@@ -3,8 +3,9 @@ use serde::{Deserialize, Serialize};
 use station_domain::{AlertConditionKind, AlertEvent, AlertEventState, AlertSeverity};
 use station_storage::StationStore;
 use station_update::{
-    ReleaseSource, StagedPackageRecord, UpdateCheckOutcome, UpdateCheckRecord, UpdateCheckTrigger,
-    fetch_and_verify_release, stage_release_package, staged_package_path,
+    PreparedSlotRecord, ReleaseSource, StagedPackageRecord, UpdateCheckOutcome, UpdateCheckRecord,
+    UpdateCheckTrigger, fetch_and_verify_release, prepare_release_slot, stage_release_package,
+    staged_package_path, verify_prepared_slot,
 };
 use std::path::{Path, PathBuf};
 use std::sync::{
@@ -31,6 +32,7 @@ pub struct UpdateStatus {
     pub feed_origin: Option<String>,
     pub latest_check: Option<UpdateCheckRecord>,
     pub staged_package: Option<StagedPackageRecord>,
+    pub prepared_slot: Option<PreparedSlotRecord>,
     pub next_step: String,
 }
 
@@ -38,6 +40,7 @@ pub struct UpdateStatus {
 pub enum CoordinatorError {
     NotConfigured,
     NoAvailableRelease,
+    NoStagedRelease,
     Fault(String),
 }
 
@@ -49,6 +52,9 @@ impl std::fmt::Display for CoordinatorError {
             ),
             Self::NoAvailableRelease => formatter
                 .write_str("No current verified release is available to stage on this station."),
+            Self::NoStagedRelease => formatter.write_str(
+                "No current verified package is staged and available to prepare on this station.",
+            ),
             Self::Fault(message) => formatter.write_str(message),
         }
     }
@@ -63,10 +69,14 @@ pub fn read_status(
     let stored_check = StationStore::open(database_path)
         .and_then(|store| store.read_update_check())
         .map_err(CoordinatorError::Fault)?;
-    let staged = StationStore::open(database_path)
-        .and_then(|store| store.read_staged_package())
+    let store = StationStore::open(database_path).map_err(CoordinatorError::Fault)?;
+    let staged = store
+        .read_staged_package()
         .map_err(CoordinatorError::Fault)?;
-    let (configured, release_channel, feed_origin, latest_check, staged_package, next_step) = match source {
+    let prepared = store
+        .read_prepared_slot()
+        .map_err(CoordinatorError::Fault)?;
+    let (configured, release_channel, feed_origin, latest_check, staged_package, prepared_slot, next_step) = match source {
         Some(source) => {
             let visible_stage = staged.filter(|stage| {
                 stored_check
@@ -81,7 +91,15 @@ pub fn read_status(
                         metadata.is_file() && metadata.len() == stage.manifest.package_size_bytes
                     })
             });
-            let next_step = if visible_stage.is_some() {
+            let visible_prepared = prepared.filter(|slot| {
+                visible_stage.as_ref().is_some_and(|stage| {
+                    stage.manifest == slot.manifest
+                        && stage.package_file_name == slot.package_file_name
+                }) && verify_prepared_slot(&slots_directory(application_directory), slot).is_ok()
+            });
+            let next_step = if visible_prepared.is_some() {
+                "The verified application slot is prepared. Activation requires an explicit maintenance window."
+            } else if visible_stage.is_some() {
                 "The verified package is staged. Activation still requires an explicit maintenance window."
             } else {
                 "Check for a signed update. Download and installation always require explicit operator action."
@@ -92,11 +110,13 @@ pub fn read_status(
                 Some(redact_feed_origin(&source.feed_url)),
                 stored_check,
                 visible_stage,
+                visible_prepared,
                 next_step.into(),
             )
         }
         None => (
             false,
+            None,
             None,
             None,
             None,
@@ -113,6 +133,7 @@ pub fn read_status(
         feed_origin,
         latest_check,
         staged_package,
+        prepared_slot,
         next_step,
     })
 }
@@ -152,8 +173,63 @@ pub fn stage_available_release(
         PACKAGE_DOWNLOAD_TIMEOUT,
     )
     .map_err(CoordinatorError::Fault)?;
-    store
+    let stored = store
         .write_staged_package(&staged)
+        .map_err(CoordinatorError::Fault)?;
+    if store
+        .read_prepared_slot()
+        .map_err(CoordinatorError::Fault)?
+        .is_some_and(|prepared| prepared.manifest != stored.manifest)
+    {
+        store
+            .clear_prepared_slot()
+            .map_err(CoordinatorError::Fault)?;
+    }
+    Ok(stored)
+}
+
+pub fn prepare_staged_release(
+    database_path: &Path,
+    application_directory: &Path,
+    now_unix_ms: i64,
+) -> Result<PreparedSlotRecord, CoordinatorError> {
+    let identity = read_install_identity(database_path)?;
+    let source =
+        read_release_source(application_directory)?.ok_or(CoordinatorError::NotConfigured)?;
+    let store = StationStore::open(database_path).map_err(CoordinatorError::Fault)?;
+    let check = store
+        .read_update_check()
+        .map_err(CoordinatorError::Fault)?
+        .filter(|check| {
+            check.outcome == UpdateCheckOutcome::UpdateAvailable
+                && check.current_version == identity.version
+                && check.release_channel == source.release_channel
+        })
+        .ok_or(CoordinatorError::NoStagedRelease)?;
+    let offered = check
+        .offered_release
+        .ok_or(CoordinatorError::NoStagedRelease)?;
+    let staged = store
+        .read_staged_package()
+        .map_err(CoordinatorError::Fault)?
+        .filter(|staged| staged.manifest == offered)
+        .ok_or(CoordinatorError::NoStagedRelease)?;
+    if !source
+        .trusted_keys
+        .iter()
+        .any(|key| key.key_id == staged.manifest.key_id)
+    {
+        return Err(CoordinatorError::NoStagedRelease);
+    }
+    let prepared = prepare_release_slot(
+        &staged,
+        &updates_directory(database_path),
+        &slots_directory(application_directory),
+        now_unix_ms,
+    )
+    .map_err(CoordinatorError::Fault)?;
+    store
+        .write_prepared_slot(&prepared)
         .map_err(CoordinatorError::Fault)
 }
 
@@ -320,7 +396,8 @@ fn deactivate_release_source(database_path: &Path, now_unix_ms: i64) -> Result<(
         store.resolve_alert(AlertConditionKind::UpdateAvailable, &version, now_unix_ms)?;
     }
     store.clear_update_check()?;
-    store.clear_staged_package()
+    store.clear_staged_package()?;
+    store.clear_prepared_slot()
 }
 
 pub fn release_notes(
@@ -421,6 +498,10 @@ fn updates_directory(database_path: &Path) -> PathBuf {
         .parent()
         .unwrap_or_else(|| Path::new("."))
         .join("updates")
+}
+
+fn slots_directory(application_directory: &Path) -> PathBuf {
+    application_directory.join("slots")
 }
 
 fn system_time_millis() -> Result<i64, String> {
@@ -529,8 +610,11 @@ mod tests {
     use base64::engine::general_purpose::STANDARD as BASE64;
     use ed25519_dalek::{Signer, SigningKey};
     use sha2::{Digest, Sha256};
-    use station_update::{ReleaseManifest, SignedReleaseEnvelope, TrustedReleaseKey};
-    use std::io::{Read, Write};
+    use station_update::{
+        ReleaseManifest, SignedReleaseEnvelope, TrustedReleaseKey, UpdatePackageFile,
+        UpdatePackageManifest, prepared_slot_path,
+    };
+    use std::io::{Cursor, Read, Write};
     use std::net::TcpListener;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -556,8 +640,42 @@ mod tests {
 
         let now = 1_800_000_000_000;
         let signing_key = SigningKey::from_bytes(&[12; 32]);
-        let package = b"installed coordinator staging proof".to_vec();
+        let payloads: [(&str, &[u8]); 3] = [
+            ("stationd.exe", b"coordinator station service"),
+            ("channel-worker.exe", b"coordinator channel worker"),
+            ("station-updater.exe", b"coordinator station updater"),
+        ];
+        let internal_manifest = UpdatePackageManifest {
+            schema_version: 1,
+            product: "TownLight Station".into(),
+            version: "0.2.0".into(),
+            source_commit: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+            files: payloads
+                .iter()
+                .map(|(path, bytes)| UpdatePackageFile {
+                    path: (*path).into(),
+                    size_bytes: bytes.len() as u64,
+                    sha256: format!("{:X}", Sha256::digest(bytes)),
+                })
+                .collect(),
+        };
+        let mut writer = zip::ZipWriter::new(Cursor::new(Vec::new()));
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored)
+            .unix_permissions(0o644);
+        writer.start_file("package-manifest.json", options).unwrap();
+        writer
+            .write_all(&serde_json::to_vec(&internal_manifest).unwrap())
+            .unwrap();
+        for (path, bytes) in payloads {
+            writer
+                .start_file(format!("payload/{path}"), options)
+                .unwrap();
+            writer.write_all(bytes).unwrap();
+        }
+        let package = writer.finish().unwrap().into_inner();
         let package_hash = format!("{:X}", Sha256::digest(&package));
+        let package_size = package.len() as u64;
         let package_listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let package_address = package_listener.local_addr().unwrap();
         let package_server = std::thread::spawn(move || {
@@ -582,7 +700,7 @@ mod tests {
             expires_at_unix_ms: now + 86_400_000,
             minimum_updater_version: "0.1.0".into(),
             package_url: format!("http://{package_address}/station-0.2.0.tlu"),
-            package_size_bytes: 35,
+            package_size_bytes: package_size,
             package_sha256: package_hash,
             release_notes_markdown: "# 0.2.0\n\nA safer update.".into(),
         };
@@ -650,6 +768,12 @@ mod tests {
             read_status(&database, &application).unwrap().staged_package,
             Some(staged.clone())
         );
+        let prepared = prepare_staged_release(&database, &application, now + 2).unwrap();
+        assert_eq!(prepared.manifest.version, "0.2.0");
+        assert_eq!(
+            read_status(&database, &application).unwrap().prepared_slot,
+            Some(prepared.clone())
+        );
 
         std::fs::remove_file(application.join(TRUST_FILE_NAME)).unwrap();
         deactivate_release_source(&database, now + 1).unwrap();
@@ -672,6 +796,13 @@ mod tests {
         assert_eq!(
             StationStore::open(&database)
                 .unwrap()
+                .read_prepared_slot()
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            StationStore::open(&database)
+                .unwrap()
                 .read_staged_package()
                 .unwrap(),
             None
@@ -681,6 +812,13 @@ mod tests {
         let mut permissions = std::fs::metadata(&staged_path).unwrap().permissions();
         permissions.set_readonly(false);
         std::fs::set_permissions(staged_path, permissions).unwrap();
+
+        let slot_path = prepared_slot_path(&slots_directory(&application), &prepared);
+        for entry in std::fs::read_dir(&slot_path).unwrap().flatten() {
+            let mut permissions = entry.metadata().unwrap().permissions();
+            permissions.set_readonly(false);
+            std::fs::set_permissions(entry.path(), permissions).unwrap();
+        }
 
         let _ = std::fs::remove_dir_all(root);
     }

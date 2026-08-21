@@ -20,7 +20,8 @@ use station_schedule::{
     MediaAsset, ScheduleItem, ScheduleState, prepare_commit,
 };
 use station_update::{
-    StagedPackageRecord, UpdateCheckOutcome, UpdateCheckRecord, UpdateCheckTrigger,
+    PreparedSlotRecord, StagedPackageRecord, UpdateCheckOutcome, UpdateCheckRecord,
+    UpdateCheckTrigger,
 };
 
 const SQLITE_OK: c_int = 0;
@@ -409,6 +410,13 @@ impl StationStore {
              CREATE TABLE IF NOT EXISTS update_stage_status (\
                singleton INTEGER PRIMARY KEY CHECK (singleton = 1),\
                staged_at_unix_ms INTEGER NOT NULL CHECK (staged_at_unix_ms >= 0),\
+               version TEXT NOT NULL,\
+               source_commit TEXT NOT NULL,\
+               record_json TEXT NOT NULL\
+             );\
+             CREATE TABLE IF NOT EXISTS update_prepare_status (\
+               singleton INTEGER PRIMARY KEY CHECK (singleton = 1),\
+               prepared_at_unix_ms INTEGER NOT NULL CHECK (prepared_at_unix_ms >= 0),\
                version TEXT NOT NULL,\
                source_commit TEXT NOT NULL,\
                record_json TEXT NOT NULL\
@@ -1602,6 +1610,62 @@ impl StationStore {
 
     pub fn clear_staged_package(&self) -> Result<(), String> {
         let statement = self.prepare("DELETE FROM update_stage_status WHERE singleton=1")?;
+        expect_done(self.database, statement.raw)
+    }
+
+    pub fn write_prepared_slot(
+        &self,
+        record: &PreparedSlotRecord,
+    ) -> Result<PreparedSlotRecord, String> {
+        record.validate().map_err(str::to_string)?;
+        let record_json = serde_json::to_string(record)
+            .map_err(|error| format!("could not encode prepared-slot record: {error}"))?;
+        let statement = self.prepare(
+            "INSERT INTO update_prepare_status(singleton, prepared_at_unix_ms, version, \
+             source_commit, record_json) VALUES(1, ?1, ?2, ?3, ?4) \
+             ON CONFLICT(singleton) DO UPDATE SET \
+               prepared_at_unix_ms=excluded.prepared_at_unix_ms, version=excluded.version, \
+               source_commit=excluded.source_commit, record_json=excluded.record_json \
+             WHERE update_prepare_status.prepared_at_unix_ms <= excluded.prepared_at_unix_ms",
+        )?;
+        let version = c_string(&record.manifest.version, "prepared-slot version")?;
+        let commit = c_string(
+            &record.manifest.source_commit,
+            "prepared-slot source commit",
+        )?;
+        let record_json = c_string(&record_json, "prepared-slot record")?;
+        bind_i64(self.database, statement.raw, 1, record.prepared_at_unix_ms)?;
+        bind_text(self.database, statement.raw, 2, &version)?;
+        bind_text(self.database, statement.raw, 3, &commit)?;
+        bind_text(self.database, statement.raw, 4, &record_json)?;
+        expect_done(self.database, statement.raw)?;
+        let stored = self
+            .read_prepared_slot()?
+            .ok_or_else(|| "stored prepared-slot record disappeared".to_string())?;
+        if stored != *record {
+            return Err("a newer prepared-slot record already exists".into());
+        }
+        Ok(stored)
+    }
+
+    pub fn read_prepared_slot(&self) -> Result<Option<PreparedSlotRecord>, String> {
+        let statement =
+            self.prepare("SELECT record_json FROM update_prepare_status WHERE singleton=1")?;
+        match unsafe { sqlite3_step(statement.raw) } {
+            SQLITE_ROW => {
+                let json = column_text(statement.raw, 0)?;
+                let record: PreparedSlotRecord = serde_json::from_str(&json)
+                    .map_err(|error| format!("stored prepared-slot record is invalid: {error}"))?;
+                record.validate().map_err(str::to_string)?;
+                Ok(Some(record))
+            }
+            SQLITE_DONE => Ok(None),
+            _ => Err(sqlite_error(self.database)),
+        }
+    }
+
+    pub fn clear_prepared_slot(&self) -> Result<(), String> {
+        let statement = self.prepare("DELETE FROM update_prepare_status WHERE singleton=1")?;
         expect_done(self.database, statement.raw)
     }
 

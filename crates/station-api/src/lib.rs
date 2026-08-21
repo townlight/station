@@ -202,6 +202,7 @@ impl Api {
             ("GET", "/api/v1/updates/status") => self.update_status(),
             ("POST", "/api/v1/updates/check") => self.check_updates(),
             ("POST", "/api/v1/updates/stage") => self.stage_update(),
+            ("POST", "/api/v1/updates/prepare") => self.prepare_update(),
             ("GET", path) if path.starts_with("/api/v1/updates/release-notes?") => {
                 self.update_release_notes(path)
             }
@@ -842,6 +843,24 @@ impl Api {
             Ok(record) => json_response(
                 201,
                 serde_json::to_vec(&record).expect("serializing a staged update cannot fail"),
+            ),
+            Err(error) => update_error_response(error),
+        }
+    }
+
+    fn prepare_update(&self) -> ApiResponse {
+        let now = match system_time_millis() {
+            Ok(value) => value,
+            Err(message) => return error_response(500, "clock_error", &message),
+        };
+        match station_update_coordinator::prepare_staged_release(
+            &self.database_path,
+            &self.application_directory,
+            now,
+        ) {
+            Ok(record) => json_response(
+                201,
+                serde_json::to_vec(&record).expect("serializing a prepared slot cannot fail"),
             ),
             Err(error) => update_error_response(error),
         }
@@ -1691,6 +1710,11 @@ fn update_error_response(error: CoordinatorError) -> ApiResponse {
             409,
             "no_available_update",
             "No current verified release is available to stage on this station.",
+        ),
+        CoordinatorError::NoStagedRelease => error_response(
+            409,
+            "no_staged_update",
+            "No current verified package is staged and available to prepare on this station.",
         ),
         CoordinatorError::Fault(message) => error_response(500, "update_status_failed", &message),
     }

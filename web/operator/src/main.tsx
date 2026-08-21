@@ -245,6 +245,13 @@ interface StagedPackageRecord {
   package_file_name: string;
 }
 
+interface PreparedSlotRecord {
+  prepared_at_unix_ms: number;
+  manifest: ReleaseManifest;
+  package_file_name: string;
+  slot_directory_name: string;
+}
+
 interface UpdateCheckRecord {
   checked_at_unix_ms: number;
   next_automatic_check_at_unix_ms: number;
@@ -262,6 +269,7 @@ interface UpdateStatus {
   feed_origin: string | null;
   latest_check: UpdateCheckRecord | null;
   staged_package: StagedPackageRecord | null;
+  prepared_slot: PreparedSlotRecord | null;
   next_step: string;
 }
 
@@ -604,6 +612,15 @@ function Health({ runtime, resources, selfTests, selfTestSchedules, updateStatus
       setUpdateError(problem instanceof Error ? problem.message : "The verified release package could not be staged.");
     } finally { setBusyId(null); }
   }
+  async function prepareUpdate() {
+    setBusyId("update-prepare"); setUpdateError(null);
+    try {
+      await request<PreparedSlotRecord>("/api/v1/updates/prepare", { method: "POST" });
+      await onRefresh();
+    } catch (problem) {
+      setUpdateError(problem instanceof Error ? problem.message : "The verified application slot could not be prepared.");
+    } finally { setBusyId(null); }
+  }
   return <>
     <header className="page-header"><div><p className="eyebrow">Unattended survival</p><h1>System health & alerts</h1><p>Runtime truth comes from durable worker heartbeats and incident records.</p></div></header>
     {runtime ? <section className={`health-hero health-${runtime.color}`}><div className="health-orb">{runtime.color === "green" ? "✓" : "!"}</div><div><p className="eyebrow">Runtime safe-to-air</p><h2>{runtime.label}</h2><p>{runtime.operator_message}</p></div><div className="health-counts"><strong>{runtime.active_critical_alerts}</strong><small>critical</small><strong>{runtime.active_warning_alerts}</strong><small>warning</small></div></section> : <section className="panel"><p>Runtime status is loading.</p></section>}
@@ -615,6 +632,7 @@ function Health({ runtime, resources, selfTests, selfTestSchedules, updateStatus
     <section className="panel update-panel"><div className="panel-head"><div><p className="eyebrow">Signed releases</p><h2>Station updates</h2></div><StatusPill status={updateStatus?.staged_package ? "staged" : updateStatus?.latest_check?.outcome ?? (updateStatus?.configured ? "never checked" : "not configured")} /></div>{updateStatus ? <div className="update-status"><div className="update-version"><span>Installed</span><strong>{updateStatus.current_version}</strong><small><code>{updateStatus.source_commit.slice(0, 12)}</code></small></div><div><strong>{updateStatus.staged_package ? `${updateStatus.staged_package.manifest.version} is verified and staged` : updateStatus.latest_check?.outcome === "update_available" ? `${updateStatus.latest_check.offered_release?.version} is available` : updateStatus.latest_check?.outcome === "updater_too_old" ? "A full installer is required" : updateStatus.latest_check?.outcome === "failed" ? "Last check failed" : updateStatus.latest_check ? "This station is up to date" : updateStatus.configured ? "Ready for first check" : "Release source not configured"}</strong><p className="muted">{updateStatus.latest_check?.error ?? updateStatus.next_step}</p>{updateStatus.feed_origin && <small>{updateStatus.release_channel} · {updateStatus.feed_origin}</small>}{updateStatus.latest_check && <small>Last checked {formatTime(updateStatus.latest_check.checked_at_unix_ms)} · {updateStatus.latest_check.trigger}</small>}{updateStatus.staged_package && <small>Staged {formatTime(updateStatus.staged_package.staged_at_unix_ms)} · {(updateStatus.staged_package.manifest.package_size_bytes / 1024 / 1024).toFixed(1)} MiB · <code>{updateStatus.staged_package.manifest.package_sha256.slice(0, 12)}</code></small>}{updateStatus.latest_check?.offered_release && <a className="secondary notes-link" href={`/api/v1/updates/release-notes?version=${encodeURIComponent(updateStatus.latest_check.offered_release.version)}`} target="_blank" rel="noreferrer">Release notes</a>}</div></div> : <div className="clear-state compact"><strong>Update identity unavailable</strong><p>The installed release receipt could not be read.</p></div>}{updateError && <div className="error-box">{updateError}</div>}<div className="update-actions"><p>Checks never download packages. Staging is an explicit action that streams through signed length and SHA-256 checks into managed quarantine; staged bytes are never loaded or executed. Installation still requires a separate maintenance window.</p><div className="button-row"><button className="secondary" disabled={!updateStatus?.configured || busyId === "update-check" || busyId === "update-stage"} onClick={() => void checkUpdates()}>{busyId === "update-check" ? "Verifying…" : "Check signed feed"}</button><button className="primary" disabled={updateStatus?.latest_check?.outcome !== "update_available" || Boolean(updateStatus?.staged_package) || busyId === "update-check" || busyId === "update-stage"} onClick={() => void stageUpdate()}>{busyId === "update-stage" ? "Downloading & verifying…" : updateStatus?.staged_package ? "Package staged" : "Stage verified package"}</button></div></div></section>
     <section className="panel"><div className="panel-head"><div><p className="eyebrow">Notify once, then pace</p><h2>Alert rules</h2></div><span className="count">{rules.length}</span></div><p className="muted rule-intro">Rules own severity, output scope, destinations, resolution notices, and the minimum interval between repeat pages.</p><div className="rule-list">{rules.map((rule) => <AlertRuleEditor key={rule.rule_id} rule={rule} destinations={alertChannels} outputChannels={outputChannels} onRefresh={onRefresh} />)}</div></section>
     <section className="panel"><div className="panel-head"><div><p className="eyebrow">Durable delivery ledger</p><h2>Recent notifications</h2></div><span className="count">{deliveries.length}</span></div>{recentDeliveries.length ? <div className="delivery-list">{recentDeliveries.map((delivery) => { const channel = alertChannels.find((item) => item.channel_id === delivery.alert_channel_id); return <article className="delivery-row" key={delivery.delivery_id}><div><strong>{delivery.notification_kind === "test" ? "Operator test" : `${delivery.notification_kind} alert`} · {channel?.label ?? "Removed destination"}</strong><small>{formatTime(delivery.created_at_unix_ms)} · {delivery.attempts} attempt{delivery.attempts === 1 ? "" : "s"}{delivery.last_error ? ` · ${delivery.last_error}` : ""}</small></div><StatusPill status={delivery.state} /></article>; })}</div> : <div className="clear-state compact"><strong>No delivery attempts</strong><p>Tests and incident notifications will remain visible here across restarts.</p></div>}</section>
+    {updateStatus?.staged_package && <section className="panel update-panel"><div className="panel-head"><div><p className="eyebrow">Immutable application slot</p><h2>Prepare verified update</h2></div><StatusPill status={updateStatus.prepared_slot ? "prepared" : "not prepared"} /></div><p className="muted">Preparation revalidates the complete signed package, rejects unexpected archive entries, and extracts exact per-file hashes into a new version-and-commit slot. It does not stop channels, switch the service, execute candidate code, or install the update.</p>{updateStatus.prepared_slot ? <div className="support-result"><div><strong>{updateStatus.prepared_slot.manifest.version} is prepared</strong><small>Prepared {formatTime(updateStatus.prepared_slot.prepared_at_unix_ms)} · <code>{updateStatus.prepared_slot.slot_directory_name}</code></small></div></div> : <button className="primary" disabled={busyId === "update-prepare"} onClick={() => void prepareUpdate()}>{busyId === "update-prepare" ? "Validating & extracting…" : "Prepare immutable slot"}</button>}</section>}
   </>;
 }
 

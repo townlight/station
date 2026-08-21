@@ -667,6 +667,7 @@ fn reports_an_honest_unconfigured_update_state_and_refuses_a_network_check() {
     assert_eq!(document["current_version"], "0.1.0");
     assert_eq!(document["latest_check"], serde_json::Value::Null);
     assert_eq!(document["staged_package"], serde_json::Value::Null);
+    assert_eq!(document["prepared_slot"], serde_json::Value::Null);
     assert!(
         document["next_step"]
             .as_str()
@@ -684,6 +685,12 @@ fn reports_an_honest_unconfigured_update_state_and_refuses_a_network_check() {
     assert_eq!(stage.status, 409);
     assert_eq!(
         serde_json::from_slice::<serde_json::Value>(&stage.body).unwrap()["error"]["code"],
+        "updates_not_configured"
+    );
+    let prepare = api.handle("POST", "/api/v1/updates/prepare", None);
+    assert_eq!(prepare.status, 409);
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&prepare.body).unwrap()["error"]["code"],
         "updates_not_configured"
     );
     let notes = api.handle("GET", "/api/v1/updates/release-notes?version=0.2.0", None);
