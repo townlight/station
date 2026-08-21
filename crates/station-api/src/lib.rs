@@ -1,6 +1,10 @@
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::Path;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 use std::time::Duration;
 
 use serde::Deserialize;
@@ -101,10 +105,26 @@ pub fn serve_one(listener: TcpListener, database_path: impl AsRef<Path>) -> Resu
 }
 
 pub fn serve(listener: TcpListener, database_path: impl AsRef<Path>) -> Result<(), String> {
+    serve_until(listener, database_path, Arc::new(AtomicBool::new(false)))
+}
+
+pub fn serve_until(
+    listener: TcpListener,
+    database_path: impl AsRef<Path>,
+    stop: Arc<AtomicBool>,
+) -> Result<(), String> {
     let api = Api::open(database_path)?;
-    for connection in listener.incoming() {
-        let mut stream = connection.map_err(|error| error.to_string())?;
-        serve_stream(&mut stream, &api)?;
+    listener
+        .set_nonblocking(true)
+        .map_err(|error| error.to_string())?;
+    while !stop.load(Ordering::Acquire) {
+        match listener.accept() {
+            Ok((mut stream, _)) => serve_stream(&mut stream, &api)?,
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Err(error) => return Err(error.to_string()),
+        }
     }
     Ok(())
 }

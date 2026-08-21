@@ -1,10 +1,15 @@
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+    mpsc,
+};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use station_api::{Api, serve_one};
+use station_api::{Api, serve_one, serve_until};
 use station_domain::StationProfile;
 
 fn temporary_database(name: &str) -> PathBuf {
@@ -147,5 +152,35 @@ fn rejects_a_stale_profile_revision_without_losing_the_winning_update() {
     assert_eq!(stored["display_name"], "KTLT Updated");
     assert_eq!(stored["revision"], 2);
     drop(api);
+    let _ = std::fs::remove_file(database);
+}
+
+#[test]
+fn serves_requests_until_a_cooperative_stop_is_requested() {
+    let database = temporary_database("cooperative-stop");
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let stop = Arc::new(AtomicBool::new(false));
+    let server_stop = Arc::clone(&stop);
+    let server_database = database.clone();
+    let (finished_tx, finished_rx) = mpsc::channel();
+    thread::spawn(move || {
+        let _ = finished_tx.send(serve_until(listener, server_database, server_stop));
+    });
+
+    let mut client = TcpStream::connect(address).unwrap();
+    client
+        .set_read_timeout(Some(Duration::from_millis(500)))
+        .unwrap();
+    client
+        .write_all(b"GET /health HTTP/1.1\r\nHost: localhost\r\n\r\n")
+        .unwrap();
+    let mut response = Vec::new();
+    let _ = client.read_to_end(&mut response);
+    stop.store(true, Ordering::Release);
+    let server_result = finished_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+
+    assert!(server_result.is_ok(), "server returned {server_result:?}");
+    assert!(response.starts_with(b"HTTP/1.1 200 OK\r\n"));
     let _ = std::fs::remove_file(database);
 }
