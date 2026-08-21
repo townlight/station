@@ -15,6 +15,9 @@ $receiptPath = Join-Path $dataDirectory 'install-receipt.json'
 $trustPath = Join-Path $applicationDirectory 'release-trust.json'
 $feedPath = Join-Path $FixtureDirectory 'stable.json'
 $fixtureTrustPath = Join-Path $FixtureDirectory 'release-trust.json'
+$serverReadyPath = Join-Path $FixtureDirectory 'server-ready.txt'
+$serverStopPath = Join-Path $FixtureDirectory 'server-stop.txt'
+$serverLogPath = Join-Path $FixtureDirectory 'server-log.txt'
 $server = $null
 $trustInstalled = $false
 
@@ -46,47 +49,23 @@ if (-not (Test-Path -LiteralPath $feedPath -PathType Leaf) -or
 }
 
 try {
-    $server = Start-Job -ArgumentList $FeedPort, $feedPath -ScriptBlock {
-        param($Port, $Path)
-        [byte[]]$Body = [IO.File]::ReadAllBytes($Path)
-        $listener = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, $Port)
-        $listener.Start()
-        try {
-            $deadline = [DateTime]::UtcNow.AddSeconds(90)
-            while ([DateTime]::UtcNow -lt $deadline) {
-                if (-not $listener.Pending()) {
-                    Start-Sleep -Milliseconds 25
-                    continue
-                }
-                $client = $listener.AcceptTcpClient()
-                try {
-                    $stream = $client.GetStream()
-                    $stream.ReadTimeout = 5_000
-                    $request = New-Object byte[] 4096
-                    $count = $stream.Read($request, 0, $request.Length)
-                    $requestLine = [Text.Encoding]::ASCII.GetString($request, 0, $count).Split("`r`n")[0]
-                    if ($requestLine -eq 'GET /stable.json HTTP/1.1') {
-                        $headers = [Text.Encoding]::ASCII.GetBytes(
-                            "HTTP/1.1 200 OK`r`nContent-Type: application/json`r`nContent-Length: $($Body.Length)`r`nConnection: close`r`n`r`n"
-                        )
-                        $stream.Write($headers, 0, $headers.Length)
-                        $stream.Write($Body, 0, $Body.Length)
-                    }
-                    else {
-                        $response = [Text.Encoding]::ASCII.GetBytes(
-                            "HTTP/1.1 404 Not Found`r`nContent-Length: 0`r`nConnection: close`r`n`r`n"
-                        )
-                        $stream.Write($response, 0, $response.Length)
-                    }
-                }
-                finally { $client.Dispose() }
-            }
-        }
-        finally { $listener.Stop() }
+    Remove-Item -LiteralPath $serverReadyPath,$serverStopPath,$serverLogPath -Force -ErrorAction SilentlyContinue
+    $serverScript = Join-Path $PSScriptRoot 'serve-update-proof-fixture.ps1'
+    $serverArguments = @(
+        '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ('"' + $serverScript + '"'),
+        '-Port', [string]$FeedPort, '-FeedPath', ('"' + $feedPath + '"'),
+        '-ReadyPath', ('"' + $serverReadyPath + '"'), '-StopPath', ('"' + $serverStopPath + '"'),
+        '-LogPath', ('"' + $serverLogPath + '"')
+    )
+    $server = Start-Process -FilePath (Get-Process -Id $PID).Path -ArgumentList $serverArguments `
+        -WindowStyle Hidden -PassThru
+    $readyDeadline = [DateTime]::UtcNow.AddSeconds(5)
+    while (-not (Test-Path -LiteralPath $serverReadyPath) -and
+        -not $server.HasExited -and [DateTime]::UtcNow -lt $readyDeadline) {
+        Start-Sleep -Milliseconds 50
     }
-    Start-Sleep -Milliseconds 500
-    if ($server.State -eq 'Failed') {
-        throw 'The local signed-feed fixture could not start.'
+    if (-not (Test-Path -LiteralPath $serverReadyPath) -or $server.HasExited) {
+        throw 'The dedicated local signed-feed fixture could not start.'
     }
 
     Copy-Item -LiteralPath $fixtureTrustPath -Destination $trustPath -Force
@@ -110,14 +89,15 @@ try {
     if ($notes -ne "# TownLight Station 0.2.0`n`nInstalled signed-discovery proof release.") {
         throw 'The installed API did not return the exact verified release notes.'
     }
-    $alerts = @(Invoke-RestMethod -Uri "$BaseUrl/alerts")
-    $availableAlert = $alerts.Where({
-        $_.condition -eq 'UpdateAvailable' -and $_.severity -eq 'info' -and
+    $alerts = Invoke-RestMethod -Uri "$BaseUrl/alerts"
+    $availableAlerts = @($alerts.Where({
+        $_.condition -eq 'update-available' -and $_.severity -eq 'info' -and
         $_.state -eq 'firing' -and $_.resource_ref -eq '0.2.0'
-    }, 'First')
-    if (-not $availableAlert -or [uint64]$availableAlert.occurrence_count -ne 1) {
+    }))
+    if ($availableAlerts.Count -ne 1 -or [uint64]($availableAlerts[0].occurrence_count) -lt 1) {
         throw 'The verified installed offer did not create one firing informational alert.'
     }
+    $availableAlert = $availableAlerts[0]
     $stagedFiles = @(
         Get-ChildItem -LiteralPath $dataDirectory -Recurse -File -ErrorAction SilentlyContinue |
             Where-Object { $_.Name -match '(?i)\.tlu$|TownLight-Station-0\.2\.0' }
@@ -133,12 +113,23 @@ try {
         param($Status)
         -not $Status.configured -and $null -eq $Status.latest_check
     }
-    $cleanAlerts = @(Invoke-RestMethod -Uri "$BaseUrl/alerts")
-    $resolvedAlert = $cleanAlerts.Where({
-        $_.condition -eq 'UpdateAvailable' -and $_.resource_ref -eq '0.2.0' -and
-        $_.state -eq 'resolved'
-    }, 'First')
-    if (-not $resolvedAlert -or $null -eq $resolvedAlert.resolved_at_unix_ms) {
+    $resolvedAlert = $null
+    $alertDeadline = [DateTime]::UtcNow.AddSeconds(10)
+    while (-not $resolvedAlert -and [DateTime]::UtcNow -lt $alertDeadline) {
+        $cleanAlerts = Invoke-RestMethod -Uri "$BaseUrl/alerts"
+        $firingOffers = @($cleanAlerts.Where({
+            $_.condition -eq 'update-available' -and $_.resource_ref -eq '0.2.0' -and
+            $_.state -eq 'firing'
+        }))
+        if ($firingOffers.Count -eq 0) {
+            $resolvedAlert = @($cleanAlerts.Where({
+                $_.condition -eq 'update-available' -and $_.resource_ref -eq '0.2.0' -and
+                $_.state -eq 'resolved' -and $null -ne $_.resolved_at_unix_ms
+            }))[0]
+        }
+        if (-not $resolvedAlert) { Start-Sleep -Milliseconds 100 }
+    }
+    if (-not $resolvedAlert) {
         throw 'Removing installer-owned trust did not resolve the prior offer alert.'
     }
 
@@ -152,7 +143,7 @@ try {
         verified_offer_commit = $available.latest_check.offered_release.source_commit
         release_notes_exact = $true
         alert_severity = $availableAlert.severity
-        alert_occurrences = [uint64]$availableAlert.occurrence_count
+        alert_occurrences = [uint64]($availableAlert.occurrence_count)
         packages_downloaded_or_staged = $stagedFiles.Count
         proof_trust_removed = -not (Test-Path -LiteralPath $trustPath)
         clean_configured_state = $clean.configured
@@ -166,9 +157,16 @@ try {
 }
 catch {
     if ($ResultPath) {
+        $latestStatus = try {
+            Invoke-RestMethod -Uri "$BaseUrl/updates/status" -Method Get
+        }
+        catch { $null }
         [ordered]@{
             error = $_.Exception.Message
             position = $_.InvocationInfo.PositionMessage
+            latest_status = $latestStatus
+            server_state = if ($server -and $server.HasExited) { "exited-$($server.ExitCode)" } elseif ($server) { 'running' } else { 'not-started' }
+            server_output = if (Test-Path -LiteralPath $serverLogPath) { (Get-Content -Raw -LiteralPath $serverLogPath).Trim() } else { '' }
         } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $ResultPath -Encoding utf8NoBOM
     }
     throw
@@ -179,7 +177,8 @@ finally {
         Restart-Service -Name TownLightStation -Force -ErrorAction SilentlyContinue
     }
     if ($server) {
-        Stop-Job -Job $server -ErrorAction SilentlyContinue
-        Remove-Job -Job $server -Force -ErrorAction SilentlyContinue
+        Set-Content -LiteralPath $serverStopPath -Value 'stop' -Encoding ascii -ErrorAction SilentlyContinue
+        if (-not $server.WaitForExit(3000)) { $server.Kill() }
+        $server.Dispose()
     }
 }
