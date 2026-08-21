@@ -343,6 +343,8 @@ pub struct CgFeedSource {
     pub label: String,
     pub source_url: String,
     pub trust_tier: CgFeedTrustTier,
+    #[serde(default)]
+    pub tags: Vec<String>,
     pub refresh_seconds: u32,
     pub enabled: bool,
     pub revision: u64,
@@ -374,7 +376,83 @@ impl CgFeedSource {
         {
             return Err("CG feed-source fields are invalid.");
         }
+        validate_tags(&self.tags)?;
         Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CgFeedItem {
+    pub item_id: String,
+    pub title: String,
+    pub summary: Option<String>,
+    pub starts_at_unix_ms: Option<i64>,
+    pub url: Option<String>,
+    pub tags: Vec<String>,
+}
+
+impl CgFeedItem {
+    pub fn validate(&self) -> Result<(), &'static str> {
+        if !is_sha256(&self.item_id)
+            || !visible_text(&self.title, 200)
+            || self.starts_at_unix_ms.is_some_and(|value| value < 0)
+            || self
+                .url
+                .as_deref()
+                .is_some_and(|value| !valid_https_url(value))
+        {
+            return Err("CG feed-item fields are invalid.");
+        }
+        if let Some(summary) = self.summary.as_deref() {
+            bounded_text(summary, 500)?;
+        }
+        validate_tags(&self.tags)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CgFeedCacheEntry {
+    pub feed_source_id: String,
+    pub fetched_at_unix_ms: i64,
+    pub expires_at_unix_ms: i64,
+    pub etag: Option<String>,
+    pub last_modified: Option<String>,
+    pub last_error: Option<String>,
+    pub items: Vec<CgFeedItem>,
+}
+
+impl CgFeedCacheEntry {
+    pub fn validate(&self) -> Result<(), &'static str> {
+        if !is_uuid(&self.feed_source_id)
+            || self.fetched_at_unix_ms < 0
+            || self.expires_at_unix_ms < self.fetched_at_unix_ms
+            || self
+                .etag
+                .as_deref()
+                .is_some_and(|value| !valid_header_value(value, 500))
+            || self
+                .last_modified
+                .as_deref()
+                .is_some_and(|value| !valid_header_value(value, 200))
+            || self
+                .last_error
+                .as_deref()
+                .is_some_and(|value| bounded_text(value, 1_000).is_err())
+        {
+            return Err("CG feed-cache fields are invalid.");
+        }
+        let mut ids = BTreeSet::new();
+        for item in &self.items {
+            item.validate()?;
+            if !ids.insert(item.item_id.as_str()) {
+                return Err("CG feed-cache item identities must be unique.");
+            }
+        }
+        Ok(())
+    }
+
+    pub fn is_stale_at(&self, now_unix_ms: i64) -> bool {
+        now_unix_ms < 0 || now_unix_ms > self.expires_at_unix_ms
     }
 }
 
@@ -662,6 +740,13 @@ fn valid_https_url(value: &str) -> bool {
             .is_some_and(|rest| !rest.is_empty() && !rest.starts_with('/') && !rest.contains('@'))
 }
 
+fn valid_header_value(value: &str, maximum: usize) -> bool {
+    !value.is_empty()
+        && value.len() <= maximum
+        && value.trim() == value
+        && !value.chars().any(char::is_control)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -774,6 +859,7 @@ mod tests {
             label: "Town notices".into(),
             source_url: "http://notices.example.test/rss".into(),
             trust_tier: CgFeedTrustTier::Moderated,
+            tags: Vec::new(),
             refresh_seconds: 300,
             enabled: true,
             revision: 1,

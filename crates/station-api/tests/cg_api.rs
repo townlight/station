@@ -5,8 +5,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use station_api::Api;
 use station_cg::{
     CgAuditEvent, CgAuditEventKind, CgBoard, CgBulletin, CgBulletinContent, CgBulletinState,
-    CgContentSource, CgFeedItemApproval, CgFeedKind, CgFeedSource, CgFeedTrustTier, CgTemplate,
-    CgZoneConfig, CgZoneKind,
+    CgContentSource, CgFeedItem, CgFeedItemApproval, CgFeedKind, CgFeedSource, CgFeedTrustTier,
+    CgTemplate, CgZoneConfig, CgZoneKind,
 };
 use station_schedule::{ChannelConfiguration, OutputProfileId, OutputSinkConfiguration};
 use station_storage::StationStore;
@@ -58,13 +58,14 @@ fn manages_cg_authority_through_the_operator_api() {
         board
     );
 
-    let feed = CgFeedSource {
+    let mut feed = CgFeedSource {
         feed_source_id: FEED_ID.into(),
         channel_id: CHANNEL_ID.into(),
         kind: CgFeedKind::Rss,
         label: "Town notices".into(),
         source_url: "https://notices.example.test/rss".into(),
         trust_tier: CgFeedTrustTier::Moderated,
+        tags: Vec::new(),
         refresh_seconds: 300,
         enabled: true,
         revision: 1,
@@ -89,6 +90,25 @@ fn manages_cg_authority_through_the_operator_api() {
         )),
     );
     assert_eq!(response.status, 200, "{}", body_text(&response.body));
+
+    StationStore::open(&database)
+        .unwrap()
+        .replace_cg_feed_cache(
+            FEED_ID,
+            1_350,
+            &[CgFeedItem {
+                item_id: "a".repeat(64),
+                title: "Town notice".into(),
+                summary: None,
+                starts_at_unix_ms: None,
+                url: None,
+                tags: Vec::new(),
+            }],
+            None,
+            None,
+        )
+        .unwrap();
+    feed.last_fetched_at_unix_ms = Some(1_350);
 
     let zone = CgZoneConfig {
         zone_id: ZONE_ID.into(),

@@ -4,8 +4,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use station_cg::{
     CgAuditEvent, CgAuditEventKind, CgBoard, CgBulletin, CgBulletinContent, CgBulletinState,
-    CgContentSource, CgFeedItemApproval, CgFeedKind, CgFeedSource, CgFeedTrustTier, CgZoneConfig,
-    CgZoneKind,
+    CgContentSource, CgFeedItem, CgFeedItemApproval, CgFeedKind, CgFeedSource, CgFeedTrustTier,
+    CgZoneConfig, CgZoneKind,
 };
 use station_schedule::{ChannelConfiguration, OutputProfileId, OutputSinkConfiguration};
 use station_storage::{CgWriteError, StationStore};
@@ -15,6 +15,7 @@ const BOARD_ID: &str = "94a0dc01-d314-4b55-b2e4-cba39cc3f1dc";
 const ZONE_ID: &str = "8f4f0f70-5c30-48c6-819a-fb22b34353c5";
 const FEED_ID: &str = "796ca80a-9cc2-4fc1-84a2-2a88d8f92f24";
 const BULLETIN_ID: &str = "597f52ae-f16c-4ff8-ab32-60379cd950c4";
+const SECOND_FEED_ID: &str = "9ac46d05-09d8-4ef8-9607-75c365b3274e";
 
 #[test]
 fn atomically_persists_revisioned_board_and_zone_authority_with_audit() {
@@ -171,6 +172,7 @@ fn persists_moderated_feeds_and_bulletin_lifecycle_with_append_only_evidence() {
         label: "Town notices".into(),
         source_url: "https://notices.example.test/rss".into(),
         trust_tier: CgFeedTrustTier::Moderated,
+        tags: Vec::new(),
         refresh_seconds: 300,
         enabled: true,
         revision: 1,
@@ -192,6 +194,23 @@ fn persists_moderated_feeds_and_bulletin_lifecycle_with_append_only_evidence() {
         )
         .unwrap();
     assert_eq!(store.list_cg_feed_sources(CHANNEL_ID).unwrap(), vec![feed]);
+
+    store
+        .replace_cg_feed_cache(
+            FEED_ID,
+            1_140,
+            &[CgFeedItem {
+                item_id: "a".repeat(64),
+                title: "Town notice".into(),
+                summary: None,
+                starts_at_unix_ms: None,
+                url: None,
+                tags: Vec::new(),
+            }],
+            None,
+            None,
+        )
+        .unwrap();
 
     let item_approval = CgFeedItemApproval {
         feed_source_id: FEED_ID.into(),
@@ -438,6 +457,7 @@ fn deletes_zones_and_feeds_with_revision_audit_and_dependency_rollback() {
         label: "Town notices".into(),
         source_url: "https://notices.example.test/rss".into(),
         trust_tier: CgFeedTrustTier::Moderated,
+        tags: Vec::new(),
         refresh_seconds: 300,
         enabled: true,
         revision: 1,
@@ -523,6 +543,178 @@ fn deletes_zones_and_feeds_with_revision_audit_and_dependency_rollback() {
     remove_database(&database);
 }
 
+#[test]
+fn feed_cache_failure_preserves_last_success_and_approval_requires_observed_item() {
+    let database = database_path("cg-feed-cache");
+    let store = StationStore::open(&database).unwrap();
+    put_channel(&store);
+    store
+        .write_cg_feed_source(
+            &feed(FEED_ID, "Town notices"),
+            0,
+            &audit(
+                "47c70ce1-f4f9-4f3f-a83b-4b220f9ba2a7",
+                CgAuditEventKind::FeedCreated,
+                1_000,
+            ),
+        )
+        .unwrap();
+    store
+        .write_cg_feed_source(
+            &feed(SECOND_FEED_ID, "Town notices 2"),
+            0,
+            &audit(
+                "fd75c0d7-93ca-4f04-80cd-9c76b40ff76c",
+                CgAuditEventKind::FeedCreated,
+                1_000,
+            ),
+        )
+        .unwrap();
+    let item = CgFeedItem {
+        item_id: "a".repeat(64),
+        title: "Library meeting".into(),
+        summary: Some("Tuesday at six".into()),
+        starts_at_unix_ms: Some(2_000),
+        url: Some("https://notices.example.test/library".into()),
+        tags: vec!["community".into()],
+    };
+    let replaced = store
+        .replace_cg_feed_cache(FEED_ID, 2_000, std::slice::from_ref(&item), None, None)
+        .unwrap();
+    assert_eq!(replaced.items, vec![item.clone()]);
+    assert_eq!(replaced.last_error, None);
+    assert_eq!(
+        store
+            .read_cg_feed_source(FEED_ID)
+            .unwrap()
+            .unwrap()
+            .last_fetched_at_unix_ms,
+        Some(2_000)
+    );
+    let second_item = CgFeedItem {
+        item_id: "b".repeat(64),
+        title: "Park event".into(),
+        summary: None,
+        starts_at_unix_ms: Some(2_100),
+        url: None,
+        tags: vec!["community".into()],
+    };
+    store
+        .replace_cg_feed_cache(
+            FEED_ID,
+            2_100,
+            &[item.clone(), second_item.clone()],
+            Some("v1"),
+            None,
+        )
+        .unwrap();
+    drop(store);
+    let store = StationStore::open(&database).unwrap();
+    assert_eq!(
+        store.read_cg_feed_cache(FEED_ID).unwrap().unwrap().items,
+        vec![item.clone(), second_item.clone()]
+    );
+    let duplicate = vec![second_item.clone(), second_item.clone()];
+    assert!(matches!(
+        store.replace_cg_feed_cache(FEED_ID, 2_200, &duplicate, None, None),
+        Err(CgWriteError::Invalid(_))
+    ));
+    let preserved = store.read_cg_feed_cache(FEED_ID).unwrap().unwrap();
+    assert_eq!(preserved.items, vec![item.clone(), second_item.clone()]);
+    assert_eq!(preserved.etag.as_deref(), Some("v1"));
+    store
+        .record_cg_feed_fetch_failure(FEED_ID, 3_000, "timeout")
+        .unwrap();
+    let cached = store.read_cg_feed_cache(FEED_ID).unwrap().unwrap();
+    assert_eq!(cached.items, vec![item, second_item]);
+    assert_eq!(cached.last_error.as_deref(), Some("timeout"));
+    assert_eq!(
+        store
+            .read_cg_feed_source(FEED_ID)
+            .unwrap()
+            .unwrap()
+            .last_fetched_at_unix_ms,
+        Some(3_000)
+    );
+
+    let unknown = CgFeedItemApproval {
+        feed_source_id: FEED_ID.into(),
+        item_id: "c".repeat(64),
+        approved_by: "station-operator".into(),
+        approved_at_unix_ms: 3_100,
+    };
+    assert_eq!(
+        store.approve_cg_feed_item(
+            &unknown,
+            &audit(
+                "c4b55b25-2697-41d5-a9d5-9ce8dd05d972",
+                CgAuditEventKind::FeedItemApproved,
+                3_100,
+            ),
+        ),
+        Err(CgWriteError::NotFound)
+    );
+    let known = CgFeedItemApproval {
+        item_id: "a".repeat(64),
+        ..unknown
+    };
+    store
+        .approve_cg_feed_item(
+            &known,
+            &audit(
+                "720c6322-6ecc-463e-9607-9ad9cfbb70c1",
+                CgAuditEventKind::FeedItemApproved,
+                3_200,
+            ),
+        )
+        .unwrap();
+    assert!(
+        store
+            .list_cg_approved_feed_item_ids(FEED_ID)
+            .unwrap()
+            .contains(&known.item_id)
+    );
+
+    store
+        .record_cg_feed_fetch_failure(SECOND_FEED_ID, 4_000, "unreachable")
+        .unwrap();
+    let second = store.read_cg_feed_source(SECOND_FEED_ID).unwrap().unwrap();
+    assert_eq!(second.last_fetched_at_unix_ms, Some(4_000));
+    assert_eq!(second.last_fetch_error.as_deref(), Some("unreachable"));
+    assert!(store.read_cg_feed_cache(SECOND_FEED_ID).unwrap().is_none());
+
+    let mut disabled = feed(FEED_ID, "Town notices");
+    disabled.enabled = false;
+    disabled.revision = 2;
+    disabled.updated_at_unix_ms = 3_300;
+    store
+        .write_cg_feed_source(
+            &disabled,
+            1,
+            &audit(
+                "02f140aa-a720-4b3b-b6ea-a0dedcde5c52",
+                CgAuditEventKind::FeedUpdated,
+                3_300,
+            ),
+        )
+        .unwrap();
+    assert!(matches!(
+        store.replace_cg_feed_cache(FEED_ID, 4_000, &[], None, None),
+        Err(CgWriteError::Invalid(message)) if message.contains("disabled")
+    ));
+    assert_eq!(
+        store
+            .read_cg_feed_cache(FEED_ID)
+            .unwrap()
+            .unwrap()
+            .items
+            .len(),
+        2
+    );
+    drop(store);
+    remove_database(&database);
+}
+
 fn put_channel(store: &StationStore) {
     store
         .put_channel(&ChannelConfiguration {
@@ -551,6 +743,26 @@ fn board(revision: u64, template_id: &str, updated_at_unix_ms: i64) -> CgBoard {
         created_at_unix_ms: 1_000,
         updated_at_unix_ms,
         created_by: "station-operator".into(),
+    }
+}
+
+fn feed(feed_source_id: &str, label: &str) -> CgFeedSource {
+    CgFeedSource {
+        feed_source_id: feed_source_id.into(),
+        channel_id: CHANNEL_ID.into(),
+        kind: CgFeedKind::Rss,
+        label: label.into(),
+        source_url: "https://notices.example.test/rss".into(),
+        trust_tier: CgFeedTrustTier::Moderated,
+        tags: Vec::new(),
+        refresh_seconds: 300,
+        enabled: true,
+        revision: 1,
+        created_at_unix_ms: 1_000,
+        updated_at_unix_ms: 1_000,
+        created_by: "station-operator".into(),
+        last_fetched_at_unix_ms: None,
+        last_fetch_error: None,
     }
 }
 

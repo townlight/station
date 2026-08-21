@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::ffi::{CStr, CString, c_char, c_int, c_longlong, c_void};
 use std::path::{Path, PathBuf};
 use std::ptr;
@@ -6,8 +6,8 @@ use std::ptr;
 use sha2::{Digest, Sha256};
 use station_cg::{
     CgAuditEvent, CgAuditEventKind, CgBoard, CgBulletin, CgBulletinContent, CgBulletinState,
-    CgContentSource, CgFeedItemApproval, CgFeedKind, CgFeedSource, CgFeedTrustTier, CgZoneConfig,
-    CgZoneKind, built_in_template,
+    CgContentSource, CgFeedCacheEntry, CgFeedItem, CgFeedItemApproval, CgFeedKind, CgFeedSource,
+    CgFeedTrustTier, CgZoneConfig, CgZoneKind, built_in_template,
 };
 use station_domain::{
     AlertChannel, AlertChannelKind, AlertConditionKind, AlertDelivery, AlertDeliveryPayload,
@@ -529,6 +529,7 @@ impl StationStore {
         store.migrate_channel_output_sink_kinds()?;
         store.migrate_channel_output_sinks()?;
         store.initialize_cg_schema()?;
+        store.migrate_cg_feed_cache_schema()?;
         store.execute(
             "CREATE TABLE IF NOT EXISTS srt_output_secrets (\
                channel_id TEXT NOT NULL,\
@@ -1705,7 +1706,7 @@ impl StationStore {
         feed_source_id: &str,
     ) -> Result<Option<CgFeedSource>, String> {
         let statement = self.prepare(
-            "SELECT feed_source_id, channel_id, kind, label, source_url, trust_tier, refresh_seconds, \
+            "SELECT feed_source_id, channel_id, kind, label, source_url, trust_tier, tags_json, refresh_seconds, \
              enabled, revision, created_at_unix_ms, updated_at_unix_ms, created_by, \
              last_fetched_at_unix_ms, last_fetch_error FROM cg_feed_sources WHERE feed_source_id=?1",
         )?;
@@ -1720,7 +1721,7 @@ impl StationStore {
 
     pub fn list_cg_feed_sources(&self, channel_id: &str) -> Result<Vec<CgFeedSource>, String> {
         let statement = self.prepare(
-            "SELECT feed_source_id, channel_id, kind, label, source_url, trust_tier, refresh_seconds, \
+            "SELECT feed_source_id, channel_id, kind, label, source_url, trust_tier, tags_json, refresh_seconds, \
              enabled, revision, created_at_unix_ms, updated_at_unix_ms, created_by, \
              last_fetched_at_unix_ms, last_fetch_error FROM cg_feed_sources WHERE channel_id=?1 \
              ORDER BY label COLLATE NOCASE, feed_source_id",
@@ -1732,6 +1733,264 @@ impl StationStore {
             match unsafe { sqlite3_step(statement.raw) } {
                 SQLITE_ROW => feeds.push(read_cg_feed_source_row(statement.raw)?),
                 SQLITE_DONE => return Ok(feeds),
+                _ => return Err(sqlite_error(self.database)),
+            }
+        }
+    }
+
+    pub fn replace_cg_feed_cache(
+        &self,
+        feed_source_id: &str,
+        fetched_at_unix_ms: i64,
+        items: &[CgFeedItem],
+        etag: Option<&str>,
+        last_modified: Option<&str>,
+    ) -> Result<CgFeedCacheEntry, CgWriteError> {
+        let feed_source_id_value = feed_source_id.to_string();
+        let feed = self
+            .read_cg_feed_source(feed_source_id)
+            .map_err(CgWriteError::Storage)?
+            .ok_or(CgWriteError::NotFound)?;
+        if !feed.enabled {
+            return Err(CgWriteError::Invalid(
+                "CG feed cache cannot be replaced for a disabled source.",
+            ));
+        }
+        let refresh_seconds = feed.refresh_seconds;
+        let expires_at_unix_ms = fetched_at_unix_ms
+            .checked_add(i64::from(refresh_seconds) * 1_000)
+            .ok_or(CgWriteError::Invalid(
+                "CG feed-cache expiry exceeds the supported range.",
+            ))?;
+        let entry = CgFeedCacheEntry {
+            feed_source_id: feed_source_id_value.clone(),
+            fetched_at_unix_ms,
+            expires_at_unix_ms,
+            etag: etag.map(str::to_string),
+            last_modified: last_modified.map(str::to_string),
+            last_error: None,
+            items: items.to_vec(),
+        };
+        entry.validate().map_err(CgWriteError::Invalid)?;
+        self.execute("BEGIN IMMEDIATE")
+            .map_err(CgWriteError::Storage)?;
+        let outcome = (|| {
+            let current = self
+                .read_cg_feed_source(feed_source_id)
+                .map_err(CgWriteError::Storage)?
+                .ok_or(CgWriteError::NotFound)?;
+            if !current.enabled {
+                return Err(CgWriteError::Invalid(
+                    "CG feed cache cannot be replaced for a disabled source.",
+                ));
+            }
+            let source = c_string(feed_source_id, "CG feed-cache source identity")
+                .map_err(CgWriteError::Storage)?;
+            let delete_items = self
+                .prepare("DELETE FROM cg_feed_cache_items WHERE feed_source_id=?1")
+                .map_err(CgWriteError::Storage)?;
+            bind_text(self.database, delete_items.raw, 1, &source)
+                .map_err(CgWriteError::Storage)?;
+            expect_done(self.database, delete_items.raw).map_err(CgWriteError::Storage)?;
+
+            for item in &entry.items {
+                let insert = self
+                    .prepare(
+                        "INSERT INTO cg_feed_cache_items(feed_source_id, item_id, title, summary, \
+                         starts_at_unix_ms, url, tags_json, fetched_at_unix_ms) \
+                         VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                    )
+                    .map_err(CgWriteError::Storage)?;
+                let item_id = c_string(&item.item_id, "CG feed item identity")
+                    .map_err(CgWriteError::Storage)?;
+                let title =
+                    c_string(&item.title, "CG feed item title").map_err(CgWriteError::Storage)?;
+                let summary = c_string(
+                    item.summary.as_deref().unwrap_or_default(),
+                    "CG feed item summary",
+                )
+                .map_err(CgWriteError::Storage)?;
+                let url = c_string(item.url.as_deref().unwrap_or_default(), "CG feed item URL")
+                    .map_err(CgWriteError::Storage)?;
+                let tags = c_string(
+                    &serde_json::to_string(&item.tags)
+                        .map_err(|error| CgWriteError::Storage(error.to_string()))?,
+                    "CG feed item tags",
+                )
+                .map_err(CgWriteError::Storage)?;
+                bind_text(self.database, insert.raw, 1, &source).map_err(CgWriteError::Storage)?;
+                bind_text(self.database, insert.raw, 2, &item_id).map_err(CgWriteError::Storage)?;
+                bind_text(self.database, insert.raw, 3, &title).map_err(CgWriteError::Storage)?;
+                bind_text(self.database, insert.raw, 4, &summary).map_err(CgWriteError::Storage)?;
+                bind_i64(
+                    self.database,
+                    insert.raw,
+                    5,
+                    item.starts_at_unix_ms.unwrap_or(-1),
+                )
+                .map_err(CgWriteError::Storage)?;
+                bind_text(self.database, insert.raw, 6, &url).map_err(CgWriteError::Storage)?;
+                bind_text(self.database, insert.raw, 7, &tags).map_err(CgWriteError::Storage)?;
+                bind_i64(self.database, insert.raw, 8, fetched_at_unix_ms)
+                    .map_err(CgWriteError::Storage)?;
+                expect_done(self.database, insert.raw).map_err(CgWriteError::Storage)?;
+            }
+            let meta = self
+                .prepare(
+                    "INSERT INTO cg_feed_cache_meta(feed_source_id, fetched_at_unix_ms, \
+                     expires_at_unix_ms, etag, last_modified, last_error) VALUES(?1, ?2, ?3, ?4, ?5, '') \
+                     ON CONFLICT(feed_source_id) DO UPDATE SET fetched_at_unix_ms=excluded.fetched_at_unix_ms, \
+                     expires_at_unix_ms=excluded.expires_at_unix_ms, etag=excluded.etag, \
+                     last_modified=excluded.last_modified, last_error=''",
+                )
+                .map_err(CgWriteError::Storage)?;
+            let etag =
+                c_string(etag.unwrap_or_default(), "CG ETag").map_err(CgWriteError::Storage)?;
+            let last_modified = c_string(last_modified.unwrap_or_default(), "CG Last-Modified")
+                .map_err(CgWriteError::Storage)?;
+            bind_text(self.database, meta.raw, 1, &source).map_err(CgWriteError::Storage)?;
+            bind_i64(self.database, meta.raw, 2, fetched_at_unix_ms)
+                .map_err(CgWriteError::Storage)?;
+            bind_i64(self.database, meta.raw, 3, expires_at_unix_ms)
+                .map_err(CgWriteError::Storage)?;
+            bind_text(self.database, meta.raw, 4, &etag).map_err(CgWriteError::Storage)?;
+            bind_text(self.database, meta.raw, 5, &last_modified).map_err(CgWriteError::Storage)?;
+            expect_done(self.database, meta.raw).map_err(CgWriteError::Storage)?;
+            let update = self
+                .prepare(
+                    "UPDATE cg_feed_sources SET last_fetched_at_unix_ms=?1, last_fetch_error='' \
+                     WHERE feed_source_id=?2",
+                )
+                .map_err(CgWriteError::Storage)?;
+            bind_i64(self.database, update.raw, 1, fetched_at_unix_ms)
+                .map_err(CgWriteError::Storage)?;
+            bind_text(self.database, update.raw, 2, &source).map_err(CgWriteError::Storage)?;
+            expect_done(self.database, update.raw).map_err(CgWriteError::Storage)?;
+            Ok(entry.clone())
+        })();
+        finish_cg_transaction(self, outcome)
+    }
+
+    pub fn record_cg_feed_fetch_failure(
+        &self,
+        feed_source_id: &str,
+        failed_at_unix_ms: i64,
+        error: &str,
+    ) -> Result<(), CgWriteError> {
+        if failed_at_unix_ms < 0 || error.trim().is_empty() || error.len() > 1_000 {
+            return Err(CgWriteError::Invalid(
+                "CG feed-fetch failure evidence is invalid.",
+            ));
+        }
+        self.execute("BEGIN IMMEDIATE")
+            .map_err(CgWriteError::Storage)?;
+        let outcome = (|| {
+            self.read_cg_feed_source(feed_source_id)
+                .map_err(CgWriteError::Storage)?
+                .ok_or(CgWriteError::NotFound)?;
+            let statement = self
+                .prepare(
+                    "UPDATE cg_feed_sources SET last_fetched_at_unix_ms=?1, last_fetch_error=?2 \
+                     WHERE feed_source_id=?3",
+                )
+                .map_err(CgWriteError::Storage)?;
+            let error = c_string(error, "CG feed-fetch error").map_err(CgWriteError::Storage)?;
+            let id = c_string(feed_source_id, "CG feed identity").map_err(CgWriteError::Storage)?;
+            bind_i64(self.database, statement.raw, 1, failed_at_unix_ms)
+                .map_err(CgWriteError::Storage)?;
+            bind_text(self.database, statement.raw, 2, &error).map_err(CgWriteError::Storage)?;
+            bind_text(self.database, statement.raw, 3, &id).map_err(CgWriteError::Storage)?;
+            expect_done(self.database, statement.raw).map_err(CgWriteError::Storage)?;
+            let cache_error = self
+                .prepare("UPDATE cg_feed_cache_meta SET last_error=?1 WHERE feed_source_id=?2")
+                .map_err(CgWriteError::Storage)?;
+            bind_text(self.database, cache_error.raw, 1, &error).map_err(CgWriteError::Storage)?;
+            bind_text(self.database, cache_error.raw, 2, &id).map_err(CgWriteError::Storage)?;
+            expect_done(self.database, cache_error.raw).map_err(CgWriteError::Storage)
+        })();
+        finish_cg_transaction(self, outcome)
+    }
+
+    pub fn read_cg_feed_cache(
+        &self,
+        feed_source_id: &str,
+    ) -> Result<Option<CgFeedCacheEntry>, String> {
+        let meta = self.prepare(
+            "SELECT fetched_at_unix_ms, expires_at_unix_ms, etag, last_modified, last_error \
+             FROM cg_feed_cache_meta WHERE feed_source_id=?1",
+        )?;
+        let source = c_string(feed_source_id, "CG feed-cache source identity")?;
+        bind_text(self.database, meta.raw, 1, &source)?;
+        let (fetched, expires, etag, last_modified, last_error) =
+            match unsafe { sqlite3_step(meta.raw) } {
+                SQLITE_ROW => (
+                    unsafe { sqlite3_column_int64(meta.raw, 0) },
+                    unsafe { sqlite3_column_int64(meta.raw, 1) },
+                    column_text(meta.raw, 2)?,
+                    column_text(meta.raw, 3)?,
+                    column_text(meta.raw, 4)?,
+                ),
+                SQLITE_DONE => return Ok(None),
+                _ => return Err(sqlite_error(self.database)),
+            };
+        let statement = self.prepare(
+            "SELECT item_id, title, summary, starts_at_unix_ms, url, tags_json \
+             FROM cg_feed_cache_items WHERE feed_source_id=?1 ORDER BY starts_at_unix_ms, item_id",
+        )?;
+        bind_text(self.database, statement.raw, 1, &source)?;
+        let mut items = Vec::new();
+        loop {
+            match unsafe { sqlite3_step(statement.raw) } {
+                SQLITE_ROW => {
+                    let summary = column_text(statement.raw, 2)?;
+                    let url = column_text(statement.raw, 4)?;
+                    items.push(CgFeedItem {
+                        item_id: column_text(statement.raw, 0)?,
+                        title: column_text(statement.raw, 1)?,
+                        summary: (!summary.is_empty()).then_some(summary),
+                        starts_at_unix_ms: {
+                            let value = unsafe { sqlite3_column_int64(statement.raw, 3) };
+                            (value >= 0).then_some(value)
+                        },
+                        url: (!url.is_empty()).then_some(url),
+                        tags: serde_json::from_str(&column_text(statement.raw, 5)?).map_err(
+                            |error| format!("database returned invalid CG cache tags: {error}"),
+                        )?,
+                    });
+                }
+                SQLITE_DONE => break,
+                _ => return Err(sqlite_error(self.database)),
+            }
+        }
+        let entry = CgFeedCacheEntry {
+            feed_source_id: feed_source_id.into(),
+            fetched_at_unix_ms: fetched,
+            expires_at_unix_ms: expires,
+            etag: (!etag.is_empty()).then_some(etag),
+            last_modified: (!last_modified.is_empty()).then_some(last_modified),
+            last_error: (!last_error.is_empty()).then_some(last_error),
+            items,
+        };
+        entry.validate().map_err(str::to_string)?;
+        Ok(Some(entry))
+    }
+
+    pub fn list_cg_approved_feed_item_ids(
+        &self,
+        feed_source_id: &str,
+    ) -> Result<BTreeSet<String>, String> {
+        let statement = self.prepare(
+            "SELECT item_id FROM cg_feed_item_approvals WHERE feed_source_id=?1 ORDER BY item_id",
+        )?;
+        let source = c_string(feed_source_id, "CG approval feed identity")?;
+        bind_text(self.database, statement.raw, 1, &source)?;
+        let mut ids = BTreeSet::new();
+        loop {
+            match unsafe { sqlite3_step(statement.raw) } {
+                SQLITE_ROW => {
+                    ids.insert(column_text(statement.raw, 0)?);
+                }
+                SQLITE_DONE => return Ok(ids),
                 _ => return Err(sqlite_error(self.database)),
             }
         }
@@ -1986,6 +2245,18 @@ impl StationStore {
                 }
                 return Ok(existing);
             }
+            let observed = self
+                .prepare("SELECT 1 FROM cg_feed_cache_items WHERE feed_source_id=?1 AND item_id=?2")
+                .map_err(CgWriteError::Storage)?;
+            let feed_id = c_string(&approval.feed_source_id, "CG approval feed identity")
+                .map_err(CgWriteError::Storage)?;
+            let item_id = c_string(&approval.item_id, "CG approval item identity")
+                .map_err(CgWriteError::Storage)?;
+            bind_text(self.database, observed.raw, 1, &feed_id).map_err(CgWriteError::Storage)?;
+            bind_text(self.database, observed.raw, 2, &item_id).map_err(CgWriteError::Storage)?;
+            if unsafe { sqlite3_step(observed.raw) } != SQLITE_ROW {
+                return Err(CgWriteError::NotFound);
+            }
             let statement = self
                 .prepare(
                     "INSERT INTO cg_feed_item_approvals(feed_source_id, item_id, approved_by, \
@@ -2173,16 +2444,16 @@ impl StationStore {
     fn upsert_cg_feed_source(&self, feed: &CgFeedSource) -> Result<(), String> {
         let statement = self.prepare(
             "INSERT INTO cg_feed_sources(feed_source_id, channel_id, kind, label, source_url, \
-             trust_tier, refresh_seconds, enabled, revision, created_at_unix_ms, updated_at_unix_ms, \
+             trust_tier, tags_json, refresh_seconds, enabled, revision, created_at_unix_ms, updated_at_unix_ms, \
              created_by, last_fetched_at_unix_ms, last_fetch_error) \
-             VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14) \
+             VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15) \
              ON CONFLICT(feed_source_id) DO UPDATE SET kind=excluded.kind, label=excluded.label, \
              source_url=excluded.source_url, trust_tier=excluded.trust_tier, \
-             refresh_seconds=excluded.refresh_seconds, enabled=excluded.enabled, \
+             tags_json=excluded.tags_json, refresh_seconds=excluded.refresh_seconds, enabled=excluded.enabled, \
              revision=excluded.revision, updated_at_unix_ms=excluded.updated_at_unix_ms, \
              last_fetched_at_unix_ms=excluded.last_fetched_at_unix_ms, \
              last_fetch_error=excluded.last_fetch_error \
-             WHERE cg_feed_sources.channel_id=excluded.channel_id AND cg_feed_sources.revision=?15",
+             WHERE cg_feed_sources.channel_id=excluded.channel_id AND cg_feed_sources.revision=?16",
         )?;
         let values = [
             c_string(&feed.feed_source_id, "CG feed identity")?,
@@ -2194,42 +2465,47 @@ impl StationStore {
                 cg_feed_trust_tier_name(feed.trust_tier),
                 "CG feed trust tier",
             )?,
+            c_string(
+                &serde_json::to_string(&feed.tags)
+                    .map_err(|error| format!("could not serialize CG feed tags: {error}"))?,
+                "CG feed tags",
+            )?,
             c_string(&feed.created_by, "CG feed creator")?,
             c_string(
                 feed.last_fetch_error.as_deref().unwrap_or_default(),
                 "CG feed fetch error",
             )?,
         ];
-        for (index, value) in values[..6].iter().enumerate() {
+        for (index, value) in values[..7].iter().enumerate() {
             bind_text(self.database, statement.raw, (index + 1) as c_int, value)?;
         }
         bind_i64(
             self.database,
             statement.raw,
-            7,
+            8,
             i64::from(feed.refresh_seconds),
         )?;
-        bind_i64(self.database, statement.raw, 8, i64::from(feed.enabled))?;
+        bind_i64(self.database, statement.raw, 9, i64::from(feed.enabled))?;
         bind_i64(
             self.database,
             statement.raw,
-            9,
+            10,
             checked_i64(feed.revision, "CG feed revision")?,
         )?;
-        bind_i64(self.database, statement.raw, 10, feed.created_at_unix_ms)?;
-        bind_i64(self.database, statement.raw, 11, feed.updated_at_unix_ms)?;
-        bind_text(self.database, statement.raw, 12, &values[6])?;
+        bind_i64(self.database, statement.raw, 11, feed.created_at_unix_ms)?;
+        bind_i64(self.database, statement.raw, 12, feed.updated_at_unix_ms)?;
+        bind_text(self.database, statement.raw, 13, &values[7])?;
         bind_i64(
             self.database,
             statement.raw,
-            13,
+            14,
             feed.last_fetched_at_unix_ms.unwrap_or(-1),
         )?;
-        bind_text(self.database, statement.raw, 14, &values[7])?;
+        bind_text(self.database, statement.raw, 15, &values[8])?;
         bind_i64(
             self.database,
             statement.raw,
-            15,
+            16,
             checked_i64(feed.revision - 1, "prior CG feed revision")?,
         )?;
         expect_done(self.database, statement.raw)?;
@@ -4742,11 +5018,12 @@ impl StationStore {
              CREATE TABLE IF NOT EXISTS cg_feed_sources (\
                feed_source_id TEXT PRIMARY KEY,\
                channel_id TEXT NOT NULL,\
-               kind TEXT NOT NULL CHECK (kind IN ('rss','ical','caldav','weather','social')),\
-               label TEXT NOT NULL,\
-               source_url TEXT NOT NULL,\
-               trust_tier TEXT NOT NULL CHECK (trust_tier IN ('station','trusted','moderated')),\
-               refresh_seconds INTEGER NOT NULL CHECK (refresh_seconds BETWEEN 60 AND 86400),\
+             kind TEXT NOT NULL CHECK (kind IN ('rss','ical','caldav','weather','social')),\
+             label TEXT NOT NULL,\
+             source_url TEXT NOT NULL,\
+             trust_tier TEXT NOT NULL CHECK (trust_tier IN ('station','trusted','moderated')),\
+             tags_json TEXT NOT NULL DEFAULT '[]',\
+             refresh_seconds INTEGER NOT NULL CHECK (refresh_seconds BETWEEN 60 AND 86400),\
                enabled INTEGER NOT NULL CHECK (enabled IN (0,1)),\
                revision INTEGER NOT NULL CHECK (revision >= 1),\
                created_at_unix_ms INTEGER NOT NULL CHECK (created_at_unix_ms >= 0),\
@@ -4796,6 +5073,53 @@ impl StationStore {
              );\
              CREATE INDEX IF NOT EXISTS cg_audit_events_channel_time \
                ON cg_audit_events(channel_id, occurred_at_unix_ms DESC, audit_id);",
+        )
+    }
+
+    fn migrate_cg_feed_cache_schema(&self) -> Result<(), String> {
+        let statement = self.prepare("PRAGMA table_info(cg_feed_sources)")?;
+        let mut has_tags = false;
+        loop {
+            match unsafe { sqlite3_step(statement.raw) } {
+                SQLITE_ROW => {
+                    if column_text(statement.raw, 1)? == "tags_json" {
+                        has_tags = true;
+                    }
+                }
+                SQLITE_DONE => break,
+                _ => return Err(sqlite_error(self.database)),
+            }
+        }
+        drop(statement);
+        if !has_tags {
+            self.execute(
+                "ALTER TABLE cg_feed_sources ADD COLUMN tags_json TEXT NOT NULL DEFAULT '[]'",
+            )?;
+        }
+        self.execute(
+            r#"CREATE TABLE IF NOT EXISTS cg_feed_cache_meta (
+               feed_source_id TEXT PRIMARY KEY,
+               fetched_at_unix_ms INTEGER NOT NULL CHECK (fetched_at_unix_ms >= 0),
+               expires_at_unix_ms INTEGER NOT NULL CHECK (expires_at_unix_ms >= fetched_at_unix_ms),
+               etag TEXT NOT NULL DEFAULT '',
+               last_modified TEXT NOT NULL DEFAULT '',
+               last_error TEXT NOT NULL DEFAULT '',
+               FOREIGN KEY(feed_source_id) REFERENCES cg_feed_sources(feed_source_id) ON DELETE CASCADE
+             );
+             CREATE TABLE IF NOT EXISTS cg_feed_cache_items (
+               feed_source_id TEXT NOT NULL,
+               item_id TEXT NOT NULL,
+               title TEXT NOT NULL,
+               summary TEXT NOT NULL DEFAULT '',
+               starts_at_unix_ms INTEGER NOT NULL DEFAULT -1 CHECK (starts_at_unix_ms >= -1),
+               url TEXT NOT NULL DEFAULT '',
+               tags_json TEXT NOT NULL DEFAULT '[]',
+               fetched_at_unix_ms INTEGER NOT NULL CHECK (fetched_at_unix_ms >= 0),
+               PRIMARY KEY(feed_source_id, item_id),
+               FOREIGN KEY(feed_source_id) REFERENCES cg_feed_sources(feed_source_id) ON DELETE CASCADE
+             );
+             CREATE INDEX IF NOT EXISTS cg_feed_cache_items_source_start
+               ON cg_feed_cache_items(feed_source_id, starts_at_unix_ms, item_id);"#,
         )
     }
 
@@ -5316,8 +5640,8 @@ fn read_cg_zone_row(statement: *mut SqliteStatement) -> Result<CgZoneConfig, Str
 }
 
 fn read_cg_feed_source_row(statement: *mut SqliteStatement) -> Result<CgFeedSource, String> {
-    let last_fetch_error = column_text(statement, 13)?;
-    let last_fetched = unsafe { sqlite3_column_int64(statement, 12) };
+    let last_fetch_error = column_text(statement, 14)?;
+    let last_fetched = unsafe { sqlite3_column_int64(statement, 13) };
     let feed = CgFeedSource {
         feed_source_id: column_text(statement, 0)?,
         channel_id: column_text(statement, 1)?,
@@ -5325,13 +5649,15 @@ fn read_cg_feed_source_row(statement: *mut SqliteStatement) -> Result<CgFeedSour
         label: column_text(statement, 3)?,
         source_url: column_text(statement, 4)?,
         trust_tier: parse_cg_feed_trust_tier(&column_text(statement, 5)?)?,
-        refresh_seconds: u32::try_from(unsafe { sqlite3_column_int64(statement, 6) })
+        tags: serde_json::from_str(&column_text(statement, 6)?)
+            .map_err(|error| format!("database returned invalid CG feed tags: {error}"))?,
+        refresh_seconds: u32::try_from(unsafe { sqlite3_column_int64(statement, 7) })
             .map_err(|_| "database returned an invalid CG feed refresh interval".to_string())?,
-        enabled: unsafe { sqlite3_column_int64(statement, 7) } == 1,
-        revision: column_u64(statement, 8, "CG feed revision")?,
-        created_at_unix_ms: unsafe { sqlite3_column_int64(statement, 9) },
-        updated_at_unix_ms: unsafe { sqlite3_column_int64(statement, 10) },
-        created_by: column_text(statement, 11)?,
+        enabled: unsafe { sqlite3_column_int64(statement, 8) } == 1,
+        revision: column_u64(statement, 9, "CG feed revision")?,
+        created_at_unix_ms: unsafe { sqlite3_column_int64(statement, 10) },
+        updated_at_unix_ms: unsafe { sqlite3_column_int64(statement, 11) },
+        created_by: column_text(statement, 12)?,
         last_fetched_at_unix_ms: (last_fetched >= 0).then_some(last_fetched),
         last_fetch_error: (!last_fetch_error.is_empty()).then_some(last_fetch_error),
     };

@@ -1,6 +1,6 @@
 use super::{
-    CgBoard, CgBulletin, CgBulletinContent, CgContentSource, CgFeedSource, CgRect, CgTemplate,
-    CgTemplateKind, CgZoneConfig, CgZoneKind,
+    CgBoard, CgBulletin, CgBulletinContent, CgContentSource, CgFeedCacheEntry, CgFeedItem,
+    CgFeedItemApproval, CgFeedSource, CgRect, CgTemplate, CgTemplateKind, CgZoneConfig, CgZoneKind,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -25,6 +25,8 @@ pub enum CgPlaceholderReason {
     MissingFeedSource,
     FeedSourceDisabled,
     FeedDataUnavailable,
+    NoApprovedFeedItems,
+    NoFeedItemsMatchTags,
     ScheduleDataUnavailable,
     ImageAssetReadinessUnknown,
     LiveSourceReadinessUnknown,
@@ -42,6 +44,12 @@ pub enum CgResolvedContent {
     },
     Clock {
         format: String,
+    },
+    FeedItems {
+        feed_source_id: String,
+        items: Vec<CgFeedItem>,
+        stale: bool,
+        last_error: Option<String>,
     },
     Placeholder {
         source: CgPlaceholderSource,
@@ -73,6 +81,28 @@ impl CgResolvedContent {
                     Err("resolved clock format is invalid")
                 }
             }
+            Self::FeedItems {
+                feed_source_id,
+                items,
+                last_error,
+                ..
+            } => {
+                if !super::is_uuid(feed_source_id)
+                    || last_error
+                        .as_deref()
+                        .is_some_and(|value| super::bounded_text(value, 1_000).is_err())
+                {
+                    return Err("resolved feed fields are invalid");
+                }
+                let mut item_ids = BTreeSet::new();
+                for item in items {
+                    item.validate()?;
+                    if !item_ids.insert(item.item_id.as_str()) {
+                        return Err("resolved feed item identities must be unique");
+                    }
+                }
+                Ok(())
+            }
             Self::Placeholder { source, reason } => {
                 let valid = match source {
                     CgPlaceholderSource::BulletinRotation => matches!(
@@ -88,6 +118,8 @@ impl CgResolvedContent {
                         CgPlaceholderReason::MissingFeedSource
                             | CgPlaceholderReason::FeedSourceDisabled
                             | CgPlaceholderReason::FeedDataUnavailable
+                            | CgPlaceholderReason::NoApprovedFeedItems
+                            | CgPlaceholderReason::NoFeedItemsMatchTags
                     ),
                     CgPlaceholderSource::Schedule => {
                         matches!(reason, CgPlaceholderReason::ScheduleDataUnavailable)
@@ -156,6 +188,9 @@ impl CgResolvedZone {
                     source: CgPlaceholderSource::Schedule,
                     ..
                 }
+            ) | (
+                CgContentSource::Feed { .. },
+                CgResolvedContent::FeedItems { .. }
             ) | (
                 CgContentSource::Feed { .. },
                 CgResolvedContent::Placeholder {
@@ -258,6 +293,14 @@ pub enum CgSnapshotError {
         feed_source_id: String,
         reason: String,
     },
+    InvalidFeedCache {
+        feed_source_id: String,
+        reason: String,
+    },
+    InvalidFeedApproval {
+        feed_source_id: String,
+        reason: String,
+    },
     DuplicateFeed {
         feed_source_id: String,
     },
@@ -287,6 +330,29 @@ pub fn resolve_snapshot(
     zones: &[CgZoneConfig],
     feed_sources: &[CgFeedSource],
     bulletins: &[CgBulletin],
+    now_unix_ms: i64,
+) -> Result<CgResolvedSnapshot, CgSnapshotError> {
+    resolve_snapshot_with_feed_cache(
+        board,
+        template,
+        zones,
+        feed_sources,
+        bulletins,
+        &[],
+        &[],
+        now_unix_ms,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn resolve_snapshot_with_feed_cache(
+    board: &CgBoard,
+    template: &CgTemplate,
+    zones: &[CgZoneConfig],
+    feed_sources: &[CgFeedSource],
+    bulletins: &[CgBulletin],
+    feed_cache: &[CgFeedCacheEntry],
+    approvals: &[CgFeedItemApproval],
     now_unix_ms: i64,
 ) -> Result<CgResolvedSnapshot, CgSnapshotError> {
     if now_unix_ms < 0 {
@@ -408,6 +474,58 @@ pub fn resolve_snapshot(
         }
     }
 
+    let mut cache_by_id = BTreeMap::new();
+    for cache in feed_cache {
+        cache
+            .validate()
+            .map_err(|reason| CgSnapshotError::InvalidFeedCache {
+                feed_source_id: cache.feed_source_id.clone(),
+                reason: reason.into(),
+            })?;
+        if !cache_by_id
+            .insert(cache.feed_source_id.as_str(), cache)
+            .is_none()
+        {
+            return Err(CgSnapshotError::InvalidFeedCache {
+                feed_source_id: cache.feed_source_id.clone(),
+                reason: "duplicate feed-cache source".into(),
+            });
+        }
+        if !feed_by_id.contains_key(cache.feed_source_id.as_str()) {
+            return Err(CgSnapshotError::InvalidFeedCache {
+                feed_source_id: cache.feed_source_id.clone(),
+                reason: "feed-cache source is not registered on this board".into(),
+            });
+        }
+    }
+    let mut approval_ids = BTreeSet::new();
+    for approval in approvals {
+        approval
+            .validate()
+            .map_err(|reason| CgSnapshotError::InvalidFeedApproval {
+                feed_source_id: approval.feed_source_id.clone(),
+                reason: reason.into(),
+            })?;
+        let Some(feed) = feed_by_id.get(approval.feed_source_id.as_str()) else {
+            return Err(CgSnapshotError::InvalidFeedApproval {
+                feed_source_id: approval.feed_source_id.clone(),
+                reason: "approval source is not registered on this board".into(),
+            });
+        };
+        if feed.channel_id != board.channel_id {
+            return Err(CgSnapshotError::InvalidFeedApproval {
+                feed_source_id: approval.feed_source_id.clone(),
+                reason: "approval source belongs to another channel".into(),
+            });
+        }
+        if !approval_ids.insert((approval.feed_source_id.as_str(), approval.item_id.as_str())) {
+            return Err(CgSnapshotError::InvalidFeedApproval {
+                feed_source_id: approval.feed_source_id.clone(),
+                reason: "duplicate feed-item approval".into(),
+            });
+        }
+    }
+
     let resolved_zones = ordered_zones
         .into_iter()
         .map(|(zone, template_zone)| CgResolvedZone {
@@ -417,7 +535,14 @@ pub fn resolve_snapshot(
             bounds: template_zone.bounds,
             z_index: template_zone.z_index,
             content_source: zone.content_source.clone(),
-            content: resolve_zone_content(zone, &feed_by_id, &valid_bulletins, now_unix_ms),
+            content: resolve_zone_content(
+                zone,
+                &feed_by_id,
+                &valid_bulletins,
+                &cache_by_id,
+                &approval_ids,
+                now_unix_ms,
+            ),
             revision: zone.revision,
         })
         .collect();
@@ -443,6 +568,8 @@ fn resolve_zone_content(
     zone: &CgZoneConfig,
     feed_by_id: &BTreeMap<&str, &CgFeedSource>,
     bulletins: &BTreeMap<&str, &CgBulletin>,
+    feed_cache: &BTreeMap<&str, &CgFeedCacheEntry>,
+    approvals: &BTreeSet<(&str, &str)>,
     now_unix_ms: i64,
 ) -> CgResolvedContent {
     match &zone.content_source {
@@ -506,14 +633,53 @@ fn resolve_zone_content(
                     reason: CgPlaceholderReason::MissingFeedSource,
                 };
             };
-            let reason = if feed.enabled {
-                CgPlaceholderReason::FeedDataUnavailable
-            } else {
-                CgPlaceholderReason::FeedSourceDisabled
+            if !feed.enabled {
+                return CgResolvedContent::Placeholder {
+                    source: CgPlaceholderSource::Feed,
+                    reason: CgPlaceholderReason::FeedSourceDisabled,
+                };
+            }
+            let Some(cache) = feed_cache.get(feed_source_id.as_str()) else {
+                return CgResolvedContent::Placeholder {
+                    source: CgPlaceholderSource::Feed,
+                    reason: CgPlaceholderReason::FeedDataUnavailable,
+                };
             };
-            CgResolvedContent::Placeholder {
-                source: CgPlaceholderSource::Feed,
-                reason,
+            let mut items: Vec<CgFeedItem> = cache.items.clone();
+            if zone.approval_required {
+                items.retain(|item| {
+                    approvals.contains(&(feed_source_id.as_str(), item.item_id.as_str()))
+                });
+                if items.is_empty() {
+                    return CgResolvedContent::Placeholder {
+                        source: CgPlaceholderSource::Feed,
+                        reason: CgPlaceholderReason::NoApprovedFeedItems,
+                    };
+                }
+            }
+            if !zone.allowed_tags.is_empty() {
+                items.retain(|item| {
+                    item.tags
+                        .iter()
+                        .any(|tag| zone.allowed_tags.iter().any(|allowed| allowed == tag))
+                });
+                if items.is_empty() {
+                    return CgResolvedContent::Placeholder {
+                        source: CgPlaceholderSource::Feed,
+                        reason: CgPlaceholderReason::NoFeedItemsMatchTags,
+                    };
+                }
+            }
+            items.sort_by(|left, right| {
+                left.starts_at_unix_ms
+                    .cmp(&right.starts_at_unix_ms)
+                    .then_with(|| left.item_id.cmp(&right.item_id))
+            });
+            CgResolvedContent::FeedItems {
+                feed_source_id: feed_source_id.clone(),
+                items,
+                stale: cache.is_stale_at(now_unix_ms),
+                last_error: cache.last_error.clone(),
             }
         }
         CgContentSource::Image { .. } => CgResolvedContent::Placeholder {
@@ -588,6 +754,37 @@ mod tests {
         }
     }
 
+    fn feed(enabled: bool) -> CgFeedSource {
+        CgFeedSource {
+            feed_source_id: "796ca80a-9cc2-4fc1-84a2-2a88d8f92f24".into(),
+            channel_id: CHANNEL.into(),
+            kind: crate::CgFeedKind::Rss,
+            label: "Notices".into(),
+            source_url: "https://notices.example.test/rss".into(),
+            trust_tier: crate::CgFeedTrustTier::Moderated,
+            tags: Vec::new(),
+            refresh_seconds: 300,
+            enabled,
+            revision: 1,
+            created_at_unix_ms: 1,
+            updated_at_unix_ms: 1,
+            created_by: "operator".into(),
+            last_fetched_at_unix_ms: None,
+            last_fetch_error: None,
+        }
+    }
+
+    fn feed_item(id: char, starts_at_unix_ms: i64, tags: &[&str]) -> CgFeedItem {
+        CgFeedItem {
+            item_id: id.to_string().repeat(64),
+            title: format!("Notice {id}"),
+            summary: None,
+            starts_at_unix_ms: Some(starts_at_unix_ms),
+            url: None,
+            tags: tags.iter().map(|tag| (*tag).into()).collect(),
+        }
+    }
+
     #[test]
     fn resolution_is_deterministic_and_orders_zones_by_template_depth() {
         let template = crate::built_in_template("l-bar").unwrap();
@@ -616,6 +813,170 @@ mod tests {
         assert_eq!(first.template_id, "l-bar");
         assert_eq!(first.zones[0].template_zone_key, "primary");
         assert_eq!(first.zones[1].template_zone_key, "ticker");
+    }
+
+    #[test]
+    fn feed_resolution_enforces_approval_tags_staleness_and_ordering() {
+        let template = crate::built_in_template("l-bar").unwrap();
+        let mut ticker = zone(
+            "8f4f0f70-5c30-48c6-819a-fb22b34353c5",
+            "ticker",
+            CgZoneKind::Ticker,
+            CgContentSource::Feed {
+                feed_source_id: "796ca80a-9cc2-4fc1-84a2-2a88d8f92f24".into(),
+            },
+        );
+        ticker.approval_required = true;
+        ticker.allowed_tags = vec!["community".into()];
+        let items = vec![
+            feed_item('b', 2_000, &["community"]),
+            feed_item('a', 2_000, &["community"]),
+            feed_item('c', 1_000, &["sports"]),
+        ];
+        let cache = CgFeedCacheEntry {
+            feed_source_id: "796ca80a-9cc2-4fc1-84a2-2a88d8f92f24".into(),
+            fetched_at_unix_ms: 1_000,
+            expires_at_unix_ms: 1_500,
+            etag: None,
+            last_modified: None,
+            last_error: Some("timeout".into()),
+            items,
+        };
+        let empty = resolve_snapshot_with_feed_cache(
+            &board("l-bar"),
+            &template,
+            &[ticker.clone()],
+            &[feed(true)],
+            &[],
+            std::slice::from_ref(&cache),
+            &[],
+            2_000,
+        )
+        .unwrap();
+        assert!(matches!(
+            empty.zones[0].content,
+            CgResolvedContent::Placeholder {
+                reason: CgPlaceholderReason::NoApprovedFeedItems,
+                ..
+            }
+        ));
+        let approvals = vec![
+            CgFeedItemApproval {
+                feed_source_id: "796ca80a-9cc2-4fc1-84a2-2a88d8f92f24".into(),
+                item_id: "b".repeat(64),
+                approved_by: "operator".into(),
+                approved_at_unix_ms: 1_100,
+            },
+            CgFeedItemApproval {
+                feed_source_id: "796ca80a-9cc2-4fc1-84a2-2a88d8f92f24".into(),
+                item_id: "a".repeat(64),
+                approved_by: "operator".into(),
+                approved_at_unix_ms: 1_100,
+            },
+        ];
+        let resolved = resolve_snapshot_with_feed_cache(
+            &board("l-bar"),
+            &template,
+            &[ticker],
+            &[feed(true)],
+            &[],
+            std::slice::from_ref(&cache),
+            &approvals,
+            2_000,
+        )
+        .unwrap();
+        let CgResolvedContent::FeedItems {
+            items,
+            stale,
+            last_error,
+            ..
+        } = &resolved.zones[0].content
+        else {
+            panic!("expected feed items");
+        };
+        assert_eq!(
+            items
+                .iter()
+                .map(|item| item.item_id.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            ]
+        );
+        assert!(*stale);
+        assert_eq!(last_error.as_deref(), Some("timeout"));
+
+        let disabled = resolve_snapshot_with_feed_cache(
+            &board("l-bar"),
+            &template,
+            &[zone(
+                "8f4f0f70-5c30-48c6-819a-fb22b34353c5",
+                "ticker",
+                CgZoneKind::Ticker,
+                CgContentSource::Feed {
+                    feed_source_id: "796ca80a-9cc2-4fc1-84a2-2a88d8f92f24".into(),
+                },
+            )],
+            &[feed(false)],
+            &[],
+            std::slice::from_ref(&cache),
+            &[],
+            1_000,
+        )
+        .unwrap();
+        assert!(matches!(
+            disabled.zones[0].content,
+            CgResolvedContent::Placeholder {
+                reason: CgPlaceholderReason::FeedSourceDisabled,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn rejects_unknown_approval_sources_and_cache_header_controls() {
+        let template = crate::built_in_template("l-bar").unwrap();
+        let approval = CgFeedItemApproval {
+            feed_source_id: "9ac46d05-09d8-4ef8-9607-75c365b3274e".into(),
+            item_id: "a".repeat(64),
+            approved_by: "operator".into(),
+            approved_at_unix_ms: 1,
+        };
+        let zone = zone(
+            "8f4f0f70-5c30-48c6-819a-fb22b34353c5",
+            "ticker",
+            CgZoneKind::Ticker,
+            CgContentSource::Feed {
+                feed_source_id: "796ca80a-9cc2-4fc1-84a2-2a88d8f92f24".into(),
+            },
+        );
+        assert!(matches!(
+            resolve_snapshot_with_feed_cache(
+                &board("l-bar"),
+                &template,
+                &[zone],
+                &[feed(true)],
+                &[],
+                &[],
+                &[approval],
+                1,
+            ),
+            Err(CgSnapshotError::InvalidFeedApproval { .. })
+        ));
+        let mut cache = CgFeedCacheEntry {
+            feed_source_id: "796ca80a-9cc2-4fc1-84a2-2a88d8f92f24".into(),
+            fetched_at_unix_ms: 1,
+            expires_at_unix_ms: 2,
+            etag: Some("bad\r\nheader".into()),
+            last_modified: None,
+            last_error: None,
+            items: Vec::new(),
+        };
+        assert!(cache.validate().is_err());
+        cache.etag = None;
+        cache.last_modified = Some("bad\nheader".into());
+        assert!(cache.validate().is_err());
     }
 
     #[test]
