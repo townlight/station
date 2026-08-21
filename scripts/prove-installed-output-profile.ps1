@@ -35,13 +35,21 @@ try {
         throw 'The installed output-profile catalog does not expose the expected 720p59.94 contract.'
     }
 
+    $baselineWorkerIds = @(Get-CimInstance Win32_Process -Filter "Name='channel-worker.exe'" |
+        Select-Object -ExpandProperty ProcessId)
     Invoke-RestMethod -Method Put -Uri "$BaseUri/api/v1/channels" -ContentType 'application/json' `
         -Body ($channel | ConvertTo-Json -Compress) -TimeoutSec 10 | Out-Null
-    $workerProcess = Get-CimInstance Win32_Process -Filter "Name='channel-worker.exe'" |
-        Where-Object CommandLine -Like "*$($channel.channel_id)*" |
-        Select-Object -First 1
+    $processClock = [Diagnostics.Stopwatch]::StartNew()
+    do {
+        $workerProcess = Get-CimInstance Win32_Process -Filter "Name='channel-worker.exe'" |
+            Where-Object { $baselineWorkerIds -notcontains $_.ProcessId } |
+            Select-Object -First 1
+        if (-not $workerProcess) {
+            Start-Sleep -Milliseconds 100
+        }
+    } while (-not $workerProcess -and $processClock.Elapsed.TotalSeconds -lt 10)
     if (-not $workerProcess) {
-        throw 'The installed proof worker process was not visible after channel startup.'
+        throw 'The installed proof worker process did not start within 10 seconds.'
     }
     foreach ($forbiddenArgument in @("127.0.0.1:$DestinationPort", "127.0.0.1:$RedundantDestinationPort", 'atsc-720p5994')) {
         if ($workerProcess.CommandLine -like "*$forbiddenArgument*") {
@@ -206,7 +214,8 @@ try {
         captured_bytes = $bytes.Length
         redundant_captured_bytes = $redundantBytes.Length
         proven_output_branches = 2
-        worker_process_arguments_redacted = $true
+        worker_process_arguments_expose_no_output_values = $true
+        worker_command_line_readable = [bool]$workerProcess.CommandLine
         null_packets = $nullPackets
         service_health = (Invoke-RestMethod -Uri "$BaseUri/health" -TimeoutSec 5).status
         capture_path = $(if ($KeepCapture) { $capture } else { $null })
