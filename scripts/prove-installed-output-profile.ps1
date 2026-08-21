@@ -2,7 +2,8 @@ param(
     [string]$BaseUri = 'http://127.0.0.1:4070',
     [int]$DestinationPort = 5920,
     [int]$RedundantDestinationPort = 5921,
-    [int]$CaptureSeconds = 6
+    [int]$CaptureSeconds = 6,
+    [switch]$KeepCapture
 )
 
 $ErrorActionPreference = 'Stop'
@@ -17,6 +18,7 @@ $channel = [ordered]@{
     enabled = $true
 }
 $capture = Join-Path ([IO.Path]::GetTempPath()) "townlight-installed-720p-$PID.ts"
+$redundantCapture = Join-Path ([IO.Path]::GetTempPath()) "townlight-installed-720p-redundant-$PID.ts"
 $receiver = [Net.Sockets.UdpClient]::new($DestinationPort)
 $redundantReceiver = [Net.Sockets.UdpClient]::new($RedundantDestinationPort)
 $receiver.Client.ReceiveBufferSize = 8388608
@@ -46,11 +48,11 @@ try {
     $redundantRemote = [Net.IPEndPoint]::new([Net.IPAddress]::Any, 0)
     $clock = [Diagnostics.Stopwatch]::StartNew()
     while ($clock.Elapsed.TotalSeconds -lt $CaptureSeconds) {
-        while ($receiver.Available -gt 0) {
+        for ($batch = 0; $batch -lt 32 -and $receiver.Available -gt 0; $batch++) {
             $datagram = $receiver.Receive([ref]$remote)
             $memory.Write($datagram, 0, $datagram.Length)
         }
-        while ($redundantReceiver.Available -gt 0) {
+        for ($batch = 0; $batch -lt 32 -and $redundantReceiver.Available -gt 0; $batch++) {
             $datagram = $redundantReceiver.Receive([ref]$redundantRemote)
             $redundantMemory.Write($datagram, 0, $datagram.Length)
         }
@@ -60,6 +62,7 @@ try {
     $bytes = $memory.ToArray()
     $redundantBytes = $redundantMemory.ToArray()
     [IO.File]::WriteAllBytes($capture, $bytes)
+    [IO.File]::WriteAllBytes($redundantCapture, $redundantBytes)
 
     foreach ($branch in @($bytes, $redundantBytes)) {
         if ($branch.Length -lt 1000000) {
@@ -165,14 +168,19 @@ try {
         throw "Installed video cadence averaged $averageVideoTicks 90 kHz ticks per frame instead of 60000/1001."
     }
 
-    $runtime = Join-Path $env:ProgramFiles 'TownLight Station\runtime\gstreamer'
-    $discoverer = Join-Path $runtime 'bin\gst-discoverer-1.0.exe'
-    $env:PATH = (Join-Path $runtime 'bin') + ';' + $env:PATH
-    $env:GST_PLUGIN_PATH_1_0 = Join-Path $runtime 'lib\gstreamer-1.0'
-    $env:GST_PLUGIN_SYSTEM_PATH_1_0 = $env:GST_PLUGIN_PATH_1_0
-    $discovery = (& $discoverer $capture 2>&1 | Out-String)
-    if ($LASTEXITCODE -ne 0 -or $discovery -notmatch 'Width:\s+1280' -or $discovery -notmatch 'Height:\s+720') {
-        throw "Installed transport discovery did not prove 1280x720 video.`n$discovery"
+    $ffprobe = (Get-Command ffprobe.exe -ErrorAction Stop).Source
+    foreach ($branchCapture in @($capture, $redundantCapture)) {
+        $probeJson = (& $ffprobe -v error -select_streams v:0 `
+            -show_entries stream=codec_name,width,height,r_frame_rate,field_order -of json $branchCapture 2>&1 | Out-String)
+        if ($LASTEXITCODE -ne 0) {
+            throw "FFprobe could not inspect installed transport $branchCapture.`n$probeJson"
+        }
+        $video = ($probeJson | ConvertFrom-Json).streams | Select-Object -First 1
+        if (-not $video -or $video.codec_name -ne 'h264' -or $video.width -ne 1280 -or
+            $video.height -ne 720 -or $video.r_frame_rate -ne '60000/1001' -or
+            $video.field_order -ne 'progressive') {
+            throw "Installed transport did not prove progressive H.264 1280x720 at 60000/1001.`n$probeJson"
+        }
     }
 
     [ordered]@{
@@ -189,6 +197,8 @@ try {
         proven_output_branches = 2
         null_packets = $nullPackets
         service_health = (Invoke-RestMethod -Uri "$BaseUri/health" -TimeoutSec 5).status
+        capture_path = $(if ($KeepCapture) { $capture } else { $null })
+        redundant_capture_path = $(if ($KeepCapture) { $redundantCapture } else { $null })
     } | ConvertTo-Json
 }
 finally {
@@ -204,5 +214,7 @@ finally {
     $redundantReceiver.Dispose()
     $memory.Dispose()
     $redundantMemory.Dispose()
-    Remove-Item -LiteralPath $capture -Force -ErrorAction SilentlyContinue
+    if (-not $KeepCapture) {
+        Remove-Item -LiteralPath $capture, $redundantCapture -Force -ErrorAction SilentlyContinue
+    }
 }
