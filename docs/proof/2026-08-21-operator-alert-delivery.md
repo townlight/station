@@ -16,6 +16,8 @@ Candidate commit `759d79e32b9435b564c35c0da1e7128dff5fefa9` produced installer S
 
 The reproducible proof harness configured a loopback webhook and one temporary enabled channel, terminated that channel's LocalSystem worker once, and received six validly signed firing/resolution requests while automatic restart recovered the channel. The received set contained both `encoder-death` and `off-air`; the durable API subsequently showed both induced incidents resolved. Cleanup disabled the temporary output and pager, and `/health` remained ready.
 
+Candidate commit `67f58dcacc5c5d06213509da7c7af73994528ec7` produced installer SHA-256 `53B9208A0CAA630433E65D84E1C765255AD7ABBE288DA6008B50693B41FE7FBB`. Installed verification matched that exact source receipt and both binary hashes, reported the LocalSystem service running automatically with ready health, and loaded every required media factory. The reproducible send-test harness then configured a disabled loopback webhook through the installed API, proved that public responses exposed only its redacted target, queued an explicit `test`, received exactly one correctly signed request, observed one delivery attempt reach durable `sent`, and found the corresponding audit event `resolved` with `info` severity.
+
 ## Boundary
 
-The incident-driven installed proof above belongs to candidate `759d79e`. Send-test/status is source-level automated evidence until its own exact candidate is installed and exercised. No evidence here claims a credentialed external provider round trip, human receipt, alert-rule editing, or re-alert windows.
+The incident-driven installed proof belongs to candidate `759d79e`; installed send-test/status proof belongs to exact candidate `67f58dc`. Neither proof claims a credentialed external provider round trip, human receipt, alert-rule editing, or re-alert windows.
