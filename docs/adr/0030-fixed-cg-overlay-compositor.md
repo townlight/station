@@ -13,12 +13,14 @@ small, explicit worker protocol boundary.
 
 ## Decision
 
-The media engine builds eight always-linked logical CG slots at startup. Each slot has one live
-BGRA source, `textoverlay`, `clockoverlay`, black-key transparency stage, queue, and one compositor pad.
-Text and clock rendering are mutually exclusive through their `silent` properties. Snapshot
-updates change element properties and pad alpha/z-order only; they never mutate the topology while
-PLAYING. The base program/fallback video remains compositor z-order 0. A configured overlay uses
-`template_z + 1`, so no overlay can be hidden behind the base.
+The media engine builds one continuously flowing black canvas and eight logical serial overlay
+pairs. The serial chain then feeds one shared black-key transparency stage, queue, and compositor
+pad at z-order 1. UDP branches install the fixed branch before PLAYING; SRT branches
+install it only after required output readiness. Text and clock rendering are mutually exclusive
+through their `silent` properties. Snapshot updates change element properties and pad alpha/z-order
+only; they never mutate the topology while PLAYING. The base program/fallback video remains
+compositor z-order 0. Logical overlays are sorted by `(z_index, slot)` before assignment to physical
+serial layers, so higher z layers are drawn later.
 
 `station-media-protocol` carries bounded `ApplyCgSnapshot` and `ClearCgSnapshot` commands. The
 worker applies them on its existing media-control thread and emits `CgApplied`, `CgCleared`, or a
@@ -37,7 +39,7 @@ ticker-region, and bug-region geometry. Text is bounded, control-safe, and newli
 ## Consequences
 
 The fixed topology preserves persistent playout continuity and bounds worker protocol payloads.
-The one-slot-per-region design avoids sixteen full-frame overlay branches. The renderer can be
+The one-canvas serial design avoids sixteen full-frame overlay branches. The renderer can be
 tested independently of feed/network availability, and malformed updates fail without taking the
 existing output off air.
 

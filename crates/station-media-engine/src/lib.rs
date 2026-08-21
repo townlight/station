@@ -80,6 +80,7 @@ pub struct PersistentPlayout {
     output_profile: OutputProfileId,
     file_program: Option<FileProgram>,
     cg_slots: Vec<CgSlot>,
+    cg_canvas_pad: gst::Pad,
     cg_revision: Option<CgSnapshot>,
     stopped: bool,
 }
@@ -87,7 +88,6 @@ pub struct PersistentPlayout {
 struct CgSlot {
     text_overlay: gst::Element,
     clock_overlay: gst::Element,
-    pad: gst::Pad,
 }
 
 enum OutputCounter {
@@ -157,6 +157,7 @@ impl PersistentPlayout {
         media_path: Option<&Path>,
         output_profile: OutputProfileId,
     ) -> Result<Self, EngineError> {
+        let startup_started = Instant::now();
         gst::init().map_err(|error| EngineError::Initialization(error.to_string()))?;
         let profile = output_profile.profile();
 
@@ -223,76 +224,6 @@ impl PersistentPlayout {
             .map_err(|error| EngineError::Pipeline(error.to_string()))?;
         let cg_base_pad = connect_to_compositor(&cg_input_caps, &cg_compositor, 0)?;
         cg_base_pad.set_property("alpha", 1.0_f64);
-        let mut cg_slots = Vec::with_capacity(MAX_CG_SLOTS);
-        for slot in 0..MAX_CG_SLOTS {
-            let source = gst::ElementFactory::make("videotestsrc")
-                .name(format!("cg-source-{slot}"))
-                .property("is-live", true)
-                .property_from_str("pattern", "black")
-                .build()
-                .map_err(|error| build_error("videotestsrc", error))?;
-            let caps = gst::ElementFactory::make("capsfilter")
-                .name(format!("cg-caps-{slot}"))
-                .property("caps", &cg_video_caps(profile)?)
-                .build()
-                .map_err(|error| build_error("capsfilter", error))?;
-            let alpha = gst::ElementFactory::make("alpha")
-                .name(format!("cg-alpha-{slot}"))
-                .property("alpha", 1.0_f64)
-                .property_from_str("method", "custom")
-                .property("target-r", 0_u32)
-                .property("target-g", 0_u32)
-                .property("target-b", 0_u32)
-                .build()
-                .map_err(|error| build_error("alpha", error))?;
-            let text_overlay = gst::ElementFactory::make("textoverlay")
-                .name(format!("cg-text-overlay-{slot}"))
-                .property("text", "")
-                .property("silent", true)
-                .property("shaded-background", false)
-                .property_from_str("halignment", "position")
-                .property_from_str("valignment", "position")
-                .build()
-                .map_err(|error| build_error("textoverlay", error))?;
-            let clock_overlay = gst::ElementFactory::make("clockoverlay")
-                .name(format!("cg-clock-overlay-{slot}"))
-                .property("time-format", "%H:%M:%S")
-                .property("silent", true)
-                .property("shaded-background", false)
-                .property_from_str("halignment", "position")
-                .property_from_str("valignment", "position")
-                .build()
-                .map_err(|error| build_error("clockoverlay", error))?;
-            let queue = element("queue", format!("cg-queue-{slot}"))?;
-            pipeline
-                .add_many([
-                    &source,
-                    &caps,
-                    &alpha,
-                    &text_overlay,
-                    &clock_overlay,
-                    &queue,
-                ])
-                .map_err(|error| EngineError::Pipeline(error.to_string()))?;
-            gst::Element::link_many([
-                &source,
-                &caps,
-                &text_overlay,
-                &clock_overlay,
-                &alpha,
-                &queue,
-            ])
-            .map_err(|_| EngineError::Link {
-                from: "cg-source",
-                to: "cg-queue",
-            })?;
-            let pad = connect_to_compositor(&queue, &cg_compositor, 1 + slot)?;
-            cg_slots.push(CgSlot {
-                text_overlay,
-                clock_overlay,
-                pad,
-            });
-        }
         let fallback_audio = gst::ElementFactory::make("audiotestsrc")
             .name("fallback-audio-source")
             .property("is-live", true)
@@ -520,17 +451,35 @@ impl PersistentPlayout {
             .unwrap_or((synthetic_program_pad, synthetic_audio_program_pad));
         video_selector.set_property("active-pad", Some(fallback_pad.clone()));
         audio_selector.set_property("active-pad", Some(audio_fallback_pad.clone()));
+        let early_cg_branch = if srt_sinks.is_empty() {
+            Some(install_cg_branch(&pipeline, &cg_compositor, profile)?)
+        } else {
+            None
+        };
+        let srt_deadline = startup_started + Duration::from_secs(5);
         pipeline
             .set_state(gst::State::Playing)
             .map_err(|error| EngineError::State(format!("{error:?}")))?;
+        wait_for_srt_connections(&srt_sinks, &pipeline, srt_deadline)?;
         pipeline
             .state(gst::ClockTime::from_seconds(5))
             .0
             .map_err(|error| EngineError::State(format!("{error:?}")))?;
-        wait_for_srt_connections(&srt_sinks, &pipeline, Duration::from_secs(5))?;
         if let Some(program) = &file_program {
             wait_for_file_decode(program, &pipeline, Duration::from_secs(5))?;
         }
+
+        let branch_result = match early_cg_branch {
+            Some(branch) => Ok(branch),
+            None => install_cg_branch(&pipeline, &cg_compositor, profile),
+        };
+        let (cg_slots, cg_canvas_pad) = match branch_result {
+            Ok(branch) => branch,
+            Err(error) => {
+                let _ = pipeline.set_state(gst::State::Null);
+                return Err(error);
+            }
+        };
 
         let playout = Self {
             pipeline,
@@ -544,13 +493,12 @@ impl PersistentPlayout {
             output_profile,
             file_program,
             cg_slots,
+            cg_canvas_pad,
             cg_revision: None,
             stopped: false,
         };
         playout.wait_for_source(SourceRole::Fallback, Duration::from_secs(2))?;
-        for slot in &playout.cg_slots {
-            slot.pad.set_property("alpha", 0.0_f64);
-        }
+        playout.cg_canvas_pad.set_property("alpha", 0.0_f64);
         Ok(playout)
     }
 
@@ -590,11 +538,16 @@ impl PersistentPlayout {
         if self.cg_revision.as_ref() == Some(snapshot) {
             return Ok(());
         }
+        let canvas_pad = &self.cg_canvas_pad;
+        canvas_pad.set_property("alpha", 0.0_f64);
         for slot in &self.cg_slots {
-            slot.pad.set_property("alpha", 0.0_f64);
+            slot.text_overlay.set_property("silent", true);
+            slot.clock_overlay.set_property("silent", true);
         }
-        for overlay in &snapshot.overlays {
-            let slot = &self.cg_slots[usize::from(overlay.slot)];
+        let mut overlays = snapshot.overlays.iter().collect::<Vec<_>>();
+        overlays.sort_by_key(|overlay| (overlay.z_index, overlay.slot));
+        for (physical_slot, overlay) in overlays.into_iter().enumerate() {
+            let slot = &self.cg_slots[physical_slot];
             configure_overlay_geometry(&slot.text_overlay, &overlay.rect)?;
             configure_overlay_geometry(&slot.clock_overlay, &overlay.rect)?;
             match &overlay.content {
@@ -602,28 +555,18 @@ impl PersistentPlayout {
                     slot.text_overlay.set_property("text", sanitize_text(text)?);
                     slot.text_overlay.set_property("silent", false);
                     slot.clock_overlay.set_property("silent", true);
-                    slot.pad.set_property(
-                        "zorder",
-                        u32::try_from(overlay.z_index)
-                            .unwrap_or(0)
-                            .saturating_add(1),
-                    );
-                    slot.pad.set_property("alpha", 1.0_f64);
                 }
                 CgOverlayContent::Clock { format } => {
                     slot.clock_overlay
                         .set_property("time-format", sanitize_text(format)?);
                     slot.text_overlay.set_property("silent", true);
                     slot.clock_overlay.set_property("silent", false);
-                    slot.pad.set_property(
-                        "zorder",
-                        u32::try_from(overlay.z_index)
-                            .unwrap_or(0)
-                            .saturating_add(1),
-                    );
-                    slot.pad.set_property("alpha", 1.0_f64);
                 }
             }
+        }
+        canvas_pad.set_property("zorder", 1_u32);
+        if !snapshot.overlays.is_empty() {
+            canvas_pad.set_property("alpha", 1.0_f64);
         }
         self.cg_revision = Some(snapshot.clone());
         Ok(())
@@ -631,10 +574,10 @@ impl PersistentPlayout {
 
     pub fn clear_cg_snapshot(&mut self) {
         for slot in &self.cg_slots {
-            slot.pad.set_property("alpha", 0.0_f64);
             slot.text_overlay.set_property("silent", true);
             slot.clock_overlay.set_property("silent", true);
         }
+        self.cg_canvas_pad.set_property("alpha", 0.0_f64);
         self.cg_revision = None;
     }
 
@@ -775,22 +718,122 @@ impl PersistentPlayout {
     }
 }
 
+fn install_cg_branch(
+    pipeline: &gst::Pipeline,
+    compositor: &gst::Element,
+    profile: &OutputProfile,
+) -> Result<(Vec<CgSlot>, gst::Pad), EngineError> {
+    let canvas_source = gst::ElementFactory::make("videotestsrc")
+        .name("cg-canvas-source")
+        .property("is-live", true)
+        .property_from_str("pattern", "black")
+        .build()
+        .map_err(|error| build_error("videotestsrc", error))?;
+    let canvas_caps = gst::ElementFactory::make("capsfilter")
+        .name("cg-canvas-caps")
+        .property("caps", &cg_video_caps(profile)?)
+        .build()
+        .map_err(|error| build_error("capsfilter", error))?;
+    let mut elements = vec![canvas_source.clone(), canvas_caps.clone()];
+    pipeline
+        .add_many([&canvas_source, &canvas_caps])
+        .map_err(|error| EngineError::Pipeline(error.to_string()))?;
+    link(
+        &canvas_source,
+        &canvas_caps,
+        "cg-canvas-source",
+        "cg-canvas-caps",
+    )?;
+    let mut previous = canvas_caps.clone();
+    let mut slots = Vec::with_capacity(MAX_CG_SLOTS);
+    for slot in 0..MAX_CG_SLOTS {
+        let text_overlay = gst::ElementFactory::make("textoverlay")
+            .name(format!("cg-text-overlay-{slot}"))
+            .property("text", "")
+            .property("silent", true)
+            .property("shaded-background", false)
+            .property_from_str("halignment", "position")
+            .property_from_str("valignment", "position")
+            .build()
+            .map_err(|error| build_error("textoverlay", error))?;
+        let clock_overlay = gst::ElementFactory::make("clockoverlay")
+            .name(format!("cg-clock-overlay-{slot}"))
+            .property("time-format", "%H:%M:%S")
+            .property("silent", true)
+            .property("shaded-background", false)
+            .property_from_str("halignment", "position")
+            .property_from_str("valignment", "position")
+            .build()
+            .map_err(|error| build_error("clockoverlay", error))?;
+        pipeline
+            .add_many([&text_overlay, &clock_overlay])
+            .map_err(|error| EngineError::Pipeline(error.to_string()))?;
+        link(&previous, &text_overlay, "cg-canvas", "cg-text-overlay")?;
+        link(
+            &text_overlay,
+            &clock_overlay,
+            "cg-text-overlay",
+            "cg-clock-overlay",
+        )?;
+        previous = clock_overlay.clone();
+        elements.extend([text_overlay.clone(), clock_overlay.clone()]);
+        slots.push(CgSlot {
+            text_overlay,
+            clock_overlay,
+        });
+    }
+    let canvas_alpha = gst::ElementFactory::make("alpha")
+        .name("cg-canvas-key")
+        .property("alpha", 1.0_f64)
+        .property_from_str("method", "custom")
+        .property("target-r", 0_u32)
+        .property("target-g", 0_u32)
+        .property("target-b", 0_u32)
+        .build()
+        .map_err(|error| build_error("alpha", error))?;
+    let canvas_queue = element("queue", "cg-canvas-queue")?;
+    pipeline
+        .add_many([&canvas_alpha, &canvas_queue])
+        .map_err(|error| EngineError::Pipeline(error.to_string()))?;
+    link(
+        &previous,
+        &canvas_alpha,
+        "cg-clock-overlay",
+        "cg-canvas-key",
+    )?;
+    link(
+        &canvas_alpha,
+        &canvas_queue,
+        "cg-canvas-key",
+        "cg-canvas-queue",
+    )?;
+    elements.extend([canvas_alpha, canvas_queue.clone()]);
+    let canvas_pad = connect_to_compositor(&canvas_queue, compositor, 1)?;
+    canvas_pad.set_property("zorder", 1_u32);
+    canvas_pad.set_property("alpha", 0.0_f64);
+    for element in elements.iter().rev() {
+        element
+            .sync_state_with_parent()
+            .map_err(|error| EngineError::State(format!("CG branch sync failed: {error:?}")))?;
+    }
+    Ok((slots, canvas_pad))
+}
+
 fn wait_for_srt_connections(
     sinks: &[gst::Element],
     pipeline: &gst::Pipeline,
-    timeout: Duration,
+    deadline: Instant,
 ) -> Result<(), EngineError> {
     if sinks.is_empty() {
         return Ok(());
     }
-    let started = Instant::now();
     while sinks.iter().any(|sink| {
         sink.property::<gst::Structure>("stats")
             .get::<u64>("bytes-sent-total")
             .unwrap_or(0)
             == 0
     }) {
-        if started.elapsed() >= timeout {
+        if Instant::now() >= deadline {
             let _ = pipeline.set_state(gst::State::Null);
             return Err(EngineError::State(
                 "required SRT output did not connect and send within the startup deadline".into(),
@@ -809,6 +852,12 @@ fn wait_for_srt_connections(
                 error.error()
             )));
         }
+    }
+    if Instant::now() > deadline {
+        let _ = pipeline.set_state(gst::State::Null);
+        return Err(EngineError::State(
+            "required SRT output did not connect and send within the startup deadline".into(),
+        ));
     }
     Ok(())
 }

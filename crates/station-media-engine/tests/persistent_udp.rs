@@ -444,11 +444,11 @@ fn cg_text_overlay_changes_pixels_in_its_declared_region() {
         .unwrap();
     std::thread::sleep(Duration::from_millis(500));
     let with_text = pull_decoded_frame(&sink);
+    let after_first_apply_bytes = playout.output_bytes_sent().unwrap()[0];
     playout.clear_cg_snapshot();
     std::thread::sleep(Duration::from_millis(500));
     let after_clear = pull_decoded_frame(&sink);
-    playout.stop().unwrap();
-    decoder.set_state(gst::State::Null).unwrap();
+    let after_clear_bytes = playout.output_bytes_sent().unwrap()[0];
     assert_eq!(
         (without_text.width, without_text.height),
         (with_text.width, with_text.height)
@@ -495,6 +495,147 @@ fn cg_text_overlay_changes_pixels_in_its_declared_region() {
         restored_pixels < changed_pixels / 2,
         "CG clear did not restore the region sufficiently: {restored_pixels} vs {changed_pixels}"
     );
+
+    // Reapplying after clear must produce fresh decoded pixels and preserve transport progress.
+    playout
+        .apply_cg_snapshot(&CgSnapshot {
+            board_id: "pixel-proof".into(),
+            board_revision: 2,
+            overlays: vec![CgOverlay {
+                slot: 0,
+                rect: CgRect {
+                    x: 10,
+                    y: 700,
+                    width: 800,
+                    height: 200,
+                },
+                z_index: 1,
+                content: CgOverlayContent::Text {
+                    text: "AGAIN".into(),
+                },
+            }],
+        })
+        .unwrap();
+    std::thread::sleep(Duration::from_millis(500));
+    let applied_again = pull_decoded_frame(&sink);
+    let after_second_apply_bytes = playout.output_bytes_sent().unwrap()[0];
+    let again_pixels = without_text
+        .bytes
+        .chunks_exact(4)
+        .zip(applied_again.bytes.chunks_exact(4))
+        .enumerate()
+        .filter(|(index, (before, after))| {
+            let x = index % without_text.width as usize;
+            let y = index / without_text.width as usize;
+            (rect.0..=rect.2).contains(&(x as u32))
+                && (rect.1..=rect.3).contains(&(y as u32))
+                && before[..3] != after[..3]
+        })
+        .count();
+    assert!(
+        again_pixels > 20,
+        "reapplied CG changed too few pixels: {again_pixels}"
+    );
+    assert!(after_first_apply_bytes > 0);
+    assert!(after_clear_bytes > after_first_apply_bytes);
+    assert!(after_second_apply_bytes > after_clear_bytes);
+
+    // Replacing two overlays with one must silence the vacated physical layer.
+    let second_rect = (6, 36, 518, 108);
+    playout
+        .apply_cg_snapshot(&CgSnapshot {
+            board_id: "pixel-proof".into(),
+            board_revision: 3,
+            overlays: vec![
+                CgOverlay {
+                    slot: 0,
+                    rect: CgRect {
+                        x: 10,
+                        y: 700,
+                        width: 800,
+                        height: 200,
+                    },
+                    z_index: 1,
+                    content: CgOverlayContent::Text {
+                        text: "KEEP".into(),
+                    },
+                },
+                CgOverlay {
+                    slot: 1,
+                    rect: CgRect {
+                        x: 10,
+                        y: 100,
+                        width: 800,
+                        height: 200,
+                    },
+                    z_index: 2,
+                    content: CgOverlayContent::Text {
+                        text: "STALE".into(),
+                    },
+                },
+            ],
+        })
+        .unwrap();
+    std::thread::sleep(Duration::from_millis(500));
+    let with_two = pull_decoded_frame(&sink);
+    playout
+        .apply_cg_snapshot(&CgSnapshot {
+            board_id: "pixel-proof".into(),
+            board_revision: 4,
+            overlays: vec![CgOverlay {
+                slot: 0,
+                rect: CgRect {
+                    x: 10,
+                    y: 700,
+                    width: 800,
+                    height: 200,
+                },
+                z_index: 1,
+                content: CgOverlayContent::Text {
+                    text: "KEEP".into(),
+                },
+            }],
+        })
+        .unwrap();
+    std::thread::sleep(Duration::from_millis(500));
+    let with_one = pull_decoded_frame(&sink);
+    let stale_pixels = after_clear
+        .bytes
+        .chunks_exact(4)
+        .zip(with_two.bytes.chunks_exact(4))
+        .enumerate()
+        .filter(|(index, (before, after))| {
+            let x = index % after_clear.width as usize;
+            let y = index / after_clear.width as usize;
+            (second_rect.0..=second_rect.2).contains(&(x as u32))
+                && (second_rect.1..=second_rect.3).contains(&(y as u32))
+                && before[..3] != after[..3]
+        })
+        .count();
+    let stale_remaining = after_clear
+        .bytes
+        .chunks_exact(4)
+        .zip(with_one.bytes.chunks_exact(4))
+        .enumerate()
+        .filter(|(index, (before, after))| {
+            let x = index % after_clear.width as usize;
+            let y = index / after_clear.width as usize;
+            (second_rect.0..=second_rect.2).contains(&(x as u32))
+                && (second_rect.1..=second_rect.3).contains(&(y as u32))
+                && before[..3] != after[..3]
+        })
+        .count();
+    assert!(
+        stale_pixels > 20,
+        "two-overlay proof did not render the upper layer"
+    );
+    assert!(
+        stale_remaining < stale_pixels / 2,
+        "fewer-overlay replacement left stale pixels: {stale_remaining} vs {stale_pixels}"
+    );
+    playout.clear_cg_snapshot();
+    playout.stop().unwrap();
+    decoder.set_state(gst::State::Null).unwrap();
 }
 
 fn start_udp_decoder(port: u16) -> (gst::Pipeline, gst::Element) {
