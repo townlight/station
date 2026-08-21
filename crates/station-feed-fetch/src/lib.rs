@@ -1,7 +1,13 @@
 use station_cg::{CgFeedKind, CgFeedSource};
 use station_feed_normalization::{MAX_INPUT_BYTES, normalize_ical, normalize_rss_or_atom};
-use station_storage::StationStore;
+use station_storage::{CgWriteError, StationStore};
 use std::net::{IpAddr, Ipv6Addr, SocketAddr};
+use std::path::Path;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use ureq::unversioned::{
     resolver::{DefaultResolver, ResolvedSocketAddrs, Resolver},
     transport::{DefaultConnector, NextTimeout},
@@ -44,28 +50,48 @@ impl<T: FeedTransport> FeedCoordinator<T> {
             max_body_bytes: MAX_INPUT_BYTES,
         }
     }
-    pub fn tick(&mut self, store: &StationStore, now_unix_ms: i64) -> Vec<(String, FetchOutcome)> {
+    pub fn tick(
+        &mut self,
+        store: &StationStore,
+        now_unix_ms: i64,
+    ) -> Result<Vec<(String, FetchOutcome)>, String> {
+        let never_stop = AtomicBool::new(false);
+        self.tick_with_stop(store, now_unix_ms, &never_stop)
+    }
+
+    pub fn tick_with_stop(
+        &mut self,
+        store: &StationStore,
+        now_unix_ms: i64,
+        stop: &AtomicBool,
+    ) -> Result<Vec<(String, FetchOutcome)>, String> {
         if now_unix_ms < 0 {
-            return Vec::new();
+            return Ok(Vec::new());
         }
-        let feeds = match store.list_all_cg_feed_sources() {
-            Ok(feeds) => feeds,
-            Err(_) => return Vec::new(),
-        };
-        feeds
-            .into_iter()
-            .filter(|feed| feed.enabled && due(feed, now_unix_ms))
-            .map(|feed| self.fetch_one(store, &feed, now_unix_ms))
-            .collect()
+        let feeds = store
+            .list_all_cg_feed_sources()
+            .map_err(|error| format!("could not list CG feed sources: {error}"))?;
+        let mut outcomes = Vec::new();
+        for feed in feeds {
+            if stop.load(Ordering::Acquire) {
+                break;
+            }
+            if feed.enabled && due(&feed, now_unix_ms) {
+                outcomes.push(self.fetch_one(store, &feed, now_unix_ms)?);
+            }
+        }
+        Ok(outcomes)
     }
     fn fetch_one(
         &mut self,
         store: &StationStore,
         feed: &CgFeedSource,
         now: i64,
-    ) -> (String, FetchOutcome) {
+    ) -> Result<(String, FetchOutcome), String> {
         let id = feed.feed_source_id.clone();
-        let cache = store.read_cg_feed_cache(&id).ok().flatten();
+        let cache = store
+            .read_cg_feed_cache(&id)
+            .map_err(|error| format!("could not read CG feed cache {id}: {error}"))?;
         let request = FetchRequest {
             url: feed.source_url.clone(),
             etag: cache.as_ref().and_then(|c| c.etag.clone()),
@@ -76,18 +102,23 @@ impl<T: FeedTransport> FeedCoordinator<T> {
             Err(error) => return self.failed(store, &id, now, error),
         };
         if response.status == 304 {
-            if store.refresh_cg_feed_cache(&id, now).is_err() {
+            if let Err(error) = store.refresh_cg_feed_cache(&id, now) {
+                if is_infrastructure_error(&error) {
+                    return Err(format!("could not refresh CG feed cache {id}: {error:?}"));
+                }
                 return self.failed(store, &id, now, "304 cache refresh failed".into());
             }
-            return (id, FetchOutcome::NotModified);
+            return Ok((id, FetchOutcome::NotModified));
         }
         if response.status != 200 || response.body.len() > self.max_body_bytes {
             return self.failed(store, &id, now, "feed response rejected".into());
         }
         let items = match feed.kind {
-            CgFeedKind::Rss => normalize_rss_or_atom(&feed.source_url, &response.body),
+            CgFeedKind::Rss => normalize_rss_or_atom(&feed.source_url, &response.body)
+                .map_err(|_| "feed content rejected".to_owned()),
             CgFeedKind::Ical | CgFeedKind::Caldav => {
                 normalize_ical(&feed.source_url, &response.body)
+                    .map_err(|_| "feed content rejected".to_owned())
             }
             _ => return self.failed(store, &id, now, "feed kind has no safe normalizer".into()),
         };
@@ -99,12 +130,13 @@ impl<T: FeedTransport> FeedCoordinator<T> {
                 response.etag.as_deref(),
                 response.last_modified.as_deref(),
             ) {
-                Ok(_) => (id, FetchOutcome::Updated(items.len())),
-                Err(error) => {
-                    self.failed(store, &id, now, format!("cache write failed: {error:?}"))
+                Ok(_) => Ok((id, FetchOutcome::Updated(items.len()))),
+                Err(error) if is_infrastructure_error(&error) => {
+                    Err(format!("could not write CG feed cache {id}: {error:?}"))
                 }
+                Err(_) => self.failed(store, &id, now, "feed cache write rejected".into()),
             },
-            Err(error) => self.failed(store, &id, now, format!("normalization failed: {error:?}")),
+            Err(error) => self.failed(store, &id, now, error),
         }
     }
     fn failed(
@@ -113,7 +145,7 @@ impl<T: FeedTransport> FeedCoordinator<T> {
         id: &str,
         now: i64,
         error: String,
-    ) -> (String, FetchOutcome) {
+    ) -> Result<(String, FetchOutcome), String> {
         let error = if error.trim().is_empty() {
             "feed transport failed".to_owned()
         } else {
@@ -128,8 +160,70 @@ impl<T: FeedTransport> FeedCoordinator<T> {
             end = next;
         }
         let bounded = error[..end].to_owned();
-        let _ = store.record_cg_feed_fetch_failure(id, now, &bounded);
-        (id.into(), FetchOutcome::Failed(bounded))
+        if let Err(error) = store.record_cg_feed_fetch_failure(id, now, &bounded)
+            && is_infrastructure_error(&error)
+        {
+            return Err(format!("could not record CG feed failure {id}: {error:?}"));
+        }
+        Ok((id.into(), FetchOutcome::Failed(bounded)))
+    }
+}
+
+fn is_infrastructure_error(error: &CgWriteError) -> bool {
+    matches!(error, CgWriteError::Storage(_))
+}
+
+pub const FEED_POLL_INTERVAL: Duration = Duration::from_secs(1);
+const SHUTDOWN_CHECK_INTERVAL: Duration = Duration::from_millis(50);
+
+pub fn run_until(database_path: &Path, stop: Arc<AtomicBool>) -> Result<(), String> {
+    let store = StationStore::open(database_path)?;
+    run_until_with(
+        store,
+        FeedCoordinator::new(UreqFeedTransport::new()),
+        stop,
+        system_time_millis,
+        wait_for_poll,
+    )
+}
+
+pub fn run_until_with<T, N, W>(
+    store: StationStore,
+    mut coordinator: FeedCoordinator<T>,
+    stop: Arc<AtomicBool>,
+    mut now: N,
+    mut wait: W,
+) -> Result<(), String>
+where
+    T: FeedTransport,
+    N: FnMut() -> Result<i64, String>,
+    W: FnMut(Duration, &AtomicBool),
+{
+    while !stop.load(Ordering::Acquire) {
+        coordinator.tick_with_stop(&store, now()?, stop.as_ref())?;
+        if !stop.load(Ordering::Acquire) {
+            wait(FEED_POLL_INTERVAL, stop.as_ref());
+        }
+    }
+    Ok(())
+}
+
+fn system_time_millis() -> Result<i64, String> {
+    let millis = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|error| format!("system clock is before Unix epoch: {error}"))?
+        .as_millis();
+    i64::try_from(millis).map_err(|_| "system clock exceeds i64 range".into())
+}
+
+fn wait_for_poll(duration: Duration, stop: &AtomicBool) {
+    let deadline = Instant::now() + duration;
+    while !stop.load(Ordering::Acquire) {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        std::thread::sleep(remaining.min(SHUTDOWN_CHECK_INTERVAL));
     }
 }
 fn due(feed: &CgFeedSource, now: i64) -> bool {
@@ -196,9 +290,9 @@ impl UreqFeedTransport {
             .proxy(None)
             .max_redirects(0)
             .http_status_as_error(false)
-            .timeout_global(Some(std::time::Duration::from_secs(30)))
-            .timeout_connect(Some(std::time::Duration::from_secs(5)))
-            .timeout_recv_body(Some(std::time::Duration::from_secs(10)))
+            .timeout_global(Some(std::time::Duration::from_secs(4)))
+            .timeout_connect(Some(std::time::Duration::from_secs(2)))
+            .timeout_recv_body(Some(std::time::Duration::from_secs(3)))
             .build();
         Self {
             agent: Agent::with_parts(config, DefaultConnector::default(), SafeResolver { policy }),
@@ -213,7 +307,7 @@ impl Default for UreqFeedTransport {
 }
 impl FeedTransport for UreqFeedTransport {
     fn fetch(&mut self, request: &FetchRequest) -> Result<FetchResponse, String> {
-        let url = url::Url::parse(&request.url).map_err(|e| e.to_string())?;
+        let url = url::Url::parse(&request.url).map_err(|_| "feed URL rejected".to_owned())?;
         if (url.scheme() != "https" && !(self.policy.allow_http && url.scheme() == "http"))
             || url.host_str().is_none()
             || !url.username().is_empty()
@@ -232,7 +326,7 @@ impl FeedTransport for UreqFeedTransport {
         if let Some(value) = request.last_modified.as_deref() {
             call = call.header("if-modified-since", value);
         }
-        let mut response = call.call().map_err(|e| e.to_string())?;
+        let mut response = call.call().map_err(|_| "feed request failed".to_owned())?;
         let status = response.status().as_u16();
         let etag = response_header(response.headers(), "etag", 1_024)?;
         let last_modified = response_header(response.headers(), "last-modified", 1_024)?;
@@ -243,7 +337,7 @@ impl FeedTransport for UreqFeedTransport {
                 .with_config()
                 .limit((MAX_INPUT_BYTES + 1) as u64)
                 .read_to_vec()
-                .map_err(|e| e.to_string())?
+                .map_err(|_| "feed body read failed".to_owned())?
         } else {
             Vec::new()
         };
@@ -357,6 +451,10 @@ mod tests {
     use std::io::{Read, Write};
     use std::net::TcpListener;
     use std::path::PathBuf;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
     use std::time::{SystemTime, UNIX_EPOCH};
 
     const CHANNEL_ID: &str = "5d85189a-cd1f-43dc-a619-66a2aeb09ac4";
@@ -372,6 +470,18 @@ mod tests {
             self.responses
                 .pop()
                 .unwrap_or_else(|| Err("no mock response".into()))
+        }
+    }
+
+    struct StopAfterFirstTransport {
+        stop: Arc<AtomicBool>,
+        calls: Arc<AtomicUsize>,
+    }
+    impl FeedTransport for StopAfterFirstTransport {
+        fn fetch(&mut self, _request: &FetchRequest) -> Result<FetchResponse, String> {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            self.stop.store(true, Ordering::Release);
+            Ok(response(200, rss()))
         }
     }
 
@@ -573,8 +683,100 @@ mod tests {
             responses: vec![Ok(response(200, rss()))],
             requests: Vec::new(),
         });
-        assert!(coordinator.tick(&store, 1_001).is_empty());
+        assert!(coordinator.tick(&store, 1_001).unwrap().is_empty());
         remove_database(&path);
+    }
+
+    #[test]
+    fn coordinator_stops_between_feeds_when_shutdown_is_requested() {
+        let path = database_path("stop-between-feeds");
+        let store = StationStore::open(&path).unwrap();
+        put_channel(&store);
+        add_source(&store, &source(CgFeedKind::Rss, true, 60));
+        let mut second = source(CgFeedKind::Rss, true, 60);
+        second.feed_source_id = "9ac46d05-09d8-4ef8-9607-75c365b3274e".into();
+        second.label = "Second notices".into();
+        add_source(&store, &second);
+        let stop = Arc::new(AtomicBool::new(false));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let transport = StopAfterFirstTransport {
+            stop: Arc::clone(&stop),
+            calls: Arc::clone(&calls),
+        };
+        let mut coordinator = FeedCoordinator::new(transport);
+        let outcomes = coordinator
+            .tick_with_stop(&store, 1_000, stop.as_ref())
+            .unwrap();
+        assert_eq!(outcomes.len(), 1);
+        assert_eq!(calls.load(Ordering::Acquire), 1);
+        remove_database(&path);
+    }
+
+    #[test]
+    fn run_loop_uses_bounded_wait_and_stops_without_a_second_tick() {
+        let path = database_path("run-loop-stop");
+        let store = StationStore::open(&path).unwrap();
+        put_channel(&store);
+        add_source(&store, &source(CgFeedKind::Rss, true, 60));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let transport = StopAfterFirstTransport {
+            stop: Arc::new(AtomicBool::new(false)),
+            calls: Arc::clone(&calls),
+        };
+        let stop = Arc::new(AtomicBool::new(false));
+        let mut clock_calls = 0;
+        let mut waits = 0;
+        run_until_with(
+            store,
+            FeedCoordinator::new(transport),
+            Arc::clone(&stop),
+            || {
+                clock_calls += 1;
+                Ok(1_000)
+            },
+            |duration, flag| {
+                waits += 1;
+                assert_eq!(duration, FEED_POLL_INTERVAL);
+                flag.store(true, Ordering::Release);
+            },
+        )
+        .unwrap();
+        assert_eq!(calls.load(Ordering::Acquire), 1);
+        assert_eq!(clock_calls, 1);
+        assert_eq!(waits, 1);
+        remove_database(&path);
+    }
+
+    #[test]
+    fn run_loop_surfaces_clock_failure() {
+        let path = database_path("run-loop-clock-error");
+        let store = StationStore::open(&path).unwrap();
+        let stop = Arc::new(AtomicBool::new(false));
+        let result = run_until_with(
+            store,
+            FeedCoordinator::new(QueueTransport {
+                responses: Vec::new(),
+                requests: Vec::new(),
+            }),
+            stop,
+            || Err("clock unavailable".into()),
+            |_duration, _flag| panic!("wait must not run after clock failure"),
+        );
+        assert_eq!(result.unwrap_err(), "clock unavailable");
+        remove_database(&path);
+    }
+
+    #[test]
+    fn production_loop_surfaces_database_open_failure() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir()
+            .join(format!("townlight-feed-missing-parent-{nonce}"))
+            .join("station.db");
+        let stop = Arc::new(AtomicBool::new(false));
+        assert!(run_until(&path, stop).is_err());
     }
 
     #[test]
@@ -588,7 +790,7 @@ mod tests {
             requests: Vec::new(),
         });
         assert_eq!(
-            coordinator.tick(&store, 10_000),
+            coordinator.tick(&store, 10_000).unwrap(),
             vec![(FEED_ID.into(), FetchOutcome::Updated(1))]
         );
         let cache = store.read_cg_feed_cache(FEED_ID).unwrap().unwrap();
@@ -611,7 +813,7 @@ mod tests {
             responses: vec![Ok(response(200, rss()))],
             requests: Vec::new(),
         });
-        first.tick(&store, 10_000);
+        first.tick(&store, 10_000).unwrap();
         let before = store.read_cg_feed_cache(FEED_ID).unwrap().unwrap();
         let approval = CgFeedItemApproval {
             feed_source_id: FEED_ID.into(),
@@ -638,7 +840,7 @@ mod tests {
             requests: Vec::new(),
         });
         assert_eq!(
-            second.tick(&store, 71_000),
+            second.tick(&store, 71_000).unwrap(),
             vec![(FEED_ID.into(), FetchOutcome::NotModified)]
         );
         let after = store.read_cg_feed_cache(FEED_ID).unwrap().unwrap();
@@ -654,6 +856,31 @@ mod tests {
     }
 
     #[test]
+    fn coordinator_records_304_without_cache_as_a_nonfatal_feed_failure() {
+        let path = database_path("not-modified-without-cache");
+        let store = StationStore::open(&path).unwrap();
+        put_channel(&store);
+        add_source(&store, &source(CgFeedKind::Rss, true, 60));
+        let mut coordinator = FeedCoordinator::new(QueueTransport {
+            responses: vec![Ok(response(304, Vec::new()))],
+            requests: Vec::new(),
+        });
+        let outcomes = coordinator.tick(&store, 10_000).unwrap();
+        assert!(matches!(outcomes[0].1, FetchOutcome::Failed(_)));
+        assert!(store.read_cg_feed_cache(FEED_ID).unwrap().is_none());
+        assert_eq!(
+            store
+                .read_cg_feed_source(FEED_ID)
+                .unwrap()
+                .unwrap()
+                .last_fetch_error
+                .as_deref(),
+            Some("304 cache refresh failed")
+        );
+        remove_database(&path);
+    }
+
+    #[test]
     fn coordinator_failure_preserves_cache_and_paces_retry_by_attempt_time() {
         let path = database_path("failure");
         let store = StationStore::open(&path).unwrap();
@@ -663,14 +890,14 @@ mod tests {
             responses: vec![Ok(response(200, rss()))],
             requests: Vec::new(),
         });
-        seed.tick(&store, 10_000);
+        seed.tick(&store, 10_000).unwrap();
         let before = store.read_cg_feed_cache(FEED_ID).unwrap().unwrap();
         let mut failing = FeedCoordinator::new(QueueTransport {
             responses: vec![Err("temporary upstream failure".into())],
             requests: Vec::new(),
         });
         assert!(matches!(
-            failing.tick(&store, 71_000)[0].1,
+            failing.tick(&store, 71_000).unwrap()[0].1,
             FetchOutcome::Failed(_)
         ));
         let after = store.read_cg_feed_cache(FEED_ID).unwrap().unwrap();
@@ -678,7 +905,7 @@ mod tests {
         assert!(after.last_error.is_some());
         let source_after = store.read_cg_feed_source(FEED_ID).unwrap().unwrap();
         assert_eq!(source_after.last_fetched_at_unix_ms, Some(71_000));
-        assert!(failing.tick(&store, 71_001).is_empty());
+        assert!(failing.tick(&store, 71_001).unwrap().is_empty());
         remove_database(&path);
     }
 
@@ -693,7 +920,7 @@ mod tests {
             responses: vec![Err(error)],
             requests: Vec::new(),
         });
-        let outcome = coordinator.tick(&store, 1_000);
+        let outcome = coordinator.tick(&store, 1_000).unwrap();
         assert!(matches!(outcome[0].1, FetchOutcome::Failed(_)));
         let saved = store
             .read_cg_feed_source(FEED_ID)
@@ -717,7 +944,7 @@ mod tests {
             requests: Vec::new(),
         });
         assert!(matches!(
-            coordinator.tick(&store, 1_000)[0].1,
+            coordinator.tick(&store, 1_000).unwrap()[0].1,
             FetchOutcome::Failed(ref message) if message == "feed transport failed"
         ));
         let saved = store
@@ -727,7 +954,7 @@ mod tests {
             .last_fetch_error
             .unwrap();
         assert_eq!(saved, "feed transport failed");
-        assert!(coordinator.tick(&store, 1_001).is_empty());
+        assert!(coordinator.tick(&store, 1_001).unwrap().is_empty());
         remove_database(&path);
     }
 
@@ -741,7 +968,7 @@ mod tests {
             responses: vec![Ok(response(200, rss()))],
             requests: Vec::new(),
         });
-        seed.tick(&store, 1_000);
+        seed.tick(&store, 1_000).unwrap();
         let before_cache = store.read_cg_feed_cache(FEED_ID).unwrap().unwrap();
         let before_source = store.read_cg_feed_source(FEED_ID).unwrap().unwrap();
         assert!(
@@ -783,7 +1010,7 @@ mod tests {
             requests: Vec::new(),
         });
         assert!(matches!(
-            coordinator.tick(&store, 1_000)[0].1,
+            coordinator.tick(&store, 1_000).unwrap()[0].1,
             FetchOutcome::Failed(_)
         ));
         assert!(store.read_cg_feed_cache(FEED_ID).unwrap().is_none());
@@ -800,7 +1027,7 @@ mod tests {
             responses: vec![Ok(response(200, rss()))],
             requests: Vec::new(),
         });
-        assert!(coordinator.tick(&store, -1).is_empty());
+        assert!(coordinator.tick(&store, -1).unwrap().is_empty());
         assert!(
             store
                 .read_cg_feed_source(FEED_ID)

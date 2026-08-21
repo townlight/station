@@ -44,6 +44,9 @@ fn run_console(config: DaemonConfig) -> Result<(), String> {
     let update_application = application_directory()?;
     let api_application = update_application.clone();
     let stop = Arc::new(AtomicBool::new(false));
+    let feed_receipt = config.database.with_file_name("feed-fetch-error.txt");
+    let feed_fetch =
+        spawn_feed_fetch_worker(&config.database, Arc::clone(&stop), Some(feed_receipt))?;
     let orchestration_database = config.database.clone();
     let orchestration_stop = Arc::clone(&stop);
     let orchestration = std::thread::spawn(move || {
@@ -95,11 +98,16 @@ fn run_console(config: DaemonConfig) -> Result<(), String> {
         .join()
         .map_err(|_| "update monitor thread panicked".to_string())?
         .map_err(|error| format!("update monitor stopped: {error}"));
+    let feed_fetch_result = feed_fetch
+        .join()
+        .map_err(|_| "feed fetch worker thread panicked".to_string())?
+        .map_err(|error| format!("feed fetch worker stopped: {error}"));
     result
         .and(orchestration_result)
         .and(ingest_result)
         .and(alerting_result)
         .and(update_result)
+        .and(feed_fetch_result)
 }
 
 fn run_dispatcher(config: DaemonConfig) -> Result<(), String> {
@@ -176,6 +184,9 @@ fn run_service(config: DaemonConfig) -> Result<(), String> {
     let worker_executable = worker_executable()?;
     let update_application = application_directory()?;
     let api_application = update_application.clone();
+    let feed_receipt = config.database.with_file_name("feed-fetch-error.txt");
+    let feed_fetch =
+        spawn_feed_fetch_worker(&config.database, Arc::clone(&stop), Some(feed_receipt))?;
     let orchestration_database = config.database.clone();
     let orchestration_stop = Arc::clone(&stop);
     let orchestration_receipt = config.database.with_file_name("orchestration-error.txt");
@@ -257,11 +268,16 @@ fn run_service(config: DaemonConfig) -> Result<(), String> {
         .join()
         .map_err(|_| "update monitor thread panicked".to_string())?
         .map_err(|error| format!("update monitor stopped: {error}"));
+    let feed_fetch_result = feed_fetch
+        .join()
+        .map_err(|_| "feed fetch worker thread panicked".to_string())?
+        .map_err(|error| format!("feed fetch worker stopped: {error}"));
     let result = result
         .and(orchestration_result)
         .and(ingest_result)
         .and(alerting_result)
-        .and(update_result);
+        .and(update_result)
+        .and(feed_fetch_result);
     let exit_code = if result.is_ok() {
         ServiceExitCode::NO_ERROR
     } else {
@@ -324,6 +340,28 @@ fn media_library(database: &std::path::Path) -> std::path::PathBuf {
         .parent()
         .unwrap_or_else(|| std::path::Path::new("."))
         .join("media")
+}
+
+fn spawn_feed_fetch_worker(
+    database: &std::path::Path,
+    stop: Arc<AtomicBool>,
+    receipt: Option<std::path::PathBuf>,
+) -> Result<std::thread::JoinHandle<Result<(), String>>, String> {
+    let database = database.to_path_buf();
+    let worker_stop = Arc::clone(&stop);
+    std::thread::Builder::new()
+        .name("station-feed-fetch".into())
+        .spawn(move || {
+            let result = station_feed_fetch::run_until(&database, stop);
+            if let (Err(error), Some(receipt)) = (&result, receipt) {
+                let _ = std::fs::write(receipt, error);
+            }
+            if result.is_err() {
+                worker_stop.store(true, Ordering::Release);
+            }
+            result
+        })
+        .map_err(|error| format!("could not start feed fetch worker thread: {error}"))
 }
 
 fn initialize_database(database: &std::path::Path) -> Result<(), String> {
