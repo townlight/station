@@ -14,7 +14,7 @@ $requirements = [ordered]@{
     'checks the required transport stream demuxer' = 'gstmpegtsdemux.dll'
     'checks the required software decoder bundle' = 'gstlibav.dll'
     'registers the native station service' = 'create TownLightStation'
-    'sets automatic delayed service start' = 'start= delayed-auto'
+    'sets immediate automatic service start' = 'config TownLightStation start= auto'
     'configures service recovery' = 'failure TownLightStation'
     'starts the station service' = 'start TownLightStation'
     'health-gates installation success' = 'WinHttp.WinHttpRequest.5.1'
@@ -33,6 +33,10 @@ foreach ($requirement in $requirements.GetEnumerator()) {
 
 if ($missing.Count -gt 0) {
     throw "Installer contract is incomplete: $($missing -join '; ')"
+}
+
+if ($source.Contains('start= delayed-auto')) {
+    throw 'Installer contract defers station recovery with delayed automatic startup.'
 }
 
 Write-Output "Installer contract passed ($($requirements.Count) requirements)."

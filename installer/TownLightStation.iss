@@ -232,9 +232,9 @@ begin
     RaiseException('The TownLight Station service could not be registered (exit ' +
       IntToStr(ResultCode) + ').');
   ConfigureServiceEnvironment;
-  if (not RunSc('config TownLightStation start= delayed-auto', ResultCode)) or
+  if (not RunSc('config TownLightStation start= auto', ResultCode)) or
     (ResultCode <> 0) then
-    RaiseException('Delayed automatic service start could not be configured.');
+    RaiseException('Immediate automatic service start could not be configured.');
   if (not RunSc('description TownLightStation "TownLight Station local broadcast appliance"', ResultCode)) or
     (ResultCode <> 0) then
     RaiseException('The station service description could not be configured.');

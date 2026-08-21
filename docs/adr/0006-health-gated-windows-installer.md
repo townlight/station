@@ -13,7 +13,7 @@ A double-click installer is not successful merely because it copied files. A sta
 TownLight Station builds one elevated x64 setup executable with Inno Setup.
 
 - The candidate embeds optimized `stationd` and `channel-worker` binaries, notices, the full official GStreamer 1.28.6 MSVC x64 runtime installer, and its pinned SHA-256 digest.
-- Before Inno Setup commits product registration, code extracts the candidate binaries, installs GStreamer to a private application prefix, registers `TownLightStation` as a delayed-auto LocalSystem service, sets bounded restart recovery, and starts it.
+- Before Inno Setup commits product registration, code extracts the candidate binaries, installs GStreamer to a private application prefix, registers `TownLightStation` as an immediate automatic LocalSystem service, sets bounded restart recovery, and starts it. Channel recovery therefore begins during boot rather than after Windows' delayed-start window.
 - The activation transaction succeeds only after `GET /health` returns HTTP 200 with database readiness. It then writes `%ProgramData%\TownLight Station\install-receipt.json` containing product version, immutable source commit, media-runtime digest, time, and health URI.
 - Failure during staging, runtime installation, service registration, startup, health, or receipt writing removes the staged service, private runtime, and binaries and returns a nonzero setup result.
 - The service receives explicit private GStreamer `PATH` and plugin paths rather than relying on machine-wide developer configuration.
@@ -25,7 +25,7 @@ TownLight Station builds one elevated x64 setup executable with Inno Setup.
 Three adversarial machine paths were executed on Windows 11:
 
 1. A malformed service-registration command caused activation to fail. Setup returned nonzero and removed the staged runtime, service, and binaries rather than leaving a registered product.
-2. A clean candidate installed successfully, reached delayed-auto `RUNNING` under LocalSystem, exposed all five media factories used by the current graph, matched installed binary hashes to the candidate manifest, answered health with HTTP 200, and wrote its database and receipt.
+2. A clean candidate installed successfully, reached `RUNNING` under LocalSystem, exposed all required media factories used by the current graph, matched installed binary hashes to the candidate manifest, answered health with HTTP 200, and wrote its database and receipt.
 3. The installed API commissioned a station at revision 1. Uninstall removed Program Files and the service while retaining ProgramData. Reinstall started successfully and returned the same station identity, name, timezone, and revision.
 
 ## Consequences

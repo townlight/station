@@ -26,4 +26,4 @@ The optimized binary was registered temporarily with Windows Service Control Man
 
 ## Consequences
 
-Installer work now has a real service entry point rather than a packaging assumption. The service is intentionally local-only; browser access outside the station requires a separately designed authenticated boundary. Recovery policy, delayed automatic start, service ACLs, upgrade orchestration, and installed-machine rollback receipts remain installer responsibilities.
+Installer work now has a real service entry point rather than a packaging assumption. The service is intentionally local-only; browser access outside the station requires a separately designed authenticated boundary. Recovery policy, immediate automatic startup, service ACLs, upgrade orchestration, and installed-machine rollback receipts remain installer responsibilities.
