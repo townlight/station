@@ -91,8 +91,9 @@ The first CG renderer slice uses one fixed transparent canvas branch with eight 
 manual/bulletin text, clocks, content-addressed static PNG/JPEG images and logos, and static lower-third, ticker-region, and bug geometry; decoded UDP
 MPEG-TS tests prove text and image apply/change/clear pixels, invalid-update retention, and output continuity. Hostile offline RSS/Atom/iCal
 normalization has 19 passing tests covering bounds, unsafe URLs, malformed input, stable identity,
-escaping, tags, and timestamps. Live-video, background-audio, animated ticker, WPE styling, and
-installed/field gates are not done.
+escaping, tags, and timestamps. Static image upload, audited binding, decoded live change, and clear
+are installed-machine-proven. Live-video, background-audio, animated ticker, WPE styling, full
+installed commissioning, and field gates are not done.
 
 ## Development
 

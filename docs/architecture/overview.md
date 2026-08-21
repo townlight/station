@@ -73,6 +73,9 @@ the channel orchestration cadence atomically expires due scheduled bulletins bef
 same timestamp's snapshot. External-provider compatibility, installed operation, and field soak
 remain separate gates. See [ADR 0030](../adr/0030-fixed-cg-overlay-compositor.md), [hostile feed proof](../proof/2026-08-21-feed-hostile-normalization.md), [feed lifecycle proof](../proof/2026-08-21-cg-feed-fetch-lifecycle.md), [bulletin expiration proof](../proof/2026-08-21-cg-bulletin-expiration.md), and [decoded CG proof record](../proof/2026-08-21-cg-udp-decoded-pixel.md).
 The managed static-image authority and decoded-pixel evidence are recorded in the [CG image proof](../proof/2026-08-21-managed-cg-image-overlay.md).
+The exact installed candidate also passed raw upload, audited image binding, live red-to-green
+change, acknowledged clear back to the captured program baseline, unchanged worker identity, and
+post-proof service/hash verification; see the [installed CG image proof](../proof/2026-08-21-installed-cg-image-apply-change-clear.md).
 Bulletin rotation is stateless and epoch-anchored: eligible bulletins are ordered by bulletin
 identity, then receive a repeating weighted timeline from each bulletin's `display_seconds`; an
 explicit zone `rotation_seconds` remains a uniform-slot override. Exact cumulative boundaries are

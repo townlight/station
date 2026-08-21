@@ -21,6 +21,7 @@ $baselinePixel = Join-Path ([IO.Path]::GetTempPath()) "townlight-cg-baseline-$PI
 $receiver = [Net.Sockets.UdpClient]::new($DestinationPort)
 $receiver.Client.ReceiveBufferSize = 8388608
 $originalChannel = $null
+$existingBoard = $null
 $workerPid = $null
 $boardRevision = 0
 $zoneRevision = 0
@@ -124,7 +125,9 @@ function Assert-TsContinuity {
 
 function Read-Pixel {
     param([string]$InputPath, [string]$OutputPath)
-    & ffmpeg.exe -hide_banner -loglevel error -i $InputPath -vf 'crop=1:1:560:120,format=rgb24' `
+    # Crop an even 2x2 region because the MPEG-TS proof profile decodes to chroma-subsampled video;
+    # a 1x1 crop is rounded to zero by FFmpeg before conversion to RGB.
+    & ffmpeg.exe -hide_banner -loglevel error -i $InputPath -vf 'crop=2:2:560:120,format=rgb24' `
         -frames:v 1 -an -f rawvideo -pix_fmt rgb24 -y $OutputPath
     if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $OutputPath)) {
         throw "ffmpeg could not decode a CG proof pixel from $InputPath."
@@ -165,7 +168,7 @@ function Wait-PreviewCleared {
                 Where-Object { $_.kind -eq 'image' } | Select-Object -First 1
             if (-not $image) { return }
         } catch {
-            if ($_.Exception.Response -and $_.Exception.Response.StatusCode.value__ -eq 422) { return }
+            if ($_.Exception.Response -and $_.Exception.Response.StatusCode.value__ -in @(409, 422)) { return }
         }
         Start-Sleep -Milliseconds 250
     } while ([DateTime]::UtcNow -lt $deadline)
@@ -176,20 +179,25 @@ try {
     if (-not (Get-Command ffmpeg.exe -ErrorAction SilentlyContinue)) {
         throw 'ffmpeg.exe is required on PATH for installed CG pixel assertions.'
     }
-    $channels = @(Invoke-Json 'Get' '/api/v1/channels' $null)
+    $channelResponse = Invoke-Json 'Get' '/api/v1/channels' $null
+    $channels = @($channelResponse)
     $originalChannel = $channels | Where-Object channel_id -eq $channelId | Select-Object -First 1
     if ($originalChannel -and $originalChannel.display_name -ne 'Installed CG image proof') {
         throw "Refusing to overwrite existing channel $channelId with display name '$($originalChannel.display_name)'."
     }
     try {
         $existingBoard = Invoke-Json 'Get' "/api/v1/cg/board?channel_id=$channelId" $null
-        if ($existingBoard) { throw "Refusing stale CG image proof board $($existingBoard.board_id)." }
+        if ($existingBoard -and ($existingBoard.board_id -ne $boardId -or
+            $existingBoard.created_by -ne 'installed-cg-image-proof' -or
+            $existingBoard.template_id -ne 'l-bar')) {
+            throw "Refusing stale CG image proof board $($existingBoard.board_id)."
+        }
     } catch {
         if ($_.Exception.Message -like '*Refusing stale*' -or
             (-not $_.Exception.Response) -or $_.Exception.Response.StatusCode.value__ -ne 404) { throw }
     }
     try {
-        $existingZones = @(Invoke-Json 'Get' "/api/v1/cg/zones?board_id=$boardId" $null)
+        $existingZones = Invoke-Json 'Get' "/api/v1/cg/zones?board_id=$boardId" $null
         if ($existingZones.Count -gt 0) { throw "Refusing stale CG image proof zones for board $boardId." }
     } catch {
         if ($_.Exception.Message -like '*Refusing stale*' -or
@@ -207,12 +215,16 @@ try {
         })
         enabled = $true
     }
+    $baselineWorkerIds = @(Get-Process channel-worker -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Id)
     Invoke-Json 'Put' '/api/v1/channels' $channel | Out-Null
     $workerDeadline = [DateTime]::UtcNow.AddSeconds(15)
     do {
-        $workerPid = Get-CimInstance Win32_Process -Filter "Name='channel-worker.exe'" |
-            Where-Object { $_.CommandLine -match [regex]::Escape($channelId) } |
-            Select-Object -First 1 -ExpandProperty ProcessId
+        $newWorkers = @(Get-Process channel-worker -ErrorAction SilentlyContinue |
+            Where-Object { $baselineWorkerIds -notcontains $_.Id })
+        if ($newWorkers.Count -gt 1) {
+            throw 'More than one channel worker started during proof setup; refusing an ambiguous PID assertion.'
+        }
+        $workerPid = $newWorkers | Select-Object -First 1 -ExpandProperty Id
         if (-not $workerPid) { Start-Sleep -Milliseconds 100 }
     } while (-not $workerPid -and [DateTime]::UtcNow -lt $workerDeadline)
     if (-not $workerPid) { throw 'The dedicated installed CG proof worker did not start.' }
@@ -225,7 +237,8 @@ try {
 
     $red = Upload-CgImage (New-ImageBytes 220 20 20)
     $green = Upload-CgImage (New-ImageBytes 20 220 20)
-    $images = @(Invoke-Json 'Get' '/api/v1/cg/images' $null)
+    $imageResponse = Invoke-Json 'Get' '/api/v1/cg/images' $null
+    $images = @($imageResponse)
     if (-not ($images.asset_id -contains $red.asset_id) -or -not ($images.asset_id -contains $green.asset_id)) {
         throw 'The installed CG image library did not list both server-issued identities.'
     }
@@ -239,13 +252,16 @@ try {
     }
 
     $now = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+    $priorBoardRevision = if ($existingBoard) { [uint64]$existingBoard.revision } else { [uint64]0 }
+    $boardRevision = $priorBoardRevision + 1
     $board = [ordered]@{
         board_id = $boardId; channel_id = $channelId; template_id = 'l-bar'; active = $true
-        background_audio_asset_id = $null; revision = 1; created_at_unix_ms = $now
+        background_audio_asset_id = $null; revision = $boardRevision
+        created_at_unix_ms = if ($existingBoard) { [int64]$existingBoard.created_at_unix_ms } else { $now }
         updated_at_unix_ms = $now; created_by = 'installed-cg-image-proof'
     }
-    Write-Cg '/api/v1/cg/board' 'board' $board 0 (New-Audit 'board_created' $boardId $now 'board') | Out-Null
-    $boardRevision = 1
+    $boardAuditKind = if ($existingBoard) { 'board_updated' } else { 'board_created' }
+    Write-Cg '/api/v1/cg/board' 'board' $board $priorBoardRevision (New-Audit $boardAuditKind $boardId $now 'board') | Out-Null
     $zone = [ordered]@{
         zone_id = $zoneId; board_id = $boardId; template_zone_key = 'sidebar'; zone_kind = 'sidebar'
         content_source = [ordered]@{ kind = 'image'; asset_id = $red.asset_id }
@@ -280,9 +296,10 @@ try {
 
     if ($ValidateClear) {
         $board.active = $false
-        $board.revision = 2
+        $board.revision = $boardRevision + 1
         $board.updated_at_unix_ms = $now + 3
-        Write-Cg '/api/v1/cg/board' 'board' $board 1 (New-Audit 'board_updated' $boardId ($now + 3) 'board-disable') | Out-Null
+        Write-Cg '/api/v1/cg/board' 'board' $board $boardRevision (New-Audit 'board_updated' $boardId ($now + 3) 'board-disable') | Out-Null
+        $boardRevision = $board.revision
         Wait-PreviewCleared
         $clearDeadline = [DateTime]::UtcNow.AddSeconds(20)
         do {
