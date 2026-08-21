@@ -14,12 +14,14 @@ $dataDirectory = Join-Path $env:ProgramData 'TownLight Station'
 $receiptPath = Join-Path $dataDirectory 'install-receipt.json'
 $trustPath = Join-Path $applicationDirectory 'release-trust.json'
 $feedPath = Join-Path $FixtureDirectory 'stable.json'
+$fixturePackagePath = Join-Path $FixtureDirectory 'TownLight-Station-0.2.0.tlu'
 $fixtureTrustPath = Join-Path $FixtureDirectory 'release-trust.json'
 $serverReadyPath = Join-Path $FixtureDirectory 'server-ready.txt'
 $serverStopPath = Join-Path $FixtureDirectory 'server-stop.txt'
 $serverLogPath = Join-Path $FixtureDirectory 'server-log.txt'
 $server = $null
 $trustInstalled = $false
+$stagedProofPath = ''
 
 function Wait-ForUpdateStatus {
     param([scriptblock]$Predicate, [int]$TimeoutSeconds = 30)
@@ -44,6 +46,7 @@ if (-not $service -or $service.State -ne 'Running' -or $service.StartName -ne 'L
     throw 'The installed TownLight Station service is not running as LocalSystem.'
 }
 if (-not (Test-Path -LiteralPath $feedPath -PathType Leaf) -or
+    -not (Test-Path -LiteralPath $fixturePackagePath -PathType Leaf) -or
     -not (Test-Path -LiteralPath $fixtureTrustPath -PathType Leaf)) {
     throw 'The signed update fixture is incomplete.'
 }
@@ -54,6 +57,7 @@ try {
     $serverArguments = @(
         '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ('"' + $serverScript + '"'),
         '-Port', [string]$FeedPort, '-FeedPath', ('"' + $feedPath + '"'),
+        '-PackagePath', ('"' + $fixturePackagePath + '"'),
         '-ReadyPath', ('"' + $serverReadyPath + '"'), '-StopPath', ('"' + $serverStopPath + '"'),
         '-LogPath', ('"' + $serverLogPath + '"')
     )
@@ -106,12 +110,49 @@ try {
         throw 'Discovery downloaded or staged a package without operator approval.'
     }
 
+    $staged = Invoke-RestMethod -Uri "$BaseUrl/updates/stage" -Method Post
+    $stagedProofPath = Join-Path (Join-Path $dataDirectory 'updates\staged') $staged.package_file_name
+    if ($staged.manifest.version -ne '0.2.0' -or
+        $staged.manifest.source_commit -ne ('b' * 40) -or
+        -not (Test-Path -LiteralPath $stagedProofPath -PathType Leaf)) {
+        throw 'The installed staging action did not publish the exact verified offer.'
+    }
+    $stagedFile = Get-Item -LiteralPath $stagedProofPath
+    $expectedPackageHash = (Get-FileHash -LiteralPath $fixturePackagePath -Algorithm SHA256).Hash
+    if ([uint64]($stagedFile.Length) -ne [uint64]($staged.manifest.package_size_bytes) -or
+        (Get-FileHash -LiteralPath $stagedProofPath -Algorithm SHA256).Hash -ne $expectedPackageHash -or
+        $staged.manifest.package_sha256 -ne $expectedPackageHash -or
+        -not $stagedFile.IsReadOnly) {
+        throw 'The installed staged package bytes, digest, size, or read-only state are invalid.'
+    }
+    $stagedStatus = Wait-ForUpdateStatus -Predicate {
+        param($Status)
+        $Status.staged_package.manifest.version -eq '0.2.0'
+    }
+    if ($stagedStatus.staged_package.package_file_name -ne $staged.package_file_name) {
+        throw 'The installed status did not expose the exact durable staged record.'
+    }
+    $quarantineLeaks = @(
+        Get-ChildItem -LiteralPath (Join-Path $dataDirectory 'updates\quarantine') `
+            -Filter '*.part' -File -ErrorAction SilentlyContinue
+    )
+    if ($quarantineLeaks.Count -ne 0) {
+        throw 'Verified staging left quarantine fragments behind.'
+    }
+    $serverRequests = @(Get-Content -LiteralPath $serverLogPath)
+    if ($serverRequests.Count -ne 2 -or
+        $serverRequests[0] -ne 'GET /stable.json HTTP/1.1' -or
+        $serverRequests[1] -ne 'GET /TownLight-Station-0.2.0.tlu HTTP/1.1') {
+        throw 'The installed proof server did not observe exactly one feed and one package request.'
+    }
+
     Remove-Item -LiteralPath $trustPath -Force
     $trustInstalled = $false
     Restart-Service -Name TownLightStation -Force
     $clean = Wait-ForUpdateStatus -Predicate {
         param($Status)
-        -not $Status.configured -and $null -eq $Status.latest_check
+        -not $Status.configured -and $null -eq $Status.latest_check -and
+            $null -eq $Status.staged_package
     }
     $resolvedAlert = $null
     $alertDeadline = [DateTime]::UtcNow.AddSeconds(10)
@@ -144,7 +185,13 @@ try {
         release_notes_exact = $true
         alert_severity = $availableAlert.severity
         alert_occurrences = [uint64]($availableAlert.occurrence_count)
-        packages_downloaded_or_staged = $stagedFiles.Count
+        discovery_package_files = $stagedFiles.Count
+        staged_package_sha256 = $expectedPackageHash
+        staged_package_size = [uint64]($stagedFile.Length)
+        staged_package_read_only = $stagedFile.IsReadOnly
+        quarantine_fragments = $quarantineLeaks.Count
+        server_requests = $serverRequests
+        stage_record_cleared_with_trust = $null -eq $clean.staged_package
         proof_trust_removed = -not (Test-Path -LiteralPath $trustPath)
         clean_configured_state = $clean.configured
         stale_offer_hidden = $null -eq $clean.latest_check
@@ -175,6 +222,10 @@ finally {
     if ($trustInstalled -and (Test-Path -LiteralPath $trustPath -PathType Leaf)) {
         Remove-Item -LiteralPath $trustPath -Force -ErrorAction SilentlyContinue
         Restart-Service -Name TownLightStation -Force -ErrorAction SilentlyContinue
+    }
+    if ($stagedProofPath -and (Test-Path -LiteralPath $stagedProofPath -PathType Leaf)) {
+        try { (Get-Item -LiteralPath $stagedProofPath).IsReadOnly = $false } catch {}
+        Remove-Item -LiteralPath $stagedProofPath -Force -ErrorAction SilentlyContinue
     }
     if ($server) {
         Set-Content -LiteralPath $serverStopPath -Value 'stop' -Encoding ascii -ErrorAction SilentlyContinue

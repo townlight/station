@@ -4,6 +4,8 @@ param(
     [Parameter(Mandatory = $true)]
     [string]$FeedPath,
     [Parameter(Mandatory = $true)]
+    [string]$PackagePath,
+    [Parameter(Mandatory = $true)]
     [string]$ReadyPath,
     [Parameter(Mandatory = $true)]
     [string]$StopPath,
@@ -14,7 +16,8 @@ param(
 $ErrorActionPreference = 'Stop'
 $listener = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, $Port)
 try {
-    [byte[]]$body = [IO.File]::ReadAllBytes($FeedPath)
+    [byte[]]$feedBody = [IO.File]::ReadAllBytes($FeedPath)
+    [byte[]]$packageBody = [IO.File]::ReadAllBytes($PackagePath)
     $listener.Start()
     Set-Content -LiteralPath $ReadyPath -Value "127.0.0.1:$Port" -Encoding ascii
     $deadline = [DateTime]::UtcNow.AddSeconds(90)
@@ -33,10 +36,17 @@ try {
             Add-Content -LiteralPath $LogPath -Value $requestLine -Encoding ascii
             if ($requestLine -eq 'GET /stable.json HTTP/1.1') {
                 $headers = [Text.Encoding]::ASCII.GetBytes(
-                    "HTTP/1.1 200 OK`r`nContent-Type: application/json`r`nContent-Length: $($body.Length)`r`nConnection: close`r`n`r`n"
+                    "HTTP/1.1 200 OK`r`nContent-Type: application/json`r`nContent-Length: $($feedBody.Length)`r`nConnection: close`r`n`r`n"
                 )
                 $stream.Write($headers, 0, $headers.Length)
-                $stream.Write($body, 0, $body.Length)
+                $stream.Write($feedBody, 0, $feedBody.Length)
+            }
+            elseif ($requestLine -eq 'GET /TownLight-Station-0.2.0.tlu HTTP/1.1') {
+                $headers = [Text.Encoding]::ASCII.GetBytes(
+                    "HTTP/1.1 200 OK`r`nContent-Type: application/octet-stream`r`nContent-Length: $($packageBody.Length)`r`nConnection: close`r`n`r`n"
+                )
+                $stream.Write($headers, 0, $headers.Length)
+                $stream.Write($packageBody, 0, $packageBody.Length)
             }
             else {
                 $response = [Text.Encoding]::ASCII.GetBytes(

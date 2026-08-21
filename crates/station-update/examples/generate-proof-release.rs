@@ -1,6 +1,7 @@
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use ed25519_dalek::{Signer, SigningKey};
+use sha2::{Digest, Sha256};
 use station_update::{ReleaseManifest, ReleaseSource, SignedReleaseEnvelope, TrustedReleaseKey};
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -26,6 +27,9 @@ fn main() -> Result<(), String> {
             .as_millis(),
     )
     .map_err(|_| "system time exceeds the supported range".to_string())?;
+    let package_file_name = "TownLight-Station-0.2.0.tlu";
+    let package_bytes = b"TownLight Station inert installed staging proof package\n";
+    let package_sha256 = format!("{:X}", Sha256::digest(package_bytes));
     let signing_key = SigningKey::from_bytes(&[42; 32]);
     let manifest = ReleaseManifest {
         schema_version: 1,
@@ -37,9 +41,9 @@ fn main() -> Result<(), String> {
         published_at_unix_ms: now_unix_ms.saturating_sub(1_000),
         expires_at_unix_ms: now_unix_ms.saturating_add(3_600_000),
         minimum_updater_version: "0.1.0".into(),
-        package_url: feed_url.replace("stable.json", "TownLight-Station-0.2.0.tlu"),
-        package_size_bytes: 1_024,
-        package_sha256: "A".repeat(64),
+        package_url: feed_url.replace("stable.json", package_file_name),
+        package_size_bytes: package_bytes.len() as u64,
+        package_sha256,
         release_notes_markdown:
             "# TownLight Station 0.2.0\n\nInstalled signed-discovery proof release.".into(),
     };
@@ -70,5 +74,7 @@ fn main() -> Result<(), String> {
         serde_json::to_vec(&source).map_err(|error| error.to_string())?,
     )
     .map_err(|error| error.to_string())?;
+    std::fs::write(output_directory.join(package_file_name), package_bytes)
+        .map_err(|error| error.to_string())?;
     Ok(())
 }
