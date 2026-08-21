@@ -33,6 +33,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Crash reconciliation for queued and acknowledged schedule work: a replacement worker reloads the content-addressed asset and retakes it only while its committed time window remains active.
 - Forward migration of the dispatch-status constraint so existing approval rows survive introduction of the terminal `completed` state.
 - Exact-candidate installed-machine proof of timed asset preload, on-air take, fallback return, worker shutdown, database status, and durable per-channel journal evidence.
+- Managed media-ingest API that is the only public route to `ready`: it validates real A/V, atomically copies and hashes into the station library, revalidates stored bytes, and rejects caller-declared readiness or invalid sources without library pollution.
 - Channel-worker ownership of fallback graph startup and shutdown, with supervisor proof that durable readiness corresponds to real MPEG-TS output.
 - Native Windows Service Control Manager hosting for `stationd`, including loopback-only service configuration, cooperative stop and operating-system shutdown, startup status, persistent data-directory creation, and a machine-proven install/start/health/stop lifecycle.
 - Self-contained elevated Windows installer with a hash-pinned private GStreamer runtime, delayed-auto service recovery, activation health gate, immutable candidate receipt, failed-install rollback, uninstall, and station-data-preserving reinstall proof.

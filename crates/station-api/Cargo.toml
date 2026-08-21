@@ -8,8 +8,10 @@ publish.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 station-domain.workspace = true
+station-media-assets.workspace = true
 station-schedule.workspace = true
 station-storage.workspace = true
 
 [dev-dependencies]
+gstreamer.workspace = true
 serde_json.workspace = true

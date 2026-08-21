@@ -1,6 +1,6 @@
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
@@ -10,6 +10,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::Deserialize;
 use station_domain::StationProfile;
+use station_media_assets::{AssetError, ingest_media};
 use station_schedule::{ChannelConfiguration, MediaAsset, ScheduleItem};
 use station_storage::{CommitWriteError, ProfileWriteError, StationStore};
 
@@ -37,6 +38,12 @@ struct CommitSchedule {
     operator_notes: String,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct IngestMedia {
+    source_path: PathBuf,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ApiResponse {
     pub status: u16,
@@ -45,12 +52,19 @@ pub struct ApiResponse {
 
 pub struct Api {
     storage: StationStore,
+    media_library: PathBuf,
 }
 
 impl Api {
     pub fn open(database_path: impl AsRef<Path>) -> Result<Self, String> {
+        let database_path = database_path.as_ref();
+        let media_library = database_path
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join("media");
         Ok(Self {
             storage: StationStore::open(database_path)?,
+            media_library,
         })
     }
 
@@ -72,7 +86,7 @@ impl Api {
                 Err(message) => error_response(500, "storage_error", &message),
             },
             ("PUT", "/api/v1/station") => self.put_profile(body),
-            ("PUT", "/api/v1/assets") => self.put_media_asset(body),
+            ("POST", "/api/v1/assets/ingest") => self.ingest_media(body),
             ("PUT", "/api/v1/channels") => self.put_channel(body),
             ("GET", "/api/v1/channels") => self.list_channels(),
             ("PUT", "/api/v1/schedule/items") => self.put_schedule_item(body),
@@ -84,6 +98,7 @@ impl Api {
             ("GET", path) if path.starts_with("/api/v1/schedule/commits/") => {
                 self.read_commit_report(path)
             }
+            ("GET", path) if path.starts_with("/api/v1/assets/") => self.read_media_asset(path),
             _ => error_response(404, "not_found", "The requested route does not exist."),
         }
     }
@@ -127,18 +142,62 @@ impl Api {
         }
     }
 
-    fn put_media_asset(&self, body: Option<&[u8]>) -> ApiResponse {
-        let Some(asset) = parse_body::<MediaAsset>(body) else {
-            return error_response(400, "invalid_json", "A media asset body is required.");
+    fn ingest_media(&self, body: Option<&[u8]>) -> ApiResponse {
+        let Some(command) = parse_body::<IngestMedia>(body) else {
+            return error_response(400, "invalid_json", "A media ingest body is required.");
         };
-        if let Err(error) = asset.validate() {
-            return error_response(422, "validation_failed", &format!("{error:?}"));
+        if !command.source_path.is_absolute() {
+            return error_response(
+                422,
+                "invalid_source_path",
+                "The media source path must be absolute.",
+            );
         }
+        let ingested = match ingest_media(&command.source_path, &self.media_library) {
+            Ok(ingested) => ingested,
+            Err(
+                AssetError::InvalidSource(message)
+                | AssetError::UnsupportedMedia(message)
+                | AssetError::Discovery(message),
+            ) => {
+                return error_response(422, "media_rejected", &message);
+            }
+            Err(AssetError::Io(message)) => {
+                return error_response(500, "media_ingest_failed", &message);
+            }
+        };
+        let asset = MediaAsset {
+            asset_id: ingested.asset_id,
+            media_path: ingested.stored_path.to_string_lossy().into_owned(),
+            duration_ms: (ingested.metadata.duration_ns / 1_000_000).max(1),
+            readiness: station_schedule::AssetReadiness::Ready,
+        };
         match self.storage.put_media_asset(&asset) {
             Ok(()) => json_response(
+                201,
+                serde_json::to_vec(&asset).expect("serializing a media asset cannot fail"),
+            ),
+            Err(message) => error_response(500, "storage_error", &message),
+        }
+    }
+
+    fn read_media_asset(&self, path: &str) -> ApiResponse {
+        let Some(asset_id) = path.strip_prefix("/api/v1/assets/") else {
+            unreachable!("the route prefix was checked")
+        };
+        if asset_id.len() != 64
+            || !asset_id
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+        {
+            return error_response(400, "invalid_path", "The asset identity is invalid.");
+        }
+        match self.storage.read_media_asset(asset_id) {
+            Ok(Some(asset)) => json_response(
                 200,
                 serde_json::to_vec(&asset).expect("serializing a media asset cannot fail"),
             ),
+            Ok(None) => error_response(404, "asset_not_found", "The media asset does not exist."),
             Err(message) => error_response(500, "storage_error", &message),
         }
     }

@@ -9,12 +9,15 @@ use std::sync::{
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use gst::prelude::*;
+use gstreamer as gst;
 use station_api::{Api, serve_one, serve_until};
 use station_domain::StationProfile;
 use station_schedule::{
     AssetReadiness, ChannelConfiguration, CommitPlan, CommitReport, DispatchStatus, MediaAsset,
     ScheduleItem, ScheduleState,
 };
+use station_storage::StationStore;
 
 fn temporary_database(name: &str) -> PathBuf {
     let nonce = SystemTime::now()
@@ -141,6 +144,169 @@ fn persists_validated_channel_output_configuration() {
 }
 
 #[test]
+fn admits_real_media_into_the_managed_library_and_refuses_declared_readiness() {
+    let marker = temporary_database("managed-ingest");
+    let root = marker.with_extension("ingest-root");
+    let database = root.join("station.db");
+    let library = root.join("media");
+    let source = root.join("incoming.ts");
+    std::fs::create_dir_all(&root).unwrap();
+    generate_media_fixture(&source);
+    let api = Api::open(&database).unwrap();
+    let body = serde_json::to_vec(&serde_json::json!({
+        "source_path": source.to_string_lossy()
+    }))
+    .unwrap();
+    let admitted = api.handle("POST", "/api/v1/assets/ingest", Some(&body));
+    assert_eq!(
+        admitted.status,
+        201,
+        "{}",
+        String::from_utf8_lossy(&admitted.body)
+    );
+    let asset: MediaAsset = serde_json::from_slice(&admitted.body).unwrap();
+    assert_eq!(asset.readiness, AssetReadiness::Ready);
+    assert!(Path::new(&asset.media_path).starts_with(std::fs::canonicalize(&library).unwrap()));
+    assert_eq!(asset.asset_id.len(), 64);
+    let fetched = api.handle("GET", &format!("/api/v1/assets/{}", asset.asset_id), None);
+    assert_eq!(fetched.status, 200);
+    assert_eq!(
+        serde_json::from_slice::<MediaAsset>(&fetched.body).unwrap(),
+        asset
+    );
+
+    let forged = MediaAsset {
+        asset_id: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+        media_path: r"C:\not-managed\forged.ts".into(),
+        duration_ms: 60_000,
+        readiness: AssetReadiness::Ready,
+    };
+    assert_eq!(
+        api.handle(
+            "PUT",
+            "/api/v1/assets",
+            Some(&serde_json::to_vec(&forged).unwrap()),
+        )
+        .status,
+        404
+    );
+    assert_eq!(
+        api.handle(
+            "POST",
+            "/api/v1/assets/ingest",
+            Some(br#"{"source_path":"relative.ts"}"#),
+        )
+        .status,
+        422
+    );
+    let stored_before_rejection = std::fs::read_dir(&library).unwrap().count();
+    let invalid_source = root.join("not-media.txt");
+    std::fs::write(&invalid_source, b"not a media asset").unwrap();
+    let invalid_body = serde_json::to_vec(&serde_json::json!({
+        "source_path": invalid_source.to_string_lossy()
+    }))
+    .unwrap();
+    let rejected = api.handle("POST", "/api/v1/assets/ingest", Some(&invalid_body));
+    assert_eq!(rejected.status, 422);
+    assert_eq!(
+        std::fs::read_dir(&library).unwrap().count(),
+        stored_before_rejection,
+        "rejected media must not pollute the managed library"
+    );
+    assert_eq!(
+        api.handle("GET", "/api/v1/assets/not-a-digest", None)
+            .status,
+        400
+    );
+    drop(api);
+    let _ = std::fs::remove_file(database);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+fn generate_media_fixture(path: &Path) {
+    gst::init().unwrap();
+    let pipeline = gst::Pipeline::new();
+    let video = gst::ElementFactory::make("videotestsrc")
+        .property("num-buffers", 90_i32)
+        .build()
+        .unwrap();
+    let video_convert = gst::ElementFactory::make("videoconvert").build().unwrap();
+    let video_caps = gst::ElementFactory::make("capsfilter")
+        .property(
+            "caps",
+            gst::Caps::builder("video/x-raw")
+                .field("format", "I420")
+                .field("width", 320_i32)
+                .field("height", 180_i32)
+                .field("framerate", gst::Fraction::new(30, 1))
+                .build(),
+        )
+        .build()
+        .unwrap();
+    let video_encoder = gst::ElementFactory::make("openh264enc").build().unwrap();
+    let video_parser = gst::ElementFactory::make("h264parse").build().unwrap();
+    let audio = gst::ElementFactory::make("audiotestsrc")
+        .property("num-buffers", 141_i32)
+        .build()
+        .unwrap();
+    let audio_convert = gst::ElementFactory::make("audioconvert").build().unwrap();
+    let audio_resample = gst::ElementFactory::make("audioresample").build().unwrap();
+    let audio_encoder = gst::ElementFactory::make("voaacenc").build().unwrap();
+    let audio_parser = gst::ElementFactory::make("aacparse").build().unwrap();
+    let mux = gst::ElementFactory::make("mpegtsmux").build().unwrap();
+    let sink = gst::ElementFactory::make("filesink")
+        .property("location", path.to_string_lossy().as_ref())
+        .build()
+        .unwrap();
+    pipeline
+        .add_many([
+            &video,
+            &video_convert,
+            &video_caps,
+            &video_encoder,
+            &video_parser,
+            &audio,
+            &audio_convert,
+            &audio_resample,
+            &audio_encoder,
+            &audio_parser,
+            &mux,
+            &sink,
+        ])
+        .unwrap();
+    gst::Element::link_many([
+        &video,
+        &video_convert,
+        &video_caps,
+        &video_encoder,
+        &video_parser,
+        &mux,
+        &sink,
+    ])
+    .unwrap();
+    gst::Element::link_many([
+        &audio,
+        &audio_convert,
+        &audio_resample,
+        &audio_encoder,
+        &audio_parser,
+        &mux,
+    ])
+    .unwrap();
+    pipeline.set_state(gst::State::Playing).unwrap();
+    let bus = pipeline.bus().unwrap();
+    for message in bus.iter_timed(gst::ClockTime::from_seconds(10)) {
+        match message.view() {
+            gst::MessageView::Eos(_) => break,
+            gst::MessageView::Error(error) => panic!("fixture pipeline failed: {}", error.error()),
+            _ => {}
+        }
+    }
+    pipeline.set_state(gst::State::Null).unwrap();
+    assert!(path.is_file());
+}
+
+#[test]
 fn prepares_commits_and_persists_an_operator_approval_through_the_api() {
     let database = temporary_database("schedule-commit");
     let api = Api::open(&database).unwrap();
@@ -150,15 +316,10 @@ fn prepares_commits_and_persists_an_operator_approval_through_the_api() {
         duration_ms: 60_000,
         readiness: AssetReadiness::Ready,
     };
-    assert_eq!(
-        api.handle(
-            "PUT",
-            "/api/v1/assets",
-            Some(&serde_json::to_vec(&asset).unwrap())
-        )
-        .status,
-        200
-    );
+    StationStore::open(&database)
+        .unwrap()
+        .put_media_asset(&asset)
+        .unwrap();
     let item = ScheduleItem {
         item_id: "256d5a07-92d3-4718-aec9-05cad42fae7d".into(),
         channel_id: "8b626c01-bdf8-419a-8a2e-b0a7caa1ff7e".into(),

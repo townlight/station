@@ -19,7 +19,8 @@ An operator-selected filename is not sufficient authority for unattended playout
 - Existing content with the same identity is verified instead of duplicated or overwritten.
 - The stored object is discovered again; metadata must equal the source result.
 - The channel worker rehashes the stored object and requires the command's asset identity to match before decoding it.
+- The public API admits media only through this boundary. It derives the database record from the measured stored asset; no route accepts a caller-declared `ready` identity/path pair.
 
 ## Consequences
 
-The database can refer to immutable content identity instead of mutable operator paths. Duplicate ingest is idempotent and incomplete copies never receive an asset name. Hashing uses heap storage because the Windows worker main thread cannot safely carry a one-megabyte stack buffer. Watch folders, job persistence, loudness measurement, thumbnails, replacement workflow, retention, and missing-file dashboards remain separate higher-level lifecycle work.
+The database can refer to immutable content identity instead of mutable operator paths. Duplicate ingest is idempotent and incomplete copies never receive an asset name. Hashing uses heap storage because the Windows worker main thread cannot safely carry a one-megabyte stack buffer. The current loopback request is synchronous; background job persistence, multipart/browser upload, watch folders, loudness measurement, thumbnails, replacement workflow, retention, and missing-file dashboards remain separate higher-level lifecycle work.
