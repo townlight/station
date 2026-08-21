@@ -451,6 +451,171 @@ fn manages_cg_authority_through_the_operator_api() {
     remove_database(&database);
 }
 
+#[test]
+fn expires_due_bulletins_through_idempotent_local_command() {
+    let database = database_path("cg-expiration-api");
+    put_channel(&database);
+    let api = Api::open(&database).unwrap();
+    let make_scheduled = |bulletin_id: &str, end: i64, suffix: &str| {
+        let submitted = CgBulletin {
+            bulletin_id: bulletin_id.into(),
+            channel_id: CHANNEL_ID.into(),
+            content: CgBulletinContent::Text {
+                title: "A town notice".into(),
+                body: "The notice body.".into(),
+            },
+            state: CgBulletinState::Submitted,
+            tags: Vec::new(),
+            requested_start_at_unix_ms: Some(1_000),
+            requested_end_at_unix_ms: Some(end),
+            display_seconds: 10,
+            audio_asset_id: None,
+            submitted_by: "station-operator".into(),
+            moderation_notes: None,
+            moderated_by: None,
+            revision: 1,
+            created_at_unix_ms: 900,
+            updated_at_unix_ms: 1_000,
+        };
+        let submitted_response = api.handle(
+            "PUT",
+            "/api/v1/cg/bulletins",
+            Some(&write_body(
+                "bulletin",
+                &submitted,
+                0,
+                &audit(
+                    &format!("a1b00000-0000-4000-8000-0000000000{suffix}0"),
+                    CgAuditEventKind::BulletinSubmitted,
+                    1_000,
+                ),
+            )),
+        );
+        assert_eq!(
+            submitted_response.status,
+            200,
+            "{}",
+            body_text(&submitted_response.body)
+        );
+        let mut scheduled = submitted;
+        scheduled.state = CgBulletinState::Scheduled;
+        scheduled.moderated_by = Some("station-operator".into());
+        scheduled.revision = 2;
+        scheduled.updated_at_unix_ms = 1_500;
+        let scheduled_response = api.handle(
+            "PUT",
+            "/api/v1/cg/bulletins",
+            Some(&write_body(
+                "bulletin",
+                &scheduled,
+                1,
+                &audit(
+                    &format!("a1b00000-0000-4000-8000-0000000000{suffix}1"),
+                    CgAuditEventKind::BulletinModerated,
+                    1_500,
+                ),
+            )),
+        );
+        assert_eq!(
+            scheduled_response.status,
+            200,
+            "{}",
+            body_text(&scheduled_response.body)
+        );
+    };
+    make_scheduled("a1b00000-0000-4000-8000-000000000001", 2_000, "1");
+    make_scheduled("a1b00000-0000-4000-8000-000000000002", 3_000, "2");
+
+    let command = serde_json::json!({
+        "channel_id": CHANNEL_ID,
+        "now_unix_ms": 2_000,
+        "operator_id": "station-operator"
+    });
+    let first = api.handle(
+        "POST",
+        "/api/v1/cg/bulletins/expire",
+        Some(&serde_json::to_vec(&command).unwrap()),
+    );
+    assert_eq!(first.status, 200, "{}", body_text(&first.body));
+    let expired: Vec<CgBulletin> = response_json(&first);
+    assert_eq!(expired.len(), 1);
+    assert_eq!(expired[0].revision, 3);
+    assert_eq!(expired[0].updated_at_unix_ms, 2_000);
+
+    let second = api.handle(
+        "POST",
+        "/api/v1/cg/bulletins/expire",
+        Some(&serde_json::to_vec(&command).unwrap()),
+    );
+    assert_eq!(second.status, 200);
+    let expired_again: Vec<CgBulletin> = response_json(&second);
+    assert!(expired_again.is_empty());
+    let audit_events: Vec<CgAuditEvent> = response_json(&api.handle(
+        "GET",
+        &format!("/api/v1/cg/audit?channel_id={CHANNEL_ID}&limit=50"),
+        None,
+    ));
+    assert_eq!(
+        audit_events
+            .iter()
+            .filter(|event| event.event_kind == CgAuditEventKind::BulletinExpired)
+            .count(),
+        1
+    );
+    let invalid_time = api.handle(
+        "POST",
+        "/api/v1/cg/bulletins/expire",
+        Some(
+            &serde_json::to_vec(&serde_json::json!({
+                "channel_id": CHANNEL_ID,
+                "now_unix_ms": -1,
+                "operator_id": "station-operator"
+            }))
+            .unwrap(),
+        ),
+    );
+    assert_eq!(invalid_time.status, 422);
+    let unknown_field = api.handle(
+        "POST",
+        "/api/v1/cg/bulletins/expire",
+        Some(
+            &serde_json::to_vec(&serde_json::json!({
+                "channel_id": CHANNEL_ID,
+                "now_unix_ms": 2_000,
+                "operator_id": "station-operator",
+                "unexpected": true
+            }))
+            .unwrap(),
+        ),
+    );
+    assert_eq!(unknown_field.status, 400);
+
+    drop(api);
+    let reopened = Api::open(&database).unwrap();
+    let after_reopen = reopened.handle(
+        "POST",
+        "/api/v1/cg/bulletins/expire",
+        Some(&serde_json::to_vec(&command).unwrap()),
+    );
+    assert_eq!(after_reopen.status, 200);
+    let expired_after_reopen: Vec<CgBulletin> = response_json(&after_reopen);
+    assert!(expired_after_reopen.is_empty());
+    let audit_after_reopen: Vec<CgAuditEvent> = response_json(&reopened.handle(
+        "GET",
+        &format!("/api/v1/cg/audit?channel_id={CHANNEL_ID}&limit=50"),
+        None,
+    ));
+    assert_eq!(
+        audit_after_reopen
+            .iter()
+            .filter(|event| event.event_kind == CgAuditEventKind::BulletinExpired)
+            .count(),
+        1
+    );
+    drop(reopened);
+    remove_database(&database);
+}
+
 fn write_body<T: serde::Serialize>(
     name: &str,
     value: &T,

@@ -2322,6 +2322,149 @@ impl StationStore {
             .collect())
     }
 
+    /// Expire scheduled bulletins whose requested end has arrived.
+    ///
+    /// This is deliberately an explicit, channel-scoped operation. It does not
+    /// run a scheduler; callers supply the observation time and operator
+    /// identity, and the state changes plus audit rows commit together.
+    pub fn expire_due_cg_bulletins(
+        &self,
+        channel_id: &str,
+        now_unix_ms: i64,
+        operator_id: &str,
+    ) -> Result<Vec<CgBulletin>, CgWriteError> {
+        if now_unix_ms < 0 {
+            return Err(CgWriteError::Invalid(
+                "CG bulletin expiration time must be nonnegative.",
+            ));
+        }
+        let operator_id = operator_id.trim();
+        let validation_audit = CgAuditEvent {
+            audit_id: deterministic_cg_expiration_audit_id(channel_id, channel_id, now_unix_ms),
+            board_id: None,
+            channel_id: channel_id.into(),
+            event_kind: CgAuditEventKind::BulletinExpired,
+            operator_id: operator_id.into(),
+            occurred_at_unix_ms: now_unix_ms,
+            details: BTreeMap::new(),
+        };
+        validation_audit.validate().map_err(CgWriteError::Invalid)?;
+
+        self.execute("BEGIN IMMEDIATE")
+            .map_err(CgWriteError::Storage)?;
+        let outcome = (|| {
+            let channel = self
+                .prepare("SELECT 1 FROM channels WHERE channel_id=?1")
+                .map_err(CgWriteError::Storage)?;
+            let channel_id_value = c_string(channel_id, "CG bulletin expiration channel identity")
+                .map_err(CgWriteError::Storage)?;
+            bind_text(self.database, channel.raw, 1, &channel_id_value)
+                .map_err(CgWriteError::Storage)?;
+            if unsafe { sqlite3_step(channel.raw) } != SQLITE_ROW {
+                return Err(CgWriteError::NotFound);
+            }
+            drop(channel);
+
+            let due: Vec<CgBulletin> = self
+                .list_cg_bulletins(channel_id)
+                .map_err(CgWriteError::Storage)?
+                .into_iter()
+                .filter(|bulletin| {
+                    bulletin.channel_id == channel_id
+                        && bulletin.state == CgBulletinState::Scheduled
+                        && bulletin
+                            .requested_end_at_unix_ms
+                            .is_some_and(|end| end <= now_unix_ms)
+                })
+                .collect();
+            let mut expired = Vec::with_capacity(due.len());
+            for bulletin in due {
+                if bulletin.updated_at_unix_ms > now_unix_ms {
+                    return Err(CgWriteError::Invalid(
+                        "CG bulletin expiration time cannot precede the bulletin update time.",
+                    ));
+                }
+                let revision = bulletin
+                    .revision
+                    .checked_add(1)
+                    .ok_or(CgWriteError::Invalid(
+                        "CG bulletin revision cannot be incremented.",
+                    ))?;
+                let mut updated = bulletin.clone();
+                updated.state = CgBulletinState::Expired;
+                updated.revision = revision;
+                updated.updated_at_unix_ms = now_unix_ms;
+                updated.validate().map_err(CgWriteError::Invalid)?;
+                let statement = self
+                    .prepare(
+                        "UPDATE cg_bulletins SET state='expired', revision=?1, updated_at_unix_ms=?2 \
+                         WHERE bulletin_id=?3 AND channel_id=?4 AND state='scheduled' \
+                         AND requested_end_at_unix_ms>=0 AND requested_end_at_unix_ms<=?2 AND revision=?5",
+                    )
+                    .map_err(CgWriteError::Storage)?;
+                bind_i64(
+                    self.database,
+                    statement.raw,
+                    1,
+                    checked_i64(revision, "CG bulletin revision").map_err(CgWriteError::Storage)?,
+                )
+                .map_err(CgWriteError::Storage)?;
+                bind_i64(self.database, statement.raw, 2, now_unix_ms)
+                    .map_err(CgWriteError::Storage)?;
+                let bulletin_id =
+                    c_string(&bulletin.bulletin_id, "CG bulletin expiration identity")
+                        .map_err(CgWriteError::Storage)?;
+                bind_text(self.database, statement.raw, 3, &bulletin_id)
+                    .map_err(CgWriteError::Storage)?;
+                bind_text(self.database, statement.raw, 4, &channel_id_value)
+                    .map_err(CgWriteError::Storage)?;
+                bind_i64(
+                    self.database,
+                    statement.raw,
+                    5,
+                    checked_i64(bulletin.revision, "prior CG bulletin revision")
+                        .map_err(CgWriteError::Storage)?,
+                )
+                .map_err(CgWriteError::Storage)?;
+                expect_done(self.database, statement.raw).map_err(CgWriteError::Storage)?;
+                if self.changes() != 1 {
+                    return Err(CgWriteError::Conflict(bulletin.revision));
+                }
+                drop(statement);
+
+                let mut details = BTreeMap::new();
+                details.insert("bulletin_id".into(), bulletin.bulletin_id.clone());
+                details.insert("prior_revision".into(), bulletin.revision.to_string());
+                details.insert(
+                    "requested_end_at_unix_ms".into(),
+                    bulletin
+                        .requested_end_at_unix_ms
+                        .expect("eligible bulletin has an end time")
+                        .to_string(),
+                );
+                let audit = CgAuditEvent {
+                    audit_id: deterministic_cg_expiration_audit_id(
+                        channel_id,
+                        &bulletin.bulletin_id,
+                        now_unix_ms,
+                    ),
+                    board_id: None,
+                    channel_id: channel_id.into(),
+                    event_kind: CgAuditEventKind::BulletinExpired,
+                    operator_id: operator_id.into(),
+                    occurred_at_unix_ms: now_unix_ms,
+                    details,
+                };
+                audit.validate().map_err(CgWriteError::Invalid)?;
+                self.insert_cg_audit(&audit)
+                    .map_err(CgWriteError::Storage)?;
+                expired.push(updated);
+            }
+            Ok(expired)
+        })();
+        finish_cg_transaction(self, outcome)
+    }
+
     pub fn approve_cg_feed_item(
         &self,
         approval: &CgFeedItemApproval,
@@ -6063,6 +6206,30 @@ fn deterministic_alert_delivery_id(
         digest.update(observed_at_unix_ms.to_le_bytes());
     }
     format!("alert-delivery-{:x}", digest.finalize())
+}
+
+fn deterministic_cg_expiration_audit_id(
+    channel_id: &str,
+    bulletin_id: &str,
+    now_unix_ms: i64,
+) -> String {
+    let mut digest = Sha256::new();
+    digest.update(b"townlight-cg-bulletin-expired");
+    digest.update([0]);
+    digest.update(channel_id.as_bytes());
+    digest.update([0]);
+    digest.update(bulletin_id.as_bytes());
+    digest.update([0]);
+    digest.update(now_unix_ms.to_le_bytes());
+    let hex = format!("{:x}", digest.finalize());
+    format!(
+        "{}-{}-{}-{}-{}",
+        &hex[0..8],
+        &hex[8..12],
+        &hex[12..16],
+        &hex[16..20],
+        &hex[20..32]
+    )
 }
 
 fn quiet_hours_release(

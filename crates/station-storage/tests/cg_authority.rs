@@ -322,6 +322,301 @@ fn persists_moderated_feeds_and_bulletin_lifecycle_with_append_only_evidence() {
 }
 
 #[test]
+fn expires_only_due_scheduled_bulletins_atomically_and_survives_reopen() {
+    let database = database_path("cg-expiration");
+    let store = StationStore::open(&database).unwrap();
+    put_channel(&store);
+    let make_bulletin = |bulletin_id: &str,
+                         state: CgBulletinState,
+                         end: Option<i64>,
+                         revision: u64,
+                         updated_at_unix_ms: i64| {
+        CgBulletin {
+            bulletin_id: bulletin_id.into(),
+            channel_id: CHANNEL_ID.into(),
+            content: CgBulletinContent::Text {
+                title: "A town notice".into(),
+                body: "The notice body.".into(),
+            },
+            state,
+            tags: Vec::new(),
+            requested_start_at_unix_ms: Some(1_000),
+            requested_end_at_unix_ms: end,
+            display_seconds: 10,
+            audio_asset_id: None,
+            submitted_by: "station-operator".into(),
+            moderation_notes: None,
+            moderated_by: None,
+            revision,
+            created_at_unix_ms: 900,
+            updated_at_unix_ms,
+        }
+    };
+    let submit_and_transition = |store: &StationStore,
+                                 bulletin: CgBulletin,
+                                 transition: CgBulletinState,
+                                 submit_audit_id: &str,
+                                 transition_audit_id: &str| {
+        store
+            .write_cg_bulletin(
+                &CgBulletin {
+                    state: CgBulletinState::Submitted,
+                    revision: 1,
+                    updated_at_unix_ms: 1_000,
+                    ..bulletin.clone()
+                },
+                0,
+                &audit(submit_audit_id, CgAuditEventKind::BulletinSubmitted, 1_000),
+            )
+            .unwrap();
+        let mut transitioned = bulletin;
+        transitioned.state = transition;
+        transitioned.moderated_by = Some("station-operator".into());
+        transitioned.revision = 2;
+        transitioned.updated_at_unix_ms = 1_500;
+        store
+            .write_cg_bulletin(
+                &transitioned,
+                1,
+                &audit(
+                    transition_audit_id,
+                    CgAuditEventKind::BulletinModerated,
+                    1_500,
+                ),
+            )
+            .unwrap();
+    };
+
+    submit_and_transition(
+        &store,
+        make_bulletin(
+            "a0b00000-0000-4000-8000-000000000001",
+            CgBulletinState::Scheduled,
+            Some(2_000),
+            1,
+            1_000,
+        ),
+        CgBulletinState::Scheduled,
+        "a0b00000-0000-4000-8000-000000000010",
+        "a0b00000-0000-4000-8000-000000000011",
+    );
+    submit_and_transition(
+        &store,
+        make_bulletin(
+            "a0b00000-0000-4000-8000-000000000002",
+            CgBulletinState::Scheduled,
+            Some(3_000),
+            1,
+            1_000,
+        ),
+        CgBulletinState::Scheduled,
+        "a0b00000-0000-4000-8000-000000000020",
+        "a0b00000-0000-4000-8000-000000000022",
+    );
+    submit_and_transition(
+        &store,
+        make_bulletin(
+            "a0b00000-0000-4000-8000-000000000003",
+            CgBulletinState::Accepted,
+            None,
+            1,
+            1_000,
+        ),
+        CgBulletinState::Accepted,
+        "a0b00000-0000-4000-8000-000000000030",
+        "a0b00000-0000-4000-8000-000000000033",
+    );
+    submit_and_transition(
+        &store,
+        make_bulletin(
+            "a0b00000-0000-4000-8000-000000000004",
+            CgBulletinState::Accepted,
+            Some(1_100),
+            1,
+            1_000,
+        ),
+        CgBulletinState::Accepted,
+        "a0b00000-0000-4000-8000-000000000040",
+        "a0b00000-0000-4000-8000-000000000044",
+    );
+
+    assert_eq!(
+        store.expire_due_cg_bulletins(CHANNEL_ID, -1, "station-operator"),
+        Err(CgWriteError::Invalid(
+            "CG bulletin expiration time must be nonnegative."
+        ))
+    );
+    let expired = store
+        .expire_due_cg_bulletins(CHANNEL_ID, 2_000, "station-operator")
+        .unwrap();
+    assert_eq!(expired.len(), 1);
+    assert_eq!(
+        expired[0].bulletin_id,
+        "a0b00000-0000-4000-8000-000000000001"
+    );
+    assert_eq!(expired[0].state, CgBulletinState::Expired);
+    assert_eq!(expired[0].revision, 3);
+    assert_eq!(expired[0].updated_at_unix_ms, 2_000);
+    assert_eq!(
+        store
+            .read_cg_bulletin("a0b00000-0000-4000-8000-000000000002")
+            .unwrap()
+            .unwrap()
+            .state,
+        CgBulletinState::Scheduled
+    );
+    assert_eq!(
+        store
+            .read_cg_bulletin("a0b00000-0000-4000-8000-000000000003")
+            .unwrap()
+            .unwrap()
+            .state,
+        CgBulletinState::Accepted
+    );
+    assert_eq!(
+        store
+            .read_cg_bulletin("a0b00000-0000-4000-8000-000000000004")
+            .unwrap()
+            .unwrap()
+            .state,
+        CgBulletinState::Accepted
+    );
+    let expiration_events: Vec<_> = store
+        .list_cg_audit_events(CHANNEL_ID, 100)
+        .unwrap()
+        .into_iter()
+        .filter(|event| event.event_kind == CgAuditEventKind::BulletinExpired)
+        .collect();
+    assert_eq!(expiration_events.len(), 1);
+    assert_eq!(expiration_events[0].occurred_at_unix_ms, 2_000);
+    assert_eq!(
+        expiration_events[0].details.get("bulletin_id").unwrap(),
+        "a0b00000-0000-4000-8000-000000000001"
+    );
+    assert_eq!(
+        expiration_events[0].details.get("prior_revision").unwrap(),
+        "2"
+    );
+
+    drop(store);
+    let reopened = StationStore::open(&database).unwrap();
+    assert!(
+        reopened
+            .expire_due_cg_bulletins(CHANNEL_ID, 2_000, "station-operator")
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        reopened
+            .list_cg_audit_events(CHANNEL_ID, 100)
+            .unwrap()
+            .into_iter()
+            .filter(|event| event.event_kind == CgAuditEventKind::BulletinExpired)
+            .count(),
+        1
+    );
+    drop(reopened);
+    remove_database(&database);
+}
+
+#[test]
+fn rejects_timestamp_regression_and_rolls_back_all_due_expirations() {
+    let database = database_path("cg-expiration-rollback");
+    let store = StationStore::open(&database).unwrap();
+    put_channel(&store);
+    let persist_scheduled = |bulletin_id: &str,
+                             updated_at_unix_ms: i64,
+                             submitted_audit_id: &str,
+                             scheduled_audit_id: &str| {
+        let submitted = CgBulletin {
+            bulletin_id: bulletin_id.into(),
+            channel_id: CHANNEL_ID.into(),
+            content: CgBulletinContent::Text {
+                title: "A town notice".into(),
+                body: "The notice body.".into(),
+            },
+            state: CgBulletinState::Submitted,
+            tags: Vec::new(),
+            requested_start_at_unix_ms: Some(1_000),
+            requested_end_at_unix_ms: Some(2_000),
+            display_seconds: 10,
+            audio_asset_id: None,
+            submitted_by: "station-operator".into(),
+            moderation_notes: None,
+            moderated_by: None,
+            revision: 1,
+            created_at_unix_ms: 900,
+            updated_at_unix_ms: 1_000,
+        };
+        store
+            .write_cg_bulletin(
+                &submitted,
+                0,
+                &audit(
+                    submitted_audit_id,
+                    CgAuditEventKind::BulletinSubmitted,
+                    1_000,
+                ),
+            )
+            .unwrap();
+        let mut scheduled = submitted;
+        scheduled.state = CgBulletinState::Scheduled;
+        scheduled.moderated_by = Some("station-operator".into());
+        scheduled.revision = 2;
+        scheduled.updated_at_unix_ms = updated_at_unix_ms;
+        store
+            .write_cg_bulletin(
+                &scheduled,
+                1,
+                &audit(
+                    scheduled_audit_id,
+                    CgAuditEventKind::BulletinModerated,
+                    updated_at_unix_ms,
+                ),
+            )
+            .unwrap();
+    };
+    persist_scheduled(
+        "a0c00000-0000-4000-8000-000000000001",
+        1_500,
+        "a0c00000-0000-4000-8000-000000000011",
+        "a0c00000-0000-4000-8000-000000000012",
+    );
+    persist_scheduled(
+        "a0c00000-0000-4000-8000-000000000002",
+        2_500,
+        "a0c00000-0000-4000-8000-000000000021",
+        "a0c00000-0000-4000-8000-000000000022",
+    );
+
+    assert_eq!(
+        store.expire_due_cg_bulletins(CHANNEL_ID, 2_000, "station-operator"),
+        Err(CgWriteError::Invalid(
+            "CG bulletin expiration time cannot precede the bulletin update time."
+        ))
+    );
+    for bulletin_id in [
+        "a0c00000-0000-4000-8000-000000000001",
+        "a0c00000-0000-4000-8000-000000000002",
+    ] {
+        let bulletin = store.read_cg_bulletin(bulletin_id).unwrap().unwrap();
+        assert_eq!(bulletin.state, CgBulletinState::Scheduled);
+        assert_eq!(bulletin.revision, 2);
+    }
+    assert_eq!(
+        store
+            .list_cg_audit_events(CHANNEL_ID, 100)
+            .unwrap()
+            .into_iter()
+            .filter(|event| event.event_kind == CgAuditEventKind::BulletinExpired)
+            .count(),
+        0
+    );
+    drop(store);
+    remove_database(&database);
+}
+
+#[test]
 fn rejects_missing_feed_zone_and_terminal_bulletin_revival() {
     let database = database_path("cg-content-invariants");
     let store = StationStore::open(&database).unwrap();

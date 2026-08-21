@@ -181,6 +181,14 @@ struct WriteCgBulletin {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct ExpireCgBulletins {
+    channel_id: String,
+    now_unix_ms: i64,
+    operator_id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ApproveCgFeedItem {
     approval: CgFeedItemApproval,
     audit: CgAuditEvent,
@@ -379,6 +387,7 @@ impl Api {
                 self.list_cg_bulletins(path)
             }
             ("PUT", "/api/v1/cg/bulletins") => self.write_cg_bulletin(body),
+            ("POST", "/api/v1/cg/bulletins/expire") => self.expire_cg_bulletins(body),
             ("GET", path) if path.starts_with("/api/v1/cg/audit?") => self.list_cg_audit(path),
             ("PUT", "/api/v1/schedule/items") => self.put_schedule_item(body),
             ("POST", "/api/v1/schedule/prepare") => self.prepare_schedule_commit(body),
@@ -1900,6 +1909,21 @@ impl Api {
             &command.bulletin,
             command.expected_revision,
             &command.audit,
+        ))
+    }
+
+    fn expire_cg_bulletins(&self, body: Option<&[u8]>) -> ApiResponse {
+        let Some(command) = parse_body::<ExpireCgBulletins>(body) else {
+            return error_response(
+                400,
+                "invalid_json",
+                "A CG bulletin-expiration command body is required.",
+            );
+        };
+        cg_write_response(self.storage.expire_due_cg_bulletins(
+            &command.channel_id,
+            command.now_unix_ms,
+            &command.operator_id,
         ))
     }
 
