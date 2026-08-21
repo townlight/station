@@ -597,10 +597,8 @@ impl AlertDeliveryPayload {
         event.validate()?;
         match (notification_kind, event.state) {
             (AlertNotificationKind::Firing, AlertEventState::Firing)
-            | (AlertNotificationKind::Resolved, AlertEventState::Resolved) => {}
-            (AlertNotificationKind::Test, _) => {
-                return Err("test notifications require a dedicated test payload.");
-            }
+            | (AlertNotificationKind::Resolved, AlertEventState::Resolved)
+            | (AlertNotificationKind::Test, AlertEventState::Resolved) => {}
             _ => return Err("alert notification kind does not match the event state."),
         }
         Ok(Self {
@@ -623,9 +621,7 @@ impl AlertDeliveryPayload {
         let state = match self.notification_kind {
             AlertNotificationKind::Firing => AlertEventState::Firing,
             AlertNotificationKind::Resolved => AlertEventState::Resolved,
-            AlertNotificationKind::Test => {
-                return Err("test notifications require a dedicated test payload.");
-            }
+            AlertNotificationKind::Test => AlertEventState::Resolved,
         };
         AlertEvent {
             event_id: self.event_id.clone(),

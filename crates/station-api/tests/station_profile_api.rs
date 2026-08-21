@@ -13,8 +13,9 @@ use gst::prelude::*;
 use gstreamer as gst;
 use station_api::{Api, serve_one, serve_until};
 use station_domain::{
-    AlertConditionKind, AlertEvent, AlertEventState, AlertSeverity, ChannelRuntimeObservation,
-    ChannelRuntimeState, RuntimeSafeToAirStatus, SafeToAirColor, StationProfile,
+    AlertConditionKind, AlertDelivery, AlertDeliveryState, AlertEvent, AlertEventState,
+    AlertNotificationKind, AlertSeverity, ChannelRuntimeObservation, ChannelRuntimeState,
+    RuntimeSafeToAirStatus, SafeToAirColor, StationProfile,
 };
 use station_ingest::{IngestOutcome, IngestWorker, TranscodeOutcome, TranscodeWorker};
 use station_media_lifecycle::WatchFolderConfig;
@@ -405,6 +406,52 @@ fn rejects_control_characters_in_smtp_endpoints() {
         api.handle("GET", "/api/v1/alert-channels", None).body,
         b"[]"
     );
+    let _ = std::fs::remove_file(database);
+}
+
+#[test]
+fn queues_a_visible_send_test_without_exposing_destination_secrets() {
+    let database = temporary_database("alert-channel-send-test");
+    let api = Api::open(&database).unwrap();
+    let channel_id = "24fcb252-8f00-4e15-a4c9-7de8637beb3c";
+    let configured = api.handle(
+        "PUT",
+        "/api/v1/alert-channels",
+        Some(
+            br#"{"channel_id":"24fcb252-8f00-4e15-a4c9-7de8637beb3c","kind":"webhook","label":"Test pager","enabled":false,"target":"http://127.0.0.1:47883/operator-alert","credential":"send-test-secret"}"#,
+        ),
+    );
+    assert_eq!(configured.status, 200);
+
+    let queued = api.handle(
+        "POST",
+        &format!("/api/v1/alert-channels/{channel_id}/test"),
+        None,
+    );
+    assert_eq!(
+        queued.status,
+        202,
+        "{}",
+        String::from_utf8_lossy(&queued.body)
+    );
+    let delivery: AlertDelivery = serde_json::from_slice(&queued.body).unwrap();
+    assert_eq!(delivery.state, AlertDeliveryState::Pending);
+    assert_eq!(delivery.notification_kind, AlertNotificationKind::Test);
+    assert_eq!(delivery.alert_channel_id, channel_id);
+    assert!(!String::from_utf8_lossy(&queued.body).contains("send-test-secret"));
+    assert!(!String::from_utf8_lossy(&queued.body).contains("127.0.0.1"));
+
+    let listed = api.handle("GET", "/api/v1/alert-deliveries", None);
+    assert_eq!(listed.status, 200);
+    let deliveries: Vec<AlertDelivery> = serde_json::from_slice(&listed.body).unwrap();
+    assert_eq!(deliveries, vec![delivery]);
+    let events = StationStore::open(&database)
+        .unwrap()
+        .list_alert_events()
+        .unwrap();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].state, AlertEventState::Resolved);
+    assert_eq!(events[0].severity, AlertSeverity::Info);
     let _ = std::fs::remove_file(database);
 }
 

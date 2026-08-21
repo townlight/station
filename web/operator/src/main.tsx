@@ -129,6 +129,37 @@ interface AlertEvent {
   acknowledged_by: string | null;
 }
 
+type AlertChannelKind = "email" | "sms" | "webhook";
+
+interface AlertChannel {
+  channel_id: string;
+  kind: AlertChannelKind;
+  label: string;
+  enabled: boolean;
+  target_redacted: string;
+  credential_configured: boolean;
+  quiet_hours_start_utc: string | null;
+  quiet_hours_end_utc: string | null;
+  created_at_unix_ms: number;
+  updated_at_unix_ms: number;
+}
+
+interface AlertDelivery {
+  delivery_id: string;
+  event_id: string;
+  alert_channel_id: string;
+  notification_kind: "firing" | "resolved" | "test";
+  state: "pending" | "leased" | "sent" | "dead_letter";
+  attempts: number;
+  next_attempt_at_unix_ms: number;
+  lease_expires_at_unix_ms: number | null;
+  last_error: string;
+  signature: string | null;
+  created_at_unix_ms: number;
+  updated_at_unix_ms: number;
+  sent_at_unix_ms: number | null;
+}
+
 function initialView(): View {
   const requested = new URLSearchParams(window.location.search).get("view");
   return ["overview", "media", "channels", "schedule", "health", "commissioning"].includes(requested ?? "")
@@ -177,9 +208,9 @@ function formatTime(milliseconds: number): string {
 }
 
 function StatusPill({ status }: { status: string }) {
-  const tone = ["ready", "completed", "acknowledged", "ok", "enabled", "healthy_fallback", "on_air"].includes(status)
+  const tone = ["ready", "completed", "acknowledged", "ok", "enabled", "healthy_fallback", "on_air", "sent"].includes(status)
     ? "good"
-    : ["failed", "error", "missing_file", "rejected", "stopped", "critical"].includes(status)
+    : ["failed", "error", "missing_file", "rejected", "stopped", "critical", "dead_letter"].includes(status)
       ? "bad"
       : "active";
   return <span className={`pill pill-${tone}`}>{status.replaceAll("_", " ")}</span>;
@@ -327,9 +358,20 @@ function Schedule({ dashboard, channels }: { dashboard: Dashboard | null; channe
   return <><header className="page-header"><div><p className="eyebrow">Commit to air</p><h1>Schedule a program</h1><p>Every approval reruns readiness and conflict checks under the station write lock.</p></div></header>{(!channels.length || !readyAssets.length) ? <section className="panel"><Empty title="Schedule prerequisites are missing" detail={!channels.length ? "Configure a channel before scheduling." : "Import and verify at least one air-ready asset."} action={!channels.length ? "Channel required" : "Ready media required"} onAction={() => undefined} /></section> : <section className="split-grid schedule-layout"><article className="panel sticky-form"><p className="eyebrow">Program details</p><h2>Create draft</h2><form onSubmit={prepare}><label>Channel<select required value={channelId} onChange={(event) => setChannelId(event.target.value)}>{channels.map((channel) => <option key={channel.channel_id} value={channel.channel_id}>{channel.display_name}</option>)}</select></label><label>Air-ready asset<select required value={assetId} onChange={(event) => setAssetId(event.target.value)}>{readyAssets.map((asset) => <option key={asset.asset_id} value={asset.asset_id}>{asset.media_path.split(/[\\/]/).pop()} · {formatDuration(asset.duration_ms)}</option>)}</select></label><label>Program title<input required value={title} onChange={(event) => setTitle(event.target.value)} placeholder="City Council Meeting" /></label><label>Starts at<input required type="datetime-local" value={start} onChange={(event) => setStart(event.target.value)} /></label><label>Air duration (seconds)<input required type="number" min="1" value={duration} onChange={(event) => setDuration(event.target.value)} /></label>{error && <div className="error-box">{error}</div>}<button className="primary wide" disabled={busy}>{busy ? "Checking…" : "Prepare commit"}</button></form></article><article className="panel"><p className="eyebrow">Approval gate</p><h2>Commit preview</h2>{!plan || !item ? <Empty title="No draft prepared" detail="Enter the program details to run conflict, gap, duration, and media-readiness checks." action="Complete the form" onAction={() => document.querySelector<HTMLInputElement>(".schedule-layout input")?.focus()} /> : <div className="commit-preview"><div className={`gate-banner ${plan.dry_run_passed ? "pass" : "fail"}`}><span>{plan.dry_run_passed ? "✓" : "!"}</span><div><strong>{plan.dry_run_passed ? "Safe to commit" : "Commit blocked"}</strong><p>{plan.dry_run_passed ? "No conflicts or missing media were found." : "Resolve every blocker, then prepare again."}</p></div></div><dl><div><dt>Program</dt><dd>{item.title}</dd></div><div><dt>Starts</dt><dd>{formatTime(item.starts_at_unix_ms)}</dd></div><div><dt>Duration</dt><dd>{formatDuration(item.duration_ms)}</dd></div><div><dt>Conflicts</dt><dd>{plan.conflicts.length}</dd></div><div><dt>Missing media</dt><dd>{plan.missing_media_detail ? 1 : 0}</dd></div></dl>{plan.missing_media_detail && <div className="error-box">{plan.missing_media_detail}</div>}<button className="primary wide" disabled={!plan.dry_run_passed || busy || Boolean(report)} onClick={() => void approve()}>{report ? "Approval recorded" : "Approve & commit to air"}</button>{report && <div className="dispatch"><span className="live-dot" /><div><strong>Dispatch {report.dispatch_status.replaceAll("_", " ")}</strong><p>The channel worker advances this record only after durable acknowledgements.</p></div><StatusPill status={report.dispatch_status} /></div>}</div>}</article></section>}</>;
 }
 
-function Health({ runtime, alerts, onRefresh }: { runtime: RuntimeSafeToAirStatus | null; alerts: AlertEvent[]; onRefresh: () => Promise<void> }) {
+function Health({ runtime, alerts, alertChannels, deliveries, onRefresh }: { runtime: RuntimeSafeToAirStatus | null; alerts: AlertEvent[]; alertChannels: AlertChannel[]; deliveries: AlertDelivery[]; onRefresh: () => Promise<void> }) {
   const [busyId, setBusyId] = useState<string | null>(null);
+  const [kind, setKind] = useState<AlertChannelKind>("webhook");
+  const [label, setLabel] = useState("");
+  const [target, setTarget] = useState("");
+  const [endpoint, setEndpoint] = useState("");
+  const [sender, setSender] = useState("");
+  const [identity, setIdentity] = useState("");
+  const [credential, setCredential] = useState("");
+  const [quietStart, setQuietStart] = useState("");
+  const [quietEnd, setQuietEnd] = useState("");
+  const [formError, setFormError] = useState<string | null>(null);
   const firing = alerts.filter((alert) => alert.state === "firing");
+  const recentDeliveries = [...deliveries].sort((a, b) => b.created_at_unix_ms - a.created_at_unix_ms).slice(0, 12);
   async function acknowledge(eventId: string) {
     setBusyId(eventId);
     try {
@@ -339,10 +381,45 @@ function Health({ runtime, alerts, onRefresh }: { runtime: RuntimeSafeToAirStatu
       setBusyId(null);
     }
   }
+  async function saveDestination(event: FormEvent) {
+    event.preventDefault();
+    setBusyId("new-destination");
+    setFormError(null);
+    try {
+      const body = {
+        channel_id: crypto.randomUUID(), kind, label: label.trim(), enabled: true, target: target.trim(), credential,
+        endpoint: kind === "webhook" ? null : endpoint.trim(),
+        sender: kind === "webhook" ? null : sender.trim(),
+        identity: kind === "webhook" ? null : identity.trim(),
+        quiet_hours_start_utc: quietStart || null,
+        quiet_hours_end_utc: quietEnd || null,
+      };
+      await request<AlertChannel>("/api/v1/alert-channels", { method: "PUT", body: JSON.stringify(body) });
+      setLabel(""); setTarget(""); setEndpoint(""); setSender(""); setIdentity(""); setCredential(""); setQuietStart(""); setQuietEnd("");
+      await onRefresh();
+    } catch (problem) {
+      setFormError(problem instanceof Error ? problem.message : "The alert destination could not be saved.");
+    } finally {
+      setBusyId(null);
+    }
+  }
+  async function sendTest(channelId: string) {
+    setBusyId(channelId);
+    try {
+      await request<AlertDelivery>(`/api/v1/alert-channels/${channelId}/test`, { method: "POST" });
+      await onRefresh();
+    } catch (problem) {
+      setFormError(problem instanceof Error ? problem.message : "The test notification could not be queued.");
+    } finally {
+      setBusyId(null);
+    }
+  }
   return <>
     <header className="page-header"><div><p className="eyebrow">Unattended survival</p><h1>System health & alerts</h1><p>Runtime truth comes from durable worker heartbeats and incident records.</p></div></header>
     {runtime ? <section className={`health-hero health-${runtime.color}`}><div className="health-orb">{runtime.color === "green" ? "✓" : "!"}</div><div><p className="eyebrow">Runtime safe-to-air</p><h2>{runtime.label}</h2><p>{runtime.operator_message}</p></div><div className="health-counts"><strong>{runtime.active_critical_alerts}</strong><small>critical</small><strong>{runtime.active_warning_alerts}</strong><small>warning</small></div></section> : <section className="panel"><p>Runtime status is loading.</p></section>}
     <section className="split-grid health-layout"><article className="panel"><div className="panel-head"><div><p className="eyebrow">Enabled outputs</p><h2>Channel runtime</h2></div><span className="count">{runtime?.channels.length ?? 0}</span></div><div className="runtime-list">{runtime?.channels.map((channel) => <article className={`runtime-card runtime-${channel.color}`} key={channel.channel_id}><div><span className="runtime-dot" /><strong>{channel.display_name}</strong></div><StatusPill status={channel.state} /><p>{channel.operator_message}</p><small>{formatDuration(channel.seconds_in_state * 1000)} in state · heartbeat {channel.heartbeat_age_seconds}s ago</small></article>)}</div>{runtime?.channels.length === 0 && <div className="clear-state"><div className="empty-orbit">→</div><strong>No enabled outputs</strong><p>Enable a channel to begin runtime monitoring.</p></div>}</article><article className="panel"><div className="panel-head"><div><p className="eyebrow">Notify on first failure</p><h2>Active alerts</h2></div><span className="count">{firing.length}</span></div>{firing.length ? <div className="alert-list">{firing.map((alert) => <article className={`alert-card alert-${alert.severity}`} key={alert.event_id}><div className="alert-top"><StatusPill status={alert.severity} /><small>{alert.source_section} · {formatTime(alert.first_observed_at_unix_ms)}</small></div><strong>{alert.summary}</strong><p>{alert.detail || alert.condition.replaceAll("-", " ")}</p><small>{alert.occurrence_count > 1 ? `Observed ${alert.occurrence_count} times; repeats deduplicated.` : "First failure recorded."}</small>{alert.acknowledged_at_unix_ms ? <span className="acknowledged">✓ Acknowledged by {alert.acknowledged_by}</span> : <button className="secondary wide" disabled={busyId === alert.event_id} onClick={() => void acknowledge(alert.event_id)}>{busyId === alert.event_id ? "Recording…" : "Acknowledge"}</button>}</article>)}</div> : <div className="clear-state"><div className="empty-orbit">✓</div><strong>No active alerts</strong><p>Runtime failures will appear here once and remain until the condition recovers.</p></div>}</article></section>
+    <section className="split-grid alerting-layout"><article className="panel"><div className="panel-head"><div><p className="eyebrow">Off-site notification</p><h2>Destinations</h2></div><span className="count">{alertChannels.length}</span></div>{alertChannels.length ? <div className="destination-list">{alertChannels.map((channel) => <article className="destination-card" key={channel.channel_id}><div><strong>{channel.label}</strong><small>{channel.kind} · {channel.target_redacted}</small>{channel.quiet_hours_start_utc && <small>Quiet {channel.quiet_hours_start_utc}–{channel.quiet_hours_end_utc} UTC; critical alerts bypass</small>}</div><StatusPill status={channel.enabled ? "enabled" : "disabled"} /><button className="secondary" disabled={busyId === channel.channel_id} onClick={() => void sendTest(channel.channel_id)}>{busyId === channel.channel_id ? "Queuing…" : "Send test"}</button></article>)}</div> : <div className="clear-state"><div className="empty-orbit">→</div><strong>No notification destination</strong><p>Add email, SMS, or a signed webhook for off-site failures and recoveries.</p></div>}</article><article className="panel"><p className="eyebrow">Encrypted at rest</p><h2>Add a destination</h2><form className="alert-form" onSubmit={saveDestination}><div className="form-pair"><label>Kind<select value={kind} onChange={(event) => setKind(event.target.value as AlertChannelKind)}><option value="webhook">Signed webhook</option><option value="email">Email</option><option value="sms">SMS</option></select></label><label>Label<input required minLength={2} value={label} onChange={(event) => setLabel(event.target.value)} placeholder="On-call operator" /></label></div><label>{kind === "email" ? "Recipient email" : kind === "sms" ? "Recipient phone" : "Webhook URL"}<input required value={target} onChange={(event) => setTarget(event.target.value)} placeholder={kind === "email" ? "operator@example.gov" : kind === "sms" ? "+13035550123" : "https://alerts.example.gov/station"} /></label>{kind !== "webhook" && <><label>{kind === "email" ? "SMTP endpoint" : "Provider endpoint"}<input required value={endpoint} onChange={(event) => setEndpoint(event.target.value)} placeholder={kind === "email" ? "smtps://smtp.example.gov:465" : "https://api.twilio.com/2010-04-01/Accounts/.../Messages.json"} /></label><div className="form-pair"><label>{kind === "email" ? "From email" : "From phone"}<input required value={sender} onChange={(event) => setSender(event.target.value)} /></label><label>{kind === "email" ? "SMTP username" : "Account SID"}<input required value={identity} onChange={(event) => setIdentity(event.target.value)} /></label></div></>}<label>{kind === "webhook" ? "Signing secret" : kind === "email" ? "SMTP password" : "Auth token"}<input required minLength={8} type="password" autoComplete="new-password" value={credential} onChange={(event) => setCredential(event.target.value)} /><small>Stored with Windows machine encryption and never returned by the API.</small></label><div className="form-pair"><label>Quiet start (UTC)<input type="time" value={quietStart} onChange={(event) => setQuietStart(event.target.value)} /></label><label>Quiet end (UTC)<input type="time" value={quietEnd} onChange={(event) => setQuietEnd(event.target.value)} /></label></div>{formError && <div className="error-box">{formError}</div>}<button className="primary wide" disabled={busyId === "new-destination"}>{busyId === "new-destination" ? "Saving…" : "Save destination"}</button></form></article></section>
+    <section className="panel"><div className="panel-head"><div><p className="eyebrow">Durable delivery ledger</p><h2>Recent notifications</h2></div><span className="count">{deliveries.length}</span></div>{recentDeliveries.length ? <div className="delivery-list">{recentDeliveries.map((delivery) => { const channel = alertChannels.find((item) => item.channel_id === delivery.alert_channel_id); return <article className="delivery-row" key={delivery.delivery_id}><div><strong>{delivery.notification_kind === "test" ? "Operator test" : `${delivery.notification_kind} alert`} · {channel?.label ?? "Removed destination"}</strong><small>{formatTime(delivery.created_at_unix_ms)} · {delivery.attempts} attempt{delivery.attempts === 1 ? "" : "s"}{delivery.last_error ? ` · ${delivery.last_error}` : ""}</small></div><StatusPill status={delivery.state} /></article>; })}</div> : <div className="clear-state compact"><strong>No delivery attempts</strong><p>Tests and incident notifications will remain visible here across restarts.</p></div>}</section>
   </>;
 }
 
@@ -364,12 +441,14 @@ function App() {
   const [channels, setChannels] = useState<Channel[]>([]);
   const [runtime, setRuntime] = useState<RuntimeSafeToAirStatus | null>(null);
   const [alerts, setAlerts] = useState<AlertEvent[]>([]);
+  const [alertChannels, setAlertChannels] = useState<AlertChannel[]>([]);
+  const [deliveries, setDeliveries] = useState<AlertDelivery[]>([]);
   const [view, setView] = useState<View>(initialView);
   const [error, setError] = useState<string | null>(null);
   const refresh = useCallback(async () => {
     try {
-      const [nextDashboard, nextChannels, nextRuntime, nextAlerts] = await Promise.all([request<Dashboard>("/api/v1/assets/readiness-dashboard"), request<Channel[]>("/api/v1/channels"), request<RuntimeSafeToAirStatus>("/api/v1/runtime-safe-to-air"), request<AlertEvent[]>("/api/v1/alerts")]);
-      setDashboard(nextDashboard); setChannels(nextChannels); setRuntime(nextRuntime); setAlerts(nextAlerts); setError(null);
+      const [nextDashboard, nextChannels, nextRuntime, nextAlerts, nextAlertChannels, nextDeliveries] = await Promise.all([request<Dashboard>("/api/v1/assets/readiness-dashboard"), request<Channel[]>("/api/v1/channels"), request<RuntimeSafeToAirStatus>("/api/v1/runtime-safe-to-air"), request<AlertEvent[]>("/api/v1/alerts"), request<AlertChannel[]>("/api/v1/alert-channels"), request<AlertDelivery[]>("/api/v1/alert-deliveries")]);
+      setDashboard(nextDashboard); setChannels(nextChannels); setRuntime(nextRuntime); setAlerts(nextAlerts); setAlertChannels(nextAlertChannels); setDeliveries(nextDeliveries); setError(null);
     } catch (problem) { setError(problem instanceof Error ? problem.message : "Station state could not be refreshed."); }
   }, []);
   useEffect(() => { void request<StationDocument>("/api/v1/station").then((value) => { setStation(value); void refresh(); }).catch((problem) => { if (problem instanceof ApiError && problem.status === 404) setStation(null); else { setStation(null); setError(problem instanceof Error ? problem.message : "Station profile could not be read."); } }); }, [refresh]);
@@ -377,7 +456,7 @@ function App() {
   const nav = useMemo(() => ([{ id: "overview" as View, label: "Overview" }, { id: "media" as View, label: "Media" }, { id: "channels" as View, label: "Channels" }, { id: "schedule" as View, label: "Schedule" }, { id: "health" as View, label: "Health" }, { id: "commissioning" as View, label: "Commission" }]), []);
   if (station === undefined) return <div className="boot"><div className="mark">TL</div><div className="boot-line"><i /></div><p>Connecting to TownLight Station…</p></div>;
   if (!station) return <SetupWizard onComplete={(value) => { setStation(value); void refresh(); }} />;
-  return <div className="app-shell"><aside className="sidebar"><div className="brand-lockup"><div className="mark small">TL</div><div><strong>TownLight</strong><span>Station</span></div></div><nav>{nav.map((item) => <button key={item.id} className={view === item.id ? "selected" : ""} onClick={() => setView(item.id)}><Icon name={item.id} /><span>{item.label}</span>{item.id === "media" && Boolean(dashboard?.failed_ingest_count) && <b>{dashboard?.failed_ingest_count}</b>}{item.id === "health" && Boolean(runtime?.active_critical_alerts || runtime?.active_warning_alerts) && <b>{(runtime?.active_critical_alerts ?? 0) + (runtime?.active_warning_alerts ?? 0)}</b>}</button>)}</nav><div className="station-card"><span className={`live-dot runtime-${runtime?.color ?? "yellow"}`} /><div><strong>{station.display_name}</strong><small>{runtime?.label ?? station.timezone}</small></div></div></aside><main className="workspace">{error && <div className="global-error" role="alert">{error}<button onClick={() => void refresh()}>Retry</button></div>}{view === "overview" && <Overview station={station} dashboard={dashboard} channels={channels} runtime={runtime} onNavigate={setView} />}{view === "media" && <Media dashboard={dashboard} onRefresh={refresh} />}{view === "channels" && <Channels channels={channels} onRefresh={refresh} />}{view === "schedule" && <Schedule dashboard={dashboard} channels={channels} />}{view === "health" && <Health runtime={runtime} alerts={alerts} onRefresh={refresh} />}{view === "commissioning" && <Commissioning station={station} dashboard={dashboard} channels={channels} />}</main><nav className="mobile-nav">{nav.map((item) => <button key={item.id} aria-label={item.label} className={view === item.id ? "selected" : ""} onClick={() => setView(item.id)}><Icon name={item.id} /><span>{item.label}</span></button>)}</nav></div>;
+  return <div className="app-shell"><aside className="sidebar"><div className="brand-lockup"><div className="mark small">TL</div><div><strong>TownLight</strong><span>Station</span></div></div><nav>{nav.map((item) => <button key={item.id} className={view === item.id ? "selected" : ""} onClick={() => setView(item.id)}><Icon name={item.id} /><span>{item.label}</span>{item.id === "media" && Boolean(dashboard?.failed_ingest_count) && <b>{dashboard?.failed_ingest_count}</b>}{item.id === "health" && Boolean(runtime?.active_critical_alerts || runtime?.active_warning_alerts) && <b>{(runtime?.active_critical_alerts ?? 0) + (runtime?.active_warning_alerts ?? 0)}</b>}</button>)}</nav><div className="station-card"><span className={`live-dot runtime-${runtime?.color ?? "yellow"}`} /><div><strong>{station.display_name}</strong><small>{runtime?.label ?? station.timezone}</small></div></div></aside><main className="workspace">{error && <div className="global-error" role="alert">{error}<button onClick={() => void refresh()}>Retry</button></div>}{view === "overview" && <Overview station={station} dashboard={dashboard} channels={channels} runtime={runtime} onNavigate={setView} />}{view === "media" && <Media dashboard={dashboard} onRefresh={refresh} />}{view === "channels" && <Channels channels={channels} onRefresh={refresh} />}{view === "schedule" && <Schedule dashboard={dashboard} channels={channels} />}{view === "health" && <Health runtime={runtime} alerts={alerts} alertChannels={alertChannels} deliveries={deliveries} onRefresh={refresh} />}{view === "commissioning" && <Commissioning station={station} dashboard={dashboard} channels={channels} />}</main><nav className="mobile-nav">{nav.map((item) => <button key={item.id} aria-label={item.label} className={view === item.id ? "selected" : ""} onClick={() => setView(item.id)}><Icon name={item.id} /><span>{item.label}</span></button>)}</nav></div>;
 }
 
 createRoot(document.getElementById("root")!).render(<React.StrictMode><App /></React.StrictMode>);

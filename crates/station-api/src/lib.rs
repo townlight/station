@@ -139,6 +139,12 @@ impl Api {
             ("GET", "/api/v1/runtime-safe-to-air") => self.runtime_safe_to_air(),
             ("PUT", "/api/v1/alert-channels") => self.put_alert_channel(body),
             ("GET", "/api/v1/alert-channels") => self.list_alert_channels(),
+            ("GET", "/api/v1/alert-deliveries") => self.list_alert_deliveries(),
+            ("POST", path)
+                if path.starts_with("/api/v1/alert-channels/") && path.ends_with("/test") =>
+            {
+                self.test_alert_channel(path)
+            }
             ("GET", "/api/v1/alerts") => self.list_alerts(),
             ("POST", path)
                 if path.starts_with("/api/v1/alerts/") && path.ends_with("/acknowledge") =>
@@ -662,6 +668,69 @@ impl Api {
             Ok(channels) => json_response(
                 200,
                 serde_json::to_vec(&channels).expect("serializing alert channels cannot fail"),
+            ),
+            Err(message) => error_response(500, "storage_error", &message),
+        }
+    }
+
+    fn list_alert_deliveries(&self) -> ApiResponse {
+        match self.storage.list_alert_deliveries() {
+            Ok(deliveries) => json_response(
+                200,
+                serde_json::to_vec(&deliveries).expect("serializing alert deliveries cannot fail"),
+            ),
+            Err(message) => error_response(500, "storage_error", &message),
+        }
+    }
+
+    fn test_alert_channel(&self, path: &str) -> ApiResponse {
+        let Some(channel_id) = path
+            .strip_prefix("/api/v1/alert-channels/")
+            .and_then(|value| value.strip_suffix("/test"))
+        else {
+            unreachable!("the alert-channel test route was checked")
+        };
+        if channel_id.is_empty() || channel_id.contains('/') {
+            return error_response(
+                400,
+                "invalid_path",
+                "The alert destination identity is invalid.",
+            );
+        }
+        match self.storage.read_alert_channel(channel_id) {
+            Ok(Some(_)) => {}
+            Ok(None) => {
+                return error_response(
+                    404,
+                    "alert_channel_not_found",
+                    "The alert destination does not exist.",
+                );
+            }
+            Err(message) => return error_response(500, "storage_error", &message),
+        }
+        let now = match system_time_millis() {
+            Ok(value) => value,
+            Err(message) => return error_response(500, "clock_error", &message),
+        };
+        let nonce = match SystemTime::now().duration_since(UNIX_EPOCH) {
+            Ok(value) => value.as_nanos(),
+            Err(_) => {
+                return error_response(
+                    500,
+                    "clock_error",
+                    "The system clock is before the Unix epoch.",
+                );
+            }
+        };
+        let event_id = format!("alert-channel-test-{channel_id}-{nonce:x}");
+        let delivery_id = format!("alert-delivery-test-{channel_id}-{nonce:x}");
+        match self
+            .storage
+            .enqueue_alert_channel_test(&event_id, &delivery_id, channel_id, now)
+        {
+            Ok(delivery) => json_response(
+                202,
+                serde_json::to_vec(&delivery).expect("serializing an alert delivery cannot fail"),
             ),
             Err(message) => error_response(500, "storage_error", &message),
         }

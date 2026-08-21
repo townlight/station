@@ -1313,6 +1313,74 @@ impl StationStore {
             sent_at_unix_ms: None,
         };
         delivery.validate().map_err(str::to_string)?;
+        self.insert_alert_delivery(&delivery, &payload)?;
+        self.read_alert_delivery(delivery_id)?
+            .ok_or_else(|| "queued alert delivery disappeared".into())
+    }
+
+    pub fn enqueue_alert_channel_test(
+        &self,
+        event_id: &str,
+        delivery_id: &str,
+        alert_channel_id: &str,
+        created_at_unix_ms: i64,
+    ) -> Result<AlertDelivery, String> {
+        let channel = self
+            .read_alert_channel(alert_channel_id)?
+            .ok_or_else(|| "alert test channel does not exist".to_string())?;
+        let event = AlertEvent {
+            event_id: event_id.into(),
+            condition: AlertConditionKind::ServiceDown,
+            severity: AlertSeverity::Info,
+            state: AlertEventState::Resolved,
+            resource_ref: alert_channel_id.into(),
+            summary: "Operator requested an alert-channel test.".into(),
+            detail: format!(
+                "Test delivery for the configured {} destination.",
+                alert_channel_kind_name(channel.kind)
+            ),
+            source_section: "S8".into(),
+            first_observed_at_unix_ms: created_at_unix_ms,
+            last_observed_at_unix_ms: created_at_unix_ms,
+            resolved_at_unix_ms: Some(created_at_unix_ms),
+            occurrence_count: 1,
+            acknowledged_at_unix_ms: None,
+            acknowledged_by: None,
+        };
+        event.validate().map_err(str::to_string)?;
+        let payload = AlertDeliveryPayload::from_event(AlertNotificationKind::Test, &event)
+            .map_err(str::to_string)?;
+        let delivery = AlertDelivery {
+            delivery_id: delivery_id.into(),
+            event_id: event_id.into(),
+            alert_channel_id: alert_channel_id.into(),
+            notification_kind: AlertNotificationKind::Test,
+            state: AlertDeliveryState::Pending,
+            attempts: 0,
+            next_attempt_at_unix_ms: created_at_unix_ms,
+            lease_expires_at_unix_ms: None,
+            last_error: String::new(),
+            signature: None,
+            created_at_unix_ms,
+            updated_at_unix_ms: created_at_unix_ms,
+            sent_at_unix_ms: None,
+        };
+        delivery.validate().map_err(str::to_string)?;
+        self.execute("BEGIN IMMEDIATE")?;
+        let outcome = (|| {
+            self.insert_alert(&event)?;
+            self.insert_alert_delivery(&delivery, &payload)
+        })();
+        self.finish_transaction(outcome)?;
+        self.read_alert_delivery(delivery_id)?
+            .ok_or_else(|| "queued alert-channel test disappeared".into())
+    }
+
+    fn insert_alert_delivery(
+        &self,
+        delivery: &AlertDelivery,
+        payload: &AlertDeliveryPayload,
+    ) -> Result<(), String> {
         let payload_json = serde_json::to_string(&payload)
             .map_err(|error| format!("could not encode alert delivery payload: {error}"))?;
         let statement = self.prepare(
@@ -1322,11 +1390,11 @@ impl StationStore {
              VALUES(?1, ?2, ?3, ?4, 'pending', 0, ?5, -1, '', '', ?6, ?7, ?7, -1)",
         )?;
         let values = [
-            c_string(delivery_id, "alert delivery identity")?,
-            c_string(&event.event_id, "alert event identity")?,
-            c_string(alert_channel_id, "alert channel identity")?,
+            c_string(&delivery.delivery_id, "alert delivery identity")?,
+            c_string(&delivery.event_id, "alert event identity")?,
+            c_string(&delivery.alert_channel_id, "alert channel identity")?,
             c_string(
-                alert_notification_kind_name(notification_kind),
+                alert_notification_kind_name(delivery.notification_kind),
                 "alert notification kind",
             )?,
             c_string(&payload_json, "alert delivery payload")?,
@@ -1335,12 +1403,15 @@ impl StationStore {
         bind_text(self.database, statement.raw, 2, &values[1])?;
         bind_text(self.database, statement.raw, 3, &values[2])?;
         bind_text(self.database, statement.raw, 4, &values[3])?;
-        bind_i64(self.database, statement.raw, 5, not_before_unix_ms)?;
+        bind_i64(
+            self.database,
+            statement.raw,
+            5,
+            delivery.next_attempt_at_unix_ms,
+        )?;
         bind_text(self.database, statement.raw, 6, &values[4])?;
-        bind_i64(self.database, statement.raw, 7, created_at_unix_ms)?;
-        expect_done(self.database, statement.raw)?;
-        self.read_alert_delivery(delivery_id)?
-            .ok_or_else(|| "queued alert delivery disappeared".into())
+        bind_i64(self.database, statement.raw, 7, delivery.created_at_unix_ms)?;
+        expect_done(self.database, statement.raw)
     }
 
     pub fn read_alert_delivery(&self, delivery_id: &str) -> Result<Option<AlertDelivery>, String> {

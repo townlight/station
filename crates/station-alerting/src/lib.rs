@@ -492,7 +492,9 @@ impl<'a, T: AlertTransport + ?Sized> AlertDeliveryWorker<'a, T> {
         let channel = store
             .read_alert_channel(&delivery.alert_channel_id)?
             .ok_or_else(|| "alert delivery channel disappeared".to_string())?;
-        if !channel.enabled {
+        if !channel.enabled
+            && delivery.notification_kind != station_domain::AlertNotificationKind::Test
+        {
             return Err("alert delivery channel is disabled".into());
         }
         let secret = store

@@ -86,6 +86,38 @@ fn arrange_delivery(database: &Path) {
         .unwrap();
 }
 
+fn arrange_disabled_test_delivery(database: &Path) {
+    let store = StationStore::open(database).unwrap();
+    let target = "https://alerts.example.org/station";
+    store
+        .put_alert_channel(
+            &AlertChannel {
+                channel_id: ALERT_CHANNEL_ID.into(),
+                kind: AlertChannelKind::Webhook,
+                label: "Disabled pager".into(),
+                enabled: false,
+                target_redacted: redact_alert_channel_target(AlertChannelKind::Webhook, target)
+                    .unwrap(),
+                credential_configured: true,
+                quiet_hours_start_utc: None,
+                quiet_hours_end_utc: None,
+                created_at_unix_ms: 100,
+                updated_at_unix_ms: 100,
+            },
+            &AlertChannelSecret {
+                target: target.into(),
+                endpoint: None,
+                sender: None,
+                identity: None,
+                credential: "signing-secret".into(),
+            },
+        )
+        .unwrap();
+    store
+        .enqueue_alert_channel_test("test-event", "test-job", ALERT_CHANNEL_ID, 1_100)
+        .unwrap();
+}
+
 struct RecordingTransport {
     envelopes: Mutex<Vec<DeliveryEnvelope>>,
     outcome: Result<DeliveryReceipt, String>,
@@ -152,5 +184,33 @@ fn records_transport_failure_for_a_later_retry_without_losing_the_job() {
     assert_eq!(delivery.attempts, 1);
     assert_eq!(delivery.next_attempt_at_unix_ms, 121_100);
     assert_eq!(delivery.last_error, "provider returned 503");
+    remove_database(&database);
+}
+
+#[test]
+fn explicitly_requested_test_reaches_a_disabled_destination() {
+    let database = database_path("disabled-test");
+    arrange_disabled_test_delivery(&database);
+    let transport = RecordingTransport {
+        envelopes: Mutex::new(Vec::new()),
+        outcome: Ok(DeliveryReceipt { signature: None }),
+    };
+    let worker = AlertDeliveryWorker::new(&database, &transport);
+
+    assert!(worker.run_once(1_100).unwrap());
+
+    let recorded = transport.envelopes.lock().unwrap();
+    assert_eq!(recorded.len(), 1);
+    assert_eq!(
+        recorded[0].payload.notification_kind,
+        AlertNotificationKind::Test
+    );
+    drop(recorded);
+    let delivery = StationStore::open(&database)
+        .unwrap()
+        .read_alert_delivery("test-job")
+        .unwrap()
+        .unwrap();
+    assert_eq!(delivery.state, AlertDeliveryState::Sent);
     remove_database(&database);
 }

@@ -18,11 +18,12 @@ Critical alerts ignore destination quiet hours. Warning and informational jobs c
 
 The service-owned worker decrypts target and credentials only after claiming a due job. Email uses authenticated SMTP: remote relays require implicit TLS, while plaintext SMTP is permitted only to loopback proof relays. SMS uses a Twilio-shaped form POST with Basic authentication; remote endpoints require HTTPS. Webhooks send a versioned JSON event snapshot with HMAC-SHA256 over the exact body. HTTP redirects are disabled so signed payloads or authorization cannot move to another origin. HTTPS certificate validation uses the Windows platform verifier.
 
+The operator can explicitly queue a `test` notification for any configured destination, including one disabled for incident routing. The test request atomically records a resolved informational audit event and a normal durable delivery job; it cannot create a false firing incident or bypass the delivery ledger. The public API and console expose redacted destination metadata and delivery state/attempts/errors, never the target or credential.
+
 ## Consequences
 
 - Database restart and process death do not silently discard queued work.
 - Delivery state proves provider acceptance attempts, not human receipt or response.
 - Destination changes affect a pending delivery's current transport target, while its incident payload remains the immutable event-time snapshot.
 - Provider errors exposed to persistence are bounded and sanitized; target and credential values never enter delivery rows or error strings.
-- Alert-rule editing, re-alert-after policy, operator send-test, and installed external-provider proof remain later boundaries and are not claimed by this ADR.
-
+- Alert-rule editing, re-alert-after policy, human receipt, and installed external-provider proof remain later boundaries and are not claimed by this ADR.
