@@ -3,7 +3,7 @@ use std::path::Path;
 
 use gst::prelude::*;
 use gstreamer as gst;
-use station_media_assets::{ingest_media, validate_media, verify_media_identity};
+use station_media_assets::{ingest_media, measure_loudness, validate_media, verify_media_identity};
 
 #[test]
 fn validates_and_atomically_ingests_real_audio_video_media() {
@@ -19,6 +19,9 @@ fn validates_and_atomically_ingests_real_audio_video_media() {
     assert_eq!(metadata.audio_streams, 1);
     assert!(!metadata.video_codec.is_empty());
     assert!(!metadata.audio_codec.is_empty());
+    let loudness = measure_loudness(&source).expect("the generated audio must be measurable");
+    assert!(loudness.integrated_lufs.is_finite());
+    assert!((-70.0..=5.0).contains(&loudness.integrated_lufs));
 
     let first = ingest_media(&source, &library).expect("first ingest must succeed");
     let second = ingest_media(&source, &library).expect("duplicate ingest must be idempotent");

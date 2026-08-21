@@ -47,6 +47,7 @@ foreach ($factory in @(
     'audioconvert',
     'audioresample',
     'audiorate',
+    'ebur128level',
     'videorate',
     'clocksync',
     'voaacenc',

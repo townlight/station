@@ -7,8 +7,10 @@ use std::sync::{
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use sha2::{Digest, Sha256};
-use station_media_assets::{AssetError, ingest_media};
-use station_media_lifecycle::{IngestSourceKind, MediaIngestJob, WatchFolderConfig};
+use station_media_assets::{AssetError, ingest_media, measure_loudness};
+use station_media_lifecycle::{
+    AssetLoudnessAnalysis, IngestSourceKind, LoudnessGateStatus, MediaIngestJob, WatchFolderConfig,
+};
 use station_schedule::{AssetReadiness, MediaAsset};
 use station_storage::StationStore;
 
@@ -84,8 +86,11 @@ impl IngestWorker {
                     duration_ms: (ingested.metadata.duration_ns / 1_000_000).max(1),
                     readiness: AssetReadiness::Ready,
                 };
+                let loudness = analyze_loudness(&asset);
                 StationStore::open(&self.database_path)
-                    .and_then(|store| store.complete_ingest_job(&job.job_id, &asset, completed_at))
+                    .and_then(|store| {
+                        store.complete_ingest_job(&job.job_id, &asset, &loudness, completed_at)
+                    })
                     .map_err(IngestWorkerError::Storage)?;
                 Ok(Some(IngestOutcome::Completed {
                     job_id: job.job_id,
@@ -279,6 +284,56 @@ fn operator_error(error: &AssetError) -> String {
 
 fn transient_watch_error(error: &AssetError) -> bool {
     matches!(error, AssetError::InvalidSource(_) | AssetError::Io(_))
+}
+
+fn analyze_loudness(asset: &MediaAsset) -> AssetLoudnessAnalysis {
+    const TARGET_MILLI: i32 = -24_000;
+    const TOLERANCE_MILLI: i32 = 2_000;
+    match measure_loudness(&asset.media_path) {
+        Ok(measurement) => {
+            let measured = (measurement.integrated_lufs * 1_000.0).round();
+            if !measured.is_finite()
+                || measured < f64::from(i32::MIN)
+                || measured > f64::from(i32::MAX)
+            {
+                return AssetLoudnessAnalysis {
+                    asset_id: asset.asset_id.clone(),
+                    status: LoudnessGateStatus::NotChecked,
+                    measured_lufs_milli: None,
+                    target_lufs_milli: TARGET_MILLI,
+                    detail: Some("Loudness analysis returned an invalid measurement.".into()),
+                };
+            }
+            let measured = measured as i32;
+            let passed = measured.abs_diff(TARGET_MILLI) <= TOLERANCE_MILLI as u32;
+            AssetLoudnessAnalysis {
+                asset_id: asset.asset_id.clone(),
+                status: if passed {
+                    LoudnessGateStatus::Ok
+                } else {
+                    LoudnessGateStatus::Failed
+                },
+                measured_lufs_milli: Some(measured),
+                target_lufs_milli: TARGET_MILLI,
+                detail: (!passed).then(|| {
+                    format!(
+                        "Measured {:.2} LUFS; ingest target is -24.00 LUFS ±2.00 LU. Normalize before air.",
+                        f64::from(measured) / 1_000.0
+                    )
+                }),
+            }
+        }
+        Err(error) => AssetLoudnessAnalysis {
+            asset_id: asset.asset_id.clone(),
+            status: LoudnessGateStatus::NotChecked,
+            measured_lufs_milli: None,
+            target_lufs_milli: TARGET_MILLI,
+            detail: Some(bounded_detail(&format!(
+                "Loudness could not be measured: {}",
+                operator_error(&error)
+            ))),
+        },
+    }
 }
 
 fn retry_delay(attempts: u32) -> i64 {

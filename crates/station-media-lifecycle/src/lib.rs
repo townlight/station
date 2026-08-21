@@ -59,6 +59,23 @@ pub struct WatchFileObservation {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+pub enum LoudnessGateStatus {
+    Ok,
+    Failed,
+    NotChecked,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AssetLoudnessAnalysis {
+    pub asset_id: String,
+    pub status: LoudnessGateStatus,
+    pub measured_lufs_milli: Option<i32>,
+    pub target_lufs_milli: i32,
+    pub detail: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ReadinessState {
     Ready,
     Processing,
@@ -66,16 +83,20 @@ pub enum ReadinessState {
     Rejected,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AssetReadinessView {
     pub asset_id: String,
     pub readiness_state: ReadinessState,
     pub readiness_reason: Option<String>,
     pub media_path: String,
     pub duration_ms: u64,
+    pub loudness_status: LoudnessGateStatus,
+    pub measured_lufs: Option<f64>,
+    pub target_lufs: f64,
+    pub loudness_detail: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ReadinessDashboard {
     pub total_assets: usize,
     pub ready_count: usize,
@@ -161,6 +182,42 @@ impl WatchFolderConfig {
             ));
         }
         Ok(())
+    }
+}
+
+impl AssetLoudnessAnalysis {
+    pub fn validate(&self) -> Result<(), IngestJobError> {
+        if !is_asset_id(&self.asset_id) {
+            return Err(IngestJobError::Invalid(
+                "loudness asset_id must be a lowercase SHA-256 digest",
+            ));
+        }
+        if !(-70_000..=-5_000).contains(&self.target_lufs_milli)
+            || self
+                .measured_lufs_milli
+                .is_some_and(|value| !(-200_000..=20_000).contains(&value))
+            || self
+                .detail
+                .as_ref()
+                .is_some_and(|value| !visible_bounded(value, 4_000))
+        {
+            return Err(IngestJobError::Invalid(
+                "loudness measurement or detail is invalid",
+            ));
+        }
+        match self.status {
+            LoudnessGateStatus::Ok | LoudnessGateStatus::Failed
+                if self.measured_lufs_milli.is_none() =>
+            {
+                Err(IngestJobError::Invalid(
+                    "a completed loudness gate requires a measurement",
+                ))
+            }
+            LoudnessGateStatus::NotChecked if self.measured_lufs_milli.is_some() => Err(
+                IngestJobError::Invalid("an unchecked loudness gate cannot contain a measurement"),
+            ),
+            _ => Ok(()),
+        }
     }
 }
 

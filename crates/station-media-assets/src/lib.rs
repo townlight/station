@@ -1,7 +1,11 @@
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
 
+use gst::prelude::*;
 use gst_pbutils::prelude::*;
 use gstreamer as gst;
 use gstreamer_pbutils as gst_pbutils;
@@ -24,6 +28,11 @@ pub struct IngestedAsset {
     pub stored_path: PathBuf,
     pub size_bytes: u64,
     pub metadata: MediaMetadata,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct LoudnessMeasurement {
+    pub integrated_lufs: f64,
 }
 
 #[derive(Debug)]
@@ -182,6 +191,153 @@ pub fn verify_media_identity(
         )));
     }
     validate_media(path)
+}
+
+pub fn measure_loudness(path: impl AsRef<Path>) -> Result<LoudnessMeasurement, AssetError> {
+    gst::init().map_err(|error| AssetError::Discovery(error.to_string()))?;
+    let canonical = fs::canonicalize(path).map_err(|error| AssetError::Io(error.to_string()))?;
+    let uri = gst::glib::filename_to_uri(&canonical, None)
+        .map_err(|error| AssetError::InvalidSource(error.to_string()))?;
+    let pipeline = gst::Pipeline::new();
+    let decoder = gst::ElementFactory::make("uridecodebin")
+        .property("uri", uri.as_str())
+        .property("expose-all-streams", false)
+        .build()
+        .map_err(|error| AssetError::Discovery(error.to_string()))?;
+    let audio_queue = make_element("queue")?;
+    let audio_convert = make_element("audioconvert")?;
+    let audio_resample = make_element("audioresample")?;
+    let level = gst::ElementFactory::make("ebur128level")
+        .property("interval", 1_000_000_000_u64)
+        .property("post-messages", true)
+        .build()
+        .map_err(|error| AssetError::Discovery(error.to_string()))?;
+    let audio_sink = gst::ElementFactory::make("fakesink")
+        .property("sync", false)
+        .build()
+        .map_err(|error| AssetError::Discovery(error.to_string()))?;
+    let video_queue = make_element("queue")?;
+    let video_sink = gst::ElementFactory::make("fakesink")
+        .property("sync", false)
+        .build()
+        .map_err(|error| AssetError::Discovery(error.to_string()))?;
+    pipeline
+        .add_many([
+            &decoder,
+            &audio_queue,
+            &audio_convert,
+            &audio_resample,
+            &level,
+            &audio_sink,
+            &video_queue,
+            &video_sink,
+        ])
+        .map_err(|error| AssetError::Discovery(error.to_string()))?;
+    gst::Element::link_many([
+        &audio_queue,
+        &audio_convert,
+        &audio_resample,
+        &level,
+        &audio_sink,
+    ])
+    .map_err(|error| AssetError::Discovery(error.to_string()))?;
+    video_queue
+        .link(&video_sink)
+        .map_err(|error| AssetError::Discovery(error.to_string()))?;
+    let audio_pad = audio_queue
+        .static_pad("sink")
+        .ok_or_else(|| AssetError::Discovery("audio queue has no sink pad".into()))?;
+    let video_pad = video_queue
+        .static_pad("sink")
+        .ok_or_else(|| AssetError::Discovery("video queue has no sink pad".into()))?;
+    let audio_linked = Arc::new(AtomicBool::new(false));
+    let audio_linked_signal = Arc::clone(&audio_linked);
+    decoder.connect_pad_added(move |_, source_pad| {
+        let caps = source_pad
+            .current_caps()
+            .unwrap_or_else(|| source_pad.query_caps(None));
+        let Some(media_type) = caps.structure(0).map(|value| value.name()) else {
+            return;
+        };
+        if media_type.starts_with("audio/") && !audio_pad.is_linked() {
+            if source_pad.link(&audio_pad).is_ok() {
+                audio_linked_signal.store(true, Ordering::Release);
+            }
+        } else if media_type.starts_with("video/") && !video_pad.is_linked() {
+            let _ = source_pad.link(&video_pad);
+        }
+    });
+    pipeline
+        .set_state(gst::State::Playing)
+        .map_err(|error| AssetError::Discovery(error.to_string()))?;
+    let result = collect_loudness(&pipeline, &level, &audio_linked);
+    let _ = pipeline.set_state(gst::State::Null);
+    result
+}
+
+fn collect_loudness(
+    pipeline: &gst::Pipeline,
+    level: &gst::Element,
+    audio_linked: &AtomicBool,
+) -> Result<LoudnessMeasurement, AssetError> {
+    let bus = pipeline
+        .bus()
+        .ok_or_else(|| AssetError::Discovery("loudness pipeline has no bus".into()))?;
+    let deadline = Instant::now() + Duration::from_secs(120);
+    let mut integrated_lufs = None;
+    while Instant::now() < deadline {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let Some(message) = bus.timed_pop(gst::ClockTime::from_nseconds(
+            remaining.as_nanos().min(u128::from(u64::MAX)) as u64,
+        )) else {
+            break;
+        };
+        match message.view() {
+            gst::MessageView::Element(element) => {
+                let Some(structure) = element.structure() else {
+                    continue;
+                };
+                if structure.name() == "ebur128-level"
+                    && message
+                        .src()
+                        .is_some_and(|source| source == level.upcast_ref::<gst::Object>())
+                    && let Ok(value) = structure.get::<f64>("global-loudness")
+                    && value.is_finite()
+                {
+                    integrated_lufs = Some(value);
+                }
+            }
+            gst::MessageView::Eos(_) => {
+                if !audio_linked.load(Ordering::Acquire) {
+                    return Err(AssetError::UnsupportedMedia(
+                        "media contains no decodable audio stream".into(),
+                    ));
+                }
+                return integrated_lufs
+                    .map(|integrated_lufs| LoudnessMeasurement { integrated_lufs })
+                    .ok_or_else(|| {
+                        AssetError::Discovery("loudness analyzer produced no measurement".into())
+                    });
+            }
+            gst::MessageView::Error(error) => {
+                return Err(AssetError::Discovery(format!(
+                    "loudness pipeline failed: {} ({:?})",
+                    error.error(),
+                    error.debug()
+                )));
+            }
+            _ => {}
+        }
+    }
+    Err(AssetError::Discovery(
+        "loudness measurement exceeded its 120-second processing deadline".into(),
+    ))
+}
+
+fn make_element(factory: &'static str) -> Result<gst::Element, AssetError> {
+    gst::ElementFactory::make(factory)
+        .build()
+        .map_err(|error| AssetError::Discovery(error.to_string()))
 }
 
 fn codec_name(stream: &impl IsA<gst_pbutils::DiscovererStreamInfo>) -> Result<String, AssetError> {

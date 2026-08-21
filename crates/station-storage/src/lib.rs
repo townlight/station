@@ -4,7 +4,8 @@ use std::ptr;
 
 use station_domain::{StationProfile, StationProfileDocument};
 use station_media_lifecycle::{
-    IngestJobStatus, IngestSourceKind, MediaIngestJob, WatchFileObservation, WatchFolderConfig,
+    AssetLoudnessAnalysis, IngestJobStatus, IngestSourceKind, LoudnessGateStatus, MediaIngestJob,
+    WatchFileObservation, WatchFolderConfig,
 };
 use station_schedule::{
     AssetReadiness, ChannelConfiguration, CommitPlan, CommitReport, DispatchJob, DispatchStatus,
@@ -124,6 +125,14 @@ impl StationStore {
                media_path TEXT NOT NULL,\
                duration_ms INTEGER NOT NULL CHECK (duration_ms > 0),\
                readiness TEXT NOT NULL CHECK (readiness IN ('ready','missing','rejected','processing'))\
+             );\
+             CREATE TABLE IF NOT EXISTS asset_loudness_analysis (\
+               asset_id TEXT PRIMARY KEY,\
+               status TEXT NOT NULL CHECK (status IN ('ok','failed','not_checked')),\
+               measured_lufs_milli INTEGER NOT NULL DEFAULT -2147483648,\
+               target_lufs_milli INTEGER NOT NULL,\
+               detail TEXT NOT NULL DEFAULT '',\
+               FOREIGN KEY(asset_id) REFERENCES media_assets(asset_id) ON DELETE CASCADE\
              );\
              CREATE TABLE IF NOT EXISTS media_ingest_jobs (\
                job_id TEXT PRIMARY KEY,\
@@ -387,6 +396,7 @@ impl StationStore {
         &self,
         job_id: &str,
         asset: &MediaAsset,
+        loudness: &AssetLoudnessAnalysis,
         completed_at_unix_ms: i64,
     ) -> Result<(), String> {
         if completed_at_unix_ms < 0 {
@@ -395,6 +405,7 @@ impl StationStore {
         self.execute("BEGIN IMMEDIATE")?;
         let outcome = (|| {
             self.put_media_asset(asset)?;
+            self.put_asset_loudness(loudness)?;
             let statement = self.prepare(
                 "UPDATE media_ingest_jobs SET status='completed', progress_percent=100, completed_at_unix_ms=?1, \
                  error_detail='', asset_id=?2 WHERE job_id=?3 AND status='running'",
@@ -532,6 +543,73 @@ impl StationStore {
             match unsafe { sqlite3_step(statement.raw) } {
                 SQLITE_ROW => assets.push(read_media_asset_row(statement.raw)?),
                 SQLITE_DONE => return Ok(assets),
+                _ => return Err(sqlite_error(self.database)),
+            }
+        }
+    }
+
+    pub fn put_asset_loudness(&self, analysis: &AssetLoudnessAnalysis) -> Result<(), String> {
+        analysis.validate().map_err(|error| format!("{error:?}"))?;
+        let statement = self.prepare(
+            "INSERT INTO asset_loudness_analysis(asset_id, status, measured_lufs_milli, \
+             target_lufs_milli, detail) VALUES(?1, ?2, ?3, ?4, ?5) \
+             ON CONFLICT(asset_id) DO UPDATE SET status=excluded.status, \
+             measured_lufs_milli=excluded.measured_lufs_milli, target_lufs_milli=excluded.target_lufs_milli, \
+             detail=excluded.detail",
+        )?;
+        let asset_id = c_string(&analysis.asset_id, "loudness asset identity")?;
+        let status = c_string(loudness_status_name(analysis.status), "loudness status")?;
+        let detail = c_string(
+            analysis.detail.as_deref().unwrap_or_default(),
+            "loudness detail",
+        )?;
+        bind_text(self.database, statement.raw, 1, &asset_id)?;
+        bind_text(self.database, statement.raw, 2, &status)?;
+        bind_i64(
+            self.database,
+            statement.raw,
+            3,
+            analysis
+                .measured_lufs_milli
+                .map_or(i64::from(i32::MIN), i64::from),
+        )?;
+        bind_i64(
+            self.database,
+            statement.raw,
+            4,
+            i64::from(analysis.target_lufs_milli),
+        )?;
+        bind_text(self.database, statement.raw, 5, &detail)?;
+        expect_done(self.database, statement.raw)
+    }
+
+    pub fn read_asset_loudness(
+        &self,
+        asset_id: &str,
+    ) -> Result<Option<AssetLoudnessAnalysis>, String> {
+        let statement = self.prepare(
+            "SELECT asset_id, status, measured_lufs_milli, target_lufs_milli, detail \
+             FROM asset_loudness_analysis WHERE asset_id=?1",
+        )?;
+        let asset_id = c_string(asset_id, "loudness asset identity")?;
+        bind_text(self.database, statement.raw, 1, &asset_id)?;
+        match unsafe { sqlite3_step(statement.raw) } {
+            SQLITE_ROW => Ok(Some(read_asset_loudness_row(statement.raw)?)),
+            SQLITE_DONE => Ok(None),
+            _ => Err(sqlite_error(self.database)),
+        }
+    }
+
+    pub fn list_asset_loudness(&self) -> Result<Vec<AssetLoudnessAnalysis>, String> {
+        let statement = self.prepare(
+            "SELECT asset_id, status, measured_lufs_milli, target_lufs_milli, detail \
+             FROM asset_loudness_analysis ORDER BY asset_id",
+        )?;
+        let mut analyses = Vec::new();
+        loop {
+            match unsafe { sqlite3_step(statement.raw) } {
+                SQLITE_ROW => analyses.push(read_asset_loudness_row(statement.raw)?),
+                SQLITE_DONE => return Ok(analyses),
                 _ => return Err(sqlite_error(self.database)),
             }
         }
@@ -1289,6 +1367,30 @@ fn read_media_asset_row(statement: *mut SqliteStatement) -> Result<MediaAsset, S
     })
 }
 
+fn read_asset_loudness_row(
+    statement: *mut SqliteStatement,
+) -> Result<AssetLoudnessAnalysis, String> {
+    let measured = unsafe { sqlite3_column_int64(statement, 2) };
+    let detail = column_text(statement, 4)?;
+    let analysis = AssetLoudnessAnalysis {
+        asset_id: column_text(statement, 0)?,
+        status: parse_loudness_status(&column_text(statement, 1)?)?,
+        measured_lufs_milli: if measured == i64::from(i32::MIN) {
+            None
+        } else {
+            Some(
+                i32::try_from(measured)
+                    .map_err(|_| "database returned invalid measured loudness".to_string())?,
+            )
+        },
+        target_lufs_milli: i32::try_from(unsafe { sqlite3_column_int64(statement, 3) })
+            .map_err(|_| "database returned invalid target loudness".to_string())?,
+        detail: (!detail.is_empty()).then_some(detail),
+    };
+    analysis.validate().map_err(|error| format!("{error:?}"))?;
+    Ok(analysis)
+}
+
 fn read_ingest_job_row(statement: *mut SqliteStatement) -> Result<MediaIngestJob, String> {
     let started = unsafe { sqlite3_column_int64(statement, 6) };
     let completed = unsafe { sqlite3_column_int64(statement, 7) };
@@ -1386,6 +1488,23 @@ fn readiness_name(value: AssetReadiness) -> &'static str {
         AssetReadiness::Missing => "missing",
         AssetReadiness::Rejected => "rejected",
         AssetReadiness::Processing => "processing",
+    }
+}
+
+fn loudness_status_name(value: LoudnessGateStatus) -> &'static str {
+    match value {
+        LoudnessGateStatus::Ok => "ok",
+        LoudnessGateStatus::Failed => "failed",
+        LoudnessGateStatus::NotChecked => "not_checked",
+    }
+}
+
+fn parse_loudness_status(value: &str) -> Result<LoudnessGateStatus, String> {
+    match value {
+        "ok" => Ok(LoudnessGateStatus::Ok),
+        "failed" => Ok(LoudnessGateStatus::Failed),
+        "not_checked" => Ok(LoudnessGateStatus::NotChecked),
+        _ => Err(format!("database returned invalid loudness status {value}")),
     }
 }
 

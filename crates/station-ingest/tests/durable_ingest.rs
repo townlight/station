@@ -64,6 +64,9 @@ fn completes_real_media_fails_invalid_media_and_recovers_an_interrupted_job() {
             .readiness,
         AssetReadiness::Ready
     );
+    let loudness = store.read_asset_loudness(&asset_id).unwrap().unwrap();
+    assert!(loudness.measured_lufs_milli.is_some());
+    assert_eq!(loudness.target_lufs_milli, -24_000);
     let stored_objects = fs::read_dir(&library).unwrap().count();
     drop(store);
 

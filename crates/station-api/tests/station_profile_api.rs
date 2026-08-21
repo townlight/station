@@ -256,6 +256,12 @@ fn admits_real_media_into_the_managed_library_and_refuses_declared_readiness() {
     assert_eq!(fetched_asset.status, 200);
     assert_eq!(asset.readiness, AssetReadiness::Ready);
     assert!(Path::new(&asset.media_path).starts_with(std::fs::canonicalize(&library).unwrap()));
+    let readiness = api.handle("GET", &format!("/api/v1/assets/{asset_id}/readiness"), None);
+    assert_eq!(readiness.status, 200);
+    let readiness: serde_json::Value = serde_json::from_slice(&readiness.body).unwrap();
+    assert_eq!(readiness["loudness_status"], "failed");
+    assert!(readiness["measured_lufs"].as_f64().is_some());
+    assert_eq!(readiness["target_lufs"], -24.0);
 
     let forged = MediaAsset {
         asset_id: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),

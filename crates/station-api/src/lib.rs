@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
@@ -11,8 +12,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde::Deserialize;
 use station_domain::StationProfile;
 use station_media_lifecycle::{
-    AssetReadinessView, IngestJobStatus, IngestSourceKind, MediaIngestJob, MissingMediaAlert,
-    ReadinessDashboard, ReadinessState, WatchFolderConfig,
+    AssetLoudnessAnalysis, AssetReadinessView, IngestJobStatus, IngestSourceKind,
+    LoudnessGateStatus, MediaIngestJob, MissingMediaAlert, ReadinessDashboard, ReadinessState,
+    WatchFolderConfig,
 };
 use station_schedule::{AssetReadiness, ChannelConfiguration, MediaAsset, ScheduleItem};
 use station_storage::{CommitWriteError, ProfileWriteError, StationStore};
@@ -103,6 +105,11 @@ impl Api {
             }
             ("GET", path) if path.starts_with("/api/v1/assets/ingest/jobs/") => {
                 self.read_ingest_job(path)
+            }
+            ("GET", path)
+                if path.starts_with("/api/v1/assets/") && path.ends_with("/readiness") =>
+            {
+                self.read_asset_readiness(path)
             }
             ("GET", path) if path.starts_with("/api/v1/assets/") => self.read_media_asset(path),
             _ => error_response(404, "not_found", "The requested route does not exist."),
@@ -235,7 +242,17 @@ impl Api {
             Ok(jobs) => jobs,
             Err(message) => return error_response(500, "storage_error", &message),
         };
-        let by_asset: Vec<_> = assets.iter().map(asset_readiness_view).collect();
+        let analyses: HashMap<_, _> = match self.storage.list_asset_loudness() {
+            Ok(analyses) => analyses
+                .into_iter()
+                .map(|analysis| (analysis.asset_id.clone(), analysis))
+                .collect(),
+            Err(message) => return error_response(500, "storage_error", &message),
+        };
+        let by_asset: Vec<_> = assets
+            .iter()
+            .map(|asset| asset_readiness_view(asset, analyses.get(&asset.asset_id)))
+            .collect();
         let dashboard = ReadinessDashboard {
             total_assets: by_asset.len(),
             ready_count: count_readiness(&by_asset, ReadinessState::Ready),
@@ -294,17 +311,24 @@ impl Api {
                 Ok(asset) => asset,
                 Err(message) => return error_response(500, "storage_error", &message),
             };
-            let view =
-                asset
-                    .as_ref()
-                    .map(asset_readiness_view)
-                    .unwrap_or_else(|| AssetReadinessView {
-                        asset_id: item.asset_id.clone(),
-                        readiness_state: ReadinessState::MissingFile,
-                        readiness_reason: Some("The asset record does not exist.".into()),
-                        media_path: String::new(),
-                        duration_ms: 0,
-                    });
+            let loudness = match self.storage.read_asset_loudness(&item.asset_id) {
+                Ok(analysis) => analysis,
+                Err(message) => return error_response(500, "storage_error", &message),
+            };
+            let view = asset
+                .as_ref()
+                .map(|asset| asset_readiness_view(asset, loudness.as_ref()))
+                .unwrap_or_else(|| AssetReadinessView {
+                    asset_id: item.asset_id.clone(),
+                    readiness_state: ReadinessState::MissingFile,
+                    readiness_reason: Some("The asset record does not exist.".into()),
+                    media_path: String::new(),
+                    duration_ms: 0,
+                    loudness_status: LoudnessGateStatus::NotChecked,
+                    measured_lufs: None,
+                    target_lufs: -24.0,
+                    loudness_detail: Some("Loudness has not been checked.".into()),
+                });
             if view.readiness_state != ReadinessState::Ready {
                 alerts.push(MissingMediaAlert {
                     schedule_item_id: item.item_id,
@@ -344,6 +368,38 @@ impl Api {
             Ok(None) => error_response(404, "asset_not_found", "The media asset does not exist."),
             Err(message) => error_response(500, "storage_error", &message),
         }
+    }
+
+    fn read_asset_readiness(&self, path: &str) -> ApiResponse {
+        let Some(asset_id) = path
+            .strip_prefix("/api/v1/assets/")
+            .and_then(|value| value.strip_suffix("/readiness"))
+        else {
+            return error_response(400, "invalid_path", "The asset identity is invalid.");
+        };
+        if asset_id.len() != 64
+            || !asset_id
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+        {
+            return error_response(400, "invalid_path", "The asset identity is invalid.");
+        }
+        let asset = match self.storage.read_media_asset(asset_id) {
+            Ok(Some(asset)) => asset,
+            Ok(None) => {
+                return error_response(404, "asset_not_found", "The media asset does not exist.");
+            }
+            Err(message) => return error_response(500, "storage_error", &message),
+        };
+        let loudness = match self.storage.read_asset_loudness(asset_id) {
+            Ok(analysis) => analysis,
+            Err(message) => return error_response(500, "storage_error", &message),
+        };
+        json_response(
+            200,
+            serde_json::to_vec(&asset_readiness_view(&asset, loudness.as_ref()))
+                .expect("serializing asset readiness cannot fail"),
+        )
     }
 
     fn put_channel(&self, body: Option<&[u8]>) -> ApiResponse {
@@ -554,7 +610,10 @@ impl Api {
     }
 }
 
-fn asset_readiness_view(asset: &MediaAsset) -> AssetReadinessView {
+fn asset_readiness_view(
+    asset: &MediaAsset,
+    loudness: Option<&AssetLoudnessAnalysis>,
+) -> AssetReadinessView {
     let (readiness_state, readiness_reason) = match asset.readiness {
         AssetReadiness::Ready if Path::new(&asset.media_path).is_file() => {
             (ReadinessState::Ready, None)
@@ -575,12 +634,36 @@ fn asset_readiness_view(asset: &MediaAsset) -> AssetReadinessView {
             Some("Media admission was rejected.".into()),
         ),
     };
+    let (loudness_status, measured_lufs, target_lufs, loudness_detail) = loudness.map_or_else(
+        || {
+            (
+                LoudnessGateStatus::NotChecked,
+                None,
+                -24.0,
+                Some("Loudness has not been checked.".into()),
+            )
+        },
+        |analysis| {
+            (
+                analysis.status,
+                analysis
+                    .measured_lufs_milli
+                    .map(|value| f64::from(value) / 1_000.0),
+                f64::from(analysis.target_lufs_milli) / 1_000.0,
+                analysis.detail.clone(),
+            )
+        },
+    );
     AssetReadinessView {
         asset_id: asset.asset_id.clone(),
         readiness_state,
         readiness_reason,
         media_path: asset.media_path.clone(),
         duration_ms: asset.duration_ms,
+        loudness_status,
+        measured_lufs,
+        target_lufs,
+        loudness_detail,
     }
 }
 
