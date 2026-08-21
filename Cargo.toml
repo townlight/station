@@ -2,6 +2,7 @@
 resolver = "3"
 members = [
     "bins/channel-worker",
+    "bins/station-updater",
     "bins/stationd",
     "crates/station-api",
     "crates/station-alerting",
@@ -12,6 +13,7 @@ members = [
     "crates/station-ingest",
     "crates/station-media-assets",
     "crates/station-media-protocol",
+    "crates/station-maintenance",
     "crates/station-orchestration",
     "crates/station-runtime",
     "crates/station-schedule",
@@ -48,6 +50,7 @@ station-media-engine = { path = "crates/station-media-engine" }
 station-ingest = { path = "crates/station-ingest" }
 station-media-assets = { path = "crates/station-media-assets" }
 station-media-protocol = { path = "crates/station-media-protocol" }
+station-maintenance = { path = "crates/station-maintenance" }
 station-orchestration = { path = "crates/station-orchestration" }
 station-runtime = { path = "crates/station-runtime" }
 station-schedule = { path = "crates/station-schedule" }

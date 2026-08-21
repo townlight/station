@@ -114,6 +114,13 @@ struct PutSelfTestSchedule {
     updated_by: String,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ApplyUpdate {
+    requested_by: String,
+    confirmation: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ApiResponse {
     pub status: u16,
@@ -203,6 +210,7 @@ impl Api {
             ("POST", "/api/v1/updates/check") => self.check_updates(),
             ("POST", "/api/v1/updates/stage") => self.stage_update(),
             ("POST", "/api/v1/updates/prepare") => self.prepare_update(),
+            ("POST", "/api/v1/updates/apply") => self.apply_update(body),
             ("GET", path) if path.starts_with("/api/v1/updates/release-notes?") => {
                 self.update_release_notes(path)
             }
@@ -861,6 +869,34 @@ impl Api {
             Ok(record) => json_response(
                 201,
                 serde_json::to_vec(&record).expect("serializing a prepared slot cannot fail"),
+            ),
+            Err(error) => update_error_response(error),
+        }
+    }
+
+    fn apply_update(&self, body: Option<&[u8]>) -> ApiResponse {
+        let Some(command) = parse_body::<ApplyUpdate>(body) else {
+            return error_response(
+                400,
+                "invalid_json",
+                "An update-application authorization body is required.",
+            );
+        };
+        let now = match system_time_millis() {
+            Ok(value) => value,
+            Err(message) => return error_response(500, "clock_error", &message),
+        };
+        match station_update_coordinator::request_maintenance_activation(
+            &self.database_path,
+            &self.application_directory,
+            &command.requested_by,
+            &command.confirmation,
+            now,
+        ) {
+            Ok(request) => json_response(
+                202,
+                serde_json::to_vec(&request)
+                    .expect("serializing a maintenance request cannot fail"),
             ),
             Err(error) => update_error_response(error),
         }
@@ -1716,6 +1752,19 @@ fn update_error_response(error: CoordinatorError) -> ApiResponse {
             "no_staged_update",
             "No current verified package is staged and available to prepare on this station.",
         ),
+        CoordinatorError::NoPreparedRelease => error_response(
+            409,
+            "no_prepared_update",
+            "No current verified application slot is prepared for maintenance activation.",
+        ),
+        CoordinatorError::MaintenanceAlreadyQueued => error_response(
+            409,
+            "maintenance_already_queued",
+            "A maintenance activation request is already pending.",
+        ),
+        CoordinatorError::MaintenanceGate(message) => {
+            error_response(409, "maintenance_gate_failed", &message)
+        }
         CoordinatorError::Fault(message) => error_response(500, "update_status_failed", &message),
     }
 }

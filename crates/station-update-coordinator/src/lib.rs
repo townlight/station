@@ -1,6 +1,13 @@
 use semver::Version;
 use serde::{Deserialize, Serialize};
-use station_domain::{AlertConditionKind, AlertEvent, AlertEventState, AlertSeverity};
+use station_domain::{
+    AlertConditionKind, AlertEvent, AlertEventState, AlertSeverity, SafeToAirColor,
+    derive_runtime_safe_to_air,
+};
+use station_maintenance::{
+    MAINTENANCE_SCHEMA_VERSION, MaintenanceRequest, enqueue_maintenance_request,
+    pending_request_paths,
+};
 use station_storage::StationStore;
 use station_update::{
     PreparedSlotRecord, ReleaseSource, StagedPackageRecord, UpdateCheckOutcome, UpdateCheckRecord,
@@ -41,6 +48,9 @@ pub enum CoordinatorError {
     NotConfigured,
     NoAvailableRelease,
     NoStagedRelease,
+    NoPreparedRelease,
+    MaintenanceAlreadyQueued,
+    MaintenanceGate(String),
     Fault(String),
 }
 
@@ -55,9 +65,143 @@ impl std::fmt::Display for CoordinatorError {
             Self::NoStagedRelease => formatter.write_str(
                 "No current verified package is staged and available to prepare on this station.",
             ),
+            Self::NoPreparedRelease => formatter.write_str(
+                "No current verified application slot is prepared for maintenance activation.",
+            ),
+            Self::MaintenanceAlreadyQueued => {
+                formatter.write_str("A maintenance activation request is already pending.")
+            }
+            Self::MaintenanceGate(message) => formatter.write_str(message),
             Self::Fault(message) => formatter.write_str(message),
         }
     }
+}
+
+pub fn request_maintenance_activation(
+    database_path: &Path,
+    application_directory: &Path,
+    requested_by: &str,
+    confirmation: &str,
+    now_unix_ms: i64,
+) -> Result<MaintenanceRequest, CoordinatorError> {
+    if confirmation != "INSTALL UPDATE" {
+        return Err(CoordinatorError::MaintenanceGate(
+            "Type INSTALL UPDATE exactly to authorize the maintenance interruption.".into(),
+        ));
+    }
+    if requested_by.trim().is_empty()
+        || requested_by.len() > 120
+        || requested_by.chars().any(char::is_control)
+    {
+        return Err(CoordinatorError::MaintenanceGate(
+            "requested_by must contain 1 to 120 visible characters.".into(),
+        ));
+    }
+    if now_unix_ms < 0 {
+        return Err(CoordinatorError::Fault(
+            "maintenance request time must be nonnegative".into(),
+        ));
+    }
+
+    let identity = read_install_identity(database_path)?;
+    let source =
+        read_release_source(application_directory)?.ok_or(CoordinatorError::NotConfigured)?;
+    let store = StationStore::open(database_path).map_err(CoordinatorError::Fault)?;
+    let offered = store
+        .read_update_check()
+        .map_err(CoordinatorError::Fault)?
+        .filter(|check| {
+            check.outcome == UpdateCheckOutcome::UpdateAvailable
+                && check.current_version == identity.version
+                && check.release_channel == source.release_channel
+        })
+        .and_then(|check| check.offered_release)
+        .ok_or(CoordinatorError::NoPreparedRelease)?;
+    let prepared = store
+        .read_prepared_slot()
+        .map_err(CoordinatorError::Fault)?
+        .filter(|prepared| prepared.manifest == offered)
+        .ok_or(CoordinatorError::NoPreparedRelease)?;
+    if !source
+        .trusted_keys
+        .iter()
+        .any(|key| key.key_id == prepared.manifest.key_id)
+        || verify_prepared_slot(&slots_directory(application_directory), &prepared).is_err()
+    {
+        return Err(CoordinatorError::NoPreparedRelease);
+    }
+    let candidate_version = Version::parse(&prepared.manifest.version)
+        .map_err(|_| CoordinatorError::NoPreparedRelease)?;
+    let current_version =
+        Version::parse(&identity.version).map_err(|_| CoordinatorError::NoPreparedRelease)?;
+    if candidate_version <= current_version {
+        return Err(CoordinatorError::NoPreparedRelease);
+    }
+
+    let channels = store.list_channels().map_err(CoordinatorError::Fault)?;
+    let mut runtime_channels = Vec::new();
+    for channel in channels.into_iter().filter(|channel| channel.enabled) {
+        let observation = store
+            .read_channel_runtime(&channel.channel_id)
+            .map_err(CoordinatorError::Fault)?;
+        runtime_channels.push((channel.channel_id, channel.display_name, observation));
+    }
+    let alerts = store.list_alert_events().map_err(CoordinatorError::Fault)?;
+    let active_critical = alerts
+        .iter()
+        .filter(|event| {
+            event.state == AlertEventState::Firing && event.severity == AlertSeverity::Critical
+        })
+        .count();
+    let active_warning = alerts
+        .iter()
+        .filter(|event| {
+            event.state == AlertEventState::Firing && event.severity == AlertSeverity::Warning
+        })
+        .count();
+    let safe_to_air = derive_runtime_safe_to_air(
+        now_unix_ms,
+        &runtime_channels,
+        active_critical,
+        active_warning,
+    )
+    .map_err(|error| CoordinatorError::MaintenanceGate(error.into()))?;
+    if safe_to_air.color != SafeToAirColor::Green {
+        return Err(CoordinatorError::MaintenanceGate(format!(
+            "Maintenance is blocked while runtime safe-to-air is {}: {}",
+            match safe_to_air.color {
+                SafeToAirColor::Green => "green",
+                SafeToAirColor::Yellow => "yellow",
+                SafeToAirColor::Red => "red",
+            },
+            safe_to_air.operator_message
+        )));
+    }
+
+    let data_directory = database_path
+        .parent()
+        .ok_or_else(|| CoordinatorError::Fault("station database has no data directory".into()))?;
+    if !pending_request_paths(data_directory)
+        .map_err(CoordinatorError::Fault)?
+        .is_empty()
+    {
+        return Err(CoordinatorError::MaintenanceAlreadyQueued);
+    }
+    let request = MaintenanceRequest {
+        schema_version: MAINTENANCE_SCHEMA_VERSION,
+        transaction_id: format!("update-{}-{now_unix_ms}", prepared.manifest.source_commit),
+        requested_at_unix_ms: now_unix_ms,
+        requested_by: requested_by.into(),
+        prepared_slot: prepared,
+    };
+    enqueue_maintenance_request(data_directory, &request).map_err(|error| {
+        if error == "a maintenance request is already pending" {
+            CoordinatorError::MaintenanceAlreadyQueued
+        } else {
+            CoordinatorError::Fault(error)
+        }
+    })?;
+    Ok(request)
 }
 
 pub fn read_status(
@@ -610,6 +754,8 @@ mod tests {
     use base64::engine::general_purpose::STANDARD as BASE64;
     use ed25519_dalek::{Signer, SigningKey};
     use sha2::{Digest, Sha256};
+    use station_domain::{ChannelRuntimeObservation, ChannelRuntimeState};
+    use station_schedule::ChannelConfiguration;
     use station_update::{
         ReleaseManifest, SignedReleaseEnvelope, TrustedReleaseKey, UpdatePackageFile,
         UpdatePackageManifest, prepared_slot_path,
@@ -773,6 +919,74 @@ mod tests {
         assert_eq!(
             read_status(&database, &application).unwrap().prepared_slot,
             Some(prepared.clone())
+        );
+
+        assert!(matches!(
+            request_maintenance_activation(
+                &database,
+                &application,
+                "Station Operator",
+                "install update",
+                now + 3,
+            ),
+            Err(CoordinatorError::MaintenanceGate(_))
+        ));
+        assert!(matches!(
+            request_maintenance_activation(
+                &database,
+                &application,
+                "Station Operator",
+                "INSTALL UPDATE",
+                now + 3,
+            ),
+            Err(CoordinatorError::MaintenanceGate(_))
+        ));
+        let channel_id = "8ea48bc4-7f2e-4f89-9bbc-2c58472f0e8e";
+        let store = StationStore::open(&database).unwrap();
+        store
+            .put_channel(&ChannelConfiguration {
+                channel_id: channel_id.into(),
+                display_name: "Government Channel".into(),
+                udp_destination: "127.0.0.1:5100".into(),
+                enabled: true,
+            })
+            .unwrap();
+        store
+            .put_channel_runtime(&ChannelRuntimeObservation {
+                channel_id: channel_id.into(),
+                state: ChannelRuntimeState::HealthyFallback,
+                on_air_asset_id: None,
+                state_started_at_unix_ms: now - 10_000,
+                heartbeat_at_unix_ms: now + 3,
+                detail: None,
+            })
+            .unwrap();
+        let request = request_maintenance_activation(
+            &database,
+            &application,
+            "Station Operator",
+            "INSTALL UPDATE",
+            now + 4,
+        )
+        .unwrap();
+        assert_eq!(request.prepared_slot, prepared);
+        assert_eq!(
+            pending_request_paths(&data).unwrap(),
+            vec![
+                data.join("updates")
+                    .join(station_maintenance::REQUEST_DIRECTORY_NAME)
+                    .join("pending.json")
+            ]
+        );
+        assert_eq!(
+            request_maintenance_activation(
+                &database,
+                &application,
+                "Station Operator",
+                "INSTALL UPDATE",
+                now + 5,
+            ),
+            Err(CoordinatorError::MaintenanceAlreadyQueued)
         );
 
         std::fs::remove_file(application.join(TRUST_FILE_NAME)).unwrap();

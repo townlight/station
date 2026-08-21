@@ -15,7 +15,7 @@ mod package;
 
 pub use package::{
     PreparedSlotRecord, UpdatePackageFile, UpdatePackageManifest, prepare_release_slot,
-    prepared_slot_path, verify_prepared_slot,
+    prepared_slot_path, read_prepared_slot_manifest, verify_prepared_slot,
 };
 
 pub const RELEASE_SCHEMA_VERSION: u32 = 1;

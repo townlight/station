@@ -1582,6 +1582,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "station-maintenance"
+version = "0.1.0"
+dependencies = [
+ "semver",
+ "serde",
+ "serde_json",
+ "sha2",
+ "station-update",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "station-media-assets"
 version = "0.1.0"
 dependencies = [
@@ -1697,9 +1709,23 @@ dependencies = [
  "serde_json",
  "sha2",
  "station-domain",
+ "station-maintenance",
+ "station-schedule",
  "station-storage",
  "station-update",
  "zip",
+]
+
+[[package]]
+name = "station-updater"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+ "station-maintenance",
+ "station-storage",
+ "ureq",
+ "windows-service",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

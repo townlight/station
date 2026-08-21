@@ -282,11 +282,29 @@ fn worker_executable() -> Result<std::path::PathBuf, String> {
 }
 
 fn application_directory() -> Result<std::path::PathBuf, String> {
-    std::env::current_exe()
-        .map_err(|error| format!("could not locate station application: {error}"))?
+    let executable = std::env::current_exe()
+        .map_err(|error| format!("could not locate station application: {error}"))?;
+    application_root_for_executable(&executable)
+}
+
+fn application_root_for_executable(
+    executable: &std::path::Path,
+) -> Result<std::path::PathBuf, String> {
+    let directory = executable
         .parent()
-        .map(std::path::Path::to_path_buf)
-        .ok_or_else(|| "station executable has no application directory".into())
+        .ok_or_else(|| "station executable has no application directory".to_string())?;
+    let slot_parent = directory.parent();
+    if directory.join("slot-manifest.json").is_file()
+        && slot_parent
+            .and_then(std::path::Path::file_name)
+            .is_some_and(|name| name.eq_ignore_ascii_case("slots"))
+    {
+        return slot_parent
+            .and_then(std::path::Path::parent)
+            .map(std::path::Path::to_path_buf)
+            .ok_or_else(|| "station slot has no application root".into());
+    }
+    Ok(directory.to_path_buf())
 }
 
 fn media_library(database: &std::path::Path) -> std::path::PathBuf {
@@ -360,6 +378,25 @@ mod startup_tests {
         assert!(store.list_channels().unwrap().is_empty());
         assert!(store.list_alert_events().unwrap().is_empty());
         drop(store);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn resolves_the_shared_application_root_when_running_from_an_immutable_slot() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("townlight-stationd-slot-{nonce}"));
+        let slot = root
+            .join("slots")
+            .join("slot-0.2.0-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
+        std::fs::create_dir_all(&slot).unwrap();
+        std::fs::write(slot.join("slot-manifest.json"), b"{}").unwrap();
+        assert_eq!(
+            application_root_for_executable(&slot.join("stationd.exe")).unwrap(),
+            root
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 }

@@ -1,0 +1,13 @@
+[package]
+name = "station-updater"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+serde_json.workspace = true
+station-maintenance.workspace = true
+station-storage.workspace = true
+ureq.workspace = true
+windows-service.workspace = true
+windows-sys.workspace = true

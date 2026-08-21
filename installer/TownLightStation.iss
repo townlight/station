@@ -7,6 +7,27 @@
 #ifndef ChannelWorkerPath
   #error ChannelWorkerPath must be supplied by build-installer.ps1
 #endif
+#ifndef StationUpdaterPath
+  #error StationUpdaterPath must be supplied by build-installer.ps1
+#endif
+#ifndef StationdSha256
+  #error StationdSha256 must be supplied by build-installer.ps1
+#endif
+#ifndef ChannelWorkerSha256
+  #error ChannelWorkerSha256 must be supplied by build-installer.ps1
+#endif
+#ifndef StationUpdaterSha256
+  #error StationUpdaterSha256 must be supplied by build-installer.ps1
+#endif
+#ifndef StationdSize
+  #error StationdSize must be supplied by build-installer.ps1
+#endif
+#ifndef ChannelWorkerSize
+  #error ChannelWorkerSize must be supplied by build-installer.ps1
+#endif
+#ifndef StationUpdaterSize
+  #error StationUpdaterSize must be supplied by build-installer.ps1
+#endif
 #ifndef GStreamerInstaller
   #error GStreamerInstaller must be supplied by build-installer.ps1
 #endif
@@ -17,6 +38,7 @@
 #define ProductName "TownLight Station"
 #define ProductVersion "0.1.0"
 #define ServiceName "TownLightStation"
+#define UpdaterServiceName "TownLightStationUpdater"
 #define GStreamerFile "gstreamer-1.0-msvc-x86_64-1.28.6.exe"
 #define GStreamerSha256 "059251444D1267B486EBA390B18D25FED87E10315E72F757EC6C7E912FA746B5"
 
@@ -56,21 +78,30 @@ Name: "{commonappdata}\TownLight Station"; Permissions: system-full admins-full
 Source: "{#GStreamerInstaller}"; DestName: "{#GStreamerFile}"; Flags: dontcopy noencryption
 Source: "{#StationdPath}"; DestName: "stationd.exe"; Flags: dontcopy noencryption
 Source: "{#ChannelWorkerPath}"; DestName: "channel-worker.exe"; Flags: dontcopy noencryption
+Source: "{#StationUpdaterPath}"; DestName: "station-updater.exe"; Flags: dontcopy noencryption
 Source: "..\THIRD-PARTY-NOTICES.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\LICENSE"; DestDir: "{app}"; Flags: ignoreversion
 
 [UninstallDelete]
 Type: files; Name: "{app}\stationd.exe"
 Type: files; Name: "{app}\channel-worker.exe"
+Type: files; Name: "{app}\station-updater.exe"
 Type: filesandordirs; Name: "{app}\runtime"
 Type: dirifempty; Name: "{app}"
 
 [Code]
 const
   StationServiceName = '{#ServiceName}';
+  UpdaterServiceName = '{#UpdaterServiceName}';
   RuntimeSha256 = '{#GStreamerSha256}';
   CandidateCommit = '{#SourceCommit}';
   CandidateVersion = '{#ProductVersion}';
+  StationdSha256 = '{#StationdSha256}';
+  ChannelWorkerSha256 = '{#ChannelWorkerSha256}';
+  StationUpdaterSha256 = '{#StationUpdaterSha256}';
+  StationdSize = '{#StationdSize}';
+  ChannelWorkerSize = '{#ChannelWorkerSize}';
+  StationUpdaterSize = '{#StationUpdaterSize}';
 
 var
   RuntimeWasInstalled: Boolean;
@@ -84,27 +115,27 @@ begin
     ewWaitUntilTerminated, ResultCode);
 end;
 
-function ServiceExists: Boolean;
+function ServiceExists(const Name: String): Boolean;
 var
   ResultCode: Integer;
 begin
-  Result := RunSc('query ' + StationServiceName, ResultCode) and
+  Result := RunSc('query ' + Name, ResultCode) and
     (ResultCode = 0);
 end;
 
-procedure StopAndDeleteServiceIfPresent;
+procedure StopAndDeleteServiceIfPresent(const Name: String);
 var
   Attempt: Integer;
   ResultCode: Integer;
 begin
-  if not ServiceExists then
+  if not ServiceExists(Name) then
     Exit;
 
-  RunSc('stop ' + StationServiceName, ResultCode);
-  RunSc('delete TownLightStation', ResultCode);
+  RunSc('stop ' + Name, ResultCode);
+  RunSc('delete ' + Name, ResultCode);
   for Attempt := 1 to 60 do
   begin
-    if not ServiceExists then
+    if not ServiceExists(Name) then
       Exit;
     Sleep(250);
   end;
@@ -113,7 +144,8 @@ end;
 
 procedure RollbackService;
 begin
-  StopAndDeleteServiceIfPresent;
+  StopAndDeleteServiceIfPresent(UpdaterServiceName);
+  StopAndDeleteServiceIfPresent(StationServiceName);
   CandidateActivated := False;
 end;
 
@@ -139,6 +171,8 @@ begin
     RemovePrivateRuntime;
   DeleteFile(ExpandConstant(
     '{commonappdata}\TownLight Station\install-receipt.json'));
+  DeleteFile(ExpandConstant(
+    '{commonappdata}\TownLight Station\active-slot.json'));
 end;
 
 procedure InstallPrivateRuntime;
@@ -185,6 +219,7 @@ var
 begin
   ExtractTemporaryFile('stationd.exe');
   ExtractTemporaryFile('channel-worker.exe');
+  ExtractTemporaryFile('station-updater.exe');
   AppDirectory := ExpandConstant('{app}');
   if not ForceDirectories(AppDirectory) then
     RaiseException('The TownLight Station application directory could not be created.');
@@ -194,6 +229,9 @@ begin
   if not CopyFile(ExpandConstant('{tmp}\channel-worker.exe'),
     AppDirectory + '\channel-worker.exe', False) then
     RaiseException('The channel worker binary could not be staged.');
+  if not CopyFile(ExpandConstant('{tmp}\station-updater.exe'),
+    AppDirectory + '\station-updater.exe', False) then
+    RaiseException('The maintenance updater binary could not be staged.');
   if not ForceDirectories(ExpandConstant('{commonappdata}\TownLight Station')) then
     RaiseException('The station data directory could not be created.');
 end;
@@ -220,14 +258,15 @@ var
   BinaryPath: String;
   Arguments: String;
 begin
-  StopAndDeleteServiceIfPresent;
+  StopAndDeleteServiceIfPresent(UpdaterServiceName);
+  StopAndDeleteServiceIfPresent(StationServiceName);
 
   BinaryPath := '\"' + ExpandConstant('{app}\stationd.exe') +
     '\" service --database \"' +
     ExpandConstant('{commonappdata}\TownLight Station\station.db') +
     '\" --address 127.0.0.1:4070';
   Arguments := 'create TownLightStation binPath= "' + BinaryPath +
-    '" start= auto DisplayName= "TownLight Station"';
+    '" start= auto obj= LocalSystem DisplayName= "TownLight Station"';
   if (not RunSc(Arguments, ResultCode)) or (ResultCode <> 0) then
     RaiseException('The TownLight Station service could not be registered (exit ' +
       IntToStr(ResultCode) + ').');
@@ -248,6 +287,41 @@ begin
   if (not RunSc('start TownLightStation', ResultCode)) or
     (ResultCode <> 0) then
     RaiseException('The TownLight Station service could not be started (exit ' +
+      IntToStr(ResultCode) + ').');
+end;
+
+procedure CreateAndStartUpdaterService;
+var
+  ResultCode: Integer;
+  BinaryPath: String;
+  Arguments: String;
+begin
+  BinaryPath := '\"' + ExpandConstant('{app}\station-updater.exe') +
+    '\" service --database \"' +
+    ExpandConstant('{commonappdata}\TownLight Station\station.db') +
+    '\" --application-root \"' + ExpandConstant('{app}') + '\"';
+  Arguments := 'create ' + UpdaterServiceName + ' binPath= "' + BinaryPath +
+    '" start= auto obj= LocalSystem DisplayName= "TownLight Station Maintenance"';
+  if (not RunSc(Arguments, ResultCode)) or (ResultCode <> 0) then
+    RaiseException('The maintenance updater service could not be registered (exit ' +
+      IntToStr(ResultCode) + ').');
+  if (not RunSc('config ' + UpdaterServiceName + ' start= auto', ResultCode)) or
+    (ResultCode <> 0) then
+    RaiseException('Maintenance updater automatic start could not be configured.');
+  if (not RunSc('description ' + UpdaterServiceName +
+    ' "TownLight Station transactional update and rollback watchdog"', ResultCode)) or
+    (ResultCode <> 0) then
+    RaiseException('The maintenance updater description could not be configured.');
+  if (not RunSc('failure ' + UpdaterServiceName +
+    ' reset= 86400 actions= restart/5000/restart/15000/restart/60000', ResultCode)) or
+    (ResultCode <> 0) then
+    RaiseException('The maintenance updater recovery policy could not be configured.');
+  if (not RunSc('failureflag ' + UpdaterServiceName + ' 1', ResultCode)) or
+    (ResultCode <> 0) then
+    RaiseException('The maintenance updater non-crash recovery policy could not be configured.');
+  if (not RunSc('start ' + UpdaterServiceName, ResultCode)) or
+    (ResultCode <> 0) then
+    RaiseException('The maintenance updater service could not be started (exit ' +
       IntToStr(ResultCode) + ').');
 end;
 
@@ -299,8 +373,44 @@ begin
     RaiseException('The immutable installation receipt could not be written.');
 end;
 
+procedure WriteActiveSlotReceipt;
+var
+  Receipt: String;
+  ReceiptPath: String;
+begin
+  ReceiptPath := ExpandConstant(
+    '{commonappdata}\TownLight Station\active-slot.json');
+  Receipt := '{' +
+    '"schema_version":1,' +
+    '"generation":1,' +
+    '"activated_at_unix_ms":0,' +
+    '"transaction_id":"installer-bootstrap",' +
+    '"active":{' +
+      '"relative_directory":".",' +
+      '"package_manifest":{' +
+        '"schema_version":1,' +
+        '"product":"TownLight Station",' +
+        '"version":"' + CandidateVersion + '",' +
+        '"source_commit":"' + CandidateCommit + '",' +
+        '"files":[' +
+          '{"path":"stationd.exe","size_bytes":' + StationdSize +
+            ',"sha256":"' + StationdSha256 + '"},' +
+          '{"path":"channel-worker.exe","size_bytes":' + ChannelWorkerSize +
+            ',"sha256":"' + ChannelWorkerSha256 + '"},' +
+          '{"path":"station-updater.exe","size_bytes":' + StationUpdaterSize +
+            ',"sha256":"' + StationUpdaterSha256 + '"}' +
+        ']' +
+      '}' +
+    '},' +
+    '"previous":null' +
+    '}';
+  if not SaveStringToFile(ReceiptPath, Receipt, False) then
+    RaiseException('The active application receipt could not be written.');
+end;
+
 procedure RemoveStagedBinaries;
 begin
+  DeleteFile(ExpandConstant('{app}\station-updater.exe'));
   DeleteFile(ExpandConstant('{app}\channel-worker.exe'));
   DeleteFile(ExpandConstant('{app}\stationd.exe'));
   RemoveDir(ExpandConstant('{app}'));
@@ -311,13 +421,16 @@ begin
   if CurStep = ssInstall then
   begin
     try
-      StopAndDeleteServiceIfPresent;
+      StopAndDeleteServiceIfPresent(UpdaterServiceName);
+      StopAndDeleteServiceIfPresent(StationServiceName);
       StageStationBinaries;
       InstallPrivateRuntime;
       CreateAndStartService;
       if not WaitForHealthyStation then
         RaiseException('TownLight Station did not become healthy within 15 seconds.');
       WriteInstallReceipt;
+      WriteActiveSlotReceipt;
+      CreateAndStartUpdaterService;
       CandidateActivated := True;
     except
       RollbackInstallation;

@@ -17,10 +17,15 @@ $requirements = [ordered]@{
     'sets immediate automatic service start' = 'config TownLightStation start= auto'
     'configures service recovery' = 'failure TownLightStation'
     'starts the station service' = 'start TownLightStation'
+    'registers the independent updater service' = 'create '' + UpdaterServiceName'
+    'configures updater recovery' = '''failure '' + UpdaterServiceName'
+    'starts the updater service' = '''start '' + UpdaterServiceName'
     'health-gates installation success' = 'WinHttp.WinHttpRequest.5.1'
     'rolls back a failed service activation' = 'RollbackService'
-    'removes the service on uninstall' = 'delete TownLightStation'
+    'removes the station service on uninstall' = 'StopAndDeleteServiceIfPresent(StationServiceName)'
+    'removes the updater service on uninstall' = 'StopAndDeleteServiceIfPresent(UpdaterServiceName)'
     'records the immutable source commit' = 'source_commit'
+    'records the active application slot' = 'active-slot.json'
     'preserves station data on uninstall' = 'Station data is deliberately preserved'
 }
 

@@ -68,12 +68,9 @@ impl PreparedSlotRecord {
 }
 
 impl UpdatePackageManifest {
-    fn validate_against(&self, release: &ReleaseManifest) -> Result<(), String> {
+    pub fn validate(&self) -> Result<(), String> {
         if self.schema_version != UPDATE_PACKAGE_SCHEMA_VERSION
             || self.product != "TownLight Station"
-            || self.product != release.product
-            || self.version != release.version
-            || self.source_commit != release.source_commit
             || Version::parse(&self.version).is_err()
             || !is_commit_hash(&self.source_commit)
             || self.files.len() != REQUIRED_FILES.len()
@@ -97,6 +94,17 @@ impl UpdatePackageManifest {
         }
         if total > MAX_SLOT_BYTES || REQUIRED_FILES.iter().any(|path| !paths.contains(path)) {
             return Err("update package required file set is invalid".into());
+        }
+        Ok(())
+    }
+
+    fn validate_against(&self, release: &ReleaseManifest) -> Result<(), String> {
+        self.validate()?;
+        if self.product != release.product
+            || self.version != release.version
+            || self.source_commit != release.source_commit
+        {
+            return Err("update package identity does not match its signed release".into());
         }
         Ok(())
     }
@@ -165,6 +173,11 @@ pub fn verify_prepared_slot(
     if !metadata.is_dir() || metadata.file_type().is_symlink() {
         return Err("prepared application slot is not a real directory".into());
     }
+    let manifest = read_prepared_slot_manifest(&slot_path)?;
+    verify_slot_directory(&slot_path, &manifest, &record.manifest)
+}
+
+pub fn read_prepared_slot_manifest(slot_path: &Path) -> Result<UpdatePackageManifest, String> {
     let manifest_path = slot_path.join(SLOT_MANIFEST_NAME);
     let bytes = read_bounded_file(
         &manifest_path,
@@ -173,7 +186,8 @@ pub fn verify_prepared_slot(
     )?;
     let manifest: UpdatePackageManifest = serde_json::from_slice(&bytes)
         .map_err(|error| format!("prepared slot manifest is invalid: {error}"))?;
-    verify_slot_directory(&slot_path, &manifest, &record.manifest)
+    manifest.validate()?;
+    Ok(manifest)
 }
 
 pub fn prepared_slot_path(slots_directory: &Path, record: &PreparedSlotRecord) -> PathBuf {
