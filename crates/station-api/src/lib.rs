@@ -28,7 +28,8 @@ use station_schedule::{
     AssetReadiness, ChannelConfiguration, MediaAsset, OUTPUT_PROFILES, ScheduleItem,
 };
 use station_storage::{
-    AlertChannelSecret, CgWriteError, CommitWriteError, ProfileWriteError, StationStore,
+    AlertChannelSecret, CgSnapshotReadError, CgWriteError, CommitWriteError, ProfileWriteError,
+    StationStore,
 };
 use station_update::UpdateCheckTrigger;
 use station_update_coordinator::CoordinatorError;
@@ -309,6 +310,16 @@ impl Api {
                     .expect("serializing built-in CG templates cannot fail"),
             ),
             ("GET", path) if path.starts_with("/api/v1/cg/board?") => self.read_cg_board(path),
+            ("GET", path)
+                if path == "/api/v1/cg/preview" || path.starts_with("/api/v1/cg/preview?") =>
+            {
+                self.read_cg_snapshot(path, "/api/v1/cg/preview", true)
+            }
+            ("GET", path)
+                if path == "/api/v1/cg/snapshot" || path.starts_with("/api/v1/cg/snapshot?") =>
+            {
+                self.read_cg_snapshot(path, "/api/v1/cg/snapshot", false)
+            }
             ("PUT", "/api/v1/cg/board") => self.write_cg_board(body),
             ("GET", path) if path.starts_with("/api/v1/cg/zones?") => self.list_cg_zones(path),
             ("PUT", "/api/v1/cg/zones") => self.write_cg_zone(body),
@@ -1508,6 +1519,69 @@ impl Api {
             ),
             Ok(None) => error_response(404, "cg_board_not_found", "The CG board does not exist."),
             Err(message) => error_response(500, "storage_error", &message),
+        }
+    }
+
+    fn read_cg_snapshot(&self, path: &str, prefix: &str, require_at: bool) -> ApiResponse {
+        let query_prefix = format!("{prefix}?");
+        let Some(query) = cg_query(path, &query_prefix) else {
+            return error_response(400, "invalid_query", "The CG snapshot query is invalid.");
+        };
+        let expected_parameter_count = if query.contains_key("at_unix_ms") {
+            2
+        } else {
+            1
+        };
+        if query.len() != expected_parameter_count
+            || (require_at && !query.contains_key("at_unix_ms"))
+        {
+            return error_response(400, "invalid_query", "channel_id is required.");
+        }
+        let Some(channel_id) = query.get("channel_id").map(String::as_str) else {
+            return error_response(400, "invalid_query", "channel_id is required.");
+        };
+        let now = match query.get("at_unix_ms") {
+            Some(value) => match value.parse::<i64>() {
+                Ok(value) if value >= 0 => value,
+                _ => {
+                    return error_response(
+                        400,
+                        "invalid_query",
+                        "at_unix_ms must be a nonnegative integer.",
+                    );
+                }
+            },
+            None => match system_time_millis() {
+                Ok(value) => value,
+                Err(message) => return error_response(500, "clock_error", &message),
+            },
+        };
+        match self.storage.load_cg_snapshot_inputs(channel_id, now) {
+            Ok(inputs) => match inputs.resolve() {
+                Ok(snapshot) => json_response(
+                    200,
+                    serde_json::to_vec(&snapshot).expect("serializing a CG snapshot cannot fail"),
+                ),
+                Err(error) => error_response(422, "cg_snapshot_invalid", &format!("{error:?}")),
+            },
+            Err(CgSnapshotReadError::InvalidChannel | CgSnapshotReadError::InvalidTimestamp) => {
+                error_response(400, "invalid_query", "The CG snapshot query is invalid.")
+            }
+            Err(CgSnapshotReadError::ChannelNotFound) => {
+                error_response(404, "cg_channel_not_found", "The channel does not exist.")
+            }
+            Err(CgSnapshotReadError::BoardNotFound) => {
+                error_response(404, "cg_board_not_found", "The CG board does not exist.")
+            }
+            Err(CgSnapshotReadError::BoardInactive) => {
+                error_response(409, "cg_board_inactive", "The CG board is inactive.")
+            }
+            Err(CgSnapshotReadError::InvalidData(message)) => {
+                error_response(422, "cg_snapshot_invalid", &message)
+            }
+            Err(CgSnapshotReadError::Storage(message)) => {
+                error_response(500, "storage_error", &message)
+            }
         }
     }
 

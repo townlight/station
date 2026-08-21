@@ -7,7 +7,7 @@ use sha2::{Digest, Sha256};
 use station_cg::{
     CgAuditEvent, CgAuditEventKind, CgBoard, CgBulletin, CgBulletinContent, CgBulletinState,
     CgContentSource, CgFeedCacheEntry, CgFeedItem, CgFeedItemApproval, CgFeedKind, CgFeedSource,
-    CgFeedTrustTier, CgZoneConfig, CgZoneKind, built_in_template,
+    CgFeedTrustTier, CgSnapshotInputs, CgZoneConfig, CgZoneKind, built_in_template,
 };
 use station_domain::{
     AlertChannel, AlertChannelKind, AlertConditionKind, AlertDelivery, AlertDeliveryPayload,
@@ -155,6 +155,17 @@ pub enum CgWriteError {
     NotFound,
     Conflict(u64),
     Invalid(&'static str),
+    Storage(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CgSnapshotReadError {
+    InvalidChannel,
+    InvalidTimestamp,
+    ChannelNotFound,
+    BoardNotFound,
+    BoardInactive,
+    InvalidData(String),
     Storage(String),
 }
 
@@ -1320,6 +1331,87 @@ impl StationStore {
         }
     }
 
+    pub fn load_cg_snapshot_inputs(
+        &self,
+        channel_id: &str,
+        generated_at_unix_ms: i64,
+    ) -> Result<CgSnapshotInputs, CgSnapshotReadError> {
+        if channel_id.trim().is_empty() {
+            return Err(CgSnapshotReadError::InvalidChannel);
+        }
+        if generated_at_unix_ms < 0 {
+            return Err(CgSnapshotReadError::InvalidTimestamp);
+        }
+        self.execute("BEGIN DEFERRED")
+            .map_err(CgSnapshotReadError::Storage)?;
+        let outcome = (|| {
+            let channel_exists = self
+                .list_channels()
+                .map_err(CgSnapshotReadError::Storage)?
+                .into_iter()
+                .any(|channel| channel.channel_id == channel_id);
+            if !channel_exists {
+                return Err(CgSnapshotReadError::ChannelNotFound);
+            }
+            let board = self
+                .read_cg_board(channel_id)
+                .map_err(CgSnapshotReadError::Storage)?
+                .ok_or(CgSnapshotReadError::BoardNotFound)?;
+            if !board.active {
+                return Err(CgSnapshotReadError::BoardInactive);
+            }
+            let template = built_in_template(&board.template_id).ok_or_else(|| {
+                CgSnapshotReadError::InvalidData("CG board template is unavailable".into())
+            })?;
+            let zones = self
+                .list_cg_zones(&board.board_id)
+                .map_err(CgSnapshotReadError::Storage)?;
+            let feed_sources = self
+                .list_cg_feed_sources(channel_id)
+                .map_err(CgSnapshotReadError::Storage)?;
+            let mut feed_cache = Vec::new();
+            let mut approvals = Vec::new();
+            for feed in &feed_sources {
+                if let Some(cache) = self
+                    .read_cg_feed_cache(&feed.feed_source_id)
+                    .map_err(CgSnapshotReadError::Storage)?
+                {
+                    feed_cache.push(cache);
+                }
+                approvals.extend(
+                    self.list_cg_feed_item_approvals(&feed.feed_source_id)
+                        .map_err(CgSnapshotReadError::Storage)?,
+                );
+            }
+            let bulletins = self
+                .list_airable_cg_bulletins(channel_id, generated_at_unix_ms)
+                .map_err(CgSnapshotReadError::Storage)?;
+            Ok(CgSnapshotInputs {
+                board,
+                template,
+                zones,
+                feed_sources,
+                feed_cache,
+                approvals,
+                bulletins,
+                generated_at_unix_ms,
+            })
+        })();
+        match outcome {
+            Ok(inputs) => match self.execute("COMMIT") {
+                Ok(()) => Ok(inputs),
+                Err(error) => {
+                    let _ = self.execute("ROLLBACK");
+                    Err(CgSnapshotReadError::Storage(error))
+                }
+            },
+            Err(error) => {
+                let _ = self.execute("ROLLBACK");
+                Err(error)
+            }
+        }
+    }
+
     pub fn write_cg_board(
         &self,
         board: &CgBoard,
@@ -1991,6 +2083,26 @@ impl StationStore {
                     ids.insert(column_text(statement.raw, 0)?);
                 }
                 SQLITE_DONE => return Ok(ids),
+                _ => return Err(sqlite_error(self.database)),
+            }
+        }
+    }
+
+    pub fn list_cg_feed_item_approvals(
+        &self,
+        feed_source_id: &str,
+    ) -> Result<Vec<CgFeedItemApproval>, String> {
+        let statement = self.prepare(
+            "SELECT feed_source_id, item_id, approved_by, approved_at_unix_ms \
+             FROM cg_feed_item_approvals WHERE feed_source_id=?1 ORDER BY item_id",
+        )?;
+        let source = c_string(feed_source_id, "CG approval feed identity")?;
+        bind_text(self.database, statement.raw, 1, &source)?;
+        let mut approvals = Vec::new();
+        loop {
+            match unsafe { sqlite3_step(statement.raw) } {
+                SQLITE_ROW => approvals.push(read_cg_feed_item_approval_row(statement.raw)?),
+                SQLITE_DONE => return Ok(approvals),
                 _ => return Err(sqlite_error(self.database)),
             }
         }

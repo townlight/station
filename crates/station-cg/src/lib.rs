@@ -5,7 +5,8 @@ mod snapshot;
 
 pub use snapshot::{
     CgPlaceholderReason, CgPlaceholderSource, CgResolvedContent, CgResolvedSnapshot,
-    CgResolvedZone, CgSnapshotError, resolve_snapshot,
+    CgResolvedZone, CgSnapshotError, CgSnapshotInputs, resolve_snapshot,
+    resolve_snapshot_with_feed_cache,
 };
 
 pub const CG_LAYOUT_SCALE: u16 = 1_000;

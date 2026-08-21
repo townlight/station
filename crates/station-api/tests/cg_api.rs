@@ -6,7 +6,7 @@ use station_api::Api;
 use station_cg::{
     CgAuditEvent, CgAuditEventKind, CgBoard, CgBulletin, CgBulletinContent, CgBulletinState,
     CgContentSource, CgFeedItem, CgFeedItemApproval, CgFeedKind, CgFeedSource, CgFeedTrustTier,
-    CgTemplate, CgZoneConfig, CgZoneKind,
+    CgResolvedContent, CgResolvedSnapshot, CgTemplate, CgZoneConfig, CgZoneKind,
 };
 use station_schedule::{ChannelConfiguration, OutputProfileId, OutputSinkConfiguration};
 use station_storage::StationStore;
@@ -102,7 +102,7 @@ fn manages_cg_authority_through_the_operator_api() {
                 summary: None,
                 starts_at_unix_ms: None,
                 url: None,
-                tags: Vec::new(),
+                tags: vec!["public-safety".into()],
             }],
             None,
             None,
@@ -198,6 +198,34 @@ fn manages_cg_authority_through_the_operator_api() {
         Some(&approval_body),
     );
     assert_eq!(response.status, 200, "{}", body_text(&response.body));
+
+    let snapshot: CgResolvedSnapshot = response_json(&api.handle(
+        "GET",
+        &format!("/api/v1/cg/snapshot?channel_id={CHANNEL_ID}"),
+        None,
+    ));
+    assert!(matches!(
+        snapshot.zones[0].content,
+        CgResolvedContent::FeedItems { stale: true, .. }
+    ));
+    let preview = api.handle(
+        "GET",
+        &format!("/api/v1/cg/preview?channel_id={CHANNEL_ID}&at_unix_ms=2000"),
+        None,
+    );
+    assert_eq!(preview.status, 200);
+    let preview: CgResolvedSnapshot = response_json(&preview);
+    assert_eq!(preview.generated_at_unix_ms, 2_000);
+    for path in [
+        "/api/v1/cg/snapshot",
+        "/api/v1/cg/snapshot?channel_id=bad&channel_id=duplicate",
+        "/api/v1/cg/snapshot?channel_id=bad&extra=value",
+        "/api/v1/cg/preview?channel_id=bad",
+        "/api/v1/cg/preview?channel_id=bad&at_unix_ms=-1",
+        "/api/v1/cg/preview?channel_id=bad%20value",
+    ] {
+        assert_eq!(api.handle("GET", path, None).status, 400, "{path}");
+    }
 
     let board_response = api.handle(
         "GET",

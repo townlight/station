@@ -5,6 +5,33 @@ use super::{
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CgSnapshotInputs {
+    pub board: CgBoard,
+    pub template: CgTemplate,
+    pub zones: Vec<CgZoneConfig>,
+    pub feed_sources: Vec<CgFeedSource>,
+    pub feed_cache: Vec<CgFeedCacheEntry>,
+    pub approvals: Vec<CgFeedItemApproval>,
+    pub bulletins: Vec<CgBulletin>,
+    pub generated_at_unix_ms: i64,
+}
+
+impl CgSnapshotInputs {
+    pub fn resolve(&self) -> Result<CgResolvedSnapshot, CgSnapshotError> {
+        resolve_snapshot_with_feed_cache(
+            &self.board,
+            &self.template,
+            &self.zones,
+            &self.feed_sources,
+            &self.bulletins,
+            &self.feed_cache,
+            &self.approvals,
+            self.generated_at_unix_ms,
+        )
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CgPlaceholderSource {
