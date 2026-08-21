@@ -12,7 +12,7 @@ Materializing a schedule item must not make it air-eligible automatically. An op
 
 `station-schedule` defines the transport-independent gate and `station-storage` executes the authoritative commit.
 
-- A playable asset has an immutable SHA-256 identity, visible path, positive duration, and `ready` state.
+- A playable asset has an immutable SHA-256 identity, visible path, positive duration, `ready` state, and a file that still exists at approval time.
 - A proposed item fails the gate if its asset is absent, invalid, not ready, identity-mismatched, or shorter than the scheduled duration.
 - Every non-cancelled item on the same channel is actively checked for half-open interval overlap.
 - The nearest prior gap greater than one second is reported but does not fail approval.
@@ -23,4 +23,4 @@ Materializing a schedule item must not make it air-eligible automatically. An op
 
 ## Consequences
 
-The operator can review a useful plan without relying on an in-memory plan cache. The approval transaction is the race authority. SQLite serializes writers at the station boundary, while the pure gate remains easy to test. Authentication/roles, rollback, worker dispatch, recurring materialization, dayparts, and the operator schedule interface remain subsequent slices.
+The operator can review a useful plan without relying on an in-memory plan cache. The approval transaction is the race authority. SQLite serializes writers at the station boundary, while the pure gate remains easy to test. Storage maps a stale `ready` record whose file disappeared to `missing` before invoking that gate. Authentication/roles, rollback, recurring materialization, dayparts, and the operator schedule interface remain subsequent slices; acknowledged worker dispatch is defined separately in ADR 0009.

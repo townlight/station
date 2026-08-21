@@ -464,6 +464,36 @@ impl StationStore {
         }
     }
 
+    pub fn list_media_assets(&self) -> Result<Vec<MediaAsset>, String> {
+        let statement = self.prepare(
+            "SELECT asset_id, media_path, duration_ms, readiness FROM media_assets ORDER BY asset_id",
+        )?;
+        let mut assets = Vec::new();
+        loop {
+            match unsafe { sqlite3_step(statement.raw) } {
+                SQLITE_ROW => assets.push(read_media_asset_row(statement.raw)?),
+                SQLITE_DONE => return Ok(assets),
+                _ => return Err(sqlite_error(self.database)),
+            }
+        }
+    }
+
+    pub fn list_ingest_jobs(&self) -> Result<Vec<MediaIngestJob>, String> {
+        let statement = self.prepare(
+            "SELECT job_id, source_kind, source_path, status, progress_percent, created_at_unix_ms, \
+             started_at_unix_ms, completed_at_unix_ms, error_detail, asset_id, attempts \
+             FROM media_ingest_jobs ORDER BY created_at_unix_ms DESC, job_id",
+        )?;
+        let mut jobs = Vec::new();
+        loop {
+            match unsafe { sqlite3_step(statement.raw) } {
+                SQLITE_ROW => jobs.push(read_ingest_job_row(statement.raw)?),
+                SQLITE_DONE => return Ok(jobs),
+                _ => return Err(sqlite_error(self.database)),
+            }
+        }
+    }
+
     pub fn put_schedule_item(&self, item: &ScheduleItem) -> Result<(), String> {
         item.validate().map_err(|error| format!("{error:?}"))?;
         let statement = self.prepare(
@@ -524,6 +554,31 @@ impl StationStore {
         }
     }
 
+    pub fn list_schedule_window(
+        &self,
+        starts_at_unix_ms: i64,
+        ends_before_unix_ms: i64,
+    ) -> Result<Vec<ScheduleItem>, String> {
+        if starts_at_unix_ms < 0 || ends_before_unix_ms <= starts_at_unix_ms {
+            return Err("schedule window is invalid".into());
+        }
+        let statement = self.prepare(
+            "SELECT item_id, channel_id, asset_id, title, starts_at_unix_ms, duration_ms, state \
+             FROM schedule_items WHERE state='committed' AND starts_at_unix_ms>=?1 \
+             AND starts_at_unix_ms<?2 ORDER BY starts_at_unix_ms, item_id",
+        )?;
+        bind_i64(self.database, statement.raw, 1, starts_at_unix_ms)?;
+        bind_i64(self.database, statement.raw, 2, ends_before_unix_ms)?;
+        let mut items = Vec::new();
+        loop {
+            match unsafe { sqlite3_step(statement.raw) } {
+                SQLITE_ROW => items.push(read_schedule_item_row(statement.raw)?),
+                SQLITE_DONE => return Ok(items),
+                _ => return Err(sqlite_error(self.database)),
+            }
+        }
+    }
+
     pub fn prepare_schedule_commit(
         &self,
         plan_id: &str,
@@ -533,9 +588,15 @@ impl StationStore {
             .read_schedule_item(item_id)
             .map_err(CommitWriteError::Storage)?
             .ok_or(CommitWriteError::NotFound)?;
-        let asset = self
+        let mut asset = self
             .read_media_asset(&item.asset_id)
             .map_err(CommitWriteError::Storage)?;
+        if let Some(asset) = asset.as_mut()
+            && asset.readiness == AssetReadiness::Ready
+            && !Path::new(&asset.media_path).is_file()
+        {
+            asset.readiness = AssetReadiness::Missing;
+        }
         let channel_items = self
             .list_channel_schedule(&item.channel_id)
             .map_err(CommitWriteError::Storage)?;

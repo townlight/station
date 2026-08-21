@@ -261,6 +261,61 @@ fn admits_real_media_into_the_managed_library_and_refuses_declared_readiness() {
         std::fs::read_dir(&library).unwrap().count(),
         stored_before_rejection
     );
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+    let store = StationStore::open(&database).unwrap();
+    store.put_media_asset(&forged).unwrap();
+    store
+        .put_schedule_item(&ScheduleItem {
+            item_id: "185dc897-a14c-45f0-bd6a-899fd90cd196".into(),
+            channel_id: "8b626c01-bdf8-419a-8a2e-b0a7caa1ff7e".into(),
+            asset_id: forged.asset_id.clone(),
+            title: "Missing council recording".into(),
+            starts_at_unix_ms: now + 60_000,
+            duration_ms: 30_000,
+            state: ScheduleState::Committed,
+        })
+        .unwrap();
+    drop(store);
+    let dashboard = api.handle("GET", "/api/v1/assets/readiness-dashboard", None);
+    assert_eq!(dashboard.status, 200);
+    let dashboard: serde_json::Value = serde_json::from_slice(&dashboard.body).unwrap();
+    assert_eq!(dashboard["ready_count"], 1);
+    assert_eq!(dashboard["missing_count"], 1);
+    assert_eq!(dashboard["failed_ingest_count"], 1);
+    let missing = api.handle(
+        "GET",
+        &format!("/api/v1/assets/missing-scheduled?now_unix_ms={now}&horizon_ms=604800000"),
+        None,
+    );
+    assert_eq!(missing.status, 200);
+    let missing: serde_json::Value = serde_json::from_slice(&missing.body).unwrap();
+    assert_eq!(missing.as_array().unwrap().len(), 1);
+    assert_eq!(
+        missing[0]["schedule_item_id"],
+        "185dc897-a14c-45f0-bd6a-899fd90cd196"
+    );
+    assert_eq!(missing[0]["readiness_state"], "missing_file");
+    assert_eq!(
+        api.handle(
+            "GET",
+            "/api/v1/assets/missing-scheduled?now_unix_ms=1",
+            None,
+        )
+        .status,
+        400
+    );
+    assert_eq!(
+        api.handle(
+            "GET",
+            "/api/v1/assets/missing-scheduled?now_unix_ms=1&horizon_ms=2678400001",
+            None,
+        )
+        .status,
+        422
+    );
     assert_eq!(
         api.handle("POST", "/api/v1/assets/ingest", Some(&body))
             .status,
@@ -383,9 +438,11 @@ fn generate_media_fixture(path: &Path) {
 fn prepares_commits_and_persists_an_operator_approval_through_the_api() {
     let database = temporary_database("schedule-commit");
     let api = Api::open(&database).unwrap();
+    let scheduled_media = database.with_extension("scheduled.ts");
+    std::fs::write(&scheduled_media, b"admitted bytes").unwrap();
     let asset = MediaAsset {
         asset_id: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
-        media_path: r"C:\ProgramData\TownLight Station\media\asset.ts".into(),
+        media_path: scheduled_media.to_string_lossy().into_owned(),
         duration_ms: 60_000,
         readiness: AssetReadiness::Ready,
     };
@@ -447,6 +504,7 @@ fn prepares_commits_and_persists_an_operator_approval_through_the_api() {
     assert_eq!(items[0].state, ScheduleState::Committed);
 
     let _ = std::fs::remove_file(database);
+    std::fs::remove_file(scheduled_media).unwrap();
 }
 
 #[test]

@@ -10,8 +10,11 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::Deserialize;
 use station_domain::StationProfile;
-use station_media_lifecycle::{IngestJobStatus, IngestSourceKind, MediaIngestJob};
-use station_schedule::{ChannelConfiguration, ScheduleItem};
+use station_media_lifecycle::{
+    AssetReadinessView, IngestJobStatus, IngestSourceKind, MediaIngestJob, MissingMediaAlert,
+    ReadinessDashboard, ReadinessState,
+};
+use station_schedule::{AssetReadiness, ChannelConfiguration, MediaAsset, ScheduleItem};
 use station_storage::{CommitWriteError, ProfileWriteError, StationStore};
 
 #[derive(Deserialize)]
@@ -81,6 +84,10 @@ impl Api {
             },
             ("PUT", "/api/v1/station") => self.put_profile(body),
             ("POST", "/api/v1/assets/ingest") => self.ingest_media(body),
+            ("GET", "/api/v1/assets/readiness-dashboard") => self.readiness_dashboard(),
+            ("GET", path) if path.starts_with("/api/v1/assets/missing-scheduled?") => {
+                self.missing_scheduled(path)
+            }
             ("PUT", "/api/v1/channels") => self.put_channel(body),
             ("GET", "/api/v1/channels") => self.list_channels(),
             ("PUT", "/api/v1/schedule/items") => self.put_schedule_item(body),
@@ -214,6 +221,105 @@ impl Api {
             ),
             Err(message) => error_response(500, "storage_error", &message),
         }
+    }
+
+    fn readiness_dashboard(&self) -> ApiResponse {
+        let assets = match self.storage.list_media_assets() {
+            Ok(assets) => assets,
+            Err(message) => return error_response(500, "storage_error", &message),
+        };
+        let ingest_jobs = match self.storage.list_ingest_jobs() {
+            Ok(jobs) => jobs,
+            Err(message) => return error_response(500, "storage_error", &message),
+        };
+        let by_asset: Vec<_> = assets.iter().map(asset_readiness_view).collect();
+        let dashboard = ReadinessDashboard {
+            total_assets: by_asset.len(),
+            ready_count: count_readiness(&by_asset, ReadinessState::Ready),
+            processing_count: count_readiness(&by_asset, ReadinessState::Processing),
+            missing_count: count_readiness(&by_asset, ReadinessState::MissingFile),
+            rejected_count: count_readiness(&by_asset, ReadinessState::Rejected),
+            pending_ingest_count: ingest_jobs
+                .iter()
+                .filter(|job| job.status == IngestJobStatus::Pending)
+                .count(),
+            running_ingest_count: ingest_jobs
+                .iter()
+                .filter(|job| job.status == IngestJobStatus::Running)
+                .count(),
+            failed_ingest_count: ingest_jobs
+                .iter()
+                .filter(|job| job.status == IngestJobStatus::Failed)
+                .count(),
+            by_asset,
+            ingest_jobs,
+        };
+        json_response(
+            200,
+            serde_json::to_vec(&dashboard).expect("serializing readiness cannot fail"),
+        )
+    }
+
+    fn missing_scheduled(&self, path: &str) -> ApiResponse {
+        let Some(query) = path.strip_prefix("/api/v1/assets/missing-scheduled?") else {
+            unreachable!("the route prefix was checked")
+        };
+        let Some((now, horizon)) = parse_window_query(query) else {
+            return error_response(
+                400,
+                "invalid_query",
+                "now_unix_ms and horizon_ms are required positive integers.",
+            );
+        };
+        if horizon == 0 || horizon > 31 * 24 * 60 * 60 * 1_000 {
+            return error_response(
+                422,
+                "invalid_horizon",
+                "The missing-media horizon must be between 1 ms and 31 days.",
+            );
+        }
+        let Some(end) = now.checked_add(horizon) else {
+            return error_response(422, "invalid_horizon", "The schedule window overflows.");
+        };
+        let items = match self.storage.list_schedule_window(now, end) {
+            Ok(items) => items,
+            Err(message) => return error_response(500, "storage_error", &message),
+        };
+        let mut alerts = Vec::new();
+        for item in items {
+            let asset = match self.storage.read_media_asset(&item.asset_id) {
+                Ok(asset) => asset,
+                Err(message) => return error_response(500, "storage_error", &message),
+            };
+            let view =
+                asset
+                    .as_ref()
+                    .map(asset_readiness_view)
+                    .unwrap_or_else(|| AssetReadinessView {
+                        asset_id: item.asset_id.clone(),
+                        readiness_state: ReadinessState::MissingFile,
+                        readiness_reason: Some("The asset record does not exist.".into()),
+                        media_path: String::new(),
+                        duration_ms: 0,
+                    });
+            if view.readiness_state != ReadinessState::Ready {
+                alerts.push(MissingMediaAlert {
+                    schedule_item_id: item.item_id,
+                    channel_id: item.channel_id,
+                    asset_id: item.asset_id,
+                    title: item.title,
+                    starts_at_unix_ms: item.starts_at_unix_ms,
+                    readiness_state: view.readiness_state,
+                    readiness_reason: view
+                        .readiness_reason
+                        .unwrap_or_else(|| "The asset is not ready.".into()),
+                });
+            }
+        }
+        json_response(
+            200,
+            serde_json::to_vec(&alerts).expect("serializing missing-media alerts cannot fail"),
+        )
     }
 
     fn read_media_asset(&self, path: &str) -> ApiResponse {
@@ -397,6 +503,59 @@ impl Api {
             Err(message) => error_response(500, "storage_error", &message),
         }
     }
+}
+
+fn asset_readiness_view(asset: &MediaAsset) -> AssetReadinessView {
+    let (readiness_state, readiness_reason) = match asset.readiness {
+        AssetReadiness::Ready if Path::new(&asset.media_path).is_file() => {
+            (ReadinessState::Ready, None)
+        }
+        AssetReadiness::Ready | AssetReadiness::Missing => (
+            ReadinessState::MissingFile,
+            Some(format!(
+                "The admitted media file is missing: {}",
+                asset.media_path
+            )),
+        ),
+        AssetReadiness::Processing => (
+            ReadinessState::Processing,
+            Some("Media processing has not completed.".into()),
+        ),
+        AssetReadiness::Rejected => (
+            ReadinessState::Rejected,
+            Some("Media admission was rejected.".into()),
+        ),
+    };
+    AssetReadinessView {
+        asset_id: asset.asset_id.clone(),
+        readiness_state,
+        readiness_reason,
+        media_path: asset.media_path.clone(),
+        duration_ms: asset.duration_ms,
+    }
+}
+
+fn count_readiness(assets: &[AssetReadinessView], state: ReadinessState) -> usize {
+    assets
+        .iter()
+        .filter(|asset| asset.readiness_state == state)
+        .count()
+}
+
+fn parse_window_query(query: &str) -> Option<(i64, i64)> {
+    let mut now = None;
+    let mut horizon = None;
+    for pair in query.split('&') {
+        let (name, value) = pair.split_once('=')?;
+        let value = value.parse::<i64>().ok()?;
+        match name {
+            "now_unix_ms" if now.is_none() => now = Some(value),
+            "horizon_ms" if horizon.is_none() => horizon = Some(value),
+            _ => return None,
+        }
+    }
+    let (now, horizon) = (now?, horizon?);
+    (now >= 0 && horizon > 0).then_some((now, horizon))
 }
 
 fn parse_body<T: serde::de::DeserializeOwned>(body: Option<&[u8]>) -> Option<T> {

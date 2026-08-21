@@ -33,6 +33,49 @@ pub struct MediaIngestJob {
     pub attempts: u32,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReadinessState {
+    Ready,
+    Processing,
+    MissingFile,
+    Rejected,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AssetReadinessView {
+    pub asset_id: String,
+    pub readiness_state: ReadinessState,
+    pub readiness_reason: Option<String>,
+    pub media_path: String,
+    pub duration_ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReadinessDashboard {
+    pub total_assets: usize,
+    pub ready_count: usize,
+    pub processing_count: usize,
+    pub missing_count: usize,
+    pub rejected_count: usize,
+    pub pending_ingest_count: usize,
+    pub running_ingest_count: usize,
+    pub failed_ingest_count: usize,
+    pub by_asset: Vec<AssetReadinessView>,
+    pub ingest_jobs: Vec<MediaIngestJob>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MissingMediaAlert {
+    pub schedule_item_id: String,
+    pub channel_id: String,
+    pub asset_id: String,
+    pub title: String,
+    pub starts_at_unix_ms: i64,
+    pub readiness_state: ReadinessState,
+    pub readiness_reason: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IngestJobError {
     Invalid(&'static str),

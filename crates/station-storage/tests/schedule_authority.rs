@@ -12,8 +12,12 @@ const ASSET: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 #[test]
 fn reruns_the_gate_under_a_write_lock_and_persists_approval_before_dispatch() {
     let database = database_path("commit-race");
+    let media = database.with_extension("ts");
+    std::fs::write(&media, b"admitted bytes").unwrap();
     let store = StationStore::open(&database).unwrap();
-    store.put_media_asset(&ready_asset()).unwrap();
+    let mut asset = ready_asset();
+    asset.media_path = media.to_string_lossy().into_owned();
+    store.put_media_asset(&asset).unwrap();
     store
         .put_schedule_item(&schedule_item(ITEM, 100_000, ScheduleState::Draft))
         .unwrap();
@@ -70,6 +74,7 @@ fn reruns_the_gate_under_a_write_lock_and_persists_approval_before_dispatch() {
     assert_eq!(reopened.list_channel_schedule(CHANNEL).unwrap().len(), 2);
     drop(reopened);
     remove_database(&database);
+    std::fs::remove_file(media).unwrap();
 }
 
 #[test]
@@ -91,6 +96,34 @@ fn persists_an_honest_missing_media_preview_without_creating_a_report() {
             .read_commit_report("missing-report")
             .unwrap()
             .is_none()
+    );
+    drop(store);
+    remove_database(&database);
+}
+
+#[test]
+fn fails_closed_when_a_ready_asset_file_has_disappeared() {
+    let database = database_path("disappeared-media");
+    let media = database.with_extension("ts");
+    std::fs::write(&media, b"admitted bytes").unwrap();
+    let store = StationStore::open(&database).unwrap();
+    let mut asset = ready_asset();
+    asset.media_path = media.to_string_lossy().into_owned();
+    store.put_media_asset(&asset).unwrap();
+    store
+        .put_schedule_item(&schedule_item(ITEM, 100_000, ScheduleState::Draft))
+        .unwrap();
+    std::fs::remove_file(&media).unwrap();
+
+    let plan = store
+        .prepare_schedule_commit("missing-on-disk", ITEM)
+        .unwrap();
+    assert!(!plan.dry_run_passed);
+    assert!(
+        plan.missing_media_detail
+            .as_deref()
+            .unwrap()
+            .contains("not ready")
     );
     drop(store);
     remove_database(&database);
