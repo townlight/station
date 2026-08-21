@@ -67,7 +67,7 @@ The response includes the new `revision`. Send that value as `expected_revision`
 
 ## Media engine
 
-`station-media-engine` programmatically builds one live GStreamer pipeline; it does not use a shell pipeline parser. The current machine slice supplies synthetic program and black fallback legs through `input-selector`, normalizes to 640×360 I420 at 30 fps, keeps OpenH264, `h264parse`, `mpegtsmux`, and `udpsink` persistent, and performs bounded source-switch acknowledgement. Its integration test receives the real UDP stream and checks TS framing, error/discontinuity flags, and per-PID continuity counters across both switch directions. Audio, scheduled files, live inputs, production profiles, and sink fanout are not claimed yet.
+`station-media-engine` programmatically builds one live GStreamer pipeline; it does not use a shell pipeline parser. The current machine slice supplies paired synthetic program and fallback A/V legs through clock-synchronized `input-selector` elements. It normalizes video to 640×360 I420 at 30 fps and audio to interleaved 48 kHz stereo, then keeps OpenH264, AAC, the parsers, `mpegtsmux`, and `udpsink` persistent while performing bounded source-switch acknowledgement. Its integration test receives the real UDP stream and checks TS framing, error/discontinuity flags, per-PID continuity counters, strict PTS monotonicity, and bounded A/V timing across both switch directions. Scheduled files, live inputs, production profiles, and sink fanout are not claimed yet.
 
 ## Development
 

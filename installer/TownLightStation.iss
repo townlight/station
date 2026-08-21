@@ -163,6 +163,10 @@ begin
     RaiseException('The bundled media runtime did not produce its required core library.');
   if not FileExists(RuntimeRoot + '\lib\gstreamer-1.0\gstopenh264.dll') then
     RaiseException('The bundled media runtime did not produce its required H.264 plugin.');
+  if not FileExists(RuntimeRoot + '\lib\gstreamer-1.0\gstvoaacenc.dll') then
+    RaiseException('The bundled media runtime did not produce its required AAC encoder.');
+  if not FileExists(RuntimeRoot + '\lib\gstreamer-1.0\gstaudiorate.dll') then
+    RaiseException('The bundled media runtime did not produce its required audio rate adjuster.');
 end;
 
 procedure StageStationBinaries;

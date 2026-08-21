@@ -41,7 +41,19 @@ if ($receipt.source_commit -ne $manifestDocument.source_commit -or
 $env:PATH = (Join-Path $runtime 'bin') + ';' + $env:PATH
 $env:GST_PLUGIN_PATH_1_0 = Join-Path $runtime 'lib\gstreamer-1.0'
 $env:GST_PLUGIN_SYSTEM_PATH_1_0 = $env:GST_PLUGIN_PATH_1_0
-foreach ($factory in @('input-selector', 'openh264enc', 'h264parse', 'mpegtsmux', 'udpsink')) {
+foreach ($factory in @(
+    'input-selector',
+    'audiotestsrc',
+    'audioconvert',
+    'audioresample',
+    'audiorate',
+    'voaacenc',
+    'aacparse',
+    'openh264enc',
+    'h264parse',
+    'mpegtsmux',
+    'udpsink'
+)) {
     & (Join-Path $runtime 'bin\gst-inspect-1.0.exe') $factory *> $null
     if ($LASTEXITCODE -ne 0) {
         throw "Installed media factory is unavailable: $factory"

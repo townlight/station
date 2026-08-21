@@ -6,6 +6,8 @@ $requirements = [ordered]@{
     'requires administrative installation' = 'PrivilegesRequired=admin'
     'targets supported 64-bit Windows' = 'ArchitecturesAllowed=x64compatible'
     'carries the official media runtime' = 'ExtractTemporaryFile'
+    'checks the required AAC encoder' = 'gstvoaacenc.dll'
+    'checks the required audio rate adjuster' = 'gstaudiorate.dll'
     'registers the native station service' = 'create TownLightStation'
     'sets automatic delayed service start' = 'start= delayed-auto'
     'configures service recovery' = 'failure TownLightStation'
