@@ -69,7 +69,9 @@ function Invoke-Api {
             $parameters.ContentType = 'application/json'
             $parameters.Body = $Body | ConvertTo-Json -Depth 12 -Compress
         }
-        Invoke-RestMethod @parameters
+        $response = Invoke-RestMethod @parameters
+        if ($response -is [string] -and $response.Trim() -eq 'null') { return $null }
+        return $response
     }
     catch {
         throw "Installed API request failed: $Method $Path ($($_.Exception.GetType().Name))."
@@ -149,26 +151,57 @@ function Capture-UdpTransport([int]$Seconds, [string]$Path, [int]$MinimumBytes =
     finally { $memory.Dispose() }
 }
 
+function Invoke-NativeCapture([string]$FilePath, [string[]]$Arguments) {
+    $captureId = [guid]::NewGuid().ToString('N')
+    $stdoutPath = Join-Path $captureRoot "native-$captureId.stdout"
+    $stderrPath = Join-Path $captureRoot "native-$captureId.stderr"
+    try {
+        # Windows PowerShell 5.1 flattens ArgumentList to one command line. Quote
+        # arguments here so captures continue to work when the temp path contains
+        # spaces (the .NET ArgumentList API is unavailable there).
+        $commandLine = (($Arguments | ForEach-Object {
+            $argument = [string]$_
+            if ($argument -notmatch '[\s"]') { return $argument }
+            $escaped = $argument -replace '(\\*)"', '$1$1\"'
+            $escaped = $escaped -replace '(\\+)$', '$1$1'
+            return '"' + $escaped + '"'
+        }) -join ' ')
+        $process = Start-Process -FilePath $FilePath -ArgumentList $commandLine -NoNewWindow -Wait -PassThru `
+            -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath
+        return [pscustomobject]@{
+            exit_code = $process.ExitCode
+            stdout = Get-Content -LiteralPath $stdoutPath -Raw -ErrorAction SilentlyContinue
+            stderr = Get-Content -LiteralPath $stderrPath -Raw -ErrorAction SilentlyContinue
+        }
+    }
+    finally {
+        Remove-Item -LiteralPath $stdoutPath, $stderrPath -Force -ErrorAction SilentlyContinue
+    }
+}
+
 function Get-DecodedEvidence([string]$Path, [bool]$RequireAudible = $false) {
     $ffprobe = (Get-Command ffprobe.exe -ErrorAction Stop).Source
     $ffmpeg = (Get-Command ffmpeg.exe -ErrorAction Stop).Source
-    $probeText = (& $ffprobe -v error -count_frames -show_entries stream=codec_type,codec_name,nb_read_frames -of json $Path 2>&1 | Out-String)
-    if ($LASTEXITCODE -ne 0) { throw "FFprobe could not inspect $Path." }
+    $probeResult = Invoke-NativeCapture $ffprobe @('-v', 'error', '-count_frames', '-show_entries', 'stream=codec_type,codec_name,nb_read_frames', '-of', 'json', $Path)
+    $probeText = $probeResult.stdout
+    if ($probeResult.exit_code -ne 0) { throw "FFprobe could not inspect $Path." }
     $streams = ($probeText | ConvertFrom-Json).streams
     $video = @($streams | Where-Object codec_type -eq 'video')[0]
     $audio = @($streams | Where-Object codec_type -eq 'audio')[0]
     if (-not $video -or -not $audio -or [int]$video.nb_read_frames -lt 30 -or [int]$audio.nb_read_frames -lt 30) {
         throw "Capture did not contain decodable continuous audio and video: $probeText"
     }
-    $decodeText = (& $ffmpeg -v error -i $Path -t 2 -map 0:v:0 -map 0:a:0 -f null NUL 2>&1 | Out-String)
-    if ($LASTEXITCODE -ne 0) { throw "FFmpeg could not decode proof output $Path. $decodeText" }
-    $digestText = (& $ffmpeg -v error -i $Path -map 0:v:0 -frames:v 1 -f md5 - 2>&1 | Out-String)
-    if ($LASTEXITCODE -ne 0 -or $digestText -notmatch 'MD5=([0-9a-fA-F]{32})') {
+    $decodeResult = Invoke-NativeCapture $ffmpeg @('-v', 'error', '-i', $Path, '-t', '2', '-map', '0:v:0', '-map', '0:a:0', '-f', 'null', 'NUL')
+    if ($decodeResult.exit_code -ne 0) { throw "FFmpeg could not decode proof output $Path. $($decodeResult.stderr)" }
+    $digestResult = Invoke-NativeCapture $ffmpeg @('-v', 'error', '-i', $Path, '-map', '0:v:0', '-frames:v', '1', '-f', 'md5', '-')
+    $digestText = $digestResult.stdout
+    if ($digestResult.exit_code -ne 0 -or $digestText -notmatch 'MD5=([0-9a-fA-F]{32})') {
         throw "FFmpeg could not fingerprint proof video pixels in $Path."
     }
     $videoMd5 = $Matches[1].ToLowerInvariant()
-    $volumeText = (& $ffmpeg -v info -i $Path -t 2 -map 0:a:0 -af volumedetect -f null NUL 2>&1 | Out-String)
-    if ($LASTEXITCODE -ne 0 -or $volumeText -notmatch 'max_volume:\s*(-?[0-9.]+) dB') {
+    $volumeResult = Invoke-NativeCapture $ffmpeg @('-v', 'info', '-i', $Path, '-t', '2', '-map', '0:a:0', '-af', 'volumedetect', '-f', 'null', 'NUL')
+    $volumeText = $volumeResult.stderr
+    if ($volumeResult.exit_code -ne 0 -or $volumeText -notmatch 'max_volume:\s*(-?[0-9.]+) dB') {
         throw "FFmpeg could not measure proof audio in $Path."
     }
     $maxVolume = [double]$Matches[1]
@@ -191,9 +224,13 @@ function Clear-UdpBacklog {
 }
 
 function Stop-ProofSender {
-    if ($sender -and -not $sender.HasExited) {
-        Stop-Process -Id $sender.Id -Force -ErrorAction SilentlyContinue
-        $sender.WaitForExit(5000) | Out-Null
+    if ($sender) {
+        if (-not $sender.HasExited) {
+            Stop-Process -Id $sender.Id -Force -ErrorAction SilentlyContinue
+            $sender.WaitForExit(5000) | Out-Null
+        }
+        $sender.Dispose()
+        $sender = $null
     }
 }
 
@@ -300,9 +337,9 @@ try {
     $fallbackDecoded = Get-DecodedEvidence $fallbackCapture
 
     $ffmpeg = (Get-Command ffmpeg.exe -ErrorAction Stop).Source
-    $senderArgs = @('-re', '-f', 'lavfi', '-i', 'testsrc2=size=640x360:rate=30', '-f', 'lavfi', '-i',
+    $senderArgs = @('-re', '-f', 'lavfi', '-i', 'testsrc2=size=640x360:rate=30', '-re', '-f', 'lavfi', '-i',
         'sine=frequency=997:sample_rate=48000', '-c:v', 'libx264', '-preset', 'ultrafast', '-tune', 'zerolatency',
-        '-g', '30', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '128k', '-f', 'mpegts', "udp://127.0.0.1:$inputPortNumber?pkt_size=1316")
+        '-g', '30', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '128k', '-f', 'mpegts', "udp://127.0.0.1:${inputPortNumber}?pkt_size=1316")
     $sender = Start-Process -FilePath $ffmpeg -ArgumentList $senderArgs -PassThru -WindowStyle Hidden
     Start-Sleep -Milliseconds 500
     if ($sender.HasExited) { throw "FFmpeg live sender exited early with code $($sender.ExitCode)." }
@@ -314,12 +351,20 @@ try {
         reason = $reason; expires_at_unix_ms = $expires; expected_authority_revision = [uint64]$authority.authority_revision
     })
     if ($requested.state -ne 'arming') { throw 'Live takeover did not begin in arming state.' }
-    $armed = Wait-For -Action { Invoke-Api 'Get' "/live-takeovers/$sessionId" } `
+    $armed = Wait-For -Action {
+        $value = Invoke-Api 'Get' "/live-takeovers/$sessionId"
+        if ($value.state -eq 'failed') { throw "Live takeover failed while arming: $($value.failure_detail)" }
+        return $value
+    } `
         -Predicate { param($value) $value.state -eq 'armed' } -Description 'durable Armed takeover state'
 
     $authority = Invoke-Api 'Get' "/channels/$channelId/live-authority"
     Invoke-Api 'Post' "/live-takeovers/$sessionId/take" ([ordered]@{ actor_id = $operatorId; expected_authority_revision = [uint64]$authority.authority_revision }) | Out-Null
-    $onAir = Wait-For -Action { Invoke-Api 'Get' "/live-takeovers/$sessionId" } `
+    $onAir = Wait-For -Action {
+        $value = Invoke-Api 'Get' "/live-takeovers/$sessionId"
+        if ($value.state -eq 'failed') { throw "Live takeover failed while taking air: $($value.failure_detail)" }
+        return $value
+    } `
         -Predicate { param($value) $value.state -eq 'on_air' -and $null -ne $value.taken_at_unix_ms } -Description 'durable OnAir takeover state'
     $liveRuntime = Wait-For -Action { Get-ProofRuntime } `
         -Predicate { param($value) $null -ne $value -and $value.state -eq 'live' } -Description 'runtime live state'
@@ -340,7 +385,11 @@ try {
 
     $authority = Invoke-Api 'Get' "/channels/$channelId/live-authority"
     Invoke-Api 'Post' "/live-takeovers/$sessionId/return" ([ordered]@{ actor_id = $operatorId; expected_authority_revision = [uint64]$authority.authority_revision }) | Out-Null
-    $completed = Wait-For -Action { Invoke-Api 'Get' "/live-takeovers/$sessionId" } `
+    $completed = Wait-For -Action {
+        $value = Invoke-Api 'Get' "/live-takeovers/$sessionId"
+        if ($value.state -eq 'failed') { throw "Live takeover failed while returning: $($value.failure_detail)" }
+        return $value
+    } `
         -Predicate { param($value) $value.state -eq 'completed' -and $null -ne $value.returned_at_unix_ms } -Description 'durable Completed takeover state'
     $recoveryRuntime = Wait-For -Action { Get-ProofRuntime } `
         -Predicate { param($value) $null -ne $value -and $value.state -in @('healthy_fallback', 'on_air') } -Description 'fallback runtime recovery'

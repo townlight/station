@@ -280,12 +280,6 @@ impl PersistentPlayout {
             .property("single-segment", true)
             .build()
             .map_err(|error| build_error("identity", error))?;
-        let audio_rate = gst::ElementFactory::make("audiorate")
-            .name("canonical-audio-rate")
-            .property("skip-to-first", true)
-            .property("tolerance", 0_u64)
-            .build()
-            .map_err(|error| build_error("audiorate", error))?;
         let audio_output_queue = element("queue", "audio-output-queue")?;
         let audio_encoder = gst::ElementFactory::make("voaacenc")
             .name("audio-encoder")
@@ -375,7 +369,6 @@ impl PersistentPlayout {
                 &program_audio_queue,
                 &audio_selector,
                 &audio_timeline,
-                &audio_rate,
                 &audio_output_queue,
                 &audio_encoder,
                 &audio_parser,
@@ -447,7 +440,6 @@ impl PersistentPlayout {
         gst::Element::link_many([
             &audio_selector,
             &audio_timeline,
-            &audio_rate,
             &audio_output_queue,
             &audio_encoder,
             &audio_parser,

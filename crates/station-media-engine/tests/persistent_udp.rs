@@ -3,6 +3,7 @@ use std::fs;
 use std::io::Cursor;
 use std::net::UdpSocket;
 use std::path::Path;
+use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
 use gst::prelude::*;
@@ -876,6 +877,167 @@ fn start_udp_decoder(port: u16) -> (gst::Pipeline, gst::Element) {
     (pipeline, sink)
 }
 
+fn start_udp_audio_decoder(port: u16) -> (gst::Pipeline, Vec<gst::Element>) {
+    let pipeline = gst::Pipeline::new();
+    let source = gst::ElementFactory::make("udpsrc")
+        .property("port", i32::from(port))
+        .property(
+            "caps",
+            gst::Caps::builder("video/mpegts")
+                .field("systemstream", true)
+                .field("packetsize", 188_i32)
+                .build(),
+        )
+        .build()
+        .unwrap();
+    let demux = gst::ElementFactory::make("tsdemux")
+        .name("audio-proof-demux")
+        .build()
+        .unwrap();
+    let queue = gst::ElementFactory::make("queue")
+        .name("audio-proof-queue")
+        .build()
+        .unwrap();
+    let parser = gst::ElementFactory::make("aacparse")
+        .name("audio-proof-parse")
+        .build()
+        .unwrap();
+    let decoder = gst::ElementFactory::make("avdec_aac")
+        .name("audio-proof-decode")
+        .build()
+        .unwrap();
+    let convert = gst::ElementFactory::make("audioconvert")
+        .name("audio-proof-convert")
+        .build()
+        .unwrap();
+    let resample = gst::ElementFactory::make("audioresample")
+        .name("audio-proof-resample")
+        .build()
+        .unwrap();
+    let caps = gst::ElementFactory::make("capsfilter")
+        .name("audio-proof-caps")
+        .property(
+            "caps",
+            gst::Caps::builder("audio/x-raw")
+                .field("format", "S16LE")
+                .field("layout", "interleaved")
+                .field("rate", 48_000_i32)
+                .field("channels", 2_i32)
+                .build(),
+        )
+        .build()
+        .unwrap();
+    let sink = gst::ElementFactory::make("appsink")
+        .name("audio-proof-sink")
+        .property("sync", false)
+        .property("max-buffers", 8_u32)
+        .property("drop", true)
+        .build()
+        .unwrap();
+    let queue1 = gst::ElementFactory::make("queue")
+        .name("audio-proof-queue-1")
+        .build()
+        .unwrap();
+    let parser1 = gst::ElementFactory::make("aacparse")
+        .name("audio-proof-parse-1")
+        .build()
+        .unwrap();
+    let decoder1 = gst::ElementFactory::make("avdec_aac")
+        .name("audio-proof-decode-1")
+        .build()
+        .unwrap();
+    let convert1 = gst::ElementFactory::make("audioconvert")
+        .name("audio-proof-convert-1")
+        .build()
+        .unwrap();
+    let resample1 = gst::ElementFactory::make("audioresample")
+        .name("audio-proof-resample-1")
+        .build()
+        .unwrap();
+    let caps1 = gst::ElementFactory::make("capsfilter")
+        .name("audio-proof-caps-1")
+        .property(
+            "caps",
+            gst::Caps::builder("audio/x-raw")
+                .field("format", "S16LE")
+                .field("layout", "interleaved")
+                .field("rate", 48_000_i32)
+                .field("channels", 2_i32)
+                .build(),
+        )
+        .build()
+        .unwrap();
+    let sink1 = gst::ElementFactory::make("appsink")
+        .name("audio-proof-sink-1")
+        .property("sync", false)
+        .property("max-buffers", 8_u32)
+        .property("drop", true)
+        .build()
+        .unwrap();
+    let discard = gst::ElementFactory::make("fakesink")
+        .name("audio-proof-discard")
+        .property("sync", false)
+        .property("async", false)
+        .build()
+        .unwrap();
+    pipeline
+        .add_many([
+            &source, &demux, &queue, &parser, &decoder, &convert, &resample, &caps, &sink, &queue1,
+            &parser1, &decoder1, &convert1, &resample1, &caps1, &sink1, &discard,
+        ])
+        .unwrap();
+    source.link(&demux).unwrap();
+    gst::Element::link_many([&queue, &parser, &decoder, &convert, &resample, &caps, &sink])
+        .unwrap();
+    gst::Element::link_many([
+        &queue1, &parser1, &decoder1, &convert1, &resample1, &caps1, &sink1,
+    ])
+    .unwrap();
+    let queue_sink = queue.static_pad("sink").unwrap();
+    let queue_sink1 = queue1.static_pad("sink").unwrap();
+    let discard_sink = discard.static_pad("sink").unwrap();
+    demux.connect_pad_added(move |_, pad| {
+        let caps = pad.current_caps().unwrap_or_else(|| pad.query_caps(None));
+        let media_type = caps
+            .structure(0)
+            .map(|structure| structure.name().to_string())
+            .unwrap_or_default();
+        if media_type.starts_with("audio/") || pad.name().starts_with("audio_") {
+            if !queue_sink.is_linked() {
+                let _ = pad.link(&queue_sink);
+            } else if !queue_sink1.is_linked() {
+                let _ = pad.link(&queue_sink1);
+            } else {
+                let _ = pad.link(&discard_sink);
+            }
+        }
+    });
+    (pipeline, vec![sink, sink1])
+}
+
+fn pull_audio_energy(sinks: &[gst::Element]) -> f64 {
+    let mut maximum: f64 = 0.0;
+    for sink in sinks {
+        for _ in 0..20 {
+            let Some(sample) = (0..10).find_map(|_| {
+                sink.emit_by_name::<Option<gst::Sample>>("try-pull-sample", &[&100_000_000_u64])
+            }) else {
+                break;
+            };
+            let map = sample.buffer().unwrap().map_readable().unwrap();
+            let samples = map
+                .as_slice()
+                .chunks_exact(2)
+                .map(|bytes| i16::from_le_bytes([bytes[0], bytes[1]]) as f64);
+            let (sum, count) = samples.fold((0.0, 0_u64), |(sum, count), sample| {
+                (sum + sample.abs(), count + 1)
+            });
+            maximum = maximum.max(sum / count as f64);
+        }
+    }
+    maximum
+}
+
 fn start_udp_live_sender(port: u16) -> gst::Pipeline {
     gst::init().unwrap();
     let pipeline = gst::Pipeline::new();
@@ -953,6 +1115,66 @@ fn start_udp_live_sender(port: u16) -> gst::Pipeline {
     .unwrap();
     pipeline.set_state(gst::State::Playing).unwrap();
     pipeline
+}
+
+struct FfmpegLiveSender {
+    child: Child,
+}
+
+impl FfmpegLiveSender {
+    fn try_wait(&mut self) -> std::io::Result<Option<std::process::ExitStatus>> {
+        self.child.try_wait()
+    }
+}
+
+impl Drop for FfmpegLiveSender {
+    fn drop(&mut self) {
+        if self.child.try_wait().ok().flatten().is_none() {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+        }
+    }
+}
+
+fn start_ffmpeg_live_sender(port: u16) -> FfmpegLiveSender {
+    let child = Command::new("ffmpeg.exe")
+        .args([
+            "-nostdin",
+            "-loglevel",
+            "error",
+            "-re",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc2=size=640x360:rate=30",
+            "-re",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=997:sample_rate=48000",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "ultrafast",
+            "-tune",
+            "zerolatency",
+            "-g",
+            "30",
+            "-pix_fmt",
+            "yuv420p",
+            "-c:a",
+            "aac",
+            "-b:a",
+            "128k",
+            "-f",
+            "mpegts",
+            &format!("udp://127.0.0.1:{port}?pkt_size=1316"),
+        ])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("FFmpeg is required for the MPEG-TS interoperability proof");
+    FfmpegLiveSender { child }
 }
 
 #[test]
@@ -1195,6 +1417,43 @@ fn arms_udp_live_av_takes_it_without_rebuilding_output_and_returns_to_fallback()
         Err(EngineError::LiveNotArmed)
     ));
 
+    decoder.set_state(gst::State::Null).unwrap();
+    playout.stop().unwrap();
+}
+
+#[test]
+fn ffmpeg_udp_live_takeover_emits_audible_audio() {
+    gst::init().unwrap();
+    let output_probe = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let output_port = output_probe.local_addr().unwrap().port();
+    drop(output_probe);
+    let (decoder, audio_sinks) = start_udp_audio_decoder(output_port);
+    decoder.set_state(gst::State::Playing).unwrap();
+    let mut playout = PersistentPlayout::start_udp_with_profile(
+        ([127, 0, 0, 1], output_port).into(),
+        OutputProfileId::Proof360p30,
+    )
+    .unwrap();
+    assert!(pull_audio_energy(&audio_sinks) < 10.0);
+
+    let input_probe = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let input_port = input_probe.local_addr().unwrap().port();
+    drop(input_probe);
+    let mut sender = start_ffmpeg_live_sender(input_port);
+    std::thread::sleep(Duration::from_millis(500));
+    assert!(sender.try_wait().unwrap().is_none());
+    playout
+        .arm_live_udp(([127, 0, 0, 1], input_port).into())
+        .unwrap();
+    playout.select(SourceRole::Live).unwrap();
+    let during = pull_audio_energy(&audio_sinks);
+    assert!(
+        during > 100.0,
+        "FFmpeg live audio was silent: mean abs {during}"
+    );
+
+    playout.select(SourceRole::Fallback).unwrap();
+    playout.disarm_live().unwrap();
     decoder.set_state(gst::State::Null).unwrap();
     playout.stop().unwrap();
 }
