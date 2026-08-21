@@ -4,7 +4,7 @@ TownLight Station is a locally installed Windows broadcast appliance for LPM and
 
 The current foundation provides a versioned station-profile API, strict commissioning validation, SQLite persistence in WAL mode, and a runnable HTTP daemon. It is the first vertical slice of the station control plane, not a feature-complete release.
 
-The repository also contains a runnable isolated channel worker, a length-framed typed command/event protocol, and a durable per-channel event journal. The worker records each event and synchronizes it to disk before emitting the event to the control plane. Unknown major versions, stale commands, corrupted journals, and malformed frames fail visibly.
+The repository also contains a supervised isolated channel worker, a length-framed typed command/event protocol, and a durable per-channel event journal. The station runtime launches and handshakes the real worker over a private named pipe, validates every identity and sequence, enforces response deadlines, and guarantees process cleanup. The worker records each event and synchronizes it to disk before emitting the event to the control plane. Unknown major versions, stale commands, corrupted journals, malformed frames, and missed deadlines fail visibly.
 
 ## Architecture
 

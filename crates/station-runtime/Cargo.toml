@@ -1,0 +1,9 @@
+[package]
+name = "station-runtime"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+station-media-protocol.workspace = true
+station-windows-ipc.workspace = true

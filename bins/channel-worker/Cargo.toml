@@ -11,4 +11,5 @@ station-windows-ipc.workspace = true
 
 [dev-dependencies]
 station-media-journal.workspace = true
+station-runtime.workspace = true
 station-media-protocol.workspace = true

@@ -3,6 +3,7 @@ use std::fs::File;
 use std::io::{Read, Write};
 use std::os::windows::io::{AsRawHandle, FromRawHandle, RawHandle};
 use std::ptr;
+use std::time::{Duration, Instant};
 
 type Bool = i32;
 type Dword = u32;
@@ -15,6 +16,7 @@ const FILE_FLAG_FIRST_PIPE_INSTANCE: Dword = 0x0008_0000;
 const PIPE_TYPE_BYTE: Dword = 0x0000_0000;
 const PIPE_READMODE_BYTE: Dword = 0x0000_0000;
 const PIPE_WAIT: Dword = 0x0000_0000;
+const PIPE_NOWAIT: Dword = 0x0000_0001;
 const PIPE_REJECT_REMOTE_CLIENTS: Dword = 0x0000_0008;
 const GENERIC_READ: Dword = 0x8000_0000;
 const GENERIC_WRITE: Dword = 0x4000_0000;
@@ -24,6 +26,7 @@ const SECURITY_IDENTIFICATION: Dword = 0x0001_0000;
 const SECURITY_DESCRIPTOR_REVISION: Dword = 1;
 const ERROR_PIPE_BUSY: Dword = 231;
 const ERROR_PIPE_CONNECTED: Dword = 535;
+const ERROR_PIPE_LISTENING: Dword = 536;
 const PIPE_BUFFER_BYTES: Dword = 65_540;
 const PIPE_CONNECT_TIMEOUT_MILLISECONDS: Dword = 5_000;
 const PIPE_SDDL: &str = "D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;OW)";
@@ -58,6 +61,20 @@ unsafe extern "system" {
         template_file: Handle,
     ) -> Handle;
     fn WaitNamedPipeW(name: *const u16, timeout: Dword) -> Bool;
+    fn SetNamedPipeHandleState(
+        pipe: Handle,
+        mode: *mut Dword,
+        maximum_collection_count: *mut Dword,
+        collection_data_timeout: *mut Dword,
+    ) -> Bool;
+    fn PeekNamedPipe(
+        pipe: Handle,
+        buffer: *mut c_void,
+        buffer_size: Dword,
+        bytes_read: *mut Dword,
+        total_bytes_available: *mut Dword,
+        bytes_left_in_message: *mut Dword,
+    ) -> Bool;
     fn GetLastError() -> Dword;
     fn LocalFree(memory: *mut c_void) -> *mut c_void;
 }
@@ -75,6 +92,8 @@ unsafe extern "system" {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IpcError {
     InvalidName,
+    InvalidByteCount,
+    TimedOut { operation: &'static str },
     Os { operation: &'static str, code: u32 },
 }
 
@@ -102,7 +121,7 @@ impl PipeServer {
             CreateNamedPipeW(
                 wide_name.as_ptr(),
                 PIPE_ACCESS_DUPLEX | FILE_FLAG_FIRST_PIPE_INSTANCE,
-                PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
+                PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_NOWAIT | PIPE_REJECT_REMOTE_CLIENTS,
                 1,
                 PIPE_BUFFER_BYTES,
                 PIPE_BUFFER_BYTES,
@@ -125,20 +144,56 @@ impl PipeServer {
         &self.name
     }
 
-    pub fn accept(mut self) -> Result<PipeStream, IpcError> {
+    pub fn accept(self) -> Result<PipeStream, IpcError> {
+        self.connect(None)
+    }
+
+    pub fn accept_timeout(self, timeout: Duration) -> Result<PipeStream, IpcError> {
+        self.connect(Some(timeout))
+    }
+
+    fn connect(mut self, timeout: Option<Duration>) -> Result<PipeStream, IpcError> {
         let file = self.file.take().expect("a pipe server owns its handle");
-        // SAFETY: the file owns a live named-pipe server handle and no OVERLAPPED operation is used.
-        let connected =
-            unsafe { ConnectNamedPipe(file.as_raw_handle() as Handle, ptr::null_mut()) };
-        if connected == 0 {
+        let started = Instant::now();
+        loop {
+            // SAFETY: the file owns a live nonblocking named-pipe server handle and no
+            // OVERLAPPED operation is used.
+            let connected =
+                unsafe { ConnectNamedPipe(file.as_raw_handle() as Handle, ptr::null_mut()) };
+            if connected != 0 {
+                break;
+            }
             // SAFETY: `GetLastError` reads the calling thread's error value.
             let code = unsafe { GetLastError() };
-            if code != ERROR_PIPE_CONNECTED {
+            if code == ERROR_PIPE_CONNECTED {
+                break;
+            }
+            if code != ERROR_PIPE_LISTENING {
                 return Err(IpcError::Os {
                     operation: "ConnectNamedPipe",
                     code,
                 });
             }
+            if timeout.is_some_and(|limit| started.elapsed() >= limit) {
+                return Err(IpcError::TimedOut {
+                    operation: "ConnectNamedPipe",
+                });
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+
+        let mut blocking_mode = PIPE_READMODE_BYTE | PIPE_WAIT;
+        // SAFETY: the handle is a connected named pipe and the mode pointer is valid for the call.
+        if unsafe {
+            SetNamedPipeHandleState(
+                file.as_raw_handle() as Handle,
+                &mut blocking_mode,
+                ptr::null_mut(),
+                ptr::null_mut(),
+            )
+        } == 0
+        {
+            return Err(last_error("SetNamedPipeHandleState"));
         }
         Ok(PipeStream { file })
     }
@@ -189,6 +244,38 @@ impl PipeStream {
             {
                 return Err(last_error("WaitNamedPipeW"));
             }
+        }
+    }
+
+    pub fn wait_for_bytes(&self, minimum: usize, timeout: Duration) -> Result<(), IpcError> {
+        let minimum = Dword::try_from(minimum).map_err(|_| IpcError::InvalidByteCount)?;
+        let started = Instant::now();
+        loop {
+            let mut available = 0;
+            // SAFETY: the handle is a connected named pipe and `available` points to writable
+            // storage. No buffer is requested, so all other optional pointers are null.
+            if unsafe {
+                PeekNamedPipe(
+                    self.file.as_raw_handle() as Handle,
+                    ptr::null_mut(),
+                    0,
+                    ptr::null_mut(),
+                    &mut available,
+                    ptr::null_mut(),
+                )
+            } == 0
+            {
+                return Err(last_error("PeekNamedPipe"));
+            }
+            if available >= minimum {
+                return Ok(());
+            }
+            if started.elapsed() >= timeout {
+                return Err(IpcError::TimedOut {
+                    operation: "PeekNamedPipe",
+                });
+            }
+            std::thread::sleep(Duration::from_millis(2));
         }
     }
 }

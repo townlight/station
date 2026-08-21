@@ -1,6 +1,6 @@
 use std::io::{Read, Write};
 use std::thread;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use station_windows_ipc::{IpcError, PipeServer, PipeStream};
 
@@ -54,4 +54,51 @@ fn rejects_names_outside_the_scoped_station_namespace() {
         PipeStream::connect(r"\\.\pipe\unrelated"),
         Err(IpcError::InvalidName)
     ));
+}
+
+#[test]
+fn bounds_the_wait_for_a_worker_to_connect() {
+    let server = PipeServer::bind(&unique_suffix("timeout")).unwrap();
+    let started = Instant::now();
+    let result = server.accept_timeout(Duration::from_millis(40));
+    let elapsed = started.elapsed();
+
+    assert!(matches!(
+        result,
+        Err(IpcError::TimedOut {
+            operation: "ConnectNamedPipe"
+        })
+    ));
+    assert!(
+        elapsed >= Duration::from_millis(30),
+        "connection wait returned too early after {elapsed:?}"
+    );
+    assert!(elapsed < Duration::from_secs(1));
+}
+
+#[test]
+fn bounds_the_wait_for_worker_bytes() {
+    let server = PipeServer::bind(&unique_suffix("read-timeout")).unwrap();
+    let name = server.name().to_string();
+    let client = thread::spawn(move || {
+        let _stream = PipeStream::connect(&name).unwrap();
+        thread::sleep(Duration::from_millis(100));
+    });
+    let stream = server.accept_timeout(Duration::from_secs(1)).unwrap();
+
+    let started = Instant::now();
+    let result = stream.wait_for_bytes(1, Duration::from_millis(40));
+    let elapsed = started.elapsed();
+    assert!(matches!(
+        result,
+        Err(IpcError::TimedOut {
+            operation: "PeekNamedPipe"
+        })
+    ));
+    assert!(
+        elapsed >= Duration::from_millis(30),
+        "byte wait returned too early after {elapsed:?}"
+    );
+    assert!(elapsed < Duration::from_secs(1));
+    client.join().unwrap();
 }

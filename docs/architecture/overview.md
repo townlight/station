@@ -30,6 +30,8 @@ The domain crate has no storage, HTTP, media, or Windows-service dependencies. S
 
 `station-windows-ipc` owns the local control boundary. Each worker connects to one duplex byte-mode named pipe beneath `\\.\pipe\townlight-station\`. Pipe creation rejects duplicate servers and remote clients, and applies a protected ACL limited to SYSTEM, Administrators, and the creating user. Commands and events use the same versioned frames; standard input and output are not protocol transports.
 
+`station-runtime` owns worker process lifecycle from the station side. It creates the exclusive pipe, launches the worker without inherited protocol handles, bounds connection and response waits, accepts only the configured worker/channel identity and next sequence, requires a durable `Ready` handshake, and terminates and reaps the child on every failed launch, timeout, or abandoned session. Clean shutdown is complete only after `ShutdownComplete` and a successful process exit. See [ADR 0003](../adr/0003-supervised-worker-lifecycle.md).
+
 ## Authority rules
 
 | Truth | Owner |
@@ -60,4 +62,4 @@ Rust is used for native services, workers, command-line tools, and installation 
 
 The current spine commissions a station profile through `PUT /api/v1/station`, protects updates with an expected revision, persists it transactionally in SQLite with WAL and foreign-key enforcement, reads it after restart, and exposes database readiness through `GET /health`.
 
-The first channel worker now runs as an independent process. It records readiness, heartbeat, applied-plan revision, rejected-command, and shutdown events durably before emitting them, resumes its event sequence after restart, and exchanges all protocol traffic through an ACL-protected Windows named pipe. The station service supervisor and persistent GStreamer graph remain the next media milestones.
+The first channel worker now runs as an independent supervised process. It records readiness, heartbeat, applied-plan revision, rejected-command, and shutdown events durably before emitting them, resumes its event sequence after restart, and exchanges all protocol traffic through an ACL-protected Windows named pipe. The supervisor proves real-process launch, handshake, sequenced commands, restart, acknowledged shutdown, response deadlines, and child cleanup. Wiring channel configuration into `stationd` and the persistent GStreamer graph remain the next media milestones.
