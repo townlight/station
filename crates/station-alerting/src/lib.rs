@@ -1,11 +1,12 @@
 //! Durable operator alert delivery.
 
+use std::collections::BTreeMap;
 use std::io::{Read, Write};
 use std::os::windows::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::sync::{
     Arc,
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicU64, Ordering},
 };
 use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -13,6 +14,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use hmac::{Hmac, Mac};
+use jiff::{Timestamp, tz::TimeZone};
 use lettre::message::header::ContentType;
 use lettre::transport::smtp::authentication::Credentials;
 use lettre::{Message, SmtpTransport, Transport};
@@ -20,7 +22,8 @@ use serde::Serialize;
 use sha2::Sha256;
 use station_domain::{
     AlertChannel, AlertConditionKind, AlertDelivery, AlertDeliveryPayload, AlertEvent,
-    AlertEventState, AlertSeverity, SystemResourceSample,
+    AlertEventState, AlertSeverity, ChannelRuntimeState, SelfTestKind, SelfTestStatus,
+    SelfTestTrigger, SystemResourceSample, SystemSelfTest,
 };
 use station_storage::{AlertChannelSecret, StationStore};
 use ureq::Agent;
@@ -34,7 +37,19 @@ const DEFAULT_LEASE_DURATION_MS: i64 = 30_000;
 const DEFAULT_MAXIMUM_ATTEMPTS: u32 = 5;
 const DEFAULT_BASE_BACKOFF_MS: i64 = 120_000;
 const RESOURCE_SAMPLE_INTERVAL_MS: i64 = 60_000;
+const SELF_TEST_SCHEDULE_CHECK_INTERVAL_MS: i64 = 30_000;
 const LOW_DISK_GB: f64 = 10.0;
+static SELF_TEST_NONCE: AtomicU64 = AtomicU64::new(1);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LocalStationTime {
+    pub year: u16,
+    pub month: u8,
+    pub day: u8,
+    pub weekday: u8,
+    pub hour: u8,
+    pub minute: u8,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeliveryEnvelope {
@@ -83,6 +98,7 @@ pub fn run_until(database_path: &Path, stop: Arc<AtomicBool>) -> Result<(), Stri
     let transport = OperatorAlertTransport::new(Duration::from_secs(5));
     let worker = AlertDeliveryWorker::new(database_path, &transport);
     let mut next_resource_sample_at = 0;
+    let mut next_self_test_schedule_check_at = 0;
     while !stop.load(Ordering::Acquire) {
         let now_unix_ms = i64::try_from(
             SystemTime::now()
@@ -95,9 +111,377 @@ pub fn run_until(database_path: &Path, stop: Arc<AtomicBool>) -> Result<(), Stri
             sample_and_record_system_resources(database_path, now_unix_ms)?;
             next_resource_sample_at = now_unix_ms.saturating_add(RESOURCE_SAMPLE_INTERVAL_MS);
         }
+        if now_unix_ms >= next_self_test_schedule_check_at {
+            run_due_system_self_tests(database_path, now_unix_ms)?;
+            next_self_test_schedule_check_at =
+                now_unix_ms.saturating_add(SELF_TEST_SCHEDULE_CHECK_INTERVAL_MS);
+        }
         if !worker.run_once(now_unix_ms)? {
             std::thread::sleep(Duration::from_millis(250));
         }
+    }
+    Ok(())
+}
+
+pub fn run_due_system_self_tests(
+    database_path: &Path,
+    now_unix_ms: i64,
+) -> Result<Vec<SystemSelfTest>, String> {
+    let application_directory = std::env::current_exe()
+        .map_err(|error| format!("could not locate the station application: {error}"))?
+        .parent()
+        .ok_or_else(|| "station application has no parent directory".to_string())?
+        .to_path_buf();
+    run_due_system_self_tests_at(
+        database_path,
+        now_unix_ms,
+        station_local_time(database_path, now_unix_ms)?,
+        &application_directory,
+    )
+}
+
+pub fn run_due_system_self_tests_at(
+    database_path: &Path,
+    now_unix_ms: i64,
+    local: LocalStationTime,
+    application_directory: &Path,
+) -> Result<Vec<SystemSelfTest>, String> {
+    validate_local_station_time(local)?;
+    let store = StationStore::open(database_path)?;
+    let schedules = store.list_self_test_schedules()?;
+    let mut due = Vec::new();
+    for schedule in schedules {
+        if !schedule.enabled
+            || (local.hour, local.minute) < (schedule.local_hour, schedule.local_minute)
+            || schedule
+                .weekday
+                .is_some_and(|weekday| weekday != local.weekday)
+        {
+            continue;
+        }
+        let period_key = format!("{:04}-{:02}-{:02}", local.year, local.month, local.day);
+        if !store.self_test_exists_for_period(schedule.kind, &period_key)? {
+            due.push((schedule.kind, period_key));
+        }
+    }
+    drop(store);
+    let mut records = Vec::with_capacity(due.len());
+    for (kind, period_key) in due {
+        records.push(run_system_self_test_at(
+            database_path,
+            kind,
+            SelfTestTrigger::Scheduled,
+            Some(period_key),
+            now_unix_ms,
+            application_directory,
+        )?);
+    }
+    Ok(records)
+}
+
+pub fn run_system_self_test(
+    database_path: &Path,
+    kind: SelfTestKind,
+    trigger: SelfTestTrigger,
+    schedule_period_key: Option<String>,
+    started_at_unix_ms: i64,
+) -> Result<SystemSelfTest, String> {
+    let application_directory = std::env::current_exe()
+        .map_err(|error| format!("could not locate the station application: {error}"))?
+        .parent()
+        .ok_or_else(|| "station application has no parent directory".to_string())?
+        .to_path_buf();
+    run_system_self_test_at(
+        database_path,
+        kind,
+        trigger,
+        schedule_period_key,
+        started_at_unix_ms,
+        &application_directory,
+    )
+}
+
+pub fn run_system_self_test_at(
+    database_path: &Path,
+    kind: SelfTestKind,
+    trigger: SelfTestTrigger,
+    schedule_period_key: Option<String>,
+    started_at_unix_ms: i64,
+    application_directory: &Path,
+) -> Result<SystemSelfTest, String> {
+    if started_at_unix_ms < 0
+        || (trigger == SelfTestTrigger::Scheduled) != schedule_period_key.is_some()
+    {
+        return Err("self-test trigger fields are invalid".into());
+    }
+    let store = StationStore::open(database_path)?;
+    let data_directory = database_path
+        .parent()
+        .ok_or_else(|| "station database has no parent directory".to_string())?;
+    let backup_directory = data_directory.join("backups");
+    let mut checks = BTreeMap::new();
+    checks.insert(
+        "database_integrity".into(),
+        store.database_integrity_check().unwrap_or(false),
+    );
+    checks.insert(
+        "backup_write_read_delete".into(),
+        backup_write_probe(&backup_directory),
+    );
+    checks.insert(
+        "station_service_binary".into(),
+        application_directory.join("stationd.exe").is_file(),
+    );
+    checks.insert(
+        "channel_worker_binary".into(),
+        application_directory.join("channel-worker.exe").is_file(),
+    );
+    checks.insert(
+        "private_media_runtime".into(),
+        application_directory
+            .join("runtime/gstreamer/bin/gstreamer-1.0-0.dll")
+            .is_file(),
+    );
+    checks.insert(
+        "station_profile_configured".into(),
+        store.read_profile().is_ok_and(|profile| profile.is_some()),
+    );
+    let enabled_channels = store
+        .list_channels()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|channel| channel.enabled)
+        .collect::<Vec<_>>();
+    checks.insert(
+        "enabled_output_configured".into(),
+        !enabled_channels.is_empty(),
+    );
+    checks.insert(
+        "enabled_output_health".into(),
+        !enabled_channels.is_empty()
+            && enabled_channels.iter().all(|channel| {
+                store
+                    .read_channel_runtime(&channel.channel_id)
+                    .is_ok_and(|observation| {
+                        observation.is_some_and(|observation| {
+                            matches!(
+                                observation.state,
+                                ChannelRuntimeState::HealthyFallback | ChannelRuntimeState::OnAir
+                            ) && started_at_unix_ms
+                                .checked_sub(observation.heartbeat_at_unix_ms)
+                                .is_some_and(|age| (0..=15_000).contains(&age))
+                        })
+                    })
+            }),
+    );
+    checks.insert(
+        "recent_resource_sample".into(),
+        store.latest_system_resource_sample().is_ok_and(|sample| {
+            sample.is_some_and(|sample| {
+                sample.database_reachable
+                    && sample.backup_volume_writable
+                    && sample.service_running
+                    && started_at_unix_ms
+                        .checked_sub(sample.sampled_at_unix_ms)
+                        .is_some_and(|age| (0..=120_000).contains(&age))
+            })
+        }),
+    );
+
+    if kind == SelfTestKind::Weekly {
+        let rehearsal_path = data_directory.join("self-tests/database-restore-rehearsal.db");
+        checks.insert(
+            "database_restore_rehearsal".into(),
+            store
+                .prove_database_restore_round_trip(&rehearsal_path)
+                .unwrap_or(false),
+        );
+        let destinations = store
+            .list_alert_channels()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|channel| channel.enabled)
+            .collect::<Vec<_>>();
+        let nonce = SELF_TEST_NONCE.fetch_add(1, Ordering::Relaxed);
+        let tests_queued = !destinations.is_empty()
+            && destinations.iter().enumerate().all(|(index, channel)| {
+                let event_id = format!("weekly-self-test-{started_at_unix_ms}-{nonce}-{index}");
+                let delivery_id =
+                    format!("weekly-self-test-delivery-{started_at_unix_ms}-{nonce}-{index}");
+                store
+                    .enqueue_alert_channel_test(
+                        &event_id,
+                        &delivery_id,
+                        &channel.channel_id,
+                        started_at_unix_ms,
+                    )
+                    .is_ok()
+            });
+        checks.insert("alert_destination_test_queued".into(), tests_queued);
+    }
+
+    let mandatory = [
+        "database_integrity",
+        "backup_write_read_delete",
+        "station_service_binary",
+        "channel_worker_binary",
+        "private_media_runtime",
+    ];
+    let mandatory_failed = mandatory
+        .iter()
+        .any(|name| checks.get(*name) != Some(&true))
+        || (kind == SelfTestKind::Weekly
+            && checks.get("database_restore_rehearsal") != Some(&true));
+    let status = if mandatory_failed {
+        SelfTestStatus::Fail
+    } else if checks.values().any(|passed| !passed) {
+        SelfTestStatus::Warn
+    } else {
+        SelfTestStatus::Pass
+    };
+    let passed = checks.values().filter(|passed| **passed).count();
+    let summary = match status {
+        SelfTestStatus::Pass => format!("All {passed} implemented {kind:?} checks passed."),
+        SelfTestStatus::Warn => format!(
+            "{passed} of {} implemented {kind:?} checks passed; commissioning attention remains.",
+            checks.len()
+        ),
+        SelfTestStatus::Fail => format!(
+            "{passed} of {} implemented {kind:?} checks passed; a core station check failed.",
+            checks.len()
+        ),
+    };
+    let nonce = SELF_TEST_NONCE.fetch_add(1, Ordering::Relaxed);
+    let kind_name = match kind {
+        SelfTestKind::Daily => "daily",
+        SelfTestKind::Weekly => "weekly",
+    };
+    let self_test_id = format!("self-test-{kind_name}-{started_at_unix_ms}-{nonce}");
+    let evidence_directory = data_directory.join("self-tests");
+    std::fs::create_dir_all(&evidence_directory)
+        .map_err(|error| format!("could not create self-test evidence directory: {error}"))?;
+    let evidence_path = evidence_directory.join(format!("{self_test_id}.json"));
+    let finished_at_unix_ms = unix_time_milliseconds()?.max(started_at_unix_ms);
+    let record = SystemSelfTest {
+        self_test_id,
+        kind,
+        trigger,
+        schedule_period_key,
+        started_at_unix_ms,
+        finished_at_unix_ms,
+        status,
+        checks,
+        summary,
+        evidence_path: Some(evidence_path.to_string_lossy().into_owned()),
+    };
+    record.validate().map_err(str::to_string)?;
+    write_self_test_evidence(&evidence_path, &record)?;
+    let stored = match store.record_system_self_test(&record) {
+        Ok(stored) => stored,
+        Err(error) => {
+            let _ = std::fs::remove_file(&evidence_path);
+            return Err(error);
+        }
+    };
+    let resource_ref = format!("system-self-test-{kind_name}");
+    if status == SelfTestStatus::Fail {
+        store.observe_alert_and_route(&AlertEvent {
+            event_id: format!("self-test-failure-{}", stored.self_test_id),
+            condition: AlertConditionKind::SelfTestFail,
+            severity: AlertSeverity::Warning,
+            state: AlertEventState::Firing,
+            resource_ref,
+            summary: format!("The {kind_name} station self-test failed."),
+            detail: stored.summary.clone(),
+            source_section: "S8".into(),
+            first_observed_at_unix_ms: stored.finished_at_unix_ms,
+            last_observed_at_unix_ms: stored.finished_at_unix_ms,
+            resolved_at_unix_ms: None,
+            occurrence_count: 1,
+            acknowledged_at_unix_ms: None,
+            acknowledged_by: None,
+        })?;
+    } else {
+        store.resolve_alert(
+            AlertConditionKind::SelfTestFail,
+            &resource_ref,
+            stored.finished_at_unix_ms,
+        )?;
+    }
+    Ok(stored)
+}
+
+fn write_self_test_evidence(path: &Path, record: &SystemSelfTest) -> Result<(), String> {
+    let temporary = path.with_extension("json.tmp");
+    let bytes = serde_json::to_vec_pretty(record)
+        .map_err(|error| format!("could not encode self-test evidence: {error}"))?;
+    let publish = (|| {
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)
+            .map_err(|error| format!("could not create self-test evidence: {error}"))?;
+        file.write_all(&bytes)
+            .and_then(|()| file.sync_all())
+            .map_err(|error| format!("could not durably write self-test evidence: {error}"))?;
+        drop(file);
+        std::fs::rename(&temporary, path)
+            .map_err(|error| format!("could not publish self-test evidence: {error}"))
+    })();
+    if publish.is_err() {
+        let _ = std::fs::remove_file(&temporary);
+    }
+    publish
+}
+
+fn unix_time_milliseconds() -> Result<i64, String> {
+    i64::try_from(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|_| "system clock is before the Unix epoch".to_string())?
+            .as_millis(),
+    )
+    .map_err(|_| "system time exceeds the station clock".to_string())
+}
+
+fn station_local_time(database_path: &Path, now_unix_ms: i64) -> Result<LocalStationTime, String> {
+    let store = StationStore::open(database_path)?;
+    let timezone = match store.read_profile()? {
+        Some(profile) => TimeZone::get(&profile.profile.timezone).map_err(|error| {
+            format!(
+                "station timezone {} is unavailable: {error}",
+                profile.profile.timezone
+            )
+        })?,
+        None => TimeZone::system(),
+    };
+    let timestamp = Timestamp::from_millisecond(now_unix_ms)
+        .map_err(|error| format!("station schedule time is invalid: {error}"))?;
+    let local = timestamp.to_zoned(timezone);
+    Ok(LocalStationTime {
+        year: u16::try_from(local.year())
+            .map_err(|_| "station local year is invalid".to_string())?,
+        month: u8::try_from(local.month())
+            .map_err(|_| "station local month is invalid".to_string())?,
+        day: u8::try_from(local.day()).map_err(|_| "station local day is invalid".to_string())?,
+        weekday: u8::try_from(local.weekday().to_sunday_zero_offset())
+            .map_err(|_| "station local weekday is invalid".to_string())?,
+        hour: u8::try_from(local.hour())
+            .map_err(|_| "station local hour is invalid".to_string())?,
+        minute: u8::try_from(local.minute())
+            .map_err(|_| "station local minute is invalid".to_string())?,
+    })
+}
+
+fn validate_local_station_time(value: LocalStationTime) -> Result<(), String> {
+    if value.year < 1970
+        || !(1..=12).contains(&value.month)
+        || !(1..=31).contains(&value.day)
+        || value.weekday > 6
+        || value.hour > 23
+        || value.minute > 59
+    {
+        return Err("local station time is invalid".into());
     }
     Ok(())
 }
@@ -548,6 +932,7 @@ fn alert_condition_label(condition: station_domain::AlertConditionKind) -> &'sta
         AlertConditionKind::ClockSkew => "clock-skew",
         AlertConditionKind::DatabaseUnreachable => "database-unreachable",
         AlertConditionKind::ServiceDown => "service-down",
+        AlertConditionKind::SelfTestFail => "self-test-fail",
     }
 }
 

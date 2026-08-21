@@ -7,6 +7,7 @@ publish.workspace = true
 [dependencies]
 base64.workspace = true
 hmac.workspace = true
+jiff.workspace = true
 lettre.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -15,3 +16,6 @@ station-domain.workspace = true
 station-storage.workspace = true
 ureq.workspace = true
 windows-sys.workspace = true
+
+[dev-dependencies]
+station-schedule.workspace = true

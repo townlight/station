@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StationProfile {
@@ -163,6 +164,96 @@ impl SystemResourceSample {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SelfTestKind {
+    Daily,
+    Weekly,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SelfTestTrigger {
+    Scheduled,
+    Manual,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SelfTestStatus {
+    Pass,
+    Warn,
+    Fail,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SystemSelfTest {
+    pub self_test_id: String,
+    pub kind: SelfTestKind,
+    pub trigger: SelfTestTrigger,
+    pub schedule_period_key: Option<String>,
+    pub started_at_unix_ms: i64,
+    pub finished_at_unix_ms: i64,
+    pub status: SelfTestStatus,
+    pub checks: BTreeMap<String, bool>,
+    pub summary: String,
+    pub evidence_path: Option<String>,
+}
+
+impl SystemSelfTest {
+    pub fn validate(&self) -> Result<(), &'static str> {
+        if !visible_text(&self.self_test_id, 120)
+            || self.started_at_unix_ms < 0
+            || self.finished_at_unix_ms < self.started_at_unix_ms
+            || self.checks.is_empty()
+            || self.checks.len() > 64
+            || self.checks.keys().any(|name| !visible_text(name, 120))
+            || !visible_text(&self.summary, 600)
+            || self
+                .evidence_path
+                .as_deref()
+                .is_some_and(|path| !visible_text(path, 500))
+            || self
+                .schedule_period_key
+                .as_deref()
+                .is_some_and(|key| !visible_text(key, 40))
+            || (self.trigger == SelfTestTrigger::Scheduled) != self.schedule_period_key.is_some()
+            || (self.status == SelfTestStatus::Pass && self.checks.values().any(|passed| !passed))
+        {
+            return Err("system self-test fields are invalid.");
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SelfTestSchedule {
+    pub kind: SelfTestKind,
+    pub enabled: bool,
+    pub local_hour: u8,
+    pub local_minute: u8,
+    pub weekday: Option<u8>,
+    pub updated_at_unix_ms: i64,
+    pub updated_by: String,
+}
+
+impl SelfTestSchedule {
+    pub fn validate(&self) -> Result<(), &'static str> {
+        if self.local_hour > 23
+            || self.local_minute > 59
+            || self.updated_at_unix_ms < 0
+            || !visible_text(&self.updated_by, 120)
+            || match self.kind {
+                SelfTestKind::Daily => self.weekday.is_some(),
+                SelfTestKind::Weekly => self.weekday.is_none_or(|day| day > 6),
+            }
+        {
+            return Err("self-test schedule fields are invalid.");
+        }
+        Ok(())
+    }
+}
+
 pub fn derive_runtime_safe_to_air(
     now_unix_ms: i64,
     channels: &[(String, String, Option<ChannelRuntimeObservation>)],
@@ -305,6 +396,7 @@ pub enum AlertConditionKind {
     ClockSkew,
     DatabaseUnreachable,
     ServiceDown,
+    SelfTestFail,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -829,6 +921,58 @@ mod runtime_tests {
         assert_eq!(
             invalid.validate(),
             Err("system resource sample fields are invalid.")
+        );
+    }
+
+    #[test]
+    fn self_tests_require_honest_status_and_scheduled_period_identity() {
+        let mut checks = std::collections::BTreeMap::new();
+        checks.insert("database_integrity".into(), true);
+        let valid = SystemSelfTest {
+            self_test_id: "self-test-daily-1000".into(),
+            kind: SelfTestKind::Daily,
+            trigger: SelfTestTrigger::Scheduled,
+            schedule_period_key: Some("2026-08-21".into()),
+            started_at_unix_ms: 1_000,
+            finished_at_unix_ms: 1_100,
+            status: SelfTestStatus::Pass,
+            checks,
+            summary: "All implemented daily checks passed.".into(),
+            evidence_path: None,
+        };
+        assert!(valid.validate().is_ok());
+        let mut invalid = valid.clone();
+        invalid.schedule_period_key = None;
+        assert_eq!(
+            invalid.validate(),
+            Err("system self-test fields are invalid.")
+        );
+        invalid = valid.clone();
+        invalid.checks.insert("backup_probe".into(), false);
+        assert_eq!(
+            invalid.validate(),
+            Err("system self-test fields are invalid.")
+        );
+
+        let daily = SelfTestSchedule {
+            kind: SelfTestKind::Daily,
+            enabled: true,
+            local_hour: 2,
+            local_minute: 0,
+            weekday: None,
+            updated_at_unix_ms: 0,
+            updated_by: "system-seed".into(),
+        };
+        assert!(daily.validate().is_ok());
+        let mut weekly = daily;
+        weekly.kind = SelfTestKind::Weekly;
+        weekly.local_hour = 3;
+        weekly.weekday = Some(0);
+        assert!(weekly.validate().is_ok());
+        weekly.weekday = None;
+        assert_eq!(
+            weekly.validate(),
+            Err("self-test schedule fields are invalid.")
         );
     }
 

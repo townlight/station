@@ -12,8 +12,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde::Deserialize;
 use station_domain::{
     AlertChannel, AlertChannelKind, AlertConditionKind, AlertEventState, AlertRule, AlertSeverity,
-    StationProfile, derive_runtime_safe_to_air, redact_alert_channel_target,
-    validate_alert_channel_target,
+    SelfTestKind, SelfTestSchedule, SelfTestTrigger, StationProfile, derive_runtime_safe_to_air,
+    redact_alert_channel_target, validate_alert_channel_target,
 };
 use station_media_lifecycle::{
     AssetLoudnessAnalysis, AssetReadinessView, IngestJobStatus, IngestSourceKind,
@@ -100,6 +100,17 @@ struct PutAlertRule {
     updated_by: String,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PutSelfTestSchedule {
+    enabled: bool,
+    local_hour: u8,
+    local_minute: u8,
+    #[serde(default)]
+    weekday: Option<u8>,
+    updated_by: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ApiResponse {
     pub status: u16,
@@ -109,12 +120,15 @@ pub struct ApiResponse {
 
 pub struct Api {
     storage: StationStore,
+    database_path: PathBuf,
 }
 
 impl Api {
     pub fn open(database_path: impl AsRef<Path>) -> Result<Self, String> {
+        let database_path = database_path.as_ref().to_path_buf();
         Ok(Self {
-            storage: StationStore::open(database_path)?,
+            storage: StationStore::open(&database_path)?,
+            database_path,
         })
     }
 
@@ -154,6 +168,14 @@ impl Api {
             ("GET", "/api/v1/channels") => self.list_channels(),
             ("GET", "/api/v1/runtime-safe-to-air") => self.runtime_safe_to_air(),
             ("GET", "/api/v1/system-resources/latest") => self.latest_system_resources(),
+            ("GET", "/api/v1/self-tests") => self.list_self_tests(),
+            ("POST", path) if path.starts_with("/api/v1/self-tests/run?") => {
+                self.run_self_test(path)
+            }
+            ("GET", "/api/v1/self-test-schedules") => self.list_self_test_schedules(),
+            ("PUT", path) if path.starts_with("/api/v1/self-test-schedules/") => {
+                self.put_self_test_schedule(path, body)
+            }
             ("PUT", "/api/v1/alert-channels") => self.put_alert_channel(body),
             ("GET", "/api/v1/alert-channels") => self.list_alert_channels(),
             ("GET", "/api/v1/alert-rules") => self.list_alert_rules(),
@@ -623,6 +645,108 @@ impl Api {
                     .expect("serializing the latest system resource sample cannot fail"),
             ),
             Err(message) => error_response(500, "storage_error", &message),
+        }
+    }
+
+    fn list_self_tests(&self) -> ApiResponse {
+        match self.storage.list_system_self_tests(100) {
+            Ok(records) => json_response(
+                200,
+                serde_json::to_vec(&records).expect("serializing self-test history cannot fail"),
+            ),
+            Err(message) => error_response(500, "storage_error", &message),
+        }
+    }
+
+    fn run_self_test(&self, path: &str) -> ApiResponse {
+        let Some(kind_value) = path.strip_prefix("/api/v1/self-tests/run?kind=") else {
+            return error_response(400, "invalid_query", "A self-test kind is required.");
+        };
+        let kind = match kind_value {
+            "daily" => SelfTestKind::Daily,
+            "weekly" => SelfTestKind::Weekly,
+            _ => {
+                return error_response(
+                    422,
+                    "validation_failed",
+                    "Self-test kind must be daily or weekly.",
+                );
+            }
+        };
+        let now = match system_time_millis() {
+            Ok(value) => value,
+            Err(message) => return error_response(500, "clock_error", &message),
+        };
+        match station_alerting::run_system_self_test(
+            &self.database_path,
+            kind,
+            SelfTestTrigger::Manual,
+            None,
+            now,
+        ) {
+            Ok(record) => json_response(
+                201,
+                serde_json::to_vec(&record).expect("serializing a self-test cannot fail"),
+            ),
+            Err(message) => error_response(500, "self_test_failed", &message),
+        }
+    }
+
+    fn list_self_test_schedules(&self) -> ApiResponse {
+        match self.storage.list_self_test_schedules() {
+            Ok(schedules) => json_response(
+                200,
+                serde_json::to_vec(&schedules)
+                    .expect("serializing self-test schedules cannot fail"),
+            ),
+            Err(message) => error_response(500, "storage_error", &message),
+        }
+    }
+
+    fn put_self_test_schedule(&self, path: &str, body: Option<&[u8]>) -> ApiResponse {
+        let Some(kind_value) = path.strip_prefix("/api/v1/self-test-schedules/") else {
+            unreachable!("the self-test schedule route was checked")
+        };
+        let kind = match kind_value {
+            "daily" => SelfTestKind::Daily,
+            "weekly" => SelfTestKind::Weekly,
+            _ => {
+                return error_response(
+                    404,
+                    "self_test_schedule_not_found",
+                    "The self-test schedule does not exist.",
+                );
+            }
+        };
+        let Some(command) = parse_body::<PutSelfTestSchedule>(body) else {
+            return error_response(
+                400,
+                "invalid_json",
+                "A self-test schedule body is required.",
+            );
+        };
+        let now = match system_time_millis() {
+            Ok(value) => value,
+            Err(message) => return error_response(500, "clock_error", &message),
+        };
+        let schedule = SelfTestSchedule {
+            kind,
+            enabled: command.enabled,
+            local_hour: command.local_hour,
+            local_minute: command.local_minute,
+            weekday: command.weekday,
+            updated_at_unix_ms: now,
+            updated_by: command.updated_by,
+        };
+        if let Err(message) = schedule.validate() {
+            return error_response(422, "validation_failed", message);
+        }
+        match self.storage.put_self_test_schedule(&schedule) {
+            Ok(stored) => json_response(
+                200,
+                serde_json::to_vec(&stored).expect("serializing a self-test schedule cannot fail"),
+            ),
+            Err(message) => error_response(422, "validation_failed", &message),
         }
     }
 

@@ -1,14 +1,15 @@
 use std::ffi::{CStr, CString, c_char, c_int, c_longlong, c_void};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::ptr;
 
 use sha2::{Digest, Sha256};
 use station_domain::{
     AlertChannel, AlertChannelKind, AlertConditionKind, AlertDelivery, AlertDeliveryPayload,
     AlertDeliveryState, AlertEvent, AlertEventState, AlertNotificationKind, AlertRule,
-    AlertSeverity, ChannelRuntimeObservation, ChannelRuntimeState, StationProfile,
-    StationProfileDocument, SystemResourceSample, redact_alert_channel_target,
-    validate_alert_channel_target, validate_secure_url,
+    AlertSeverity, ChannelRuntimeObservation, ChannelRuntimeState, SelfTestKind, SelfTestSchedule,
+    SelfTestStatus, SelfTestTrigger, StationProfile, StationProfileDocument, SystemResourceSample,
+    SystemSelfTest, redact_alert_channel_target, validate_alert_channel_target,
+    validate_secure_url,
 };
 use station_media_lifecycle::{
     AssetLoudnessAnalysis, IngestJobStatus, IngestSourceKind, LoudnessGateStatus, MediaIngestJob,
@@ -367,6 +368,32 @@ impl StationStore {
              );\
              CREATE INDEX IF NOT EXISTS system_resource_samples_time \
                ON system_resource_samples(sampled_at_unix_ms DESC, sample_id DESC);\
+             CREATE TABLE IF NOT EXISTS self_test_schedules (\
+               kind TEXT PRIMARY KEY CHECK (kind IN ('daily','weekly')),\
+               enabled INTEGER NOT NULL CHECK (enabled IN (0,1)),\
+               local_hour INTEGER NOT NULL CHECK (local_hour BETWEEN 0 AND 23),\
+               local_minute INTEGER NOT NULL CHECK (local_minute BETWEEN 0 AND 59),\
+               weekday INTEGER NOT NULL DEFAULT -1 CHECK (weekday BETWEEN -1 AND 6),\
+               updated_at_unix_ms INTEGER NOT NULL CHECK (updated_at_unix_ms >= 0),\
+               updated_by TEXT NOT NULL\
+             );\
+             CREATE TABLE IF NOT EXISTS system_self_tests (\
+               self_test_id TEXT PRIMARY KEY,\
+               kind TEXT NOT NULL CHECK (kind IN ('daily','weekly')),\
+               trigger_kind TEXT NOT NULL CHECK (trigger_kind IN ('scheduled','manual')),\
+               schedule_period_key TEXT NOT NULL DEFAULT '',\
+               started_at_unix_ms INTEGER NOT NULL CHECK (started_at_unix_ms >= 0),\
+               finished_at_unix_ms INTEGER NOT NULL CHECK (finished_at_unix_ms >= started_at_unix_ms),\
+               status TEXT NOT NULL CHECK (status IN ('pass','warn','fail')),\
+               checks_json TEXT NOT NULL,\
+               summary TEXT NOT NULL,\
+               evidence_path TEXT NOT NULL DEFAULT ''\
+             );\
+             CREATE UNIQUE INDEX IF NOT EXISTS system_self_tests_one_scheduled_period \
+               ON system_self_tests(kind, schedule_period_key) \
+               WHERE trigger_kind='scheduled';\
+             CREATE INDEX IF NOT EXISTS system_self_tests_time \
+               ON system_self_tests(started_at_unix_ms DESC, self_test_id DESC);\
              CREATE TABLE IF NOT EXISTS alert_channels (\
                channel_id TEXT PRIMARY KEY,\
                kind TEXT NOT NULL CHECK (kind IN ('email','sms','webhook')),\
@@ -433,6 +460,7 @@ impl StationStore {
         store.migrate_commit_report_statuses()?;
         store.migrate_alert_delivery_realerts()?;
         store.seed_default_alert_rules()?;
+        store.seed_default_self_test_schedules()?;
         Ok(store)
     }
 
@@ -1255,6 +1283,246 @@ impl StationStore {
         )?;
         match unsafe { sqlite3_step(statement.raw) } {
             SQLITE_ROW => Ok(Some(read_system_resource_sample_row(statement.raw)?)),
+            SQLITE_DONE => Ok(None),
+            _ => Err(sqlite_error(self.database)),
+        }
+    }
+
+    pub fn put_self_test_schedule(
+        &self,
+        schedule: &SelfTestSchedule,
+    ) -> Result<SelfTestSchedule, String> {
+        schedule.validate().map_err(str::to_string)?;
+        if let Some(existing) = self.read_self_test_schedule(schedule.kind)?
+            && schedule.updated_at_unix_ms < existing.updated_at_unix_ms
+        {
+            return Err("self-test schedule update time moved backward".into());
+        }
+        let statement = self.prepare(
+            "INSERT INTO self_test_schedules(kind, enabled, local_hour, local_minute, weekday, \
+             updated_at_unix_ms, updated_by) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7) \
+             ON CONFLICT(kind) DO UPDATE SET enabled=excluded.enabled, local_hour=excluded.local_hour, \
+             local_minute=excluded.local_minute, weekday=excluded.weekday, \
+             updated_at_unix_ms=excluded.updated_at_unix_ms, updated_by=excluded.updated_by",
+        )?;
+        let kind = c_string(
+            self_test_kind_name(schedule.kind),
+            "self-test schedule kind",
+        )?;
+        let updated_by = c_string(&schedule.updated_by, "self-test schedule operator")?;
+        bind_text(self.database, statement.raw, 1, &kind)?;
+        bind_i64(self.database, statement.raw, 2, i64::from(schedule.enabled))?;
+        bind_i64(
+            self.database,
+            statement.raw,
+            3,
+            i64::from(schedule.local_hour),
+        )?;
+        bind_i64(
+            self.database,
+            statement.raw,
+            4,
+            i64::from(schedule.local_minute),
+        )?;
+        bind_i64(
+            self.database,
+            statement.raw,
+            5,
+            schedule.weekday.map_or(-1, i64::from),
+        )?;
+        bind_i64(self.database, statement.raw, 6, schedule.updated_at_unix_ms)?;
+        bind_text(self.database, statement.raw, 7, &updated_by)?;
+        expect_done(self.database, statement.raw)?;
+        self.read_self_test_schedule(schedule.kind)?
+            .ok_or_else(|| "stored self-test schedule disappeared".into())
+    }
+
+    pub fn read_self_test_schedule(
+        &self,
+        kind: SelfTestKind,
+    ) -> Result<Option<SelfTestSchedule>, String> {
+        let statement = self.prepare(
+            "SELECT kind, enabled, local_hour, local_minute, weekday, updated_at_unix_ms, updated_by \
+             FROM self_test_schedules WHERE kind=?1",
+        )?;
+        let kind = c_string(self_test_kind_name(kind), "self-test schedule kind")?;
+        bind_text(self.database, statement.raw, 1, &kind)?;
+        match unsafe { sqlite3_step(statement.raw) } {
+            SQLITE_ROW => Ok(Some(read_self_test_schedule_row(statement.raw)?)),
+            SQLITE_DONE => Ok(None),
+            _ => Err(sqlite_error(self.database)),
+        }
+    }
+
+    pub fn list_self_test_schedules(&self) -> Result<Vec<SelfTestSchedule>, String> {
+        let statement = self.prepare(
+            "SELECT kind, enabled, local_hour, local_minute, weekday, updated_at_unix_ms, updated_by \
+             FROM self_test_schedules ORDER BY CASE kind WHEN 'daily' THEN 0 ELSE 1 END",
+        )?;
+        let mut schedules = Vec::new();
+        loop {
+            match unsafe { sqlite3_step(statement.raw) } {
+                SQLITE_ROW => schedules.push(read_self_test_schedule_row(statement.raw)?),
+                SQLITE_DONE => return Ok(schedules),
+                _ => return Err(sqlite_error(self.database)),
+            }
+        }
+    }
+
+    pub fn record_system_self_test(
+        &self,
+        record: &SystemSelfTest,
+    ) -> Result<SystemSelfTest, String> {
+        record.validate().map_err(str::to_string)?;
+        let checks_json = serde_json::to_string(&record.checks)
+            .map_err(|error| format!("could not encode self-test checks: {error}"))?;
+        let statement = self.prepare(
+            "INSERT INTO system_self_tests(self_test_id, kind, trigger_kind, schedule_period_key, \
+             started_at_unix_ms, finished_at_unix_ms, status, checks_json, summary, evidence_path) \
+             VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+        )?;
+        let values = [
+            c_string(&record.self_test_id, "self-test identity")?,
+            c_string(self_test_kind_name(record.kind), "self-test kind")?,
+            c_string(self_test_trigger_name(record.trigger), "self-test trigger")?,
+            c_string(
+                record.schedule_period_key.as_deref().unwrap_or_default(),
+                "self-test schedule period",
+            )?,
+            c_string(self_test_status_name(record.status), "self-test status")?,
+            c_string(&checks_json, "self-test checks")?,
+            c_string(&record.summary, "self-test summary")?,
+            c_string(
+                record.evidence_path.as_deref().unwrap_or_default(),
+                "self-test evidence path",
+            )?,
+        ];
+        bind_text(self.database, statement.raw, 1, &values[0])?;
+        bind_text(self.database, statement.raw, 2, &values[1])?;
+        bind_text(self.database, statement.raw, 3, &values[2])?;
+        bind_text(self.database, statement.raw, 4, &values[3])?;
+        bind_i64(self.database, statement.raw, 5, record.started_at_unix_ms)?;
+        bind_i64(self.database, statement.raw, 6, record.finished_at_unix_ms)?;
+        bind_text(self.database, statement.raw, 7, &values[4])?;
+        bind_text(self.database, statement.raw, 8, &values[5])?;
+        bind_text(self.database, statement.raw, 9, &values[6])?;
+        bind_text(self.database, statement.raw, 10, &values[7])?;
+        expect_done(self.database, statement.raw)?;
+        self.execute(
+            "DELETE FROM system_self_tests WHERE self_test_id NOT IN (\
+               SELECT self_test_id FROM system_self_tests ORDER BY started_at_unix_ms DESC, \
+               self_test_id DESC LIMIT 400)",
+        )?;
+        self.read_system_self_test(&record.self_test_id)?
+            .ok_or_else(|| "stored self-test record disappeared".into())
+    }
+
+    pub fn list_system_self_tests(&self, limit: u32) -> Result<Vec<SystemSelfTest>, String> {
+        if !(1..=1_000).contains(&limit) {
+            return Err("self-test history limit must be between 1 and 1000".into());
+        }
+        let statement = self.prepare(
+            "SELECT self_test_id, kind, trigger_kind, schedule_period_key, started_at_unix_ms, \
+             finished_at_unix_ms, status, checks_json, summary, evidence_path \
+             FROM system_self_tests ORDER BY started_at_unix_ms DESC, self_test_id DESC LIMIT ?1",
+        )?;
+        bind_i64(self.database, statement.raw, 1, i64::from(limit))?;
+        let mut records = Vec::new();
+        loop {
+            match unsafe { sqlite3_step(statement.raw) } {
+                SQLITE_ROW => records.push(read_system_self_test_row(statement.raw)?),
+                SQLITE_DONE => return Ok(records),
+                _ => return Err(sqlite_error(self.database)),
+            }
+        }
+    }
+
+    pub fn self_test_exists_for_period(
+        &self,
+        kind: SelfTestKind,
+        period_key: &str,
+    ) -> Result<bool, String> {
+        if period_key.trim().is_empty() || period_key.len() > 40 {
+            return Err("self-test period identity is invalid".into());
+        }
+        let statement = self.prepare(
+            "SELECT 1 FROM system_self_tests WHERE kind=?1 AND trigger_kind='scheduled' \
+             AND schedule_period_key=?2 LIMIT 1",
+        )?;
+        let kind = c_string(self_test_kind_name(kind), "self-test kind")?;
+        let period_key = c_string(period_key, "self-test period identity")?;
+        bind_text(self.database, statement.raw, 1, &kind)?;
+        bind_text(self.database, statement.raw, 2, &period_key)?;
+        match unsafe { sqlite3_step(statement.raw) } {
+            SQLITE_ROW => Ok(true),
+            SQLITE_DONE => Ok(false),
+            _ => Err(sqlite_error(self.database)),
+        }
+    }
+
+    pub fn database_integrity_check(&self) -> Result<bool, String> {
+        let statement = self.prepare("PRAGMA quick_check")?;
+        match unsafe { sqlite3_step(statement.raw) } {
+            SQLITE_ROW => Ok(column_text(statement.raw, 0)? == "ok"),
+            SQLITE_DONE => Ok(false),
+            _ => Err(sqlite_error(self.database)),
+        }
+    }
+
+    pub fn prove_database_restore_round_trip(&self, target: &Path) -> Result<bool, String> {
+        if target.exists() {
+            return Err("database restore rehearsal target already exists".into());
+        }
+        if let Some(parent) = target.parent() {
+            std::fs::create_dir_all(parent).map_err(|error| {
+                format!("could not create restore rehearsal directory: {error}")
+            })?;
+        }
+        let statement = self.prepare("VACUUM INTO ?1")?;
+        let target_text = c_string(
+            target.to_string_lossy().as_ref(),
+            "database restore rehearsal path",
+        )?;
+        bind_text(self.database, statement.raw, 1, &target_text)?;
+        let outcome = (|| {
+            expect_done(self.database, statement.raw)?;
+            let restored = StationStore::open(target)?;
+            let healthy = restored.database_integrity_check()?;
+            drop(restored);
+            Ok(healthy)
+        })();
+        let mut cleanup_error = None;
+        for candidate in [
+            target.to_path_buf(),
+            PathBuf::from(format!("{}-wal", target.display())),
+            PathBuf::from(format!("{}-shm", target.display())),
+        ] {
+            if candidate.exists()
+                && let Err(error) = std::fs::remove_file(&candidate)
+            {
+                cleanup_error = Some(format!(
+                    "could not remove restore rehearsal artifact {}: {error}",
+                    candidate.display()
+                ));
+                break;
+            }
+        }
+        match (outcome, cleanup_error) {
+            (Ok(healthy), None) => Ok(healthy),
+            (Err(error), _) | (_, Some(error)) => Err(error),
+        }
+    }
+
+    fn read_system_self_test(&self, self_test_id: &str) -> Result<Option<SystemSelfTest>, String> {
+        let statement = self.prepare(
+            "SELECT self_test_id, kind, trigger_kind, schedule_period_key, started_at_unix_ms, \
+             finished_at_unix_ms, status, checks_json, summary, evidence_path \
+             FROM system_self_tests WHERE self_test_id=?1",
+        )?;
+        let self_test_id = c_string(self_test_id, "self-test identity")?;
+        bind_text(self.database, statement.raw, 1, &self_test_id)?;
+        match unsafe { sqlite3_step(statement.raw) } {
+            SQLITE_ROW => Ok(Some(read_system_self_test_row(statement.raw)?)),
             SQLITE_DONE => Ok(None),
             _ => Err(sqlite_error(self.database)),
         }
@@ -2980,6 +3248,34 @@ impl StationStore {
         Ok(())
     }
 
+    fn seed_default_self_test_schedules(&self) -> Result<(), String> {
+        for schedule in [
+            SelfTestSchedule {
+                kind: SelfTestKind::Daily,
+                enabled: true,
+                local_hour: 2,
+                local_minute: 0,
+                weekday: None,
+                updated_at_unix_ms: 0,
+                updated_by: "system-seed".into(),
+            },
+            SelfTestSchedule {
+                kind: SelfTestKind::Weekly,
+                enabled: true,
+                local_hour: 3,
+                local_minute: 0,
+                weekday: Some(0),
+                updated_at_unix_ms: 0,
+                updated_by: "system-seed".into(),
+            },
+        ] {
+            if self.read_self_test_schedule(schedule.kind)?.is_none() {
+                self.put_self_test_schedule(&schedule)?;
+            }
+        }
+        Ok(())
+    }
+
     fn migrate_ingest_retry_schedule(&self) -> Result<(), String> {
         if self.ingest_retry_column_exists()? {
             return Ok(());
@@ -3264,6 +3560,49 @@ fn read_system_resource_sample_row(
     };
     sample.validate().map_err(str::to_string)?;
     Ok(sample)
+}
+
+fn read_self_test_schedule_row(
+    statement: *mut SqliteStatement,
+) -> Result<SelfTestSchedule, String> {
+    let weekday = unsafe { sqlite3_column_int64(statement, 4) };
+    let schedule = SelfTestSchedule {
+        kind: parse_self_test_kind(&column_text(statement, 0)?)?,
+        enabled: unsafe { sqlite3_column_int64(statement, 1) } == 1,
+        local_hour: u8::try_from(unsafe { sqlite3_column_int64(statement, 2) })
+            .map_err(|_| "database returned an invalid self-test hour".to_string())?,
+        local_minute: u8::try_from(unsafe { sqlite3_column_int64(statement, 3) })
+            .map_err(|_| "database returned an invalid self-test minute".to_string())?,
+        weekday: (weekday >= 0)
+            .then(|| u8::try_from(weekday))
+            .transpose()
+            .map_err(|_| "database returned an invalid self-test weekday".to_string())?,
+        updated_at_unix_ms: unsafe { sqlite3_column_int64(statement, 5) },
+        updated_by: column_text(statement, 6)?,
+    };
+    schedule.validate().map_err(str::to_string)?;
+    Ok(schedule)
+}
+
+fn read_system_self_test_row(statement: *mut SqliteStatement) -> Result<SystemSelfTest, String> {
+    let period_key = column_text(statement, 3)?;
+    let evidence_path = column_text(statement, 9)?;
+    let checks_json = column_text(statement, 7)?;
+    let record = SystemSelfTest {
+        self_test_id: column_text(statement, 0)?,
+        kind: parse_self_test_kind(&column_text(statement, 1)?)?,
+        trigger: parse_self_test_trigger(&column_text(statement, 2)?)?,
+        schedule_period_key: (!period_key.is_empty()).then_some(period_key),
+        started_at_unix_ms: unsafe { sqlite3_column_int64(statement, 4) },
+        finished_at_unix_ms: unsafe { sqlite3_column_int64(statement, 5) },
+        status: parse_self_test_status(&column_text(statement, 6)?)?,
+        checks: serde_json::from_str(&checks_json)
+            .map_err(|error| format!("database returned invalid self-test checks: {error}"))?,
+        summary: column_text(statement, 8)?,
+        evidence_path: (!evidence_path.is_empty()).then_some(evidence_path),
+    };
+    record.validate().map_err(str::to_string)?;
+    Ok(record)
 }
 
 fn read_alert_event_row(statement: *mut SqliteStatement) -> Result<AlertEvent, String> {
@@ -3705,6 +4044,57 @@ fn parse_channel_runtime_state(value: &str) -> Result<ChannelRuntimeState, Strin
     }
 }
 
+fn self_test_kind_name(value: SelfTestKind) -> &'static str {
+    match value {
+        SelfTestKind::Daily => "daily",
+        SelfTestKind::Weekly => "weekly",
+    }
+}
+
+fn parse_self_test_kind(value: &str) -> Result<SelfTestKind, String> {
+    match value {
+        "daily" => Ok(SelfTestKind::Daily),
+        "weekly" => Ok(SelfTestKind::Weekly),
+        _ => Err(format!("database returned invalid self-test kind {value}")),
+    }
+}
+
+fn self_test_trigger_name(value: SelfTestTrigger) -> &'static str {
+    match value {
+        SelfTestTrigger::Scheduled => "scheduled",
+        SelfTestTrigger::Manual => "manual",
+    }
+}
+
+fn parse_self_test_trigger(value: &str) -> Result<SelfTestTrigger, String> {
+    match value {
+        "scheduled" => Ok(SelfTestTrigger::Scheduled),
+        "manual" => Ok(SelfTestTrigger::Manual),
+        _ => Err(format!(
+            "database returned invalid self-test trigger {value}"
+        )),
+    }
+}
+
+fn self_test_status_name(value: SelfTestStatus) -> &'static str {
+    match value {
+        SelfTestStatus::Pass => "pass",
+        SelfTestStatus::Warn => "warn",
+        SelfTestStatus::Fail => "fail",
+    }
+}
+
+fn parse_self_test_status(value: &str) -> Result<SelfTestStatus, String> {
+    match value {
+        "pass" => Ok(SelfTestStatus::Pass),
+        "warn" => Ok(SelfTestStatus::Warn),
+        "fail" => Ok(SelfTestStatus::Fail),
+        _ => Err(format!(
+            "database returned invalid self-test status {value}"
+        )),
+    }
+}
+
 fn alert_condition_name(value: AlertConditionKind) -> &'static str {
     match value {
         AlertConditionKind::OffAir => "off-air",
@@ -3721,6 +4111,7 @@ fn alert_condition_name(value: AlertConditionKind) -> &'static str {
         AlertConditionKind::ClockSkew => "clock-skew",
         AlertConditionKind::DatabaseUnreachable => "database-unreachable",
         AlertConditionKind::ServiceDown => "service-down",
+        AlertConditionKind::SelfTestFail => "self-test-fail",
     }
 }
 
@@ -3740,6 +4131,7 @@ fn parse_alert_condition(value: &str) -> Result<AlertConditionKind, String> {
         "clock-skew" => Ok(AlertConditionKind::ClockSkew),
         "database-unreachable" => Ok(AlertConditionKind::DatabaseUnreachable),
         "service-down" => Ok(AlertConditionKind::ServiceDown),
+        "self-test-fail" => Ok(AlertConditionKind::SelfTestFail),
         _ => Err(format!("database returned invalid alert condition {value}")),
     }
 }
@@ -3795,6 +4187,11 @@ fn default_alert_rules() -> Vec<AlertRule> {
             AlertConditionKind::ServiceDown,
             AlertSeverity::Critical,
             1_800,
+        ),
+        (
+            AlertConditionKind::SelfTestFail,
+            AlertSeverity::Warning,
+            86_400,
         ),
     ];
     definitions
@@ -4285,7 +4682,7 @@ mod tests {
             .unwrap();
         assert_eq!(delivery.notification_kind, AlertNotificationKind::Resolved);
         assert_eq!(delivery.state, AlertDeliveryState::Sent);
-        assert_eq!(migrated.list_alert_rules().unwrap().len(), 14);
+        assert_eq!(migrated.list_alert_rules().unwrap().len(), 15);
         drop(migrated);
         for candidate in [
             database.clone(),

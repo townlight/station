@@ -4,7 +4,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use station_domain::{
     AlertChannel, AlertChannelKind, AlertConditionKind, AlertDeliveryState, AlertEvent,
     AlertEventState, AlertNotificationKind, AlertRule, AlertSeverity, ChannelRuntimeObservation,
-    ChannelRuntimeState, SystemResourceSample, redact_alert_channel_target,
+    ChannelRuntimeState, SelfTestKind, SelfTestSchedule, SelfTestStatus, SelfTestTrigger,
+    SystemResourceSample, SystemSelfTest, redact_alert_channel_target,
 };
 use station_schedule::ChannelConfiguration;
 use station_storage::{AlertChannelSecret, StationStore};
@@ -494,5 +495,73 @@ fn seeds_editable_rules_and_routes_bounded_realerts_to_selected_destinations() {
         .unwrap();
     assert_eq!(store.list_alert_deliveries().unwrap().len(), 3);
     drop(store);
+    remove_database(&database);
+}
+
+#[test]
+fn seeds_schedules_and_persists_one_scheduled_self_test_per_period() {
+    let database = database_path("self-tests");
+    let store = StationStore::open(&database).unwrap();
+    let schedules = store.list_self_test_schedules().unwrap();
+    assert_eq!(schedules.len(), 2);
+    assert_eq!(schedules[0].kind, SelfTestKind::Daily);
+    assert_eq!(schedules[0].local_hour, 2);
+    assert_eq!(schedules[0].weekday, None);
+    assert_eq!(schedules[1].kind, SelfTestKind::Weekly);
+    assert_eq!(schedules[1].local_hour, 3);
+    assert_eq!(schedules[1].weekday, Some(0));
+
+    let edited = SelfTestSchedule {
+        kind: SelfTestKind::Daily,
+        enabled: true,
+        local_hour: 1,
+        local_minute: 30,
+        weekday: None,
+        updated_at_unix_ms: 500,
+        updated_by: "station-operator".into(),
+    };
+    assert_eq!(store.put_self_test_schedule(&edited).unwrap(), edited);
+
+    let record = SystemSelfTest {
+        self_test_id: "self-test-daily-1000".into(),
+        kind: SelfTestKind::Daily,
+        trigger: SelfTestTrigger::Scheduled,
+        schedule_period_key: Some("2026-08-21".into()),
+        started_at_unix_ms: 1_000,
+        finished_at_unix_ms: 1_250,
+        status: SelfTestStatus::Warn,
+        checks: [
+            ("database_integrity".into(), true),
+            ("output_health".into(), false),
+        ]
+        .into_iter()
+        .collect(),
+        summary: "Core checks passed; output is not commissioned.".into(),
+        evidence_path: Some("C:\\ProgramData\\TownLight Station\\self-tests\\daily.json".into()),
+    };
+    assert_eq!(store.record_system_self_test(&record).unwrap(), record);
+    assert!(
+        store
+            .self_test_exists_for_period(SelfTestKind::Daily, "2026-08-21")
+            .unwrap()
+    );
+    assert!(
+        !store
+            .self_test_exists_for_period(SelfTestKind::Weekly, "2026-08-21")
+            .unwrap()
+    );
+    assert_eq!(store.list_system_self_tests(10).unwrap(), vec![record]);
+    assert!(store.database_integrity_check().unwrap());
+    let rehearsal = database.with_extension("restore-proof.db");
+    assert!(store.prove_database_restore_round_trip(&rehearsal).unwrap());
+    assert!(!rehearsal.exists());
+    assert!(!PathBuf::from(format!("{}-wal", rehearsal.display())).exists());
+    assert!(!PathBuf::from(format!("{}-shm", rehearsal.display())).exists());
+
+    drop(store);
+    let reopened = StationStore::open(&database).unwrap();
+    assert_eq!(reopened.list_self_test_schedules().unwrap()[0], edited);
+    assert_eq!(reopened.list_system_self_tests(10).unwrap().len(), 1);
+    drop(reopened);
     remove_database(&database);
 }

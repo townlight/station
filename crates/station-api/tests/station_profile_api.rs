@@ -15,8 +15,8 @@ use station_api::{Api, serve_one, serve_until};
 use station_domain::{
     AlertConditionKind, AlertDelivery, AlertDeliveryState, AlertEvent, AlertEventState,
     AlertNotificationKind, AlertRule, AlertSeverity, ChannelRuntimeObservation,
-    ChannelRuntimeState, RuntimeSafeToAirStatus, SafeToAirColor, StationProfile,
-    SystemResourceSample,
+    ChannelRuntimeState, RuntimeSafeToAirStatus, SafeToAirColor, SelfTestKind, SelfTestSchedule,
+    SelfTestTrigger, StationProfile, SystemResourceSample, SystemSelfTest,
 };
 use station_ingest::{IngestOutcome, IngestWorker, TranscodeOutcome, TranscodeWorker};
 use station_media_lifecycle::WatchFolderConfig;
@@ -531,6 +531,56 @@ fn exposes_the_latest_persisted_system_resource_sample() {
         serde_json::from_slice::<SystemResourceSample>(&response.body).unwrap(),
         recorded
     );
+    let _ = std::fs::remove_file(database);
+}
+
+#[test]
+fn exposes_editable_self_test_schedules_and_runs_a_durable_manual_check() {
+    let database = temporary_database("self-tests-api");
+    let api = Api::open(&database).unwrap();
+    let schedules: Vec<SelfTestSchedule> =
+        serde_json::from_slice(&api.handle("GET", "/api/v1/self-test-schedules", None).body)
+            .unwrap();
+    assert_eq!(schedules.len(), 2);
+    assert_eq!(schedules[0].kind, SelfTestKind::Daily);
+    assert_eq!(schedules[1].kind, SelfTestKind::Weekly);
+
+    let edited = api.handle(
+        "PUT",
+        "/api/v1/self-test-schedules/daily",
+        Some(
+            br#"{"enabled":true,"local_hour":1,"local_minute":30,"weekday":null,"updated_by":"station-operator"}"#,
+        ),
+    );
+    assert_eq!(edited.status, 200);
+    let edited: SelfTestSchedule = serde_json::from_slice(&edited.body).unwrap();
+    assert_eq!(edited.local_hour, 1);
+    assert_eq!(edited.local_minute, 30);
+    assert_eq!(edited.updated_by, "station-operator");
+    assert_eq!(
+        api.handle(
+            "PUT",
+            "/api/v1/self-test-schedules/daily",
+            Some(
+                br#"{"enabled":true,"local_hour":1,"local_minute":30,"weekday":2,"updated_by":"station-operator"}"#,
+            ),
+        )
+        .status,
+        422
+    );
+
+    let run = api.handle("POST", "/api/v1/self-tests/run?kind=daily", None);
+    assert_eq!(run.status, 201, "{}", String::from_utf8_lossy(&run.body));
+    let record: SystemSelfTest = serde_json::from_slice(&run.body).unwrap();
+    assert_eq!(record.kind, SelfTestKind::Daily);
+    assert_eq!(record.trigger, SelfTestTrigger::Manual);
+    assert_eq!(record.schedule_period_key, None);
+    let history: Vec<SystemSelfTest> =
+        serde_json::from_slice(&api.handle("GET", "/api/v1/self-tests", None).body).unwrap();
+    assert_eq!(history, vec![record.clone()]);
+
+    drop(api);
+    let _ = std::fs::remove_file(record.evidence_path.unwrap());
     let _ = std::fs::remove_file(database);
 }
 
