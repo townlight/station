@@ -2,7 +2,8 @@ param(
     [string]$BaseUri = 'http://127.0.0.1:4070',
     [int]$ListenerPort = 5937,
     [int]$CaptureSeconds = 5,
-    [string]$Passphrase = 'TownLight-AES256-proof-2026'
+    [string]$Passphrase = 'TownLight-AES256-proof-2026',
+    [string]$ResultPath = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -29,6 +30,7 @@ $runtime = Join-Path $env:ProgramFiles 'TownLight Station\runtime\gstreamer'
 $launcher = Join-Path $runtime 'bin\gst-launch-1.0.exe'
 $listener = $null
 $configured = $false
+$serviceStopped = $false
 
 function Test-ContainsBytes([byte[]]$Bytes, [byte[]]$Needle) {
     if ($Needle.Length -eq 0 -or $Bytes.Length -lt $Needle.Length) { return $false }
@@ -65,6 +67,8 @@ try {
         throw 'The public channel API exposed the write-only SRT passphrase contract.'
     }
 
+    Stop-Service -Name TownLightStation -Force
+    $serviceStopped = $true
     $needle = [Text.Encoding]::UTF8.GetBytes($Passphrase)
     foreach ($candidate in @(
         (Join-Path $env:ProgramData 'TownLight Station\station.db'),
@@ -77,7 +81,8 @@ try {
         }
     }
 
-    Restart-Service -Name TownLightStation -Force
+    Start-Service -Name TownLightStation
+    $serviceStopped = $false
     $healthDeadline = [DateTime]::UtcNow.AddSeconds(30)
     do {
         try { $health = Invoke-RestMethod -Uri "$BaseUri/health" -TimeoutSec 2 }
@@ -173,7 +178,7 @@ try {
         throw "Encrypted SRT audio missed the AAC stereo 48 kHz contract.`n$probeJson"
     }
 
-    [ordered]@{
+    $result = [ordered]@{
         channel_id = $channelId
         encryption = 'AES-256'
         passphrase_publicly_exposed = $false
@@ -188,8 +193,16 @@ try {
         captured_bytes = $bytes.Length
         service_health = (Invoke-RestMethod -Uri "$BaseUri/health" -TimeoutSec 5).status
     } | ConvertTo-Json
+    if ($ResultPath) {
+        Set-Content -LiteralPath $ResultPath -Value $result -Encoding utf8
+    }
+    Write-Output $result
 }
 finally {
+    if ($serviceStopped) {
+        try { Start-Service -Name TownLightStation }
+        catch { Write-Warning "Could not restart the station service: $($_.Exception.Message)" }
+    }
     if ($configured) {
         try {
             $channel.enabled = $false
