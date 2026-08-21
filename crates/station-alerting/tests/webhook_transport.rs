@@ -156,13 +156,39 @@ fn refuses_provider_redirects_without_forwarding_the_signed_payload() {
     let origin_address = origin.local_addr().unwrap();
     let server = std::thread::spawn(move || {
         let (mut stream, _) = origin.accept().unwrap();
-        let mut request = [0_u8; 4096];
-        let _ = stream.read(&mut request).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let mut request = Vec::new();
+        let mut chunk = [0_u8; 4096];
+        loop {
+            let count = stream.read(&mut chunk).unwrap();
+            if count == 0 {
+                break;
+            }
+            request.extend_from_slice(&chunk[..count]);
+            if let Some(header_end) = request.windows(4).position(|window| window == b"\r\n\r\n") {
+                let headers = String::from_utf8_lossy(&request[..header_end + 4]);
+                let content_length = headers
+                    .lines()
+                    .find_map(|line| {
+                        line.strip_prefix("content-length: ")
+                            .or_else(|| line.strip_prefix("Content-Length: "))
+                    })
+                    .unwrap()
+                    .parse::<usize>()
+                    .unwrap();
+                if request.len() >= header_end + 4 + content_length {
+                    break;
+                }
+            }
+        }
         write!(
             stream,
             "HTTP/1.1 307 Temporary Redirect\r\nLocation: http://{redirect_address}/stolen\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
         )
         .unwrap();
+        stream.flush().unwrap();
     });
     let result = WebhookTransport::new(Duration::from_secs(5))
         .deliver(&envelope(format!("http://{origin_address}/operator-alert")));

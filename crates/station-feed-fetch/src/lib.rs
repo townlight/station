@@ -772,11 +772,14 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let path = std::env::temp_dir()
-            .join(format!("townlight-feed-missing-parent-{nonce}"))
-            .join("station.db");
+        let root = std::env::temp_dir().join(format!("townlight-feed-open-failure-{nonce}"));
+        std::fs::create_dir_all(&root).unwrap();
+        let blocked_parent = root.join("not-a-directory");
+        std::fs::write(&blocked_parent, b"block directory creation").unwrap();
+        let path = blocked_parent.join("station.db");
         let stop = Arc::new(AtomicBool::new(false));
         assert!(run_until(&path, stop).is_err());
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

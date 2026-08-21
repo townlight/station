@@ -37,13 +37,5 @@ fn probes_real_windows_resources_and_cleans_the_backup_write_test() {
     );
     assert_eq!(std::fs::read_dir(root.join("backups")).unwrap().count(), 0);
 
-    for candidate in [
-        database.clone(),
-        database.with_file_name("station.db-wal"),
-        database.with_file_name("station.db-shm"),
-    ] {
-        let _ = std::fs::remove_file(candidate);
-    }
-    std::fs::remove_dir(root.join("backups")).unwrap();
-    std::fs::remove_dir(root).unwrap();
+    std::fs::remove_dir_all(root).unwrap();
 }
