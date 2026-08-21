@@ -13,9 +13,10 @@ small, explicit worker protocol boundary.
 
 ## Decision
 
-The media engine builds one continuously flowing black canvas and eight logical serial overlay
-pairs. The serial chain then feeds one shared black-key transparency stage, queue, and compositor
-pad at z-order 1. UDP branches install the fixed branch before PLAYING; SRT branches
+The media engine builds one continuously flowing transparent canvas and eight logical serial
+overlay slots. Each slot has fixed text/clock elements and two fixed image banks so the next image
+can be validated and prepared before it becomes visible. The serial chain then feeds a queue and
+compositor pad at z-order 1. UDP branches install the fixed branch before PLAYING; SRT branches
 install it only after required output readiness. Text and clock rendering are mutually exclusive
 through their `silent` properties. Snapshot updates change element properties and pad alpha/z-order
 only; they never mutate the topology while PLAYING. The base program/fallback video remains
@@ -33,8 +34,13 @@ revision, so content changes with the same board revision are applied. Validatio
 the current visible state is hidden. Invalid updates retain the last valid snapshot; clear makes
 all slots transparent.
 
-The implemented content scope is manual text, text bulletins, clocks, and static lower-third,
-ticker-region, and bug-region geometry. Text is bounded, control-safe, and newline-normalized.
+The implemented content scope is manual text, text bulletins, clocks, bounded static PNG/JPEG
+image/logo overlays, and static lower-third, ticker-region, and bug-region geometry. Image overlays
+carry only asset identity and format across the protocol. The worker derives the managed path from
+its trusted CG image root and independently verifies containment, regular non-reparse file type,
+byte identity, format, bounds, and complete decode immediately before apply. Image updates switch
+between the fixed banks only after preparation; a failure retains the prior valid visible state.
+Text is bounded, control-safe, and newline-normalized.
 Bulletin rotation remains cache-only and stateless: after moderation, time-window, and tag
 filtering, eligible bulletins are sorted by bulletin identity. Without a zone override, each
 bulletin occupies a weighted half-open interval sized by its validated `display_seconds` and the
@@ -52,7 +58,7 @@ existing output off air.
 
 ## Explicit non-claims
 
-This ADR does not claim image/logo rendering, WPE/HTML styling, live-video bulletins, audio CG,
-animated ticker crawling, program-aware interstitials, or field/soak operation. The decoded UDP
+This ADR does not claim WPE/HTML styling, live-video bulletins, audio CG, animated ticker crawling,
+program-aware interstitials, or field/soak operation. The decoded UDP
 MPEG-TS pixel apply/change/clear proof is bounded to the focused machine test; it is not an
 installed, multi-station, or field-soak claim.

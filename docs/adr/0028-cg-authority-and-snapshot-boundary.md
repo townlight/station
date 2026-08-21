@@ -21,6 +21,13 @@ cross-entity reference, or audit failure rolls the entire transaction back. Boar
 configuration is validated against the selected built-in template, channel identity, enabled feed
 source, and managed asset readiness where those dependencies are available.
 
+Managed CG image authority is content-addressed and path-independent. SQLite stores only the
+SHA-256 identity, MIME/format, byte size, dimensions, and readiness. `StationStore` owns the exact
+canonical CG image root and derives the only permitted filename from identity and format.
+Admission fully decodes bounded PNG/JPEG content before publishing it atomically. Snapshot
+resolution loads only board-referenced image identities and downgrades missing or failed
+verification to typed readiness placeholders.
+
 The pure `station-cg` snapshot resolver is the boundary to playout. Given an immutable board,
 template, zone, feed-source, bulletin, and timestamp input, it validates ownership and ordering,
 filters airable bulletins and allowed tags, and returns a deterministic `CgResolvedSnapshot`.
@@ -41,6 +48,10 @@ board. The renderer can consume one typed contract and deliberately render a saf
 unresolved external sources. Feed/bulletin moderation and tag policy can be tested independently
 from the media graph.
 
+Ready-image verification uses a cache capped at 256 identities. File existence, file type, length,
+and modification time are checked on each snapshot load; full read/hash/decode is repeated after a
+change or at most 60 seconds. Reparse targets fail closed.
+
 The authority model and snapshot resolver remain separate from network I/O, credential handling,
 asset readiness services, schedule resolution, and GStreamer lifecycle. Those integrations must
 consume the boundary rather than mutate it implicitly.
@@ -49,16 +60,10 @@ consume the boundary rather than mutate it implicitly.
 
 This ADR does not claim any of the following are complete:
 
-- feed ingestion, normalization, refresh scheduling, cache fallback, or authenticated CalDAV/social
-  credentials;
-- a current-snapshot or preview HTTP endpoint that assembles storage records automatically;
-- the phone-first moderation, board designer, feed manager, preview, or settings/history UI;
-- GStreamer compositor/text/clock/image/WPE integration, live-video compositing, or background-audio
-  mixing through the loudness path;
+- authenticated CalDAV/social-provider compatibility and credentials;
+- WPE/HTML styling, live-video compositing, or background-audio mixing through the loudness path;
 - program-aware schedule interstitial resolution;
-- an expiration/cleanup worker beyond deterministic time-window filtering;
 - a 24-hour CG soak, installed proof, or field-station proof.
 
 These are follow-on implementation and proof gates, not reasons to weaken the authority or snapshot
 contract.
-

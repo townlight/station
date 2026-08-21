@@ -1,15 +1,208 @@
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
+use std::io::Cursor;
+use std::path::{Path, PathBuf};
 
 mod snapshot;
 
 pub use snapshot::{
     CgPlaceholderReason, CgPlaceholderSource, CgResolvedContent, CgResolvedSnapshot,
     CgResolvedZone, CgSnapshotError, CgSnapshotInputs, resolve_snapshot,
-    resolve_snapshot_with_feed_cache,
+    resolve_snapshot_with_feed_cache, resolve_snapshot_with_feed_cache_and_images,
 };
 
 pub const CG_LAYOUT_SCALE: u16 = 1_000;
+pub const MAX_CG_IMAGE_BYTES: usize = 8 * 1024 * 1024;
+pub const MAX_CG_IMAGE_DIMENSION: u32 = 4_096;
+pub const CG_IMAGE_SUBDIRECTORY: &str = "cg-images";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CgImageReadiness {
+    Ready,
+    Missing,
+    Rejected,
+    Processing,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CgImageAsset {
+    pub asset_id: String,
+    pub mime_type: String,
+    pub byte_size: u64,
+    pub width: u32,
+    pub height: u32,
+    pub readiness: CgImageReadiness,
+}
+
+impl CgImageAsset {
+    pub fn validate(&self) -> Result<(), &'static str> {
+        if !is_sha256(&self.asset_id)
+            || !matches!(self.mime_type.as_str(), "image/png" | "image/jpeg")
+            || self.byte_size == 0
+            || self.byte_size > MAX_CG_IMAGE_BYTES as u64
+            || self.width == 0
+            || self.height == 0
+            || self.width > MAX_CG_IMAGE_DIMENSION
+            || self.height > MAX_CG_IMAGE_DIMENSION
+        {
+            return Err("CG image asset fields are invalid.");
+        }
+        Ok(())
+    }
+}
+
+/// Derive the only filesystem location permitted for a managed CG image.
+/// `cg_image_root` is the exact canonical image-library root, not the station root.
+pub fn managed_cg_image_path(
+    cg_image_root: &Path,
+    asset_id: &str,
+    mime_type: &str,
+) -> Result<PathBuf, String> {
+    if !is_sha256(asset_id) {
+        return Err("CG image identity is not a SHA-256 digest".into());
+    }
+    let extension = match mime_type {
+        "image/png" => "png",
+        "image/jpeg" => "jpg",
+        _ => return Err("unsupported CG image MIME type".into()),
+    };
+    let path = cg_image_root.join(format!("{asset_id}.{extension}"));
+    if path.strip_prefix(cg_image_root).is_err() {
+        return Err("managed CG image path escapes its root".into());
+    }
+    Ok(path)
+}
+
+pub fn inspect_cg_image(asset_id: &str, bytes: &[u8]) -> Result<CgImageAsset, String> {
+    if bytes.is_empty() || bytes.len() > MAX_CG_IMAGE_BYTES {
+        return Err("image exceeds the bounded byte limit".into());
+    }
+    let digest = format!("{:x}", Sha256::digest(bytes));
+    if digest != asset_id {
+        return Err("image content hash does not match asset identity".into());
+    }
+    let (mime_type, width, height, animated) = if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        if bytes.len() < 33 || &bytes[12..16] != b"IHDR" {
+            return Err("PNG is missing its IHDR header".into());
+        }
+        let width = u32::from_be_bytes(bytes[16..20].try_into().unwrap());
+        let height = u32::from_be_bytes(bytes[20..24].try_into().unwrap());
+        let mut cursor = 8usize;
+        let mut animated = false;
+        while cursor + 12 <= bytes.len() {
+            let length = u32::from_be_bytes(bytes[cursor..cursor + 4].try_into().unwrap()) as usize;
+            let end = cursor
+                .checked_add(12)
+                .and_then(|value| value.checked_add(length))
+                .ok_or("PNG chunk length overflow")?;
+            if end > bytes.len() {
+                return Err("PNG chunk exceeds input".into());
+            }
+            if &bytes[cursor + 4..cursor + 8] == b"acTL" {
+                animated = true;
+            }
+            if &bytes[cursor + 4..cursor + 8] == b"IEND" {
+                break;
+            }
+            cursor = end;
+        }
+        ("image/png", width, height, animated)
+    } else if bytes.starts_with(&[0xff, 0xd8, 0xff]) {
+        let mut cursor = 2usize;
+        let mut dimensions = None;
+        while cursor + 4 <= bytes.len() {
+            if bytes[cursor] != 0xff {
+                return Err("JPEG marker stream is malformed".into());
+            }
+            while cursor < bytes.len() && bytes[cursor] == 0xff {
+                cursor += 1;
+            }
+            if cursor >= bytes.len() {
+                break;
+            }
+            let marker = bytes[cursor];
+            cursor += 1;
+            if marker == 0xd9 || marker == 0xda {
+                break;
+            }
+            if cursor + 2 > bytes.len() {
+                return Err("JPEG segment is truncated".into());
+            }
+            let length = u16::from_be_bytes(bytes[cursor..cursor + 2].try_into().unwrap()) as usize;
+            if length < 2 || cursor + length > bytes.len() {
+                return Err("JPEG segment length is invalid".into());
+            }
+            let is_sof = matches!(
+                marker,
+                0xc0 | 0xc1
+                    | 0xc2
+                    | 0xc3
+                    | 0xc5
+                    | 0xc6
+                    | 0xc7
+                    | 0xc9
+                    | 0xca
+                    | 0xcb
+                    | 0xcd
+                    | 0xce
+                    | 0xcf
+            );
+            if is_sof {
+                if marker == 0xc2 {
+                    return Err("progressive JPEG is not supported".into());
+                }
+                if length < 7 {
+                    return Err("JPEG frame header is truncated".into());
+                }
+                let height =
+                    u16::from_be_bytes(bytes[cursor + 3..cursor + 5].try_into().unwrap()) as u32;
+                let width =
+                    u16::from_be_bytes(bytes[cursor + 5..cursor + 7].try_into().unwrap()) as u32;
+                dimensions = Some((width, height));
+                break;
+            }
+            cursor += length;
+        }
+        let (width, height) = dimensions.ok_or("JPEG dimensions are unavailable")?;
+        ("image/jpeg", width, height, false)
+    } else {
+        return Err("only PNG and JPEG images are supported".into());
+    };
+    if animated {
+        return Err("animated PNG is not supported".into());
+    }
+    let format = match mime_type {
+        "image/png" => image::ImageFormat::Png,
+        "image/jpeg" => image::ImageFormat::Jpeg,
+        _ => unreachable!(),
+    };
+    let mut reader = image::ImageReader::new(Cursor::new(bytes));
+    reader.set_format(format);
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(MAX_CG_IMAGE_DIMENSION);
+    limits.max_image_height = Some(MAX_CG_IMAGE_DIMENSION);
+    limits.max_alloc = Some(MAX_CG_IMAGE_BYTES as u64 * 4);
+    reader.limits(limits);
+    let decoded = reader
+        .decode()
+        .map_err(|error| format!("image decode failed: {error}"))?;
+    let (decoded_width, decoded_height) = image::GenericImageView::dimensions(&decoded);
+    if decoded_width != width || decoded_height != height {
+        return Err("decoded image dimensions do not match its header".into());
+    }
+    let asset = CgImageAsset {
+        asset_id: asset_id.into(),
+        mime_type: mime_type.into(),
+        byte_size: bytes.len() as u64,
+        width,
+        height,
+        readiness: CgImageReadiness::Ready,
+    };
+    asset.validate().map_err(str::to_string)?;
+    Ok(asset)
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -751,6 +944,56 @@ fn valid_header_value(value: &str, maximum: usize) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn tiny_png() -> Vec<u8> {
+        let image = image::DynamicImage::new_rgba8(2, 3);
+        let mut bytes = std::io::Cursor::new(Vec::new());
+        image.write_to(&mut bytes, image::ImageFormat::Png).unwrap();
+        bytes.into_inner()
+    }
+
+    fn png_chunk(kind: &[u8; 4], data: &[u8]) -> Vec<u8> {
+        let mut chunk = Vec::new();
+        chunk.extend_from_slice(&(data.len() as u32).to_be_bytes());
+        chunk.extend_from_slice(kind);
+        chunk.extend_from_slice(data);
+        let mut crc = 0xffff_ffffu32;
+        for byte in kind.iter().chain(data) {
+            crc ^= u32::from(*byte);
+            for _ in 0..8 {
+                crc = if crc & 1 == 1 {
+                    (crc >> 1) ^ 0xedb8_8320
+                } else {
+                    crc >> 1
+                };
+            }
+        }
+        chunk.extend_from_slice(&(crc ^ 0xffff_ffff).to_be_bytes());
+        chunk
+    }
+
+    #[test]
+    fn image_inspection_admits_content_addressed_png() {
+        let bytes = tiny_png();
+        let id = format!("{:x}", Sha256::digest(&bytes));
+        let asset = inspect_cg_image(&id, &bytes).unwrap();
+        assert_eq!((asset.width, asset.height), (2, 3));
+        assert_eq!(asset.mime_type, "image/png");
+        assert_eq!(asset.readiness, CgImageReadiness::Ready);
+    }
+
+    #[test]
+    fn image_inspection_rejects_hash_path_format_and_apng() {
+        let bytes = tiny_png();
+        let id = format!("{:x}", Sha256::digest(&bytes));
+        assert!(inspect_cg_image(&"0".repeat(64), &bytes).is_err());
+        assert!(inspect_cg_image(&id, b"not-an-image").is_err());
+        let mut apng = bytes[..bytes.len() - 12].to_vec();
+        apng.extend_from_slice(&png_chunk(b"acTL", &1u32.to_be_bytes().repeat(2)));
+        apng.extend_from_slice(&bytes[bytes.len() - 12..]);
+        let apng_id = format!("{:x}", Sha256::digest(&apng));
+        assert!(inspect_cg_image(&apng_id, &apng).is_err());
+    }
 
     const CHANNEL_ID: &str = "5d85189a-cd1f-43dc-a619-66a2aeb09ac4";
     const BOARD_ID: &str = "94a0dc01-d314-4b55-b2e4-cba39cc3f1dc";

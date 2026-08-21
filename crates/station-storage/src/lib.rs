@@ -1,13 +1,24 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::ffi::{CStr, CString, c_char, c_int, c_longlong, c_void};
+use std::os::windows::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::ptr;
+use std::{
+    fs,
+    io::Write,
+    sync::{
+        Mutex,
+        atomic::{AtomicU64, Ordering},
+    },
+    time::{Instant, SystemTime},
+};
 
 use sha2::{Digest, Sha256};
 use station_cg::{
     CgAuditEvent, CgAuditEventKind, CgBoard, CgBulletin, CgBulletinContent, CgBulletinState,
     CgContentSource, CgFeedCacheEntry, CgFeedItem, CgFeedItemApproval, CgFeedKind, CgFeedSource,
-    CgFeedTrustTier, CgSnapshotInputs, CgZoneConfig, CgZoneKind, built_in_template,
+    CgFeedTrustTier, CgImageAsset, CgImageReadiness, CgSnapshotInputs, CgZoneConfig, CgZoneKind,
+    built_in_template, inspect_cg_image, managed_cg_image_path,
 };
 use station_domain::{
     AlertChannel, AlertChannelKind, AlertConditionKind, AlertDelivery, AlertDeliveryPayload,
@@ -37,6 +48,9 @@ const SQLITE_DONE: c_int = 101;
 const SQLITE_OPEN_READWRITE: c_int = 0x0000_0002;
 const SQLITE_OPEN_CREATE: c_int = 0x0000_0004;
 const SQLITE_OPEN_FULLMUTEX: c_int = 0x0001_0000;
+const CG_IMAGE_VERIFICATION_CACHE_LIMIT: usize = 256;
+const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
+static CG_IMAGE_TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
 #[repr(C)]
 struct Sqlite3 {
@@ -241,11 +255,36 @@ impl SrtOutputSecret {
 
 pub struct StationStore {
     database: *mut Sqlite3,
+    _data_root: PathBuf,
+    cg_image_root: PathBuf,
+    cg_image_verification_cache: Mutex<HashMap<String, CachedCgImageVerification>>,
+    cg_image_verification_count: AtomicU64,
+}
+
+struct CachedCgImageVerification {
+    byte_len: u64,
+    modified: Option<SystemTime>,
+    checked_at: Instant,
+    authority: CgImageAsset,
+    asset: CgImageAsset,
 }
 
 impl StationStore {
     pub fn open(database_path: impl AsRef<Path>) -> Result<Self, String> {
-        let filename = CString::new(database_path.as_ref().to_string_lossy().as_bytes())
+        let database_path = database_path.as_ref();
+        let data_root = station_data_root(database_path)?;
+        fs::create_dir_all(&data_root).map_err(|error| format!("create data root: {error}"))?;
+        let data_root = fs::canonicalize(&data_root)
+            .map_err(|error| format!("canonicalize data root: {error}"))?;
+        let cg_image_root = data_root.join("cg-images");
+        fs::create_dir_all(&cg_image_root)
+            .map_err(|error| format!("create CG image root: {error}"))?;
+        let cg_image_root = fs::canonicalize(&cg_image_root)
+            .map_err(|error| format!("canonicalize CG image root: {error}"))?;
+        if cg_image_root.parent() != Some(data_root.as_path()) {
+            return Err("CG image root escapes station data root".into());
+        }
+        let filename = CString::new(database_path.to_string_lossy().as_bytes())
             .map_err(|_| "database path contains a null byte".to_string())?;
         let mut database = ptr::null_mut();
         let flags = SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX;
@@ -262,7 +301,13 @@ impl StationStore {
             return Err(message);
         }
 
-        let store = Self { database };
+        let store = Self {
+            database,
+            _data_root: data_root,
+            cg_image_root,
+            cg_image_verification_cache: Mutex::new(HashMap::new()),
+            cg_image_verification_count: AtomicU64::new(0),
+        };
         store.execute("PRAGMA busy_timeout=5000;")?;
         store.execute(
             "PRAGMA journal_mode=WAL;\
@@ -1386,6 +1431,24 @@ impl StationStore {
             let bulletins = self
                 .list_airable_cg_bulletins(channel_id, generated_at_unix_ms)
                 .map_err(CgSnapshotReadError::Storage)?;
+            let referenced_image_ids = zones
+                .iter()
+                .filter_map(|zone| match &zone.content_source {
+                    CgContentSource::Image { asset_id } => Some(asset_id.as_str()),
+                    _ => None,
+                })
+                .collect::<BTreeSet<_>>();
+            let image_assets = referenced_image_ids
+                .iter()
+                .map(|asset_id| {
+                    self.read_cg_image_asset(asset_id)
+                        .map_err(CgSnapshotReadError::Storage)
+                })
+                .collect::<Result<Vec<_>, _>>()?
+                .into_iter()
+                .flatten()
+                .map(|asset| self.verify_cg_image_asset(asset))
+                .collect();
             Ok(CgSnapshotInputs {
                 board,
                 template,
@@ -1393,6 +1456,7 @@ impl StationStore {
                 feed_sources,
                 feed_cache,
                 approvals,
+                image_assets,
                 bulletins,
                 generated_at_unix_ms,
             })
@@ -1410,6 +1474,104 @@ impl StationStore {
                 Err(error)
             }
         }
+    }
+
+    pub fn cg_image_verification_count(&self) -> u64 {
+        self.cg_image_verification_count.load(Ordering::Relaxed)
+    }
+
+    fn verify_cg_image_asset(&self, mut asset: CgImageAsset) -> CgImageAsset {
+        if asset.readiness != CgImageReadiness::Ready {
+            return asset;
+        }
+        let image_root = match self.validated_cg_image_root() {
+            Ok(root) => root,
+            Err(_) => {
+                asset.readiness = CgImageReadiness::Rejected;
+                return asset;
+            }
+        };
+        let path = match managed_cg_image_path(&image_root, &asset.asset_id, &asset.mime_type) {
+            Ok(path) => path,
+            Err(_) => {
+                asset.readiness = CgImageReadiness::Rejected;
+                return asset;
+            }
+        };
+        let metadata = match fs::symlink_metadata(&path) {
+            Ok(metadata)
+                if metadata.is_file()
+                    && metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT == 0 =>
+            {
+                metadata
+            }
+            _ => {
+                self.cg_image_verification_cache
+                    .lock()
+                    .unwrap()
+                    .remove(&asset.asset_id);
+                asset.readiness = CgImageReadiness::Missing;
+                return asset;
+            }
+        };
+        let byte_len = metadata.len();
+        let modified = metadata.modified().ok();
+        if let Some(cached) = self
+            .cg_image_verification_cache
+            .lock()
+            .unwrap()
+            .get(&asset.asset_id)
+            && cached.byte_len == byte_len
+            && cached.modified == modified
+            && cached.checked_at.elapsed() <= std::time::Duration::from_secs(60)
+            && cached.authority == asset
+        {
+            return cached.asset.clone();
+        }
+        self.cg_image_verification_count
+            .fetch_add(1, Ordering::Relaxed);
+        let authority = asset.clone();
+        let verified = match fs::read(&path)
+            .map_err(|error| error.to_string())
+            .and_then(|bytes| {
+                inspect_cg_image(&asset.asset_id, &bytes).map_err(|error| error.to_string())
+            }) {
+            Ok(candidate) if candidate == asset => asset,
+            _ => {
+                asset.readiness = CgImageReadiness::Rejected;
+                asset
+            }
+        };
+        let mut cache = self.cg_image_verification_cache.lock().unwrap();
+        if cache.len() >= CG_IMAGE_VERIFICATION_CACHE_LIMIT
+            && !cache.contains_key(&verified.asset_id)
+            && let Some(oldest) = cache
+                .iter()
+                .min_by_key(|(_, entry)| entry.checked_at)
+                .map(|(asset_id, _)| asset_id.clone())
+        {
+            cache.remove(&oldest);
+        }
+        cache.insert(
+            verified.asset_id.clone(),
+            CachedCgImageVerification {
+                byte_len,
+                modified,
+                checked_at: Instant::now(),
+                authority,
+                asset: verified.clone(),
+            },
+        );
+        verified
+    }
+
+    fn validated_cg_image_root(&self) -> Result<PathBuf, String> {
+        let current = fs::canonicalize(&self.cg_image_root)
+            .map_err(|error| format!("canonicalize CG image root: {error}"))?;
+        if current != self.cg_image_root {
+            return Err("CG image root authority changed after station startup".into());
+        }
+        Ok(current)
     }
 
     pub fn write_cg_board(
@@ -1570,10 +1732,10 @@ impl StationStore {
                 }
                 CgContentSource::Image { asset_id } => {
                     let asset = self
-                        .read_media_asset(asset_id)
+                        .read_cg_image_asset(asset_id)
                         .map_err(CgWriteError::Storage)?
                         .ok_or(CgWriteError::NotFound)?;
-                    if asset.readiness != AssetReadiness::Ready {
+                    if asset.readiness != CgImageReadiness::Ready {
                         return Err(CgWriteError::Invalid(
                             "CG zone image must identify a ready managed asset.",
                         ));
@@ -4728,6 +4890,134 @@ impl StationStore {
         }
     }
 
+    /// Admit an immutable, content-addressed PNG/JPEG into the CG image library.
+    /// The database stores only the path derived from `managed_cg_image_path`; a caller-supplied
+    /// path is never accepted as authority.
+    pub fn admit_cg_image_asset(&self, bytes: &[u8]) -> Result<CgImageAsset, String> {
+        let asset_id = format!("{:x}", Sha256::digest(bytes));
+        let mime_type = if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+            "image/png"
+        } else if bytes.starts_with(&[0xff, 0xd8, 0xff]) {
+            "image/jpeg"
+        } else {
+            return Err("only PNG and JPEG images are supported".into());
+        };
+        let image_dir = self.validated_cg_image_root()?;
+        let path = managed_cg_image_path(&image_dir, &asset_id, mime_type)?;
+        let asset = inspect_cg_image(&asset_id, bytes)?;
+
+        if path.exists() {
+            let metadata = fs::symlink_metadata(&path)
+                .map_err(|error| format!("inspect immutable image: {error}"))?;
+            if !metadata.is_file() || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+            {
+                return Err("managed image path is not a regular non-reparse file".into());
+            }
+            let existing =
+                fs::read(&path).map_err(|error| format!("read immutable image: {error}"))?;
+            if existing != bytes {
+                return Err("managed image path already contains different bytes".into());
+            }
+        } else {
+            let sequence = CG_IMAGE_TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+            let temp_path = image_dir.join(format!(
+                ".{}.part-{}-{}",
+                asset.asset_id,
+                std::process::id(),
+                sequence
+            ));
+            let mut file = fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&temp_path)
+                .map_err(|error| format!("create immutable image: {error}"))?;
+            if let Err(error) = file.write_all(bytes).and_then(|_| file.sync_all()) {
+                let _ = fs::remove_file(&temp_path);
+                return Err(format!("write immutable image: {error}"));
+            }
+            if let Err(error) = fs::rename(&temp_path, &path) {
+                let _ = fs::remove_file(&temp_path);
+                if !path.exists() {
+                    return Err(format!("publish immutable image: {error}"));
+                }
+                let existing = fs::read(&path)
+                    .map_err(|read_error| format!("read raced image: {read_error}"))?;
+                if existing != bytes {
+                    return Err("managed image path already contains different bytes".into());
+                }
+            }
+        }
+
+        self.execute("BEGIN IMMEDIATE")?;
+        let outcome = (|| {
+            if let Some(existing) = self.read_cg_image_asset(&asset.asset_id)? {
+                if existing != asset {
+                    return Err("CG image identity already has different metadata".into());
+                }
+                return Ok(existing);
+            }
+            let statement = self.prepare(
+                "INSERT INTO cg_image_assets(asset_id, mime_type, byte_size, width, height, readiness) VALUES(?1, ?2, ?3, ?4, ?5, ?6)",
+            )?;
+            let asset_id = c_string(&asset.asset_id, "image identity")?;
+            let mime_type = c_string(&asset.mime_type, "image MIME")?;
+            let readiness = c_string(cg_image_readiness_name(asset.readiness), "image readiness")?;
+            bind_text(self.database, statement.raw, 1, &asset_id)?;
+            bind_text(self.database, statement.raw, 2, &mime_type)?;
+            bind_i64(
+                self.database,
+                statement.raw,
+                3,
+                checked_i64(asset.byte_size, "image byte size")?,
+            )?;
+            bind_i64(self.database, statement.raw, 4, i64::from(asset.width))?;
+            bind_i64(self.database, statement.raw, 5, i64::from(asset.height))?;
+            bind_text(self.database, statement.raw, 6, &readiness)?;
+            expect_done(self.database, statement.raw)?;
+            Ok(asset)
+        })();
+        match outcome {
+            Ok(asset) => match self.execute("COMMIT") {
+                Ok(()) => Ok(asset),
+                Err(error) => {
+                    let _ = self.execute("ROLLBACK");
+                    Err(error)
+                }
+            },
+            Err(error) => {
+                let _ = self.execute("ROLLBACK");
+                Err(error)
+            }
+        }
+    }
+
+    pub fn read_cg_image_asset(&self, asset_id: &str) -> Result<Option<CgImageAsset>, String> {
+        let statement = self.prepare(
+            "SELECT asset_id, mime_type, byte_size, width, height, readiness FROM cg_image_assets WHERE asset_id=?1",
+        )?;
+        let asset_id = c_string(asset_id, "image identity")?;
+        bind_text(self.database, statement.raw, 1, &asset_id)?;
+        match unsafe { sqlite3_step(statement.raw) } {
+            SQLITE_ROW => Ok(Some(read_cg_image_asset_row(statement.raw)?)),
+            SQLITE_DONE => Ok(None),
+            _ => Err(sqlite_error(self.database)),
+        }
+    }
+
+    pub fn list_cg_image_assets(&self) -> Result<Vec<CgImageAsset>, String> {
+        let statement = self.prepare(
+            "SELECT asset_id, mime_type, byte_size, width, height, readiness FROM cg_image_assets ORDER BY asset_id",
+        )?;
+        let mut assets = Vec::new();
+        loop {
+            match unsafe { sqlite3_step(statement.raw) } {
+                SQLITE_ROW => assets.push(read_cg_image_asset_row(statement.raw)?),
+                SQLITE_DONE => return Ok(assets),
+                _ => return Err(sqlite_error(self.database)),
+            }
+        }
+    }
+
     pub fn list_media_assets(&self) -> Result<Vec<MediaAsset>, String> {
         let statement = self.prepare(
             "SELECT asset_id, media_path, duration_ms, readiness FROM media_assets ORDER BY asset_id",
@@ -5428,6 +5718,17 @@ impl StationStore {
              );\
              CREATE INDEX IF NOT EXISTS cg_audit_events_channel_time \
                ON cg_audit_events(channel_id, occurred_at_unix_ms DESC, audit_id);",
+        )?;
+        self.execute(
+            "CREATE TABLE IF NOT EXISTS cg_image_assets (\
+               asset_id TEXT PRIMARY KEY,\
+               mime_type TEXT NOT NULL CHECK (mime_type IN ('image/png','image/jpeg')),\
+               byte_size INTEGER NOT NULL CHECK (byte_size BETWEEN 1 AND 8388608),\
+               width INTEGER NOT NULL CHECK (width BETWEEN 1 AND 4096),\
+               height INTEGER NOT NULL CHECK (height BETWEEN 1 AND 4096),\
+               readiness TEXT NOT NULL CHECK (readiness IN ('ready','missing','rejected','processing'))\
+             );\
+             CREATE INDEX IF NOT EXISTS cg_image_assets_readiness ON cg_image_assets(readiness, asset_id);",
         )
     }
 
@@ -5819,6 +6120,16 @@ impl StationStore {
     }
 }
 
+fn station_data_root(database_path: &Path) -> Result<PathBuf, String> {
+    match database_path
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+    {
+        Some(path) => Ok(path.to_path_buf()),
+        None => std::env::current_dir().map_err(|error| format!("resolve data root: {error}")),
+    }
+}
+
 impl Drop for StationStore {
     fn drop(&mut self) {
         // SAFETY: `StationStore` owns this live handle and drops it exactly once.
@@ -5932,6 +6243,22 @@ fn read_media_asset_row(statement: *mut SqliteStatement) -> Result<MediaAsset, S
         duration_ms: column_u64(statement, 2, "asset duration")?,
         readiness: parse_readiness(&column_text(statement, 3)?)?,
     })
+}
+
+fn read_cg_image_asset_row(statement: *mut SqliteStatement) -> Result<CgImageAsset, String> {
+    let asset = CgImageAsset {
+        asset_id: column_text(statement, 0)?,
+        mime_type: column_text(statement, 1)?,
+        byte_size: u64::try_from(unsafe { sqlite3_column_int64(statement, 2) })
+            .map_err(|_| "database returned an invalid CG image byte size".to_string())?,
+        width: u32::try_from(unsafe { sqlite3_column_int64(statement, 3) })
+            .map_err(|_| "database returned an invalid CG image width".to_string())?,
+        height: u32::try_from(unsafe { sqlite3_column_int64(statement, 4) })
+            .map_err(|_| "database returned an invalid CG image height".to_string())?,
+        readiness: cg_image_readiness_from_name(&column_text(statement, 5)?)?,
+    };
+    asset.validate().map_err(str::to_string)?;
+    Ok(asset)
 }
 
 fn read_channel_runtime_row(
@@ -6532,6 +6859,25 @@ fn readiness_name(value: AssetReadiness) -> &'static str {
         AssetReadiness::Missing => "missing",
         AssetReadiness::Rejected => "rejected",
         AssetReadiness::Processing => "processing",
+    }
+}
+
+fn cg_image_readiness_name(value: CgImageReadiness) -> &'static str {
+    match value {
+        CgImageReadiness::Ready => "ready",
+        CgImageReadiness::Missing => "missing",
+        CgImageReadiness::Rejected => "rejected",
+        CgImageReadiness::Processing => "processing",
+    }
+}
+
+fn cg_image_readiness_from_name(value: &str) -> Result<CgImageReadiness, String> {
+    match value {
+        "ready" => Ok(CgImageReadiness::Ready),
+        "missing" => Ok(CgImageReadiness::Missing),
+        "rejected" => Ok(CgImageReadiness::Rejected),
+        "processing" => Ok(CgImageReadiness::Processing),
+        _ => Err("database returned an invalid CG image readiness".into()),
     }
 }
 
@@ -7354,6 +7700,14 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn bare_database_filename_uses_the_current_directory_as_its_data_root() {
+        assert_eq!(
+            station_data_root(Path::new("station.db")).unwrap(),
+            std::env::current_dir().unwrap()
+        );
+    }
 
     #[test]
     fn adds_the_default_output_profile_to_existing_channels_without_losing_rows() {

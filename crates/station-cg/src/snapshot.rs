@@ -1,6 +1,7 @@
 use super::{
     CgBoard, CgBulletin, CgBulletinContent, CgContentSource, CgFeedCacheEntry, CgFeedItem,
-    CgFeedItemApproval, CgFeedSource, CgRect, CgTemplate, CgTemplateKind, CgZoneConfig, CgZoneKind,
+    CgFeedItemApproval, CgFeedSource, CgImageAsset, CgImageReadiness, CgRect, CgTemplate,
+    CgTemplateKind, CgZoneConfig, CgZoneKind,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -13,19 +14,21 @@ pub struct CgSnapshotInputs {
     pub feed_sources: Vec<CgFeedSource>,
     pub feed_cache: Vec<CgFeedCacheEntry>,
     pub approvals: Vec<CgFeedItemApproval>,
+    pub image_assets: Vec<CgImageAsset>,
     pub bulletins: Vec<CgBulletin>,
     pub generated_at_unix_ms: i64,
 }
 
 impl CgSnapshotInputs {
     pub fn resolve(&self) -> Result<CgResolvedSnapshot, CgSnapshotError> {
-        resolve_snapshot_with_feed_cache(
+        resolve_snapshot_with_feed_cache_and_images(
             &self.board,
             &self.template,
             &self.zones,
             &self.feed_sources,
             &self.bulletins,
             &self.feed_cache,
+            &self.image_assets,
             &self.approvals,
             self.generated_at_unix_ms,
         )
@@ -79,6 +82,9 @@ pub enum CgResolvedContent {
         stale: bool,
         last_error: Option<String>,
     },
+    Image {
+        asset: CgImageAsset,
+    },
     Placeholder {
         source: CgPlaceholderSource,
         reason: CgPlaceholderReason,
@@ -130,6 +136,12 @@ impl CgResolvedContent {
                     }
                 }
                 Ok(())
+            }
+            Self::Image { asset } => {
+                asset.validate()?;
+                (asset.readiness == CgImageReadiness::Ready)
+                    .then_some(())
+                    .ok_or("resolved CG image must be ready")
             }
             Self::Placeholder { source, reason } => {
                 let valid = match source {
@@ -228,6 +240,9 @@ impl CgResolvedZone {
                 }
             ) | (
                 CgContentSource::Image { .. },
+                CgResolvedContent::Image { .. }
+            ) | (
+                CgContentSource::Image { .. },
                 CgResolvedContent::Placeholder {
                     source: CgPlaceholderSource::Image,
                     ..
@@ -243,6 +258,13 @@ impl CgResolvedZone {
                 }
             )
         );
+        let source_matches = source_matches
+            && match (&self.content_source, &self.content) {
+                (CgContentSource::Image { asset_id }, CgResolvedContent::Image { asset }) => {
+                    asset_id == &asset.asset_id
+                }
+                _ => true,
+            };
         source_matches
             .then_some(())
             .ok_or("resolved content does not match its source")
@@ -381,6 +403,31 @@ pub fn resolve_snapshot_with_feed_cache(
     feed_sources: &[CgFeedSource],
     bulletins: &[CgBulletin],
     feed_cache: &[CgFeedCacheEntry],
+    approvals: &[CgFeedItemApproval],
+    now_unix_ms: i64,
+) -> Result<CgResolvedSnapshot, CgSnapshotError> {
+    resolve_snapshot_with_feed_cache_and_images(
+        board,
+        template,
+        zones,
+        feed_sources,
+        bulletins,
+        feed_cache,
+        &[],
+        approvals,
+        now_unix_ms,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn resolve_snapshot_with_feed_cache_and_images(
+    board: &CgBoard,
+    template: &CgTemplate,
+    zones: &[CgZoneConfig],
+    feed_sources: &[CgFeedSource],
+    bulletins: &[CgBulletin],
+    feed_cache: &[CgFeedCacheEntry],
+    image_assets: &[CgImageAsset],
     approvals: &[CgFeedItemApproval],
     now_unix_ms: i64,
 ) -> Result<CgResolvedSnapshot, CgSnapshotError> {
@@ -555,6 +602,20 @@ pub fn resolve_snapshot_with_feed_cache(
         }
     }
 
+    let mut image_by_id = BTreeMap::new();
+    for image in image_assets {
+        image
+            .validate()
+            .map_err(|reason| CgSnapshotError::SnapshotInvalid {
+                reason: reason.into(),
+            })?;
+        if image_by_id.insert(image.asset_id.as_str(), image).is_some() {
+            return Err(CgSnapshotError::SnapshotInvalid {
+                reason: "duplicate CG image asset identity".into(),
+            });
+        }
+    }
+
     let resolved_zones = ordered_zones
         .into_iter()
         .map(|(zone, template_zone)| CgResolvedZone {
@@ -569,6 +630,7 @@ pub fn resolve_snapshot_with_feed_cache(
                 &feed_by_id,
                 &valid_bulletins,
                 &cache_by_id,
+                &image_by_id,
                 &approval_ids,
                 now_unix_ms,
             ),
@@ -598,6 +660,7 @@ fn resolve_zone_content(
     feed_by_id: &BTreeMap<&str, &CgFeedSource>,
     bulletins: &BTreeMap<&str, &CgBulletin>,
     feed_cache: &BTreeMap<&str, &CgFeedCacheEntry>,
+    image_by_id: &BTreeMap<&str, &CgImageAsset>,
     approvals: &BTreeSet<(&str, &str)>,
     now_unix_ms: i64,
 ) -> CgResolvedContent {
@@ -713,9 +776,14 @@ fn resolve_zone_content(
                 last_error: cache.last_error.clone(),
             }
         }
-        CgContentSource::Image { .. } => CgResolvedContent::Placeholder {
-            source: CgPlaceholderSource::Image,
-            reason: CgPlaceholderReason::ImageAssetReadinessUnknown,
+        CgContentSource::Image { asset_id } => match image_by_id.get(asset_id.as_str()) {
+            Some(asset) if asset.readiness == CgImageReadiness::Ready => CgResolvedContent::Image {
+                asset: (*asset).clone(),
+            },
+            _ => CgResolvedContent::Placeholder {
+                source: CgPlaceholderSource::Image,
+                reason: CgPlaceholderReason::ImageAssetReadinessUnknown,
+            },
         },
         CgContentSource::LiveVideo { .. } => CgResolvedContent::Placeholder {
             source: CgPlaceholderSource::LiveVideo,
@@ -1277,6 +1345,73 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn image_resolution_requires_ready_authority_and_preserves_typed_placeholder() {
+        let template = crate::built_in_template("l-bar").unwrap();
+        let zone = zone(
+            "94a0dc01-d314-4b55-b2e4-cba39cc3f1dc",
+            "sidebar",
+            CgZoneKind::Sidebar,
+            CgContentSource::Image {
+                asset_id: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+            },
+        );
+        let ready = CgImageAsset {
+            asset_id: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+            mime_type: "image/png".into(),
+            byte_size: 64,
+            width: 2,
+            height: 2,
+            readiness: CgImageReadiness::Ready,
+        };
+        let resolved = resolve_snapshot_with_feed_cache_and_images(
+            &board("l-bar"),
+            &template,
+            std::slice::from_ref(&zone),
+            &[],
+            &[],
+            &[],
+            &[ready],
+            &[],
+            1_000,
+        )
+        .unwrap();
+        assert!(matches!(
+            resolved.zones[0].content,
+            CgResolvedContent::Image { .. }
+        ));
+        for readiness in [
+            CgImageReadiness::Missing,
+            CgImageReadiness::Rejected,
+            CgImageReadiness::Processing,
+        ] {
+            let mut unavailable = match &resolved.zones[0].content {
+                CgResolvedContent::Image { asset } => asset.clone(),
+                _ => unreachable!(),
+            };
+            unavailable.readiness = readiness;
+            let fallback = resolve_snapshot_with_feed_cache_and_images(
+                &board("l-bar"),
+                &template,
+                std::slice::from_ref(&zone),
+                &[],
+                &[],
+                &[],
+                &[unavailable],
+                &[],
+                1_000,
+            )
+            .unwrap();
+            assert!(matches!(
+                fallback.zones[0].content,
+                CgResolvedContent::Placeholder {
+                    source: CgPlaceholderSource::Image,
+                    reason: CgPlaceholderReason::ImageAssetReadinessUnknown,
+                }
+            ));
+        }
     }
 
     #[test]

@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::fs;
+use std::io::Cursor;
 use std::net::UdpSocket;
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -7,9 +8,11 @@ use std::time::{Duration, Instant};
 use gst::prelude::*;
 use gstreamer as gst;
 use gstreamer_pbutils as gst_pbutils;
+use image::{ImageBuffer, ImageFormat, Rgba};
+use sha2::{Digest, Sha256};
 use station_media_assets::ingest_media;
 use station_media_engine::{EngineError, PersistentPlayout, SourceRole, TransportOutput};
-use station_media_protocol::{CgOverlay, CgOverlayContent, CgRect, CgSnapshot};
+use station_media_protocol::{CgImageFormat, CgOverlay, CgOverlayContent, CgRect, CgSnapshot};
 use station_schedule::OutputProfileId;
 
 #[test]
@@ -636,6 +639,152 @@ fn cg_text_overlay_changes_pixels_in_its_declared_region() {
     playout.clear_cg_snapshot();
     playout.stop().unwrap();
     decoder.set_state(gst::State::Null).unwrap();
+}
+
+#[test]
+fn managed_png_jpeg_image_apply_clear_reapply_and_invalid_retain_pixels() {
+    gst::init().unwrap();
+    let root = test_root("cg-images");
+    fs::create_dir_all(&root).unwrap();
+    let (png_id, _) = write_image_fixture(&root, ImageFormat::Png, [0, 255, 0, 255]);
+    let (jpeg_id, _) = write_image_fixture(&root, ImageFormat::Jpeg, [255, 0, 0, 255]);
+    let reservation = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let port = reservation.local_addr().unwrap().port();
+    drop(reservation);
+    let (decoder, sink) = start_udp_decoder(port);
+    decoder.set_state(gst::State::Playing).unwrap();
+    let mut playout = PersistentPlayout::start_outputs_with_profile_and_cg_root(
+        &[TransportOutput::Udp(
+            format!("127.0.0.1:{port}").parse().unwrap(),
+        )],
+        OutputProfileId::Proof360p30,
+        Some(&root),
+    )
+    .unwrap();
+    playout.select(SourceRole::Program).unwrap();
+    std::thread::sleep(Duration::from_millis(500));
+    let baseline = pull_decoded_frame(&sink);
+    let before_bytes = playout.output_bytes_sent().unwrap()[0];
+    let image_snapshot = |asset_id: String, format: CgImageFormat, revision| CgSnapshot {
+        board_id: "image-proof".into(),
+        board_revision: revision,
+        overlays: vec![CgOverlay {
+            slot: 0,
+            rect: CgRect {
+                x: 100,
+                y: 100,
+                width: 300,
+                height: 300,
+            },
+            z_index: 1,
+            content: CgOverlayContent::Image { asset_id, format },
+        }],
+    };
+    playout
+        .apply_cg_snapshot(&image_snapshot(png_id.clone(), CgImageFormat::Png, 1))
+        .unwrap();
+    std::thread::sleep(Duration::from_millis(500));
+    let png_frame = pull_decoded_frame(&sink);
+    let sample = |frame: &DecodedFrame, x: usize, y: usize| -> [u8; 4] {
+        let index = (y * frame.width as usize + x) * 4;
+        frame.bytes[index..index + 4].try_into().unwrap()
+    };
+    let black_sample = sample(&png_frame, 90, 80);
+    let green_sample = sample(&png_frame, 220, 80);
+    let baseline_sample = sample(&baseline, 90, 80);
+    assert!(baseline_sample[..3].iter().any(|channel| *channel > 45));
+    assert!(black_sample[..3].iter().all(|channel| *channel < 35));
+    assert!(green_sample[1] > green_sample[0] + 40 && green_sample[1] > green_sample[2] + 40);
+    let outside_before = sample(&baseline, 20, 20);
+    let outside_after = sample(&png_frame, 20, 20);
+    assert!(
+        outside_before
+            .iter()
+            .zip(outside_after)
+            .all(|(before, after)| before.abs_diff(after) < 80)
+    );
+    let region_diff = |left: &DecodedFrame, right: &DecodedFrame| {
+        left.bytes
+            .chunks_exact(4)
+            .zip(right.bytes.chunks_exact(4))
+            .enumerate()
+            .filter(|(index, (before, after))| {
+                let x = index % left.width as usize;
+                let y = index / left.width as usize;
+                (64..=255).contains(&(x as u32))
+                    && (36..=143).contains(&(y as u32))
+                    && before[..3] != after[..3]
+            })
+            .count()
+    };
+    assert!(region_diff(&baseline, &png_frame) > 20);
+    playout.clear_cg_snapshot();
+    std::thread::sleep(Duration::from_millis(500));
+    let cleared = pull_decoded_frame(&sink);
+    let cleared_sample = sample(&cleared, 90, 80);
+    assert!(cleared_sample[..3].iter().any(|channel| *channel > 45));
+    let after_clear_bytes = playout.output_bytes_sent().unwrap()[0];
+    playout
+        .apply_cg_snapshot(&image_snapshot(jpeg_id, CgImageFormat::Jpeg, 2))
+        .unwrap();
+    std::thread::sleep(Duration::from_millis(500));
+    let jpeg_frame = pull_decoded_frame(&sink);
+    assert!(region_diff(&baseline, &jpeg_frame) > 20);
+    let after_jpeg_bytes = playout.output_bytes_sent().unwrap()[0];
+    let invalid = image_snapshot("f".repeat(64), CgImageFormat::Png, 3);
+    assert!(playout.apply_cg_snapshot(&invalid).is_err());
+    assert!(
+        playout
+            .apply_cg_snapshot(&image_snapshot(png_id, CgImageFormat::Jpeg, 3))
+            .is_err()
+    );
+    let missing = image_snapshot("e".repeat(64), CgImageFormat::Png, 4);
+    assert!(playout.apply_cg_snapshot(&missing).is_err());
+    assert_eq!(playout.current_cg_revision(), Some(("image-proof", 2)));
+    std::thread::sleep(Duration::from_millis(500));
+    let after_invalid = pull_decoded_frame(&sink);
+    let jpeg_center = sample(&jpeg_frame, 220, 80);
+    let retained_center = sample(&after_invalid, 220, 80);
+    assert!(
+        retained_center[2] > retained_center[1] + 30
+            && retained_center[2] > retained_center[0] + 30
+            && jpeg_center[2] > jpeg_center[1] + 20
+    );
+    let after_invalid_bytes = playout.output_bytes_sent().unwrap()[0];
+    assert!(after_clear_bytes > before_bytes);
+    assert!(after_jpeg_bytes > after_clear_bytes);
+    assert!(after_invalid_bytes > after_jpeg_bytes);
+    playout.stop().unwrap();
+    decoder.set_state(gst::State::Null).unwrap();
+    let _ = fs::remove_dir_all(root);
+}
+
+fn write_image_fixture(
+    root: &Path,
+    format: ImageFormat,
+    color: [u8; 4],
+) -> (String, std::path::PathBuf) {
+    let image = ImageBuffer::from_fn(96, 96, |x, _| {
+        if format == ImageFormat::Png && x < 48 {
+            Rgba([0, 0, 0, 255])
+        } else {
+            Rgba(color)
+        }
+    });
+    let mut bytes = Cursor::new(Vec::new());
+    image::DynamicImage::ImageRgba8(image)
+        .write_to(&mut bytes, format)
+        .unwrap();
+    let bytes = bytes.into_inner();
+    let id = format!("{:x}", Sha256::digest(&bytes));
+    let extension = match format {
+        ImageFormat::Png => "png",
+        ImageFormat::Jpeg => "jpg",
+        _ => unreachable!(),
+    };
+    let path = root.join(format!("{id}.{extension}"));
+    fs::write(&path, bytes).unwrap();
+    (id, path)
 }
 
 fn start_udp_decoder(port: u16) -> (gst::Pipeline, gst::Element) {

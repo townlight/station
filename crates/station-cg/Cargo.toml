@@ -6,3 +6,5 @@ publish.workspace = true
 
 [dependencies]
 serde.workspace = true
+image.workspace = true
+sha2.workspace = true

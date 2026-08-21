@@ -47,6 +47,27 @@ fn main() {
             "worker or channel identity did not match the process identity",
         );
     }
+    std::fs::create_dir_all(&bootstrap.cg_image_root).unwrap_or_else(|error| {
+        fatal(
+            6,
+            "create its managed CG image root",
+            &format!("{}: {error}", bootstrap.cg_image_root),
+        )
+    });
+    let cg_image_root = std::fs::canonicalize(&bootstrap.cg_image_root).unwrap_or_else(|error| {
+        fatal(
+            6,
+            "validate its managed CG image root",
+            &format!("{}: {error}", bootstrap.cg_image_root),
+        )
+    });
+    if !cg_image_root.is_dir() {
+        fatal(
+            6,
+            "validate its managed CG image root",
+            "the managed CG image root is not a directory",
+        );
+    }
     let output_profile = OutputProfileId::from_storage_name(&bootstrap.output_profile)
         .unwrap_or_else(|error| fatal(6, "validate its output profile", &format!("{error:?}")));
     let outputs = bootstrap
@@ -74,8 +95,12 @@ fn main() {
         );
     }
     let mut media = Some(
-        PersistentPlayout::start_outputs_with_profile(&outputs, output_profile)
-            .unwrap_or_else(|error| fatal(8, "start its fallback graph", &format!("{error:?}"))),
+        PersistentPlayout::start_outputs_with_profile_and_cg_root(
+            &outputs,
+            output_profile,
+            Some(&cg_image_root),
+        )
+        .unwrap_or_else(|error| fatal(8, "start its fallback graph", &format!("{error:?}"))),
     );
 
     record_and_emit(

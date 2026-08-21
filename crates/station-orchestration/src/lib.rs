@@ -13,7 +13,7 @@ use station_domain::{
     ChannelRuntimeState,
 };
 use station_media_protocol::{
-    CgOverlay, CgOverlayContent, CgRect, CgSnapshot, ChannelCommand, MAX_CG_SLOTS,
+    CgImageFormat, CgOverlay, CgOverlayContent, CgRect, CgSnapshot, ChannelCommand, MAX_CG_SLOTS,
     MAX_CG_TEXT_BYTES, SrtPassphrase, WorkerEvent, WorkerOutputConfiguration,
 };
 use station_runtime::{SupervisorError, WorkerSupervisor};
@@ -24,6 +24,18 @@ static ALERT_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 const HEARTBEAT_INTERVAL_MS: i64 = 5_000;
 const CG_EXPIRER_OPERATOR_ID: &str = "stationd-cg-expirer";
 const CG_SYNC_INTERVAL_MS: i64 = 1_000;
+pub fn managed_cg_image_root(database_path: &Path) -> PathBuf {
+    let parent = database_path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .to_path_buf();
+    let parent = if parent.is_absolute() {
+        parent
+    } else {
+        std::env::current_dir().map_or(parent.clone(), |current| current.join(parent))
+    };
+    parent.join(station_cg::CG_IMAGE_SUBDIRECTORY)
+}
 
 fn expire_due_bulletins(
     store: &StationStore,
@@ -164,6 +176,32 @@ pub fn resolved_snapshot_to_protocol(
                     })
                     .into_iter()
                     .collect()
+            }
+            CgResolvedContent::Image { asset } => {
+                let format = match asset.mime_type.as_str() {
+                    "image/png" => CgImageFormat::Png,
+                    "image/jpeg" => CgImageFormat::Jpeg,
+                    _ => {
+                        return Err(OrchestrationError::InvalidCgSnapshot(
+                            "CG image format is not supported by the worker protocol".into(),
+                        ));
+                    }
+                };
+                if asset.readiness != station_cg::CgImageReadiness::Ready {
+                    return Err(OrchestrationError::InvalidCgSnapshot(
+                        "CG image snapshot references a non-ready asset".into(),
+                    ));
+                }
+                overlays.push(CgOverlay {
+                    slot: checked_slot(overlays.len())?,
+                    rect: protocol_rect(zone),
+                    z_index: protocol_z_index(zone)?,
+                    content: CgOverlayContent::Image {
+                        asset_id: asset.asset_id.clone(),
+                        format,
+                    },
+                });
+                continue;
             }
             CgResolvedContent::Placeholder { .. } => vec![None],
         };
@@ -307,12 +345,13 @@ impl ChannelController {
             })
             .collect();
         let worker_id = format!("station-worker-{}", channel.channel_id);
-        let supervisor = WorkerSupervisor::launch_with_outputs(
+        let supervisor = WorkerSupervisor::launch_with_outputs_and_cg_image_root(
             worker_executable,
             &worker_id,
             &channel.channel_id,
             journal_path,
             &outputs,
+            &managed_cg_image_root(database_path),
             channel.output_profile,
             timeout,
         )
@@ -995,7 +1034,7 @@ fn system_time_millis() -> Result<i64, OrchestrationError> {
 mod tests {
     use super::{
         CgSnapshotState, OrchestrationError, OutputExpectation, expire_due_bulletins,
-        resolved_snapshot_to_protocol, stalled_required_output,
+        managed_cg_image_root, resolved_snapshot_to_protocol, stalled_required_output,
     };
     use station_cg::{
         CgAuditEvent, CgAuditEventKind, CgBoard, CgBulletin, CgBulletinContent, CgBulletinState,
@@ -1024,6 +1063,15 @@ mod tests {
             .unwrap()
             .as_nanos();
         std::env::temp_dir().join(format!("townlight-orchestration-{label}-{nonce}.db"))
+    }
+
+    #[test]
+    fn managed_cg_image_root_is_anchored_to_database_parent() {
+        let database = PathBuf::from(r"C:\ProgramData\TownLight Station\station.db");
+        assert_eq!(
+            managed_cg_image_root(&database),
+            PathBuf::from(r"C:\ProgramData\TownLight Station\cg-images")
+        );
     }
 
     fn remove_database(path: &std::path::Path) {
@@ -1378,6 +1426,9 @@ mod tests {
                     CgResolvedContent::FeedItems { feed_source_id, .. } => CgContentSource::Feed {
                         feed_source_id: feed_source_id.clone(),
                     },
+                    CgResolvedContent::Image { asset } => CgContentSource::Image {
+                        asset_id: asset.asset_id.clone(),
+                    },
                     CgResolvedContent::Placeholder {
                         source: station_cg::CgPlaceholderSource::Image,
                         ..
@@ -1432,6 +1483,24 @@ mod tests {
         assert!(matches!(
             &protocol.overlays[0].content,
             station_media_protocol::CgOverlayContent::Text { text } if text == "Title\nBody"
+        ));
+
+        let image = snapshot(CgResolvedContent::Image {
+            asset: station_cg::CgImageAsset {
+                asset_id: "a".repeat(64),
+                mime_type: "image/jpeg".into(),
+                byte_size: 128,
+                width: 640,
+                height: 360,
+                readiness: station_cg::CgImageReadiness::Ready,
+            },
+        });
+        let protocol = resolved_snapshot_to_protocol(&image).unwrap();
+        assert!(matches!(
+            &protocol.overlays[0].content,
+            station_media_protocol::CgOverlayContent::Image { asset_id, format }
+                if asset_id == &"a".repeat(64)
+                    && *format == station_media_protocol::CgImageFormat::Jpeg
         ));
 
         let feed = snapshot(CgResolvedContent::FeedItems {

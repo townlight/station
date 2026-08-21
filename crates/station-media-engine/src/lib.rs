@@ -1,14 +1,19 @@
 use std::net::SocketAddr;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{
     Arc,
     atomic::{AtomicBool, AtomicU64, Ordering},
 };
 use std::time::{Duration, Instant};
 
+use gdk_pixbuf::Pixbuf;
 use gst::prelude::*;
 use gstreamer as gst;
-use station_media_protocol::{CgOverlayContent, CgSnapshot, MAX_CG_SLOTS, MAX_CG_TEXT_BYTES};
+use image::{ImageReader, Limits};
+use sha2::{Digest, Sha256};
+use station_media_protocol::{
+    CgImageFormat, CgOverlayContent, CgSnapshot, MAX_CG_SLOTS, MAX_CG_TEXT_BYTES,
+};
 use station_schedule::{OutputProfile, OutputProfileId};
 
 static FILE_PROGRAM_SEQUENCE: AtomicU64 = AtomicU64::new(1);
@@ -81,6 +86,7 @@ pub struct PersistentPlayout {
     file_program: Option<FileProgram>,
     cg_slots: Vec<CgSlot>,
     cg_canvas_pad: gst::Pad,
+    cg_image_root: Option<PathBuf>,
     cg_revision: Option<CgSnapshot>,
     stopped: bool,
 }
@@ -88,6 +94,8 @@ pub struct PersistentPlayout {
 struct CgSlot {
     text_overlay: gst::Element,
     clock_overlay: gst::Element,
+    image_overlays: [gst::Element; 2],
+    active_image: Option<(usize, String)>,
 }
 
 enum OutputCounter {
@@ -123,12 +131,20 @@ impl PersistentPlayout {
         outputs: &[TransportOutput],
         output_profile: OutputProfileId,
     ) -> Result<Self, EngineError> {
+        Self::start_outputs_with_profile_and_cg_root(outputs, output_profile, None)
+    }
+
+    pub fn start_outputs_with_profile_and_cg_root(
+        outputs: &[TransportOutput],
+        output_profile: OutputProfileId,
+        cg_image_root: Option<&Path>,
+    ) -> Result<Self, EngineError> {
         if outputs.is_empty() {
             return Err(EngineError::Pipeline(
                 "at least one transport output is required".into(),
             ));
         }
-        Self::start_outputs_with_program(outputs, None, output_profile)
+        Self::start_outputs_with_program(outputs, None, output_profile, cg_image_root)
     }
 
     pub fn start_file_udp(
@@ -149,6 +165,7 @@ impl PersistentPlayout {
             &[TransportOutput::Udp(destination)],
             Some(media_path.as_ref()),
             output_profile,
+            None,
         )
     }
 
@@ -156,6 +173,7 @@ impl PersistentPlayout {
         outputs: &[TransportOutput],
         media_path: Option<&Path>,
         output_profile: OutputProfileId,
+        cg_image_root: Option<&Path>,
     ) -> Result<Self, EngineError> {
         let startup_started = Instant::now();
         gst::init().map_err(|error| EngineError::Initialization(error.to_string()))?;
@@ -494,6 +512,7 @@ impl PersistentPlayout {
             file_program,
             cg_slots,
             cg_canvas_pad,
+            cg_image_root: cg_image_root.map(Path::to_path_buf),
             cg_revision: None,
             stopped: false,
         };
@@ -539,34 +558,86 @@ impl PersistentPlayout {
             return Ok(());
         }
         let canvas_pad = &self.cg_canvas_pad;
-        canvas_pad.set_property("alpha", 0.0_f64);
+        let mut overlays = snapshot.overlays.iter().collect::<Vec<_>>();
+        overlays.sort_by_key(|overlay| (overlay.z_index, overlay.slot));
+        let mut prepared_images = Vec::new();
+        for overlay in &overlays {
+            if let CgOverlayContent::Image { asset_id, format } = &overlay.content {
+                let root = self.cg_image_root.as_deref().ok_or_else(|| {
+                    EngineError::CgInvalid("managed CG image root is unavailable".into())
+                })?;
+                prepared_images.push((
+                    overlay.slot,
+                    load_managed_cg_image(root, asset_id, *format)?,
+                ));
+            }
+        }
+        let mut image_commits = Vec::new();
         for slot in &self.cg_slots {
             slot.text_overlay.set_property("silent", true);
             slot.clock_overlay.set_property("silent", true);
         }
-        let mut overlays = snapshot.overlays.iter().collect::<Vec<_>>();
-        overlays.sort_by_key(|overlay| (overlay.z_index, overlay.slot));
         for (physical_slot, overlay) in overlays.into_iter().enumerate() {
             let slot = &self.cg_slots[physical_slot];
-            configure_overlay_geometry(&slot.text_overlay, &overlay.rect)?;
-            configure_overlay_geometry(&slot.clock_overlay, &overlay.rect)?;
             match &overlay.content {
                 CgOverlayContent::Text { text } => {
+                    configure_overlay_geometry(&slot.text_overlay, &overlay.rect)?;
+                    configure_overlay_geometry(&slot.clock_overlay, &overlay.rect)?;
+                    for image in &slot.image_overlays {
+                        image.set_property("alpha", 0.0_f64);
+                    }
                     slot.text_overlay.set_property("text", sanitize_text(text)?);
                     slot.text_overlay.set_property("silent", false);
                     slot.clock_overlay.set_property("silent", true);
                 }
                 CgOverlayContent::Clock { format } => {
+                    configure_overlay_geometry(&slot.text_overlay, &overlay.rect)?;
+                    configure_overlay_geometry(&slot.clock_overlay, &overlay.rect)?;
+                    for image in &slot.image_overlays {
+                        image.set_property("alpha", 0.0_f64);
+                    }
                     slot.clock_overlay
                         .set_property("time-format", sanitize_text(format)?);
                     slot.text_overlay.set_property("silent", true);
                     slot.clock_overlay.set_property("silent", false);
                 }
+                CgOverlayContent::Image { .. } => {
+                    let (_, pixbuf) = prepared_images
+                        .iter()
+                        .find(|(slot, _)| *slot == overlay.slot)
+                        .expect("image was prepared before mutation");
+                    let bank = slot
+                        .active_image
+                        .as_ref()
+                        .map_or(0, |(active, _)| 1 - *active);
+                    configure_image_geometry(
+                        &slot.image_overlays[bank],
+                        &overlay.rect,
+                        self.output_profile.profile(),
+                    )?;
+                    slot.image_overlays[bank].set_property("pixbuf", pixbuf);
+                    image_commits.push((physical_slot, bank, overlay_asset_id(overlay)?));
+                }
+            }
+        }
+        for (physical_slot, bank, asset_id) in image_commits {
+            let slot = &mut self.cg_slots[physical_slot];
+            if let Some((active, _)) = slot.active_image {
+                slot.image_overlays[active].set_property("alpha", 0.0_f64);
+            }
+            slot.image_overlays[bank].set_property("alpha", 1.0_f64);
+            slot.active_image = Some((bank, asset_id));
+        }
+        for slot in self.cg_slots.iter().skip(snapshot.overlays.len()) {
+            for image in &slot.image_overlays {
+                image.set_property("alpha", 0.0_f64);
             }
         }
         canvas_pad.set_property("zorder", 1_u32);
         if !snapshot.overlays.is_empty() {
             canvas_pad.set_property("alpha", 1.0_f64);
+        } else {
+            canvas_pad.set_property("alpha", 0.0_f64);
         }
         self.cg_revision = Some(snapshot.clone());
         Ok(())
@@ -726,7 +797,8 @@ fn install_cg_branch(
     let canvas_source = gst::ElementFactory::make("videotestsrc")
         .name("cg-canvas-source")
         .property("is-live", true)
-        .property_from_str("pattern", "black")
+        .property_from_str("pattern", "solid-color")
+        .property("foreground-color", 0_u32)
         .build()
         .map_err(|error| build_error("videotestsrc", error))?;
     let canvas_caps = gst::ElementFactory::make("capsfilter")
@@ -747,6 +819,17 @@ fn install_cg_branch(
     let mut previous = canvas_caps.clone();
     let mut slots = Vec::with_capacity(MAX_CG_SLOTS);
     for slot in 0..MAX_CG_SLOTS {
+        let image_a = gst::ElementFactory::make("gdkpixbufoverlay")
+            .name(format!("cg-image-overlay-{slot}-a"))
+            .property("alpha", 0.0_f64)
+            .build()
+            .map_err(|error| build_error("gdkpixbufoverlay", error))?;
+        let image_b = gst::ElementFactory::make("gdkpixbufoverlay")
+            .name(format!("cg-image-overlay-{slot}-b"))
+            .property("alpha", 0.0_f64)
+            .build()
+            .map_err(|error| build_error("gdkpixbufoverlay", error))?;
+        let image_overlays = [image_a.clone(), image_b.clone()];
         let text_overlay = gst::ElementFactory::make("textoverlay")
             .name(format!("cg-text-overlay-{slot}"))
             .property("text", "")
@@ -766,9 +849,16 @@ fn install_cg_branch(
             .build()
             .map_err(|error| build_error("clockoverlay", error))?;
         pipeline
-            .add_many([&text_overlay, &clock_overlay])
+            .add_many([&image_a, &image_b, &text_overlay, &clock_overlay])
             .map_err(|error| EngineError::Pipeline(error.to_string()))?;
-        link(&previous, &text_overlay, "cg-canvas", "cg-text-overlay")?;
+        link(&previous, &image_a, "cg-canvas", "cg-image-overlay")?;
+        link(&image_a, &image_b, "cg-image-overlay", "cg-image-overlay")?;
+        link(
+            &image_b,
+            &text_overlay,
+            "cg-image-overlay",
+            "cg-text-overlay",
+        )?;
         link(
             &text_overlay,
             &clock_overlay,
@@ -776,21 +866,23 @@ fn install_cg_branch(
             "cg-clock-overlay",
         )?;
         previous = clock_overlay.clone();
-        elements.extend([text_overlay.clone(), clock_overlay.clone()]);
+        elements.extend([
+            image_a.clone(),
+            image_b.clone(),
+            text_overlay.clone(),
+            clock_overlay.clone(),
+        ]);
         slots.push(CgSlot {
             text_overlay,
             clock_overlay,
+            image_overlays,
+            active_image: None,
         });
     }
-    let canvas_alpha = gst::ElementFactory::make("alpha")
+    let canvas_alpha = gst::ElementFactory::make("identity")
         .name("cg-canvas-key")
-        .property("alpha", 1.0_f64)
-        .property_from_str("method", "custom")
-        .property("target-r", 0_u32)
-        .property("target-g", 0_u32)
-        .property("target-b", 0_u32)
         .build()
-        .map_err(|error| build_error("alpha", error))?;
+        .map_err(|error| build_error("identity", error))?;
     let canvas_queue = element("queue", "cg-canvas-queue")?;
     pipeline
         .add_many([&canvas_alpha, &canvas_queue])
@@ -1276,6 +1368,17 @@ fn validate_cg_snapshot(snapshot: &CgSnapshot) -> Result<(), EngineError> {
         let text_len = match &overlay.content {
             CgOverlayContent::Text { text } => sanitize_text(text)?.len(),
             CgOverlayContent::Clock { format } => sanitize_text(format)?.len(),
+            CgOverlayContent::Image { asset_id, .. } => {
+                if asset_id.len() != 64
+                    || asset_id != &asset_id.to_ascii_lowercase()
+                    || !asset_id.bytes().all(|byte| byte.is_ascii_hexdigit())
+                {
+                    return Err(EngineError::CgInvalid(
+                        "managed image asset id must be a SHA-256 digest".into(),
+                    ));
+                }
+                0
+            }
         };
         if text_len > MAX_CG_TEXT_BYTES {
             return Err(EngineError::CgInvalid("overlay text is too long".into()));
@@ -1290,6 +1393,120 @@ fn validate_cg_snapshot(snapshot: &CgSnapshot) -> Result<(), EngineError> {
         ));
     }
     Ok(())
+}
+
+fn overlay_asset_id(overlay: &station_media_protocol::CgOverlay) -> Result<String, EngineError> {
+    match &overlay.content {
+        CgOverlayContent::Image { asset_id, .. } => Ok(asset_id.clone()),
+        _ => Err(EngineError::CgInvalid("overlay is not an image".into())),
+    }
+}
+
+fn configure_image_geometry(
+    image: &gst::Element,
+    rect: &station_media_protocol::CgRect,
+    profile: &OutputProfile,
+) -> Result<(), EngineError> {
+    let x = u32::from(rect.x) * profile.width / 1000;
+    let y = u32::from(rect.y) * profile.height / 1000;
+    let width = (u32::from(rect.width) * profile.width / 1000).max(1);
+    let height = (u32::from(rect.height) * profile.height / 1000).max(1);
+    image.set_property(
+        "offset-x",
+        i32::try_from(x).map_err(|_| {
+            EngineError::CgInvalid("image x geometry exceeds GStreamer range".into())
+        })?,
+    );
+    image.set_property(
+        "offset-y",
+        i32::try_from(y).map_err(|_| {
+            EngineError::CgInvalid("image y geometry exceeds GStreamer range".into())
+        })?,
+    );
+    image.set_property(
+        "overlay-width",
+        i32::try_from(width)
+            .map_err(|_| EngineError::CgInvalid("image width exceeds GStreamer range".into()))?,
+    );
+    image.set_property(
+        "overlay-height",
+        i32::try_from(height)
+            .map_err(|_| EngineError::CgInvalid("image height exceeds GStreamer range".into()))?,
+    );
+    Ok(())
+}
+
+fn load_managed_cg_image(
+    root: &Path,
+    asset_id: &str,
+    format: CgImageFormat,
+) -> Result<Pixbuf, EngineError> {
+    if asset_id.len() != 64 || !asset_id.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(EngineError::CgInvalid(
+            "invalid managed image identity".into(),
+        ));
+    }
+    let extension = match format {
+        CgImageFormat::Png => "png",
+        CgImageFormat::Jpeg => "jpg",
+    };
+    let path = root.join(format!("{}.{}", asset_id.to_ascii_lowercase(), extension));
+    let canonical_root = std::fs::canonicalize(root).map_err(|error| {
+        EngineError::CgInvalid(format!("managed image root is unreadable: {error}"))
+    })?;
+    let canonical_path = std::fs::canonicalize(&path)
+        .map_err(|error| EngineError::CgInvalid(format!("managed image is unreadable: {error}")))?;
+    if canonical_path.parent() != Some(canonical_root.as_path()) {
+        return Err(EngineError::CgInvalid(
+            "managed image escapes its trusted root".into(),
+        ));
+    }
+    let metadata = std::fs::metadata(&canonical_path).map_err(|error| {
+        EngineError::CgInvalid(format!("managed image metadata failed: {error}"))
+    })?;
+    if !metadata.is_file() || !(1..=8 * 1024 * 1024).contains(&metadata.len()) {
+        return Err(EngineError::CgInvalid(
+            "managed image must be a regular file between 1 and 8 MiB".into(),
+        ));
+    }
+    let bytes = std::fs::read(&canonical_path)
+        .map_err(|error| EngineError::CgInvalid(format!("managed image is unreadable: {error}")))?;
+    let digest = format!("{:x}", Sha256::digest(&bytes));
+    if digest != asset_id.to_ascii_lowercase() {
+        return Err(EngineError::CgInvalid("managed image hash mismatch".into()));
+    }
+    let detected = image::guess_format(&bytes).map_err(|error| {
+        EngineError::CgInvalid(format!("managed image format is invalid: {error}"))
+    })?;
+    let expected = match format {
+        CgImageFormat::Png => image::ImageFormat::Png,
+        CgImageFormat::Jpeg => image::ImageFormat::Jpeg,
+    };
+    if detected != expected {
+        return Err(EngineError::CgInvalid(
+            "managed image format does not match identity".into(),
+        ));
+    }
+    let mut reader = ImageReader::new(std::io::Cursor::new(bytes.clone()));
+    let mut limits = Limits::default();
+    limits.max_image_width = Some(4096);
+    limits.max_image_height = Some(4096);
+    limits.max_alloc = Some(32 * 1024 * 1024);
+    reader.limits(limits);
+    let decoded = reader
+        .with_guessed_format()
+        .map_err(|error| {
+            EngineError::CgInvalid(format!("managed image format is invalid: {error}"))
+        })?
+        .decode()
+        .map_err(|error| EngineError::CgInvalid(format!("managed image decode failed: {error}")))?;
+    if decoded.width() > 4096 || decoded.height() > 4096 {
+        return Err(EngineError::CgInvalid(
+            "managed image dimensions exceed 4096 pixels".into(),
+        ));
+    }
+    Pixbuf::from_read(std::io::Cursor::new(bytes))
+        .map_err(|error| EngineError::CgInvalid(format!("managed image decode failed: {error}")))
 }
 
 fn sanitize_text(text: &str) -> Result<String, EngineError> {

@@ -6,6 +6,9 @@ publish.workspace = true
 
 [dependencies]
 gstreamer.workspace = true
+gdk-pixbuf.workspace = true
+image.workspace = true
+sha2.workspace = true
 station-media-assets.workspace = true
 station-media-protocol.workspace = true
 station-schedule.workspace = true
