@@ -141,6 +141,13 @@ pub fn ingest_media(
         return Err(AssetError::Io(error.to_string()));
     }
 
+    let (stored_id, stored_size) = hash_file(&stored_path)?;
+    if stored_id != asset_id || stored_size != size_bytes {
+        return Err(AssetError::Io(
+            "the copied library object failed its post-copy identity and size verification".into(),
+        ));
+    }
+
     let stored_metadata = validate_media(&stored_path)?;
     if stored_metadata != metadata {
         return Err(AssetError::Io(

@@ -12,7 +12,7 @@ use serde::Deserialize;
 use station_domain::StationProfile;
 use station_media_lifecycle::{
     AssetReadinessView, IngestJobStatus, IngestSourceKind, MediaIngestJob, MissingMediaAlert,
-    ReadinessDashboard, ReadinessState,
+    ReadinessDashboard, ReadinessState, WatchFolderConfig,
 };
 use station_schedule::{AssetReadiness, ChannelConfiguration, MediaAsset, ScheduleItem};
 use station_storage::{CommitWriteError, ProfileWriteError, StationStore};
@@ -90,6 +90,8 @@ impl Api {
             }
             ("PUT", "/api/v1/channels") => self.put_channel(body),
             ("GET", "/api/v1/channels") => self.list_channels(),
+            ("PUT", "/api/v1/watch-folders") => self.put_watch_folder(body),
+            ("GET", "/api/v1/watch-folders") => self.list_watch_folders(),
             ("PUT", "/api/v1/schedule/items") => self.put_schedule_item(body),
             ("POST", "/api/v1/schedule/prepare") => self.prepare_schedule_commit(body),
             ("POST", "/api/v1/schedule/commit") => self.commit_schedule(body),
@@ -184,6 +186,7 @@ impl Api {
             error_detail: None,
             asset_id: None,
             attempts: 0,
+            next_attempt_at_unix_ms: None,
         };
         if let Err(error) = job.validate() {
             return error_response(422, "validation_failed", &format!("{error:?}"));
@@ -370,6 +373,52 @@ impl Api {
                 200,
                 serde_json::to_vec(&channels)
                     .expect("serializing channel configurations cannot fail"),
+            ),
+            Err(message) => error_response(500, "storage_error", &message),
+        }
+    }
+
+    fn put_watch_folder(&self, body: Option<&[u8]>) -> ApiResponse {
+        let Some(config) = parse_body::<WatchFolderConfig>(body) else {
+            return error_response(
+                400,
+                "invalid_json",
+                "A watch-folder configuration body is required.",
+            );
+        };
+        if !Path::new(&config.monitor_path).is_absolute() {
+            return error_response(
+                422,
+                "invalid_watch_folder",
+                "The watch-folder path must be absolute.",
+            );
+        }
+        if let Err(error) = config.validate() {
+            return error_response(422, "validation_failed", &format!("{error:?}"));
+        }
+        if config.last_scan_at_unix_ms.is_some() || config.last_error.is_some() {
+            return error_response(
+                422,
+                "read_only_scan_state",
+                "Watch-folder scan status is written only by the station service.",
+            );
+        }
+        match self.storage.put_watch_folder(&config) {
+            Ok(()) => json_response(
+                200,
+                serde_json::to_vec(&config)
+                    .expect("serializing a watch-folder configuration cannot fail"),
+            ),
+            Err(message) => error_response(500, "storage_error", &message),
+        }
+    }
+
+    fn list_watch_folders(&self) -> ApiResponse {
+        match self.storage.list_watch_folders() {
+            Ok(configs) => json_response(
+                200,
+                serde_json::to_vec(&configs)
+                    .expect("serializing watch-folder configurations cannot fail"),
             ),
             Err(message) => error_response(500, "storage_error", &message),
         }

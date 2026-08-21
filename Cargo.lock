@@ -633,6 +633,7 @@ name = "station-ingest"
 version = "0.1.0"
 dependencies = [
  "gstreamer",
+ "sha2",
  "station-media-assets",
  "station-media-lifecycle",
  "station-schedule",
@@ -708,6 +709,7 @@ dependencies = [
 name = "station-storage"
 version = "0.1.0"
 dependencies = [
+ "serde_json",
  "station-domain",
  "station-media-lifecycle",
  "station-schedule",

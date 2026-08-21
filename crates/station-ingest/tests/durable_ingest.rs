@@ -4,8 +4,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use gst::prelude::*;
 use gstreamer as gst;
-use station_ingest::{IngestOutcome, IngestWorker, pending_job};
-use station_media_lifecycle::IngestJobStatus;
+use station_ingest::{
+    IngestOutcome, IngestWorker, WatchFolderMonitor, pending_job, pending_job_with_source,
+};
+use station_media_lifecycle::{IngestJobStatus, IngestSourceKind, WatchFolderConfig};
 use station_schedule::AssetReadiness;
 use station_storage::StationStore;
 
@@ -113,6 +115,146 @@ fn completes_real_media_fails_invalid_media_and_recovers_an_interrupted_job() {
     assert_eq!(recovered.status, IngestJobStatus::Completed);
     assert_eq!(recovered.attempts, 2);
     assert_eq!(worker.run_once().unwrap(), None);
+
+    remove_directory(&root);
+}
+
+#[test]
+fn waits_for_a_stable_watch_file_queues_it_once_and_surfaces_an_offline_share() {
+    let root = test_root();
+    let incoming = root.join("incoming");
+    let offline = root.join("offline-share");
+    let database = root.join("station.db");
+    let library = root.join("media");
+    fs::create_dir_all(&incoming).unwrap();
+    let source = incoming.join("council.ts");
+    generate_fixture(&source);
+    let store = StationStore::open(&database).unwrap();
+    store
+        .put_watch_folder(&WatchFolderConfig {
+            config_id: "44444444-5555-4666-8777-888888888888".into(),
+            display_name: "Council recorder".into(),
+            monitor_path: incoming.to_string_lossy().into_owned(),
+            extensions: vec![".ts".into()],
+            settle_seconds: 1,
+            enabled: true,
+            last_scan_at_unix_ms: None,
+            last_error: None,
+        })
+        .unwrap();
+    store
+        .put_watch_folder(&WatchFolderConfig {
+            config_id: "55555555-6666-4777-8888-999999999999".into(),
+            display_name: "Temporarily offline NAS".into(),
+            monitor_path: offline.to_string_lossy().into_owned(),
+            extensions: vec![".ts".into()],
+            settle_seconds: 1,
+            enabled: true,
+            last_scan_at_unix_ms: None,
+            last_error: None,
+        })
+        .unwrap();
+    drop(store);
+
+    let monitor = WatchFolderMonitor::new(&database);
+    let first = monitor.scan_once_at(1_000).unwrap();
+    assert_eq!(first.scanned_files, 1);
+    assert!(first.queued_job_ids.is_empty());
+    assert!(
+        monitor
+            .scan_once_at(1_500)
+            .unwrap()
+            .queued_job_ids
+            .is_empty()
+    );
+    let stable = monitor.scan_once_at(2_000).unwrap();
+    assert_eq!(stable.queued_job_ids.len(), 1);
+    let job_id = &stable.queued_job_ids[0];
+    let store = StationStore::open(&database).unwrap();
+    let job = store.read_ingest_job(job_id).unwrap().unwrap();
+    assert_eq!(job.source_kind, IngestSourceKind::WatchFolder);
+    assert_eq!(job.status, IngestJobStatus::Pending);
+    let configs = store.list_watch_folders().unwrap();
+    assert!(
+        configs
+            .iter()
+            .find(|config| config.config_id == "55555555-6666-4777-8888-999999999999")
+            .unwrap()
+            .last_error
+            .as_deref()
+            .unwrap()
+            .contains("unavailable")
+    );
+    drop(store);
+
+    let after_restart = WatchFolderMonitor::new(&database)
+        .scan_once_at(3_000)
+        .unwrap();
+    assert!(after_restart.queued_job_ids.is_empty());
+    assert!(matches!(
+        IngestWorker::new(&database, &library).run_once().unwrap(),
+        Some(IngestOutcome::Completed { job_id: ref completed, .. }) if completed == job_id
+    ));
+    assert_eq!(
+        StationStore::open(&database)
+            .unwrap()
+            .list_ingest_jobs()
+            .unwrap()
+            .len(),
+        1
+    );
+
+    remove_directory(&root);
+}
+
+#[test]
+fn durably_backs_off_a_transient_watch_source_failure() {
+    let root = test_root();
+    let database = root.join("station.db");
+    let library = root.join("media");
+    fs::create_dir_all(&root).unwrap();
+    let job_id = "66666666-7777-4888-8999-aaaaaaaaaaaa";
+    StationStore::open(&database)
+        .unwrap()
+        .create_ingest_job(&pending_job_with_source(
+            job_id.into(),
+            root.join("temporarily-offline.ts")
+                .to_string_lossy()
+                .into_owned(),
+            1,
+            IngestSourceKind::WatchFolder,
+        ))
+        .unwrap();
+
+    let outcome = IngestWorker::new(&database, &library)
+        .run_once()
+        .unwrap()
+        .unwrap();
+    let next_attempt = match outcome {
+        IngestOutcome::RetryScheduled {
+            job_id: actual,
+            next_attempt_at_unix_ms,
+            detail,
+        } => {
+            assert_eq!(actual, job_id);
+            assert!(detail.contains("Invalid media source"));
+            next_attempt_at_unix_ms
+        }
+        other => panic!("transient watch failure was not retried: {other:?}"),
+    };
+    let store = StationStore::open(&database).unwrap();
+    let pending = store.read_ingest_job(job_id).unwrap().unwrap();
+    assert_eq!(pending.status, IngestJobStatus::Pending);
+    assert_eq!(pending.attempts, 1);
+    assert_eq!(pending.next_attempt_at_unix_ms, Some(next_attempt));
+    assert!(
+        store
+            .claim_next_ingest_job(next_attempt - 1)
+            .unwrap()
+            .is_none()
+    );
+    assert!(store.claim_next_ingest_job(next_attempt).unwrap().is_some());
+    drop(store);
 
     remove_directory(&root);
 }

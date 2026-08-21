@@ -3,7 +3,9 @@ use std::path::Path;
 use std::ptr;
 
 use station_domain::{StationProfile, StationProfileDocument};
-use station_media_lifecycle::{IngestJobStatus, IngestSourceKind, MediaIngestJob};
+use station_media_lifecycle::{
+    IngestJobStatus, IngestSourceKind, MediaIngestJob, WatchFileObservation, WatchFolderConfig,
+};
 use station_schedule::{
     AssetReadiness, ChannelConfiguration, CommitPlan, CommitReport, DispatchJob, DispatchStatus,
     MediaAsset, ScheduleItem, ScheduleState, prepare_commit,
@@ -134,10 +136,32 @@ impl StationStore {
                completed_at_unix_ms INTEGER NOT NULL DEFAULT -1 CHECK (completed_at_unix_ms >= -1),\
                error_detail TEXT NOT NULL DEFAULT '',\
                asset_id TEXT NOT NULL DEFAULT '',\
-               attempts INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0)\
+               attempts INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),\
+               next_attempt_at_unix_ms INTEGER NOT NULL DEFAULT -1 CHECK (next_attempt_at_unix_ms >= -1)\
              );\
              CREATE INDEX IF NOT EXISTS media_ingest_jobs_status_time \
                ON media_ingest_jobs(status, created_at_unix_ms);\
+             CREATE TABLE IF NOT EXISTS watch_folder_configs (\
+               config_id TEXT PRIMARY KEY,\
+               display_name TEXT NOT NULL,\
+               monitor_path TEXT NOT NULL,\
+               extensions_json TEXT NOT NULL,\
+               settle_seconds INTEGER NOT NULL CHECK (settle_seconds BETWEEN 1 AND 3600),\
+               enabled INTEGER NOT NULL CHECK (enabled IN (0,1)),\
+               last_scan_at_unix_ms INTEGER NOT NULL DEFAULT -1 CHECK (last_scan_at_unix_ms >= -1),\
+               last_error TEXT NOT NULL DEFAULT ''\
+             );\
+             CREATE TABLE IF NOT EXISTS watch_file_observations (\
+               config_id TEXT NOT NULL,\
+               source_path TEXT NOT NULL,\
+               size_bytes INTEGER NOT NULL CHECK (size_bytes >= 0),\
+               modified_at_unix_ms INTEGER NOT NULL CHECK (modified_at_unix_ms >= 0),\
+               unchanged_since_unix_ms INTEGER NOT NULL CHECK (unchanged_since_unix_ms >= 0),\
+               observation_count INTEGER NOT NULL CHECK (observation_count >= 1),\
+               queued_job_id TEXT NOT NULL DEFAULT '',\
+               PRIMARY KEY(config_id, source_path),\
+               FOREIGN KEY(config_id) REFERENCES watch_folder_configs(config_id) ON DELETE CASCADE\
+             );\
              CREATE TABLE IF NOT EXISTS channels (\
                channel_id TEXT PRIMARY KEY,\
                display_name TEXT NOT NULL,\
@@ -169,6 +193,7 @@ impl StationStore {
              CREATE INDEX IF NOT EXISTS commit_reports_channel_time \
                ON commit_reports(channel_id, approved_at_unix_ms);",
         )?;
+        store.migrate_ingest_retry_schedule()?;
         store.migrate_commit_report_statuses()?;
         Ok(store)
     }
@@ -259,13 +284,14 @@ impl StationStore {
             || job.error_detail.is_some()
             || job.asset_id.is_some()
             || job.attempts != 0
+            || job.next_attempt_at_unix_ms.is_some()
         {
             return Err("new ingest jobs must begin in the pending state".into());
         }
         let statement = self.prepare(
             "INSERT OR IGNORE INTO media_ingest_jobs(job_id, source_kind, source_path, status, progress_percent, \
-             created_at_unix_ms, started_at_unix_ms, completed_at_unix_ms, error_detail, asset_id, attempts) \
-             VALUES(?1, ?2, ?3, 'pending', 0, ?4, -1, -1, '', '', 0)",
+             created_at_unix_ms, started_at_unix_ms, completed_at_unix_ms, error_detail, asset_id, attempts, next_attempt_at_unix_ms) \
+             VALUES(?1, ?2, ?3, 'pending', 0, ?4, -1, -1, '', '', 0, -1)",
         )?;
         let job_id = c_string(&job.job_id, "ingest job identity")?;
         let source_kind = c_string(
@@ -283,8 +309,8 @@ impl StationStore {
 
     pub fn read_ingest_job(&self, job_id: &str) -> Result<Option<MediaIngestJob>, String> {
         let statement = self.prepare(
-            "SELECT job_id, source_kind, source_path, status, progress_percent, created_at_unix_ms, \
-             started_at_unix_ms, completed_at_unix_ms, error_detail, asset_id, attempts \
+             "SELECT job_id, source_kind, source_path, status, progress_percent, created_at_unix_ms, \
+             started_at_unix_ms, completed_at_unix_ms, error_detail, asset_id, attempts, next_attempt_at_unix_ms \
              FROM media_ingest_jobs WHERE job_id=?1",
         )?;
         let job_id = c_string(job_id, "ingest job identity")?;
@@ -299,7 +325,7 @@ impl StationStore {
     pub fn recover_interrupted_ingest_jobs(&self) -> Result<u64, String> {
         let statement = self.prepare(
             "UPDATE media_ingest_jobs SET status='pending', progress_percent=0, started_at_unix_ms=-1, \
-             error_detail='' WHERE status='running'",
+             error_detail='', next_attempt_at_unix_ms=-1 WHERE status='running'",
         )?;
         expect_done(self.database, statement.raw)?;
         u64::try_from(self.changes()).map_err(|_| "SQLite returned invalid changes".into())
@@ -316,8 +342,10 @@ impl StationStore {
         let outcome = (|| {
             let statement = self.prepare(
                 "SELECT job_id FROM media_ingest_jobs WHERE status='pending' \
+                 AND (next_attempt_at_unix_ms=-1 OR next_attempt_at_unix_ms<=?1) \
                  ORDER BY created_at_unix_ms, job_id LIMIT 1",
             )?;
+            bind_i64(self.database, statement.raw, 1, started_at_unix_ms)?;
             let job_id = match unsafe { sqlite3_step(statement.raw) } {
                 SQLITE_ROW => column_text(statement.raw, 0)?,
                 SQLITE_DONE => return Ok(None),
@@ -326,7 +354,7 @@ impl StationStore {
             drop(statement);
             let update = self.prepare(
                 "UPDATE media_ingest_jobs SET status='running', progress_percent=10, started_at_unix_ms=?1, \
-                 completed_at_unix_ms=-1, error_detail='', asset_id='', attempts=attempts+1 \
+                 completed_at_unix_ms=-1, error_detail='', asset_id='', attempts=attempts+1, next_attempt_at_unix_ms=-1 \
                  WHERE job_id=?2 AND status='pending'",
             )?;
             let id = c_string(&job_id, "ingest job identity")?;
@@ -416,6 +444,37 @@ impl StationStore {
         }
     }
 
+    pub fn retry_ingest_job(
+        &self,
+        job_id: &str,
+        next_attempt_at_unix_ms: i64,
+        error_detail: &str,
+    ) -> Result<(), String> {
+        if next_attempt_at_unix_ms < 0
+            || error_detail.trim().is_empty()
+            || error_detail.len() > 4_000
+            || error_detail.chars().any(char::is_control)
+        {
+            return Err("ingest retry schedule is invalid".into());
+        }
+        let statement = self.prepare(
+            "UPDATE media_ingest_jobs SET status='pending', progress_percent=0, started_at_unix_ms=-1, \
+             completed_at_unix_ms=-1, error_detail=?1, asset_id='', next_attempt_at_unix_ms=?2 \
+             WHERE job_id=?3 AND status='running'",
+        )?;
+        let detail = c_string(error_detail, "ingest retry detail")?;
+        let job_id = c_string(job_id, "ingest job identity")?;
+        bind_text(self.database, statement.raw, 1, &detail)?;
+        bind_i64(self.database, statement.raw, 2, next_attempt_at_unix_ms)?;
+        bind_text(self.database, statement.raw, 3, &job_id)?;
+        expect_done(self.database, statement.raw)?;
+        if self.changes() == 1 {
+            Ok(())
+        } else {
+            Err("ingest job is not running".into())
+        }
+    }
+
     pub fn put_channel(&self, channel: &ChannelConfiguration) -> Result<(), String> {
         channel.validate().map_err(|error| format!("{error:?}"))?;
         let statement = self.prepare(
@@ -480,8 +539,8 @@ impl StationStore {
 
     pub fn list_ingest_jobs(&self) -> Result<Vec<MediaIngestJob>, String> {
         let statement = self.prepare(
-            "SELECT job_id, source_kind, source_path, status, progress_percent, created_at_unix_ms, \
-             started_at_unix_ms, completed_at_unix_ms, error_detail, asset_id, attempts \
+             "SELECT job_id, source_kind, source_path, status, progress_percent, created_at_unix_ms, \
+             started_at_unix_ms, completed_at_unix_ms, error_detail, asset_id, attempts, next_attempt_at_unix_ms \
              FROM media_ingest_jobs ORDER BY created_at_unix_ms DESC, job_id",
         )?;
         let mut jobs = Vec::new();
@@ -491,6 +550,217 @@ impl StationStore {
                 SQLITE_DONE => return Ok(jobs),
                 _ => return Err(sqlite_error(self.database)),
             }
+        }
+    }
+
+    pub fn put_watch_folder(&self, config: &WatchFolderConfig) -> Result<(), String> {
+        config.validate().map_err(|error| format!("{error:?}"))?;
+        if config.last_scan_at_unix_ms.is_some() || config.last_error.is_some() {
+            return Err("watch-folder scan state is read-only".into());
+        }
+        let statement = self.prepare(
+            "INSERT INTO watch_folder_configs(config_id, display_name, monitor_path, extensions_json, \
+             settle_seconds, enabled, last_scan_at_unix_ms, last_error) VALUES(?1, ?2, ?3, ?4, ?5, ?6, -1, '') \
+             ON CONFLICT(config_id) DO UPDATE SET display_name=excluded.display_name, \
+             monitor_path=excluded.monitor_path, extensions_json=excluded.extensions_json, \
+             settle_seconds=excluded.settle_seconds, enabled=excluded.enabled",
+        )?;
+        let values = [
+            c_string(&config.config_id, "watch-folder identity")?,
+            c_string(&config.display_name, "watch-folder display name")?,
+            c_string(&config.monitor_path, "watch-folder path")?,
+            c_string(
+                &serde_json::to_string(&config.extensions).map_err(|error| {
+                    format!("could not serialize watch-folder extensions: {error}")
+                })?,
+                "watch-folder extensions",
+            )?,
+        ];
+        for (index, value) in values.iter().enumerate() {
+            bind_text(self.database, statement.raw, (index + 1) as c_int, value)?;
+        }
+        bind_i64(
+            self.database,
+            statement.raw,
+            5,
+            i64::from(config.settle_seconds),
+        )?;
+        bind_i64(self.database, statement.raw, 6, i64::from(config.enabled))?;
+        expect_done(self.database, statement.raw)
+    }
+
+    pub fn list_watch_folders(&self) -> Result<Vec<WatchFolderConfig>, String> {
+        let statement = self.prepare(
+            "SELECT config_id, display_name, monitor_path, extensions_json, settle_seconds, enabled, \
+             last_scan_at_unix_ms, last_error FROM watch_folder_configs ORDER BY display_name, config_id",
+        )?;
+        let mut configs = Vec::new();
+        loop {
+            match unsafe { sqlite3_step(statement.raw) } {
+                SQLITE_ROW => configs.push(read_watch_folder_row(statement.raw)?),
+                SQLITE_DONE => return Ok(configs),
+                _ => return Err(sqlite_error(self.database)),
+            }
+        }
+    }
+
+    pub fn record_watch_folder_scan(
+        &self,
+        config_id: &str,
+        scanned_at_unix_ms: i64,
+        error_detail: Option<&str>,
+    ) -> Result<(), String> {
+        if scanned_at_unix_ms < 0
+            || error_detail.is_some_and(|value| {
+                value.trim().is_empty()
+                    || value.len() > 4_000
+                    || value.chars().any(char::is_control)
+            })
+        {
+            return Err("watch-folder scan result is invalid".into());
+        }
+        let statement = self.prepare(
+            "UPDATE watch_folder_configs SET last_scan_at_unix_ms=?1, last_error=?2 WHERE config_id=?3",
+        )?;
+        let error = c_string(error_detail.unwrap_or_default(), "watch-folder scan error")?;
+        let config_id = c_string(config_id, "watch-folder identity")?;
+        bind_i64(self.database, statement.raw, 1, scanned_at_unix_ms)?;
+        bind_text(self.database, statement.raw, 2, &error)?;
+        bind_text(self.database, statement.raw, 3, &config_id)?;
+        expect_done(self.database, statement.raw)?;
+        if self.changes() == 1 {
+            Ok(())
+        } else {
+            Err("watch-folder configuration does not exist".into())
+        }
+    }
+
+    pub fn observe_watch_file(
+        &self,
+        config_id: &str,
+        source_path: &str,
+        size_bytes: u64,
+        modified_at_unix_ms: i64,
+        observed_at_unix_ms: i64,
+    ) -> Result<WatchFileObservation, String> {
+        if source_path.trim().is_empty()
+            || source_path.chars().any(char::is_control)
+            || modified_at_unix_ms < 0
+            || observed_at_unix_ms < 0
+        {
+            return Err("watch-file observation is invalid".into());
+        }
+        let existing = self.read_watch_file_observation(config_id, source_path)?;
+        let unchanged = existing.as_ref().is_some_and(|value| {
+            value.size_bytes == size_bytes && value.modified_at_unix_ms == modified_at_unix_ms
+        });
+        let unchanged_since = if unchanged {
+            existing
+                .as_ref()
+                .expect("unchanged requires an observation")
+                .unchanged_since_unix_ms
+        } else {
+            observed_at_unix_ms
+        };
+        let observation_count = if unchanged {
+            existing
+                .as_ref()
+                .expect("unchanged requires an observation")
+                .observation_count
+                .saturating_add(1)
+        } else {
+            1
+        };
+        let queued_job_id = if unchanged {
+            existing.and_then(|value| value.queued_job_id)
+        } else {
+            None
+        };
+        let statement = self.prepare(
+            "INSERT INTO watch_file_observations(config_id, source_path, size_bytes, modified_at_unix_ms, \
+             unchanged_since_unix_ms, observation_count, queued_job_id) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7) \
+             ON CONFLICT(config_id, source_path) DO UPDATE SET size_bytes=excluded.size_bytes, \
+             modified_at_unix_ms=excluded.modified_at_unix_ms, unchanged_since_unix_ms=excluded.unchanged_since_unix_ms, \
+             observation_count=excluded.observation_count, queued_job_id=excluded.queued_job_id",
+        )?;
+        let config = c_string(config_id, "watch-folder identity")?;
+        let source = c_string(source_path, "watch-file path")?;
+        let queued = c_string(
+            queued_job_id.as_deref().unwrap_or_default(),
+            "watch-file job",
+        )?;
+        bind_text(self.database, statement.raw, 1, &config)?;
+        bind_text(self.database, statement.raw, 2, &source)?;
+        bind_i64(
+            self.database,
+            statement.raw,
+            3,
+            checked_i64(size_bytes, "watch-file size")?,
+        )?;
+        bind_i64(self.database, statement.raw, 4, modified_at_unix_ms)?;
+        bind_i64(self.database, statement.raw, 5, unchanged_since)?;
+        bind_i64(
+            self.database,
+            statement.raw,
+            6,
+            i64::from(observation_count),
+        )?;
+        bind_text(self.database, statement.raw, 7, &queued)?;
+        expect_done(self.database, statement.raw)?;
+        Ok(WatchFileObservation {
+            config_id: config_id.into(),
+            source_path: source_path.into(),
+            size_bytes,
+            modified_at_unix_ms,
+            unchanged_since_unix_ms: unchanged_since,
+            observation_count,
+            queued_job_id,
+        })
+    }
+
+    pub fn mark_watch_file_queued(
+        &self,
+        config_id: &str,
+        source_path: &str,
+        job_id: &str,
+    ) -> Result<(), String> {
+        let statement = self.prepare(
+            "UPDATE watch_file_observations SET queued_job_id=?1 WHERE config_id=?2 AND source_path=?3 \
+             AND (queued_job_id='' OR queued_job_id=?1)",
+        )?;
+        let values = [
+            c_string(job_id, "watch-file job identity")?,
+            c_string(config_id, "watch-folder identity")?,
+            c_string(source_path, "watch-file path")?,
+        ];
+        for (index, value) in values.iter().enumerate() {
+            bind_text(self.database, statement.raw, (index + 1) as c_int, value)?;
+        }
+        expect_done(self.database, statement.raw)?;
+        if self.changes() == 1 {
+            Ok(())
+        } else {
+            Err("watch-file observation was not queueable".into())
+        }
+    }
+
+    fn read_watch_file_observation(
+        &self,
+        config_id: &str,
+        source_path: &str,
+    ) -> Result<Option<WatchFileObservation>, String> {
+        let statement = self.prepare(
+            "SELECT config_id, source_path, size_bytes, modified_at_unix_ms, unchanged_since_unix_ms, \
+             observation_count, queued_job_id FROM watch_file_observations WHERE config_id=?1 AND source_path=?2",
+        )?;
+        let config = c_string(config_id, "watch-folder identity")?;
+        let source = c_string(source_path, "watch-file path")?;
+        bind_text(self.database, statement.raw, 1, &config)?;
+        bind_text(self.database, statement.raw, 2, &source)?;
+        match unsafe { sqlite3_step(statement.raw) } {
+            SQLITE_ROW => Ok(Some(read_watch_file_observation_row(statement.raw)?)),
+            SQLITE_DONE => Ok(None),
+            _ => Err(sqlite_error(self.database)),
         }
     }
 
@@ -836,6 +1106,34 @@ impl StationStore {
         })
     }
 
+    fn migrate_ingest_retry_schedule(&self) -> Result<(), String> {
+        if self.ingest_retry_column_exists()? {
+            return Ok(());
+        }
+        self.execute("BEGIN IMMEDIATE")?;
+        let outcome = (|| {
+            if !self.ingest_retry_column_exists()? {
+                self.execute(
+                    "ALTER TABLE media_ingest_jobs ADD COLUMN next_attempt_at_unix_ms INTEGER NOT NULL \
+                     DEFAULT -1 CHECK (next_attempt_at_unix_ms >= -1)",
+                )?;
+            }
+            Ok(())
+        })();
+        self.finish_transaction(outcome)
+    }
+
+    fn ingest_retry_column_exists(&self) -> Result<bool, String> {
+        let statement = self.prepare(
+            "SELECT COUNT(*) FROM pragma_table_info('media_ingest_jobs') \
+             WHERE name='next_attempt_at_unix_ms'",
+        )?;
+        match unsafe { sqlite3_step(statement.raw) } {
+            SQLITE_ROW => Ok((unsafe { sqlite3_column_int64(statement.raw, 0) }) == 1),
+            _ => Err(sqlite_error(self.database)),
+        }
+    }
+
     fn upsert_profile(&self, profile: &StationProfile) -> Result<(), String> {
         let sql = "INSERT INTO station_profile(singleton, station_id, display_name, timezone) VALUES(1, ?1, ?2, ?3) \
                    ON CONFLICT(singleton) DO UPDATE SET station_id=excluded.station_id, display_name=excluded.display_name, \
@@ -996,6 +1294,7 @@ fn read_ingest_job_row(statement: *mut SqliteStatement) -> Result<MediaIngestJob
     let completed = unsafe { sqlite3_column_int64(statement, 7) };
     let error_detail = column_text(statement, 8)?;
     let asset_id = column_text(statement, 9)?;
+    let next_attempt = unsafe { sqlite3_column_int64(statement, 11) };
     Ok(MediaIngestJob {
         job_id: column_text(statement, 0)?,
         source_kind: parse_ingest_source_kind(&column_text(statement, 1)?)?,
@@ -1010,6 +1309,43 @@ fn read_ingest_job_row(statement: *mut SqliteStatement) -> Result<MediaIngestJob
         asset_id: (!asset_id.is_empty()).then_some(asset_id),
         attempts: u32::try_from(unsafe { sqlite3_column_int64(statement, 10) })
             .map_err(|_| "database returned invalid ingest attempts".to_string())?,
+        next_attempt_at_unix_ms: (next_attempt >= 0).then_some(next_attempt),
+    })
+}
+
+fn read_watch_folder_row(statement: *mut SqliteStatement) -> Result<WatchFolderConfig, String> {
+    let last_scan = unsafe { sqlite3_column_int64(statement, 6) };
+    let last_error = column_text(statement, 7)?;
+    let config = WatchFolderConfig {
+        config_id: column_text(statement, 0)?,
+        display_name: column_text(statement, 1)?,
+        monitor_path: column_text(statement, 2)?,
+        extensions: serde_json::from_str(&column_text(statement, 3)?).map_err(|error| {
+            format!("database returned invalid watch-folder extensions: {error}")
+        })?,
+        settle_seconds: u32::try_from(unsafe { sqlite3_column_int64(statement, 4) })
+            .map_err(|_| "database returned invalid watch-folder settle time".to_string())?,
+        enabled: unsafe { sqlite3_column_int64(statement, 5) } == 1,
+        last_scan_at_unix_ms: (last_scan >= 0).then_some(last_scan),
+        last_error: (!last_error.is_empty()).then_some(last_error),
+    };
+    config.validate().map_err(|error| format!("{error:?}"))?;
+    Ok(config)
+}
+
+fn read_watch_file_observation_row(
+    statement: *mut SqliteStatement,
+) -> Result<WatchFileObservation, String> {
+    let queued = column_text(statement, 6)?;
+    Ok(WatchFileObservation {
+        config_id: column_text(statement, 0)?,
+        source_path: column_text(statement, 1)?,
+        size_bytes: column_u64(statement, 2, "watch-file size")?,
+        modified_at_unix_ms: unsafe { sqlite3_column_int64(statement, 3) },
+        unchanged_since_unix_ms: unsafe { sqlite3_column_int64(statement, 4) },
+        observation_count: u32::try_from(unsafe { sqlite3_column_int64(statement, 5) })
+            .map_err(|_| "database returned invalid watch-file observation count".to_string())?,
+        queued_job_id: (!queued.is_empty()).then_some(queued),
     })
 }
 
@@ -1219,6 +1555,46 @@ mod tests {
                 .dispatch_status,
             DispatchStatus::Completed
         );
+        drop(migrated);
+        for candidate in [
+            database.clone(),
+            PathBuf::from(format!("{}-wal", database.display())),
+            PathBuf::from(format!("{}-shm", database.display())),
+        ] {
+            let _ = std::fs::remove_file(candidate);
+        }
+    }
+
+    #[test]
+    fn adds_retry_scheduling_to_an_existing_ingest_database_without_losing_jobs() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let database = std::env::temp_dir().join(format!("townlight-ingest-migration-{nonce}.db"));
+        let store = StationStore::open(&database).unwrap();
+        store
+            .execute(
+                "DROP TABLE media_ingest_jobs;\
+                 CREATE TABLE media_ingest_jobs (\
+                   job_id TEXT PRIMARY KEY, source_kind TEXT NOT NULL, source_path TEXT NOT NULL,\
+                   status TEXT NOT NULL, progress_percent INTEGER NOT NULL, created_at_unix_ms INTEGER NOT NULL,\
+                   started_at_unix_ms INTEGER NOT NULL, completed_at_unix_ms INTEGER NOT NULL,\
+                   error_detail TEXT NOT NULL, asset_id TEXT NOT NULL, attempts INTEGER NOT NULL);\
+                 INSERT INTO media_ingest_jobs VALUES(\
+                   '11111111-2222-4333-8444-555555555555','watch_folder','C:\\incoming\\meeting.ts',\
+                   'pending',0,1,-1,-1,'','','0');",
+            )
+            .unwrap();
+        drop(store);
+
+        let migrated = StationStore::open(&database).unwrap();
+        let job = migrated
+            .read_ingest_job("11111111-2222-4333-8444-555555555555")
+            .unwrap()
+            .unwrap();
+        assert_eq!(job.source_kind, IngestSourceKind::WatchFolder);
+        assert_eq!(job.next_attempt_at_unix_ms, None);
         drop(migrated);
         for candidate in [
             database.clone(),

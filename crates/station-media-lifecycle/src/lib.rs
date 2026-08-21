@@ -31,6 +31,30 @@ pub struct MediaIngestJob {
     pub error_detail: Option<String>,
     pub asset_id: Option<String>,
     pub attempts: u32,
+    pub next_attempt_at_unix_ms: Option<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WatchFolderConfig {
+    pub config_id: String,
+    pub display_name: String,
+    pub monitor_path: String,
+    pub extensions: Vec<String>,
+    pub settle_seconds: u32,
+    pub enabled: bool,
+    pub last_scan_at_unix_ms: Option<i64>,
+    pub last_error: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WatchFileObservation {
+    pub config_id: String,
+    pub source_path: String,
+    pub size_bytes: u64,
+    pub modified_at_unix_ms: i64,
+    pub unchanged_since_unix_ms: i64,
+    pub observation_count: u32,
+    pub queued_job_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -81,6 +105,65 @@ pub enum IngestJobError {
     Invalid(&'static str),
 }
 
+impl WatchFolderConfig {
+    pub fn validate(&self) -> Result<(), IngestJobError> {
+        if !is_uuid(&self.config_id) {
+            return Err(IngestJobError::Invalid(
+                "config_id must be a canonical UUID",
+            ));
+        }
+        if !visible_bounded(&self.display_name, 120) {
+            return Err(IngestJobError::Invalid(
+                "display_name must be visible and at most 120 characters",
+            ));
+        }
+        if !visible_bounded(&self.monitor_path, 2_000) {
+            return Err(IngestJobError::Invalid(
+                "monitor_path must be a visible path",
+            ));
+        }
+        if self.extensions.is_empty()
+            || self.extensions.len() > 32
+            || self.extensions.iter().any(|extension| {
+                !(2..=13).contains(&extension.len())
+                    || !extension.starts_with('.')
+                    || !extension
+                        .bytes()
+                        .skip(1)
+                        .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
+            })
+        {
+            return Err(IngestJobError::Invalid(
+                "extensions must be unique lowercase dot-prefixed file extensions",
+            ));
+        }
+        let mut sorted = self.extensions.clone();
+        sorted.sort();
+        sorted.dedup();
+        if sorted.len() != self.extensions.len() {
+            return Err(IngestJobError::Invalid(
+                "extensions must be unique lowercase dot-prefixed file extensions",
+            ));
+        }
+        if !(1..=3_600).contains(&self.settle_seconds) {
+            return Err(IngestJobError::Invalid(
+                "settle_seconds must be between 1 and 3600",
+            ));
+        }
+        if self.last_scan_at_unix_ms.is_some_and(|value| value < 0)
+            || self
+                .last_error
+                .as_ref()
+                .is_some_and(|value| !visible_bounded(value, 4_000))
+        {
+            return Err(IngestJobError::Invalid(
+                "watch-folder scan state is invalid",
+            ));
+        }
+        Ok(())
+    }
+}
+
 impl MediaIngestJob {
     pub fn validate(&self) -> Result<(), IngestJobError> {
         if !is_uuid(&self.job_id) {
@@ -98,6 +181,7 @@ impl MediaIngestJob {
         }
         if self.started_at_unix_ms.is_some_and(|value| value < 0)
             || self.completed_at_unix_ms.is_some_and(|value| value < 0)
+            || self.next_attempt_at_unix_ms.is_some_and(|value| value < 0)
             || self
                 .error_detail
                 .as_ref()
@@ -133,4 +217,43 @@ fn is_uuid(value: &str) -> bool {
             8 | 13 | 18 | 23 => byte == b'-',
             _ => byte.is_ascii_hexdigit(),
         })
+}
+
+fn visible_bounded(value: &str, maximum: usize) -> bool {
+    !value.trim().is_empty() && value.len() <= maximum && !value.chars().any(char::is_control)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{IngestJobError, WatchFolderConfig};
+
+    fn config() -> WatchFolderConfig {
+        WatchFolderConfig {
+            config_id: "11111111-2222-4333-8444-555555555555".into(),
+            display_name: "Council drop folder".into(),
+            monitor_path: r"\\station-nas\incoming".into(),
+            extensions: vec![".mov".into(), ".mp4".into(), ".ts".into()],
+            settle_seconds: 10,
+            enabled: true,
+            last_scan_at_unix_ms: None,
+            last_error: None,
+        }
+    }
+
+    #[test]
+    fn validates_operator_configurable_watch_folders() {
+        config().validate().unwrap();
+        let mut invalid = config();
+        invalid.extensions = vec![".MP4".into()];
+        assert!(matches!(
+            invalid.validate(),
+            Err(IngestJobError::Invalid(_))
+        ));
+        let mut duplicate = config();
+        duplicate.extensions = vec![".ts".into(), ".ts".into()];
+        assert!(duplicate.validate().is_err());
+        let mut unsafe_error = config();
+        unsafe_error.last_error = Some("bad\nstate".into());
+        assert!(unsafe_error.validate().is_err());
+    }
 }

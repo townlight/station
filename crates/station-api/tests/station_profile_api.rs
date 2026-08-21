@@ -14,6 +14,7 @@ use gstreamer as gst;
 use station_api::{Api, serve_one, serve_until};
 use station_domain::StationProfile;
 use station_ingest::{IngestOutcome, IngestWorker};
+use station_media_lifecycle::WatchFolderConfig;
 use station_schedule::{
     AssetReadiness, ChannelConfiguration, CommitPlan, CommitReport, DispatchStatus, MediaAsset,
     ScheduleItem, ScheduleState,
@@ -141,6 +142,56 @@ fn persists_validated_channel_output_configuration() {
         Some(br#"{"channel_id":"not-a-uuid","display_name":"Bad","udp_destination":"nowhere","enabled":true}"#),
     );
     assert_eq!(invalid.status, 422);
+    let _ = std::fs::remove_file(database);
+}
+
+#[test]
+fn configures_watch_folders_without_allowing_clients_to_forge_scan_health() {
+    let database = temporary_database("watch-folders");
+    let api = Api::open(&database).unwrap();
+    let config = WatchFolderConfig {
+        config_id: "780934dc-96e3-46bd-83c4-a2c10ec5c33d".into(),
+        display_name: "Council recordings".into(),
+        monitor_path: database
+            .with_extension("incoming")
+            .to_string_lossy()
+            .into_owned(),
+        extensions: vec![".mov".into(), ".mp4".into(), ".ts".into()],
+        settle_seconds: 10,
+        enabled: true,
+        last_scan_at_unix_ms: None,
+        last_error: None,
+    };
+    let stored = api.handle(
+        "PUT",
+        "/api/v1/watch-folders",
+        Some(&serde_json::to_vec(&config).unwrap()),
+    );
+    assert_eq!(
+        stored.status,
+        200,
+        "{}",
+        String::from_utf8_lossy(&stored.body)
+    );
+    let listed = api.handle("GET", "/api/v1/watch-folders", None);
+    assert_eq!(listed.status, 200);
+    assert_eq!(
+        serde_json::from_slice::<Vec<WatchFolderConfig>>(&listed.body).unwrap(),
+        vec![config.clone()]
+    );
+
+    let mut forged = config;
+    forged.last_error = Some("Everything is fine".into());
+    assert_eq!(
+        api.handle(
+            "PUT",
+            "/api/v1/watch-folders",
+            Some(&serde_json::to_vec(&forged).unwrap()),
+        )
+        .status,
+        422
+    );
+
     let _ = std::fs::remove_file(database);
 }
 
