@@ -22,6 +22,8 @@ use station_media_lifecycle::{
 };
 use station_schedule::{AssetReadiness, ChannelConfiguration, MediaAsset, ScheduleItem};
 use station_storage::{AlertChannelSecret, CommitWriteError, ProfileWriteError, StationStore};
+use station_update::UpdateCheckTrigger;
+use station_update_coordinator::CoordinatorError;
 
 const OPERATOR_HTML: &[u8] = include_bytes!("../../../web/operator/dist/index.html");
 const OPERATOR_SCRIPT: &[u8] = include_bytes!("../../../web/operator/dist/operator.js");
@@ -122,14 +124,27 @@ pub struct ApiResponse {
 pub struct Api {
     storage: StationStore,
     database_path: PathBuf,
+    application_directory: PathBuf,
 }
 
 impl Api {
     pub fn open(database_path: impl AsRef<Path>) -> Result<Self, String> {
+        let application_directory = std::env::current_exe()
+            .ok()
+            .and_then(|path| path.parent().map(Path::to_path_buf))
+            .ok_or_else(|| "the station application directory is unavailable".to_string())?;
+        Self::open_with_application_directory(database_path, application_directory)
+    }
+
+    pub fn open_with_application_directory(
+        database_path: impl AsRef<Path>,
+        application_directory: impl AsRef<Path>,
+    ) -> Result<Self, String> {
         let database_path = database_path.as_ref().to_path_buf();
         Ok(Self {
             storage: StationStore::open(&database_path)?,
             database_path,
+            application_directory: application_directory.as_ref().to_path_buf(),
         })
     }
 
@@ -182,6 +197,11 @@ impl Api {
                 if path.starts_with("/api/v1/support-bundles/") && path.ends_with("/download") =>
             {
                 self.download_support_bundle(path)
+            }
+            ("GET", "/api/v1/updates/status") => self.update_status(),
+            ("POST", "/api/v1/updates/check") => self.check_updates(),
+            ("GET", path) if path.starts_with("/api/v1/updates/release-notes?") => {
+                self.update_release_notes(path)
             }
             ("PUT", "/api/v1/alert-channels") => self.put_alert_channel(body),
             ("GET", "/api/v1/alert-channels") => self.list_alert_channels(),
@@ -762,22 +782,9 @@ impl Api {
             Ok(value) => value,
             Err(message) => return error_response(500, "clock_error", &message),
         };
-        let application_directory = match std::env::current_exe()
-            .ok()
-            .and_then(|path| path.parent().map(Path::to_path_buf))
-        {
-            Some(path) => path,
-            None => {
-                return error_response(
-                    500,
-                    "application_path_error",
-                    "The station application directory is unavailable.",
-                );
-            }
-        };
         match station_support::create_support_bundle(
             &self.database_path,
-            &application_directory,
+            &self.application_directory,
             now,
         ) {
             Ok(record) => json_response(
@@ -785,6 +792,58 @@ impl Api {
                 serde_json::to_vec(&record).expect("serializing a support bundle cannot fail"),
             ),
             Err(message) => error_response(500, "support_bundle_failed", &message),
+        }
+    }
+
+    fn update_status(&self) -> ApiResponse {
+        match station_update_coordinator::read_status(
+            &self.database_path,
+            &self.application_directory,
+        ) {
+            Ok(status) => json_response(
+                200,
+                serde_json::to_vec(&status).expect("serializing update status cannot fail"),
+            ),
+            Err(error) => update_error_response(error),
+        }
+    }
+
+    fn check_updates(&self) -> ApiResponse {
+        let now = match system_time_millis() {
+            Ok(value) => value,
+            Err(message) => return error_response(500, "clock_error", &message),
+        };
+        match station_update_coordinator::check_now(
+            &self.database_path,
+            &self.application_directory,
+            UpdateCheckTrigger::Manual,
+            now,
+        ) {
+            Ok(record) => json_response(
+                200,
+                serde_json::to_vec(&record).expect("serializing an update check cannot fail"),
+            ),
+            Err(error) => update_error_response(error),
+        }
+    }
+
+    fn update_release_notes(&self, path: &str) -> ApiResponse {
+        let Some(version) = path.strip_prefix("/api/v1/updates/release-notes?version=") else {
+            return error_response(400, "invalid_query", "A release version is required.");
+        };
+        if version.contains('&') {
+            return error_response(400, "invalid_query", "The release version is invalid.");
+        }
+        match station_update_coordinator::release_notes(&self.database_path, version) {
+            Ok(Some(markdown)) => {
+                dynamic_response(200, "text/markdown; charset=utf-8", markdown.into_bytes())
+            }
+            Ok(None) => error_response(
+                404,
+                "release_notes_not_found",
+                "No verified release notes exist for that version.",
+            ),
+            Err(error) => update_error_response(error),
         }
     }
 
@@ -1552,6 +1611,26 @@ fn static_response(status: u16, content_type: &'static str, body: &[u8]) -> ApiR
         content_type,
         attachment_name: None,
         body: body.to_vec(),
+    }
+}
+
+fn dynamic_response(status: u16, content_type: &'static str, body: Vec<u8>) -> ApiResponse {
+    ApiResponse {
+        status,
+        content_type,
+        attachment_name: None,
+        body,
+    }
+}
+
+fn update_error_response(error: CoordinatorError) -> ApiResponse {
+    match error {
+        CoordinatorError::NotConfigured => error_response(
+            409,
+            "updates_not_configured",
+            "No signed TownLight Station release source is installed on this station.",
+        ),
+        CoordinatorError::Fault(message) => error_response(500, "update_status_failed", &message),
     }
 }
 

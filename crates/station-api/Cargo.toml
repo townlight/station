@@ -13,6 +13,8 @@ station-media-lifecycle.workspace = true
 station-schedule.workspace = true
 station-storage.workspace = true
 station-support.workspace = true
+station-update.workspace = true
+station-update-coordinator.workspace = true
 
 [dev-dependencies]
 gstreamer.workspace = true

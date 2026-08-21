@@ -646,6 +646,47 @@ fn creates_and_downloads_a_manifested_support_bundle_without_path_escape() {
 }
 
 #[test]
+fn reports_an_honest_unconfigured_update_state_and_refuses_a_network_check() {
+    let root = temporary_database("updates-unconfigured");
+    let application = root.join("application");
+    let data = root.join("data");
+    std::fs::create_dir_all(&application).unwrap();
+    std::fs::create_dir_all(&data).unwrap();
+    let database = data.join("station.db");
+    std::fs::write(
+        data.join("install-receipt.json"),
+        br#"{"product":"TownLight Station","version":"0.1.0","source_commit":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}"#,
+    )
+    .unwrap();
+    let api = Api::open_with_application_directory(&database, &application).unwrap();
+
+    let status = api.handle("GET", "/api/v1/updates/status", None);
+    assert_eq!(status.status, 200);
+    let document: serde_json::Value = serde_json::from_slice(&status.body).unwrap();
+    assert_eq!(document["configured"], false);
+    assert_eq!(document["current_version"], "0.1.0");
+    assert_eq!(document["latest_check"], serde_json::Value::Null);
+    assert!(
+        document["next_step"]
+            .as_str()
+            .unwrap()
+            .contains("trust file")
+    );
+
+    let check = api.handle("POST", "/api/v1/updates/check", None);
+    assert_eq!(check.status, 409);
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&check.body).unwrap()["error"]["code"],
+        "updates_not_configured"
+    );
+    let notes = api.handle("GET", "/api/v1/updates/release-notes?version=0.2.0", None);
+    assert_eq!(notes.status, 404);
+
+    drop(api);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn configures_watch_folders_without_allowing_clients_to_forge_scan_health() {
     let database = temporary_database("watch-folders");
     let api = Api::open(&database).unwrap();

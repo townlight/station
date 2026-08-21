@@ -10,4 +10,5 @@ station-api.workspace = true
 station-ingest.workspace = true
 station-orchestration.workspace = true
 station-storage.workspace = true
+station-update-coordinator.workspace = true
 windows-service.workspace = true

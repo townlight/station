@@ -18,6 +18,7 @@ members = [
     "crates/station-support",
     "crates/station-storage",
     "crates/station-update",
+    "crates/station-update-coordinator",
     "crates/station-windows-ipc",
 ]
 
@@ -53,6 +54,7 @@ station-schedule = { path = "crates/station-schedule" }
 station-support = { path = "crates/station-support" }
 station-storage = { path = "crates/station-storage" }
 station-update = { path = "crates/station-update" }
+station-update-coordinator = { path = "crates/station-update-coordinator" }
 station-windows-ipc = { path = "crates/station-windows-ipc" }
 ureq = { version = "=3.4.0", features = ["platform-verifier"] }
 windows-service = "=0.8.1"

@@ -19,6 +19,7 @@ use station_schedule::{
     AssetReadiness, ChannelConfiguration, CommitPlan, CommitReport, DispatchJob, DispatchStatus,
     MediaAsset, ScheduleItem, ScheduleState, prepare_commit,
 };
+use station_update::{UpdateCheckOutcome, UpdateCheckRecord, UpdateCheckTrigger};
 
 const SQLITE_OK: c_int = 0;
 const SQLITE_ROW: c_int = 100;
@@ -394,6 +395,15 @@ impl StationStore {
                WHERE trigger_kind='scheduled';\
              CREATE INDEX IF NOT EXISTS system_self_tests_time \
                ON system_self_tests(started_at_unix_ms DESC, self_test_id DESC);\
+             CREATE TABLE IF NOT EXISTS update_check_status (\
+               singleton INTEGER PRIMARY KEY CHECK (singleton = 1),\
+               checked_at_unix_ms INTEGER NOT NULL CHECK (checked_at_unix_ms >= 0),\
+               next_automatic_check_at_unix_ms INTEGER NOT NULL \
+                 CHECK (next_automatic_check_at_unix_ms > checked_at_unix_ms),\
+               trigger_kind TEXT NOT NULL CHECK (trigger_kind IN ('automatic','manual')),\
+               outcome TEXT NOT NULL CHECK (outcome IN ('up_to_date','update_available','updater_too_old','failed')),\
+               record_json TEXT NOT NULL\
+             );\
              CREATE TABLE IF NOT EXISTS alert_channels (\
                channel_id TEXT PRIMARY KEY,\
                kind TEXT NOT NULL CHECK (kind IN ('email','sms','webhook')),\
@@ -1459,6 +1469,69 @@ impl StationStore {
                 SQLITE_DONE => return Ok(records),
                 _ => return Err(sqlite_error(self.database)),
             }
+        }
+    }
+
+    pub fn write_update_check(
+        &self,
+        record: &UpdateCheckRecord,
+    ) -> Result<UpdateCheckRecord, String> {
+        record.validate().map_err(str::to_string)?;
+        let record_json = serde_json::to_string(record)
+            .map_err(|error| format!("could not encode update-check record: {error}"))?;
+        let statement = self.prepare(
+            "INSERT INTO update_check_status(singleton, checked_at_unix_ms, \
+             next_automatic_check_at_unix_ms, trigger_kind, outcome, record_json) \
+             VALUES(1, ?1, ?2, ?3, ?4, ?5) \
+             ON CONFLICT(singleton) DO UPDATE SET \
+               checked_at_unix_ms=excluded.checked_at_unix_ms, \
+               next_automatic_check_at_unix_ms=excluded.next_automatic_check_at_unix_ms, \
+               trigger_kind=excluded.trigger_kind, outcome=excluded.outcome, \
+               record_json=excluded.record_json \
+             WHERE update_check_status.checked_at_unix_ms <= excluded.checked_at_unix_ms",
+        )?;
+        let trigger = c_string(
+            update_check_trigger_name(record.trigger),
+            "update-check trigger",
+        )?;
+        let outcome = c_string(
+            update_check_outcome_name(record.outcome),
+            "update-check outcome",
+        )?;
+        let record_json = c_string(&record_json, "update-check record")?;
+        bind_i64(self.database, statement.raw, 1, record.checked_at_unix_ms)?;
+        bind_i64(
+            self.database,
+            statement.raw,
+            2,
+            record.next_automatic_check_at_unix_ms,
+        )?;
+        bind_text(self.database, statement.raw, 3, &trigger)?;
+        bind_text(self.database, statement.raw, 4, &outcome)?;
+        bind_text(self.database, statement.raw, 5, &record_json)?;
+        expect_done(self.database, statement.raw)?;
+        let stored = self
+            .read_update_check()?
+            .ok_or_else(|| "stored update-check record disappeared".to_string())?;
+        if stored != *record {
+            return Err("a newer update-check record already exists".into());
+        }
+        Ok(stored)
+    }
+
+    pub fn read_update_check(&self) -> Result<Option<UpdateCheckRecord>, String> {
+        let statement =
+            self.prepare("SELECT record_json FROM update_check_status WHERE singleton=1")?;
+        match unsafe { sqlite3_step(statement.raw) } {
+            SQLITE_ROW => {
+                let json = column_text(statement.raw, 0)?;
+                let record: UpdateCheckRecord = serde_json::from_str(&json)
+                    .map_err(|error| format!("stored update-check record is invalid: {error}"))?;
+                record.validate().map_err(str::to_string)?;
+                Ok(Some(record))
+            }
+            SQLITE_DONE => Ok(None),
+            _ => Err(sqlite_error(self.database)),
         }
     }
 
@@ -4151,6 +4224,22 @@ fn self_test_status_name(value: SelfTestStatus) -> &'static str {
     }
 }
 
+fn update_check_trigger_name(value: UpdateCheckTrigger) -> &'static str {
+    match value {
+        UpdateCheckTrigger::Automatic => "automatic",
+        UpdateCheckTrigger::Manual => "manual",
+    }
+}
+
+fn update_check_outcome_name(value: UpdateCheckOutcome) -> &'static str {
+    match value {
+        UpdateCheckOutcome::UpToDate => "up_to_date",
+        UpdateCheckOutcome::UpdateAvailable => "update_available",
+        UpdateCheckOutcome::UpdaterTooOld => "updater_too_old",
+        UpdateCheckOutcome::Failed => "failed",
+    }
+}
+
 fn parse_self_test_status(value: &str) -> Result<SelfTestStatus, String> {
     match value {
         "pass" => Ok(SelfTestStatus::Pass),
@@ -4179,6 +4268,9 @@ fn alert_condition_name(value: AlertConditionKind) -> &'static str {
         AlertConditionKind::DatabaseUnreachable => "database-unreachable",
         AlertConditionKind::ServiceDown => "service-down",
         AlertConditionKind::SelfTestFail => "self-test-fail",
+        AlertConditionKind::UpdateAvailable => "update-available",
+        AlertConditionKind::UpdateCheckFailed => "update-check-failed",
+        AlertConditionKind::UpdateApplyFailed => "update-apply-failed",
     }
 }
 
@@ -4199,6 +4291,9 @@ fn parse_alert_condition(value: &str) -> Result<AlertConditionKind, String> {
         "database-unreachable" => Ok(AlertConditionKind::DatabaseUnreachable),
         "service-down" => Ok(AlertConditionKind::ServiceDown),
         "self-test-fail" => Ok(AlertConditionKind::SelfTestFail),
+        "update-available" => Ok(AlertConditionKind::UpdateAvailable),
+        "update-check-failed" => Ok(AlertConditionKind::UpdateCheckFailed),
+        "update-apply-failed" => Ok(AlertConditionKind::UpdateApplyFailed),
         _ => Err(format!("database returned invalid alert condition {value}")),
     }
 }
@@ -4259,6 +4354,21 @@ fn default_alert_rules() -> Vec<AlertRule> {
             AlertConditionKind::SelfTestFail,
             AlertSeverity::Warning,
             86_400,
+        ),
+        (
+            AlertConditionKind::UpdateAvailable,
+            AlertSeverity::Info,
+            86_400,
+        ),
+        (
+            AlertConditionKind::UpdateCheckFailed,
+            AlertSeverity::Warning,
+            21_600,
+        ),
+        (
+            AlertConditionKind::UpdateApplyFailed,
+            AlertSeverity::Critical,
+            3_600,
         ),
     ];
     definitions
@@ -4749,7 +4859,7 @@ mod tests {
             .unwrap();
         assert_eq!(delivery.notification_kind, AlertNotificationKind::Resolved);
         assert_eq!(delivery.state, AlertDeliveryState::Sent);
-        assert_eq!(migrated.list_alert_rules().unwrap().len(), 15);
+        assert_eq!(migrated.list_alert_rules().unwrap().len(), 18);
         drop(migrated);
         for candidate in [
             database.clone(),

@@ -1,0 +1,17 @@
+[package]
+name = "station-update-coordinator"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+semver.workspace = true
+station-domain.workspace = true
+station-storage.workspace = true
+station-update.workspace = true
+
+[dev-dependencies]
+base64.workspace = true
+ed25519-dalek.workspace = true

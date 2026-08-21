@@ -1557,6 +1557,8 @@ dependencies = [
  "station-schedule",
  "station-storage",
  "station-support",
+ "station-update",
+ "station-update-coordinator",
  "zip",
 ]
 
@@ -1654,6 +1656,7 @@ dependencies = [
  "station-domain",
  "station-media-lifecycle",
  "station-schedule",
+ "station-update",
 ]
 
 [[package]]
@@ -1678,6 +1681,21 @@ dependencies = [
  "semver",
  "serde",
  "serde_json",
+ "ureq",
+]
+
+[[package]]
+name = "station-update-coordinator"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "ed25519-dalek",
+ "semver",
+ "serde",
+ "serde_json",
+ "station-domain",
+ "station-storage",
+ "station-update",
 ]
 
 [[package]]
@@ -1693,6 +1711,7 @@ dependencies = [
  "station-ingest",
  "station-orchestration",
  "station-storage",
+ "station-update-coordinator",
  "windows-service",
 ]
 

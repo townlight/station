@@ -933,6 +933,9 @@ fn alert_condition_label(condition: station_domain::AlertConditionKind) -> &'sta
         AlertConditionKind::DatabaseUnreachable => "database-unreachable",
         AlertConditionKind::ServiceDown => "service-down",
         AlertConditionKind::SelfTestFail => "self-test-fail",
+        AlertConditionKind::UpdateAvailable => "update-available",
+        AlertConditionKind::UpdateCheckFailed => "update-check-failed",
+        AlertConditionKind::UpdateApplyFailed => "update-apply-failed",
     }
 }
 

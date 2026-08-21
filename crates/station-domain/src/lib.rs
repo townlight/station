@@ -397,6 +397,9 @@ pub enum AlertConditionKind {
     DatabaseUnreachable,
     ServiceDown,
     SelfTestFail,
+    UpdateAvailable,
+    UpdateCheckFailed,
+    UpdateApplyFailed,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

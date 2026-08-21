@@ -3,6 +3,9 @@ use base64::engine::general_purpose::STANDARD as BASE64;
 use ed25519_dalek::{Signature, VerifyingKey};
 use semver::Version;
 use serde::{Deserialize, Serialize};
+use std::time::Duration;
+use ureq::Agent;
+use ureq::tls::{RootCerts, TlsConfig};
 
 pub const RELEASE_SCHEMA_VERSION: u32 = 1;
 pub const MAX_ENVELOPE_BYTES: usize = 256 * 1024;
@@ -46,10 +49,241 @@ pub enum Availability {
     UpdaterTooOld,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UpdateCheckTrigger {
+    Automatic,
+    Manual,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UpdateCheckOutcome {
+    UpToDate,
+    UpdateAvailable,
+    UpdaterTooOld,
+    Failed,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VerifiedRelease {
     pub manifest: ReleaseManifest,
     pub availability: Availability,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UpdateCheckRecord {
+    pub checked_at_unix_ms: i64,
+    pub next_automatic_check_at_unix_ms: i64,
+    pub trigger: UpdateCheckTrigger,
+    pub outcome: UpdateCheckOutcome,
+    pub current_version: String,
+    pub updater_version: String,
+    pub release_channel: String,
+    pub offered_release: Option<ReleaseManifest>,
+    pub error: Option<String>,
+}
+
+impl UpdateCheckRecord {
+    pub fn validate(&self) -> Result<(), &'static str> {
+        let versions_valid = Version::parse(&self.current_version).is_ok()
+            && Version::parse(&self.updater_version).is_ok();
+        let timing_valid = self.checked_at_unix_ms >= 0
+            && self.next_automatic_check_at_unix_ms > self.checked_at_unix_ms
+            && self
+                .next_automatic_check_at_unix_ms
+                .saturating_sub(self.checked_at_unix_ms)
+                <= 24 * 60 * 60 * 1_000;
+        let release_valid = self.offered_release.as_ref().is_none_or(|release| {
+            validate_manifest(
+                release,
+                &release.key_id,
+                &self.release_channel,
+                self.checked_at_unix_ms,
+            )
+            .is_ok()
+                && Version::parse(&release.version).is_ok()
+                && Version::parse(&release.minimum_updater_version).is_ok()
+        });
+        let offered_outcome = self.offered_release.as_ref().and_then(|release| {
+            let current = Version::parse(&self.current_version).ok()?;
+            let updater = Version::parse(&self.updater_version).ok()?;
+            let offered = Version::parse(&release.version).ok()?;
+            let minimum = Version::parse(&release.minimum_updater_version).ok()?;
+            Some(UpdateCheckOutcome::from(classify_availability(
+                &current, &offered, &updater, &minimum,
+            )))
+        });
+        let state_valid = match self.outcome {
+            UpdateCheckOutcome::Failed => {
+                self.offered_release.is_none() && self.error.as_deref().is_some_and(bounded_error)
+            }
+            UpdateCheckOutcome::UpToDate
+            | UpdateCheckOutcome::UpdateAvailable
+            | UpdateCheckOutcome::UpdaterTooOld => {
+                offered_outcome == Some(self.outcome) && self.error.is_none()
+            }
+        };
+        if versions_valid
+            && timing_valid
+            && visible_identifier(&self.release_channel, 32)
+            && release_valid
+            && state_valid
+        {
+            Ok(())
+        } else {
+            Err("update-check record fields are invalid")
+        }
+    }
+}
+
+impl From<Availability> for UpdateCheckOutcome {
+    fn from(value: Availability) -> Self {
+        match value {
+            Availability::UpToDate => Self::UpToDate,
+            Availability::UpdateAvailable => Self::UpdateAvailable,
+            Availability::UpdaterTooOld => Self::UpdaterTooOld,
+        }
+    }
+}
+
+fn bounded_error(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 500
+        && value.trim() == value
+        && !value.chars().any(char::is_control)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TrustedReleaseKey {
+    pub key_id: String,
+    pub public_key_base64: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReleaseSource {
+    pub schema_version: u32,
+    pub feed_url: String,
+    pub release_channel: String,
+    pub trusted_keys: Vec<TrustedReleaseKey>,
+}
+
+impl ReleaseSource {
+    pub fn validate(&self) -> Result<(), String> {
+        if self.schema_version != 1
+            || !valid_package_url(&self.feed_url)
+            || !visible_identifier(&self.release_channel, 32)
+            || self.trusted_keys.is_empty()
+            || self.trusted_keys.len() > 4
+        {
+            return Err("release source fields are invalid".into());
+        }
+        let mut ids = std::collections::BTreeSet::new();
+        for key in &self.trusted_keys {
+            if !visible_identifier(&key.key_id, 80) || !ids.insert(&key.key_id) {
+                return Err("release source key ids are invalid or duplicated".into());
+            }
+            let bytes = BASE64
+                .decode(&key.public_key_base64)
+                .map_err(|_| "release source public key is not valid base64".to_string())?;
+            let bytes: [u8; 32] = bytes
+                .try_into()
+                .map_err(|_| "release source public key has the wrong length".to_string())?;
+            let verifying_key = VerifyingKey::from_bytes(&bytes)
+                .map_err(|_| "release source public key is invalid".to_string())?;
+            if verifying_key.is_weak() {
+                return Err("release source public key is weak".into());
+            }
+        }
+        Ok(())
+    }
+
+    fn decoded_keys(&self) -> Result<Vec<(&str, [u8; 32])>, String> {
+        self.validate()?;
+        self.trusted_keys
+            .iter()
+            .map(|key| {
+                let decoded = BASE64
+                    .decode(&key.public_key_base64)
+                    .map_err(|_| "release source public key is not valid base64".to_string())?;
+                let bytes = decoded
+                    .try_into()
+                    .map_err(|_| "release source public key has the wrong length".to_string())?;
+                Ok((key.key_id.as_str(), bytes))
+            })
+            .collect()
+    }
+}
+
+pub fn fetch_and_verify_release(
+    source: &ReleaseSource,
+    current_version: &str,
+    updater_version: &str,
+    now_unix_ms: i64,
+    timeout: Duration,
+) -> Result<VerifiedRelease, String> {
+    let trusted_keys = source.decoded_keys()?;
+    if timeout.is_zero() || timeout > Duration::from_secs(60) {
+        return Err("release-check timeout is outside the accepted bounds".into());
+    }
+    let agent = Agent::config_builder()
+        .timeout_global(Some(timeout))
+        .max_redirects(0)
+        .tls_config(
+            TlsConfig::builder()
+                .root_certs(RootCerts::PlatformVerifier)
+                .build(),
+        )
+        .user_agent("TownLight-Station-Update/1")
+        .build()
+        .new_agent();
+    let mut response = agent
+        .get(&source.feed_url)
+        .call()
+        .map_err(release_request_error)?;
+    if !response.status().is_success() {
+        return Err(format!(
+            "release service returned HTTP {}",
+            response.status().as_u16()
+        ));
+    }
+    let content_type = response
+        .headers()
+        .get("Content-Type")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default();
+    if !content_type
+        .split(';')
+        .next()
+        .is_some_and(|value| value.trim().eq_ignore_ascii_case("application/json"))
+    {
+        return Err("release service response is not application/json".into());
+    }
+    let bytes = response
+        .body_mut()
+        .with_config()
+        .limit((MAX_ENVELOPE_BYTES + 1) as u64)
+        .read_to_vec()
+        .map_err(|_| "release service response could not be read within bounds".to_string())?;
+    verify_release_envelope(
+        &bytes,
+        &trusted_keys,
+        &source.release_channel,
+        current_version,
+        updater_version,
+        now_unix_ms,
+    )
+}
+
+fn release_request_error(error: ureq::Error) -> String {
+    match error {
+        ureq::Error::StatusCode(status) => {
+            format!("release service returned HTTP {status}")
+        }
+        _ => "release check failed before a trusted response was received".into(),
+    }
 }
 
 pub fn verify_release_envelope(
@@ -108,17 +342,26 @@ pub fn verify_release_envelope(
         .map_err(|_| "installed updater version is not valid semantic versioning".to_string())?;
     let minimum_updater = Version::parse(&manifest.minimum_updater_version)
         .map_err(|_| "minimum updater version is not valid semantic versioning".to_string())?;
-    let availability = if offered <= current {
+    let availability = classify_availability(&current, &offered, &updater, &minimum_updater);
+    Ok(VerifiedRelease {
+        manifest,
+        availability,
+    })
+}
+
+fn classify_availability(
+    current: &Version,
+    offered: &Version,
+    updater: &Version,
+    minimum_updater: &Version,
+) -> Availability {
+    if offered <= current {
         Availability::UpToDate
     } else if updater < minimum_updater {
         Availability::UpdaterTooOld
     } else {
         Availability::UpdateAvailable
-    };
-    Ok(VerifiedRelease {
-        manifest,
-        availability,
-    })
+    }
 }
 
 fn validate_manifest(
@@ -211,6 +454,9 @@ fn valid_package_url(value: &str) -> bool {
 mod tests {
     use super::*;
     use ed25519_dalek::{Signer, SigningKey};
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::thread;
 
     const NOW: i64 = 1_800_000_000_000;
 
@@ -359,5 +605,67 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn fetches_one_bounded_json_envelope_without_following_redirects() {
+        let signing_key = SigningKey::from_bytes(&[11; 32]);
+        let envelope = signed_envelope(&manifest(), &signing_key);
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0_u8; 2_048];
+            let size = stream.read(&mut request).unwrap();
+            assert!(String::from_utf8_lossy(&request[..size]).starts_with("GET /stable.json "));
+            let headers = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                envelope.len()
+            );
+            stream.write_all(headers.as_bytes()).unwrap();
+            stream.write_all(&envelope).unwrap();
+        });
+        let source = ReleaseSource {
+            schema_version: 1,
+            feed_url: format!("http://{address}/stable.json"),
+            release_channel: "stable".into(),
+            trusted_keys: vec![TrustedReleaseKey {
+                key_id: "release-2026-a".into(),
+                public_key_base64: BASE64.encode(signing_key.verifying_key().as_bytes()),
+            }],
+        };
+        let verified =
+            fetch_and_verify_release(&source, "1.2.0", "1.0.0", NOW, Duration::from_secs(2))
+                .unwrap();
+        assert_eq!(verified.availability, Availability::UpdateAvailable);
+        server.join().unwrap();
+
+        let redirect_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let redirect_address = redirect_listener.local_addr().unwrap();
+        let redirect_server = thread::spawn(move || {
+            let (mut stream, _) = redirect_listener.accept().unwrap();
+            let mut request = [0_u8; 2_048];
+            let _ = stream.read(&mut request).unwrap();
+            stream
+                .write_all(
+                    b"HTTP/1.1 302 Found\r\nLocation: https://example.test/elsewhere\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                )
+                .unwrap();
+        });
+        let redirect_source = ReleaseSource {
+            feed_url: format!("http://{redirect_address}/stable.json"),
+            ..source
+        };
+        assert!(
+            fetch_and_verify_release(
+                &redirect_source,
+                "1.2.0",
+                "1.0.0",
+                NOW,
+                Duration::from_secs(2),
+            )
+            .is_err()
+        );
+        redirect_server.join().unwrap();
     }
 }

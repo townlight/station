@@ -41,6 +41,7 @@ fn run_console(config: DaemonConfig) -> Result<(), String> {
     let listener = bind(&config)?;
     initialize_database(&config.database)?;
     let worker_executable = worker_executable()?;
+    let update_application = application_directory()?;
     let stop = Arc::new(AtomicBool::new(false));
     let orchestration_database = config.database.clone();
     let orchestration_stop = Arc::clone(&stop);
@@ -61,6 +62,11 @@ fn run_console(config: DaemonConfig) -> Result<(), String> {
     let alerting_stop = Arc::clone(&stop);
     let alerting =
         std::thread::spawn(move || station_alerting::run_until(&alerting_database, alerting_stop));
+    let update_database = config.database.clone();
+    let update_stop = Arc::clone(&stop);
+    let updates = std::thread::spawn(move || {
+        station_update_coordinator::run_until(&update_database, &update_application, update_stop)
+    });
     println!(
         "TownLight Station is listening on http://{}",
         config.address
@@ -79,10 +85,15 @@ fn run_console(config: DaemonConfig) -> Result<(), String> {
         .join()
         .map_err(|_| "operator alerting thread panicked".to_string())?
         .map_err(|error| format!("operator alerting stopped: {error}"));
+    let update_result = updates
+        .join()
+        .map_err(|_| "update monitor thread panicked".to_string())?
+        .map_err(|error| format!("update monitor stopped: {error}"));
     result
         .and(orchestration_result)
         .and(ingest_result)
         .and(alerting_result)
+        .and(update_result)
 }
 
 fn run_dispatcher(config: DaemonConfig) -> Result<(), String> {
@@ -157,6 +168,7 @@ fn run_service(config: DaemonConfig) -> Result<(), String> {
     };
     initialize_database(&config.database)?;
     let worker_executable = worker_executable()?;
+    let update_application = application_directory()?;
     let orchestration_database = config.database.clone();
     let orchestration_stop = Arc::clone(&stop);
     let orchestration_receipt = config.database.with_file_name("orchestration-error.txt");
@@ -192,6 +204,20 @@ fn run_service(config: DaemonConfig) -> Result<(), String> {
         }
         result
     });
+    let update_database = config.database.clone();
+    let update_stop = Arc::clone(&stop);
+    let update_receipt = config.database.with_file_name("update-monitor-error.txt");
+    let updates = std::thread::spawn(move || {
+        let result = station_update_coordinator::run_until(
+            &update_database,
+            &update_application,
+            update_stop,
+        );
+        if let Err(error) = &result {
+            let _ = std::fs::write(&update_receipt, error);
+        }
+        result
+    });
     status
         .set_service_status(service_status(
             ServiceState::Running,
@@ -215,10 +241,15 @@ fn run_service(config: DaemonConfig) -> Result<(), String> {
         .join()
         .map_err(|_| "operator alerting thread panicked".to_string())?
         .map_err(|error| format!("operator alerting stopped: {error}"));
+    let update_result = updates
+        .join()
+        .map_err(|_| "update monitor thread panicked".to_string())?
+        .map_err(|error| format!("update monitor stopped: {error}"));
     let result = result
         .and(orchestration_result)
         .and(ingest_result)
-        .and(alerting_result);
+        .and(alerting_result)
+        .and(update_result);
     let exit_code = if result.is_ok() {
         ServiceExitCode::NO_ERROR
     } else {
@@ -248,6 +279,14 @@ fn worker_executable() -> Result<std::path::PathBuf, String> {
             executable.display()
         ))
     }
+}
+
+fn application_directory() -> Result<std::path::PathBuf, String> {
+    std::env::current_exe()
+        .map_err(|error| format!("could not locate station application: {error}"))?
+        .parent()
+        .map(std::path::Path::to_path_buf)
+        .ok_or_else(|| "station executable has no application directory".into())
 }
 
 fn media_library(database: &std::path::Path) -> std::path::PathBuf {
