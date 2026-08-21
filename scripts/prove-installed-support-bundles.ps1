@@ -17,6 +17,7 @@ $expectedEntries = @(
     'alert-rules.json',
     'channels.json',
     'installation.json',
+    'maintenance-latest.json',
     'manifest.json',
     'recent-alert-deliveries-redacted.json',
     'recent-alerts-redacted.json',
@@ -182,9 +183,17 @@ try {
     }
     $stationArtifact = @($installation.artifacts).Where({ $_.name -eq 'stationd.exe' }, 'First')
     $workerArtifact = @($installation.artifacts).Where({ $_.name -eq 'channel-worker.exe' }, 'First')
+    $updaterArtifact = @($installation.artifacts).Where({ $_.name -eq 'station-updater.exe' }, 'First')
     if (-not $stationArtifact.present -or $stationArtifact.sha256 -ne $candidate.stationd_sha256 -or
-        -not $workerArtifact.present -or $workerArtifact.sha256 -ne $candidate.channel_worker_sha256) {
+        -not $workerArtifact.present -or $workerArtifact.sha256 -ne $candidate.channel_worker_sha256 -or
+        -not $updaterArtifact.present -or $updaterArtifact.sha256 -ne $candidate.station_updater_sha256) {
         throw 'The support installation snapshot does not match the installed candidate binaries.'
+    }
+    $maintenance = [Text.Encoding]::UTF8.GetString([byte[]]$entries['maintenance-latest.json']) | ConvertFrom-Json
+    if ($maintenance -and
+        (($maintenance.PSObject.Properties.Name -contains 'detail') -or
+        -not $maintenance.summary -or -not $maintenance.phase)) {
+        throw 'The maintenance diagnostic is missing its bounded summary or exposes raw detail.'
     }
     $runtime = [Text.Encoding]::UTF8.GetString([byte[]]$entries['runtime-safe-to-air.json']) | ConvertFrom-Json
     $resources = @([Text.Encoding]::UTF8.GetString([byte[]]$entries['recent-system-resources.json']) | ConvertFrom-Json)
@@ -224,6 +233,12 @@ try {
         credential_canary_absent = $true
         full_target_canary_absent = $true
         database_files_present = 0
+        active_relative_directory = $installation.active_relative_directory
+        active_generation = $installation.active_generation
+        updater_root_hash_verified = $true
+        maintenance_phase = if ($maintenance) { $maintenance.phase } else { $null }
+        maintenance_raw_detail_absent = -not $maintenance -or
+            -not ($maintenance.PSObject.Properties.Name -contains 'detail')
         runtime_status = $runtime.status.color
         resource_records = $resources.Count
         self_test_records = $selfTests.Count
