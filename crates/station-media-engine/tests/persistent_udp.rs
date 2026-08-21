@@ -42,6 +42,33 @@ fn fans_one_persistent_transport_out_to_two_independent_udp_sinks() {
 }
 
 #[test]
+fn repeats_codec_configuration_for_a_receiver_that_joins_after_startup() {
+    let reservation = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let destination = reservation.local_addr().unwrap();
+    drop(reservation);
+    let playout =
+        PersistentPlayout::start_udp_with_profile(destination, OutputProfileId::Atsc720p5994)
+            .expect("the persistent transport must start without a receiver");
+
+    std::thread::sleep(Duration::from_millis(750));
+    let receiver = UdpSocket::bind(destination).unwrap();
+    receiver
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .unwrap();
+    let started = Instant::now();
+    let mut datagram = [0_u8; 65_536];
+    let mut capture = Vec::new();
+    while started.elapsed() < Duration::from_secs(5) {
+        let received = receiver.recv(&mut datagram).unwrap();
+        capture.extend_from_slice(&datagram[..received]);
+    }
+    playout.stop().unwrap();
+
+    assert!(capture.len() > 4_000_000);
+    assert_discovered_video_contract(&capture, 1_280, 720);
+}
+
+#[test]
 fn emits_the_selected_720p5994_constant_bitrate_transport_contract() {
     let receiver = UdpSocket::bind("127.0.0.1:0").unwrap();
     receiver

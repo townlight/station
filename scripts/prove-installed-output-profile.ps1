@@ -2,7 +2,7 @@ param(
     [string]$BaseUri = 'http://127.0.0.1:4070',
     [int]$DestinationPort = 5920,
     [int]$RedundantDestinationPort = 5921,
-    [int]$CaptureSeconds = 3
+    [int]$CaptureSeconds = 6
 )
 
 $ErrorActionPreference = 'Stop'
