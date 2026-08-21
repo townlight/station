@@ -2,7 +2,11 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use ed25519_dalek::{Signer, SigningKey};
 use sha2::{Digest, Sha256};
-use station_update::{ReleaseManifest, ReleaseSource, SignedReleaseEnvelope, TrustedReleaseKey};
+use station_update::{
+    ReleaseManifest, ReleaseSource, SignedReleaseEnvelope, TrustedReleaseKey, UpdatePackageFile,
+    UpdatePackageManifest,
+};
+use std::io::Write;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -27,9 +31,63 @@ fn main() -> Result<(), String> {
             .as_millis(),
     )
     .map_err(|_| "system time exceeds the supported range".to_string())?;
+    std::fs::create_dir_all(&output_directory).map_err(|error| error.to_string())?;
     let package_file_name = "TownLight-Station-0.2.0.tlu";
-    let package_bytes = b"TownLight Station inert installed staging proof package\n";
-    let package_sha256 = format!("{:X}", Sha256::digest(package_bytes));
+    let payloads: [(&str, &[u8]); 3] = [
+        (
+            "stationd.exe",
+            b"inert installed station service slot proof",
+        ),
+        (
+            "channel-worker.exe",
+            b"inert installed channel worker slot proof",
+        ),
+        (
+            "station-updater.exe",
+            b"inert installed station updater slot proof",
+        ),
+    ];
+    let internal_manifest = UpdatePackageManifest {
+        schema_version: 1,
+        product: "TownLight Station".into(),
+        version: "0.2.0".into(),
+        source_commit: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+        files: payloads
+            .iter()
+            .map(|(path, bytes)| UpdatePackageFile {
+                path: (*path).into(),
+                size_bytes: bytes.len() as u64,
+                sha256: format!("{:X}", Sha256::digest(bytes)),
+            })
+            .collect(),
+    };
+    let package_path = output_directory.join(package_file_name);
+    let package_file = std::fs::File::create(&package_path).map_err(|error| error.to_string())?;
+    let mut package = zip::ZipWriter::new(package_file);
+    let options = zip::write::SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Stored)
+        .unix_permissions(0o644);
+    package
+        .start_file("package-manifest.json", options)
+        .map_err(|error| error.to_string())?;
+    package
+        .write_all(&serde_json::to_vec(&internal_manifest).map_err(|error| error.to_string())?)
+        .map_err(|error| error.to_string())?;
+    for (path, bytes) in payloads {
+        package
+            .start_file(format!("payload/{path}"), options)
+            .map_err(|error| error.to_string())?;
+        package
+            .write_all(bytes)
+            .map_err(|error| error.to_string())?;
+    }
+    package
+        .finish()
+        .map_err(|error| error.to_string())?
+        .sync_all()
+        .map_err(|error| error.to_string())?;
+    let package_bytes = std::fs::read(&package_path).map_err(|error| error.to_string())?;
+    let package_sha256 = format!("{:X}", Sha256::digest(&package_bytes));
     let signing_key = SigningKey::from_bytes(&[42; 32]);
     let manifest = ReleaseManifest {
         schema_version: 1,
@@ -63,7 +121,6 @@ fn main() -> Result<(), String> {
         }],
     };
 
-    std::fs::create_dir_all(&output_directory).map_err(|error| error.to_string())?;
     std::fs::write(
         output_directory.join("stable.json"),
         serde_json::to_vec(&envelope).map_err(|error| error.to_string())?,
@@ -74,7 +131,5 @@ fn main() -> Result<(), String> {
         serde_json::to_vec(&source).map_err(|error| error.to_string())?,
     )
     .map_err(|error| error.to_string())?;
-    std::fs::write(output_directory.join(package_file_name), package_bytes)
-        .map_err(|error| error.to_string())?;
     Ok(())
 }

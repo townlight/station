@@ -22,6 +22,7 @@ $serverLogPath = Join-Path $FixtureDirectory 'server-log.txt'
 $server = $null
 $trustInstalled = $false
 $stagedProofPath = ''
+$preparedProofPath = ''
 
 function Wait-ForUpdateStatus {
     param([scriptblock]$Predicate, [int]$TimeoutSeconds = 30)
@@ -139,6 +140,40 @@ try {
     if ($quarantineLeaks.Count -ne 0) {
         throw 'Verified staging left quarantine fragments behind.'
     }
+    $prepared = Invoke-RestMethod -Uri "$BaseUrl/updates/prepare" -Method Post
+    $preparedProofPath = Join-Path (Join-Path $applicationDirectory 'slots') $prepared.slot_directory_name
+    if ($prepared.manifest.version -ne '0.2.0' -or
+        $prepared.manifest.source_commit -ne ('b' * 40) -or
+        -not (Test-Path -LiteralPath $preparedProofPath -PathType Container)) {
+        throw 'The installed prepare action did not publish the exact immutable slot.'
+    }
+    $slotManifestPath = Join-Path $preparedProofPath 'slot-manifest.json'
+    $slotManifest = Get-Content -LiteralPath $slotManifestPath -Raw | ConvertFrom-Json
+    $slotFiles = @(Get-ChildItem -LiteralPath $preparedProofPath -File)
+    if ($slotFiles.Count -ne 4 -or $slotManifest.files.Count -ne 3 -or
+        -not (Get-Item -LiteralPath $slotManifestPath).IsReadOnly) {
+        throw 'The installed prepared slot does not have the exact read-only file set.'
+    }
+    foreach ($specification in $slotManifest.files) {
+        $payloadPath = Join-Path $preparedProofPath $specification.path
+        $payload = Get-Item -LiteralPath $payloadPath
+        if (-not $payload.IsReadOnly -or
+            [uint64]($payload.Length) -ne [uint64]($specification.size_bytes) -or
+            (Get-FileHash -LiteralPath $payloadPath -Algorithm SHA256).Hash -ne $specification.sha256) {
+            throw "Prepared slot payload failed exact verification: $($specification.path)"
+        }
+    }
+    $preparedStatus = Wait-ForUpdateStatus -Predicate {
+        param($Status)
+        $Status.prepared_slot.slot_directory_name -eq $prepared.slot_directory_name
+    }
+    $slotQuarantineLeaks = @(
+        Get-ChildItem -LiteralPath (Join-Path $applicationDirectory 'slots') `
+            -Filter '.incoming-*' -Directory -ErrorAction SilentlyContinue
+    )
+    if ($slotQuarantineLeaks.Count -ne 0) {
+        throw 'Immutable slot preparation left a quarantine directory behind.'
+    }
     $serverRequests = @(Get-Content -LiteralPath $serverLogPath)
     if ($serverRequests.Count -ne 2 -or
         $serverRequests[0] -ne 'GET /stable.json HTTP/1.1' -or
@@ -152,7 +187,7 @@ try {
     $clean = Wait-ForUpdateStatus -Predicate {
         param($Status)
         -not $Status.configured -and $null -eq $Status.latest_check -and
-            $null -eq $Status.staged_package
+            $null -eq $Status.staged_package -and $null -eq $Status.prepared_slot
     }
     $resolvedAlert = $null
     $alertDeadline = [DateTime]::UtcNow.AddSeconds(10)
@@ -192,6 +227,12 @@ try {
         quarantine_fragments = $quarantineLeaks.Count
         server_requests = $serverRequests
         stage_record_cleared_with_trust = $null -eq $clean.staged_package
+        prepared_slot_name = $prepared.slot_directory_name
+        prepared_slot_files = $slotFiles.Count
+        prepared_payloads_verified = $slotManifest.files.Count
+        prepared_slot_read_only = @($slotFiles.Where({ -not $_.IsReadOnly })).Count -eq 0
+        slot_quarantine_directories = $slotQuarantineLeaks.Count
+        prepare_record_cleared_with_trust = $null -eq $clean.prepared_slot
         proof_trust_removed = -not (Test-Path -LiteralPath $trustPath)
         clean_configured_state = $clean.configured
         stale_offer_hidden = $null -eq $clean.latest_check
@@ -226,6 +267,15 @@ finally {
     if ($stagedProofPath -and (Test-Path -LiteralPath $stagedProofPath -PathType Leaf)) {
         try { (Get-Item -LiteralPath $stagedProofPath).IsReadOnly = $false } catch {}
         Remove-Item -LiteralPath $stagedProofPath -Force -ErrorAction SilentlyContinue
+    }
+    if ($preparedProofPath -and (Test-Path -LiteralPath $preparedProofPath -PathType Container)) {
+        $slotsRoot = [IO.Path]::GetFullPath((Join-Path $applicationDirectory 'slots'))
+        $resolvedSlot = [IO.Path]::GetFullPath($preparedProofPath)
+        if ((Split-Path -Parent $resolvedSlot) -eq $slotsRoot -and
+            (Split-Path -Leaf $resolvedSlot) -eq 'slot-0.2.0-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb') {
+            Get-ChildItem -LiteralPath $resolvedSlot -File | ForEach-Object { $_.IsReadOnly = $false }
+            Remove-Item -LiteralPath $resolvedSlot -Recurse -Force -ErrorAction SilentlyContinue
+        }
     }
     if ($server) {
         Set-Content -LiteralPath $serverStopPath -Value 'stop' -Encoding ascii -ErrorAction SilentlyContinue

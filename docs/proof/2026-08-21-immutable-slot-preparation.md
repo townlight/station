@@ -23,6 +23,20 @@
 - API behavior for honest unconfigured update state, including the prepare route.
 - Complete workspace tests, all-target/all-feature clippy with warnings denied, and the production operator-console build.
 
+## Installed candidate evidence
+
+- Frozen installed source: `b3f132a4825cb32e03915b203e435cee42c29004`
+- Installer SHA-256: `3C6D91AD3E6923F02614AA811E17BBCD734AB12C5C3BED72D311375C6A636DDB`
+- Installed `stationd.exe` SHA-256: `F639DF684969282080DA0644262B2040A116E37A5766B88317AE6BA0A263C3CB`
+- Installed `channel-worker.exe` SHA-256: `873DF0DD9002096D5C231D0B6225055D156B374555F19D58FA46F80EE767ADB0`
+- Installed GStreamer runtime SHA-256: `059251444D1267B486EBA390B18D25FED87E10315E72F757EC6C7E912FA746B5`
+- The LocalSystem service accepted the automatic signed `0.2.0` offer, and discovery created zero package or slot files.
+- After explicit staging, the proof server had observed exactly one feed request and one package request. The staged 1,137-byte package matched SHA-256 `FB4910AB69A34E63D1EF1144F49F762BE51BD10AAB54C690828233F1000DCF28` and was read-only.
+- Explicit preparation published `slot-0.2.0-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb` beneath the installed application root with exactly four read-only files: one slot manifest and all three exact hash-verified payloads.
+- Both download quarantine and slot quarantine were empty after publication.
+- Removing installer-owned trust and restarting cleared the check, stage, and prepare records and resolved the update alert.
+- Final cleanup inspection found no trust fixture, staged package, prepared slot, quarantine residue, or firing update alert. The candidate remained healthy under LocalSystem.
+
 ## Boundary
 
-This proves strict package validation and immutable slot preparation in source and machine-level tests. Installed-candidate proof, the out-of-process maintenance transaction, active-slot switching, candidate health/identity proof, and automatic rollback are not claimed here.
+This proves strict package validation and immutable slot preparation in source, tests, and the exact installed candidate. The out-of-process maintenance transaction, active-slot switching, candidate health/identity proof, and automatic rollback are not claimed here.
