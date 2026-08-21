@@ -13,6 +13,7 @@ use gst::prelude::*;
 use gstreamer as gst;
 use station_api::{Api, serve_one, serve_until};
 use station_domain::StationProfile;
+use station_ingest::{IngestOutcome, IngestWorker};
 use station_schedule::{
     AssetReadiness, ChannelConfiguration, CommitPlan, CommitReport, DispatchStatus, MediaAsset,
     ScheduleItem, ScheduleState,
@@ -154,26 +155,56 @@ fn admits_real_media_into_the_managed_library_and_refuses_declared_readiness() {
     generate_media_fixture(&source);
     let api = Api::open(&database).unwrap();
     let body = serde_json::to_vec(&serde_json::json!({
+        "job_id": "7a49c96c-12da-4c3c-a144-739049eb19af",
         "source_path": source.to_string_lossy()
     }))
     .unwrap();
     let admitted = api.handle("POST", "/api/v1/assets/ingest", Some(&body));
     assert_eq!(
         admitted.status,
-        201,
+        202,
         "{}",
         String::from_utf8_lossy(&admitted.body)
     );
-    let asset: MediaAsset = serde_json::from_slice(&admitted.body).unwrap();
-    assert_eq!(asset.readiness, AssetReadiness::Ready);
-    assert!(Path::new(&asset.media_path).starts_with(std::fs::canonicalize(&library).unwrap()));
-    assert_eq!(asset.asset_id.len(), 64);
-    let fetched = api.handle("GET", &format!("/api/v1/assets/{}", asset.asset_id), None);
+    let job: serde_json::Value = serde_json::from_slice(&admitted.body).unwrap();
+    assert_eq!(job["status"], "pending");
+    assert_eq!(job["progress_percent"], 0);
+    assert!(
+        !library.exists(),
+        "the API request must not perform ingest work"
+    );
+    let fetched = api.handle(
+        "GET",
+        "/api/v1/assets/ingest/jobs/7a49c96c-12da-4c3c-a144-739049eb19af",
+        None,
+    );
     assert_eq!(fetched.status, 200);
     assert_eq!(
-        serde_json::from_slice::<MediaAsset>(&fetched.body).unwrap(),
-        asset
+        serde_json::from_slice::<serde_json::Value>(&fetched.body).unwrap(),
+        job
     );
+    let outcome = IngestWorker::new(&database, &library)
+        .run_once()
+        .unwrap()
+        .unwrap();
+    let asset_id = match outcome {
+        IngestOutcome::Completed { asset_id, .. } => asset_id,
+        other => panic!("real media did not complete: {other:?}"),
+    };
+    let completed = api.handle(
+        "GET",
+        "/api/v1/assets/ingest/jobs/7a49c96c-12da-4c3c-a144-739049eb19af",
+        None,
+    );
+    let completed: serde_json::Value = serde_json::from_slice(&completed.body).unwrap();
+    assert_eq!(completed["status"], "completed");
+    assert_eq!(completed["progress_percent"], 100);
+    assert_eq!(completed["asset_id"], asset_id);
+    let fetched_asset = api.handle("GET", &format!("/api/v1/assets/{asset_id}"), None);
+    let asset: MediaAsset = serde_json::from_slice(&fetched_asset.body).unwrap();
+    assert_eq!(fetched_asset.status, 200);
+    assert_eq!(asset.readiness, AssetReadiness::Ready);
+    assert!(Path::new(&asset.media_path).starts_with(std::fs::canonicalize(&library).unwrap()));
 
     let forged = MediaAsset {
         asset_id: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
@@ -194,7 +225,9 @@ fn admits_real_media_into_the_managed_library_and_refuses_declared_readiness() {
         api.handle(
             "POST",
             "/api/v1/assets/ingest",
-            Some(br#"{"source_path":"relative.ts"}"#),
+            Some(
+                br#"{"job_id":"0c433632-f893-49bb-b689-57bfac44d29b","source_path":"relative.ts"}"#
+            ),
         )
         .status,
         422
@@ -203,15 +236,55 @@ fn admits_real_media_into_the_managed_library_and_refuses_declared_readiness() {
     let invalid_source = root.join("not-media.txt");
     std::fs::write(&invalid_source, b"not a media asset").unwrap();
     let invalid_body = serde_json::to_vec(&serde_json::json!({
+        "job_id": "640068de-2886-46f5-981a-0144597ce2aa",
         "source_path": invalid_source.to_string_lossy()
     }))
     .unwrap();
-    let rejected = api.handle("POST", "/api/v1/assets/ingest", Some(&invalid_body));
-    assert_eq!(rejected.status, 422);
+    assert_eq!(
+        api.handle("POST", "/api/v1/assets/ingest", Some(&invalid_body))
+            .status,
+        202
+    );
+    assert!(matches!(
+        IngestWorker::new(&database, &library).run_once().unwrap(),
+        Some(IngestOutcome::Failed { .. })
+    ));
+    let failed = api.handle(
+        "GET",
+        "/api/v1/assets/ingest/jobs/640068de-2886-46f5-981a-0144597ce2aa",
+        None,
+    );
+    let failed: serde_json::Value = serde_json::from_slice(&failed.body).unwrap();
+    assert_eq!(failed["status"], "failed");
+    assert!(failed["error_detail"].as_str().unwrap().contains("Media"));
     assert_eq!(
         std::fs::read_dir(&library).unwrap().count(),
-        stored_before_rejection,
-        "rejected media must not pollute the managed library"
+        stored_before_rejection
+    );
+    assert_eq!(
+        api.handle("POST", "/api/v1/assets/ingest", Some(&body))
+            .status,
+        409
+    );
+    let invalid_job = serde_json::to_vec(&serde_json::json!({
+        "job_id": "not-a-uuid",
+        "source_path": source.to_string_lossy()
+    }))
+    .unwrap();
+    assert_eq!(
+        api.handle("POST", "/api/v1/assets/ingest", Some(&invalid_job))
+            .status,
+        422
+    );
+    let missing_source = serde_json::to_vec(&serde_json::json!({
+        "job_id": "89a1cfac-81a6-4500-b712-6688fb71bda7",
+        "source_path": root.join("missing.ts").to_string_lossy()
+    }))
+    .unwrap();
+    assert_eq!(
+        api.handle("POST", "/api/v1/assets/ingest", Some(&missing_source),)
+            .status,
+        422
     );
     assert_eq!(
         api.handle("GET", "/api/v1/assets/not-a-digest", None)

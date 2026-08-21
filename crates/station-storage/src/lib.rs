@@ -3,6 +3,7 @@ use std::path::Path;
 use std::ptr;
 
 use station_domain::{StationProfile, StationProfileDocument};
+use station_media_lifecycle::{IngestJobStatus, IngestSourceKind, MediaIngestJob};
 use station_schedule::{
     AssetReadiness, ChannelConfiguration, CommitPlan, CommitReport, DispatchJob, DispatchStatus,
     MediaAsset, ScheduleItem, ScheduleState, prepare_commit,
@@ -122,6 +123,21 @@ impl StationStore {
                duration_ms INTEGER NOT NULL CHECK (duration_ms > 0),\
                readiness TEXT NOT NULL CHECK (readiness IN ('ready','missing','rejected','processing'))\
              );\
+             CREATE TABLE IF NOT EXISTS media_ingest_jobs (\
+               job_id TEXT PRIMARY KEY,\
+               source_kind TEXT NOT NULL CHECK (source_kind IN ('operator_path','watch_folder','live_finalization')),\
+               source_path TEXT NOT NULL,\
+               status TEXT NOT NULL CHECK (status IN ('pending','running','completed','failed','cancelled')),\
+               progress_percent INTEGER NOT NULL CHECK (progress_percent BETWEEN 0 AND 100),\
+               created_at_unix_ms INTEGER NOT NULL CHECK (created_at_unix_ms >= 0),\
+               started_at_unix_ms INTEGER NOT NULL DEFAULT -1 CHECK (started_at_unix_ms >= -1),\
+               completed_at_unix_ms INTEGER NOT NULL DEFAULT -1 CHECK (completed_at_unix_ms >= -1),\
+               error_detail TEXT NOT NULL DEFAULT '',\
+               asset_id TEXT NOT NULL DEFAULT '',\
+               attempts INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0)\
+             );\
+             CREATE INDEX IF NOT EXISTS media_ingest_jobs_status_time \
+               ON media_ingest_jobs(status, created_at_unix_ms);\
              CREATE TABLE IF NOT EXISTS channels (\
                channel_id TEXT PRIMARY KEY,\
                display_name TEXT NOT NULL,\
@@ -232,6 +248,172 @@ impl StationStore {
         )?;
         bind_text(self.database, statement.raw, 4, &readiness)?;
         expect_done(self.database, statement.raw)
+    }
+
+    pub fn create_ingest_job(&self, job: &MediaIngestJob) -> Result<bool, String> {
+        job.validate().map_err(|error| format!("{error:?}"))?;
+        if job.status != IngestJobStatus::Pending
+            || job.progress_percent != 0
+            || job.started_at_unix_ms.is_some()
+            || job.completed_at_unix_ms.is_some()
+            || job.error_detail.is_some()
+            || job.asset_id.is_some()
+            || job.attempts != 0
+        {
+            return Err("new ingest jobs must begin in the pending state".into());
+        }
+        let statement = self.prepare(
+            "INSERT OR IGNORE INTO media_ingest_jobs(job_id, source_kind, source_path, status, progress_percent, \
+             created_at_unix_ms, started_at_unix_ms, completed_at_unix_ms, error_detail, asset_id, attempts) \
+             VALUES(?1, ?2, ?3, 'pending', 0, ?4, -1, -1, '', '', 0)",
+        )?;
+        let job_id = c_string(&job.job_id, "ingest job identity")?;
+        let source_kind = c_string(
+            ingest_source_kind_name(job.source_kind),
+            "ingest source kind",
+        )?;
+        let source_path = c_string(&job.source_path, "ingest source path")?;
+        bind_text(self.database, statement.raw, 1, &job_id)?;
+        bind_text(self.database, statement.raw, 2, &source_kind)?;
+        bind_text(self.database, statement.raw, 3, &source_path)?;
+        bind_i64(self.database, statement.raw, 4, job.created_at_unix_ms)?;
+        expect_done(self.database, statement.raw)?;
+        Ok(self.changes() == 1)
+    }
+
+    pub fn read_ingest_job(&self, job_id: &str) -> Result<Option<MediaIngestJob>, String> {
+        let statement = self.prepare(
+            "SELECT job_id, source_kind, source_path, status, progress_percent, created_at_unix_ms, \
+             started_at_unix_ms, completed_at_unix_ms, error_detail, asset_id, attempts \
+             FROM media_ingest_jobs WHERE job_id=?1",
+        )?;
+        let job_id = c_string(job_id, "ingest job identity")?;
+        bind_text(self.database, statement.raw, 1, &job_id)?;
+        match unsafe { sqlite3_step(statement.raw) } {
+            SQLITE_ROW => Ok(Some(read_ingest_job_row(statement.raw)?)),
+            SQLITE_DONE => Ok(None),
+            _ => Err(sqlite_error(self.database)),
+        }
+    }
+
+    pub fn recover_interrupted_ingest_jobs(&self) -> Result<u64, String> {
+        let statement = self.prepare(
+            "UPDATE media_ingest_jobs SET status='pending', progress_percent=0, started_at_unix_ms=-1, \
+             error_detail='' WHERE status='running'",
+        )?;
+        expect_done(self.database, statement.raw)?;
+        u64::try_from(self.changes()).map_err(|_| "SQLite returned invalid changes".into())
+    }
+
+    pub fn claim_next_ingest_job(
+        &self,
+        started_at_unix_ms: i64,
+    ) -> Result<Option<MediaIngestJob>, String> {
+        if started_at_unix_ms < 0 {
+            return Err("ingest start time must be nonnegative".into());
+        }
+        self.execute("BEGIN IMMEDIATE")?;
+        let outcome = (|| {
+            let statement = self.prepare(
+                "SELECT job_id FROM media_ingest_jobs WHERE status='pending' \
+                 ORDER BY created_at_unix_ms, job_id LIMIT 1",
+            )?;
+            let job_id = match unsafe { sqlite3_step(statement.raw) } {
+                SQLITE_ROW => column_text(statement.raw, 0)?,
+                SQLITE_DONE => return Ok(None),
+                _ => return Err(sqlite_error(self.database)),
+            };
+            drop(statement);
+            let update = self.prepare(
+                "UPDATE media_ingest_jobs SET status='running', progress_percent=10, started_at_unix_ms=?1, \
+                 completed_at_unix_ms=-1, error_detail='', asset_id='', attempts=attempts+1 \
+                 WHERE job_id=?2 AND status='pending'",
+            )?;
+            let id = c_string(&job_id, "ingest job identity")?;
+            bind_i64(self.database, update.raw, 1, started_at_unix_ms)?;
+            bind_text(self.database, update.raw, 2, &id)?;
+            expect_done(self.database, update.raw)?;
+            if self.changes() != 1 {
+                return Err("ingest job was claimed concurrently".into());
+            }
+            self.read_ingest_job(&job_id)?
+                .ok_or_else(|| "claimed ingest job disappeared".into())
+                .map(Some)
+        })();
+        match outcome {
+            Ok(job) => match self.execute("COMMIT") {
+                Ok(()) => Ok(job),
+                Err(error) => {
+                    let _ = self.execute("ROLLBACK");
+                    Err(error)
+                }
+            },
+            Err(error) => {
+                let _ = self.execute("ROLLBACK");
+                Err(error)
+            }
+        }
+    }
+
+    pub fn complete_ingest_job(
+        &self,
+        job_id: &str,
+        asset: &MediaAsset,
+        completed_at_unix_ms: i64,
+    ) -> Result<(), String> {
+        if completed_at_unix_ms < 0 {
+            return Err("ingest completion time must be nonnegative".into());
+        }
+        self.execute("BEGIN IMMEDIATE")?;
+        let outcome = (|| {
+            self.put_media_asset(asset)?;
+            let statement = self.prepare(
+                "UPDATE media_ingest_jobs SET status='completed', progress_percent=100, completed_at_unix_ms=?1, \
+                 error_detail='', asset_id=?2 WHERE job_id=?3 AND status='running'",
+            )?;
+            let asset_id = c_string(&asset.asset_id, "asset identity")?;
+            let job_id = c_string(job_id, "ingest job identity")?;
+            bind_i64(self.database, statement.raw, 1, completed_at_unix_ms)?;
+            bind_text(self.database, statement.raw, 2, &asset_id)?;
+            bind_text(self.database, statement.raw, 3, &job_id)?;
+            expect_done(self.database, statement.raw)?;
+            if self.changes() == 1 {
+                Ok(())
+            } else {
+                Err("ingest job is not running".into())
+            }
+        })();
+        self.finish_transaction(outcome)
+    }
+
+    pub fn fail_ingest_job(
+        &self,
+        job_id: &str,
+        completed_at_unix_ms: i64,
+        error_detail: &str,
+    ) -> Result<(), String> {
+        if completed_at_unix_ms < 0
+            || error_detail.trim().is_empty()
+            || error_detail.len() > 4_000
+            || error_detail.chars().any(char::is_control)
+        {
+            return Err("ingest failure time or detail is invalid".into());
+        }
+        let statement = self.prepare(
+            "UPDATE media_ingest_jobs SET status='failed', completed_at_unix_ms=?1, error_detail=?2 \
+             WHERE job_id=?3 AND status='running'",
+        )?;
+        let detail = c_string(error_detail, "ingest error detail")?;
+        let job_id = c_string(job_id, "ingest job identity")?;
+        bind_i64(self.database, statement.raw, 1, completed_at_unix_ms)?;
+        bind_text(self.database, statement.raw, 2, &detail)?;
+        bind_text(self.database, statement.raw, 3, &job_id)?;
+        expect_done(self.database, statement.raw)?;
+        if self.changes() == 1 {
+            Ok(())
+        } else {
+            Err("ingest job is not running".into())
+        }
     }
 
     pub fn put_channel(&self, channel: &ChannelConfiguration) -> Result<(), String> {
@@ -658,6 +840,22 @@ impl StationStore {
         debug_assert_eq!(status, SQLITE_ROW);
         unsafe { sqlite3_column_int64(statement.raw, 0) }
     }
+
+    fn finish_transaction(&self, outcome: Result<(), String>) -> Result<(), String> {
+        match outcome {
+            Ok(()) => match self.execute("COMMIT") {
+                Ok(()) => Ok(()),
+                Err(error) => {
+                    let _ = self.execute("ROLLBACK");
+                    Err(error)
+                }
+            },
+            Err(error) => {
+                let _ = self.execute("ROLLBACK");
+                Err(error)
+            }
+        }
+    }
 }
 
 impl Drop for StationStore {
@@ -732,6 +930,28 @@ fn read_media_asset_row(statement: *mut SqliteStatement) -> Result<MediaAsset, S
     })
 }
 
+fn read_ingest_job_row(statement: *mut SqliteStatement) -> Result<MediaIngestJob, String> {
+    let started = unsafe { sqlite3_column_int64(statement, 6) };
+    let completed = unsafe { sqlite3_column_int64(statement, 7) };
+    let error_detail = column_text(statement, 8)?;
+    let asset_id = column_text(statement, 9)?;
+    Ok(MediaIngestJob {
+        job_id: column_text(statement, 0)?,
+        source_kind: parse_ingest_source_kind(&column_text(statement, 1)?)?,
+        source_path: column_text(statement, 2)?,
+        status: parse_ingest_job_status(&column_text(statement, 3)?)?,
+        progress_percent: u8::try_from(unsafe { sqlite3_column_int64(statement, 4) })
+            .map_err(|_| "database returned invalid ingest progress".to_string())?,
+        created_at_unix_ms: unsafe { sqlite3_column_int64(statement, 5) },
+        started_at_unix_ms: (started >= 0).then_some(started),
+        completed_at_unix_ms: (completed >= 0).then_some(completed),
+        error_detail: (!error_detail.is_empty()).then_some(error_detail),
+        asset_id: (!asset_id.is_empty()).then_some(asset_id),
+        attempts: u32::try_from(unsafe { sqlite3_column_int64(statement, 10) })
+            .map_err(|_| "database returned invalid ingest attempts".to_string())?,
+    })
+}
+
 fn read_schedule_item_row(statement: *mut SqliteStatement) -> Result<ScheduleItem, String> {
     Ok(ScheduleItem {
         item_id: column_text(statement, 0)?,
@@ -769,6 +989,38 @@ fn readiness_name(value: AssetReadiness) -> &'static str {
         AssetReadiness::Missing => "missing",
         AssetReadiness::Rejected => "rejected",
         AssetReadiness::Processing => "processing",
+    }
+}
+
+fn ingest_source_kind_name(value: IngestSourceKind) -> &'static str {
+    match value {
+        IngestSourceKind::OperatorPath => "operator_path",
+        IngestSourceKind::WatchFolder => "watch_folder",
+        IngestSourceKind::LiveFinalization => "live_finalization",
+    }
+}
+
+fn parse_ingest_source_kind(value: &str) -> Result<IngestSourceKind, String> {
+    match value {
+        "operator_path" => Ok(IngestSourceKind::OperatorPath),
+        "watch_folder" => Ok(IngestSourceKind::WatchFolder),
+        "live_finalization" => Ok(IngestSourceKind::LiveFinalization),
+        _ => Err(format!(
+            "database returned invalid ingest source kind {value}"
+        )),
+    }
+}
+
+fn parse_ingest_job_status(value: &str) -> Result<IngestJobStatus, String> {
+    match value {
+        "pending" => Ok(IngestJobStatus::Pending),
+        "running" => Ok(IngestJobStatus::Running),
+        "completed" => Ok(IngestJobStatus::Completed),
+        "failed" => Ok(IngestJobStatus::Failed),
+        "cancelled" => Ok(IngestJobStatus::Cancelled),
+        _ => Err(format!(
+            "database returned invalid ingest job status {value}"
+        )),
     }
 }
 

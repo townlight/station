@@ -10,8 +10,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::Deserialize;
 use station_domain::StationProfile;
-use station_media_assets::{AssetError, ingest_media};
-use station_schedule::{ChannelConfiguration, MediaAsset, ScheduleItem};
+use station_media_lifecycle::{IngestJobStatus, IngestSourceKind, MediaIngestJob};
+use station_schedule::{ChannelConfiguration, ScheduleItem};
 use station_storage::{CommitWriteError, ProfileWriteError, StationStore};
 
 #[derive(Deserialize)]
@@ -41,6 +41,7 @@ struct CommitSchedule {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct IngestMedia {
+    job_id: String,
     source_path: PathBuf,
 }
 
@@ -52,19 +53,12 @@ pub struct ApiResponse {
 
 pub struct Api {
     storage: StationStore,
-    media_library: PathBuf,
 }
 
 impl Api {
     pub fn open(database_path: impl AsRef<Path>) -> Result<Self, String> {
-        let database_path = database_path.as_ref();
-        let media_library = database_path
-            .parent()
-            .unwrap_or_else(|| Path::new("."))
-            .join("media");
         Ok(Self {
             storage: StationStore::open(database_path)?,
-            media_library,
         })
     }
 
@@ -97,6 +91,9 @@ impl Api {
             }
             ("GET", path) if path.starts_with("/api/v1/schedule/commits/") => {
                 self.read_commit_report(path)
+            }
+            ("GET", path) if path.starts_with("/api/v1/assets/ingest/jobs/") => {
+                self.read_ingest_job(path)
             }
             ("GET", path) if path.starts_with("/api/v1/assets/") => self.read_media_asset(path),
             _ => error_response(404, "not_found", "The requested route does not exist."),
@@ -153,29 +150,67 @@ impl Api {
                 "The media source path must be absolute.",
             );
         }
-        let ingested = match ingest_media(&command.source_path, &self.media_library) {
-            Ok(ingested) => ingested,
-            Err(
-                AssetError::InvalidSource(message)
-                | AssetError::UnsupportedMedia(message)
-                | AssetError::Discovery(message),
-            ) => {
-                return error_response(422, "media_rejected", &message);
+        match std::fs::metadata(&command.source_path) {
+            Ok(source) if source.is_file() && source.len() > 0 => {}
+            Ok(_) => {
+                return error_response(
+                    422,
+                    "invalid_source_path",
+                    "The media source must be a non-empty regular file.",
+                );
             }
-            Err(AssetError::Io(message)) => {
-                return error_response(500, "media_ingest_failed", &message);
-            }
+            Err(error) => return error_response(422, "invalid_source_path", &error.to_string()),
+        }
+        let created_at = match system_time_millis() {
+            Ok(value) => value,
+            Err(message) => return error_response(500, "clock_error", &message),
         };
-        let asset = MediaAsset {
-            asset_id: ingested.asset_id,
-            media_path: ingested.stored_path.to_string_lossy().into_owned(),
-            duration_ms: (ingested.metadata.duration_ns / 1_000_000).max(1),
-            readiness: station_schedule::AssetReadiness::Ready,
+        let job = MediaIngestJob {
+            job_id: command.job_id,
+            source_kind: IngestSourceKind::OperatorPath,
+            source_path: command.source_path.to_string_lossy().into_owned(),
+            status: IngestJobStatus::Pending,
+            progress_percent: 0,
+            created_at_unix_ms: created_at,
+            started_at_unix_ms: None,
+            completed_at_unix_ms: None,
+            error_detail: None,
+            asset_id: None,
+            attempts: 0,
         };
-        match self.storage.put_media_asset(&asset) {
-            Ok(()) => json_response(
-                201,
-                serde_json::to_vec(&asset).expect("serializing a media asset cannot fail"),
+        if let Err(error) = job.validate() {
+            return error_response(422, "validation_failed", &format!("{error:?}"));
+        }
+        match self.storage.create_ingest_job(&job) {
+            Ok(true) => json_response(
+                202,
+                serde_json::to_vec(&job).expect("serializing an ingest job cannot fail"),
+            ),
+            Ok(false) => error_response(
+                409,
+                "ingest_job_conflict",
+                "An ingest job with this identity already exists.",
+            ),
+            Err(message) => error_response(500, "storage_error", &message),
+        }
+    }
+
+    fn read_ingest_job(&self, path: &str) -> ApiResponse {
+        let Some(job_id) = path.strip_prefix("/api/v1/assets/ingest/jobs/") else {
+            unreachable!("the route prefix was checked")
+        };
+        if job_id.is_empty() || job_id.contains('/') {
+            return error_response(400, "invalid_path", "The ingest job identity is invalid.");
+        }
+        match self.storage.read_ingest_job(job_id) {
+            Ok(Some(job)) => json_response(
+                200,
+                serde_json::to_vec(&job).expect("serializing an ingest job cannot fail"),
+            ),
+            Ok(None) => error_response(
+                404,
+                "ingest_job_not_found",
+                "The media ingest job does not exist.",
             ),
             Err(message) => error_response(500, "storage_error", &message),
         }
@@ -423,6 +458,7 @@ fn serve_stream(stream: &mut TcpStream, api: &Api) -> Result<(), String> {
     let reason = match response.status {
         200 => "OK",
         201 => "Created",
+        202 => "Accepted",
         400 => "Bad Request",
         404 => "Not Found",
         409 => "Conflict",

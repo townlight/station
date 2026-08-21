@@ -24,6 +24,7 @@ The initial control-plane dependency direction is enforced by the Cargo workspac
 
 ```text
 station-domain <- station-storage <- station-api <- stationd
+station-media-lifecycle <- station-storage <- station-ingest <- stationd
 ```
 
 The domain crate has no storage, HTTP, media, or Windows-service dependencies. Storage translates domain objects to SQLite. The API owns transport and error contracts. The daemon is composition and process lifecycle only.
@@ -37,6 +38,8 @@ The domain crate has no storage, HTTP, media, or Windows-service dependencies. S
 `station-runtime` owns worker process lifecycle from the station side. It creates the exclusive pipe, launches the worker without inherited protocol handles, bounds connection and response waits, accepts only the configured worker/channel identity and next sequence, requires a durable `Ready` handshake, and terminates and reaps the child on every failed launch, timeout, or abandoned session. Clean shutdown is complete only after `ShutdownComplete` and a successful process exit. See [ADR 0003](../adr/0003-supervised-worker-lifecycle.md).
 
 `station-media-assets` owns the admission boundary for file bytes. It discovers real stream metadata, requires finite A/V, atomically copies and synchronizes the source into a SHA-256-addressed library object, revalidates the stored copy, and treats duplicate content as the same asset. See [ADR 0007](../adr/0007-content-addressed-media-ingest.md).
+
+`station-media-lifecycle` owns durable ingest job state without depending on GStreamer or SQLite. The API persists an operator-path request as `pending` and returns immediately. `station-ingest` claims work in the daemon, executes `station-media-assets`, and atomically completes both the job and ready asset record. Failed media keeps a bounded operator-visible reason without creating an asset; interrupted running work is safely requeued because content-addressed admission is idempotent. See [ADR 0010](../adr/0010-durable-background-media-ingest.md).
 
 `station-schedule` owns schedule and commit-to-air rules independently of HTTP, SQLite, and the media worker. `station-storage` persists channels, assets, schedule items, and approval reports. Preview is informative; approval starts a SQLite immediate transaction and reruns the complete gate so an overlap or media-state change that appeared after preview cannot race onto air. `station-orchestration` owns the state bridge from durable approval to worker execution: load acknowledgment produces `queued`, the scheduled take acknowledgment produces `acknowledged`, and fallback return after the scheduled end produces `completed`. Compare-and-set updates prevent competing controllers from claiming the same transition. See [ADR 0008](../adr/0008-commit-to-air-authority.md) and [ADR 0009](../adr/0009-acknowledged-schedule-dispatch.md).
 

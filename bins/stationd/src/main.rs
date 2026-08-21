@@ -49,6 +49,12 @@ fn run_console(config: DaemonConfig) -> Result<(), String> {
             orchestration_stop,
         )
     });
+    let ingest_database = config.database.clone();
+    let ingest_library = media_library(&config.database);
+    let ingest_stop = Arc::clone(&stop);
+    let ingest = std::thread::spawn(move || {
+        station_ingest::run_until(&ingest_database, &ingest_library, ingest_stop)
+    });
     println!(
         "TownLight Station is listening on http://{}",
         config.address
@@ -59,7 +65,11 @@ fn run_console(config: DaemonConfig) -> Result<(), String> {
         .join()
         .map_err(|_| "channel orchestration thread panicked".to_string())?
         .map_err(|error| format!("channel orchestration stopped: {error:?}"));
-    result.and(orchestration_result)
+    let ingest_result = ingest
+        .join()
+        .map_err(|_| "media ingest thread panicked".to_string())?
+        .map_err(|error| format!("media ingest stopped: {error:?}"));
+    result.and(orchestration_result).and(ingest_result)
 }
 
 fn run_dispatcher(config: DaemonConfig) -> Result<(), String> {
@@ -147,6 +157,17 @@ fn run_service(config: DaemonConfig) -> Result<(), String> {
         }
         result
     });
+    let ingest_database = config.database.clone();
+    let ingest_library = media_library(&config.database);
+    let ingest_stop = Arc::clone(&stop);
+    let ingest_receipt = config.database.with_file_name("ingest-error.txt");
+    let ingest = std::thread::spawn(move || {
+        let result = station_ingest::run_until(&ingest_database, &ingest_library, ingest_stop);
+        if let Err(error) = &result {
+            let _ = std::fs::write(&ingest_receipt, format!("{error:?}"));
+        }
+        result
+    });
     status
         .set_service_status(service_status(
             ServiceState::Running,
@@ -162,7 +183,11 @@ fn run_service(config: DaemonConfig) -> Result<(), String> {
         .join()
         .map_err(|_| "channel orchestration thread panicked".to_string())?
         .map_err(|error| format!("channel orchestration stopped: {error:?}"));
-    let result = result.and(orchestration_result);
+    let ingest_result = ingest
+        .join()
+        .map_err(|_| "media ingest thread panicked".to_string())?
+        .map_err(|error| format!("media ingest stopped: {error:?}"));
+    let result = result.and(orchestration_result).and(ingest_result);
     let exit_code = if result.is_ok() {
         ServiceExitCode::NO_ERROR
     } else {
@@ -192,6 +217,13 @@ fn worker_executable() -> Result<std::path::PathBuf, String> {
             executable.display()
         ))
     }
+}
+
+fn media_library(database: &std::path::Path) -> std::path::PathBuf {
+    database
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("."))
+        .join("media")
 }
 
 fn bind(config: &DaemonConfig) -> Result<TcpListener, String> {

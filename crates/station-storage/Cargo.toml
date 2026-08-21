@@ -6,4 +6,5 @@ publish.workspace = true
 
 [dependencies]
 station-domain.workspace = true
+station-media-lifecycle.workspace = true
 station-schedule.workspace = true
