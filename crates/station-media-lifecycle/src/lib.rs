@@ -34,6 +34,40 @@ pub struct MediaIngestJob {
     pub next_attempt_at_unix_ms: Option<i64>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TranscodeFormat {
+    H264_720p4mbpsAac192kTs,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TranscodeJobStatus {
+    Pending,
+    Running,
+    Completed,
+    Failed,
+    Cancelled,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TranscodeJob {
+    pub job_id: String,
+    pub ingest_job_id: String,
+    pub source_asset_id: String,
+    pub source_path: String,
+    pub output_format: TranscodeFormat,
+    pub status: TranscodeJobStatus,
+    pub progress_percent: u8,
+    pub created_at_unix_ms: i64,
+    pub started_at_unix_ms: Option<i64>,
+    pub completed_at_unix_ms: Option<i64>,
+    pub output_asset_id: Option<String>,
+    pub error_detail: Option<String>,
+    pub attempts: u32,
+    pub next_attempt_at_unix_ms: Option<i64>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WatchFolderConfig {
     pub config_id: String,
@@ -261,6 +295,92 @@ impl MediaIngestJob {
     }
 }
 
+impl TranscodeJob {
+    pub fn validate(&self) -> Result<(), IngestJobError> {
+        if !is_uuid(&self.job_id) || !is_uuid(&self.ingest_job_id) {
+            return Err(IngestJobError::Invalid(
+                "transcode and ingest job identities must be canonical UUIDs",
+            ));
+        }
+        if !is_asset_id(&self.source_asset_id)
+            || self
+                .output_asset_id
+                .as_ref()
+                .is_some_and(|value| !is_asset_id(value))
+        {
+            return Err(IngestJobError::Invalid(
+                "transcode source and output identities must be lowercase SHA-256 digests",
+            ));
+        }
+        if !visible_bounded(&self.source_path, 2_000)
+            || self.progress_percent > 100
+            || self.created_at_unix_ms < 0
+            || self
+                .started_at_unix_ms
+                .is_some_and(|value| value < self.created_at_unix_ms)
+            || self.completed_at_unix_ms.is_some_and(|value| {
+                value < self.started_at_unix_ms.unwrap_or(self.created_at_unix_ms)
+            })
+            || self.next_attempt_at_unix_ms.is_some_and(|value| value < 0)
+            || self
+                .error_detail
+                .as_ref()
+                .is_some_and(|value| !visible_bounded(value, 4_000))
+        {
+            return Err(IngestJobError::Invalid(
+                "transcode path, progress, timestamps, or error detail is invalid",
+            ));
+        }
+        let valid_state = match self.status {
+            TranscodeJobStatus::Pending => {
+                self.progress_percent == 0
+                    && self.started_at_unix_ms.is_none()
+                    && self.completed_at_unix_ms.is_none()
+                    && self.output_asset_id.is_none()
+            }
+            TranscodeJobStatus::Running => {
+                (1..100).contains(&self.progress_percent)
+                    && self.started_at_unix_ms.is_some()
+                    && self.completed_at_unix_ms.is_none()
+                    && self.output_asset_id.is_none()
+                    && self.error_detail.is_none()
+                    && self.next_attempt_at_unix_ms.is_none()
+                    && self.attempts > 0
+            }
+            TranscodeJobStatus::Completed => {
+                self.progress_percent == 100
+                    && self.started_at_unix_ms.is_some()
+                    && self.completed_at_unix_ms.is_some()
+                    && self.output_asset_id.is_some()
+                    && self.error_detail.is_none()
+                    && self.next_attempt_at_unix_ms.is_none()
+                    && self.attempts > 0
+            }
+            TranscodeJobStatus::Failed => {
+                self.progress_percent < 100
+                    && self.started_at_unix_ms.is_some()
+                    && self.completed_at_unix_ms.is_some()
+                    && self.output_asset_id.is_none()
+                    && self.error_detail.is_some()
+                    && self.next_attempt_at_unix_ms.is_none()
+                    && self.attempts > 0
+            }
+            TranscodeJobStatus::Cancelled => {
+                self.completed_at_unix_ms.is_some()
+                    && self.output_asset_id.is_none()
+                    && self.next_attempt_at_unix_ms.is_none()
+            }
+        };
+        if valid_state {
+            Ok(())
+        } else {
+            Err(IngestJobError::Invalid(
+                "transcode fields do not match the declared job state",
+            ))
+        }
+    }
+}
+
 fn is_asset_id(value: &str) -> bool {
     value.len() == 64
         && value
@@ -282,7 +402,9 @@ fn visible_bounded(value: &str, maximum: usize) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{IngestJobError, WatchFolderConfig};
+    use super::{
+        IngestJobError, TranscodeFormat, TranscodeJob, TranscodeJobStatus, WatchFolderConfig,
+    };
 
     fn config() -> WatchFolderConfig {
         WatchFolderConfig {
@@ -312,5 +434,38 @@ mod tests {
         let mut unsafe_error = config();
         unsafe_error.last_error = Some("bad\nstate".into());
         assert!(unsafe_error.validate().is_err());
+    }
+
+    fn transcode_job() -> TranscodeJob {
+        TranscodeJob {
+            job_id: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee".into(),
+            ingest_job_id: "11111111-2222-4333-8444-555555555555".into(),
+            source_asset_id: "a".repeat(64),
+            source_path: r"C:\ProgramData\TownLight Station\sources\source.ts".into(),
+            output_format: TranscodeFormat::H264_720p4mbpsAac192kTs,
+            status: TranscodeJobStatus::Pending,
+            progress_percent: 0,
+            created_at_unix_ms: 100,
+            started_at_unix_ms: None,
+            completed_at_unix_ms: None,
+            output_asset_id: None,
+            error_detail: None,
+            attempts: 0,
+            next_attempt_at_unix_ms: None,
+        }
+    }
+
+    #[test]
+    fn validates_transcode_job_state_invariants() {
+        transcode_job().validate().unwrap();
+        let mut impossible_pending = transcode_job();
+        impossible_pending.progress_percent = 50;
+        assert!(impossible_pending.validate().is_err());
+        let mut incomplete_success = transcode_job();
+        incomplete_success.status = TranscodeJobStatus::Completed;
+        incomplete_success.progress_percent = 100;
+        incomplete_success.started_at_unix_ms = Some(110);
+        incomplete_success.completed_at_unix_ms = Some(120);
+        assert!(incomplete_success.validate().is_err());
     }
 }
