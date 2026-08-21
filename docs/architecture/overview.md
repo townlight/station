@@ -44,4 +44,4 @@ Rust is used for native services, workers, command-line tools, and installation 
 
 ## Current vertical slice
 
-The first slice commissions a station profile through `PUT /api/v1/station`, persists it in SQLite with WAL and foreign-key enforcement, reads it after restart, and exposes database readiness through `GET /health`. It establishes the API-to-domain-to-storage path that subsequent commissioning capabilities will extend.
+The first slice commissions a station profile through `PUT /api/v1/station`, protects updates with an expected revision, persists it transactionally in SQLite with WAL and foreign-key enforcement, reads it after restart, and exposes database readiness through `GET /health`. It establishes the API-to-domain-to-storage path that subsequent commissioning capabilities will extend.

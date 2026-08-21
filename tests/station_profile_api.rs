@@ -123,7 +123,44 @@ fn serves_the_station_profile_through_the_http_boundary() {
     let response = String::from_utf8(response).unwrap();
     assert!(response.starts_with("HTTP/1.1 200 OK\r\n"));
     assert!(response.contains("\r\nContent-Type: application/json\r\n"));
-    assert!(response.ends_with(std::str::from_utf8(body).unwrap()));
+    let response_body = response.split("\r\n\r\n").nth(1).unwrap();
+    let stored: serde_json::Value = serde_json::from_str(response_body).unwrap();
+    assert_eq!(stored["display_name"], "KTLT");
+    assert_eq!(stored["revision"], 1);
 
+    let _ = std::fs::remove_file(database);
+}
+
+#[test]
+fn rejects_a_stale_profile_revision_without_losing_the_winning_update() {
+    let database = temporary_database("revision");
+    let api = Api::open(&database).expect("database opens");
+    let initial = br#"{"station_id":"3f5f721f-96c7-48b1-b061-1bf1ad1e62c2","display_name":"KTLT","timezone":"America/Denver","expected_revision":0}"#;
+    assert_eq!(
+        api.handle("PUT", "/api/v1/station", Some(initial)).status,
+        200
+    );
+
+    let winning = br#"{"station_id":"3f5f721f-96c7-48b1-b061-1bf1ad1e62c2","display_name":"KTLT Updated","timezone":"America/Denver","expected_revision":1}"#;
+    assert_eq!(
+        api.handle("PUT", "/api/v1/station", Some(winning)).status,
+        200
+    );
+
+    let stale = br#"{"station_id":"3f5f721f-96c7-48b1-b061-1bf1ad1e62c2","display_name":"KTLT Stale","timezone":"America/Denver","expected_revision":1}"#;
+    let conflict = api.handle("PUT", "/api/v1/station", Some(stale));
+    assert_eq!(conflict.status, 409);
+    assert!(
+        String::from_utf8(conflict.body)
+            .unwrap()
+            .contains("revision_conflict")
+    );
+
+    let stored: serde_json::Value =
+        serde_json::from_slice(&api.handle("GET", "/api/v1/station", None).body).unwrap();
+    assert_eq!(stored["display_name"], "KTLT Updated");
+    assert_eq!(stored["revision"], 2);
+
+    drop(api);
     let _ = std::fs::remove_file(database);
 }

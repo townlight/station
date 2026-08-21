@@ -39,11 +39,14 @@ The runtime currently uses the SQLite library included with Windows. It does not
 {
   "station_id": "3f5f721f-96c7-48b1-b061-1bf1ad1e62c2",
   "display_name": "KTLT Community Television",
-  "timezone": "America/Denver"
+  "timezone": "America/Denver",
+  "expected_revision": 0
 }
 ```
 
-`GET /api/v1/station` returns the commissioned profile or a typed `not_commissioned` error.
+The response includes the new `revision`. Send that value as `expected_revision` on the next update; a stale update receives `409 revision_conflict` instead of overwriting another operator's work.
+
+`GET /api/v1/station` returns the commissioned profile and revision, or a typed `not_commissioned` error.
 
 ## Development
 

@@ -1,4 +1,4 @@
-use std::ffi::{CStr, CString, c_char, c_int, c_void};
+use std::ffi::{CStr, CString, c_char, c_int, c_longlong, c_void};
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::path::Path;
@@ -56,6 +56,7 @@ unsafe extern "C" {
     ) -> c_int;
     fn sqlite3_step(statement: *mut SqliteStatement) -> c_int;
     fn sqlite3_column_text(statement: *mut SqliteStatement, column: c_int) -> *const u8;
+    fn sqlite3_column_int64(statement: *mut SqliteStatement, column: c_int) -> c_longlong;
     fn sqlite3_finalize(statement: *mut SqliteStatement) -> c_int;
     fn sqlite3_errmsg(database: *mut Sqlite3) -> *const c_char;
 }
@@ -65,6 +66,26 @@ pub struct StationProfile {
     pub station_id: String,
     pub display_name: String,
     pub timezone: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct StationProfileDocument {
+    #[serde(flatten)]
+    pub profile: StationProfile,
+    pub revision: u64,
+}
+
+#[derive(Deserialize)]
+struct PutStationProfile {
+    #[serde(flatten)]
+    profile: StationProfile,
+    #[serde(default)]
+    expected_revision: u64,
+}
+
+enum ProfileWriteError {
+    Conflict(u64),
+    Storage(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -103,6 +124,7 @@ fn serve_stream(stream: &mut std::net::TcpStream, api: &Api) -> Result<(), Strin
     let reason = match response.status {
         200 => "OK",
         400 => "Bad Request",
+        409 => "Conflict",
         404 => "Not Found",
         413 => "Content Too Large",
         422 => "Unprocessable Content",
@@ -313,8 +335,8 @@ impl Api {
         let Some(body) = body else {
             return error_response(400, "invalid_json", "A JSON request body is required.");
         };
-        let profile: StationProfile = match serde_json::from_slice(body) {
-            Ok(profile) => profile,
+        let command: PutStationProfile = match serde_json::from_slice(body) {
+            Ok(command) => command,
             Err(_) => {
                 return error_response(
                     400,
@@ -323,15 +345,25 @@ impl Api {
                 );
             }
         };
-        if let Err(message) = profile.validate() {
+        if let Err(message) = command.profile.validate() {
             return error_response(422, "validation_failed", message);
         }
-        match self.write_profile(&profile) {
-            Ok(()) => json_response(
+        match self.write_profile(&command.profile, command.expected_revision) {
+            Ok(document) => json_response(
                 200,
-                serde_json::to_vec(&profile).expect("serializing a profile cannot fail"),
+                serde_json::to_vec(&document).expect("serializing a profile cannot fail"),
             ),
-            Err(message) => error_response(500, "storage_error", &message),
+            Err(ProfileWriteError::Conflict(current_revision)) => error_response(
+                409,
+                "revision_conflict",
+                &format!(
+                    "The station profile changed; expected revision {}, current revision {}.",
+                    command.expected_revision, current_revision
+                ),
+            ),
+            Err(ProfileWriteError::Storage(message)) => {
+                error_response(500, "storage_error", &message)
+            }
         }
     }
 
@@ -354,7 +386,43 @@ impl Api {
         }
     }
 
-    fn write_profile(&self, profile: &StationProfile) -> Result<(), String> {
+    fn write_profile(
+        &self,
+        profile: &StationProfile,
+        expected_revision: u64,
+    ) -> Result<StationProfileDocument, ProfileWriteError> {
+        self.execute("BEGIN IMMEDIATE")
+            .map_err(ProfileWriteError::Storage)?;
+        let outcome = (|| {
+            let current = self.read_profile().map_err(ProfileWriteError::Storage)?;
+            let current_revision = current.as_ref().map_or(0, |document| document.revision);
+            if current_revision != expected_revision {
+                return Err(ProfileWriteError::Conflict(current_revision));
+            }
+            self.upsert_profile(profile)
+                .map_err(ProfileWriteError::Storage)?;
+            Ok(StationProfileDocument {
+                profile: profile.clone(),
+                revision: current_revision + 1,
+            })
+        })();
+
+        match outcome {
+            Ok(document) => match self.execute("COMMIT") {
+                Ok(()) => Ok(document),
+                Err(message) => {
+                    let _ = self.execute("ROLLBACK");
+                    Err(ProfileWriteError::Storage(message))
+                }
+            },
+            Err(error) => {
+                let _ = self.execute("ROLLBACK");
+                Err(error)
+            }
+        }
+    }
+
+    fn upsert_profile(&self, profile: &StationProfile) -> Result<(), String> {
         let sql = "INSERT INTO station_profile(singleton, station_id, display_name, timezone) VALUES(1, ?1, ?2, ?3) \
                    ON CONFLICT(singleton) DO UPDATE SET station_id=excluded.station_id, display_name=excluded.display_name, \
                    timezone=excluded.timezone, revision=station_profile.revision+1";
@@ -391,16 +459,20 @@ impl Api {
         }
     }
 
-    fn read_profile(&self) -> Result<Option<StationProfile>, String> {
+    fn read_profile(&self) -> Result<Option<StationProfileDocument>, String> {
         let statement = self.prepare(
-            "SELECT station_id, display_name, timezone FROM station_profile WHERE singleton=1",
+            "SELECT station_id, display_name, timezone, revision FROM station_profile WHERE singleton=1",
         )?;
         // SAFETY: the prepared statement is live.
         match unsafe { sqlite3_step(statement.raw) } {
-            SQLITE_ROW => Ok(Some(StationProfile {
-                station_id: column_text(statement.raw, 0)?,
-                display_name: column_text(statement.raw, 1)?,
-                timezone: column_text(statement.raw, 2)?,
+            SQLITE_ROW => Ok(Some(StationProfileDocument {
+                profile: StationProfile {
+                    station_id: column_text(statement.raw, 0)?,
+                    display_name: column_text(statement.raw, 1)?,
+                    timezone: column_text(statement.raw, 2)?,
+                },
+                revision: u64::try_from(unsafe { sqlite3_column_int64(statement.raw, 3) })
+                    .map_err(|_| "database returned an invalid profile revision".to_string())?,
             })),
             SQLITE_DONE => Ok(None),
             _ => Err(sqlite_error(self.database)),

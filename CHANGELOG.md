@@ -13,3 +13,4 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - SQLite WAL persistence using the database runtime included with Windows.
 - Validation for station identity, operator-visible name, and IANA timezone.
 - HTTP health endpoint and end-to-end transport tests.
+- Optimistic revision checks that reject stale station-profile updates without losing the winning change.
