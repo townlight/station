@@ -5,7 +5,7 @@ use std::ptr;
 use station_domain::{StationProfile, StationProfileDocument};
 use station_media_lifecycle::{
     AssetLoudnessAnalysis, IngestJobStatus, IngestSourceKind, LoudnessGateStatus, MediaIngestJob,
-    WatchFileObservation, WatchFolderConfig,
+    TranscodeFormat, TranscodeJob, TranscodeJobStatus, WatchFileObservation, WatchFolderConfig,
 };
 use station_schedule::{
     AssetReadiness, ChannelConfiguration, CommitPlan, CommitReport, DispatchJob, DispatchStatus,
@@ -150,6 +150,24 @@ impl StationStore {
              );\
              CREATE INDEX IF NOT EXISTS media_ingest_jobs_status_time \
                ON media_ingest_jobs(status, created_at_unix_ms);\
+             CREATE TABLE IF NOT EXISTS transcode_jobs (\
+               job_id TEXT PRIMARY KEY,\
+               ingest_job_id TEXT NOT NULL UNIQUE,\
+               source_asset_id TEXT NOT NULL,\
+               source_path TEXT NOT NULL,\
+               output_format TEXT NOT NULL CHECK (output_format IN ('h264_720p4mbps_aac192k_ts')),\
+               status TEXT NOT NULL CHECK (status IN ('pending','running','completed','failed','cancelled')),\
+               progress_percent INTEGER NOT NULL CHECK (progress_percent BETWEEN 0 AND 100),\
+               created_at_unix_ms INTEGER NOT NULL CHECK (created_at_unix_ms >= 0),\
+               started_at_unix_ms INTEGER NOT NULL DEFAULT -1 CHECK (started_at_unix_ms >= -1),\
+               completed_at_unix_ms INTEGER NOT NULL DEFAULT -1 CHECK (completed_at_unix_ms >= -1),\
+               output_asset_id TEXT NOT NULL DEFAULT '',\
+               error_detail TEXT NOT NULL DEFAULT '',\
+               attempts INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),\
+               next_attempt_at_unix_ms INTEGER NOT NULL DEFAULT -1 CHECK (next_attempt_at_unix_ms >= -1)\
+             );\
+             CREATE INDEX IF NOT EXISTS transcode_jobs_status_time \
+               ON transcode_jobs(status, next_attempt_at_unix_ms, created_at_unix_ms);\
              CREATE TABLE IF NOT EXISTS watch_folder_configs (\
                config_id TEXT PRIMARY KEY,\
                display_name TEXT NOT NULL,\
@@ -483,6 +501,247 @@ impl StationStore {
             Ok(())
         } else {
             Err("ingest job is not running".into())
+        }
+    }
+
+    pub fn create_transcode_job(&self, job: &TranscodeJob) -> Result<bool, String> {
+        job.validate().map_err(|error| format!("{error:?}"))?;
+        if job.status != TranscodeJobStatus::Pending
+            || job.progress_percent != 0
+            || job.started_at_unix_ms.is_some()
+            || job.completed_at_unix_ms.is_some()
+            || job.output_asset_id.is_some()
+            || job.error_detail.is_some()
+            || job.attempts != 0
+            || job.next_attempt_at_unix_ms.is_some()
+        {
+            return Err("new transcode jobs must begin in the pending state".into());
+        }
+        let statement = self.prepare(
+            "INSERT OR IGNORE INTO transcode_jobs(job_id, ingest_job_id, source_asset_id, source_path, \
+             output_format, status, progress_percent, created_at_unix_ms, started_at_unix_ms, \
+             completed_at_unix_ms, output_asset_id, error_detail, attempts, next_attempt_at_unix_ms) \
+             VALUES(?1, ?2, ?3, ?4, ?5, 'pending', 0, ?6, -1, -1, '', '', 0, -1)",
+        )?;
+        let values = [
+            c_string(&job.job_id, "transcode job identity")?,
+            c_string(&job.ingest_job_id, "transcode ingest identity")?,
+            c_string(&job.source_asset_id, "transcode source identity")?,
+            c_string(&job.source_path, "transcode source path")?,
+            c_string(transcode_format_name(job.output_format), "transcode format")?,
+        ];
+        for (offset, value) in values.iter().enumerate() {
+            bind_text(self.database, statement.raw, (offset + 1) as c_int, value)?;
+        }
+        bind_i64(self.database, statement.raw, 6, job.created_at_unix_ms)?;
+        expect_done(self.database, statement.raw)?;
+        Ok(self.changes() == 1)
+    }
+
+    pub fn read_transcode_job(&self, job_id: &str) -> Result<Option<TranscodeJob>, String> {
+        let statement = self.prepare(
+            "SELECT job_id, ingest_job_id, source_asset_id, source_path, output_format, status, \
+             progress_percent, created_at_unix_ms, started_at_unix_ms, completed_at_unix_ms, \
+             output_asset_id, error_detail, attempts, next_attempt_at_unix_ms \
+             FROM transcode_jobs WHERE job_id=?1",
+        )?;
+        let job_id = c_string(job_id, "transcode job identity")?;
+        bind_text(self.database, statement.raw, 1, &job_id)?;
+        match unsafe { sqlite3_step(statement.raw) } {
+            SQLITE_ROW => Ok(Some(read_transcode_job_row(statement.raw)?)),
+            SQLITE_DONE => Ok(None),
+            _ => Err(sqlite_error(self.database)),
+        }
+    }
+
+    pub fn list_transcode_jobs(&self) -> Result<Vec<TranscodeJob>, String> {
+        let statement = self.prepare(
+            "SELECT job_id, ingest_job_id, source_asset_id, source_path, output_format, status, \
+             progress_percent, created_at_unix_ms, started_at_unix_ms, completed_at_unix_ms, \
+             output_asset_id, error_detail, attempts, next_attempt_at_unix_ms \
+             FROM transcode_jobs ORDER BY created_at_unix_ms DESC, job_id",
+        )?;
+        let mut jobs = Vec::new();
+        loop {
+            match unsafe { sqlite3_step(statement.raw) } {
+                SQLITE_ROW => jobs.push(read_transcode_job_row(statement.raw)?),
+                SQLITE_DONE => return Ok(jobs),
+                _ => return Err(sqlite_error(self.database)),
+            }
+        }
+    }
+
+    pub fn recover_interrupted_transcode_jobs(&self) -> Result<u64, String> {
+        let statement = self.prepare(
+            "UPDATE transcode_jobs SET status='pending', progress_percent=0, started_at_unix_ms=-1, \
+             completed_at_unix_ms=-1, output_asset_id='', error_detail='interrupted before completion', \
+             next_attempt_at_unix_ms=-1 WHERE status='running'",
+        )?;
+        expect_done(self.database, statement.raw)?;
+        u64::try_from(self.changes()).map_err(|_| "SQLite returned invalid changes".into())
+    }
+
+    pub fn claim_next_transcode_job(
+        &self,
+        started_at_unix_ms: i64,
+    ) -> Result<Option<TranscodeJob>, String> {
+        if started_at_unix_ms < 0 {
+            return Err("transcode start time must be nonnegative".into());
+        }
+        self.execute("BEGIN IMMEDIATE")?;
+        let outcome = (|| {
+            let statement = self.prepare(
+                "SELECT job_id FROM transcode_jobs WHERE status='pending' \
+                 AND (next_attempt_at_unix_ms=-1 OR next_attempt_at_unix_ms<=?1) \
+                 ORDER BY created_at_unix_ms, job_id LIMIT 1",
+            )?;
+            bind_i64(self.database, statement.raw, 1, started_at_unix_ms)?;
+            let job_id = match unsafe { sqlite3_step(statement.raw) } {
+                SQLITE_ROW => column_text(statement.raw, 0)?,
+                SQLITE_DONE => return Ok(None),
+                _ => return Err(sqlite_error(self.database)),
+            };
+            drop(statement);
+            let update = self.prepare(
+                "UPDATE transcode_jobs SET status='running', progress_percent=5, started_at_unix_ms=?1, \
+                 completed_at_unix_ms=-1, output_asset_id='', error_detail='', attempts=attempts+1, \
+                 next_attempt_at_unix_ms=-1 WHERE job_id=?2 AND status='pending'",
+            )?;
+            let id = c_string(&job_id, "transcode job identity")?;
+            bind_i64(self.database, update.raw, 1, started_at_unix_ms)?;
+            bind_text(self.database, update.raw, 2, &id)?;
+            expect_done(self.database, update.raw)?;
+            if self.changes() != 1 {
+                return Err("transcode job was claimed concurrently".into());
+            }
+            self.read_transcode_job(&job_id)?
+                .ok_or_else(|| "claimed transcode job disappeared".into())
+                .map(Some)
+        })();
+        match outcome {
+            Ok(job) => match self.execute("COMMIT") {
+                Ok(()) => Ok(job),
+                Err(error) => {
+                    let _ = self.execute("ROLLBACK");
+                    Err(error)
+                }
+            },
+            Err(error) => {
+                let _ = self.execute("ROLLBACK");
+                Err(error)
+            }
+        }
+    }
+
+    pub fn update_transcode_progress(
+        &self,
+        job_id: &str,
+        progress_percent: u8,
+    ) -> Result<(), String> {
+        if !(1..100).contains(&progress_percent) {
+            return Err("running transcode progress must be between 1 and 99".into());
+        }
+        let statement = self.prepare(
+            "UPDATE transcode_jobs SET progress_percent=?1 WHERE job_id=?2 AND status='running' \
+             AND progress_percent<?1",
+        )?;
+        let job_id = c_string(job_id, "transcode job identity")?;
+        bind_i64(self.database, statement.raw, 1, i64::from(progress_percent))?;
+        bind_text(self.database, statement.raw, 2, &job_id)?;
+        expect_done(self.database, statement.raw)?;
+        if self.changes() == 1 {
+            Ok(())
+        } else {
+            Err("transcode job is not running or progress did not advance".into())
+        }
+    }
+
+    pub fn complete_transcode_job(
+        &self,
+        job_id: &str,
+        output_asset_id: &str,
+        completed_at_unix_ms: i64,
+    ) -> Result<(), String> {
+        if completed_at_unix_ms < 0 || !is_sha256_identity(output_asset_id) {
+            return Err("transcode completion time or output identity is invalid".into());
+        }
+        let statement = self.prepare(
+            "UPDATE transcode_jobs SET status='completed', progress_percent=100, \
+             completed_at_unix_ms=?1, output_asset_id=?2, error_detail='', next_attempt_at_unix_ms=-1 \
+             WHERE job_id=?3 AND status='running' AND started_at_unix_ms<=?1",
+        )?;
+        let output_asset_id = c_string(output_asset_id, "transcode output identity")?;
+        let job_id = c_string(job_id, "transcode job identity")?;
+        bind_i64(self.database, statement.raw, 1, completed_at_unix_ms)?;
+        bind_text(self.database, statement.raw, 2, &output_asset_id)?;
+        bind_text(self.database, statement.raw, 3, &job_id)?;
+        expect_done(self.database, statement.raw)?;
+        if self.changes() == 1 {
+            Ok(())
+        } else {
+            Err("transcode job is not running or completion predates its start".into())
+        }
+    }
+
+    pub fn fail_transcode_job(
+        &self,
+        job_id: &str,
+        completed_at_unix_ms: i64,
+        error_detail: &str,
+    ) -> Result<(), String> {
+        if completed_at_unix_ms < 0
+            || error_detail.trim().is_empty()
+            || error_detail.len() > 4_000
+            || error_detail.chars().any(char::is_control)
+        {
+            return Err("transcode failure time or detail is invalid".into());
+        }
+        let statement = self.prepare(
+            "UPDATE transcode_jobs SET status='failed', completed_at_unix_ms=?1, error_detail=?2, \
+             output_asset_id='', next_attempt_at_unix_ms=-1 WHERE job_id=?3 AND status='running' \
+             AND started_at_unix_ms<=?1",
+        )?;
+        let detail = c_string(error_detail, "transcode error detail")?;
+        let job_id = c_string(job_id, "transcode job identity")?;
+        bind_i64(self.database, statement.raw, 1, completed_at_unix_ms)?;
+        bind_text(self.database, statement.raw, 2, &detail)?;
+        bind_text(self.database, statement.raw, 3, &job_id)?;
+        expect_done(self.database, statement.raw)?;
+        if self.changes() == 1 {
+            Ok(())
+        } else {
+            Err("transcode job is not running or failure predates its start".into())
+        }
+    }
+
+    pub fn retry_transcode_job(
+        &self,
+        job_id: &str,
+        next_attempt_at_unix_ms: i64,
+        error_detail: &str,
+    ) -> Result<(), String> {
+        if next_attempt_at_unix_ms < 0
+            || error_detail.trim().is_empty()
+            || error_detail.len() > 4_000
+            || error_detail.chars().any(char::is_control)
+        {
+            return Err("transcode retry schedule is invalid".into());
+        }
+        let statement = self.prepare(
+            "UPDATE transcode_jobs SET status='pending', progress_percent=0, started_at_unix_ms=-1, \
+             completed_at_unix_ms=-1, output_asset_id='', error_detail=?1, next_attempt_at_unix_ms=?2 \
+             WHERE job_id=?3 AND status='running'",
+        )?;
+        let detail = c_string(error_detail, "transcode retry detail")?;
+        let job_id = c_string(job_id, "transcode job identity")?;
+        bind_text(self.database, statement.raw, 1, &detail)?;
+        bind_i64(self.database, statement.raw, 2, next_attempt_at_unix_ms)?;
+        bind_text(self.database, statement.raw, 3, &job_id)?;
+        expect_done(self.database, statement.raw)?;
+        if self.changes() == 1 {
+            Ok(())
+        } else {
+            Err("transcode job is not running".into())
         }
     }
 
@@ -1415,6 +1674,34 @@ fn read_ingest_job_row(statement: *mut SqliteStatement) -> Result<MediaIngestJob
     })
 }
 
+fn read_transcode_job_row(statement: *mut SqliteStatement) -> Result<TranscodeJob, String> {
+    let started = unsafe { sqlite3_column_int64(statement, 8) };
+    let completed = unsafe { sqlite3_column_int64(statement, 9) };
+    let output_asset_id = column_text(statement, 10)?;
+    let error_detail = column_text(statement, 11)?;
+    let next_attempt = unsafe { sqlite3_column_int64(statement, 13) };
+    let job = TranscodeJob {
+        job_id: column_text(statement, 0)?,
+        ingest_job_id: column_text(statement, 1)?,
+        source_asset_id: column_text(statement, 2)?,
+        source_path: column_text(statement, 3)?,
+        output_format: parse_transcode_format(&column_text(statement, 4)?)?,
+        status: parse_transcode_job_status(&column_text(statement, 5)?)?,
+        progress_percent: u8::try_from(unsafe { sqlite3_column_int64(statement, 6) })
+            .map_err(|_| "database returned invalid transcode progress".to_string())?,
+        created_at_unix_ms: unsafe { sqlite3_column_int64(statement, 7) },
+        started_at_unix_ms: (started >= 0).then_some(started),
+        completed_at_unix_ms: (completed >= 0).then_some(completed),
+        output_asset_id: (!output_asset_id.is_empty()).then_some(output_asset_id),
+        error_detail: (!error_detail.is_empty()).then_some(error_detail),
+        attempts: u32::try_from(unsafe { sqlite3_column_int64(statement, 12) })
+            .map_err(|_| "database returned invalid transcode attempts".to_string())?,
+        next_attempt_at_unix_ms: (next_attempt >= 0).then_some(next_attempt),
+    };
+    job.validate().map_err(|error| format!("{error:?}"))?;
+    Ok(job)
+}
+
 fn read_watch_folder_row(statement: *mut SqliteStatement) -> Result<WatchFolderConfig, String> {
     let last_scan = unsafe { sqlite3_column_int64(statement, 6) };
     let last_error = column_text(statement, 7)?;
@@ -1538,6 +1825,41 @@ fn parse_ingest_job_status(value: &str) -> Result<IngestJobStatus, String> {
             "database returned invalid ingest job status {value}"
         )),
     }
+}
+
+fn transcode_format_name(value: TranscodeFormat) -> &'static str {
+    match value {
+        TranscodeFormat::H264_720p4mbpsAac192kTs => "h264_720p4mbps_aac192k_ts",
+    }
+}
+
+fn parse_transcode_format(value: &str) -> Result<TranscodeFormat, String> {
+    match value {
+        "h264_720p4mbps_aac192k_ts" => Ok(TranscodeFormat::H264_720p4mbpsAac192kTs),
+        _ => Err(format!(
+            "database returned invalid transcode format {value}"
+        )),
+    }
+}
+
+fn parse_transcode_job_status(value: &str) -> Result<TranscodeJobStatus, String> {
+    match value {
+        "pending" => Ok(TranscodeJobStatus::Pending),
+        "running" => Ok(TranscodeJobStatus::Running),
+        "completed" => Ok(TranscodeJobStatus::Completed),
+        "failed" => Ok(TranscodeJobStatus::Failed),
+        "cancelled" => Ok(TranscodeJobStatus::Cancelled),
+        _ => Err(format!(
+            "database returned invalid transcode job status {value}"
+        )),
+    }
+}
+
+fn is_sha256_identity(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
 }
 
 fn parse_readiness(value: &str) -> Result<AssetReadiness, String> {
