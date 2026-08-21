@@ -35,6 +35,13 @@ all slots transparent.
 
 The implemented content scope is manual text, text bulletins, clocks, and static lower-third,
 ticker-region, and bug-region geometry. Text is bounded, control-safe, and newline-normalized.
+Bulletin rotation remains cache-only and stateless: after moderation, time-window, and tag
+filtering, eligible bulletins are sorted by bulletin identity. Without a zone override, each
+bulletin occupies a weighted half-open interval sized by its validated `display_seconds` and the
+cycle repeats from Unix epoch time; `rotation_seconds` preserves uniform slots for every item.
+All phase and cycle calculations use checked integer milliseconds, with overflow represented as a
+typed rotation placeholder rather than a wrapped selection. The boundary, ordering, mixed-duration,
+override, eligible-set, and large-timestamp cases are covered by `cargo test -p station-cg`.
 
 ## Consequences
 

@@ -68,6 +68,10 @@ UDP pixel apply/change/clear gate passes. The service also runs bounded direct-H
 the channel orchestration cadence atomically expires due scheduled bulletins before resolving the
 same timestamp's snapshot. External-provider compatibility, installed operation, and field soak
 remain separate gates. See [ADR 0030](../adr/0030-fixed-cg-overlay-compositor.md), [hostile feed proof](../proof/2026-08-21-feed-hostile-normalization.md), [feed lifecycle proof](../proof/2026-08-21-cg-feed-fetch-lifecycle.md), [bulletin expiration proof](../proof/2026-08-21-cg-bulletin-expiration.md), and [decoded CG proof record](../proof/2026-08-21-cg-udp-decoded-pixel.md).
+Bulletin rotation is stateless and epoch-anchored: eligible bulletins are ordered by bulletin
+identity, then receive a repeating weighted timeline from each bulletin's `display_seconds`; an
+explicit zone `rotation_seconds` remains a uniform-slot override. Exact cumulative boundaries are
+half-open, and checked integer arithmetic yields an explicit placeholder instead of wrapping.
 
 ## Authority rules
 

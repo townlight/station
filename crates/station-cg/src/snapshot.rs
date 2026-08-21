@@ -48,6 +48,7 @@ pub enum CgPlaceholderSource {
 pub enum CgPlaceholderReason {
     NoAirableBulletins,
     NoBulletinsMatchTags,
+    RotationDurationOverflow,
     NoActiveEmergency,
     MissingFeedSource,
     FeedSourceDisabled,
@@ -136,6 +137,7 @@ impl CgResolvedContent {
                         reason,
                         CgPlaceholderReason::NoAirableBulletins
                             | CgPlaceholderReason::NoBulletinsMatchTags
+                            | CgPlaceholderReason::RotationDurationOverflow
                     ),
                     CgPlaceholderSource::Emergency => {
                         matches!(reason, CgPlaceholderReason::NoActiveEmergency)
@@ -632,14 +634,16 @@ fn resolve_zone_content(
                     reason,
                 };
             }
-            let slot_seconds = u64::from(zone.rotation_seconds.unwrap_or_else(|| {
-                tagged
-                    .first()
-                    .map_or(3, |bulletin| bulletin.display_seconds)
-            }));
-            let slot = u128::from(slot_seconds) * 1_000;
-            let index = ((now_unix_ms as u128) / slot % tagged.len() as u128) as usize;
-            let bulletin = tagged[index];
+            let mut tagged = tagged;
+            tagged.sort_unstable_by(|left, right| left.bulletin_id.cmp(&right.bulletin_id));
+            let Some(bulletin) =
+                select_rotation_bulletin(&tagged, zone.rotation_seconds, now_unix_ms)
+            else {
+                return CgResolvedContent::Placeholder {
+                    source: CgPlaceholderSource::BulletinRotation,
+                    reason: CgPlaceholderReason::RotationDurationOverflow,
+                };
+            };
             CgResolvedContent::Bulletin {
                 bulletin_id: bulletin.bulletin_id.clone(),
                 content: bulletin.content.clone(),
@@ -718,6 +722,33 @@ fn resolve_zone_content(
             reason: CgPlaceholderReason::LiveSourceReadinessUnknown,
         },
     }
+}
+
+fn select_rotation_bulletin<'a>(
+    bulletins: &[&'a CgBulletin],
+    rotation_seconds: Option<u32>,
+    now_unix_ms: i64,
+) -> Option<&'a CgBulletin> {
+    let mut durations_ms = Vec::with_capacity(bulletins.len());
+    let mut cycle_ms = 0_u128;
+    for bulletin in bulletins {
+        let seconds = rotation_seconds.unwrap_or(bulletin.display_seconds);
+        let duration_ms = u128::from(seconds).checked_mul(1_000)?;
+        cycle_ms = cycle_ms.checked_add(duration_ms)?;
+        durations_ms.push(duration_ms);
+    }
+    if cycle_ms == 0 {
+        return None;
+    }
+
+    let mut elapsed_ms = (now_unix_ms as u128) % cycle_ms;
+    for (bulletin, duration_ms) in bulletins.iter().zip(durations_ms) {
+        if elapsed_ms < duration_ms {
+            return Some(*bulletin);
+        }
+        elapsed_ms -= duration_ms;
+    }
+    None
 }
 
 #[cfg(test)]
@@ -1074,6 +1105,138 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    fn scheduled_rotation_bulletin(id: &str, display_seconds: u32, tags: &[&str]) -> CgBulletin {
+        let mut bulletin = bulletin(id, CgBulletinState::Scheduled, tags);
+        bulletin.requested_start_at_unix_ms = Some(0);
+        bulletin.requested_end_at_unix_ms = Some(i64::MAX);
+        bulletin.display_seconds = display_seconds;
+        bulletin
+    }
+
+    fn selected_bulletin_id(
+        zone: CgZoneConfig,
+        bulletins: &[CgBulletin],
+        now_unix_ms: i64,
+    ) -> String {
+        let snapshot = resolve_snapshot(
+            &board("fullscreen"),
+            &crate::built_in_template("fullscreen").unwrap(),
+            &[zone],
+            &[],
+            bulletins,
+            now_unix_ms,
+        )
+        .unwrap();
+        let CgResolvedContent::Bulletin { bulletin_id, .. } = &snapshot.zones[0].content else {
+            panic!("expected bulletin content");
+        };
+        bulletin_id.clone()
+    }
+
+    #[test]
+    fn rotation_uses_sorted_weighted_display_durations_at_exact_boundaries() {
+        let zone = zone(
+            "8f4f0f70-5c30-48c6-819a-fb22b34353c5",
+            "primary",
+            CgZoneKind::Primary,
+            CgContentSource::BulletinRotation,
+        );
+        let first = scheduled_rotation_bulletin("00000000-0000-0000-0000-000000000001", 3, &[]);
+        let second = scheduled_rotation_bulletin("00000000-0000-0000-0000-000000000002", 5, &[]);
+        let reversed = vec![second.clone(), first.clone()];
+
+        assert_eq!(
+            selected_bulletin_id(zone.clone(), &reversed, 0),
+            first.bulletin_id
+        );
+        assert_eq!(
+            selected_bulletin_id(zone.clone(), &reversed, 2_999),
+            first.bulletin_id
+        );
+        assert_eq!(
+            selected_bulletin_id(zone.clone(), &reversed, 3_000),
+            second.bulletin_id
+        );
+        assert_eq!(
+            selected_bulletin_id(zone.clone(), &reversed, 7_999),
+            second.bulletin_id
+        );
+        assert_eq!(
+            selected_bulletin_id(zone, &reversed, 8_000),
+            first.bulletin_id
+        );
+    }
+
+    #[test]
+    fn rotation_override_keeps_one_uniform_slot_per_bulletin() {
+        let mut zone = zone(
+            "8f4f0f70-5c30-48c6-819a-fb22b34353c5",
+            "primary",
+            CgZoneKind::Primary,
+            CgContentSource::BulletinRotation,
+        );
+        zone.rotation_seconds = Some(4);
+        let first = scheduled_rotation_bulletin("00000000-0000-0000-0000-000000000001", 3, &[]);
+        let second = scheduled_rotation_bulletin("00000000-0000-0000-0000-000000000002", 9, &[]);
+        let bulletins = vec![first.clone(), second.clone()];
+
+        assert_eq!(
+            selected_bulletin_id(zone.clone(), &bulletins, 3_999),
+            first.bulletin_id
+        );
+        assert_eq!(
+            selected_bulletin_id(zone.clone(), &bulletins, 4_000),
+            second.bulletin_id
+        );
+        assert_eq!(
+            selected_bulletin_id(zone, &bulletins, 8_000),
+            first.bulletin_id
+        );
+    }
+
+    #[test]
+    fn rotation_restarts_deterministically_when_eligible_set_changes() {
+        let mut zone = zone(
+            "8f4f0f70-5c30-48c6-819a-fb22b34353c5",
+            "primary",
+            CgZoneKind::Primary,
+            CgContentSource::BulletinRotation,
+        );
+        let first =
+            scheduled_rotation_bulletin("00000000-0000-0000-0000-000000000001", 3, &["community"]);
+        let second =
+            scheduled_rotation_bulletin("00000000-0000-0000-0000-000000000002", 5, &["sports"]);
+        let bulletins = vec![first, second.clone()];
+
+        assert_eq!(
+            selected_bulletin_id(zone.clone(), &bulletins, 3_000),
+            second.bulletin_id
+        );
+        zone.allowed_tags = vec!["community".into()];
+        assert_eq!(
+            selected_bulletin_id(zone, &bulletins, 3_000),
+            "00000000-0000-0000-0000-000000000001"
+        );
+    }
+
+    #[test]
+    fn rotation_large_timestamp_is_repeatable_without_float_or_overflow_behavior() {
+        let zone = zone(
+            "8f4f0f70-5c30-48c6-819a-fb22b34353c5",
+            "primary",
+            CgZoneKind::Primary,
+            CgContentSource::BulletinRotation,
+        );
+        let bulletins = vec![
+            scheduled_rotation_bulletin("00000000-0000-0000-0000-000000000001", 300, &[]),
+            scheduled_rotation_bulletin("00000000-0000-0000-0000-000000000002", 299, &[]),
+        ];
+        let now = i64::MAX - 1;
+        let first = selected_bulletin_id(zone.clone(), &bulletins, now);
+        let second = selected_bulletin_id(zone, &bulletins, now);
+        assert_eq!(first, second);
     }
 
     #[test]
