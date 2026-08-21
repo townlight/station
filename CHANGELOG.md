@@ -25,3 +25,4 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Native Windows Service Control Manager hosting for `stationd`, including loopback-only service configuration, cooperative stop and operating-system shutdown, startup status, persistent data-directory creation, and a machine-proven install/start/health/stop lifecycle.
 - Self-contained elevated Windows installer with a hash-pinned private GStreamer runtime, delayed-auto service recovery, activation health gate, immutable candidate receipt, failed-install rollback, uninstall, and station-data-preserving reinstall proof.
 - HTTP `Expect: 100-continue` support so standard Windows clients can submit API bodies without a request-body deadlock.
+- Blocking per-client sockets behind the cooperative nonblocking listener, eliminating a Windows race that aborted clients which did not send request bytes immediately after connecting.

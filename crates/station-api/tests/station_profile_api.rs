@@ -214,3 +214,38 @@ fn serves_requests_until_a_cooperative_stop_is_requested() {
     assert!(response.starts_with(b"HTTP/1.1 200 OK\r\n"));
     let _ = std::fs::remove_file(database);
 }
+
+#[test]
+fn allows_an_accepted_client_time_to_send_its_request() {
+    let database = temporary_database("delayed-client-write");
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let stop = Arc::new(AtomicBool::new(false));
+    let server_stop = Arc::clone(&stop);
+    let server_database = database.clone();
+    let (finished_tx, finished_rx) = mpsc::channel();
+    thread::spawn(move || {
+        let _ = finished_tx.send(serve_until(listener, server_database, server_stop));
+    });
+
+    let mut client = TcpStream::connect(address).unwrap();
+    client
+        .set_read_timeout(Some(Duration::from_secs(1)))
+        .unwrap();
+    thread::sleep(Duration::from_millis(100));
+    client
+        .write_all(b"GET /health HTTP/1.1\r\nHost: localhost\r\n\r\n")
+        .unwrap();
+    let mut response = Vec::new();
+    client.read_to_end(&mut response).unwrap();
+    assert!(response.starts_with(b"HTTP/1.1 200 OK\r\n"));
+
+    stop.store(true, Ordering::Release);
+    assert!(
+        finished_rx
+            .recv_timeout(Duration::from_secs(1))
+            .unwrap()
+            .is_ok()
+    );
+    let _ = std::fs::remove_file(database);
+}

@@ -119,7 +119,12 @@ pub fn serve_until(
         .map_err(|error| error.to_string())?;
     while !stop.load(Ordering::Acquire) {
         match listener.accept() {
-            Ok((mut stream, _)) => serve_stream(&mut stream, &api)?,
+            Ok((mut stream, _)) => {
+                stream
+                    .set_nonblocking(false)
+                    .map_err(|error| error.to_string())?;
+                serve_stream(&mut stream, &api)?;
+            }
             Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                 std::thread::sleep(Duration::from_millis(10));
             }
