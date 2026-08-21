@@ -232,6 +232,7 @@ pub struct ChannelController {
     output_expectations: Vec<OutputExpectation>,
     last_output_bytes: Option<Vec<u64>>,
     cg_state: CgSnapshotState,
+    next_cg_sync_at_unix_ms: i64,
 }
 
 impl ChannelController {
@@ -312,6 +313,7 @@ impl ChannelController {
             output_expectations,
             last_output_bytes: None,
             cg_state: CgSnapshotState::default(),
+            next_cg_sync_at_unix_ms: 0,
         })
     }
 
@@ -332,6 +334,15 @@ impl ChannelController {
 
     pub fn mark_cg_applied(&mut self, board_id: &str, board_revision: u64) {
         self.cg_state.mark_applied(board_id, board_revision);
+    }
+
+    pub fn seed_cg_state(&mut self, mut state: CgSnapshotState) {
+        state.worker_ready();
+        self.cg_state = state;
+    }
+
+    pub fn cg_state(&self) -> CgSnapshotState {
+        self.cg_state.clone()
     }
 
     fn poll_health(&mut self, now_unix_ms: i64) -> Result<(), OrchestrationError> {
@@ -389,6 +400,10 @@ impl ChannelController {
             .ensure_running()
             .map_err(OrchestrationError::Worker)?;
         let store = StationStore::open(&self.database_path).map_err(OrchestrationError::Storage)?;
+        if now_unix_ms >= self.next_cg_sync_at_unix_ms {
+            self.next_cg_sync_at_unix_ms = now_unix_ms.saturating_add(1_000);
+            self.sync_cg(&store, now_unix_ms)?;
+        }
         let Some(job) = store
             .list_dispatch_jobs(&self.channel_id)
             .map_err(OrchestrationError::Storage)?
@@ -544,6 +559,51 @@ impl ChannelController {
         Ok(transition)
     }
 
+    fn sync_cg(
+        &mut self,
+        store: &StationStore,
+        now_unix_ms: i64,
+    ) -> Result<(), OrchestrationError> {
+        let inputs = match store.load_cg_snapshot_inputs(&self.channel_id, now_unix_ms) {
+            Ok(inputs) => inputs,
+            Err(_) => return Ok(()),
+        };
+        let resolved = match inputs.resolve() {
+            Ok(snapshot) => snapshot,
+            Err(_) => return Ok(()),
+        };
+        let mut candidate = self.cg_state.clone();
+        if candidate.accept(&resolved).is_err() {
+            return Ok(());
+        }
+        let protocol = match candidate.resend_after_ready() {
+            Some(protocol) => protocol,
+            None => return Ok(()),
+        };
+        let event = match self.supervisor.command(
+            &format!("cg-apply-{}-{}", protocol.board_revision, now_unix_ms),
+            ChannelCommand::ApplyCgSnapshot {
+                snapshot: protocol.clone(),
+            },
+            self.command_timeout,
+        ) {
+            Ok(event) => event,
+            Err(_) => return Ok(()),
+        };
+        if !matches!(
+            event.event,
+            WorkerEvent::CgApplied {
+                ref board_id,
+                board_revision
+            } if board_id == &protocol.board_id && board_revision == protocol.board_revision
+        ) {
+            return Ok(());
+        }
+        candidate.mark_applied(&protocol.board_id, protocol.board_revision);
+        self.cg_state = candidate;
+        Ok(())
+    }
+
     pub fn shutdown(self, timeout: Duration) -> Result<(), OrchestrationError> {
         self.supervisor
             .shutdown("orchestrator-shutdown", timeout)
@@ -635,6 +695,7 @@ pub fn run_until(
         ))
     })?;
     let mut controllers: HashMap<String, ChannelController> = HashMap::new();
+    let mut cg_states: HashMap<String, CgSnapshotState> = HashMap::new();
     let mut restart_attempts: HashMap<String, u32> = HashMap::new();
     let mut restart_after: HashMap<String, i64> = HashMap::new();
     while !stop.load(Ordering::Acquire) {
@@ -697,6 +758,10 @@ pub fn run_until(
                         continue;
                     }
                 };
+                let mut controller = controller;
+                if let Some(state) = cg_states.remove(&channel.channel_id) {
+                    controller.seed_cg_state(state);
+                }
                 let activated_at = system_time_millis()?;
                 store
                     .put_channel_runtime(&controller.runtime_observation(activated_at))
@@ -739,7 +804,9 @@ pub fn run_until(
             }
         }
         for channel_id in failed {
-            controllers.remove(&channel_id);
+            if let Some(controller) = controllers.remove(&channel_id) {
+                cg_states.insert(channel_id, controller.cg_state());
+            }
         }
         std::thread::sleep(Duration::from_millis(50));
     }
