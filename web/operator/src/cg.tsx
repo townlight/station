@@ -239,7 +239,7 @@ async function cgRequest<T>(path: string, init?: RequestInit): Promise<T> {
 async function cgUploadImage(file: File): Promise<CgImageAsset> {
   const response = await fetch("/api/v1/cg/images", {
     method: "POST",
-    headers: { "Content-Type": file.type },
+    headers: file.type ? { "Content-Type": file.type } : undefined,
     body: file,
   });
   const body = await response.json().catch(() => null) as { message?: string; error?: { message?: string } } | CgImageAsset | null;
@@ -734,7 +734,7 @@ function BoardDesigner({ data, channelId, operatorId, onRefresh }: { data: CgDat
   async function uploadImage(file: File | undefined) {
     if (!file) return;
     clearResult();
-    if (!isSupportedImageMime(file.type)) {
+    if (file.type && !isSupportedImageMime(file.type)) {
       setError("Choose a PNG or JPEG image. The file MIME type must be image/png or image/jpeg.");
       return;
     }

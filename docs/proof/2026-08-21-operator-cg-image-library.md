@@ -11,13 +11,15 @@ to the managed library and selecting its server-issued identity for a zone.
 
 - `POST /api/v1/cg/images` accepts only a raw request body and passes it to the bounded immutable
   storage admission path. No caller path or identity is accepted.
-- `GET /api/v1/cg/images` returns a freshly verified readiness view, so a deleted or corrupted file
-  is not offered as ready merely because SQLite once admitted it.
+- `GET /api/v1/cg/images` checks current filesystem metadata and returns readiness through the
+  bounded verification cache, so a deleted file is not offered as ready merely because SQLite once
+  admitted it. Full hash/decode verification repeats on metadata change or within 60 seconds.
 - The HTTP reader permits up to 8 MiB only for the exact image-upload route. A real loopback TCP
   parser test sends a body larger than 64 KiB, proves the upload route reaches dispatch, and proves
   an unrelated route rejects the declared body at the parser with HTTP 413.
 - API integration tests prove valid PNG upload, duplicate idempotence, listing, malformed rejection,
-  missing-body rejection, and the 8 MiB ceiling.
+  missing-body rejection, the 8 MiB ceiling, audited image-zone binding, database reopen, and a
+  resolved image in the cache-only preview snapshot.
 - The operator production build provides an accessible PNG/JPEG file input, performs immediate MIME
   and byte-size checks, refreshes the managed library, selects the returned digest, displays format,
   dimensions, size, and readiness, disables unusable entries, and preserves the typed image-zone

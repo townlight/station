@@ -454,6 +454,7 @@ fn manages_cg_authority_through_the_operator_api() {
 #[test]
 fn manages_cg_images_through_raw_upload_and_list_routes() {
     let database = database_path("cg-image-api");
+    put_channel(&database);
     let api = Api::open(&database).unwrap();
     let png: &[u8] = &[
         137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 1, 0, 0, 0, 1, 8, 6,
@@ -472,7 +473,87 @@ fn manages_cg_images_through_raw_upload_and_list_routes() {
     let listed = api.handle("GET", "/api/v1/cg/images", None);
     assert_eq!(listed.status, 200);
     let images: Vec<station_cg::CgImageAsset> = serde_json::from_slice(&listed.body).unwrap();
-    assert_eq!(images, vec![asset]);
+    assert_eq!(images, vec![asset.clone()]);
+
+    let board = CgBoard {
+        board_id: BOARD_ID.into(),
+        channel_id: CHANNEL_ID.into(),
+        template_id: "l-bar".into(),
+        active: true,
+        background_audio_asset_id: None,
+        revision: 1,
+        created_at_unix_ms: 1_000,
+        updated_at_unix_ms: 1_000,
+        created_by: "station-operator".into(),
+    };
+    let response = api.handle(
+        "PUT",
+        "/api/v1/cg/board",
+        Some(&write_body(
+            "board",
+            &board,
+            0,
+            &audit(
+                "a0e02a83-f589-4c62-8978-e3dcc11bef7c",
+                CgAuditEventKind::BoardCreated,
+                1_000,
+            ),
+        )),
+    );
+    assert_eq!(response.status, 200, "{}", body_text(&response.body));
+    let zone = CgZoneConfig {
+        zone_id: ZONE_ID.into(),
+        board_id: BOARD_ID.into(),
+        template_zone_key: "sidebar".into(),
+        zone_kind: CgZoneKind::Sidebar,
+        content_source: CgContentSource::Image {
+            asset_id: asset.asset_id.clone(),
+        },
+        rotation_seconds: None,
+        approval_required: false,
+        allowed_tags: Vec::new(),
+        revision: 1,
+        created_at_unix_ms: 1_100,
+        updated_at_unix_ms: 1_100,
+    };
+    let response = api.handle(
+        "PUT",
+        "/api/v1/cg/zones",
+        Some(&write_body(
+            "zone",
+            &zone,
+            0,
+            &audit(
+                "7bc765dc-b2f9-4866-b2fd-c886596851bb",
+                CgAuditEventKind::ZoneCreated,
+                1_100,
+            ),
+        )),
+    );
+    assert_eq!(response.status, 200, "{}", body_text(&response.body));
+
+    let reopened = Api::open(&database).unwrap();
+    let zones = reopened.handle(
+        "GET",
+        &format!("/api/v1/cg/zones?board_id={BOARD_ID}"),
+        None,
+    );
+    assert_eq!(zones.status, 200, "{}", body_text(&zones.body));
+    assert_eq!(
+        serde_json::from_slice::<Vec<CgZoneConfig>>(&zones.body).unwrap(),
+        vec![zone]
+    );
+    let snapshot = reopened.handle(
+        "GET",
+        &format!("/api/v1/cg/preview?channel_id={CHANNEL_ID}&at_unix_ms=2000"),
+        None,
+    );
+    assert_eq!(snapshot.status, 200, "{}", body_text(&snapshot.body));
+    let snapshot: CgResolvedSnapshot = serde_json::from_slice(&snapshot.body).unwrap();
+    assert!(matches!(
+        snapshot.zones[0].content,
+        CgResolvedContent::Image { ref asset } if asset.asset_id == images[0].asset_id
+    ));
     assert_eq!(
         api.handle("POST", "/api/v1/cg/images", Some(b"not-an-image"))
             .status,
