@@ -1,0 +1,13 @@
+[package]
+name = "station-feed-normalization"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+quick-xml.workspace = true
+sha2.workspace = true
+jiff.workspace = true
+url.workspace = true
+httpdate.workspace = true
+station-cg.workspace = true

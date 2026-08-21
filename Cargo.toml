@@ -18,6 +18,7 @@ members = [
     "crates/station-orchestration",
     "crates/station-runtime",
     "crates/station-schedule",
+    "crates/station-feed-normalization",
     "crates/station-support",
     "crates/station-storage",
     "crates/station-update",
@@ -42,6 +43,9 @@ serde = { version = "=1.0.228", features = ["derive"] }
 serde_json = "=1.0.150"
 semver = "=1.0.28"
 sha2 = "=0.10.9"
+quick-xml = "=0.39.4"
+url = "=2.5.8"
+httpdate = "=1.0.3"
 station-api = { path = "crates/station-api" }
 station-alerting = { path = "crates/station-alerting" }
 station-cg = { path = "crates/station-cg" }
@@ -56,6 +60,7 @@ station-maintenance = { path = "crates/station-maintenance" }
 station-orchestration = { path = "crates/station-orchestration" }
 station-runtime = { path = "crates/station-runtime" }
 station-schedule = { path = "crates/station-schedule" }
+station-feed-normalization = { path = "crates/station-feed-normalization" }
 station-support = { path = "crates/station-support" }
 station-storage = { path = "crates/station-storage" }
 station-update = { path = "crates/station-update" }
