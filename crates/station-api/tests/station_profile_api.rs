@@ -120,6 +120,187 @@ fn health_reports_database_readiness_and_unknown_routes_are_not_found() {
 }
 
 #[test]
+fn commissioning_report_is_ordered_and_does_not_claim_field_proof() {
+    let database = temporary_database("commissioning-report");
+    let api = Api::open(&database).expect("database opens");
+    let empty = api.handle("GET", "/api/v1/commissioning/report", None);
+    assert_eq!(empty.status, 200);
+    let report: serde_json::Value = serde_json::from_slice(&empty.body).unwrap();
+    assert_eq!(report["overall_status"], "blocked");
+    let checks = report["checks"].as_array().unwrap();
+    assert_eq!(checks[0]["id"], "station_profile");
+    assert_eq!(checks[1]["id"], "runtime_api");
+    assert_eq!(checks.last().unwrap()["id"], "installed_field_proof");
+    assert_eq!(checks.last().unwrap()["status"], "not_verified");
+    assert_eq!(checks.last().unwrap()["blocking"], false);
+    assert!(
+        checks.last().unwrap()["detail"]
+            .as_str()
+            .unwrap()
+            .contains("does not claim")
+    );
+
+    let profile = br#"{"station_id":"3f5f721f-96c7-48b1-b061-1bf1ad1e62c2","display_name":"KTLT","timezone":"America/Denver"}"#;
+    assert_eq!(
+        api.handle("PUT", "/api/v1/station", Some(profile)).status,
+        200
+    );
+    let commissioned = api.handle("GET", "/api/v1/commissioning/report", None);
+    let report: serde_json::Value = serde_json::from_slice(&commissioned.body).unwrap();
+    assert_eq!(report["checks"][0]["status"], "pass");
+    assert_eq!(report["overall_status"], "blocked");
+    let _ = std::fs::remove_file(database);
+}
+
+#[test]
+fn commissioning_report_separates_schedule_authority_from_dispatch_execution() {
+    let database = temporary_database("commissioning-progression");
+    let media = database.with_extension("ts");
+    std::fs::write(&media, b"admitted media").unwrap();
+    let channel_id = "8b626c01-bdf8-419a-8a2e-b0a7caa1ff7e";
+    let asset_id = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    let item_id = "256d5a07-92d3-4718-aec9-05cad42fae7d";
+    let api = Api::open(&database).unwrap();
+    let profile = br#"{"station_id":"3f5f721f-96c7-48b1-b061-1bf1ad1e62c2","display_name":"KTLT","timezone":"America/Denver"}"#;
+    assert_eq!(
+        api.handle("PUT", "/api/v1/station", Some(profile)).status,
+        200
+    );
+    let channel = ChannelConfiguration {
+        channel_id: channel_id.into(),
+        display_name: "Primary".into(),
+        output_profile: Default::default(),
+        output_sinks: vec![OutputSinkConfiguration::required_udp(
+            "22222222-3333-4444-8555-666666666666",
+            "Primary",
+            "127.0.0.1:5500",
+            -16.0,
+        )],
+        enabled: true,
+    };
+    assert_eq!(
+        api.handle(
+            "PUT",
+            "/api/v1/channels",
+            Some(&serde_json::to_vec(&channel).unwrap()),
+        )
+        .status,
+        200
+    );
+    drop(api);
+    let now = system_time_millis_for_test();
+    let store = StationStore::open(&database).unwrap();
+    store
+        .put_channel_runtime(&ChannelRuntimeObservation {
+            channel_id: channel_id.into(),
+            state: ChannelRuntimeState::HealthyFallback,
+            on_air_asset_id: None,
+            state_started_at_unix_ms: now - 1_000,
+            heartbeat_at_unix_ms: now,
+            detail: None,
+        })
+        .unwrap();
+    store
+        .put_media_asset(&MediaAsset {
+            asset_id: asset_id.into(),
+            media_path: media.to_string_lossy().into_owned(),
+            duration_ms: 60_000,
+            readiness: AssetReadiness::Ready,
+        })
+        .unwrap();
+    store
+        .put_schedule_item(&ScheduleItem {
+            item_id: item_id.into(),
+            channel_id: channel_id.into(),
+            asset_id: asset_id.into(),
+            title: "City Council".into(),
+            starts_at_unix_ms: now + 60_000,
+            duration_ms: 60_000,
+            state: ScheduleState::Draft,
+        })
+        .unwrap();
+    let report = store
+        .commit_schedule(
+            "report-commissioning",
+            "plan-commissioning",
+            item_id,
+            "operator",
+            now,
+            "",
+        )
+        .unwrap();
+    assert_eq!(report.dispatch_status, DispatchStatus::Pending);
+    drop(store);
+
+    let api = Api::open(&database).unwrap();
+    let response = api.handle("GET", "/api/v1/commissioning/report", None);
+    assert_eq!(response.status, 200);
+    let report: serde_json::Value = serde_json::from_slice(&response.body).unwrap();
+    let checks = report["checks"].as_array().unwrap();
+    let find = |id: &str| checks.iter().find(|check| check["id"] == id).unwrap();
+    assert_eq!(find("enabled_channel")["status"], "pass");
+    assert_eq!(find("ready_media")["status"], "pass");
+    assert_eq!(find("schedule_authority")["status"], "pass");
+    assert_eq!(find("dispatch_execution")["status"], "warning");
+    assert!(
+        find("dispatch_execution")["detail"]
+            .as_str()
+            .unwrap()
+            .contains("0 completed")
+    );
+    drop(api);
+    let store = StationStore::open(&database).unwrap();
+    assert!(
+        store
+            .advance_dispatch_status(
+                "report-commissioning",
+                DispatchStatus::Pending,
+                DispatchStatus::Queued
+            )
+            .unwrap()
+    );
+    assert!(
+        store
+            .advance_dispatch_status(
+                "report-commissioning",
+                DispatchStatus::Queued,
+                DispatchStatus::Acknowledged
+            )
+            .unwrap()
+    );
+    assert!(
+        store
+            .advance_dispatch_status(
+                "report-commissioning",
+                DispatchStatus::Acknowledged,
+                DispatchStatus::Completed
+            )
+            .unwrap()
+    );
+    drop(store);
+    let api = Api::open(&database).unwrap();
+    let completed = api.handle("GET", "/api/v1/commissioning/report", None);
+    let completed: serde_json::Value = serde_json::from_slice(&completed.body).unwrap();
+    let completed_dispatch = completed["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|check| check["id"] == "dispatch_execution")
+        .unwrap();
+    assert_eq!(completed_dispatch["status"], "pass");
+    drop(api);
+    let _ = std::fs::remove_file(database);
+    let _ = std::fs::remove_file(media);
+}
+
+fn system_time_millis_for_test() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64
+}
+
+#[test]
 fn serves_the_embedded_operator_console_from_the_station_origin() {
     let database = temporary_database("operator-console");
     let api = Api::open(&database).expect("database opens");

@@ -185,6 +185,12 @@ try {
     if ($originalChannel -and $originalChannel.display_name -ne 'Installed CG image proof') {
         throw "Refusing to overwrite existing channel $channelId with display name '$($originalChannel.display_name)'."
     }
+    if ($originalChannel) {
+        # This fixed identity is proof-owned. Stop its current destination before
+        # changing it, and ensure a prior interrupted proof cannot leave it on air.
+        $originalChannel.enabled = $false
+        Invoke-Json 'Put' '/api/v1/channels' $originalChannel | Out-Null
+    }
     try {
         $existingBoard = Invoke-Json 'Get' "/api/v1/cg/board?channel_id=$channelId" $null
         if ($existingBoard -and ($existingBoard.board_id -ne $boardId -or
@@ -340,8 +346,11 @@ finally {
         enabled = $false
     }
     try {
+        # The API deliberately rejects output/profile changes while a channel is
+        # enabled. Stop the exact proof destination first, then restore the prior
+        # proof-owned configuration if one existed.
+        Invoke-Json 'Put' '/api/v1/channels' $disabled | Out-Null
         if ($originalChannel) { Invoke-Json 'Put' '/api/v1/channels' $originalChannel | Out-Null }
-        else { Invoke-Json 'Put' '/api/v1/channels' $disabled | Out-Null }
     } catch { Write-Warning "Could not restore/disable the CG image proof channel: $($_.Exception.Message)" }
     $receiver.Dispose()
     foreach ($path in @($baselineCapture, $baselinePixel, $redCapture, $greenCapture, $redPixel, $greenPixel, $clearCapture, $clearPixel)) {

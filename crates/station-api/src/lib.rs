@@ -16,8 +16,8 @@ use station_cg::{
 };
 use station_domain::{
     AlertChannel, AlertChannelKind, AlertConditionKind, AlertEventState, AlertRule, AlertSeverity,
-    SelfTestKind, SelfTestSchedule, SelfTestTrigger, StationProfile, derive_runtime_safe_to_air,
-    redact_alert_channel_target, validate_alert_channel_target,
+    SafeToAirColor, SelfTestKind, SelfTestSchedule, SelfTestTrigger, StationProfile,
+    derive_runtime_safe_to_air, redact_alert_channel_target, validate_alert_channel_target,
 };
 use station_media_lifecycle::{
     AssetLoudnessAnalysis, AssetReadinessView, IngestJobStatus, IngestSourceKind,
@@ -25,7 +25,8 @@ use station_media_lifecycle::{
     TranscodeJobStatus, WatchFolderConfig,
 };
 use station_schedule::{
-    AssetReadiness, ChannelConfiguration, MediaAsset, OUTPUT_PROFILES, ScheduleItem,
+    AssetReadiness, ChannelConfiguration, DispatchStatus, MediaAsset, OUTPUT_PROFILES,
+    ScheduleItem, ScheduleState,
 };
 use station_storage::{
     AlertChannelSecret, CgSnapshotReadError, CgWriteError, CommitWriteError, ProfileWriteError,
@@ -40,6 +41,32 @@ const OPERATOR_STYLES: &[u8] = include_bytes!("../../../web/operator/dist/operat
 const MAX_CONCURRENT_REQUESTS: usize = 16;
 const MAX_SMALL_REQUEST_BODY: usize = 65_536;
 const MAX_CG_IMAGE_BODY: usize = 8 * 1024 * 1024;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum CommissioningCheckStatus {
+    Pass,
+    Warning,
+    Blocked,
+    NotVerified,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct CommissioningCheck {
+    id: &'static str,
+    label: &'static str,
+    status: CommissioningCheckStatus,
+    blocking: bool,
+    detail: String,
+    evidence: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct CommissioningReport {
+    generated_at_unix_ms: i64,
+    overall_status: CommissioningCheckStatus,
+    checks: Vec<CommissioningCheck>,
+}
 
 #[derive(Deserialize)]
 struct PutStationProfile {
@@ -297,6 +324,7 @@ impl Api {
                 ),
                 Err(message) => error_response(500, "storage_error", &message),
             },
+            ("GET", "/api/v1/commissioning/report") => self.commissioning_report(),
             ("PUT", "/api/v1/station") => self.put_profile(body),
             ("POST", "/api/v1/assets/ingest") => self.ingest_media(body),
             ("GET", "/api/v1/assets/readiness-dashboard") => self.readiness_dashboard(),
@@ -913,6 +941,249 @@ impl Api {
             ),
             Err(message) => error_response(500, "runtime_state_invalid", message),
         }
+    }
+
+    fn commissioning_report(&self) -> ApiResponse {
+        let generated_at_unix_ms = match system_time_millis() {
+            Ok(value) => value,
+            Err(message) => return error_response(500, "clock_error", &message),
+        };
+        let mut checks = Vec::new();
+
+        let profile = match self.storage.read_profile() {
+            Ok(profile) => profile,
+            Err(message) => return error_response(500, "storage_error", &message),
+        };
+        checks.push(match profile {
+            Some(profile) => CommissioningCheck {
+                id: "station_profile",
+                label: "Station profile commissioned",
+                status: CommissioningCheckStatus::Pass,
+                blocking: false,
+                detail: format!(
+                    "{} (revision {})",
+                    profile.profile.display_name, profile.revision
+                ),
+                evidence: "authoritative station profile in SQLite".into(),
+            },
+            None => CommissioningCheck {
+                id: "station_profile",
+                label: "Station profile commissioned",
+                status: CommissioningCheckStatus::Blocked,
+                blocking: true,
+                detail: "No station profile has been commissioned.".into(),
+                evidence: "GET /api/v1/station returned no profile".into(),
+            },
+        });
+
+        checks.push(CommissioningCheck {
+            id: "runtime_api",
+            label: "Station runtime is serving authoritative state",
+            status: CommissioningCheckStatus::Pass,
+            blocking: false,
+            detail: "The station API and SQLite authority are serving this report.".into(),
+            evidence: "current stationd request".into(),
+        });
+
+        let channels = match self.storage.list_channels() {
+            Ok(channels) => channels,
+            Err(message) => return error_response(500, "storage_error", &message),
+        };
+        let enabled: Vec<_> = channels.iter().filter(|channel| channel.enabled).collect();
+        if enabled.is_empty() {
+            checks.push(CommissioningCheck {
+                id: "enabled_channel",
+                label: "Enabled channel reaches safe-to-air runtime",
+                status: CommissioningCheckStatus::Blocked,
+                blocking: true,
+                detail: "No enabled output channel is configured.".into(),
+                evidence: "authoritative channel configuration".into(),
+            });
+        } else {
+            let mut runtime_channels = Vec::with_capacity(enabled.len());
+            for channel in enabled {
+                let observation = match self.storage.read_channel_runtime(&channel.channel_id) {
+                    Ok(observation) => observation,
+                    Err(message) => return error_response(500, "storage_error", &message),
+                };
+                runtime_channels.push((
+                    channel.channel_id.clone(),
+                    channel.display_name.clone(),
+                    observation,
+                ));
+            }
+            let alerts = match self.storage.list_alert_events() {
+                Ok(alerts) => alerts,
+                Err(message) => return error_response(500, "storage_error", &message),
+            };
+            let active_critical = alerts
+                .iter()
+                .filter(|event| {
+                    event.state == AlertEventState::Firing
+                        && event.severity == AlertSeverity::Critical
+                })
+                .count();
+            let active_warning = alerts
+                .iter()
+                .filter(|event| {
+                    event.state == AlertEventState::Firing
+                        && event.severity == AlertSeverity::Warning
+                })
+                .count();
+            let safe_to_air = match derive_runtime_safe_to_air(
+                generated_at_unix_ms,
+                &runtime_channels,
+                active_critical,
+                active_warning,
+            ) {
+                Ok(status) => status,
+                Err(message) => return error_response(500, "runtime_state_invalid", message),
+            };
+            let status = match safe_to_air.color {
+                SafeToAirColor::Green => CommissioningCheckStatus::Pass,
+                SafeToAirColor::Yellow => CommissioningCheckStatus::Warning,
+                SafeToAirColor::Red => CommissioningCheckStatus::Blocked,
+            };
+            checks.push(CommissioningCheck {
+                id: "enabled_channel",
+                label: "Enabled channel reaches safe-to-air runtime",
+                blocking: status == CommissioningCheckStatus::Blocked,
+                status,
+                detail: safe_to_air.operator_message,
+                evidence: format!(
+                    "current heartbeat-derived runtime status; {} critical and {} warning alert(s)",
+                    safe_to_air.active_critical_alerts, safe_to_air.active_warning_alerts
+                ),
+            });
+        }
+
+        let assets = match self.storage.list_media_assets() {
+            Ok(assets) => assets,
+            Err(message) => return error_response(500, "storage_error", &message),
+        };
+        let ready_assets = assets
+            .iter()
+            .filter(|asset| {
+                asset.readiness == AssetReadiness::Ready && Path::new(&asset.media_path).is_file()
+            })
+            .count();
+        checks.push(if ready_assets > 0 {
+            CommissioningCheck {
+                id: "ready_media",
+                label: "At least one air-ready media asset exists",
+                status: CommissioningCheckStatus::Pass,
+                blocking: false,
+                detail: format!("{ready_assets} ready asset(s) have present files."),
+                evidence: "current media catalog and filesystem presence".into(),
+            }
+        } else {
+            CommissioningCheck {
+                id: "ready_media",
+                label: "At least one air-ready media asset exists",
+                status: CommissioningCheckStatus::Blocked,
+                blocking: true,
+                detail: "No ready media asset with a present file is available.".into(),
+                evidence: "current media catalog and filesystem presence".into(),
+            }
+        });
+
+        let mut committed = 0usize;
+        let mut reports = Vec::new();
+        for channel in &channels {
+            let schedule = match self.storage.list_channel_schedule(&channel.channel_id) {
+                Ok(schedule) => schedule,
+                Err(message) => return error_response(500, "storage_error", &message),
+            };
+            committed += schedule
+                .iter()
+                .filter(|item| item.state == ScheduleState::Committed)
+                .count();
+            let channel_reports = match self.storage.list_commit_reports(&channel.channel_id) {
+                Ok(reports) => reports,
+                Err(message) => return error_response(500, "storage_error", &message),
+            };
+            reports.extend(channel_reports);
+        }
+        checks.push(if committed > 0 {
+            CommissioningCheck {
+                id: "schedule_authority",
+                label: "Committed scheduling authority exists",
+                status: CommissioningCheckStatus::Pass,
+                blocking: false,
+                detail: format!("{committed} committed schedule item(s) are recorded."),
+                evidence: "authoritative channel schedule rows".into(),
+            }
+        } else {
+            CommissioningCheck {
+                id: "schedule_authority",
+                label: "Committed scheduling authority exists",
+                status: CommissioningCheckStatus::Warning,
+                blocking: false,
+                detail: "No committed schedule item is recorded yet.".into(),
+                evidence: "authoritative channel schedule rows".into(),
+            }
+        });
+
+        let completed = reports
+            .iter()
+            .filter(|report| report.dispatch_status == DispatchStatus::Completed)
+            .count();
+        let acknowledged = reports
+            .iter()
+            .filter(|report| report.dispatch_status == DispatchStatus::Acknowledged)
+            .count();
+        checks.push(CommissioningCheck {
+            id: "dispatch_execution",
+            label: "Dispatch execution evidence exists",
+            status: if completed > 0 {
+                CommissioningCheckStatus::Pass
+            } else {
+                CommissioningCheckStatus::Warning
+            },
+            blocking: false,
+            detail: if reports.is_empty() {
+                "No commit report is recorded; dispatch execution is not verified.".into()
+            } else {
+                format!(
+                    "{} commit report(s), including {} acknowledged and {} completed.",
+                    reports.len(),
+                    acknowledged,
+                    completed
+                )
+            },
+            evidence: "authoritative commit_reports rows, distinct from schedule authority".into(),
+        });
+
+        checks.push(CommissioningCheck {
+            id: "installed_field_proof",
+            label: "Installed and field proof",
+            status: CommissioningCheckStatus::NotVerified,
+            blocking: false,
+            detail: "This report does not claim clean-machine installation, external receiver proof, or one-/three-station field operation.".into(),
+            evidence: "no authoritative field-proof record is stored by the current control plane".into(),
+        });
+
+        let overall_status = if checks.iter().any(|check| check.blocking) {
+            CommissioningCheckStatus::Blocked
+        } else if checks.iter().any(|check| {
+            matches!(
+                check.status,
+                CommissioningCheckStatus::Warning | CommissioningCheckStatus::NotVerified
+            )
+        }) {
+            CommissioningCheckStatus::Warning
+        } else {
+            CommissioningCheckStatus::Pass
+        };
+        json_response(
+            200,
+            serde_json::to_vec(&CommissioningReport {
+                generated_at_unix_ms,
+                overall_status,
+                checks,
+            })
+            .expect("serializing commissioning report cannot fail"),
+        )
     }
 
     fn list_alerts(&self) -> ApiResponse {

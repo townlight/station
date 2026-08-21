@@ -64,13 +64,43 @@ fn reruns_the_gate_under_a_write_lock_and_persists_approval_before_dispatch() {
         store.read_schedule_item(ITEM).unwrap().unwrap().state,
         ScheduleState::Committed
     );
+    assert_eq!(
+        store.list_commit_reports(CHANNEL).unwrap(),
+        vec![report.clone()]
+    );
+    assert!(
+        store
+            .advance_dispatch_status("report-2", DispatchStatus::Pending, DispatchStatus::Queued)
+            .unwrap()
+    );
+    assert!(
+        store
+            .advance_dispatch_status(
+                "report-2",
+                DispatchStatus::Queued,
+                DispatchStatus::Acknowledged
+            )
+            .unwrap()
+    );
+    assert!(
+        store
+            .advance_dispatch_status(
+                "report-2",
+                DispatchStatus::Acknowledged,
+                DispatchStatus::Completed
+            )
+            .unwrap()
+    );
+    assert_eq!(
+        store.list_commit_reports(CHANNEL).unwrap()[0].dispatch_status,
+        DispatchStatus::Completed
+    );
     drop(store);
 
     let reopened = StationStore::open(&database).unwrap();
-    assert_eq!(
-        reopened.read_commit_report("report-2").unwrap(),
-        Some(report)
-    );
+    let reopened_report = reopened.read_commit_report("report-2").unwrap().unwrap();
+    assert_eq!(reopened_report.report_id, report.report_id);
+    assert_eq!(reopened_report.dispatch_status, DispatchStatus::Completed);
     assert_eq!(reopened.list_channel_schedule(CHANNEL).unwrap().len(), 2);
     drop(reopened);
     remove_database(&database);

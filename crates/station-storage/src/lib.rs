@@ -5526,6 +5526,24 @@ impl StationStore {
         }
     }
 
+    pub fn list_commit_reports(&self, channel_id: &str) -> Result<Vec<CommitReport>, String> {
+        let statement = self.prepare(
+            "SELECT report_id, plan_id, channel_id, schedule_item_id, asset_id, approved_by, \
+             approved_at_unix_ms, dispatch_status, operator_notes FROM commit_reports \
+             WHERE channel_id=?1 ORDER BY approved_at_unix_ms, report_id",
+        )?;
+        let channel_id = c_string(channel_id, "channel identity")?;
+        bind_text(self.database, statement.raw, 1, &channel_id)?;
+        let mut reports = Vec::new();
+        loop {
+            match unsafe { sqlite3_step(statement.raw) } {
+                SQLITE_ROW => reports.push(read_commit_report_row(statement.raw)?),
+                SQLITE_DONE => return Ok(reports),
+                _ => return Err(sqlite_error(self.database)),
+            }
+        }
+    }
+
     pub fn list_dispatch_jobs(&self, channel_id: &str) -> Result<Vec<DispatchJob>, String> {
         let statement = self.prepare(
             "SELECT r.report_id, r.plan_id, r.channel_id, r.schedule_item_id, r.asset_id, r.approved_by, \

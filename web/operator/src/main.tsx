@@ -713,16 +713,105 @@ function Health({ runtime, resources, selfTests, selfTestSchedules, updateStatus
   </>;
 }
 
-function Commissioning({ station, dashboard, channels }: { station: StationDocument; dashboard: Dashboard | null; channels: Channel[] }) {
-  const checks = [
-    { label: "Windows station service", detail: "Loopback API and SQLite authority are ready", ok: true },
-    { label: "Station identity", detail: `${station.display_name} · ${station.timezone}`, ok: true },
-    { label: "Channel output", detail: channels.length ? `${channels.length} configured, ${channels.filter((channel) => channel.enabled).length} enabled` : "Configure at least one output", ok: channels.length > 0 },
-    { label: "Canonical media", detail: dashboard?.ready_count ? `${dashboard.ready_count} verified air-ready asset${dashboard.ready_count === 1 ? "" : "s"}` : "Import and verify the first program", ok: Boolean(dashboard?.ready_count) },
-    { label: "Processing queue", detail: dashboard?.failed_ingest_count || dashboard?.failed_transcode_count ? "A media job needs operator attention" : "No failed background work", ok: !(dashboard?.failed_ingest_count || dashboard?.failed_transcode_count) },
+interface CommissioningScheduleItem {
+  state: "draft" | "committed" | "cancelled";
+  dispatch_status?: CommitReport["dispatch_status"];
+}
+
+interface CommissioningBoard {
+  board_id: string;
+  active: boolean;
+  revision: number;
+}
+
+interface CommissioningReportCheck {
+  id: string;
+  label: string;
+  status: "pass" | "warning" | "blocked" | "not_verified";
+  blocking: boolean;
+  detail: string;
+  evidence: string;
+}
+
+interface CommissioningReport {
+  overall_status: "pass" | "warning" | "blocked";
+  checks: CommissioningReportCheck[];
+}
+
+interface CommissioningStep {
+  label: string;
+  detail: string;
+  ok: boolean;
+  action?: View;
+  nonCompletable?: boolean;
+}
+
+function Commissioning({ station, dashboard, channels, runtime, onNavigate }: { station: StationDocument; dashboard: Dashboard | null; channels: Channel[]; runtime: RuntimeSafeToAirStatus | null; onNavigate: (view: View) => void }) {
+  const storageKey = `townlight-commissioning:${station.station_id}`;
+  const [scheduleItems, setScheduleItems] = useState<CommissioningScheduleItem[]>([]);
+  const [board, setBoard] = useState<CommissioningBoard | null>(null);
+  const [report, setReport] = useState<CommissioningReport | null>(null);
+  const [readError, setReadError] = useState<string | null>(null);
+  const [activeStep, setActiveStep] = useState(() => Number(window.localStorage.getItem(storageKey) ?? 0));
+  const channel = channels.find((item) => item.enabled) ?? channels[0];
+
+  useEffect(() => {
+    let cancelled = false;
+    setReadError(null);
+    request<CommissioningReport>("/api/v1/commissioning/report").then((nextReport) => {
+      if (!cancelled) setReport(nextReport);
+    }).catch(() => { /* Older stations use the state-derived fallback below. */ });
+    if (!channel) return () => { cancelled = true; };
+    request<CommissioningScheduleItem[]>(`/api/v1/schedule/items?channel_id=${encodeURIComponent(channel.channel_id)}`).then((items) => {
+      if (!cancelled) setScheduleItems(items);
+    }).catch((problem) => {
+      if (!cancelled) setReadError(problem instanceof Error ? problem.message : "Schedule evidence could not be read.");
+    });
+    request<CommissioningBoard>(`/api/v1/cg/board?channel_id=${encodeURIComponent(channel.channel_id)}`).then((nextBoard) => {
+      if (!cancelled) setBoard(nextBoard);
+    }).catch(() => { /* A missing board is a normal pending state, not a combined-read failure. */ });
+    return () => { cancelled = true; };
+  }, [channel?.channel_id]);
+
+  const derivedChecks: CommissioningStep[] = [
+    { label: "Station identity", detail: `${station.display_name} · ${station.timezone}`, ok: Boolean(station.station_id), action: undefined as View | undefined },
+    { label: "Output channel", detail: channels.length ? `${channels.filter((item) => item.enabled).length} enabled of ${channels.length} configured` : "Configure the first output", ok: channels.some((item) => item.enabled), action: "channels" as View },
+    { label: "Air-ready media", detail: dashboard?.ready_count ? `${dashboard.ready_count} verified asset${dashboard.ready_count === 1 ? "" : "s"}` : "Import and verify the first program", ok: Boolean(dashboard?.ready_count), action: "media" as View },
+    { label: "Schedule authority", detail: scheduleItems.some((item) => item.state === "committed") ? "A committed program exists for this channel" : "Prepare and approve the first program", ok: scheduleItems.some((item) => item.state === "committed"), action: "schedule" as View },
+    { label: "Dispatch execution", detail: "Execution evidence is available from the authoritative commissioning report", ok: false, action: "schedule" as View },
+    { label: "CG board setup", detail: board?.active ? `Active board revision ${board.revision}` : "Create and activate a board with a zone", ok: Boolean(board?.active), action: "cg-board" as View },
+    { label: "Runtime proof", detail: runtime?.color === "green" ? runtime.label : runtime?.operator_message ?? "Waiting for a green safe-to-air result", ok: runtime?.color === "green", action: "health" as View },
+    { label: "Installed and field proof", detail: "Not verified by the current control plane; complete the installed one-station and three-station field gates separately.", ok: false, nonCompletable: true },
   ];
-  const ready = checks.every((check) => check.ok);
-  return <><header className="page-header"><div><p className="eyebrow">Commissioning report</p><h1>{ready ? "Ready for first-air proof." : "Commissioning in progress."}</h1><p>Every item below is read from the running station, not a saved checklist.</p></div></header><section className="panel commissioning-panel"><div className={`commission-banner ${ready ? "pass" : "pending"}`}><div className="commission-score">{checks.filter((check) => check.ok).length}/{checks.length}</div><div><strong>{ready ? "Core station checks passed" : "Finish the remaining station checks"}</strong><p>{ready ? "Schedule a verified asset on a proof channel to advance the station." : "Blocked items name the next operator action."}</p></div></div><div className="commission-list">{checks.map((check) => <div key={check.label}><span className={check.ok ? "check-ok" : "check-wait"}>{check.ok ? "✓" : "→"}</span><p><strong>{check.label}</strong><small>{check.detail}</small></p><StatusPill status={check.ok ? "ready" : "pending"} /></div>)}</div></section></>;
+  const reportStep = (id: string, fallback: CommissioningStep): CommissioningStep => {
+    const check = report?.checks.find((item) => item.id === id);
+    return check ? { label: check.label, detail: check.detail, ok: check.status === "pass", action: fallback.action, nonCompletable: fallback.nonCompletable } : fallback;
+  };
+  const checks: CommissioningStep[] = report ? [
+    reportStep("station_profile", derivedChecks[0]),
+    reportStep("enabled_channel", derivedChecks[1]),
+    reportStep("ready_media", derivedChecks[2]),
+    reportStep("schedule_authority", derivedChecks[3]),
+    reportStep("dispatch_execution", derivedChecks[4]),
+    { ...derivedChecks[5], detail: board?.active ? `Active board revision ${board.revision}` : "Create and activate a board with a zone" },
+    { ...derivedChecks[6], ok: runtime?.color === "green", detail: runtime?.color === "green" ? runtime.label : runtime?.operator_message ?? "Waiting for a green safe-to-air result" },
+    reportStep("installed_field_proof", derivedChecks[7]),
+  ] : derivedChecks;
+  const completableChecks = checks.filter((check) => !check.nonCompletable);
+  const completed = completableChecks.filter((check) => check.ok).length;
+  const ready = completableChecks.every((check) => check.ok);
+  const nextIndex = checks.findIndex((check) => !check.ok);
+  const focusIndex = nextIndex < 0 ? checks.length - 1 : Math.max(0, Math.min(activeStep, nextIndex));
+  function selectStep(index: number) {
+    setActiveStep(index);
+    window.localStorage.setItem(storageKey, String(index));
+  }
+  return <><header className="page-header"><div><p className="eyebrow">Guided commissioning</p><h1>{ready ? "Station is ready for field proof." : "Bring this station on air."}</h1><p>Progress is derived from the running station and resumes where you left off. This screen never invents proof.</p></div><div className="header-actions"><span className="service-ready"><span className="live-dot" /> {completed}/{completableChecks.length} core checks verified</span></div></header>
+    <section className="panel commissioning-panel"><div className={`commission-banner ${ready ? "pass" : "pending"}`}><div className="commission-score">{completed}/{completableChecks.length}</div><div><strong>{ready ? "Core commissioning complete" : `Next: ${checks[focusIndex].label}`}</strong><p>{ready ? "The station can proceed to the one-station installed proof. Field duration is not claimed here." : checks[focusIndex].detail}</p></div></div>
+      {readError && <div className="error-box" role="alert">{readError} Refresh the console after correcting the station state.</div>}
+      <div className="commission-list" aria-label="Commissioning steps">{checks.map((check, index) => <div key={check.label} className={index === focusIndex ? "commission-step-current" : undefined}><span className={check.ok ? "check-ok" : "check-wait"}>{check.ok ? "✓" : index === focusIndex ? "→" : index + 1}</span><p><strong>{check.label}</strong><small>{check.detail}</small></p><div className="commission-step-actions"><StatusPill status={check.ok ? "ready" : check.nonCompletable ? "not_verified" : "pending"} />{!check.ok && !check.nonCompletable && check.action && <button className="text-button" onClick={() => { selectStep(index); onNavigate(check.action!); }}>Open {check.label.toLowerCase()} →</button>}</div></div>)}</div>
+      <div className="button-row commissioning-controls"><button className="secondary" disabled={focusIndex <= 0} onClick={() => selectStep(focusIndex - 1)}>Previous step</button>{!ready && !checks[focusIndex].nonCompletable && checks[focusIndex].action && <button className="primary" onClick={() => { selectStep(focusIndex); onNavigate(checks[focusIndex].action!); }}>Continue to {checks[focusIndex].label.toLowerCase()}</button>}{ready && <button className="primary" onClick={() => onNavigate("health")}>Review runtime proof</button>}</div>
+    </section></>;
 }
 
 function App() {
@@ -753,7 +842,7 @@ function App() {
   const cgNav = useMemo(() => CG_ROUTES.map((item) => ({ id: item.id as View, label: item.shortLabel })), []);
   if (station === undefined) return <div className="boot"><div className="mark">TL</div><div className="boot-line"><i /></div><p>Connecting to TownLight Station…</p></div>;
   if (!station) return <SetupWizard onComplete={(value) => { setStation(value); void refresh(); }} />;
-  return <div className="app-shell"><aside className="sidebar"><div className="brand-lockup"><div className="mark small">TL</div><div><strong>TownLight</strong><span>Station</span></div></div><nav>{nav.map((item) => <button key={item.id} className={view === item.id ? "selected" : ""} onClick={() => setView(item.id)}><Icon name={item.id} /><span>{item.label}</span>{item.id === "media" && Boolean(dashboard?.failed_ingest_count) && <b>{dashboard?.failed_ingest_count}</b>}{item.id === "health" && Boolean(runtime?.active_critical_alerts || runtime?.active_warning_alerts) && <b>{(runtime?.active_critical_alerts ?? 0) + (runtime?.active_warning_alerts ?? 0)}</b>}</button>)}<p className="nav-section-label">CG authoring</p>{cgNav.map((item) => <button key={item.id} className={`cg-nav-item ${view === item.id ? "selected" : ""}`} onClick={() => setView(item.id)}><span className="cg-nav-mark">CG</span><span>{item.label}</span></button>)}</nav><div className="station-card"><span className={`live-dot runtime-${runtime?.color ?? "yellow"}`} /><div><strong>{station.display_name}</strong><small>{runtime?.label ?? station.timezone}</small></div></div></aside><main className="workspace">{error && <div className="global-error" role="alert">{error}<button onClick={() => void refresh()}>Retry</button></div>}{view === "overview" && <Overview station={station} dashboard={dashboard} channels={channels} runtime={runtime} onNavigate={setView} />}{view === "media" && <Media dashboard={dashboard} onRefresh={refresh} />}{view === "channels" && <Channels channels={channels} outputProfiles={outputProfiles} onRefresh={refresh} />}{view === "schedule" && <Schedule dashboard={dashboard} channels={channels} />}{view === "health" && <Health runtime={runtime} resources={resources} selfTests={selfTests} selfTestSchedules={selfTestSchedules} updateStatus={updateStatus} alerts={alerts} alertChannels={alertChannels} deliveries={deliveries} rules={rules} outputChannels={channels} onRefresh={refresh} />}{view === "commissioning" && <Commissioning station={station} dashboard={dashboard} channels={channels} />}{view.startsWith("cg-") && <CgOperator channelId={channels[0]?.channel_id} channels={channels.map((channel) => ({ channel_id: channel.channel_id, display_name: channel.display_name }))} route={view as CgRoute} onNavigate={(route) => setView(route)} />}</main><nav className="mobile-nav">{[...nav, { id: "cg-moderation" as View, label: "CG" }].map((item) => <button key={item.id} aria-label={item.label} className={view === item.id || (item.id === "cg-moderation" && view.startsWith("cg-")) ? "selected" : ""} onClick={() => setView(item.id)}>{"id" in item && item.id.startsWith("cg-") ? <span className="cg-nav-mark">CG</span> : <Icon name={item.id as CoreView} />}<span>{item.label}</span></button>)}</nav></div>;
+  return <div className="app-shell"><aside className="sidebar"><div className="brand-lockup"><div className="mark small">TL</div><div><strong>TownLight</strong><span>Station</span></div></div><nav>{nav.map((item) => <button key={item.id} className={view === item.id ? "selected" : ""} onClick={() => setView(item.id)}><Icon name={item.id} /><span>{item.label}</span>{item.id === "media" && Boolean(dashboard?.failed_ingest_count) && <b>{dashboard?.failed_ingest_count}</b>}{item.id === "health" && Boolean(runtime?.active_critical_alerts || runtime?.active_warning_alerts) && <b>{(runtime?.active_critical_alerts ?? 0) + (runtime?.active_warning_alerts ?? 0)}</b>}</button>)}<p className="nav-section-label">CG authoring</p>{cgNav.map((item) => <button key={item.id} className={`cg-nav-item ${view === item.id ? "selected" : ""}`} onClick={() => setView(item.id)}><span className="cg-nav-mark">CG</span><span>{item.label}</span></button>)}</nav><div className="station-card"><span className={`live-dot runtime-${runtime?.color ?? "yellow"}`} /><div><strong>{station.display_name}</strong><small>{runtime?.label ?? station.timezone}</small></div></div></aside><main className="workspace">{error && <div className="global-error" role="alert">{error}<button onClick={() => void refresh()}>Retry</button></div>}{view === "overview" && <Overview station={station} dashboard={dashboard} channels={channels} runtime={runtime} onNavigate={setView} />}{view === "media" && <Media dashboard={dashboard} onRefresh={refresh} />}{view === "channels" && <Channels channels={channels} outputProfiles={outputProfiles} onRefresh={refresh} />}{view === "schedule" && <Schedule dashboard={dashboard} channels={channels} />}{view === "health" && <Health runtime={runtime} resources={resources} selfTests={selfTests} selfTestSchedules={selfTestSchedules} updateStatus={updateStatus} alerts={alerts} alertChannels={alertChannels} deliveries={deliveries} rules={rules} outputChannels={channels} onRefresh={refresh} />}{view === "commissioning" && <Commissioning station={station} dashboard={dashboard} channels={channels} runtime={runtime} onNavigate={setView} />}{view.startsWith("cg-") && <CgOperator channelId={channels[0]?.channel_id} channels={channels.map((channel) => ({ channel_id: channel.channel_id, display_name: channel.display_name }))} route={view as CgRoute} onNavigate={(route) => setView(route)} />}</main><nav className="mobile-nav">{[...nav, { id: "cg-moderation" as View, label: "CG" }].map((item) => <button key={item.id} aria-label={item.label} className={view === item.id || (item.id === "cg-moderation" && view.startsWith("cg-")) ? "selected" : ""} onClick={() => setView(item.id)}>{"id" in item && item.id.startsWith("cg-") ? <span className="cg-nav-mark">CG</span> : <Icon name={item.id as CoreView} />}<span>{item.label}</span></button>)}</nav></div>;
 }
 
 createRoot(document.getElementById("root")!).render(<React.StrictMode><App /></React.StrictMode>);
