@@ -2,7 +2,7 @@
 
 TownLight Station is a locally installed Windows broadcast appliance for LPM and PEG operations. It is being built as one traceable product: station control, deterministic media execution, operator workflows, installation, recovery, distribution, and proof all ship from this repository.
 
-The current foundation provides a versioned station-profile API, strict commissioning validation, SQLite persistence in WAL mode, and a runnable HTTP daemon. It is the first vertical slice of the station control plane, not a feature-complete release.
+The current foundation provides a versioned station-profile API, strict commissioning validation, SQLite persistence in WAL mode, and a native Windows service. It is the first vertical slice of the station control plane, not a feature-complete release.
 
 The repository also contains a supervised isolated channel worker, a length-framed typed command/event protocol, a durable per-channel event journal, and the first machine-proven persistent media graph. The station runtime launches and handshakes the real worker over a private named pipe, validates every identity and sequence, enforces response deadlines, and guarantees process cleanup. The GStreamer graph keeps its encoder, MPEG-TS mux, and UDP output alive while switching raw fallback and program sources. Unknown major versions, stale commands, corrupted journals, malformed frames, missed deadlines, and MPEG-TS continuity errors fail visibly.
 
@@ -31,6 +31,8 @@ Install GStreamer from the [official Windows download](https://gstreamer.freedes
 3. Run `cargo test --offline --workspace`.
 4. Run `cargo run -p stationd -- station.db 127.0.0.1:4070`.
 5. Open `http://127.0.0.1:4070/health`.
+
+`stationd service --database <absolute-path> --address 127.0.0.1:<port>` is the Service Control Manager entry point used by installation infrastructure. Service mode refuses relative database paths and non-loopback listeners, reports startup and shutdown state to Windows, and handles both requested stops and operating-system shutdown cooperatively. It is not intended to be launched directly from an operator terminal.
 
 ## API
 

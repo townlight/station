@@ -30,6 +30,7 @@ station-media-protocol = { path = "crates/station-media-protocol" }
 station-runtime = { path = "crates/station-runtime" }
 station-storage = { path = "crates/station-storage" }
 station-windows-ipc = { path = "crates/station-windows-ipc" }
+windows-service = "=0.8.1"
 
 [profile.release]
 lto = "thin"
