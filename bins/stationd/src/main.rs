@@ -9,6 +9,7 @@ use std::sync::{
 use std::time::Duration;
 
 use config::{DaemonConfig, LaunchMode};
+use station_storage::StationStore;
 use windows_service::define_windows_service;
 use windows_service::service::{
     ServiceControl, ServiceControlAccept, ServiceExitCode, ServiceState, ServiceStatus, ServiceType,
@@ -38,6 +39,7 @@ fn main() {
 
 fn run_console(config: DaemonConfig) -> Result<(), String> {
     let listener = bind(&config)?;
+    initialize_database(&config.database)?;
     let worker_executable = worker_executable()?;
     let stop = Arc::new(AtomicBool::new(false));
     let orchestration_database = config.database.clone();
@@ -142,6 +144,7 @@ fn run_service(config: DaemonConfig) -> Result<(), String> {
             return Err(message);
         }
     };
+    initialize_database(&config.database)?;
     let worker_executable = worker_executable()?;
     let orchestration_database = config.database.clone();
     let orchestration_stop = Arc::clone(&stop);
@@ -226,6 +229,12 @@ fn media_library(database: &std::path::Path) -> std::path::PathBuf {
         .join("media")
 }
 
+fn initialize_database(database: &std::path::Path) -> Result<(), String> {
+    let store = StationStore::open(database)?;
+    drop(store);
+    Ok(())
+}
+
 fn bind(config: &DaemonConfig) -> Result<TcpListener, String> {
     if let Some(parent) = config.database.parent()
         && !parent.as_os_str().is_empty()
@@ -263,4 +272,27 @@ fn service_status(
 fn fatal(message: &str) -> ! {
     eprintln!("TownLight Station stopped: {message}");
     std::process::exit(1);
+}
+
+#[cfg(test)]
+mod startup_tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn initializes_a_fresh_database_before_concurrent_subsystems_start() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("townlight-stationd-startup-{nonce}"));
+        std::fs::create_dir_all(&root).unwrap();
+        let database = root.join("station.db");
+        initialize_database(&database).unwrap();
+        let store = StationStore::open(&database).unwrap();
+        assert!(store.list_channels().unwrap().is_empty());
+        assert!(store.list_alert_events().unwrap().is_empty());
+        drop(store);
+        let _ = std::fs::remove_dir_all(root);
+    }
 }

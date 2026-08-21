@@ -10,7 +10,7 @@ use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::Deserialize;
-use station_domain::StationProfile;
+use station_domain::{AlertEventState, AlertSeverity, StationProfile, derive_runtime_safe_to_air};
 use station_media_lifecycle::{
     AssetLoudnessAnalysis, AssetReadinessView, IngestJobStatus, IngestSourceKind,
     LoudnessGateStatus, MediaIngestJob, MissingMediaAlert, ReadinessDashboard, ReadinessState,
@@ -54,6 +54,12 @@ struct IngestMedia {
     source_path: PathBuf,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AcknowledgeAlert {
+    acknowledged_by: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ApiResponse {
     pub status: u16,
@@ -74,7 +80,9 @@ impl Api {
 
     pub fn handle(&self, method: &str, path: &str, body: Option<&[u8]>) -> ApiResponse {
         match (method, path) {
-            ("GET", "/") => static_response(200, "text/html; charset=utf-8", OPERATOR_HTML),
+            ("GET", path) if path == "/" || path.starts_with("/?") => {
+                static_response(200, "text/html; charset=utf-8", OPERATOR_HTML)
+            }
             ("GET", "/operator.js") => {
                 static_response(200, "text/javascript; charset=utf-8", OPERATOR_SCRIPT)
             }
@@ -104,6 +112,13 @@ impl Api {
             }
             ("PUT", "/api/v1/channels") => self.put_channel(body),
             ("GET", "/api/v1/channels") => self.list_channels(),
+            ("GET", "/api/v1/runtime-safe-to-air") => self.runtime_safe_to_air(),
+            ("GET", "/api/v1/alerts") => self.list_alerts(),
+            ("POST", path)
+                if path.starts_with("/api/v1/alerts/") && path.ends_with("/acknowledge") =>
+            {
+                self.acknowledge_alert(path, body)
+            }
             ("PUT", "/api/v1/watch-folders") => self.put_watch_folder(body),
             ("GET", "/api/v1/watch-folders") => self.list_watch_folders(),
             ("PUT", "/api/v1/schedule/items") => self.put_schedule_item(body),
@@ -491,6 +506,99 @@ impl Api {
                 serde_json::to_vec(&channels)
                     .expect("serializing channel configurations cannot fail"),
             ),
+            Err(message) => error_response(500, "storage_error", &message),
+        }
+    }
+
+    fn runtime_safe_to_air(&self) -> ApiResponse {
+        let now = match system_time_millis() {
+            Ok(value) => value,
+            Err(message) => return error_response(500, "clock_error", &message),
+        };
+        let channels = match self.storage.list_channels() {
+            Ok(channels) => channels,
+            Err(message) => return error_response(500, "storage_error", &message),
+        };
+        let mut runtime_channels = Vec::new();
+        for channel in channels.into_iter().filter(|channel| channel.enabled) {
+            let observation = match self.storage.read_channel_runtime(&channel.channel_id) {
+                Ok(observation) => observation,
+                Err(message) => return error_response(500, "storage_error", &message),
+            };
+            runtime_channels.push((channel.channel_id, channel.display_name, observation));
+        }
+        let alerts = match self.storage.list_alert_events() {
+            Ok(alerts) => alerts,
+            Err(message) => return error_response(500, "storage_error", &message),
+        };
+        let active_critical = alerts
+            .iter()
+            .filter(|event| {
+                event.state == AlertEventState::Firing && event.severity == AlertSeverity::Critical
+            })
+            .count();
+        let active_warning = alerts
+            .iter()
+            .filter(|event| {
+                event.state == AlertEventState::Firing && event.severity == AlertSeverity::Warning
+            })
+            .count();
+        match derive_runtime_safe_to_air(now, &runtime_channels, active_critical, active_warning) {
+            Ok(status) => json_response(
+                200,
+                serde_json::to_vec(&status).expect("serializing runtime status cannot fail"),
+            ),
+            Err(message) => error_response(500, "runtime_state_invalid", message),
+        }
+    }
+
+    fn list_alerts(&self) -> ApiResponse {
+        match self.storage.list_alert_events() {
+            Ok(events) => json_response(
+                200,
+                serde_json::to_vec(&events).expect("serializing alert events cannot fail"),
+            ),
+            Err(message) => error_response(500, "storage_error", &message),
+        }
+    }
+
+    fn acknowledge_alert(&self, path: &str, body: Option<&[u8]>) -> ApiResponse {
+        let Some(event_id) = path
+            .strip_prefix("/api/v1/alerts/")
+            .and_then(|value| value.strip_suffix("/acknowledge"))
+        else {
+            unreachable!("the alert acknowledgment route was checked")
+        };
+        if event_id.is_empty() || event_id.contains('/') {
+            return error_response(400, "invalid_path", "The alert identity is invalid.");
+        }
+        let Some(command) = parse_body::<AcknowledgeAlert>(body) else {
+            return error_response(
+                400,
+                "invalid_json",
+                "An alert acknowledgment body is required.",
+            );
+        };
+        if command.acknowledged_by.trim().is_empty() || command.acknowledged_by.len() > 120 {
+            return error_response(
+                422,
+                "validation_failed",
+                "acknowledged_by must contain 1 to 120 visible characters.",
+            );
+        }
+        let now = match system_time_millis() {
+            Ok(value) => value,
+            Err(message) => return error_response(500, "clock_error", &message),
+        };
+        match self
+            .storage
+            .acknowledge_alert(event_id, now, &command.acknowledged_by)
+        {
+            Ok(Some(event)) => json_response(
+                200,
+                serde_json::to_vec(&event).expect("serializing an alert cannot fail"),
+            ),
+            Ok(None) => error_response(404, "alert_not_found", "The alert event does not exist."),
             Err(message) => error_response(500, "storage_error", &message),
         }
     }

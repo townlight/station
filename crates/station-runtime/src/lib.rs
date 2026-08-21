@@ -118,6 +118,20 @@ impl WorkerSupervisor {
         &self.ready
     }
 
+    pub fn ensure_running(&mut self) -> Result<(), SupervisorError> {
+        let child = self.child.as_mut().ok_or(SupervisorError::AlreadyStopped)?;
+        match child
+            .try_wait()
+            .map_err(|error| io_error("query channel worker liveness", error))?
+        {
+            Some(status) => {
+                self.child.take();
+                Err(SupervisorError::ProcessExit(status.code()))
+            }
+            None => Ok(()),
+        }
+    }
+
     pub fn command(
         &mut self,
         command_id: &str,

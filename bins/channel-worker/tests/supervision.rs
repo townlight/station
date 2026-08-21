@@ -8,6 +8,7 @@ use std::sync::{
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use station_domain::{AlertConditionKind, AlertEventState, ChannelRuntimeState};
 use station_media_journal::read_events;
 use station_media_protocol::{ChannelCommand, WorkerEvent};
 use station_orchestration::{ChannelController, DispatchTransition, run_until};
@@ -487,6 +488,65 @@ fn daemon_loop_discovers_an_enabled_channel_and_completes_its_committed_item() {
     assert!(events.iter().any(
         |event| matches!(event.event, WorkerEvent::OnAirChanged { ref source_kind, .. } if source_kind == "fallback")
     ));
+    remove_directory(&root);
+}
+
+#[test]
+fn daemon_records_one_deduplicated_incident_per_condition_when_worker_cannot_start() {
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!("townlight-daemon-alert-{nonce}"));
+    fs::create_dir_all(&root).unwrap();
+    let database = root.join("station.db");
+    let store = StationStore::open(&database).unwrap();
+    store
+        .put_channel(&ChannelConfiguration {
+            channel_id: CHANNEL_ID.into(),
+            display_name: "Failure proof channel".into(),
+            udp_destination: "127.0.0.1:5519".into(),
+            enabled: true,
+        })
+        .unwrap();
+    drop(store);
+
+    let stop = Arc::new(AtomicBool::new(false));
+    let runner_stop = Arc::clone(&stop);
+    let runner_database = database.clone();
+    let missing_worker = root.join("missing-channel-worker.exe");
+    let runner = thread::spawn(move || run_until(&runner_database, &missing_worker, runner_stop));
+    thread::sleep(Duration::from_millis(1_300));
+    stop.store(true, Ordering::Release);
+    runner.join().unwrap().unwrap();
+
+    let store = StationStore::open(&database).unwrap();
+    let runtime = store.read_channel_runtime(CHANNEL_ID).unwrap().unwrap();
+    assert_eq!(runtime.state, ChannelRuntimeState::Error);
+    let alerts = store.list_alert_events().unwrap();
+    assert_eq!(alerts.len(), 2);
+    assert!(
+        alerts
+            .iter()
+            .all(|event| event.state == AlertEventState::Firing)
+    );
+    assert!(alerts.iter().all(|event| event.occurrence_count >= 2));
+    assert!(alerts.iter().all(|event| {
+        event
+            .detail
+            .contains("automatic restart attempts are active")
+    }));
+    assert!(
+        alerts
+            .iter()
+            .any(|event| event.condition == AlertConditionKind::EncoderDeath)
+    );
+    assert!(
+        alerts
+            .iter()
+            .any(|event| event.condition == AlertConditionKind::OffAir)
+    );
+    drop(store);
     remove_directory(&root);
 }
 

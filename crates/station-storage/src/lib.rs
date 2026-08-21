@@ -2,7 +2,10 @@ use std::ffi::{CStr, CString, c_char, c_int, c_longlong, c_void};
 use std::path::Path;
 use std::ptr;
 
-use station_domain::{StationProfile, StationProfileDocument};
+use station_domain::{
+    AlertConditionKind, AlertEvent, AlertEventState, AlertSeverity, ChannelRuntimeObservation,
+    ChannelRuntimeState, StationProfile, StationProfileDocument,
+};
 use station_media_lifecycle::{
     AssetLoudnessAnalysis, IngestJobStatus, IngestSourceKind, LoudnessGateStatus, MediaIngestJob,
     TranscodeFormat, TranscodeJob, TranscodeJobStatus, WatchFileObservation, WatchFolderConfig,
@@ -195,6 +198,35 @@ impl StationStore {
                udp_destination TEXT NOT NULL,\
                enabled INTEGER NOT NULL CHECK (enabled IN (0,1))\
              );\
+             CREATE TABLE IF NOT EXISTS channel_runtime (\
+               channel_id TEXT PRIMARY KEY,\
+               state TEXT NOT NULL CHECK (state IN ('starting','healthy_fallback','on_air','error','stopped')),\
+               on_air_asset_id TEXT NOT NULL DEFAULT '',\
+               state_started_at_unix_ms INTEGER NOT NULL CHECK (state_started_at_unix_ms >= 0),\
+               heartbeat_at_unix_ms INTEGER NOT NULL CHECK (heartbeat_at_unix_ms >= state_started_at_unix_ms),\
+               detail TEXT NOT NULL DEFAULT '',\
+               FOREIGN KEY(channel_id) REFERENCES channels(channel_id) ON DELETE CASCADE\
+             );\
+             CREATE TABLE IF NOT EXISTS alert_events (\
+               event_id TEXT PRIMARY KEY,\
+               condition TEXT NOT NULL,\
+               severity TEXT NOT NULL CHECK (severity IN ('critical','warning','info')),\
+               state TEXT NOT NULL CHECK (state IN ('firing','resolved')),\
+               resource_ref TEXT NOT NULL,\
+               summary TEXT NOT NULL,\
+               detail TEXT NOT NULL DEFAULT '',\
+               source_section TEXT NOT NULL,\
+               first_observed_at_unix_ms INTEGER NOT NULL CHECK (first_observed_at_unix_ms >= 0),\
+               last_observed_at_unix_ms INTEGER NOT NULL CHECK (last_observed_at_unix_ms >= first_observed_at_unix_ms),\
+               resolved_at_unix_ms INTEGER NOT NULL DEFAULT -1 CHECK (resolved_at_unix_ms >= -1),\
+               occurrence_count INTEGER NOT NULL CHECK (occurrence_count >= 1),\
+               acknowledged_at_unix_ms INTEGER NOT NULL DEFAULT -1 CHECK (acknowledged_at_unix_ms >= -1),\
+               acknowledged_by TEXT NOT NULL DEFAULT ''\
+             );\
+             CREATE UNIQUE INDEX IF NOT EXISTS alert_events_one_firing_condition_resource \
+               ON alert_events(condition, resource_ref) WHERE state='firing';\
+             CREATE INDEX IF NOT EXISTS alert_events_state_severity_time \
+               ON alert_events(state, severity, last_observed_at_unix_ms DESC);\
              CREATE TABLE IF NOT EXISTS schedule_items (\
                item_id TEXT PRIMARY KEY,\
                channel_id TEXT NOT NULL,\
@@ -883,6 +915,326 @@ impl StationStore {
                 _ => return Err(sqlite_error(self.database)),
             }
         }
+    }
+
+    pub fn put_channel_runtime(
+        &self,
+        observation: &ChannelRuntimeObservation,
+    ) -> Result<(), String> {
+        observation.validate().map_err(str::to_string)?;
+        let statement = self.prepare(
+            "INSERT INTO channel_runtime(channel_id, state, on_air_asset_id, \
+             state_started_at_unix_ms, heartbeat_at_unix_ms, detail) VALUES(?1, ?2, ?3, ?4, ?5, ?6) \
+             ON CONFLICT(channel_id) DO UPDATE SET state=excluded.state, \
+             on_air_asset_id=excluded.on_air_asset_id, state_started_at_unix_ms=excluded.state_started_at_unix_ms, \
+             heartbeat_at_unix_ms=excluded.heartbeat_at_unix_ms, detail=excluded.detail \
+             WHERE excluded.heartbeat_at_unix_ms >= channel_runtime.heartbeat_at_unix_ms",
+        )?;
+        let channel_id = c_string(&observation.channel_id, "runtime channel identity")?;
+        let state = c_string(
+            channel_runtime_state_name(observation.state),
+            "runtime state",
+        )?;
+        let asset_id = c_string(
+            observation.on_air_asset_id.as_deref().unwrap_or_default(),
+            "runtime asset identity",
+        )?;
+        let detail = c_string(
+            observation.detail.as_deref().unwrap_or_default(),
+            "runtime detail",
+        )?;
+        bind_text(self.database, statement.raw, 1, &channel_id)?;
+        bind_text(self.database, statement.raw, 2, &state)?;
+        bind_text(self.database, statement.raw, 3, &asset_id)?;
+        bind_i64(
+            self.database,
+            statement.raw,
+            4,
+            observation.state_started_at_unix_ms,
+        )?;
+        bind_i64(
+            self.database,
+            statement.raw,
+            5,
+            observation.heartbeat_at_unix_ms,
+        )?;
+        bind_text(self.database, statement.raw, 6, &detail)?;
+        expect_done(self.database, statement.raw)?;
+        if self.changes() == 1 {
+            Ok(())
+        } else {
+            Err("channel runtime heartbeat moved backward".into())
+        }
+    }
+
+    pub fn read_channel_runtime(
+        &self,
+        channel_id: &str,
+    ) -> Result<Option<ChannelRuntimeObservation>, String> {
+        let statement = self.prepare(
+            "SELECT channel_id, state, on_air_asset_id, state_started_at_unix_ms, \
+             heartbeat_at_unix_ms, detail FROM channel_runtime WHERE channel_id=?1",
+        )?;
+        let channel_id = c_string(channel_id, "runtime channel identity")?;
+        bind_text(self.database, statement.raw, 1, &channel_id)?;
+        match unsafe { sqlite3_step(statement.raw) } {
+            SQLITE_ROW => Ok(Some(read_channel_runtime_row(statement.raw)?)),
+            SQLITE_DONE => Ok(None),
+            _ => Err(sqlite_error(self.database)),
+        }
+    }
+
+    pub fn list_channel_runtime(&self) -> Result<Vec<ChannelRuntimeObservation>, String> {
+        let statement = self.prepare(
+            "SELECT channel_id, state, on_air_asset_id, state_started_at_unix_ms, \
+             heartbeat_at_unix_ms, detail FROM channel_runtime ORDER BY channel_id",
+        )?;
+        let mut observations = Vec::new();
+        loop {
+            match unsafe { sqlite3_step(statement.raw) } {
+                SQLITE_ROW => observations.push(read_channel_runtime_row(statement.raw)?),
+                SQLITE_DONE => return Ok(observations),
+                _ => return Err(sqlite_error(self.database)),
+            }
+        }
+    }
+
+    pub fn observe_alert(&self, proposed: &AlertEvent) -> Result<AlertEvent, String> {
+        proposed.validate().map_err(str::to_string)?;
+        if proposed.state != AlertEventState::Firing
+            || proposed.occurrence_count != 1
+            || proposed.first_observed_at_unix_ms != proposed.last_observed_at_unix_ms
+            || proposed.acknowledged_at_unix_ms.is_some()
+        {
+            return Err("a new alert observation must be an unacknowledged first firing".into());
+        }
+        self.execute("BEGIN IMMEDIATE")?;
+        let mut recorded = None;
+        let outcome = (|| {
+            if let Some(mut current) =
+                self.read_firing_alert(proposed.condition, &proposed.resource_ref)?
+            {
+                if proposed.last_observed_at_unix_ms < current.last_observed_at_unix_ms {
+                    return Err("alert observation time moved backward".into());
+                }
+                let statement = self.prepare(
+                    "UPDATE alert_events SET severity=?1, summary=?2, detail=?3, source_section=?4, \
+                     last_observed_at_unix_ms=?5, occurrence_count=occurrence_count+1 WHERE event_id=?6 AND state='firing'",
+                )?;
+                let severity = c_string(alert_severity_name(proposed.severity), "alert severity")?;
+                let summary = c_string(&proposed.summary, "alert summary")?;
+                let detail = c_string(&proposed.detail, "alert detail")?;
+                let source = c_string(&proposed.source_section, "alert source")?;
+                let event_id = c_string(&current.event_id, "alert identity")?;
+                bind_text(self.database, statement.raw, 1, &severity)?;
+                bind_text(self.database, statement.raw, 2, &summary)?;
+                bind_text(self.database, statement.raw, 3, &detail)?;
+                bind_text(self.database, statement.raw, 4, &source)?;
+                bind_i64(
+                    self.database,
+                    statement.raw,
+                    5,
+                    proposed.last_observed_at_unix_ms,
+                )?;
+                bind_text(self.database, statement.raw, 6, &event_id)?;
+                expect_done(self.database, statement.raw)?;
+                current.severity = proposed.severity;
+                current.summary.clone_from(&proposed.summary);
+                current.detail.clone_from(&proposed.detail);
+                current.source_section.clone_from(&proposed.source_section);
+                current.last_observed_at_unix_ms = proposed.last_observed_at_unix_ms;
+                current.occurrence_count = current
+                    .occurrence_count
+                    .checked_add(1)
+                    .ok_or_else(|| "alert occurrence count overflowed".to_string())?;
+                recorded = Some(current);
+                return Ok(());
+            }
+            self.insert_alert(proposed)?;
+            recorded = Some(proposed.clone());
+            Ok(())
+        })();
+        self.finish_transaction(outcome)?;
+        recorded.ok_or_else(|| "alert transaction produced no event".into())
+    }
+
+    pub fn acknowledge_alert(
+        &self,
+        event_id: &str,
+        acknowledged_at_unix_ms: i64,
+        acknowledged_by: &str,
+    ) -> Result<Option<AlertEvent>, String> {
+        if acknowledged_at_unix_ms < 0
+            || acknowledged_by.trim().is_empty()
+            || acknowledged_by.len() > 120
+        {
+            return Err("alert acknowledgment is invalid".into());
+        }
+        let statement = self.prepare(
+            "UPDATE alert_events SET acknowledged_at_unix_ms=?1, acknowledged_by=?2 \
+             WHERE event_id=?3 AND acknowledged_at_unix_ms=-1",
+        )?;
+        let operator = c_string(acknowledged_by, "alert operator")?;
+        let event_id = c_string(event_id, "alert identity")?;
+        bind_i64(self.database, statement.raw, 1, acknowledged_at_unix_ms)?;
+        bind_text(self.database, statement.raw, 2, &operator)?;
+        bind_text(self.database, statement.raw, 3, &event_id)?;
+        expect_done(self.database, statement.raw)?;
+        self.read_alert_event(event_id.to_str().map_err(|_| "invalid alert identity")?)
+    }
+
+    pub fn resolve_alert(
+        &self,
+        condition: AlertConditionKind,
+        resource_ref: &str,
+        resolved_at_unix_ms: i64,
+    ) -> Result<Option<AlertEvent>, String> {
+        if resolved_at_unix_ms < 0 {
+            return Err("alert resolution time must be nonnegative".into());
+        }
+        let statement = self.prepare(
+            "UPDATE alert_events SET state='resolved', resolved_at_unix_ms=?1 \
+             WHERE condition=?2 AND resource_ref=?3 AND state='firing' AND last_observed_at_unix_ms<=?1",
+        )?;
+        let condition = c_string(alert_condition_name(condition), "alert condition")?;
+        let resource_ref = c_string(resource_ref, "alert resource")?;
+        bind_i64(self.database, statement.raw, 1, resolved_at_unix_ms)?;
+        bind_text(self.database, statement.raw, 2, &condition)?;
+        bind_text(self.database, statement.raw, 3, &resource_ref)?;
+        expect_done(self.database, statement.raw)?;
+        if self.changes() == 0 {
+            return Ok(None);
+        }
+        let statement = self.prepare(
+            "SELECT event_id, condition, severity, state, resource_ref, summary, detail, source_section, \
+             first_observed_at_unix_ms, last_observed_at_unix_ms, resolved_at_unix_ms, occurrence_count, \
+             acknowledged_at_unix_ms, acknowledged_by FROM alert_events \
+             WHERE condition=?1 AND resource_ref=?2 AND resolved_at_unix_ms=?3 ORDER BY rowid DESC LIMIT 1",
+        )?;
+        bind_text(self.database, statement.raw, 1, &condition)?;
+        bind_text(self.database, statement.raw, 2, &resource_ref)?;
+        bind_i64(self.database, statement.raw, 3, resolved_at_unix_ms)?;
+        match unsafe { sqlite3_step(statement.raw) } {
+            SQLITE_ROW => Ok(Some(read_alert_event_row(statement.raw)?)),
+            _ => Err("resolved alert disappeared".into()),
+        }
+    }
+
+    pub fn read_alert_event(&self, event_id: &str) -> Result<Option<AlertEvent>, String> {
+        let statement = self.prepare(
+            "SELECT event_id, condition, severity, state, resource_ref, summary, detail, source_section, \
+             first_observed_at_unix_ms, last_observed_at_unix_ms, resolved_at_unix_ms, occurrence_count, \
+             acknowledged_at_unix_ms, acknowledged_by FROM alert_events WHERE event_id=?1",
+        )?;
+        let event_id = c_string(event_id, "alert identity")?;
+        bind_text(self.database, statement.raw, 1, &event_id)?;
+        match unsafe { sqlite3_step(statement.raw) } {
+            SQLITE_ROW => Ok(Some(read_alert_event_row(statement.raw)?)),
+            SQLITE_DONE => Ok(None),
+            _ => Err(sqlite_error(self.database)),
+        }
+    }
+
+    pub fn list_alert_events(&self) -> Result<Vec<AlertEvent>, String> {
+        let statement = self.prepare(
+            "SELECT event_id, condition, severity, state, resource_ref, summary, detail, source_section, \
+             first_observed_at_unix_ms, last_observed_at_unix_ms, resolved_at_unix_ms, occurrence_count, \
+             acknowledged_at_unix_ms, acknowledged_by FROM alert_events \
+             ORDER BY CASE state WHEN 'firing' THEN 0 ELSE 1 END, last_observed_at_unix_ms DESC, event_id",
+        )?;
+        let mut events = Vec::new();
+        loop {
+            match unsafe { sqlite3_step(statement.raw) } {
+                SQLITE_ROW => events.push(read_alert_event_row(statement.raw)?),
+                SQLITE_DONE => return Ok(events),
+                _ => return Err(sqlite_error(self.database)),
+            }
+        }
+    }
+
+    fn read_firing_alert(
+        &self,
+        condition: AlertConditionKind,
+        resource_ref: &str,
+    ) -> Result<Option<AlertEvent>, String> {
+        let statement = self.prepare(
+            "SELECT event_id, condition, severity, state, resource_ref, summary, detail, source_section, \
+             first_observed_at_unix_ms, last_observed_at_unix_ms, resolved_at_unix_ms, occurrence_count, \
+             acknowledged_at_unix_ms, acknowledged_by FROM alert_events \
+             WHERE condition=?1 AND resource_ref=?2 AND state='firing'",
+        )?;
+        let condition = c_string(alert_condition_name(condition), "alert condition")?;
+        let resource_ref = c_string(resource_ref, "alert resource")?;
+        bind_text(self.database, statement.raw, 1, &condition)?;
+        bind_text(self.database, statement.raw, 2, &resource_ref)?;
+        match unsafe { sqlite3_step(statement.raw) } {
+            SQLITE_ROW => Ok(Some(read_alert_event_row(statement.raw)?)),
+            SQLITE_DONE => Ok(None),
+            _ => Err(sqlite_error(self.database)),
+        }
+    }
+
+    fn insert_alert(&self, event: &AlertEvent) -> Result<(), String> {
+        let statement = self.prepare(
+            "INSERT INTO alert_events(event_id, condition, severity, state, resource_ref, summary, \
+             detail, source_section, first_observed_at_unix_ms, last_observed_at_unix_ms, \
+             resolved_at_unix_ms, occurrence_count, acknowledged_at_unix_ms, acknowledged_by) \
+             VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+        )?;
+        let values = [
+            c_string(&event.event_id, "alert identity")?,
+            c_string(alert_condition_name(event.condition), "alert condition")?,
+            c_string(alert_severity_name(event.severity), "alert severity")?,
+            c_string(alert_event_state_name(event.state), "alert state")?,
+            c_string(&event.resource_ref, "alert resource")?,
+            c_string(&event.summary, "alert summary")?,
+            c_string(&event.detail, "alert detail")?,
+            c_string(&event.source_section, "alert source")?,
+        ];
+        for (offset, value) in values.iter().enumerate() {
+            bind_text(
+                self.database,
+                statement.raw,
+                i32::try_from(offset + 1).unwrap(),
+                value,
+            )?;
+        }
+        bind_i64(
+            self.database,
+            statement.raw,
+            9,
+            event.first_observed_at_unix_ms,
+        )?;
+        bind_i64(
+            self.database,
+            statement.raw,
+            10,
+            event.last_observed_at_unix_ms,
+        )?;
+        bind_i64(
+            self.database,
+            statement.raw,
+            11,
+            event.resolved_at_unix_ms.unwrap_or(-1),
+        )?;
+        bind_i64(
+            self.database,
+            statement.raw,
+            12,
+            checked_i64(event.occurrence_count, "alert occurrence count")?,
+        )?;
+        bind_i64(
+            self.database,
+            statement.raw,
+            13,
+            event.acknowledged_at_unix_ms.unwrap_or(-1),
+        )?;
+        let acknowledged_by = c_string(
+            event.acknowledged_by.as_deref().unwrap_or_default(),
+            "alert operator",
+        )?;
+        bind_text(self.database, statement.raw, 14, &acknowledged_by)?;
+        expect_done(self.database, statement.raw)
     }
 
     pub fn read_media_asset(&self, asset_id: &str) -> Result<Option<MediaAsset>, String> {
@@ -1771,6 +2123,47 @@ fn read_media_asset_row(statement: *mut SqliteStatement) -> Result<MediaAsset, S
     })
 }
 
+fn read_channel_runtime_row(
+    statement: *mut SqliteStatement,
+) -> Result<ChannelRuntimeObservation, String> {
+    let asset_id = column_text(statement, 2)?;
+    let detail = column_text(statement, 5)?;
+    let observation = ChannelRuntimeObservation {
+        channel_id: column_text(statement, 0)?,
+        state: parse_channel_runtime_state(&column_text(statement, 1)?)?,
+        on_air_asset_id: (!asset_id.is_empty()).then_some(asset_id),
+        state_started_at_unix_ms: unsafe { sqlite3_column_int64(statement, 3) },
+        heartbeat_at_unix_ms: unsafe { sqlite3_column_int64(statement, 4) },
+        detail: (!detail.is_empty()).then_some(detail),
+    };
+    observation.validate().map_err(str::to_string)?;
+    Ok(observation)
+}
+
+fn read_alert_event_row(statement: *mut SqliteStatement) -> Result<AlertEvent, String> {
+    let resolved = unsafe { sqlite3_column_int64(statement, 10) };
+    let acknowledged = unsafe { sqlite3_column_int64(statement, 12) };
+    let acknowledged_by = column_text(statement, 13)?;
+    let event = AlertEvent {
+        event_id: column_text(statement, 0)?,
+        condition: parse_alert_condition(&column_text(statement, 1)?)?,
+        severity: parse_alert_severity(&column_text(statement, 2)?)?,
+        state: parse_alert_event_state(&column_text(statement, 3)?)?,
+        resource_ref: column_text(statement, 4)?,
+        summary: column_text(statement, 5)?,
+        detail: column_text(statement, 6)?,
+        source_section: column_text(statement, 7)?,
+        first_observed_at_unix_ms: unsafe { sqlite3_column_int64(statement, 8) },
+        last_observed_at_unix_ms: unsafe { sqlite3_column_int64(statement, 9) },
+        resolved_at_unix_ms: (resolved >= 0).then_some(resolved),
+        occurrence_count: column_u64(statement, 11, "alert occurrence count")?,
+        acknowledged_at_unix_ms: (acknowledged >= 0).then_some(acknowledged),
+        acknowledged_by: (!acknowledged_by.is_empty()).then_some(acknowledged_by),
+    };
+    event.validate().map_err(str::to_string)?;
+    Ok(event)
+}
+
 fn read_asset_loudness_row(
     statement: *mut SqliteStatement,
 ) -> Result<AssetLoudnessAnalysis, String> {
@@ -1920,6 +2313,102 @@ fn readiness_name(value: AssetReadiness) -> &'static str {
         AssetReadiness::Missing => "missing",
         AssetReadiness::Rejected => "rejected",
         AssetReadiness::Processing => "processing",
+    }
+}
+
+fn channel_runtime_state_name(value: ChannelRuntimeState) -> &'static str {
+    match value {
+        ChannelRuntimeState::Starting => "starting",
+        ChannelRuntimeState::HealthyFallback => "healthy_fallback",
+        ChannelRuntimeState::OnAir => "on_air",
+        ChannelRuntimeState::Error => "error",
+        ChannelRuntimeState::Stopped => "stopped",
+    }
+}
+
+fn parse_channel_runtime_state(value: &str) -> Result<ChannelRuntimeState, String> {
+    match value {
+        "starting" => Ok(ChannelRuntimeState::Starting),
+        "healthy_fallback" => Ok(ChannelRuntimeState::HealthyFallback),
+        "on_air" => Ok(ChannelRuntimeState::OnAir),
+        "error" => Ok(ChannelRuntimeState::Error),
+        "stopped" => Ok(ChannelRuntimeState::Stopped),
+        _ => Err(format!(
+            "database returned invalid channel runtime state {value}"
+        )),
+    }
+}
+
+fn alert_condition_name(value: AlertConditionKind) -> &'static str {
+    match value {
+        AlertConditionKind::OffAir => "off-air",
+        AlertConditionKind::EncoderDeath => "encoder-death",
+        AlertConditionKind::ServerCrash => "server-crash",
+        AlertConditionKind::SchemaDrift => "schema-drift",
+        AlertConditionKind::RelayBlocked => "relay-blocked",
+        AlertConditionKind::ComplianceProbeFail => "compliance-probe-fail",
+        AlertConditionKind::MissingMedia => "missing-media",
+        AlertConditionKind::CommitFailure => "commit-failure",
+        AlertConditionKind::TakeoverStuck2h => "takeover-stuck-2h",
+        AlertConditionKind::AiRuntimeDown => "ai-runtime-down",
+        AlertConditionKind::DiskLow => "disk-low",
+        AlertConditionKind::ClockSkew => "clock-skew",
+        AlertConditionKind::DatabaseUnreachable => "database-unreachable",
+        AlertConditionKind::ServiceDown => "service-down",
+    }
+}
+
+fn parse_alert_condition(value: &str) -> Result<AlertConditionKind, String> {
+    match value {
+        "off-air" => Ok(AlertConditionKind::OffAir),
+        "encoder-death" => Ok(AlertConditionKind::EncoderDeath),
+        "server-crash" => Ok(AlertConditionKind::ServerCrash),
+        "schema-drift" => Ok(AlertConditionKind::SchemaDrift),
+        "relay-blocked" => Ok(AlertConditionKind::RelayBlocked),
+        "compliance-probe-fail" => Ok(AlertConditionKind::ComplianceProbeFail),
+        "missing-media" => Ok(AlertConditionKind::MissingMedia),
+        "commit-failure" => Ok(AlertConditionKind::CommitFailure),
+        "takeover-stuck-2h" => Ok(AlertConditionKind::TakeoverStuck2h),
+        "ai-runtime-down" => Ok(AlertConditionKind::AiRuntimeDown),
+        "disk-low" => Ok(AlertConditionKind::DiskLow),
+        "clock-skew" => Ok(AlertConditionKind::ClockSkew),
+        "database-unreachable" => Ok(AlertConditionKind::DatabaseUnreachable),
+        "service-down" => Ok(AlertConditionKind::ServiceDown),
+        _ => Err(format!("database returned invalid alert condition {value}")),
+    }
+}
+
+fn alert_severity_name(value: AlertSeverity) -> &'static str {
+    match value {
+        AlertSeverity::Critical => "critical",
+        AlertSeverity::Warning => "warning",
+        AlertSeverity::Info => "info",
+    }
+}
+
+fn parse_alert_severity(value: &str) -> Result<AlertSeverity, String> {
+    match value {
+        "critical" => Ok(AlertSeverity::Critical),
+        "warning" => Ok(AlertSeverity::Warning),
+        "info" => Ok(AlertSeverity::Info),
+        _ => Err(format!("database returned invalid alert severity {value}")),
+    }
+}
+
+fn alert_event_state_name(value: AlertEventState) -> &'static str {
+    match value {
+        AlertEventState::Firing => "firing",
+        AlertEventState::Resolved => "resolved",
+    }
+}
+
+fn parse_alert_event_state(value: &str) -> Result<AlertEventState, String> {
+    match value {
+        "firing" => Ok(AlertEventState::Firing),
+        "resolved" => Ok(AlertEventState::Resolved),
+        _ => Err(format!(
+            "database returned invalid alert event state {value}"
+        )),
     }
 }
 

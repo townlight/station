@@ -50,6 +50,7 @@ name = "channel-worker"
 version = "0.1.0"
 dependencies = [
  "gstreamer",
+ "station-domain",
  "station-media-assets",
  "station-media-engine",
  "station-media-journal",
@@ -684,6 +685,7 @@ dependencies = [
 name = "station-orchestration"
 version = "0.1.0"
 dependencies = [
+ "station-domain",
  "station-media-protocol",
  "station-runtime",
  "station-schedule",
@@ -726,6 +728,7 @@ dependencies = [
  "station-api",
  "station-ingest",
  "station-orchestration",
+ "station-storage",
  "windows-service",
 ]
 

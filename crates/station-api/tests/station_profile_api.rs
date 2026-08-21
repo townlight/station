@@ -12,7 +12,10 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use gst::prelude::*;
 use gstreamer as gst;
 use station_api::{Api, serve_one, serve_until};
-use station_domain::StationProfile;
+use station_domain::{
+    AlertConditionKind, AlertEvent, AlertEventState, AlertSeverity, ChannelRuntimeObservation,
+    ChannelRuntimeState, RuntimeSafeToAirStatus, SafeToAirColor, StationProfile,
+};
 use station_ingest::{IngestOutcome, IngestWorker, TranscodeOutcome, TranscodeWorker};
 use station_media_lifecycle::WatchFolderConfig;
 use station_schedule::{
@@ -124,6 +127,9 @@ fn serves_the_embedded_operator_console_from_the_station_origin() {
     let html = String::from_utf8(shell.body).unwrap();
     assert!(html.contains("TownLight Station"));
     assert!(html.contains("/operator.js"));
+    let deep_link = api.handle("GET", "/?view=health", None);
+    assert_eq!(deep_link.status, 200);
+    assert_eq!(deep_link.content_type, "text/html; charset=utf-8");
     let script = api.handle("GET", "/operator.js", None);
     assert_eq!(script.status, 200);
     assert_eq!(script.content_type, "text/javascript; charset=utf-8");
@@ -163,6 +169,78 @@ fn persists_validated_channel_output_configuration() {
         Some(br#"{"channel_id":"not-a-uuid","display_name":"Bad","udp_destination":"nowhere","enabled":true}"#),
     );
     assert_eq!(invalid.status, 422);
+    let _ = std::fs::remove_file(database);
+}
+
+#[test]
+fn exposes_runtime_safe_to_air_and_acknowledges_durable_alerts() {
+    let database = temporary_database("runtime-alerts");
+    let channel = ChannelConfiguration {
+        channel_id: "8b626c01-bdf8-419a-8a2e-b0a7caa1ff7e".into(),
+        display_name: "Primary Cable Channel".into(),
+        udp_destination: "127.0.0.1:5500".into(),
+        enabled: true,
+    };
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+    let store = StationStore::open(&database).unwrap();
+    store.put_channel(&channel).unwrap();
+    store
+        .put_channel_runtime(&ChannelRuntimeObservation {
+            channel_id: channel.channel_id.clone(),
+            state: ChannelRuntimeState::HealthyFallback,
+            on_air_asset_id: None,
+            state_started_at_unix_ms: now - 10_000,
+            heartbeat_at_unix_ms: now,
+            detail: None,
+        })
+        .unwrap();
+    store
+        .observe_alert(&AlertEvent {
+            event_id: "alert-runtime-test".into(),
+            condition: AlertConditionKind::CommitFailure,
+            severity: AlertSeverity::Warning,
+            state: AlertEventState::Firing,
+            resource_ref: channel.channel_id.clone(),
+            summary: "Commit needs operator review.".into(),
+            detail: String::new(),
+            source_section: "S4".into(),
+            first_observed_at_unix_ms: now,
+            last_observed_at_unix_ms: now,
+            resolved_at_unix_ms: None,
+            occurrence_count: 1,
+            acknowledged_at_unix_ms: None,
+            acknowledged_by: None,
+        })
+        .unwrap();
+    drop(store);
+
+    let api = Api::open(&database).unwrap();
+    let runtime = api.handle("GET", "/api/v1/runtime-safe-to-air", None);
+    assert_eq!(runtime.status, 200);
+    let runtime: RuntimeSafeToAirStatus = serde_json::from_slice(&runtime.body).unwrap();
+    assert_eq!(runtime.color, SafeToAirColor::Yellow);
+    assert!(runtime.channels[0].on_healthy_fallback);
+    assert_eq!(runtime.active_warning_alerts, 1);
+
+    let listed = api.handle("GET", "/api/v1/alerts", None);
+    let alerts: Vec<AlertEvent> = serde_json::from_slice(&listed.body).unwrap();
+    assert_eq!(alerts.len(), 1);
+    assert!(alerts[0].acknowledged_at_unix_ms.is_none());
+
+    let acknowledged = api.handle(
+        "POST",
+        "/api/v1/alerts/alert-runtime-test/acknowledge",
+        Some(br#"{"acknowledged_by":"station-operator"}"#),
+    );
+    assert_eq!(acknowledged.status, 200);
+    let acknowledged: AlertEvent = serde_json::from_slice(&acknowledged.body).unwrap();
+    assert_eq!(
+        acknowledged.acknowledged_by.as_deref(),
+        Some("station-operator")
+    );
     let _ = std::fs::remove_file(database);
 }
 
