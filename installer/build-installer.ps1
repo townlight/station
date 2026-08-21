@@ -79,8 +79,9 @@ try {
         media_runtime_sha256 = $runtimeHash
     }
     $manifestPath = Join-Path $outputDirectory 'candidate-manifest.json'
-    $manifest | ConvertTo-Json | Set-Content -LiteralPath $manifestPath -Encoding utf8NoBOM
-    $manifest | ConvertTo-Json
+    $manifestJson = $manifest | ConvertTo-Json
+    [IO.File]::WriteAllText($manifestPath, $manifestJson, (New-Object Text.UTF8Encoding($false)))
+    $manifestJson
 }
 finally {
     Pop-Location
