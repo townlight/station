@@ -3,7 +3,7 @@ use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use gst::prelude::*;
 use gst_pbutils::prelude::*;
@@ -273,6 +273,230 @@ pub fn measure_loudness(path: impl AsRef<Path>) -> Result<LoudnessMeasurement, A
     let result = collect_loudness(&pipeline, &level, &audio_linked);
     let _ = pipeline.set_state(gst::State::Null);
     result
+}
+
+pub fn transcode_playout_asset(
+    source: impl AsRef<Path>,
+    library: impl AsRef<Path>,
+) -> Result<IngestedAsset, AssetError> {
+    validate_media(&source)?;
+    gst::init().map_err(|error| AssetError::Discovery(error.to_string()))?;
+    fs::create_dir_all(&library).map_err(|error| AssetError::Io(error.to_string()))?;
+    let library = fs::canonicalize(library).map_err(|error| AssetError::Io(error.to_string()))?;
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|error| AssetError::Io(error.to_string()))?
+        .as_nanos();
+    let temporary = library.join(format!(".transcode-{}-{nonce}.ts", std::process::id()));
+    let canonical = fs::canonicalize(source).map_err(|error| AssetError::Io(error.to_string()))?;
+    let uri = gst::glib::filename_to_uri(&canonical, None)
+        .map_err(|error| AssetError::InvalidSource(error.to_string()))?;
+    let pipeline = gst::Pipeline::new();
+    let decoder = gst::ElementFactory::make("uridecodebin")
+        .property("uri", uri.as_str())
+        .property("expose-all-streams", false)
+        .build()
+        .map_err(|error| AssetError::Discovery(error.to_string()))?;
+    let video_queue = make_element("queue")?;
+    let video_convert = make_element("videoconvert")?;
+    let video_scale = make_element("videoscale")?;
+    let video_rate = make_element("videorate")?;
+    let video_caps = gst::ElementFactory::make("capsfilter")
+        .property(
+            "caps",
+            gst::Caps::builder("video/x-raw")
+                .field("format", "I420")
+                .field("width", 1280_i32)
+                .field("height", 720_i32)
+                .field("framerate", gst::Fraction::new(30, 1))
+                .build(),
+        )
+        .build()
+        .map_err(|error| AssetError::Discovery(error.to_string()))?;
+    let video_encoder = gst::ElementFactory::make("openh264enc")
+        .property("bitrate", 4_000_000_u32)
+        .build()
+        .map_err(|error| AssetError::Discovery(error.to_string()))?;
+    let video_parser = make_element("h264parse")?;
+    let video_output_queue = make_element("queue")?;
+    let audio_queue = make_element("queue")?;
+    let audio_convert_in = make_element("audioconvert")?;
+    let audio_resample_in = make_element("audioresample")?;
+    let loudness_input_caps = gst::ElementFactory::make("capsfilter")
+        .property(
+            "caps",
+            gst::Caps::builder("audio/x-raw")
+                .field("format", "F64LE")
+                .field("rate", 192_000_i32)
+                .field("channels", 2_i32)
+                .build(),
+        )
+        .build()
+        .map_err(|error| AssetError::Discovery(error.to_string()))?;
+    let normalizer = gst::ElementFactory::make("audioloudnorm")
+        .property("loudness-target", -24.0_f64)
+        .property("max-true-peak", -2.0_f64)
+        .property("loudness-range-target", 7.0_f64)
+        .build()
+        .map_err(|error| AssetError::Discovery(error.to_string()))?;
+    let audio_convert_out = make_element("audioconvert")?;
+    let audio_resample_out = make_element("audioresample")?;
+    let audio_caps = gst::ElementFactory::make("capsfilter")
+        .property(
+            "caps",
+            gst::Caps::builder("audio/x-raw")
+                .field("format", "S16LE")
+                .field("rate", 48_000_i32)
+                .field("channels", 2_i32)
+                .build(),
+        )
+        .build()
+        .map_err(|error| AssetError::Discovery(error.to_string()))?;
+    let audio_encoder = gst::ElementFactory::make("voaacenc")
+        .property("bitrate", 192_000_i32)
+        .build()
+        .map_err(|error| AssetError::Discovery(error.to_string()))?;
+    let audio_parser = make_element("aacparse")?;
+    let audio_output_queue = make_element("queue")?;
+    let mux = make_element("mpegtsmux")?;
+    let sink = gst::ElementFactory::make("filesink")
+        .property("location", temporary.to_string_lossy().as_ref())
+        .build()
+        .map_err(|error| AssetError::Discovery(error.to_string()))?;
+    pipeline
+        .add_many([
+            &decoder,
+            &video_queue,
+            &video_convert,
+            &video_scale,
+            &video_rate,
+            &video_caps,
+            &video_encoder,
+            &video_parser,
+            &video_output_queue,
+            &audio_queue,
+            &audio_convert_in,
+            &audio_resample_in,
+            &loudness_input_caps,
+            &normalizer,
+            &audio_convert_out,
+            &audio_resample_out,
+            &audio_caps,
+            &audio_encoder,
+            &audio_parser,
+            &audio_output_queue,
+            &mux,
+            &sink,
+        ])
+        .map_err(|error| AssetError::Discovery(error.to_string()))?;
+    gst::Element::link_many([
+        &video_queue,
+        &video_convert,
+        &video_scale,
+        &video_rate,
+        &video_caps,
+        &video_encoder,
+        &video_parser,
+        &video_output_queue,
+        &mux,
+        &sink,
+    ])
+    .map_err(|error| AssetError::Discovery(error.to_string()))?;
+    gst::Element::link_many([
+        &audio_queue,
+        &audio_convert_in,
+        &audio_resample_in,
+        &loudness_input_caps,
+        &normalizer,
+        &audio_convert_out,
+        &audio_resample_out,
+        &audio_caps,
+        &audio_encoder,
+        &audio_parser,
+        &audio_output_queue,
+        &mux,
+    ])
+    .map_err(|error| AssetError::Discovery(error.to_string()))?;
+    let video_pad = video_queue
+        .static_pad("sink")
+        .ok_or_else(|| AssetError::Discovery("video queue has no sink pad".into()))?;
+    let audio_pad = audio_queue
+        .static_pad("sink")
+        .ok_or_else(|| AssetError::Discovery("audio queue has no sink pad".into()))?;
+    let video_linked = Arc::new(AtomicBool::new(false));
+    let audio_linked = Arc::new(AtomicBool::new(false));
+    let video_signal = Arc::clone(&video_linked);
+    let audio_signal = Arc::clone(&audio_linked);
+    decoder.connect_pad_added(move |_, source_pad| {
+        let caps = source_pad
+            .current_caps()
+            .unwrap_or_else(|| source_pad.query_caps(None));
+        let Some(media_type) = caps.structure(0).map(|value| value.name()) else {
+            return;
+        };
+        if media_type.starts_with("video/") && !video_pad.is_linked() {
+            if source_pad.link(&video_pad).is_ok() {
+                video_signal.store(true, Ordering::Release);
+            }
+        } else if media_type.starts_with("audio/")
+            && !audio_pad.is_linked()
+            && source_pad.link(&audio_pad).is_ok()
+        {
+            audio_signal.store(true, Ordering::Release);
+        }
+    });
+    pipeline
+        .set_state(gst::State::Playing)
+        .map_err(|error| AssetError::Discovery(error.to_string()))?;
+    let transcode = wait_for_transcode(&pipeline, &video_linked, &audio_linked);
+    let _ = pipeline.set_state(gst::State::Null);
+    if let Err(error) = transcode {
+        let _ = fs::remove_file(&temporary);
+        return Err(error);
+    }
+    let output = ingest_media(&temporary, &library);
+    let _ = fs::remove_file(&temporary);
+    output
+}
+
+fn wait_for_transcode(
+    pipeline: &gst::Pipeline,
+    video_linked: &AtomicBool,
+    audio_linked: &AtomicBool,
+) -> Result<(), AssetError> {
+    let bus = pipeline
+        .bus()
+        .ok_or_else(|| AssetError::Discovery("transcode pipeline has no bus".into()))?;
+    let deadline = Instant::now() + Duration::from_secs(300);
+    while Instant::now() < deadline {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let Some(message) = bus.timed_pop(gst::ClockTime::from_nseconds(
+            remaining.as_nanos().min(u128::from(u64::MAX)) as u64,
+        )) else {
+            break;
+        };
+        match message.view() {
+            gst::MessageView::Eos(_) => {
+                if video_linked.load(Ordering::Acquire) && audio_linked.load(Ordering::Acquire) {
+                    return Ok(());
+                }
+                return Err(AssetError::UnsupportedMedia(
+                    "canonical transcode did not receive both audio and video".into(),
+                ));
+            }
+            gst::MessageView::Error(error) => {
+                return Err(AssetError::Discovery(format!(
+                    "canonical transcode failed: {} ({:?})",
+                    error.error(),
+                    error.debug()
+                )));
+            }
+            _ => {}
+        }
+    }
+    Err(AssetError::Discovery(
+        "canonical transcode exceeded its 300-second deadline".into(),
+    ))
 }
 
 fn collect_loudness(

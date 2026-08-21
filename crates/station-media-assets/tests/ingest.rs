@@ -3,7 +3,9 @@ use std::path::Path;
 
 use gst::prelude::*;
 use gstreamer as gst;
-use station_media_assets::{ingest_media, measure_loudness, validate_media, verify_media_identity};
+use station_media_assets::{
+    ingest_media, measure_loudness, transcode_playout_asset, validate_media, verify_media_identity,
+};
 
 #[test]
 fn validates_and_atomically_ingests_real_audio_video_media() {
@@ -61,6 +63,40 @@ fn rejects_non_media_without_polluting_the_library() {
     assert!(validate_media(&source).is_err());
     assert!(ingest_media(&source, &library).is_err());
     assert!(!library.exists() || fs::read_dir(&library).unwrap().next().is_none());
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn transcodes_to_verified_h264_aac_transport_with_target_loudness() {
+    let root = test_root("transcode");
+    let source = root.join("hot-source.ts");
+    let library = root.join("playout");
+    fs::create_dir_all(&root).unwrap();
+    generate_fixture(&source);
+    let source_loudness = measure_loudness(&source).unwrap().integrated_lufs;
+    assert!(!(-26.0..=-22.0).contains(&source_loudness));
+
+    let output = transcode_playout_asset(&source, &library)
+        .expect("a decodable A/V source must produce a canonical playout derivative");
+    assert_ne!(
+        fs::read(&source).unwrap(),
+        fs::read(&output.stored_path).unwrap()
+    );
+    assert_eq!(output.metadata.video_codec, "video/x-h264");
+    assert!(output.metadata.audio_codec.contains("mpeg"));
+    assert_eq!(output.stored_path.extension().unwrap(), "ts");
+    assert_eq!(
+        verify_media_identity(&output.stored_path, &output.asset_id).unwrap(),
+        output.metadata
+    );
+    let normalized = measure_loudness(&output.stored_path)
+        .unwrap()
+        .integrated_lufs;
+    assert!(
+        (-26.0..=-22.0).contains(&normalized),
+        "normalized output measured {normalized} LUFS"
+    );
 
     fs::remove_dir_all(root).unwrap();
 }
