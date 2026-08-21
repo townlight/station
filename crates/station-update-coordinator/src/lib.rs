@@ -249,7 +249,7 @@ fn deactivate_release_source(database_path: &Path, now_unix_ms: i64) -> Result<(
     {
         store.resolve_alert(AlertConditionKind::UpdateAvailable, &version, now_unix_ms)?;
     }
-    Ok(())
+    store.clear_update_check()
 }
 
 pub fn release_notes(
@@ -559,6 +559,13 @@ mod tests {
             .unwrap();
         assert_eq!(alerts.len(), 1);
         assert_eq!(alerts[0].state, AlertEventState::Resolved);
+        assert_eq!(
+            StationStore::open(&database)
+                .unwrap()
+                .read_update_check()
+                .unwrap(),
+            None
+        );
 
         let _ = std::fs::remove_dir_all(root);
     }

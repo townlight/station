@@ -52,6 +52,12 @@ fn persists_the_latest_verified_update_check_and_refuses_stale_overwrite() {
 
     let reopened = StationStore::open(&database).unwrap();
     assert_eq!(reopened.read_update_check().unwrap(), Some(newest));
+    reopened.clear_update_check().unwrap();
+    assert_eq!(reopened.read_update_check().unwrap(), None);
+    drop(reopened);
+
+    let reopened = StationStore::open(&database).unwrap();
+    assert_eq!(reopened.read_update_check().unwrap(), None);
     drop(reopened);
     let _ = std::fs::remove_dir_all(root);
 }

@@ -1535,6 +1535,11 @@ impl StationStore {
         }
     }
 
+    pub fn clear_update_check(&self) -> Result<(), String> {
+        let statement = self.prepare("DELETE FROM update_check_status WHERE singleton=1")?;
+        expect_done(self.database, statement.raw)
+    }
+
     pub fn self_test_exists_for_period(
         &self,
         kind: SelfTestKind,
