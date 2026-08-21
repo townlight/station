@@ -104,6 +104,52 @@ export interface CgFeedItemsRead {
   feeds: CgFeedRead[];
 }
 
+export interface CgResolvedFeedItem {
+  item_id: string;
+  title: string;
+  summary: string | null;
+  starts_at_unix_ms: number | null;
+  url: string | null;
+  tags: string[];
+}
+
+export type CgResolvedBulletinContent =
+  | { kind: "text"; title: string; body: string }
+  | { kind: "uploaded_image"; asset_id: string; alt_text: string }
+  | { kind: "fullscreen_slide"; asset_id: string; alt_text: string }
+  | { kind: "live_video"; source_id: string; title: string };
+
+export type CgResolvedPlaceholderSource = "bulletin_rotation" | "emergency" | "feed" | "schedule" | "image" | "live_video";
+export type CgResolvedPlaceholderReason = "no_airable_bulletins" | "no_bulletins_match_tags" | "no_active_emergency" | "missing_feed_source" | "feed_source_disabled" | "feed_data_unavailable" | "no_approved_feed_items" | "no_feed_items_match_tags" | "schedule_data_unavailable" | "image_asset_readiness_unknown" | "live_source_readiness_unknown";
+
+export type CgResolvedContent =
+  | { kind: "manual_text"; text: string }
+  | { kind: "bulletin"; bulletin_id: string; content: CgResolvedBulletinContent }
+  | { kind: "clock"; format: string }
+  | { kind: "feed_items"; feed_source_id: string; items: CgResolvedFeedItem[]; stale: boolean; last_error: string | null }
+  | { kind: "placeholder"; source: CgResolvedPlaceholderSource; reason: CgResolvedPlaceholderReason };
+
+export interface CgResolvedZone {
+  zone_id: string;
+  template_zone_key: string;
+  zone_kind: string;
+  bounds: { x: number; y: number; width: number; height: number };
+  z_index: number;
+  content_source: CgZone["content_source"];
+  content: CgResolvedContent;
+  revision: number;
+}
+
+export interface CgResolvedSnapshot {
+  board_id: string;
+  channel_id: string;
+  template_id: string;
+  template_kind: string;
+  board_revision: number;
+  generated_at_unix_ms: number;
+  zones: CgResolvedZone[];
+}
+
 export interface CgBulletin {
   bulletin_id: string;
   channel_id: string;
@@ -173,6 +219,7 @@ export const cgApi = {
   zones: (boardId: string) => cgRequest<CgZone[]>(`/api/v1/cg/zones?board_id=${encodeURIComponent(boardId)}`),
   feeds: (channelId: string) => cgRequest<CgFeed[]>(`/api/v1/cg/feeds?channel_id=${encodeURIComponent(channelId)}`),
   feedItems: (channelId: string, atUnixMs = Date.now()) => cgRequest<CgFeedItemsRead>(`/api/v1/cg/feed-items?channel_id=${encodeURIComponent(channelId)}&at_unix_ms=${atUnixMs}`),
+  preview: (channelId: string, atUnixMs: number) => cgRequest<CgResolvedSnapshot>(`/api/v1/cg/preview?channel_id=${encodeURIComponent(channelId)}&at_unix_ms=${atUnixMs}`),
   bulletins: (channelId: string) => cgRequest<CgBulletin[]>(`/api/v1/cg/bulletins?channel_id=${encodeURIComponent(channelId)}`),
   audit: (channelId: string) => cgRequest<CgAuditEvent[]>(`/api/v1/cg/audit?channel_id=${encodeURIComponent(channelId)}&limit=50`),
   writeBoard: (body: { board: CgBoard; expected_revision: number; audit: CgAuditEvent }) => cgRequest<CgBoard>("/api/v1/cg/board", { method: "PUT", body: JSON.stringify(body) }),
@@ -667,9 +714,56 @@ function FeedItemApprovalQueue({ data, channelId, operatorId, onRefresh }: { dat
   return <section className="panel"><div className="panel-head"><div><p className="eyebrow">Moderated cache</p><h2>Feed-item approvals</h2></div><span className="count">{pendingCount} pending</span></div><MutationNotice>Only cached items are shown. This screen does not fetch the network; approval is durable, channel-scoped, and append-only.</MutationNotice>{feeds.length === 0 ? <CgEmpty title="No configured feeds" detail="Register a feed source before reviewing cached items." /> : <div className="cg-list">{feeds.map((feed) => { const fetchError = feed.last_fetch_error ?? feed.cache_last_error; const state = feed.never_fetched ? "never fetched" : fetchError ? "fetch error" : feed.stale ? "stale cache" : "fresh cache"; return <article className="cg-card" key={feed.feed_source_id}><div className="cg-card-top"><div><strong>{feed.label}</strong><small>{displayKind(feed.kind)} · {feed.items.length} cached item{feed.items.length === 1 ? "" : "s"}</small></div><span className={`cg-state-pill ${feed.never_fetched || fetchError ? "cg-state-declined" : feed.stale ? "cg-state-submitted" : "cg-state-accepted"}`}>{state}</span></div>{feed.never_fetched ? <p>No successful cache exists yet. Network fetching is not part of this slice.</p> : fetchError ? <p className="cg-feed-error">{fetchError}</p> : <p>Cache fetched {feed.cache_fetched_at_unix_ms ? formatCgTime(feed.cache_fetched_at_unix_ms) : "at an unknown time"}{feed.cache_expires_at_unix_ms ? ` · expires ${formatCgTime(feed.cache_expires_at_unix_ms)}` : ""}.</p>}{feed.items.length > 0 && <div className="cg-feed-item-list">{feed.items.map((item) => <div className="cg-feed-item" key={item.item_id}><div><strong>{item.title}</strong><small>{item.tags.length ? item.tags.join(", ") : "untagged"}{item.starts_at_unix_ms ? ` · ${formatCgTime(item.starts_at_unix_ms)}` : ""}</small>{item.summary && <p>{item.summary}</p>}</div><button className={item.approved ? "secondary" : "primary"} disabled={item.approved || busy !== null || !operatorId.trim()} onClick={() => void approve(feed, item)}>{item.approved ? `Approved by ${item.approved_by ?? "operator"}` : busy === `${feed.feed_source_id}:${item.item_id}` ? "Approving…" : "Approve"}</button></div>)}</div>}</article>; })}</div>}<MutationResult error={error} message={message} /></section>;
 }
 
-function LivePreview({ data }: { data: CgData }) {
-  const template = data.templates.find((item) => item.template_id === data.board?.template_id);
-  return <section className="panel"><div className="panel-head"><div><p className="eyebrow">Renderer handoff</p><h2>Live preview</h2></div><span className="cg-state-pill cg-state-declined">contract only</span></div><div className="cg-preview-warning"><strong>This is not an on-air preview.</strong><p>The current API exposes board configuration, not a resolved runtime snapshot. This view shows the stored geometry and source bindings without inventing feed, schedule, image, or live-video data.</p></div>{!data.board ? <CgEmpty title="Preview unavailable" detail="Configure a board before a contract preview can be assembled." /> : <div className="cg-preview-wrap"><div className="cg-preview-stage" aria-label="Stored CG zone geometry">{data.zones.length ? data.zones.map((zone) => { const templateZone = template?.zones.find((item) => item.template_zone_key === zone.template_zone_key); const bounds = templateZone?.bounds ?? { x: 0, y: 0, width: 1000, height: 1000 }; return <div className="cg-preview-zone" key={zone.zone_id} style={{ left: `${bounds.x / 10}%`, top: `${bounds.y / 10}%`, width: `${bounds.width / 10}%`, height: `${bounds.height / 10}%`, zIndex: templateZone?.z_index ?? 0 }}><strong>{displayKind(zone.template_zone_key)}</strong><small>{displayKind(zone.content_source.kind)}</small></div>; }) : <span className="cg-preview-empty">No zone bindings</span>}</div><div className="cg-preview-legend"><span><i className="cg-legend-configured" />Stored zone</span><span><i className="cg-legend-unresolved" />External content unresolved</span></div></div>}</section>;
+function ResolvedContent({ content }: { content: CgResolvedContent }) {
+  switch (content.kind) {
+    case "manual_text":
+      return <div className="cg-preview-content"><strong>Manual text</strong><p>{content.text || "(empty)"}</p></div>;
+    case "clock":
+      return <div className="cg-preview-content"><strong>Clock</strong><code>{content.format}</code></div>;
+    case "bulletin":
+      if (content.content.kind === "text") {
+        return <div className="cg-preview-content cg-preview-bulletin"><strong>{content.content.title}</strong><p>{content.content.body}</p><small>Bulletin {content.bulletin_id}</small></div>;
+      }
+      return <div className="cg-preview-placeholder"><strong>Unsupported bulletin media</strong><p>{displayKind(content.content.kind)} is resolved but not rendered by this handoff preview.</p><small>Asset/source readiness is not invented.</small></div>;
+    case "feed_items":
+      return <div className="cg-preview-content cg-preview-feed"><div className="cg-preview-content-head"><strong>Feed items</strong>{content.stale && <span className="cg-state-pill cg-state-submitted">stale cache</span>}</div>{content.last_error && <p className="cg-feed-error">Feed error: {content.last_error}</p>}{content.items.length === 0 ? <p>No resolved items.</p> : <ul>{content.items.map((item) => <li key={item.item_id}><strong>{item.title}</strong>{item.summary && <span>{item.summary}</span>}<small>{item.tags.length ? item.tags.join(", ") : "untagged"}</small></li>)}</ul>}</div>;
+    case "placeholder":
+      return <div className="cg-preview-placeholder"><strong>Unresolved {displayKind(content.source)}</strong><p>{displayKind(content.reason)}</p><small>No external content was invented.</small></div>;
+  }
+}
+
+function LivePreview({ data, channelId }: { data: CgData; channelId: string }) {
+  const [snapshot, setSnapshot] = useState<CgResolvedSnapshot | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [atUnixMs, setAtUnixMs] = useState(() => Date.now());
+  const hasBoard = data.board !== null;
+
+  const loadPreview = useCallback(async (timestamp: number) => {
+    if (!hasBoard) return;
+    setLoading(true);
+    setError(null);
+    try {
+      setSnapshot(await cgApi.preview(channelId, timestamp));
+      setAtUnixMs(timestamp);
+    } catch (problem) {
+      setError(problem instanceof Error ? problem.message : "The resolved CG snapshot could not be read.");
+    } finally {
+      setLoading(false);
+    }
+  }, [channelId, hasBoard]);
+
+  useEffect(() => {
+    setSnapshot(null);
+    setError(null);
+    if (hasBoard) void loadPreview(Date.now());
+  }, [channelId, data, hasBoard, loadPreview]);
+
+  function refresh() {
+    void loadPreview(Date.now());
+  }
+
+  return <section className="panel"><div className="panel-head"><div><p className="eyebrow">Resolved renderer handoff</p><h2>Live preview</h2></div><span className="cg-state-pill cg-state-accepted">resolved snapshot</span></div><div className="cg-preview-warning"><strong>Deterministic snapshot handoff — not on-air pixel parity.</strong><p>This renders the server-resolved snapshot at a supplied timestamp. It does not claim pixel parity with the on-air worker or prove media/output readiness.</p></div>{!data.board ? <CgEmpty title="Preview unavailable" detail="Configure a board before a resolved snapshot can be assembled." /> : <div className="cg-preview-wrap"><div className="cg-preview-controls"><span>Resolved at {formatCgTime(atUnixMs)}</span><button className="secondary" onClick={refresh} disabled={loading}>{loading ? "Resolving…" : "Refresh snapshot"}</button></div>{loading && !snapshot ? <div className="cg-preview-status">Resolving board, zones, and airable content…</div> : error ? <div className="cg-preview-status cg-preview-status-error"><strong>Snapshot unavailable</strong><p>{error}</p><button className="secondary" onClick={refresh}>Retry</button></div> : snapshot ? <><div className="cg-preview-meta"><span>Board revision {snapshot.board_revision}</span><span>Template {displayKind(snapshot.template_kind)}</span><span>Generated {formatCgTime(snapshot.generated_at_unix_ms)}</span></div><div className="cg-preview-stage" aria-label="Resolved CG snapshot"><div className="cg-preview-stage-label">Resolved snapshot</div>{snapshot.zones.length ? snapshot.zones.map((zone) => <div className="cg-preview-zone" key={zone.zone_id} style={{ left: `${zone.bounds.x / 10}%`, top: `${zone.bounds.y / 10}%`, width: `${zone.bounds.width / 10}%`, height: `${zone.bounds.height / 10}%`, zIndex: zone.z_index }}><span className="cg-preview-zone-label">{displayKind(zone.template_zone_key)} · {displayKind(zone.zone_kind)}</span><ResolvedContent content={zone.content} /></div>) : <span className="cg-preview-empty">No zones resolved</span>}</div><div className="cg-preview-legend"><span><i className="cg-legend-configured" />Resolved zone</span><span><i className="cg-legend-unresolved" />Typed unresolved placeholder</span></div></> : <CgEmpty title="No resolved snapshot" detail="Refresh to request a deterministic snapshot for this channel." />}</div>}</section>;
 }
 
 function SettingsHistory({ data }: { data: CgData }) {
@@ -726,6 +820,6 @@ export function CgOperator({ channelId, channels, route, onNavigate }: { channel
   return <>
     <header className="page-header"><div><p className="eyebrow">CG / Bulletin board</p><h1>{CG_ROUTES.find((item) => item.id === route)?.label ?? "Operator tools"}</h1><p>Authoring and management contract</p></div><div className="header-actions"><OperatorIdentity value={operatorId} onChange={updateOperatorId} /><label className="cg-channel-picker">Channel<select value={activeChannelId} onChange={(event) => setSelectedChannelId(event.target.value)}>{channels.map((channel) => <option key={channel.channel_id} value={channel.channel_id}>{channel.display_name}</option>)}</select></label><span className="cg-channel-badge">{data?.board?.active ? "Board active" : "Board not configured"}</span><button className="secondary" onClick={() => void load()} disabled={refreshing}>{refreshing ? "Reading…" : "Refresh"}</button></div></header>
     <CgTabs route={route} onNavigate={onNavigate} />
-    {error ? <CgError error={error} onRetry={() => void load()} /> : !data ? <CgLoading /> : route === "cg-moderation" ? <ModerationQueue data={data} channelId={activeChannelId} operatorId={operatorId} onRefresh={load} /> : route === "cg-board" ? <BoardDesigner data={data} channelId={activeChannelId} operatorId={operatorId} onRefresh={load} /> : route === "cg-feeds" ? <FeedManager data={data} channelId={activeChannelId} operatorId={operatorId} onRefresh={load} /> : route === "cg-preview" ? <LivePreview data={data} /> : <SettingsHistory data={data} />}
+    {error ? <CgError error={error} onRetry={() => void load()} /> : !data ? <CgLoading /> : route === "cg-moderation" ? <ModerationQueue data={data} channelId={activeChannelId} operatorId={operatorId} onRefresh={load} /> : route === "cg-board" ? <BoardDesigner data={data} channelId={activeChannelId} operatorId={operatorId} onRefresh={load} /> : route === "cg-feeds" ? <FeedManager data={data} channelId={activeChannelId} operatorId={operatorId} onRefresh={load} /> : route === "cg-preview" ? <LivePreview data={data} channelId={activeChannelId} /> : <SettingsHistory data={data} />}
   </>;
 }
