@@ -188,6 +188,9 @@ begin
     FileExists(RuntimeRoot + '\lib\gstreamer-1.0\gstmpegtsdemux.dll') and
     FileExists(RuntimeRoot + '\lib\gstreamer-1.0\gstlibav.dll') and
     FileExists(RuntimeRoot + '\lib\gstreamer-1.0\gstsrt.dll') and
+    FileExists(RuntimeRoot + '\lib\gstreamer-1.0\gstgdkpixbuf.dll') and
+    FileExists(RuntimeRoot + '\lib\gstreamer-1.0\gstpng.dll') and
+    FileExists(RuntimeRoot + '\lib\gstreamer-1.0\gstjpeg.dll') and
     FileExists(RuntimeRoot + '\bin\srt.dll');
 end;
 
