@@ -43,29 +43,37 @@ fn fans_one_persistent_transport_out_to_two_independent_udp_sinks() {
 
 #[test]
 fn repeats_codec_configuration_for_a_receiver_that_joins_after_startup() {
-    let reservation = UdpSocket::bind("127.0.0.1:0").unwrap();
-    let destination = reservation.local_addr().unwrap();
-    drop(reservation);
-    let playout =
-        PersistentPlayout::start_udp_with_profile(destination, OutputProfileId::Atsc720p5994)
-            .expect("the persistent transport must start without a receiver");
+    let primary_reservation = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let redundant_reservation = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let primary_destination = primary_reservation.local_addr().unwrap();
+    let redundant_destination = redundant_reservation.local_addr().unwrap();
+    drop(primary_reservation);
+    drop(redundant_reservation);
+    let playout = PersistentPlayout::start_udp_fanout_with_profile(
+        &[primary_destination, redundant_destination],
+        OutputProfileId::Atsc720p5994,
+    )
+    .expect("the persistent transport must start without receivers");
 
-    std::thread::sleep(Duration::from_millis(750));
-    let receiver = UdpSocket::bind(destination).unwrap();
-    receiver
-        .set_read_timeout(Some(Duration::from_secs(2)))
-        .unwrap();
-    let started = Instant::now();
-    let mut datagram = [0_u8; 65_536];
-    let mut capture = Vec::new();
-    while started.elapsed() < Duration::from_secs(5) {
-        let received = receiver.recv(&mut datagram).unwrap();
-        capture.extend_from_slice(&datagram[..received]);
-    }
+    std::thread::sleep(Duration::from_secs(3));
+    let primary = UdpSocket::bind(primary_destination).unwrap();
+    let redundant = UdpSocket::bind(redundant_destination).unwrap();
+    let (primary_capture, redundant_capture) = std::thread::scope(|scope| {
+        let primary_capture =
+            scope.spawn(|| capture_transport_for(&primary, Duration::from_secs(5)));
+        let redundant_capture =
+            scope.spawn(|| capture_transport_for(&redundant, Duration::from_secs(5)));
+        (
+            primary_capture.join().unwrap(),
+            redundant_capture.join().unwrap(),
+        )
+    });
     playout.stop().unwrap();
 
-    assert!(capture.len() > 4_000_000);
-    assert_discovered_video_contract(&capture, 1_280, 720);
+    for capture in [&primary_capture, &redundant_capture] {
+        assert!(capture.len() > 4_000_000);
+        assert_discovered_video_contract(capture, 1_280, 720);
+    }
 }
 
 #[test]
@@ -268,6 +276,20 @@ fn assert_transport_stream(
             continuity.observe(packet);
         }
     }
+}
+
+fn capture_transport_for(receiver: &UdpSocket, duration: Duration) -> Vec<u8> {
+    receiver
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .unwrap();
+    let started = Instant::now();
+    let mut datagram = [0_u8; 65_536];
+    let mut capture = Vec::new();
+    while started.elapsed() < duration {
+        let received = receiver.recv(&mut datagram).unwrap();
+        capture.extend_from_slice(&datagram[..received]);
+    }
+    capture
 }
 
 #[derive(Default)]

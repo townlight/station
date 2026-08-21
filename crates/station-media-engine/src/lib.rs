@@ -167,7 +167,7 @@ impl PersistentPlayout {
             .map_err(|error| build_error("openh264enc", error))?;
         let parser = gst::ElementFactory::make("h264parse")
             .name("video-parser")
-            .property("config-interval", -1_i32)
+            .property("config-interval", 1_i32)
             .build()
             .map_err(|error| build_error("h264parse", error))?;
         let fallback_audio = gst::ElementFactory::make("audiotestsrc")
