@@ -16,6 +16,7 @@ use station_domain::{
     AlertConditionKind, AlertDelivery, AlertDeliveryState, AlertEvent, AlertEventState,
     AlertNotificationKind, AlertRule, AlertSeverity, ChannelRuntimeObservation,
     ChannelRuntimeState, RuntimeSafeToAirStatus, SafeToAirColor, StationProfile,
+    SystemResourceSample,
 };
 use station_ingest::{IngestOutcome, IngestWorker, TranscodeOutcome, TranscodeWorker};
 use station_media_lifecycle::WatchFolderConfig;
@@ -494,6 +495,42 @@ fn lists_seeded_alert_rules_and_persists_an_operator_policy_edit() {
     let persisted: Vec<AlertRule> =
         serde_json::from_slice(&reopened.handle("GET", "/api/v1/alert-rules", None).body).unwrap();
     assert!(persisted.contains(&edited));
+    let _ = std::fs::remove_file(database);
+}
+
+#[test]
+fn exposes_the_latest_persisted_system_resource_sample() {
+    let database = temporary_database("system-resources-api");
+    let api = Api::open(&database).unwrap();
+    assert_eq!(
+        api.handle("GET", "/api/v1/system-resources/latest", None)
+            .body,
+        b"null"
+    );
+    let recorded = StationStore::open(&database)
+        .unwrap()
+        .record_system_resource_sample(&SystemResourceSample {
+            sample_id: None,
+            sampled_at_unix_ms: 5_000,
+            cpu_percent: Some(25.0),
+            ram_used_gb: Some(8.0),
+            ram_total_gb: Some(16.0),
+            gpu_percent: None,
+            gpu_vram_used_gb: None,
+            media_volume_free_gb: Some(100.0),
+            backup_volume_free_gb: Some(90.0),
+            database_reachable: true,
+            backup_volume_writable: true,
+            service_running: true,
+            clock_skew_seconds: None,
+        })
+        .unwrap();
+    let response = api.handle("GET", "/api/v1/system-resources/latest", None);
+    assert_eq!(response.status, 200);
+    assert_eq!(
+        serde_json::from_slice::<SystemResourceSample>(&response.body).unwrap(),
+        recorded
+    );
     let _ = std::fs::remove_file(database);
 }
 

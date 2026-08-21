@@ -7,8 +7,8 @@ use station_domain::{
     AlertChannel, AlertChannelKind, AlertConditionKind, AlertDelivery, AlertDeliveryPayload,
     AlertDeliveryState, AlertEvent, AlertEventState, AlertNotificationKind, AlertRule,
     AlertSeverity, ChannelRuntimeObservation, ChannelRuntimeState, StationProfile,
-    StationProfileDocument, redact_alert_channel_target, validate_alert_channel_target,
-    validate_secure_url,
+    StationProfileDocument, SystemResourceSample, redact_alert_channel_target,
+    validate_alert_channel_target, validate_secure_url,
 };
 use station_media_lifecycle::{
     AssetLoudnessAnalysis, IngestJobStatus, IngestSourceKind, LoudnessGateStatus, MediaIngestJob,
@@ -350,6 +350,23 @@ impl StationStore {
                updated_at_unix_ms INTEGER NOT NULL CHECK (updated_at_unix_ms >= 0),\
                updated_by TEXT NOT NULL\
              );\
+             CREATE TABLE IF NOT EXISTS system_resource_samples (\
+               sample_id INTEGER PRIMARY KEY AUTOINCREMENT,\
+               sampled_at_unix_ms INTEGER NOT NULL CHECK (sampled_at_unix_ms >= 0),\
+               cpu_milli_percent INTEGER NOT NULL DEFAULT -1,\
+               ram_used_milli_gb INTEGER NOT NULL DEFAULT -1,\
+               ram_total_milli_gb INTEGER NOT NULL DEFAULT -1,\
+               gpu_milli_percent INTEGER NOT NULL DEFAULT -1,\
+               gpu_vram_used_milli_gb INTEGER NOT NULL DEFAULT -1,\
+               media_volume_free_milli_gb INTEGER NOT NULL DEFAULT -1,\
+               backup_volume_free_milli_gb INTEGER NOT NULL DEFAULT -1,\
+               database_reachable INTEGER NOT NULL CHECK (database_reachable IN (0,1)),\
+               backup_volume_writable INTEGER NOT NULL CHECK (backup_volume_writable IN (0,1)),\
+               service_running INTEGER NOT NULL CHECK (service_running IN (0,1)),\
+               clock_skew_milliseconds INTEGER NOT NULL DEFAULT -9223372036854775808\
+             );\
+             CREATE INDEX IF NOT EXISTS system_resource_samples_time \
+               ON system_resource_samples(sampled_at_unix_ms DESC, sample_id DESC);\
              CREATE TABLE IF NOT EXISTS alert_channels (\
                channel_id TEXT PRIMARY KEY,\
                kind TEXT NOT NULL CHECK (kind IN ('email','sms','webhook')),\
@@ -1157,6 +1174,89 @@ impl StationStore {
                 SQLITE_DONE => return Ok(observations),
                 _ => return Err(sqlite_error(self.database)),
             }
+        }
+    }
+
+    pub fn record_system_resource_sample(
+        &self,
+        sample: &SystemResourceSample,
+    ) -> Result<SystemResourceSample, String> {
+        sample.validate().map_err(str::to_string)?;
+        if sample.sample_id.is_some() {
+            return Err("a new system resource sample cannot supply its database identity".into());
+        }
+        let statement = self.prepare(
+            "INSERT INTO system_resource_samples(sampled_at_unix_ms, cpu_milli_percent, \
+             ram_used_milli_gb, ram_total_milli_gb, gpu_milli_percent, gpu_vram_used_milli_gb, \
+             media_volume_free_milli_gb, backup_volume_free_milli_gb, database_reachable, \
+             backup_volume_writable, service_running, clock_skew_milliseconds) \
+             VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+        )?;
+        bind_i64(self.database, statement.raw, 1, sample.sampled_at_unix_ms)?;
+        for (index, value) in [
+            sample.cpu_percent,
+            sample.ram_used_gb,
+            sample.ram_total_gb,
+            sample.gpu_percent,
+            sample.gpu_vram_used_gb,
+            sample.media_volume_free_gb,
+            sample.backup_volume_free_gb,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            bind_i64(
+                self.database,
+                statement.raw,
+                c_int::try_from(index + 2).map_err(|_| "resource metric index overflowed")?,
+                scaled_metric(value)?,
+            )?;
+        }
+        bind_i64(
+            self.database,
+            statement.raw,
+            9,
+            i64::from(sample.database_reachable),
+        )?;
+        bind_i64(
+            self.database,
+            statement.raw,
+            10,
+            i64::from(sample.backup_volume_writable),
+        )?;
+        bind_i64(
+            self.database,
+            statement.raw,
+            11,
+            i64::from(sample.service_running),
+        )?;
+        bind_i64(
+            self.database,
+            statement.raw,
+            12,
+            scaled_signed_metric(sample.clock_skew_seconds)?,
+        )?;
+        expect_done(self.database, statement.raw)?;
+        self.execute(
+            "DELETE FROM system_resource_samples WHERE sample_id NOT IN (\
+               SELECT sample_id FROM system_resource_samples ORDER BY sample_id DESC LIMIT 10080)",
+        )?;
+        self.latest_system_resource_sample()?
+            .ok_or_else(|| "recorded system resource sample disappeared".into())
+    }
+
+    pub fn latest_system_resource_sample(&self) -> Result<Option<SystemResourceSample>, String> {
+        let statement = self.prepare(
+            "SELECT sample_id, sampled_at_unix_ms, cpu_milli_percent, ram_used_milli_gb, \
+             ram_total_milli_gb, gpu_milli_percent, gpu_vram_used_milli_gb, \
+             media_volume_free_milli_gb, backup_volume_free_milli_gb, database_reachable, \
+             backup_volume_writable, service_running, clock_skew_milliseconds \
+             FROM system_resource_samples ORDER BY sample_id DESC LIMIT 1",
+        )?;
+        match unsafe { sqlite3_step(statement.raw) } {
+            SQLITE_ROW => Ok(Some(read_system_resource_sample_row(statement.raw)?)),
+            SQLITE_DONE => Ok(None),
+            _ => Err(sqlite_error(self.database)),
         }
     }
 
@@ -3144,6 +3244,28 @@ fn read_channel_runtime_row(
     Ok(observation)
 }
 
+fn read_system_resource_sample_row(
+    statement: *mut SqliteStatement,
+) -> Result<SystemResourceSample, String> {
+    let sample = SystemResourceSample {
+        sample_id: Some(column_u64(statement, 0, "system resource sample identity")?),
+        sampled_at_unix_ms: unsafe { sqlite3_column_int64(statement, 1) },
+        cpu_percent: unscaled_metric(unsafe { sqlite3_column_int64(statement, 2) }),
+        ram_used_gb: unscaled_metric(unsafe { sqlite3_column_int64(statement, 3) }),
+        ram_total_gb: unscaled_metric(unsafe { sqlite3_column_int64(statement, 4) }),
+        gpu_percent: unscaled_metric(unsafe { sqlite3_column_int64(statement, 5) }),
+        gpu_vram_used_gb: unscaled_metric(unsafe { sqlite3_column_int64(statement, 6) }),
+        media_volume_free_gb: unscaled_metric(unsafe { sqlite3_column_int64(statement, 7) }),
+        backup_volume_free_gb: unscaled_metric(unsafe { sqlite3_column_int64(statement, 8) }),
+        database_reachable: unsafe { sqlite3_column_int64(statement, 9) } == 1,
+        backup_volume_writable: unsafe { sqlite3_column_int64(statement, 10) } == 1,
+        service_running: unsafe { sqlite3_column_int64(statement, 11) } == 1,
+        clock_skew_seconds: unscaled_signed_metric(unsafe { sqlite3_column_int64(statement, 12) }),
+    };
+    sample.validate().map_err(str::to_string)?;
+    Ok(sample)
+}
+
 fn read_alert_event_row(statement: *mut SqliteStatement) -> Result<AlertEvent, String> {
     let resolved = unsafe { sqlite3_column_int64(statement, 10) };
     let acknowledged = unsafe { sqlite3_column_int64(statement, 12) };
@@ -3246,6 +3368,44 @@ fn validate_new_alert_observation(proposed: &AlertEvent) -> Result<(), String> {
         return Err("a new alert observation must be an unacknowledged first firing".into());
     }
     Ok(())
+}
+
+fn scaled_metric(value: Option<f64>) -> Result<i64, String> {
+    match value {
+        None => Ok(-1),
+        Some(value) if value.is_finite() && value >= 0.0 => {
+            let scaled = value * 1_000.0;
+            if scaled > i64::MAX as f64 {
+                Err("system resource metric is too large".into())
+            } else {
+                Ok(scaled.round() as i64)
+            }
+        }
+        Some(_) => Err("system resource metric is invalid".into()),
+    }
+}
+
+fn unscaled_metric(value: i64) -> Option<f64> {
+    (value >= 0).then_some(value as f64 / 1_000.0)
+}
+
+fn scaled_signed_metric(value: Option<f64>) -> Result<i64, String> {
+    match value {
+        None => Ok(i64::MIN),
+        Some(value) if value.is_finite() => {
+            let scaled = value * 1_000.0;
+            if scaled <= i64::MIN as f64 || scaled > i64::MAX as f64 {
+                Err("signed system resource metric is too large".into())
+            } else {
+                Ok(scaled.round() as i64)
+            }
+        }
+        Some(_) => Err("signed system resource metric is invalid".into()),
+    }
+}
+
+fn unscaled_signed_metric(value: i64) -> Option<f64> {
+    (value != i64::MIN).then_some(value as f64 / 1_000.0)
 }
 
 fn deterministic_alert_delivery_id(

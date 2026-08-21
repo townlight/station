@@ -1,5 +1,7 @@
 //! Durable operator alert delivery.
 
+use std::io::{Read, Write};
+use std::os::windows::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::sync::{
     Arc,
@@ -16,14 +18,23 @@ use lettre::transport::smtp::authentication::Credentials;
 use lettre::{Message, SmtpTransport, Transport};
 use serde::Serialize;
 use sha2::Sha256;
-use station_domain::{AlertChannel, AlertDelivery, AlertDeliveryPayload};
+use station_domain::{
+    AlertChannel, AlertConditionKind, AlertDelivery, AlertDeliveryPayload, AlertEvent,
+    AlertEventState, AlertSeverity, SystemResourceSample,
+};
 use station_storage::{AlertChannelSecret, StationStore};
 use ureq::Agent;
 use ureq::tls::{RootCerts, TlsConfig};
+use windows_sys::Win32::Foundation::FILETIME;
+use windows_sys::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
+use windows_sys::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
+use windows_sys::Win32::System::Threading::GetSystemTimes;
 
 const DEFAULT_LEASE_DURATION_MS: i64 = 30_000;
 const DEFAULT_MAXIMUM_ATTEMPTS: u32 = 5;
 const DEFAULT_BASE_BACKOFF_MS: i64 = 120_000;
+const RESOURCE_SAMPLE_INTERVAL_MS: i64 = 60_000;
+const LOW_DISK_GB: f64 = 10.0;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeliveryEnvelope {
@@ -71,6 +82,7 @@ impl AlertTransport for OperatorAlertTransport {
 pub fn run_until(database_path: &Path, stop: Arc<AtomicBool>) -> Result<(), String> {
     let transport = OperatorAlertTransport::new(Duration::from_secs(5));
     let worker = AlertDeliveryWorker::new(database_path, &transport);
+    let mut next_resource_sample_at = 0;
     while !stop.load(Ordering::Acquire) {
         let now_unix_ms = i64::try_from(
             SystemTime::now()
@@ -79,11 +91,166 @@ pub fn run_until(database_path: &Path, stop: Arc<AtomicBool>) -> Result<(), Stri
                 .as_millis(),
         )
         .map_err(|_| "system time exceeds the alerting clock".to_string())?;
+        if now_unix_ms >= next_resource_sample_at {
+            sample_and_record_system_resources(database_path, now_unix_ms)?;
+            next_resource_sample_at = now_unix_ms.saturating_add(RESOURCE_SAMPLE_INTERVAL_MS);
+        }
         if !worker.run_once(now_unix_ms)? {
             std::thread::sleep(Duration::from_millis(250));
         }
     }
     Ok(())
+}
+
+pub fn sample_and_record_system_resources(
+    database_path: &Path,
+    sampled_at_unix_ms: i64,
+) -> Result<SystemResourceSample, String> {
+    let (ram_used_gb, ram_total_gb) = memory_usage()?;
+    let cpu_percent = cpu_usage()?;
+    let data_directory = database_path
+        .parent()
+        .ok_or_else(|| "station database has no parent directory".to_string())?;
+    let media_volume_free_gb = disk_free_gb(data_directory)?;
+    let backup_directory = data_directory.join("backups");
+    let backup_volume_writable = backup_write_probe(&backup_directory);
+    let backup_volume_free_gb = disk_free_gb(data_directory)?;
+    let sample = SystemResourceSample {
+        sample_id: None,
+        sampled_at_unix_ms,
+        cpu_percent: Some(cpu_percent),
+        ram_used_gb: Some(ram_used_gb),
+        ram_total_gb: Some(ram_total_gb),
+        gpu_percent: None,
+        gpu_vram_used_gb: None,
+        media_volume_free_gb: Some(media_volume_free_gb),
+        backup_volume_free_gb: Some(backup_volume_free_gb),
+        database_reachable: true,
+        backup_volume_writable,
+        service_running: true,
+        clock_skew_seconds: None,
+    };
+    sample.validate().map_err(str::to_string)?;
+    let store = StationStore::open(database_path)?;
+    let recorded = store.record_system_resource_sample(&sample)?;
+    let disk_unhealthy = media_volume_free_gb < LOW_DISK_GB
+        || backup_volume_free_gb < LOW_DISK_GB
+        || !backup_volume_writable;
+    if disk_unhealthy {
+        store.observe_alert_and_route(&AlertEvent {
+            event_id: format!("system-resource-disk-{sampled_at_unix_ms}"),
+            condition: AlertConditionKind::DiskLow,
+            severity: AlertSeverity::Warning,
+            state: AlertEventState::Firing,
+            resource_ref: "station-storage".into(),
+            summary: "Station storage needs operator attention.".into(),
+            detail: format!(
+                "Media free {:.1} GB; backup free {:.1} GB; backup writable {}.",
+                media_volume_free_gb, backup_volume_free_gb, backup_volume_writable
+            ),
+            source_section: "S8".into(),
+            first_observed_at_unix_ms: sampled_at_unix_ms,
+            last_observed_at_unix_ms: sampled_at_unix_ms,
+            resolved_at_unix_ms: None,
+            occurrence_count: 1,
+            acknowledged_at_unix_ms: None,
+            acknowledged_by: None,
+        })?;
+    } else {
+        store.resolve_alert(
+            AlertConditionKind::DiskLow,
+            "station-storage",
+            sampled_at_unix_ms,
+        )?;
+    }
+    Ok(recorded)
+}
+
+fn memory_usage() -> Result<(f64, f64), String> {
+    let mut status: MEMORYSTATUSEX = unsafe { std::mem::zeroed() };
+    status.dwLength = u32::try_from(std::mem::size_of::<MEMORYSTATUSEX>())
+        .map_err(|_| "memory status structure is too large".to_string())?;
+    if unsafe { GlobalMemoryStatusEx(&mut status) } == 0 {
+        return Err("Windows could not read memory status".into());
+    }
+    const GIB: f64 = 1_073_741_824.0;
+    let total = status.ullTotalPhys as f64 / GIB;
+    let available = status.ullAvailPhys as f64 / GIB;
+    Ok(((total - available).max(0.0), total))
+}
+
+fn cpu_usage() -> Result<f64, String> {
+    let first = system_times()?;
+    std::thread::sleep(Duration::from_millis(50));
+    let second = system_times()?;
+    let total = second.1.saturating_sub(first.1) + second.2.saturating_sub(first.2);
+    let idle = second.0.saturating_sub(first.0);
+    if total == 0 {
+        return Ok(0.0);
+    }
+    Ok((100.0 * (total.saturating_sub(idle)) as f64 / total as f64).clamp(0.0, 100.0))
+}
+
+fn system_times() -> Result<(u64, u64, u64), String> {
+    let mut idle: FILETIME = unsafe { std::mem::zeroed() };
+    let mut kernel: FILETIME = unsafe { std::mem::zeroed() };
+    let mut user: FILETIME = unsafe { std::mem::zeroed() };
+    if unsafe { GetSystemTimes(&mut idle, &mut kernel, &mut user) } == 0 {
+        return Err("Windows could not read processor times".into());
+    }
+    Ok((
+        filetime_ticks(idle),
+        filetime_ticks(kernel),
+        filetime_ticks(user),
+    ))
+}
+
+fn filetime_ticks(value: FILETIME) -> u64 {
+    (u64::from(value.dwHighDateTime) << 32) | u64::from(value.dwLowDateTime)
+}
+
+fn disk_free_gb(path: &Path) -> Result<f64, String> {
+    let wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+    let mut available = 0_u64;
+    if unsafe {
+        GetDiskFreeSpaceExW(
+            wide.as_ptr(),
+            &mut available,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        )
+    } == 0
+    {
+        return Err(format!(
+            "Windows could not read free space for {}",
+            path.display()
+        ));
+    }
+    Ok(available as f64 / 1_073_741_824.0)
+}
+
+fn backup_write_probe(directory: &Path) -> bool {
+    if std::fs::create_dir_all(directory).is_err() {
+        return false;
+    }
+    let path = directory.join(format!(".write-probe-{}", std::process::id()));
+    let outcome = (|| -> std::io::Result<()> {
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)?;
+        file.write_all(b"townlight-storage-proof")?;
+        file.sync_all()?;
+        drop(file);
+        let mut content = Vec::new();
+        std::fs::File::open(&path)?.read_to_end(&mut content)?;
+        if content != b"townlight-storage-proof" {
+            return Err(std::io::Error::other("backup write probe mismatch"));
+        }
+        Ok(())
+    })();
+    let removed = std::fs::remove_file(&path).is_ok();
+    outcome.is_ok() && removed
 }
 
 pub struct WebhookTransport {

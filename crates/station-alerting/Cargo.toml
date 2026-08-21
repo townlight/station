@@ -14,3 +14,4 @@ sha2.workspace = true
 station-domain.workspace = true
 station-storage.workspace = true
 ureq.workspace = true
+windows-sys.workspace = true

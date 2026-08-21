@@ -116,6 +116,53 @@ pub struct RuntimeSafeToAirStatus {
     pub active_warning_alerts: usize,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SystemResourceSample {
+    pub sample_id: Option<u64>,
+    pub sampled_at_unix_ms: i64,
+    pub cpu_percent: Option<f64>,
+    pub ram_used_gb: Option<f64>,
+    pub ram_total_gb: Option<f64>,
+    pub gpu_percent: Option<f64>,
+    pub gpu_vram_used_gb: Option<f64>,
+    pub media_volume_free_gb: Option<f64>,
+    pub backup_volume_free_gb: Option<f64>,
+    pub database_reachable: bool,
+    pub backup_volume_writable: bool,
+    pub service_running: bool,
+    pub clock_skew_seconds: Option<f64>,
+}
+
+impl SystemResourceSample {
+    pub fn validate(&self) -> Result<(), &'static str> {
+        let percentage = |value: Option<f64>| {
+            value.is_none_or(|number| number.is_finite() && (0.0..=100.0).contains(&number))
+        };
+        let nonnegative =
+            |value: Option<f64>| value.is_none_or(|number| number.is_finite() && number >= 0.0);
+        if self.sample_id == Some(0)
+            || self.sampled_at_unix_ms < 0
+            || !percentage(self.cpu_percent)
+            || !percentage(self.gpu_percent)
+            || !nonnegative(self.ram_used_gb)
+            || !nonnegative(self.ram_total_gb)
+            || !nonnegative(self.gpu_vram_used_gb)
+            || !nonnegative(self.media_volume_free_gb)
+            || !nonnegative(self.backup_volume_free_gb)
+            || self
+                .ram_used_gb
+                .zip(self.ram_total_gb)
+                .is_some_and(|(used, total)| used > total)
+            || self
+                .clock_skew_seconds
+                .is_some_and(|value| !value.is_finite())
+        {
+            return Err("system resource sample fields are invalid.");
+        }
+        Ok(())
+    }
+}
+
 pub fn derive_runtime_safe_to_air(
     now_unix_ms: i64,
     channels: &[(String, String, Option<ChannelRuntimeObservation>)],
@@ -751,6 +798,38 @@ mod runtime_tests {
         invalid = valid;
         invalid.channel_ids.push("not-a-uuid".into());
         assert_eq!(invalid.validate(), Err("alert rule fields are invalid."));
+    }
+
+    #[test]
+    fn resource_sample_rejects_impossible_or_nonfinite_measurements() {
+        let valid = SystemResourceSample {
+            sample_id: None,
+            sampled_at_unix_ms: 1_000,
+            cpu_percent: Some(42.5),
+            ram_used_gb: Some(8.0),
+            ram_total_gb: Some(16.0),
+            gpu_percent: None,
+            gpu_vram_used_gb: None,
+            media_volume_free_gb: Some(120.0),
+            backup_volume_free_gb: Some(120.0),
+            database_reachable: true,
+            backup_volume_writable: true,
+            service_running: true,
+            clock_skew_seconds: None,
+        };
+        assert!(valid.validate().is_ok());
+        let mut invalid = valid.clone();
+        invalid.cpu_percent = Some(f64::NAN);
+        assert_eq!(
+            invalid.validate(),
+            Err("system resource sample fields are invalid.")
+        );
+        invalid = valid;
+        invalid.ram_used_gb = Some(17.0);
+        assert_eq!(
+            invalid.validate(),
+            Err("system resource sample fields are invalid.")
+        );
     }
 
     const CHANNEL_ID: &str = "8ea48bc4-7f2e-4f89-9bbc-2c58472f0e8e";

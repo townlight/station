@@ -153,6 +153,7 @@ impl Api {
             ("PUT", "/api/v1/channels") => self.put_channel(body),
             ("GET", "/api/v1/channels") => self.list_channels(),
             ("GET", "/api/v1/runtime-safe-to-air") => self.runtime_safe_to_air(),
+            ("GET", "/api/v1/system-resources/latest") => self.latest_system_resources(),
             ("PUT", "/api/v1/alert-channels") => self.put_alert_channel(body),
             ("GET", "/api/v1/alert-channels") => self.list_alert_channels(),
             ("GET", "/api/v1/alert-rules") => self.list_alert_rules(),
@@ -609,6 +610,17 @@ impl Api {
             Ok(events) => json_response(
                 200,
                 serde_json::to_vec(&events).expect("serializing alert events cannot fail"),
+            ),
+            Err(message) => error_response(500, "storage_error", &message),
+        }
+    }
+
+    fn latest_system_resources(&self) -> ApiResponse {
+        match self.storage.latest_system_resource_sample() {
+            Ok(sample) => json_response(
+                200,
+                serde_json::to_vec(&sample)
+                    .expect("serializing the latest system resource sample cannot fail"),
             ),
             Err(message) => error_response(500, "storage_error", &message),
         }

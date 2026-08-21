@@ -4,7 +4,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use station_domain::{
     AlertChannel, AlertChannelKind, AlertConditionKind, AlertDeliveryState, AlertEvent,
     AlertEventState, AlertNotificationKind, AlertRule, AlertSeverity, ChannelRuntimeObservation,
-    ChannelRuntimeState, redact_alert_channel_target,
+    ChannelRuntimeState, SystemResourceSample, redact_alert_channel_target,
 };
 use station_schedule::ChannelConfiguration;
 use station_storage::{AlertChannelSecret, StationStore};
@@ -120,6 +120,42 @@ fn persists_monotonic_channel_runtime_truth() {
 
     let reopened = StationStore::open(&database).unwrap();
     assert_eq!(reopened.list_channel_runtime().unwrap(), vec![fallback]);
+    drop(reopened);
+    remove_database(&database);
+}
+
+#[test]
+fn persists_latest_bounded_precision_system_resource_truth() {
+    let database = database_path("system-resources");
+    let store = StationStore::open(&database).unwrap();
+    let recorded = store
+        .record_system_resource_sample(&SystemResourceSample {
+            sample_id: None,
+            sampled_at_unix_ms: 1_000,
+            cpu_percent: Some(32.1254),
+            ram_used_gb: Some(7.5555),
+            ram_total_gb: Some(16.0),
+            gpu_percent: None,
+            gpu_vram_used_gb: None,
+            media_volume_free_gb: Some(88.25),
+            backup_volume_free_gb: Some(77.5),
+            database_reachable: true,
+            backup_volume_writable: true,
+            service_running: true,
+            clock_skew_seconds: Some(-0.125),
+        })
+        .unwrap();
+    assert_eq!(recorded.sample_id, Some(1));
+    assert_eq!(recorded.cpu_percent, Some(32.125));
+    assert_eq!(recorded.ram_used_gb, Some(7.556));
+    assert_eq!(recorded.clock_skew_seconds, Some(-0.125));
+    drop(store);
+
+    let reopened = StationStore::open(&database).unwrap();
+    assert_eq!(
+        reopened.latest_system_resource_sample().unwrap(),
+        Some(recorded)
+    );
     drop(reopened);
     remove_database(&database);
 }

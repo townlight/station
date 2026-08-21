@@ -1365,6 +1365,7 @@ dependencies = [
  "station-domain",
  "station-storage",
  "ureq",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
