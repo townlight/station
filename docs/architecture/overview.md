@@ -56,6 +56,16 @@ The operator console is a production React/TypeScript bundle embedded into `stat
 
 `station-media-engine` owns the GStreamer graph. It builds all elements through factories and leaves OpenH264, AAC, the parsers, `mpegtsmux`, and stable output branches in one persistent graph across switches. A validated stored asset can be decoded and added while fallback remains on air. Preparing the next asset uses generation-scoped elements; only after the new leg is ready does it become the program target, after which the retired decoder is disconnected, stopped, awaited in `NULL`, and removed. File pads receive the running pipeline offset, both selectors feed single continuous timelines, and video/audio rate adjusters prevent boundary jitter. A typed output profile crosses UI, API, SQLite, supervision, process, and GStreamer boundaries without reinterpretation. After the one encoder and mux, a tee feeds isolated queues and typed UDP-TS or SRT caller sinks; channel configuration persists stable sink identities separately from the encoded profile. Required SRT branches must connect and transmit before worker readiness; encrypted branches set a write-only passphrase with a 32-byte AES key. The Windows machine tests validate actual transport across two distinct real assets, prove 720p59.94 dimensions, cadence, and CBR rate, receive the same live transport on two independent UDP destinations, and capture both open and AES-256 MPEG-TS through real SRT caller/listener pairs. See [ADR 0004](../adr/0004-persistent-gstreamer-graph.md), [ADR 0022](../adr/0022-typed-output-profile-contracts.md), [ADR 0023](../adr/0023-stable-output-branches.md), [ADR 0025](../adr/0025-required-srt-caller-output.md), and [ADR 0026](../adr/0026-machine-protected-srt-passphrases.md).
 
+The first CG renderer slice is now bounded behind the same worker protocol. A fixed eight-slot
+compositor is built at startup; each slot has one BGRA branch with serial text and clock overlays
+followed by black-key transparency, and live updates change properties rather than graph topology. The cache-only
+resolved snapshot is handed to the worker with `ApplyCgSnapshot`/`ClearCgSnapshot`; complete
+snapshot equality controls deduplication, and invalid updates retain the last valid visible state.
+The implemented scope is manual/bulletin text, clock, and static lower-third, ticker-region, and
+bug-region geometry. Feed normalization has offline hostile-input coverage, and the focused decoded
+UDP pixel apply/change/clear gate passes; live feed transport, installed operation, and field soak
+remain separate gates. See [ADR 0030](../adr/0030-fixed-cg-overlay-compositor.md), [hostile feed proof](../proof/2026-08-21-feed-hostile-normalization.md), and [decoded CG proof record](../proof/2026-08-21-cg-udp-decoded-pixel.md).
+
 ## Authority rules
 
 | Truth | Owner |
