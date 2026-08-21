@@ -4,6 +4,8 @@ TownLight Station is a locally installed Windows broadcast appliance for LPM and
 
 The current foundation provides a versioned station-profile API, strict commissioning validation, SQLite persistence in WAL mode, and a runnable HTTP daemon. It is the first vertical slice of the station control plane, not a feature-complete release.
 
+The repository also defines the first version of the length-framed, typed command/event protocol between the control plane and isolated channel workers. Unknown major versions and malformed frames fail closed.
+
 ## Architecture
 
 - Rust owns the station control plane and isolated media workers.

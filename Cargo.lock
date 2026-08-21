@@ -93,6 +93,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "station-media-protocol"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "station-storage"
 version = "0.1.0"
 dependencies = [
