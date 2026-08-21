@@ -44,6 +44,8 @@ Installation is health-gated before Inno Setup commits the product registration:
 
 Run `installer\verify-installed.ps1` after installation to compare installed hashes and receipts with the candidate manifest and to prove the service, health endpoint, and required media factories. Development candidates are not code-signed; a trusted Windows signing identity and timestamp are mandatory release gates before external distribution.
 
+The exact commissioning candidate `8e9a27d3286815e0b34a0fad961cb2e5dc9a5a84` passed post-install hash/service verification and the complete installed commissioning harness, including decoded CG apply/change/clear, canonical media admission, all four acknowledged dispatch states, service restart, and green recovery. See the [installed commissioning proof](docs/proof/2026-08-21-installed-commissioning.md). Clean-machine, headend, and field-duration gates remain separate.
+
 ## API
 
 `GET /health` reports whether the local database is ready.
