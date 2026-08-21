@@ -21,7 +21,7 @@ Control commands and observed worker events use typed envelopes from `station-me
 - Unknown major versions, truncated frames, conflicting lengths, and invalid JSON fail closed.
 - Minor versions are forward-compatible when added fields are optional.
 
-The transport will be an ACL-protected Windows named pipe. This ADR freezes the wire contract independently of that transport implementation.
+The transport is a duplex byte-mode Windows named pipe in the product-scoped `\\.\pipe\townlight-station\` namespace. The server permits a single instance, rejects remote clients, and uses a protected ACL granting access only to SYSTEM, Administrators, and the creating user. The worker opens the client handle at security-identification impersonation level. Standard input and output are not part of the protocol.
 
 ## Consequences
 

@@ -8,6 +8,7 @@ members = [
     "crates/station-media-journal",
     "crates/station-media-protocol",
     "crates/station-storage",
+    "crates/station-windows-ipc",
 ]
 
 [workspace.package]
@@ -23,6 +24,7 @@ station-domain = { path = "crates/station-domain" }
 station-media-journal = { path = "crates/station-media-journal" }
 station-media-protocol = { path = "crates/station-media-protocol" }
 station-storage = { path = "crates/station-storage" }
+station-windows-ipc = { path = "crates/station-windows-ipc" }
 
 [profile.release]
 lto = "thin"

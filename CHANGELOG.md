@@ -18,3 +18,4 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Versioned, bounded command and event frames for the channel-worker boundary, including incompatible-version and truncation rejection.
 - Durable per-channel event journals with checksums, strict sequences, identity isolation, synchronized writes, restart recovery, and visible corruption failures.
 - Executable `channel-worker` process that journals readiness, heartbeat, plan, rejection, and shutdown events before emitting them.
+- Local-only duplex Windows named-pipe transport with a protected ACL, first-instance ownership, scoped names, and process-level command/event contract tests.

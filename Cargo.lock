@@ -8,6 +8,7 @@ version = "0.1.0"
 dependencies = [
  "station-media-journal",
  "station-media-protocol",
+ "station-windows-ipc",
 ]
 
 [[package]]
@@ -121,6 +122,10 @@ version = "0.1.0"
 dependencies = [
  "station-domain",
 ]
+
+[[package]]
+name = "station-windows-ipc"
+version = "0.1.0"
 
 [[package]]
 name = "stationd"

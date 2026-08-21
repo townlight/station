@@ -1,0 +1,5 @@
+[package]
+name = "station-windows-ipc"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true

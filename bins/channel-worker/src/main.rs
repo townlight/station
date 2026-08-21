@@ -7,31 +7,30 @@ use station_media_protocol::{
     ChannelCommand, CommandEnvelope, MAX_FRAME_BYTES, PROTOCOL_VERSION, WorkerEvent,
     WorkerEventEnvelope, decode_command_frame, encode_event_frame,
 };
+use station_windows_ipc::PipeStream;
 
 fn main() {
-    let (worker_id, channel_id, journal_path) = arguments().unwrap_or_else(|message| {
+    let (worker_id, channel_id, journal_path, pipe_name) = arguments().unwrap_or_else(|message| {
         eprintln!("{message}");
         std::process::exit(2);
     });
     let mut journal = JournalWriter::open(journal_path, &worker_id, &channel_id)
         .unwrap_or_else(|error| fatal(3, "open its journal", &format!("{error:?}")));
     let started = Instant::now();
-    let stdout = std::io::stdout();
-    let mut output = stdout.lock();
+    let mut pipe = PipeStream::connect(&pipe_name)
+        .unwrap_or_else(|error| fatal(5, "connect to its control pipe", &format!("{error:?}")));
 
     record_and_emit(
         &mut journal,
-        &mut output,
+        &mut pipe,
         &worker_id,
         &channel_id,
         WorkerEvent::Ready { graph_revision: 0 },
     )
     .unwrap_or_else(|error| fatal(4, "record and emit readiness", &error));
 
-    let stdin = std::io::stdin();
-    let mut input = stdin.lock();
     loop {
-        let frame = match read_command_frame(&mut input) {
+        let frame = match read_command_frame(&mut pipe) {
             Ok(Some(frame)) => frame,
             Ok(None) => break,
             Err(error) => fatal(5, "read a command frame", &error),
@@ -44,7 +43,7 @@ fn main() {
             journal.next_sequence(),
             started.elapsed().as_millis() as u64,
         );
-        record_and_emit(&mut journal, &mut output, &worker_id, &channel_id, event)
+        record_and_emit(&mut journal, &mut pipe, &worker_id, &channel_id, event)
             .unwrap_or_else(|error| fatal(7, "record and emit an event", &error));
         if should_stop {
             break;
@@ -52,21 +51,24 @@ fn main() {
     }
 }
 
-fn arguments() -> Result<(String, String, PathBuf), &'static str> {
+fn arguments() -> Result<(String, String, PathBuf, String), &'static str> {
     let mut arguments = std::env::args_os().skip(1);
     let Some(worker_id) = arguments.next().and_then(|value| value.into_string().ok()) else {
-        return Err("usage: channel-worker <worker-id> <channel-id> <journal-path>");
+        return Err("usage: channel-worker <worker-id> <channel-id> <journal-path> <pipe-name>");
     };
     let Some(channel_id) = arguments.next().and_then(|value| value.into_string().ok()) else {
-        return Err("usage: channel-worker <worker-id> <channel-id> <journal-path>");
+        return Err("usage: channel-worker <worker-id> <channel-id> <journal-path> <pipe-name>");
     };
     let Some(journal_path) = arguments.next().map(PathBuf::from) else {
-        return Err("usage: channel-worker <worker-id> <channel-id> <journal-path>");
+        return Err("usage: channel-worker <worker-id> <channel-id> <journal-path> <pipe-name>");
+    };
+    let Some(pipe_name) = arguments.next().and_then(|value| value.into_string().ok()) else {
+        return Err("usage: channel-worker <worker-id> <channel-id> <journal-path> <pipe-name>");
     };
     if arguments.next().is_some() {
-        return Err("usage: channel-worker <worker-id> <channel-id> <journal-path>");
+        return Err("usage: channel-worker <worker-id> <channel-id> <journal-path> <pipe-name>");
     }
-    Ok((worker_id, channel_id, journal_path))
+    Ok((worker_id, channel_id, journal_path, pipe_name))
 }
 
 fn read_command_frame(input: &mut impl Read) -> Result<Option<Vec<u8>>, String> {

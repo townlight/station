@@ -7,6 +7,7 @@ publish.workspace = true
 [dependencies]
 station-media-journal.workspace = true
 station-media-protocol.workspace = true
+station-windows-ipc.workspace = true
 
 [dev-dependencies]
 station-media-journal.workspace = true
