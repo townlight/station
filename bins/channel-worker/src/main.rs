@@ -6,9 +6,9 @@ use std::time::Instant;
 use station_media_engine::{PersistentPlayout, SourceRole, TransportOutput};
 use station_media_journal::JournalWriter;
 use station_media_protocol::{
-    ChannelCommand, CommandEnvelope, MAX_FRAME_BYTES, PROTOCOL_VERSION, WorkerEvent,
-    WorkerEventEnvelope, WorkerOutputConfiguration, decode_bootstrap_frame, decode_command_frame,
-    encode_event_frame,
+    ChannelCommand, CommandEnvelope, MAX_FRAME_BYTES, OutputTransportObservation, PROTOCOL_VERSION,
+    WorkerEvent, WorkerEventEnvelope, WorkerOutputConfiguration, decode_bootstrap_frame,
+    decode_command_frame, encode_event_frame,
 };
 use station_schedule::OutputProfileId;
 use station_windows_ipc::PipeStream;
@@ -219,12 +219,40 @@ fn decide_event(
         );
     }
     match &command.command {
-        ChannelCommand::Ping => (
-            WorkerEvent::Heartbeat {
-                monotonic_milliseconds,
-            },
-            false,
-        ),
+        ChannelCommand::Ping => match media.output_bytes_sent().and_then(|bytes_sent| {
+            bytes_sent
+                .into_iter()
+                .enumerate()
+                .map(|(output_index, bytes_sent_total)| {
+                    u16::try_from(output_index)
+                        .map(|output_index| OutputTransportObservation {
+                            output_index,
+                            bytes_sent_total,
+                        })
+                        .map_err(|_| {
+                            station_media_engine::EngineError::State(
+                                "output count exceeds the heartbeat protocol limit".into(),
+                            )
+                        })
+                })
+                .collect::<Result<Vec<_>, _>>()
+        }) {
+            Ok(outputs) => (
+                WorkerEvent::Heartbeat {
+                    monotonic_milliseconds,
+                    outputs,
+                },
+                false,
+            ),
+            Err(error) => (
+                rejection(
+                    command,
+                    "output_health_failed",
+                    &format!("Required output health could not be verified: {error:?}"),
+                ),
+                false,
+            ),
+        },
         ChannelCommand::ApplyPlan { revision, .. } => (
             WorkerEvent::Ready {
                 graph_revision: *revision,

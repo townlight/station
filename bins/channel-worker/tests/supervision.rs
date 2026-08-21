@@ -76,7 +76,12 @@ fn launches_handshakes_commands_and_cleanly_stops_the_real_worker() {
         .command("ping-1", ChannelCommand::Ping, Duration::from_secs(1))
         .unwrap();
     assert_eq!(heartbeat.sequence, 2);
-    assert!(matches!(heartbeat.event, WorkerEvent::Heartbeat { .. }));
+    let WorkerEvent::Heartbeat { ref outputs, .. } = heartbeat.event else {
+        panic!("the real worker did not return a transport heartbeat");
+    };
+    assert_eq!(outputs.len(), 1);
+    assert_eq!(outputs[0].output_index, 0);
+    assert!(outputs[0].bytes_sent_total > 0);
 
     let applied = supervisor
         .command(

@@ -456,6 +456,12 @@ fn seeds_editable_rules_and_routes_bounded_realerts_to_selected_destinations() {
         .unwrap();
     assert_eq!(default.severity, AlertSeverity::Critical);
     assert_eq!(default.re_alert_after_seconds, 3_600);
+    let output_stall = defaults
+        .iter()
+        .find(|rule| rule.condition == AlertConditionKind::OutputStall)
+        .expect("a required-output stall must have an editable seeded rule");
+    assert_eq!(output_stall.severity, AlertSeverity::Critical);
+    assert_eq!(output_stall.re_alert_after_seconds, 3_600);
 
     let selected_channel = "70c12dc7-b29e-426f-a26d-8678102ffb10";
     let excluded_channel = "bf45c318-27a9-4c6c-82f6-d35f430cfaeb";

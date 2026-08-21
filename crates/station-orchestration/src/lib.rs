@@ -34,7 +34,21 @@ pub enum OrchestrationError {
     Worker(SupervisorError),
     UnexpectedWorkerEvent,
     ConcurrentTransition,
+    RequiredOutputStalled {
+        sink_id: String,
+        label: String,
+        detail: String,
+    },
+    OutputGraphUnhealthy {
+        detail: String,
+    },
     Clock(String),
+}
+
+struct OutputExpectation {
+    sink_id: String,
+    label: String,
+    required: bool,
 }
 
 pub struct ChannelController {
@@ -47,6 +61,8 @@ pub struct ChannelController {
     runtime_state: ChannelRuntimeState,
     state_started_at_unix_ms: i64,
     last_heartbeat_at_unix_ms: i64,
+    output_expectations: Vec<OutputExpectation>,
+    last_output_bytes: Option<Vec<u64>>,
 }
 
 impl ChannelController {
@@ -92,6 +108,16 @@ impl ChannelController {
                 }
             })
             .collect::<Result<Vec<_>, OrchestrationError>>()?;
+        let output_expectations = channel
+            .output_sinks
+            .iter()
+            .filter(|sink| sink.enabled)
+            .map(|sink| OutputExpectation {
+                sink_id: sink.sink_id.clone(),
+                label: sink.label.clone(),
+                required: sink.required,
+            })
+            .collect();
         let worker_id = format!("station-worker-{}", channel.channel_id);
         let supervisor = WorkerSupervisor::launch_with_outputs(
             worker_executable,
@@ -114,7 +140,56 @@ impl ChannelController {
             runtime_state: ChannelRuntimeState::HealthyFallback,
             state_started_at_unix_ms: started_at_unix_ms,
             last_heartbeat_at_unix_ms: started_at_unix_ms,
+            output_expectations,
+            last_output_bytes: None,
         })
+    }
+
+    fn poll_health(&mut self, now_unix_ms: i64) -> Result<(), OrchestrationError> {
+        let response = self
+            .supervisor
+            .command(
+                &format!("heartbeat-{now_unix_ms}"),
+                ChannelCommand::Ping,
+                self.command_timeout,
+            )
+            .map_err(OrchestrationError::Worker)?;
+        let outputs = match response.event {
+            WorkerEvent::Heartbeat { outputs, .. } => outputs,
+            WorkerEvent::CommandRejected { code, message, .. }
+                if code == "output_health_failed" =>
+            {
+                return Err(OrchestrationError::OutputGraphUnhealthy { detail: message });
+            }
+            _ => return Err(OrchestrationError::UnexpectedWorkerEvent),
+        };
+        if outputs.len() != self.output_expectations.len()
+            || outputs
+                .iter()
+                .enumerate()
+                .any(|(index, output)| usize::from(output.output_index) != index)
+        {
+            return Err(OrchestrationError::UnexpectedWorkerEvent);
+        }
+        let current = outputs
+            .into_iter()
+            .map(|output| output.bytes_sent_total)
+            .collect::<Vec<_>>();
+        if let Some(index) = stalled_required_output(
+            &self.output_expectations,
+            self.last_output_bytes.as_deref(),
+            &current,
+        ) {
+            let expectation = &self.output_expectations[index];
+            return Err(OrchestrationError::RequiredOutputStalled {
+                sink_id: expectation.sink_id.clone(),
+                label: expectation.label.clone(),
+                detail: "The local transport byte counter did not advance between heartbeat polls."
+                    .into(),
+            });
+        }
+        self.last_output_bytes = Some(current);
+        Ok(())
     }
 
     pub fn run_once(
@@ -338,6 +413,24 @@ impl ChannelController {
     }
 }
 
+fn stalled_required_output(
+    expectations: &[OutputExpectation],
+    previous: Option<&[u64]>,
+    current: &[u64],
+) -> Option<usize> {
+    expectations
+        .iter()
+        .enumerate()
+        .find(|(index, expectation)| {
+            expectation.required
+                && previous.map_or_else(
+                    || current[*index] == 0,
+                    |prior| current[*index] <= prior[*index],
+                )
+        })
+        .map(|(index, _)| index)
+}
+
 pub fn run_until(
     database_path: &Path,
     worker_executable: &Path,
@@ -428,9 +521,16 @@ pub fn run_until(
         let dispatch_now = system_time_millis()?;
         let mut failed = Vec::new();
         for (channel_id, controller) in &mut controllers {
-            match controller.run_once(dispatch_now) {
+            let heartbeat_due = controller.heartbeat_due(dispatch_now);
+            let result = (|| {
+                if heartbeat_due {
+                    controller.poll_health(dispatch_now)?;
+                }
+                controller.run_once(dispatch_now)
+            })();
+            match result {
                 Ok(transition) => {
-                    if transition.is_some() || controller.heartbeat_due(dispatch_now) {
+                    if transition.is_some() || heartbeat_due {
                         store
                             .put_channel_runtime(&controller.runtime_observation(dispatch_now))
                             .map_err(OrchestrationError::Storage)?;
@@ -497,16 +597,34 @@ fn record_channel_failure(
             detail: Some(detail.clone()),
         })
         .map_err(OrchestrationError::Storage)?;
-    for (condition, summary) in [
-        (
-            AlertConditionKind::EncoderDeath,
-            "Channel worker is not running.",
-        ),
-        (
-            AlertConditionKind::OffAir,
-            "Enabled channel output is not on verified fallback or scheduled media.",
-        ),
-    ] {
+    let conditions = if matches!(
+        error,
+        OrchestrationError::RequiredOutputStalled { .. }
+            | OrchestrationError::OutputGraphUnhealthy { .. }
+    ) {
+        vec![
+            (
+                AlertConditionKind::OutputStall,
+                "A required channel output stopped advancing.",
+            ),
+            (
+                AlertConditionKind::OffAir,
+                "Enabled channel output is not on verified fallback or scheduled media.",
+            ),
+        ]
+    } else {
+        vec![
+            (
+                AlertConditionKind::EncoderDeath,
+                "Channel worker is not running.",
+            ),
+            (
+                AlertConditionKind::OffAir,
+                "Enabled channel output is not on verified fallback or scheduled media.",
+            ),
+        ]
+    };
+    for (condition, summary) in conditions {
         store
             .observe_alert_and_route(&AlertEvent {
                 event_id: format!(
@@ -550,6 +668,12 @@ fn operator_failure_detail(error: &OrchestrationError) -> String {
             "The channel worker returned an unexpected acknowledgment; output was stopped rather than accepting uncertain on-air state.".into(),
         OrchestrationError::ConcurrentTransition =>
             "The schedule changed during dispatch; TownLight Station stopped the transition rather than overwrite newer authority.".into(),
+        OrchestrationError::RequiredOutputStalled { sink_id, label, detail } => format!(
+            "Required output '{label}' ({sink_id}) stopped advancing; the worker was stopped and automatic restart attempts are active. {detail}"
+        ),
+        OrchestrationError::OutputGraphUnhealthy { detail } => format!(
+            "The output graph reported an unhealthy transport; the worker was stopped and automatic restart attempts are active. {detail}"
+        ),
         OrchestrationError::Clock(_) =>
             "The station clock could not provide a valid dispatch time; verify Windows time service before returning this output to service.".into(),
     }
@@ -560,7 +684,11 @@ fn resolve_channel_failure(
     channel_id: &str,
     resolved_at_unix_ms: i64,
 ) -> Result<(), OrchestrationError> {
-    for condition in [AlertConditionKind::EncoderDeath, AlertConditionKind::OffAir] {
+    for condition in [
+        AlertConditionKind::EncoderDeath,
+        AlertConditionKind::OutputStall,
+        AlertConditionKind::OffAir,
+    ] {
         store
             .resolve_alert(condition, channel_id, resolved_at_unix_ms)
             .map_err(OrchestrationError::Storage)?;
@@ -583,4 +711,38 @@ fn system_time_millis() -> Result<i64, OrchestrationError> {
         .map_err(|error| OrchestrationError::Clock(error.to_string()))?
         .as_millis();
     i64::try_from(millis).map_err(|_| OrchestrationError::Clock("system time exceeds i64".into()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{OutputExpectation, stalled_required_output};
+
+    fn output(required: bool) -> OutputExpectation {
+        OutputExpectation {
+            sink_id: "76ad7ff3-60cb-4ae5-862c-b26d66e45808".into(),
+            label: "Test output".into(),
+            required,
+        }
+    }
+
+    #[test]
+    fn requires_initial_bytes_and_continuous_progress_only_for_required_outputs() {
+        assert_eq!(
+            stalled_required_output(&[output(true)], None, &[0]),
+            Some(0)
+        );
+        assert_eq!(stalled_required_output(&[output(true)], None, &[1]), None);
+        assert_eq!(
+            stalled_required_output(&[output(true)], Some(&[100]), &[100]),
+            Some(0)
+        );
+        assert_eq!(
+            stalled_required_output(&[output(true)], Some(&[100]), &[101]),
+            None
+        );
+        assert_eq!(
+            stalled_required_output(&[output(false)], Some(&[100]), &[100]),
+            None
+        );
+    }
 }

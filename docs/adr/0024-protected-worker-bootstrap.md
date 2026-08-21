@@ -20,4 +20,4 @@ The worker command line contains only its worker identity, channel identity, jou
 
 ## Consequences
 
-Output destinations and transport credentials do not appear in process listings or installer/service arguments. Protocol minor version 1.3 carries a debug-redacted optional SRT passphrase in the bootstrap envelope without changing the command/event major contract. A worker can no longer be launched as a useful standalone playout process by supplying destinations on its command line; it requires an authenticated local supervisor connection and valid bootstrap frame.
+Output destinations and transport credentials do not appear in process listings or installer/service arguments. Protocol minor version 1.4 carries a debug-redacted optional SRT passphrase in the bootstrap envelope and ordered output counters in heartbeat events without changing the command/event major contract. A worker can no longer be launched as a useful standalone playout process by supplying destinations on its command line; it requires an authenticated local supervisor connection and valid bootstrap frame.

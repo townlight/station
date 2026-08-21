@@ -74,9 +74,15 @@ pub struct PersistentPlayout {
     audio_selector: gst::Element,
     audio_fallback_pad: gst::Pad,
     audio_program_pad: gst::Pad,
+    output_counters: Vec<OutputCounter>,
     output_profile: OutputProfileId,
     file_program: Option<FileProgram>,
     stopped: bool,
+}
+
+enum OutputCounter {
+    Udp(gst::Element),
+    Srt(gst::Element),
 }
 
 impl PersistentPlayout {
@@ -244,6 +250,7 @@ impl PersistentPlayout {
             .map_err(|error| build_error("mpegtsmux", error))?;
         let transport_fanout = element("tee", "transport-fanout")?;
         let mut output_branches = Vec::with_capacity(outputs.len());
+        let mut output_counters = Vec::with_capacity(outputs.len());
         let mut srt_sinks = Vec::new();
         for (index, output) in outputs.iter().enumerate() {
             let queue = element("queue", format!("transport-output-queue-{index}"))?;
@@ -278,8 +285,12 @@ impl PersistentPlayout {
                         .map_err(|error| build_error("srtsink", error))?
                 }
             };
-            if matches!(output, TransportOutput::Srt { .. }) {
-                srt_sinks.push(sink.clone());
+            match output {
+                TransportOutput::Udp(_) => output_counters.push(OutputCounter::Udp(sink.clone())),
+                TransportOutput::Srt { .. } => {
+                    srt_sinks.push(sink.clone());
+                    output_counters.push(OutputCounter::Srt(sink.clone()));
+                }
             }
             output_branches.push((queue, sink));
         }
@@ -424,12 +435,41 @@ impl PersistentPlayout {
             audio_selector,
             audio_fallback_pad,
             audio_program_pad,
+            output_counters,
             output_profile,
             file_program,
             stopped: false,
         };
         playout.wait_for_source(SourceRole::Fallback, Duration::from_secs(2))?;
         Ok(playout)
+    }
+
+    pub fn output_bytes_sent(&self) -> Result<Vec<u64>, EngineError> {
+        if let Some(message) = self
+            .pipeline
+            .bus()
+            .and_then(|bus| bus.pop_filtered(&[gst::MessageType::Error]))
+            && let gst::MessageView::Error(error) = message.view()
+        {
+            return Err(EngineError::State(format!(
+                "output graph reported an error: {}",
+                error.error()
+            )));
+        }
+        self.output_counters
+            .iter()
+            .map(|counter| match counter {
+                OutputCounter::Udp(sink) => Ok(sink.property::<u64>("bytes-served")),
+                OutputCounter::Srt(sink) => sink
+                    .property::<gst::Structure>("stats")
+                    .get::<u64>("bytes-sent-total")
+                    .map_err(|error| {
+                        EngineError::State(format!(
+                            "could not read required SRT output statistics: {error}"
+                        ))
+                    }),
+            })
+            .collect()
     }
 
     pub fn active_source(&self) -> Result<SourceRole, EngineError> {

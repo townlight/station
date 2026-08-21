@@ -1,6 +1,6 @@
 use station_media_protocol::{
-    ChannelCommand, CommandEnvelope, PROTOCOL_VERSION, ProtocolError, ProtocolVersion,
-    SrtPassphrase, WorkerBootstrapEnvelope, WorkerEvent, WorkerEventEnvelope,
+    ChannelCommand, CommandEnvelope, OutputTransportObservation, PROTOCOL_VERSION, ProtocolError,
+    ProtocolVersion, SrtPassphrase, WorkerBootstrapEnvelope, WorkerEvent, WorkerEventEnvelope,
     WorkerOutputConfiguration, decode_bootstrap_frame, decode_command_frame, decode_event_frame,
     encode_bootstrap_frame, encode_command_frame, encode_event_frame,
 };
@@ -114,6 +114,28 @@ fn round_trips_worker_events_and_rejects_an_incompatible_major() {
     };
     let frame = encode_event_frame(&event).expect("event encodes");
     assert_eq!(decode_event_frame(&frame).unwrap(), event);
+
+    let heartbeat = WorkerEventEnvelope {
+        version: PROTOCOL_VERSION,
+        worker_id: "ae819b97-2920-434b-9d96-0b51a8ea9abb".into(),
+        channel_id: "62a47b7e-2a03-48d6-8703-a6e5ce986527".into(),
+        sequence: 44,
+        event: WorkerEvent::Heartbeat {
+            monotonic_milliseconds: 5_000,
+            outputs: vec![
+                OutputTransportObservation {
+                    output_index: 0,
+                    bytes_sent_total: 4_000_000,
+                },
+                OutputTransportObservation {
+                    output_index: 1,
+                    bytes_sent_total: 4_000_100,
+                },
+            ],
+        },
+    };
+    let frame = encode_event_frame(&heartbeat).expect("heartbeat encodes");
+    assert_eq!(decode_event_frame(&frame).unwrap(), heartbeat);
 
     let mut incompatible = event;
     incompatible.version = ProtocolVersion { major: 9, minor: 0 };

@@ -4683,6 +4683,7 @@ fn parse_self_test_status(value: &str) -> Result<SelfTestStatus, String> {
 fn alert_condition_name(value: AlertConditionKind) -> &'static str {
     match value {
         AlertConditionKind::OffAir => "off-air",
+        AlertConditionKind::OutputStall => "output-stall",
         AlertConditionKind::EncoderDeath => "encoder-death",
         AlertConditionKind::ServerCrash => "server-crash",
         AlertConditionKind::SchemaDrift => "schema-drift",
@@ -4706,6 +4707,7 @@ fn alert_condition_name(value: AlertConditionKind) -> &'static str {
 fn parse_alert_condition(value: &str) -> Result<AlertConditionKind, String> {
     match value {
         "off-air" => Ok(AlertConditionKind::OffAir),
+        "output-stall" => Ok(AlertConditionKind::OutputStall),
         "encoder-death" => Ok(AlertConditionKind::EncoderDeath),
         "server-crash" => Ok(AlertConditionKind::ServerCrash),
         "schema-drift" => Ok(AlertConditionKind::SchemaDrift),
@@ -4730,6 +4732,11 @@ fn parse_alert_condition(value: &str) -> Result<AlertConditionKind, String> {
 fn default_alert_rules() -> Vec<AlertRule> {
     let definitions = [
         (AlertConditionKind::OffAir, AlertSeverity::Critical, 3_600),
+        (
+            AlertConditionKind::OutputStall,
+            AlertSeverity::Critical,
+            3_600,
+        ),
         (
             AlertConditionKind::EncoderDeath,
             AlertSeverity::Critical,
@@ -5399,7 +5406,7 @@ mod tests {
             .unwrap();
         assert_eq!(delivery.notification_kind, AlertNotificationKind::Resolved);
         assert_eq!(delivery.state, AlertDeliveryState::Sent);
-        assert_eq!(migrated.list_alert_rules().unwrap().len(), 18);
+        assert_eq!(migrated.list_alert_rules().unwrap().len(), 19);
         drop(migrated);
         for candidate in [
             database.clone(),

@@ -35,6 +35,7 @@ fn persists_events_across_reopen_without_sequence_loss() {
         2,
         WorkerEvent::Heartbeat {
             monotonic_milliseconds: 500,
+            outputs: Vec::new(),
         },
     );
 

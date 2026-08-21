@@ -18,7 +18,7 @@ Each channel owns an ordered set of durable, typed output sinks. Every sink has 
 - The current `udp-ts` implementation encodes and multiplexes exactly once, then uses a `tee` and an isolated queue per destination. A slow or failed branch therefore does not introduce another encoder or replace the persistent program graph.
 - The supervisor passes the complete enabled destination set to the worker at launch. The worker owns all GStreamer sink branches and reports ready only after the graph reaches its running state.
 - All UDP-TS branches currently share the selected encoded audio contract, so their loudness targets must match the output profile. Future branches that genuinely require different audio processing must make that processing explicit rather than claiming unsupported per-sink normalization.
-- `required` is durable commissioning intent. It will become part of continuous per-branch health and safe-to-air evaluation when receiver/device telemetry is introduced; it is not yet represented as independently observed receiver health.
+- `required` is durable commissioning intent. Every five-second worker heartbeat reports a byte counter for each ordered branch, and failure of any required counter to advance fails channel safe-to-air and enters supervised restart. This proves local sink progress. UDP still requires external receiver/device telemetry for end-to-end headend truth.
 
 ## Consequences
 

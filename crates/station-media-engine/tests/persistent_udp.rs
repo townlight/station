@@ -32,6 +32,17 @@ fn fans_one_persistent_transport_out_to_two_independent_udp_sinks() {
     let mut redundant_truth = ContinuityTracker::default();
     assert_transport_stream(&primary, &mut primary_truth, 24);
     assert_transport_stream(&redundant, &mut redundant_truth, 24);
+    let first_counters = playout.output_bytes_sent().unwrap();
+    std::thread::sleep(Duration::from_millis(300));
+    let second_counters = playout.output_bytes_sent().unwrap();
+    assert_eq!(first_counters.len(), 2);
+    assert!(
+        second_counters
+            .iter()
+            .zip(first_counters)
+            .all(|(current, previous)| *current > previous),
+        "every UDP output counter must advance while the graph is healthy"
+    );
     for truth in [&primary_truth, &redundant_truth] {
         assert!(truth.video_pid.is_some());
         assert!(truth.audio_pid.is_some());
@@ -75,7 +86,11 @@ fn sends_the_persistent_transport_to_an_srt_listener() {
         OutputProfileId::Proof360p30,
     )
     .expect("the SRT caller output must start");
+    let first_counter = playout.output_bytes_sent().unwrap();
     std::thread::sleep(Duration::from_secs(4));
+    let second_counter = playout.output_bytes_sent().unwrap();
+    assert_eq!(first_counter.len(), 1);
+    assert!(second_counter[0] > first_counter[0]);
     playout.stop().unwrap();
     receiver.set_state(gst::State::Null).unwrap();
     receiver.state(gst::ClockTime::from_seconds(5)).0.unwrap();

@@ -383,6 +383,7 @@ pub fn derive_runtime_safe_to_air(
 #[serde(rename_all = "kebab-case")]
 pub enum AlertConditionKind {
     OffAir,
+    OutputStall,
     EncoderDeath,
     ServerCrash,
     SchemaDrift,

@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 pub const MAX_FRAME_BYTES: usize = 65_536;
-pub const PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion { major: 1, minor: 3 };
+pub const PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion { major: 1, minor: 4 };
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(transparent)]
@@ -103,6 +103,12 @@ pub struct WorkerEventEnvelope {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OutputTransportObservation {
+    pub output_index: u16,
+    pub bytes_sent_total: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum WorkerEvent {
     Ready {
@@ -122,6 +128,7 @@ pub enum WorkerEvent {
     },
     Heartbeat {
         monotonic_milliseconds: u64,
+        outputs: Vec<OutputTransportObservation>,
     },
     ShutdownComplete,
 }

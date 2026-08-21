@@ -919,6 +919,7 @@ fn alert_condition_label(condition: station_domain::AlertConditionKind) -> &'sta
     use station_domain::AlertConditionKind;
     match condition {
         AlertConditionKind::OffAir => "off-air",
+        AlertConditionKind::OutputStall => "output-stall",
         AlertConditionKind::EncoderDeath => "encoder-death",
         AlertConditionKind::ServerCrash => "server-crash",
         AlertConditionKind::SchemaDrift => "schema-drift",
