@@ -1,0 +1,15 @@
+/target/
+*.db
+*.db-shm
+*.db-wal
+.env
+.env.*
+!.env.example
+*.pfx
+*.p12
+*.pem
+*.key
+.idea/
+.vscode/
+*.user
+*.suo
