@@ -1,8 +1,10 @@
 import React, { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
 import { createRoot } from "react-dom/client";
 import "./styles.css";
+import { CgOperator, CG_ROUTES, CgRoute } from "./cg";
 
-type View = "overview" | "media" | "channels" | "schedule" | "health" | "commissioning";
+type CoreView = "overview" | "media" | "channels" | "schedule" | "health" | "commissioning";
+type View = CoreView | CgRoute;
 type JobStatus = "pending" | "running" | "awaiting_transcode" | "completed" | "failed" | "cancelled";
 
 interface StationDocument {
@@ -315,7 +317,7 @@ interface MaintenanceStatus {
 
 function initialView(): View {
   const requested = new URLSearchParams(window.location.search).get("view");
-  return ["overview", "media", "channels", "schedule", "health", "commissioning"].includes(requested ?? "")
+  return ["overview", "media", "channels", "schedule", "health", "commissioning", ...CG_ROUTES.map((item) => item.id)].includes(requested ?? "")
     ? requested as View
     : "overview";
 }
@@ -369,8 +371,8 @@ function StatusPill({ status }: { status: string }) {
   return <span className={`pill pill-${tone}`}>{status.replaceAll("_", " ")}</span>;
 }
 
-function Icon({ name }: { name: View }) {
-  const paths: Record<View, React.ReactNode> = {
+function Icon({ name }: { name: CoreView }) {
+  const paths: Record<CoreView, React.ReactNode> = {
     overview: <><path d="M4 13h6V4H4zM14 20h6v-9h-6zM4 20h6v-3H4zM14 7h6V4h-6z" /></>,
     media: <><rect x="3" y="5" width="18" height="14" rx="2" /><path d="m10 9 5 3-5 3z" /></>,
     channels: <><path d="M5 8.5a10 10 0 0 0 0 7M19 8.5a10 10 0 0 1 0 7M8.5 10.5a5 5 0 0 0 0 3M15.5 10.5a5 5 0 0 1 0 3" /><circle cx="12" cy="12" r="1.5" /></>,
@@ -747,10 +749,11 @@ function App() {
   }, []);
   useEffect(() => { void request<StationDocument>("/api/v1/station").then((value) => { setStation(value); void refresh(); }).catch((problem) => { if (problem instanceof ApiError && problem.status === 404) setStation(null); else { setStation(null); setError(problem instanceof Error ? problem.message : "Station profile could not be read."); } }); }, [refresh]);
   useEffect(() => { if (!station) return; const timer = window.setInterval(() => void refresh(), 5_000); return () => window.clearInterval(timer); }, [refresh, station]);
-  const nav = useMemo(() => ([{ id: "overview" as View, label: "Overview" }, { id: "media" as View, label: "Media" }, { id: "channels" as View, label: "Channels" }, { id: "schedule" as View, label: "Schedule" }, { id: "health" as View, label: "Health" }, { id: "commissioning" as View, label: "Commission" }]), []);
+  const nav = useMemo(() => ([{ id: "overview" as CoreView, label: "Overview" }, { id: "media" as CoreView, label: "Media" }, { id: "channels" as CoreView, label: "Channels" }, { id: "schedule" as CoreView, label: "Schedule" }, { id: "health" as CoreView, label: "Health" }, { id: "commissioning" as CoreView, label: "Commission" }]), []);
+  const cgNav = useMemo(() => CG_ROUTES.map((item) => ({ id: item.id as View, label: item.shortLabel })), []);
   if (station === undefined) return <div className="boot"><div className="mark">TL</div><div className="boot-line"><i /></div><p>Connecting to TownLight Station…</p></div>;
   if (!station) return <SetupWizard onComplete={(value) => { setStation(value); void refresh(); }} />;
-  return <div className="app-shell"><aside className="sidebar"><div className="brand-lockup"><div className="mark small">TL</div><div><strong>TownLight</strong><span>Station</span></div></div><nav>{nav.map((item) => <button key={item.id} className={view === item.id ? "selected" : ""} onClick={() => setView(item.id)}><Icon name={item.id} /><span>{item.label}</span>{item.id === "media" && Boolean(dashboard?.failed_ingest_count) && <b>{dashboard?.failed_ingest_count}</b>}{item.id === "health" && Boolean(runtime?.active_critical_alerts || runtime?.active_warning_alerts) && <b>{(runtime?.active_critical_alerts ?? 0) + (runtime?.active_warning_alerts ?? 0)}</b>}</button>)}</nav><div className="station-card"><span className={`live-dot runtime-${runtime?.color ?? "yellow"}`} /><div><strong>{station.display_name}</strong><small>{runtime?.label ?? station.timezone}</small></div></div></aside><main className="workspace">{error && <div className="global-error" role="alert">{error}<button onClick={() => void refresh()}>Retry</button></div>}{view === "overview" && <Overview station={station} dashboard={dashboard} channels={channels} runtime={runtime} onNavigate={setView} />}{view === "media" && <Media dashboard={dashboard} onRefresh={refresh} />}{view === "channels" && <Channels channels={channels} outputProfiles={outputProfiles} onRefresh={refresh} />}{view === "schedule" && <Schedule dashboard={dashboard} channels={channels} />}{view === "health" && <Health runtime={runtime} resources={resources} selfTests={selfTests} selfTestSchedules={selfTestSchedules} updateStatus={updateStatus} alerts={alerts} alertChannels={alertChannels} deliveries={deliveries} rules={rules} outputChannels={channels} onRefresh={refresh} />}{view === "commissioning" && <Commissioning station={station} dashboard={dashboard} channels={channels} />}</main><nav className="mobile-nav">{nav.map((item) => <button key={item.id} aria-label={item.label} className={view === item.id ? "selected" : ""} onClick={() => setView(item.id)}><Icon name={item.id} /><span>{item.label}</span></button>)}</nav></div>;
+  return <div className="app-shell"><aside className="sidebar"><div className="brand-lockup"><div className="mark small">TL</div><div><strong>TownLight</strong><span>Station</span></div></div><nav>{nav.map((item) => <button key={item.id} className={view === item.id ? "selected" : ""} onClick={() => setView(item.id)}><Icon name={item.id} /><span>{item.label}</span>{item.id === "media" && Boolean(dashboard?.failed_ingest_count) && <b>{dashboard?.failed_ingest_count}</b>}{item.id === "health" && Boolean(runtime?.active_critical_alerts || runtime?.active_warning_alerts) && <b>{(runtime?.active_critical_alerts ?? 0) + (runtime?.active_warning_alerts ?? 0)}</b>}</button>)}<p className="nav-section-label">CG authoring</p>{cgNav.map((item) => <button key={item.id} className={`cg-nav-item ${view === item.id ? "selected" : ""}`} onClick={() => setView(item.id)}><span className="cg-nav-mark">CG</span><span>{item.label}</span></button>)}</nav><div className="station-card"><span className={`live-dot runtime-${runtime?.color ?? "yellow"}`} /><div><strong>{station.display_name}</strong><small>{runtime?.label ?? station.timezone}</small></div></div></aside><main className="workspace">{error && <div className="global-error" role="alert">{error}<button onClick={() => void refresh()}>Retry</button></div>}{view === "overview" && <Overview station={station} dashboard={dashboard} channels={channels} runtime={runtime} onNavigate={setView} />}{view === "media" && <Media dashboard={dashboard} onRefresh={refresh} />}{view === "channels" && <Channels channels={channels} outputProfiles={outputProfiles} onRefresh={refresh} />}{view === "schedule" && <Schedule dashboard={dashboard} channels={channels} />}{view === "health" && <Health runtime={runtime} resources={resources} selfTests={selfTests} selfTestSchedules={selfTestSchedules} updateStatus={updateStatus} alerts={alerts} alertChannels={alertChannels} deliveries={deliveries} rules={rules} outputChannels={channels} onRefresh={refresh} />}{view === "commissioning" && <Commissioning station={station} dashboard={dashboard} channels={channels} />}{view.startsWith("cg-") && <CgOperator channelId={channels[0]?.channel_id} channels={channels.map((channel) => ({ channel_id: channel.channel_id, display_name: channel.display_name }))} route={view as CgRoute} onNavigate={(route) => setView(route)} />}</main><nav className="mobile-nav">{[...nav, { id: "cg-moderation" as View, label: "CG" }].map((item) => <button key={item.id} aria-label={item.label} className={view === item.id || (item.id === "cg-moderation" && view.startsWith("cg-")) ? "selected" : ""} onClick={() => setView(item.id)}>{"id" in item && item.id.startsWith("cg-") ? <span className="cg-nav-mark">CG</span> : <Icon name={item.id as CoreView} />}<span>{item.label}</span></button>)}</nav></div>;
 }
 
 createRoot(document.getElementById("root")!).render(<React.StrictMode><App /></React.StrictMode>);
