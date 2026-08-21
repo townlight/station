@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::ffi::{CStr, CString, c_char, c_int, c_longlong, c_void};
 use std::path::{Path, PathBuf};
 use std::ptr;
@@ -201,6 +202,16 @@ impl AlertChannelSecret {
             }
         }
         Ok(())
+    }
+}
+
+pub struct SrtOutputSecret {
+    passphrase: String,
+}
+
+impl SrtOutputSecret {
+    pub fn expose(&self) -> &str {
+        &self.passphrase
     }
 }
 
@@ -504,6 +515,15 @@ impl StationStore {
         store.migrate_channel_output_profile()?;
         store.migrate_channel_output_sink_kinds()?;
         store.migrate_channel_output_sinks()?;
+        store.execute(
+            "CREATE TABLE IF NOT EXISTS srt_output_secrets (\
+               channel_id TEXT NOT NULL,\
+               sink_id TEXT NOT NULL,\
+               encrypted_passphrase BLOB NOT NULL,\
+               PRIMARY KEY(channel_id, sink_id),\
+               FOREIGN KEY(channel_id, sink_id) REFERENCES channel_output_sinks(channel_id, sink_id) ON DELETE CASCADE\
+             );",
+        )?;
         store.seed_default_alert_rules()?;
         store.seed_default_self_test_schedules()?;
         Ok(store)
@@ -1134,13 +1154,37 @@ impl StationStore {
     }
 
     pub fn put_channel(&self, channel: &ChannelConfiguration) -> Result<(), String> {
+        self.put_channel_with_srt_passphrases(channel, &HashMap::new())
+    }
+
+    pub fn put_channel_with_srt_passphrases(
+        &self,
+        channel: &ChannelConfiguration,
+        passphrases: &HashMap<String, String>,
+    ) -> Result<(), String> {
         channel.validate().map_err(|error| format!("{error:?}"))?;
+        for (sink_id, passphrase) in passphrases {
+            let valid_sink = channel.output_sinks.iter().any(|sink| {
+                sink.sink_id == *sink_id
+                    && sink.kind == OutputSinkKind::Srt
+                    && sink.encryption_configured
+            });
+            if !valid_sink {
+                return Err("SRT passphrases must identify an encrypted SRT output sink".into());
+            }
+            validate_srt_passphrase(passphrase)?;
+        }
         self.execute("BEGIN IMMEDIATE")?;
-        let outcome = self.put_channel_transaction(channel);
+        let outcome = self.put_channel_transaction(channel, passphrases);
         self.finish_transaction(outcome)
     }
 
-    fn put_channel_transaction(&self, channel: &ChannelConfiguration) -> Result<(), String> {
+    fn put_channel_transaction(
+        &self,
+        channel: &ChannelConfiguration,
+        passphrases: &HashMap<String, String>,
+    ) -> Result<(), String> {
+        let prior_passphrases = self.list_encrypted_srt_passphrases(&channel.channel_id)?;
         let statement = self.prepare(
             "INSERT INTO channels(channel_id, display_name, udp_destination, output_profile, enabled) VALUES(?1, ?2, ?3, ?4, ?5) \
              ON CONFLICT(channel_id) DO UPDATE SET display_name=excluded.display_name, udp_destination=excluded.udp_destination, output_profile=excluded.output_profile, enabled=excluded.enabled",
@@ -1189,8 +1233,51 @@ impl StationStore {
             bind_i64(self.database, insert.raw, 7, i64::from(sink.required))?;
             bind_i64(self.database, insert.raw, 8, i64::from(sink.enabled))?;
             expect_done(self.database, insert.raw)?;
+            drop(insert);
+            if sink.kind == OutputSinkKind::Srt && sink.encryption_configured {
+                let encrypted = if let Some(passphrase) = passphrases.get(&sink.sink_id) {
+                    protect_local_machine(passphrase.as_bytes())?
+                } else {
+                    prior_passphrases
+                        .get(&sink.sink_id)
+                        .cloned()
+                        .ok_or("an encrypted SRT output requires a write-only passphrase")?
+                };
+                let secret = self.prepare(
+                    "INSERT INTO srt_output_secrets(channel_id, sink_id, encrypted_passphrase) \
+                     VALUES(?1, ?2, ?3)",
+                )?;
+                bind_text(self.database, secret.raw, 1, &channel_id)?;
+                bind_text(self.database, secret.raw, 2, &sink_id)?;
+                bind_blob(self.database, secret.raw, 3, &encrypted)?;
+                expect_done(self.database, secret.raw)?;
+            }
         }
         Ok(())
+    }
+
+    fn list_encrypted_srt_passphrases(
+        &self,
+        channel_id: &str,
+    ) -> Result<HashMap<String, Vec<u8>>, String> {
+        let statement = self.prepare(
+            "SELECT sink_id, encrypted_passphrase FROM srt_output_secrets WHERE channel_id=?1",
+        )?;
+        let channel_id = c_string(channel_id, "channel identity")?;
+        bind_text(self.database, statement.raw, 1, &channel_id)?;
+        let mut secrets = HashMap::new();
+        loop {
+            match unsafe { sqlite3_step(statement.raw) } {
+                SQLITE_ROW => {
+                    secrets.insert(
+                        column_text(statement.raw, 0)?,
+                        column_blob(statement.raw, 1)?,
+                    );
+                }
+                SQLITE_DONE => return Ok(secrets),
+                _ => return Err(sqlite_error(self.database)),
+            }
+        }
     }
 
     pub fn list_channels(&self) -> Result<Vec<ChannelConfiguration>, String> {
@@ -1223,7 +1310,10 @@ impl StationStore {
         channel_id: &str,
     ) -> Result<Vec<OutputSinkConfiguration>, String> {
         let statement = self.prepare(
-            "SELECT sink_id, label, kind, destination, loudness_target_milli, required, enabled \
+            "SELECT sink_id, label, kind, destination, loudness_target_milli, required, enabled, \
+             EXISTS(SELECT 1 FROM srt_output_secrets secret \
+                    WHERE secret.channel_id=channel_output_sinks.channel_id \
+                      AND secret.sink_id=channel_output_sinks.sink_id) \
              FROM channel_output_sinks WHERE channel_id=?1 ORDER BY sink_id",
         )?;
         let channel_id = c_string(channel_id, "channel identity")?;
@@ -1240,10 +1330,36 @@ impl StationStore {
                         / 1_000.0,
                     required: unsafe { sqlite3_column_int64(statement.raw, 5) } == 1,
                     enabled: unsafe { sqlite3_column_int64(statement.raw, 6) } == 1,
+                    encryption_configured: unsafe { sqlite3_column_int64(statement.raw, 7) } == 1,
                 }),
                 SQLITE_DONE => return Ok(sinks),
                 _ => return Err(sqlite_error(self.database)),
             }
+        }
+    }
+
+    pub fn read_srt_output_secret(
+        &self,
+        channel_id: &str,
+        sink_id: &str,
+    ) -> Result<Option<SrtOutputSecret>, String> {
+        let statement = self.prepare(
+            "SELECT encrypted_passphrase FROM srt_output_secrets WHERE channel_id=?1 AND sink_id=?2",
+        )?;
+        let channel_id = c_string(channel_id, "channel identity")?;
+        let sink_id = c_string(sink_id, "output sink identity")?;
+        bind_text(self.database, statement.raw, 1, &channel_id)?;
+        bind_text(self.database, statement.raw, 2, &sink_id)?;
+        match unsafe { sqlite3_step(statement.raw) } {
+            SQLITE_ROW => {
+                let decrypted = unprotect_local_machine(&column_blob(statement.raw, 0)?)?;
+                let passphrase = String::from_utf8(decrypted)
+                    .map_err(|_| "stored SRT passphrase is not valid UTF-8".to_string())?;
+                validate_srt_passphrase(&passphrase)?;
+                Ok(Some(SrtOutputSecret { passphrase }))
+            }
+            SQLITE_DONE => Ok(None),
+            _ => Err(sqlite_error(self.database)),
         }
     }
 
@@ -4900,20 +5016,20 @@ fn column_text(statement: *mut SqliteStatement, column: c_int) -> Result<String,
 fn column_blob(statement: *mut SqliteStatement, column: c_int) -> Result<Vec<u8>, String> {
     let byte_count = unsafe { sqlite3_column_bytes(statement, column) };
     if byte_count <= 0 {
-        return Err("database returned an empty encrypted alert configuration".into());
+        return Err("database returned an empty encrypted secret".into());
     }
     let value = unsafe { sqlite3_column_blob(statement, column) };
     if value.is_null() {
-        return Err("database returned an invalid encrypted alert configuration".into());
+        return Err("database returned an invalid encrypted secret".into());
     }
     let length = usize::try_from(byte_count)
-        .map_err(|_| "database returned an oversized alert configuration".to_string())?;
+        .map_err(|_| "database returned an oversized encrypted secret".to_string())?;
     Ok(unsafe { std::slice::from_raw_parts(value.cast::<u8>(), length) }.to_vec())
 }
 
 fn protect_local_machine(plaintext: &[u8]) -> Result<Vec<u8>, String> {
-    let byte_count = u32::try_from(plaintext.len())
-        .map_err(|_| "alert destination secret is too large".to_string())?;
+    let byte_count =
+        u32::try_from(plaintext.len()).map_err(|_| "station secret is too large".to_string())?;
     let mut input = DataBlob {
         byte_count,
         data: plaintext.as_ptr().cast_mut(),
@@ -4935,12 +5051,12 @@ fn protect_local_machine(plaintext: &[u8]) -> Result<Vec<u8>, String> {
     };
     if status == 0 {
         return Err(format!(
-            "Windows could not protect the alert destination secret (error {}).",
+            "Windows could not protect the station secret (error {}).",
             unsafe { GetLastError() }
         ));
     }
     if output.data.is_null() || output.byte_count == 0 {
-        return Err("Windows returned an empty protected alert destination secret.".into());
+        return Err("Windows returned an empty protected station secret.".into());
     }
     let protected = unsafe {
         std::slice::from_raw_parts(output.data.cast_const(), output.byte_count as usize).to_vec()
@@ -4953,7 +5069,7 @@ fn protect_local_machine(plaintext: &[u8]) -> Result<Vec<u8>, String> {
 
 fn unprotect_local_machine(protected: &[u8]) -> Result<Vec<u8>, String> {
     let byte_count = u32::try_from(protected.len())
-        .map_err(|_| "encrypted alert destination secret is too large".to_string())?;
+        .map_err(|_| "encrypted station secret is too large".to_string())?;
     let mut input = DataBlob {
         byte_count,
         data: protected.as_ptr().cast_mut(),
@@ -4975,12 +5091,12 @@ fn unprotect_local_machine(protected: &[u8]) -> Result<Vec<u8>, String> {
     };
     if status == 0 {
         return Err(format!(
-            "Windows could not unlock the alert destination secret (error {}).",
+            "Windows could not unlock the station secret (error {}).",
             unsafe { GetLastError() }
         ));
     }
     if output.data.is_null() || output.byte_count == 0 {
-        return Err("Windows returned an empty unlocked alert destination secret.".into());
+        return Err("Windows returned an empty unlocked station secret.".into());
     }
     let plaintext = unsafe {
         std::slice::from_raw_parts(output.data.cast_const(), output.byte_count as usize).to_vec()
@@ -4996,6 +5112,17 @@ fn secret_field(value: &str, maximum: usize) -> bool {
         && !value.is_empty()
         && value.len() <= maximum
         && !value.chars().any(char::is_control)
+}
+
+fn validate_srt_passphrase(value: &str) -> Result<(), String> {
+    if !(10..=79).contains(&value.len()) || !value.bytes().all(|byte| (0x21..=0x7e).contains(&byte))
+    {
+        return Err(
+            "SRT passphrases must contain 10 to 79 printable ASCII characters without spaces"
+                .into(),
+        );
+    }
+    Ok(())
 }
 
 fn valid_smtp_endpoint(value: &str) -> bool {

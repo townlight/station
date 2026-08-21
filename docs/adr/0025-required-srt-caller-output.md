@@ -16,9 +16,8 @@ Stations need a reliable IP contribution path beyond best-effort UDP. SRT is pre
 - The branch uses caller mode, 200 ms latency, automatic reconnect, one isolated queue, and the same channel-wide MPEG-TS produced by the persistent encoder/mux.
 - Every enabled SRT sink is required in this phase. The engine polls the sink's runtime statistics and refuses worker readiness unless every SRT branch connects and sends bytes within five seconds. An absent receiver therefore fails red instead of producing a false healthy-fallback state.
 - The output profile and SRT URI cross the protected named-pipe bootstrap. They do not appear in worker process arguments.
-- Unencrypted SRT is explicit in this slice. Passphrases are not accepted in public URIs or stored in plaintext. Encrypted SRT requires a separate write-only API backed by DPAPI machine protection before it can be claimed.
+- Passphrases are never accepted in public URIs or stored in plaintext. Optional AES-256 authentication uses the separate write-only, DPAPI-backed contract in [ADR 0026](0026-machine-protected-srt-passphrases.md).
 
 ## Consequences
 
-Operators can configure a real SRT caller through the same channel/sink API and console as UDP. Existing databases migrate transactionally from the UDP-only sink constraint without losing rows. Startup now depends on the required SRT receiver being reachable; the supervisor's existing failure/backoff/incident path handles an unavailable listener. Optional SRT, rendezvous/listener modes, stream IDs, encryption, independent continuous branch telemetry, and remote interoperability remain separate gates.
-
+Operators can configure a real SRT caller through the same channel/sink API and console as UDP. Existing databases migrate transactionally from the UDP-only sink constraint without losing rows. Startup depends on the required SRT receiver being reachable and, when configured, presenting the matching passphrase; the supervisor's existing failure/backoff/incident path handles an unavailable or mismatched listener. Optional SRT, rendezvous/listener modes, stream IDs, independent continuous branch telemetry, and remote interoperability remain separate gates.

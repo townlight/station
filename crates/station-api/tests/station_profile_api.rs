@@ -257,6 +257,192 @@ fn persists_validated_channel_output_configuration() {
 }
 
 #[test]
+fn stores_srt_passphrases_with_machine_protection_and_returns_only_presence() {
+    let database = temporary_database("encrypted-srt-output");
+    let passphrase = "srt-proof-passphrase-2026";
+    let replacement = "replacement-srt-secret";
+    let mut channel = ChannelConfiguration {
+        channel_id: "93045fad-e4fa-4229-8f34-188dc9b14981".into(),
+        display_name: "Encrypted contribution".into(),
+        output_profile: OutputProfileId::Atsc720p5994,
+        output_sinks: vec![OutputSinkConfiguration::required_srt(
+            "be767862-a514-401f-9b27-01594a50664a",
+            "Encrypted SRT caller",
+            "srt://127.0.0.1:5602",
+            -24.0,
+        )],
+        enabled: true,
+    };
+    channel.output_sinks[0].encryption_configured = true;
+    let api = Api::open(&database).unwrap();
+    let mut command = serde_json::to_value(&channel).unwrap();
+    command["srt_passphrases"] = serde_json::json!({
+        channel.output_sinks[0].sink_id.clone(): passphrase
+    });
+    let put = api.handle(
+        "PUT",
+        "/api/v1/channels",
+        Some(&serde_json::to_vec(&command).unwrap()),
+    );
+    assert_eq!(put.status, 200, "{}", String::from_utf8_lossy(&put.body));
+    let public = String::from_utf8(put.body).unwrap();
+    assert!(!public.contains(passphrase));
+    assert!(!public.contains("srt_passphrases"));
+    assert!(public.contains("\"encryption_configured\":true"));
+    let stored = StationStore::open(&database)
+        .unwrap()
+        .read_srt_output_secret(&channel.channel_id, &channel.output_sinks[0].sink_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.expose(), passphrase);
+
+    command["srt_passphrases"] = serde_json::json!({
+        channel.output_sinks[0].sink_id.clone(): replacement
+    });
+    assert_eq!(
+        api.handle(
+            "PUT",
+            "/api/v1/channels",
+            Some(&serde_json::to_vec(&command).unwrap())
+        )
+        .status,
+        409,
+        "a live channel must reject secret rotation"
+    );
+    channel.enabled = false;
+    assert_eq!(
+        api.handle(
+            "PUT",
+            "/api/v1/channels",
+            Some(&serde_json::to_vec(&channel).unwrap())
+        )
+        .status,
+        200,
+        "the operator must first stop the channel while preserving its secret"
+    );
+    let mut legacy_client = serde_json::to_value(&channel).unwrap();
+    legacy_client["output_sinks"][0]["encryption_configured"] = serde_json::json!(false);
+    let preserved = api.handle(
+        "PUT",
+        "/api/v1/channels",
+        Some(&serde_json::to_vec(&legacy_client).unwrap()),
+    );
+    assert_eq!(preserved.status, 200);
+    assert!(
+        String::from_utf8(preserved.body)
+            .unwrap()
+            .contains("\"encryption_configured\":true")
+    );
+    let mut stopped = serde_json::to_value(&channel).unwrap();
+    stopped["srt_passphrases"] = serde_json::json!({
+        channel.output_sinks[0].sink_id.clone(): replacement
+    });
+    assert_eq!(
+        api.handle(
+            "PUT",
+            "/api/v1/channels",
+            Some(&serde_json::to_vec(&stopped).unwrap())
+        )
+        .status,
+        200
+    );
+    assert_eq!(
+        StationStore::open(&database)
+            .unwrap()
+            .read_srt_output_secret(&channel.channel_id, &channel.output_sinks[0].sink_id)
+            .unwrap()
+            .unwrap()
+            .expose(),
+        replacement
+    );
+    drop(api);
+
+    for candidate in [
+        database.clone(),
+        PathBuf::from(format!("{}-wal", database.display())),
+        PathBuf::from(format!("{}-shm", database.display())),
+    ] {
+        if let Ok(bytes) = std::fs::read(&candidate) {
+            for secret in [passphrase, replacement] {
+                assert!(
+                    !bytes
+                        .windows(secret.len())
+                        .any(|window| window == secret.as_bytes())
+                );
+            }
+        }
+        let _ = std::fs::remove_file(candidate);
+    }
+}
+
+#[test]
+fn clears_a_stopped_srt_passphrase_only_when_explicitly_requested() {
+    let database = temporary_database("clear-encrypted-srt-output");
+    let mut channel = ChannelConfiguration {
+        channel_id: "8a198412-c8d3-4c69-a040-d2dc1d9cbcea".into(),
+        display_name: "Encrypted contribution".into(),
+        output_profile: OutputProfileId::Atsc720p5994,
+        output_sinks: vec![OutputSinkConfiguration::required_srt(
+            "50831fe4-806a-4d88-b29a-e4fe3ee71b7d",
+            "Encrypted SRT caller",
+            "srt://127.0.0.1:5603",
+            -24.0,
+        )],
+        enabled: false,
+    };
+    channel.output_sinks[0].encryption_configured = true;
+    let api = Api::open(&database).unwrap();
+    let mut create = serde_json::to_value(&channel).unwrap();
+    create["srt_passphrases"] = serde_json::json!({
+        channel.output_sinks[0].sink_id.clone(): "clear-me-safely"
+    });
+    assert_eq!(
+        api.handle(
+            "PUT",
+            "/api/v1/channels",
+            Some(&serde_json::to_vec(&create).unwrap())
+        )
+        .status,
+        200
+    );
+
+    let mut clear = serde_json::to_value(&channel).unwrap();
+    clear["clear_srt_passphrases"] = serde_json::json!([channel.output_sinks[0].sink_id.clone()]);
+    let response = api.handle(
+        "PUT",
+        "/api/v1/channels",
+        Some(&serde_json::to_vec(&clear).unwrap()),
+    );
+    assert_eq!(
+        response.status,
+        200,
+        "{}",
+        String::from_utf8_lossy(&response.body)
+    );
+    assert!(
+        String::from_utf8(response.body)
+            .unwrap()
+            .contains("\"encryption_configured\":false")
+    );
+    assert!(
+        StationStore::open(&database)
+            .unwrap()
+            .read_srt_output_secret(&channel.channel_id, &channel.output_sinks[0].sink_id)
+            .unwrap()
+            .is_none()
+    );
+
+    drop(api);
+    for candidate in [
+        database.clone(),
+        PathBuf::from(format!("{}-wal", database.display())),
+        PathBuf::from(format!("{}-shm", database.display())),
+    ] {
+        let _ = std::fs::remove_file(candidate);
+    }
+}
+
+#[test]
 fn exposes_runtime_safe_to_air_and_acknowledges_durable_alerts() {
     let database = temporary_database("runtime-alerts");
     let channel = ChannelConfiguration {

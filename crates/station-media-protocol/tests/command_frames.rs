@@ -1,8 +1,8 @@
 use station_media_protocol::{
     ChannelCommand, CommandEnvelope, PROTOCOL_VERSION, ProtocolError, ProtocolVersion,
-    WorkerBootstrapEnvelope, WorkerEvent, WorkerEventEnvelope, WorkerOutputConfiguration,
-    decode_bootstrap_frame, decode_command_frame, decode_event_frame, encode_bootstrap_frame,
-    encode_command_frame, encode_event_frame,
+    SrtPassphrase, WorkerBootstrapEnvelope, WorkerEvent, WorkerEventEnvelope,
+    WorkerOutputConfiguration, decode_bootstrap_frame, decode_command_frame, decode_event_frame,
+    encode_bootstrap_frame, encode_command_frame, encode_event_frame,
 };
 
 fn take_live_command() -> CommandEnvelope {
@@ -40,11 +40,15 @@ fn round_trips_private_worker_bootstrap_without_process_arguments() {
             },
             WorkerOutputConfiguration::Srt {
                 uri: "srt://127.0.0.1:5600".into(),
+                passphrase: Some(SrtPassphrase::new("private-srt-proof".into()).unwrap()),
             },
         ],
     };
     let frame = encode_bootstrap_frame(&bootstrap).expect("bootstrap encodes");
     assert_eq!(decode_bootstrap_frame(&frame).unwrap(), bootstrap);
+    let diagnostic = format!("{bootstrap:?}");
+    assert!(diagnostic.contains("[REDACTED]"));
+    assert!(!diagnostic.contains("private-srt-proof"));
 }
 
 #[test]

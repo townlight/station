@@ -41,6 +41,16 @@ struct PutStationProfile {
 }
 
 #[derive(Deserialize)]
+struct PutChannel {
+    #[serde(flatten)]
+    channel: ChannelConfiguration,
+    #[serde(default)]
+    srt_passphrases: HashMap<String, String>,
+    #[serde(default)]
+    clear_srt_passphrases: Vec<String>,
+}
+
+#[derive(Deserialize)]
 struct PrepareScheduleCommit {
     plan_id: String,
     schedule_item_id: String,
@@ -599,26 +609,81 @@ impl Api {
     }
 
     fn put_channel(&self, body: Option<&[u8]>) -> ApiResponse {
-        let Some(channel) = parse_body::<ChannelConfiguration>(body) else {
+        let Some(mut command) = parse_body::<PutChannel>(body) else {
             return error_response(
                 400,
                 "invalid_json",
                 "A channel configuration body is required.",
             );
         };
-        if let Err(error) = channel.validate() {
-            return error_response(422, "validation_failed", &format!("{error:?}"));
+        for (sink_id, passphrase) in &command.srt_passphrases {
+            if !(10..=79).contains(&passphrase.len())
+                || !passphrase.bytes().all(|byte| (0x21..=0x7e).contains(&byte))
+            {
+                return error_response(
+                    422,
+                    "validation_failed",
+                    "SRT passphrases must contain 10 to 79 printable ASCII characters without spaces.",
+                );
+            }
+            let Some(sink) = command.channel.output_sinks.iter_mut().find(|sink| {
+                sink.sink_id == *sink_id && sink.kind == station_schedule::OutputSinkKind::Srt
+            }) else {
+                return error_response(
+                    422,
+                    "validation_failed",
+                    "Every SRT passphrase must identify an SRT output sink in this channel.",
+                );
+            };
+            sink.encryption_configured = true;
         }
         let existing = match self.storage.list_channels() {
             Ok(channels) => channels
                 .into_iter()
-                .find(|existing| existing.channel_id == channel.channel_id),
+                .find(|existing| existing.channel_id == command.channel.channel_id),
             Err(message) => return error_response(500, "storage_error", &message),
         };
+        for sink_id in &command.clear_srt_passphrases {
+            if command.srt_passphrases.contains_key(sink_id) {
+                return error_response(
+                    422,
+                    "validation_failed",
+                    "An SRT passphrase cannot be replaced and cleared in the same request.",
+                );
+            }
+            let Some(sink) = command.channel.output_sinks.iter_mut().find(|sink| {
+                sink.sink_id == *sink_id && sink.kind == station_schedule::OutputSinkKind::Srt
+            }) else {
+                return error_response(
+                    422,
+                    "validation_failed",
+                    "Every cleared SRT passphrase must identify an SRT output sink.",
+                );
+            };
+            sink.encryption_configured = false;
+        }
+        if let Some(existing) = &existing {
+            for sink in &mut command.channel.output_sinks {
+                if !command.clear_srt_passphrases.contains(&sink.sink_id)
+                    && existing
+                        .output_sinks
+                        .iter()
+                        .any(|prior| prior.sink_id == sink.sink_id && prior.encryption_configured)
+                {
+                    sink.encryption_configured = true;
+                }
+            }
+        }
+        let channel = command.channel;
+        if let Err(error) = channel.validate() {
+            return error_response(422, "validation_failed", &format!("{error:?}"));
+        }
         if existing.as_ref().is_some_and(|existing| {
             existing.enabled
                 && (existing.output_sinks != channel.output_sinks
-                    || existing.output_profile != channel.output_profile)
+                    || existing.output_profile != channel.output_profile
+                    || !command.srt_passphrases.is_empty()
+                    || !command.clear_srt_passphrases.is_empty())
         }) {
             return error_response(
                 409,
@@ -626,7 +691,26 @@ impl Api {
                 "Stop this output before changing its destination or output profile.",
             );
         }
-        match self.storage.put_channel(&channel) {
+        if channel.output_sinks.iter().any(|sink| {
+            sink.encryption_configured
+                && !command.srt_passphrases.contains_key(&sink.sink_id)
+                && !existing.as_ref().is_some_and(|existing| {
+                    existing
+                        .output_sinks
+                        .iter()
+                        .any(|prior| prior.sink_id == sink.sink_id && prior.encryption_configured)
+                })
+        }) {
+            return error_response(
+                422,
+                "srt_passphrase_required",
+                "A new encrypted SRT output requires its write-only passphrase.",
+            );
+        }
+        match self
+            .storage
+            .put_channel_with_srt_passphrases(&channel, &command.srt_passphrases)
+        {
             Ok(()) => json_response(
                 200,
                 serde_json::to_vec(&channel)

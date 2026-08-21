@@ -70,6 +70,7 @@ fn sends_the_persistent_transport_to_an_srt_listener() {
     let playout = PersistentPlayout::start_outputs_with_profile(
         &[TransportOutput::Srt {
             uri: format!("srt://{destination}"),
+            passphrase: None,
         }],
         OutputProfileId::Proof360p30,
     )
@@ -95,6 +96,90 @@ fn sends_the_persistent_transport_to_an_srt_listener() {
 }
 
 #[test]
+fn sends_an_aes256_srt_transport_only_to_a_matching_listener() {
+    gst::init().unwrap();
+    let reservation = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let destination = reservation.local_addr().unwrap();
+    drop(reservation);
+    let capture_path = test_root("encrypted-srt-transport").with_extension("ts");
+    let passphrase = "townlight-srt-proof-secret";
+    let receiver = gst::Pipeline::new();
+    let source = gst::ElementFactory::make("srtsrc")
+        .property("uri", format!("srt://{destination}"))
+        .property_from_str("mode", "listener")
+        .property("localaddress", "127.0.0.1")
+        .property("localport", u32::from(destination.port()))
+        .property("latency", 200_i32)
+        .property("passphrase", passphrase)
+        .property_from_str("pbkeylen", "32")
+        .build()
+        .unwrap();
+    let sink = gst::ElementFactory::make("filesink")
+        .property("location", capture_path.to_string_lossy().as_ref())
+        .property("sync", false)
+        .property("async", false)
+        .build()
+        .unwrap();
+    receiver.add_many([&source, &sink]).unwrap();
+    source.link(&sink).unwrap();
+    receiver.set_state(gst::State::Playing).unwrap();
+
+    let playout = PersistentPlayout::start_outputs_with_profile(
+        &[TransportOutput::Srt {
+            uri: format!("srt://{destination}"),
+            passphrase: Some(passphrase.into()),
+        }],
+        OutputProfileId::Proof360p30,
+    )
+    .expect("matching AES-256 SRT peers must start");
+    std::thread::sleep(Duration::from_secs(4));
+    playout.stop().unwrap();
+    receiver.set_state(gst::State::Null).unwrap();
+    receiver.state(gst::ClockTime::from_seconds(5)).0.unwrap();
+
+    let capture = fs::read(&capture_path).unwrap();
+    assert!(capture.len() > 500_000);
+    assert_eq!(capture.len() % 188, 0);
+    fs::remove_file(capture_path).unwrap();
+}
+
+#[test]
+fn refuses_encrypted_srt_readiness_for_a_mismatched_passphrase() {
+    gst::init().unwrap();
+    let reservation = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let destination = reservation.local_addr().unwrap();
+    drop(reservation);
+    let receiver = gst::Pipeline::new();
+    let source = gst::ElementFactory::make("srtsrc")
+        .property("uri", format!("srt://{destination}"))
+        .property_from_str("mode", "listener")
+        .property("localaddress", "127.0.0.1")
+        .property("localport", u32::from(destination.port()))
+        .property("passphrase", "listener-secret-value")
+        .property_from_str("pbkeylen", "32")
+        .build()
+        .unwrap();
+    let sink = gst::ElementFactory::make("fakesink").build().unwrap();
+    receiver.add_many([&source, &sink]).unwrap();
+    source.link(&sink).unwrap();
+    receiver.set_state(gst::State::Playing).unwrap();
+
+    let started = Instant::now();
+    let result = PersistentPlayout::start_outputs_with_profile(
+        &[TransportOutput::Srt {
+            uri: format!("srt://{destination}"),
+            passphrase: Some("different-caller-secret".into()),
+        }],
+        OutputProfileId::Proof360p30,
+    );
+    assert!(
+        matches!(result, Err(EngineError::State(message)) if message.contains("did not connect"))
+    );
+    assert!(started.elapsed() < Duration::from_secs(8));
+    receiver.set_state(gst::State::Null).unwrap();
+}
+
+#[test]
 fn refuses_srt_readiness_when_the_required_listener_is_absent() {
     let reservation = UdpSocket::bind("127.0.0.1:0").unwrap();
     let destination = reservation.local_addr().unwrap();
@@ -103,6 +188,7 @@ fn refuses_srt_readiness_when_the_required_listener_is_absent() {
     let error = match PersistentPlayout::start_outputs_with_profile(
         &[TransportOutput::Srt {
             uri: format!("srt://{destination}"),
+            passphrase: None,
         }],
         OutputProfileId::Proof360p30,
     ) {

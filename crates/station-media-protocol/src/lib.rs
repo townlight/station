@@ -1,7 +1,34 @@
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 pub const MAX_FRAME_BYTES: usize = 65_536;
-pub const PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion { major: 1, minor: 2 };
+pub const PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion { major: 1, minor: 3 };
+
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct SrtPassphrase(String);
+
+impl SrtPassphrase {
+    pub fn new(value: String) -> Result<Self, &'static str> {
+        if !(10..=79).contains(&value.len())
+            || !value.bytes().all(|byte| (0x21..=0x7e).contains(&byte))
+        {
+            return Err(
+                "SRT passphrases must contain 10 to 79 printable ASCII characters without spaces",
+            );
+        }
+        Ok(Self(value))
+    }
+
+    pub fn expose(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Debug for SrtPassphrase {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("SrtPassphrase([REDACTED])")
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProtocolVersion {
@@ -21,8 +48,14 @@ pub struct WorkerBootstrapEnvelope {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "kebab-case")]
 pub enum WorkerOutputConfiguration {
-    UdpTs { destination: String },
-    Srt { uri: String },
+    UdpTs {
+        destination: String,
+    },
+    Srt {
+        uri: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        passphrase: Option<SrtPassphrase>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

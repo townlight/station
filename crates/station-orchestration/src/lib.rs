@@ -10,7 +10,9 @@ use station_domain::{
     AlertConditionKind, AlertEvent, AlertEventState, AlertSeverity, ChannelRuntimeObservation,
     ChannelRuntimeState,
 };
-use station_media_protocol::{ChannelCommand, WorkerEvent, WorkerOutputConfiguration};
+use station_media_protocol::{
+    ChannelCommand, SrtPassphrase, WorkerEvent, WorkerOutputConfiguration,
+};
 use station_runtime::{SupervisorError, WorkerSupervisor};
 use station_schedule::{ChannelConfiguration, DispatchStatus, OutputSinkKind};
 use station_storage::StationStore;
@@ -58,19 +60,38 @@ impl ChannelController {
         channel
             .validate()
             .map_err(|error| OrchestrationError::InvalidDestination(format!("{error:?}")))?;
+        let store = StationStore::open(database_path).map_err(OrchestrationError::Storage)?;
         let outputs = channel
             .output_sinks
             .iter()
             .filter(|sink| sink.enabled)
             .map(|sink| match sink.kind {
-                OutputSinkKind::UdpTs => WorkerOutputConfiguration::UdpTs {
+                OutputSinkKind::UdpTs => Ok(WorkerOutputConfiguration::UdpTs {
                     destination: sink.destination.clone(),
-                },
-                OutputSinkKind::Srt => WorkerOutputConfiguration::Srt {
-                    uri: sink.destination.clone(),
-                },
+                }),
+                OutputSinkKind::Srt => {
+                    let passphrase = if sink.encryption_configured {
+                        let secret = store
+                            .read_srt_output_secret(&channel.channel_id, &sink.sink_id)
+                            .map_err(OrchestrationError::Storage)?
+                            .ok_or_else(|| {
+                                OrchestrationError::Storage(
+                                    "encrypted SRT output secret is missing".into(),
+                                )
+                            })?;
+                        Some(SrtPassphrase::new(secret.expose().to_string()).map_err(
+                            |message| OrchestrationError::InvalidDestination(message.into()),
+                        )?)
+                    } else {
+                        None
+                    };
+                    Ok(WorkerOutputConfiguration::Srt {
+                        uri: sink.destination.clone(),
+                        passphrase,
+                    })
+                }
             })
-            .collect::<Vec<_>>();
+            .collect::<Result<Vec<_>, OrchestrationError>>()?;
         let worker_id = format!("station-worker-{}", channel.channel_id);
         let supervisor = WorkerSupervisor::launch_with_outputs(
             worker_executable,

@@ -650,6 +650,7 @@ fn sha256_file(path: &Path) -> Result<String, String> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
     use std::io::Read;
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -703,19 +704,36 @@ mod tests {
             )
             .unwrap();
         let channel_id = "60606060-7070-4080-8090-a0a0a0a0a0a0";
+        let srt_sink_id = "61616161-7171-4181-8191-a1a1a1a1a1a1";
+        let mut srt_sink = OutputSinkConfiguration::required_srt(
+            srt_sink_id,
+            "Encrypted contribution",
+            "srt://127.0.0.1:5799",
+            -16.0,
+        );
+        srt_sink.encryption_configured = true;
+        let srt_canary = "NEVER-EXPORT-SRT-PASSPHRASE-84126";
+        let mut srt_passphrases = HashMap::new();
+        srt_passphrases.insert(srt_sink_id.into(), srt_canary.into());
         store
-            .put_channel(&ChannelConfiguration {
-                channel_id: channel_id.into(),
-                display_name: "Government".into(),
-                output_profile: Default::default(),
-                output_sinks: vec![OutputSinkConfiguration::required_udp(
-                    channel_id,
-                    "Primary transport",
-                    "127.0.0.1:5798",
-                    -16.0,
-                )],
-                enabled: true,
-            })
+            .put_channel_with_srt_passphrases(
+                &ChannelConfiguration {
+                    channel_id: channel_id.into(),
+                    display_name: "Government".into(),
+                    output_profile: Default::default(),
+                    output_sinks: vec![
+                        OutputSinkConfiguration::required_udp(
+                            channel_id,
+                            "Primary transport",
+                            "127.0.0.1:5798",
+                            -16.0,
+                        ),
+                        srt_sink,
+                    ],
+                    enabled: true,
+                },
+                &srt_passphrases,
+            )
             .unwrap();
         store
             .put_channel_runtime(&ChannelRuntimeObservation {
@@ -777,6 +795,7 @@ mod tests {
         assert_eq!(bundle.sha256, sha256_bytes(&bytes));
         assert!(bundle.size_bytes <= MAX_BUNDLE_BYTES);
         assert!(!String::from_utf8_lossy(&bytes).contains(canary));
+        assert!(!String::from_utf8_lossy(&bytes).contains(srt_canary));
         assert!(!String::from_utf8_lossy(&bytes).contains("must-not-export"));
         assert!(!String::from_utf8_lossy(&bytes).contains(target));
 

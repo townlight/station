@@ -57,8 +57,11 @@ fn main() {
                 .parse::<SocketAddr>()
                 .map(TransportOutput::Udp)
                 .map_err(|error| error.to_string()),
-            WorkerOutputConfiguration::Srt { uri } => {
-                validate_srt_uri(&uri).map(|()| TransportOutput::Srt { uri })
+            WorkerOutputConfiguration::Srt { uri, passphrase } => {
+                validate_srt_uri(&uri).map(|()| TransportOutput::Srt {
+                    uri,
+                    passphrase: passphrase.map(|value| value.expose().to_string()),
+                })
             }
         })
         .collect::<Result<Vec<_>, _>>()

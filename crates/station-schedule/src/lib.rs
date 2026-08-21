@@ -100,6 +100,8 @@ pub struct OutputSinkConfiguration {
     pub loudness_target_lufs: f32,
     pub required: bool,
     pub enabled: bool,
+    #[serde(default)]
+    pub encryption_configured: bool,
 }
 
 impl OutputSinkConfiguration {
@@ -117,6 +119,7 @@ impl OutputSinkConfiguration {
             loudness_target_lufs,
             required: true,
             enabled: true,
+            encryption_configured: false,
         }
     }
 
@@ -134,6 +137,7 @@ impl OutputSinkConfiguration {
             loudness_target_lufs,
             required: true,
             enabled: true,
+            encryption_configured: false,
         }
     }
 }
@@ -354,6 +358,11 @@ impl ChannelConfiguration {
             }
             match sink.kind {
                 OutputSinkKind::UdpTs => {
+                    if sink.encryption_configured {
+                        return Err(ScheduleError::Invalid(
+                            "UDP outputs cannot carry SRT encryption configuration",
+                        ));
+                    }
                     let destination =
                         sink.destination
                             .parse::<std::net::SocketAddr>()

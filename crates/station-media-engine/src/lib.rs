@@ -18,10 +18,13 @@ pub enum SourceRole {
     Program,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub enum TransportOutput {
     Udp(SocketAddr),
-    Srt { uri: String },
+    Srt {
+        uri: String,
+        passphrase: Option<String>,
+    },
 }
 
 #[derive(Debug)]
@@ -253,17 +256,27 @@ impl PersistentPlayout {
                     .property("async", false)
                     .build()
                     .map_err(|error| build_error("udpsink", error))?,
-                TransportOutput::Srt { uri } => gst::ElementFactory::make("srtsink")
-                    .name(format!("srt-output-{index}"))
-                    .property("uri", uri)
-                    .property_from_str("mode", "caller")
-                    .property("latency", 200_i32)
-                    .property("wait-for-connection", false)
-                    .property("auto-reconnect", true)
-                    .property("sync", false)
-                    .property("async", false)
-                    .build()
-                    .map_err(|error| build_error("srtsink", error))?,
+                TransportOutput::Srt { uri, passphrase } => {
+                    let builder = gst::ElementFactory::make("srtsink")
+                        .name(format!("srt-output-{index}"))
+                        .property("uri", uri)
+                        .property_from_str("mode", "caller")
+                        .property("latency", 200_i32)
+                        .property("wait-for-connection", false)
+                        .property("auto-reconnect", true)
+                        .property("sync", false)
+                        .property("async", false);
+                    let builder = if let Some(passphrase) = passphrase {
+                        builder
+                            .property("passphrase", passphrase)
+                            .property_from_str("pbkeylen", "32")
+                    } else {
+                        builder
+                    };
+                    builder
+                        .build()
+                        .map_err(|error| build_error("srtsink", error))?
+                }
             };
             if matches!(output, TransportOutput::Srt { .. }) {
                 srt_sinks.push(sink.clone());
