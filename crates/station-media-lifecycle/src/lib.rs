@@ -140,9 +140,14 @@ pub struct ReadinessDashboard {
     pub rejected_count: usize,
     pub pending_ingest_count: usize,
     pub running_ingest_count: usize,
+    pub awaiting_transcode_ingest_count: usize,
     pub failed_ingest_count: usize,
+    pub pending_transcode_count: usize,
+    pub running_transcode_count: usize,
+    pub failed_transcode_count: usize,
     pub by_asset: Vec<AssetReadinessView>,
     pub ingest_jobs: Vec<MediaIngestJob>,
+    pub transcode_jobs: Vec<TranscodeJob>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

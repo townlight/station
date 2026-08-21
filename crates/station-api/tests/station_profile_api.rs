@@ -238,7 +238,28 @@ fn admits_real_media_into_the_managed_library_and_refuses_declared_readiness() {
         .run_once()
         .unwrap()
         .unwrap();
-    assert!(matches!(outcome, IngestOutcome::AwaitingTranscode { .. }));
+    let transcode_job_id = match outcome {
+        IngestOutcome::AwaitingTranscode {
+            transcode_job_id, ..
+        } => transcode_job_id,
+        other => panic!("real media did not reach transcode: {other:?}"),
+    };
+    let queued_transcode = api.handle(
+        "GET",
+        &format!("/api/v1/assets/transcode/jobs/{transcode_job_id}"),
+        None,
+    );
+    assert_eq!(queued_transcode.status, 200);
+    let queued_transcode: serde_json::Value =
+        serde_json::from_slice(&queued_transcode.body).unwrap();
+    assert_eq!(queued_transcode["status"], "pending");
+    let processing = api.handle("GET", "/api/v1/assets/readiness-dashboard", None);
+    let processing: serde_json::Value = serde_json::from_slice(&processing.body).unwrap();
+    assert_eq!(processing["awaiting_transcode_ingest_count"], 1);
+    assert_eq!(processing["pending_transcode_count"], 1);
+    assert_eq!(processing["running_transcode_count"], 0);
+    assert_eq!(processing["failed_transcode_count"], 0);
+    assert_eq!(processing["transcode_jobs"][0]["job_id"], transcode_job_id);
     let asset_id = match TranscodeWorker::new(&database, &library)
         .run_once()
         .unwrap()

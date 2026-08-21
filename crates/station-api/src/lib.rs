@@ -14,7 +14,7 @@ use station_domain::StationProfile;
 use station_media_lifecycle::{
     AssetLoudnessAnalysis, AssetReadinessView, IngestJobStatus, IngestSourceKind,
     LoudnessGateStatus, MediaIngestJob, MissingMediaAlert, ReadinessDashboard, ReadinessState,
-    WatchFolderConfig,
+    TranscodeJobStatus, WatchFolderConfig,
 };
 use station_schedule::{AssetReadiness, ChannelConfiguration, MediaAsset, ScheduleItem};
 use station_storage::{CommitWriteError, ProfileWriteError, StationStore};
@@ -105,6 +105,9 @@ impl Api {
             }
             ("GET", path) if path.starts_with("/api/v1/assets/ingest/jobs/") => {
                 self.read_ingest_job(path)
+            }
+            ("GET", path) if path.starts_with("/api/v1/assets/transcode/jobs/") => {
+                self.read_transcode_job(path)
             }
             ("GET", path)
                 if path.starts_with("/api/v1/assets/") && path.ends_with("/readiness") =>
@@ -233,12 +236,41 @@ impl Api {
         }
     }
 
+    fn read_transcode_job(&self, path: &str) -> ApiResponse {
+        let Some(job_id) = path.strip_prefix("/api/v1/assets/transcode/jobs/") else {
+            unreachable!("the route prefix was checked")
+        };
+        if job_id.is_empty() || job_id.contains('/') {
+            return error_response(
+                400,
+                "invalid_path",
+                "The transcode job identity is invalid.",
+            );
+        }
+        match self.storage.read_transcode_job(job_id) {
+            Ok(Some(job)) => json_response(
+                200,
+                serde_json::to_vec(&job).expect("serializing a transcode job cannot fail"),
+            ),
+            Ok(None) => error_response(
+                404,
+                "transcode_job_not_found",
+                "The media transcode job does not exist.",
+            ),
+            Err(message) => error_response(500, "storage_error", &message),
+        }
+    }
+
     fn readiness_dashboard(&self) -> ApiResponse {
         let assets = match self.storage.list_media_assets() {
             Ok(assets) => assets,
             Err(message) => return error_response(500, "storage_error", &message),
         };
         let ingest_jobs = match self.storage.list_ingest_jobs() {
+            Ok(jobs) => jobs,
+            Err(message) => return error_response(500, "storage_error", &message),
+        };
+        let transcode_jobs = match self.storage.list_transcode_jobs() {
             Ok(jobs) => jobs,
             Err(message) => return error_response(500, "storage_error", &message),
         };
@@ -267,12 +299,29 @@ impl Api {
                 .iter()
                 .filter(|job| job.status == IngestJobStatus::Running)
                 .count(),
+            awaiting_transcode_ingest_count: ingest_jobs
+                .iter()
+                .filter(|job| job.status == IngestJobStatus::AwaitingTranscode)
+                .count(),
             failed_ingest_count: ingest_jobs
                 .iter()
                 .filter(|job| job.status == IngestJobStatus::Failed)
                 .count(),
+            pending_transcode_count: transcode_jobs
+                .iter()
+                .filter(|job| job.status == TranscodeJobStatus::Pending)
+                .count(),
+            running_transcode_count: transcode_jobs
+                .iter()
+                .filter(|job| job.status == TranscodeJobStatus::Running)
+                .count(),
+            failed_transcode_count: transcode_jobs
+                .iter()
+                .filter(|job| job.status == TranscodeJobStatus::Failed)
+                .count(),
             by_asset,
             ingest_jobs,
+            transcode_jobs,
         };
         json_response(
             200,
