@@ -138,7 +138,7 @@ impl StationStore {
                job_id TEXT PRIMARY KEY,\
                source_kind TEXT NOT NULL CHECK (source_kind IN ('operator_path','watch_folder','live_finalization')),\
                source_path TEXT NOT NULL,\
-               status TEXT NOT NULL CHECK (status IN ('pending','running','completed','failed','cancelled')),\
+               status TEXT NOT NULL CHECK (status IN ('pending','running','awaiting_transcode','completed','failed','cancelled')),\
                progress_percent INTEGER NOT NULL CHECK (progress_percent BETWEEN 0 AND 100),\
                created_at_unix_ms INTEGER NOT NULL CHECK (created_at_unix_ms >= 0),\
                started_at_unix_ms INTEGER NOT NULL DEFAULT -1 CHECK (started_at_unix_ms >= -1),\
@@ -221,6 +221,7 @@ impl StationStore {
                ON commit_reports(channel_id, approved_at_unix_ms);",
         )?;
         store.migrate_ingest_retry_schedule()?;
+        store.migrate_ingest_transcode_status()?;
         store.migrate_commit_report_statuses()?;
         Ok(store)
     }
@@ -743,6 +744,73 @@ impl StationStore {
         } else {
             Err("transcode job is not running".into())
         }
+    }
+
+    pub fn handoff_ingest_to_transcode(&self, job: &TranscodeJob) -> Result<(), String> {
+        job.validate().map_err(|error| format!("{error:?}"))?;
+        self.execute("BEGIN IMMEDIATE")?;
+        let outcome = (|| {
+            if !self.create_transcode_job(job)? {
+                return Err("transcode job or ingest handoff already exists".into());
+            }
+            let statement = self.prepare(
+                "UPDATE media_ingest_jobs SET status='awaiting_transcode', progress_percent=60, \
+                 completed_at_unix_ms=-1, error_detail='', asset_id='', next_attempt_at_unix_ms=-1 \
+                 WHERE job_id=?1 AND status='running'",
+            )?;
+            let ingest_job_id = c_string(&job.ingest_job_id, "transcode ingest identity")?;
+            bind_text(self.database, statement.raw, 1, &ingest_job_id)?;
+            expect_done(self.database, statement.raw)?;
+            if self.changes() == 1 {
+                Ok(())
+            } else {
+                Err("ingest job is not running".into())
+            }
+        })();
+        self.finish_transaction(outcome)
+    }
+
+    pub fn complete_transcode_and_ingest(
+        &self,
+        transcode_job_id: &str,
+        output: &MediaAsset,
+        loudness: &AssetLoudnessAnalysis,
+        completed_at_unix_ms: i64,
+    ) -> Result<(), String> {
+        output.validate().map_err(|error| format!("{error:?}"))?;
+        loudness.validate().map_err(|error| format!("{error:?}"))?;
+        if output.readiness != AssetReadiness::Ready || loudness.asset_id != output.asset_id {
+            return Err("transcode output and loudness identities must match and be ready".into());
+        }
+        self.execute("BEGIN IMMEDIATE")?;
+        let outcome = (|| {
+            let job = self
+                .read_transcode_job(transcode_job_id)?
+                .ok_or_else(|| "transcode job does not exist".to_string())?;
+            if job.status != TranscodeJobStatus::Running {
+                return Err("transcode job is not running".into());
+            }
+            self.put_media_asset(output)?;
+            self.put_asset_loudness(loudness)?;
+            self.complete_transcode_job(transcode_job_id, &output.asset_id, completed_at_unix_ms)?;
+            let statement = self.prepare(
+                "UPDATE media_ingest_jobs SET status='completed', progress_percent=100, \
+                 completed_at_unix_ms=?1, error_detail='', asset_id=?2, next_attempt_at_unix_ms=-1 \
+                 WHERE job_id=?3 AND status='awaiting_transcode' AND started_at_unix_ms<=?1",
+            )?;
+            let output_asset_id = c_string(&output.asset_id, "transcode output identity")?;
+            let ingest_job_id = c_string(&job.ingest_job_id, "transcode ingest identity")?;
+            bind_i64(self.database, statement.raw, 1, completed_at_unix_ms)?;
+            bind_text(self.database, statement.raw, 2, &output_asset_id)?;
+            bind_text(self.database, statement.raw, 3, &ingest_job_id)?;
+            expect_done(self.database, statement.raw)?;
+            if self.changes() == 1 {
+                Ok(())
+            } else {
+                Err("ingest job is not awaiting this transcode".into())
+            }
+        })();
+        self.finish_transaction(outcome)
     }
 
     pub fn put_channel(&self, channel: &ChannelConfiguration) -> Result<(), String> {
@@ -1460,6 +1528,46 @@ impl StationStore {
         self.finish_transaction(outcome)
     }
 
+    fn migrate_ingest_transcode_status(&self) -> Result<(), String> {
+        let statement = self.prepare(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='media_ingest_jobs'",
+        )?;
+        let definition = match unsafe { sqlite3_step(statement.raw) } {
+            SQLITE_ROW => column_text(statement.raw, 0)?,
+            SQLITE_DONE => return Err("media_ingest_jobs schema is missing".into()),
+            _ => return Err(sqlite_error(self.database)),
+        };
+        drop(statement);
+        if definition.contains("'awaiting_transcode'") {
+            return Ok(());
+        }
+        self.execute(
+            "BEGIN IMMEDIATE;\
+             ALTER TABLE media_ingest_jobs RENAME TO media_ingest_jobs_legacy;\
+             CREATE TABLE media_ingest_jobs (\
+               job_id TEXT PRIMARY KEY,\
+               source_kind TEXT NOT NULL CHECK (source_kind IN ('operator_path','watch_folder','live_finalization')),\
+               source_path TEXT NOT NULL,\
+               status TEXT NOT NULL CHECK (status IN ('pending','running','awaiting_transcode','completed','failed','cancelled')),\
+               progress_percent INTEGER NOT NULL CHECK (progress_percent BETWEEN 0 AND 100),\
+               created_at_unix_ms INTEGER NOT NULL CHECK (created_at_unix_ms >= 0),\
+               started_at_unix_ms INTEGER NOT NULL DEFAULT -1 CHECK (started_at_unix_ms >= -1),\
+               completed_at_unix_ms INTEGER NOT NULL DEFAULT -1 CHECK (completed_at_unix_ms >= -1),\
+               error_detail TEXT NOT NULL DEFAULT '',\
+               asset_id TEXT NOT NULL DEFAULT '',\
+               attempts INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),\
+               next_attempt_at_unix_ms INTEGER NOT NULL DEFAULT -1 CHECK (next_attempt_at_unix_ms >= -1)\
+             );\
+             INSERT INTO media_ingest_jobs SELECT * FROM media_ingest_jobs_legacy;\
+             DROP TABLE media_ingest_jobs_legacy;\
+             CREATE INDEX media_ingest_jobs_status_time ON media_ingest_jobs(status, created_at_unix_ms);\
+             COMMIT;",
+        )
+        .inspect_err(|_| {
+            let _ = self.execute("ROLLBACK");
+        })
+    }
+
     fn ingest_retry_column_exists(&self) -> Result<bool, String> {
         let statement = self.prepare(
             "SELECT COUNT(*) FROM pragma_table_info('media_ingest_jobs') \
@@ -1818,6 +1926,7 @@ fn parse_ingest_job_status(value: &str) -> Result<IngestJobStatus, String> {
     match value {
         "pending" => Ok(IngestJobStatus::Pending),
         "running" => Ok(IngestJobStatus::Running),
+        "awaiting_transcode" => Ok(IngestJobStatus::AwaitingTranscode),
         "completed" => Ok(IngestJobStatus::Completed),
         "failed" => Ok(IngestJobStatus::Failed),
         "cancelled" => Ok(IngestJobStatus::Cancelled),

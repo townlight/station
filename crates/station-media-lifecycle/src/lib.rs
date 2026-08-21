@@ -13,6 +13,7 @@ pub enum IngestSourceKind {
 pub enum IngestJobStatus {
     Pending,
     Running,
+    AwaitingTranscode,
     Completed,
     Failed,
     Cancelled,
@@ -291,6 +292,19 @@ impl MediaIngestJob {
                 "asset_id must be a lowercase SHA-256 digest",
             ));
         }
+        if self.status == IngestJobStatus::AwaitingTranscode
+            && (!(11..100).contains(&self.progress_percent)
+                || self.started_at_unix_ms.is_none()
+                || self.completed_at_unix_ms.is_some()
+                || self.error_detail.is_some()
+                || self.asset_id.is_some()
+                || self.attempts == 0
+                || self.next_attempt_at_unix_ms.is_some())
+        {
+            return Err(IngestJobError::Invalid(
+                "an ingest awaiting transcode must retain an unfinished durable handoff",
+            ));
+        }
         Ok(())
     }
 }
@@ -467,5 +481,27 @@ mod tests {
         incomplete_success.started_at_unix_ms = Some(110);
         incomplete_success.completed_at_unix_ms = Some(120);
         assert!(incomplete_success.validate().is_err());
+    }
+
+    #[test]
+    fn requires_a_durable_handoff_while_ingest_awaits_transcode() {
+        let job = super::MediaIngestJob {
+            job_id: "11111111-2222-4333-8444-555555555555".into(),
+            source_kind: super::IngestSourceKind::OperatorPath,
+            source_path: r"C:\incoming\meeting.mov".into(),
+            status: super::IngestJobStatus::AwaitingTranscode,
+            progress_percent: 60,
+            created_at_unix_ms: 100,
+            started_at_unix_ms: Some(200),
+            completed_at_unix_ms: None,
+            error_detail: None,
+            asset_id: None,
+            attempts: 1,
+            next_attempt_at_unix_ms: None,
+        };
+        job.validate().unwrap();
+        let mut impossible = job;
+        impossible.asset_id = Some("a".repeat(64));
+        assert!(impossible.validate().is_err());
     }
 }

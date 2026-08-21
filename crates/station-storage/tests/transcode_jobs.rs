@@ -1,7 +1,11 @@
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use station_media_lifecycle::{TranscodeFormat, TranscodeJob, TranscodeJobStatus};
+use station_media_lifecycle::{
+    AssetLoudnessAnalysis, IngestJobStatus, IngestSourceKind, LoudnessGateStatus, MediaIngestJob,
+    TranscodeFormat, TranscodeJob, TranscodeJobStatus,
+};
+use station_schedule::{AssetReadiness, MediaAsset};
 use station_storage::StationStore;
 
 fn database_path(label: &str) -> PathBuf {
@@ -112,5 +116,86 @@ fn recovers_interrupted_transcode_for_a_new_attempt() {
     assert_eq!(reclaimed.attempts, 2);
     assert_eq!(reclaimed.source_asset_id, pending.source_asset_id);
     drop(reopened);
+    remove_database(&database);
+}
+
+#[test]
+fn atomically_hands_ingest_to_transcode_and_publishes_only_the_output_asset() {
+    let database = database_path("transcode-handoff");
+    let store = StationStore::open(&database).unwrap();
+    let ingest = MediaIngestJob {
+        job_id: "11111111-2222-4333-8444-555555555555".into(),
+        source_kind: IngestSourceKind::OperatorPath,
+        source_path: r"C:\incoming\meeting.mov".into(),
+        status: IngestJobStatus::Pending,
+        progress_percent: 0,
+        created_at_unix_ms: 100,
+        started_at_unix_ms: None,
+        completed_at_unix_ms: None,
+        error_detail: None,
+        asset_id: None,
+        attempts: 0,
+        next_attempt_at_unix_ms: None,
+    };
+    store.create_ingest_job(&ingest).unwrap();
+    store.claim_next_ingest_job(200).unwrap().unwrap();
+    let transcode = pending_job();
+    store.handoff_ingest_to_transcode(&transcode).unwrap();
+    assert_eq!(
+        store
+            .read_ingest_job(&ingest.job_id)
+            .unwrap()
+            .unwrap()
+            .status,
+        IngestJobStatus::AwaitingTranscode
+    );
+    assert_eq!(
+        store
+            .read_transcode_job(&transcode.job_id)
+            .unwrap()
+            .unwrap(),
+        transcode
+    );
+    store.claim_next_transcode_job(300).unwrap().unwrap();
+
+    let output_asset_id = "b".repeat(64);
+    let output = MediaAsset {
+        asset_id: output_asset_id.clone(),
+        media_path: r"C:\ProgramData\TownLight Station\media\output.ts".into(),
+        duration_ms: 1_000,
+        readiness: AssetReadiness::Ready,
+    };
+    let loudness = AssetLoudnessAnalysis {
+        asset_id: output_asset_id.clone(),
+        status: LoudnessGateStatus::Ok,
+        measured_lufs_milli: Some(-24_000),
+        target_lufs_milli: -24_000,
+        detail: None,
+    };
+    store
+        .complete_transcode_and_ingest(&transcode.job_id, &output, &loudness, 400)
+        .unwrap();
+    let completed_ingest = store.read_ingest_job(&ingest.job_id).unwrap().unwrap();
+    assert_eq!(completed_ingest.status, IngestJobStatus::Completed);
+    assert_eq!(completed_ingest.asset_id, Some(output_asset_id.clone()));
+    assert_eq!(
+        store
+            .read_transcode_job(&transcode.job_id)
+            .unwrap()
+            .unwrap()
+            .output_asset_id,
+        Some(output_asset_id.clone())
+    );
+    assert_eq!(
+        store.read_media_asset(&output_asset_id).unwrap(),
+        Some(output)
+    );
+    assert!(
+        store
+            .read_media_asset(&transcode.source_asset_id)
+            .unwrap()
+            .is_none()
+    );
+    drop(store);
     remove_database(&database);
 }
