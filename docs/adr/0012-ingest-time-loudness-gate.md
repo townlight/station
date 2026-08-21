@@ -10,11 +10,11 @@ Finite A/V and codec decodability do not establish that a file is safe to air. P
 
 ## Decision
 
-`station-media-assets` measures integrated loudness from the station-owned copy with GStreamer's `ebur128level` analyzer. The pipeline decodes audio and video without a real-time sink, retains the final finite global measurement, fails visibly on bus errors or a 120-second processing deadline, and always returns the pipeline to `NULL`.
+`station-media-assets` measures integrated loudness with GStreamer's `ebur128level` analyzer. The pipeline decodes audio and video without a real-time sink, retains the final finite global measurement, fails visibly on bus errors or a 120-second processing deadline, and always returns the pipeline to `NULL`.
 
-The ingest target is -24 LUFS with ±2 LU tolerance. Storage uses integer milli-LUFS to avoid floating-point authority. `AssetLoudnessAnalysis` records `ok`, `failed`, or `not_checked`, the target, optional measurement, and bounded operator detail. The ready asset, completed ingest job, and analysis are one SQLite transaction.
+The canonical target is -24 LUFS with ±2 LU tolerance. Storage uses integer milli-LUFS to avoid floating-point authority. `AssetLoudnessAnalysis` records `ok`, `failed`, or `not_checked`, the target, optional measurement, and bounded operator detail. Under ADR 0013, only the canonical derivative's passing measurement is published; the ready asset, completed transcode job, completed ingest job, and analysis are one SQLite transaction.
 
-A loudness miss does not reject otherwise valid source media. It produces a failed gate and explicit normalize-before-air guidance. A measurement failure produces `not_checked`; it never becomes a false pass. Per-asset readiness and the dashboard expose both states. Egress profiles will own final per-sink target selection and normalization.
+A loudness miss does not destroy or mislabel otherwise valid source media. Canonical processing normalizes it before measuring the derivative. A measurement or normalization miss prevents publication and remains an operator-visible job failure; it never becomes a false pass. Per-asset readiness and the dashboard expose the durable processing state. Egress profiles will own final per-sink target selection.
 
 The installer requires the private runtime's `gstrsaudiofx.dll`, and installed verification requires the `ebur128level` factory.
 
@@ -22,4 +22,4 @@ The installer requires the private runtime's `gstrsaudiofx.dll`, and installed v
 
 - Operators see measured LUFS and the target before air.
 - Source admission remains lossless and content-addressed.
-- Commit-to-Air normalization enforcement depends on the following transcode/conform slice; this ADR does not claim that failed audio has already been corrected.
+- Commit-to-Air sees only a verified derivative whose post-transcode loudness passed.

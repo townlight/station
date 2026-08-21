@@ -12,6 +12,7 @@ $stationd = Join-Path $repository 'target\release\stationd.exe'
 $channelWorker = Join-Path $repository 'target\release\channel-worker.exe'
 $contract = Join-Path $PSScriptRoot 'verify-contract.ps1'
 $innoScript = Join-Path $PSScriptRoot 'TownLightStation.iss'
+$operatorRoot = Join-Path $repository 'web\operator'
 
 foreach ($requiredFile in @($GStreamerInstaller, $InnoCompiler, $contract, $innoScript)) {
     if (-not (Test-Path -LiteralPath $requiredFile -PathType Leaf)) {
@@ -27,6 +28,21 @@ if ($runtimeHash -ne $expectedRuntimeHash) {
 Push-Location $repository
 try {
     & $contract
+
+    Push-Location $operatorRoot
+    try {
+        npm ci --ignore-scripts --no-audit
+        if ($LASTEXITCODE -ne 0) {
+            throw 'Operator console dependency restore failed.'
+        }
+        npm run build
+        if ($LASTEXITCODE -ne 0) {
+            throw 'Operator console production build failed.'
+        }
+    }
+    finally {
+        Pop-Location
+    }
 
     if (-not $AllowDirty) {
         $dirty = git status --porcelain

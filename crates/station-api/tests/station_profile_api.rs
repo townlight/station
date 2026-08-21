@@ -115,6 +115,27 @@ fn health_reports_database_readiness_and_unknown_routes_are_not_found() {
 }
 
 #[test]
+fn serves_the_embedded_operator_console_from_the_station_origin() {
+    let database = temporary_database("operator-console");
+    let api = Api::open(&database).expect("database opens");
+    let shell = api.handle("GET", "/", None);
+    assert_eq!(shell.status, 200);
+    assert_eq!(shell.content_type, "text/html; charset=utf-8");
+    let html = String::from_utf8(shell.body).unwrap();
+    assert!(html.contains("TownLight Station"));
+    assert!(html.contains("/operator.js"));
+    let script = api.handle("GET", "/operator.js", None);
+    assert_eq!(script.status, 200);
+    assert_eq!(script.content_type, "text/javascript; charset=utf-8");
+    assert!(script.body.len() > 1_000);
+    let styles = api.handle("GET", "/operator.css", None);
+    assert_eq!(styles.status, 200);
+    assert_eq!(styles.content_type, "text/css; charset=utf-8");
+    assert!(styles.body.len() > 1_000);
+    let _ = std::fs::remove_file(database);
+}
+
+#[test]
 fn persists_validated_channel_output_configuration() {
     let database = temporary_database("channels");
     let api = Api::open(&database).unwrap();

@@ -19,6 +19,10 @@ use station_media_lifecycle::{
 use station_schedule::{AssetReadiness, ChannelConfiguration, MediaAsset, ScheduleItem};
 use station_storage::{CommitWriteError, ProfileWriteError, StationStore};
 
+const OPERATOR_HTML: &[u8] = include_bytes!("../../../web/operator/dist/index.html");
+const OPERATOR_SCRIPT: &[u8] = include_bytes!("../../../web/operator/dist/operator.js");
+const OPERATOR_STYLES: &[u8] = include_bytes!("../../../web/operator/dist/operator.css");
+
 #[derive(Deserialize)]
 struct PutStationProfile {
     #[serde(flatten)]
@@ -53,6 +57,7 @@ struct IngestMedia {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ApiResponse {
     pub status: u16,
+    pub content_type: &'static str,
     pub body: Vec<u8>,
 }
 
@@ -69,6 +74,13 @@ impl Api {
 
     pub fn handle(&self, method: &str, path: &str, body: Option<&[u8]>) -> ApiResponse {
         match (method, path) {
+            ("GET", "/") => static_response(200, "text/html; charset=utf-8", OPERATOR_HTML),
+            ("GET", "/operator.js") => {
+                static_response(200, "text/javascript; charset=utf-8", OPERATOR_SCRIPT)
+            }
+            ("GET", "/operator.css") => {
+                static_response(200, "text/css; charset=utf-8", OPERATOR_STYLES)
+            }
             ("GET", "/health") => {
                 json_response(200, br#"{"database":"ready","status":"ready"}"#.to_vec())
             }
@@ -807,9 +819,10 @@ fn serve_stream(stream: &mut TcpStream, api: &Api) -> Result<(), String> {
         _ => "Internal Server Error",
     };
     let headers = format!(
-        "HTTP/1.1 {} {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        "HTTP/1.1 {} {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
         response.status,
         reason,
+        response.content_type,
         response.body.len()
     );
     stream
@@ -971,7 +984,19 @@ fn dispatch_http(api: &Api, request: &[u8]) -> ApiResponse {
 }
 
 fn json_response(status: u16, body: Vec<u8>) -> ApiResponse {
-    ApiResponse { status, body }
+    ApiResponse {
+        status,
+        content_type: "application/json",
+        body,
+    }
+}
+
+fn static_response(status: u16, content_type: &'static str, body: &[u8]) -> ApiResponse {
+    ApiResponse {
+        status,
+        content_type,
+        body: body.to_vec(),
+    }
 }
 
 fn error_response(status: u16, code: &str, message: &str) -> ApiResponse {
