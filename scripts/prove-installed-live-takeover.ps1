@@ -32,8 +32,8 @@ $operatorId = 'installed-live-takeover-proof'
 $reason = 'Installed loopback live-takeover proof.'
 $runId = [guid]::NewGuid().ToString()
 $sessionId = [guid]::NewGuid().ToString()
-$inputPort = 0
-$outputPort = 0
+$inputPortNumber = 0
+$outputPortNumber = 0
 $receiver = $null
 $sender = $null
 $proofChannel = $null
@@ -231,18 +231,18 @@ try {
     $health = Invoke-RestMethod -Uri "$serviceUri/health" -TimeoutSec 5
     if ($health.status -ne 'ready' -or $health.database -ne 'ready') { throw 'Installed loopback API is not ready.' }
 
-    $inputPort = $InputPort
-    $outputPort = $OutputPort
-    if ($inputPort -eq $outputPort) { throw 'InputPort and OutputPort must be different loopback UDP ports.' }
-    Assert-UdpPortUnowned $outputPort
-    Assert-UdpPortUnowned $inputPort
-    $receiver = [Net.Sockets.UdpClient]::new([Net.IPEndPoint]::new([Net.IPAddress]::Loopback, $outputPort))
+    $inputPortNumber = $InputPort
+    $outputPortNumber = $OutputPort
+    if ($inputPortNumber -eq $outputPortNumber) { throw 'InputPort and OutputPort must be different loopback UDP ports.' }
+    Assert-UdpPortUnowned $outputPortNumber
+    Assert-UdpPortUnowned $inputPortNumber
+    $receiver = [Net.Sockets.UdpClient]::new([Net.IPEndPoint]::new([Net.IPAddress]::Loopback, $outputPortNumber))
     $receiver.Client.ReceiveBufferSize = 8388608
-    Assert-UdpPortUnowned $outputPort $PID
+    Assert-UdpPortUnowned $outputPortNumber $PID
 
     $existingChannel = @((Invoke-Api 'Get' '/channels') | Where-Object channel_id -eq $channelId | Select-Object -First 1)
     if ($existingChannel.Count -gt 0) {
-        if (-not (Test-ProofChannel $existingChannel[0] $outputPort) -or [bool]$existingChannel[0].enabled) {
+        if (-not (Test-ProofChannel $existingChannel[0] $outputPortNumber) -or [bool]$existingChannel[0].enabled) {
             throw 'The proof channel UUID already exists with ambiguous ownership or is enabled.'
         }
     }
@@ -258,7 +258,7 @@ try {
             sink_id = $sinkId
             label = 'Installed live-takeover proof output'
             kind = 'udp-ts'
-            destination = "127.0.0.1:$outputPort"
+            destination = "127.0.0.1:$outputPortNumber"
             loudness_target_lufs = -16.0
             required = $true
             enabled = $true
@@ -272,7 +272,7 @@ try {
     $expectedSourceRevision = 0
     $sourceRevision = 1
     if ($existingSource.Count -gt 0) {
-        if (-not (Test-ProofSource $existingSource[0] $inputPort)) {
+        if (-not (Test-ProofSource $existingSource[0] $inputPortNumber)) {
             throw 'The proof live-source UUID already exists with ambiguous ownership.'
         }
         $expectedSourceRevision = [uint64]$existingSource[0].revision
@@ -283,23 +283,27 @@ try {
         channel_id = $channelId
         label = 'Installed live-takeover proof input'
         enabled = $true
-        endpoint = [ordered]@{ UdpMpegTs = [ordered]@{ bind_ip = '127.0.0.1'; port = $inputPort } }
+        endpoint = [ordered]@{ UdpMpegTs = [ordered]@{ bind_ip = '127.0.0.1'; port = $inputPortNumber } }
         revision = $sourceRevision
         expected_revision = $expectedSourceRevision
     }
     Invoke-Api 'Put' "/live-sources/$sourceId" $source | Out-Null
     $sourceConfigured = $true
 
-    $fallbackTransport = Capture-UdpTransport $CaptureSeconds $fallbackCapture
-    $fallbackDecoded = Get-DecodedEvidence $fallbackCapture
     $worker = Wait-For -Action { Get-Process -Name channel-worker -ErrorAction SilentlyContinue | Where-Object { $_.Id -notin $baselineWorkerIds } | Select-Object -First 1 } `
         -Predicate { param($value) $null -ne $value } -Description 'proof channel worker'
     $workerPid = $worker.Id
+    Wait-For -Action { Get-ProofRuntime } `
+        -Predicate { param($value) $null -ne $value -and $value.state -in @('healthy_fallback', 'on_air') } -Description 'proof fallback runtime readiness' | Out-Null
+    Clear-UdpBacklog
+    Start-Sleep -Milliseconds 750
+    $fallbackTransport = Capture-UdpTransport $CaptureSeconds $fallbackCapture
+    $fallbackDecoded = Get-DecodedEvidence $fallbackCapture
 
     $ffmpeg = (Get-Command ffmpeg.exe -ErrorAction Stop).Source
     $senderArgs = @('-re', '-f', 'lavfi', '-i', 'testsrc2=size=640x360:rate=30', '-f', 'lavfi', '-i',
         'sine=frequency=997:sample_rate=48000', '-c:v', 'libx264', '-preset', 'ultrafast', '-tune', 'zerolatency',
-        '-g', '30', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '128k', '-f', 'mpegts', "udp://127.0.0.1:$inputPort?pkt_size=1316")
+        '-g', '30', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '128k', '-f', 'mpegts', "udp://127.0.0.1:$inputPortNumber?pkt_size=1316")
     $sender = Start-Process -FilePath $ffmpeg -ArgumentList $senderArgs -PassThru -WindowStyle Hidden
     Start-Sleep -Milliseconds 500
     if ($sender.HasExited) { throw "FFmpeg live sender exited early with code $($sender.ExitCode)." }
