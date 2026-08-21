@@ -1,5 +1,88 @@
 use serde::{Deserialize, Serialize};
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum OutputProfileId {
+    #[default]
+    #[serde(rename = "proof-360p30")]
+    Proof360p30,
+    #[serde(rename = "atsc-720p5994")]
+    Atsc720p5994,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+pub struct OutputProfile {
+    pub profile_id: OutputProfileId,
+    pub display_name: &'static str,
+    pub intended_use: &'static str,
+    pub width: u32,
+    pub height: u32,
+    pub frame_rate_numerator: u32,
+    pub frame_rate_denominator: u32,
+    pub interlaced: bool,
+    pub video_bitrate_bps: u32,
+    pub audio_bitrate_bps: u32,
+    pub transport_bitrate_bps: u64,
+    pub audio_sample_rate_hz: u32,
+    pub loudness_target_lufs: f32,
+}
+
+pub const OUTPUT_PROFILES: [OutputProfile; 2] = [
+    OutputProfile {
+        profile_id: OutputProfileId::Proof360p30,
+        display_name: "Local proof — 360p30",
+        intended_use: "Loopback commissioning and low-load machine proof only",
+        width: 640,
+        height: 360,
+        frame_rate_numerator: 30,
+        frame_rate_denominator: 1,
+        interlaced: false,
+        video_bitrate_bps: 1_000_000,
+        audio_bitrate_bps: 128_000,
+        transport_bitrate_bps: 1_500_000,
+        audio_sample_rate_hz: 48_000,
+        loudness_target_lufs: -16.0,
+    },
+    OutputProfile {
+        profile_id: OutputProfileId::Atsc720p5994,
+        display_name: "ATSC/IP cable — 720p59.94",
+        intended_use: "Progressive HD MPEG-TS handoff to an IP-capable headend",
+        width: 1_280,
+        height: 720,
+        frame_rate_numerator: 60_000,
+        frame_rate_denominator: 1_001,
+        interlaced: false,
+        video_bitrate_bps: 6_000_000,
+        audio_bitrate_bps: 192_000,
+        transport_bitrate_bps: 8_000_000,
+        audio_sample_rate_hz: 48_000,
+        loudness_target_lufs: -24.0,
+    },
+];
+
+impl OutputProfileId {
+    pub fn profile(self) -> &'static OutputProfile {
+        OUTPUT_PROFILES
+            .iter()
+            .find(|profile| profile.profile_id == self)
+            .expect("every output profile identifier has one specification")
+    }
+
+    pub const fn storage_name(self) -> &'static str {
+        match self {
+            Self::Proof360p30 => "proof-360p30",
+            Self::Atsc720p5994 => "atsc-720p5994",
+        }
+    }
+
+    pub fn from_storage_name(value: &str) -> Result<Self, ScheduleError> {
+        match value {
+            "proof-360p30" => Ok(Self::Proof360p30),
+            "atsc-720p5994" => Ok(Self::Atsc720p5994),
+            _ => Err(ScheduleError::Invalid("output_profile is unsupported")),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MediaAsset {
     pub asset_id: String,
@@ -33,6 +116,8 @@ pub struct ChannelConfiguration {
     pub channel_id: String,
     pub display_name: String,
     pub udp_destination: String,
+    #[serde(default)]
+    pub output_profile: OutputProfileId,
     pub enabled: bool,
 }
 
@@ -182,6 +267,22 @@ impl ChannelConfiguration {
         if destination.port() == 0 {
             return Err(ScheduleError::Invalid(
                 "udp_destination port must be nonzero",
+            ));
+        }
+        let profile = self.output_profile.profile();
+        if profile.interlaced
+            || profile.width == 0
+            || profile.height == 0
+            || profile.frame_rate_numerator == 0
+            || profile.frame_rate_denominator == 0
+            || profile.video_bitrate_bps == 0
+            || profile.audio_bitrate_bps == 0
+            || profile.transport_bitrate_bps
+                <= u64::from(profile.video_bitrate_bps) + u64::from(profile.audio_bitrate_bps)
+            || profile.audio_sample_rate_hz != 48_000
+        {
+            return Err(ScheduleError::Invalid(
+                "output_profile does not define a runnable broadcast contract",
             ));
         }
         Ok(())

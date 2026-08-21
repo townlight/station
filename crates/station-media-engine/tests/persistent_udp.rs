@@ -2,12 +2,75 @@ use std::collections::HashMap;
 use std::fs;
 use std::net::UdpSocket;
 use std::path::Path;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use gst::prelude::*;
 use gstreamer as gst;
+use gstreamer_pbutils as gst_pbutils;
 use station_media_assets::ingest_media;
 use station_media_engine::{PersistentPlayout, SourceRole};
+use station_schedule::OutputProfileId;
+
+#[test]
+fn emits_the_selected_720p5994_constant_bitrate_transport_contract() {
+    let receiver = UdpSocket::bind("127.0.0.1:0").unwrap();
+    receiver
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .unwrap();
+    let playout = PersistentPlayout::start_udp_with_profile(
+        receiver.local_addr().unwrap(),
+        OutputProfileId::Atsc720p5994,
+    )
+    .expect("the 720p59.94 graph must start");
+
+    let mut datagram = [0_u8; 65_536];
+    receiver
+        .recv(&mut datagram)
+        .expect("the profile must emit its first transport datagram");
+    let started = Instant::now();
+    let mut received_bytes = 0_u64;
+    let mut null_packets = 0_u64;
+    let mut transport_capture = Vec::new();
+    while started.elapsed() < Duration::from_secs(2) {
+        let received = receiver.recv(&mut datagram).unwrap();
+        received_bytes += received as u64;
+        transport_capture.extend_from_slice(&datagram[..received]);
+        for packet in datagram[..received].chunks_exact(188) {
+            let pid = (u16::from(packet[1] & 0x1f) << 8) | u16::from(packet[2]);
+            if pid == 0x1fff {
+                null_packets += 1;
+            }
+        }
+    }
+    let measured_bitrate =
+        received_bytes.saturating_mul(8) as f64 / started.elapsed().as_secs_f64();
+    assert!(
+        (7_600_000.0..=8_400_000.0).contains(&measured_bitrate),
+        "transport bitrate was {measured_bitrate:.0} bps"
+    );
+    assert!(
+        null_packets > 0,
+        "the CBR mux emitted no null padding packets"
+    );
+    playout.stop().unwrap();
+
+    let mut timing = ContinuityTracker::default();
+    for packet in transport_capture.chunks_exact(188) {
+        timing.observe(packet);
+    }
+    assert!(
+        timing.video_pts_delta_samples >= 100,
+        "only {} video frame intervals were observable",
+        timing.video_pts_delta_samples
+    );
+    let average_video_ticks =
+        timing.video_pts_delta_total as f64 / timing.video_pts_delta_samples as f64;
+    assert!(
+        (1_500.0..=1_503.0).contains(&average_video_ticks),
+        "average video frame interval was {average_video_ticks:.3} 90 kHz ticks"
+    );
+    assert_discovered_video_contract(&transport_capture, 1_280, 720);
+}
 
 #[test]
 fn keeps_one_pipeline_running_while_switching_sources_and_emits_mpeg_ts() {
@@ -114,6 +177,26 @@ fn plays_a_validated_ingested_file_without_rebuilding_the_output_graph() {
     fs::remove_dir_all(root).unwrap();
 }
 
+fn assert_discovered_video_contract(
+    transport_stream: &[u8],
+    expected_width: i32,
+    expected_height: i32,
+) {
+    gst::init().unwrap();
+    let path = test_root("profile-contract").with_extension("ts");
+    fs::write(&path, transport_stream).unwrap();
+    let canonical = fs::canonicalize(&path).unwrap();
+    let uri = gst::glib::filename_to_uri(&canonical, None).unwrap();
+    let discoverer = gst_pbutils::Discoverer::new(gst::ClockTime::from_seconds(15)).unwrap();
+    let info = discoverer.discover_uri(uri.as_str()).unwrap();
+    assert_eq!(info.result(), gst_pbutils::DiscovererResult::Ok);
+    let video = info.video_streams();
+    assert_eq!(video.len(), 1);
+    assert_eq!(video[0].width(), expected_width as u32);
+    assert_eq!(video[0].height(), expected_height as u32);
+    fs::remove_file(path).unwrap();
+}
+
 fn assert_transport_stream(
     receiver: &UdpSocket,
     continuity: &mut ContinuityTracker,
@@ -141,6 +224,8 @@ struct ContinuityTracker {
     latest_video_pts: Option<u64>,
     latest_audio_pts: Option<u64>,
     video_pts_samples: usize,
+    video_pts_delta_samples: usize,
+    video_pts_delta_total: u64,
     audio_pts_samples: usize,
     max_av_delta_ticks: u64,
 }
@@ -236,13 +321,20 @@ impl ContinuityTracker {
         let Some(pts) = payload.and_then(pes_pts) else {
             return;
         };
-        if let Some(previous) = self.last_pts.insert(pid, pts) {
+        let previous = self.last_pts.insert(pid, pts);
+        if let Some(previous) = previous {
             assert!(
                 pts >= previous,
                 "PID {pid:#06x} PTS moved backward from {previous} to {pts}"
             );
         }
         if Some(pid) == self.video_pid {
+            if let Some(previous) = previous
+                && pts > previous
+            {
+                self.video_pts_delta_samples += 1;
+                self.video_pts_delta_total += pts - previous;
+            }
             self.latest_video_pts = Some(pts);
             self.video_pts_samples += 1;
         }

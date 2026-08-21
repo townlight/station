@@ -20,7 +20,9 @@ use station_media_lifecycle::{
     LoudnessGateStatus, MediaIngestJob, MissingMediaAlert, ReadinessDashboard, ReadinessState,
     TranscodeJobStatus, WatchFolderConfig,
 };
-use station_schedule::{AssetReadiness, ChannelConfiguration, MediaAsset, ScheduleItem};
+use station_schedule::{
+    AssetReadiness, ChannelConfiguration, MediaAsset, OUTPUT_PROFILES, ScheduleItem,
+};
 use station_storage::{AlertChannelSecret, CommitWriteError, ProfileWriteError, StationStore};
 use station_update::UpdateCheckTrigger;
 use station_update_coordinator::CoordinatorError;
@@ -190,6 +192,11 @@ impl Api {
             }
             ("PUT", "/api/v1/channels") => self.put_channel(body),
             ("GET", "/api/v1/channels") => self.list_channels(),
+            ("GET", "/api/v1/output-profiles") => json_response(
+                200,
+                serde_json::to_vec(&OUTPUT_PROFILES)
+                    .expect("serializing output profiles cannot fail"),
+            ),
             ("GET", "/api/v1/runtime-safe-to-air") => self.runtime_safe_to_air(),
             ("GET", "/api/v1/system-resources/latest") => self.latest_system_resources(),
             ("GET", "/api/v1/self-tests") => self.list_self_tests(),
@@ -601,6 +608,23 @@ impl Api {
         };
         if let Err(error) = channel.validate() {
             return error_response(422, "validation_failed", &format!("{error:?}"));
+        }
+        let existing = match self.storage.list_channels() {
+            Ok(channels) => channels
+                .into_iter()
+                .find(|existing| existing.channel_id == channel.channel_id),
+            Err(message) => return error_response(500, "storage_error", &message),
+        };
+        if existing.as_ref().is_some_and(|existing| {
+            existing.enabled
+                && (existing.udp_destination != channel.udp_destination
+                    || existing.output_profile != channel.output_profile)
+        }) {
+            return error_response(
+                409,
+                "channel_must_be_stopped",
+                "Stop this output before changing its destination or output profile.",
+            );
         }
         match self.storage.put_channel(&channel) {
             Ok(()) => json_response(

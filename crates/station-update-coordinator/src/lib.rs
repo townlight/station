@@ -993,6 +993,7 @@ mod tests {
                 channel_id: channel_id.into(),
                 display_name: "Government Channel".into(),
                 udp_destination: "127.0.0.1:5100".into(),
+                output_profile: Default::default(),
                 enabled: true,
             })
             .unwrap();

@@ -17,7 +17,7 @@ use station_media_lifecycle::{
 };
 use station_schedule::{
     AssetReadiness, ChannelConfiguration, CommitPlan, CommitReport, DispatchJob, DispatchStatus,
-    MediaAsset, ScheduleItem, ScheduleState, prepare_commit,
+    MediaAsset, OutputProfileId, ScheduleItem, ScheduleState, prepare_commit,
 };
 use station_update::{
     PreparedSlotRecord, StagedPackageRecord, UpdateCheckOutcome, UpdateCheckRecord,
@@ -311,6 +311,7 @@ impl StationStore {
                channel_id TEXT PRIMARY KEY,\
                display_name TEXT NOT NULL,\
                udp_destination TEXT NOT NULL,\
+               output_profile TEXT NOT NULL DEFAULT 'proof-360p30',\
                enabled INTEGER NOT NULL CHECK (enabled IN (0,1))\
              );\
              CREATE TABLE IF NOT EXISTS channel_runtime (\
@@ -486,6 +487,7 @@ impl StationStore {
         store.migrate_ingest_transcode_status()?;
         store.migrate_commit_report_statuses()?;
         store.migrate_alert_delivery_realerts()?;
+        store.migrate_channel_output_profile()?;
         store.seed_default_alert_rules()?;
         store.seed_default_self_test_schedules()?;
         Ok(store)
@@ -1118,22 +1120,27 @@ impl StationStore {
     pub fn put_channel(&self, channel: &ChannelConfiguration) -> Result<(), String> {
         channel.validate().map_err(|error| format!("{error:?}"))?;
         let statement = self.prepare(
-            "INSERT INTO channels(channel_id, display_name, udp_destination, enabled) VALUES(?1, ?2, ?3, ?4) \
-             ON CONFLICT(channel_id) DO UPDATE SET display_name=excluded.display_name, udp_destination=excluded.udp_destination, enabled=excluded.enabled",
+            "INSERT INTO channels(channel_id, display_name, udp_destination, output_profile, enabled) VALUES(?1, ?2, ?3, ?4, ?5) \
+             ON CONFLICT(channel_id) DO UPDATE SET display_name=excluded.display_name, udp_destination=excluded.udp_destination, output_profile=excluded.output_profile, enabled=excluded.enabled",
         )?;
         let channel_id = c_string(&channel.channel_id, "channel identity")?;
         let display_name = c_string(&channel.display_name, "channel display name")?;
         let destination = c_string(&channel.udp_destination, "UDP destination")?;
+        let output_profile = c_string(
+            channel.output_profile.storage_name(),
+            "channel output profile",
+        )?;
         bind_text(self.database, statement.raw, 1, &channel_id)?;
         bind_text(self.database, statement.raw, 2, &display_name)?;
         bind_text(self.database, statement.raw, 3, &destination)?;
-        bind_i64(self.database, statement.raw, 4, i64::from(channel.enabled))?;
+        bind_text(self.database, statement.raw, 4, &output_profile)?;
+        bind_i64(self.database, statement.raw, 5, i64::from(channel.enabled))?;
         expect_done(self.database, statement.raw)
     }
 
     pub fn list_channels(&self) -> Result<Vec<ChannelConfiguration>, String> {
         let statement = self.prepare(
-            "SELECT channel_id, display_name, udp_destination, enabled FROM channels ORDER BY channel_id",
+            "SELECT channel_id, display_name, udp_destination, output_profile, enabled FROM channels ORDER BY channel_id",
         )?;
         let mut channels = Vec::new();
         loop {
@@ -1142,7 +1149,12 @@ impl StationStore {
                     channel_id: column_text(statement.raw, 0)?,
                     display_name: column_text(statement.raw, 1)?,
                     udp_destination: column_text(statement.raw, 2)?,
-                    enabled: unsafe { sqlite3_column_int64(statement.raw, 3) } == 1,
+                    output_profile: OutputProfileId::from_storage_name(&column_text(
+                        statement.raw,
+                        3,
+                    )?)
+                    .map_err(|error| format!("{error:?}"))?,
+                    enabled: unsafe { sqlite3_column_int64(statement.raw, 4) } == 1,
                 }),
                 SQLITE_DONE => return Ok(channels),
                 _ => return Err(sqlite_error(self.database)),
@@ -3567,6 +3579,24 @@ impl StationStore {
         self.finish_transaction(outcome)
     }
 
+    fn migrate_channel_output_profile(&self) -> Result<(), String> {
+        let statement = self.prepare(
+            "SELECT COUNT(*) FROM pragma_table_info('channels') WHERE name='output_profile'",
+        )?;
+        let exists = match unsafe { sqlite3_step(statement.raw) } {
+            SQLITE_ROW => (unsafe { sqlite3_column_int64(statement.raw, 0) }) == 1,
+            _ => return Err(sqlite_error(self.database)),
+        };
+        drop(statement);
+        if !exists {
+            self.execute(
+                "ALTER TABLE channels ADD COLUMN output_profile TEXT NOT NULL \
+                 DEFAULT 'proof-360p30'",
+            )?;
+        }
+        Ok(())
+    }
+
     fn migrate_ingest_transcode_status(&self) -> Result<(), String> {
         let statement = self.prepare(
             "SELECT sql FROM sqlite_master WHERE type='table' AND name='media_ingest_jobs'",
@@ -4860,6 +4890,41 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn adds_the_default_output_profile_to_existing_channels_without_losing_rows() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let database = std::env::temp_dir().join(format!("townlight-profile-migration-{nonce}.db"));
+        let store = StationStore::open(&database).unwrap();
+        store
+            .execute(
+                "DROP TABLE channels;\
+                 CREATE TABLE channels (\
+                   channel_id TEXT PRIMARY KEY, display_name TEXT NOT NULL,\
+                   udp_destination TEXT NOT NULL, enabled INTEGER NOT NULL CHECK (enabled IN (0,1)));\
+                 INSERT INTO channels VALUES(\
+                   '8b626c01-bdf8-419a-8a2e-b0a7caa1ff7e','Government','127.0.0.1:5500',1);",
+            )
+            .unwrap();
+        drop(store);
+
+        let migrated = StationStore::open(&database).unwrap();
+        let channels = migrated.list_channels().unwrap();
+        assert_eq!(channels.len(), 1);
+        assert_eq!(channels[0].display_name, "Government");
+        assert_eq!(channels[0].output_profile, OutputProfileId::Proof360p30);
+        drop(migrated);
+        for candidate in [
+            database.clone(),
+            PathBuf::from(format!("{}-wal", database.display())),
+            PathBuf::from(format!("{}-shm", database.display())),
+        ] {
+            let _ = std::fs::remove_file(candidate);
+        }
+    }
 
     #[test]
     fn migrates_the_pre_completion_dispatch_constraint_without_losing_rows() {

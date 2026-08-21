@@ -708,6 +708,7 @@ mod tests {
                 channel_id: channel_id.into(),
                 display_name: "Government".into(),
                 udp_destination: "127.0.0.1:5798".into(),
+                output_profile: Default::default(),
                 enabled: true,
             })
             .unwrap();

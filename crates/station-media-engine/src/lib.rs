@@ -8,6 +8,7 @@ use std::time::{Duration, Instant};
 
 use gst::prelude::*;
 use gstreamer as gst;
+use station_schedule::{OutputProfile, OutputProfileId};
 
 static FILE_PROGRAM_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
@@ -64,29 +65,47 @@ pub struct PersistentPlayout {
     audio_selector: gst::Element,
     audio_fallback_pad: gst::Pad,
     audio_program_pad: gst::Pad,
+    output_profile: OutputProfileId,
     file_program: Option<FileProgram>,
     stopped: bool,
 }
 
 impl PersistentPlayout {
     pub fn start_udp(destination: SocketAddr) -> Result<Self, EngineError> {
-        Self::start_udp_with_program(destination, None)
+        Self::start_udp_with_profile(destination, OutputProfileId::default())
+    }
+
+    pub fn start_udp_with_profile(
+        destination: SocketAddr,
+        output_profile: OutputProfileId,
+    ) -> Result<Self, EngineError> {
+        Self::start_udp_with_program(destination, None, output_profile)
     }
 
     pub fn start_file_udp(
         media_path: impl AsRef<Path>,
         destination: SocketAddr,
     ) -> Result<Self, EngineError> {
+        Self::start_file_udp_with_profile(media_path, destination, OutputProfileId::default())
+    }
+
+    pub fn start_file_udp_with_profile(
+        media_path: impl AsRef<Path>,
+        destination: SocketAddr,
+        output_profile: OutputProfileId,
+    ) -> Result<Self, EngineError> {
         station_media_assets::validate_media(media_path.as_ref())
             .map_err(|error| EngineError::MediaRejected(format!("{error:?}")))?;
-        Self::start_udp_with_program(destination, Some(media_path.as_ref()))
+        Self::start_udp_with_program(destination, Some(media_path.as_ref()), output_profile)
     }
 
     fn start_udp_with_program(
         destination: SocketAddr,
         media_path: Option<&Path>,
+        output_profile: OutputProfileId,
     ) -> Result<Self, EngineError> {
         gst::init().map_err(|error| EngineError::Initialization(error.to_string()))?;
+        let profile = output_profile.profile();
 
         let pipeline = gst::Pipeline::with_name("townlight-synthetic-playout");
         let fallback = gst::ElementFactory::make("videotestsrc")
@@ -115,18 +134,21 @@ impl PersistentPlayout {
             .build()
             .map_err(|error| build_error("videorate", error))?;
         let convert = element("videoconvert", "output-convert")?;
-        let caps = gst::Caps::builder("video/x-raw")
-            .field("format", "I420")
-            .field("width", 640_i32)
-            .field("height", 360_i32)
-            .field("framerate", gst::Fraction::new(30, 1))
-            .build();
+        let caps = video_caps(profile)?;
         let caps_filter = gst::ElementFactory::make("capsfilter")
             .name("canonical-video")
             .property("caps", &caps)
             .build()
             .map_err(|error| build_error("capsfilter", error))?;
-        let encoder = element("openh264enc", "video-encoder")?;
+        let encoder = gst::ElementFactory::make("openh264enc")
+            .name("video-encoder")
+            .property("bitrate", profile.video_bitrate_bps)
+            .property("max-bitrate", profile.video_bitrate_bps)
+            .property("gop-size", two_second_gop(profile))
+            .property("enable-frame-skip", false)
+            .property_from_str("rate-control", "bitrate")
+            .build()
+            .map_err(|error| build_error("openh264enc", error))?;
         let parser = gst::ElementFactory::make("h264parse")
             .name("video-parser")
             .property("config-interval", -1_i32)
@@ -140,7 +162,7 @@ impl PersistentPlayout {
             .map_err(|error| build_error("audiotestsrc", error))?;
         let fallback_audio_convert = element("audioconvert", "fallback-audio-convert")?;
         let fallback_audio_resample = element("audioresample", "fallback-audio-resample")?;
-        let fallback_audio_caps = audio_caps_filter("fallback-canonical-audio")?;
+        let fallback_audio_caps = audio_caps_filter("fallback-canonical-audio", profile)?;
         let fallback_audio_queue = element("queue", "fallback-audio-queue")?;
         let program_audio = gst::ElementFactory::make("audiotestsrc")
             .name("program-audio-source")
@@ -152,7 +174,7 @@ impl PersistentPlayout {
             .map_err(|error| build_error("audiotestsrc", error))?;
         let program_audio_convert = element("audioconvert", "program-audio-convert")?;
         let program_audio_resample = element("audioresample", "program-audio-resample")?;
-        let program_audio_caps = audio_caps_filter("program-canonical-audio")?;
+        let program_audio_caps = audio_caps_filter("program-canonical-audio", profile)?;
         let program_audio_queue = element("queue", "program-audio-queue")?;
         let audio_selector = selector("audio-source-selector")?;
         let audio_timeline = gst::ElementFactory::make("identity")
@@ -169,7 +191,7 @@ impl PersistentPlayout {
         let audio_output_queue = element("queue", "audio-output-queue")?;
         let audio_encoder = gst::ElementFactory::make("voaacenc")
             .name("audio-encoder")
-            .property("bitrate", 128_000_i32)
+            .property("bitrate", profile.audio_bitrate_bps as i32)
             .property("perfect-timestamp", true)
             .build()
             .map_err(|error| build_error("voaacenc", error))?;
@@ -177,6 +199,10 @@ impl PersistentPlayout {
         let mux = gst::ElementFactory::make("mpegtsmux")
             .name("transport-mux")
             .property("alignment", 7_i32)
+            .property("bitrate", profile.transport_bitrate_bps)
+            .property("pat-interval", 9_000_u32)
+            .property("pmt-interval", 9_000_u32)
+            .property("pcr-interval", 3_600_u32)
             .build()
             .map_err(|error| build_error("mpegtsmux", error))?;
         let sink = gst::ElementFactory::make("udpsink")
@@ -285,7 +311,9 @@ impl PersistentPlayout {
         let synthetic_audio_program_pad =
             connect_source(&program_audio_queue, &audio_selector, "program-audio-queue")?;
         let file_program = media_path
-            .map(|path| install_file_program(&pipeline, path, &video_selector, &audio_selector))
+            .map(|path| {
+                install_file_program(&pipeline, path, &video_selector, &audio_selector, profile)
+            })
             .transpose()?;
         let (program_pad, audio_program_pad) = file_program
             .as_ref()
@@ -312,6 +340,7 @@ impl PersistentPlayout {
             audio_selector,
             audio_fallback_pad,
             audio_program_pad,
+            output_profile,
             file_program,
             stopped: false,
         };
@@ -374,6 +403,7 @@ impl PersistentPlayout {
             media_path.as_ref(),
             &self.video_selector,
             &self.audio_selector,
+            self.output_profile.profile(),
         )?;
         let running_time = self
             .pipeline
@@ -456,6 +486,7 @@ fn install_file_program(
     media_path: &Path,
     video_selector: &gst::Element,
     audio_selector: &gst::Element,
+    profile: &OutputProfile,
 ) -> Result<FileProgram, EngineError> {
     let sequence = FILE_PROGRAM_SEQUENCE.fetch_add(1, Ordering::Relaxed);
     let name = |component: &str| format!("program-file-{component}-{sequence}");
@@ -474,7 +505,7 @@ fn install_file_program(
     let video_convert = element("videoconvert", name("video-convert"))?;
     let video_scale = element("videoscale", name("video-scale"))?;
     let video_rate = element("videorate", name("video-rate"))?;
-    let video_caps = video_caps_filter(name("canonical-video"))?;
+    let video_caps = video_caps_filter(name("canonical-video"), profile)?;
     let video_clock = gst::ElementFactory::make("clocksync")
         .name(name("video-clock"))
         .property("sync-to-first", true)
@@ -485,7 +516,7 @@ fn install_file_program(
     let audio_decode_queue = element("queue", name("audio-decode-queue"))?;
     let audio_convert = element("audioconvert", name("audio-convert"))?;
     let audio_resample = element("audioresample", name("audio-resample"))?;
-    let audio_caps = audio_caps_filter(name("canonical-audio"))?;
+    let audio_caps = audio_caps_filter(name("canonical-audio"), profile)?;
     let audio_rate = gst::ElementFactory::make("audiorate")
         .name(name("audio-rate"))
         .property("skip-to-first", true)
@@ -735,11 +766,16 @@ fn selector(name: &'static str) -> Result<gst::Element, EngineError> {
         .map_err(|error| build_error("input-selector", error))
 }
 
-fn audio_caps_filter(name: impl Into<gst::glib::GString>) -> Result<gst::Element, EngineError> {
+fn audio_caps_filter(
+    name: impl Into<gst::glib::GString>,
+    profile: &OutputProfile,
+) -> Result<gst::Element, EngineError> {
+    let sample_rate = i32::try_from(profile.audio_sample_rate_hz)
+        .map_err(|_| EngineError::Pipeline("audio sample rate exceeds GStreamer range".into()))?;
     let caps = gst::Caps::builder("audio/x-raw")
         .field("format", "S16LE")
         .field("layout", "interleaved")
-        .field("rate", 48_000_i32)
+        .field("rate", sample_rate)
         .field("channels", 2_i32)
         .build();
     gst::ElementFactory::make("capsfilter")
@@ -749,18 +785,42 @@ fn audio_caps_filter(name: impl Into<gst::glib::GString>) -> Result<gst::Element
         .map_err(|error| build_error("capsfilter", error))
 }
 
-fn video_caps_filter(name: impl Into<gst::glib::GString>) -> Result<gst::Element, EngineError> {
-    let caps = gst::Caps::builder("video/x-raw")
+fn video_caps(profile: &OutputProfile) -> Result<gst::Caps, EngineError> {
+    let width = i32::try_from(profile.width)
+        .map_err(|_| EngineError::Pipeline("output width exceeds GStreamer range".into()))?;
+    let height = i32::try_from(profile.height)
+        .map_err(|_| EngineError::Pipeline("output height exceeds GStreamer range".into()))?;
+    let numerator = i32::try_from(profile.frame_rate_numerator).map_err(|_| {
+        EngineError::Pipeline("frame-rate numerator exceeds GStreamer range".into())
+    })?;
+    let denominator = i32::try_from(profile.frame_rate_denominator).map_err(|_| {
+        EngineError::Pipeline("frame-rate denominator exceeds GStreamer range".into())
+    })?;
+    Ok(gst::Caps::builder("video/x-raw")
         .field("format", "I420")
-        .field("width", 640_i32)
-        .field("height", 360_i32)
-        .field("framerate", gst::Fraction::new(30, 1))
-        .build();
+        .field("width", width)
+        .field("height", height)
+        .field("framerate", gst::Fraction::new(numerator, denominator))
+        .build())
+}
+
+fn video_caps_filter(
+    name: impl Into<gst::glib::GString>,
+    profile: &OutputProfile,
+) -> Result<gst::Element, EngineError> {
+    let caps = video_caps(profile)?;
     gst::ElementFactory::make("capsfilter")
         .name(name)
         .property("caps", &caps)
         .build()
         .map_err(|error| build_error("capsfilter", error))
+}
+
+fn two_second_gop(profile: &OutputProfile) -> u32 {
+    profile
+        .frame_rate_numerator
+        .saturating_mul(2)
+        .div_ceil(profile.frame_rate_denominator)
 }
 
 fn build_error(factory: &'static str, error: gst::glib::BoolError) -> EngineError {

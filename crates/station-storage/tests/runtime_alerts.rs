@@ -96,6 +96,7 @@ fn persists_monotonic_channel_runtime_truth() {
             channel_id: CHANNEL_ID.into(),
             display_name: "Government Channel".into(),
             udp_destination: "127.0.0.1:5500".into(),
+            output_profile: Default::default(),
             enabled: true,
         })
         .unwrap();

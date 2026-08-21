@@ -9,6 +9,7 @@ use station_media_protocol::{
     ChannelCommand, CommandEnvelope, MAX_FRAME_BYTES, PROTOCOL_VERSION, ProtocolError, WorkerEvent,
     WorkerEventEnvelope, decode_event_frame, encode_command_frame,
 };
+use station_schedule::OutputProfileId;
 use station_windows_ipc::{IpcError, PipeServer, PipeStream};
 
 static PIPE_SEQUENCE: AtomicU64 = AtomicU64::new(1);
@@ -59,6 +60,26 @@ impl WorkerSupervisor {
         udp_destination: SocketAddr,
         timeout: Duration,
     ) -> Result<Self, SupervisorError> {
+        Self::launch_with_output_profile(
+            executable,
+            worker_id,
+            channel_id,
+            journal_path,
+            udp_destination,
+            OutputProfileId::default(),
+            timeout,
+        )
+    }
+
+    pub fn launch_with_output_profile(
+        executable: &Path,
+        worker_id: &str,
+        channel_id: &str,
+        journal_path: &Path,
+        udp_destination: SocketAddr,
+        output_profile: OutputProfileId,
+        timeout: Duration,
+    ) -> Result<Self, SupervisorError> {
         let started = Instant::now();
         let suffix = format!(
             "worker-{}-{}",
@@ -71,6 +92,7 @@ impl WorkerSupervisor {
             .arg(journal_path)
             .arg(server.name())
             .arg(udp_destination.to_string())
+            .arg(output_profile.storage_name())
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())

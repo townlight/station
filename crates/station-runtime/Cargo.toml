@@ -6,4 +6,5 @@ publish.workspace = true
 
 [dependencies]
 station-media-protocol.workspace = true
+station-schedule.workspace = true
 station-windows-ipc.workspace = true

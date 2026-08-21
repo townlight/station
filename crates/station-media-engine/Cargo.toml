@@ -7,3 +7,7 @@ publish.workspace = true
 [dependencies]
 gstreamer.workspace = true
 station-media-assets.workspace = true
+station-schedule.workspace = true
+
+[dev-dependencies]
+gstreamer-pbutils.workspace = true

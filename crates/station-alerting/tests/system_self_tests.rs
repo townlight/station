@@ -51,6 +51,7 @@ fn build_healthy_station(root: &Path, now: i64) -> PathBuf {
             channel_id: CHANNEL_ID.into(),
             display_name: "Government".into(),
             udp_destination: "127.0.0.1:5100".into(),
+            output_profile: Default::default(),
             enabled: true,
         })
         .unwrap();

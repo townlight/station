@@ -14,7 +14,8 @@ use station_media_protocol::{ChannelCommand, WorkerEvent};
 use station_orchestration::{ChannelController, DispatchTransition, run_until};
 use station_runtime::WorkerSupervisor;
 use station_schedule::{
-    AssetReadiness, ChannelConfiguration, DispatchStatus, MediaAsset, ScheduleItem, ScheduleState,
+    AssetReadiness, ChannelConfiguration, DispatchStatus, MediaAsset, OutputProfileId,
+    ScheduleItem, ScheduleState,
 };
 use station_storage::StationStore;
 
@@ -44,12 +45,13 @@ fn launches_handshakes_commands_and_cleanly_stops_the_real_worker() {
     output
         .set_read_timeout(Some(Duration::from_secs(5)))
         .unwrap();
-    let launched = WorkerSupervisor::launch(
+    let launched = WorkerSupervisor::launch_with_output_profile(
         PathBuf::from(env!("CARGO_BIN_EXE_channel-worker")).as_path(),
         WORKER_ID,
         CHANNEL_ID,
         &journal,
         output.local_addr().unwrap(),
+        OutputProfileId::Atsc720p5994,
         Duration::from_secs(2),
     );
     assert!(
@@ -238,6 +240,7 @@ fn committed_schedule_is_loaded_aired_and_completed_only_after_worker_acknowledg
         channel_id: CHANNEL_ID.into(),
         display_name: "Primary Cable Channel".into(),
         udp_destination: output.local_addr().unwrap().to_string(),
+        output_profile: Default::default(),
         enabled: true,
     };
     let now = SystemTime::now()
@@ -414,6 +417,7 @@ fn daemon_loop_discovers_an_enabled_channel_and_completes_its_committed_item() {
         channel_id: CHANNEL_ID.into(),
         display_name: "Daemon-owned channel".into(),
         udp_destination: output.local_addr().unwrap().to_string(),
+        output_profile: Default::default(),
         enabled: true,
     };
     let now = SystemTime::now()
@@ -506,6 +510,7 @@ fn daemon_records_one_deduplicated_incident_per_condition_when_worker_cannot_sta
             channel_id: CHANNEL_ID.into(),
             display_name: "Failure proof channel".into(),
             udp_destination: "127.0.0.1:5519".into(),
+            output_profile: Default::default(),
             enabled: true,
         })
         .unwrap();

@@ -1608,7 +1608,9 @@ name = "station-media-engine"
 version = "0.1.0"
 dependencies = [
  "gstreamer",
+ "gstreamer-pbutils",
  "station-media-assets",
+ "station-schedule",
 ]
 
 [[package]]
@@ -1649,6 +1651,7 @@ name = "station-runtime"
 version = "0.1.0"
 dependencies = [
  "station-media-protocol",
+ "station-schedule",
  "station-windows-ipc",
 ]
 

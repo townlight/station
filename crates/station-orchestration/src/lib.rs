@@ -64,12 +64,13 @@ impl ChannelController {
             .parse()
             .map_err(|_| OrchestrationError::InvalidDestination(channel.udp_destination.clone()))?;
         let worker_id = format!("station-worker-{}", channel.channel_id);
-        let supervisor = WorkerSupervisor::launch(
+        let supervisor = WorkerSupervisor::launch_with_output_profile(
             worker_executable,
             &worker_id,
             &channel.channel_id,
             journal_path,
             destination,
+            channel.output_profile,
             timeout,
         )
         .map_err(OrchestrationError::Worker)?;

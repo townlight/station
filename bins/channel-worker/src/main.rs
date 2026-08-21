@@ -9,11 +9,12 @@ use station_media_protocol::{
     ChannelCommand, CommandEnvelope, MAX_FRAME_BYTES, PROTOCOL_VERSION, WorkerEvent,
     WorkerEventEnvelope, decode_command_frame, encode_event_frame,
 };
+use station_schedule::OutputProfileId;
 use station_windows_ipc::PipeStream;
 
 fn main() {
-    let (worker_id, channel_id, journal_path, pipe_name, udp_destination) = arguments()
-        .unwrap_or_else(|message| {
+    let (worker_id, channel_id, journal_path, pipe_name, udp_destination, output_profile) =
+        arguments().unwrap_or_else(|message| {
             eprintln!("{message}");
             std::process::exit(2);
         });
@@ -23,7 +24,7 @@ fn main() {
     let mut pipe = PipeStream::connect(&pipe_name)
         .unwrap_or_else(|error| fatal(5, "connect to its control pipe", &format!("{error:?}")));
     let mut media = Some(
-        PersistentPlayout::start_udp(udp_destination)
+        PersistentPlayout::start_udp_with_profile(udp_destination, output_profile)
             .unwrap_or_else(|error| fatal(8, "start its fallback graph", &format!("{error:?}"))),
     );
 
@@ -70,8 +71,8 @@ fn main() {
     }
 }
 
-fn arguments() -> Result<(String, String, PathBuf, String, SocketAddr), String> {
-    const USAGE: &str = "usage: channel-worker <worker-id> <channel-id> <journal-path> <pipe-name> <udp-destination>";
+fn arguments() -> Result<(String, String, PathBuf, String, SocketAddr, OutputProfileId), String> {
+    const USAGE: &str = "usage: channel-worker <worker-id> <channel-id> <journal-path> <pipe-name> <udp-destination> <output-profile>";
     let mut arguments = std::env::args_os().skip(1);
     let Some(worker_id) = arguments.next().and_then(|value| value.into_string().ok()) else {
         return Err(USAGE.into());
@@ -91,6 +92,11 @@ fn arguments() -> Result<(String, String, PathBuf, String, SocketAddr), String> 
     let udp_destination = udp_destination
         .parse()
         .map_err(|_| "udp-destination must be an IP address and port".to_string())?;
+    let Some(output_profile) = arguments.next().and_then(|value| value.into_string().ok()) else {
+        return Err(USAGE.into());
+    };
+    let output_profile = OutputProfileId::from_storage_name(&output_profile)
+        .map_err(|_| "output-profile is unsupported".to_string())?;
     if arguments.next().is_some() {
         return Err(USAGE.into());
     }
@@ -100,6 +106,7 @@ fn arguments() -> Result<(String, String, PathBuf, String, SocketAddr), String> 
         journal_path,
         pipe_name,
         udp_destination,
+        output_profile,
     ))
 }
 

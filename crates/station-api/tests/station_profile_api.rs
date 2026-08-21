@@ -22,7 +22,7 @@ use station_ingest::{IngestOutcome, IngestWorker, TranscodeOutcome, TranscodeWor
 use station_media_lifecycle::WatchFolderConfig;
 use station_schedule::{
     AssetReadiness, ChannelConfiguration, CommitPlan, CommitReport, DispatchStatus, MediaAsset,
-    ScheduleItem, ScheduleState,
+    OutputProfileId, ScheduleItem, ScheduleState,
 };
 use station_storage::StationStore;
 
@@ -151,6 +151,7 @@ fn persists_validated_channel_output_configuration() {
         channel_id: "8b626c01-bdf8-419a-8a2e-b0a7caa1ff7e".into(),
         display_name: "Primary Cable Channel".into(),
         udp_destination: "127.0.0.1:5500".into(),
+        output_profile: OutputProfileId::Atsc720p5994,
         enabled: true,
     };
     let put = api.handle(
@@ -163,7 +164,44 @@ fn persists_validated_channel_output_configuration() {
     assert_eq!(listed.status, 200);
     assert_eq!(
         serde_json::from_slice::<Vec<ChannelConfiguration>>(&listed.body).unwrap(),
-        vec![channel]
+        vec![channel.clone()]
+    );
+    let profiles = api.handle("GET", "/api/v1/output-profiles", None);
+    assert_eq!(profiles.status, 200);
+    let profiles: serde_json::Value = serde_json::from_slice(&profiles.body).unwrap();
+    assert_eq!(profiles.as_array().unwrap().len(), 2);
+    assert_eq!(profiles[1]["profile_id"], "atsc-720p5994");
+    assert_eq!(profiles[1]["width"], 1_280);
+    assert_eq!(profiles[1]["frame_rate_numerator"], 60_000);
+    assert_eq!(profiles[1]["frame_rate_denominator"], 1_001);
+    let mut changed = channel.clone();
+    changed.output_profile = OutputProfileId::Proof360p30;
+    let blocked = api.handle(
+        "PUT",
+        "/api/v1/channels",
+        Some(&serde_json::to_vec(&changed).unwrap()),
+    );
+    assert_eq!(blocked.status, 409);
+    let mut stopped = channel.clone();
+    stopped.enabled = false;
+    assert_eq!(
+        api.handle(
+            "PUT",
+            "/api/v1/channels",
+            Some(&serde_json::to_vec(&stopped).unwrap())
+        )
+        .status,
+        200
+    );
+    changed.enabled = false;
+    assert_eq!(
+        api.handle(
+            "PUT",
+            "/api/v1/channels",
+            Some(&serde_json::to_vec(&changed).unwrap())
+        )
+        .status,
+        200
     );
     let invalid = api.handle(
         "PUT",
@@ -181,6 +219,7 @@ fn exposes_runtime_safe_to_air_and_acknowledges_durable_alerts() {
         channel_id: "8b626c01-bdf8-419a-8a2e-b0a7caa1ff7e".into(),
         display_name: "Primary Cable Channel".into(),
         udp_destination: "127.0.0.1:5500".into(),
+        output_profile: Default::default(),
         enabled: true,
     };
     let now = SystemTime::now()

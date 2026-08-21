@@ -61,6 +61,7 @@ fn run_worker(
         .arg(journal)
         .arg(pipe_name)
         .arg(udp.local_addr().unwrap().to_string())
+        .arg("proof-360p30")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
