@@ -13,6 +13,8 @@ $requirements = [ordered]@{
     'checks the required file playback plugin' = 'gstplayback.dll'
     'checks the required transport stream demuxer' = 'gstmpegtsdemux.dll'
     'checks the required software decoder bundle' = 'gstlibav.dll'
+    'checks the required SRT plugin' = 'gstsrt.dll'
+    'checks the required SRT transport library' = 'srt.dll'
     'registers the native station service' = 'create TownLightStation'
     'sets immediate automatic service start' = 'config TownLightStation start= auto'
     'configures service recovery' = 'failure TownLightStation'

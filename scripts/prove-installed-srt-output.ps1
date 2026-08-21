@@ -36,13 +36,26 @@ try {
     $listenerArguments = @(
         '-q', 'srtsrc', "uri=srt://127.0.0.1:$ListenerPort", 'mode=listener',
         'localaddress=127.0.0.1', "localport=$ListenerPort", 'latency=200',
-        '!', 'filesink', "location=$capture", 'sync=false', 'async=false'
+        '!', 'fdsink', 'fd=1', 'sync=false', 'async=false'
     )
     $listener = Start-Process -FilePath $launcher -ArgumentList $listenerArguments `
-        -PassThru -WindowStyle Hidden
-    Start-Sleep -Milliseconds 500
-    if ($listener.HasExited) {
-        throw "The SRT listener exited before channel startup with code $($listener.ExitCode)."
+        -RedirectStandardOutput $capture -PassThru -WindowStyle Hidden
+    $listenerClock = [Diagnostics.Stopwatch]::StartNew()
+    $listenerBound = $false
+    do {
+        if ($listener.HasExited) {
+            throw "The SRT listener exited before channel startup with code $($listener.ExitCode)."
+        }
+        $listenerBound = @(
+            Get-NetUDPEndpoint -LocalPort $ListenerPort -ErrorAction SilentlyContinue |
+                Where-Object OwningProcess -eq $listener.Id
+        ).Count -gt 0
+        if (-not $listenerBound) {
+            Start-Sleep -Milliseconds 100
+        }
+    } while (-not $listenerBound -and $listenerClock.Elapsed.TotalSeconds -lt 20)
+    if (-not $listenerBound) {
+        throw 'The installed SRT listener did not bind within 20 seconds.'
     }
 
     Invoke-RestMethod -Method Put -Uri "$BaseUri/api/v1/channels" -ContentType 'application/json' `
@@ -75,7 +88,7 @@ try {
     $configured = $false
     Start-Sleep -Milliseconds 500
     if (-not $listener.HasExited) {
-        Stop-Process -Id $listener.Id -Force
+        Stop-Process -Id $listener.Id -Force -ErrorAction SilentlyContinue
         $listener.WaitForExit(5000) | Out-Null
     }
 

@@ -211,6 +211,10 @@ begin
     RaiseException('The bundled media runtime did not produce its required transport stream demuxer.');
   if not FileExists(RuntimeRoot + '\lib\gstreamer-1.0\gstlibav.dll') then
     RaiseException('The bundled media runtime did not produce its required software decoder bundle.');
+  if not FileExists(RuntimeRoot + '\lib\gstreamer-1.0\gstsrt.dll') then
+    RaiseException('The bundled media runtime did not produce its required SRT plugin.');
+  if not FileExists(RuntimeRoot + '\bin\srt.dll') then
+    RaiseException('The bundled media runtime did not produce its required SRT transport library.');
 end;
 
 procedure StageStationBinaries;

@@ -89,7 +89,8 @@ foreach ($factory in @(
     'openh264enc',
     'h264parse',
     'mpegtsmux',
-    'udpsink'
+    'udpsink',
+    'srtsink'
 )) {
     & (Join-Path $runtime 'bin\gst-inspect-1.0.exe') $factory *> $null
     if ($LASTEXITCODE -ne 0) {
