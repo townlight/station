@@ -18,7 +18,7 @@ use station_media_protocol::{
 };
 use station_runtime::{SupervisorError, WorkerSupervisor};
 use station_schedule::{ChannelConfiguration, DispatchStatus, OutputSinkKind};
-use station_storage::{CgWriteError, StationStore};
+use station_storage::{CgSnapshotReadError, CgWriteError, StationStore};
 
 static ALERT_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 const HEARTBEAT_INTERVAL_MS: i64 = 5_000;
@@ -53,6 +53,13 @@ fn expire_due_bulletins(
     }
 }
 
+fn cg_read_requires_clear(error: &CgSnapshotReadError) -> bool {
+    matches!(
+        error,
+        CgSnapshotReadError::BoardNotFound | CgSnapshotReadError::BoardInactive
+    )
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DispatchTransition {
     Loaded { report_id: String },
@@ -83,6 +90,7 @@ pub enum OrchestrationError {
 pub struct CgSnapshotState {
     last_valid: Option<(CgSnapshot, [u8; 32])>,
     last_applied: Option<(u64, [u8; 32])>,
+    clear_required: bool,
 }
 
 impl CgSnapshotState {
@@ -92,8 +100,26 @@ impl CgSnapshotState {
     ) -> Result<CgSnapshot, OrchestrationError> {
         let protocol = resolved_snapshot_to_protocol(snapshot)?;
         let hash = snapshot_hash(&protocol)?;
+        self.clear_required = false;
         self.last_valid = Some((protocol.clone(), hash));
         Ok(protocol)
+    }
+
+    /// Forget the authoritative snapshot and request one clear if this state was
+    /// previously acknowledged by the worker. A failed clear keeps the request
+    /// pending so the next CG sync retries it; an already-cleared state is a no-op.
+    pub fn invalidate_authority(&mut self) {
+        self.clear_required |= self.last_applied.is_some();
+        self.last_valid = None;
+        self.last_applied = None;
+    }
+
+    pub fn clear_required(&self) -> bool {
+        self.clear_required
+    }
+
+    pub fn mark_cleared(&mut self) {
+        self.clear_required = false;
     }
 
     pub fn mark_applied(&mut self, board_id: &str, board_revision: u64) {
@@ -107,6 +133,9 @@ impl CgSnapshotState {
 
     pub fn worker_ready(&mut self) {
         self.last_applied = None;
+        if self.last_valid.is_none() {
+            self.clear_required = false;
+        }
     }
 
     pub fn resend_after_ready(&self) -> Option<CgSnapshot> {
@@ -624,10 +653,16 @@ impl ChannelController {
     ) -> Result<(), OrchestrationError> {
         let inputs = match store.load_cg_snapshot_inputs(&self.channel_id, now_unix_ms) {
             Ok(inputs) => inputs,
+            Err(error) if cg_read_requires_clear(&error) => {
+                return self.clear_cg_if_required(now_unix_ms);
+            }
             Err(_) => return Ok(()),
         };
         let resolved = match inputs.resolve() {
             Ok(snapshot) => snapshot,
+            Err(station_cg::CgSnapshotError::NoZones) => {
+                return self.clear_cg_if_required(now_unix_ms);
+            }
             Err(_) => return Ok(()),
         };
         let mut candidate = self.cg_state.clone();
@@ -658,6 +693,33 @@ impl ChannelController {
             return Ok(());
         }
         candidate.mark_applied(&protocol.board_id, protocol.board_revision);
+        self.cg_state = candidate;
+        Ok(())
+    }
+
+    fn clear_cg_if_required(&mut self, now_unix_ms: i64) -> Result<(), OrchestrationError> {
+        let mut candidate = self.cg_state.clone();
+        candidate.invalidate_authority();
+        if !candidate.clear_required() {
+            self.cg_state = candidate;
+            return Ok(());
+        }
+        let event = match self.supervisor.command(
+            &format!("cg-clear-{now_unix_ms}"),
+            ChannelCommand::ClearCgSnapshot,
+            self.command_timeout,
+        ) {
+            Ok(event) => event,
+            Err(_) => {
+                self.cg_state = candidate;
+                return Ok(());
+            }
+        };
+        if !matches!(event.event, WorkerEvent::CgCleared) {
+            self.cg_state = candidate;
+            return Ok(());
+        }
+        candidate.mark_cleared();
         self.cg_state = candidate;
         Ok(())
     }
@@ -1534,6 +1596,43 @@ mod tests {
             &protocol.overlays[0].content,
             station_media_protocol::CgOverlayContent::Text { text } if text == "Second"
         ));
+    }
+
+    #[test]
+    fn inactive_or_missing_cg_authority_requests_one_clear_and_allows_reapply() {
+        assert!(super::cg_read_requires_clear(
+            &station_storage::CgSnapshotReadError::BoardInactive
+        ));
+        assert!(super::cg_read_requires_clear(
+            &station_storage::CgSnapshotReadError::BoardNotFound
+        ));
+        assert!(!super::cg_read_requires_clear(
+            &station_storage::CgSnapshotReadError::Storage("transient".into())
+        ));
+
+        let mut state = CgSnapshotState::default();
+        let resolved = snapshot(CgResolvedContent::ManualText {
+            text: "visible before disable".into(),
+        });
+        let protocol = state.accept(&resolved).unwrap();
+        state.mark_applied(&protocol.board_id, protocol.board_revision);
+
+        state.invalidate_authority();
+        assert!(state.last_valid().is_none());
+        assert!(state.clear_required());
+
+        // A successful CgCleared acknowledgment consumes the request. Repeated
+        // inactive/missing reads must not emit another clear.
+        state.mark_cleared();
+        state.invalidate_authority();
+        assert!(!state.clear_required());
+
+        // A newly authoritative snapshot after clear is sent again, including
+        // when it reuses the same board revision.
+        let reapplied = state.accept(&resolved).unwrap();
+        assert!(state.resend_after_ready().is_some());
+        state.mark_applied(&reapplied.board_id, reapplied.board_revision);
+        assert!(state.resend_after_ready().is_none());
     }
 
     #[test]

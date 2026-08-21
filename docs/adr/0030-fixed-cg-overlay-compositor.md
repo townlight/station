@@ -34,6 +34,11 @@ revision, so content changes with the same board revision are applied. Validatio
 the current visible state is hidden. Invalid updates retain the last valid snapshot; clear makes
 all slots transparent.
 
+An authoritative transition to no active board or no zones sends one `ClearCgSnapshot` command and
+requires `CgCleared` before consuming the transition. Command failure retains a pending clear for
+retry; a successful clear is not repeated, and later reactivation reapplies even the same board
+revision. Transient storage errors do not masquerade as an authoritative clear.
+
 The implemented content scope is manual text, text bulletins, clocks, bounded static PNG/JPEG
 image/logo overlays, and static lower-third, ticker-region, and bug-region geometry. Image overlays
 carry only asset identity and format across the protocol. The worker derives the managed path from
