@@ -15,6 +15,7 @@ const CHANNEL_ID: &str = "5d85189a-cd1f-43dc-a619-66a2aeb09ac4";
 const BOARD_ID: &str = "94a0dc01-d314-4b55-b2e4-cba39cc3f1dc";
 const ZONE_ID: &str = "8f4f0f70-5c30-48c6-819a-fb22b34353c5";
 const FEED_ID: &str = "796ca80a-9cc2-4fc1-84a2-2a88d8f92f24";
+const EMPTY_FEED_ID: &str = "9ac46d05-09d8-4ef8-9607-75c365b3274e";
 
 #[test]
 fn manages_cg_authority_through_the_operator_api() {
@@ -57,6 +58,39 @@ fn manages_cg_authority_through_the_operator_api() {
         serde_json::from_slice::<CgBoard>(&response.body).unwrap(),
         board
     );
+
+    let empty_feed = CgFeedSource {
+        feed_source_id: EMPTY_FEED_ID.into(),
+        channel_id: CHANNEL_ID.into(),
+        kind: CgFeedKind::Ical,
+        label: "No cache yet".into(),
+        source_url: "https://calendar.example.test/events.ics".into(),
+        trust_tier: CgFeedTrustTier::Trusted,
+        tags: Vec::new(),
+        refresh_seconds: 600,
+        enabled: true,
+        revision: 1,
+        created_at_unix_ms: 1_101,
+        updated_at_unix_ms: 1_101,
+        created_by: "station-operator".into(),
+        last_fetched_at_unix_ms: None,
+        last_fetch_error: None,
+    };
+    let response = api.handle(
+        "PUT",
+        "/api/v1/cg/feeds",
+        Some(&write_body(
+            "feed",
+            &empty_feed,
+            0,
+            &audit(
+                "5f7b9535-d3a3-4ea2-bf96-2e8be5e85bc1",
+                CgAuditEventKind::FeedCreated,
+                1_101,
+            ),
+        )),
+    );
+    assert_eq!(response.status, 200, "{}", body_text(&response.body));
 
     let mut feed = CgFeedSource {
         feed_source_id: FEED_ID.into(),
@@ -109,6 +143,43 @@ fn manages_cg_authority_through_the_operator_api() {
         )
         .unwrap();
     feed.last_fetched_at_unix_ms = Some(1_350);
+
+    let feed_items = api.handle(
+        "GET",
+        &format!("/api/v1/cg/feed-items?channel_id={CHANNEL_ID}&at_unix_ms=2000"),
+        None,
+    );
+    assert_eq!(feed_items.status, 200, "{}", body_text(&feed_items.body));
+    let feed_items: serde_json::Value = serde_json::from_slice(&feed_items.body).unwrap();
+    assert_eq!(feed_items["channel_id"], CHANNEL_ID);
+    assert_eq!(feed_items["as_of_unix_ms"], 2_000);
+    let feed_rows = feed_items["feeds"].as_array().unwrap();
+    let empty_row = feed_rows
+        .iter()
+        .find(|feed| feed["feed_source_id"] == EMPTY_FEED_ID)
+        .unwrap();
+    assert_eq!(empty_row["never_fetched"], true);
+    assert_eq!(empty_row["stale"], false);
+    let cached_row = feed_rows
+        .iter()
+        .find(|feed| feed["feed_source_id"] == FEED_ID)
+        .unwrap();
+    assert_eq!(cached_row["never_fetched"], false);
+    assert_eq!(cached_row["stale"], false);
+    assert_eq!(cached_row["items"][0]["approved"], false);
+
+    let stale_read: serde_json::Value = response_json(&api.handle(
+        "GET",
+        &format!("/api/v1/cg/feed-items?channel_id={CHANNEL_ID}&at_unix_ms=301351"),
+        None,
+    ));
+    let stale_row = stale_read["feeds"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|feed| feed["feed_source_id"] == FEED_ID)
+        .unwrap();
+    assert_eq!(stale_row["stale"], true);
 
     let zone = CgZoneConfig {
         zone_id: ZONE_ID.into(),
@@ -199,6 +270,20 @@ fn manages_cg_authority_through_the_operator_api() {
     );
     assert_eq!(response.status, 200, "{}", body_text(&response.body));
 
+    let feed_items: serde_json::Value = response_json(&api.handle(
+        "GET",
+        &format!("/api/v1/cg/feed-items?channel_id={CHANNEL_ID}&at_unix_ms=2000"),
+        None,
+    ));
+    let approved_feed = feed_items["feeds"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|feed| feed["feed_source_id"] == FEED_ID)
+        .unwrap();
+    assert_eq!(approved_feed["items"][0]["approved"], true);
+    assert_eq!(approved_feed["items"][0]["approved_by"], "station-operator");
+
     let snapshot: CgResolvedSnapshot = response_json(&api.handle(
         "GET",
         &format!("/api/v1/cg/snapshot?channel_id={CHANNEL_ID}"),
@@ -223,6 +308,8 @@ fn manages_cg_authority_through_the_operator_api() {
         "/api/v1/cg/preview?channel_id=bad",
         "/api/v1/cg/preview?channel_id=bad&at_unix_ms=-1",
         "/api/v1/cg/preview?channel_id=bad%20value",
+        "/api/v1/cg/feed-items?channel_id=bad&unexpected=true",
+        "/api/v1/cg/feed-items?channel_id=bad&at_unix_ms=-1",
     ] {
         assert_eq!(api.handle("GET", path, None).status, 400, "{path}");
     }
@@ -248,7 +335,8 @@ fn manages_cg_authority_through_the_operator_api() {
         &format!("/api/v1/cg/feeds?channel_id={CHANNEL_ID}"),
         None,
     ));
-    assert_eq!(feeds, vec![feed]);
+    assert_eq!(feeds.len(), 2);
+    assert!(feeds.contains(&feed));
     let bulletins: Vec<CgBulletin> = response_json(&api.handle(
         "GET",
         &format!("/api/v1/cg/bulletins?channel_id={CHANNEL_ID}"),
@@ -260,7 +348,7 @@ fn manages_cg_authority_through_the_operator_api() {
         &format!("/api/v1/cg/audit?channel_id={CHANNEL_ID}&limit=20"),
         None,
     ));
-    assert_eq!(audit_events.len(), 5);
+    assert_eq!(audit_events.len(), 6);
 
     let conflict = api.handle(
         "PUT",
@@ -323,6 +411,24 @@ fn manages_cg_authority_through_the_operator_api() {
         204,
         "{}",
         body_text(&removed_feed.body)
+    );
+    let removed_empty_feed = api.handle(
+        "DELETE",
+        &format!("/api/v1/cg/feeds/{EMPTY_FEED_ID}"),
+        Some(&delete_body(
+            1,
+            &audit(
+                "2b3a94c4-78ca-4787-9b5d-2e7a63d99704",
+                CgAuditEventKind::FeedRemoved,
+                1_701,
+            ),
+        )),
+    );
+    assert_eq!(
+        removed_empty_feed.status,
+        204,
+        "{}",
+        body_text(&removed_empty_feed.body)
     );
     assert!(
         response_json::<Vec<CgZoneConfig>>(&api.handle(

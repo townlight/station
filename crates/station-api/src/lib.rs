@@ -9,9 +9,9 @@ use std::sync::{
 use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use station_cg::{
-    CgAuditEvent, CgBoard, CgBulletin, CgFeedItemApproval, CgFeedSource, CgZoneConfig,
+    CgAuditEvent, CgBoard, CgBulletin, CgFeedItem, CgFeedItemApproval, CgFeedSource, CgZoneConfig,
     built_in_templates,
 };
 use station_domain::{
@@ -186,6 +186,46 @@ struct ApproveCgFeedItem {
     audit: CgAuditEvent,
 }
 
+#[derive(Debug, Clone, Serialize)]
+struct CgFeedItemRead {
+    item_id: String,
+    title: String,
+    summary: Option<String>,
+    starts_at_unix_ms: Option<i64>,
+    url: Option<String>,
+    tags: Vec<String>,
+    approved: bool,
+    approved_by: Option<String>,
+    approved_at_unix_ms: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct CgFeedRead {
+    feed_source_id: String,
+    label: String,
+    kind: station_cg::CgFeedKind,
+    source_url: String,
+    trust_tier: station_cg::CgFeedTrustTier,
+    tags: Vec<String>,
+    enabled: bool,
+    refresh_seconds: u32,
+    last_fetched_at_unix_ms: Option<i64>,
+    last_fetch_error: Option<String>,
+    cache_fetched_at_unix_ms: Option<i64>,
+    cache_expires_at_unix_ms: Option<i64>,
+    cache_last_error: Option<String>,
+    stale: bool,
+    never_fetched: bool,
+    items: Vec<CgFeedItemRead>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct CgFeedItemsRead {
+    channel_id: String,
+    as_of_unix_ms: i64,
+    feeds: Vec<CgFeedRead>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ApiResponse {
     pub status: u16,
@@ -330,6 +370,9 @@ impl Api {
             ("PUT", "/api/v1/cg/feeds") => self.write_cg_feed(body),
             ("DELETE", path) if path.starts_with("/api/v1/cg/feeds/") => {
                 self.delete_cg_feed(path, body)
+            }
+            ("GET", path) if path.starts_with("/api/v1/cg/feed-items?") => {
+                self.list_cg_feed_items(path)
             }
             ("POST", "/api/v1/cg/feed-items/approve") => self.approve_cg_feed_item(body),
             ("GET", path) if path.starts_with("/api/v1/cg/bulletins?") => {
@@ -1651,6 +1694,128 @@ impl Api {
             ),
             Err(message) => error_response(500, "storage_error", &message),
         }
+    }
+
+    fn list_cg_feed_items(&self, path: &str) -> ApiResponse {
+        let Some(query) = cg_query(path, "/api/v1/cg/feed-items?") else {
+            return error_response(400, "invalid_query", "The CG feed-item query is invalid.");
+        };
+        if query.len() > 2 || !query.contains_key("channel_id") {
+            return error_response(400, "invalid_query", "channel_id is required.");
+        }
+        let Some(channel_id) = query.get("channel_id").map(String::as_str) else {
+            return error_response(400, "invalid_query", "channel_id is required.");
+        };
+        let as_of_unix_ms = match query.get("at_unix_ms") {
+            Some(value) => match value.parse::<i64>() {
+                Ok(value) if value >= 0 => value,
+                _ => {
+                    return error_response(
+                        400,
+                        "invalid_query",
+                        "at_unix_ms must be a nonnegative integer.",
+                    );
+                }
+            },
+            None => match system_time_millis() {
+                Ok(value) => value,
+                Err(message) => return error_response(500, "clock_error", &message),
+            },
+        };
+        if query
+            .keys()
+            .any(|key| key != "channel_id" && key != "at_unix_ms")
+        {
+            return error_response(400, "invalid_query", "The CG feed-item query is invalid.");
+        }
+
+        let channel_exists = match self.storage.list_channels() {
+            Ok(channels) => channels
+                .iter()
+                .any(|channel| channel.channel_id == channel_id),
+            Err(message) => return error_response(500, "storage_error", &message),
+        };
+        if !channel_exists {
+            return error_response(404, "cg_channel_not_found", "The channel does not exist.");
+        }
+
+        let feeds = match self.storage.list_cg_feed_sources(channel_id) {
+            Ok(feeds) => feeds,
+            Err(message) => return error_response(500, "storage_error", &message),
+        };
+        let mut read_feeds = Vec::with_capacity(feeds.len());
+        for feed in feeds {
+            let cache = match self.storage.read_cg_feed_cache(&feed.feed_source_id) {
+                Ok(cache) => cache,
+                Err(message) => return error_response(500, "storage_error", &message),
+            };
+            let approvals = match self
+                .storage
+                .list_cg_feed_item_approvals(&feed.feed_source_id)
+            {
+                Ok(approvals) => approvals,
+                Err(message) => return error_response(500, "storage_error", &message),
+            };
+            let approvals = approvals
+                .into_iter()
+                .map(|approval| (approval.item_id.clone(), approval))
+                .collect::<std::collections::BTreeMap<_, _>>();
+            let stale = cache
+                .as_ref()
+                .is_some_and(|cache| cache.is_stale_at(as_of_unix_ms));
+            let never_fetched = cache.is_none() && feed.last_fetched_at_unix_ms.is_none();
+            let items = cache
+                .as_ref()
+                .map(|cache| {
+                    cache
+                        .items
+                        .iter()
+                        .map(|item: &CgFeedItem| {
+                            let approval = approvals.get(&item.item_id);
+                            CgFeedItemRead {
+                                item_id: item.item_id.clone(),
+                                title: item.title.clone(),
+                                summary: item.summary.clone(),
+                                starts_at_unix_ms: item.starts_at_unix_ms,
+                                url: item.url.clone(),
+                                tags: item.tags.clone(),
+                                approved: approval.is_some(),
+                                approved_by: approval.map(|value| value.approved_by.clone()),
+                                approved_at_unix_ms: approval
+                                    .map(|value| value.approved_at_unix_ms),
+                            }
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            read_feeds.push(CgFeedRead {
+                feed_source_id: feed.feed_source_id,
+                label: feed.label,
+                kind: feed.kind,
+                source_url: feed.source_url,
+                trust_tier: feed.trust_tier,
+                tags: feed.tags,
+                enabled: feed.enabled,
+                refresh_seconds: feed.refresh_seconds,
+                last_fetched_at_unix_ms: feed.last_fetched_at_unix_ms,
+                last_fetch_error: feed.last_fetch_error,
+                cache_fetched_at_unix_ms: cache.as_ref().map(|value| value.fetched_at_unix_ms),
+                cache_expires_at_unix_ms: cache.as_ref().map(|value| value.expires_at_unix_ms),
+                cache_last_error: cache.and_then(|value| value.last_error),
+                stale,
+                never_fetched,
+                items,
+            });
+        }
+        json_response(
+            200,
+            serde_json::to_vec(&CgFeedItemsRead {
+                channel_id: channel_id.to_string(),
+                as_of_unix_ms,
+                feeds: read_feeds,
+            })
+            .expect("serializing CG feed-item reads cannot fail"),
+        )
     }
 
     fn write_cg_feed(&self, body: Option<&[u8]>) -> ApiResponse {

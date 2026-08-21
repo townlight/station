@@ -60,6 +60,50 @@ export interface CgFeed {
   tags?: string[];
 }
 
+export interface CgFeedItemRead {
+  item_id: string;
+  title: string;
+  summary: string | null;
+  starts_at_unix_ms: number | null;
+  url: string | null;
+  tags: string[];
+  approved: boolean;
+  approved_by: string | null;
+  approved_at_unix_ms: number | null;
+}
+
+export interface CgFeedItemApproval {
+  feed_source_id: string;
+  item_id: string;
+  approved_by: string;
+  approved_at_unix_ms: number;
+}
+
+export interface CgFeedRead {
+  feed_source_id: string;
+  label: string;
+  kind: string;
+  source_url: string;
+  trust_tier: string;
+  tags: string[];
+  enabled: boolean;
+  refresh_seconds: number;
+  last_fetched_at_unix_ms: number | null;
+  last_fetch_error: string | null;
+  cache_fetched_at_unix_ms: number | null;
+  cache_expires_at_unix_ms: number | null;
+  cache_last_error: string | null;
+  stale: boolean;
+  never_fetched: boolean;
+  items: CgFeedItemRead[];
+}
+
+export interface CgFeedItemsRead {
+  channel_id: string;
+  as_of_unix_ms: number;
+  feeds: CgFeedRead[];
+}
+
 export interface CgBulletin {
   bulletin_id: string;
   channel_id: string;
@@ -93,6 +137,7 @@ export interface CgData {
   board: CgBoard | null;
   zones: CgZone[];
   feeds: CgFeed[];
+  feedItems: CgFeedItemsRead;
   bulletins: CgBulletin[];
   audit: CgAuditEvent[];
 }
@@ -127,6 +172,7 @@ export const cgApi = {
   board: (channelId: string) => cgRequest<CgBoard>(`/api/v1/cg/board?channel_id=${encodeURIComponent(channelId)}`),
   zones: (boardId: string) => cgRequest<CgZone[]>(`/api/v1/cg/zones?board_id=${encodeURIComponent(boardId)}`),
   feeds: (channelId: string) => cgRequest<CgFeed[]>(`/api/v1/cg/feeds?channel_id=${encodeURIComponent(channelId)}`),
+  feedItems: (channelId: string, atUnixMs = Date.now()) => cgRequest<CgFeedItemsRead>(`/api/v1/cg/feed-items?channel_id=${encodeURIComponent(channelId)}&at_unix_ms=${atUnixMs}`),
   bulletins: (channelId: string) => cgRequest<CgBulletin[]>(`/api/v1/cg/bulletins?channel_id=${encodeURIComponent(channelId)}`),
   audit: (channelId: string) => cgRequest<CgAuditEvent[]>(`/api/v1/cg/audit?channel_id=${encodeURIComponent(channelId)}&limit=50`),
   writeBoard: (body: { board: CgBoard; expected_revision: number; audit: CgAuditEvent }) => cgRequest<CgBoard>("/api/v1/cg/board", { method: "PUT", body: JSON.stringify(body) }),
@@ -135,6 +181,7 @@ export const cgApi = {
   writeFeed: (body: { feed: CgFeed; expected_revision: number; audit: CgAuditEvent }) => cgRequest<CgFeed>("/api/v1/cg/feeds", { method: "PUT", body: JSON.stringify(body) }),
   deleteFeed: (feedId: string, body: { expected_revision: number; audit: CgAuditEvent }) => cgRequest<void>(`/api/v1/cg/feeds/${encodeURIComponent(feedId)}`, { method: "DELETE", body: JSON.stringify(body) }),
   writeBulletin: (body: { bulletin: CgBulletin; expected_revision: number; audit: CgAuditEvent }) => cgRequest<CgBulletin>("/api/v1/cg/bulletins", { method: "PUT", body: JSON.stringify(body) }),
+  approveFeedItem: (body: { approval: CgFeedItemApproval; audit: CgAuditEvent }) => cgRequest<CgFeedItemApproval>("/api/v1/cg/feed-items/approve", { method: "POST", body: JSON.stringify(body) }),
 };
 
 export const CG_ROUTES: Array<{ id: CgRoute; label: string; shortLabel: string }> = [
@@ -581,7 +628,43 @@ function FeedManager({ data, channelId, operatorId, onRefresh }: { data: CgData;
   return <>
     <section className="panel"><div className="panel-head"><div><p className="eyebrow">External sources</p><h2>{editingFeedId ? "Edit feed source" : "Add feed source"}</h2></div><span className="count">{data.feeds.length}</span></div><MutationNotice>These sources are unauthenticated HTTPS registrations. No credentials are collected or implied; fetch receipts and failures remain visible below.</MutationNotice><div className="cg-editor-grid"><label>Kind<select value={kind} onChange={(event) => setKind(event.target.value)}><option value="rss">RSS</option><option value="ical">iCal</option><option value="caldav">CalDAV</option><option value="weather">Weather</option><option value="social">Social</option></select></label><label>Trust tier<select value={trustTier} onChange={(event) => setTrustTier(event.target.value)}><option value="station">Station</option><option value="trusted">Trusted</option><option value="moderated">Moderated</option></select></label><label>Label<input maxLength={160} value={label} onChange={(event) => setLabel(event.target.value)} placeholder="Town notices" /></label><label>HTTPS source URL<input type="url" maxLength={500} value={sourceUrl} onChange={(event) => setSourceUrl(event.target.value)} placeholder="https://example.gov/notices.xml" /></label><label>Refresh seconds<input type="number" min={60} max={86400} value={refreshSeconds} onChange={(event) => setRefreshSeconds(event.target.value)} /></label><label>Tags <span className="cg-form-help">comma-separated slugs</span><input value={tags} onChange={(event) => setTags(event.target.value)} placeholder="public-safety, community" /></label></div><label className="cg-checkbox"><input type="checkbox" checked={enabled} onChange={(event) => setEnabled(event.target.checked)} />Source enabled</label><div className="button-row"><button className="primary" disabled={busy !== null || !operatorId.trim()} onClick={() => void saveFeed()}>{busy === "feed" ? "Saving feed…" : editingFeedId ? "Save feed" : "Register feed"}</button>{editingFeedId && <button className="secondary" onClick={clearForm}>Cancel</button>}</div><MutationResult error={error} message={message} /></section>
     <section className="panel"><div className="panel-head"><div><p className="eyebrow">Registered sources</p><h2>Feed health</h2></div><span className="count">{data.feeds.length}</span></div>{data.feeds.length === 0 ? <CgEmpty title="No feeds registered" detail="Add an unauthenticated HTTPS source above. The fetcher will report its first receipt or failure here." /> : <div className="cg-list">{data.feeds.map((feed) => <article className="cg-card" key={feed.feed_source_id}><div className="cg-card-top"><div><strong>{feed.label}</strong><small>{displayKind(feed.kind)} · {displayKind(feed.trust_tier)} · every {feed.refresh_seconds}s</small></div><span className={`cg-state-pill ${feed.enabled ? "cg-state-accepted" : "cg-state-declined"}`}>{feed.enabled ? "enabled" : "disabled"}</span></div><code className="cg-url">{feed.source_url}</code>{feed.last_fetch_error ? <p className="cg-feed-error">{feed.last_fetch_error}</p> : <p>{feed.last_fetched_at_unix_ms ? `Last fetched ${formatCgTime(feed.last_fetched_at_unix_ms)}.` : "No fetch receipt yet; no content is fabricated in preview."}</p>}<div className="cg-card-foot"><small>Owner {feed.created_by} · revision {feed.revision}{feed.tags?.length ? ` · tags ${feed.tags.join(", ")}` : ""}</small><div className="cg-inline-actions"><button className="secondary" onClick={() => editFeed(feed)}>Edit</button><button className="secondary danger-button" disabled={busy === feed.feed_source_id || !operatorId.trim()} onClick={() => void removeFeed(feed)}>{busy === feed.feed_source_id ? "Deleting…" : "Delete"}</button></div></div></article>)}</div>}</section>
+    <FeedItemApprovalQueue data={data} channelId={channelId} operatorId={operatorId} onRefresh={onRefresh} />
   </>;
+}
+
+function FeedItemApprovalQueue({ data, channelId, operatorId, onRefresh }: { data: CgData; channelId: string; operatorId: string; onRefresh: () => Promise<void> }) {
+  const [busy, setBusy] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [message, setMessage] = useState<string | null>(null);
+  const feeds = data.feedItems.feeds;
+  const pendingCount = feeds.reduce((total, feed) => total + feed.items.filter((item) => !item.approved).length, 0);
+
+  async function approve(feed: CgFeedRead, item: CgFeedItemRead) {
+    if (item.approved || busy || !operatorId.trim()) return;
+    setError(null);
+    setMessage(null);
+    const now = Date.now();
+    setBusy(`${feed.feed_source_id}:${item.item_id}`);
+    try {
+      await cgApi.approveFeedItem({
+        approval: {
+          feed_source_id: feed.feed_source_id,
+          item_id: item.item_id,
+          approved_by: operatorId.trim(),
+          approved_at_unix_ms: now,
+        },
+        audit: buildAudit(channelId, data.board?.board_id ?? null, "feed_item_approved", operatorId, { feed_source_id: feed.feed_source_id, item_id: item.item_id }, now),
+      });
+      await onRefresh();
+      setMessage(`Approved “${item.title}”; audit evidence recorded.`);
+    } catch (problem) {
+      setError(problem instanceof Error ? problem.message : "The feed item could not be approved.");
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  return <section className="panel"><div className="panel-head"><div><p className="eyebrow">Moderated cache</p><h2>Feed-item approvals</h2></div><span className="count">{pendingCount} pending</span></div><MutationNotice>Only cached items are shown. This screen does not fetch the network; approval is durable, channel-scoped, and append-only.</MutationNotice>{feeds.length === 0 ? <CgEmpty title="No configured feeds" detail="Register a feed source before reviewing cached items." /> : <div className="cg-list">{feeds.map((feed) => { const fetchError = feed.last_fetch_error ?? feed.cache_last_error; const state = feed.never_fetched ? "never fetched" : fetchError ? "fetch error" : feed.stale ? "stale cache" : "fresh cache"; return <article className="cg-card" key={feed.feed_source_id}><div className="cg-card-top"><div><strong>{feed.label}</strong><small>{displayKind(feed.kind)} · {feed.items.length} cached item{feed.items.length === 1 ? "" : "s"}</small></div><span className={`cg-state-pill ${feed.never_fetched || fetchError ? "cg-state-declined" : feed.stale ? "cg-state-submitted" : "cg-state-accepted"}`}>{state}</span></div>{feed.never_fetched ? <p>No successful cache exists yet. Network fetching is not part of this slice.</p> : fetchError ? <p className="cg-feed-error">{fetchError}</p> : <p>Cache fetched {feed.cache_fetched_at_unix_ms ? formatCgTime(feed.cache_fetched_at_unix_ms) : "at an unknown time"}{feed.cache_expires_at_unix_ms ? ` · expires ${formatCgTime(feed.cache_expires_at_unix_ms)}` : ""}.</p>}{feed.items.length > 0 && <div className="cg-feed-item-list">{feed.items.map((item) => <div className="cg-feed-item" key={item.item_id}><div><strong>{item.title}</strong><small>{item.tags.length ? item.tags.join(", ") : "untagged"}{item.starts_at_unix_ms ? ` · ${formatCgTime(item.starts_at_unix_ms)}` : ""}</small>{item.summary && <p>{item.summary}</p>}</div><button className={item.approved ? "secondary" : "primary"} disabled={item.approved || busy !== null || !operatorId.trim()} onClick={() => void approve(feed, item)}>{item.approved ? `Approved by ${item.approved_by ?? "operator"}` : busy === `${feed.feed_source_id}:${item.item_id}` ? "Approving…" : "Approve"}</button></div>)}</div>}</article>; })}</div>}<MutationResult error={error} message={message} /></section>;
 }
 
 function LivePreview({ data }: { data: CgData }) {
@@ -597,9 +680,10 @@ function SettingsHistory({ data }: { data: CgData }) {
 }
 
 async function loadCgData(channelId: string): Promise<CgData> {
-  const [templates, feeds, bulletins, audit] = await Promise.all([
+  const [templates, feeds, feedItems, bulletins, audit] = await Promise.all([
     cgApi.templates(),
     cgApi.feeds(channelId),
+    cgApi.feedItems(channelId),
     cgApi.bulletins(channelId),
     cgApi.audit(channelId),
   ]);
@@ -610,7 +694,7 @@ async function loadCgData(channelId: string): Promise<CgData> {
     if (!(error instanceof CgApiError && error.status === 404)) throw error;
   }
   const zones = board ? await cgApi.zones(board.board_id) : [];
-  return { templates, board, zones, feeds, bulletins, audit };
+  return { templates, board, zones, feeds, feedItems, bulletins, audit };
 }
 
 export function CgOperator({ channelId, channels, route, onNavigate }: { channelId: string | undefined; channels: CgChannelOption[]; route: CgRoute; onNavigate: (route: CgRoute) => void }) {
