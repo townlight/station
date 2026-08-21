@@ -38,11 +38,28 @@ fn main() {
 
 fn run_console(config: DaemonConfig) -> Result<(), String> {
     let listener = bind(&config)?;
+    let worker_executable = worker_executable()?;
+    let stop = Arc::new(AtomicBool::new(false));
+    let orchestration_database = config.database.clone();
+    let orchestration_stop = Arc::clone(&stop);
+    let orchestration = std::thread::spawn(move || {
+        station_orchestration::run_until(
+            &orchestration_database,
+            &worker_executable,
+            orchestration_stop,
+        )
+    });
     println!(
         "TownLight Station is listening on http://{}",
         config.address
     );
-    station_api::serve(listener, config.database)
+    let result = station_api::serve_until(listener, &config.database, Arc::clone(&stop));
+    stop.store(true, Ordering::Release);
+    let orchestration_result = orchestration
+        .join()
+        .map_err(|_| "channel orchestration thread panicked".to_string())?
+        .map_err(|error| format!("channel orchestration stopped: {error:?}"));
+    result.and(orchestration_result)
 }
 
 fn run_dispatcher(config: DaemonConfig) -> Result<(), String> {
@@ -115,6 +132,21 @@ fn run_service(config: DaemonConfig) -> Result<(), String> {
             return Err(message);
         }
     };
+    let worker_executable = worker_executable()?;
+    let orchestration_database = config.database.clone();
+    let orchestration_stop = Arc::clone(&stop);
+    let orchestration_receipt = config.database.with_file_name("orchestration-error.txt");
+    let orchestration = std::thread::spawn(move || {
+        let result = station_orchestration::run_until(
+            &orchestration_database,
+            &worker_executable,
+            orchestration_stop,
+        );
+        if let Err(error) = &result {
+            let _ = std::fs::write(&orchestration_receipt, format!("{error:?}"));
+        }
+        result
+    });
     status
         .set_service_status(service_status(
             ServiceState::Running,
@@ -124,7 +156,13 @@ fn run_service(config: DaemonConfig) -> Result<(), String> {
             ServiceExitCode::NO_ERROR,
         ))
         .map_err(|error| error.to_string())?;
-    let result = station_api::serve_until(listener, &config.database, stop);
+    let result = station_api::serve_until(listener, &config.database, Arc::clone(&stop));
+    stop.store(true, Ordering::Release);
+    let orchestration_result = orchestration
+        .join()
+        .map_err(|_| "channel orchestration thread panicked".to_string())?
+        .map_err(|error| format!("channel orchestration stopped: {error:?}"));
+    let result = result.and(orchestration_result);
     let exit_code = if result.is_ok() {
         ServiceExitCode::NO_ERROR
     } else {
@@ -140,6 +178,20 @@ fn run_service(config: DaemonConfig) -> Result<(), String> {
         ))
         .map_err(|error| error.to_string())?;
     result
+}
+
+fn worker_executable() -> Result<std::path::PathBuf, String> {
+    let executable = std::env::current_exe()
+        .map_err(|error| format!("could not locate stationd: {error}"))?
+        .with_file_name("channel-worker.exe");
+    if executable.is_file() {
+        Ok(executable)
+    } else {
+        Err(format!(
+            "channel worker is missing: {}",
+            executable.display()
+        ))
+    }
 }
 
 fn bind(config: &DaemonConfig) -> Result<TcpListener, String> {

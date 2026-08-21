@@ -54,7 +54,10 @@ dependencies = [
  "station-media-engine",
  "station-media-journal",
  "station-media-protocol",
+ "station-orchestration",
  "station-runtime",
+ "station-schedule",
+ "station-storage",
  "station-windows-ipc",
 ]
 
@@ -656,6 +659,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "station-orchestration"
+version = "0.1.0"
+dependencies = [
+ "station-media-protocol",
+ "station-runtime",
+ "station-schedule",
+ "station-storage",
+]
+
+[[package]]
 name = "station-runtime"
 version = "0.1.0"
 dependencies = [
@@ -687,6 +700,7 @@ name = "stationd"
 version = "0.1.0"
 dependencies = [
  "station-api",
+ "station-orchestration",
  "windows-service",
 ]
 

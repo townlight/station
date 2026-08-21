@@ -1,11 +1,21 @@
 use std::fs;
 use std::net::UdpSocket;
 use std::path::{Path, PathBuf};
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
+use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use station_media_journal::read_events;
 use station_media_protocol::{ChannelCommand, WorkerEvent};
+use station_orchestration::{ChannelController, DispatchTransition, run_until};
 use station_runtime::WorkerSupervisor;
+use station_schedule::{
+    AssetReadiness, ChannelConfiguration, DispatchStatus, MediaAsset, ScheduleItem, ScheduleState,
+};
+use station_storage::StationStore;
 
 const WORKER_ID: &str = "256d5a07-92d3-4718-aec9-05cad42fae7d";
 const CHANNEL_ID: &str = "8b626c01-bdf8-419a-8a2e-b0a7caa1ff7e";
@@ -207,7 +217,294 @@ fn launches_handshakes_commands_and_cleanly_stops_the_real_worker() {
         ]
     );
     let _ = std::fs::remove_file(journal);
-    fs::remove_dir_all(media_root).unwrap();
+    remove_directory(&media_root);
+}
+
+#[test]
+fn committed_schedule_is_loaded_aired_and_completed_only_after_worker_acknowledgments() {
+    let journal = journal_path();
+    let database = journal.with_extension("dispatch.db");
+    let media_root = journal.with_extension("dispatch-media");
+    fs::create_dir_all(&media_root).unwrap();
+    let source = media_root.join("scheduled.ts");
+    generate_fixture(&source, "ball");
+    let ingested = ingest_media(&source, media_root.join("library")).unwrap();
+    let output = UdpSocket::bind("127.0.0.1:0").unwrap();
+    output
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    let channel = ChannelConfiguration {
+        channel_id: CHANNEL_ID.into(),
+        display_name: "Primary Cable Channel".into(),
+        udp_destination: output.local_addr().unwrap().to_string(),
+        enabled: true,
+    };
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+    let starts_at = now + 1_000;
+    let store = StationStore::open(&database).unwrap();
+    store.put_channel(&channel).unwrap();
+    store
+        .put_media_asset(&MediaAsset {
+            asset_id: ingested.asset_id.clone(),
+            media_path: ingested.stored_path.to_string_lossy().into_owned(),
+            duration_ms: 6_000,
+            readiness: AssetReadiness::Ready,
+        })
+        .unwrap();
+    store
+        .put_schedule_item(&ScheduleItem {
+            item_id: WORKER_ID.into(),
+            channel_id: CHANNEL_ID.into(),
+            asset_id: ingested.asset_id.clone(),
+            title: "Automated council playback".into(),
+            starts_at_unix_ms: starts_at,
+            duration_ms: 1_000,
+            state: ScheduleState::Draft,
+        })
+        .unwrap();
+    store
+        .commit_schedule(
+            "dispatch-report-1",
+            "dispatch-plan-1",
+            WORKER_ID,
+            "operator-test",
+            now,
+            "Approved for automated dispatch.",
+        )
+        .unwrap();
+    drop(store);
+
+    let mut controller = ChannelController::launch(
+        PathBuf::from(env!("CARGO_BIN_EXE_channel-worker")).as_path(),
+        &database,
+        &journal,
+        &channel,
+        Duration::from_secs(7),
+    )
+    .unwrap();
+    let mut datagram = [0_u8; 65_536];
+    assert_eq!(output.recv(&mut datagram).unwrap() % 188, 0);
+
+    assert!(matches!(
+        controller.run_once(now).unwrap(),
+        Some(DispatchTransition::Loaded { .. })
+    ));
+    assert_eq!(
+        StationStore::open(&database)
+            .unwrap()
+            .read_commit_report("dispatch-report-1")
+            .unwrap()
+            .unwrap()
+            .dispatch_status,
+        DispatchStatus::Queued
+    );
+    assert_eq!(controller.run_once(starts_at - 1).unwrap(), None);
+    controller.shutdown(Duration::from_secs(3)).unwrap();
+    let mut controller = ChannelController::launch(
+        PathBuf::from(env!("CARGO_BIN_EXE_channel-worker")).as_path(),
+        &database,
+        &journal,
+        &channel,
+        Duration::from_secs(7),
+    )
+    .unwrap();
+    assert!(matches!(
+        controller.run_once(starts_at).unwrap(),
+        Some(DispatchTransition::Loaded { .. })
+    ));
+    assert!(matches!(
+        controller.run_once(starts_at).unwrap(),
+        Some(DispatchTransition::OnAir { .. })
+    ));
+    assert_eq!(
+        StationStore::open(&database)
+            .unwrap()
+            .read_commit_report("dispatch-report-1")
+            .unwrap()
+            .unwrap()
+            .dispatch_status,
+        DispatchStatus::Acknowledged
+    );
+    controller.shutdown(Duration::from_secs(3)).unwrap();
+    let mut controller = ChannelController::launch(
+        PathBuf::from(env!("CARGO_BIN_EXE_channel-worker")).as_path(),
+        &database,
+        &journal,
+        &channel,
+        Duration::from_secs(7),
+    )
+    .unwrap();
+    assert!(matches!(
+        controller.run_once(starts_at + 500).unwrap(),
+        Some(DispatchTransition::Loaded { .. })
+    ));
+    assert!(matches!(
+        controller.run_once(starts_at + 500).unwrap(),
+        Some(DispatchTransition::OnAir { .. })
+    ));
+    assert!(matches!(
+        controller.run_once(starts_at + 1_000).unwrap(),
+        Some(DispatchTransition::Completed { .. })
+    ));
+    assert_eq!(
+        StationStore::open(&database)
+            .unwrap()
+            .read_commit_report("dispatch-report-1")
+            .unwrap()
+            .unwrap()
+            .dispatch_status,
+        DispatchStatus::Completed
+    );
+    controller.shutdown(Duration::from_secs(3)).unwrap();
+    let events = read_events(&journal).unwrap();
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event.event, WorkerEvent::AssetLoaded { .. }))
+            .count(),
+        3
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event.event, WorkerEvent::OnAirChanged { ref source_kind, .. } if source_kind == "asset"))
+            .count(),
+        2
+    );
+    assert!(events.iter().any(
+        |event| matches!(event.event, WorkerEvent::OnAirChanged { ref source_kind, .. } if source_kind == "fallback")
+    ));
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event.event, WorkerEvent::ShutdownComplete))
+            .count(),
+        3
+    );
+
+    let _ = fs::remove_file(journal);
+    for candidate in [
+        database.clone(),
+        PathBuf::from(format!("{}-wal", database.display())),
+        PathBuf::from(format!("{}-shm", database.display())),
+    ] {
+        let _ = fs::remove_file(candidate);
+    }
+    remove_directory(&media_root);
+}
+
+#[test]
+fn daemon_loop_discovers_an_enabled_channel_and_completes_its_committed_item() {
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!("townlight-daemon-dispatch-{nonce}"));
+    fs::create_dir_all(&root).unwrap();
+    let database = root.join("station.db");
+    let source = root.join("scheduled.ts");
+    generate_fixture(&source, "zone-plate");
+    let ingested = ingest_media(&source, root.join("library")).unwrap();
+    let output = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let channel = ChannelConfiguration {
+        channel_id: CHANNEL_ID.into(),
+        display_name: "Daemon-owned channel".into(),
+        udp_destination: output.local_addr().unwrap().to_string(),
+        enabled: true,
+    };
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+    let store = StationStore::open(&database).unwrap();
+    store.put_channel(&channel).unwrap();
+    store
+        .put_media_asset(&MediaAsset {
+            asset_id: ingested.asset_id.clone(),
+            media_path: ingested.stored_path.to_string_lossy().into_owned(),
+            duration_ms: 6_000,
+            readiness: AssetReadiness::Ready,
+        })
+        .unwrap();
+    store
+        .put_schedule_item(&ScheduleItem {
+            item_id: WORKER_ID.into(),
+            channel_id: CHANNEL_ID.into(),
+            asset_id: ingested.asset_id,
+            title: "Daemon dispatch proof".into(),
+            starts_at_unix_ms: now + 1_000,
+            duration_ms: 1_000,
+            state: ScheduleState::Draft,
+        })
+        .unwrap();
+    store
+        .commit_schedule(
+            "daemon-report-1",
+            "daemon-plan-1",
+            WORKER_ID,
+            "operator-test",
+            now,
+            "Prove daemon discovery.",
+        )
+        .unwrap();
+    drop(store);
+
+    let stop = Arc::new(AtomicBool::new(false));
+    let runner_stop = Arc::clone(&stop);
+    let runner_database = database.clone();
+    let worker = PathBuf::from(env!("CARGO_BIN_EXE_channel-worker"));
+    let runner = thread::spawn(move || run_until(&runner_database, &worker, runner_stop));
+    let deadline = std::time::Instant::now() + Duration::from_secs(12);
+    loop {
+        let status = StationStore::open(&database)
+            .unwrap()
+            .read_commit_report("daemon-report-1")
+            .unwrap()
+            .unwrap()
+            .dispatch_status;
+        if status == DispatchStatus::Completed {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "daemon dispatch stalled in {status:?}"
+        );
+        thread::sleep(Duration::from_millis(50));
+    }
+    stop.store(true, Ordering::Release);
+    runner.join().unwrap().unwrap();
+    let events = read_events(
+        root.join("channel-journals")
+            .join(format!("{CHANNEL_ID}.tlj")),
+    )
+    .unwrap();
+    assert!(events.iter().any(
+        |event| matches!(event.event, WorkerEvent::OnAirChanged { ref source_kind, .. } if source_kind == "asset")
+    ));
+    assert!(events.iter().any(
+        |event| matches!(event.event, WorkerEvent::OnAirChanged { ref source_kind, .. } if source_kind == "fallback")
+    ));
+    remove_directory(&root);
+}
+
+fn remove_directory(path: &Path) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    loop {
+        match fs::remove_dir_all(path) {
+            Ok(()) => return,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
+            Err(_) if std::time::Instant::now() < deadline => {
+                thread::sleep(Duration::from_millis(25));
+            }
+            Err(error) => panic!(
+                "could not remove {} after worker exit: {error}",
+                path.display()
+            ),
+        }
+    }
 }
 
 fn generate_fixture(path: &Path, pattern: &'static str) {

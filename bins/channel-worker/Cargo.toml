@@ -8,6 +8,9 @@ publish.workspace = true
 station-media-journal.workspace = true
 station-media-engine.workspace = true
 station-media-protocol.workspace = true
+station-orchestration.workspace = true
+station-schedule.workspace = true
+station-storage.workspace = true
 station-windows-ipc.workspace = true
 
 [dev-dependencies]

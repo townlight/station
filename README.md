@@ -10,7 +10,7 @@ The repository also contains a supervised isolated channel worker, a length-fram
 
 - Rust owns the station control plane and isolated media workers.
 - A single station service owns authoritative SQLite writes.
-- One persistent GStreamer worker per channel will own media timing and output.
+- One persistent GStreamer worker per enabled channel owns media timing and output.
 - React and TypeScript will provide operator and resident web interfaces.
 - The appliance remains locally operable when optional cloud services are unavailable.
 
@@ -61,7 +61,7 @@ The response includes the new `revision`. Send that value as `expected_revision`
 
 `GET /api/v1/station` returns the commissioned profile and revision, or a typed `not_commissioned` error.
 
-The loopback control plane also has the first schedule authority endpoints: `PUT /api/v1/assets`, `PUT /api/v1/schedule/items`, `POST /api/v1/schedule/prepare`, `POST /api/v1/schedule/commit`, channel schedule listing, and commit-report lookup. Preparation actively reports overlaps, missing/unready/short media, and the nearest gap. Approval reruns that gate under a SQLite write lock, then atomically stores the operator approval and changes the item from draft to committed. A new report remains honestly `pending` until dispatch to a supervised channel worker is implemented; persistence alone is not claimed as on-air execution.
+The loopback control plane also exposes `PUT`/`GET /api/v1/channels`, `PUT /api/v1/assets`, `PUT /api/v1/schedule/items`, `POST /api/v1/schedule/prepare`, `POST /api/v1/schedule/commit`, channel schedule listing, and commit-report lookup. Preparation actively reports overlaps, missing/unready/short media, and the nearest gap. Approval reruns that gate under a SQLite write lock, then atomically stores the operator approval and changes the item from draft to committed. The daemon launches one supervised worker per enabled channel and advances a report through `pending`, `queued`, `acknowledged`, and `completed` only after durable worker acknowledgments for load, take, and fallback return. A restarted worker reconciles queued and on-air database state by reloading and, when still within the scheduled window, retaking the asset.
 
 ## Channel worker
 
@@ -69,7 +69,7 @@ The loopback control plane also has the first schedule authority endpoints: `PUT
 
 ## Media engine
 
-`station-media-assets` probes actual streams and finite duration, rejects non-media or incomplete A/V, copies accepted bytes atomically into a SHA-256-addressed library, revalidates the stored object, and makes duplicate imports idempotent. `station-media-engine` can then prepare and transactionally replace the decoded program leg while fallback remains live. File pads are aligned to the running clock; both selectors feed one continuous segment; and sample-rate adjusters enforce canonical video/audio timelines before the persistent OpenH264/AAC encoders and MPEG-TS output. The integration proof generates and ingests two distinct real A/V files, airs both in sequence with fallback between them, and rejects transport errors, discontinuities, counter jumps, backward PTS, excessive A/V divergence, or unsafe decoder teardown. Full schedule automation, live inputs, production profiles, and sink fanout are not claimed yet.
+`station-media-assets` probes actual streams and finite duration, rejects non-media or incomplete A/V, copies accepted bytes atomically into a SHA-256-addressed library, revalidates the stored object, and makes duplicate imports idempotent. `station-media-engine` can then prepare and transactionally replace the decoded program leg while fallback remains live. File pads are aligned to the running clock; both selectors feed one continuous segment; and sample-rate adjusters enforce canonical video/audio timelines before the persistent OpenH264/AAC encoders and MPEG-TS output. The integration proof generates and ingests two distinct real A/V files, airs both in sequence with fallback between them, and rejects transport errors, discontinuities, counter jumps, backward PTS, excessive A/V divergence, or unsafe decoder teardown. A second process-level proof drives an approved timed item through the real worker and twice restarts that worker to prove state reconciliation. Live inputs, production profiles, and sink fanout are not claimed yet.
 
 ## Development
 

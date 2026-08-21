@@ -10,7 +10,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::Deserialize;
 use station_domain::StationProfile;
-use station_schedule::{MediaAsset, ScheduleItem};
+use station_schedule::{ChannelConfiguration, MediaAsset, ScheduleItem};
 use station_storage::{CommitWriteError, ProfileWriteError, StationStore};
 
 #[derive(Deserialize)]
@@ -73,6 +73,8 @@ impl Api {
             },
             ("PUT", "/api/v1/station") => self.put_profile(body),
             ("PUT", "/api/v1/assets") => self.put_media_asset(body),
+            ("PUT", "/api/v1/channels") => self.put_channel(body),
+            ("GET", "/api/v1/channels") => self.list_channels(),
             ("PUT", "/api/v1/schedule/items") => self.put_schedule_item(body),
             ("POST", "/api/v1/schedule/prepare") => self.prepare_schedule_commit(body),
             ("POST", "/api/v1/schedule/commit") => self.commit_schedule(body),
@@ -136,6 +138,38 @@ impl Api {
             Ok(()) => json_response(
                 200,
                 serde_json::to_vec(&asset).expect("serializing a media asset cannot fail"),
+            ),
+            Err(message) => error_response(500, "storage_error", &message),
+        }
+    }
+
+    fn put_channel(&self, body: Option<&[u8]>) -> ApiResponse {
+        let Some(channel) = parse_body::<ChannelConfiguration>(body) else {
+            return error_response(
+                400,
+                "invalid_json",
+                "A channel configuration body is required.",
+            );
+        };
+        if let Err(error) = channel.validate() {
+            return error_response(422, "validation_failed", &format!("{error:?}"));
+        }
+        match self.storage.put_channel(&channel) {
+            Ok(()) => json_response(
+                200,
+                serde_json::to_vec(&channel)
+                    .expect("serializing a channel configuration cannot fail"),
+            ),
+            Err(message) => error_response(500, "storage_error", &message),
+        }
+    }
+
+    fn list_channels(&self) -> ApiResponse {
+        match self.storage.list_channels() {
+            Ok(channels) => json_response(
+                200,
+                serde_json::to_vec(&channels)
+                    .expect("serializing channel configurations cannot fail"),
             ),
             Err(message) => error_response(500, "storage_error", &message),
         }

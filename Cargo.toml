@@ -9,6 +9,7 @@ members = [
     "crates/station-media-engine",
     "crates/station-media-assets",
     "crates/station-media-protocol",
+    "crates/station-orchestration",
     "crates/station-runtime",
     "crates/station-schedule",
     "crates/station-storage",
@@ -32,6 +33,7 @@ station-media-journal = { path = "crates/station-media-journal" }
 station-media-engine = { path = "crates/station-media-engine" }
 station-media-assets = { path = "crates/station-media-assets" }
 station-media-protocol = { path = "crates/station-media-protocol" }
+station-orchestration = { path = "crates/station-orchestration" }
 station-runtime = { path = "crates/station-runtime" }
 station-schedule = { path = "crates/station-schedule" }
 station-storage = { path = "crates/station-storage" }

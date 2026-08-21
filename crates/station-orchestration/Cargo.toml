@@ -1,0 +1,11 @@
+[package]
+name = "station-orchestration"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+station-media-protocol.workspace = true
+station-runtime.workspace = true
+station-schedule.workspace = true
+station-storage.workspace = true

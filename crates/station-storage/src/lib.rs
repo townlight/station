@@ -4,8 +4,8 @@ use std::ptr;
 
 use station_domain::{StationProfile, StationProfileDocument};
 use station_schedule::{
-    AssetReadiness, CommitPlan, CommitReport, DispatchStatus, MediaAsset, ScheduleItem,
-    ScheduleState, prepare_commit,
+    AssetReadiness, ChannelConfiguration, CommitPlan, CommitReport, DispatchJob, DispatchStatus,
+    MediaAsset, ScheduleItem, ScheduleState, prepare_commit,
 };
 
 const SQLITE_OK: c_int = 0;
@@ -105,9 +105,9 @@ impl StationStore {
         }
 
         let store = Self { database };
+        store.execute("PRAGMA busy_timeout=5000;")?;
         store.execute(
             "PRAGMA journal_mode=WAL;\
-             PRAGMA busy_timeout=5000;\
              PRAGMA foreign_keys=ON;\
              CREATE TABLE IF NOT EXISTS station_profile (\
                singleton INTEGER PRIMARY KEY CHECK (singleton = 1),\
@@ -121,6 +121,12 @@ impl StationStore {
                media_path TEXT NOT NULL,\
                duration_ms INTEGER NOT NULL CHECK (duration_ms > 0),\
                readiness TEXT NOT NULL CHECK (readiness IN ('ready','missing','rejected','processing'))\
+             );\
+             CREATE TABLE IF NOT EXISTS channels (\
+               channel_id TEXT PRIMARY KEY,\
+               display_name TEXT NOT NULL,\
+               udp_destination TEXT NOT NULL,\
+               enabled INTEGER NOT NULL CHECK (enabled IN (0,1))\
              );\
              CREATE TABLE IF NOT EXISTS schedule_items (\
                item_id TEXT PRIMARY KEY,\
@@ -141,12 +147,13 @@ impl StationStore {
                asset_id TEXT NOT NULL,\
                approved_by TEXT NOT NULL,\
                approved_at_unix_ms INTEGER NOT NULL,\
-               dispatch_status TEXT NOT NULL CHECK (dispatch_status IN ('pending','queued','acknowledged','error','cancelled')),\
+               dispatch_status TEXT NOT NULL CHECK (dispatch_status IN ('pending','queued','acknowledged','completed','error','cancelled')),\
                operator_notes TEXT NOT NULL\
              );\
              CREATE INDEX IF NOT EXISTS commit_reports_channel_time \
                ON commit_reports(channel_id, approved_at_unix_ms);",
         )?;
+        store.migrate_commit_report_statuses()?;
         Ok(store)
     }
 
@@ -225,6 +232,41 @@ impl StationStore {
         )?;
         bind_text(self.database, statement.raw, 4, &readiness)?;
         expect_done(self.database, statement.raw)
+    }
+
+    pub fn put_channel(&self, channel: &ChannelConfiguration) -> Result<(), String> {
+        channel.validate().map_err(|error| format!("{error:?}"))?;
+        let statement = self.prepare(
+            "INSERT INTO channels(channel_id, display_name, udp_destination, enabled) VALUES(?1, ?2, ?3, ?4) \
+             ON CONFLICT(channel_id) DO UPDATE SET display_name=excluded.display_name, udp_destination=excluded.udp_destination, enabled=excluded.enabled",
+        )?;
+        let channel_id = c_string(&channel.channel_id, "channel identity")?;
+        let display_name = c_string(&channel.display_name, "channel display name")?;
+        let destination = c_string(&channel.udp_destination, "UDP destination")?;
+        bind_text(self.database, statement.raw, 1, &channel_id)?;
+        bind_text(self.database, statement.raw, 2, &display_name)?;
+        bind_text(self.database, statement.raw, 3, &destination)?;
+        bind_i64(self.database, statement.raw, 4, i64::from(channel.enabled))?;
+        expect_done(self.database, statement.raw)
+    }
+
+    pub fn list_channels(&self) -> Result<Vec<ChannelConfiguration>, String> {
+        let statement = self.prepare(
+            "SELECT channel_id, display_name, udp_destination, enabled FROM channels ORDER BY channel_id",
+        )?;
+        let mut channels = Vec::new();
+        loop {
+            match unsafe { sqlite3_step(statement.raw) } {
+                SQLITE_ROW => channels.push(ChannelConfiguration {
+                    channel_id: column_text(statement.raw, 0)?,
+                    display_name: column_text(statement.raw, 1)?,
+                    udp_destination: column_text(statement.raw, 2)?,
+                    enabled: unsafe { sqlite3_column_int64(statement.raw, 3) } == 1,
+                }),
+                SQLITE_DONE => return Ok(channels),
+                _ => return Err(sqlite_error(self.database)),
+            }
+        }
     }
 
     pub fn read_media_asset(&self, asset_id: &str) -> Result<Option<MediaAsset>, String> {
@@ -397,6 +439,68 @@ impl StationStore {
         }
     }
 
+    pub fn list_dispatch_jobs(&self, channel_id: &str) -> Result<Vec<DispatchJob>, String> {
+        let statement = self.prepare(
+            "SELECT r.report_id, r.plan_id, r.channel_id, r.schedule_item_id, r.asset_id, r.approved_by, \
+             r.approved_at_unix_ms, r.dispatch_status, r.operator_notes, \
+             s.item_id, s.channel_id, s.asset_id, s.title, s.starts_at_unix_ms, s.duration_ms, s.state, \
+             a.asset_id, a.media_path, a.duration_ms, a.readiness \
+             FROM commit_reports r JOIN schedule_items s ON s.item_id=r.schedule_item_id \
+             JOIN media_assets a ON a.asset_id=r.asset_id WHERE r.channel_id=?1 \
+             AND r.dispatch_status IN ('pending','queued','acknowledged') \
+             ORDER BY s.starts_at_unix_ms, r.approved_at_unix_ms, r.report_id",
+        )?;
+        let channel_id = c_string(channel_id, "channel identity")?;
+        bind_text(self.database, statement.raw, 1, &channel_id)?;
+        let mut jobs = Vec::new();
+        loop {
+            match unsafe { sqlite3_step(statement.raw) } {
+                SQLITE_ROW => jobs.push(DispatchJob {
+                    report: read_commit_report_row(statement.raw)?,
+                    item: ScheduleItem {
+                        item_id: column_text(statement.raw, 9)?,
+                        channel_id: column_text(statement.raw, 10)?,
+                        asset_id: column_text(statement.raw, 11)?,
+                        title: column_text(statement.raw, 12)?,
+                        starts_at_unix_ms: unsafe { sqlite3_column_int64(statement.raw, 13) },
+                        duration_ms: column_u64(statement.raw, 14, "schedule duration")?,
+                        state: parse_schedule_state(&column_text(statement.raw, 15)?)?,
+                    },
+                    asset: MediaAsset {
+                        asset_id: column_text(statement.raw, 16)?,
+                        media_path: column_text(statement.raw, 17)?,
+                        duration_ms: column_u64(statement.raw, 18, "asset duration")?,
+                        readiness: parse_readiness(&column_text(statement.raw, 19)?)?,
+                    },
+                }),
+                SQLITE_DONE => return Ok(jobs),
+                _ => return Err(sqlite_error(self.database)),
+            }
+        }
+    }
+
+    pub fn advance_dispatch_status(
+        &self,
+        report_id: &str,
+        expected: DispatchStatus,
+        next: DispatchStatus,
+    ) -> Result<bool, String> {
+        if !valid_dispatch_transition(expected, next) {
+            return Err("invalid dispatch status transition".into());
+        }
+        let statement = self.prepare(
+            "UPDATE commit_reports SET dispatch_status=?1 WHERE report_id=?2 AND dispatch_status=?3",
+        )?;
+        let next = c_string(dispatch_status_name(next), "next dispatch status")?;
+        let report_id = c_string(report_id, "report identity")?;
+        let expected = c_string(dispatch_status_name(expected), "expected dispatch status")?;
+        bind_text(self.database, statement.raw, 1, &next)?;
+        bind_text(self.database, statement.raw, 2, &report_id)?;
+        bind_text(self.database, statement.raw, 3, &expected)?;
+        expect_done(self.database, statement.raw)?;
+        Ok(self.changes() == 1)
+    }
+
     fn insert_commit_report(&self, report: &CommitReport) -> Result<(), String> {
         let statement = self.prepare(
             "INSERT INTO commit_reports(report_id, plan_id, channel_id, schedule_item_id, asset_id, approved_by, \
@@ -450,6 +554,43 @@ impl StationStore {
         } else {
             Err(sqlite_error(self.database))
         }
+    }
+
+    fn migrate_commit_report_statuses(&self) -> Result<(), String> {
+        let statement = self.prepare(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='commit_reports'",
+        )?;
+        let definition = match unsafe { sqlite3_step(statement.raw) } {
+            SQLITE_ROW => column_text(statement.raw, 0)?,
+            SQLITE_DONE => return Err("commit_reports schema is missing".into()),
+            _ => return Err(sqlite_error(self.database)),
+        };
+        drop(statement);
+        if definition.contains("'completed'") {
+            return Ok(());
+        }
+        self.execute(
+            "BEGIN IMMEDIATE;\
+             ALTER TABLE commit_reports RENAME TO commit_reports_legacy;\
+             CREATE TABLE commit_reports (\
+               report_id TEXT PRIMARY KEY,\
+               plan_id TEXT NOT NULL,\
+               channel_id TEXT NOT NULL,\
+               schedule_item_id TEXT NOT NULL,\
+               asset_id TEXT NOT NULL,\
+               approved_by TEXT NOT NULL,\
+               approved_at_unix_ms INTEGER NOT NULL,\
+               dispatch_status TEXT NOT NULL CHECK (dispatch_status IN ('pending','queued','acknowledged','completed','error','cancelled')),\
+               operator_notes TEXT NOT NULL\
+             );\
+             INSERT INTO commit_reports SELECT * FROM commit_reports_legacy;\
+             DROP TABLE commit_reports_legacy;\
+             CREATE INDEX commit_reports_channel_time ON commit_reports(channel_id, approved_at_unix_ms);\
+             COMMIT;",
+        )
+        .inspect_err(|_| {
+            let _ = self.execute("ROLLBACK");
+        })
     }
 
     fn upsert_profile(&self, profile: &StationProfile) -> Result<(), String> {
@@ -507,6 +648,15 @@ impl StationStore {
         } else {
             Err(sqlite_error(self.database))
         }
+    }
+
+    fn changes(&self) -> i64 {
+        let statement = self
+            .prepare("SELECT changes()")
+            .expect("SELECT changes is valid");
+        let status = unsafe { sqlite3_step(statement.raw) };
+        debug_assert_eq!(status, SQLITE_ROW);
+        unsafe { sqlite3_column_int64(statement.raw, 0) }
     }
 }
 
@@ -654,6 +804,7 @@ fn dispatch_status_name(value: DispatchStatus) -> &'static str {
         DispatchStatus::Pending => "pending",
         DispatchStatus::Queued => "queued",
         DispatchStatus::Acknowledged => "acknowledged",
+        DispatchStatus::Completed => "completed",
         DispatchStatus::Error => "error",
         DispatchStatus::Cancelled => "cancelled",
     }
@@ -664,10 +815,25 @@ fn parse_dispatch_status(value: &str) -> Result<DispatchStatus, String> {
         "pending" => Ok(DispatchStatus::Pending),
         "queued" => Ok(DispatchStatus::Queued),
         "acknowledged" => Ok(DispatchStatus::Acknowledged),
+        "completed" => Ok(DispatchStatus::Completed),
         "error" => Ok(DispatchStatus::Error),
         "cancelled" => Ok(DispatchStatus::Cancelled),
         _ => Err(format!("database returned invalid dispatch status {value}")),
     }
+}
+
+fn valid_dispatch_transition(expected: DispatchStatus, next: DispatchStatus) -> bool {
+    matches!(
+        (expected, next),
+        (DispatchStatus::Pending, DispatchStatus::Queued)
+            | (DispatchStatus::Pending, DispatchStatus::Error)
+            | (DispatchStatus::Pending, DispatchStatus::Cancelled)
+            | (DispatchStatus::Queued, DispatchStatus::Acknowledged)
+            | (DispatchStatus::Queued, DispatchStatus::Error)
+            | (DispatchStatus::Queued, DispatchStatus::Cancelled)
+            | (DispatchStatus::Acknowledged, DispatchStatus::Completed)
+            | (DispatchStatus::Acknowledged, DispatchStatus::Error)
+    )
 }
 
 fn column_text(statement: *mut SqliteStatement, column: c_int) -> Result<String, String> {
@@ -690,4 +856,63 @@ fn sqlite_error(database: *mut Sqlite3) -> String {
     unsafe { CStr::from_ptr(sqlite3_errmsg(database)) }
         .to_string_lossy()
         .into_owned()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn migrates_the_pre_completion_dispatch_constraint_without_losing_rows() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let database = std::env::temp_dir().join(format!("townlight-migration-{nonce}.db"));
+        let store = StationStore::open(&database).unwrap();
+        store
+            .execute(
+                "DROP TABLE commit_reports;\
+                 CREATE TABLE commit_reports (\
+                   report_id TEXT PRIMARY KEY, plan_id TEXT NOT NULL, channel_id TEXT NOT NULL,\
+                   schedule_item_id TEXT NOT NULL, asset_id TEXT NOT NULL, approved_by TEXT NOT NULL,\
+                   approved_at_unix_ms INTEGER NOT NULL, dispatch_status TEXT NOT NULL CHECK \
+                   (dispatch_status IN ('pending','queued','acknowledged','error','cancelled')),\
+                   operator_notes TEXT NOT NULL);\
+                 INSERT INTO commit_reports VALUES('legacy','plan','channel','item','asset','operator',1,'acknowledged','kept');",
+            )
+            .unwrap();
+        drop(store);
+
+        let migrated = StationStore::open(&database).unwrap();
+        let report = migrated.read_commit_report("legacy").unwrap().unwrap();
+        assert_eq!(report.operator_notes, "kept");
+        assert!(
+            migrated
+                .advance_dispatch_status(
+                    "legacy",
+                    DispatchStatus::Acknowledged,
+                    DispatchStatus::Completed,
+                )
+                .unwrap()
+        );
+        assert_eq!(
+            migrated
+                .read_commit_report("legacy")
+                .unwrap()
+                .unwrap()
+                .dispatch_status,
+            DispatchStatus::Completed
+        );
+        drop(migrated);
+        for candidate in [
+            database.clone(),
+            PathBuf::from(format!("{}-wal", database.display())),
+            PathBuf::from(format!("{}-shm", database.display())),
+        ] {
+            let _ = std::fs::remove_file(candidate);
+        }
+    }
 }

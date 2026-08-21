@@ -12,8 +12,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use station_api::{Api, serve_one, serve_until};
 use station_domain::StationProfile;
 use station_schedule::{
-    AssetReadiness, CommitPlan, CommitReport, DispatchStatus, MediaAsset, ScheduleItem,
-    ScheduleState,
+    AssetReadiness, ChannelConfiguration, CommitPlan, CommitReport, DispatchStatus, MediaAsset,
+    ScheduleItem, ScheduleState,
 };
 
 fn temporary_database(name: &str) -> PathBuf {
@@ -106,6 +106,37 @@ fn health_reports_database_readiness_and_unknown_routes_are_not_found() {
     assert_eq!(health.status, 200);
     assert_eq!(health.body, br#"{"database":"ready","status":"ready"}"#);
     assert_eq!(api.handle("GET", "/not-a-route", None).status, 404);
+    let _ = std::fs::remove_file(database);
+}
+
+#[test]
+fn persists_validated_channel_output_configuration() {
+    let database = temporary_database("channels");
+    let api = Api::open(&database).unwrap();
+    let channel = ChannelConfiguration {
+        channel_id: "8b626c01-bdf8-419a-8a2e-b0a7caa1ff7e".into(),
+        display_name: "Primary Cable Channel".into(),
+        udp_destination: "127.0.0.1:5500".into(),
+        enabled: true,
+    };
+    let put = api.handle(
+        "PUT",
+        "/api/v1/channels",
+        Some(&serde_json::to_vec(&channel).unwrap()),
+    );
+    assert_eq!(put.status, 200);
+    let listed = api.handle("GET", "/api/v1/channels", None);
+    assert_eq!(listed.status, 200);
+    assert_eq!(
+        serde_json::from_slice::<Vec<ChannelConfiguration>>(&listed.body).unwrap(),
+        vec![channel]
+    );
+    let invalid = api.handle(
+        "PUT",
+        "/api/v1/channels",
+        Some(br#"{"channel_id":"not-a-uuid","display_name":"Bad","udp_destination":"nowhere","enabled":true}"#),
+    );
+    assert_eq!(invalid.status, 422);
     let _ = std::fs::remove_file(database);
 }
 

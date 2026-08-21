@@ -6,4 +6,5 @@ publish.workspace = true
 
 [dependencies]
 station-api.workspace = true
+station-orchestration.workspace = true
 windows-service.workspace = true

@@ -29,6 +29,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Transactional replacement of prepared file legs while fallback stays live, including generation-scoped GStreamer elements, ordered decoder teardown, canonical video-rate repair, and repeated two-asset worker/journal proof.
 - Typed schedule and commit-to-air domain with active overlap, missing/unready/short-media, nearest-gap, adjacency, and time-overflow checks.
 - SQLite schedule authority and loopback JSON endpoints that rerun the gate under a write lock and atomically persist operator approval before dispatch; race failures leave no report and do not change the draft item.
+- Validated channel/output configuration plus daemon-owned per-channel orchestration that preloads approved assets, takes them at their scheduled start, returns to fallback at their scheduled end, and advances dispatch state only after durable worker acknowledgments.
+- Crash reconciliation for queued and acknowledged schedule work: a replacement worker reloads the content-addressed asset and retakes it only while its committed time window remains active.
+- Forward migration of the dispatch-status constraint so existing approval rows survive introduction of the terminal `completed` state.
 - Channel-worker ownership of fallback graph startup and shutdown, with supervisor proof that durable readiness corresponds to real MPEG-TS output.
 - Native Windows Service Control Manager hosting for `stationd`, including loopback-only service configuration, cooperative stop and operating-system shutdown, startup status, persistent data-directory creation, and a machine-proven install/start/health/stop lifecycle.
 - Self-contained elevated Windows installer with a hash-pinned private GStreamer runtime, delayed-auto service recovery, activation health gate, immutable candidate receipt, failed-install rollback, uninstall, and station-data-preserving reinstall proof.

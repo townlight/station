@@ -28,6 +28,14 @@ pub struct ScheduleItem {
     pub state: ScheduleState,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChannelConfiguration {
+    pub channel_id: String,
+    pub display_name: String,
+    pub udp_destination: String,
+    pub enabled: bool,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ScheduleState {
@@ -78,8 +86,16 @@ pub enum DispatchStatus {
     Pending,
     Queued,
     Acknowledged,
+    Completed,
     Error,
     Cancelled,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DispatchJob {
+    pub report: CommitReport,
+    pub item: ScheduleItem,
+    pub asset: MediaAsset,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -139,6 +155,36 @@ impl ScheduleItem {
         self.starts_at_unix_ms
             .checked_add(duration)
             .ok_or(ScheduleError::TimeOverflow)
+    }
+}
+
+impl ChannelConfiguration {
+    pub fn validate(&self) -> Result<(), ScheduleError> {
+        if !is_uuid(&self.channel_id) {
+            return Err(ScheduleError::Invalid(
+                "channel_id must be a canonical UUID",
+            ));
+        }
+        if self.display_name.trim().is_empty()
+            || self.display_name.len() > 120
+            || self.display_name.chars().any(char::is_control)
+        {
+            return Err(ScheduleError::Invalid(
+                "display_name must contain 1 to 120 visible characters",
+            ));
+        }
+        let destination = self
+            .udp_destination
+            .parse::<std::net::SocketAddr>()
+            .map_err(|_| {
+                ScheduleError::Invalid("udp_destination must be an IP address and port")
+            })?;
+        if destination.port() == 0 {
+            return Err(ScheduleError::Invalid(
+                "udp_destination port must be nonzero",
+            ));
+        }
+        Ok(())
     }
 }
 
