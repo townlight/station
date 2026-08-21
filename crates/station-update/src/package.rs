@@ -17,7 +17,7 @@ const SLOT_MANIFEST_NAME: &str = "slot-manifest.json";
 const MAX_PACKAGE_MANIFEST_BYTES: u64 = 64 * 1024;
 const MAX_SLOT_FILE_BYTES: u64 = 512 * 1024 * 1024;
 const MAX_SLOT_BYTES: u64 = 1024 * 1024 * 1024;
-const REQUIRED_FILES: [&str; 3] = ["stationd.exe", "channel-worker.exe", "station-updater.exe"];
+const REQUIRED_FILES: [&str; 2] = ["stationd.exe", "channel-worker.exe"];
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

@@ -3,7 +3,7 @@ use station_maintenance::{
     ACTIVE_SLOT_RECEIPT_NAME, ACTIVE_SLOT_SCHEMA_VERSION, ActiveApplication, ActiveSlotReceipt,
     INSTALL_RECEIPT_NAME, MAINTENANCE_SCHEMA_VERSION, MaintenanceHost, MaintenancePhase,
     MaintenanceRequest, TRANSACTION_DIRECTORY_NAME, activate_prepared_slot,
-    read_active_slot_receipt, recover_incomplete_transaction,
+    latest_maintenance_transaction, read_active_slot_receipt, recover_incomplete_transaction,
 };
 use station_update::{
     PreparedSlotRecord, ReleaseManifest, UpdatePackageFile, UpdatePackageManifest,
@@ -100,6 +100,13 @@ fn commits_only_after_candidate_proof_and_records_the_previous_application() {
             .unwrap();
     assert_eq!(install["version"], "0.2.0");
     assert_eq!(install["media_runtime_sha256"], "C".repeat(64));
+    assert_eq!(
+        latest_maintenance_transaction(&fixture.data)
+            .unwrap()
+            .unwrap()
+            .phase,
+        MaintenancePhase::Committed
+    );
     cleanup(&fixture.root);
 }
 
@@ -311,7 +318,7 @@ fn write_application(
     source_commit: &str,
     read_only: bool,
 ) -> UpdatePackageManifest {
-    let payloads: [(&str, &[u8]); 3] = [
+    let payloads: [(&str, &[u8]); 2] = [
         (
             "stationd.exe",
             format!("stationd-{version}").leak().as_bytes(),
@@ -319,10 +326,6 @@ fn write_application(
         (
             "channel-worker.exe",
             format!("channel-worker-{version}").leak().as_bytes(),
-        ),
-        (
-            "station-updater.exe",
-            format!("station-updater-{version}").leak().as_bytes(),
         ),
     ];
     let mut files = Vec::new();

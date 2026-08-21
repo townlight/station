@@ -11,6 +11,10 @@ use station_domain::{
     AlertNotificationKind, AlertSeverity, ChannelRuntimeObservation, RuntimeSafeToAirStatus,
     SelfTestKind, SelfTestStatus, SelfTestTrigger, derive_runtime_safe_to_air,
 };
+use station_maintenance::{
+    ACTIVE_SLOT_RECEIPT_NAME, MaintenancePhase, latest_maintenance_transaction,
+    read_active_slot_receipt,
+};
 use station_storage::StationStore;
 use zip::CompressionMethod;
 use zip::write::SimpleFileOptions;
@@ -64,9 +68,23 @@ struct InstallationSnapshot {
     source_commit: Option<String>,
     media_runtime_sha256: Option<String>,
     installed_local_time: Option<String>,
+    active_relative_directory: Option<String>,
+    active_generation: Option<u64>,
     operating_system: &'static str,
     architecture: &'static str,
     artifacts: Vec<InstalledArtifact>,
+}
+
+#[derive(Debug, Serialize)]
+struct MaintenanceDiagnostic {
+    transaction_id: String,
+    requested_at_unix_ms: i64,
+    requested_by: String,
+    updated_at_unix_ms: i64,
+    phase: MaintenancePhase,
+    from_version: String,
+    candidate_version: String,
+    summary: &'static str,
 }
 
 #[derive(Debug, Deserialize)]
@@ -274,6 +292,17 @@ pub fn create_support_bundle(
             }),
         })
         .collect::<Vec<_>>();
+    let maintenance =
+        latest_maintenance_transaction(data_directory)?.map(|transaction| MaintenanceDiagnostic {
+            transaction_id: transaction.request.transaction_id,
+            requested_at_unix_ms: transaction.request.requested_at_unix_ms,
+            requested_by: transaction.request.requested_by,
+            updated_at_unix_ms: transaction.updated_at_unix_ms,
+            phase: transaction.phase,
+            from_version: transaction.previous_receipt.active.package_manifest.version,
+            candidate_version: transaction.candidate.package_manifest.version,
+            summary: maintenance_phase_summary(transaction.phase),
+        });
 
     let mut documents = BTreeMap::new();
     insert_json(&mut documents, "installation.json", &install)?;
@@ -310,6 +339,7 @@ pub fn create_support_bundle(
         &store.list_system_resource_samples(RESOURCE_LIMIT)?,
     )?;
     insert_json(&mut documents, "self-tests-redacted.json", &self_tests)?;
+    insert_json(&mut documents, "maintenance-latest.json", &maintenance)?;
     insert_json(
         &mut documents,
         "self-test-schedules.json",
@@ -375,6 +405,7 @@ pub fn create_support_bundle(
             "installation identity and artifact hashes".into(),
             "station profile, channel configuration, and current runtime truth".into(),
             "bounded alert, delivery, resource, and self-test history".into(),
+            "latest durable maintenance transaction and active application identity".into(),
         ],
         excludes,
         retention_warning,
@@ -417,11 +448,29 @@ fn read_installation_snapshot(
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
         Err(error) => return Err(format!("could not inspect install receipt: {error}")),
     };
+    let active_path = data_directory.join(ACTIVE_SLOT_RECEIPT_NAME);
+    let active = match std::fs::symlink_metadata(&active_path) {
+        Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => {
+            Some(read_active_slot_receipt(&active_path)?)
+        }
+        Ok(_) => return Err("active-slot receipt is not a regular file".into()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(format!("could not inspect active-slot receipt: {error}")),
+    };
+    let payload_directory = active
+        .as_ref()
+        .map(|receipt| receipt.active.directory(application_directory))
+        .transpose()?
+        .unwrap_or_else(|| application_directory.to_path_buf());
     let artifacts = [
-        ("stationd.exe", application_directory.join("stationd.exe")),
+        ("stationd.exe", payload_directory.join("stationd.exe")),
         (
             "channel-worker.exe",
-            application_directory.join("channel-worker.exe"),
+            payload_directory.join("channel-worker.exe"),
+        ),
+        (
+            "station-updater.exe",
+            application_directory.join("station-updater.exe"),
         ),
         (
             "private-media-runtime",
@@ -446,10 +495,30 @@ fn read_installation_snapshot(
         installed_local_time: receipt
             .as_ref()
             .and_then(|receipt| receipt.installed_local_time.clone()),
+        active_relative_directory: active
+            .as_ref()
+            .map(|receipt| receipt.active.relative_directory.clone()),
+        active_generation: active.as_ref().map(|receipt| receipt.generation),
         operating_system: std::env::consts::OS,
         architecture: std::env::consts::ARCH,
         artifacts,
     })
+}
+
+fn maintenance_phase_summary(phase: MaintenancePhase) -> &'static str {
+    match phase {
+        MaintenancePhase::Requested => "Activation was requested and is awaiting the watchdog.",
+        MaintenancePhase::ServiceStopped => "The station service was stopped for activation.",
+        MaintenancePhase::CandidateConfigured => "The candidate service was configured.",
+        MaintenancePhase::CandidateStarted => "The candidate service was started for proof.",
+        MaintenancePhase::CommitStarted => "Candidate proof passed and commit began.",
+        MaintenancePhase::Committed => "The candidate was proved and committed.",
+        MaintenancePhase::RollbackStarted => "Candidate proof failed and rollback began.",
+        MaintenancePhase::RolledBack => "The previous application was restored and proved.",
+        MaintenancePhase::RollbackFailed => {
+            "Candidate proof and automatic rollback proof both failed; local inspection is required."
+        }
+    }
 }
 
 fn installed_artifact(name: &str, path: &Path) -> Result<InstalledArtifact, String> {
@@ -712,6 +781,7 @@ mod tests {
         assert!(names.contains(&"manifest.json".into()));
         assert!(names.contains(&"runtime-safe-to-air.json".into()));
         assert!(names.contains(&"alert-channels-redacted.json".into()));
+        assert!(names.contains(&"maintenance-latest.json".into()));
         assert!(!names.iter().any(|name| name.ends_with(".db")));
         let mut manifest_json = String::new();
         archive
@@ -739,6 +809,85 @@ mod tests {
                 .any(|item| item.contains("credentials"))
         );
         assert!(read_support_bundle(&database, "support-bundle-..-station").is_err());
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn hashes_slot_payloads_but_the_installer_owned_root_updater() {
+        let root = temp_directory("active-artifacts");
+        let data = root.join("data");
+        let app = root.join("app");
+        let slot = app.join("slots/slot-0.2.0-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
+        std::fs::create_dir_all(&data).unwrap();
+        std::fs::create_dir_all(app.join("runtime/gstreamer/bin")).unwrap();
+        std::fs::create_dir_all(&slot).unwrap();
+        std::fs::write(slot.join("stationd.exe"), b"active-stationd").unwrap();
+        std::fs::write(slot.join("channel-worker.exe"), b"active-worker").unwrap();
+        std::fs::write(slot.join("station-updater.exe"), b"dormant-slot-updater").unwrap();
+        std::fs::write(app.join("station-updater.exe"), b"running-root-updater").unwrap();
+        std::fs::write(
+            app.join("runtime/gstreamer/bin/gstreamer-1.0-0.dll"),
+            b"runtime-core",
+        )
+        .unwrap();
+        let receipt = serde_json::json!({
+            "schema_version": station_maintenance::ACTIVE_SLOT_SCHEMA_VERSION,
+            "generation": 2,
+            "activated_at_unix_ms": 2_000,
+            "transaction_id": "update-support-proof",
+            "active": {
+                "relative_directory":
+                    "slots/slot-0.2.0-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "package_manifest": {
+                    "schema_version": 1,
+                    "product": "TownLight Station",
+                    "version": "0.2.0",
+                    "source_commit": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                    "files": [
+                        {
+                            "path": "stationd.exe",
+                            "size_bytes": b"active-stationd".len(),
+                            "sha256": sha256_bytes(b"active-stationd")
+                        },
+                        {
+                            "path": "channel-worker.exe",
+                            "size_bytes": b"active-worker".len(),
+                            "sha256": sha256_bytes(b"active-worker")
+                        }
+                    ]
+                }
+            },
+            "previous": null
+        });
+        std::fs::write(
+            data.join(ACTIVE_SLOT_RECEIPT_NAME),
+            serde_json::to_vec(&receipt).unwrap(),
+        )
+        .unwrap();
+
+        let snapshot = read_installation_snapshot(&data, &app).unwrap();
+        assert_eq!(
+            snapshot.active_relative_directory.as_deref(),
+            Some("slots/slot-0.2.0-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+        );
+        let hashes = snapshot
+            .artifacts
+            .iter()
+            .map(|artifact| (artifact.name.as_str(), artifact.sha256.as_deref()))
+            .collect::<std::collections::BTreeMap<_, _>>();
+        let stationd_hash = sha256_bytes(b"active-stationd");
+        let root_updater_hash = sha256_bytes(b"running-root-updater");
+        let dormant_updater_hash = sha256_bytes(b"dormant-slot-updater");
+        assert_eq!(hashes["stationd.exe"], Some(stationd_hash.as_str()));
+        assert_eq!(
+            hashes["station-updater.exe"],
+            Some(root_updater_hash.as_str())
+        );
+        assert_ne!(
+            hashes["station-updater.exe"],
+            Some(dormant_updater_hash.as_str())
+        );
 
         std::fs::remove_dir_all(root).unwrap();
     }

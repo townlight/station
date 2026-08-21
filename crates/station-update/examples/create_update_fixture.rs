@@ -14,10 +14,9 @@ use zip::{CompressionMethod, ZipWriter, write::SimpleFileOptions};
 
 fn main() -> Result<(), String> {
     let arguments = std::env::args_os().skip(1).collect::<Vec<_>>();
-    if arguments.len() != 7 {
+    if arguments.len() != 6 {
         return Err(
-            "usage: create_update_fixture OUTPUT VERSION SOURCE_COMMIT PORT STATIOND WORKER UPDATER"
-                .into(),
+            "usage: create_update_fixture OUTPUT VERSION SOURCE_COMMIT PORT STATIOND WORKER".into(),
         );
     }
     let output = PathBuf::from(&arguments[0]);
@@ -37,7 +36,6 @@ fn main() -> Result<(), String> {
     let payload_paths = [
         ("stationd.exe", PathBuf::from(&arguments[4])),
         ("channel-worker.exe", PathBuf::from(&arguments[5])),
-        ("station-updater.exe", PathBuf::from(&arguments[6])),
     ];
     std::fs::create_dir_all(&output)
         .map_err(|error| format!("could not create fixture directory: {error}"))?;

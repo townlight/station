@@ -538,6 +538,54 @@ pub fn read_transaction(path: &Path) -> Result<MaintenanceTransactionRecord, Str
     Ok(transaction)
 }
 
+pub fn latest_maintenance_transaction(
+    data_directory: &Path,
+) -> Result<Option<MaintenanceTransactionRecord>, String> {
+    let directory = data_directory
+        .join("updates")
+        .join(TRANSACTION_DIRECTORY_NAME);
+    let metadata = match std::fs::symlink_metadata(&directory) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(format!("could not inspect maintenance history: {error}")),
+    };
+    if !metadata.is_dir() || metadata.file_type().is_symlink() {
+        return Err("maintenance history is not a real directory".into());
+    }
+    let mut latest: Option<MaintenanceTransactionRecord> = None;
+    let mut count = 0_usize;
+    for entry in std::fs::read_dir(&directory)
+        .map_err(|error| format!("could not list maintenance history: {error}"))?
+    {
+        count += 1;
+        if count > 1_000 {
+            return Err("maintenance history exceeds its bounded entry count".into());
+        }
+        let entry =
+            entry.map_err(|error| format!("could not inspect maintenance history: {error}"))?;
+        let path = entry.path();
+        let metadata = std::fs::symlink_metadata(&path)
+            .map_err(|error| format!("could not inspect maintenance history entry: {error}"))?;
+        if !metadata.is_file()
+            || metadata.file_type().is_symlink()
+            || path.extension().and_then(|value| value.to_str()) != Some("json")
+        {
+            return Err("maintenance history contains an unexpected entry".into());
+        }
+        let transaction = read_transaction(&path)?;
+        let replace = latest.as_ref().is_none_or(|current| {
+            (
+                transaction.updated_at_unix_ms,
+                &transaction.request.transaction_id,
+            ) > (current.updated_at_unix_ms, &current.request.transaction_id)
+        });
+        if replace {
+            latest = Some(transaction);
+        }
+    }
+    Ok(latest)
+}
+
 pub fn read_active_slot_receipt(path: &Path) -> Result<ActiveSlotReceipt, String> {
     let bytes = read_bounded_file(path, 256 * 1024, "active-slot receipt")?;
     let receipt: ActiveSlotReceipt = serde_json::from_slice(&bytes)

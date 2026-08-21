@@ -56,7 +56,7 @@ if ($receipt.source_commit -ne $manifestDocument.source_commit -or
 if ($activeReceipt.active.relative_directory -ne '.' -or
     $activeReceipt.active.package_manifest.source_commit -ne $manifestDocument.source_commit -or
     $activeReceipt.active.package_manifest.version -ne $manifestDocument.version -or
-    $activeReceipt.active.package_manifest.files.Count -ne 3) {
+    $activeReceipt.active.package_manifest.files.Count -ne 2) {
     throw 'The active application receipt does not match the installed candidate.'
 }
 $activeHashes = @{}
@@ -64,9 +64,8 @@ foreach ($file in $activeReceipt.active.package_manifest.files) {
     $activeHashes[$file.path] = $file.sha256
 }
 if ($activeHashes['stationd.exe'] -ne $stationdHash -or
-    $activeHashes['channel-worker.exe'] -ne $workerHash -or
-    $activeHashes['station-updater.exe'] -ne $updaterHash) {
-    throw 'The active application receipt does not authenticate all installed binaries.'
+    $activeHashes['channel-worker.exe'] -ne $workerHash) {
+    throw 'The active application receipt does not authenticate both slot-owned binaries.'
 }
 
 $env:PATH = (Join-Path $runtime 'bin') + ';' + $env:PATH

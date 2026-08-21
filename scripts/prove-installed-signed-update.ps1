@@ -150,7 +150,7 @@ try {
     $slotManifestPath = Join-Path $preparedProofPath 'slot-manifest.json'
     $slotManifest = Get-Content -LiteralPath $slotManifestPath -Raw | ConvertFrom-Json
     $slotFiles = @(Get-ChildItem -LiteralPath $preparedProofPath -File)
-    if ($slotFiles.Count -ne 4 -or $slotManifest.files.Count -ne 3 -or
+    if ($slotFiles.Count -ne 3 -or $slotManifest.files.Count -ne 2 -or
         -not (Get-Item -LiteralPath $slotManifestPath).IsReadOnly) {
         throw 'The installed prepared slot does not have the exact read-only file set.'
     }

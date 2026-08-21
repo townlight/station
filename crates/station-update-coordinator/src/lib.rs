@@ -5,8 +5,8 @@ use station_domain::{
     derive_runtime_safe_to_air,
 };
 use station_maintenance::{
-    MAINTENANCE_SCHEMA_VERSION, MaintenanceRequest, enqueue_maintenance_request,
-    pending_request_paths,
+    MAINTENANCE_SCHEMA_VERSION, MaintenancePhase, MaintenanceRequest, enqueue_maintenance_request,
+    latest_maintenance_transaction, pending_request_paths,
 };
 use station_storage::StationStore;
 use station_update::{
@@ -40,7 +40,20 @@ pub struct UpdateStatus {
     pub latest_check: Option<UpdateCheckRecord>,
     pub staged_package: Option<StagedPackageRecord>,
     pub prepared_slot: Option<PreparedSlotRecord>,
+    pub maintenance: Option<MaintenanceStatus>,
     pub next_step: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct MaintenanceStatus {
+    pub transaction_id: String,
+    pub requested_at_unix_ms: i64,
+    pub requested_by: String,
+    pub updated_at_unix_ms: i64,
+    pub phase: MaintenancePhase,
+    pub from_version: String,
+    pub candidate_version: String,
+    pub detail: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -209,6 +222,21 @@ pub fn read_status(
     application_directory: &Path,
 ) -> Result<UpdateStatus, CoordinatorError> {
     let identity = read_install_identity(database_path)?;
+    let data_directory = database_path
+        .parent()
+        .ok_or_else(|| CoordinatorError::Fault("station database has no data directory".into()))?;
+    let maintenance = latest_maintenance_transaction(data_directory)
+        .map_err(CoordinatorError::Fault)?
+        .map(|transaction| MaintenanceStatus {
+            transaction_id: transaction.request.transaction_id,
+            requested_at_unix_ms: transaction.request.requested_at_unix_ms,
+            requested_by: transaction.request.requested_by,
+            updated_at_unix_ms: transaction.updated_at_unix_ms,
+            phase: transaction.phase,
+            from_version: transaction.previous_receipt.active.package_manifest.version,
+            candidate_version: transaction.candidate.package_manifest.version,
+            detail: transaction.detail,
+        });
     let source = read_release_source(application_directory)?;
     let stored_check = StationStore::open(database_path)
         .and_then(|store| store.read_update_check())
@@ -220,7 +248,7 @@ pub fn read_status(
     let prepared = store
         .read_prepared_slot()
         .map_err(CoordinatorError::Fault)?;
-    let (configured, release_channel, feed_origin, latest_check, staged_package, prepared_slot, next_step) = match source {
+    let (configured, release_channel, feed_origin, latest_check, staged_package, prepared_slot, mut next_step) = match source {
         Some(source) => {
             let visible_stage = staged.filter(|stage| {
                 stored_check
@@ -269,6 +297,23 @@ pub fn read_status(
                 .into(),
         ),
     };
+    if let Some(status) = &maintenance {
+        next_step = match status.phase {
+            MaintenancePhase::Requested
+            | MaintenancePhase::ServiceStopped
+            | MaintenancePhase::CandidateConfigured
+            | MaintenancePhase::CandidateStarted
+            | MaintenancePhase::CommitStarted
+            | MaintenancePhase::RollbackStarted => {
+                "A maintenance transaction is in progress under the independent watchdog.".into()
+            }
+            MaintenancePhase::RollbackFailed => {
+                "MAINTENANCE RECOVERY FAILED. Keep the station out of unattended service and inspect the latest transaction immediately."
+                    .into()
+            }
+            MaintenancePhase::Committed | MaintenancePhase::RolledBack => next_step,
+        };
+    }
     Ok(UpdateStatus {
         configured,
         current_version: identity.version,
@@ -278,6 +323,7 @@ pub fn read_status(
         latest_check,
         staged_package,
         prepared_slot,
+        maintenance,
         next_step,
     })
 }
@@ -786,10 +832,9 @@ mod tests {
 
         let now = 1_800_000_000_000;
         let signing_key = SigningKey::from_bytes(&[12; 32]);
-        let payloads: [(&str, &[u8]); 3] = [
+        let payloads: [(&str, &[u8]); 2] = [
             ("stationd.exe", b"coordinator station service"),
             ("channel-worker.exe", b"coordinator channel worker"),
-            ("station-updater.exe", b"coordinator station updater"),
         ];
         let internal_manifest = UpdatePackageManifest {
             schema_version: 1,

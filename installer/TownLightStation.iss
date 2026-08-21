@@ -396,9 +396,7 @@ begin
           '{"path":"stationd.exe","size_bytes":' + StationdSize +
             ',"sha256":"' + StationdSha256 + '"},' +
           '{"path":"channel-worker.exe","size_bytes":' + ChannelWorkerSize +
-            ',"sha256":"' + ChannelWorkerSha256 + '"},' +
-          '{"path":"station-updater.exe","size_bytes":' + StationUpdaterSize +
-            ',"sha256":"' + StationUpdaterSha256 + '"}' +
+            ',"sha256":"' + ChannelWorkerSha256 + '"}' +
         ']' +
       '}' +
     '},' +

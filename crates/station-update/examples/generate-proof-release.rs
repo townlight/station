@@ -33,7 +33,7 @@ fn main() -> Result<(), String> {
     .map_err(|_| "system time exceeds the supported range".to_string())?;
     std::fs::create_dir_all(&output_directory).map_err(|error| error.to_string())?;
     let package_file_name = "TownLight-Station-0.2.0.tlu";
-    let payloads: [(&str, &[u8]); 3] = [
+    let payloads: [(&str, &[u8]); 2] = [
         (
             "stationd.exe",
             b"inert installed station service slot proof",
@@ -41,10 +41,6 @@ fn main() -> Result<(), String> {
         (
             "channel-worker.exe",
             b"inert installed channel worker slot proof",
-        ),
-        (
-            "station-updater.exe",
-            b"inert installed station updater slot proof",
         ),
     ];
     let internal_manifest = UpdatePackageManifest {

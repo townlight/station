@@ -16,7 +16,6 @@ fn payloads() -> Vec<(&'static str, &'static [u8])> {
     vec![
         ("stationd.exe", b"station service proof bytes"),
         ("channel-worker.exe", b"channel worker proof bytes"),
-        ("station-updater.exe", b"station updater proof bytes"),
     ]
 }
 

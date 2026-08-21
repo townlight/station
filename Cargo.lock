@@ -1679,6 +1679,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "station-domain",
+ "station-maintenance",
  "station-schedule",
  "station-storage",
  "zip",
