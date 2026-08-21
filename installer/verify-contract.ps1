@@ -15,6 +15,8 @@ $requirements = [ordered]@{
     'checks the required software decoder bundle' = 'gstlibav.dll'
     'checks the required SRT plugin' = 'gstsrt.dll'
     'checks the required SRT transport library' = 'srt.dll'
+    'reuses an already-complete private runtime during upgrade' = 'if PrivateRuntimeIsComplete(RuntimeRoot) then'
+    'removes an incomplete private runtime before replacement' = "if FileExists(RuntimeRoot + '\unins000.exe') then"
     'registers the native station service' = 'create TownLightStation'
     'sets immediate automatic service start' = 'config TownLightStation start= auto'
     'configures service recovery' = 'failure TownLightStation'

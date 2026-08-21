@@ -175,6 +175,22 @@ begin
     '{commonappdata}\TownLight Station\active-slot.json'));
 end;
 
+function PrivateRuntimeIsComplete(const RuntimeRoot: String): Boolean;
+begin
+  Result :=
+    FileExists(RuntimeRoot + '\bin\gstreamer-1.0-0.dll') and
+    FileExists(RuntimeRoot + '\lib\gstreamer-1.0\gstopenh264.dll') and
+    FileExists(RuntimeRoot + '\lib\gstreamer-1.0\gstvoaacenc.dll') and
+    FileExists(RuntimeRoot + '\lib\gstreamer-1.0\gstaudiorate.dll') and
+    FileExists(RuntimeRoot + '\lib\gstreamer-1.0\gstvideorate.dll') and
+    FileExists(RuntimeRoot + '\lib\gstreamer-1.0\gstrsaudiofx.dll') and
+    FileExists(RuntimeRoot + '\lib\gstreamer-1.0\gstplayback.dll') and
+    FileExists(RuntimeRoot + '\lib\gstreamer-1.0\gstmpegtsdemux.dll') and
+    FileExists(RuntimeRoot + '\lib\gstreamer-1.0\gstlibav.dll') and
+    FileExists(RuntimeRoot + '\lib\gstreamer-1.0\gstsrt.dll') and
+    FileExists(RuntimeRoot + '\bin\srt.dll');
+end;
+
 procedure InstallPrivateRuntime;
 var
   ResultCode: Integer;
@@ -182,9 +198,20 @@ var
   RuntimeRoot: String;
   Parameters: String;
 begin
+  RuntimeRoot := ExpandConstant('{app}\runtime\gstreamer');
+  if PrivateRuntimeIsComplete(RuntimeRoot) then
+  begin
+    Log('Reusing the complete private media runtime already installed at ' +
+      RuntimeRoot);
+    RuntimeWasInstalled := False;
+    Exit;
+  end;
+
+  if FileExists(RuntimeRoot + '\unins000.exe') then
+    RemovePrivateRuntime;
+
   ExtractTemporaryFile('{#GStreamerFile}');
   RuntimeInstaller := ExpandConstant('{tmp}\{#GStreamerFile}');
-  RuntimeRoot := ExpandConstant('{app}\runtime\gstreamer');
   Parameters := '/VERYSILENT /ALLUSERS /NORESTART /TYPE=runtime /DIR="' +
     RuntimeRoot + '"';
   if (not Exec(RuntimeInstaller, Parameters, '', SW_HIDE,
@@ -193,28 +220,8 @@ begin
       IntToStr(ResultCode) + ').');
   RuntimeWasInstalled := True;
 
-  if not FileExists(RuntimeRoot + '\bin\gstreamer-1.0-0.dll') then
-    RaiseException('The bundled media runtime did not produce its required core library.');
-  if not FileExists(RuntimeRoot + '\lib\gstreamer-1.0\gstopenh264.dll') then
-    RaiseException('The bundled media runtime did not produce its required H.264 plugin.');
-  if not FileExists(RuntimeRoot + '\lib\gstreamer-1.0\gstvoaacenc.dll') then
-    RaiseException('The bundled media runtime did not produce its required AAC encoder.');
-  if not FileExists(RuntimeRoot + '\lib\gstreamer-1.0\gstaudiorate.dll') then
-    RaiseException('The bundled media runtime did not produce its required audio rate adjuster.');
-  if not FileExists(RuntimeRoot + '\lib\gstreamer-1.0\gstvideorate.dll') then
-    RaiseException('The bundled media runtime did not produce its required video rate adjuster.');
-  if not FileExists(RuntimeRoot + '\lib\gstreamer-1.0\gstrsaudiofx.dll') then
-    RaiseException('The bundled media runtime did not produce its required loudness analyzer.');
-  if not FileExists(RuntimeRoot + '\lib\gstreamer-1.0\gstplayback.dll') then
-    RaiseException('The bundled media runtime did not produce its required file playback plugin.');
-  if not FileExists(RuntimeRoot + '\lib\gstreamer-1.0\gstmpegtsdemux.dll') then
-    RaiseException('The bundled media runtime did not produce its required transport stream demuxer.');
-  if not FileExists(RuntimeRoot + '\lib\gstreamer-1.0\gstlibav.dll') then
-    RaiseException('The bundled media runtime did not produce its required software decoder bundle.');
-  if not FileExists(RuntimeRoot + '\lib\gstreamer-1.0\gstsrt.dll') then
-    RaiseException('The bundled media runtime did not produce its required SRT plugin.');
-  if not FileExists(RuntimeRoot + '\bin\srt.dll') then
-    RaiseException('The bundled media runtime did not produce its required SRT transport library.');
+  if not PrivateRuntimeIsComplete(RuntimeRoot) then
+    RaiseException('The bundled media runtime did not produce every required library and plugin.');
 end;
 
 procedure StageStationBinaries;
