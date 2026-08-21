@@ -270,6 +270,145 @@ pub enum AlertSeverity {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+pub enum AlertChannelKind {
+    Email,
+    Sms,
+    Webhook,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AlertChannel {
+    pub channel_id: String,
+    pub kind: AlertChannelKind,
+    pub label: String,
+    pub enabled: bool,
+    pub target_redacted: String,
+    pub credential_configured: bool,
+    pub quiet_hours_start_utc: Option<String>,
+    pub quiet_hours_end_utc: Option<String>,
+    pub created_at_unix_ms: i64,
+    pub updated_at_unix_ms: i64,
+}
+
+impl AlertChannel {
+    pub fn validate(&self) -> Result<(), &'static str> {
+        if !is_uuid(&self.channel_id)
+            || !visible_text(&self.label, 120)
+            || !visible_text(&self.target_redacted, 200)
+            || self.created_at_unix_ms < 0
+            || self.updated_at_unix_ms < self.created_at_unix_ms
+            || self.quiet_hours_start_utc.is_some() != self.quiet_hours_end_utc.is_some()
+            || self
+                .quiet_hours_start_utc
+                .as_deref()
+                .is_some_and(|value| !is_utc_clock(value))
+            || self
+                .quiet_hours_end_utc
+                .as_deref()
+                .is_some_and(|value| !is_utc_clock(value))
+        {
+            return Err("alert channel fields are invalid.");
+        }
+        Ok(())
+    }
+}
+
+pub fn validate_alert_channel_target(
+    kind: AlertChannelKind,
+    target: &str,
+) -> Result<(), &'static str> {
+    if target.trim() != target || target.chars().any(char::is_control) || target.len() > 500 {
+        return Err("alert destination target is invalid.");
+    }
+    match kind {
+        AlertChannelKind::Email => {
+            let Some((local, domain)) = target.split_once('@') else {
+                return Err("email alert targets must be a single email address.");
+            };
+            if local.is_empty()
+                || domain.is_empty()
+                || domain.contains('@')
+                || !domain.contains('.')
+                || target.contains([',', ';', ' '])
+            {
+                return Err("email alert targets must be a single email address.");
+            }
+        }
+        AlertChannelKind::Sms => {
+            if target.len() < 9
+                || target.len() > 16
+                || !target.starts_with('+')
+                || !target[1..].bytes().all(|byte| byte.is_ascii_digit())
+            {
+                return Err("SMS alert targets must be an E.164 number.");
+            }
+        }
+        AlertChannelKind::Webhook => validate_secure_url(target, "webhook")?,
+    }
+    Ok(())
+}
+
+pub fn redact_alert_channel_target(
+    kind: AlertChannelKind,
+    target: &str,
+) -> Result<String, &'static str> {
+    validate_alert_channel_target(kind, target)?;
+    Ok(match kind {
+        AlertChannelKind::Email => {
+            let (local, domain) = target.split_once('@').expect("validated email");
+            format!(
+                "{}***@{domain}",
+                local.chars().next().expect("nonempty local")
+            )
+        }
+        AlertChannelKind::Sms => format!("••••{}", &target[target.len() - 4..]),
+        AlertChannelKind::Webhook => {
+            let (scheme, remainder) = target.split_once("://").expect("validated URL");
+            let authority = remainder
+                .split(['/', '?', '#'])
+                .next()
+                .expect("validated authority");
+            format!("{scheme}://{authority}/…")
+        }
+    })
+}
+
+pub fn validate_secure_url(value: &str, label: &str) -> Result<(), &'static str> {
+    if value.trim() != value
+        || value.is_empty()
+        || value.len() > 2048
+        || value.chars().any(char::is_control)
+    {
+        return Err("alert destination URL is invalid.");
+    }
+    let (secure, remainder) = if let Some(value) = value.strip_prefix("https://") {
+        (true, value)
+    } else if let Some(value) = value.strip_prefix("http://") {
+        (false, value)
+    } else {
+        return Err("alert destination URLs must use https.");
+    };
+    let authority = remainder.split(['/', '?', '#']).next().unwrap_or_default();
+    if authority.is_empty()
+        || authority.contains('@')
+        || authority.chars().any(char::is_whitespace)
+        || value.contains('#')
+    {
+        return Err("alert destination URL is invalid.");
+    }
+    let host = authority.split(':').next().unwrap_or_default();
+    let loopback = host.eq_ignore_ascii_case("localhost") || host == "127.0.0.1";
+    if !secure && !loopback {
+        return Err("remote alert destination URLs must use https.");
+    }
+    if label.is_empty() {
+        return Err("alert destination URL label is invalid.");
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum AlertEventState {
     Firing,
     Resolved,
@@ -354,6 +493,17 @@ fn is_iana_timezone(value: &str) -> bool {
                         byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'+')
                     })
             }))
+}
+
+fn visible_text(value: &str, maximum: usize) -> bool {
+    !value.trim().is_empty() && value.len() <= maximum && !value.chars().any(char::is_control)
+}
+
+fn is_utc_clock(value: &str) -> bool {
+    value.len() == 5
+        && value.as_bytes()[2] == b':'
+        && value[..2].parse::<u8>().is_ok_and(|hours| hours < 24)
+        && value[3..].parse::<u8>().is_ok_and(|minutes| minutes < 60)
 }
 
 #[cfg(test)]

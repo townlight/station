@@ -245,6 +245,170 @@ fn exposes_runtime_safe_to_air_and_acknowledges_durable_alerts() {
 }
 
 #[test]
+fn stores_and_lists_only_a_redacted_alert_destination_across_restart() {
+    let database = temporary_database("alert-channel-redaction");
+    let api = Api::open(&database).unwrap();
+    let configured = api.handle(
+        "PUT",
+        "/api/v1/alert-channels",
+        Some(
+            br#"{"channel_id":"22500b92-555b-4ef8-a1de-4f8177d5df23","kind":"webhook","label":"On-call webhook","enabled":true,"target":"https://alerts.example.org/private/station","credential":"proof-signing-secret","quiet_hours_start_utc":"22:00","quiet_hours_end_utc":"07:00"}"#,
+        ),
+    );
+    assert_eq!(
+        configured.status,
+        200,
+        "{}",
+        String::from_utf8_lossy(&configured.body)
+    );
+    let public: serde_json::Value = serde_json::from_slice(&configured.body).unwrap();
+    assert_eq!(public["kind"], "webhook");
+    assert_eq!(public["target_redacted"], "https://alerts.example.org/…");
+    assert_eq!(public["credential_configured"], true);
+    assert!(public.get("target").is_none());
+    assert!(public.get("credential").is_none());
+    drop(api);
+
+    let restarted = Api::open(&database).unwrap();
+    let listed = restarted.handle("GET", "/api/v1/alert-channels", None);
+    assert_eq!(listed.status, 200);
+    let listed: serde_json::Value = serde_json::from_slice(&listed.body).unwrap();
+    assert_eq!(listed.as_array().unwrap().len(), 1);
+    assert_eq!(listed[0], public);
+    drop(restarted);
+    let secret = StationStore::open(&database)
+        .unwrap()
+        .read_alert_channel_secret("22500b92-555b-4ef8-a1de-4f8177d5df23")
+        .unwrap()
+        .unwrap();
+    assert_eq!(secret.target, "https://alerts.example.org/private/station");
+    assert_eq!(secret.credential, "proof-signing-secret");
+    let _ = std::fs::remove_file(database);
+}
+
+#[test]
+fn alert_destination_plaintext_never_reaches_sqlite_files() {
+    let database = temporary_database("alert-channel-encryption");
+    let target = "https://pager.example.net/private/callback";
+    let secret = "never-store-this-webhook-secret";
+    let api = Api::open(&database).unwrap();
+    let body = serde_json::to_vec(&serde_json::json!({
+        "channel_id": "6a6c10af-dfdf-4db2-b8a0-b39ab4040233",
+        "kind": "webhook",
+        "label": "Encrypted pager",
+        "enabled": true,
+        "target": target,
+        "credential": secret
+    }))
+    .unwrap();
+    assert_eq!(
+        api.handle("PUT", "/api/v1/alert-channels", Some(&body))
+            .status,
+        200
+    );
+    drop(api);
+
+    for candidate in [
+        database.clone(),
+        PathBuf::from(format!("{}-wal", database.display())),
+        PathBuf::from(format!("{}-shm", database.display())),
+    ] {
+        if let Ok(bytes) = std::fs::read(&candidate) {
+            assert!(
+                !bytes
+                    .windows(target.len())
+                    .any(|window| window == target.as_bytes())
+            );
+            assert!(
+                !bytes
+                    .windows(secret.len())
+                    .any(|window| window == secret.as_bytes())
+            );
+        }
+        let _ = std::fs::remove_file(candidate);
+    }
+}
+
+#[test]
+fn rejects_insecure_remote_webhook_destinations() {
+    let database = temporary_database("alert-channel-insecure");
+    let api = Api::open(&database).unwrap();
+    let response = api.handle(
+        "PUT",
+        "/api/v1/alert-channels",
+        Some(
+            br#"{"channel_id":"566c7e2a-661d-40fd-8078-7df64586c363","kind":"webhook","label":"Unsafe pager","enabled":true,"target":"http://alerts.example.org/callback","credential":"secret"}"#,
+        ),
+    );
+    assert_eq!(response.status, 422);
+    assert!(String::from_utf8(response.body).unwrap().contains("https"));
+    let listed = api.handle("GET", "/api/v1/alert-channels", None);
+    assert_eq!(listed.status, 200);
+    assert_eq!(listed.body, b"[]");
+    let _ = std::fs::remove_file(database);
+}
+
+#[test]
+fn rejects_control_characters_in_alert_provider_endpoints() {
+    let database = temporary_database("alert-channel-control-character");
+    let api = Api::open(&database).unwrap();
+    let body = serde_json::to_vec(&serde_json::json!({
+        "channel_id": "cdb30e41-e649-4bcd-b9e3-161ebd6cd20c",
+        "kind": "sms",
+        "label": "Unsafe SMS provider",
+        "enabled": true,
+        "target": "+15551234567",
+        "endpoint": "https://sms.example.org/send\nInjected: true",
+        "sender": "+15557654321",
+        "identity": "provider-account",
+        "credential": "provider-auth-token"
+    }))
+    .unwrap();
+    let response = api.handle("PUT", "/api/v1/alert-channels", Some(&body));
+    assert_eq!(
+        response.status,
+        422,
+        "{}",
+        String::from_utf8_lossy(&response.body)
+    );
+    assert_eq!(
+        api.handle("GET", "/api/v1/alert-channels", None).body,
+        b"[]"
+    );
+    let _ = std::fs::remove_file(database);
+}
+
+#[test]
+fn rejects_control_characters_in_smtp_endpoints() {
+    let database = temporary_database("alert-channel-smtp-control-character");
+    let api = Api::open(&database).unwrap();
+    let body = serde_json::to_vec(&serde_json::json!({
+        "channel_id": "5b34c64b-a659-48f7-8707-4ed33f28ba0d",
+        "kind": "email",
+        "label": "Unsafe SMTP provider",
+        "enabled": true,
+        "target": "operator@example.org",
+        "endpoint": "smtps://smtp.example.org/mail\nInjected: true",
+        "sender": "station@example.org",
+        "identity": "station-account",
+        "credential": "smtp-password"
+    }))
+    .unwrap();
+    let response = api.handle("PUT", "/api/v1/alert-channels", Some(&body));
+    assert_eq!(
+        response.status,
+        422,
+        "{}",
+        String::from_utf8_lossy(&response.body)
+    );
+    assert_eq!(
+        api.handle("GET", "/api/v1/alert-channels", None).body,
+        b"[]"
+    );
+    let _ = std::fs::remove_file(database);
+}
+
+#[test]
 fn configures_watch_folders_without_allowing_clients_to_forge_scan_health() {
     let database = temporary_database("watch-folders");
     let api = Api::open(&database).unwrap();

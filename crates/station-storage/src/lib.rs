@@ -3,8 +3,9 @@ use std::path::Path;
 use std::ptr;
 
 use station_domain::{
-    AlertConditionKind, AlertEvent, AlertEventState, AlertSeverity, ChannelRuntimeObservation,
-    ChannelRuntimeState, StationProfile, StationProfileDocument,
+    AlertChannel, AlertChannelKind, AlertConditionKind, AlertEvent, AlertEventState, AlertSeverity,
+    ChannelRuntimeObservation, ChannelRuntimeState, StationProfile, StationProfileDocument,
+    redact_alert_channel_target, validate_alert_channel_target, validate_secure_url,
 };
 use station_media_lifecycle::{
     AssetLoudnessAnalysis, IngestJobStatus, IngestSourceKind, LoudnessGateStatus, MediaIngestJob,
@@ -67,12 +68,58 @@ unsafe extern "C" {
         index: c_int,
         value: c_longlong,
     ) -> c_int;
+    fn sqlite3_bind_blob(
+        statement: *mut SqliteStatement,
+        index: c_int,
+        value: *const c_void,
+        byte_count: c_int,
+        destructor: *mut c_void,
+    ) -> c_int;
     fn sqlite3_step(statement: *mut SqliteStatement) -> c_int;
     fn sqlite3_column_text(statement: *mut SqliteStatement, column: c_int) -> *const u8;
+    fn sqlite3_column_blob(statement: *mut SqliteStatement, column: c_int) -> *const c_void;
+    fn sqlite3_column_bytes(statement: *mut SqliteStatement, column: c_int) -> c_int;
     fn sqlite3_column_int64(statement: *mut SqliteStatement, column: c_int) -> c_longlong;
     fn sqlite3_finalize(statement: *mut SqliteStatement) -> c_int;
     fn sqlite3_errmsg(database: *mut Sqlite3) -> *const c_char;
 }
+
+#[repr(C)]
+struct DataBlob {
+    byte_count: u32,
+    data: *mut u8,
+}
+
+#[link(name = "crypt32")]
+unsafe extern "system" {
+    fn CryptProtectData(
+        input: *mut DataBlob,
+        description: *const u16,
+        entropy: *mut DataBlob,
+        reserved: *mut c_void,
+        prompt: *mut c_void,
+        flags: u32,
+        output: *mut DataBlob,
+    ) -> i32;
+    fn CryptUnprotectData(
+        input: *mut DataBlob,
+        description: *mut *mut u16,
+        entropy: *mut DataBlob,
+        reserved: *mut c_void,
+        prompt: *mut c_void,
+        flags: u32,
+        output: *mut DataBlob,
+    ) -> i32;
+}
+
+#[link(name = "kernel32")]
+unsafe extern "system" {
+    fn LocalFree(memory: *mut c_void) -> *mut c_void;
+    fn GetLastError() -> u32;
+}
+
+const CRYPTPROTECT_UI_FORBIDDEN: u32 = 0x1;
+const CRYPTPROTECT_LOCAL_MACHINE: u32 = 0x4;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProfileWriteError {
@@ -86,6 +133,66 @@ pub enum CommitWriteError {
     GateFailed(Box<CommitPlan>),
     Invalid(&'static str),
     Storage(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AlertChannelSecret {
+    pub target: String,
+    pub endpoint: Option<String>,
+    pub sender: Option<String>,
+    pub identity: Option<String>,
+    pub credential: String,
+}
+
+impl AlertChannelSecret {
+    pub fn validate(&self, kind: AlertChannelKind) -> Result<(), String> {
+        validate_alert_channel_target(kind, &self.target).map_err(str::to_string)?;
+        if !secret_field(&self.credential, 2_000) {
+            return Err("alert destination credential is invalid".into());
+        }
+        match kind {
+            AlertChannelKind::Webhook => {
+                if self.endpoint.is_some() || self.sender.is_some() || self.identity.is_some() {
+                    return Err("webhook destinations do not accept mail or SMS fields".into());
+                }
+            }
+            AlertChannelKind::Email => {
+                let endpoint = self
+                    .endpoint
+                    .as_deref()
+                    .ok_or("email destinations require an SMTP endpoint")?;
+                if !valid_smtp_endpoint(endpoint)
+                    || !self.sender.as_deref().is_some_and(|value| {
+                        validate_alert_channel_target(AlertChannelKind::Email, value).is_ok()
+                    })
+                    || !self
+                        .identity
+                        .as_deref()
+                        .is_some_and(|value| secret_field(value, 500))
+                {
+                    return Err("email destination delivery fields are invalid".into());
+                }
+            }
+            AlertChannelKind::Sms => {
+                let endpoint = self
+                    .endpoint
+                    .as_deref()
+                    .ok_or("SMS destinations require a provider endpoint")?;
+                if validate_secure_url(endpoint, "SMS provider").is_err()
+                    || !self.sender.as_deref().is_some_and(|value| {
+                        validate_alert_channel_target(AlertChannelKind::Sms, value).is_ok()
+                    })
+                    || !self
+                        .identity
+                        .as_deref()
+                        .is_some_and(|value| secret_field(value, 500))
+                {
+                    return Err("SMS destination delivery fields are invalid".into());
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 pub struct StationStore {
@@ -227,6 +334,19 @@ impl StationStore {
                ON alert_events(condition, resource_ref) WHERE state='firing';\
              CREATE INDEX IF NOT EXISTS alert_events_state_severity_time \
                ON alert_events(state, severity, last_observed_at_unix_ms DESC);\
+             CREATE TABLE IF NOT EXISTS alert_channels (\
+               channel_id TEXT PRIMARY KEY,\
+               kind TEXT NOT NULL CHECK (kind IN ('email','sms','webhook')),\
+               label TEXT NOT NULL,\
+               enabled INTEGER NOT NULL CHECK (enabled IN (0,1)),\
+               target_redacted TEXT NOT NULL,\
+               credential_configured INTEGER NOT NULL CHECK (credential_configured IN (0,1)),\
+               quiet_hours_start_utc TEXT NOT NULL DEFAULT '',\
+               quiet_hours_end_utc TEXT NOT NULL DEFAULT '',\
+               encrypted_configuration BLOB NOT NULL,\
+               created_at_unix_ms INTEGER NOT NULL CHECK (created_at_unix_ms >= 0),\
+               updated_at_unix_ms INTEGER NOT NULL CHECK (updated_at_unix_ms >= created_at_unix_ms)\
+             );\
              CREATE TABLE IF NOT EXISTS schedule_items (\
                item_id TEXT PRIMARY KEY,\
                channel_id TEXT NOT NULL,\
@@ -997,6 +1117,140 @@ impl StationStore {
                 _ => return Err(sqlite_error(self.database)),
             }
         }
+    }
+
+    pub fn put_alert_channel(
+        &self,
+        channel: &AlertChannel,
+        secret: &AlertChannelSecret,
+    ) -> Result<AlertChannel, String> {
+        channel.validate().map_err(str::to_string)?;
+        secret.validate(channel.kind)?;
+        let redacted =
+            redact_alert_channel_target(channel.kind, &secret.target).map_err(str::to_string)?;
+        if channel.target_redacted != redacted || !channel.credential_configured {
+            return Err("alert channel redaction or credential state is inconsistent".into());
+        }
+        let plaintext = serde_json::to_vec(&serde_json::json!({
+            "target": secret.target,
+            "endpoint": secret.endpoint,
+            "sender": secret.sender,
+            "identity": secret.identity,
+            "credential": secret.credential,
+        }))
+        .map_err(|error| format!("could not encode alert destination secret: {error}"))?;
+        let encrypted = protect_local_machine(&plaintext)?;
+        let statement = self.prepare(
+            "INSERT INTO alert_channels(channel_id, kind, label, enabled, target_redacted, \
+             credential_configured, quiet_hours_start_utc, quiet_hours_end_utc, encrypted_configuration, \
+             created_at_unix_ms, updated_at_unix_ms) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11) \
+             ON CONFLICT(channel_id) DO UPDATE SET kind=excluded.kind, label=excluded.label, \
+             enabled=excluded.enabled, target_redacted=excluded.target_redacted, \
+             credential_configured=excluded.credential_configured, \
+             quiet_hours_start_utc=excluded.quiet_hours_start_utc, \
+             quiet_hours_end_utc=excluded.quiet_hours_end_utc, \
+             encrypted_configuration=excluded.encrypted_configuration, \
+             updated_at_unix_ms=excluded.updated_at_unix_ms",
+        )?;
+        let values = [
+            c_string(&channel.channel_id, "alert channel identity")?,
+            c_string(alert_channel_kind_name(channel.kind), "alert channel kind")?,
+            c_string(&channel.label, "alert channel label")?,
+            c_string(&channel.target_redacted, "redacted alert target")?,
+            c_string(
+                channel.quiet_hours_start_utc.as_deref().unwrap_or_default(),
+                "quiet-hours start",
+            )?,
+            c_string(
+                channel.quiet_hours_end_utc.as_deref().unwrap_or_default(),
+                "quiet-hours end",
+            )?,
+        ];
+        bind_text(self.database, statement.raw, 1, &values[0])?;
+        bind_text(self.database, statement.raw, 2, &values[1])?;
+        bind_text(self.database, statement.raw, 3, &values[2])?;
+        bind_i64(self.database, statement.raw, 4, i64::from(channel.enabled))?;
+        bind_text(self.database, statement.raw, 5, &values[3])?;
+        bind_i64(
+            self.database,
+            statement.raw,
+            6,
+            i64::from(channel.credential_configured),
+        )?;
+        bind_text(self.database, statement.raw, 7, &values[4])?;
+        bind_text(self.database, statement.raw, 8, &values[5])?;
+        bind_blob(self.database, statement.raw, 9, &encrypted)?;
+        bind_i64(self.database, statement.raw, 10, channel.created_at_unix_ms)?;
+        bind_i64(self.database, statement.raw, 11, channel.updated_at_unix_ms)?;
+        expect_done(self.database, statement.raw)?;
+        self.read_alert_channel(&channel.channel_id)?
+            .ok_or_else(|| "stored alert channel disappeared".into())
+    }
+
+    pub fn read_alert_channel(&self, channel_id: &str) -> Result<Option<AlertChannel>, String> {
+        let statement = self.prepare(
+            "SELECT channel_id, kind, label, enabled, target_redacted, credential_configured, \
+             quiet_hours_start_utc, quiet_hours_end_utc, created_at_unix_ms, updated_at_unix_ms \
+             FROM alert_channels WHERE channel_id=?1",
+        )?;
+        let channel_id = c_string(channel_id, "alert channel identity")?;
+        bind_text(self.database, statement.raw, 1, &channel_id)?;
+        match unsafe { sqlite3_step(statement.raw) } {
+            SQLITE_ROW => Ok(Some(read_alert_channel_row(statement.raw)?)),
+            SQLITE_DONE => Ok(None),
+            _ => Err(sqlite_error(self.database)),
+        }
+    }
+
+    pub fn list_alert_channels(&self) -> Result<Vec<AlertChannel>, String> {
+        let statement = self.prepare(
+            "SELECT channel_id, kind, label, enabled, target_redacted, credential_configured, \
+             quiet_hours_start_utc, quiet_hours_end_utc, created_at_unix_ms, updated_at_unix_ms \
+             FROM alert_channels ORDER BY label, channel_id",
+        )?;
+        let mut channels = Vec::new();
+        loop {
+            match unsafe { sqlite3_step(statement.raw) } {
+                SQLITE_ROW => channels.push(read_alert_channel_row(statement.raw)?),
+                SQLITE_DONE => return Ok(channels),
+                _ => return Err(sqlite_error(self.database)),
+            }
+        }
+    }
+
+    pub fn read_alert_channel_secret(
+        &self,
+        channel_id: &str,
+    ) -> Result<Option<AlertChannelSecret>, String> {
+        let statement = self.prepare(
+            "SELECT kind, encrypted_configuration FROM alert_channels WHERE channel_id=?1",
+        )?;
+        let channel_id = c_string(channel_id, "alert channel identity")?;
+        bind_text(self.database, statement.raw, 1, &channel_id)?;
+        match unsafe { sqlite3_step(statement.raw) } {
+            SQLITE_ROW => {}
+            SQLITE_DONE => return Ok(None),
+            _ => return Err(sqlite_error(self.database)),
+        }
+        let kind = parse_alert_channel_kind(&column_text(statement.raw, 0)?)?;
+        let decrypted = unprotect_local_machine(&column_blob(statement.raw, 1)?)?;
+        let value: serde_json::Value = serde_json::from_slice(&decrypted)
+            .map_err(|error| format!("stored alert destination secret is invalid: {error}"))?;
+        let optional = |name: &str| {
+            value
+                .get(name)
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string)
+        };
+        let secret = AlertChannelSecret {
+            target: optional("target").ok_or("stored alert target is missing")?,
+            endpoint: optional("endpoint"),
+            sender: optional("sender"),
+            identity: optional("identity"),
+            credential: optional("credential").ok_or("stored alert credential is missing")?,
+        };
+        secret.validate(kind)?;
+        Ok(Some(secret))
     }
 
     pub fn observe_alert(&self, proposed: &AlertEvent) -> Result<AlertEvent, String> {
@@ -2098,6 +2352,30 @@ fn bind_i64(
     }
 }
 
+fn bind_blob(
+    database: *mut Sqlite3,
+    statement: *mut SqliteStatement,
+    index: c_int,
+    value: &[u8],
+) -> Result<(), String> {
+    let byte_count = c_int::try_from(value.len())
+        .map_err(|_| "encrypted alert configuration exceeds SQLite's blob limit".to_string())?;
+    let status = unsafe {
+        sqlite3_bind_blob(
+            statement,
+            index,
+            value.as_ptr().cast(),
+            byte_count,
+            ptr::null_mut(),
+        )
+    };
+    if status == SQLITE_OK {
+        Ok(())
+    } else {
+        Err(sqlite_error(database))
+    }
+}
+
 fn expect_done(database: *mut Sqlite3, statement: *mut SqliteStatement) -> Result<(), String> {
     if unsafe { sqlite3_step(statement) } == SQLITE_DONE {
         Ok(())
@@ -2162,6 +2440,25 @@ fn read_alert_event_row(statement: *mut SqliteStatement) -> Result<AlertEvent, S
     };
     event.validate().map_err(str::to_string)?;
     Ok(event)
+}
+
+fn read_alert_channel_row(statement: *mut SqliteStatement) -> Result<AlertChannel, String> {
+    let quiet_start = column_text(statement, 6)?;
+    let quiet_end = column_text(statement, 7)?;
+    let channel = AlertChannel {
+        channel_id: column_text(statement, 0)?,
+        kind: parse_alert_channel_kind(&column_text(statement, 1)?)?,
+        label: column_text(statement, 2)?,
+        enabled: unsafe { sqlite3_column_int64(statement, 3) } == 1,
+        target_redacted: column_text(statement, 4)?,
+        credential_configured: unsafe { sqlite3_column_int64(statement, 5) } == 1,
+        quiet_hours_start_utc: (!quiet_start.is_empty()).then_some(quiet_start),
+        quiet_hours_end_utc: (!quiet_end.is_empty()).then_some(quiet_end),
+        created_at_unix_ms: unsafe { sqlite3_column_int64(statement, 8) },
+        updated_at_unix_ms: unsafe { sqlite3_column_int64(statement, 9) },
+    };
+    channel.validate().map_err(str::to_string)?;
+    Ok(channel)
 }
 
 fn read_asset_loudness_row(
@@ -2323,6 +2620,25 @@ fn channel_runtime_state_name(value: ChannelRuntimeState) -> &'static str {
         ChannelRuntimeState::OnAir => "on_air",
         ChannelRuntimeState::Error => "error",
         ChannelRuntimeState::Stopped => "stopped",
+    }
+}
+
+fn alert_channel_kind_name(value: AlertChannelKind) -> &'static str {
+    match value {
+        AlertChannelKind::Email => "email",
+        AlertChannelKind::Sms => "sms",
+        AlertChannelKind::Webhook => "webhook",
+    }
+}
+
+fn parse_alert_channel_kind(value: &str) -> Result<AlertChannelKind, String> {
+    match value {
+        "email" => Ok(AlertChannelKind::Email),
+        "sms" => Ok(AlertChannelKind::Sms),
+        "webhook" => Ok(AlertChannelKind::Webhook),
+        _ => Err(format!(
+            "database returned invalid alert channel kind {value}"
+        )),
     }
 }
 
@@ -2571,6 +2887,130 @@ fn column_text(statement: *mut SqliteStatement, column: c_int) -> Result<String,
     Ok(unsafe { CStr::from_ptr(value.cast()) }
         .to_string_lossy()
         .into_owned())
+}
+
+fn column_blob(statement: *mut SqliteStatement, column: c_int) -> Result<Vec<u8>, String> {
+    let byte_count = unsafe { sqlite3_column_bytes(statement, column) };
+    if byte_count <= 0 {
+        return Err("database returned an empty encrypted alert configuration".into());
+    }
+    let value = unsafe { sqlite3_column_blob(statement, column) };
+    if value.is_null() {
+        return Err("database returned an invalid encrypted alert configuration".into());
+    }
+    let length = usize::try_from(byte_count)
+        .map_err(|_| "database returned an oversized alert configuration".to_string())?;
+    Ok(unsafe { std::slice::from_raw_parts(value.cast::<u8>(), length) }.to_vec())
+}
+
+fn protect_local_machine(plaintext: &[u8]) -> Result<Vec<u8>, String> {
+    let byte_count = u32::try_from(plaintext.len())
+        .map_err(|_| "alert destination secret is too large".to_string())?;
+    let mut input = DataBlob {
+        byte_count,
+        data: plaintext.as_ptr().cast_mut(),
+    };
+    let mut output = DataBlob {
+        byte_count: 0,
+        data: ptr::null_mut(),
+    };
+    let status = unsafe {
+        CryptProtectData(
+            &mut input,
+            ptr::null(),
+            ptr::null_mut(),
+            ptr::null_mut(),
+            ptr::null_mut(),
+            CRYPTPROTECT_UI_FORBIDDEN | CRYPTPROTECT_LOCAL_MACHINE,
+            &mut output,
+        )
+    };
+    if status == 0 {
+        return Err(format!(
+            "Windows could not protect the alert destination secret (error {}).",
+            unsafe { GetLastError() }
+        ));
+    }
+    if output.data.is_null() || output.byte_count == 0 {
+        return Err("Windows returned an empty protected alert destination secret.".into());
+    }
+    let protected = unsafe {
+        std::slice::from_raw_parts(output.data.cast_const(), output.byte_count as usize).to_vec()
+    };
+    unsafe {
+        LocalFree(output.data.cast());
+    }
+    Ok(protected)
+}
+
+fn unprotect_local_machine(protected: &[u8]) -> Result<Vec<u8>, String> {
+    let byte_count = u32::try_from(protected.len())
+        .map_err(|_| "encrypted alert destination secret is too large".to_string())?;
+    let mut input = DataBlob {
+        byte_count,
+        data: protected.as_ptr().cast_mut(),
+    };
+    let mut output = DataBlob {
+        byte_count: 0,
+        data: ptr::null_mut(),
+    };
+    let status = unsafe {
+        CryptUnprotectData(
+            &mut input,
+            ptr::null_mut(),
+            ptr::null_mut(),
+            ptr::null_mut(),
+            ptr::null_mut(),
+            CRYPTPROTECT_UI_FORBIDDEN,
+            &mut output,
+        )
+    };
+    if status == 0 {
+        return Err(format!(
+            "Windows could not unlock the alert destination secret (error {}).",
+            unsafe { GetLastError() }
+        ));
+    }
+    if output.data.is_null() || output.byte_count == 0 {
+        return Err("Windows returned an empty unlocked alert destination secret.".into());
+    }
+    let plaintext = unsafe {
+        std::slice::from_raw_parts(output.data.cast_const(), output.byte_count as usize).to_vec()
+    };
+    unsafe {
+        LocalFree(output.data.cast());
+    }
+    Ok(plaintext)
+}
+
+fn secret_field(value: &str, maximum: usize) -> bool {
+    value.trim() == value
+        && !value.is_empty()
+        && value.len() <= maximum
+        && !value.chars().any(char::is_control)
+}
+
+fn valid_smtp_endpoint(value: &str) -> bool {
+    if value.trim() != value
+        || value.is_empty()
+        || value.len() > 2048
+        || value.chars().any(char::is_control)
+    {
+        return false;
+    }
+    let (secure, remainder) = if let Some(value) = value.strip_prefix("smtps://") {
+        (true, value)
+    } else if let Some(value) = value.strip_prefix("smtp://") {
+        (false, value)
+    } else {
+        return false;
+    };
+    let authority = remainder.split('/').next().unwrap_or_default();
+    let host = authority.split(':').next().unwrap_or_default();
+    !authority.is_empty()
+        && !authority.contains('@')
+        && !authority.chars().any(char::is_whitespace)
+        && (secure || host.eq_ignore_ascii_case("localhost") || host == "127.0.0.1")
 }
 
 fn sqlite_error(database: *mut Sqlite3) -> String {

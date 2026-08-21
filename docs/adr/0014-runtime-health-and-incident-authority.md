@@ -24,5 +24,5 @@ Restart attempts use bounded 1, 5, 15, then 60-second delays. The loopback API d
 - Healthy fallback is not mislabeled as off-air.
 - Restart storms are paced and incident storms are deduplicated.
 - Runtime truth and acknowledgment survive service and PC restarts.
-- External alert destinations and delivery receipts can attach to the durable event boundary without changing channel supervision.
-- Email/SMS/webhook delivery, system-resource samples, scheduled self-tests, support bundles, and update alerts are explicitly not claimed by this ADR.
+- Encrypted/redacted external alert destinations attach to the durable event boundary without changing channel supervision; ADR 0015 owns that storage contract.
+- Email/SMS/webhook dispatch and delivery receipts, system-resource samples, scheduled self-tests, support bundles, and update alerts are explicitly not claimed by this ADR.

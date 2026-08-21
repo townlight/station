@@ -10,14 +10,17 @@ use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::Deserialize;
-use station_domain::{AlertEventState, AlertSeverity, StationProfile, derive_runtime_safe_to_air};
+use station_domain::{
+    AlertChannel, AlertChannelKind, AlertEventState, AlertSeverity, StationProfile,
+    derive_runtime_safe_to_air, redact_alert_channel_target, validate_alert_channel_target,
+};
 use station_media_lifecycle::{
     AssetLoudnessAnalysis, AssetReadinessView, IngestJobStatus, IngestSourceKind,
     LoudnessGateStatus, MediaIngestJob, MissingMediaAlert, ReadinessDashboard, ReadinessState,
     TranscodeJobStatus, WatchFolderConfig,
 };
 use station_schedule::{AssetReadiness, ChannelConfiguration, MediaAsset, ScheduleItem};
-use station_storage::{CommitWriteError, ProfileWriteError, StationStore};
+use station_storage::{AlertChannelSecret, CommitWriteError, ProfileWriteError, StationStore};
 
 const OPERATOR_HTML: &[u8] = include_bytes!("../../../web/operator/dist/index.html");
 const OPERATOR_SCRIPT: &[u8] = include_bytes!("../../../web/operator/dist/operator.js");
@@ -58,6 +61,27 @@ struct IngestMedia {
 #[serde(deny_unknown_fields)]
 struct AcknowledgeAlert {
     acknowledged_by: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PutAlertChannel {
+    channel_id: String,
+    kind: AlertChannelKind,
+    label: String,
+    enabled: bool,
+    target: String,
+    #[serde(default)]
+    endpoint: Option<String>,
+    #[serde(default)]
+    sender: Option<String>,
+    #[serde(default)]
+    identity: Option<String>,
+    credential: String,
+    #[serde(default)]
+    quiet_hours_start_utc: Option<String>,
+    #[serde(default)]
+    quiet_hours_end_utc: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -113,6 +137,8 @@ impl Api {
             ("PUT", "/api/v1/channels") => self.put_channel(body),
             ("GET", "/api/v1/channels") => self.list_channels(),
             ("GET", "/api/v1/runtime-safe-to-air") => self.runtime_safe_to_air(),
+            ("PUT", "/api/v1/alert-channels") => self.put_alert_channel(body),
+            ("GET", "/api/v1/alert-channels") => self.list_alert_channels(),
             ("GET", "/api/v1/alerts") => self.list_alerts(),
             ("POST", path)
                 if path.starts_with("/api/v1/alerts/") && path.ends_with("/acknowledge") =>
@@ -557,6 +583,85 @@ impl Api {
             Ok(events) => json_response(
                 200,
                 serde_json::to_vec(&events).expect("serializing alert events cannot fail"),
+            ),
+            Err(message) => error_response(500, "storage_error", &message),
+        }
+    }
+
+    fn put_alert_channel(&self, body: Option<&[u8]>) -> ApiResponse {
+        let Some(command) = parse_body::<PutAlertChannel>(body) else {
+            return error_response(
+                400,
+                "invalid_json",
+                "An alert destination configuration body is required.",
+            );
+        };
+        if let Err(message) = validate_alert_channel_target(command.kind, &command.target) {
+            return error_response(422, "validation_failed", message);
+        }
+        if command.credential.trim() != command.credential
+            || command.credential.len() < 8
+            || command.credential.len() > 2_000
+            || command.credential.chars().any(char::is_control)
+        {
+            return error_response(
+                422,
+                "validation_failed",
+                "The alert destination credential must contain 8 to 2000 visible characters.",
+            );
+        }
+        let now = match system_time_millis() {
+            Ok(value) => value,
+            Err(message) => return error_response(500, "clock_error", &message),
+        };
+        let created_at = match self.storage.read_alert_channel(&command.channel_id) {
+            Ok(Some(existing)) => existing.created_at_unix_ms,
+            Ok(None) => now,
+            Err(message) => return error_response(500, "storage_error", &message),
+        };
+        let target_redacted = match redact_alert_channel_target(command.kind, &command.target) {
+            Ok(value) => value,
+            Err(message) => return error_response(422, "validation_failed", message),
+        };
+        let channel = AlertChannel {
+            channel_id: command.channel_id,
+            kind: command.kind,
+            label: command.label,
+            enabled: command.enabled,
+            target_redacted,
+            credential_configured: true,
+            quiet_hours_start_utc: command.quiet_hours_start_utc,
+            quiet_hours_end_utc: command.quiet_hours_end_utc,
+            created_at_unix_ms: created_at,
+            updated_at_unix_ms: now,
+        };
+        if let Err(message) = channel.validate() {
+            return error_response(422, "validation_failed", message);
+        }
+        let secret = AlertChannelSecret {
+            target: command.target,
+            endpoint: command.endpoint,
+            sender: command.sender,
+            identity: command.identity,
+            credential: command.credential,
+        };
+        if let Err(message) = secret.validate(channel.kind) {
+            return error_response(422, "validation_failed", &message);
+        }
+        match self.storage.put_alert_channel(&channel, &secret) {
+            Ok(stored) => json_response(
+                200,
+                serde_json::to_vec(&stored).expect("serializing an alert channel cannot fail"),
+            ),
+            Err(message) => error_response(500, "storage_error", &message),
+        }
+    }
+
+    fn list_alert_channels(&self) -> ApiResponse {
+        match self.storage.list_alert_channels() {
+            Ok(channels) => json_response(
+                200,
+                serde_json::to_vec(&channels).expect("serializing alert channels cannot fail"),
             ),
             Err(message) => error_response(500, "storage_error", &message),
         }
