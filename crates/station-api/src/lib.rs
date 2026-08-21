@@ -163,6 +163,7 @@ fn serve_stream(stream: &mut TcpStream, api: &Api) -> Result<(), String> {
 fn read_http_request(stream: &mut TcpStream) -> Result<Vec<u8>, ApiResponse> {
     let mut request = Vec::new();
     let mut chunk = [0_u8; 4096];
+    let mut continue_sent = false;
     loop {
         let count = match stream.read(&mut chunk) {
             Ok(0) => {
@@ -202,6 +203,7 @@ fn read_http_request(stream: &mut TcpStream) -> Result<Vec<u8>, ApiResponse> {
         let headers = std::str::from_utf8(&request[..header_end])
             .map_err(|_| error_response(400, "malformed_request", "HTTP headers must be UTF-8."))?;
         let mut content_length = None;
+        let mut expects_continue = false;
         for line in headers.split("\r\n").skip(1) {
             let Some((name, value)) = line.split_once(':') else {
                 return Err(error_response(
@@ -222,6 +224,17 @@ fn read_http_request(stream: &mut TcpStream) -> Result<Vec<u8>, ApiResponse> {
                     error_response(400, "malformed_request", "Content-Length is invalid.")
                 })?);
             }
+            if name.eq_ignore_ascii_case("expect") {
+                if value.trim().eq_ignore_ascii_case("100-continue") {
+                    expects_continue = true;
+                } else {
+                    return Err(error_response(
+                        400,
+                        "unsupported_expectation",
+                        "Only Expect: 100-continue is supported.",
+                    ));
+                }
+            }
         }
         let expected_length = header_end + 4 + content_length.unwrap_or(0);
         if expected_length > 65_536 {
@@ -230,6 +243,15 @@ fn read_http_request(stream: &mut TcpStream) -> Result<Vec<u8>, ApiResponse> {
                 "request_too_large",
                 "Requests may not exceed 64 KiB.",
             ));
+        }
+        if expects_continue && !continue_sent && request.len() < expected_length {
+            stream
+                .write_all(b"HTTP/1.1 100 Continue\r\n\r\n")
+                .map_err(|error| error_response(400, "write_failed", &error.to_string()))?;
+            stream
+                .flush()
+                .map_err(|error| error_response(400, "write_failed", &error.to_string()))?;
+            continue_sent = true;
         }
         if request.len() >= expected_length {
             request.truncate(expected_length);

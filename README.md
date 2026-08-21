@@ -34,6 +34,14 @@ Install GStreamer from the [official Windows download](https://gstreamer.freedes
 
 `stationd service --database <absolute-path> --address 127.0.0.1:<port>` is the Service Control Manager entry point used by installation infrastructure. Service mode refuses relative database paths and non-loopback listeners, reports startup and shutdown state to Windows, and handles both requested stops and operating-system shutdown cooperatively. It is not intended to be launched directly from an operator terminal.
 
+## Installer
+
+`installer\build-installer.ps1` builds one elevated x64 setup executable in `dist`. It accepts only the pinned official GStreamer 1.28.6 runtime hash, embeds `stationd`, `channel-worker`, the private media runtime, notices, and an immutable source commit, and refuses a dirty release worktree. `-AllowDirty` exists only for local packaging tests.
+
+Installation is health-gated before Inno Setup commits the product registration: the installer stages immutable binaries, installs the private runtime, registers a delayed-auto LocalSystem service with restart recovery, starts it, receives the local readiness response, and writes a candidate receipt. Any failure before formal installation removes the staged service, runtime, and binaries and returns nonzero. Uninstall removes application/runtime files and the service but deliberately preserves station data beneath `%ProgramData%\TownLight Station`.
+
+Run `installer\verify-installed.ps1` after installation to compare installed hashes and receipts with the candidate manifest and to prove the service, health endpoint, and required media factories. Development candidates are not code-signed; a trusted Windows signing identity and timestamp are mandatory release gates before external distribution.
+
 ## API
 
 `GET /health` reports whether the local database is ready.

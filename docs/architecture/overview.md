@@ -18,6 +18,8 @@ flowchart LR
 
 On an installed station, Windows Service Control Manager owns the `stationd` process. Service startup requires an absolute database path and a loopback HTTP address. The process reports start-pending, running, stop-pending, and stopped states; both an operator stop and operating-system shutdown drain through the same cooperative API stop signal. See [ADR 0005](../adr/0005-native-windows-service.md).
 
+One elevated setup executable carries the station binaries and a private, hash-pinned media runtime. Activation precedes formal product registration and must reach SCM running state plus HTTP/database readiness; otherwise staged resources are rolled back and setup returns nonzero. Uninstall removes executable state but preserves the authoritative station database. See [ADR 0006](../adr/0006-health-gated-windows-installer.md).
+
 The initial control-plane dependency direction is enforced by the Cargo workspace:
 
 ```text
@@ -64,6 +66,6 @@ Rust is used for native services, workers, command-line tools, and installation 
 
 ## Current vertical slice
 
-The current spine runs under Windows Service Control Manager, commissions a station profile through `PUT /api/v1/station`, protects updates with an expected revision, persists it transactionally in SQLite with WAL and foreign-key enforcement, reads it after restart, and exposes database readiness through `GET /health`. A machine proof registered the optimized binary as LocalSystem, reached the SCM running state, received HTTP 200 readiness, observed database creation, stopped cooperatively, and removed the temporary service registration.
+The current spine installs from one setup executable, runs under Windows Service Control Manager, commissions a station profile through `PUT /api/v1/station`, protects updates with an expected revision, persists it transactionally in SQLite with WAL and foreign-key enforcement, reads it after restart, and exposes database readiness through `GET /health`. Machine proofs cover native service lifecycle; failed installer rollback; clean install with a private GStreamer runtime; installed binary/receipt integrity; uninstall that removes the service and application while preserving station data; and reinstall that recovers the same commissioned profile and revision.
 
 The first channel worker now runs as an independent supervised process and owns its persistent GStreamer graph. Durable `Ready` follows successful fallback output startup; durable `ShutdownComplete` follows graph shutdown. The supervisor proves that the real worker produces MPEG-TS after handshake, while the engine test separately proves uninterrupted continuity across fallback/program switches. Adding audio, real media/live inputs, profile-driven output, and `stationd` channel configuration are the next media milestones.

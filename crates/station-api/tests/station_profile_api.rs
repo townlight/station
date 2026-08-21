@@ -126,6 +126,36 @@ fn serves_the_station_profile_through_the_http_boundary() {
 }
 
 #[test]
+fn acknowledges_expect_continue_before_waiting_for_the_request_body() {
+    let database = temporary_database("expect-continue");
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let server_database = database.clone();
+    let server = thread::spawn(move || serve_one(listener, server_database));
+    let body = br#"{"station_id":"3f5f721f-96c7-48b1-b061-1bf1ad1e62c2","display_name":"KTLT","timezone":"America/Denver"}"#;
+    let headers = format!(
+        "PUT /api/v1/station HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\nExpect: 100-continue\r\n\r\n",
+        body.len()
+    );
+    let mut client = TcpStream::connect(address).unwrap();
+    client
+        .set_read_timeout(Some(Duration::from_secs(1)))
+        .unwrap();
+    client.write_all(headers.as_bytes()).unwrap();
+
+    let mut interim = [0_u8; 25];
+    client.read_exact(&mut interim).unwrap();
+    assert_eq!(&interim, b"HTTP/1.1 100 Continue\r\n\r\n");
+
+    client.write_all(body).unwrap();
+    let mut response = Vec::new();
+    client.read_to_end(&mut response).unwrap();
+    assert!(response.starts_with(b"HTTP/1.1 200 OK\r\n"));
+    server.join().unwrap().unwrap();
+    let _ = std::fs::remove_file(database);
+}
+
+#[test]
 fn rejects_a_stale_profile_revision_without_losing_the_winning_update() {
     let database = temporary_database("revision");
     let api = Api::open(&database).expect("database opens");

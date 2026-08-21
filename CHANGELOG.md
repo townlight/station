@@ -23,3 +23,5 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Programmatically built persistent GStreamer video graph with raw fallback/program selection, OpenH264 encoding, uninterrupted MPEG-TS muxing, UDP output, bounded switch acknowledgement, and machine tests that verify TS framing and per-PID continuity across switches.
 - Channel-worker ownership of fallback graph startup and shutdown, with supervisor proof that durable readiness corresponds to real MPEG-TS output.
 - Native Windows Service Control Manager hosting for `stationd`, including loopback-only service configuration, cooperative stop and operating-system shutdown, startup status, persistent data-directory creation, and a machine-proven install/start/health/stop lifecycle.
+- Self-contained elevated Windows installer with a hash-pinned private GStreamer runtime, delayed-auto service recovery, activation health gate, immutable candidate receipt, failed-install rollback, uninstall, and station-data-preserving reinstall proof.
+- HTTP `Expect: 100-continue` support so standard Windows clients can submit API bodies without a request-body deadlock.

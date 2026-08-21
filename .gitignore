@@ -1,4 +1,6 @@
 /target/
+/dist/
+/installer/.build/
 *.db
 *.db-shm
 *.db-wal
