@@ -24,8 +24,11 @@ fn launches_handshakes_commands_and_cleanly_stops_the_real_worker() {
     let media_root = journal.with_extension("media-test");
     fs::create_dir_all(&media_root).unwrap();
     let source = media_root.join("incoming.ts");
-    generate_fixture(&source);
+    let second_source = media_root.join("second.ts");
+    generate_fixture(&source, "smpte");
+    generate_fixture(&second_source, "snow");
     let asset = ingest_media(&source, media_root.join("library")).unwrap();
+    let second_asset = ingest_media(&second_source, media_root.join("library")).unwrap();
     let output = UdpSocket::bind("127.0.0.1:0").unwrap();
     output
         .set_read_timeout(Some(Duration::from_secs(5)))
@@ -125,10 +128,49 @@ fn launches_handshakes_commands_and_cleanly_stops_the_real_worker() {
         WorkerEvent::OnAirChanged { source_kind, .. } if source_kind == "fallback"
     ));
 
+    let second_loaded = supervisor
+        .command(
+            "load-asset-2",
+            ChannelCommand::LoadAsset {
+                asset_id: second_asset.asset_id.clone(),
+                media_path: second_asset.stored_path.to_string_lossy().into_owned(),
+            },
+            Duration::from_secs(5),
+        )
+        .unwrap();
+    assert_eq!(second_loaded.sequence, 7);
+    assert!(matches!(
+        &second_loaded.event,
+        WorkerEvent::AssetLoaded { asset_id } if asset_id == &second_asset.asset_id
+    ));
+    let second_on_air = supervisor
+        .command(
+            "take-asset-2",
+            ChannelCommand::TakeAsset {
+                asset_id: second_asset.asset_id.clone(),
+            },
+            Duration::from_secs(2),
+        )
+        .unwrap();
+    assert_eq!(second_on_air.sequence, 8);
+    assert!(matches!(
+        &second_on_air.event,
+        WorkerEvent::OnAirChanged { source_kind, source_id }
+            if source_kind == "asset" && source_id == &second_asset.asset_id
+    ));
+    let second_returned = supervisor
+        .command(
+            "return-2",
+            ChannelCommand::ReturnToSchedule,
+            Duration::from_secs(2),
+        )
+        .unwrap();
+    assert_eq!(second_returned.sequence, 9);
+
     let stopped = supervisor
         .shutdown("shutdown-1", Duration::from_secs(1))
         .unwrap();
-    assert_eq!(stopped.sequence, 7);
+    assert_eq!(stopped.sequence, 10);
     assert!(matches!(stopped.event, WorkerEvent::ShutdownComplete));
 
     let restarted = WorkerSupervisor::launch(
@@ -141,11 +183,11 @@ fn launches_handshakes_commands_and_cleanly_stops_the_real_worker() {
     )
     .unwrap();
     let restart_ready = restarted.ready().clone();
-    assert_eq!(restart_ready.sequence, 8);
+    assert_eq!(restart_ready.sequence, 11);
     let restart_stopped = restarted
         .shutdown("shutdown-2", Duration::from_secs(1))
         .unwrap();
-    assert_eq!(restart_stopped.sequence, 9);
+    assert_eq!(restart_stopped.sequence, 12);
 
     assert_eq!(
         read_events(&journal).unwrap(),
@@ -156,6 +198,9 @@ fn launches_handshakes_commands_and_cleanly_stops_the_real_worker() {
             loaded,
             on_air,
             returned,
+            second_loaded,
+            second_on_air,
+            second_returned,
             stopped,
             restart_ready,
             restart_stopped
@@ -165,11 +210,12 @@ fn launches_handshakes_commands_and_cleanly_stops_the_real_worker() {
     fs::remove_dir_all(media_root).unwrap();
 }
 
-fn generate_fixture(path: &Path) {
+fn generate_fixture(path: &Path, pattern: &'static str) {
     gst::init().unwrap();
     let pipeline = gst::Pipeline::new();
     let video = gst::ElementFactory::make("videotestsrc")
         .property("num-buffers", 180_i32)
+        .property_from_str("pattern", pattern)
         .build()
         .unwrap();
     let video_convert = gst::ElementFactory::make("videoconvert").build().unwrap();

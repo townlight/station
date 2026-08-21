@@ -167,6 +167,8 @@ begin
     RaiseException('The bundled media runtime did not produce its required AAC encoder.');
   if not FileExists(RuntimeRoot + '\lib\gstreamer-1.0\gstaudiorate.dll') then
     RaiseException('The bundled media runtime did not produce its required audio rate adjuster.');
+  if not FileExists(RuntimeRoot + '\lib\gstreamer-1.0\gstvideorate.dll') then
+    RaiseException('The bundled media runtime did not produce its required video rate adjuster.');
   if not FileExists(RuntimeRoot + '\lib\gstreamer-1.0\gstplayback.dll') then
     RaiseException('The bundled media runtime did not produce its required file playback plugin.');
   if not FileExists(RuntimeRoot + '\lib\gstreamer-1.0\gstmpegtsdemux.dll') then

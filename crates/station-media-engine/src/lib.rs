@@ -2,12 +2,14 @@ use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::{
     Arc,
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicU64, Ordering},
 };
 use std::time::{Duration, Instant};
 
 use gst::prelude::*;
 use gstreamer as gst;
+
+static FILE_PROGRAM_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SourceRole {
@@ -52,7 +54,6 @@ pub enum EngineError {
         audio_ready: bool,
     },
     LoadRequiresFallback,
-    ProgramAlreadyLoaded,
 }
 
 pub struct PersistentPlayout {
@@ -63,7 +64,7 @@ pub struct PersistentPlayout {
     audio_selector: gst::Element,
     audio_fallback_pad: gst::Pad,
     audio_program_pad: gst::Pad,
-    file_program_loaded: bool,
+    file_program: Option<FileProgram>,
     stopped: bool,
 }
 
@@ -108,6 +109,11 @@ impl PersistentPlayout {
             .property("single-segment", true)
             .build()
             .map_err(|error| build_error("identity", error))?;
+        let video_rate = gst::ElementFactory::make("videorate")
+            .name("canonical-video-rate")
+            .property("skip-to-first", true)
+            .build()
+            .map_err(|error| build_error("videorate", error))?;
         let convert = element("videoconvert", "output-convert")?;
         let caps = gst::Caps::builder("video/x-raw")
             .field("format", "I420")
@@ -190,6 +196,7 @@ impl PersistentPlayout {
                 &program_queue,
                 &video_selector,
                 &video_timeline,
+                &video_rate,
                 &convert,
                 &caps_filter,
                 &encoder,
@@ -241,6 +248,7 @@ impl PersistentPlayout {
         gst::Element::link_many([
             &video_selector,
             &video_timeline,
+            &video_rate,
             &convert,
             &caps_filter,
             &encoder,
@@ -304,7 +312,7 @@ impl PersistentPlayout {
             audio_selector,
             audio_fallback_pad,
             audio_program_pad,
-            file_program_loaded: file_program.is_some(),
+            file_program,
             stopped: false,
         };
         playout.wait_for_source(SourceRole::Fallback, Duration::from_secs(2))?;
@@ -359,9 +367,6 @@ impl PersistentPlayout {
         if self.active_source()? != SourceRole::Fallback {
             return Err(EngineError::LoadRequiresFallback);
         }
-        if self.file_program_loaded {
-            return Err(EngineError::ProgramAlreadyLoaded);
-        }
         station_media_assets::validate_media(media_path.as_ref())
             .map_err(|error| EngineError::MediaRejected(format!("{error:?}")))?;
         let program = install_file_program(
@@ -379,14 +384,35 @@ impl PersistentPlayout {
         program.video_source_pad.set_offset(offset);
         program.audio_source_pad.set_offset(offset);
         for element in &program.elements {
-            element
-                .sync_state_with_parent()
-                .map_err(|error| EngineError::State(error.to_string()))?;
+            if let Err(error) = element.sync_state_with_parent() {
+                remove_file_program(
+                    &self.pipeline,
+                    &self.video_selector,
+                    &self.audio_selector,
+                    &program,
+                );
+                return Err(EngineError::State(error.to_string()));
+            }
         }
-        wait_for_file_decode(&program, &self.pipeline, Duration::from_secs(5))?;
-        self.video_program_pad = program.video_pad;
-        self.audio_program_pad = program.audio_pad;
-        self.file_program_loaded = true;
+        if let Err(error) = wait_for_file_decode(&program, &self.pipeline, Duration::from_secs(5)) {
+            remove_file_program(
+                &self.pipeline,
+                &self.video_selector,
+                &self.audio_selector,
+                &program,
+            );
+            return Err(error);
+        }
+        self.video_program_pad = program.video_pad.clone();
+        self.audio_program_pad = program.audio_pad.clone();
+        if let Some(previous) = self.file_program.replace(program) {
+            remove_file_program(
+                &self.pipeline,
+                &self.video_selector,
+                &self.audio_selector,
+                &previous,
+            );
+        }
         Ok(())
     }
 
@@ -431,45 +457,47 @@ fn install_file_program(
     video_selector: &gst::Element,
     audio_selector: &gst::Element,
 ) -> Result<FileProgram, EngineError> {
+    let sequence = FILE_PROGRAM_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let name = |component: &str| format!("program-file-{component}-{sequence}");
     let canonical = std::fs::canonicalize(media_path)
         .map_err(|error| EngineError::MediaRejected(error.to_string()))?;
     let uri = gst::glib::filename_to_uri(&canonical, None)
         .map_err(|error| EngineError::MediaRejected(error.to_string()))?;
     let decoder = gst::ElementFactory::make("uridecodebin")
-        .name("program-file-decoder")
+        .name(name("decoder"))
         .property("uri", uri.as_str())
         .property("expose-all-streams", false)
         .build()
         .map_err(|error| build_error("uridecodebin", error))?;
 
-    let video_decode_queue = element("queue", "program-file-video-decode-queue")?;
-    let video_convert = element("videoconvert", "program-file-video-convert")?;
-    let video_scale = element("videoscale", "program-file-video-scale")?;
-    let video_rate = element("videorate", "program-file-video-rate")?;
-    let video_caps = video_caps_filter("program-file-canonical-video")?;
+    let video_decode_queue = element("queue", name("video-decode-queue"))?;
+    let video_convert = element("videoconvert", name("video-convert"))?;
+    let video_scale = element("videoscale", name("video-scale"))?;
+    let video_rate = element("videorate", name("video-rate"))?;
+    let video_caps = video_caps_filter(name("canonical-video"))?;
     let video_clock = gst::ElementFactory::make("clocksync")
-        .name("program-file-video-clock")
+        .name(name("video-clock"))
         .property("sync-to-first", true)
         .build()
         .map_err(|error| build_error("clocksync", error))?;
-    let video_output_queue = element("queue", "program-file-video-output-queue")?;
+    let video_output_queue = element("queue", name("video-output-queue"))?;
 
-    let audio_decode_queue = element("queue", "program-file-audio-decode-queue")?;
-    let audio_convert = element("audioconvert", "program-file-audio-convert")?;
-    let audio_resample = element("audioresample", "program-file-audio-resample")?;
-    let audio_caps = audio_caps_filter("program-file-canonical-audio")?;
+    let audio_decode_queue = element("queue", name("audio-decode-queue"))?;
+    let audio_convert = element("audioconvert", name("audio-convert"))?;
+    let audio_resample = element("audioresample", name("audio-resample"))?;
+    let audio_caps = audio_caps_filter(name("canonical-audio"))?;
     let audio_rate = gst::ElementFactory::make("audiorate")
-        .name("program-file-audio-rate")
+        .name(name("audio-rate"))
         .property("skip-to-first", true)
         .property("tolerance", 0_u64)
         .build()
         .map_err(|error| build_error("audiorate", error))?;
     let audio_clock = gst::ElementFactory::make("clocksync")
-        .name("program-file-audio-clock")
+        .name(name("audio-clock"))
         .property("sync-to-first", true)
         .build()
         .map_err(|error| build_error("clocksync", error))?;
-    let audio_output_queue = element("queue", "program-file-audio-output-queue")?;
+    let audio_output_queue = element("queue", name("audio-output-queue"))?;
 
     pipeline
         .add_many([
@@ -633,6 +661,27 @@ fn wait_for_file_decode(
     }
 }
 
+fn remove_file_program(
+    pipeline: &gst::Pipeline,
+    video_selector: &gst::Element,
+    audio_selector: &gst::Element,
+    program: &FileProgram,
+) {
+    let _ = program.video_source_pad.unlink(&program.video_pad);
+    let _ = program.audio_source_pad.unlink(&program.audio_pad);
+    video_selector.release_request_pad(&program.video_pad);
+    audio_selector.release_request_pad(&program.audio_pad);
+    for element in &program.elements {
+        let _ = element.set_state(gst::State::Null);
+    }
+    for element in &program.elements {
+        let _ = element.state(gst::ClockTime::from_seconds(5));
+    }
+    for element in program.elements.iter().rev() {
+        let _ = pipeline.remove(element);
+    }
+}
+
 fn active_role(
     selector: &gst::Element,
     fallback_pad: &gst::Pad,
@@ -665,7 +714,10 @@ impl Drop for PersistentPlayout {
 
 pub type SyntheticPlayout = PersistentPlayout;
 
-fn element(factory: &'static str, name: &'static str) -> Result<gst::Element, EngineError> {
+fn element(
+    factory: &'static str,
+    name: impl Into<gst::glib::GString>,
+) -> Result<gst::Element, EngineError> {
     gst::ElementFactory::make(factory)
         .name(name)
         .build()
@@ -683,7 +735,7 @@ fn selector(name: &'static str) -> Result<gst::Element, EngineError> {
         .map_err(|error| build_error("input-selector", error))
 }
 
-fn audio_caps_filter(name: &'static str) -> Result<gst::Element, EngineError> {
+fn audio_caps_filter(name: impl Into<gst::glib::GString>) -> Result<gst::Element, EngineError> {
     let caps = gst::Caps::builder("audio/x-raw")
         .field("format", "S16LE")
         .field("layout", "interleaved")
@@ -697,7 +749,7 @@ fn audio_caps_filter(name: &'static str) -> Result<gst::Element, EngineError> {
         .map_err(|error| build_error("capsfilter", error))
 }
 
-fn video_caps_filter(name: &'static str) -> Result<gst::Element, EngineError> {
+fn video_caps_filter(name: impl Into<gst::glib::GString>) -> Result<gst::Element, EngineError> {
     let caps = gst::Caps::builder("video/x-raw")
         .field("format", "I420")
         .field("width", 640_i32)

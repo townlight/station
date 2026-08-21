@@ -26,6 +26,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Dynamic real-file decode into an already-running channel graph, live-clock source alignment, one-segment output timing, and ten-run fallback/file/fallback transport stress proof.
 - Durable worker commands and events for identity-verified asset load, on-air take, and fallback return; the supervised process proof recovers the full transition journal after restart.
 - Heap-backed media hashing avoids overflowing the constrained Windows worker main-thread stack.
+- Transactional replacement of prepared file legs while fallback stays live, including generation-scoped GStreamer elements, ordered decoder teardown, canonical video-rate repair, and repeated two-asset worker/journal proof.
 - Channel-worker ownership of fallback graph startup and shutdown, with supervisor proof that durable readiness corresponds to real MPEG-TS output.
 - Native Windows Service Control Manager hosting for `stationd`, including loopback-only service configuration, cooperative stop and operating-system shutdown, startup status, persistent data-directory creation, and a machine-proven install/start/health/stop lifecycle.
 - Self-contained elevated Windows installer with a hash-pinned private GStreamer runtime, delayed-auto service recovery, activation health gate, immutable candidate receipt, failed-install rollback, uninstall, and station-data-preserving reinstall proof.

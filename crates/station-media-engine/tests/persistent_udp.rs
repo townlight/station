@@ -68,10 +68,15 @@ fn keeps_one_pipeline_running_while_switching_sources_and_emits_mpeg_ts() {
 fn plays_a_validated_ingested_file_without_rebuilding_the_output_graph() {
     let root = test_root("file-playout");
     let source = root.join("incoming.ts");
+    let second_source = root.join("second.ts");
     let library = root.join("library");
     fs::create_dir_all(&root).unwrap();
-    generate_fixture(&source);
+    generate_fixture(&source, "smpte");
+    generate_fixture(&second_source, "snow");
     let asset = ingest_media(&source, &library).expect("the real A/V file must ingest");
+    let second_asset =
+        ingest_media(&second_source, &library).expect("the second real A/V file must ingest");
+    assert_ne!(asset.asset_id, second_asset.asset_id);
 
     let receiver = UdpSocket::bind("127.0.0.1:0").unwrap();
     receiver
@@ -86,6 +91,15 @@ fn plays_a_validated_ingested_file_without_rebuilding_the_output_graph() {
     playout
         .load_file(&asset.stored_path)
         .expect("the validated stored asset must load into the running graph");
+    playout.select(SourceRole::Program).unwrap();
+    assert_transport_stream(&receiver, &mut continuity, 36);
+    assert_eq!(playout.active_source().unwrap(), SourceRole::Program);
+    playout.select(SourceRole::Fallback).unwrap();
+    assert_transport_stream(&receiver, &mut continuity, 12);
+    assert_eq!(playout.active_source().unwrap(), SourceRole::Fallback);
+    playout
+        .load_file(&second_asset.stored_path)
+        .expect("a second stored asset must replace the prepared program leg");
     playout.select(SourceRole::Program).unwrap();
     assert_transport_stream(&receiver, &mut continuity, 36);
     assert_eq!(playout.active_source().unwrap(), SourceRole::Program);
@@ -271,11 +285,12 @@ fn pes_pts(payload: &[u8]) -> Option<u64> {
     )
 }
 
-fn generate_fixture(path: &Path) {
+fn generate_fixture(path: &Path, pattern: &'static str) {
     gst::init().unwrap();
     let pipeline = gst::Pipeline::new();
     let video = gst::ElementFactory::make("videotestsrc")
         .property("num-buffers", 180_i32)
+        .property_from_str("pattern", pattern)
         .build()
         .unwrap();
     let video_convert = gst::ElementFactory::make("videoconvert").build().unwrap();

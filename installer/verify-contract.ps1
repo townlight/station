@@ -8,6 +8,7 @@ $requirements = [ordered]@{
     'carries the official media runtime' = 'ExtractTemporaryFile'
     'checks the required AAC encoder' = 'gstvoaacenc.dll'
     'checks the required audio rate adjuster' = 'gstaudiorate.dll'
+    'checks the required video rate adjuster' = 'gstvideorate.dll'
     'checks the required file playback plugin' = 'gstplayback.dll'
     'checks the required transport stream demuxer' = 'gstmpegtsdemux.dll'
     'checks the required software decoder bundle' = 'gstlibav.dll'
