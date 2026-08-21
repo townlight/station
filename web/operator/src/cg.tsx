@@ -33,7 +33,7 @@ export interface CgZone {
   board_id: string;
   template_zone_key: string;
   zone_kind: string;
-  content_source: { kind: string; text?: string; feed_source_id?: string; mode?: string; asset_id?: string; format?: string; source_id?: string };
+  content_source: CgContentSource;
   rotation_seconds: number | null;
   approval_required: boolean;
   allowed_tags: string[];
@@ -41,6 +41,17 @@ export interface CgZone {
   created_at_unix_ms: number;
   updated_at_unix_ms: number;
 }
+
+export type CgScheduleDisplayMode = "next_three" | "coming_up_next" | "just_watched";
+export type CgContentSource =
+  | { kind: "manual"; text: string }
+  | { kind: "bulletin_rotation" }
+  | { kind: "feed"; feed_source_id: string }
+  | { kind: "schedule"; mode: CgScheduleDisplayMode }
+  | { kind: "emergency" }
+  | { kind: "image"; asset_id: string }
+  | { kind: "clock"; format: string }
+  | { kind: "live_video"; source_id: string };
 
 export interface CgFeed {
   feed_source_id: string;
@@ -252,6 +263,75 @@ function toLocalDateTime(value: number | null): string {
 
 function displayKind(value: string): string {
   return value.replaceAll("_", " ").replaceAll("-", " ");
+}
+
+const CG_SOURCE_KINDS: Array<{ kind: CgContentSource["kind"]; label: string }> = [
+  { kind: "manual", label: "Manual text" },
+  { kind: "clock", label: "Clock" },
+  { kind: "feed", label: "Feed items" },
+  { kind: "bulletin_rotation", label: "Bulletin rotation" },
+  { kind: "schedule", label: "Schedule" },
+  { kind: "emergency", label: "Emergency" },
+  { kind: "image", label: "Image asset" },
+  { kind: "live_video", label: "Live video" },
+];
+
+const CG_SCHEDULE_MODES: Array<{ value: CgScheduleDisplayMode; label: string }> = [
+  { value: "next_three", label: "Next three" },
+  { value: "coming_up_next", label: "Coming up next" },
+  { value: "just_watched", label: "Just watched" },
+];
+
+const DEFAULT_CLOCK_FORMAT = "%H:%M";
+const SAFE_STRFTIME_DIRECTIVES = new Set("aAbBcCdDeFgGhHIjkmMpPrRsSuUVwWxXyYzZ%".split(""));
+
+function isCanonicalUuid(value: string): boolean {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(value);
+}
+
+function parseZoneTags(value: string): string[] | string {
+  const tags = value.split(/[\s,]+/).map((tag) => tag.trim().toLowerCase()).filter(Boolean);
+  if (tags.length > 32 || tags.some((tag) => !/^[a-z0-9_-]{1,40}$/.test(tag)) || new Set(tags).size !== tags.length) {
+    return "Tags must be unique lowercase slugs using letters, numbers, hyphens, or underscores.";
+  }
+  return tags;
+}
+
+function validateZoneSourceInput(kind: CgContentSource["kind"], values: { manualText: string; clockFormat: string; feedSourceId: string; scheduleMode: CgScheduleDisplayMode; imageAssetId: string; liveSourceId: string }): string | null {
+  switch (kind) {
+    case "manual":
+      return !values.manualText.trim() || values.manualText.length > 2_000 ? "Manual text is required and must be at most 2,000 characters." : null;
+    case "clock":
+      return validateClockFormat(values.clockFormat);
+    case "feed":
+      return isCanonicalUuid(values.feedSourceId) ? null : "Choose a configured feed source.";
+    case "image":
+      return /^[0-9a-f]{64}$/.test(values.imageAssetId) ? null : "Image asset ID must be a lowercase SHA-256 digest.";
+    case "live_video":
+      return isCanonicalUuid(values.liveSourceId) ? null : "Live source ID must be a canonical UUID.";
+    case "bulletin_rotation":
+    case "schedule":
+    case "emergency":
+      return null;
+  }
+}
+
+function validateClockFormat(format: string): string | null {
+  if (!format.trim() || format.length > 80 || /[\r\n\u0000-\u001f\u007f]/.test(format)) {
+    return "Clock format is required, single-line, and at most 80 safe characters.";
+  }
+  if (!format.includes("%")) {
+    return "Clock format must use strftime directives, for example %H:%M or %I:%M %p.";
+  }
+  for (let index = 0; index < format.length; index += 1) {
+    if (format[index] !== "%") continue;
+    const directive = format[index + 1];
+    if (!directive || !SAFE_STRFTIME_DIRECTIVES.has(directive)) {
+      return "Clock format contains an unsupported strftime directive.";
+    }
+    index += 1;
+  }
+  return null;
 }
 
 function newUuid(): string {
@@ -478,7 +558,16 @@ function BoardDesigner({ data, channelId, operatorId, onRefresh }: { data: CgDat
   const [templateId, setTemplateId] = useState(data.board?.template_id ?? data.templates[0]?.template_id ?? "");
   const [active, setActive] = useState(data.board?.active ?? true);
   const [zoneKey, setZoneKey] = useState("");
+  const [sourceKind, setSourceKind] = useState<CgContentSource["kind"]>("manual");
   const [manualText, setManualText] = useState("");
+  const [clockFormat, setClockFormat] = useState(DEFAULT_CLOCK_FORMAT);
+  const [feedSourceId, setFeedSourceId] = useState("");
+  const [scheduleMode, setScheduleMode] = useState<CgScheduleDisplayMode>("next_three");
+  const [imageAssetId, setImageAssetId] = useState("");
+  const [liveSourceId, setLiveSourceId] = useState("");
+  const [zoneTags, setZoneTags] = useState("");
+  const [rotationSeconds, setRotationSeconds] = useState("");
+  const [approvalRequired, setApprovalRequired] = useState(false);
   const [editingZoneId, setEditingZoneId] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -487,6 +576,8 @@ function BoardDesigner({ data, channelId, operatorId, onRefresh }: { data: CgDat
   const usedZoneKeys = new Set(data.zones.map((zone) => zone.template_zone_key));
   const availableZoneKeys = selectedTemplate?.zones.filter((item) => !usedZoneKeys.has(item.template_zone_key)) ?? [];
   const editableZoneOptions = editingZoneId ? selectedTemplate?.zones.filter((item) => item.template_zone_key === zoneKey) ?? [] : availableZoneKeys;
+
+  const sourceUsesApproval = sourceKind === "feed" || sourceKind === "bulletin_rotation";
 
   useEffect(() => {
     if (data.board) {
@@ -500,6 +591,37 @@ function BoardDesigner({ data, channelId, operatorId, onRefresh }: { data: CgDat
   function clearResult() {
     setError(null);
     setMessage(null);
+  }
+
+  function clearZoneForm() {
+    setEditingZoneId(null);
+    setZoneKey("");
+    setSourceKind("manual");
+    setManualText("");
+    setClockFormat(DEFAULT_CLOCK_FORMAT);
+    setFeedSourceId(data.feeds[0]?.feed_source_id ?? "");
+    setScheduleMode("next_three");
+    setImageAssetId("");
+    setLiveSourceId("");
+    setZoneTags("");
+    setRotationSeconds("");
+    setApprovalRequired(false);
+  }
+
+  function editZone(zone: CgZone) {
+    setEditingZoneId(zone.zone_id);
+    setZoneKey(zone.template_zone_key);
+    setSourceKind(zone.content_source.kind);
+    setManualText(zone.content_source.kind === "manual" ? zone.content_source.text : "");
+    setClockFormat(zone.content_source.kind === "clock" ? zone.content_source.format : DEFAULT_CLOCK_FORMAT);
+    setFeedSourceId(zone.content_source.kind === "feed" ? zone.content_source.feed_source_id : "");
+    setScheduleMode(zone.content_source.kind === "schedule" ? zone.content_source.mode : "next_three");
+    setImageAssetId(zone.content_source.kind === "image" ? zone.content_source.asset_id : "");
+    setLiveSourceId(zone.content_source.kind === "live_video" ? zone.content_source.source_id : "");
+    setZoneTags(zone.allowed_tags.join(", "));
+    setRotationSeconds(zone.rotation_seconds === null ? "" : String(zone.rotation_seconds));
+    setApprovalRequired(zone.approval_required);
+    clearResult();
   }
 
   async function saveBoard() {
@@ -529,14 +651,37 @@ function BoardDesigner({ data, channelId, operatorId, onRefresh }: { data: CgDat
     }
   }
 
-  async function saveManualZone() {
+  async function saveZone() {
     clearResult();
     if (!operatorId.trim()) {
       setError("Enter an operator name before making an audited change.");
       return;
     }
-    if (!data.board || !selectedTemplate || !zoneKey || !manualText.trim()) {
-      setError("Choose a built-in zone key and enter manual text.");
+    if (!data.board || !selectedTemplate || !zoneKey) {
+      setError("Choose a built-in template zone key.");
+      return;
+    }
+    const sourceError = validateZoneSourceInput(sourceKind, { manualText, clockFormat, feedSourceId, scheduleMode, imageAssetId, liveSourceId });
+    if (sourceError) {
+      setError(sourceError);
+      return;
+    }
+    if (sourceKind === "feed" && !data.feeds.some((feed) => feed.feed_source_id === feedSourceId)) {
+      setError("Choose a feed source configured for this channel.");
+      return;
+    }
+    const parsedTags = parseZoneTags(zoneTags);
+    if (typeof parsedTags === "string") {
+      setError(parsedTags);
+      return;
+    }
+    const rotation = rotationSeconds.trim() ? Number(rotationSeconds) : null;
+    if (rotation !== null && (!Number.isInteger(rotation) || rotation < 3 || rotation > 3_600)) {
+      setError("Rotation seconds must be empty or an integer from 3 to 3,600.");
+      return;
+    }
+    if (!sourceUsesApproval && approvalRequired) {
+      setError("Approval gates apply only to feed or bulletin-rotation zones.");
       return;
     }
     setBusy("zone");
@@ -545,40 +690,53 @@ function BoardDesigner({ data, channelId, operatorId, onRefresh }: { data: CgDat
       const editing = editingZoneId ? data.zones.find((zone) => zone.zone_id === editingZoneId) : undefined;
       const templateZone = selectedTemplate.zones.find((zone) => zone.template_zone_key === (editing?.template_zone_key ?? zoneKey));
       if (!templateZone) throw new Error("That zone key is not part of the selected built-in template.");
+      const contentSource: CgContentSource = sourceKind === "manual"
+        ? { kind: "manual", text: manualText.trim() }
+        : sourceKind === "clock"
+          ? { kind: "clock", format: clockFormat.trim() }
+          : sourceKind === "feed"
+            ? { kind: "feed", feed_source_id: feedSourceId }
+            : sourceKind === "schedule"
+              ? { kind: "schedule", mode: scheduleMode }
+              : sourceKind === "image"
+                ? { kind: "image", asset_id: imageAssetId }
+                : sourceKind === "live_video"
+                  ? { kind: "live_video", source_id: liveSourceId }
+                  : sourceKind === "bulletin_rotation"
+                    ? { kind: "bulletin_rotation" }
+                    : { kind: "emergency" };
       const zone: CgZone = editing
-        ? { ...editing, content_source: { kind: "manual", text: manualText.trim() }, revision: editing.revision + 1, updated_at_unix_ms: Math.max(now, editing.updated_at_unix_ms) }
-        : { zone_id: newUuid(), board_id: data.board.board_id, template_zone_key: zoneKey, zone_kind: templateZone.zone_kind, content_source: { kind: "manual", text: manualText.trim() }, rotation_seconds: null, approval_required: false, allowed_tags: [], revision: 1, created_at_unix_ms: now, updated_at_unix_ms: now };
-      await cgApi.writeZone({ zone, expected_revision: editing?.revision ?? 0, audit: buildAudit(data.board.channel_id, data.board.board_id, editing ? "zone_updated" : "zone_created", operatorId, { template_zone_key: zone.template_zone_key, content_source: "manual" }, zone.updated_at_unix_ms) });
+        ? { ...editing, content_source: contentSource, rotation_seconds: rotation, approval_required: sourceUsesApproval && approvalRequired, allowed_tags: sourceUsesApproval ? parsedTags : [], revision: editing.revision + 1, updated_at_unix_ms: Math.max(now, editing.updated_at_unix_ms) }
+        : { zone_id: newUuid(), board_id: data.board.board_id, template_zone_key: zoneKey, zone_kind: templateZone.zone_kind, content_source: contentSource, rotation_seconds: rotation, approval_required: sourceUsesApproval && approvalRequired, allowed_tags: sourceUsesApproval ? parsedTags : [], revision: 1, created_at_unix_ms: now, updated_at_unix_ms: now };
+      await cgApi.writeZone({ zone, expected_revision: editing?.revision ?? 0, audit: buildAudit(data.board.channel_id, data.board.board_id, editing ? "zone_updated" : "zone_created", operatorId, { template_zone_key: zone.template_zone_key, content_source: sourceKind }, zone.updated_at_unix_ms) });
       await onRefresh();
-      setEditingZoneId(null);
-      setZoneKey("");
-      setManualText("");
-      setMessage(editing ? "Manual zone updated and audit evidence recorded." : "Manual zone added and audit evidence recorded.");
+      clearZoneForm();
+      setMessage(editing ? "Zone source updated and audit evidence recorded." : "Zone source added and audit evidence recorded.");
     } catch (problem) {
-      setError(problem instanceof Error ? problem.message : "The manual zone could not be saved.");
+      setError(problem instanceof Error ? problem.message : "The zone source could not be saved.");
     } finally {
       setBusy(null);
     }
   }
 
-  async function removeManualZone(zone: CgZone) {
-    if (!data.board || zone.content_source.kind !== "manual" || !operatorId.trim() || !window.confirm(`Delete the manual zone “${zone.template_zone_key}”?`)) return;
+  async function removeZone(zone: CgZone) {
+    if (!data.board || !operatorId.trim() || !window.confirm(`Delete the ${displayKind(zone.content_source.kind)} zone “${zone.template_zone_key}”?`)) return;
     clearResult();
     setBusy(zone.zone_id);
     try {
       await cgApi.deleteZone(zone.zone_id, { expected_revision: zone.revision, audit: buildAudit(data.board.channel_id, data.board.board_id, "zone_removed", operatorId, { template_zone_key: zone.template_zone_key }, Math.max(Date.now(), zone.updated_at_unix_ms)) });
       await onRefresh();
-      setMessage("Manual zone deleted and audit evidence recorded.");
+      setMessage("Zone deleted and audit evidence recorded.");
     } catch (problem) {
-      setError(problem instanceof Error ? problem.message : "The manual zone could not be deleted.");
+      setError(problem instanceof Error ? problem.message : "The zone could not be deleted.");
     } finally {
       setBusy(null);
     }
   }
 
   return <>
-    <section className="panel"><div className="panel-head"><div><p className="eyebrow">Board configuration</p><h2>Layout designer</h2></div><span className={`cg-state-pill ${data.board?.active ? "cg-state-accepted" : "cg-state-declined"}`}>{data.board ? (data.board.active ? "active" : "inactive") : "not configured"}</span></div><div className="cg-editor-grid"><label>Built-in template<select value={templateId} onChange={(event) => setTemplateId(event.target.value)}>{data.templates.map((item) => <option key={item.template_id} value={item.template_id}>{item.display_name}</option>)}</select></label><label className="cg-checkbox"><input type="checkbox" checked={active} onChange={(event) => setActive(event.target.checked)} />Board active</label></div><p className="cg-form-help">Writes use the current revision and append a {data.board ? "board-updated" : "board-created"} audit event. The operator name below is session-local and is not authentication.</p><button className="primary" disabled={busy !== null || !operatorId.trim() || !templateId} onClick={() => void saveBoard()}>{busy === "board" ? "Saving board…" : data.board ? "Save board" : "Create board"}</button><MutationResult error={error} message={message} />{!data.board && <CgEmpty title="No CG board configured" detail="Create a board from one of the six built-in templates to unlock manual zones." />}{data.board && <><div className="cg-board-meta"><div><span>Template</span><strong>{template?.display_name ?? data.board.template_id}</strong><small>{data.board.template_id} · revision {data.board.revision}</small></div><div><span>Created by</span><strong>{data.board.created_by}</strong><small>Updated {formatCgTime(data.board.updated_at_unix_ms)}</small></div></div><div className="cg-zone-list">{data.zones.length ? data.zones.map((zone) => <article className="cg-zone-row" key={zone.zone_id}><div className="cg-zone-index">{zone.template_zone_key.slice(0, 2).toUpperCase()}</div><div><strong>{displayKind(zone.template_zone_key)}</strong><small>{displayKind(zone.zone_kind)} · {displayKind(zone.content_source.kind)}{zone.approval_required ? " · approval gate" : ""}</small>{zone.allowed_tags.length > 0 && <small>Tags: {zone.allowed_tags.join(", ")}</small>}</div><span className="cg-zone-dim">{zone.content_source.kind === "manual" ? <><button className="text-button" onClick={() => { setEditingZoneId(zone.zone_id); setZoneKey(zone.template_zone_key); setManualText(zone.content_source.text ?? ""); clearResult(); }}>Edit</button><button className="text-button danger-text" disabled={busy === zone.zone_id || !operatorId.trim()} onClick={() => void removeManualZone(zone)}>{busy === zone.zone_id ? "Deleting…" : "Delete"}</button></> : "External binding"}</span></article>) : <CgEmpty title="No zones configured" detail="Add the first manual zone below." />}</div></>}</section>
-    {data.board && <section className="panel"><div className="panel-head"><div><p className="eyebrow">Manual zone text</p><h2>{editingZoneId ? "Edit manual zone" : "Add a manual zone"}</h2></div><span className="count">{availableZoneKeys.length}</span></div><MutationNotice>Only manual zone content is editable here. External feed, image, schedule, and live-video bindings remain untouched.</MutationNotice><div className="cg-editor-grid"><label>Template zone<select value={zoneKey} disabled={Boolean(editingZoneId)} onChange={(event) => setZoneKey(event.target.value)}><option value="">Choose a built-in zone key</option>{editableZoneOptions.map((item) => <option key={item.template_zone_key} value={item.template_zone_key}>{item.template_zone_key} · {displayKind(item.zone_kind)}</option>)}</select></label><label>Manual text<textarea value={manualText} maxLength={2000} onChange={(event) => setManualText(event.target.value)} placeholder="Text shown in this zone" /></label></div><div className="button-row"><button className="primary" disabled={busy !== null || !operatorId.trim() || !zoneKey || !manualText.trim()} onClick={() => void saveManualZone()}>{busy === "zone" ? "Saving zone…" : editingZoneId ? "Save manual zone" : "Add manual zone"}</button>{editingZoneId && <button className="secondary" onClick={() => { setEditingZoneId(null); setZoneKey(""); setManualText(""); }}>Cancel</button>}</div></section>}
+    <section className="panel"><div className="panel-head"><div><p className="eyebrow">Board configuration</p><h2>Layout designer</h2></div><span className={`cg-state-pill ${data.board?.active ? "cg-state-accepted" : "cg-state-declined"}`}>{data.board ? (data.board.active ? "active" : "inactive") : "not configured"}</span></div><div className="cg-editor-grid"><label>Built-in template<select value={templateId} onChange={(event) => setTemplateId(event.target.value)}>{data.templates.map((item) => <option key={item.template_id} value={item.template_id}>{item.display_name}</option>)}</select></label><label className="cg-checkbox"><input type="checkbox" checked={active} onChange={(event) => setActive(event.target.checked)} />Board active</label></div><p className="cg-form-help">Writes use the current revision and append a {data.board ? "board-updated" : "board-created"} audit event. The operator name below is session-local and is not authentication.</p><button className="primary" disabled={busy !== null || !operatorId.trim() || !templateId} onClick={() => void saveBoard()}>{busy === "board" ? "Saving board…" : data.board ? "Save board" : "Create board"}</button><MutationResult error={error} message={message} />{!data.board && <CgEmpty title="No CG board configured" detail="Create a board from one of the six built-in templates to unlock zones." />}{data.board && <><div className="cg-board-meta"><div><span>Template</span><strong>{template?.display_name ?? data.board.template_id}</strong><small>{data.board.template_id} · revision {data.board.revision}</small></div><div><span>Created by</span><strong>{data.board.created_by}</strong><small>Updated {formatCgTime(data.board.updated_at_unix_ms)}</small></div></div><div className="cg-zone-list">{data.zones.length ? data.zones.map((zone) => <article className="cg-zone-row" key={zone.zone_id}><div className="cg-zone-index">{zone.template_zone_key.slice(0, 2).toUpperCase()}</div><div><strong>{displayKind(zone.template_zone_key)}</strong><small>{displayKind(zone.zone_kind)} · {displayKind(zone.content_source.kind)}{zone.approval_required ? " · approval gate" : ""}</small>{zone.allowed_tags.length > 0 && <small>Tags: {zone.allowed_tags.join(", ")}</small>}</div><span className="cg-zone-dim"><button className="text-button" onClick={() => editZone(zone)}>Edit</button><button className="text-button danger-text" disabled={busy === zone.zone_id || !operatorId.trim()} onClick={() => void removeZone(zone)}>{busy === zone.zone_id ? "Deleting…" : "Delete"}</button></span></article>) : <CgEmpty title="No zones configured" detail="Add the first source binding below." />}</div></>}</section>
+    {data.board && <section className="panel"><div className="panel-head"><div><p className="eyebrow">Zone source binding</p><h2>{editingZoneId ? "Edit zone source" : "Add a zone source"}</h2></div><span className="count">{availableZoneKeys.length}</span></div><MutationNotice>All source kinds are stored as typed bindings. Feed and bulletin tags filter content; readiness, network fetching, schedule data, emergency state, image assets, and live sources are resolved elsewhere and remain visibly unresolved until proven.</MutationNotice><div className="cg-editor-grid"><label>Template zone<select value={zoneKey} disabled={Boolean(editingZoneId)} onChange={(event) => setZoneKey(event.target.value)}><option value="">Choose a built-in zone key</option>{editableZoneOptions.map((item) => <option key={item.template_zone_key} value={item.template_zone_key}>{item.template_zone_key} · {displayKind(item.zone_kind)}</option>)}</select></label><label>Content source<select value={sourceKind} onChange={(event) => { const next = event.target.value as CgContentSource["kind"]; setSourceKind(next); if (next !== "feed" && next !== "bulletin_rotation") setApprovalRequired(false); }}>{CG_SOURCE_KINDS.map((item) => <option key={item.kind} value={item.kind}>{item.label}</option>)}</select></label>{sourceKind === "manual" && <label>Manual text<textarea value={manualText} maxLength={2000} onChange={(event) => setManualText(event.target.value)} placeholder="Text shown in this zone" /></label>}{sourceKind === "clock" && <label>Clock format<input maxLength={80} value={clockFormat} onChange={(event) => setClockFormat(event.target.value)} placeholder={DEFAULT_CLOCK_FORMAT} /><span className="cg-form-help">Uses strftime syntax, for example %H:%M or %I:%M %p. The renderer supplies the actual time.</span></label>}{sourceKind === "feed" && <label>Feed source<select value={feedSourceId} onChange={(event) => setFeedSourceId(event.target.value)}><option value="">Choose a configured feed</option>{data.feeds.map((feed) => <option key={feed.feed_source_id} value={feed.feed_source_id}>{feed.label} · {feed.feed_source_id}</option>)}</select>{data.feeds.length === 0 && <span className="cg-form-help">No configured feeds are available. Register one in Feed manager first.</span>}</label>}{sourceKind === "schedule" && <label>Schedule field<select value={scheduleMode} onChange={(event) => setScheduleMode(event.target.value as CgScheduleDisplayMode)}>{CG_SCHEDULE_MODES.map((mode) => <option key={mode.value} value={mode.value}>{mode.label}</option>)}</select><span className="cg-form-help">Schedule data is not fabricated in this configuration screen.</span></label>}{sourceKind === "image" && <label>Image asset ID<input value={imageAssetId} onChange={(event) => setImageAssetId(event.target.value)} placeholder="64-character lowercase SHA-256" /><span className="cg-form-help">Readiness is checked by the runtime; this screen does not claim an asset is ready.</span></label>}{sourceKind === "live_video" && <label>Live source ID<input value={liveSourceId} onChange={(event) => setLiveSourceId(event.target.value)} placeholder="00000000-0000-0000-0000-000000000000" /><span className="cg-form-help">Source readiness and on-air output are not claimed here.</span></label>}{(sourceKind === "feed" || sourceKind === "bulletin_rotation") && <label>Allowed tags <span className="cg-form-help">comma-separated slugs; empty means no tag filter</span><input value={zoneTags} onChange={(event) => setZoneTags(event.target.value)} placeholder="public-safety, community" /></label>}<label>Rotation seconds <span className="cg-form-help">optional; 3–3,600</span><input type="number" min={3} max={3600} value={rotationSeconds} onChange={(event) => setRotationSeconds(event.target.value)} placeholder="No rotation" /></label>{sourceUsesApproval && <label className="cg-checkbox"><input type="checkbox" checked={approvalRequired} onChange={(event) => setApprovalRequired(event.target.checked)} />Require approval for this source</label>}</div><div className="button-row"><button className="primary" disabled={busy !== null || !operatorId.trim() || !zoneKey} onClick={() => void saveZone()}>{busy === "zone" ? "Saving zone…" : editingZoneId ? "Save source binding" : "Add source binding"}</button>{editingZoneId && <button className="secondary" onClick={clearZoneForm}>Cancel</button>}</div><MutationResult error={error} message={message} /></section>}
     <section className="panel"><div className="panel-head"><div><p className="eyebrow">Built-in library</p><h2>Templates</h2></div><span className="count">{data.templates.length}</span></div><div className="cg-template-grid">{data.templates.map((item) => <article className={`cg-template-card ${item.template_id === data.board?.template_id ? "selected" : ""}`} key={item.template_id}><div className="cg-template-mini" data-kind={item.kind}><span>{item.zones.length} zones</span></div><strong>{item.display_name}</strong><small>{item.template_id} · {displayKind(item.kind)}</small></article>)}</div></section>
   </>;
 }
