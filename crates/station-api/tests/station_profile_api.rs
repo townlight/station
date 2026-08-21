@@ -11,6 +11,10 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use station_api::{Api, serve_one, serve_until};
 use station_domain::StationProfile;
+use station_schedule::{
+    AssetReadiness, CommitPlan, CommitReport, DispatchStatus, MediaAsset, ScheduleItem,
+    ScheduleState,
+};
 
 fn temporary_database(name: &str) -> PathBuf {
     let nonce = SystemTime::now()
@@ -102,6 +106,81 @@ fn health_reports_database_readiness_and_unknown_routes_are_not_found() {
     assert_eq!(health.status, 200);
     assert_eq!(health.body, br#"{"database":"ready","status":"ready"}"#);
     assert_eq!(api.handle("GET", "/not-a-route", None).status, 404);
+    let _ = std::fs::remove_file(database);
+}
+
+#[test]
+fn prepares_commits_and_persists_an_operator_approval_through_the_api() {
+    let database = temporary_database("schedule-commit");
+    let api = Api::open(&database).unwrap();
+    let asset = MediaAsset {
+        asset_id: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+        media_path: r"C:\ProgramData\TownLight Station\media\asset.ts".into(),
+        duration_ms: 60_000,
+        readiness: AssetReadiness::Ready,
+    };
+    assert_eq!(
+        api.handle(
+            "PUT",
+            "/api/v1/assets",
+            Some(&serde_json::to_vec(&asset).unwrap())
+        )
+        .status,
+        200
+    );
+    let item = ScheduleItem {
+        item_id: "256d5a07-92d3-4718-aec9-05cad42fae7d".into(),
+        channel_id: "8b626c01-bdf8-419a-8a2e-b0a7caa1ff7e".into(),
+        asset_id: asset.asset_id.clone(),
+        title: "City Council".into(),
+        starts_at_unix_ms: 100_000,
+        duration_ms: 60_000,
+        state: ScheduleState::Draft,
+    };
+    assert_eq!(
+        api.handle(
+            "PUT",
+            "/api/v1/schedule/items",
+            Some(&serde_json::to_vec(&item).unwrap())
+        )
+        .status,
+        200
+    );
+    let prepare = api.handle(
+        "POST",
+        "/api/v1/schedule/prepare",
+        Some(br#"{"plan_id":"plan-1","schedule_item_id":"256d5a07-92d3-4718-aec9-05cad42fae7d"}"#),
+    );
+    assert_eq!(prepare.status, 200);
+    assert!(
+        serde_json::from_slice::<CommitPlan>(&prepare.body)
+            .unwrap()
+            .dry_run_passed
+    );
+
+    let commit = api.handle(
+        "POST",
+        "/api/v1/schedule/commit",
+        Some(br#"{"report_id":"report-1","plan_id":"plan-1","schedule_item_id":"256d5a07-92d3-4718-aec9-05cad42fae7d","approved_by":"operator-scott","operator_notes":"Reviewed."}"#),
+    );
+    assert_eq!(commit.status, 201);
+    let report: CommitReport = serde_json::from_slice(&commit.body).unwrap();
+    assert_eq!(report.dispatch_status, DispatchStatus::Pending);
+    let fetched = api.handle("GET", "/api/v1/schedule/commits/report-1", None);
+    assert_eq!(fetched.status, 200);
+    assert_eq!(
+        serde_json::from_slice::<CommitReport>(&fetched.body).unwrap(),
+        report
+    );
+    let listed = api.handle(
+        "GET",
+        "/api/v1/schedule/items?channel_id=8b626c01-bdf8-419a-8a2e-b0a7caa1ff7e",
+        None,
+    );
+    let items: Vec<ScheduleItem> = serde_json::from_slice(&listed.body).unwrap();
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0].state, ScheduleState::Committed);
+
     let _ = std::fs::remove_file(database);
 }
 

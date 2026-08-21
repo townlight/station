@@ -10,6 +10,7 @@ members = [
     "crates/station-media-assets",
     "crates/station-media-protocol",
     "crates/station-runtime",
+    "crates/station-schedule",
     "crates/station-storage",
     "crates/station-windows-ipc",
 ]
@@ -32,6 +33,7 @@ station-media-engine = { path = "crates/station-media-engine" }
 station-media-assets = { path = "crates/station-media-assets" }
 station-media-protocol = { path = "crates/station-media-protocol" }
 station-runtime = { path = "crates/station-runtime" }
+station-schedule = { path = "crates/station-schedule" }
 station-storage = { path = "crates/station-storage" }
 station-windows-ipc = { path = "crates/station-windows-ipc" }
 windows-service = "=0.8.1"

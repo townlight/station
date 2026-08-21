@@ -38,13 +38,15 @@ The domain crate has no storage, HTTP, media, or Windows-service dependencies. S
 
 `station-media-assets` owns the admission boundary for file bytes. It discovers real stream metadata, requires finite A/V, atomically copies and synchronizes the source into a SHA-256-addressed library object, revalidates the stored copy, and treats duplicate content as the same asset. See [ADR 0007](../adr/0007-content-addressed-media-ingest.md).
 
+`station-schedule` owns schedule and commit-to-air rules independently of HTTP, SQLite, and the media worker. `station-storage` persists assets, schedule items, and approval reports. Preview is informative; approval starts a SQLite immediate transaction and reruns the complete gate so an overlap or media-state change that appeared after preview cannot race onto air. The report begins in `pending` because durable approval precedes dispatch by design. See [ADR 0008](../adr/0008-commit-to-air-authority.md).
+
 `station-media-engine` owns the GStreamer graph. It builds all elements through factories and leaves OpenH264, AAC, the parsers, `mpegtsmux`, and UDP output in one persistent graph across switches. A validated stored asset can be decoded and added while fallback remains on air. Preparing the next asset uses generation-scoped elements; only after the new leg is ready does it become the program target, after which the retired decoder is disconnected, stopped, awaited in `NULL`, and removed. File pads receive the running pipeline offset, both selectors feed single continuous timelines, and video/audio rate adjusters prevent boundary jitter. The Windows machine test validates the actual transport stream across two distinct real assets and both fallback returns. See [ADR 0004](../adr/0004-persistent-gstreamer-graph.md).
 
 ## Authority rules
 
 | Truth | Owner |
 |---|---|
-| Configuration, users, assets, schedules, jobs | `stationd` through SQLite |
+| Configuration, assets, schedules, approvals, jobs | `stationd` through SQLite |
 | Media bytes | Content-addressed NTFS store |
 | Current on-air execution | Channel worker |
 | What actually aired | Durable per-channel journal |
@@ -68,6 +70,6 @@ Rust is used for native services, workers, command-line tools, and installation 
 
 ## Current vertical slice
 
-The current spine installs from one setup executable, runs under Windows Service Control Manager, commissions a station profile through `PUT /api/v1/station`, protects updates with an expected revision, persists it transactionally in SQLite with WAL and foreign-key enforcement, reads it after restart, and exposes database readiness through `GET /health`. Machine proofs cover native service lifecycle; failed installer rollback; clean install with a private GStreamer runtime; installed binary/receipt integrity; uninstall that removes the service and application while preserving station data; and reinstall that recovers the same commissioned profile and revision.
+The current spine installs from one setup executable, runs under Windows Service Control Manager, commissions a station profile, persists media/schedule/approval authority transactionally in SQLite with WAL and foreign-key enforcement, and exposes database readiness through `GET /health`. The loopback API can register an admitted asset, create a draft schedule item, preview the commit gate, atomically approve it, list the channel schedule, and retrieve the approval report. Dispatch remains explicitly pending at this slice boundary. Machine proofs cover native service lifecycle; failed installer rollback; clean install with a private GStreamer runtime; installed binary/receipt integrity; uninstall that removes the service and application while preserving station data; and reinstall that recovers the same commissioned profile and revision.
 
 The first channel worker now runs as an independent supervised process and owns its persistent GStreamer graph. Durable `Ready` follows successful fallback output startup; durable `AssetLoaded` follows identity verification and dynamic decode readiness; durable `OnAirChanged` follows an acknowledged asset or fallback transition; durable `ShutdownComplete` follows graph shutdown. The supervisor drives two distinct ingested files on air in sequence and proves the entire event sequence survives worker restart. Schedule-time dispatch, live inputs, profile-driven output, and `stationd` channel configuration are the next media milestones.

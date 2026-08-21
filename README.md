@@ -61,6 +61,8 @@ The response includes the new `revision`. Send that value as `expected_revision`
 
 `GET /api/v1/station` returns the commissioned profile and revision, or a typed `not_commissioned` error.
 
+The loopback control plane also has the first schedule authority endpoints: `PUT /api/v1/assets`, `PUT /api/v1/schedule/items`, `POST /api/v1/schedule/prepare`, `POST /api/v1/schedule/commit`, channel schedule listing, and commit-report lookup. Preparation actively reports overlaps, missing/unready/short media, and the nearest gap. Approval reruns that gate under a SQLite write lock, then atomically stores the operator approval and changes the item from draft to committed. A new report remains honestly `pending` until dispatch to a supervised channel worker is implemented; persistence alone is not claimed as on-air execution.
+
 ## Channel worker
 
 `channel-worker <worker-id> <channel-id> <journal-path> <pipe-name> <udp-destination>` connects to the station service through its private duplex Windows named pipe and owns the channel media graph. It reports `Ready` only after fallback output starts, and reports `ShutdownComplete` only after the graph stops. The pipe is restricted to the creating user, Administrators, and SYSTEM, rejects remote clients, and permits only one server instance. `LoadAsset` verifies the asset's content identity and decodability before adding it to the running graph; `TakeAsset` and `ReturnToSchedule` perform bounded source transitions. Every accepted load and on-air change is synchronized to the worker journal before acknowledgement. Live transitions remain explicitly rejected.

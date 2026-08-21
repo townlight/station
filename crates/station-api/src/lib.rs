@@ -6,10 +6,12 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 use std::time::Duration;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::Deserialize;
 use station_domain::StationProfile;
-use station_storage::{ProfileWriteError, StationStore};
+use station_schedule::{MediaAsset, ScheduleItem};
+use station_storage::{CommitWriteError, ProfileWriteError, StationStore};
 
 #[derive(Deserialize)]
 struct PutStationProfile {
@@ -17,6 +19,22 @@ struct PutStationProfile {
     profile: StationProfile,
     #[serde(default)]
     expected_revision: u64,
+}
+
+#[derive(Deserialize)]
+struct PrepareScheduleCommit {
+    plan_id: String,
+    schedule_item_id: String,
+}
+
+#[derive(Deserialize)]
+struct CommitSchedule {
+    report_id: String,
+    plan_id: String,
+    schedule_item_id: String,
+    approved_by: String,
+    #[serde(default)]
+    operator_notes: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -54,6 +72,16 @@ impl Api {
                 Err(message) => error_response(500, "storage_error", &message),
             },
             ("PUT", "/api/v1/station") => self.put_profile(body),
+            ("PUT", "/api/v1/assets") => self.put_media_asset(body),
+            ("PUT", "/api/v1/schedule/items") => self.put_schedule_item(body),
+            ("POST", "/api/v1/schedule/prepare") => self.prepare_schedule_commit(body),
+            ("POST", "/api/v1/schedule/commit") => self.commit_schedule(body),
+            ("GET", path) if path.starts_with("/api/v1/schedule/items?") => {
+                self.list_schedule(path)
+            }
+            ("GET", path) if path.starts_with("/api/v1/schedule/commits/") => {
+                self.read_commit_report(path)
+            }
             _ => error_response(404, "not_found", "The requested route does not exist."),
         }
     }
@@ -96,6 +124,163 @@ impl Api {
             }
         }
     }
+
+    fn put_media_asset(&self, body: Option<&[u8]>) -> ApiResponse {
+        let Some(asset) = parse_body::<MediaAsset>(body) else {
+            return error_response(400, "invalid_json", "A media asset body is required.");
+        };
+        if let Err(error) = asset.validate() {
+            return error_response(422, "validation_failed", &format!("{error:?}"));
+        }
+        match self.storage.put_media_asset(&asset) {
+            Ok(()) => json_response(
+                200,
+                serde_json::to_vec(&asset).expect("serializing a media asset cannot fail"),
+            ),
+            Err(message) => error_response(500, "storage_error", &message),
+        }
+    }
+
+    fn put_schedule_item(&self, body: Option<&[u8]>) -> ApiResponse {
+        let Some(item) = parse_body::<ScheduleItem>(body) else {
+            return error_response(400, "invalid_json", "A schedule item body is required.");
+        };
+        if let Err(error) = item.validate() {
+            return error_response(422, "validation_failed", &format!("{error:?}"));
+        }
+        match self.storage.put_schedule_item(&item) {
+            Ok(()) => json_response(
+                200,
+                serde_json::to_vec(&item).expect("serializing a schedule item cannot fail"),
+            ),
+            Err(message) => error_response(500, "storage_error", &message),
+        }
+    }
+
+    fn prepare_schedule_commit(&self, body: Option<&[u8]>) -> ApiResponse {
+        let Some(command) = parse_body::<PrepareScheduleCommit>(body) else {
+            return error_response(
+                400,
+                "invalid_json",
+                "A commit preparation body is required.",
+            );
+        };
+        match self
+            .storage
+            .prepare_schedule_commit(&command.plan_id, &command.schedule_item_id)
+        {
+            Ok(plan) => json_response(
+                200,
+                serde_json::to_vec(&plan).expect("serializing a commit plan cannot fail"),
+            ),
+            Err(CommitWriteError::NotFound) => error_response(
+                404,
+                "schedule_item_not_found",
+                "The schedule item does not exist.",
+            ),
+            Err(CommitWriteError::Invalid(message)) => {
+                error_response(422, "validation_failed", message)
+            }
+            Err(CommitWriteError::GateFailed(_)) => unreachable!("prepare returns a plan"),
+            Err(CommitWriteError::Storage(message)) => {
+                error_response(500, "storage_error", &message)
+            }
+        }
+    }
+
+    fn commit_schedule(&self, body: Option<&[u8]>) -> ApiResponse {
+        let Some(command) = parse_body::<CommitSchedule>(body) else {
+            return error_response(400, "invalid_json", "A schedule commit body is required.");
+        };
+        let approved_at = match system_time_millis() {
+            Ok(value) => value,
+            Err(message) => return error_response(500, "clock_error", &message),
+        };
+        match self.storage.commit_schedule(
+            &command.report_id,
+            &command.plan_id,
+            &command.schedule_item_id,
+            &command.approved_by,
+            approved_at,
+            &command.operator_notes,
+        ) {
+            Ok(report) => json_response(
+                201,
+                serde_json::to_vec(&report).expect("serializing a commit report cannot fail"),
+            ),
+            Err(CommitWriteError::NotFound) => error_response(
+                404,
+                "schedule_item_not_found",
+                "The schedule item does not exist.",
+            ),
+            Err(CommitWriteError::GateFailed(plan)) => {
+                let status = if plan.missing_media_detail.is_some() {
+                    422
+                } else {
+                    409
+                };
+                json_response(
+                    status,
+                    serde_json::to_vec(&plan).expect("serializing a failed gate cannot fail"),
+                )
+            }
+            Err(CommitWriteError::Invalid(message)) => {
+                error_response(422, "validation_failed", message)
+            }
+            Err(CommitWriteError::Storage(message)) => {
+                error_response(500, "storage_error", &message)
+            }
+        }
+    }
+
+    fn list_schedule(&self, path: &str) -> ApiResponse {
+        let Some(channel_id) = path.strip_prefix("/api/v1/schedule/items?channel_id=") else {
+            return error_response(400, "invalid_query", "channel_id is required.");
+        };
+        if channel_id.is_empty() || channel_id.contains('&') {
+            return error_response(400, "invalid_query", "channel_id is invalid.");
+        }
+        match self.storage.list_channel_schedule(channel_id) {
+            Ok(items) => json_response(
+                200,
+                serde_json::to_vec(&items).expect("serializing schedule items cannot fail"),
+            ),
+            Err(message) => error_response(500, "storage_error", &message),
+        }
+    }
+
+    fn read_commit_report(&self, path: &str) -> ApiResponse {
+        let Some(report_id) = path.strip_prefix("/api/v1/schedule/commits/") else {
+            unreachable!("the route prefix was checked")
+        };
+        if report_id.is_empty() || report_id.contains('/') {
+            return error_response(400, "invalid_path", "The report identity is invalid.");
+        }
+        match self.storage.read_commit_report(report_id) {
+            Ok(Some(report)) => json_response(
+                200,
+                serde_json::to_vec(&report).expect("serializing a commit report cannot fail"),
+            ),
+            Ok(None) => error_response(
+                404,
+                "commit_report_not_found",
+                "The commit report does not exist.",
+            ),
+            Err(message) => error_response(500, "storage_error", &message),
+        }
+    }
+}
+
+fn parse_body<T: serde::de::DeserializeOwned>(body: Option<&[u8]>) -> Option<T> {
+    body.and_then(|body| serde_json::from_slice(body).ok())
+}
+
+fn system_time_millis() -> Result<i64, String> {
+    let millis = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|error| error.to_string())?
+        .as_millis();
+    i64::try_from(millis).map_err(|_| "system time exceeds the supported range".into())
 }
 
 pub fn serve_one(listener: TcpListener, database_path: impl AsRef<Path>) -> Result<(), String> {
@@ -144,6 +329,7 @@ fn serve_stream(stream: &mut TcpStream, api: &Api) -> Result<(), String> {
     };
     let reason = match response.status {
         200 => "OK",
+        201 => "Created",
         400 => "Bad Request",
         404 => "Not Found",
         409 => "Conflict",

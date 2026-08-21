@@ -1,9 +1,8 @@
 [package]
-name = "station-storage"
+name = "station-schedule"
 version.workspace = true
 edition.workspace = true
 publish.workspace = true
 
 [dependencies]
-station-domain.workspace = true
-station-schedule.workspace = true
+serde.workspace = true
