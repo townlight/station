@@ -22,7 +22,7 @@ use station_ingest::{IngestOutcome, IngestWorker, TranscodeOutcome, TranscodeWor
 use station_media_lifecycle::WatchFolderConfig;
 use station_schedule::{
     AssetReadiness, ChannelConfiguration, CommitPlan, CommitReport, DispatchStatus, MediaAsset,
-    OutputProfileId, ScheduleItem, ScheduleState,
+    OutputProfileId, OutputSinkConfiguration, ScheduleItem, ScheduleState,
 };
 use station_storage::StationStore;
 
@@ -150,8 +150,21 @@ fn persists_validated_channel_output_configuration() {
     let channel = ChannelConfiguration {
         channel_id: "8b626c01-bdf8-419a-8a2e-b0a7caa1ff7e".into(),
         display_name: "Primary Cable Channel".into(),
-        udp_destination: "127.0.0.1:5500".into(),
         output_profile: OutputProfileId::Atsc720p5994,
+        output_sinks: vec![
+            OutputSinkConfiguration::required_udp(
+                "11111111-2222-4333-8444-555555555555",
+                "Primary transport",
+                "127.0.0.1:5500",
+                -24.0,
+            ),
+            OutputSinkConfiguration::required_udp(
+                "33333333-4444-4555-8666-777777777777",
+                "Redundant transport",
+                "127.0.0.1:5501",
+                -24.0,
+            ),
+        ],
         enabled: true,
     };
     let put = api.handle(
@@ -174,8 +187,19 @@ fn persists_validated_channel_output_configuration() {
     assert_eq!(profiles[1]["width"], 1_280);
     assert_eq!(profiles[1]["frame_rate_numerator"], 60_000);
     assert_eq!(profiles[1]["frame_rate_denominator"], 1_001);
+    let mut rerouted = channel.clone();
+    rerouted.output_sinks[1].destination = "127.0.0.1:5502".into();
+    let blocked_reroute = api.handle(
+        "PUT",
+        "/api/v1/channels",
+        Some(&serde_json::to_vec(&rerouted).unwrap()),
+    );
+    assert_eq!(blocked_reroute.status, 409);
     let mut changed = channel.clone();
     changed.output_profile = OutputProfileId::Proof360p30;
+    for sink in &mut changed.output_sinks {
+        sink.loudness_target_lufs = -16.0;
+    }
     let blocked = api.handle(
         "PUT",
         "/api/v1/channels",
@@ -206,9 +230,23 @@ fn persists_validated_channel_output_configuration() {
     let invalid = api.handle(
         "PUT",
         "/api/v1/channels",
-        Some(br#"{"channel_id":"not-a-uuid","display_name":"Bad","udp_destination":"nowhere","enabled":true}"#),
+        Some(br#"{"channel_id":"not-a-uuid","display_name":"Bad","output_profile":"proof-360p30","output_sinks":[{"sink_id":"11111111-2222-4333-8444-555555555555","label":"Bad transport","kind":"udp-ts","destination":"nowhere","loudness_target_lufs":-16.0,"required":true,"enabled":true}],"enabled":true}"#),
     );
     assert_eq!(invalid.status, 422);
+    let mut no_live_sink = changed;
+    no_live_sink.enabled = true;
+    for sink in &mut no_live_sink.output_sinks {
+        sink.enabled = false;
+    }
+    assert_eq!(
+        api.handle(
+            "PUT",
+            "/api/v1/channels",
+            Some(&serde_json::to_vec(&no_live_sink).unwrap())
+        )
+        .status,
+        422
+    );
     let _ = std::fs::remove_file(database);
 }
 
@@ -218,8 +256,13 @@ fn exposes_runtime_safe_to_air_and_acknowledges_durable_alerts() {
     let channel = ChannelConfiguration {
         channel_id: "8b626c01-bdf8-419a-8a2e-b0a7caa1ff7e".into(),
         display_name: "Primary Cable Channel".into(),
-        udp_destination: "127.0.0.1:5500".into(),
         output_profile: Default::default(),
+        output_sinks: vec![OutputSinkConfiguration::required_udp(
+            "22222222-3333-4444-8555-666666666666",
+            "Primary transport",
+            "127.0.0.1:5500",
+            -16.0,
+        )],
         enabled: true,
     };
     let now = SystemTime::now()

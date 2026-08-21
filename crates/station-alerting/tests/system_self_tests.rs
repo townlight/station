@@ -11,7 +11,7 @@ use station_domain::{
     SelfTestKind, SelfTestSchedule, SelfTestStatus, SelfTestTrigger, StationProfile,
     SystemResourceSample,
 };
-use station_schedule::ChannelConfiguration;
+use station_schedule::{ChannelConfiguration, OutputSinkConfiguration};
 use station_storage::StationStore;
 
 const CHANNEL_ID: &str = "7c86749e-a4bb-4323-866d-fea8720e77b7";
@@ -50,8 +50,13 @@ fn build_healthy_station(root: &Path, now: i64) -> PathBuf {
         .put_channel(&ChannelConfiguration {
             channel_id: CHANNEL_ID.into(),
             display_name: "Government".into(),
-            udp_destination: "127.0.0.1:5100".into(),
             output_profile: Default::default(),
+            output_sinks: vec![OutputSinkConfiguration::required_udp(
+                CHANNEL_ID,
+                "Primary transport",
+                "127.0.0.1:5100",
+                -16.0,
+            )],
             enabled: true,
         })
         .unwrap();

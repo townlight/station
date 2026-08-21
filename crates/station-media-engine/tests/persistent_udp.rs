@@ -12,6 +12,36 @@ use station_media_engine::{PersistentPlayout, SourceRole};
 use station_schedule::OutputProfileId;
 
 #[test]
+fn fans_one_persistent_transport_out_to_two_independent_udp_sinks() {
+    let primary = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let redundant = UdpSocket::bind("127.0.0.1:0").unwrap();
+    for receiver in [&primary, &redundant] {
+        receiver
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+    }
+    let playout = PersistentPlayout::start_udp_fanout_with_profile(
+        &[
+            primary.local_addr().unwrap(),
+            redundant.local_addr().unwrap(),
+        ],
+        OutputProfileId::Proof360p30,
+    )
+    .expect("one graph must start both transport branches");
+    let mut primary_truth = ContinuityTracker::default();
+    let mut redundant_truth = ContinuityTracker::default();
+    assert_transport_stream(&primary, &mut primary_truth, 24);
+    assert_transport_stream(&redundant, &mut redundant_truth, 24);
+    for truth in [&primary_truth, &redundant_truth] {
+        assert!(truth.video_pid.is_some());
+        assert!(truth.audio_pid.is_some());
+        assert!(truth.video_pts_samples >= 3);
+        assert!(truth.audio_pts_samples >= 3);
+    }
+    playout.stop().unwrap();
+}
+
+#[test]
 fn emits_the_selected_720p5994_constant_bitrate_transport_contract() {
     let receiver = UdpSocket::bind("127.0.0.1:0").unwrap();
     receiver

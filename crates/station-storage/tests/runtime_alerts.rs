@@ -7,7 +7,7 @@ use station_domain::{
     ChannelRuntimeState, SelfTestKind, SelfTestSchedule, SelfTestStatus, SelfTestTrigger,
     SystemResourceSample, SystemSelfTest, redact_alert_channel_target,
 };
-use station_schedule::ChannelConfiguration;
+use station_schedule::{ChannelConfiguration, OutputSinkConfiguration};
 use station_storage::{AlertChannelSecret, StationStore};
 
 const CHANNEL_ID: &str = "8ea48bc4-7f2e-4f89-9bbc-2c58472f0e8e";
@@ -95,8 +95,13 @@ fn persists_monotonic_channel_runtime_truth() {
         .put_channel(&ChannelConfiguration {
             channel_id: CHANNEL_ID.into(),
             display_name: "Government Channel".into(),
-            udp_destination: "127.0.0.1:5500".into(),
             output_profile: Default::default(),
+            output_sinks: vec![OutputSinkConfiguration::required_udp(
+                CHANNEL_ID,
+                "Primary transport",
+                "127.0.0.1:5500",
+                -16.0,
+            )],
             enabled: true,
         })
         .unwrap();

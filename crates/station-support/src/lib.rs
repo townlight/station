@@ -658,7 +658,7 @@ mod tests {
         AlertChannel, AlertChannelKind, ChannelRuntimeObservation, ChannelRuntimeState,
         StationProfile, SystemResourceSample, redact_alert_channel_target,
     };
-    use station_schedule::ChannelConfiguration;
+    use station_schedule::{ChannelConfiguration, OutputSinkConfiguration};
     use station_storage::{AlertChannelSecret, StationStore};
 
     use super::*;
@@ -707,8 +707,13 @@ mod tests {
             .put_channel(&ChannelConfiguration {
                 channel_id: channel_id.into(),
                 display_name: "Government".into(),
-                udp_destination: "127.0.0.1:5798".into(),
                 output_profile: Default::default(),
+                output_sinks: vec![OutputSinkConfiguration::required_udp(
+                    channel_id,
+                    "Primary transport",
+                    "127.0.0.1:5798",
+                    -16.0,
+                )],
                 enabled: true,
             })
             .unwrap();

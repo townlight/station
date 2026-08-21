@@ -79,7 +79,19 @@ impl PersistentPlayout {
         destination: SocketAddr,
         output_profile: OutputProfileId,
     ) -> Result<Self, EngineError> {
-        Self::start_udp_with_program(destination, None, output_profile)
+        Self::start_udp_fanout_with_profile(&[destination], output_profile)
+    }
+
+    pub fn start_udp_fanout_with_profile(
+        destinations: &[SocketAddr],
+        output_profile: OutputProfileId,
+    ) -> Result<Self, EngineError> {
+        if destinations.is_empty() {
+            return Err(EngineError::Pipeline(
+                "at least one UDP output destination is required".into(),
+            ));
+        }
+        Self::start_udp_fanout_with_program(destinations, None, output_profile)
     }
 
     pub fn start_file_udp(
@@ -96,11 +108,15 @@ impl PersistentPlayout {
     ) -> Result<Self, EngineError> {
         station_media_assets::validate_media(media_path.as_ref())
             .map_err(|error| EngineError::MediaRejected(format!("{error:?}")))?;
-        Self::start_udp_with_program(destination, Some(media_path.as_ref()), output_profile)
+        Self::start_udp_fanout_with_program(
+            &[destination],
+            Some(media_path.as_ref()),
+            output_profile,
+        )
     }
 
-    fn start_udp_with_program(
-        destination: SocketAddr,
+    fn start_udp_fanout_with_program(
+        destinations: &[SocketAddr],
         media_path: Option<&Path>,
         output_profile: OutputProfileId,
     ) -> Result<Self, EngineError> {
@@ -205,14 +221,20 @@ impl PersistentPlayout {
             .property("pcr-interval", 3_600_u32)
             .build()
             .map_err(|error| build_error("mpegtsmux", error))?;
-        let sink = gst::ElementFactory::make("udpsink")
-            .name("udp-output")
-            .property("host", destination.ip().to_string())
-            .property("port", destination.port() as i32)
-            .property("sync", false)
-            .property("async", false)
-            .build()
-            .map_err(|error| build_error("udpsink", error))?;
+        let transport_fanout = element("tee", "transport-fanout")?;
+        let mut output_branches = Vec::with_capacity(destinations.len());
+        for (index, destination) in destinations.iter().enumerate() {
+            let queue = element("queue", format!("transport-output-queue-{index}"))?;
+            let sink = gst::ElementFactory::make("udpsink")
+                .name(format!("udp-output-{index}"))
+                .property("host", destination.ip().to_string())
+                .property("port", i32::from(destination.port()))
+                .property("sync", false)
+                .property("async", false)
+                .build()
+                .map_err(|error| build_error("udpsink", error))?;
+            output_branches.push((queue, sink));
+        }
 
         pipeline
             .add_many([
@@ -244,9 +266,14 @@ impl PersistentPlayout {
                 &audio_encoder,
                 &audio_parser,
                 &mux,
-                &sink,
+                &transport_fanout,
             ])
             .map_err(|error| EngineError::Pipeline(error.to_string()))?;
+        for (queue, sink) in &output_branches {
+            pipeline
+                .add_many([queue, sink])
+                .map_err(|error| EngineError::Pipeline(error.to_string()))?;
+        }
         link(&fallback, &fallback_queue, "videotestsrc", "queue")?;
         link(&program, &program_queue, "videotestsrc", "queue")?;
         gst::Element::link_many([
@@ -280,12 +307,20 @@ impl PersistentPlayout {
             &encoder,
             &parser,
             &mux,
-            &sink,
+            &transport_fanout,
         ])
         .map_err(|_| EngineError::Link {
             from: "input-selector",
-            to: "udpsink",
+            to: "transport-fanout",
         })?;
+        for (queue, sink) in &output_branches {
+            gst::Element::link_many([&transport_fanout, queue, sink]).map_err(|_| {
+                EngineError::Link {
+                    from: "transport-fanout",
+                    to: "udpsink",
+                }
+            })?;
+        }
         gst::Element::link_many([
             &audio_selector,
             &audio_timeline,
@@ -449,6 +484,10 @@ impl PersistentPlayout {
     pub fn stop(mut self) -> Result<(), EngineError> {
         self.pipeline
             .set_state(gst::State::Null)
+            .map_err(|error| EngineError::State(format!("{error:?}")))?;
+        self.pipeline
+            .state(gst::ClockTime::from_seconds(5))
+            .0
             .map_err(|error| EngineError::State(format!("{error:?}")))?;
         self.stopped = true;
         Ok(())

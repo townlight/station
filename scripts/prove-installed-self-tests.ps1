@@ -81,7 +81,8 @@ try {
     $outputBody = @{
         channel_id = $outputChannelId
         display_name = 'Installed self-test proof output'
-        udp_destination = '127.0.0.1:5795'
+        output_profile = 'proof-360p30'
+        output_sinks = @([ordered]@{ sink_id = $outputChannelId; label = 'Primary transport'; kind = 'udp-ts'; destination = '127.0.0.1:5795'; loudness_target_lufs = -16.0; required = $true; enabled = $true })
         enabled = $true
     } | ConvertTo-Json -Compress
     Invoke-RestMethod -Method Put -Uri "$BaseUrl/channels" -ContentType 'application/json' -Body $outputBody | Out-Null
@@ -277,7 +278,8 @@ finally {
         $disabledOutputBody = @{
             channel_id = $outputChannelId
             display_name = 'Installed self-test proof output'
-            udp_destination = '127.0.0.1:5795'
+            output_profile = 'proof-360p30'
+            output_sinks = @([ordered]@{ sink_id = $outputChannelId; label = 'Primary transport'; kind = 'udp-ts'; destination = '127.0.0.1:5795'; loudness_target_lufs = -16.0; required = $true; enabled = $true })
             enabled = $false
         } | ConvertTo-Json -Compress
         try {

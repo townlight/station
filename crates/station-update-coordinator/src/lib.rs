@@ -801,7 +801,7 @@ mod tests {
     use ed25519_dalek::{Signer, SigningKey};
     use sha2::{Digest, Sha256};
     use station_domain::{ChannelRuntimeObservation, ChannelRuntimeState};
-    use station_schedule::ChannelConfiguration;
+    use station_schedule::{ChannelConfiguration, OutputSinkConfiguration};
     use station_update::{
         ReleaseManifest, SignedReleaseEnvelope, TrustedReleaseKey, UPDATE_PACKAGE_SCHEMA_VERSION,
         UpdatePackageFile, UpdatePackageManifest, prepared_slot_path,
@@ -992,8 +992,13 @@ mod tests {
             .put_channel(&ChannelConfiguration {
                 channel_id: channel_id.into(),
                 display_name: "Government Channel".into(),
-                udp_destination: "127.0.0.1:5100".into(),
                 output_profile: Default::default(),
+                output_sinks: vec![OutputSinkConfiguration::required_udp(
+                    channel_id,
+                    "Primary transport",
+                    "127.0.0.1:5100",
+                    -16.0,
+                )],
                 enabled: true,
             })
             .unwrap();

@@ -80,6 +80,36 @@ impl WorkerSupervisor {
         output_profile: OutputProfileId,
         timeout: Duration,
     ) -> Result<Self, SupervisorError> {
+        Self::launch_with_output_profile_and_destinations(
+            executable,
+            worker_id,
+            channel_id,
+            journal_path,
+            &[udp_destination],
+            output_profile,
+            timeout,
+        )
+    }
+
+    pub fn launch_with_output_profile_and_destinations(
+        executable: &Path,
+        worker_id: &str,
+        channel_id: &str,
+        journal_path: &Path,
+        udp_destinations: &[SocketAddr],
+        output_profile: OutputProfileId,
+        timeout: Duration,
+    ) -> Result<Self, SupervisorError> {
+        let destinations = serde_json::to_string(
+            &udp_destinations
+                .iter()
+                .map(SocketAddr::to_string)
+                .collect::<Vec<_>>(),
+        )
+        .map_err(|error| SupervisorError::Io {
+            operation: "serialize channel output destinations",
+            message: error.to_string(),
+        })?;
         let started = Instant::now();
         let suffix = format!(
             "worker-{}-{}",
@@ -91,7 +121,7 @@ impl WorkerSupervisor {
             .args([worker_id, channel_id])
             .arg(journal_path)
             .arg(server.name())
-            .arg(udp_destination.to_string())
+            .arg(destinations)
             .arg(output_profile.storage_name())
             .stdin(Stdio::null())
             .stdout(Stdio::null())

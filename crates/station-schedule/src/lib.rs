@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum OutputProfileId {
@@ -83,6 +84,42 @@ impl OutputProfileId {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum OutputSinkKind {
+    UdpTs,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct OutputSinkConfiguration {
+    pub sink_id: String,
+    pub label: String,
+    pub kind: OutputSinkKind,
+    pub destination: String,
+    pub loudness_target_lufs: f32,
+    pub required: bool,
+    pub enabled: bool,
+}
+
+impl OutputSinkConfiguration {
+    pub fn required_udp(
+        sink_id: impl Into<String>,
+        label: impl Into<String>,
+        destination: impl Into<String>,
+        loudness_target_lufs: f32,
+    ) -> Self {
+        Self {
+            sink_id: sink_id.into(),
+            label: label.into(),
+            kind: OutputSinkKind::UdpTs,
+            destination: destination.into(),
+            loudness_target_lufs,
+            required: true,
+            enabled: true,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MediaAsset {
     pub asset_id: String,
@@ -111,13 +148,13 @@ pub struct ScheduleItem {
     pub state: ScheduleState,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ChannelConfiguration {
     pub channel_id: String,
     pub display_name: String,
-    pub udp_destination: String,
     #[serde(default)]
     pub output_profile: OutputProfileId,
+    pub output_sinks: Vec<OutputSinkConfiguration>,
     pub enabled: bool,
 }
 
@@ -258,17 +295,6 @@ impl ChannelConfiguration {
                 "display_name must contain 1 to 120 visible characters",
             ));
         }
-        let destination = self
-            .udp_destination
-            .parse::<std::net::SocketAddr>()
-            .map_err(|_| {
-                ScheduleError::Invalid("udp_destination must be an IP address and port")
-            })?;
-        if destination.port() == 0 {
-            return Err(ScheduleError::Invalid(
-                "udp_destination port must be nonzero",
-            ));
-        }
         let profile = self.output_profile.profile();
         if profile.interlaced
             || profile.width == 0
@@ -283,6 +309,64 @@ impl ChannelConfiguration {
         {
             return Err(ScheduleError::Invalid(
                 "output_profile does not define a runnable broadcast contract",
+            ));
+        }
+        if self.output_sinks.is_empty() {
+            return Err(ScheduleError::Invalid(
+                "a channel must define at least one output sink",
+            ));
+        }
+        let mut sink_ids = HashSet::new();
+        let mut labels = HashSet::new();
+        for sink in &self.output_sinks {
+            if !is_uuid(&sink.sink_id) || !sink_ids.insert(sink.sink_id.as_str()) {
+                return Err(ScheduleError::Invalid(
+                    "output sink identities must be unique canonical UUIDs",
+                ));
+            }
+            if sink.label.trim() != sink.label
+                || sink.label.is_empty()
+                || sink.label.len() > 120
+                || sink.label.chars().any(char::is_control)
+                || !labels.insert(sink.label.to_lowercase())
+            {
+                return Err(ScheduleError::Invalid(
+                    "output sink labels must be unique, trimmed, and 1-120 visible characters",
+                ));
+            }
+            match sink.kind {
+                OutputSinkKind::UdpTs => {
+                    let destination =
+                        sink.destination
+                            .parse::<std::net::SocketAddr>()
+                            .map_err(|_| {
+                                ScheduleError::Invalid(
+                                    "UDP transport destinations must be an IP address and port",
+                                )
+                            })?;
+                    if destination.port() == 0 {
+                        return Err(ScheduleError::Invalid(
+                            "UDP transport destination ports must be nonzero",
+                        ));
+                    }
+                }
+            }
+            if !sink.loudness_target_lufs.is_finite()
+                || !(-70.0..=-5.0).contains(&sink.loudness_target_lufs)
+            {
+                return Err(ScheduleError::Invalid(
+                    "output sink loudness targets must be finite and between -70 and -5 LUFS",
+                ));
+            }
+            if (sink.loudness_target_lufs - profile.loudness_target_lufs).abs() > f32::EPSILON {
+                return Err(ScheduleError::Invalid(
+                    "UDP transport sink loudness must match the selected encoded profile",
+                ));
+            }
+        }
+        if self.enabled && !self.output_sinks.iter().any(|sink| sink.enabled) {
+            return Err(ScheduleError::Invalid(
+                "an enabled channel must have at least one enabled output sink",
             ));
         }
         Ok(())

@@ -96,7 +96,8 @@ try {
     $channelBody = @{
         channel_id = $channelId
         display_name = 'Installed alert delivery proof'
-        udp_destination = '127.0.0.1:5791'
+        output_profile = 'proof-360p30'
+        output_sinks = @([ordered]@{ sink_id = $channelId; label = 'Primary transport'; kind = 'udp-ts'; destination = '127.0.0.1:5791'; loudness_target_lufs = -16.0; required = $true; enabled = $true })
         enabled = $true
     } | ConvertTo-Json -Compress
     Invoke-RestMethod -Method Put -Uri "$BaseUrl/channels" -ContentType 'application/json' -Body $channelBody | Out-Null
@@ -162,7 +163,8 @@ finally {
     $disabledChannelBody = @{
         channel_id = $channelId
         display_name = 'Installed alert delivery proof'
-        udp_destination = '127.0.0.1:5791'
+        output_profile = 'proof-360p30'
+        output_sinks = @([ordered]@{ sink_id = $channelId; label = 'Primary transport'; kind = 'udp-ts'; destination = '127.0.0.1:5791'; loudness_target_lufs = -16.0; required = $true; enabled = $true })
         enabled = $false
     } | ConvertTo-Json -Compress
     try { Invoke-RestMethod -Method Put -Uri "$BaseUrl/channels" -ContentType 'application/json' -Body $disabledChannelBody | Out-Null } catch {}

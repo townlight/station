@@ -15,7 +15,7 @@ use station_orchestration::{ChannelController, DispatchTransition, run_until};
 use station_runtime::WorkerSupervisor;
 use station_schedule::{
     AssetReadiness, ChannelConfiguration, DispatchStatus, MediaAsset, OutputProfileId,
-    ScheduleItem, ScheduleState,
+    OutputSinkConfiguration, ScheduleItem, ScheduleState,
 };
 use station_storage::StationStore;
 
@@ -239,8 +239,13 @@ fn committed_schedule_is_loaded_aired_and_completed_only_after_worker_acknowledg
     let channel = ChannelConfiguration {
         channel_id: CHANNEL_ID.into(),
         display_name: "Primary Cable Channel".into(),
-        udp_destination: output.local_addr().unwrap().to_string(),
         output_profile: Default::default(),
+        output_sinks: vec![OutputSinkConfiguration::required_udp(
+            CHANNEL_ID,
+            "Primary transport",
+            output.local_addr().unwrap().to_string(),
+            -16.0,
+        )],
         enabled: true,
     };
     let now = SystemTime::now()
@@ -413,11 +418,30 @@ fn daemon_loop_discovers_an_enabled_channel_and_completes_its_committed_item() {
     generate_fixture(&source, "zone-plate");
     let ingested = ingest_media(&source, root.join("library")).unwrap();
     let output = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let redundant_output = UdpSocket::bind("127.0.0.1:0").unwrap();
+    for receiver in [&output, &redundant_output] {
+        receiver
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+    }
     let channel = ChannelConfiguration {
         channel_id: CHANNEL_ID.into(),
         display_name: "Daemon-owned channel".into(),
-        udp_destination: output.local_addr().unwrap().to_string(),
         output_profile: Default::default(),
+        output_sinks: vec![
+            OutputSinkConfiguration::required_udp(
+                CHANNEL_ID,
+                "Primary transport",
+                output.local_addr().unwrap().to_string(),
+                -16.0,
+            ),
+            OutputSinkConfiguration::required_udp(
+                "44444444-5555-4666-8777-888888888888",
+                "Redundant transport",
+                redundant_output.local_addr().unwrap().to_string(),
+                -16.0,
+            ),
+        ],
         enabled: true,
     };
     let now = SystemTime::now()
@@ -481,6 +505,13 @@ fn daemon_loop_discovers_an_enabled_channel_and_completes_its_committed_item() {
     }
     stop.store(true, Ordering::Release);
     runner.join().unwrap().unwrap();
+    for receiver in [&output, &redundant_output] {
+        let mut datagram = [0_u8; 65_536];
+        let received = receiver.recv(&mut datagram).unwrap();
+        assert!(received >= 188);
+        assert_eq!(received % 188, 0);
+        assert_eq!(datagram[0], 0x47);
+    }
     let events = read_events(
         root.join("channel-journals")
             .join(format!("{CHANNEL_ID}.tlj")),
@@ -509,8 +540,13 @@ fn daemon_records_one_deduplicated_incident_per_condition_when_worker_cannot_sta
         .put_channel(&ChannelConfiguration {
             channel_id: CHANNEL_ID.into(),
             display_name: "Failure proof channel".into(),
-            udp_destination: "127.0.0.1:5519".into(),
             output_profile: Default::default(),
+            output_sinks: vec![OutputSinkConfiguration::required_udp(
+                CHANNEL_ID,
+                "Primary transport",
+                "127.0.0.1:5519",
+                -16.0,
+            )],
             enabled: true,
         })
         .unwrap();

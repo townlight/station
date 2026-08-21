@@ -617,7 +617,7 @@ impl Api {
         };
         if existing.as_ref().is_some_and(|existing| {
             existing.enabled
-                && (existing.udp_destination != channel.udp_destination
+                && (existing.output_sinks != channel.output_sinks
                     || existing.output_profile != channel.output_profile)
         }) {
             return error_response(

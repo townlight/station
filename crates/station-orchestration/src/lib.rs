@@ -13,7 +13,7 @@ use station_domain::{
 };
 use station_media_protocol::{ChannelCommand, WorkerEvent};
 use station_runtime::{SupervisorError, WorkerSupervisor};
-use station_schedule::{ChannelConfiguration, DispatchStatus};
+use station_schedule::{ChannelConfiguration, DispatchStatus, OutputSinkKind};
 use station_storage::StationStore;
 
 static ALERT_SEQUENCE: AtomicU64 = AtomicU64::new(1);
@@ -59,17 +59,23 @@ impl ChannelController {
         channel
             .validate()
             .map_err(|error| OrchestrationError::InvalidDestination(format!("{error:?}")))?;
-        let destination: SocketAddr = channel
-            .udp_destination
-            .parse()
-            .map_err(|_| OrchestrationError::InvalidDestination(channel.udp_destination.clone()))?;
+        let destinations = channel
+            .output_sinks
+            .iter()
+            .filter(|sink| sink.enabled && sink.kind == OutputSinkKind::UdpTs)
+            .map(|sink| {
+                sink.destination
+                    .parse::<SocketAddr>()
+                    .map_err(|_| OrchestrationError::InvalidDestination(sink.destination.clone()))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
         let worker_id = format!("station-worker-{}", channel.channel_id);
-        let supervisor = WorkerSupervisor::launch_with_output_profile(
+        let supervisor = WorkerSupervisor::launch_with_output_profile_and_destinations(
             worker_executable,
             &worker_id,
             &channel.channel_id,
             journal_path,
-            destination,
+            &destinations,
             channel.output_profile,
             timeout,
         )

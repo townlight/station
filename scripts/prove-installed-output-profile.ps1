@@ -1,6 +1,7 @@
 param(
     [string]$BaseUri = 'http://127.0.0.1:4070',
     [int]$DestinationPort = 5920,
+    [int]$RedundantDestinationPort = 5921,
     [int]$CaptureSeconds = 3
 )
 
@@ -8,14 +9,20 @@ $ErrorActionPreference = 'Stop'
 $channel = [ordered]@{
     channel_id = '205ba78d-eb32-4464-9e3f-5ba780dcd2c4'
     display_name = 'Installed 720p59.94 profile proof'
-    udp_destination = "127.0.0.1:$DestinationPort"
     output_profile = 'atsc-720p5994'
+    output_sinks = @(
+        [ordered]@{ sink_id = '205ba78d-eb32-4464-9e3f-5ba780dcd2c4'; label = 'Primary transport'; kind = 'udp-ts'; destination = "127.0.0.1:$DestinationPort"; loudness_target_lufs = -24.0; required = $true; enabled = $true }
+        [ordered]@{ sink_id = '7a68be4c-f96f-4e26-b483-c5853748293e'; label = 'Redundant transport'; kind = 'udp-ts'; destination = "127.0.0.1:$RedundantDestinationPort"; loudness_target_lufs = -24.0; required = $true; enabled = $true }
+    )
     enabled = $true
 }
 $capture = Join-Path ([IO.Path]::GetTempPath()) "townlight-installed-720p-$PID.ts"
 $receiver = [Net.Sockets.UdpClient]::new($DestinationPort)
-$receiver.Client.ReceiveTimeout = 5000
+$redundantReceiver = [Net.Sockets.UdpClient]::new($RedundantDestinationPort)
+$receiver.Client.ReceiveBufferSize = 8388608
+$redundantReceiver.Client.ReceiveBufferSize = 8388608
 $memory = [IO.MemoryStream]::new()
+$redundantMemory = [IO.MemoryStream]::new()
 
 try {
     $profiles = Invoke-RestMethod -Uri "$BaseUri/api/v1/output-profiles" -TimeoutSec 5
@@ -28,16 +35,42 @@ try {
 
     Invoke-RestMethod -Method Put -Uri "$BaseUri/api/v1/channels" -ContentType 'application/json' `
         -Body ($channel | ConvertTo-Json -Compress) -TimeoutSec 10 | Out-Null
+    $readyClock = [Diagnostics.Stopwatch]::StartNew()
+    while (($receiver.Available -eq 0 -or $redundantReceiver.Available -eq 0) -and $readyClock.Elapsed.TotalSeconds -lt 10) {
+        Start-Sleep -Milliseconds 2
+    }
+    if ($receiver.Available -eq 0 -or $redundantReceiver.Available -eq 0) {
+        throw 'Both installed UDP branches did not become active within 10 seconds.'
+    }
     $remote = [Net.IPEndPoint]::new([Net.IPAddress]::Any, 0)
-    $first = $receiver.Receive([ref]$remote)
+    $redundantRemote = [Net.IPEndPoint]::new([Net.IPAddress]::Any, 0)
     $clock = [Diagnostics.Stopwatch]::StartNew()
     while ($clock.Elapsed.TotalSeconds -lt $CaptureSeconds) {
-        $datagram = $receiver.Receive([ref]$remote)
-        $memory.Write($datagram, 0, $datagram.Length)
+        while ($receiver.Available -gt 0) {
+            $datagram = $receiver.Receive([ref]$remote)
+            $memory.Write($datagram, 0, $datagram.Length)
+        }
+        while ($redundantReceiver.Available -gt 0) {
+            $datagram = $redundantReceiver.Receive([ref]$redundantRemote)
+            $redundantMemory.Write($datagram, 0, $datagram.Length)
+        }
+        Start-Sleep -Milliseconds 1
     }
     $clock.Stop()
     $bytes = $memory.ToArray()
+    $redundantBytes = $redundantMemory.ToArray()
     [IO.File]::WriteAllBytes($capture, $bytes)
+
+    foreach ($branch in @($bytes, $redundantBytes)) {
+        if ($branch.Length -lt 1000000) {
+            throw "An installed UDP branch captured only $($branch.Length) bytes."
+        }
+        for ($syncOffset = 0; $syncOffset + 188 -le $branch.Length; $syncOffset += 188) {
+            if ($branch[$syncOffset] -ne 0x47) {
+                throw "An installed UDP branch lost MPEG-TS sync at byte $syncOffset."
+            }
+        }
+    }
 
     $nullPackets = 0
     $pmtPid = -1
@@ -114,8 +147,12 @@ try {
         }
     }
     $bitrate = [math]::Round(($bytes.Length * 8) / $clock.Elapsed.TotalSeconds)
+    $redundantBitrate = [math]::Round(($redundantBytes.Length * 8) / $clock.Elapsed.TotalSeconds)
     if ($bitrate -lt 7600000 -or $bitrate -gt 8400000) {
         throw "Installed transport measured $bitrate bps instead of the 8 Mb/s contract."
+    }
+    if ($redundantBitrate -lt 7600000 -or $redundantBitrate -gt 8400000) {
+        throw "Installed redundant transport measured $redundantBitrate bps instead of the 8 Mb/s contract."
     }
     if ($nullPackets -eq 0) {
         throw 'Installed transport contained no CBR null-packet padding.'
@@ -146,7 +183,10 @@ try {
         measured_frame_rate = [math]::Round(90000 / $averageVideoTicks, 3)
         video_pts_intervals = $videoPtsDeltaSamples
         measured_transport_bitrate_bps = $bitrate
+        redundant_transport_bitrate_bps = $redundantBitrate
         captured_bytes = $bytes.Length
+        redundant_captured_bytes = $redundantBytes.Length
+        proven_output_branches = 2
         null_packets = $nullPackets
         service_health = (Invoke-RestMethod -Uri "$BaseUri/health" -TimeoutSec 5).status
     } | ConvertTo-Json
@@ -161,6 +201,8 @@ finally {
         Write-Warning "Could not disable the proof output: $($_.Exception.Message)"
     }
     $receiver.Dispose()
+    $redundantReceiver.Dispose()
     $memory.Dispose()
+    $redundantMemory.Dispose()
     Remove-Item -LiteralPath $capture -Force -ErrorAction SilentlyContinue
 }

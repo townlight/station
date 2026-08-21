@@ -17,7 +17,8 @@ use station_media_lifecycle::{
 };
 use station_schedule::{
     AssetReadiness, ChannelConfiguration, CommitPlan, CommitReport, DispatchJob, DispatchStatus,
-    MediaAsset, OutputProfileId, ScheduleItem, ScheduleState, prepare_commit,
+    MediaAsset, OutputProfileId, OutputSinkConfiguration, OutputSinkKind, ScheduleItem,
+    ScheduleState, prepare_commit,
 };
 use station_update::{
     PreparedSlotRecord, StagedPackageRecord, UpdateCheckOutcome, UpdateCheckRecord,
@@ -323,6 +324,19 @@ impl StationStore {
                detail TEXT NOT NULL DEFAULT '',\
                FOREIGN KEY(channel_id) REFERENCES channels(channel_id) ON DELETE CASCADE\
              );\
+             CREATE TABLE IF NOT EXISTS channel_output_sinks (\
+               channel_id TEXT NOT NULL,\
+               sink_id TEXT NOT NULL,\
+               label TEXT NOT NULL,\
+               kind TEXT NOT NULL CHECK (kind IN ('udp-ts')),\
+               destination TEXT NOT NULL,\
+               loudness_target_milli INTEGER NOT NULL,\
+               required INTEGER NOT NULL CHECK (required IN (0,1)),\
+               enabled INTEGER NOT NULL CHECK (enabled IN (0,1)),\
+               PRIMARY KEY(channel_id, sink_id),\
+               UNIQUE(channel_id, label),\
+               FOREIGN KEY(channel_id) REFERENCES channels(channel_id) ON DELETE CASCADE\
+             );\
              CREATE TABLE IF NOT EXISTS alert_events (\
                event_id TEXT PRIMARY KEY,\
                condition TEXT NOT NULL,\
@@ -488,6 +502,7 @@ impl StationStore {
         store.migrate_commit_report_statuses()?;
         store.migrate_alert_delivery_realerts()?;
         store.migrate_channel_output_profile()?;
+        store.migrate_channel_output_sinks()?;
         store.seed_default_alert_rules()?;
         store.seed_default_self_test_schedules()?;
         Ok(store)
@@ -1119,13 +1134,22 @@ impl StationStore {
 
     pub fn put_channel(&self, channel: &ChannelConfiguration) -> Result<(), String> {
         channel.validate().map_err(|error| format!("{error:?}"))?;
+        self.execute("BEGIN IMMEDIATE")?;
+        let outcome = self.put_channel_transaction(channel);
+        self.finish_transaction(outcome)
+    }
+
+    fn put_channel_transaction(&self, channel: &ChannelConfiguration) -> Result<(), String> {
         let statement = self.prepare(
             "INSERT INTO channels(channel_id, display_name, udp_destination, output_profile, enabled) VALUES(?1, ?2, ?3, ?4, ?5) \
              ON CONFLICT(channel_id) DO UPDATE SET display_name=excluded.display_name, udp_destination=excluded.udp_destination, output_profile=excluded.output_profile, enabled=excluded.enabled",
         )?;
         let channel_id = c_string(&channel.channel_id, "channel identity")?;
         let display_name = c_string(&channel.display_name, "channel display name")?;
-        let destination = c_string(&channel.udp_destination, "UDP destination")?;
+        let destination = c_string(
+            &channel.output_sinks[0].destination,
+            "primary output destination",
+        )?;
         let output_profile = c_string(
             channel.output_profile.storage_name(),
             "channel output profile",
@@ -1135,12 +1159,42 @@ impl StationStore {
         bind_text(self.database, statement.raw, 3, &destination)?;
         bind_text(self.database, statement.raw, 4, &output_profile)?;
         bind_i64(self.database, statement.raw, 5, i64::from(channel.enabled))?;
-        expect_done(self.database, statement.raw)
+        expect_done(self.database, statement.raw)?;
+        drop(statement);
+        let delete = self.prepare("DELETE FROM channel_output_sinks WHERE channel_id=?1")?;
+        bind_text(self.database, delete.raw, 1, &channel_id)?;
+        expect_done(self.database, delete.raw)?;
+        drop(delete);
+        for sink in &channel.output_sinks {
+            let insert = self.prepare(
+                "INSERT INTO channel_output_sinks(channel_id, sink_id, label, kind, destination, loudness_target_milli, required, enabled) \
+                 VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            )?;
+            let sink_id = c_string(&sink.sink_id, "output sink identity")?;
+            let label = c_string(&sink.label, "output sink label")?;
+            let kind = c_string(output_sink_kind_name(sink.kind), "output sink kind")?;
+            let destination = c_string(&sink.destination, "output sink destination")?;
+            bind_text(self.database, insert.raw, 1, &channel_id)?;
+            bind_text(self.database, insert.raw, 2, &sink_id)?;
+            bind_text(self.database, insert.raw, 3, &label)?;
+            bind_text(self.database, insert.raw, 4, &kind)?;
+            bind_text(self.database, insert.raw, 5, &destination)?;
+            bind_i64(
+                self.database,
+                insert.raw,
+                6,
+                (sink.loudness_target_lufs * 1_000.0).round() as i64,
+            )?;
+            bind_i64(self.database, insert.raw, 7, i64::from(sink.required))?;
+            bind_i64(self.database, insert.raw, 8, i64::from(sink.enabled))?;
+            expect_done(self.database, insert.raw)?;
+        }
+        Ok(())
     }
 
     pub fn list_channels(&self) -> Result<Vec<ChannelConfiguration>, String> {
         let statement = self.prepare(
-            "SELECT channel_id, display_name, udp_destination, output_profile, enabled FROM channels ORDER BY channel_id",
+            "SELECT channel_id, display_name, output_profile, enabled FROM channels ORDER BY channel_id",
         )?;
         let mut channels = Vec::new();
         loop {
@@ -1148,15 +1202,45 @@ impl StationStore {
                 SQLITE_ROW => channels.push(ChannelConfiguration {
                     channel_id: column_text(statement.raw, 0)?,
                     display_name: column_text(statement.raw, 1)?,
-                    udp_destination: column_text(statement.raw, 2)?,
                     output_profile: OutputProfileId::from_storage_name(&column_text(
                         statement.raw,
-                        3,
+                        2,
                     )?)
                     .map_err(|error| format!("{error:?}"))?,
-                    enabled: unsafe { sqlite3_column_int64(statement.raw, 4) } == 1,
+                    output_sinks: self
+                        .list_channel_output_sinks(&column_text(statement.raw, 0)?)?,
+                    enabled: unsafe { sqlite3_column_int64(statement.raw, 3) } == 1,
                 }),
                 SQLITE_DONE => return Ok(channels),
+                _ => return Err(sqlite_error(self.database)),
+            }
+        }
+    }
+
+    fn list_channel_output_sinks(
+        &self,
+        channel_id: &str,
+    ) -> Result<Vec<OutputSinkConfiguration>, String> {
+        let statement = self.prepare(
+            "SELECT sink_id, label, kind, destination, loudness_target_milli, required, enabled \
+             FROM channel_output_sinks WHERE channel_id=?1 ORDER BY sink_id",
+        )?;
+        let channel_id = c_string(channel_id, "channel identity")?;
+        bind_text(self.database, statement.raw, 1, &channel_id)?;
+        let mut sinks = Vec::new();
+        loop {
+            match unsafe { sqlite3_step(statement.raw) } {
+                SQLITE_ROW => sinks.push(OutputSinkConfiguration {
+                    sink_id: column_text(statement.raw, 0)?,
+                    label: column_text(statement.raw, 1)?,
+                    kind: parse_output_sink_kind(&column_text(statement.raw, 2)?)?,
+                    destination: column_text(statement.raw, 3)?,
+                    loudness_target_lufs: unsafe { sqlite3_column_int64(statement.raw, 4) } as f32
+                        / 1_000.0,
+                    required: unsafe { sqlite3_column_int64(statement.raw, 5) } == 1,
+                    enabled: unsafe { sqlite3_column_int64(statement.raw, 6) } == 1,
+                }),
+                SQLITE_DONE => return Ok(sinks),
                 _ => return Err(sqlite_error(self.database)),
             }
         }
@@ -3597,6 +3681,17 @@ impl StationStore {
         Ok(())
     }
 
+    fn migrate_channel_output_sinks(&self) -> Result<(), String> {
+        self.execute(
+            "INSERT INTO channel_output_sinks(\
+               channel_id, sink_id, label, kind, destination, loudness_target_milli, required, enabled) \
+             SELECT channel_id, channel_id, 'Primary transport', 'udp-ts', udp_destination,\
+               CASE output_profile WHEN 'atsc-720p5994' THEN -24000 ELSE -16000 END, 1, 1 \
+             FROM channels WHERE NOT EXISTS (\
+               SELECT 1 FROM channel_output_sinks WHERE channel_output_sinks.channel_id=channels.channel_id)",
+        )
+    }
+
     fn migrate_ingest_transcode_status(&self) -> Result<(), String> {
         let statement = self.prepare(
             "SELECT sql FROM sqlite_master WHERE type='table' AND name='media_ingest_jobs'",
@@ -4273,6 +4368,19 @@ fn readiness_name(value: AssetReadiness) -> &'static str {
     }
 }
 
+fn output_sink_kind_name(value: OutputSinkKind) -> &'static str {
+    match value {
+        OutputSinkKind::UdpTs => "udp-ts",
+    }
+}
+
+fn parse_output_sink_kind(value: &str) -> Result<OutputSinkKind, String> {
+    match value {
+        "udp-ts" => Ok(OutputSinkKind::UdpTs),
+        _ => Err(format!("unknown output sink kind: {value}")),
+    }
+}
+
 fn channel_runtime_state_name(value: ChannelRuntimeState) -> &'static str {
     match value {
         ChannelRuntimeState::Starting => "starting",
@@ -4916,6 +5024,10 @@ mod tests {
         assert_eq!(channels.len(), 1);
         assert_eq!(channels[0].display_name, "Government");
         assert_eq!(channels[0].output_profile, OutputProfileId::Proof360p30);
+        assert_eq!(channels[0].output_sinks.len(), 1);
+        assert_eq!(channels[0].output_sinks[0].sink_id, channels[0].channel_id);
+        assert_eq!(channels[0].output_sinks[0].destination, "127.0.0.1:5500");
+        assert_eq!(channels[0].output_sinks[0].loudness_target_lufs, -16.0);
         drop(migrated);
         for candidate in [
             database.clone(),

@@ -5,12 +5,14 @@ use station_update::{
 };
 use std::io::{Cursor, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 use zip::CompressionMethod;
 use zip::write::SimpleFileOptions;
 
 const NOW: i64 = 1_800_000_000_000;
 const COMMIT: &str = "0123456789abcdef0123456789abcdef01234567";
+static FIXTURE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 fn payloads() -> Vec<(&'static str, &'static [u8])> {
     vec![
@@ -66,7 +68,11 @@ fn staged_fixture(bytes: &[u8]) -> (PathBuf, PathBuf, StagedPackageRecord) {
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    let root = std::env::temp_dir().join(format!("townlight-package-slot-{nonce}"));
+    let sequence = FIXTURE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let root = std::env::temp_dir().join(format!(
+        "townlight-package-slot-{}-{nonce}-{sequence}",
+        std::process::id()
+    ));
     let updates = root.join("updates");
     let slots = root.join("slots");
     std::fs::create_dir_all(updates.join("staged")).unwrap();

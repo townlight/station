@@ -66,8 +66,18 @@ interface Dashboard {
 interface Channel {
   channel_id: string;
   display_name: string;
-  udp_destination: string;
   output_profile: "proof-360p30" | "atsc-720p5994";
+  output_sinks: OutputSink[];
+  enabled: boolean;
+}
+
+interface OutputSink {
+  sink_id: string;
+  label: string;
+  kind: "udp-ts";
+  destination: string;
+  loudness_target_lufs: number;
+  required: boolean;
   enabled: boolean;
 }
 
@@ -448,7 +458,7 @@ function Overview({ station, dashboard, channels, runtime, onNavigate }: { stati
     <section className="split-grid">
       <article className="panel">
         <div className="panel-head"><div><p className="eyebrow">Air chain</p><h2>Channel status</h2></div><button className="text-button" onClick={() => onNavigate("channels")}>Manage channels →</button></div>
-        {channels.length === 0 ? <Empty title="No channels configured" detail="Add the station’s first loopback, headend, or proof output." action="Configure channel" onAction={() => onNavigate("channels")} /> : <div className="row-list">{channels.slice(0, 5).map((channel) => <div className="data-row" key={channel.channel_id}><div className="signal-icon">◉</div><div><strong>{channel.display_name}</strong><small>{channel.udp_destination}</small></div><StatusPill status={channel.enabled ? "enabled" : "disabled"} /></div>)}</div>}
+        {channels.length === 0 ? <Empty title="No channels configured" detail="Add the station’s first loopback, headend, or proof output." action="Configure channel" onAction={() => onNavigate("channels")} /> : <div className="row-list">{channels.slice(0, 5).map((channel) => <div className="data-row" key={channel.channel_id}><div className="signal-icon">◉</div><div><strong>{channel.display_name}</strong><small>{channel.output_sinks.filter((sink) => sink.enabled).map((sink) => sink.destination).join(" · ")}</small></div><StatusPill status={channel.enabled ? "enabled" : "disabled"} /></div>)}</div>}
       </article>
       <article className="panel">
         <div className="panel-head"><div><p className="eyebrow">Media pipeline</p><h2>Recent ingest</h2></div><button className="text-button" onClick={() => onNavigate("media")}>Open library →</button></div>
@@ -484,11 +494,21 @@ function Media({ dashboard, onRefresh }: { dashboard: Dashboard | null; onRefres
 }
 
 function Channels({ channels, outputProfiles, onRefresh }: { channels: Channel[]; outputProfiles: OutputProfile[]; onRefresh: () => Promise<void> }) {
-  const [name, setName] = useState(""); const [destination, setDestination] = useState("127.0.0.1:5500"); const [outputProfile, setOutputProfile] = useState<Channel["output_profile"]>("proof-360p30"); const [busy, setBusy] = useState(false); const [error, setError] = useState<string | null>(null);
-  async function save(event: FormEvent) { event.preventDefault(); setBusy(true); setError(null); try { await request<Channel>("/api/v1/channels", { method: "PUT", body: JSON.stringify({ channel_id: crypto.randomUUID(), display_name: name.trim(), udp_destination: destination.trim(), output_profile: outputProfile, enabled: true }) }); setName(""); await onRefresh(); } catch (problem) { setError(problem instanceof Error ? problem.message : "Channel could not be saved."); } finally { setBusy(false); } }
+  const [name, setName] = useState(""); const [destination, setDestination] = useState("127.0.0.1:5500"); const [redundantDestination, setRedundantDestination] = useState(""); const [outputProfile, setOutputProfile] = useState<Channel["output_profile"]>("proof-360p30"); const [busy, setBusy] = useState(false); const [error, setError] = useState<string | null>(null);
+  async function save(event: FormEvent) {
+    event.preventDefault(); setBusy(true); setError(null);
+    try {
+      if (!selected) throw new Error("Select a supported output profile.");
+      const outputSinks: OutputSink[] = [{ sink_id: crypto.randomUUID(), label: "Primary transport", kind: "udp-ts", destination: destination.trim(), loudness_target_lufs: selected.loudness_target_lufs, required: true, enabled: true }];
+      if (redundantDestination.trim()) outputSinks.push({ sink_id: crypto.randomUUID(), label: "Redundant transport", kind: "udp-ts", destination: redundantDestination.trim(), loudness_target_lufs: selected.loudness_target_lufs, required: true, enabled: true });
+      await request<Channel>("/api/v1/channels", { method: "PUT", body: JSON.stringify({ channel_id: crypto.randomUUID(), display_name: name.trim(), output_profile: outputProfile, output_sinks: outputSinks, enabled: true }) });
+      setName(""); setRedundantDestination(""); await onRefresh();
+    } catch (problem) { setError(problem instanceof Error ? problem.message : "Channel could not be saved."); }
+    finally { setBusy(false); }
+  }
   async function toggle(channel: Channel) { await request<Channel>("/api/v1/channels", { method: "PUT", body: JSON.stringify({ ...channel, enabled: !channel.enabled }) }); await onRefresh(); }
   const selected = outputProfiles.find((profile) => profile.profile_id === outputProfile);
-  return <><header className="page-header"><div><p className="eyebrow">Output control</p><h1>Channels</h1><p>Each enabled channel owns an isolated persistent media worker and an explicit output contract.</p></div></header><section className="split-grid channels-layout"><article className="panel"><p className="eyebrow">Configured outputs</p><h2>{channels.length || "No"} channel{channels.length === 1 ? "" : "s"}</h2>{channels.length ? <div className="channel-cards">{channels.map((channel) => { const profile = outputProfiles.find((item) => item.profile_id === channel.output_profile); return <article className="channel-card" key={channel.channel_id}><div className="channel-top"><div className="signal-icon">◉</div><StatusPill status={channel.enabled ? "enabled" : "disabled"} /></div><h3>{channel.display_name}</h3><p>{profile?.display_name ?? channel.output_profile}</p><code>{channel.udp_destination}</code><button className="secondary wide" onClick={() => void toggle(channel)}>{channel.enabled ? "Stop output" : "Start output"}</button></article>; })}</div> : <Empty title="No output configured" detail="Create the first persistent channel worker." action="Use the form" onAction={() => document.querySelector<HTMLInputElement>("#channel-name")?.focus()} />}</article><article className="panel sticky-form"><p className="eyebrow">New output</p><h2>Add a channel</h2><form onSubmit={save}><label>Channel name<input id="channel-name" required minLength={2} value={name} onChange={(event) => setName(event.target.value)} placeholder="Government Channel 12" /></label><label>Output profile<select required value={outputProfile} onChange={(event) => setOutputProfile(event.target.value as Channel["output_profile"])}>{outputProfiles.map((profile) => <option key={profile.profile_id} value={profile.profile_id}>{profile.display_name}</option>)}</select>{selected && <small>{selected.intended_use} · {(selected.transport_bitrate_bps / 1_000_000).toFixed(1)} Mb/s CBR transport</small>}</label><label>UDP destination<input required value={destination} onChange={(event) => setDestination(event.target.value)} placeholder="192.168.1.100:5000" /><small>Use 127.0.0.1 for a local proof channel.</small></label>{error && <div className="error-box">{error}</div>}<button className="primary wide" disabled={busy || outputProfiles.length === 0}>{busy ? "Saving…" : "Create & start channel"}</button></form></article></section></>;
+  return <><header className="page-header"><div><p className="eyebrow">Output control</p><h1>Channels</h1><p>Each enabled channel owns an isolated persistent media worker and explicit stable output branches.</p></div></header><section className="split-grid channels-layout"><article className="panel"><p className="eyebrow">Configured outputs</p><h2>{channels.length || "No"} channel{channels.length === 1 ? "" : "s"}</h2>{channels.length ? <div className="channel-cards">{channels.map((channel) => { const profile = outputProfiles.find((item) => item.profile_id === channel.output_profile); return <article className="channel-card" key={channel.channel_id}><div className="channel-top"><div className="signal-icon">◉</div><StatusPill status={channel.enabled ? "enabled" : "disabled"} /></div><h3>{channel.display_name}</h3><p>{profile?.display_name ?? channel.output_profile} · {channel.output_sinks.filter((sink) => sink.enabled).length} sink{channel.output_sinks.filter((sink) => sink.enabled).length === 1 ? "" : "s"}</p>{channel.output_sinks.map((sink) => <code key={sink.sink_id}>{sink.label}: {sink.destination}</code>)}<button className="secondary wide" onClick={() => void toggle(channel)}>{channel.enabled ? "Stop output" : "Start output"}</button></article>; })}</div> : <Empty title="No output configured" detail="Create the first persistent channel worker." action="Use the form" onAction={() => document.querySelector<HTMLInputElement>("#channel-name")?.focus()} />}</article><article className="panel sticky-form"><p className="eyebrow">New output</p><h2>Add a channel</h2><form onSubmit={save}><label>Channel name<input id="channel-name" required minLength={2} value={name} onChange={(event) => setName(event.target.value)} placeholder="Government Channel 12" /></label><label>Output profile<select required value={outputProfile} onChange={(event) => setOutputProfile(event.target.value as Channel["output_profile"])}>{outputProfiles.map((profile) => <option key={profile.profile_id} value={profile.profile_id}>{profile.display_name}</option>)}</select>{selected && <small>{selected.intended_use} · {(selected.transport_bitrate_bps / 1_000_000).toFixed(1)} Mb/s CBR transport</small>}</label><label>Primary UDP destination<input required value={destination} onChange={(event) => setDestination(event.target.value)} placeholder="192.168.1.100:5000" /><small>Use 127.0.0.1 for a local proof channel.</small></label><label>Redundant UDP destination <small>Optional</small><input value={redundantDestination} onChange={(event) => setRedundantDestination(event.target.value)} placeholder="192.168.2.100:5000" /><small>The persistent graph sends the same encoded transport to both required branches.</small></label>{error && <div className="error-box">{error}</div>}<button className="primary wide" disabled={busy || outputProfiles.length === 0}>{busy ? "Saving…" : "Create & start channel"}</button></form></article></section></>;
 }
 
 function Schedule({ dashboard, channels }: { dashboard: Dashboard | null; channels: Channel[] }) {

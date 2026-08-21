@@ -60,7 +60,7 @@ fn run_worker(
         .args([WORKER_ID, CHANNEL_ID])
         .arg(journal)
         .arg(pipe_name)
-        .arg(udp.local_addr().unwrap().to_string())
+        .arg(serde_json::to_string(&vec![udp.local_addr().unwrap().to_string()]).unwrap())
         .arg("proof-360p30")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())

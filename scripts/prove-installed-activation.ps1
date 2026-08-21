@@ -56,7 +56,8 @@ try {
     $channel = [ordered]@{
         channel_id = '70707070-8080-4090-80a0-b0b0b0b0b0b0'
         display_name = 'Activation Proof Output'
-        udp_destination = '127.0.0.1:5910'
+        output_profile = 'proof-360p30'
+        output_sinks = @([ordered]@{ sink_id = '70707070-8080-4090-80a0-b0b0b0b0b0b0'; label = 'Primary transport'; kind = 'udp-ts'; destination = '127.0.0.1:5910'; loudness_target_lufs = -16.0; required = $true; enabled = $true })
         enabled = $true
     } | ConvertTo-Json
     Invoke-RestMethod -Uri "$BaseUrl/channels" -Method Put -ContentType 'application/json' -Body $channel | Out-Null

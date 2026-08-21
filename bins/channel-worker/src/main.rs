@@ -12,19 +12,34 @@ use station_media_protocol::{
 use station_schedule::OutputProfileId;
 use station_windows_ipc::PipeStream;
 
+struct WorkerArguments {
+    worker_id: String,
+    channel_id: String,
+    journal_path: PathBuf,
+    pipe_name: String,
+    udp_destinations: Vec<SocketAddr>,
+    output_profile: OutputProfileId,
+}
+
 fn main() {
-    let (worker_id, channel_id, journal_path, pipe_name, udp_destination, output_profile) =
-        arguments().unwrap_or_else(|message| {
-            eprintln!("{message}");
-            std::process::exit(2);
-        });
+    let WorkerArguments {
+        worker_id,
+        channel_id,
+        journal_path,
+        pipe_name,
+        udp_destinations,
+        output_profile,
+    } = arguments().unwrap_or_else(|message| {
+        eprintln!("{message}");
+        std::process::exit(2);
+    });
     let mut journal = JournalWriter::open(journal_path, &worker_id, &channel_id)
         .unwrap_or_else(|error| fatal(3, "open its journal", &format!("{error:?}")));
     let started = Instant::now();
     let mut pipe = PipeStream::connect(&pipe_name)
         .unwrap_or_else(|error| fatal(5, "connect to its control pipe", &format!("{error:?}")));
     let mut media = Some(
-        PersistentPlayout::start_udp_with_profile(udp_destination, output_profile)
+        PersistentPlayout::start_udp_fanout_with_profile(&udp_destinations, output_profile)
             .unwrap_or_else(|error| fatal(8, "start its fallback graph", &format!("{error:?}"))),
     );
 
@@ -71,8 +86,8 @@ fn main() {
     }
 }
 
-fn arguments() -> Result<(String, String, PathBuf, String, SocketAddr, OutputProfileId), String> {
-    const USAGE: &str = "usage: channel-worker <worker-id> <channel-id> <journal-path> <pipe-name> <udp-destination> <output-profile>";
+fn arguments() -> Result<WorkerArguments, String> {
+    const USAGE: &str = "usage: channel-worker <worker-id> <channel-id> <journal-path> <pipe-name> <udp-destinations-json> <output-profile>";
     let mut arguments = std::env::args_os().skip(1);
     let Some(worker_id) = arguments.next().and_then(|value| value.into_string().ok()) else {
         return Err(USAGE.into());
@@ -86,12 +101,21 @@ fn arguments() -> Result<(String, String, PathBuf, String, SocketAddr, OutputPro
     let Some(pipe_name) = arguments.next().and_then(|value| value.into_string().ok()) else {
         return Err(USAGE.into());
     };
-    let Some(udp_destination) = arguments.next().and_then(|value| value.into_string().ok()) else {
+    let Some(udp_destinations) = arguments.next().and_then(|value| value.into_string().ok()) else {
         return Err(USAGE.into());
     };
-    let udp_destination = udp_destination
-        .parse()
-        .map_err(|_| "udp-destination must be an IP address and port".to_string())?;
+    let udp_destinations = serde_json::from_str::<Vec<String>>(&udp_destinations)
+        .map_err(|_| "udp-destinations-json must be an array of strings".to_string())?
+        .into_iter()
+        .map(|destination| {
+            destination
+                .parse()
+                .map_err(|_| "every UDP destination must be an IP address and port".to_string())
+        })
+        .collect::<Result<Vec<SocketAddr>, String>>()?;
+    if udp_destinations.is_empty() {
+        return Err("at least one UDP destination is required".into());
+    }
     let Some(output_profile) = arguments.next().and_then(|value| value.into_string().ok()) else {
         return Err(USAGE.into());
     };
@@ -100,14 +124,14 @@ fn arguments() -> Result<(String, String, PathBuf, String, SocketAddr, OutputPro
     if arguments.next().is_some() {
         return Err(USAGE.into());
     }
-    Ok((
+    Ok(WorkerArguments {
         worker_id,
         channel_id,
         journal_path,
         pipe_name,
-        udp_destination,
+        udp_destinations,
         output_profile,
-    ))
+    })
 }
 
 fn read_command_frame(input: &mut impl Read) -> Result<Option<Vec<u8>>, String> {

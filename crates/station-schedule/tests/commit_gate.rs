@@ -1,6 +1,6 @@
 use station_schedule::{
     AssetReadiness, ChannelConfiguration, MediaAsset, OUTPUT_PROFILES, OutputProfileId,
-    ScheduleItem, ScheduleState, prepare_commit,
+    OutputSinkConfiguration, ScheduleItem, ScheduleState, prepare_commit,
 };
 
 const CHANNEL: &str = "8b626c01-bdf8-419a-8a2e-b0a7caa1ff7e";
@@ -21,8 +21,13 @@ fn output_profiles_are_explicit_runnable_transport_contracts() {
     ChannelConfiguration {
         channel_id: CHANNEL.into(),
         display_name: "Government".into(),
-        udp_destination: "127.0.0.1:5500".into(),
         output_profile: OutputProfileId::Atsc720p5994,
+        output_sinks: vec![OutputSinkConfiguration::required_udp(
+            CHANNEL,
+            "Primary transport",
+            "127.0.0.1:5500",
+            -24.0,
+        )],
         enabled: true,
     }
     .validate()
