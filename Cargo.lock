@@ -84,7 +84,6 @@ name = "channel-worker"
 version = "0.1.0"
 dependencies = [
  "gstreamer",
- "serde_json",
  "station-domain",
  "station-media-assets",
  "station-media-engine",
@@ -1651,7 +1650,6 @@ dependencies = [
 name = "station-runtime"
 version = "0.1.0"
 dependencies = [
- "serde_json",
  "station-media-protocol",
  "station-schedule",
  "station-windows-ipc",

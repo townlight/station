@@ -7,7 +7,8 @@ use station_media_engine::{PersistentPlayout, SourceRole};
 use station_media_journal::JournalWriter;
 use station_media_protocol::{
     ChannelCommand, CommandEnvelope, MAX_FRAME_BYTES, PROTOCOL_VERSION, WorkerEvent,
-    WorkerEventEnvelope, decode_command_frame, encode_event_frame,
+    WorkerEventEnvelope, WorkerOutputConfiguration, decode_bootstrap_frame, decode_command_frame,
+    encode_event_frame,
 };
 use station_schedule::OutputProfileId;
 use station_windows_ipc::PipeStream;
@@ -17,8 +18,6 @@ struct WorkerArguments {
     channel_id: String,
     journal_path: PathBuf,
     pipe_name: String,
-    udp_destinations: Vec<SocketAddr>,
-    output_profile: OutputProfileId,
 }
 
 fn main() {
@@ -27,8 +26,6 @@ fn main() {
         channel_id,
         journal_path,
         pipe_name,
-        udp_destinations,
-        output_profile,
     } = arguments().unwrap_or_else(|message| {
         eprintln!("{message}");
         std::process::exit(2);
@@ -38,6 +35,35 @@ fn main() {
     let started = Instant::now();
     let mut pipe = PipeStream::connect(&pipe_name)
         .unwrap_or_else(|error| fatal(5, "connect to its control pipe", &format!("{error:?}")));
+    let bootstrap_frame = read_command_frame(&mut pipe)
+        .unwrap_or_else(|error| fatal(6, "read its bootstrap frame", &error))
+        .unwrap_or_else(|| fatal(6, "read its bootstrap frame", "the supervisor disconnected"));
+    let bootstrap = decode_bootstrap_frame(&bootstrap_frame)
+        .unwrap_or_else(|error| fatal(6, "decode its bootstrap frame", &format!("{error:?}")));
+    if bootstrap.worker_id != worker_id || bootstrap.channel_id != channel_id {
+        fatal(
+            6,
+            "validate its bootstrap identity",
+            "worker or channel identity did not match the process identity",
+        );
+    }
+    let output_profile = OutputProfileId::from_storage_name(&bootstrap.output_profile)
+        .unwrap_or_else(|error| fatal(6, "validate its output profile", &format!("{error:?}")));
+    let udp_destinations = bootstrap
+        .outputs
+        .into_iter()
+        .map(|output| match output {
+            WorkerOutputConfiguration::UdpTs { destination } => destination.parse::<SocketAddr>(),
+        })
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap_or_else(|error| fatal(6, "validate its output destinations", &error.to_string()));
+    if udp_destinations.is_empty() {
+        fatal(
+            6,
+            "validate its output destinations",
+            "at least one output is required",
+        );
+    }
     let mut media = Some(
         PersistentPlayout::start_udp_fanout_with_profile(&udp_destinations, output_profile)
             .unwrap_or_else(|error| fatal(8, "start its fallback graph", &format!("{error:?}"))),
@@ -87,7 +113,7 @@ fn main() {
 }
 
 fn arguments() -> Result<WorkerArguments, String> {
-    const USAGE: &str = "usage: channel-worker <worker-id> <channel-id> <journal-path> <pipe-name> <udp-destinations-json> <output-profile>";
+    const USAGE: &str = "usage: channel-worker <worker-id> <channel-id> <journal-path> <pipe-name>";
     let mut arguments = std::env::args_os().skip(1);
     let Some(worker_id) = arguments.next().and_then(|value| value.into_string().ok()) else {
         return Err(USAGE.into());
@@ -101,26 +127,6 @@ fn arguments() -> Result<WorkerArguments, String> {
     let Some(pipe_name) = arguments.next().and_then(|value| value.into_string().ok()) else {
         return Err(USAGE.into());
     };
-    let Some(udp_destinations) = arguments.next().and_then(|value| value.into_string().ok()) else {
-        return Err(USAGE.into());
-    };
-    let udp_destinations = serde_json::from_str::<Vec<String>>(&udp_destinations)
-        .map_err(|_| "udp-destinations-json must be an array of strings".to_string())?
-        .into_iter()
-        .map(|destination| {
-            destination
-                .parse()
-                .map_err(|_| "every UDP destination must be an IP address and port".to_string())
-        })
-        .collect::<Result<Vec<SocketAddr>, String>>()?;
-    if udp_destinations.is_empty() {
-        return Err("at least one UDP destination is required".into());
-    }
-    let Some(output_profile) = arguments.next().and_then(|value| value.into_string().ok()) else {
-        return Err(USAGE.into());
-    };
-    let output_profile = OutputProfileId::from_storage_name(&output_profile)
-        .map_err(|_| "output-profile is unsupported".to_string())?;
     if arguments.next().is_some() {
         return Err(USAGE.into());
     }
@@ -129,8 +135,6 @@ fn arguments() -> Result<WorkerArguments, String> {
         channel_id,
         journal_path,
         pipe_name,
-        udp_destinations,
-        output_profile,
     })
 }
 

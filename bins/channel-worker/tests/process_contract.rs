@@ -6,8 +6,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use station_media_journal::read_events;
 use station_media_protocol::{
-    ChannelCommand, CommandEnvelope, PROTOCOL_VERSION, WorkerEvent, WorkerEventEnvelope,
-    decode_event_frame, encode_command_frame,
+    ChannelCommand, CommandEnvelope, PROTOCOL_VERSION, WorkerBootstrapEnvelope, WorkerEvent,
+    WorkerEventEnvelope, WorkerOutputConfiguration, decode_event_frame, encode_bootstrap_frame,
+    encode_command_frame,
 };
 use station_windows_ipc::PipeServer;
 
@@ -60,14 +61,24 @@ fn run_worker(
         .args([WORKER_ID, CHANNEL_ID])
         .arg(journal)
         .arg(pipe_name)
-        .arg(serde_json::to_string(&vec![udp.local_addr().unwrap().to_string()]).unwrap())
-        .arg("proof-360p30")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
     let mut stream = server.accept().unwrap();
+    let bootstrap = WorkerBootstrapEnvelope {
+        version: PROTOCOL_VERSION,
+        worker_id: WORKER_ID.into(),
+        channel_id: CHANNEL_ID.into(),
+        output_profile: "proof-360p30".into(),
+        outputs: vec![WorkerOutputConfiguration::UdpTs {
+            destination: udp.local_addr().unwrap().to_string(),
+        }],
+    };
+    stream
+        .write_all(&encode_bootstrap_frame(&bootstrap).unwrap())
+        .unwrap();
     stream.write_all(input).unwrap();
     let events = (0..expected_events)
         .map(|_| read_event(&mut stream))

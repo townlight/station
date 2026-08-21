@@ -37,6 +37,17 @@ try {
 
     Invoke-RestMethod -Method Put -Uri "$BaseUri/api/v1/channels" -ContentType 'application/json' `
         -Body ($channel | ConvertTo-Json -Compress) -TimeoutSec 10 | Out-Null
+    $workerProcess = Get-CimInstance Win32_Process -Filter "Name='channel-worker.exe'" |
+        Where-Object CommandLine -Like "*$($channel.channel_id)*" |
+        Select-Object -First 1
+    if (-not $workerProcess) {
+        throw 'The installed proof worker process was not visible after channel startup.'
+    }
+    foreach ($forbiddenArgument in @("127.0.0.1:$DestinationPort", "127.0.0.1:$RedundantDestinationPort", 'atsc-720p5994')) {
+        if ($workerProcess.CommandLine -like "*$forbiddenArgument*") {
+            throw "Protected output value leaked into the worker command line: $forbiddenArgument"
+        }
+    }
     $readyClock = [Diagnostics.Stopwatch]::StartNew()
     while (($receiver.Available -eq 0 -or $redundantReceiver.Available -eq 0) -and $readyClock.Elapsed.TotalSeconds -lt 10) {
         Start-Sleep -Milliseconds 2
@@ -195,6 +206,7 @@ try {
         captured_bytes = $bytes.Length
         redundant_captured_bytes = $redundantBytes.Length
         proven_output_branches = 2
+        worker_process_arguments_redacted = $true
         null_packets = $nullPackets
         service_health = (Invoke-RestMethod -Uri "$BaseUri/health" -TimeoutSec 5).status
         capture_path = $(if ($KeepCapture) { $capture } else { $null })

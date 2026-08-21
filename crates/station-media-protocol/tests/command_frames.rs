@@ -1,7 +1,8 @@
 use station_media_protocol::{
-    ChannelCommand, CommandEnvelope, PROTOCOL_VERSION, ProtocolError, ProtocolVersion, WorkerEvent,
-    WorkerEventEnvelope, decode_command_frame, decode_event_frame, encode_command_frame,
-    encode_event_frame,
+    ChannelCommand, CommandEnvelope, PROTOCOL_VERSION, ProtocolError, ProtocolVersion,
+    WorkerBootstrapEnvelope, WorkerEvent, WorkerEventEnvelope, WorkerOutputConfiguration,
+    decode_bootstrap_frame, decode_command_frame, decode_event_frame, encode_bootstrap_frame,
+    encode_command_frame, encode_event_frame,
 };
 
 fn take_live_command() -> CommandEnvelope {
@@ -21,6 +22,26 @@ fn round_trips_a_typed_command_in_a_length_delimited_frame() {
     let command = take_live_command();
     let frame = encode_command_frame(&command).expect("command encodes");
     assert_eq!(decode_command_frame(&frame).unwrap(), command);
+}
+
+#[test]
+fn round_trips_private_worker_bootstrap_without_process_arguments() {
+    let bootstrap = WorkerBootstrapEnvelope {
+        version: PROTOCOL_VERSION,
+        worker_id: "ae819b97-2920-434b-9d96-0b51a8ea9abb".into(),
+        channel_id: "62a47b7e-2a03-48d6-8703-a6e5ce986527".into(),
+        output_profile: "atsc-720p5994".into(),
+        outputs: vec![
+            WorkerOutputConfiguration::UdpTs {
+                destination: "127.0.0.1:5500".into(),
+            },
+            WorkerOutputConfiguration::UdpTs {
+                destination: "127.0.0.1:5501".into(),
+            },
+        ],
+    };
+    let frame = encode_bootstrap_frame(&bootstrap).expect("bootstrap encodes");
+    assert_eq!(decode_bootstrap_frame(&frame).unwrap(), bootstrap);
 }
 
 #[test]

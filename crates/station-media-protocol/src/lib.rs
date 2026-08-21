@@ -1,12 +1,27 @@
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 pub const MAX_FRAME_BYTES: usize = 65_536;
-pub const PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion { major: 1, minor: 1 };
+pub const PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion { major: 1, minor: 2 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProtocolVersion {
     pub major: u16,
     pub minor: u16,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkerBootstrapEnvelope {
+    pub version: ProtocolVersion,
+    pub worker_id: String,
+    pub channel_id: String,
+    pub output_profile: String,
+    pub outputs: Vec<WorkerOutputConfiguration>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+pub enum WorkerOutputConfiguration {
+    UdpTs { destination: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -88,6 +103,20 @@ pub enum ProtocolError {
 
 pub fn encode_command_frame(command: &CommandEnvelope) -> Result<Vec<u8>, ProtocolError> {
     encode_frame(command)
+}
+
+pub fn encode_bootstrap_frame(
+    bootstrap: &WorkerBootstrapEnvelope,
+) -> Result<Vec<u8>, ProtocolError> {
+    encode_frame(bootstrap)
+}
+
+pub fn decode_bootstrap_frame(frame: &[u8]) -> Result<WorkerBootstrapEnvelope, ProtocolError> {
+    let bootstrap: WorkerBootstrapEnvelope = decode_frame(frame)?;
+    if bootstrap.version.major != PROTOCOL_VERSION.major {
+        return Err(ProtocolError::UnsupportedMajor(bootstrap.version.major));
+    }
+    Ok(bootstrap)
 }
 
 pub fn decode_command_frame(frame: &[u8]) -> Result<CommandEnvelope, ProtocolError> {

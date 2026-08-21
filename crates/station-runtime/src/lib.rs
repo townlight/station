@@ -6,8 +6,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use station_media_protocol::{
-    ChannelCommand, CommandEnvelope, MAX_FRAME_BYTES, PROTOCOL_VERSION, ProtocolError, WorkerEvent,
-    WorkerEventEnvelope, decode_event_frame, encode_command_frame,
+    ChannelCommand, CommandEnvelope, MAX_FRAME_BYTES, PROTOCOL_VERSION, ProtocolError,
+    WorkerBootstrapEnvelope, WorkerEvent, WorkerEventEnvelope, WorkerOutputConfiguration,
+    decode_event_frame, encode_bootstrap_frame, encode_command_frame,
 };
 use station_schedule::OutputProfileId;
 use station_windows_ipc::{IpcError, PipeServer, PipeStream};
@@ -100,16 +101,20 @@ impl WorkerSupervisor {
         output_profile: OutputProfileId,
         timeout: Duration,
     ) -> Result<Self, SupervisorError> {
-        let destinations = serde_json::to_string(
-            &udp_destinations
+        let bootstrap = WorkerBootstrapEnvelope {
+            version: PROTOCOL_VERSION,
+            worker_id: worker_id.to_string(),
+            channel_id: channel_id.to_string(),
+            output_profile: output_profile.storage_name().to_string(),
+            outputs: udp_destinations
                 .iter()
-                .map(SocketAddr::to_string)
-                .collect::<Vec<_>>(),
-        )
-        .map_err(|error| SupervisorError::Io {
-            operation: "serialize channel output destinations",
-            message: error.to_string(),
-        })?;
+                .map(|destination| WorkerOutputConfiguration::UdpTs {
+                    destination: destination.to_string(),
+                })
+                .collect(),
+        };
+        let bootstrap_frame =
+            encode_bootstrap_frame(&bootstrap).map_err(SupervisorError::Protocol)?;
         let started = Instant::now();
         let suffix = format!(
             "worker-{}-{}",
@@ -121,8 +126,6 @@ impl WorkerSupervisor {
             .args([worker_id, channel_id])
             .arg(journal_path)
             .arg(server.name())
-            .arg(destinations)
-            .arg(output_profile.storage_name())
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -136,6 +139,10 @@ impl WorkerSupervisor {
                 return Err(SupervisorError::Ipc(error));
             }
         };
+        if let Err(error) = pipe.write_all(&bootstrap_frame).and_then(|_| pipe.flush()) {
+            terminate(&mut child);
+            return Err(io_error("write worker bootstrap", error));
+        }
         let ready = match read_event(&mut pipe, timeout.saturating_sub(started.elapsed())) {
             Ok(event) => event,
             Err(error) => {
