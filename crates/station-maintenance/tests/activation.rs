@@ -6,7 +6,8 @@ use station_maintenance::{
     latest_maintenance_transaction, read_active_slot_receipt, recover_incomplete_transaction,
 };
 use station_update::{
-    PreparedSlotRecord, ReleaseManifest, UpdatePackageFile, UpdatePackageManifest,
+    PreparedSlotRecord, ReleaseManifest, UPDATE_PACKAGE_SCHEMA_VERSION, UpdatePackageFile,
+    UpdatePackageManifest,
 };
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -342,7 +343,7 @@ fn write_application(
         });
     }
     UpdatePackageManifest {
-        schema_version: 1,
+        schema_version: UPDATE_PACKAGE_SCHEMA_VERSION,
         product: "TownLight Station".into(),
         version: version.into(),
         source_commit: source_commit.into(),

@@ -3,8 +3,8 @@ use base64::engine::general_purpose::STANDARD as BASE64;
 use ed25519_dalek::{Signer, SigningKey};
 use sha2::{Digest, Sha256};
 use station_update::{
-    ReleaseManifest, ReleaseSource, SignedReleaseEnvelope, TrustedReleaseKey, UpdatePackageFile,
-    UpdatePackageManifest,
+    ReleaseManifest, ReleaseSource, SignedReleaseEnvelope, TrustedReleaseKey,
+    UPDATE_PACKAGE_SCHEMA_VERSION, UpdatePackageFile, UpdatePackageManifest,
 };
 use std::io::Write;
 use std::path::PathBuf;
@@ -44,7 +44,7 @@ fn main() -> Result<(), String> {
         ),
     ];
     let internal_manifest = UpdatePackageManifest {
-        schema_version: 1,
+        schema_version: UPDATE_PACKAGE_SCHEMA_VERSION,
         product: "TownLight Station".into(),
         version: "0.2.0".into(),
         source_commit: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),

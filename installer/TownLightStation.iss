@@ -388,7 +388,7 @@ begin
     '"active":{' +
       '"relative_directory":".",' +
       '"package_manifest":{' +
-        '"schema_version":1,' +
+        '"schema_version":2,' +
         '"product":"TownLight Station",' +
         '"version":"' + CandidateVersion + '",' +
         '"source_commit":"' + CandidateCommit + '",' +

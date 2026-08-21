@@ -1682,6 +1682,7 @@ dependencies = [
  "station-maintenance",
  "station-schedule",
  "station-storage",
+ "station-update",
  "zip",
 ]
 

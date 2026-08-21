@@ -803,8 +803,8 @@ mod tests {
     use station_domain::{ChannelRuntimeObservation, ChannelRuntimeState};
     use station_schedule::ChannelConfiguration;
     use station_update::{
-        ReleaseManifest, SignedReleaseEnvelope, TrustedReleaseKey, UpdatePackageFile,
-        UpdatePackageManifest, prepared_slot_path,
+        ReleaseManifest, SignedReleaseEnvelope, TrustedReleaseKey, UPDATE_PACKAGE_SCHEMA_VERSION,
+        UpdatePackageFile, UpdatePackageManifest, prepared_slot_path,
     };
     use std::io::{Cursor, Read, Write};
     use std::net::TcpListener;
@@ -837,7 +837,7 @@ mod tests {
             ("channel-worker.exe", b"coordinator channel worker"),
         ];
         let internal_manifest = UpdatePackageManifest {
-            schema_version: 1,
+            schema_version: UPDATE_PACKAGE_SCHEMA_VERSION,
             product: "TownLight Station".into(),
             version: "0.2.0".into(),
             source_commit: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),

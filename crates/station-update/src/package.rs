@@ -11,13 +11,15 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use zip::{CompressionMethod, ZipArchive};
 
-pub const UPDATE_PACKAGE_SCHEMA_VERSION: u32 = 1;
+pub const UPDATE_PACKAGE_SCHEMA_VERSION: u32 = 2;
 const PACKAGE_MANIFEST_NAME: &str = "package-manifest.json";
 const SLOT_MANIFEST_NAME: &str = "slot-manifest.json";
 const MAX_PACKAGE_MANIFEST_BYTES: u64 = 64 * 1024;
 const MAX_SLOT_FILE_BYTES: u64 = 512 * 1024 * 1024;
 const MAX_SLOT_BYTES: u64 = 1024 * 1024 * 1024;
 const REQUIRED_FILES: [&str; 2] = ["stationd.exe", "channel-worker.exe"];
+const LEGACY_SCHEMA_ONE_FILES: [&str; 3] =
+    ["stationd.exe", "channel-worker.exe", "station-updater.exe"];
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -69,18 +71,22 @@ impl PreparedSlotRecord {
 
 impl UpdatePackageManifest {
     pub fn validate(&self) -> Result<(), String> {
-        if self.schema_version != UPDATE_PACKAGE_SCHEMA_VERSION
-            || self.product != "TownLight Station"
+        let required_files = match self.schema_version {
+            1 => LEGACY_SCHEMA_ONE_FILES.as_slice(),
+            UPDATE_PACKAGE_SCHEMA_VERSION => REQUIRED_FILES.as_slice(),
+            _ => return Err("update package schema is unsupported".into()),
+        };
+        if self.product != "TownLight Station"
             || Version::parse(&self.version).is_err()
             || !is_commit_hash(&self.source_commit)
-            || self.files.len() != REQUIRED_FILES.len()
+            || self.files.len() != required_files.len()
         {
             return Err("update package identity does not match its signed release".into());
         }
         let mut paths = BTreeSet::new();
         let mut total = 0_u64;
         for file in &self.files {
-            if !REQUIRED_FILES.contains(&file.path.as_str())
+            if !required_files.contains(&file.path.as_str())
                 || !paths.insert(file.path.as_str())
                 || file.size_bytes == 0
                 || file.size_bytes > MAX_SLOT_FILE_BYTES
@@ -92,7 +98,7 @@ impl UpdatePackageManifest {
                 .checked_add(file.size_bytes)
                 .ok_or_else(|| "update package extracted size overflowed".to_string())?;
         }
-        if total > MAX_SLOT_BYTES || REQUIRED_FILES.iter().any(|path| !paths.contains(path)) {
+        if total > MAX_SLOT_BYTES || required_files.iter().any(|path| !paths.contains(path)) {
             return Err("update package required file set is invalid".into());
         }
         Ok(())
@@ -100,7 +106,8 @@ impl UpdatePackageManifest {
 
     fn validate_against(&self, release: &ReleaseManifest) -> Result<(), String> {
         self.validate()?;
-        if self.product != release.product
+        if self.schema_version != UPDATE_PACKAGE_SCHEMA_VERSION
+            || self.product != release.product
             || self.version != release.version
             || self.source_commit != release.source_commit
         {
@@ -174,6 +181,9 @@ pub fn verify_prepared_slot(
         return Err("prepared application slot is not a real directory".into());
     }
     let manifest = read_prepared_slot_manifest(&slot_path)?;
+    if manifest.schema_version != UPDATE_PACKAGE_SCHEMA_VERSION {
+        return Err("prepared application slot uses a read-only legacy package schema".into());
+    }
     verify_slot_directory(&slot_path, &manifest, &record.manifest)
 }
 

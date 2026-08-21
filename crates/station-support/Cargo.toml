@@ -12,4 +12,5 @@ station-domain.workspace = true
 station-maintenance.workspace = true
 station-schedule.workspace = true
 station-storage.workspace = true
+station-update.workspace = true
 zip.workspace = true

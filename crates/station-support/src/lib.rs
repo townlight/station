@@ -840,7 +840,7 @@ mod tests {
                 "relative_directory":
                     "slots/slot-0.2.0-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
                 "package_manifest": {
-                    "schema_version": 1,
+                    "schema_version": station_update::UPDATE_PACKAGE_SCHEMA_VERSION,
                     "product": "TownLight Station",
                     "version": "0.2.0",
                     "source_commit": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",

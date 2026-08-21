@@ -1,7 +1,7 @@
 use sha2::{Digest, Sha256};
 use station_update::{
-    ReleaseManifest, StagedPackageRecord, UpdatePackageFile, UpdatePackageManifest,
-    prepare_release_slot, prepared_slot_path, verify_prepared_slot,
+    ReleaseManifest, StagedPackageRecord, UPDATE_PACKAGE_SCHEMA_VERSION, UpdatePackageFile,
+    UpdatePackageManifest, prepare_release_slot, prepared_slot_path, verify_prepared_slot,
 };
 use std::io::{Cursor, Write};
 use std::path::{Path, PathBuf};
@@ -21,7 +21,7 @@ fn payloads() -> Vec<(&'static str, &'static [u8])> {
 
 fn package_manifest() -> UpdatePackageManifest {
     UpdatePackageManifest {
-        schema_version: 1,
+        schema_version: UPDATE_PACKAGE_SCHEMA_VERSION,
         product: "TownLight Station".into(),
         version: "1.3.0".into(),
         source_commit: COMMIT.into(),
@@ -136,6 +136,25 @@ fn rejects_extra_or_path_traversal_entries_before_extraction() {
     assert!(error.contains("unexpected number") || error.contains("unsafe"));
     assert_eq!(std::fs::read_dir(&slots).unwrap().count(), 0);
     assert!(!slots.parent().unwrap().join("outside.exe").exists());
+    remove_fixture(slots.parent().unwrap());
+}
+
+#[test]
+fn reads_legacy_three_payload_identity_but_refuses_to_prepare_it() {
+    let updater = b"legacy station updater proof bytes";
+    let mut legacy = package_manifest();
+    legacy.schema_version = 1;
+    legacy.files.push(UpdatePackageFile {
+        path: "station-updater.exe".into(),
+        size_bytes: updater.len() as u64,
+        sha256: format!("{:X}", Sha256::digest(updater)),
+    });
+    legacy.validate().unwrap();
+
+    let package = package_bytes(&legacy, Some(("payload/station-updater.exe", updater)));
+    let (updates, slots, staged) = staged_fixture(&package);
+    let error = prepare_release_slot(&staged, &updates, &slots, NOW + 1).unwrap_err();
+    assert!(error.contains("unexpected number") || error.contains("legacy package schema"));
     remove_fixture(slots.parent().unwrap());
 }
 

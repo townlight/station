@@ -4,7 +4,7 @@ use ed25519_dalek::{Signer, SigningKey};
 use sha2::{Digest, Sha256};
 use station_update::{
     RELEASE_SCHEMA_VERSION, ReleaseManifest, ReleaseSource, SignedReleaseEnvelope,
-    TrustedReleaseKey, UpdatePackageFile, UpdatePackageManifest,
+    TrustedReleaseKey, UPDATE_PACKAGE_SCHEMA_VERSION, UpdatePackageFile, UpdatePackageManifest,
 };
 use std::fs::File;
 use std::io::{Cursor, Write};
@@ -50,7 +50,7 @@ fn main() -> Result<(), String> {
         payloads.push((name, bytes));
     }
     let package_manifest = UpdatePackageManifest {
-        schema_version: 1,
+        schema_version: UPDATE_PACKAGE_SCHEMA_VERSION,
         product: "TownLight Station".into(),
         version: version.clone(),
         source_commit: source_commit.clone(),
