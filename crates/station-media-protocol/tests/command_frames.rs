@@ -24,6 +24,29 @@ fn round_trips_a_typed_command_in_a_length_delimited_frame() {
 }
 
 #[test]
+fn round_trips_asset_load_and_take_commands() {
+    for command in [
+        ChannelCommand::LoadAsset {
+            asset_id: "a".repeat(64),
+            media_path: r"C:\ProgramData\TownLight Station\media\asset.ts".into(),
+        },
+        ChannelCommand::TakeAsset {
+            asset_id: "a".repeat(64),
+        },
+    ] {
+        let envelope = CommandEnvelope {
+            version: PROTOCOL_VERSION,
+            channel_id: "62a47b7e-2a03-48d6-8703-a6e5ce986527".into(),
+            command_id: "asset-command".into(),
+            expected_sequence: 1,
+            command,
+        };
+        let frame = encode_command_frame(&envelope).unwrap();
+        assert_eq!(decode_command_frame(&frame).unwrap(), envelope);
+    }
+}
+
+#[test]
 fn rejects_a_command_from_an_incompatible_future_major_version() {
     let mut command = take_live_command();
     command.version = ProtocolVersion { major: 2, minor: 0 };

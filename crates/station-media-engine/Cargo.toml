@@ -6,3 +6,4 @@ publish.workspace = true
 
 [dependencies]
 gstreamer.workspace = true
+station-media-assets.workspace = true

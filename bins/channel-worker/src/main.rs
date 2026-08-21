@@ -3,7 +3,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::time::Instant;
 
-use station_media_engine::SyntheticPlayout;
+use station_media_engine::{PersistentPlayout, SourceRole};
 use station_media_journal::JournalWriter;
 use station_media_protocol::{
     ChannelCommand, CommandEnvelope, MAX_FRAME_BYTES, PROTOCOL_VERSION, WorkerEvent,
@@ -23,7 +23,7 @@ fn main() {
     let mut pipe = PipeStream::connect(&pipe_name)
         .unwrap_or_else(|error| fatal(5, "connect to its control pipe", &format!("{error:?}")));
     let mut media = Some(
-        SyntheticPlayout::start_udp(udp_destination)
+        PersistentPlayout::start_udp(udp_destination)
             .unwrap_or_else(|error| fatal(8, "start its fallback graph", &format!("{error:?}"))),
     );
 
@@ -35,6 +35,7 @@ fn main() {
         WorkerEvent::Ready { graph_revision: 0 },
     )
     .unwrap_or_else(|error| fatal(4, "record and emit readiness", &error));
+    let mut loaded_asset = None;
 
     loop {
         let frame = match read_command_frame(&mut pipe) {
@@ -49,6 +50,10 @@ fn main() {
             &channel_id,
             journal.next_sequence(),
             started.elapsed().as_millis() as u64,
+            media
+                .as_mut()
+                .expect("a running worker owns its media graph"),
+            &mut loaded_asset,
         );
         if should_stop {
             media
@@ -127,6 +132,8 @@ fn decide_event(
     channel_id: &str,
     next_sequence: u64,
     monotonic_milliseconds: u64,
+    media: &mut PersistentPlayout,
+    loaded_asset: &mut Option<String>,
 ) -> (WorkerEvent, bool) {
     if command.channel_id != channel_id {
         return (
@@ -164,10 +171,77 @@ fn decide_event(
             },
             false,
         ),
+        ChannelCommand::LoadAsset {
+            asset_id,
+            media_path,
+        } => match media.load_asset(asset_id, media_path) {
+            Ok(()) => {
+                *loaded_asset = Some(asset_id.clone());
+                (
+                    WorkerEvent::AssetLoaded {
+                        asset_id: asset_id.clone(),
+                    },
+                    false,
+                )
+            }
+            Err(error) => (
+                rejection(
+                    command,
+                    "asset_load_failed",
+                    &format!("The asset could not be loaded: {error:?}"),
+                ),
+                false,
+            ),
+        },
+        ChannelCommand::TakeAsset { asset_id } => {
+            if loaded_asset.as_deref() != Some(asset_id.as_str()) {
+                (
+                    rejection(
+                        command,
+                        "asset_not_loaded",
+                        "The requested asset is not loaded in this channel worker.",
+                    ),
+                    false,
+                )
+            } else {
+                match media.select(SourceRole::Program) {
+                    Ok(()) => (
+                        WorkerEvent::OnAirChanged {
+                            source_kind: "asset".into(),
+                            source_id: asset_id.clone(),
+                        },
+                        false,
+                    ),
+                    Err(error) => (
+                        rejection(
+                            command,
+                            "take_failed",
+                            &format!("The asset could not be taken on air: {error:?}"),
+                        ),
+                        false,
+                    ),
+                }
+            }
+        }
+        ChannelCommand::ReturnToSchedule => match media.select(SourceRole::Fallback) {
+            Ok(()) => (
+                WorkerEvent::OnAirChanged {
+                    source_kind: "fallback".into(),
+                    source_id: "station-fallback".into(),
+                },
+                false,
+            ),
+            Err(error) => (
+                rejection(
+                    command,
+                    "return_failed",
+                    &format!("The worker could not return to fallback: {error:?}"),
+                ),
+                false,
+            ),
+        },
         ChannelCommand::Shutdown => (WorkerEvent::ShutdownComplete, true),
-        ChannelCommand::ArmLive { .. }
-        | ChannelCommand::TakeLive { .. }
-        | ChannelCommand::ReturnToSchedule => (
+        ChannelCommand::ArmLive { .. } | ChannelCommand::TakeLive { .. } => (
             rejection(
                 command,
                 "not_implemented",

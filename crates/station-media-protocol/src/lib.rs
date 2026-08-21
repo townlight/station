@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 pub const MAX_FRAME_BYTES: usize = 65_536;
-pub const PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion { major: 1, minor: 0 };
+pub const PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion { major: 1, minor: 1 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProtocolVersion {
@@ -25,6 +25,13 @@ pub enum ChannelCommand {
     ApplyPlan {
         plan_id: String,
         revision: u64,
+    },
+    LoadAsset {
+        asset_id: String,
+        media_path: String,
+    },
+    TakeAsset {
+        asset_id: String,
     },
     ArmLive {
         source_id: String,
@@ -55,6 +62,9 @@ pub enum WorkerEvent {
     OnAirChanged {
         source_kind: String,
         source_id: String,
+    },
+    AssetLoaded {
+        asset_id: String,
     },
     CommandRejected {
         command_id: String,

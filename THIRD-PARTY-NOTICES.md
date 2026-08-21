@@ -4,6 +4,8 @@ TownLight Station's media engine dynamically uses GStreamer and its selected plu
 
 The Rust GStreamer bindings are available under MIT OR Apache-2.0 from <https://gitlab.freedesktop.org/gstreamer/gstreamer-rs>.
 
+The RustCrypto SHA-2 implementation is available under MIT OR Apache-2.0 from <https://github.com/RustCrypto/hashes>.
+
 The `windows-service` Rust crate is available under MIT OR Apache-2.0 from <https://github.com/mullvad/windows-service-rs>.
 
 The Windows setup executable is produced with Inno Setup. Inno Setup source, license, and commercial-use terms are available from <https://jrsoftware.org/isinfo.php>.

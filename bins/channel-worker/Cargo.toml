@@ -11,6 +11,8 @@ station-media-protocol.workspace = true
 station-windows-ipc.workspace = true
 
 [dev-dependencies]
+gstreamer.workspace = true
+station-media-assets.workspace = true
 station-media-journal.workspace = true
 station-runtime.workspace = true
 station-media-protocol.workspace = true

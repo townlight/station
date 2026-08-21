@@ -7,6 +7,7 @@ members = [
     "crates/station-domain",
     "crates/station-media-journal",
     "crates/station-media-engine",
+    "crates/station-media-assets",
     "crates/station-media-protocol",
     "crates/station-runtime",
     "crates/station-storage",
@@ -20,12 +21,15 @@ publish = false
 
 [workspace.dependencies]
 gstreamer = { version = "=0.25.3", features = ["v1_28"] }
+gstreamer-pbutils = { version = "=0.25.2", features = ["v1_28"] }
 serde = { version = "=1.0.228", features = ["derive"] }
 serde_json = "=1.0.150"
+sha2 = "=0.10.9"
 station-api = { path = "crates/station-api" }
 station-domain = { path = "crates/station-domain" }
 station-media-journal = { path = "crates/station-media-journal" }
 station-media-engine = { path = "crates/station-media-engine" }
+station-media-assets = { path = "crates/station-media-assets" }
 station-media-protocol = { path = "crates/station-media-protocol" }
 station-runtime = { path = "crates/station-runtime" }
 station-storage = { path = "crates/station-storage" }
