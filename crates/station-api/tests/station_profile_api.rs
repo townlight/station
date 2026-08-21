@@ -164,6 +164,12 @@ fn persists_validated_channel_output_configuration() {
                 "127.0.0.1:5501",
                 -24.0,
             ),
+            OutputSinkConfiguration::required_srt(
+                "44444444-5555-4666-8777-888888888888",
+                "Remote SRT caller",
+                "srt://127.0.0.1:5600",
+                -24.0,
+            ),
         ],
         enabled: true,
     };

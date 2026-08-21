@@ -38,6 +38,9 @@ fn round_trips_private_worker_bootstrap_without_process_arguments() {
             WorkerOutputConfiguration::UdpTs {
                 destination: "127.0.0.1:5501".into(),
             },
+            WorkerOutputConfiguration::Srt {
+                uri: "srt://127.0.0.1:5600".into(),
+            },
         ],
     };
     let frame = encode_bootstrap_frame(&bootstrap).expect("bootstrap encodes");

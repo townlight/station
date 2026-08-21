@@ -3,7 +3,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::time::Instant;
 
-use station_media_engine::{PersistentPlayout, SourceRole};
+use station_media_engine::{PersistentPlayout, SourceRole, TransportOutput};
 use station_media_journal::JournalWriter;
 use station_media_protocol::{
     ChannelCommand, CommandEnvelope, MAX_FRAME_BYTES, PROTOCOL_VERSION, WorkerEvent,
@@ -49,15 +49,21 @@ fn main() {
     }
     let output_profile = OutputProfileId::from_storage_name(&bootstrap.output_profile)
         .unwrap_or_else(|error| fatal(6, "validate its output profile", &format!("{error:?}")));
-    let udp_destinations = bootstrap
+    let outputs = bootstrap
         .outputs
         .into_iter()
         .map(|output| match output {
-            WorkerOutputConfiguration::UdpTs { destination } => destination.parse::<SocketAddr>(),
+            WorkerOutputConfiguration::UdpTs { destination } => destination
+                .parse::<SocketAddr>()
+                .map(TransportOutput::Udp)
+                .map_err(|error| error.to_string()),
+            WorkerOutputConfiguration::Srt { uri } => {
+                validate_srt_uri(&uri).map(|()| TransportOutput::Srt { uri })
+            }
         })
         .collect::<Result<Vec<_>, _>>()
         .unwrap_or_else(|error| fatal(6, "validate its output destinations", &error.to_string()));
-    if udp_destinations.is_empty() {
+    if outputs.is_empty() {
         fatal(
             6,
             "validate its output destinations",
@@ -65,7 +71,7 @@ fn main() {
         );
     }
     let mut media = Some(
-        PersistentPlayout::start_udp_fanout_with_profile(&udp_destinations, output_profile)
+        PersistentPlayout::start_outputs_with_profile(&outputs, output_profile)
             .unwrap_or_else(|error| fatal(8, "start its fallback graph", &format!("{error:?}"))),
     );
 
@@ -110,6 +116,22 @@ fn main() {
             break;
         }
     }
+}
+
+fn validate_srt_uri(uri: &str) -> Result<(), String> {
+    let authority = uri
+        .strip_prefix("srt://")
+        .ok_or_else(|| "SRT output URI must start with srt://".to_string())?;
+    if authority.contains(['?', '#', '@']) {
+        return Err("SRT output URI cannot contain options or credentials".into());
+    }
+    let destination = authority
+        .parse::<SocketAddr>()
+        .map_err(|_| "SRT output URI must contain an IP address and port".to_string())?;
+    if destination.port() == 0 {
+        return Err("SRT output port must be nonzero".into());
+    }
+    Ok(())
 }
 
 fn arguments() -> Result<WorkerArguments, String> {

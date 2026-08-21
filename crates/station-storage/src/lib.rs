@@ -328,13 +328,13 @@ impl StationStore {
                channel_id TEXT NOT NULL,\
                sink_id TEXT NOT NULL,\
                label TEXT NOT NULL,\
-               kind TEXT NOT NULL CHECK (kind IN ('udp-ts')),\
+               kind TEXT NOT NULL CHECK (kind IN ('udp-ts','srt')),\
                destination TEXT NOT NULL,\
                loudness_target_milli INTEGER NOT NULL,\
                required INTEGER NOT NULL CHECK (required IN (0,1)),\
                enabled INTEGER NOT NULL CHECK (enabled IN (0,1)),\
                PRIMARY KEY(channel_id, sink_id),\
-               UNIQUE(channel_id, label),\
+               UNIQUE(channel_id, label COLLATE NOCASE),\
                FOREIGN KEY(channel_id) REFERENCES channels(channel_id) ON DELETE CASCADE\
              );\
              CREATE TABLE IF NOT EXISTS alert_events (\
@@ -502,6 +502,7 @@ impl StationStore {
         store.migrate_commit_report_statuses()?;
         store.migrate_alert_delivery_realerts()?;
         store.migrate_channel_output_profile()?;
+        store.migrate_channel_output_sink_kinds()?;
         store.migrate_channel_output_sinks()?;
         store.seed_default_alert_rules()?;
         store.seed_default_self_test_schedules()?;
@@ -3681,6 +3682,44 @@ impl StationStore {
         Ok(())
     }
 
+    fn migrate_channel_output_sink_kinds(&self) -> Result<(), String> {
+        let statement = self.prepare(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='channel_output_sinks'",
+        )?;
+        let definition = match unsafe { sqlite3_step(statement.raw) } {
+            SQLITE_ROW => column_text(statement.raw, 0)?,
+            SQLITE_DONE => return Err("channel_output_sinks schema is missing".into()),
+            _ => return Err(sqlite_error(self.database)),
+        };
+        drop(statement);
+        if definition.contains("'srt'") {
+            return Ok(());
+        }
+        self.execute(
+            "BEGIN IMMEDIATE;\
+             ALTER TABLE channel_output_sinks RENAME TO channel_output_sinks_udp_legacy;\
+             CREATE TABLE channel_output_sinks (\
+               channel_id TEXT NOT NULL,\
+               sink_id TEXT NOT NULL,\
+               label TEXT NOT NULL,\
+               kind TEXT NOT NULL CHECK (kind IN ('udp-ts','srt')),\
+               destination TEXT NOT NULL,\
+               loudness_target_milli INTEGER NOT NULL,\
+               required INTEGER NOT NULL CHECK (required IN (0,1)),\
+               enabled INTEGER NOT NULL CHECK (enabled IN (0,1)),\
+               PRIMARY KEY(channel_id, sink_id),\
+               UNIQUE(channel_id, label COLLATE NOCASE),\
+               FOREIGN KEY(channel_id) REFERENCES channels(channel_id) ON DELETE CASCADE\
+             ); \
+             INSERT INTO channel_output_sinks(\
+               channel_id, sink_id, label, kind, destination, loudness_target_milli, required, enabled) \
+             SELECT channel_id, sink_id, label, kind, destination, loudness_target_milli, required, enabled \
+             FROM channel_output_sinks_udp_legacy; \
+             DROP TABLE channel_output_sinks_udp_legacy; \
+             COMMIT",
+        )
+    }
+
     fn migrate_channel_output_sinks(&self) -> Result<(), String> {
         self.execute(
             "INSERT INTO channel_output_sinks(\
@@ -4371,12 +4410,14 @@ fn readiness_name(value: AssetReadiness) -> &'static str {
 fn output_sink_kind_name(value: OutputSinkKind) -> &'static str {
     match value {
         OutputSinkKind::UdpTs => "udp-ts",
+        OutputSinkKind::Srt => "srt",
     }
 }
 
 fn parse_output_sink_kind(value: &str) -> Result<OutputSinkKind, String> {
     match value {
         "udp-ts" => Ok(OutputSinkKind::UdpTs),
+        "srt" => Ok(OutputSinkKind::Srt),
         _ => Err(format!("unknown output sink kind: {value}")),
     }
 }
@@ -5028,6 +5069,67 @@ mod tests {
         assert_eq!(channels[0].output_sinks[0].sink_id, channels[0].channel_id);
         assert_eq!(channels[0].output_sinks[0].destination, "127.0.0.1:5500");
         assert_eq!(channels[0].output_sinks[0].loudness_target_lufs, -16.0);
+        drop(migrated);
+        for candidate in [
+            database.clone(),
+            PathBuf::from(format!("{}-wal", database.display())),
+            PathBuf::from(format!("{}-shm", database.display())),
+        ] {
+            let _ = std::fs::remove_file(candidate);
+        }
+    }
+
+    #[test]
+    fn expands_the_existing_udp_sink_table_for_srt_without_losing_rows() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let database = std::env::temp_dir().join(format!("townlight-srt-migration-{nonce}.db"));
+        let store = StationStore::open(&database).unwrap();
+        store
+            .execute(
+                "DROP TABLE channel_output_sinks;\
+                 CREATE TABLE channel_output_sinks (\
+                   channel_id TEXT NOT NULL, sink_id TEXT NOT NULL, label TEXT NOT NULL,\
+                   kind TEXT NOT NULL CHECK (kind IN ('udp-ts')), destination TEXT NOT NULL,\
+                   loudness_target_milli INTEGER NOT NULL,\
+                   required INTEGER NOT NULL CHECK (required IN (0,1)),\
+                   enabled INTEGER NOT NULL CHECK (enabled IN (0,1)),\
+                   PRIMARY KEY(channel_id, sink_id), UNIQUE(channel_id, label),\
+                   FOREIGN KEY(channel_id) REFERENCES channels(channel_id) ON DELETE CASCADE);\
+                 INSERT INTO channels(channel_id, display_name, udp_destination, output_profile, enabled)\
+                   VALUES('11111111-2222-4333-8444-555555555555','Preserved UDP',\
+                     '127.0.0.1:5500','atsc-720p5994',0);\
+                 INSERT INTO channel_output_sinks VALUES(\
+                   '11111111-2222-4333-8444-555555555555',\
+                   '11111111-2222-4333-8444-555555555555',\
+                   'Primary transport','udp-ts','127.0.0.1:5500',-24000,1,1)",
+            )
+            .unwrap();
+        drop(store);
+
+        let migrated = StationStore::open(&database).unwrap();
+        let srt = ChannelConfiguration {
+            channel_id: "22222222-3333-4444-8555-666666666666".into(),
+            display_name: "SRT output".into(),
+            output_profile: OutputProfileId::Atsc720p5994,
+            output_sinks: vec![OutputSinkConfiguration::required_srt(
+                "33333333-4444-4555-8666-777777777777",
+                "SRT caller",
+                "srt://127.0.0.1:5600",
+                -24.0,
+            )],
+            enabled: false,
+        };
+        migrated.put_channel(&srt).unwrap();
+        let channels = migrated.list_channels().unwrap();
+        assert_eq!(channels.len(), 2);
+        assert!(channels.iter().any(|channel| {
+            channel.display_name == "Preserved UDP"
+                && channel.output_sinks[0].kind == OutputSinkKind::UdpTs
+        }));
+        assert!(channels.iter().any(|channel| channel == &srt));
         drop(migrated);
         for candidate in [
             database.clone(),

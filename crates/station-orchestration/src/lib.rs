@@ -1,5 +1,4 @@
 use std::collections::{HashMap, HashSet};
-use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::{
     Arc,
@@ -11,7 +10,7 @@ use station_domain::{
     AlertConditionKind, AlertEvent, AlertEventState, AlertSeverity, ChannelRuntimeObservation,
     ChannelRuntimeState,
 };
-use station_media_protocol::{ChannelCommand, WorkerEvent};
+use station_media_protocol::{ChannelCommand, WorkerEvent, WorkerOutputConfiguration};
 use station_runtime::{SupervisorError, WorkerSupervisor};
 use station_schedule::{ChannelConfiguration, DispatchStatus, OutputSinkKind};
 use station_storage::StationStore;
@@ -59,23 +58,26 @@ impl ChannelController {
         channel
             .validate()
             .map_err(|error| OrchestrationError::InvalidDestination(format!("{error:?}")))?;
-        let destinations = channel
+        let outputs = channel
             .output_sinks
             .iter()
-            .filter(|sink| sink.enabled && sink.kind == OutputSinkKind::UdpTs)
-            .map(|sink| {
-                sink.destination
-                    .parse::<SocketAddr>()
-                    .map_err(|_| OrchestrationError::InvalidDestination(sink.destination.clone()))
+            .filter(|sink| sink.enabled)
+            .map(|sink| match sink.kind {
+                OutputSinkKind::UdpTs => WorkerOutputConfiguration::UdpTs {
+                    destination: sink.destination.clone(),
+                },
+                OutputSinkKind::Srt => WorkerOutputConfiguration::Srt {
+                    uri: sink.destination.clone(),
+                },
             })
-            .collect::<Result<Vec<_>, _>>()?;
+            .collect::<Vec<_>>();
         let worker_id = format!("station-worker-{}", channel.channel_id);
-        let supervisor = WorkerSupervisor::launch_with_output_profile_and_destinations(
+        let supervisor = WorkerSupervisor::launch_with_outputs(
             worker_executable,
             &worker_id,
             &channel.channel_id,
             journal_path,
-            &destinations,
+            &outputs,
             channel.output_profile,
             timeout,
         )

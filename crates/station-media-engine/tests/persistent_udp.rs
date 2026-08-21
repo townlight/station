@@ -8,7 +8,7 @@ use gst::prelude::*;
 use gstreamer as gst;
 use gstreamer_pbutils as gst_pbutils;
 use station_media_assets::ingest_media;
-use station_media_engine::{PersistentPlayout, SourceRole};
+use station_media_engine::{EngineError, PersistentPlayout, SourceRole, TransportOutput};
 use station_schedule::OutputProfileId;
 
 #[test]
@@ -39,6 +39,81 @@ fn fans_one_persistent_transport_out_to_two_independent_udp_sinks() {
         assert!(truth.audio_pts_samples >= 3);
     }
     playout.stop().unwrap();
+}
+
+#[test]
+fn sends_the_persistent_transport_to_an_srt_listener() {
+    gst::init().unwrap();
+    let reservation = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let destination = reservation.local_addr().unwrap();
+    drop(reservation);
+    let capture_path = test_root("srt-transport").with_extension("ts");
+    let receiver = gst::Pipeline::new();
+    let source = gst::ElementFactory::make("srtsrc")
+        .property("uri", format!("srt://{destination}"))
+        .property_from_str("mode", "listener")
+        .property("localaddress", "127.0.0.1")
+        .property("localport", u32::from(destination.port()))
+        .property("latency", 200_i32)
+        .build()
+        .unwrap();
+    let sink = gst::ElementFactory::make("filesink")
+        .property("location", capture_path.to_string_lossy().as_ref())
+        .property("sync", false)
+        .property("async", false)
+        .build()
+        .unwrap();
+    receiver.add_many([&source, &sink]).unwrap();
+    source.link(&sink).unwrap();
+    receiver.set_state(gst::State::Playing).unwrap();
+
+    let playout = PersistentPlayout::start_outputs_with_profile(
+        &[TransportOutput::Srt {
+            uri: format!("srt://{destination}"),
+        }],
+        OutputProfileId::Proof360p30,
+    )
+    .expect("the SRT caller output must start");
+    std::thread::sleep(Duration::from_secs(4));
+    playout.stop().unwrap();
+    receiver.set_state(gst::State::Null).unwrap();
+    receiver.state(gst::ClockTime::from_seconds(5)).0.unwrap();
+
+    let capture = fs::read(&capture_path).unwrap();
+    assert!(capture.len() > 500_000);
+    let mut continuity = ContinuityTracker::default();
+    // srtsink sends the muxer's PAT/PMT streamheader once at connection before
+    // the continuous transport buffers. Start continuity tracking after that
+    // standards-compatible bootstrap duplicate.
+    for packet in capture.chunks_exact(188).skip(32) {
+        continuity.observe(packet);
+    }
+    assert!(continuity.video_pid.is_some());
+    assert!(continuity.audio_pid.is_some());
+    assert!(continuity.video_pts_samples >= 3);
+    fs::remove_file(capture_path).unwrap();
+}
+
+#[test]
+fn refuses_srt_readiness_when_the_required_listener_is_absent() {
+    let reservation = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let destination = reservation.local_addr().unwrap();
+    drop(reservation);
+    let started = Instant::now();
+    let error = match PersistentPlayout::start_outputs_with_profile(
+        &[TransportOutput::Srt {
+            uri: format!("srt://{destination}"),
+        }],
+        OutputProfileId::Proof360p30,
+    ) {
+        Err(error) => error,
+        Ok(playout) => {
+            playout.stop().unwrap();
+            panic!("an absent required SRT listener must fail closed");
+        }
+    };
+    assert!(matches!(error, EngineError::State(message) if message.contains("did not connect")));
+    assert!(started.elapsed() < Duration::from_secs(8));
 }
 
 #[test]

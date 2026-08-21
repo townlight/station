@@ -88,6 +88,7 @@ impl OutputProfileId {
 #[serde(rename_all = "kebab-case")]
 pub enum OutputSinkKind {
     UdpTs,
+    Srt,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -112,6 +113,23 @@ impl OutputSinkConfiguration {
             sink_id: sink_id.into(),
             label: label.into(),
             kind: OutputSinkKind::UdpTs,
+            destination: destination.into(),
+            loudness_target_lufs,
+            required: true,
+            enabled: true,
+        }
+    }
+
+    pub fn required_srt(
+        sink_id: impl Into<String>,
+        label: impl Into<String>,
+        destination: impl Into<String>,
+        loudness_target_lufs: f32,
+    ) -> Self {
+        Self {
+            sink_id: sink_id.into(),
+            label: label.into(),
+            kind: OutputSinkKind::Srt,
             destination: destination.into(),
             loudness_target_lufs,
             required: true,
@@ -350,6 +368,33 @@ impl ChannelConfiguration {
                         ));
                     }
                 }
+                OutputSinkKind::Srt => {
+                    if sink.enabled && !sink.required {
+                        return Err(ScheduleError::Invalid(
+                            "enabled SRT outputs must be required until independent branch health is available",
+                        ));
+                    }
+                    let Some(authority) = sink.destination.strip_prefix("srt://") else {
+                        return Err(ScheduleError::Invalid(
+                            "SRT destinations must use srt:// followed by an IP address and port",
+                        ));
+                    };
+                    if authority.contains(['?', '#', '@']) {
+                        return Err(ScheduleError::Invalid(
+                            "SRT destination options and credentials are not allowed in the public URI",
+                        ));
+                    }
+                    let destination = authority.parse::<std::net::SocketAddr>().map_err(|_| {
+                        ScheduleError::Invalid(
+                            "SRT destinations must use srt:// followed by an IP address and port",
+                        )
+                    })?;
+                    if destination.port() == 0 {
+                        return Err(ScheduleError::Invalid(
+                            "SRT destination ports must be nonzero",
+                        ));
+                    }
+                }
             }
             if !sink.loudness_target_lufs.is_finite()
                 || !(-70.0..=-5.0).contains(&sink.loudness_target_lufs)
@@ -360,7 +405,7 @@ impl ChannelConfiguration {
             }
             if (sink.loudness_target_lufs - profile.loudness_target_lufs).abs() > f32::EPSILON {
                 return Err(ScheduleError::Invalid(
-                    "UDP transport sink loudness must match the selected encoded profile",
+                    "transport sink loudness must match the selected encoded profile",
                 ));
             }
         }

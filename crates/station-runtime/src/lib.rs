@@ -101,17 +101,38 @@ impl WorkerSupervisor {
         output_profile: OutputProfileId,
         timeout: Duration,
     ) -> Result<Self, SupervisorError> {
+        let outputs = udp_destinations
+            .iter()
+            .map(|destination| WorkerOutputConfiguration::UdpTs {
+                destination: destination.to_string(),
+            })
+            .collect::<Vec<_>>();
+        Self::launch_with_outputs(
+            executable,
+            worker_id,
+            channel_id,
+            journal_path,
+            &outputs,
+            output_profile,
+            timeout,
+        )
+    }
+
+    pub fn launch_with_outputs(
+        executable: &Path,
+        worker_id: &str,
+        channel_id: &str,
+        journal_path: &Path,
+        outputs: &[WorkerOutputConfiguration],
+        output_profile: OutputProfileId,
+        timeout: Duration,
+    ) -> Result<Self, SupervisorError> {
         let bootstrap = WorkerBootstrapEnvelope {
             version: PROTOCOL_VERSION,
             worker_id: worker_id.to_string(),
             channel_id: channel_id.to_string(),
             output_profile: output_profile.storage_name().to_string(),
-            outputs: udp_destinations
-                .iter()
-                .map(|destination| WorkerOutputConfiguration::UdpTs {
-                    destination: destination.to_string(),
-                })
-                .collect(),
+            outputs: outputs.to_vec(),
         };
         let bootstrap_frame =
             encode_bootstrap_frame(&bootstrap).map_err(SupervisorError::Protocol)?;

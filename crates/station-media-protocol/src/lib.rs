@@ -22,6 +22,7 @@ pub struct WorkerBootstrapEnvelope {
 #[serde(tag = "kind", rename_all = "kebab-case")]
 pub enum WorkerOutputConfiguration {
     UdpTs { destination: String },
+    Srt { uri: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

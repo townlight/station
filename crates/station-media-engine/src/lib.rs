@@ -18,6 +18,12 @@ pub enum SourceRole {
     Program,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TransportOutput {
+    Udp(SocketAddr),
+    Srt { uri: String },
+}
+
 #[derive(Debug)]
 pub enum EngineError {
     Initialization(String),
@@ -86,12 +92,24 @@ impl PersistentPlayout {
         destinations: &[SocketAddr],
         output_profile: OutputProfileId,
     ) -> Result<Self, EngineError> {
-        if destinations.is_empty() {
+        let outputs = destinations
+            .iter()
+            .copied()
+            .map(TransportOutput::Udp)
+            .collect::<Vec<_>>();
+        Self::start_outputs_with_profile(&outputs, output_profile)
+    }
+
+    pub fn start_outputs_with_profile(
+        outputs: &[TransportOutput],
+        output_profile: OutputProfileId,
+    ) -> Result<Self, EngineError> {
+        if outputs.is_empty() {
             return Err(EngineError::Pipeline(
-                "at least one UDP output destination is required".into(),
+                "at least one transport output is required".into(),
             ));
         }
-        Self::start_udp_fanout_with_program(destinations, None, output_profile)
+        Self::start_outputs_with_program(outputs, None, output_profile)
     }
 
     pub fn start_file_udp(
@@ -108,15 +126,15 @@ impl PersistentPlayout {
     ) -> Result<Self, EngineError> {
         station_media_assets::validate_media(media_path.as_ref())
             .map_err(|error| EngineError::MediaRejected(format!("{error:?}")))?;
-        Self::start_udp_fanout_with_program(
-            &[destination],
+        Self::start_outputs_with_program(
+            &[TransportOutput::Udp(destination)],
             Some(media_path.as_ref()),
             output_profile,
         )
     }
 
-    fn start_udp_fanout_with_program(
-        destinations: &[SocketAddr],
+    fn start_outputs_with_program(
+        outputs: &[TransportOutput],
         media_path: Option<&Path>,
         output_profile: OutputProfileId,
     ) -> Result<Self, EngineError> {
@@ -222,17 +240,34 @@ impl PersistentPlayout {
             .build()
             .map_err(|error| build_error("mpegtsmux", error))?;
         let transport_fanout = element("tee", "transport-fanout")?;
-        let mut output_branches = Vec::with_capacity(destinations.len());
-        for (index, destination) in destinations.iter().enumerate() {
+        let mut output_branches = Vec::with_capacity(outputs.len());
+        let mut srt_sinks = Vec::new();
+        for (index, output) in outputs.iter().enumerate() {
             let queue = element("queue", format!("transport-output-queue-{index}"))?;
-            let sink = gst::ElementFactory::make("udpsink")
-                .name(format!("udp-output-{index}"))
-                .property("host", destination.ip().to_string())
-                .property("port", i32::from(destination.port()))
-                .property("sync", false)
-                .property("async", false)
-                .build()
-                .map_err(|error| build_error("udpsink", error))?;
+            let sink = match output {
+                TransportOutput::Udp(destination) => gst::ElementFactory::make("udpsink")
+                    .name(format!("udp-output-{index}"))
+                    .property("host", destination.ip().to_string())
+                    .property("port", i32::from(destination.port()))
+                    .property("sync", false)
+                    .property("async", false)
+                    .build()
+                    .map_err(|error| build_error("udpsink", error))?,
+                TransportOutput::Srt { uri } => gst::ElementFactory::make("srtsink")
+                    .name(format!("srt-output-{index}"))
+                    .property("uri", uri)
+                    .property_from_str("mode", "caller")
+                    .property("latency", 200_i32)
+                    .property("wait-for-connection", false)
+                    .property("auto-reconnect", true)
+                    .property("sync", false)
+                    .property("async", false)
+                    .build()
+                    .map_err(|error| build_error("srtsink", error))?,
+            };
+            if matches!(output, TransportOutput::Srt { .. }) {
+                srt_sinks.push(sink.clone());
+            }
             output_branches.push((queue, sink));
         }
 
@@ -363,6 +398,7 @@ impl PersistentPlayout {
             .state(gst::ClockTime::from_seconds(5))
             .0
             .map_err(|error| EngineError::State(format!("{error:?}")))?;
+        wait_for_srt_connections(&srt_sinks, &pipeline, Duration::from_secs(5))?;
         if let Some(program) = &file_program {
             wait_for_file_decode(program, &pipeline, Duration::from_secs(5))?;
         }
@@ -508,6 +544,44 @@ impl PersistentPlayout {
             std::thread::sleep(Duration::from_millis(2));
         }
     }
+}
+
+fn wait_for_srt_connections(
+    sinks: &[gst::Element],
+    pipeline: &gst::Pipeline,
+    timeout: Duration,
+) -> Result<(), EngineError> {
+    if sinks.is_empty() {
+        return Ok(());
+    }
+    let started = Instant::now();
+    while sinks.iter().any(|sink| {
+        sink.property::<gst::Structure>("stats")
+            .get::<u64>("bytes-sent-total")
+            .unwrap_or(0)
+            == 0
+    }) {
+        if started.elapsed() >= timeout {
+            let _ = pipeline.set_state(gst::State::Null);
+            return Err(EngineError::State(
+                "required SRT output did not connect and send within the startup deadline".into(),
+            ));
+        }
+        if let Some(message) = pipeline.bus().and_then(|bus| {
+            bus.timed_pop_filtered(
+                gst::ClockTime::from_mseconds(25),
+                &[gst::MessageType::Error],
+            )
+        }) && let gst::MessageView::Error(error) = message.view()
+        {
+            let _ = pipeline.set_state(gst::State::Null);
+            return Err(EngineError::State(format!(
+                "SRT output failed before readiness: {}",
+                error.error()
+            )));
+        }
+    }
+    Ok(())
 }
 
 struct FileProgram {

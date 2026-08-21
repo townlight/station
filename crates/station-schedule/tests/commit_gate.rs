@@ -32,6 +32,38 @@ fn output_profiles_are_explicit_runnable_transport_contracts() {
     }
     .validate()
     .unwrap();
+    ChannelConfiguration {
+        channel_id: CHANNEL.into(),
+        display_name: "Remote contribution".into(),
+        output_profile: OutputProfileId::Atsc720p5994,
+        output_sinks: vec![OutputSinkConfiguration::required_srt(
+            CHANNEL,
+            "SRT caller",
+            "srt://127.0.0.1:5600",
+            -24.0,
+        )],
+        enabled: true,
+    }
+    .validate()
+    .unwrap();
+    let mut unsafe_uri = OutputSinkConfiguration::required_srt(
+        CHANNEL,
+        "SRT caller",
+        "srt://127.0.0.1:5600?passphrase=leaked",
+        -24.0,
+    );
+    unsafe_uri.enabled = false;
+    assert!(
+        ChannelConfiguration {
+            channel_id: CHANNEL.into(),
+            display_name: "Unsafe remote contribution".into(),
+            output_profile: OutputProfileId::Atsc720p5994,
+            output_sinks: vec![unsafe_uri],
+            enabled: false,
+        }
+        .validate()
+        .is_err()
+    );
     assert!(OutputProfileId::from_storage_name("unknown").is_err());
 }
 
