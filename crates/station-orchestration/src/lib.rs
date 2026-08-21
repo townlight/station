@@ -6,12 +6,15 @@ use std::sync::{
 };
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use sha2::{Digest, Sha256};
+use station_cg::{CgBulletinContent, CgResolvedContent, CgResolvedSnapshot};
 use station_domain::{
     AlertConditionKind, AlertEvent, AlertEventState, AlertSeverity, ChannelRuntimeObservation,
     ChannelRuntimeState,
 };
 use station_media_protocol::{
-    ChannelCommand, SrtPassphrase, WorkerEvent, WorkerOutputConfiguration,
+    CgOverlay, CgOverlayContent, CgRect, CgSnapshot, ChannelCommand, MAX_CG_SLOTS,
+    MAX_CG_TEXT_BYTES, SrtPassphrase, WorkerEvent, WorkerOutputConfiguration,
 };
 use station_runtime::{SupervisorError, WorkerSupervisor};
 use station_schedule::{ChannelConfiguration, DispatchStatus, OutputSinkKind};
@@ -43,6 +46,171 @@ pub enum OrchestrationError {
         detail: String,
     },
     Clock(String),
+    InvalidCgSnapshot(String),
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CgSnapshotState {
+    last_valid: Option<(CgSnapshot, [u8; 32])>,
+    last_applied: Option<(u64, [u8; 32])>,
+}
+
+impl CgSnapshotState {
+    pub fn accept(
+        &mut self,
+        snapshot: &CgResolvedSnapshot,
+    ) -> Result<CgSnapshot, OrchestrationError> {
+        let protocol = resolved_snapshot_to_protocol(snapshot)?;
+        let hash = snapshot_hash(&protocol)?;
+        self.last_valid = Some((protocol.clone(), hash));
+        Ok(protocol)
+    }
+
+    pub fn mark_applied(&mut self, board_id: &str, board_revision: u64) {
+        if self.last_valid.as_ref().is_some_and(|(snapshot, _)| {
+            snapshot.board_id == board_id && snapshot.board_revision == board_revision
+        }) {
+            let hash = self.last_valid.as_ref().map(|(_, hash)| *hash).unwrap();
+            self.last_applied = Some((board_revision, hash));
+        }
+    }
+
+    pub fn worker_ready(&mut self) {
+        self.last_applied = None;
+    }
+
+    pub fn resend_after_ready(&self) -> Option<CgSnapshot> {
+        let (snapshot, hash) = self.last_valid.as_ref()?;
+        let applied = self.last_applied.as_ref();
+        (applied != Some(&(snapshot.board_revision, *hash))).then_some(snapshot.clone())
+    }
+
+    pub fn last_valid(&self) -> Option<&CgSnapshot> {
+        self.last_valid.as_ref().map(|(snapshot, _)| snapshot)
+    }
+
+    pub fn last_applied(&self) -> Option<(u64, [u8; 32])> {
+        self.last_applied
+    }
+}
+
+pub fn resolved_snapshot_to_protocol(
+    snapshot: &CgResolvedSnapshot,
+) -> Result<CgSnapshot, OrchestrationError> {
+    snapshot
+        .validate()
+        .map_err(|error| OrchestrationError::InvalidCgSnapshot(error.into()))?;
+    let mut zones = snapshot.zones.iter().collect::<Vec<_>>();
+    zones.sort_by(|left, right| {
+        left.template_zone_key
+            .cmp(&right.template_zone_key)
+            .then_with(|| left.zone_id.cmp(&right.zone_id))
+    });
+    let mut overlays = Vec::new();
+    for zone in zones {
+        let contents = match &zone.content {
+            CgResolvedContent::ManualText { text } => vec![Some(normalize_cg_text(text))],
+            CgResolvedContent::Clock { format } => {
+                let format = normalize_cg_text(format);
+                validate_cg_text(&format)?;
+                overlays.push(CgOverlay {
+                    slot: checked_slot(overlays.len())?,
+                    rect: protocol_rect(zone),
+                    z_index: protocol_z_index(zone)?,
+                    content: CgOverlayContent::Clock { format },
+                });
+                continue;
+            }
+            CgResolvedContent::Bulletin { content, .. } => match content {
+                CgBulletinContent::Text { title, body } => {
+                    vec![Some(normalize_cg_text(&format!("{title}\n{body}")))]
+                }
+                _ => vec![None],
+            },
+            CgResolvedContent::FeedItems { items, .. } => {
+                let mut items = items.clone();
+                items.sort_by(|left, right| {
+                    left.starts_at_unix_ms
+                        .cmp(&right.starts_at_unix_ms)
+                        .then_with(|| left.item_id.cmp(&right.item_id))
+                });
+                items
+                    .into_iter()
+                    .next()
+                    .map(|item| {
+                        let title = item.title;
+                        Some(normalize_cg_text(&item.summary.map_or_else(
+                            || title.clone(),
+                            |summary| format!("{title}\n{summary}"),
+                        )))
+                    })
+                    .into_iter()
+                    .collect()
+            }
+            CgResolvedContent::Placeholder { .. } => vec![None],
+        };
+        for text in contents.into_iter().flatten() {
+            validate_cg_text(&text)?;
+            overlays.push(CgOverlay {
+                slot: checked_slot(overlays.len())?,
+                rect: protocol_rect(zone),
+                z_index: protocol_z_index(zone)?,
+                content: CgOverlayContent::Text { text },
+            });
+        }
+    }
+    Ok(CgSnapshot {
+        board_id: snapshot.board_id.clone(),
+        board_revision: snapshot.board_revision,
+        overlays,
+    })
+}
+
+fn checked_slot(index: usize) -> Result<u8, OrchestrationError> {
+    (index < MAX_CG_SLOTS)
+        .then_some(index as u8)
+        .ok_or_else(|| OrchestrationError::InvalidCgSnapshot("CG snapshot exceeds 8 slots".into()))
+}
+
+fn protocol_rect(zone: &station_cg::CgResolvedZone) -> CgRect {
+    CgRect {
+        x: zone.bounds.x,
+        y: zone.bounds.y,
+        width: zone.bounds.width,
+        height: zone.bounds.height,
+    }
+}
+
+fn protocol_z_index(zone: &station_cg::CgResolvedZone) -> Result<i16, OrchestrationError> {
+    i16::try_from(zone.z_index).map_err(|_| {
+        OrchestrationError::InvalidCgSnapshot("CG z-index exceeds protocol range".into())
+    })
+}
+
+fn validate_cg_text(text: &str) -> Result<(), OrchestrationError> {
+    if text.is_empty()
+        || text.len() > MAX_CG_TEXT_BYTES
+        || text
+            .chars()
+            .any(|character| character.is_control() && character != '\n')
+    {
+        Err(OrchestrationError::InvalidCgSnapshot(
+            "CG overlay text violates protocol limits".into(),
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+fn normalize_cg_text(text: &str) -> String {
+    text.replace("\r\n", "\n").replace('\r', "\n")
+}
+
+fn snapshot_hash(snapshot: &CgSnapshot) -> Result<[u8; 32], OrchestrationError> {
+    let bytes = serde_json::to_vec(snapshot).map_err(|error| {
+        OrchestrationError::InvalidCgSnapshot(format!("CG snapshot hash failed: {error}"))
+    })?;
+    Ok(Sha256::digest(bytes).into())
 }
 
 struct OutputExpectation {
@@ -63,6 +231,7 @@ pub struct ChannelController {
     last_heartbeat_at_unix_ms: i64,
     output_expectations: Vec<OutputExpectation>,
     last_output_bytes: Option<Vec<u64>>,
+    cg_state: CgSnapshotState,
 }
 
 impl ChannelController {
@@ -142,7 +311,27 @@ impl ChannelController {
             last_heartbeat_at_unix_ms: started_at_unix_ms,
             output_expectations,
             last_output_bytes: None,
+            cg_state: CgSnapshotState::default(),
         })
+    }
+
+    pub fn accept_cg_snapshot(
+        &mut self,
+        snapshot: &CgResolvedSnapshot,
+    ) -> Result<CgSnapshot, OrchestrationError> {
+        self.cg_state.accept(snapshot)
+    }
+
+    pub fn cg_snapshot_after_worker_ready(&self) -> Option<CgSnapshot> {
+        self.cg_state.resend_after_ready()
+    }
+
+    pub fn mark_cg_worker_ready(&mut self) {
+        self.cg_state.worker_ready();
+    }
+
+    pub fn mark_cg_applied(&mut self, board_id: &str, board_revision: u64) {
+        self.cg_state.mark_applied(board_id, board_revision);
     }
 
     fn poll_health(&mut self, now_unix_ms: i64) -> Result<(), OrchestrationError> {
@@ -676,6 +865,9 @@ fn operator_failure_detail(error: &OrchestrationError) -> String {
         ),
         OrchestrationError::Clock(_) =>
             "The station clock could not provide a valid dispatch time; verify Windows time service before returning this output to service.".into(),
+        OrchestrationError::InvalidCgSnapshot(detail) => {
+            format!("The CG snapshot exceeded the worker protocol contract: {detail}")
+        }
     }
 }
 
@@ -715,7 +907,14 @@ fn system_time_millis() -> Result<i64, OrchestrationError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{OutputExpectation, stalled_required_output};
+    use super::{
+        CgSnapshotState, OrchestrationError, OutputExpectation, resolved_snapshot_to_protocol,
+        stalled_required_output,
+    };
+    use station_cg::{
+        CgContentSource, CgRect, CgResolvedContent, CgResolvedSnapshot, CgResolvedZone,
+        CgTemplateKind, CgZoneKind,
+    };
 
     fn output(required: bool) -> OutputExpectation {
         OutputExpectation {
@@ -744,5 +943,133 @@ mod tests {
             stalled_required_output(&[output(false)], Some(&[100]), &[100]),
             None
         );
+    }
+
+    fn snapshot(content: CgResolvedContent) -> CgResolvedSnapshot {
+        CgResolvedSnapshot {
+            board_id: "94a0dc01-d314-4b55-b2e4-cba39cc3f1dc".into(),
+            channel_id: "5d85189a-cd1f-43dc-a619-66a2aeb09ac4".into(),
+            template_id: "l-bar".into(),
+            template_kind: CgTemplateKind::LBar,
+            board_revision: 7,
+            generated_at_unix_ms: 1_000,
+            zones: vec![CgResolvedZone {
+                zone_id: "8f4f0f70-5c30-48c6-819a-fb22b34353c5".into(),
+                template_zone_key: "ticker".into(),
+                zone_kind: CgZoneKind::Ticker,
+                bounds: CgRect {
+                    x: 10,
+                    y: 700,
+                    width: 800,
+                    height: 200,
+                },
+                z_index: 1,
+                content_source: match &content {
+                    CgResolvedContent::Bulletin { .. } => CgContentSource::BulletinRotation,
+                    CgResolvedContent::FeedItems { feed_source_id, .. } => CgContentSource::Feed {
+                        feed_source_id: feed_source_id.clone(),
+                    },
+                    CgResolvedContent::Placeholder {
+                        source: station_cg::CgPlaceholderSource::Image,
+                        ..
+                    } => CgContentSource::Image {
+                        asset_id:
+                            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                                .into(),
+                    },
+                    _ => CgContentSource::Manual { text: "x".into() },
+                },
+                content,
+                revision: 1,
+            }],
+        }
+    }
+
+    #[test]
+    fn maps_supported_content_and_leaves_typed_placeholders_transparent() {
+        let mut state = CgSnapshotState::default();
+        let resolved = snapshot(CgResolvedContent::ManualText {
+            text: "hello".into(),
+        });
+        let protocol = state.accept(&resolved).unwrap();
+        assert_eq!(protocol.overlays.len(), 1);
+        assert!(state.resend_after_ready().is_some());
+        state.mark_applied(&protocol.board_id, protocol.board_revision);
+        assert!(state.resend_after_ready().is_none());
+        state.worker_ready();
+        state.mark_applied("another-board", protocol.board_revision);
+        assert!(state.resend_after_ready().is_some());
+        state.worker_ready();
+        assert!(state.resend_after_ready().is_some());
+        let transparent = snapshot(CgResolvedContent::Placeholder {
+            source: station_cg::CgPlaceholderSource::Image,
+            reason: station_cg::CgPlaceholderReason::ImageAssetReadinessUnknown,
+        });
+        assert!(
+            resolved_snapshot_to_protocol(&transparent)
+                .unwrap()
+                .overlays
+                .is_empty()
+        );
+
+        let bulletin = snapshot(CgResolvedContent::Bulletin {
+            bulletin_id: "597f52ae-f16c-4ff8-ab32-60379cd950c4".into(),
+            content: station_cg::CgBulletinContent::Text {
+                title: "Title".into(),
+                body: "Body".into(),
+            },
+        });
+        let protocol = resolved_snapshot_to_protocol(&bulletin).unwrap();
+        assert!(matches!(
+            &protocol.overlays[0].content,
+            station_media_protocol::CgOverlayContent::Text { text } if text == "Title\nBody"
+        ));
+
+        let feed = snapshot(CgResolvedContent::FeedItems {
+            feed_source_id: "796ca80a-9cc2-4fc1-84a2-2a88d8f92f24".into(),
+            items: vec![
+                station_cg::CgFeedItem {
+                    item_id: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                        .into(),
+                    title: "First".into(),
+                    summary: None,
+                    starts_at_unix_ms: Some(2),
+                    url: None,
+                    tags: Vec::new(),
+                },
+                station_cg::CgFeedItem {
+                    item_id: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+                        .into(),
+                    title: "Second".into(),
+                    summary: None,
+                    starts_at_unix_ms: Some(1),
+                    url: None,
+                    tags: Vec::new(),
+                },
+            ],
+            stale: false,
+            last_error: None,
+        });
+        let protocol = resolved_snapshot_to_protocol(&feed).unwrap();
+        assert_eq!(protocol.overlays.len(), 1);
+        assert!(matches!(
+            &protocol.overlays[0].content,
+            station_media_protocol::CgOverlayContent::Text { text } if text == "Second"
+        ));
+    }
+
+    #[test]
+    fn rejects_text_that_exceeds_protocol_limit() {
+        let resolved = snapshot(CgResolvedContent::Bulletin {
+            bulletin_id: "597f52ae-f16c-4ff8-ab32-60379cd950c4".into(),
+            content: station_cg::CgBulletinContent::Text {
+                title: "title".into(),
+                body: "x".repeat(3_000),
+            },
+        });
+        assert!(matches!(
+            resolved_snapshot_to_protocol(&resolved),
+            Err(OrchestrationError::InvalidCgSnapshot(_))
+        ));
     }
 }

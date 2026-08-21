@@ -1647,6 +1647,9 @@ dependencies = [
 name = "station-orchestration"
 version = "0.1.0"
 dependencies = [
+ "serde_json",
+ "sha2",
+ "station-cg",
  "station-domain",
  "station-media-protocol",
  "station-runtime",
