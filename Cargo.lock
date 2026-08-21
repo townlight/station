@@ -76,6 +76,37 @@ dependencies = [
 ]
 
 [[package]]
+name = "station-api"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "station-domain",
+ "station-storage",
+]
+
+[[package]]
+name = "station-domain"
+version = "0.1.0"
+dependencies = [
+ "serde",
+]
+
+[[package]]
+name = "station-storage"
+version = "0.1.0"
+dependencies = [
+ "station-domain",
+]
+
+[[package]]
+name = "stationd"
+version = "0.1.0"
+dependencies = [
+ "station-api",
+]
+
+[[package]]
 name = "syn"
 version = "2.0.117"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -84,14 +115,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "unicode-ident",
-]
-
-[[package]]
-name = "townlight-station"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
 ]
 
 [[package]]

@@ -17,7 +17,7 @@ fn main() {
         std::process::exit(1);
     });
     println!("TownLight Station is listening on http://{address}");
-    if let Err(error) = townlight_station::serve(listener, database) {
+    if let Err(error) = station_api::serve(listener, database) {
         eprintln!("TownLight Station stopped: {error}");
         std::process::exit(1);
     }

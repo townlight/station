@@ -1,12 +1,23 @@
-[package]
-name = "townlight-station"
+[workspace]
+resolver = "3"
+members = [
+    "bins/stationd",
+    "crates/station-api",
+    "crates/station-domain",
+    "crates/station-storage",
+]
+
+[workspace.package]
 version = "0.1.0"
 edition = "2024"
 publish = false
 
-[dependencies]
+[workspace.dependencies]
 serde = { version = "=1.0.228", features = ["derive"] }
 serde_json = "=1.0.150"
+station-api = { path = "crates/station-api" }
+station-domain = { path = "crates/station-domain" }
+station-storage = { path = "crates/station-storage" }
 
 [profile.release]
 lto = "thin"

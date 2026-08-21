@@ -26,7 +26,7 @@ The runtime currently uses the SQLite library included with Windows. It does not
 1. Install the Rust toolchain.
 2. Clone this repository.
 3. Run `cargo test --offline`.
-4. Run `cargo run -- station.db 127.0.0.1:4070`.
+4. Run `cargo run -p stationd -- station.db 127.0.0.1:4070`.
 5. Open `http://127.0.0.1:4070/health`.
 
 ## API
@@ -55,7 +55,7 @@ Run formatting, linting, and tests before committing:
 ```powershell
 cargo fmt --check
 cargo clippy --offline --all-targets --all-features -- -D warnings
-cargo test --offline
+cargo test --offline --workspace
 ```
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the proof-first workflow and [LICENSE](LICENSE) for terms.

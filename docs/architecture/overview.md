@@ -16,6 +16,14 @@ flowchart LR
 
 `stationd` is a modular monolith and the only writer to the authoritative station database. A separate persistent worker owns each channel's GStreamer graph, media clock, output switching, and append-only as-run journal. File processing and optional local AI run outside both timing-critical and authoritative paths.
 
+The initial control-plane dependency direction is enforced by the Cargo workspace:
+
+```text
+station-domain <- station-storage <- station-api <- stationd
+```
+
+The domain crate has no storage, HTTP, media, or Windows-service dependencies. Storage translates domain objects to SQLite. The API owns transport and error contracts. The daemon is composition and process lifecycle only.
+
 ## Authority rules
 
 | Truth | Owner |

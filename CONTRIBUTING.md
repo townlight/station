@@ -22,5 +22,5 @@ Before committing, run:
 ```powershell
 cargo fmt --check
 cargo clippy --offline --all-targets --all-features -- -D warnings
-cargo test --offline
+cargo test --offline --workspace
 ```

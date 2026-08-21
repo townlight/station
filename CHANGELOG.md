@@ -14,3 +14,4 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Validation for station identity, operator-visible name, and IANA timezone.
 - HTTP health endpoint and end-to-end transport tests.
 - Optimistic revision checks that reject stale station-profile updates without losing the winning change.
+- Acyclic workspace boundaries for the domain model, SQLite storage, HTTP API, and `stationd` process.
