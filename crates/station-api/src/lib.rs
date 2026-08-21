@@ -4,7 +4,7 @@ use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::sync::{
     Arc,
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -28,6 +28,7 @@ use station_update_coordinator::CoordinatorError;
 const OPERATOR_HTML: &[u8] = include_bytes!("../../../web/operator/dist/index.html");
 const OPERATOR_SCRIPT: &[u8] = include_bytes!("../../../web/operator/dist/operator.js");
 const OPERATOR_STYLES: &[u8] = include_bytes!("../../../web/operator/dist/operator.css");
+const MAX_CONCURRENT_REQUESTS: usize = 16;
 
 #[derive(Deserialize)]
 struct PutStationProfile {
@@ -200,6 +201,7 @@ impl Api {
             }
             ("GET", "/api/v1/updates/status") => self.update_status(),
             ("POST", "/api/v1/updates/check") => self.check_updates(),
+            ("POST", "/api/v1/updates/stage") => self.stage_update(),
             ("GET", path) if path.starts_with("/api/v1/updates/release-notes?") => {
                 self.update_release_notes(path)
             }
@@ -827,6 +829,24 @@ impl Api {
         }
     }
 
+    fn stage_update(&self) -> ApiResponse {
+        let now = match system_time_millis() {
+            Ok(value) => value,
+            Err(message) => return error_response(500, "clock_error", &message),
+        };
+        match station_update_coordinator::stage_available_release(
+            &self.database_path,
+            &self.application_directory,
+            now,
+        ) {
+            Ok(record) => json_response(
+                201,
+                serde_json::to_vec(&record).expect("serializing a staged update cannot fail"),
+            ),
+            Err(error) => update_error_response(error),
+        }
+    }
+
     fn update_release_notes(&self, path: &str) -> ApiResponse {
         let Some(version) = path.strip_prefix("/api/v1/updates/release-notes?version=") else {
             return error_response(400, "invalid_query", "A release version is required.");
@@ -1381,7 +1401,9 @@ pub fn serve_until(
     database_path: impl AsRef<Path>,
     stop: Arc<AtomicBool>,
 ) -> Result<(), String> {
-    let api = Api::open(database_path)?;
+    let database_path = database_path.as_ref().to_path_buf();
+    Api::open(&database_path)?;
+    let active_requests = Arc::new(AtomicUsize::new(0));
     listener
         .set_nonblocking(true)
         .map_err(|error| error.to_string())?;
@@ -1391,7 +1413,29 @@ pub fn serve_until(
                 stream
                     .set_nonblocking(false)
                     .map_err(|error| error.to_string())?;
-                serve_stream(&mut stream, &api)?;
+                let active = active_requests.fetch_add(1, Ordering::AcqRel);
+                if active >= MAX_CONCURRENT_REQUESTS {
+                    active_requests.fetch_sub(1, Ordering::AcqRel);
+                    write_response(
+                        &mut stream,
+                        error_response(
+                            503,
+                            "server_busy",
+                            "The station is handling the maximum number of concurrent requests.",
+                        ),
+                    )?;
+                    continue;
+                }
+                let request_database = database_path.clone();
+                let request_count = Arc::clone(&active_requests);
+                std::thread::spawn(move || {
+                    let _guard = ActiveRequestGuard(request_count);
+                    let result = Api::open(&request_database)
+                        .and_then(|api| serve_stream(&mut stream, &api));
+                    if let Err(error) = result {
+                        eprintln!("TownLight Station request failed: {error}");
+                    }
+                });
             }
             Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                 std::thread::sleep(Duration::from_millis(10));
@@ -1410,6 +1454,10 @@ fn serve_stream(stream: &mut TcpStream, api: &Api) -> Result<(), String> {
         Ok(request) => dispatch_http(api, &request),
         Err(response) => response,
     };
+    write_response(stream, response)
+}
+
+fn write_response(stream: &mut TcpStream, response: ApiResponse) -> Result<(), String> {
     let reason = match response.status {
         200 => "OK",
         201 => "Created",
@@ -1419,6 +1467,7 @@ fn serve_stream(stream: &mut TcpStream, api: &Api) -> Result<(), String> {
         409 => "Conflict",
         413 => "Content Too Large",
         422 => "Unprocessable Content",
+        503 => "Service Unavailable",
         _ => "Internal Server Error",
     };
     let attachment_header = response
@@ -1444,6 +1493,14 @@ fn serve_stream(stream: &mut TcpStream, api: &Api) -> Result<(), String> {
     stream
         .write_all(&response.body)
         .map_err(|error| error.to_string())
+}
+
+struct ActiveRequestGuard(Arc<AtomicUsize>);
+
+impl Drop for ActiveRequestGuard {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::AcqRel);
+    }
 }
 
 fn read_http_request(stream: &mut TcpStream) -> Result<Vec<u8>, ApiResponse> {
@@ -1629,6 +1686,11 @@ fn update_error_response(error: CoordinatorError) -> ApiResponse {
             409,
             "updates_not_configured",
             "No signed TownLight Station release source is installed on this station.",
+        ),
+        CoordinatorError::NoAvailableRelease => error_response(
+            409,
+            "no_available_update",
+            "No current verified release is available to stage on this station.",
         ),
         CoordinatorError::Fault(message) => error_response(500, "update_status_failed", &message),
     }

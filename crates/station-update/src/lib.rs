@@ -3,6 +3,10 @@ use base64::engine::general_purpose::STANDARD as BASE64;
 use ed25519_dalek::{Signature, VerifyingKey};
 use semver::Version;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use std::fs::{File, OpenOptions};
+use std::io::{Read, Write};
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 use ureq::Agent;
 use ureq::tls::{RootCerts, TlsConfig};
@@ -82,6 +86,34 @@ pub struct UpdateCheckRecord {
     pub release_channel: String,
     pub offered_release: Option<ReleaseManifest>,
     pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StagedPackageRecord {
+    pub staged_at_unix_ms: i64,
+    pub manifest: ReleaseManifest,
+    pub package_file_name: String,
+}
+
+impl StagedPackageRecord {
+    pub fn validate(&self) -> Result<(), &'static str> {
+        let expected_name = staged_package_file_name(&self.manifest.package_sha256);
+        if self.staged_at_unix_ms < 0
+            || self.staged_at_unix_ms < self.manifest.published_at_unix_ms
+            || self.staged_at_unix_ms > self.manifest.expires_at_unix_ms
+            || self.package_file_name != expected_name
+            || validate_manifest(
+                &self.manifest,
+                &self.manifest.key_id,
+                &self.manifest.release_channel,
+                self.staged_at_unix_ms,
+            )
+            .is_err()
+        {
+            return Err("staged package record fields are invalid");
+        }
+        Ok(())
+    }
 }
 
 impl UpdateCheckRecord {
@@ -215,6 +247,215 @@ impl ReleaseSource {
             })
             .collect()
     }
+}
+
+pub fn stage_release_package(
+    manifest: &ReleaseManifest,
+    updates_directory: &Path,
+    staged_at_unix_ms: i64,
+    timeout: Duration,
+) -> Result<StagedPackageRecord, String> {
+    validate_manifest(
+        manifest,
+        &manifest.key_id,
+        &manifest.release_channel,
+        staged_at_unix_ms,
+    )?;
+    if timeout.is_zero() || timeout > Duration::from_secs(15 * 60) {
+        return Err("package-download timeout is outside the accepted bounds".into());
+    }
+    let quarantine_directory = updates_directory.join("quarantine");
+    let staged_directory = updates_directory.join("staged");
+    ensure_managed_directory(&quarantine_directory)?;
+    ensure_managed_directory(&staged_directory)?;
+    let package_file_name = staged_package_file_name(&manifest.package_sha256);
+    let final_path = staged_directory.join(&package_file_name);
+    if final_path.exists() {
+        verify_package_file(&final_path, manifest)?;
+        return staged_record(manifest, package_file_name, staged_at_unix_ms);
+    }
+
+    let temporary_path = create_quarantine_file(&quarantine_directory, staged_at_unix_ms)?;
+    let result = (|| {
+        let mut output = OpenOptions::new()
+            .write(true)
+            .open(&temporary_path)
+            .map_err(|error| format!("could not open update quarantine file: {error}"))?;
+        let agent = Agent::config_builder()
+            .timeout_global(Some(timeout))
+            .max_redirects(0)
+            .tls_config(
+                TlsConfig::builder()
+                    .root_certs(RootCerts::PlatformVerifier)
+                    .build(),
+            )
+            .user_agent("TownLight-Station-Update/1")
+            .build()
+            .new_agent();
+        let mut response = agent
+            .get(&manifest.package_url)
+            .call()
+            .map_err(release_request_error)?;
+        if !response.status().is_success() {
+            return Err(format!(
+                "release package service returned HTTP {}",
+                response.status().as_u16()
+            ));
+        }
+        if let Some(length) = response.headers().get("Content-Length") {
+            let length = length
+                .to_str()
+                .ok()
+                .and_then(|value| value.parse::<u64>().ok())
+                .ok_or_else(|| "release package Content-Length is invalid".to_string())?;
+            if length != manifest.package_size_bytes {
+                return Err("release package Content-Length does not match its signed size".into());
+            }
+        }
+        let mut reader = response
+            .body_mut()
+            .with_config()
+            .limit(manifest.package_size_bytes.saturating_add(1))
+            .reader();
+        let mut digest = Sha256::new();
+        let mut total = 0_u64;
+        let mut buffer = [0_u8; 64 * 1024];
+        loop {
+            let count = reader.read(&mut buffer).map_err(|_| {
+                "release package could not be read within signed bounds".to_string()
+            })?;
+            if count == 0 {
+                break;
+            }
+            total = total
+                .checked_add(count as u64)
+                .ok_or_else(|| "release package byte count overflowed".to_string())?;
+            if total > manifest.package_size_bytes {
+                return Err("release package exceeds its signed size".into());
+            }
+            digest.update(&buffer[..count]);
+            output
+                .write_all(&buffer[..count])
+                .map_err(|error| format!("could not write update quarantine file: {error}"))?;
+        }
+        if total != manifest.package_size_bytes {
+            return Err("release package size does not match its signed size".into());
+        }
+        let actual_hash = format!("{:X}", digest.finalize());
+        if !actual_hash.eq_ignore_ascii_case(&manifest.package_sha256) {
+            return Err("release package SHA-256 does not match its signed digest".into());
+        }
+        output
+            .sync_all()
+            .map_err(|error| format!("could not synchronize update quarantine file: {error}"))?;
+        drop(output);
+        match std::fs::rename(&temporary_path, &final_path) {
+            Ok(()) => {}
+            Err(_) if final_path.exists() => {
+                verify_package_file(&final_path, manifest)?;
+                std::fs::remove_file(&temporary_path).map_err(|error| {
+                    format!("could not remove duplicate update quarantine file: {error}")
+                })?;
+            }
+            Err(error) => {
+                return Err(format!(
+                    "could not publish verified update package: {error}"
+                ));
+            }
+        }
+        let mut permissions = std::fs::metadata(&final_path)
+            .map_err(|error| format!("could not inspect staged update package: {error}"))?
+            .permissions();
+        permissions.set_readonly(true);
+        std::fs::set_permissions(&final_path, permissions)
+            .map_err(|error| format!("could not make staged update package read-only: {error}"))?;
+        staged_record(manifest, package_file_name, staged_at_unix_ms)
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temporary_path);
+    }
+    result
+}
+
+pub fn staged_package_path(updates_directory: &Path, record: &StagedPackageRecord) -> PathBuf {
+    updates_directory
+        .join("staged")
+        .join(&record.package_file_name)
+}
+
+fn staged_record(
+    manifest: &ReleaseManifest,
+    package_file_name: String,
+    staged_at_unix_ms: i64,
+) -> Result<StagedPackageRecord, String> {
+    let record = StagedPackageRecord {
+        staged_at_unix_ms,
+        manifest: manifest.clone(),
+        package_file_name,
+    };
+    record.validate().map_err(str::to_string)?;
+    Ok(record)
+}
+
+fn staged_package_file_name(sha256: &str) -> String {
+    format!("{}.tlu", sha256.to_ascii_lowercase())
+}
+
+fn ensure_managed_directory(path: &Path) -> Result<(), String> {
+    std::fs::create_dir_all(path)
+        .map_err(|error| format!("could not create managed update directory: {error}"))?;
+    let metadata = std::fs::symlink_metadata(path)
+        .map_err(|error| format!("could not inspect managed update directory: {error}"))?;
+    if !metadata.is_dir() || metadata.file_type().is_symlink() {
+        return Err("managed update directory is not a real directory".into());
+    }
+    Ok(())
+}
+
+fn create_quarantine_file(directory: &Path, staged_at_unix_ms: i64) -> Result<PathBuf, String> {
+    for attempt in 0..100_u32 {
+        let path = directory.join(format!(
+            "download-{staged_at_unix_ms}-{}-{attempt}.part",
+            std::process::id()
+        ));
+        match OpenOptions::new().write(true).create_new(true).open(&path) {
+            Ok(file) => {
+                drop(file);
+                return Ok(path);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => {
+                return Err(format!("could not create update quarantine file: {error}"));
+            }
+        }
+    }
+    Err("could not allocate a unique update quarantine file".into())
+}
+
+fn verify_package_file(path: &Path, manifest: &ReleaseManifest) -> Result<(), String> {
+    let metadata = std::fs::metadata(path)
+        .map_err(|error| format!("could not inspect staged update package: {error}"))?;
+    if !metadata.is_file() || metadata.len() != manifest.package_size_bytes {
+        return Err("staged update package size does not match signed metadata".into());
+    }
+    let mut file = File::open(path)
+        .map_err(|error| format!("could not open staged update package: {error}"))?;
+    let mut digest = Sha256::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let count = file
+            .read(&mut buffer)
+            .map_err(|error| format!("could not verify staged update package: {error}"))?;
+        if count == 0 {
+            break;
+        }
+        digest.update(&buffer[..count]);
+    }
+    let actual_hash = format!("{:X}", digest.finalize());
+    if !actual_hash.eq_ignore_ascii_case(&manifest.package_sha256) {
+        return Err("staged update package SHA-256 does not match signed metadata".into());
+    }
+    Ok(())
 }
 
 pub fn fetch_and_verify_release(
@@ -457,6 +698,7 @@ mod tests {
     use std::io::{Read, Write};
     use std::net::TcpListener;
     use std::thread;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     const NOW: i64 = 1_800_000_000_000;
 
@@ -667,5 +909,104 @@ mod tests {
             .is_err()
         );
         redirect_server.join().unwrap();
+    }
+
+    #[test]
+    #[allow(clippy::permissions_set_readonly_false)]
+    fn stages_only_exact_signed_package_bytes_and_reuses_the_content_address() {
+        let package = b"TownLight update package proof bytes".to_vec();
+        let package_hash = format!("{:X}", Sha256::digest(&package));
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server_package = package.clone();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0_u8; 2_048];
+            let size = stream.read(&mut request).unwrap();
+            assert!(String::from_utf8_lossy(&request[..size]).starts_with("GET /proof.tlu "));
+            let headers = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                server_package.len()
+            );
+            stream.write_all(headers.as_bytes()).unwrap();
+            stream.write_all(&server_package).unwrap();
+        });
+        let mut offered = manifest();
+        offered.package_url = format!("http://{address}/proof.tlu");
+        offered.package_size_bytes = package.len() as u64;
+        offered.package_sha256 = package_hash.clone();
+        let root = std::env::temp_dir().join(format!(
+            "townlight-stage-package-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let staged = stage_release_package(&offered, &root, NOW, Duration::from_secs(2)).unwrap();
+        server.join().unwrap();
+        assert_eq!(
+            staged.package_file_name,
+            format!("{}.tlu", package_hash.to_ascii_lowercase())
+        );
+        assert_eq!(
+            std::fs::read(staged_package_path(&root, &staged)).unwrap(),
+            package
+        );
+        assert!(
+            std::fs::metadata(staged_package_path(&root, &staged))
+                .unwrap()
+                .permissions()
+                .readonly()
+        );
+        let reused =
+            stage_release_package(&offered, &root, NOW + 1, Duration::from_secs(2)).unwrap();
+        assert_eq!(reused.package_file_name, staged.package_file_name);
+        let mut permissions = std::fs::metadata(staged_package_path(&root, &staged))
+            .unwrap()
+            .permissions();
+        permissions.set_readonly(false);
+        std::fs::set_permissions(staged_package_path(&root, &staged), permissions).unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn removes_quarantine_bytes_when_the_signed_package_digest_disagrees() {
+        let package = b"tampered package bytes".to_vec();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0_u8; 2_048];
+            let _ = stream.read(&mut request).unwrap();
+            let headers = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                package.len()
+            );
+            stream.write_all(headers.as_bytes()).unwrap();
+            stream.write_all(&package).unwrap();
+        });
+        let mut offered = manifest();
+        offered.package_url = format!("http://{address}/tampered.tlu");
+        offered.package_size_bytes = 22;
+        offered.package_sha256 = "B".repeat(64);
+        let root = std::env::temp_dir().join(format!(
+            "townlight-reject-package-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        assert!(
+            stage_release_package(&offered, &root, NOW, Duration::from_secs(2))
+                .unwrap_err()
+                .contains("SHA-256")
+        );
+        server.join().unwrap();
+        assert_eq!(
+            std::fs::read_dir(root.join("quarantine")).unwrap().count(),
+            0
+        );
+        assert_eq!(std::fs::read_dir(root.join("staged")).unwrap().count(), 0);
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

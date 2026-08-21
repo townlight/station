@@ -1681,6 +1681,7 @@ dependencies = [
  "semver",
  "serde",
  "serde_json",
+ "sha2",
  "ureq",
 ]
 
@@ -1693,6 +1694,7 @@ dependencies = [
  "semver",
  "serde",
  "serde_json",
+ "sha2",
  "station-domain",
  "station-storage",
  "station-update",

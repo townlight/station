@@ -19,7 +19,9 @@ use station_schedule::{
     AssetReadiness, ChannelConfiguration, CommitPlan, CommitReport, DispatchJob, DispatchStatus,
     MediaAsset, ScheduleItem, ScheduleState, prepare_commit,
 };
-use station_update::{UpdateCheckOutcome, UpdateCheckRecord, UpdateCheckTrigger};
+use station_update::{
+    StagedPackageRecord, UpdateCheckOutcome, UpdateCheckRecord, UpdateCheckTrigger,
+};
 
 const SQLITE_OK: c_int = 0;
 const SQLITE_ROW: c_int = 100;
@@ -402,6 +404,13 @@ impl StationStore {
                  CHECK (next_automatic_check_at_unix_ms > checked_at_unix_ms),\
                trigger_kind TEXT NOT NULL CHECK (trigger_kind IN ('automatic','manual')),\
                outcome TEXT NOT NULL CHECK (outcome IN ('up_to_date','update_available','updater_too_old','failed')),\
+               record_json TEXT NOT NULL\
+             );\
+             CREATE TABLE IF NOT EXISTS update_stage_status (\
+               singleton INTEGER PRIMARY KEY CHECK (singleton = 1),\
+               staged_at_unix_ms INTEGER NOT NULL CHECK (staged_at_unix_ms >= 0),\
+               version TEXT NOT NULL,\
+               source_commit TEXT NOT NULL,\
                record_json TEXT NOT NULL\
              );\
              CREATE TABLE IF NOT EXISTS alert_channels (\
@@ -1537,6 +1546,62 @@ impl StationStore {
 
     pub fn clear_update_check(&self) -> Result<(), String> {
         let statement = self.prepare("DELETE FROM update_check_status WHERE singleton=1")?;
+        expect_done(self.database, statement.raw)
+    }
+
+    pub fn write_staged_package(
+        &self,
+        record: &StagedPackageRecord,
+    ) -> Result<StagedPackageRecord, String> {
+        record.validate().map_err(str::to_string)?;
+        let record_json = serde_json::to_string(record)
+            .map_err(|error| format!("could not encode staged-package record: {error}"))?;
+        let statement = self.prepare(
+            "INSERT INTO update_stage_status(singleton, staged_at_unix_ms, version, \
+             source_commit, record_json) VALUES(1, ?1, ?2, ?3, ?4) \
+             ON CONFLICT(singleton) DO UPDATE SET \
+               staged_at_unix_ms=excluded.staged_at_unix_ms, version=excluded.version, \
+               source_commit=excluded.source_commit, record_json=excluded.record_json \
+             WHERE update_stage_status.staged_at_unix_ms <= excluded.staged_at_unix_ms",
+        )?;
+        let version = c_string(&record.manifest.version, "staged-package version")?;
+        let commit = c_string(
+            &record.manifest.source_commit,
+            "staged-package source commit",
+        )?;
+        let record_json = c_string(&record_json, "staged-package record")?;
+        bind_i64(self.database, statement.raw, 1, record.staged_at_unix_ms)?;
+        bind_text(self.database, statement.raw, 2, &version)?;
+        bind_text(self.database, statement.raw, 3, &commit)?;
+        bind_text(self.database, statement.raw, 4, &record_json)?;
+        expect_done(self.database, statement.raw)?;
+        let stored = self
+            .read_staged_package()?
+            .ok_or_else(|| "stored staged-package record disappeared".to_string())?;
+        if stored != *record {
+            return Err("a newer staged-package record already exists".into());
+        }
+        Ok(stored)
+    }
+
+    pub fn read_staged_package(&self) -> Result<Option<StagedPackageRecord>, String> {
+        let statement =
+            self.prepare("SELECT record_json FROM update_stage_status WHERE singleton=1")?;
+        match unsafe { sqlite3_step(statement.raw) } {
+            SQLITE_ROW => {
+                let json = column_text(statement.raw, 0)?;
+                let record: StagedPackageRecord = serde_json::from_str(&json)
+                    .map_err(|error| format!("stored staged-package record is invalid: {error}"))?;
+                record.validate().map_err(str::to_string)?;
+                Ok(Some(record))
+            }
+            SQLITE_DONE => Ok(None),
+            _ => Err(sqlite_error(self.database)),
+        }
+    }
+
+    pub fn clear_staged_package(&self) -> Result<(), String> {
+        let statement = self.prepare("DELETE FROM update_stage_status WHERE singleton=1")?;
         expect_done(self.database, statement.raw)
     }
 

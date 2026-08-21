@@ -3,10 +3,10 @@ use serde::{Deserialize, Serialize};
 use station_domain::{AlertConditionKind, AlertEvent, AlertEventState, AlertSeverity};
 use station_storage::StationStore;
 use station_update::{
-    ReleaseSource, UpdateCheckOutcome, UpdateCheckRecord, UpdateCheckTrigger,
-    fetch_and_verify_release,
+    ReleaseSource, StagedPackageRecord, UpdateCheckOutcome, UpdateCheckRecord, UpdateCheckTrigger,
+    fetch_and_verify_release, stage_release_package, staged_package_path,
 };
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
@@ -20,6 +20,7 @@ const MAX_CONFIGURATION_BYTES: u64 = 64 * 1024;
 const MAX_RECEIPT_BYTES: u64 = 16 * 1024;
 pub const AUTOMATIC_CHECK_INTERVAL_MS: i64 = 60 * 60 * 1_000;
 const CHECK_TIMEOUT: Duration = Duration::from_secs(10);
+const PACKAGE_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct UpdateStatus {
@@ -29,12 +30,14 @@ pub struct UpdateStatus {
     pub release_channel: Option<String>,
     pub feed_origin: Option<String>,
     pub latest_check: Option<UpdateCheckRecord>,
+    pub staged_package: Option<StagedPackageRecord>,
     pub next_step: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CoordinatorError {
     NotConfigured,
+    NoAvailableRelease,
     Fault(String),
 }
 
@@ -44,6 +47,8 @@ impl std::fmt::Display for CoordinatorError {
             Self::NotConfigured => formatter.write_str(
                 "No signed TownLight Station release source is installed on this station.",
             ),
+            Self::NoAvailableRelease => formatter
+                .write_str("No current verified release is available to stage on this station."),
             Self::Fault(message) => formatter.write_str(message),
         }
     }
@@ -58,17 +63,41 @@ pub fn read_status(
     let stored_check = StationStore::open(database_path)
         .and_then(|store| store.read_update_check())
         .map_err(CoordinatorError::Fault)?;
-    let (configured, release_channel, feed_origin, latest_check, next_step) = match source {
-        Some(source) => (
-            true,
-            Some(source.release_channel),
-            Some(redact_feed_origin(&source.feed_url)),
-            stored_check,
-            "Check for a signed update. Download and installation always require explicit operator action."
-                .into(),
-        ),
+    let staged = StationStore::open(database_path)
+        .and_then(|store| store.read_staged_package())
+        .map_err(CoordinatorError::Fault)?;
+    let (configured, release_channel, feed_origin, latest_check, staged_package, next_step) = match source {
+        Some(source) => {
+            let visible_stage = staged.filter(|stage| {
+                stored_check
+                    .as_ref()
+                    .and_then(|check| check.offered_release.as_ref())
+                    .is_some_and(|release| release == &stage.manifest)
+                    && std::fs::metadata(staged_package_path(
+                        &updates_directory(database_path),
+                        stage,
+                    ))
+                    .is_ok_and(|metadata| {
+                        metadata.is_file() && metadata.len() == stage.manifest.package_size_bytes
+                    })
+            });
+            let next_step = if visible_stage.is_some() {
+                "The verified package is staged. Activation still requires an explicit maintenance window."
+            } else {
+                "Check for a signed update. Download and installation always require explicit operator action."
+            };
+            (
+                true,
+                Some(source.release_channel),
+                Some(redact_feed_origin(&source.feed_url)),
+                stored_check,
+                visible_stage,
+                next_step.into(),
+            )
+        }
         None => (
             false,
+            None,
             None,
             None,
             None,
@@ -83,8 +112,49 @@ pub fn read_status(
         release_channel,
         feed_origin,
         latest_check,
+        staged_package,
         next_step,
     })
+}
+
+pub fn stage_available_release(
+    database_path: &Path,
+    application_directory: &Path,
+    now_unix_ms: i64,
+) -> Result<StagedPackageRecord, CoordinatorError> {
+    let identity = read_install_identity(database_path)?;
+    let source =
+        read_release_source(application_directory)?.ok_or(CoordinatorError::NotConfigured)?;
+    let store = StationStore::open(database_path).map_err(CoordinatorError::Fault)?;
+    let check = store
+        .read_update_check()
+        .map_err(CoordinatorError::Fault)?
+        .filter(|check| {
+            check.outcome == UpdateCheckOutcome::UpdateAvailable
+                && check.current_version == identity.version
+                && check.release_channel == source.release_channel
+        })
+        .ok_or(CoordinatorError::NoAvailableRelease)?;
+    let manifest = check
+        .offered_release
+        .ok_or(CoordinatorError::NoAvailableRelease)?;
+    if !source
+        .trusted_keys
+        .iter()
+        .any(|key| key.key_id == manifest.key_id)
+    {
+        return Err(CoordinatorError::NoAvailableRelease);
+    }
+    let staged = stage_release_package(
+        &manifest,
+        &updates_directory(database_path),
+        now_unix_ms,
+        PACKAGE_DOWNLOAD_TIMEOUT,
+    )
+    .map_err(CoordinatorError::Fault)?;
+    store
+        .write_staged_package(&staged)
+        .map_err(CoordinatorError::Fault)
 }
 
 pub fn check_now(
@@ -249,7 +319,8 @@ fn deactivate_release_source(database_path: &Path, now_unix_ms: i64) -> Result<(
     {
         store.resolve_alert(AlertConditionKind::UpdateAvailable, &version, now_unix_ms)?;
     }
-    store.clear_update_check()
+    store.clear_update_check()?;
+    store.clear_staged_package()
 }
 
 pub fn release_notes(
@@ -343,6 +414,13 @@ pub fn run_until(
 fn record_monitor_error(path: &Path, message: &str) {
     let safe = sanitize_error(message);
     let _ = std::fs::write(path, safe);
+}
+
+fn updates_directory(database_path: &Path) -> PathBuf {
+    database_path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join("updates")
 }
 
 fn system_time_millis() -> Result<i64, String> {
@@ -450,12 +528,14 @@ mod tests {
     use base64::Engine;
     use base64::engine::general_purpose::STANDARD as BASE64;
     use ed25519_dalek::{Signer, SigningKey};
+    use sha2::{Digest, Sha256};
     use station_update::{ReleaseManifest, SignedReleaseEnvelope, TrustedReleaseKey};
     use std::io::{Read, Write};
     use std::net::TcpListener;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
+    #[allow(clippy::permissions_set_readonly_false)]
     fn checks_a_signed_feed_persists_status_and_serves_only_matching_notes() {
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -476,6 +556,21 @@ mod tests {
 
         let now = 1_800_000_000_000;
         let signing_key = SigningKey::from_bytes(&[12; 32]);
+        let package = b"installed coordinator staging proof".to_vec();
+        let package_hash = format!("{:X}", Sha256::digest(&package));
+        let package_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let package_address = package_listener.local_addr().unwrap();
+        let package_server = std::thread::spawn(move || {
+            let (mut stream, _) = package_listener.accept().unwrap();
+            let mut request = [0_u8; 2_048];
+            let _ = stream.read(&mut request).unwrap();
+            let headers = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                package.len()
+            );
+            stream.write_all(headers.as_bytes()).unwrap();
+            stream.write_all(&package).unwrap();
+        });
         let manifest = ReleaseManifest {
             schema_version: 1,
             product: "TownLight Station".into(),
@@ -486,9 +581,9 @@ mod tests {
             published_at_unix_ms: now - 1_000,
             expires_at_unix_ms: now + 86_400_000,
             minimum_updater_version: "0.1.0".into(),
-            package_url: "https://releases.example.test/station/0.2.0.tlu".into(),
-            package_size_bytes: 100,
-            package_sha256: "B".repeat(64),
+            package_url: format!("http://{package_address}/station-0.2.0.tlu"),
+            package_size_bytes: 35,
+            package_sha256: package_hash,
             release_notes_markdown: "# 0.2.0\n\nA safer update.".into(),
         };
         let manifest_bytes = serde_json::to_vec(&manifest).unwrap();
@@ -548,6 +643,14 @@ mod tests {
         );
         assert_eq!(release_notes(&database, "0.3.0").unwrap(), None);
 
+        let staged = stage_available_release(&database, &application, now + 1).unwrap();
+        package_server.join().unwrap();
+        assert_eq!(staged.manifest.version, "0.2.0");
+        assert_eq!(
+            read_status(&database, &application).unwrap().staged_package,
+            Some(staged.clone())
+        );
+
         std::fs::remove_file(application.join(TRUST_FILE_NAME)).unwrap();
         deactivate_release_source(&database, now + 1).unwrap();
         let unconfigured = read_status(&database, &application).unwrap();
@@ -566,6 +669,18 @@ mod tests {
                 .unwrap(),
             None
         );
+        assert_eq!(
+            StationStore::open(&database)
+                .unwrap()
+                .read_staged_package()
+                .unwrap(),
+            None
+        );
+
+        let staged_path = staged_package_path(&updates_directory(&database), &staged);
+        let mut permissions = std::fs::metadata(&staged_path).unwrap().permissions();
+        permissions.set_readonly(false);
+        std::fs::set_permissions(staged_path, permissions).unwrap();
 
         let _ = std::fs::remove_dir_all(root);
     }

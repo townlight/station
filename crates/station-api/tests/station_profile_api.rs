@@ -666,6 +666,7 @@ fn reports_an_honest_unconfigured_update_state_and_refuses_a_network_check() {
     assert_eq!(document["configured"], false);
     assert_eq!(document["current_version"], "0.1.0");
     assert_eq!(document["latest_check"], serde_json::Value::Null);
+    assert_eq!(document["staged_package"], serde_json::Value::Null);
     assert!(
         document["next_step"]
             .as_str()
@@ -677,6 +678,12 @@ fn reports_an_honest_unconfigured_update_state_and_refuses_a_network_check() {
     assert_eq!(check.status, 409);
     assert_eq!(
         serde_json::from_slice::<serde_json::Value>(&check.body).unwrap()["error"]["code"],
+        "updates_not_configured"
+    );
+    let stage = api.handle("POST", "/api/v1/updates/stage", None);
+    assert_eq!(stage.status, 409);
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&stage.body).unwrap()["error"]["code"],
         "updates_not_configured"
     );
     let notes = api.handle("GET", "/api/v1/updates/release-notes?version=0.2.0", None);
@@ -1266,6 +1273,47 @@ fn allows_an_accepted_client_time_to_send_its_request() {
     client.read_to_end(&mut response).unwrap();
     assert!(response.starts_with(b"HTTP/1.1 200 OK\r\n"));
 
+    stop.store(true, Ordering::Release);
+    assert!(
+        finished_rx
+            .recv_timeout(Duration::from_secs(1))
+            .unwrap()
+            .is_ok()
+    );
+    let _ = std::fs::remove_file(database);
+}
+
+#[test]
+fn keeps_health_responsive_while_another_request_is_stalled() {
+    let database = temporary_database("concurrent-health");
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let stop = Arc::new(AtomicBool::new(false));
+    let server_stop = Arc::clone(&stop);
+    let server_database = database.clone();
+    let (finished_tx, finished_rx) = mpsc::channel();
+    thread::spawn(move || {
+        let _ = finished_tx.send(serve_until(listener, server_database, server_stop));
+    });
+
+    let mut stalled = TcpStream::connect(address).unwrap();
+    stalled
+        .write_all(b"POST /api/v1/updates/stage HTTP/1.1\r\nHost: localhost\r\n")
+        .unwrap();
+    thread::sleep(Duration::from_millis(50));
+
+    let mut health = TcpStream::connect(address).unwrap();
+    health
+        .set_read_timeout(Some(Duration::from_secs(1)))
+        .unwrap();
+    health
+        .write_all(b"GET /health HTTP/1.1\r\nHost: localhost\r\n\r\n")
+        .unwrap();
+    let mut response = Vec::new();
+    health.read_to_end(&mut response).unwrap();
+    assert!(response.starts_with(b"HTTP/1.1 200 OK\r\n"));
+
+    drop(stalled);
     stop.store(true, Ordering::Release);
     assert!(
         finished_rx
