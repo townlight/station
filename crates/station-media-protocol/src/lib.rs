@@ -1,7 +1,8 @@
-use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use std::path::Path;
 
 pub const MAX_FRAME_BYTES: usize = 65_536;
-pub const PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion { major: 1, minor: 5 };
+pub const PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion { major: 1, minor: 6 };
 
 pub const MAX_CG_SLOTS: usize = 8;
 pub const MAX_CG_TEXT_BYTES: usize = 2048;
@@ -17,8 +18,23 @@ pub struct CgRect {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum CgOverlayContent {
-    Text { text: String },
-    Clock { format: String },
+    Text {
+        text: String,
+    },
+    Clock {
+        format: String,
+    },
+    Image {
+        asset_id: String,
+        format: CgImageFormat,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CgImageFormat {
+    Png,
+    Jpeg,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -75,6 +91,9 @@ pub struct WorkerBootstrapEnvelope {
     pub worker_id: String,
     pub channel_id: String,
     pub output_profile: String,
+    /// Station-managed root used by the worker to resolve CG image identities.
+    /// Overlay commands carry only an asset id and format, never a path.
+    pub cg_image_root: String,
     pub outputs: Vec<WorkerOutputConfiguration>,
 }
 
@@ -218,6 +237,7 @@ pub enum ProtocolError {
     LengthMismatch { declared: usize, actual: usize },
     InvalidJson(String),
     UnsupportedMajor(u16),
+    InvalidManagedCgImageRoot(String),
 }
 
 pub fn encode_command_frame(command: &CommandEnvelope) -> Result<Vec<u8>, ProtocolError> {
@@ -227,6 +247,8 @@ pub fn encode_command_frame(command: &CommandEnvelope) -> Result<Vec<u8>, Protoc
 pub fn encode_bootstrap_frame(
     bootstrap: &WorkerBootstrapEnvelope,
 ) -> Result<Vec<u8>, ProtocolError> {
+    validate_cg_image_root(&bootstrap.cg_image_root)
+        .map_err(ProtocolError::InvalidManagedCgImageRoot)?;
     encode_frame(bootstrap)
 }
 
@@ -235,7 +257,22 @@ pub fn decode_bootstrap_frame(frame: &[u8]) -> Result<WorkerBootstrapEnvelope, P
     if bootstrap.version.major != PROTOCOL_VERSION.major {
         return Err(ProtocolError::UnsupportedMajor(bootstrap.version.major));
     }
+    validate_cg_image_root(&bootstrap.cg_image_root)
+        .map_err(ProtocolError::InvalidManagedCgImageRoot)?;
     Ok(bootstrap)
+}
+
+fn validate_cg_image_root(root: &str) -> Result<(), String> {
+    let trimmed = root.trim_end_matches(['\\', '/']);
+    if trimmed.is_empty()
+        || !Path::new(root).is_absolute()
+        || root.chars().any(char::is_control)
+        || trimmed.rsplit(['\\', '/']).next() != Some("cg-images")
+        || root.split(['\\', '/']).any(|component| component == "..")
+    {
+        return Err("CG image root must be a safe managed cg-images directory".into());
+    }
+    Ok(())
 }
 
 pub fn decode_command_frame(frame: &[u8]) -> Result<CommandEnvelope, ProtocolError> {

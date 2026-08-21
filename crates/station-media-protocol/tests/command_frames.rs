@@ -1,8 +1,9 @@
 use station_media_protocol::{
-    ChannelCommand, CommandEnvelope, OutputTransportObservation, PROTOCOL_VERSION, ProtocolError,
-    ProtocolVersion, SrtPassphrase, WorkerBootstrapEnvelope, WorkerEvent, WorkerEventEnvelope,
-    WorkerOutputConfiguration, decode_bootstrap_frame, decode_command_frame, decode_event_frame,
-    encode_bootstrap_frame, encode_command_frame, encode_event_frame,
+    decode_bootstrap_frame, decode_command_frame, decode_event_frame, encode_bootstrap_frame,
+    encode_command_frame, encode_event_frame, ChannelCommand, CommandEnvelope,
+    OutputTransportObservation, ProtocolError, ProtocolVersion, SrtPassphrase,
+    WorkerBootstrapEnvelope, WorkerEvent, WorkerEventEnvelope, WorkerOutputConfiguration,
+    PROTOCOL_VERSION,
 };
 
 fn take_live_command() -> CommandEnvelope {
@@ -31,6 +32,7 @@ fn round_trips_private_worker_bootstrap_without_process_arguments() {
         worker_id: "ae819b97-2920-434b-9d96-0b51a8ea9abb".into(),
         channel_id: "62a47b7e-2a03-48d6-8703-a6e5ce986527".into(),
         output_profile: "atsc-720p5994".into(),
+        cg_image_root: r"C:\ProgramData\TownLight Station\cg-images".into(),
         outputs: vec![
             WorkerOutputConfiguration::UdpTs {
                 destination: "127.0.0.1:5500".into(),
@@ -49,6 +51,65 @@ fn round_trips_private_worker_bootstrap_without_process_arguments() {
     let diagnostic = format!("{bootstrap:?}");
     assert!(diagnostic.contains("[REDACTED]"));
     assert!(!diagnostic.contains("private-srt-proof"));
+}
+
+#[test]
+fn image_overlay_carries_identity_and_format_but_no_path() {
+    let command = CommandEnvelope {
+        version: PROTOCOL_VERSION,
+        channel_id: "62a47b7e-2a03-48d6-8703-a6e5ce986527".into(),
+        command_id: "image-command".into(),
+        expected_sequence: 1,
+        command: ChannelCommand::ApplyCgSnapshot {
+            snapshot: station_media_protocol::CgSnapshot {
+                board_id: "board-1".into(),
+                board_revision: 1,
+                overlays: vec![station_media_protocol::CgOverlay {
+                    slot: 0,
+                    rect: station_media_protocol::CgRect {
+                        x: 0,
+                        y: 0,
+                        width: 1000,
+                        height: 1000,
+                    },
+                    z_index: 0,
+                    content: station_media_protocol::CgOverlayContent::Image {
+                        asset_id: "a".repeat(64),
+                        format: station_media_protocol::CgImageFormat::Png,
+                    },
+                }],
+            },
+        },
+    };
+    let frame = encode_command_frame(&command).unwrap();
+    let json = String::from_utf8(frame[4..].to_vec()).unwrap();
+    assert!(json.contains("\"asset_id\""));
+    assert!(json.contains("\"format\":\"png\""));
+    assert!(!json.contains("media_path"));
+    assert!(!json.contains("cg_image_root"));
+    assert_eq!(decode_command_frame(&frame).unwrap(), command);
+}
+
+#[test]
+fn bootstrap_rejects_relative_traversing_or_wrong_managed_image_roots() {
+    for root in [
+        "cg-images",
+        r"C:\ProgramData\TownLight Station\..\cg-images",
+        r"C:\ProgramData\TownLight Station\images",
+    ] {
+        let bootstrap = WorkerBootstrapEnvelope {
+            version: PROTOCOL_VERSION,
+            worker_id: "worker".into(),
+            channel_id: "channel".into(),
+            output_profile: "profile".into(),
+            cg_image_root: root.into(),
+            outputs: Vec::new(),
+        };
+        assert!(matches!(
+            encode_bootstrap_frame(&bootstrap),
+            Err(ProtocolError::InvalidManagedCgImageRoot(_))
+        ));
+    }
 }
 
 #[test]

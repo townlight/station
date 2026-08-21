@@ -6,9 +6,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use station_media_protocol::{
-    ChannelCommand, CommandEnvelope, MAX_FRAME_BYTES, PROTOCOL_VERSION, ProtocolError,
-    WorkerBootstrapEnvelope, WorkerEvent, WorkerEventEnvelope, WorkerOutputConfiguration,
-    decode_event_frame, encode_bootstrap_frame, encode_command_frame,
+    decode_event_frame, encode_bootstrap_frame, encode_command_frame, ChannelCommand,
+    CommandEnvelope, ProtocolError, WorkerBootstrapEnvelope, WorkerEvent, WorkerEventEnvelope,
+    WorkerOutputConfiguration, MAX_FRAME_BYTES, PROTOCOL_VERSION,
 };
 use station_schedule::OutputProfileId;
 use station_windows_ipc::{IpcError, PipeServer, PipeStream};
@@ -127,11 +127,45 @@ impl WorkerSupervisor {
         output_profile: OutputProfileId,
         timeout: Duration,
     ) -> Result<Self, SupervisorError> {
+        Self::launch_with_outputs_and_cg_image_root(
+            executable,
+            worker_id,
+            channel_id,
+            journal_path,
+            outputs,
+            &journal_path
+                .parent()
+                .unwrap_or_else(|| Path::new("."))
+                .join("cg-images"),
+            output_profile,
+            timeout,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn launch_with_outputs_and_cg_image_root(
+        executable: &Path,
+        worker_id: &str,
+        channel_id: &str,
+        journal_path: &Path,
+        outputs: &[WorkerOutputConfiguration],
+        cg_image_root: &Path,
+        output_profile: OutputProfileId,
+        timeout: Duration,
+    ) -> Result<Self, SupervisorError> {
+        let cg_image_root = if cg_image_root.is_absolute() {
+            cg_image_root.to_path_buf()
+        } else {
+            std::env::current_dir()
+                .map_err(|error| io_error("resolve CG image root", error))?
+                .join(cg_image_root)
+        };
         let bootstrap = WorkerBootstrapEnvelope {
             version: PROTOCOL_VERSION,
             worker_id: worker_id.to_string(),
             channel_id: channel_id.to_string(),
             output_profile: output_profile.storage_name().to_string(),
+            cg_image_root: cg_image_root.to_string_lossy().into_owned(),
             outputs: outputs.to_vec(),
         };
         let bootstrap_frame =

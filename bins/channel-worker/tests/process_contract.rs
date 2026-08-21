@@ -72,6 +72,12 @@ fn run_worker(
         worker_id: WORKER_ID.into(),
         channel_id: CHANNEL_ID.into(),
         output_profile: "proof-360p30".into(),
+        cg_image_root: journal
+            .parent()
+            .unwrap()
+            .join("cg-images")
+            .to_string_lossy()
+            .into_owned(),
         outputs: vec![WorkerOutputConfiguration::UdpTs {
             destination: udp.local_addr().unwrap().to_string(),
         }],
