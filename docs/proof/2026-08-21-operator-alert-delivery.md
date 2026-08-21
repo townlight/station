@@ -9,7 +9,12 @@
 - A real loopback HTTP receiver proves the Twilio-shaped authenticated SMS form request and the 140-character body limit.
 - A real loopback SMTP server proves authenticated SMTP envelope and message submission. A CRLF injection test proves hostile resource text is rejected before connection.
 
+## Installed-machine evidence
+
+Candidate commit `759d79e32b9435b564c35c0da1e7128dff5fefa9` produced installer SHA-256 `467052EAC9FA7E97373EE9B1C14C44A0C7BE7E2792D1F1D92014ADF929AA54F4`. Installed verification matched the source receipt and both binary hashes, loaded every required media factory, and reported the service running as LocalSystem with immediate `AUTO_START` plus ready HTTP/database health.
+
+The reproducible proof harness configured a loopback webhook and one temporary enabled channel, terminated that channel's LocalSystem worker once, and received six validly signed firing/resolution requests while automatic restart recovered the channel. The received set contained both `encoder-death` and `off-air`; the durable API subsequently showed both induced incidents resolved. Cleanup disabled the temporary output and pager, and `/health` remained ready.
+
 ## Boundary
 
-This is local protocol and persistence proof. It does not claim installed-candidate activation of the new worker, a credentialed external provider round trip, human receipt, alert-rule editing, re-alert windows, or the operator send-test/status interface. Those claims require their own evidence.
-
+This is installed local protocol and persistence proof. It does not claim a credentialed external provider round trip, human receipt, alert-rule editing, re-alert windows, or the operator send-test/status interface. Those claims require their own evidence.
