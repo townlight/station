@@ -246,9 +246,6 @@ try {
             throw 'The proof channel UUID already exists with ambiguous ownership or is enabled.'
         }
     }
-    $active = Invoke-Api 'Get' "/channels/$channelId/active-live-takeover"
-    if ($null -ne $active) { throw 'The proof channel has an active takeover; refusing to disturb it.' }
-
     $baselineWorkerIds = @(Get-Process -Name channel-worker -ErrorAction SilentlyContinue | ForEach-Object Id)
     $proofChannel = [ordered]@{
         channel_id = $channelId
@@ -267,6 +264,8 @@ try {
     }
     Invoke-Api 'Put' '/channels' $proofChannel | Out-Null
     $channelConfigured = $true
+    $active = Invoke-Api 'Get' "/channels/$channelId/active-live-takeover"
+    if ($null -ne $active) { throw 'The proof channel has an active takeover; refusing to disturb it.' }
 
     $existingSource = @((Invoke-Api 'Get' "/channels/$channelId/live-sources") | Where-Object source_id -eq $sourceId | Select-Object -First 1)
     $expectedSourceRevision = 0
