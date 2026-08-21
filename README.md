@@ -4,7 +4,7 @@ TownLight Station is a locally installed Windows broadcast appliance for LPM and
 
 The current foundation provides a versioned station-profile API, strict commissioning validation, SQLite persistence in WAL mode, and a runnable HTTP daemon. It is the first vertical slice of the station control plane, not a feature-complete release.
 
-The repository also contains a supervised isolated channel worker, a length-framed typed command/event protocol, and a durable per-channel event journal. The station runtime launches and handshakes the real worker over a private named pipe, validates every identity and sequence, enforces response deadlines, and guarantees process cleanup. The worker records each event and synchronizes it to disk before emitting the event to the control plane. Unknown major versions, stale commands, corrupted journals, malformed frames, and missed deadlines fail visibly.
+The repository also contains a supervised isolated channel worker, a length-framed typed command/event protocol, a durable per-channel event journal, and the first machine-proven persistent media graph. The station runtime launches and handshakes the real worker over a private named pipe, validates every identity and sequence, enforces response deadlines, and guarantees process cleanup. The GStreamer graph keeps its encoder, MPEG-TS mux, and UDP output alive while switching raw fallback and program sources. Unknown major versions, stale commands, corrupted journals, malformed frames, missed deadlines, and MPEG-TS continuity errors fail visibly.
 
 ## Architecture
 
@@ -20,12 +20,13 @@ See [the architecture overview](docs/architecture/overview.md) for boundaries an
 
 - Windows 11 or Windows Server 2022 or newer
 - Rust 1.97.1 for development
+- GStreamer 1.28.6 MSVC x64, development install, for media-engine development and tests
 
-The runtime currently uses the SQLite library included with Windows. It does not require a separately installed database server.
+Install GStreamer from the [official Windows download](https://gstreamer.freedesktop.org/download/#windows) and put its `bin` directory first in `PATH` before building. The runtime currently uses the SQLite library included with Windows and does not require a separately installed database server. The product installer will carry the selected GStreamer runtime rather than asking station operators to configure a development SDK.
 
 ## Quick start
 
-1. Install the Rust toolchain.
+1. Install Rust and the official GStreamer 1.28.6 MSVC x64 development runtime.
 2. Clone this repository.
 3. Run `cargo test --offline --workspace`.
 4. Run `cargo run -p stationd -- station.db 127.0.0.1:4070`.
@@ -52,7 +53,11 @@ The response includes the new `revision`. Send that value as `expected_revision`
 
 ## Channel worker
 
-`channel-worker <worker-id> <channel-id> <journal-path> <pipe-name>` connects to the station service through its private duplex Windows named pipe. The pipe is restricted to the creating user, Administrators, and SYSTEM, rejects remote clients, and permits only one server instance. The worker emits framed events only after appending and synchronizing them to the channel journal; protocol traffic never uses standard input or output. `Ping`, `ApplyPlan`, and `Shutdown` are executable; live transitions are explicitly rejected until the persistent media graph is present.
+`channel-worker <worker-id> <channel-id> <journal-path> <pipe-name>` connects to the station service through its private duplex Windows named pipe. The pipe is restricted to the creating user, Administrators, and SYSTEM, rejects remote clients, and permits only one server instance. The worker emits framed events only after appending and synchronizing them to the channel journal; protocol traffic never uses standard input or output. `Ping`, `ApplyPlan`, and `Shutdown` are executable; live transitions are explicitly rejected until `station-media-engine` is integrated into the worker.
+
+## Media engine
+
+`station-media-engine` programmatically builds one live GStreamer pipeline; it does not use a shell pipeline parser. The current machine slice supplies synthetic program and black fallback legs through `input-selector`, normalizes to 640×360 I420 at 30 fps, keeps OpenH264, `h264parse`, `mpegtsmux`, and `udpsink` persistent, and performs bounded source-switch acknowledgement. Its integration test receives the real UDP stream and checks TS framing, error/discontinuity flags, and per-PID continuity counters across both switch directions. Audio, scheduled files, live inputs, production profiles, and sink fanout are not claimed yet.
 
 ## Development
 
