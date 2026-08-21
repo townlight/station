@@ -155,8 +155,37 @@ fn persists_latest_bounded_precision_system_resource_truth() {
     let reopened = StationStore::open(&database).unwrap();
     assert_eq!(
         reopened.latest_system_resource_sample().unwrap(),
-        Some(recorded)
+        Some(recorded.clone())
     );
+    let second = reopened
+        .record_system_resource_sample(&SystemResourceSample {
+            sample_id: None,
+            sampled_at_unix_ms: 2_000,
+            cpu_percent: Some(11.0),
+            ram_used_gb: Some(8.0),
+            ram_total_gb: Some(16.0),
+            gpu_percent: None,
+            gpu_vram_used_gb: None,
+            media_volume_free_gb: Some(87.0),
+            backup_volume_free_gb: Some(76.0),
+            database_reachable: true,
+            backup_volume_writable: true,
+            service_running: true,
+            clock_skew_seconds: None,
+        })
+        .unwrap();
+    assert_eq!(
+        reopened.list_system_resource_samples(1).unwrap(),
+        vec![second]
+    );
+    assert_eq!(
+        reopened.list_system_resource_samples(2).unwrap(),
+        vec![
+            reopened.latest_system_resource_sample().unwrap().unwrap(),
+            recorded
+        ]
+    );
+    assert!(reopened.list_system_resource_samples(0).is_err());
     drop(reopened);
     remove_database(&database);
 }
@@ -190,6 +219,7 @@ fn deduplicates_acknowledges_and_resolves_alerts_durably() {
     let fresh = store.observe_alert(&alert("alert-fresh", 4_000)).unwrap();
     assert_eq!(fresh.event_id, "alert-fresh");
     assert_eq!(store.list_alert_events().unwrap().len(), 2);
+    assert_eq!(store.list_recent_alert_events(1).unwrap(), vec![fresh]);
     drop(store);
     remove_database(&database);
 }
@@ -488,6 +518,9 @@ fn seeds_editable_rules_and_routes_bounded_realerts_to_selected_destinations() {
         .observe_alert_and_route(&alert("next-window-realert", 181_002))
         .unwrap();
     assert_eq!(store.list_alert_deliveries().unwrap().len(), 3);
+    let recent = store.list_recent_alert_deliveries(2).unwrap();
+    assert_eq!(recent.len(), 2);
+    assert!(recent[0].created_at_unix_ms >= recent[1].created_at_unix_ms);
 
     store
         .resolve_alert(AlertConditionKind::EncoderDeath, CHANNEL_ID, 182_000)

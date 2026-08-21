@@ -115,6 +115,7 @@ struct PutSelfTestSchedule {
 pub struct ApiResponse {
     pub status: u16,
     pub content_type: &'static str,
+    pub attachment_name: Option<String>,
     pub body: Vec<u8>,
 }
 
@@ -175,6 +176,12 @@ impl Api {
             ("GET", "/api/v1/self-test-schedules") => self.list_self_test_schedules(),
             ("PUT", path) if path.starts_with("/api/v1/self-test-schedules/") => {
                 self.put_self_test_schedule(path, body)
+            }
+            ("POST", "/api/v1/support-bundles") => self.create_support_bundle(),
+            ("GET", path)
+                if path.starts_with("/api/v1/support-bundles/") && path.ends_with("/download") =>
+            {
+                self.download_support_bundle(path)
             }
             ("PUT", "/api/v1/alert-channels") => self.put_alert_channel(body),
             ("GET", "/api/v1/alert-channels") => self.list_alert_channels(),
@@ -750,6 +757,52 @@ impl Api {
         }
     }
 
+    fn create_support_bundle(&self) -> ApiResponse {
+        let now = match system_time_millis() {
+            Ok(value) => value,
+            Err(message) => return error_response(500, "clock_error", &message),
+        };
+        let application_directory = match std::env::current_exe()
+            .ok()
+            .and_then(|path| path.parent().map(Path::to_path_buf))
+        {
+            Some(path) => path,
+            None => {
+                return error_response(
+                    500,
+                    "application_path_error",
+                    "The station application directory is unavailable.",
+                );
+            }
+        };
+        match station_support::create_support_bundle(
+            &self.database_path,
+            &application_directory,
+            now,
+        ) {
+            Ok(record) => json_response(
+                201,
+                serde_json::to_vec(&record).expect("serializing a support bundle cannot fail"),
+            ),
+            Err(message) => error_response(500, "support_bundle_failed", &message),
+        }
+    }
+
+    fn download_support_bundle(&self, path: &str) -> ApiResponse {
+        let Some(bundle_id) = path
+            .strip_prefix("/api/v1/support-bundles/")
+            .and_then(|value| value.strip_suffix("/download"))
+        else {
+            unreachable!("the support bundle download route was checked")
+        };
+        match station_support::read_support_bundle(&self.database_path, bundle_id) {
+            Ok(bytes) => {
+                attachment_response(200, "application/zip", format!("{bundle_id}.zip"), bytes)
+            }
+            Err(message) => error_response(404, "support_bundle_not_found", &message),
+        }
+    }
+
     fn put_alert_channel(&self, body: Option<&[u8]>) -> ApiResponse {
         let Some(command) = parse_body::<PutAlertChannel>(body) else {
             return error_response(
@@ -1309,11 +1362,21 @@ fn serve_stream(stream: &mut TcpStream, api: &Api) -> Result<(), String> {
         422 => "Unprocessable Content",
         _ => "Internal Server Error",
     };
+    let attachment_header = response
+        .attachment_name
+        .as_ref()
+        .map_or_else(String::new, |name| {
+            format!(
+                "Content-Disposition: attachment; filename=\"{name}\"\r\n\
+                 Cache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\n"
+            )
+        });
     let headers = format!(
-        "HTTP/1.1 {} {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        "HTTP/1.1 {} {}\r\nContent-Type: {}\r\n{}Content-Length: {}\r\nConnection: close\r\n\r\n",
         response.status,
         reason,
         response.content_type,
+        attachment_header,
         response.body.len()
     );
     stream
@@ -1478,6 +1541,7 @@ fn json_response(status: u16, body: Vec<u8>) -> ApiResponse {
     ApiResponse {
         status,
         content_type: "application/json",
+        attachment_name: None,
         body,
     }
 }
@@ -1486,7 +1550,28 @@ fn static_response(status: u16, content_type: &'static str, body: &[u8]) -> ApiR
     ApiResponse {
         status,
         content_type,
+        attachment_name: None,
         body: body.to_vec(),
+    }
+}
+
+fn attachment_response(
+    status: u16,
+    content_type: &'static str,
+    attachment_name: String,
+    body: Vec<u8>,
+) -> ApiResponse {
+    debug_assert!(
+        !attachment_name.is_empty()
+            && attachment_name
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+    );
+    ApiResponse {
+        status,
+        content_type,
+        attachment_name: Some(attachment_name),
+        body,
     }
 }
 

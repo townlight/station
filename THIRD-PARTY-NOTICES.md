@@ -6,6 +6,8 @@ The Rust GStreamer bindings are available under MIT OR Apache-2.0 from <https://
 
 The RustCrypto SHA-2 implementation is available under MIT OR Apache-2.0 from <https://github.com/RustCrypto/hashes>.
 
+The `zip` Rust crate is available under MIT from <https://github.com/zip-rs/zip2>. Its `typed-path` dependency is available under MIT OR Apache-2.0 from <https://github.com/chipsenkbeil/typed-path>.
+
 The `windows-service` Rust crate is available under MIT OR Apache-2.0 from <https://github.com/mullvad/windows-service-rs>.
 
 The Windows setup executable is produced with Inno Setup. Inno Setup source, license, and commercial-use terms are available from <https://jrsoftware.org/isinfo.php>.

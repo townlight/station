@@ -585,6 +585,67 @@ fn exposes_editable_self_test_schedules_and_runs_a_durable_manual_check() {
 }
 
 #[test]
+fn creates_and_downloads_a_manifested_support_bundle_without_path_escape() {
+    let root = temporary_database("support-bundle-root");
+    std::fs::create_dir_all(&root).unwrap();
+    let database = root.join("station.db");
+    let api = Api::open(&database).expect("database opens");
+
+    let created = api.handle("POST", "/api/v1/support-bundles", None);
+    assert_eq!(created.status, 201);
+    let record: station_support::SupportBundleRecord =
+        serde_json::from_slice(&created.body).unwrap();
+    assert!(record.entries.iter().any(|name| name == "manifest.json"));
+    assert_eq!(record.sha256.len(), 64);
+    assert!(record.size_bytes > 0);
+    assert!(
+        record
+            .excludes
+            .iter()
+            .any(|item| item.contains("credentials"))
+    );
+
+    let downloaded = api.handle("GET", &record.download_uri, None);
+    assert_eq!(downloaded.status, 200);
+    assert_eq!(downloaded.content_type, "application/zip");
+    assert_eq!(
+        downloaded.attachment_name.as_deref(),
+        Some(record.file_name.as_str())
+    );
+    assert!(downloaded.body.starts_with(b"PK"));
+    let archive = zip::ZipArchive::new(std::io::Cursor::new(&downloaded.body)).unwrap();
+    assert!(archive.file_names().any(|name| name == "manifest.json"));
+
+    let escaped = api.handle("GET", "/api/v1/support-bundles/..%2Fstation/download", None);
+    assert_eq!(escaped.status, 404);
+
+    let wire = http_request(
+        &database,
+        format!(
+            "GET {} HTTP/1.1\r\nHost: localhost\r\n\r\n",
+            record.download_uri
+        )
+        .as_bytes(),
+    );
+    let header_end = wire
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .unwrap();
+    let headers = String::from_utf8(wire[..header_end].to_vec()).unwrap();
+    assert!(headers.starts_with("HTTP/1.1 200 OK\r\n"));
+    assert!(headers.contains("Content-Type: application/zip\r\n"));
+    assert!(headers.contains(&format!(
+        "Content-Disposition: attachment; filename=\"{}\"\r\n",
+        record.file_name
+    )));
+    assert!(headers.contains("Cache-Control: no-store\r\n"));
+    assert!(headers.contains("X-Content-Type-Options: nosniff\r\n"));
+
+    drop(api);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn configures_watch_folders_without_allowing_clients_to_forge_scan_health() {
     let database = temporary_database("watch-folders");
     let api = Api::open(&database).unwrap();

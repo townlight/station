@@ -12,8 +12,10 @@ station-domain.workspace = true
 station-media-lifecycle.workspace = true
 station-schedule.workspace = true
 station-storage.workspace = true
+station-support.workspace = true
 
 [dev-dependencies]
 gstreamer.workspace = true
 serde_json.workspace = true
 station-ingest.workspace = true
+zip.workspace = true

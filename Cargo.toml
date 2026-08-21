@@ -15,6 +15,7 @@ members = [
     "crates/station-orchestration",
     "crates/station-runtime",
     "crates/station-schedule",
+    "crates/station-support",
     "crates/station-storage",
     "crates/station-windows-ipc",
 ]
@@ -46,11 +47,13 @@ station-media-protocol = { path = "crates/station-media-protocol" }
 station-orchestration = { path = "crates/station-orchestration" }
 station-runtime = { path = "crates/station-runtime" }
 station-schedule = { path = "crates/station-schedule" }
+station-support = { path = "crates/station-support" }
 station-storage = { path = "crates/station-storage" }
 station-windows-ipc = { path = "crates/station-windows-ipc" }
 ureq = { version = "=3.4.0", features = ["platform-verifier"] }
 windows-service = "=0.8.1"
 windows-sys = { version = "=0.61.2", features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_SystemInformation", "Win32_System_Threading"] }
+zip = { version = "=8.6.0", default-features = false }
 
 [profile.release]
 lto = "thin"

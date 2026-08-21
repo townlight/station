@@ -1288,6 +1288,31 @@ impl StationStore {
         }
     }
 
+    pub fn list_system_resource_samples(
+        &self,
+        limit: u32,
+    ) -> Result<Vec<SystemResourceSample>, String> {
+        if !(1..=10_080).contains(&limit) {
+            return Err("resource sample limit must be between 1 and 10080".into());
+        }
+        let statement = self.prepare(
+            "SELECT sample_id, sampled_at_unix_ms, cpu_milli_percent, ram_used_milli_gb, \
+             ram_total_milli_gb, gpu_milli_percent, gpu_vram_used_milli_gb, \
+             media_volume_free_milli_gb, backup_volume_free_milli_gb, database_reachable, \
+             backup_volume_writable, service_running, clock_skew_milliseconds \
+             FROM system_resource_samples ORDER BY sample_id DESC LIMIT ?1",
+        )?;
+        bind_i64(self.database, statement.raw, 1, i64::from(limit))?;
+        let mut samples = Vec::new();
+        loop {
+            match unsafe { sqlite3_step(statement.raw) } {
+                SQLITE_ROW => samples.push(read_system_resource_sample_row(statement.raw)?),
+                SQLITE_DONE => return Ok(samples),
+                _ => return Err(sqlite_error(self.database)),
+            }
+        }
+    }
+
     pub fn put_self_test_schedule(
         &self,
         schedule: &SelfTestSchedule,
@@ -1953,6 +1978,27 @@ impl StationStore {
         }
     }
 
+    pub fn list_recent_alert_deliveries(&self, limit: u32) -> Result<Vec<AlertDelivery>, String> {
+        if !(1..=1_000).contains(&limit) {
+            return Err("alert delivery limit must be between 1 and 1000".into());
+        }
+        let statement = self.prepare(
+            "SELECT delivery_id, event_id, alert_channel_id, notification_kind, state, attempts, \
+             next_attempt_at_unix_ms, lease_expires_at_unix_ms, last_error, signature, \
+             created_at_unix_ms, updated_at_unix_ms, sent_at_unix_ms \
+             FROM alert_deliveries ORDER BY created_at_unix_ms DESC, delivery_id DESC LIMIT ?1",
+        )?;
+        bind_i64(self.database, statement.raw, 1, i64::from(limit))?;
+        let mut deliveries = Vec::new();
+        loop {
+            match unsafe { sqlite3_step(statement.raw) } {
+                SQLITE_ROW => deliveries.push(read_alert_delivery_row(statement.raw)?),
+                SQLITE_DONE => return Ok(deliveries),
+                _ => return Err(sqlite_error(self.database)),
+            }
+        }
+    }
+
     pub fn read_alert_delivery_payload(
         &self,
         delivery_id: &str,
@@ -2432,6 +2478,27 @@ impl StationStore {
              acknowledged_at_unix_ms, acknowledged_by FROM alert_events \
              ORDER BY CASE state WHEN 'firing' THEN 0 ELSE 1 END, last_observed_at_unix_ms DESC, event_id",
         )?;
+        let mut events = Vec::new();
+        loop {
+            match unsafe { sqlite3_step(statement.raw) } {
+                SQLITE_ROW => events.push(read_alert_event_row(statement.raw)?),
+                SQLITE_DONE => return Ok(events),
+                _ => return Err(sqlite_error(self.database)),
+            }
+        }
+    }
+
+    pub fn list_recent_alert_events(&self, limit: u32) -> Result<Vec<AlertEvent>, String> {
+        if !(1..=1_000).contains(&limit) {
+            return Err("alert event limit must be between 1 and 1000".into());
+        }
+        let statement = self.prepare(
+            "SELECT event_id, condition, severity, state, resource_ref, summary, detail, source_section, \
+             first_observed_at_unix_ms, last_observed_at_unix_ms, resolved_at_unix_ms, occurrence_count, \
+             acknowledged_at_unix_ms, acknowledged_by FROM alert_events \
+             ORDER BY last_observed_at_unix_ms DESC, event_id DESC LIMIT ?1",
+        )?;
+        bind_i64(self.database, statement.raw, 1, i64::from(limit))?;
         let mut events = Vec::new();
         loop {
             match unsafe { sqlite3_step(statement.raw) } {
