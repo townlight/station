@@ -84,5 +84,7 @@ This decision covers UDP MPEG-TS input only. Additional live transports, SDI/NDI
 input are not implemented here. Wall-clock schedule catch-up and live handback selection are
 defined separately by [ADR 0033](0033-wall-clock-schedule-catch-up.md). The exact installed
 fallback-to-live-to-fallback decoded evidence is recorded in the [installed live takeover
-proof](../proof/2026-08-21-installed-live-takeover.md); it does not replace clean-machine or
-field-soak acceptance, and it does not claim installed schedule catch-up evidence.
+proof](../proof/2026-08-21-installed-live-takeover.md). The distinct installed
+[schedule catch-up proof](../proof/2026-08-22-installed-live-schedule-catch-up.md) crosses an item
+boundary under live and decodes the positive-offset successor after return. Neither proof replaces
+clean-machine, headend, or field-soak acceptance.

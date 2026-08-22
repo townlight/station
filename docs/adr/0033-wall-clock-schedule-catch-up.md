@@ -78,7 +78,8 @@ is confirmed. Return is not complete until `LiveReturned` and `LiveDisarmed` are
 Returning from live is deterministic at the actual handback time: it does not replay an expired
 item and does not take a future item early. Operators and audit consumers can distinguish missed
 scheduled work, completed prior work, the selected successor, and the exact successor media offset.
-The policy is bounded and channel-scoped; it does not claim additional live transports or installed
-machine capture evidence. The behavior is covered by schedule, media-engine, storage, and
-orchestration tests; an installed proof remains a separate gate.
-
+The policy is bounded and channel-scoped; it does not claim additional live transports. The
+behavior is covered by schedule, media-engine, storage, and orchestration tests. One exact installed
+candidate also crossed an A-to-B schedule boundary under live and returned to decoded B at a
+positive offset in the [installed schedule catch-up proof](../proof/2026-08-22-installed-live-schedule-catch-up.md).
+Clean-machine, headend, and field-duration acceptance remain separate gates.
