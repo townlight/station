@@ -143,7 +143,7 @@ function New-Fixture([string]$Path, [string]$Pattern, [int]$Frequency) {
     $ffmpeg = (Get-Command ffmpeg.exe -ErrorAction Stop).Source
     $videoSource = "color=c=${Pattern}:size=320x180:rate=30"
     $args = @('-y', '-v', 'error', '-f', 'lavfi', '-i', $videoSource,
-        '-f', 'lavfi', '-i', "sine=frequency=$Frequency:sample_rate=48000", '-t', $ItemDurationSeconds,
+        '-f', 'lavfi', '-i', "sine=frequency=${Frequency}:sample_rate=48000", '-t', $ItemDurationSeconds,
         '-c:v', 'libx264', '-preset', 'ultrafast', '-g', '30', '-pix_fmt', 'yuv420p',
         '-c:a', 'aac', '-b:a', '128k', '-f', 'mpegts', $Path)
     $run = Invoke-Native $ffmpeg $args
