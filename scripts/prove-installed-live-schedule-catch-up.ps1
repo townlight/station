@@ -166,24 +166,45 @@ function Capture-Udp([int]$Seconds, [string]$Path, [int]$MinimumBytes = 50000) {
     $endOffset = (Get-Item -LiteralPath $continuousOutput).Length
     $length = $endOffset - $startOffset
     if ($length -lt $MinimumBytes) { throw "Captured only $length bytes of installed UDP output." }
-    if ($startOffset % 188 -ne 0 -or $length % 188 -ne 0) { throw 'Persistent proof capture lost MPEG-TS packet alignment.' }
-    $bytes = [byte[]]::new($length)
-    $stream = [IO.FileStream]::new($continuousOutput, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite)
+    if ($startOffset % 188 -ne 0 -or $length % 188 -ne 0 -or $endOffset % 188 -ne 0) { throw 'Persistent proof capture lost MPEG-TS packet alignment.' }
+
+    # A raw byte-range cut can begin after the most recent PAT/PMT or H.264
+    # parameter set. Snapshot the continuous ledger and remux its final settled
+    # window so every evidence file is independently decodable without changing
+    # the installed H.264/AAC elementary streams.
+    $snapshot = Join-Path $captureRoot "snapshot-$([guid]::NewGuid().ToString('N')).ts"
+    $source = [IO.FileStream]::new($continuousOutput, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite)
+    $destination = [IO.FileStream]::new($snapshot, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::Read)
     try {
-        [void]$stream.Seek($startOffset, [IO.SeekOrigin]::Begin)
-        $read = 0
-        while ($read -lt $bytes.Length) {
-            $count = $stream.Read($bytes, $read, $bytes.Length - $read)
+        $buffer = [byte[]]::new(1MB)
+        $remaining = $endOffset
+        while ($remaining -gt 0) {
+            $requested = [int][math]::Min($buffer.Length, $remaining)
+            $count = $source.Read($buffer, 0, $requested)
             if ($count -eq 0) { throw 'Persistent proof capture ended before its measured byte range.' }
-            $read += $count
+            $destination.Write($buffer, 0, $count)
+            $remaining -= $count
         }
     }
-    finally { $stream.Dispose() }
+    finally { $destination.Dispose(); $source.Dispose() }
+
+    try {
+        $ffmpeg = (Get-Command ffmpeg.exe -ErrorAction Stop).Source
+        $remux = Invoke-Native $ffmpeg @('-y', '-v', 'error', '-sseof', "-$Seconds", '-i', $snapshot,
+            '-map', '0:v:0', '-map', '0:a:0', '-c', 'copy', '-mpegts_flags', 'resend_headers', '-f', 'mpegts', $Path)
+        if ($remux.exit_code -ne 0 -or -not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+            throw "FFmpeg could not make the proof window independently decodable. $($remux.stderr)"
+        }
+    }
+    finally { Remove-Item -LiteralPath $snapshot -Force -ErrorAction SilentlyContinue }
+
+    $bytes = [IO.File]::ReadAllBytes($Path)
+    if ($bytes.Length -lt $MinimumBytes) { throw "Remuxed proof window contained only $($bytes.Length) bytes." }
+    if ($bytes.Length % 188 -ne 0) { throw 'Remuxed proof window lost MPEG-TS packet alignment.' }
     for ($offset = 0; $offset + 188 -le $bytes.Length; $offset += 188) {
         if ($bytes[$offset] -ne 0x47) { throw "Captured output lost MPEG-TS sync at byte $offset." }
     }
-    [IO.File]::WriteAllBytes($Path, $bytes)
-    return [ordered]@{ path = $Path; bytes = $bytes.Length; seconds = [math]::Round($clock.Elapsed.TotalSeconds, 3) }
+    return [ordered]@{ path = $Path; bytes = $bytes.Length; source_bytes = $length; seconds = [math]::Round($clock.Elapsed.TotalSeconds, 3) }
 }
 
 function Get-VideoFingerprint([string]$Path) {
