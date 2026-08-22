@@ -37,11 +37,17 @@ accepts it only for the matching armed session, consumes it on take, and never e
 output. Return must be acknowledged before disarm is permitted.
 
 The worker adds a candidate branch to the existing GStreamer graph using `udpsrc` with 188-byte
-MPEG-TS caps, `tsdemux`, H.264/AAC decoders, canonical conversion/rate stages, and a running-time
-offset. Both decoded legs must produce buffers before the branch is armed. Taking live selects the
+MPEG-TS caps, `tsdemux`, H.264/AAC decoders, canonical conversion/rate stages, and running-time
+alignment. Both decoded legs must produce buffers before the branch is armed. Taking live selects the
 video and audio pads together and leaves the encoder, MPEG-TS mux, CG compositor, and required
 output branches running. Returning selects the remembered prior program/fallback source and
 disarm removes the live branch only after it is no longer selected.
+
+Live audio may arrive with timestamps established before the station attaches. Its source-local
+`audiorate` uses `skip-to-first=true`, and the following `clocksync(sync-to-first)` is the sole audio
+running-time rebase. The audio selector pad does not add the pipeline running time again. This keeps
+an already-running standards-compatible MPEG-TS source audible instead of generating a timestamp-
+sized silent lead-in or holding subsequent samples in the future.
 
 While live is on air, the worker observes decoded video and audio buffer counters. Two consecutive
 non-advancing observations or two seconds without progress is a live-input stall. The worker

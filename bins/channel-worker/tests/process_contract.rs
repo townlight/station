@@ -1,14 +1,17 @@
+use std::fs;
 use std::io::{Read, Write};
 use std::net::UdpSocket;
+use std::num::NonZeroU16;
 use std::path::PathBuf;
-use std::process::{Command, Output, Stdio};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::process::{Child, Command, Output, Stdio};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use station_media_journal::read_events;
 use station_media_protocol::{
-    CgOverlay, CgOverlayContent, CgRect, CgSnapshot, ChannelCommand, CommandEnvelope,
-    PROTOCOL_VERSION, WorkerBootstrapEnvelope, WorkerEvent, WorkerEventEnvelope,
-    WorkerOutputConfiguration, decode_event_frame, encode_bootstrap_frame, encode_command_frame,
+    CgOverlay, CgOverlayContent, CgRect, CgSnapshot, ChannelCommand, CommandEnvelope, LiveArmToken,
+    LiveInputConfiguration, PROTOCOL_VERSION, WorkerBootstrapEnvelope, WorkerEvent,
+    WorkerEventEnvelope, WorkerOutputConfiguration, decode_event_frame, encode_bootstrap_frame,
+    encode_command_frame,
 };
 use station_windows_ipc::PipeServer;
 
@@ -42,6 +45,15 @@ fn read_event(stream: &mut impl Read) -> WorkerEventEnvelope {
     frame.resize(4 + payload_length, 0);
     stream.read_exact(&mut frame[4..]).unwrap();
     decode_event_frame(&frame).unwrap()
+}
+
+fn read_command_event(stream: &mut impl Read) -> WorkerEventEnvelope {
+    loop {
+        let event = read_event(stream);
+        if !matches!(event.event, WorkerEvent::Heartbeat { .. }) {
+            return event;
+        }
+    }
 }
 
 fn run_worker(
@@ -90,6 +102,330 @@ fn run_worker(
         .map(|_| read_event(&mut stream))
         .collect();
     (child.wait_with_output().unwrap(), events)
+}
+
+struct ChildGuard {
+    child: Child,
+}
+
+impl ChildGuard {
+    fn new(child: Child) -> Self {
+        Self { child }
+    }
+
+    fn try_wait(&mut self) -> std::io::Result<Option<std::process::ExitStatus>> {
+        self.child.try_wait()
+    }
+
+    fn wait(&mut self) -> std::io::Result<std::process::ExitStatus> {
+        self.child.wait()
+    }
+}
+
+impl Drop for ChildGuard {
+    fn drop(&mut self) {
+        if self.child.try_wait().ok().flatten().is_none() {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+        }
+    }
+}
+
+struct TempFiles(Vec<PathBuf>);
+
+impl Drop for TempFiles {
+    fn drop(&mut self) {
+        for path in &self.0 {
+            let _ = fs::remove_file(path);
+        }
+    }
+}
+
+fn start_ffmpeg_live_sender(port: u16) -> ChildGuard {
+    ChildGuard::new(
+        Command::new("ffmpeg.exe")
+            .args([
+                "-nostdin",
+                "-loglevel",
+                "error",
+                "-re",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc2=size=640x360:rate=30",
+                "-re",
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=997:sample_rate=48000",
+                "-c:v",
+                "libx264",
+                "-preset",
+                "ultrafast",
+                "-tune",
+                "zerolatency",
+                "-g",
+                "30",
+                "-pix_fmt",
+                "yuv420p",
+                "-c:a",
+                "aac",
+                "-b:a",
+                "128k",
+                "-f",
+                "mpegts",
+                &format!("udp://127.0.0.1:{port}?pkt_size=1316"),
+            ])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("FFmpeg is required for the MPEG-TS interoperability proof"),
+    )
+}
+
+fn capture_transport_for(receiver: &UdpSocket, duration: Duration) -> Vec<u8> {
+    receiver
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .unwrap();
+    let started = Instant::now();
+    let mut datagram = [0_u8; 65_536];
+    let mut capture = Vec::new();
+    while started.elapsed() < duration {
+        let received = receiver
+            .recv(&mut datagram)
+            .expect("worker UDP output stopped during live capture");
+        capture.extend_from_slice(&datagram[..received]);
+    }
+    capture
+}
+
+fn clear_udp_backlog(receiver: &UdpSocket) {
+    receiver.set_nonblocking(true).unwrap();
+    let mut datagram = [0_u8; 65_536];
+    loop {
+        match receiver.recv(&mut datagram) {
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
+            Err(error) => panic!("could not clear worker UDP output backlog: {error}"),
+        }
+    }
+    receiver.set_nonblocking(false).unwrap();
+}
+
+#[test]
+fn spawned_worker_live_takeover_preserves_audible_audio() {
+    let journal = journal_path("live-audio");
+    let capture_path = journal.with_extension("ts");
+    let _temp_files = TempFiles(vec![journal.clone(), capture_path.clone()]);
+    let server = PipeServer::bind(
+        &journal
+            .file_stem()
+            .unwrap()
+            .to_string_lossy()
+            .replace('.', "-"),
+    )
+    .unwrap();
+    let output = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let child = Command::new(env!("CARGO_BIN_EXE_channel-worker"))
+        .args([WORKER_ID, CHANNEL_ID])
+        .arg(&journal)
+        .arg(server.name())
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut worker = ChildGuard::new(child);
+    let mut stream = server.accept().unwrap();
+    let bootstrap = WorkerBootstrapEnvelope {
+        version: PROTOCOL_VERSION,
+        worker_id: WORKER_ID.into(),
+        channel_id: CHANNEL_ID.into(),
+        output_profile: "proof-360p30".into(),
+        cg_image_root: journal
+            .parent()
+            .unwrap()
+            .join("cg-images")
+            .to_string_lossy()
+            .into_owned(),
+        outputs: vec![WorkerOutputConfiguration::UdpTs {
+            destination: output.local_addr().unwrap().to_string(),
+        }],
+    };
+    stream
+        .write_all(&encode_bootstrap_frame(&bootstrap).unwrap())
+        .unwrap();
+    let ready = read_event(&mut stream);
+    assert!(matches!(
+        ready.event,
+        WorkerEvent::Ready { graph_revision: 0 }
+    ));
+
+    let input_probe = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let input_port = input_probe.local_addr().unwrap().port();
+    drop(input_probe);
+    let mut sender = start_ffmpeg_live_sender(input_port);
+    std::thread::sleep(Duration::from_secs(10));
+    assert!(sender.try_wait().unwrap().is_none());
+
+    let session_id = "e8d9c07d-1d04-40cc-9fb7-5c1b13f0e961";
+    let source_id = "f7f2d7c5-0f87-4fd0-8d2c-142b6f0d1a42";
+    let token = LiveArmToken::new("worker-live-audio-proof-token".into()).unwrap();
+    let input = LiveInputConfiguration::new(
+        session_id.into(),
+        source_id.into(),
+        1,
+        "127.0.0.1".into(),
+        NonZeroU16::new(input_port).unwrap(),
+    )
+    .unwrap();
+    stream
+        .write_all(
+            &encode_command_frame(&command(
+                "arm-live",
+                2,
+                ChannelCommand::ArmLive {
+                    input,
+                    arm_token: token.clone(),
+                },
+            ))
+            .unwrap(),
+        )
+        .unwrap();
+    assert!(matches!(
+        read_command_event(&mut stream).event,
+        WorkerEvent::LiveArmed {
+            session_id: ref event_session,
+            ..
+        }
+            if event_session == session_id
+    ));
+    stream
+        .write_all(
+            &encode_command_frame(&command(
+                "take-live",
+                3,
+                ChannelCommand::TakeLive {
+                    session_id: session_id.into(),
+                    arm_token: token,
+                },
+            ))
+            .unwrap(),
+        )
+        .unwrap();
+    let take_event = read_command_event(&mut stream);
+    assert!(
+        matches!(
+        &take_event.event,
+        WorkerEvent::LiveOnAir {
+            session_id: event_session,
+            ..
+        }
+            if event_session == session_id
+        ),
+        "unexpected take event: {:?}",
+        take_event.event
+    );
+
+    clear_udp_backlog(&output);
+    std::thread::sleep(Duration::from_millis(750));
+    let transport_capture = capture_transport_for(&output, Duration::from_secs(4));
+    assert!(
+        transport_capture.len() > 100_000,
+        "live capture was too short: {} bytes",
+        transport_capture.len()
+    );
+    fs::write(&capture_path, &transport_capture).unwrap();
+
+    stream
+        .write_all(
+            &encode_command_frame(&command(
+                "return-live",
+                4,
+                ChannelCommand::ReturnFromLive {
+                    session_id: session_id.into(),
+                },
+            ))
+            .unwrap(),
+        )
+        .unwrap();
+    assert!(matches!(
+        read_command_event(&mut stream).event,
+        WorkerEvent::LiveReturned {
+            session_id: ref event_session,
+        }
+            if event_session == session_id
+    ));
+    stream
+        .write_all(
+            &encode_command_frame(&command(
+                "disarm-live",
+                5,
+                ChannelCommand::DisarmLive {
+                    session_id: session_id.into(),
+                },
+            ))
+            .unwrap(),
+        )
+        .unwrap();
+    assert!(matches!(
+        read_command_event(&mut stream).event,
+        WorkerEvent::LiveDisarmed {
+            session_id: ref event_session,
+        }
+            if event_session == session_id
+    ));
+    drop(sender);
+    stream
+        .write_all(
+            &encode_command_frame(&command("shutdown", 6, ChannelCommand::Shutdown)).unwrap(),
+        )
+        .unwrap();
+    assert!(matches!(
+        read_command_event(&mut stream).event,
+        WorkerEvent::ShutdownComplete
+    ));
+    let status = worker.wait().unwrap();
+    assert!(status.success());
+
+    let decoded = Command::new("ffmpeg.exe")
+        .args([
+            "-nostdin",
+            "-loglevel",
+            "error",
+            "-i",
+            capture_path.to_string_lossy().as_ref(),
+            "-map",
+            "0:a:0",
+            "-f",
+            "s16le",
+            "-acodec",
+            "pcm_s16le",
+            "-ar",
+            "48000",
+            "-ac",
+            "2",
+            "pipe:1",
+        ])
+        .output()
+        .expect("FFmpeg is required to decode the captured MPEG-TS audio proof");
+    assert!(
+        decoded.status.success(),
+        "FFmpeg failed to decode captured audio: {}",
+        String::from_utf8_lossy(&decoded.stderr)
+    );
+    let (sum, count) = decoded
+        .stdout
+        .chunks_exact(2)
+        .map(|bytes| i16::from_le_bytes([bytes[0], bytes[1]]))
+        .fold((0_u64, 0_u64), |(sum, count), sample| {
+            (sum + u64::from(sample.unsigned_abs()), count + 1)
+        });
+    let mean_abs = sum as f64 / count.max(1) as f64;
+    assert!(
+        count > 10_000 && mean_abs > 100.0,
+        "FFmpeg live audio was silent: {count} decoded samples, mean abs {mean_abs:.2}"
+    );
 }
 
 #[test]

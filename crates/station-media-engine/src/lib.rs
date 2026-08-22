@@ -280,6 +280,12 @@ impl PersistentPlayout {
             .property("single-segment", true)
             .build()
             .map_err(|error| build_error("identity", error))?;
+        let audio_rate = gst::ElementFactory::make("audiorate")
+            .name("canonical-audio-rate")
+            .property("skip-to-first", true)
+            .property("tolerance", 0_u64)
+            .build()
+            .map_err(|error| build_error("audiorate", error))?;
         let audio_output_queue = element("queue", "audio-output-queue")?;
         let audio_encoder = gst::ElementFactory::make("voaacenc")
             .name("audio-encoder")
@@ -369,6 +375,7 @@ impl PersistentPlayout {
                 &program_audio_queue,
                 &audio_selector,
                 &audio_timeline,
+                &audio_rate,
                 &audio_output_queue,
                 &audio_encoder,
                 &audio_parser,
@@ -440,6 +447,7 @@ impl PersistentPlayout {
         gst::Element::link_many([
             &audio_selector,
             &audio_timeline,
+            &audio_rate,
             &audio_output_queue,
             &audio_encoder,
             &audio_parser,
@@ -756,7 +764,6 @@ impl PersistentPlayout {
             }
         };
         candidate.video_source_pad.set_offset(offset);
-        candidate.audio_source_pad.set_offset(offset);
         for element in &candidate.elements {
             if let Err(error) = element.sync_state_with_parent() {
                 remove_live_program(
@@ -951,24 +958,33 @@ impl PersistentPlayout {
             .set_property("active-pad", Some(video_pad.clone()));
         self.audio_selector
             .set_property("active-pad", Some(audio_pad.clone()));
-        let result = (|| {
+        let started = Instant::now();
+        let result = loop {
             let video = active_role(
                 &self.video_selector,
                 &self.video_fallback_pad,
                 &self.video_program_pad,
                 self.live_program.as_ref().map(|program| &program.video_pad),
-            )?;
+            );
             let audio = active_role(
                 &self.audio_selector,
                 &self.audio_fallback_pad,
                 &self.audio_program_pad,
                 self.live_program.as_ref().map(|program| &program.audio_pad),
-            )?;
-            if video != audio {
-                return Err(EngineError::SourceSelectorsDisagree { video, audio });
+            );
+            match (video, audio) {
+                (Ok(video), Ok(audio)) if video == audio => break Ok(()),
+                (Ok(video), Ok(audio)) if started.elapsed() >= Duration::from_secs(2) => {
+                    break Err(EngineError::SourceSelectorsDisagree { video, audio });
+                }
+                (Err(error), _) | (_, Err(error))
+                    if started.elapsed() >= Duration::from_secs(2) =>
+                {
+                    break Err(error);
+                }
+                _ => std::thread::sleep(Duration::from_millis(2)),
             }
-            Ok(())
-        })();
+        };
         if result.is_err() {
             self.video_selector
                 .set_property("active-pad", previous_video);
@@ -1229,7 +1245,12 @@ fn install_live_program(
     let audio_convert = element("audioconvert", name("audio-convert"))?;
     let audio_resample = element("audioresample", name("audio-resample"))?;
     let audio_caps = audio_caps_filter(name("canonical-audio"), profile)?;
-    let audio_rate = element("audiorate", name("audio-rate"))?;
+    let audio_rate = gst::ElementFactory::make("audiorate")
+        .name(name("audio-rate"))
+        .property("skip-to-first", true)
+        .property("tolerance", 0_u64)
+        .build()
+        .map_err(|error| build_error("audiorate", error))?;
     let audio_clock = gst::ElementFactory::make("clocksync")
         .name(name("audio-clock"))
         .property("sync-to-first", true)
