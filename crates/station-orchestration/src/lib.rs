@@ -6,7 +6,7 @@ use std::sync::{
     Arc,
     atomic::{AtomicBool, AtomicU64, Ordering},
 };
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use sha2::{Digest, Sha256};
 use station_cg::{CgBulletinContent, CgResolvedContent, CgResolvedSnapshot};
@@ -17,11 +17,13 @@ use station_domain::{
 use station_live::{LiveEndpoint, TakeoverSession, TakeoverState};
 use station_media_protocol::{
     CgImageFormat, CgOverlay, CgOverlayContent, CgRect, CgSnapshot, ChannelCommand, LiveArmToken,
-    LiveInputConfiguration, MAX_CG_SLOTS, MAX_CG_TEXT_BYTES, SrtPassphrase, WorkerEvent,
-    WorkerOutputConfiguration,
+    LiveInputConfiguration, LiveReturnTarget, MAX_CG_SLOTS, MAX_CG_TEXT_BYTES, SrtPassphrase,
+    WorkerEvent, WorkerOutputConfiguration,
 };
 use station_runtime::{SupervisorError, WorkerSupervisor};
-use station_schedule::{ChannelConfiguration, DispatchStatus, OutputSinkKind};
+use station_schedule::{
+    ChannelConfiguration, DispatchJob, DispatchStatus, OutputSinkKind, ScheduleWindow,
+};
 use station_storage::{CgSnapshotReadError, CgWriteError, StationStore};
 
 static ALERT_SEQUENCE: AtomicU64 = AtomicU64::new(1);
@@ -70,6 +72,7 @@ pub enum DispatchTransition {
     Loaded { report_id: String },
     OnAir { report_id: String },
     Completed { report_id: String },
+    Missed { report_id: String },
     LiveArmed { session_id: String },
     LiveOnAir { session_id: String },
     LiveCompleted { session_id: String },
@@ -326,12 +329,19 @@ struct LiveRunOutcome {
     transition: Option<DispatchTransition>,
 }
 
+struct LiveHandbackPlan {
+    target: LiveReturnTarget,
+    active_report: Option<(String, DispatchStatus)>,
+    expired_acknowledged_reports: Vec<String>,
+    detail: String,
+}
+
 pub struct ChannelController {
     supervisor: WorkerSupervisor,
     database_path: PathBuf,
     channel_id: String,
     command_timeout: Duration,
-    loaded_asset_id: Option<String>,
+    loaded_report_id: Option<String>,
     on_air_asset_id: Option<String>,
     runtime_state: ChannelRuntimeState,
     state_started_at_unix_ms: i64,
@@ -414,7 +424,7 @@ impl ChannelController {
             database_path: database_path.to_path_buf(),
             channel_id: channel.channel_id.clone(),
             command_timeout: timeout,
-            loaded_asset_id: None,
+            loaded_report_id: None,
             on_air_asset_id: None,
             runtime_state: ChannelRuntimeState::HealthyFallback,
             state_started_at_unix_ms: started_at_unix_ms,
@@ -584,6 +594,165 @@ impl ChannelController {
             arm_token: Some(arm_token),
         });
         Ok(())
+    }
+
+    fn retire_missed_dispatches(
+        &self,
+        store: &StationStore,
+        now_unix_ms: i64,
+    ) -> Result<Option<DispatchTransition>, OrchestrationError> {
+        let jobs = store
+            .list_dispatch_jobs(&self.channel_id)
+            .map_err(OrchestrationError::Storage)?;
+        let mut first = None;
+        for job in jobs {
+            let window = job
+                .item
+                .window_at(now_unix_ms)
+                .map_err(|error| OrchestrationError::Storage(format!("{error:?}")))?;
+            if window == ScheduleWindow::Ended
+                && matches!(
+                    job.report.dispatch_status,
+                    DispatchStatus::Pending | DispatchStatus::Queued
+                )
+            {
+                self.advance(
+                    store,
+                    &job.report.report_id,
+                    job.report.dispatch_status,
+                    DispatchStatus::Missed,
+                )?;
+                first.get_or_insert(DispatchTransition::Missed {
+                    report_id: job.report.report_id,
+                });
+            }
+        }
+        Ok(first)
+    }
+
+    fn load_dispatch_job(
+        &mut self,
+        store: &StationStore,
+        job: &DispatchJob,
+    ) -> Result<DispatchStatus, OrchestrationError> {
+        if self.loaded_report_id.as_deref() != Some(job.report.report_id.as_str()) {
+            let event = self
+                .supervisor
+                .command(
+                    &format!("load-{}", job.report.report_id),
+                    ChannelCommand::LoadAsset {
+                        asset_id: job.asset.asset_id.clone(),
+                        media_path: job.asset.media_path.clone(),
+                    },
+                    self.command_timeout,
+                )
+                .map_err(OrchestrationError::Worker)?;
+            if !matches!(event.event, WorkerEvent::AssetLoaded { ref asset_id } if asset_id == &job.asset.asset_id)
+            {
+                self.advance(
+                    store,
+                    &job.report.report_id,
+                    job.report.dispatch_status,
+                    DispatchStatus::Error,
+                )?;
+                return Err(OrchestrationError::UnexpectedWorkerEvent);
+            }
+            self.loaded_report_id = Some(job.report.report_id.clone());
+        }
+        if job.report.dispatch_status == DispatchStatus::Pending {
+            self.advance(
+                store,
+                &job.report.report_id,
+                DispatchStatus::Pending,
+                DispatchStatus::Queued,
+            )?;
+            Ok(DispatchStatus::Queued)
+        } else {
+            Ok(job.report.dispatch_status)
+        }
+    }
+
+    fn prepare_live_handback(
+        &mut self,
+        store: &StationStore,
+        now_unix_ms: i64,
+    ) -> Result<LiveHandbackPlan, OrchestrationError> {
+        let preparation_started = Instant::now();
+        let mut expired_acknowledged_reports = Vec::new();
+        for _ in 0..16 {
+            let elapsed_ms =
+                i64::try_from(preparation_started.elapsed().as_millis()).unwrap_or(i64::MAX);
+            let decision_now = now_unix_ms.saturating_add(elapsed_ms);
+            self.retire_missed_dispatches(store, decision_now)?;
+            let jobs = store
+                .list_dispatch_jobs(&self.channel_id)
+                .map_err(OrchestrationError::Storage)?;
+            let mut active = None;
+            for job in jobs {
+                match job
+                    .item
+                    .window_at(decision_now)
+                    .map_err(|error| OrchestrationError::Storage(format!("{error:?}")))?
+                {
+                    ScheduleWindow::Active { media_offset_ms } if active.is_none() => {
+                        active = Some((job, media_offset_ms));
+                    }
+                    ScheduleWindow::Ended
+                        if job.report.dispatch_status == DispatchStatus::Acknowledged =>
+                    {
+                        if !expired_acknowledged_reports.contains(&job.report.report_id) {
+                            expired_acknowledged_reports.push(job.report.report_id);
+                        }
+                    }
+                    ScheduleWindow::Future
+                    | ScheduleWindow::Active { .. }
+                    | ScheduleWindow::Ended => {}
+                }
+            }
+            let Some((job, _)) = active else {
+                return Ok(LiveHandbackPlan {
+                    target: LiveReturnTarget::Fallback,
+                    active_report: None,
+                    expired_acknowledged_reports,
+                    detail: "Returned to healthy fallback because no committed schedule window was active."
+                        .into(),
+                });
+            };
+            let dispatch_status = self.load_dispatch_job(store, &job)?;
+            let elapsed_ms =
+                i64::try_from(preparation_started.elapsed().as_millis()).unwrap_or(i64::MAX);
+            let switch_now = now_unix_ms.saturating_add(elapsed_ms);
+            match job
+                .item
+                .window_at(switch_now)
+                .map_err(|error| OrchestrationError::Storage(format!("{error:?}")))?
+            {
+                ScheduleWindow::Active { media_offset_ms } => {
+                    return Ok(LiveHandbackPlan {
+                        target: LiveReturnTarget::Program {
+                            asset_id: job.asset.asset_id.clone(),
+                            media_offset_ms,
+                        },
+                        active_report: Some((job.report.report_id, dispatch_status)),
+                        expired_acknowledged_reports,
+                        detail: format!(
+                            "Returned to scheduled asset {} at media offset {} ms.",
+                            job.asset.asset_id, media_offset_ms
+                        ),
+                    });
+                }
+                ScheduleWindow::Ended => continue,
+                ScheduleWindow::Future => {
+                    return Err(OrchestrationError::Clock(
+                        "The station clock moved backward while preparing live handback.".into(),
+                    ));
+                }
+            }
+        }
+        Err(OrchestrationError::LiveControl(
+            "The schedule crossed too many boundaries while live handback was being prepared."
+                .into(),
+        ))
     }
 
     fn reconcile_live(
@@ -776,20 +945,68 @@ impl ChannelController {
                         session.authority_revision,
                     )
                     .map_err(OrchestrationError::Storage)?;
+                let handback = self.prepare_live_handback(store, now_unix_ms)?;
                 let response = self
                     .supervisor
                     .command(
                         &format!("live-return-{}", session.session_id),
                         ChannelCommand::ReturnFromLive {
                             session_id: session.session_id.clone(),
+                            target: handback.target.clone(),
                         },
                         self.command_timeout,
                     )
                     .map_err(OrchestrationError::Worker)?;
-                if !matches!(response.event, WorkerEvent::LiveReturned { ref session_id } if session_id == &session.session_id)
-                {
+                let confirmed = match (&handback.target, &response.event) {
+                    (
+                        LiveReturnTarget::Fallback,
+                        WorkerEvent::LiveReturned {
+                            session_id,
+                            source_kind,
+                            source_id,
+                        },
+                    ) => {
+                        session_id == &session.session_id
+                            && source_kind == "fallback"
+                            && source_id == "station-fallback"
+                    }
+                    (
+                        LiveReturnTarget::Program { asset_id, .. },
+                        WorkerEvent::LiveReturned {
+                            session_id,
+                            source_kind,
+                            source_id,
+                        },
+                    ) => {
+                        session_id == &session.session_id
+                            && source_kind == "asset"
+                            && source_id == asset_id
+                    }
+                    _ => false,
+                };
+                if !confirmed {
                     return Err(OrchestrationError::UnexpectedWorkerEvent);
                 }
+                for report_id in &handback.expired_acknowledged_reports {
+                    self.advance(
+                        store,
+                        report_id,
+                        DispatchStatus::Acknowledged,
+                        DispatchStatus::Completed,
+                    )?;
+                }
+                if let Some((report_id, DispatchStatus::Queued)) = &handback.active_report {
+                    self.advance(
+                        store,
+                        report_id,
+                        DispatchStatus::Queued,
+                        DispatchStatus::Acknowledged,
+                    )?;
+                }
+                self.on_air_asset_id = match &handback.target {
+                    LiveReturnTarget::Fallback => None,
+                    LiveReturnTarget::Program { asset_id, .. } => Some(asset_id.clone()),
+                };
                 let response = self
                     .supervisor
                     .command(
@@ -811,13 +1028,13 @@ impl ChannelController {
                         TakeoverState::Returning,
                         TakeoverState::Completed,
                         now_unix_ms,
-                        None,
+                        Some(&handback.detail),
                         "stationd-live-controller",
                         returning.authority_revision,
                     )
                     .map_err(OrchestrationError::Storage)?;
                 self.mark_state(
-                    if self.on_air_asset_id.is_some() {
+                    if matches!(handback.target, LiveReturnTarget::Program { .. }) {
                         ChannelRuntimeState::OnAir
                     } else {
                         ChannelRuntimeState::HealthyFallback
@@ -873,71 +1090,42 @@ impl ChannelController {
             return Ok(live.transition);
         }
         let live_transition = live.transition;
+        let missed_transition = self.retire_missed_dispatches(&store, now_unix_ms)?;
         let Some(job) = store
             .list_dispatch_jobs(&self.channel_id)
             .map_err(OrchestrationError::Storage)?
             .into_iter()
             .next()
         else {
-            return Ok(live_transition);
+            return Ok(live_transition.or(missed_transition));
         };
         let report_id = job.report.report_id.clone();
+        let job_window = job
+            .item
+            .window_at(now_unix_ms)
+            .map_err(|error| OrchestrationError::Storage(format!("{error:?}")))?;
         if matches!(
             job.report.dispatch_status,
             DispatchStatus::Queued | DispatchStatus::Acknowledged
-        ) && self.loaded_asset_id.as_deref() != Some(job.asset.asset_id.as_str())
+        ) && job_window != ScheduleWindow::Ended
+            && self.loaded_report_id.as_deref() != Some(job.report.report_id.as_str())
         {
-            let event = self
-                .supervisor
-                .command(
-                    &format!("reconcile-load-{report_id}"),
-                    ChannelCommand::LoadAsset {
-                        asset_id: job.asset.asset_id.clone(),
-                        media_path: job.asset.media_path.clone(),
-                    },
-                    self.command_timeout,
-                )
-                .map_err(OrchestrationError::Worker)?;
-            if !matches!(event.event, WorkerEvent::AssetLoaded { ref asset_id } if asset_id == &job.asset.asset_id)
-            {
-                return self.reject_worker_event(&store, &report_id, job.report.dispatch_status);
-            }
-            self.loaded_asset_id = Some(job.asset.asset_id);
+            self.load_dispatch_job(&store, &job)?;
             return Ok(Some(DispatchTransition::Loaded { report_id }));
         }
-        let transition = match job.report.dispatch_status {
-            DispatchStatus::Pending => {
-                let event = self
-                    .supervisor
-                    .command(
-                        &format!("load-{report_id}"),
-                        ChannelCommand::LoadAsset {
-                            asset_id: job.asset.asset_id.clone(),
-                            media_path: job.asset.media_path.clone(),
-                        },
-                        self.command_timeout,
-                    )
-                    .map_err(OrchestrationError::Worker)?;
-                if !matches!(event.event, WorkerEvent::AssetLoaded { ref asset_id } if asset_id == &job.asset.asset_id)
-                {
-                    return self.reject_worker_event(&store, &report_id, DispatchStatus::Pending);
-                }
-                self.advance(
-                    &store,
-                    &report_id,
-                    DispatchStatus::Pending,
-                    DispatchStatus::Queued,
-                )?;
-                self.loaded_asset_id = Some(job.asset.asset_id);
+        let transition = match (job.report.dispatch_status, job_window) {
+            (DispatchStatus::Pending, ScheduleWindow::Future | ScheduleWindow::Active { .. }) => {
+                self.load_dispatch_job(&store, &job)?;
                 Some(DispatchTransition::Loaded { report_id })
             }
-            DispatchStatus::Queued if now_unix_ms >= job.item.starts_at_unix_ms => {
+            (DispatchStatus::Queued, ScheduleWindow::Active { media_offset_ms }) => {
                 let event = self
                     .supervisor
                     .command(
                         &format!("take-{report_id}"),
                         ChannelCommand::TakeAsset {
                             asset_id: job.asset.asset_id.clone(),
+                            media_offset_ms,
                         },
                         self.command_timeout,
                     )
@@ -957,13 +1145,8 @@ impl ChannelController {
                 self.mark_state(ChannelRuntimeState::OnAir, now_unix_ms);
                 Some(DispatchTransition::OnAir { report_id })
             }
-            DispatchStatus::Acknowledged
-                if now_unix_ms
-                    < job
-                        .item
-                        .ends_at_unix_ms()
-                        .map_err(|error| OrchestrationError::Storage(format!("{error:?}")))?
-                    && self.on_air_asset_id.as_deref() != Some(job.asset.asset_id.as_str()) =>
+            (DispatchStatus::Acknowledged, ScheduleWindow::Active { media_offset_ms })
+                if self.on_air_asset_id.as_deref() != Some(job.asset.asset_id.as_str()) =>
             {
                 let event = self
                     .supervisor
@@ -971,6 +1154,7 @@ impl ChannelController {
                         &format!("reconcile-take-{report_id}"),
                         ChannelCommand::TakeAsset {
                             asset_id: job.asset.asset_id.clone(),
+                            media_offset_ms,
                         },
                         self.command_timeout,
                     )
@@ -988,13 +1172,7 @@ impl ChannelController {
                 self.mark_state(ChannelRuntimeState::OnAir, now_unix_ms);
                 Some(DispatchTransition::OnAir { report_id })
             }
-            DispatchStatus::Acknowledged
-                if now_unix_ms
-                    >= job
-                        .item
-                        .ends_at_unix_ms()
-                        .map_err(|error| OrchestrationError::Storage(format!("{error:?}")))? =>
-            {
+            (DispatchStatus::Acknowledged, ScheduleWindow::Ended) => {
                 let event = self
                     .supervisor
                     .command(
@@ -1022,10 +1200,13 @@ impl ChannelController {
                 self.mark_state(ChannelRuntimeState::HealthyFallback, now_unix_ms);
                 Some(DispatchTransition::Completed { report_id })
             }
-            DispatchStatus::Queued | DispatchStatus::Acknowledged => None,
+            (
+                DispatchStatus::Queued | DispatchStatus::Acknowledged,
+                ScheduleWindow::Future | ScheduleWindow::Active { .. },
+            ) => None,
             _ => None,
         };
-        Ok(transition.or(live_transition))
+        Ok(transition.or(live_transition).or(missed_transition))
     }
 
     fn sync_cg(

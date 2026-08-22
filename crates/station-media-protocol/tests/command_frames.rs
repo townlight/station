@@ -1,5 +1,5 @@
 use station_media_protocol::{
-    ChannelCommand, CommandEnvelope, LiveArmToken, LiveInputConfiguration,
+    ChannelCommand, CommandEnvelope, LiveArmToken, LiveInputConfiguration, LiveReturnTarget,
     OutputTransportObservation, PROTOCOL_VERSION, ProtocolError, ProtocolVersion, SrtPassphrase,
     WorkerBootstrapEnvelope, WorkerEvent, WorkerEventEnvelope, WorkerOutputConfiguration,
     decode_bootstrap_frame, decode_command_frame, decode_event_frame, encode_bootstrap_frame,
@@ -48,6 +48,10 @@ fn round_trips_live_arm_and_lifecycle_commands() {
         },
         ChannelCommand::ReturnFromLive {
             session_id: live_input().session_id.clone(),
+            target: LiveReturnTarget::Program {
+                asset_id: "a".repeat(64),
+                media_offset_ms: 12_345,
+            },
         },
         ChannelCommand::DisarmLive {
             session_id: live_input().session_id,
@@ -228,6 +232,7 @@ fn round_trips_asset_load_and_take_commands() {
         },
         ChannelCommand::TakeAsset {
             asset_id: "a".repeat(64),
+            media_offset_ms: 12_345,
         },
     ] {
         let envelope = CommandEnvelope {
@@ -339,6 +344,8 @@ fn rejects_invalid_live_events_on_encode_and_decode() {
         sequence: 1,
         event: WorkerEvent::LiveReturned {
             session_id: live_input().session_id,
+            source_kind: "asset".into(),
+            source_id: "a".repeat(64),
         },
     };
     let frame = encode_event_frame(&valid).unwrap();

@@ -574,7 +574,7 @@ impl StationStore {
                asset_id TEXT NOT NULL,\
                approved_by TEXT NOT NULL,\
                approved_at_unix_ms INTEGER NOT NULL,\
-               dispatch_status TEXT NOT NULL CHECK (dispatch_status IN ('pending','queued','acknowledged','completed','error','cancelled')),\
+               dispatch_status TEXT NOT NULL CHECK (dispatch_status IN ('pending','queued','acknowledged','missed','completed','error','cancelled')),\
                operator_notes TEXT NOT NULL\
              );\
              CREATE INDEX IF NOT EXISTS commit_reports_channel_time \
@@ -6370,11 +6370,12 @@ impl StationStore {
             _ => return Err(sqlite_error(self.database)),
         };
         drop(statement);
-        if definition.contains("'completed'") {
+        if definition.contains("'missed'") {
             return Ok(());
         }
         self.execute(
             "BEGIN IMMEDIATE;\
+             DROP INDEX IF EXISTS commit_reports_channel_time;\
              ALTER TABLE commit_reports RENAME TO commit_reports_legacy;\
              CREATE TABLE commit_reports (\
                report_id TEXT PRIMARY KEY,\
@@ -6384,7 +6385,7 @@ impl StationStore {
                asset_id TEXT NOT NULL,\
                approved_by TEXT NOT NULL,\
                approved_at_unix_ms INTEGER NOT NULL,\
-               dispatch_status TEXT NOT NULL CHECK (dispatch_status IN ('pending','queued','acknowledged','completed','error','cancelled')),\
+               dispatch_status TEXT NOT NULL CHECK (dispatch_status IN ('pending','queued','acknowledged','missed','completed','error','cancelled')),\
                operator_notes TEXT NOT NULL\
              );\
              INSERT INTO commit_reports SELECT * FROM commit_reports_legacy;\
@@ -8184,6 +8185,7 @@ fn dispatch_status_name(value: DispatchStatus) -> &'static str {
         DispatchStatus::Pending => "pending",
         DispatchStatus::Queued => "queued",
         DispatchStatus::Acknowledged => "acknowledged",
+        DispatchStatus::Missed => "missed",
         DispatchStatus::Completed => "completed",
         DispatchStatus::Error => "error",
         DispatchStatus::Cancelled => "cancelled",
@@ -8195,6 +8197,7 @@ fn parse_dispatch_status(value: &str) -> Result<DispatchStatus, String> {
         "pending" => Ok(DispatchStatus::Pending),
         "queued" => Ok(DispatchStatus::Queued),
         "acknowledged" => Ok(DispatchStatus::Acknowledged),
+        "missed" => Ok(DispatchStatus::Missed),
         "completed" => Ok(DispatchStatus::Completed),
         "error" => Ok(DispatchStatus::Error),
         "cancelled" => Ok(DispatchStatus::Cancelled),
@@ -8208,9 +8211,11 @@ fn valid_dispatch_transition(expected: DispatchStatus, next: DispatchStatus) -> 
         (DispatchStatus::Pending, DispatchStatus::Queued)
             | (DispatchStatus::Pending, DispatchStatus::Error)
             | (DispatchStatus::Pending, DispatchStatus::Cancelled)
+            | (DispatchStatus::Pending, DispatchStatus::Missed)
             | (DispatchStatus::Queued, DispatchStatus::Acknowledged)
             | (DispatchStatus::Queued, DispatchStatus::Error)
             | (DispatchStatus::Queued, DispatchStatus::Cancelled)
+            | (DispatchStatus::Queued, DispatchStatus::Missed)
             | (DispatchStatus::Acknowledged, DispatchStatus::Completed)
             | (DispatchStatus::Acknowledged, DispatchStatus::Error)
     )
@@ -8533,6 +8538,77 @@ mod tests {
             DispatchStatus::Completed
         );
         drop(migrated);
+        for candidate in [
+            database.clone(),
+            PathBuf::from(format!("{}-wal", database.display())),
+            PathBuf::from(format!("{}-shm", database.display())),
+        ] {
+            let _ = std::fs::remove_file(candidate);
+        }
+    }
+
+    #[test]
+    fn migrates_completed_dispatch_schema_to_missed_without_losing_rows() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let database = std::env::temp_dir().join(format!("townlight-missed-migration-{nonce}.db"));
+        let store = StationStore::open(&database).unwrap();
+        store
+            .execute(
+                "DROP TABLE commit_reports;\
+                 CREATE TABLE commit_reports (\
+                   report_id TEXT PRIMARY KEY, plan_id TEXT NOT NULL, channel_id TEXT NOT NULL,\
+                   schedule_item_id TEXT NOT NULL, asset_id TEXT NOT NULL, approved_by TEXT NOT NULL,\
+                   approved_at_unix_ms INTEGER NOT NULL, dispatch_status TEXT NOT NULL CHECK \
+                   (dispatch_status IN ('pending','queued','acknowledged','completed','error','cancelled')),\
+                   operator_notes TEXT NOT NULL);\
+                 CREATE INDEX commit_reports_channel_time ON commit_reports(channel_id, approved_at_unix_ms);\
+                 INSERT INTO commit_reports VALUES('legacy-pending','plan','channel','item-p','asset','operator',1,'pending','kept pending');\
+                 INSERT INTO commit_reports VALUES('legacy-completed','plan','channel','item-c','asset','operator',2,'completed','kept completed');",
+            )
+            .unwrap();
+        drop(store);
+
+        let migrated = StationStore::open(&database).unwrap();
+        assert!(
+            migrated
+                .advance_dispatch_status(
+                    "legacy-pending",
+                    DispatchStatus::Pending,
+                    DispatchStatus::Missed,
+                )
+                .unwrap()
+        );
+        assert_eq!(
+            migrated
+                .read_commit_report("legacy-completed")
+                .unwrap()
+                .unwrap()
+                .dispatch_status,
+            DispatchStatus::Completed
+        );
+        drop(migrated);
+
+        let reopened = StationStore::open(&database).unwrap();
+        assert_eq!(
+            reopened
+                .read_commit_report("legacy-pending")
+                .unwrap()
+                .unwrap()
+                .dispatch_status,
+            DispatchStatus::Missed
+        );
+        assert_eq!(
+            reopened
+                .read_commit_report("legacy-completed")
+                .unwrap()
+                .unwrap()
+                .dispatch_status,
+            DispatchStatus::Completed
+        );
+        drop(reopened);
         for candidate in [
             database.clone(),
             PathBuf::from(format!("{}-wal", database.display())),

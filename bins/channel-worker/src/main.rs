@@ -6,9 +6,9 @@ use std::time::Instant;
 use station_media_engine::{PersistentPlayout, SourceRole, TransportOutput};
 use station_media_journal::JournalWriter;
 use station_media_protocol::{
-    ChannelCommand, CommandEnvelope, LiveArmToken, MAX_FRAME_BYTES, OutputTransportObservation,
-    PROTOCOL_VERSION, WorkerEvent, WorkerEventEnvelope, WorkerOutputConfiguration,
-    decode_bootstrap_frame, decode_command_frame, encode_event_frame,
+    ChannelCommand, CommandEnvelope, LiveArmToken, LiveReturnTarget, MAX_FRAME_BYTES,
+    OutputTransportObservation, PROTOCOL_VERSION, WorkerEvent, WorkerEventEnvelope,
+    WorkerOutputConfiguration, decode_bootstrap_frame, decode_command_frame, encode_event_frame,
 };
 use station_schedule::OutputProfileId;
 use station_windows_ipc::PipeStream;
@@ -30,10 +30,7 @@ struct LiveState {
 
 enum LivePhase {
     Armed,
-    OnAir {
-        prior_source: SourceRole,
-        health: LiveBufferHealth,
-    },
+    OnAir { health: LiveBufferHealth },
     Returned,
 }
 
@@ -67,10 +64,9 @@ impl LiveState {
                 .is_some_and(|expected| expected == arm_token)
     }
 
-    fn mark_on_air(&mut self, prior_source: SourceRole) {
+    fn mark_on_air(&mut self) {
         self.arm_token = None;
         self.phase = LivePhase::OnAir {
-            prior_source,
             health: LiveBufferHealth {
                 last_buffer_counts: None,
                 stalled_since_milliseconds: None,
@@ -465,7 +461,10 @@ fn decide_event(
                 false,
             ),
         },
-        ChannelCommand::TakeAsset { asset_id } => {
+        ChannelCommand::TakeAsset {
+            asset_id,
+            media_offset_ms,
+        } => {
             if live_state.as_ref().is_some_and(LiveState::is_on_air) {
                 (
                     rejection(
@@ -485,7 +484,7 @@ fn decide_event(
                     false,
                 )
             } else {
-                match media.select(SourceRole::Program) {
+                match media.take_program_at(*media_offset_ms) {
                     Ok(()) => (
                         WorkerEvent::OnAirChanged {
                             source_kind: "asset".into(),
@@ -656,7 +655,7 @@ fn decide_event(
                                 live_state
                                     .as_mut()
                                     .expect("the armed live state remains present")
-                                    .mark_on_air(prior_source);
+                                    .mark_on_air();
                                 (
                                     rejection(
                                         command,
@@ -673,7 +672,7 @@ fn decide_event(
                     let state = live_state
                         .as_mut()
                         .expect("the armed live state remains present");
-                    state.mark_on_air(prior_source);
+                    state.mark_on_air();
                     (
                         WorkerEvent::LiveOnAir {
                             session_id: state.session_id.clone(),
@@ -693,7 +692,7 @@ fn decide_event(
                 ),
             }
         }
-        ChannelCommand::ReturnFromLive { session_id } => {
+        ChannelCommand::ReturnFromLive { session_id, target } => {
             let Some(state) = live_state.as_ref() else {
                 return (
                     rejection(command, "live_not_armed", "No live input is armed."),
@@ -710,7 +709,7 @@ fn decide_event(
                     false,
                 );
             }
-            let LivePhase::OnAir { prior_source, .. } = &state.phase else {
+            let LivePhase::OnAir { .. } = &state.phase else {
                 return (
                     rejection(
                         command,
@@ -720,7 +719,32 @@ fn decide_event(
                     false,
                 );
             };
-            match media.select(*prior_source) {
+            let (return_result, source_kind, source_id) = match target {
+                LiveReturnTarget::Fallback => (
+                    media.select(SourceRole::Fallback),
+                    "fallback",
+                    "station-fallback".to_string(),
+                ),
+                LiveReturnTarget::Program {
+                    asset_id,
+                    media_offset_ms,
+                } if loaded_asset.as_deref() == Some(asset_id.as_str()) => (
+                    media.take_program_at(*media_offset_ms),
+                    "asset",
+                    asset_id.clone(),
+                ),
+                LiveReturnTarget::Program { .. } => {
+                    return (
+                        rejection(
+                            command,
+                            "asset_not_loaded",
+                            "The scheduled handback asset is not loaded in this channel worker.",
+                        ),
+                        false,
+                    );
+                }
+            };
+            match return_result {
                 Ok(()) => {
                     live_state
                         .as_mut()
@@ -729,6 +753,8 @@ fn decide_event(
                     (
                         WorkerEvent::LiveReturned {
                             session_id: session_id.clone(),
+                            source_kind: source_kind.into(),
+                            source_id,
                         },
                         false,
                     )
@@ -864,7 +890,6 @@ mod tests {
         assert!(!state.accepts_take(SESSION, &wrong_token));
 
         state.phase = LivePhase::OnAir {
-            prior_source: SourceRole::Fallback,
             health: LiveBufferHealth {
                 last_buffer_counts: Some((1, 1)),
                 stalled_since_milliseconds: None,
@@ -879,7 +904,7 @@ mod tests {
         let token = LiveArmToken::new("test-token-123456".into()).unwrap();
         let mut state = armed_state();
 
-        state.mark_on_air(SourceRole::Fallback);
+        state.mark_on_air();
         state.mark_returned();
 
         assert!(!state.is_on_air());
@@ -892,7 +917,7 @@ mod tests {
         let token = LiveArmToken::new("test-token-123456".into()).unwrap();
         let mut state = armed_state();
 
-        state.mark_on_air(SourceRole::Program);
+        state.mark_on_air();
 
         assert!(state.is_on_air());
         assert!(!state.accepts_take(SESSION, &token));

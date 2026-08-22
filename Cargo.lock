@@ -97,6 +97,7 @@ version = "0.1.0"
 dependencies = [
  "gstreamer",
  "station-domain",
+ "station-live",
  "station-media-assets",
  "station-media-engine",
  "station-media-journal",

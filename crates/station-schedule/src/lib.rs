@@ -188,6 +188,13 @@ pub enum ScheduleState {
     Cancelled,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScheduleWindow {
+    Future,
+    Active { media_offset_ms: u64 },
+    Ended,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ScheduleConflict {
     pub existing_item_id: String,
@@ -230,6 +237,7 @@ pub enum DispatchStatus {
     Pending,
     Queued,
     Acknowledged,
+    Missed,
     Completed,
     Error,
     Cancelled,
@@ -299,6 +307,23 @@ impl ScheduleItem {
         self.starts_at_unix_ms
             .checked_add(duration)
             .ok_or(ScheduleError::TimeOverflow)
+    }
+
+    /// Classifies the item's half-open wall-clock window. At an exact end
+    /// boundary the item is no longer eligible; an item beginning at that
+    /// same instant is eligible at media offset zero.
+    pub fn window_at(&self, now_unix_ms: i64) -> Result<ScheduleWindow, ScheduleError> {
+        if now_unix_ms < self.starts_at_unix_ms {
+            return Ok(ScheduleWindow::Future);
+        }
+        if now_unix_ms >= self.ends_at_unix_ms()? {
+            return Ok(ScheduleWindow::Ended);
+        }
+        let elapsed = now_unix_ms
+            .checked_sub(self.starts_at_unix_ms)
+            .ok_or(ScheduleError::TimeOverflow)?;
+        let media_offset_ms = u64::try_from(elapsed).map_err(|_| ScheduleError::TimeOverflow)?;
+        Ok(ScheduleWindow::Active { media_offset_ms })
     }
 }
 

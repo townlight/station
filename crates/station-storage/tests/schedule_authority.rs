@@ -6,6 +6,8 @@ use station_storage::{CommitWriteError, StationStore};
 
 const CHANNEL: &str = "8b626c01-bdf8-419a-8a2e-b0a7caa1ff7e";
 const ITEM: &str = "256d5a07-92d3-4718-aec9-05cad42fae7d";
+const ITEM_TWO: &str = "356d5a07-92d3-4718-aec9-05cad42fae7d";
+const ITEM_THREE: &str = "456d5a07-92d3-4718-aec9-05cad42fae7d";
 const CONFLICT: &str = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
 const ASSET: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
@@ -129,6 +131,129 @@ fn persists_an_honest_missing_media_preview_without_creating_a_report() {
     );
     drop(store);
     remove_database(&database);
+}
+
+#[test]
+fn persists_missed_windows_with_compare_and_swap_transition_rules() {
+    let database = database_path("missed-dispatch");
+    let media = database.with_extension("ts");
+    std::fs::write(&media, b"admitted bytes").unwrap();
+    let store = StationStore::open(&database).unwrap();
+    let mut asset = ready_asset();
+    asset.media_path = media.to_string_lossy().into_owned();
+    store.put_media_asset(&asset).unwrap();
+    for (item_id, starts_at) in [(ITEM, 0), (ITEM_TWO, 60_000), (ITEM_THREE, 120_000)] {
+        store
+            .put_schedule_item(&schedule_item(item_id, starts_at, ScheduleState::Draft))
+            .unwrap();
+    }
+    let pending = store
+        .commit_schedule("missed-pending", "plan-pending", ITEM, "operator", 1, "")
+        .unwrap();
+    let queued = store
+        .commit_schedule("missed-queued", "plan-queued", ITEM_TWO, "operator", 2, "")
+        .unwrap();
+    let acknowledged = store
+        .commit_schedule(
+            "missed-acknowledged",
+            "plan-acknowledged",
+            ITEM_THREE,
+            "operator",
+            3,
+            "",
+        )
+        .unwrap();
+    assert!(
+        store
+            .advance_dispatch_status(
+                &pending.report_id,
+                DispatchStatus::Pending,
+                DispatchStatus::Missed,
+            )
+            .unwrap()
+    );
+    assert!(
+        store
+            .advance_dispatch_status(
+                &queued.report_id,
+                DispatchStatus::Pending,
+                DispatchStatus::Queued,
+            )
+            .unwrap()
+    );
+    assert!(
+        store
+            .advance_dispatch_status(
+                &queued.report_id,
+                DispatchStatus::Queued,
+                DispatchStatus::Missed,
+            )
+            .unwrap()
+    );
+    assert!(
+        store
+            .advance_dispatch_status(
+                &acknowledged.report_id,
+                DispatchStatus::Pending,
+                DispatchStatus::Queued,
+            )
+            .unwrap()
+    );
+    assert!(
+        store
+            .advance_dispatch_status(
+                &acknowledged.report_id,
+                DispatchStatus::Queued,
+                DispatchStatus::Acknowledged,
+            )
+            .unwrap()
+    );
+    assert!(matches!(
+        store.advance_dispatch_status(
+            &acknowledged.report_id,
+            DispatchStatus::Acknowledged,
+            DispatchStatus::Missed,
+        ),
+        Err(message) if message == "invalid dispatch status transition"
+    ));
+    assert_eq!(
+        store
+            .read_commit_report(&acknowledged.report_id)
+            .unwrap()
+            .unwrap()
+            .dispatch_status,
+        DispatchStatus::Acknowledged
+    );
+    drop(store);
+
+    let reopened = StationStore::open(&database).unwrap();
+    assert_eq!(
+        reopened
+            .read_commit_report(&pending.report_id)
+            .unwrap()
+            .unwrap()
+            .dispatch_status,
+        DispatchStatus::Missed
+    );
+    assert_eq!(
+        reopened
+            .read_commit_report(&queued.report_id)
+            .unwrap()
+            .unwrap()
+            .dispatch_status,
+        DispatchStatus::Missed
+    );
+    assert_eq!(
+        reopened
+            .read_commit_report(&acknowledged.report_id)
+            .unwrap()
+            .unwrap()
+            .dispatch_status,
+        DispatchStatus::Acknowledged
+    );
+    drop(reopened);
+    remove_database(&database);
+    std::fs::remove_file(&media).unwrap();
 }
 
 #[test]

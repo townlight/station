@@ -9,9 +9,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use station_media_journal::read_events;
 use station_media_protocol::{
     CgOverlay, CgOverlayContent, CgRect, CgSnapshot, ChannelCommand, CommandEnvelope, LiveArmToken,
-    LiveInputConfiguration, PROTOCOL_VERSION, WorkerBootstrapEnvelope, WorkerEvent,
-    WorkerEventEnvelope, WorkerOutputConfiguration, decode_event_frame, encode_bootstrap_frame,
-    encode_command_frame,
+    LiveInputConfiguration, LiveReturnTarget, PROTOCOL_VERSION, WorkerBootstrapEnvelope,
+    WorkerEvent, WorkerEventEnvelope, WorkerOutputConfiguration, decode_event_frame,
+    encode_bootstrap_frame, encode_command_frame,
 };
 use station_windows_ipc::PipeServer;
 
@@ -344,6 +344,7 @@ fn spawned_worker_live_takeover_preserves_audible_audio() {
                 4,
                 ChannelCommand::ReturnFromLive {
                     session_id: session_id.into(),
+                    target: LiveReturnTarget::Fallback,
                 },
             ))
             .unwrap(),
@@ -353,8 +354,12 @@ fn spawned_worker_live_takeover_preserves_audible_audio() {
         read_command_event(&mut stream).event,
         WorkerEvent::LiveReturned {
             session_id: ref event_session,
+            ref source_kind,
+            ref source_id,
         }
             if event_session == session_id
+                && source_kind == "fallback"
+                && source_id == "station-fallback"
     ));
     stream
         .write_all(

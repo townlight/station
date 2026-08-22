@@ -1,6 +1,6 @@
 use station_schedule::{
     AssetReadiness, ChannelConfiguration, MediaAsset, OUTPUT_PROFILES, OutputProfileId,
-    OutputSinkConfiguration, ScheduleItem, ScheduleState, prepare_commit,
+    OutputSinkConfiguration, ScheduleItem, ScheduleState, ScheduleWindow, prepare_commit,
 };
 
 const CHANNEL: &str = "8b626c01-bdf8-419a-8a2e-b0a7caa1ff7e";
@@ -186,4 +186,21 @@ fn adjacent_items_have_no_conflict_or_reportable_gap() {
     assert!(plan.dry_run_passed);
     assert!(plan.conflicts.is_empty());
     assert!(plan.gaps.is_empty());
+}
+
+#[test]
+fn wall_clock_window_is_half_open_and_reports_the_resume_offset() {
+    let scheduled = item(ITEM, 100_000, 60_000);
+    assert_eq!(scheduled.window_at(99_999).unwrap(), ScheduleWindow::Future);
+    assert_eq!(
+        scheduled.window_at(100_000).unwrap(),
+        ScheduleWindow::Active { media_offset_ms: 0 }
+    );
+    assert_eq!(
+        scheduled.window_at(112_345).unwrap(),
+        ScheduleWindow::Active {
+            media_offset_ms: 12_345
+        }
+    );
+    assert_eq!(scheduled.window_at(160_000).unwrap(), ScheduleWindow::Ended);
 }

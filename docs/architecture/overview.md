@@ -52,7 +52,7 @@ Canonical transcode runs a bounded EBU R128 analysis against the derivative byte
 
 The operator console is a production React/TypeScript bundle embedded into `stationd` and served from the same loopback origin as the API. It commissions station identity and provides responsive views for readiness, media/job state, channels, schedule commit, dispatch, and guided commissioning. Commissioning status comes from an ordered server-derived report: schedule authority and worker execution are distinct, runtime state is heartbeat-derived, and installed/field proof remains explicitly external. Browser state remembers navigation only. It carries no runtime dependency on an Internet service, CDN, or separate web server. See [ADR 0031](../adr/0031-authoritative-commissioning-report.md).
 
-`station-schedule` owns schedule and commit-to-air rules independently of HTTP, SQLite, and the media worker. `station-storage` persists channels, assets, schedule items, and approval reports. Preview is informative; approval starts a SQLite immediate transaction and reruns the complete gate so an overlap or media-state change that appeared after preview cannot race onto air. `station-orchestration` owns the state bridge from durable approval to worker execution: load acknowledgment produces `queued`, the scheduled take acknowledgment produces `acknowledged`, and fallback return after the scheduled end produces `completed`. Compare-and-set updates prevent competing controllers from claiming the same transition. See [ADR 0008](../adr/0008-commit-to-air-authority.md) and [ADR 0009](../adr/0009-acknowledged-schedule-dispatch.md).
+`station-schedule` owns schedule and commit-to-air rules independently of HTTP, SQLite, and the media worker. `station-storage` persists channels, assets, schedule items, and approval reports. Preview is informative; approval starts a SQLite immediate transaction and reruns the complete gate so an overlap or media-state change that appeared after preview cannot race onto air. `station-orchestration` owns the state bridge from durable approval to worker execution: load acknowledgment produces `queued`, the scheduled take acknowledgment produces `acknowledged`, and return after the scheduled end produces `completed` or retires an unstarted item as `missed`. Half-open wall-clock windows calculate the active media offset; live handback selects the item active at the actual return time, or fallback when no committed window is active. Compare-and-set updates prevent competing controllers from claiming the same transition. See [ADR 0008](../adr/0008-commit-to-air-authority.md), [ADR 0009](../adr/0009-acknowledged-schedule-dispatch.md), and [ADR 0033](../adr/0033-wall-clock-schedule-catch-up.md).
 
 `station-media-engine` owns the GStreamer graph. It builds all elements through factories and leaves OpenH264, AAC, the parsers, `mpegtsmux`, and stable output branches in one persistent graph across switches. A validated stored asset can be decoded and added while fallback remains on air. Preparing the next asset uses generation-scoped elements; only after the new leg is ready does it become the program target, after which the retired decoder is disconnected, stopped, awaited in `NULL`, and removed. File pads receive the running pipeline offset, both selectors feed single continuous timelines, and source-local conversion/rate stages prevent branch-boundary jitter. Shared post-selector rate stages preserve video cadence and monotonic audio timestamps after correctly rebased branches join the selectors. A typed output profile crosses UI, API, SQLite, supervision, process, and GStreamer boundaries without reinterpretation. After the one encoder and mux, a tee feeds isolated queues and typed UDP-TS or SRT caller sinks; channel configuration persists stable sink identities separately from the encoded profile. Required SRT branches must connect and transmit before worker readiness; encrypted branches set a write-only passphrase with a 32-byte AES key. The Windows machine tests validate actual transport across two distinct real assets, prove 720p59.94 dimensions, cadence, and CBR rate, receive the same live transport on two independent UDP destinations, and capture both open and AES-256 MPEG-TS through real SRT caller/listener pairs. See [ADR 0004](../adr/0004-persistent-gstreamer-graph.md), [ADR 0022](../adr/0022-typed-output-profile-contracts.md), [ADR 0023](../adr/0023-stable-output-branches.md), [ADR 0025](../adr/0025-required-srt-caller-output.md), and [ADR 0026](../adr/0026-machine-protected-srt-passphrases.md).
 
@@ -106,8 +106,11 @@ typed endpoint and session/source revisions through the protected worker protoco
 installs and decodes the candidate branch before acknowledging `LiveArmed`. `take_requested` sends
 the exact session and a short-lived bearer arm token; the worker accepts the token once, selects
 the live video and audio pads together, and emits `LiveOnAir`. While `OnAir`, schedule dispatch is
-blocked. Return selects the source that was active before the take; only after `LiveReturned` does
-the controller send `DisarmLive` and complete the durable session. The worker protocol is private
+blocked. On return, stationd evaluates the current half-open schedule windows, retires ended
+pending/queued work as `missed`, and asks the worker to take the active scheduled asset at its
+wall-clock media offset, or to select fallback when no window is active. Only after `LiveReturned`
+does the controller send `DisarmLive` and complete the durable session; the audit detail records
+the selected target and offset. The worker protocol is private
 to stationd and the worker: the duplex named pipe has a protected ACL, rejects remote clients, and
 validates channel identity, command sequence, session identity, source identity, and source
 revision. Token debug formatting is redacted.
@@ -142,11 +145,13 @@ live transition as a CG reset.
 The operator console presents source revision and enabled state, channel authority revision, the
 current session state, expiry, operator/reason, and the append-only audit trail. Take Live and
 Return to Schedule require explicit confirmation; stale authority is surfaced as a conflict and
-the operator must refresh. The current slice supports UDP MPEG-TS only. It does not claim exact
-schedule catch-up after a long takeover or additional live transports. The exact installed
-fallback-to-live-to-fallback decoded evidence is recorded in the
-[installed live takeover proof](../proof/2026-08-21-installed-live-takeover.md); clean-machine and
-field-soak acceptance remain separate gates.
+the operator must refresh. Wall-clock schedule catch-up is implemented for the committed channel
+schedule, with bounded fail-closed handling for clock reversal, excessive boundary crossing,
+worker failure, and uncertain return. The current live-input transport remains UDP MPEG-TS only.
+The exact installed fallback-to-live-to-fallback decoded evidence is recorded in the
+[installed live takeover proof](../proof/2026-08-21-installed-live-takeover.md); it does not claim
+installed schedule-catch-up evidence, and clean-machine and field-soak acceptance remain separate
+gates. See [ADR 0033](../adr/0033-wall-clock-schedule-catch-up.md).
 
 ## Authority rules
 

@@ -72,6 +72,7 @@ pub enum EngineError {
         video_ready: bool,
         audio_ready: bool,
     },
+    ProgramAlreadyStarted,
     LoadRequiresFallback,
     LiveNotArmed,
     LiveActive,
@@ -468,7 +469,7 @@ impl PersistentPlayout {
         )?;
         let synthetic_audio_program_pad =
             connect_source(&program_audio_queue, &audio_selector, "program-audio-queue")?;
-        let file_program = media_path
+        let mut file_program = media_path
             .map(|path| {
                 install_file_program(&pipeline, path, &video_selector, &audio_selector, profile)
             })
@@ -495,6 +496,9 @@ impl PersistentPlayout {
             .map_err(|error| EngineError::State(format!("{error:?}")))?;
         if let Some(program) = &file_program {
             wait_for_file_decode(program, &pipeline, Duration::from_secs(5))?;
+        }
+        if let Some(program) = file_program.as_mut() {
+            program.started = true;
         }
 
         let branch_result = match early_cg_branch {
@@ -694,6 +698,14 @@ impl PersistentPlayout {
     }
 
     pub fn select(&mut self, role: SourceRole) -> Result<(), EngineError> {
+        if role == SourceRole::Program
+            && self
+                .file_program
+                .as_ref()
+                .is_some_and(|program| !program.started)
+        {
+            self.start_prepared_program(0)?;
+        }
         if role == SourceRole::Live {
             let before = self.live_buffer_counts().ok_or(EngineError::LiveNotArmed)?;
             self.wait_for_live_activity(before, Duration::from_secs(2))?;
@@ -721,6 +733,14 @@ impl PersistentPlayout {
 
     pub fn load_file(&mut self, media_path: impl AsRef<Path>) -> Result<(), EngineError> {
         self.load_validated_file(media_path)
+    }
+
+    /// Starts the prepared program at an explicit media position and takes it
+    /// to air. The prepared decoder remains parked until this call, so an
+    /// early load cannot consume a future schedule item off air.
+    pub fn take_program_at(&mut self, media_offset_ms: u64) -> Result<(), EngineError> {
+        self.start_prepared_program(media_offset_ms)?;
+        self.select(SourceRole::Program)
     }
 
     /// Arms a typed UDP MPEG-TS input without taking it to air. The branch is
@@ -866,7 +886,7 @@ impl PersistentPlayout {
     }
 
     fn load_validated_file(&mut self, media_path: impl AsRef<Path>) -> Result<(), EngineError> {
-        if self.active_source()? != SourceRole::Fallback {
+        if self.active_source()? == SourceRole::Program {
             return Err(EngineError::LoadRequiresFallback);
         }
         station_media_assets::validate_media(media_path.as_ref())
@@ -878,16 +898,8 @@ impl PersistentPlayout {
             &self.audio_selector,
             self.output_profile.profile(),
         )?;
-        let running_time = self
-            .pipeline
-            .current_running_time()
-            .ok_or_else(|| EngineError::State("the running pipeline has no clock time".into()))?;
-        let offset = i64::try_from(running_time.nseconds())
-            .map_err(|_| EngineError::State("pipeline running time exceeded i64".into()))?;
-        program.video_source_pad.set_offset(offset);
-        program.audio_source_pad.set_offset(offset);
         for element in &program.elements {
-            if let Err(error) = element.sync_state_with_parent() {
+            if let Err(error) = element.set_state(gst::State::Paused) {
                 remove_file_program(
                     &self.pipeline,
                     &self.video_selector,
@@ -916,6 +928,50 @@ impl PersistentPlayout {
                 &previous,
             );
         }
+        Ok(())
+    }
+
+    fn start_prepared_program(&mut self, media_offset_ms: u64) -> Result<(), EngineError> {
+        let active_source = self.active_source()?;
+        let program = self.file_program.as_mut().ok_or_else(|| {
+            EngineError::State("no validated program is prepared for take".into())
+        })?;
+        if program.started {
+            return if active_source == SourceRole::Live {
+                Ok(())
+            } else {
+                Err(EngineError::ProgramAlreadyStarted)
+            };
+        }
+        let media_offset = gst::ClockTime::from_mseconds(media_offset_ms);
+        program
+            .decoder
+            .seek_simple(
+                gst::SeekFlags::FLUSH | gst::SeekFlags::ACCURATE,
+                media_offset,
+            )
+            .map_err(|error| EngineError::State(format!("program seek failed: {error}")))?;
+        let running_time = self
+            .pipeline
+            .current_running_time()
+            .ok_or_else(|| EngineError::State("the running pipeline has no clock time".into()))?;
+        let timeline_offset =
+            i128::from(running_time.nseconds()) - i128::from(media_offset.nseconds());
+        let timeline_offset = i64::try_from(timeline_offset)
+            .map_err(|_| EngineError::State("program timeline offset exceeded i64".into()))?;
+        program.video_source_pad.set_offset(timeline_offset);
+        program.audio_source_pad.set_offset(timeline_offset);
+        for element in &program.elements {
+            if let Err(error) = element.sync_state_with_parent() {
+                for candidate in &program.elements {
+                    let _ = candidate.set_state(gst::State::Paused);
+                }
+                program.video_source_pad.set_offset(0);
+                program.audio_source_pad.set_offset(0);
+                return Err(EngineError::State(error.to_string()));
+            }
+        }
+        program.started = true;
         Ok(())
     }
 
@@ -1514,6 +1570,7 @@ fn cleanup_live_install(
 }
 
 struct FileProgram {
+    decoder: gst::Element,
     video_pad: gst::Pad,
     audio_pad: gst::Pad,
     video_ready: Arc<AtomicBool>,
@@ -1521,6 +1578,7 @@ struct FileProgram {
     video_source_pad: gst::Pad,
     audio_source_pad: gst::Pad,
     elements: Vec<gst::Element>,
+    started: bool,
 }
 
 fn install_file_program(
@@ -1676,6 +1734,7 @@ fn install_file_program(
     });
 
     Ok(FileProgram {
+        decoder: decoder.clone(),
         video_pad,
         audio_pad,
         video_ready,
@@ -1699,6 +1758,7 @@ fn install_file_program(
             audio_clock,
             audio_output_queue,
         ],
+        started: false,
     })
 }
 

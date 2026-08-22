@@ -1162,6 +1162,51 @@ fn plays_a_validated_ingested_file_without_rebuilding_the_output_graph() {
 }
 
 #[test]
+fn prepared_file_stays_parked_and_can_take_at_a_wall_clock_offset() {
+    let root = test_root("parked-offset-playout");
+    let source = root.join("timed-source.ts");
+    let library = root.join("library");
+    fs::create_dir_all(&root).unwrap();
+    generate_black_then_white_fixture(&source);
+    let asset = ingest_media(&source, &library).expect("the timed A/V file must ingest");
+
+    let output_probe = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let output_port = output_probe.local_addr().unwrap().port();
+    drop(output_probe);
+    let (decoder, frame_sink) = start_udp_decoder(output_port);
+    decoder.set_state(gst::State::Playing).unwrap();
+    let mut playout = PersistentPlayout::start_udp_with_profile(
+        ([127, 0, 0, 1], output_port).into(),
+        OutputProfileId::Proof360p30,
+    )
+    .unwrap();
+
+    playout
+        .load_asset(&asset.asset_id, &asset.stored_path)
+        .unwrap();
+    std::thread::sleep(Duration::from_secs(3));
+    playout.take_program_at(0).unwrap();
+    let from_start = pull_frame_matching(&frame_sink, Duration::from_secs(3), |frame| {
+        center_luma(frame) < 40
+    });
+    assert!(center_luma(&from_start) < 40);
+
+    playout.select(SourceRole::Fallback).unwrap();
+    playout
+        .load_asset(&asset.asset_id, &asset.stored_path)
+        .unwrap();
+    playout.take_program_at(2_500).unwrap();
+    let caught_up = pull_frame_matching(&frame_sink, Duration::from_secs(3), |frame| {
+        center_luma(frame) > 200
+    });
+    assert!(center_luma(&caught_up) > 200);
+
+    playout.stop().unwrap();
+    decoder.set_state(gst::State::Null).unwrap();
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn arms_udp_live_av_takes_it_without_rebuilding_output_and_returns_to_fallback() {
     gst::init().unwrap();
     let output_probe = UdpSocket::bind("127.0.0.1:0").unwrap();
@@ -1682,6 +1727,80 @@ fn generate_fixture(path: &Path, pattern: &'static str) {
     }
     pipeline.set_state(gst::State::Null).unwrap();
     assert!(reached_eos, "fixture generation timed out");
+}
+
+fn generate_black_then_white_fixture(path: &Path) {
+    let output = Command::new("ffmpeg.exe")
+        .args([
+            "-nostdin",
+            "-loglevel",
+            "error",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=black:s=320x180:r=30:d=2",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=white:s=320x180:r=30:d=3",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=440:sample_rate=48000:duration=5",
+            "-filter_complex",
+            "[0:v][1:v]concat=n=2:v=1:a=0[v]",
+            "-map",
+            "[v]",
+            "-map",
+            "2:a:0",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "ultrafast",
+            "-g",
+            "30",
+            "-pix_fmt",
+            "yuv420p",
+            "-c:a",
+            "aac",
+            "-b:a",
+            "128k",
+            "-f",
+            "mpegts",
+            path.to_string_lossy().as_ref(),
+        ])
+        .output()
+        .expect("FFmpeg is required to generate the offset fixture");
+    assert!(
+        output.status.success(),
+        "FFmpeg offset fixture generation failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+fn center_luma(frame: &DecodedFrame) -> u8 {
+    let x = frame.width as usize / 2;
+    let y = frame.height as usize / 2;
+    frame.bytes[y * frame.stride + x * 4]
+}
+
+fn pull_frame_matching(
+    sink: &gst::Element,
+    timeout: Duration,
+    predicate: impl Fn(&DecodedFrame) -> bool,
+) -> DecodedFrame {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let frame = pull_decoded_frame(sink);
+        if predicate(&frame) {
+            return frame;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "decoded output never reached the expected timed fixture region"
+        );
+    }
 }
 
 fn test_root(label: &str) -> std::path::PathBuf {

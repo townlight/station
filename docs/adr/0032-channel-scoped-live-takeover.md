@@ -40,8 +40,9 @@ The worker adds a candidate branch to the existing GStreamer graph using `udpsrc
 MPEG-TS caps, `tsdemux`, H.264/AAC decoders, canonical conversion/rate stages, and running-time
 alignment. Both decoded legs must produce buffers before the branch is armed. Taking live selects the
 video and audio pads together and leaves the encoder, MPEG-TS mux, CG compositor, and required
-output branches running. Returning selects the remembered prior program/fallback source and
-disarm removes the live branch only after it is no longer selected.
+output branches running. Returning receives the current schedule or fallback target selected under
+[ADR 0033](0033-wall-clock-schedule-catch-up.md), then disarm removes the live branch only after it
+is no longer selected.
 
 Live audio may arrive with timestamps established before the station attaches. Its source-local
 `audiorate` uses `skip-to-first=true`, and the following `clocksync(sync-to-first)` is the sole audio
@@ -77,7 +78,8 @@ adds bounded decoded-A/V readiness and stall handling before a take can be accep
 ## Explicit non-claims
 
 This decision covers UDP MPEG-TS input only. Additional live transports, SDI/NDI, and remote SRT
-input are not implemented here. Exact schedule catch-up across a long takeover is not defined by
-this slice. The exact installed fallback-to-live-to-fallback decoded evidence is recorded in the
-[installed live takeover proof](../proof/2026-08-21-installed-live-takeover.md); it does not replace
-clean-machine or field-soak acceptance.
+input are not implemented here. Wall-clock schedule catch-up and live handback selection are
+defined separately by [ADR 0033](0033-wall-clock-schedule-catch-up.md). The exact installed
+fallback-to-live-to-fallback decoded evidence is recorded in the [installed live takeover
+proof](../proof/2026-08-21-installed-live-takeover.md); it does not replace clean-machine or
+field-soak acceptance, and it does not claim installed schedule catch-up evidence.

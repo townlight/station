@@ -9,6 +9,7 @@ use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use station_domain::{AlertConditionKind, AlertEventState, ChannelRuntimeState};
+use station_live::{LiveEndpoint, LiveSource, TakeoverSession, TakeoverState};
 use station_media_journal::read_events;
 use station_media_protocol::{ChannelCommand, WorkerEvent};
 use station_orchestration::{ChannelController, DispatchTransition, run_until};
@@ -120,6 +121,7 @@ fn launches_handshakes_commands_and_cleanly_stops_the_real_worker() {
             "take-asset-1",
             ChannelCommand::TakeAsset {
                 asset_id: asset.asset_id.clone(),
+                media_offset_ms: 0,
             },
             Duration::from_secs(2),
         )
@@ -166,6 +168,7 @@ fn launches_handshakes_commands_and_cleanly_stops_the_real_worker() {
             "take-asset-2",
             ChannelCommand::TakeAsset {
                 asset_id: second_asset.asset_id.clone(),
+                media_offset_ms: 0,
             },
             Duration::from_secs(2),
         )
@@ -411,6 +414,385 @@ fn committed_schedule_is_loaded_aired_and_completed_only_after_worker_acknowledg
 }
 
 #[test]
+fn expired_unstarted_item_is_missed_and_current_item_takes_at_catch_up_time() {
+    const CURRENT_ITEM: &str = "d2b12490-04bf-466f-9317-a19953229642";
+    let journal = journal_path();
+    let database = journal.with_extension("catch-up.db");
+    let media_root = journal.with_extension("catch-up-media");
+    fs::create_dir_all(&media_root).unwrap();
+    let stale_source = media_root.join("stale.ts");
+    let current_source = media_root.join("current.ts");
+    generate_fixture(&stale_source, "smpte");
+    generate_fixture(&current_source, "snow");
+    let stale_asset = ingest_media(&stale_source, media_root.join("library")).unwrap();
+    let current_asset = ingest_media(&current_source, media_root.join("library")).unwrap();
+    let output = UdpSocket::bind("127.0.0.1:0").unwrap();
+    output
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    let channel = ChannelConfiguration {
+        channel_id: CHANNEL_ID.into(),
+        display_name: "Catch-up channel".into(),
+        output_profile: Default::default(),
+        output_sinks: vec![OutputSinkConfiguration::required_udp(
+            CHANNEL_ID,
+            "Primary transport",
+            output.local_addr().unwrap().to_string(),
+            -16.0,
+        )],
+        enabled: true,
+    };
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+    let store = StationStore::open(&database).unwrap();
+    store.put_channel(&channel).unwrap();
+    for asset in [&stale_asset, &current_asset] {
+        store
+            .put_media_asset(&MediaAsset {
+                asset_id: asset.asset_id.clone(),
+                media_path: asset.stored_path.to_string_lossy().into_owned(),
+                duration_ms: 6_000,
+                readiness: AssetReadiness::Ready,
+            })
+            .unwrap();
+    }
+    for (item_id, asset_id, start, duration, report_id) in [
+        (
+            WORKER_ID,
+            stale_asset.asset_id.as_str(),
+            now - 4_000,
+            1_000,
+            "catch-up-stale-report",
+        ),
+        (
+            CURRENT_ITEM,
+            current_asset.asset_id.as_str(),
+            now - 500,
+            2_000,
+            "catch-up-current-report",
+        ),
+    ] {
+        store
+            .put_schedule_item(&ScheduleItem {
+                item_id: item_id.into(),
+                channel_id: CHANNEL_ID.into(),
+                asset_id: asset_id.into(),
+                title: report_id.into(),
+                starts_at_unix_ms: start,
+                duration_ms: duration,
+                state: ScheduleState::Draft,
+            })
+            .unwrap();
+        store
+            .commit_schedule(
+                report_id,
+                &format!("{report_id}-plan"),
+                item_id,
+                "operator-test",
+                now - 5_000,
+                "Approved before live interruption.",
+            )
+            .unwrap();
+    }
+    drop(store);
+
+    let mut controller = ChannelController::launch(
+        PathBuf::from(env!("CARGO_BIN_EXE_channel-worker")).as_path(),
+        &database,
+        &journal,
+        &channel,
+        Duration::from_secs(7),
+    )
+    .unwrap();
+    assert!(matches!(
+        controller.run_once(now).unwrap(),
+        Some(DispatchTransition::Loaded { ref report_id })
+            if report_id == "catch-up-current-report"
+    ));
+    let store = StationStore::open(&database).unwrap();
+    assert_eq!(
+        store
+            .read_commit_report("catch-up-stale-report")
+            .unwrap()
+            .unwrap()
+            .dispatch_status,
+        DispatchStatus::Missed
+    );
+    drop(store);
+    assert!(matches!(
+        controller.run_once(now).unwrap(),
+        Some(DispatchTransition::OnAir { ref report_id })
+            if report_id == "catch-up-current-report"
+    ));
+    controller.shutdown(Duration::from_secs(3)).unwrap();
+
+    let events = read_events(&journal).unwrap();
+    assert!(!events.iter().any(|event| {
+        matches!(
+            &event.event,
+            WorkerEvent::OnAirChanged { source_kind, source_id }
+                if source_kind == "asset" && source_id == &stale_asset.asset_id
+        )
+    }));
+    assert!(events.iter().any(|event| {
+        matches!(
+            &event.event,
+            WorkerEvent::OnAirChanged { source_kind, source_id }
+                if source_kind == "asset" && source_id == &current_asset.asset_id
+        )
+    }));
+
+    let _ = fs::remove_file(journal);
+    for candidate in [
+        database.clone(),
+        PathBuf::from(format!("{}-wal", database.display())),
+        PathBuf::from(format!("{}-shm", database.display())),
+    ] {
+        let _ = fs::remove_file(candidate);
+    }
+    remove_directory(&media_root);
+}
+
+#[test]
+fn long_live_takeover_hands_back_to_the_schedule_item_valid_now() {
+    const NEXT_ITEM: &str = "d2b12490-04bf-466f-9317-a19953229642";
+    const LIVE_SOURCE: &str = "3f5f721c-bdf8-419a-8a2e-b0a7caa1ff7e";
+    const LIVE_SESSION: &str = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    let journal = journal_path();
+    let database = journal.with_extension("live-catch-up.db");
+    let media_root = journal.with_extension("live-catch-up-media");
+    fs::create_dir_all(&media_root).unwrap();
+    let first_source = media_root.join("first.ts");
+    let next_source = media_root.join("next.ts");
+    generate_fixture(&first_source, "smpte");
+    generate_fixture(&next_source, "snow");
+    let first_asset = ingest_media(&first_source, media_root.join("library")).unwrap();
+    let next_asset = ingest_media(&next_source, media_root.join("library")).unwrap();
+    let output = UdpSocket::bind("127.0.0.1:0").unwrap();
+    output
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    let live_probe = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let live_port = live_probe.local_addr().unwrap().port();
+    drop(live_probe);
+    let live_sender = start_udp_live_sender(live_port);
+    thread::sleep(Duration::from_millis(500));
+    let channel = ChannelConfiguration {
+        channel_id: CHANNEL_ID.into(),
+        display_name: "Live catch-up channel".into(),
+        output_profile: Default::default(),
+        output_sinks: vec![OutputSinkConfiguration::required_udp(
+            CHANNEL_ID,
+            "Primary transport",
+            output.local_addr().unwrap().to_string(),
+            -16.0,
+        )],
+        enabled: true,
+    };
+    let starts_at = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+    let store = StationStore::open(&database).unwrap();
+    store.put_channel(&channel).unwrap();
+    store
+        .write_live_source(
+            &LiveSource {
+                source_id: LIVE_SOURCE.into(),
+                channel_id: CHANNEL_ID.into(),
+                label: "Council chamber".into(),
+                enabled: true,
+                endpoint: LiveEndpoint::UdpMpegTs {
+                    bind_ip: "127.0.0.1".into(),
+                    port: live_port,
+                },
+                revision: 1,
+            },
+            0,
+        )
+        .unwrap();
+    for asset in [&first_asset, &next_asset] {
+        store
+            .put_media_asset(&MediaAsset {
+                asset_id: asset.asset_id.clone(),
+                media_path: asset.stored_path.to_string_lossy().into_owned(),
+                duration_ms: 6_000,
+                readiness: AssetReadiness::Ready,
+            })
+            .unwrap();
+    }
+    for (item_id, asset_id, start, duration, report_id) in [
+        (
+            WORKER_ID,
+            first_asset.asset_id.as_str(),
+            starts_at,
+            1_000,
+            "live-catch-up-first",
+        ),
+        (
+            NEXT_ITEM,
+            next_asset.asset_id.as_str(),
+            starts_at + 1_000,
+            4_000,
+            "live-catch-up-next",
+        ),
+    ] {
+        store
+            .put_schedule_item(&ScheduleItem {
+                item_id: item_id.into(),
+                channel_id: CHANNEL_ID.into(),
+                asset_id: asset_id.into(),
+                title: report_id.into(),
+                starts_at_unix_ms: start,
+                duration_ms: duration,
+                state: ScheduleState::Draft,
+            })
+            .unwrap();
+        store
+            .commit_schedule(
+                report_id,
+                &format!("{report_id}-plan"),
+                item_id,
+                "operator-test",
+                starts_at - 1,
+                "Approved before live interruption.",
+            )
+            .unwrap();
+    }
+    drop(store);
+
+    let mut controller = ChannelController::launch(
+        PathBuf::from(env!("CARGO_BIN_EXE_channel-worker")).as_path(),
+        &database,
+        &journal,
+        &channel,
+        Duration::from_secs(7),
+    )
+    .unwrap();
+    assert!(matches!(
+        controller.run_once(starts_at).unwrap(),
+        Some(DispatchTransition::Loaded { .. })
+    ));
+    assert!(matches!(
+        controller.run_once(starts_at).unwrap(),
+        Some(DispatchTransition::OnAir { .. })
+    ));
+    let store = StationStore::open(&database).unwrap();
+    store
+        .request_takeover(
+            &TakeoverSession {
+                session_id: LIVE_SESSION.into(),
+                channel_id: CHANNEL_ID.into(),
+                source_id: LIVE_SOURCE.into(),
+                source_revision: 1,
+                authority_revision: 1,
+                operator_id: "operator-test".into(),
+                reason: Some("Live council meeting".into()),
+                requested_at_unix_ms: starts_at + 100,
+                expires_at_unix_ms: starts_at + 60_100,
+                taken_at_unix_ms: None,
+                returned_at_unix_ms: None,
+                state: TakeoverState::Arming,
+                failure_detail: None,
+            },
+            0,
+        )
+        .unwrap();
+    drop(store);
+    assert!(matches!(
+        controller.run_once(starts_at + 100).unwrap(),
+        Some(DispatchTransition::LiveArmed { .. })
+    ));
+    let store = StationStore::open(&database).unwrap();
+    store
+        .transition_takeover(
+            LIVE_SESSION,
+            TakeoverState::Armed,
+            TakeoverState::TakeRequested,
+            starts_at + 200,
+            None,
+            "operator-test",
+            2,
+        )
+        .unwrap();
+    drop(store);
+    assert!(matches!(
+        controller.run_once(starts_at + 200).unwrap(),
+        Some(DispatchTransition::LiveOnAir { .. })
+    ));
+    assert_eq!(controller.run_once(starts_at + 2_000).unwrap(), None);
+    let store = StationStore::open(&database).unwrap();
+    store
+        .transition_takeover(
+            LIVE_SESSION,
+            TakeoverState::OnAir,
+            TakeoverState::ReturnRequested,
+            starts_at + 2_500,
+            None,
+            "operator-test",
+            4,
+        )
+        .unwrap();
+    drop(store);
+    assert!(matches!(
+        controller.run_once(starts_at + 2_500).unwrap(),
+        Some(DispatchTransition::LiveCompleted { .. })
+    ));
+    let store = StationStore::open(&database).unwrap();
+    assert_eq!(
+        store
+            .read_commit_report("live-catch-up-first")
+            .unwrap()
+            .unwrap()
+            .dispatch_status,
+        DispatchStatus::Completed
+    );
+    assert_eq!(
+        store
+            .read_commit_report("live-catch-up-next")
+            .unwrap()
+            .unwrap()
+            .dispatch_status,
+        DispatchStatus::Acknowledged
+    );
+    let completed = store.read_takeover_session(LIVE_SESSION).unwrap().unwrap();
+    assert_eq!(completed.state, TakeoverState::Completed);
+    assert!(
+        store
+            .list_takeover_audit(LIVE_SESSION)
+            .unwrap()
+            .last()
+            .unwrap()
+            .detail
+            .as_deref()
+            .is_some_and(|detail| detail.contains(&next_asset.asset_id))
+    );
+    drop(store);
+    controller.shutdown(Duration::from_secs(3)).unwrap();
+    let events = read_events(&journal).unwrap();
+    assert!(events.iter().any(|event| {
+        matches!(
+            &event.event,
+            WorkerEvent::LiveReturned { source_kind, source_id, .. }
+                if source_kind == "asset" && source_id == &next_asset.asset_id
+        )
+    }));
+
+    live_sender.set_state(gst::State::Null).unwrap();
+    let _ = fs::remove_file(journal);
+    for candidate in [
+        database.clone(),
+        PathBuf::from(format!("{}-wal", database.display())),
+        PathBuf::from(format!("{}-shm", database.display())),
+    ] {
+        let _ = fs::remove_file(candidate);
+    }
+    remove_directory(&media_root);
+}
+
+#[test]
 fn daemon_loop_discovers_an_enabled_channel_and_completes_its_committed_item() {
     let nonce = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -449,10 +831,6 @@ fn daemon_loop_discovers_an_enabled_channel_and_completes_its_committed_item() {
         ],
         enabled: true,
     };
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_millis() as i64;
     let store = StationStore::open(&database).unwrap();
     store.put_channel(&channel).unwrap();
     store
@@ -463,14 +841,42 @@ fn daemon_loop_discovers_an_enabled_channel_and_completes_its_committed_item() {
             readiness: AssetReadiness::Ready,
         })
         .unwrap();
+    let asset_id = ingested.asset_id;
+    drop(store);
+
+    let stop = Arc::new(AtomicBool::new(false));
+    let runner_stop = Arc::clone(&stop);
+    let runner_database = database.clone();
+    let worker = PathBuf::from(env!("CARGO_BIN_EXE_channel-worker"));
+    let runner = thread::spawn(move || run_until(&runner_database, &worker, runner_stop));
+    let startup_deadline = std::time::Instant::now() + Duration::from_secs(20);
+    loop {
+        let runtime = StationStore::open(&database)
+            .unwrap()
+            .read_channel_runtime(CHANNEL_ID)
+            .unwrap();
+        if runtime.is_some_and(|runtime| runtime.state == ChannelRuntimeState::HealthyFallback) {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < startup_deadline,
+            "daemon did not reach healthy fallback before scheduling"
+        );
+        thread::sleep(Duration::from_millis(50));
+    }
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+    let store = StationStore::open(&database).unwrap();
     store
         .put_schedule_item(&ScheduleItem {
             item_id: WORKER_ID.into(),
             channel_id: CHANNEL_ID.into(),
-            asset_id: ingested.asset_id,
+            asset_id,
             title: "Daemon dispatch proof".into(),
             starts_at_unix_ms: now + 1_000,
-            duration_ms: 1_000,
+            duration_ms: 2_000,
             state: ScheduleState::Draft,
         })
         .unwrap();
@@ -485,13 +891,7 @@ fn daemon_loop_discovers_an_enabled_channel_and_completes_its_committed_item() {
         )
         .unwrap();
     drop(store);
-
-    let stop = Arc::new(AtomicBool::new(false));
-    let runner_stop = Arc::clone(&stop);
-    let runner_database = database.clone();
-    let worker = PathBuf::from(env!("CARGO_BIN_EXE_channel-worker"));
-    let runner = thread::spawn(move || run_until(&runner_database, &worker, runner_stop));
-    let deadline = std::time::Instant::now() + Duration::from_secs(12);
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
     loop {
         let status = StationStore::open(&database)
             .unwrap()
@@ -611,6 +1011,85 @@ fn remove_directory(path: &Path) {
             ),
         }
     }
+}
+
+fn start_udp_live_sender(port: u16) -> gst::Pipeline {
+    gst::init().unwrap();
+    let pipeline = gst::Pipeline::new();
+    let video = gst::ElementFactory::make("videotestsrc")
+        .property("is-live", true)
+        .property_from_str("pattern", "zone-plate")
+        .build()
+        .unwrap();
+    let video_convert = gst::ElementFactory::make("videoconvert").build().unwrap();
+    let video_caps = gst::ElementFactory::make("capsfilter")
+        .property(
+            "caps",
+            gst::Caps::builder("video/x-raw")
+                .field("format", "I420")
+                .field("width", 320_i32)
+                .field("height", 180_i32)
+                .field("framerate", gst::Fraction::new(30, 1))
+                .build(),
+        )
+        .build()
+        .unwrap();
+    let video_encoder = gst::ElementFactory::make("openh264enc").build().unwrap();
+    let video_parser = gst::ElementFactory::make("h264parse").build().unwrap();
+    let audio = gst::ElementFactory::make("audiotestsrc")
+        .property("is-live", true)
+        .property_from_str("wave", "sine")
+        .build()
+        .unwrap();
+    let audio_convert = gst::ElementFactory::make("audioconvert").build().unwrap();
+    let audio_resample = gst::ElementFactory::make("audioresample").build().unwrap();
+    let audio_encoder = gst::ElementFactory::make("voaacenc").build().unwrap();
+    let audio_parser = gst::ElementFactory::make("aacparse").build().unwrap();
+    let mux = gst::ElementFactory::make("mpegtsmux").build().unwrap();
+    let sink = gst::ElementFactory::make("udpsink")
+        .property("host", "127.0.0.1")
+        .property("port", i32::from(port))
+        .property("sync", true)
+        .property("async", false)
+        .build()
+        .unwrap();
+    pipeline
+        .add_many([
+            &video,
+            &video_convert,
+            &video_caps,
+            &video_encoder,
+            &video_parser,
+            &audio,
+            &audio_convert,
+            &audio_resample,
+            &audio_encoder,
+            &audio_parser,
+            &mux,
+            &sink,
+        ])
+        .unwrap();
+    gst::Element::link_many([
+        &video,
+        &video_convert,
+        &video_caps,
+        &video_encoder,
+        &video_parser,
+        &mux,
+        &sink,
+    ])
+    .unwrap();
+    gst::Element::link_many([
+        &audio,
+        &audio_convert,
+        &audio_resample,
+        &audio_encoder,
+        &audio_parser,
+        &mux,
+    ])
+    .unwrap();
+    pipeline.set_state(gst::State::Playing).unwrap();
+    pipeline
 }
 
 fn generate_fixture(path: &Path, pattern: &'static str) {

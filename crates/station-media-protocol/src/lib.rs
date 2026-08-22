@@ -4,7 +4,7 @@ use std::num::NonZeroU16;
 use std::path::Path;
 
 pub const MAX_FRAME_BYTES: usize = 65_536;
-pub const PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion { major: 1, minor: 7 };
+pub const PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion { major: 1, minor: 8 };
 
 const MIN_LIVE_TOKEN_BYTES: usize = 16;
 const MAX_LIVE_TOKEN_BYTES: usize = 128;
@@ -270,6 +270,7 @@ pub enum ChannelCommand {
     },
     TakeAsset {
         asset_id: String,
+        media_offset_ms: u64,
     },
     ArmLive {
         input: LiveInputConfiguration,
@@ -282,11 +283,22 @@ pub enum ChannelCommand {
     ReturnToSchedule,
     ReturnFromLive {
         session_id: String,
+        target: LiveReturnTarget,
     },
     DisarmLive {
         session_id: String,
     },
     Shutdown,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum LiveReturnTarget {
+    Fallback,
+    Program {
+        asset_id: String,
+        media_offset_ms: u64,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -326,6 +338,8 @@ pub enum WorkerEvent {
     },
     LiveReturned {
         session_id: String,
+        source_kind: String,
+        source_id: String,
     },
     LiveDisarmed {
         session_id: String,
@@ -447,7 +461,7 @@ fn validate_live_command(command: &ChannelCommand) -> Result<(), String> {
     match command {
         ChannelCommand::ArmLive { input, .. } => input.validate().map_err(str::to_owned),
         ChannelCommand::TakeLive { session_id, .. }
-        | ChannelCommand::ReturnFromLive { session_id }
+        | ChannelCommand::ReturnFromLive { session_id, .. }
         | ChannelCommand::DisarmLive { session_id } => {
             validate_live_id(session_id, "session_id").map_err(str::to_owned)
         }
@@ -488,7 +502,18 @@ fn validate_live_event(event: &WorkerEvent) -> Result<(), String> {
             }
             Ok(())
         }
-        WorkerEvent::LiveReturned { session_id } | WorkerEvent::LiveDisarmed { session_id } => {
+        WorkerEvent::LiveReturned {
+            session_id,
+            source_kind,
+            source_id,
+        } => {
+            validate_live_id(session_id, "session_id")?;
+            if !matches!(source_kind.as_str(), "fallback" | "asset") || source_id.is_empty() {
+                return Err("live return event source is invalid".into());
+            }
+            Ok(())
+        }
+        WorkerEvent::LiveDisarmed { session_id } => {
             validate_live_id(session_id, "session_id").map_err(str::to_owned)
         }
         _ => Ok(()),
