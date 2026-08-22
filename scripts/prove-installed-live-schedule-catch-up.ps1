@@ -47,7 +47,12 @@ $calibrationCapture = Join-Path $captureRoot 'item-b-calibration.ts'
 $beforeCapture = Join-Path $captureRoot 'before-live.ts'
 $liveCapture = Join-Path $captureRoot 'during-live.ts'
 $afterCapture = Join-Path $captureRoot 'after-return.ts'
+$senderStdout = Join-Path $captureRoot 'live-sender.stdout'
+$senderStderr = Join-Path $captureRoot 'live-sender.stderr'
 $sender = $null
+$outputReceiverJob = $null
+$continuousOutput = Join-Path $captureRoot 'continuous-output.ts'
+$outputReceiverReady = Join-Path $captureRoot 'output-receiver.ready'
 $proofChannel = $null
 $source = $null
 $channelConfigured = $false
@@ -149,36 +154,36 @@ function New-Fixture([string]$Path, [string]$Pattern, [int]$Frequency) {
 }
 
 function Capture-Udp([int]$Seconds, [string]$Path, [int]$MinimumBytes = 100000) {
-    Assert-UdpPortUnowned $OutputPort
-    $captureReceiver = [Net.Sockets.UdpClient]::new([Net.IPEndPoint]::new([Net.IPAddress]::Loopback, $OutputPort))
-    $captureReceiver.Client.ReceiveBufferSize = 8388608
-    $memory = [IO.MemoryStream]::new()
-    $remote = [Net.IPEndPoint]::new([Net.IPAddress]::Any, 0)
+    if ($null -eq $outputReceiverJob -or $outputReceiverJob.State -ne 'Running') {
+        $jobFailure = if ($outputReceiverJob) { Receive-Job $outputReceiverJob -ErrorAction SilentlyContinue | Out-String } else { '' }
+        throw "The persistent proof output receiver is not running. $jobFailure"
+    }
+    Start-Sleep -Milliseconds 750
+    $startOffset = (Get-Item -LiteralPath $continuousOutput).Length
+    $clock = [Diagnostics.Stopwatch]::StartNew()
+    Start-Sleep -Seconds $Seconds
+    $clock.Stop()
+    $endOffset = (Get-Item -LiteralPath $continuousOutput).Length
+    $length = $endOffset - $startOffset
+    if ($length -lt $MinimumBytes) { throw "Captured only $length bytes of installed UDP output." }
+    if ($startOffset % 188 -ne 0 -or $length % 188 -ne 0) { throw 'Persistent proof capture lost MPEG-TS packet alignment.' }
+    $bytes = [byte[]]::new($length)
+    $stream = [IO.FileStream]::new($continuousOutput, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite)
     try {
-        Start-Sleep -Milliseconds 750
-        $clock = [Diagnostics.Stopwatch]::StartNew()
-        while ($clock.Elapsed.TotalSeconds -lt $Seconds) {
-            while ($captureReceiver.Available -gt 0) {
-                $datagram = $captureReceiver.Receive([ref]$remote)
-                if ($datagram.Length -lt 188 -or $datagram.Length % 188 -ne 0) {
-                    throw "Proof output sent a non-MPEG-TS UDP datagram ($($datagram.Length) bytes)."
-                }
-                $memory.Write($datagram, 0, $datagram.Length)
-            }
-            Start-Sleep -Milliseconds 1
+        [void]$stream.Seek($startOffset, [IO.SeekOrigin]::Begin)
+        $read = 0
+        while ($read -lt $bytes.Length) {
+            $count = $stream.Read($bytes, $read, $bytes.Length - $read)
+            if ($count -eq 0) { throw 'Persistent proof capture ended before its measured byte range.' }
+            $read += $count
         }
-        $bytes = $memory.ToArray()
-        if ($bytes.Length -lt $MinimumBytes) { throw "Captured only $($bytes.Length) bytes of installed UDP output." }
-        for ($offset = 0; $offset + 188 -le $bytes.Length; $offset += 188) {
-            if ($bytes[$offset] -ne 0x47) { throw "Captured output lost MPEG-TS sync at byte $offset." }
-        }
-        [IO.File]::WriteAllBytes($Path, $bytes)
-        return [ordered]@{ path = $Path; bytes = $bytes.Length; seconds = [math]::Round($clock.Elapsed.TotalSeconds, 3) }
     }
-    finally {
-        $memory.Dispose()
-        $captureReceiver.Dispose()
+    finally { $stream.Dispose() }
+    for ($offset = 0; $offset + 188 -le $bytes.Length; $offset += 188) {
+        if ($bytes[$offset] -ne 0x47) { throw "Captured output lost MPEG-TS sync at byte $offset." }
     }
+    [IO.File]::WriteAllBytes($Path, $bytes)
+    return [ordered]@{ path = $Path; bytes = $bytes.Length; seconds = [math]::Round($clock.Elapsed.TotalSeconds, 3) }
 }
 
 function Get-VideoFingerprint([string]$Path) {
@@ -294,6 +299,26 @@ try {
 
     Assert-UdpPortUnowned $InputPort
     Assert-UdpPortUnowned $OutputPort
+    $outputReceiverJob = Start-Job -ScriptBlock {
+        param([int]$Port, [string]$OutputPath, [string]$ReadyPath)
+        $receiver = [Net.Sockets.UdpClient]::new([Net.IPEndPoint]::new([Net.IPAddress]::Loopback, $Port))
+        $receiver.Client.ReceiveBufferSize = 8388608
+        $stream = [IO.FileStream]::new($OutputPath, [IO.FileMode]::Create, [IO.FileAccess]::Write, [IO.FileShare]::ReadWrite)
+        $remote = [Net.IPEndPoint]::new([Net.IPAddress]::Any, 0)
+        try {
+            [IO.File]::WriteAllText($ReadyPath, 'ready')
+            while ($true) {
+                $datagram = $receiver.Receive([ref]$remote)
+                if ($datagram.Length -lt 188 -or $datagram.Length % 188 -ne 0) {
+                    throw "Proof output sent a non-MPEG-TS UDP datagram ($($datagram.Length) bytes)."
+                }
+                $stream.Write($datagram, 0, $datagram.Length)
+                $stream.Flush()
+            }
+        }
+        finally { $stream.Dispose(); $receiver.Dispose() }
+    } -ArgumentList $OutputPort, $continuousOutput, $outputReceiverReady
+    Wait-For -Action { Test-Path -LiteralPath $outputReceiverReady } -Predicate { param($value) $value } -Description 'persistent proof output receiver' -Seconds 15 | Out-Null
     $proofChannel = [ordered]@{
         channel_id = $channelId; display_name = "Installed live schedule catch-up proof $runId"; output_profile = 'proof-360p30'
         output_sinks = @([ordered]@{ sink_id = $sinkId; label = 'Installed live schedule catch-up output'; kind = 'udp-ts'; destination = "127.0.0.1:$OutputPort"; loudness_target_lufs = -16.0; required = $true; enabled = $true })
@@ -355,10 +380,15 @@ try {
     $beforeDecoded = Get-DecodedEvidence $beforeCapture
     if ($beforeColor.classification -ne 'red') { throw 'Scheduled item A output was not red.' }
 
+    # Arming is synchronous and requires decoded input, so start the sender first
+    # and immediately request arming. The persistent output receiver runs in an
+    # independent process so proof analysis cannot back-pressure the media graph.
     $ffmpeg = (Get-Command ffmpeg.exe -ErrorAction Stop).Source
-    $sender = Start-Process -FilePath $ffmpeg -ArgumentList @('-re', '-f', 'lavfi', '-i', 'color=c=green:size=640x360:rate=30', '-re', '-f', 'lavfi', '-i', 'sine=frequency=1231:sample_rate=48000', '-c:v', 'libx264', '-preset', 'ultrafast', '-tune', 'zerolatency', '-g', '30', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '128k', '-f', 'mpegts', "udp://127.0.0.1:${InputPort}?pkt_size=1316") -PassThru -WindowStyle Hidden
-    Start-Sleep -Milliseconds 750
-    if ($sender.HasExited) { throw "FFmpeg live sender exited early with code $($sender.ExitCode)." }
+    $sender = Start-Process -FilePath $ffmpeg -ArgumentList @('-nostdin', '-loglevel', 'warning', '-re', '-f', 'lavfi', '-i', 'color=c=green:size=640x360:rate=30', '-re', '-f', 'lavfi', '-i', 'sine=frequency=1231:sample_rate=48000', '-c:v', 'libx264', '-preset', 'ultrafast', '-tune', 'zerolatency', '-g', '30', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '128k', '-f', 'mpegts', "udp://127.0.0.1:${InputPort}?pkt_size=1316&connect=0") -PassThru -WindowStyle Hidden -RedirectStandardOutput $senderStdout -RedirectStandardError $senderStderr
+    if ($sender.HasExited) {
+        $senderError = Get-Content -LiteralPath $senderStderr -Raw -ErrorAction SilentlyContinue
+        throw "FFmpeg live sender exited early with code $($sender.ExitCode). $senderError"
+    }
     $authority = Invoke-Api 'Get' "/channels/$channelId/live-authority"
     $expires = [DateTimeOffset]::UtcNow.AddMinutes(5).ToUnixTimeMilliseconds()
     Invoke-Api 'Post' '/live-takeovers' ([ordered]@{ session_id = $sessionId; channel_id = $channelId; source_id = $sourceId; operator_id = $operatorId; reason = $reason; expires_at_unix_ms = $expires; expected_authority_revision = [uint64]$authority.authority_revision }) | Out-Null
@@ -382,6 +412,10 @@ try {
     $beforeReturnB = Invoke-Api 'Get' "/schedule/commits/$reportBId"
     if ($beforeReturnA.dispatch_status -ne 'acknowledged' -or $beforeReturnB.dispatch_status -ne 'pending') {
         throw "Live did not block schedule dispatch at the boundary (A=$($beforeReturnA.dispatch_status), B=$($beforeReturnB.dispatch_status))."
+    }
+    if ($sender.HasExited) {
+        $senderError = Get-Content -LiteralPath $senderStderr -Raw -ErrorAction SilentlyContinue
+        throw "FFmpeg live sender exited before return with code $($sender.ExitCode). $senderError"
     }
     $authority = Invoke-Api 'Get' "/channels/$channelId/live-authority"
     Invoke-Api 'Post' "/live-takeovers/$sessionId/return" ([ordered]@{ actor_id = $operatorId; expected_authority_revision = [uint64]$authority.authority_revision }) | Out-Null
@@ -448,6 +482,11 @@ finally {
     }
     if ($channelConfigured -and $proofChannel) {
         try { $proofChannel.enabled = $false; Invoke-Api 'Put' '/channels' $proofChannel | Out-Null } catch { Write-Warning "Could not disable proof channel: $($_.Exception.Message)" }
+    }
+    if ($outputReceiverJob) {
+        Stop-Job $outputReceiverJob -ErrorAction SilentlyContinue
+        Remove-Job $outputReceiverJob -Force -ErrorAction SilentlyContinue
+        $outputReceiverJob = $null
     }
     $result.finished_at_unix_ms = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
     if ($ResultPath) {
