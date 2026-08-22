@@ -6,8 +6,9 @@
     This is an installed-machine proof.  It creates two distinct proof-owned A/V
     fixtures, admits and schedules them through the public API, observes the output
     over loopback UDP, takes a live source across the A-to-B boundary, and verifies
-    that returning at a positive offset resumes item B.  It never reads or writes
-    the station database, worker journal, or ProgramData state directly.
+    that returning at a positive offset resumes item B. It reads the installed
+    receipt only to authenticate candidate identity; it never reads or writes the
+    station database, worker journal, or station runtime state directly.
 #>
 param(
     [string]$BaseUri = 'http://127.0.0.1:4070',
@@ -30,6 +31,9 @@ $sinkId = [guid]::NewGuid().ToString()
 $sessionId = [guid]::NewGuid().ToString()
 $itemAId = [guid]::NewGuid().ToString()
 $itemBId = [guid]::NewGuid().ToString()
+$calibrationItemId = [guid]::NewGuid().ToString()
+$calibrationPlanId = "catch-up-calibration-$runId"
+$calibrationReportId = "catch-up-report-calibration-$runId"
 $planAId = "catch-up-a-$runId"
 $planBId = "catch-up-b-$runId"
 $reportAId = "catch-up-report-a-$runId"
@@ -39,6 +43,7 @@ $reason = 'Installed live schedule catch-up proof.'
 $captureRoot = Join-Path ([IO.Path]::GetTempPath()) "townlight-live-schedule-catch-up-$PID-$runId"
 $fixtureA = Join-Path $captureRoot 'item-a.ts'
 $fixtureB = Join-Path $captureRoot 'item-b.ts'
+$calibrationCapture = Join-Path $captureRoot 'item-b-calibration.ts'
 $beforeCapture = Join-Path $captureRoot 'before-live.ts'
 $liveCapture = Join-Path $captureRoot 'during-live.ts'
 $afterCapture = Join-Path $captureRoot 'after-return.ts'
@@ -136,9 +141,9 @@ function Assert-UdpPortUnowned([int]$Port, [int]$AllowedPid = 0) {
 
 function New-Fixture([string]$Path, [string]$Pattern, [int]$Frequency) {
     $ffmpeg = (Get-Command ffmpeg.exe -ErrorAction Stop).Source
-    $videoSource = if ($Pattern -eq 'smpte') { 'smptebars=size=320x180:rate=30' } else { 'testsrc2=size=320x180:rate=30' }
-    $args = @('-y', '-v', 'error', '-f', 'lavfi', $videoSource,
-        '-f', 'lavfi', "sine=frequency=$Frequency:sample_rate=48000", '-t', $ItemDurationSeconds,
+    $videoSource = "color=c=${Pattern}:size=320x180:rate=30"
+    $args = @('-y', '-v', 'error', '-f', 'lavfi', '-i', $videoSource,
+        '-f', 'lavfi', '-i', "sine=frequency=$Frequency:sample_rate=48000", '-t', $ItemDurationSeconds,
         '-c:v', 'libx264', '-preset', 'ultrafast', '-g', '30', '-pix_fmt', 'yuv420p',
         '-c:a', 'aac', '-b:a', '128k', '-f', 'mpegts', $Path)
     $run = Invoke-Native $ffmpeg $args
@@ -185,6 +190,21 @@ function Get-VideoFingerprint([string]$Path) {
         throw "FFmpeg could not fingerprint proof output $Path. $($probe.stderr)"
     }
     return $Matches[1].ToLowerInvariant()
+}
+
+function Get-ColorEvidence([string]$Path) {
+    $ffmpeg = (Get-Command ffmpeg.exe -ErrorAction Stop).Source
+    $sample = Invoke-Native $ffmpeg @('-v', 'error', '-i', $Path, '-frames:v', '1', '-vf', 'signalstats,metadata=print:file=-', '-f', 'null', 'NUL')
+    if ($sample.exit_code -ne 0 -or $sample.stdout -notmatch 'lavfi\.signalstats\.YAVG=([0-9.]+)') {
+        throw "FFmpeg could not measure proof video color in $Path. $($sample.stderr)"
+    }
+    $y = [double]$Matches[1]
+    if ($sample.stdout -notmatch 'lavfi\.signalstats\.UAVG=([0-9.]+)') { throw "Proof video omitted UAVG color evidence in $Path." }
+    $u = [double]$Matches[1]
+    if ($sample.stdout -notmatch 'lavfi\.signalstats\.VAVG=([0-9.]+)') { throw "Proof video omitted VAVG color evidence in $Path." }
+    $v = [double]$Matches[1]
+    $classification = if ($u -gt $v + 40) { 'blue' } elseif ($v -gt $u + 40) { 'red' } elseif ($u -lt 100 -and $v -lt 100) { 'green' } else { 'unknown' }
+    return [ordered]@{ classification = $classification; y_average = $y; u_average = $u; v_average = $v }
 }
 
 function Get-DecodedEvidence([string]$Path) {
@@ -270,8 +290,8 @@ try {
     $health = Wait-For -Action { Invoke-RestMethod -Uri "$serviceUri/health" -TimeoutSec 5 } `
         -Predicate { param($value) $value.status -eq 'ready' -and $value.database -eq 'ready' } `
         -Description 'installed database health' -Seconds 30
-    New-Fixture $fixtureA 'smpte' 697
-    New-Fixture $fixtureB 'snow' 997
+    New-Fixture $fixtureA 'red' 697
+    New-Fixture $fixtureB 'blue' 997
 
     Assert-UdpPortUnowned $InputPort
     Assert-UdpPortUnowned $OutputPort
@@ -305,28 +325,45 @@ try {
     Wait-For -Action { Invoke-Api 'Get' "/assets/$assetA/readiness" } -Predicate { param($value) $value.readiness_state -eq 'ready' } -Description 'fixture A readiness' -Seconds 120 | Out-Null
     Wait-For -Action { Invoke-Api 'Get' "/assets/$assetB/readiness" } -Predicate { param($value) $value.readiness_state -eq 'ready' } -Description 'fixture B readiness' -Seconds 120 | Out-Null
 
-    $startA = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() + 12000
+    $calibrationStart = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() + 8000
+    $calibrationDuration = 4000
+    $startA = $calibrationStart + $calibrationDuration + 3000
     $startB = $startA + ([int64]$ItemDurationSeconds * 1000)
     foreach ($item in @(
+        [ordered]@{ item_id = $calibrationItemId; channel_id = $channelId; asset_id = $assetB; title = "Item B transport calibration $runId"; starts_at_unix_ms = $calibrationStart; duration_ms = $calibrationDuration; state = 'draft' },
         [ordered]@{ item_id = $itemAId; channel_id = $channelId; asset_id = $assetA; title = "Catch-up item A $runId"; starts_at_unix_ms = $startA; duration_ms = [int64]$ItemDurationSeconds * 1000; state = 'draft' },
         [ordered]@{ item_id = $itemBId; channel_id = $channelId; asset_id = $assetB; title = "Catch-up item B $runId"; starts_at_unix_ms = $startB; duration_ms = [int64]$ItemDurationSeconds * 1000; state = 'draft' }
     )) { Invoke-Api 'Put' '/schedule/items' $item | Out-Null }
+    $calibrationPlan = Invoke-Api 'Post' '/schedule/prepare' ([ordered]@{ plan_id = $calibrationPlanId; schedule_item_id = $calibrationItemId })
     $planA = Invoke-Api 'Post' '/schedule/prepare' ([ordered]@{ plan_id = $planAId; schedule_item_id = $itemAId })
     $planB = Invoke-Api 'Post' '/schedule/prepare' ([ordered]@{ plan_id = $planBId; schedule_item_id = $itemBId })
-    if (-not $planA.dry_run_passed -or -not $planB.dry_run_passed) { throw 'Schedule prepare rejected one of the proof items.' }
-    $reportA = Invoke-Api 'Post' '/schedule/commit' ([ordered]@{ report_id = $reportAId; plan_id = $planAId; schedule_item_id = $itemAId; approved_by = $operatorId; operator_notes = 'Installed catch-up item A.' })
-    $reportB = Invoke-Api 'Post' '/schedule/commit' ([ordered]@{ report_id = $reportBId; plan_id = $planBId; schedule_item_id = $itemBId; approved_by = $operatorId; operator_notes = 'Installed catch-up item B.' })
+    if (-not $calibrationPlan.dry_run_passed -or -not $planA.dry_run_passed -or -not $planB.dry_run_passed) { throw 'Schedule prepare rejected one of the proof items.' }
+    Invoke-Api 'Post' '/schedule/commit' ([ordered]@{ report_id = $calibrationReportId; plan_id = $calibrationPlanId; schedule_item_id = $calibrationItemId; approved_by = $operatorId; operator_notes = 'Independent item B transport calibration.' }) | Out-Null
+    Invoke-Api 'Post' '/schedule/commit' ([ordered]@{ report_id = $reportAId; plan_id = $planAId; schedule_item_id = $itemAId; approved_by = $operatorId; operator_notes = 'Installed catch-up item A.' }) | Out-Null
+    Invoke-Api 'Post' '/schedule/commit' ([ordered]@{ report_id = $reportBId; plan_id = $planBId; schedule_item_id = $itemBId; approved_by = $operatorId; operator_notes = 'Installed catch-up item B.' }) | Out-Null
+
+    while ([DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() -lt $calibrationStart) { Start-Sleep -Milliseconds 100 }
+    Wait-For -Action { Invoke-Api 'Get' "/schedule/commits/$calibrationReportId" } -Predicate { param($value) $value.dispatch_status -eq 'acknowledged' } -Description 'independent item B calibration on air' -Seconds 30 | Out-Null
+    Clear-UdpBacklog
+    $calibrationTransport = Capture-Udp 2 $calibrationCapture
+    $calibrationFingerprint = Get-VideoFingerprint $calibrationCapture
+    $calibrationColor = Get-ColorEvidence $calibrationCapture
+    $calibrationDecoded = Get-DecodedEvidence $calibrationCapture
+    if ($calibrationColor.classification -ne 'blue') { throw 'Independent item B calibration was not blue.' }
+    Wait-For -Action { Invoke-Api 'Get' "/schedule/commits/$calibrationReportId" } -Predicate { param($value) $value.dispatch_status -eq 'completed' } -Description 'item B calibration completion' -Seconds 30 | Out-Null
 
     while ([DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() -lt $startA) { Start-Sleep -Milliseconds 100 }
     $statusA = Wait-For -Action { Invoke-Api 'Get' "/schedule/commits/$reportAId" } -Predicate { param($value) $value.dispatch_status -in @('acknowledged', 'completed') } -Description 'item A on-air dispatch' -Seconds 90
     Clear-UdpBacklog
     $beforeTransport = Capture-Udp 2 $beforeCapture
     $beforeFingerprint = Get-VideoFingerprint $beforeCapture
+    $beforeColor = Get-ColorEvidence $beforeCapture
     $beforeDecoded = Get-DecodedEvidence $beforeCapture
+    if ($beforeColor.classification -ne 'red') { throw 'Scheduled item A output was not red.' }
 
     $ffmpeg = (Get-Command ffmpeg.exe -ErrorAction Stop).Source
-    $sender = Start-Process -FilePath $ffmpeg -ArgumentList @('-re', '-f', 'lavfi', '-i', 'testsrc2=size=640x360:rate=30', '-re', '-f', 'lavfi', '-i', 'sine=frequency=1231:sample_rate=48000', '-c:v', 'libx264', '-preset', 'ultrafast', '-g', '30', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '128k', '-f', 'mpegts', "udp://127.0.0.1:${InputPort}?pkt_size=1316") -PassThru -WindowStyle Hidden
-    Start-Sleep -Seconds 2
+    $sender = Start-Process -FilePath $ffmpeg -ArgumentList @('-re', '-f', 'lavfi', '-i', 'color=c=green:size=640x360:rate=30', '-re', '-f', 'lavfi', '-i', 'sine=frequency=1231:sample_rate=48000', '-c:v', 'libx264', '-preset', 'ultrafast', '-tune', 'zerolatency', '-g', '30', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '128k', '-f', 'mpegts', "udp://127.0.0.1:${InputPort}?pkt_size=1316") -PassThru -WindowStyle Hidden
+    Start-Sleep -Milliseconds 750
     if ($sender.HasExited) { throw "FFmpeg live sender exited early with code $($sender.ExitCode)." }
     $authority = Invoke-Api 'Get' "/channels/$channelId/live-authority"
     $expires = [DateTimeOffset]::UtcNow.AddMinutes(5).ToUnixTimeMilliseconds()
@@ -342,8 +379,9 @@ try {
     Clear-UdpBacklog
     $liveTransport = Capture-Udp 2 $liveCapture
     $liveFingerprint = Get-VideoFingerprint $liveCapture
+    $liveColor = Get-ColorEvidence $liveCapture
     $liveDecoded = Get-DecodedEvidence $liveCapture
-    if ($liveFingerprint -eq $beforeFingerprint) { throw 'Live output did not differ from scheduled item A.' }
+    if ($liveColor.classification -ne 'green' -or $liveFingerprint -eq $beforeFingerprint) { throw 'Live output did not prove the distinct green source.' }
 
     $returnAt = $startB + 2000
     while ([DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() -lt $returnAt) { Start-Sleep -Milliseconds 100 }
@@ -361,8 +399,9 @@ try {
     Clear-UdpBacklog
     $afterTransport = Capture-Udp 3 $afterCapture
     $afterFingerprint = Get-VideoFingerprint $afterCapture
+    $afterColor = Get-ColorEvidence $afterCapture
     $afterDecoded = Get-DecodedEvidence $afterCapture
-    if ($beforeFingerprint -eq $afterFingerprint) { throw 'Schedule catch-up output did not differ from item A after returning past the boundary.' }
+    if ($afterColor.classification -ne 'blue') { throw 'Post-return output did not match the independently proven blue item B identity.' }
     if ([int64]$completed.returned_at_unix_ms -lt $startB) { throw 'Live return did not occur after item B began.' }
     $audit = Invoke-Api 'Get' "/live-takeovers/$sessionId/audit"
     $states = @($audit | ForEach-Object state)
@@ -380,9 +419,9 @@ try {
     $result.evidence = [ordered]@{
         installed_identity = $result.evidence.installed_identity
         health = $health
-        schedule = [ordered]@{ item_a_start_unix_ms = $startA; item_b_start_unix_ms = $startB; live_boundary_item_a_report = $beforeReturnA; live_boundary_item_b_report = $beforeReturnB; item_a_report = $statusA; item_b_report = $statusB; audited_return_offset_ms = $auditedOffset; observed_return_offset_ms = $observedOffset }
+        schedule = [ordered]@{ calibration_start_unix_ms = $calibrationStart; item_a_start_unix_ms = $startA; item_b_start_unix_ms = $startB; live_boundary_item_a_report = $beforeReturnA; live_boundary_item_b_report = $beforeReturnB; item_a_report = $statusA; item_b_report = $statusB; audited_return_offset_ms = $auditedOffset; observed_return_offset_ms = $observedOffset }
         takeover = [ordered]@{ on_air = $onAir; completed = $completed; runtime_live = $runtimeLive.state; runtime_after = $runtimeAfter.state; audit_states = $states; audit = $audit }
-        transport = [ordered]@{ before = $beforeTransport; live = $liveTransport; after = $afterTransport; before_decoded = $beforeDecoded; live_decoded = $liveDecoded; after_decoded = $afterDecoded; item_a_video_md5 = $beforeFingerprint; live_video_md5 = $liveFingerprint; item_b_video_md5 = $afterFingerprint; distinct_item_evidence = $true }
+        transport = [ordered]@{ item_b_calibration = $calibrationTransport; before = $beforeTransport; live = $liveTransport; after = $afterTransport; calibration_decoded = $calibrationDecoded; before_decoded = $beforeDecoded; live_decoded = $liveDecoded; after_decoded = $afterDecoded; calibration_color = $calibrationColor; item_a_color = $beforeColor; live_color = $liveColor; returned_item_b_color = $afterColor; calibrated_item_b_video_md5 = $calibrationFingerprint; item_a_video_md5 = $beforeFingerprint; live_video_md5 = $liveFingerprint; returned_item_b_video_md5 = $afterFingerprint; calibrated_item_b_match = $true }
     }
     $result.status = 'passed'
 }
@@ -402,6 +441,11 @@ finally {
             }
             if ($null -ne $active -and $active.state -in @('return_requested', 'returning')) {
                 Wait-For -Action { Invoke-Api 'Get' "/live-takeovers/$($active.session_id)" } -Predicate { param($value) $value.state -in @('completed', 'failed') } -Description 'proof takeover cleanup' -Seconds 30 | Out-Null
+            }
+            elseif ($null -ne $active -and $active.state -in @('arming', 'armed', 'take_requested')) {
+                $proofChannel.enabled = $false
+                Invoke-Api 'Put' '/channels' $proofChannel | Out-Null
+                Wait-For -Action { Invoke-Api 'Get' "/live-takeovers/$($active.session_id)" } -Predicate { param($value) $value.state -eq 'failed' } -Description 'pre-take proof takeover cleanup' -Seconds 30 | Out-Null
             }
         }
         catch { Write-Warning "Could not return an active proof takeover: $($_.Exception.Message)" }
