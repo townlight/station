@@ -30,7 +30,7 @@ static ALERT_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 const HEARTBEAT_INTERVAL_MS: i64 = 5_000;
 const MINIMUM_WORKER_BOOTSTRAP_TIMEOUT: Duration = Duration::from_secs(15);
 const MEDIA_LOAD_TIMEOUT: Duration = Duration::from_secs(25);
-const MEDIA_TEARDOWN_TIMEOUT: Duration = Duration::from_secs(15);
+const MEDIA_TEARDOWN_TIMEOUT: Duration = Duration::from_secs(30);
 const CG_EXPIRER_OPERATOR_ID: &str = "stationd-cg-expirer";
 const CG_SYNC_INTERVAL_MS: i64 = 1_000;
 pub fn managed_cg_image_root(database_path: &Path) -> PathBuf {

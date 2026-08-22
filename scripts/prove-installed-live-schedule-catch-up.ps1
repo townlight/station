@@ -400,7 +400,7 @@ try {
     if ([int64]$onAir.taken_at_unix_ms -ge $startB) {
         throw 'Live takeover did not reach air before the adjacent schedule boundary.'
     }
-    $liveTransport = Capture-Udp 3 $liveCapture
+    $liveTransport = Capture-Udp 6 $liveCapture
     $liveFingerprint = Get-VideoFingerprint $liveCapture
     $liveColor = Get-ColorEvidence $liveCapture
     $liveDecoded = Get-DecodedEvidence $liveCapture

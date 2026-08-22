@@ -1324,6 +1324,11 @@ fn arms_udp_live_av_takes_it_without_rebuilding_output_and_returns_to_fallback()
 #[test]
 fn ffmpeg_udp_live_takeover_emits_audible_audio() {
     gst::init().unwrap();
+    let root = test_root("ffmpeg-live-program-return");
+    fs::create_dir_all(&root).unwrap();
+    let source = root.join("scheduled.ts");
+    generate_fixture(&source, "smpte");
+    let asset = ingest_media(&source, root.join("library")).unwrap();
     let receiver = UdpSocket::bind("127.0.0.1:0").unwrap();
     receiver
         .set_read_timeout(Some(Duration::from_secs(2)))
@@ -1334,6 +1339,9 @@ fn ffmpeg_udp_live_takeover_emits_audible_audio() {
     let mut playout =
         PersistentPlayout::start_udp_with_profile(output_address, OutputProfileId::Proof360p30)
             .unwrap();
+    playout
+        .load_asset(&asset.asset_id, &asset.stored_path)
+        .unwrap();
 
     let input_probe = UdpSocket::bind("127.0.0.1:0").unwrap();
     let input_port = input_probe.local_addr().unwrap().port();
@@ -1357,6 +1365,22 @@ fn ffmpeg_udp_live_takeover_emits_audible_audio() {
     );
     fs::write(&capture_path, &transport_capture).unwrap();
 
+    let teardown_started = Instant::now();
+    playout.take_program_at(1_000).unwrap();
+    playout.disarm_live().unwrap();
+    eprintln!(
+        "active FFmpeg live branch teardown: {:?}",
+        teardown_started.elapsed()
+    );
+    assert!(
+        teardown_started.elapsed() < Duration::from_secs(15),
+        "active FFmpeg live branch teardown exceeded the controller budget: {:?}",
+        teardown_started.elapsed()
+    );
+    let rebound = UdpSocket::bind(("127.0.0.1", input_port))
+        .expect("live input UDP port must be reusable after teardown");
+    drop(rebound);
+    drop(sender);
     playout.stop().unwrap();
     let decoded = Command::new("ffmpeg.exe")
         .args([
@@ -1395,6 +1419,16 @@ fn ffmpeg_udp_live_takeover_emits_audible_audio() {
     assert!(
         count > 10_000 && mean_abs > 100.0,
         "FFmpeg live audio was silent: {count} decoded samples, mean abs {mean_abs:.2}"
+    );
+    for _ in 0..20 {
+        if fs::remove_dir_all(&root).is_ok() || !root.exists() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(
+        !root.exists(),
+        "test media remained locked after playout stop"
     );
 }
 
