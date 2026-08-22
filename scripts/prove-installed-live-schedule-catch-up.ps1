@@ -222,14 +222,24 @@ function Get-ColorEvidence([string]$Path) {
     $yMatches = [regex]::Matches($sample.stdout, 'lavfi\.signalstats\.YAVG=([0-9.]+)')
     $uMatches = [regex]::Matches($sample.stdout, 'lavfi\.signalstats\.UAVG=([0-9.]+)')
     $vMatches = [regex]::Matches($sample.stdout, 'lavfi\.signalstats\.VAVG=([0-9.]+)')
-    if ($sample.exit_code -ne 0 -or $yMatches.Count -eq 0 -or $uMatches.Count -eq 0 -or $vMatches.Count -eq 0) {
+    if ($sample.exit_code -ne 0 -or $yMatches.Count -eq 0 -or $uMatches.Count -ne $yMatches.Count -or $vMatches.Count -ne $yMatches.Count) {
         throw "FFmpeg could not measure proof video color in $Path. $($sample.stderr)"
     }
     $y = [double]$yMatches[$yMatches.Count - 1].Groups[1].Value
     $u = [double]$uMatches[$uMatches.Count - 1].Groups[1].Value
     $v = [double]$vMatches[$vMatches.Count - 1].Groups[1].Value
-    $classification = if ($u -gt $v + 40) { 'blue' } elseif ($v -gt $u + 40) { 'red' } elseif ($u -lt 100 -and $v -lt 100) { 'green' } else { 'unknown' }
-    return [ordered]@{ classification = $classification; y_average = $y; u_average = $u; v_average = $v }
+    $classifications = for ($index = 0; $index -lt $yMatches.Count; $index++) {
+        $sampleU = [double]$uMatches[$index].Groups[1].Value
+        $sampleV = [double]$vMatches[$index].Groups[1].Value
+        if ($sampleU -gt $sampleV + 40) { 'blue' }
+        elseif ($sampleV -gt $sampleU + 40) { 'red' }
+        elseif ($sampleU -lt 100 -and $sampleV -lt 100) { 'green' }
+        else { 'unknown' }
+    }
+    $dominant = $classifications | Group-Object | Sort-Object Count -Descending | Select-Object -First 1
+    $dominantFraction = $dominant.Count / $classifications.Count
+    $classification = if ($dominantFraction -ge 0.9) { $dominant.Name } else { 'unknown' }
+    return [ordered]@{ classification = $classification; dominant_fraction = [math]::Round($dominantFraction, 4); sample_count = $classifications.Count; y_average = $y; u_average = $u; v_average = $v }
 }
 
 function Get-DecodedEvidence([string]$Path) {
@@ -449,6 +459,10 @@ try {
     $afterColor = Get-ColorEvidence $afterCapture
     $afterDecoded = Get-DecodedEvidence $afterCapture
     if ($afterColor.classification -ne 'blue') { throw 'Post-return output did not match the independently proven blue item B identity.' }
+    if ($afterFingerprint -ne $calibrationFingerprint) { throw 'Post-return item B did not match its independently calibrated decoded-frame fingerprint.' }
+    if ($beforeFingerprint -eq $calibrationFingerprint -or $liveFingerprint -in @($beforeFingerprint, $calibrationFingerprint)) {
+        throw 'The independently observed item A, item B, and live video fingerprints were not distinct.'
+    }
     if ([int64]$completed.returned_at_unix_ms -lt $startB) { throw 'Live return did not occur after item B began.' }
     $audit = Invoke-Api 'Get' "/live-takeovers/$sessionId/audit"
     $states = @($audit | ForEach-Object state)
@@ -468,7 +482,7 @@ try {
         health = $health
         schedule = [ordered]@{ calibration_start_unix_ms = $calibrationStart; item_a_start_unix_ms = $startA; item_b_start_unix_ms = $startB; live_boundary_item_a_report = $beforeReturnA; live_boundary_item_b_report = $beforeReturnB; item_a_report = $statusA; item_b_report = $statusB; audited_return_offset_ms = $auditedOffset; observed_return_offset_ms = $observedOffset }
         takeover = [ordered]@{ on_air = $onAir; completed = $completed; runtime_live = $runtimeLive.state; runtime_after = $runtimeAfter.state; audit_states = $states; audit = $audit }
-        transport = [ordered]@{ item_b_calibration = $calibrationTransport; before = $beforeTransport; live = $liveTransport; after = $afterTransport; calibration_decoded = $calibrationDecoded; before_decoded = $beforeDecoded; live_decoded = $liveDecoded; after_decoded = $afterDecoded; calibration_color = $calibrationColor; item_a_color = $beforeColor; live_color = $liveColor; returned_item_b_color = $afterColor; calibrated_item_b_video_md5 = $calibrationFingerprint; item_a_video_md5 = $beforeFingerprint; live_video_md5 = $liveFingerprint; returned_item_b_video_md5 = $afterFingerprint; calibrated_item_b_match = $true }
+        transport = [ordered]@{ item_b_calibration = $calibrationTransport; before = $beforeTransport; live = $liveTransport; after = $afterTransport; calibration_decoded = $calibrationDecoded; before_decoded = $beforeDecoded; live_decoded = $liveDecoded; after_decoded = $afterDecoded; calibration_color = $calibrationColor; item_a_color = $beforeColor; live_color = $liveColor; returned_item_b_color = $afterColor; calibrated_item_b_video_md5 = $calibrationFingerprint; item_a_video_md5 = $beforeFingerprint; live_video_md5 = $liveFingerprint; returned_item_b_video_md5 = $afterFingerprint; calibrated_item_b_match = ($afterFingerprint -eq $calibrationFingerprint) }
     }
     $result.status = 'passed'
 }
