@@ -216,7 +216,7 @@ function Get-DecodedEvidence([string]$Path) {
     $video = @($streams | Where-Object codec_type -eq 'video')[0]
     $audio = @($streams | Where-Object codec_type -eq 'audio')[0]
     if (-not $video -or -not $audio -or [int]$video.nb_read_frames -lt 30 -or [int]$audio.nb_read_frames -lt 30) {
-        throw "Proof output did not contain continuous decodable H.264/AAC audio and video."
+        throw "Proof output did not contain continuous decodable H.264/AAC audio and video: $($probe.stdout)"
     }
     if ($video.codec_name -ne 'h264' -or $audio.codec_name -ne 'aac') {
         throw "Proof output codecs were not H.264/AAC ($($video.codec_name)/$($audio.codec_name))."
@@ -345,6 +345,7 @@ try {
     while ([DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() -lt $calibrationStart) { Start-Sleep -Milliseconds 100 }
     Wait-For -Action { Invoke-Api 'Get' "/schedule/commits/$calibrationReportId" } -Predicate { param($value) $value.dispatch_status -eq 'acknowledged' } -Description 'independent item B calibration on air' -Seconds 30 | Out-Null
     Clear-UdpBacklog
+    Start-Sleep -Milliseconds 750
     $calibrationTransport = Capture-Udp 2 $calibrationCapture
     $calibrationFingerprint = Get-VideoFingerprint $calibrationCapture
     $calibrationColor = Get-ColorEvidence $calibrationCapture
@@ -355,6 +356,7 @@ try {
     while ([DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() -lt $startA) { Start-Sleep -Milliseconds 100 }
     $statusA = Wait-For -Action { Invoke-Api 'Get' "/schedule/commits/$reportAId" } -Predicate { param($value) $value.dispatch_status -in @('acknowledged', 'completed') } -Description 'item A on-air dispatch' -Seconds 90
     Clear-UdpBacklog
+    Start-Sleep -Milliseconds 750
     $beforeTransport = Capture-Udp 2 $beforeCapture
     $beforeFingerprint = Get-VideoFingerprint $beforeCapture
     $beforeColor = Get-ColorEvidence $beforeCapture
@@ -377,6 +379,7 @@ try {
         throw 'Live takeover did not reach air before the adjacent schedule boundary.'
     }
     Clear-UdpBacklog
+    Start-Sleep -Milliseconds 750
     $liveTransport = Capture-Udp 2 $liveCapture
     $liveFingerprint = Get-VideoFingerprint $liveCapture
     $liveColor = Get-ColorEvidence $liveCapture
@@ -397,6 +400,7 @@ try {
     $statusA = Wait-For -Action { Invoke-Api 'Get' "/schedule/commits/$reportAId" } -Predicate { param($value) $value.dispatch_status -eq 'completed' } -Description 'item A retired after live return' -Seconds 90
     $statusB = Wait-For -Action { Invoke-Api 'Get' "/schedule/commits/$reportBId" } -Predicate { param($value) $value.dispatch_status -eq 'acknowledged' } -Description 'item B resumed on air' -Seconds 90
     Clear-UdpBacklog
+    Start-Sleep -Milliseconds 750
     $afterTransport = Capture-Udp 3 $afterCapture
     $afterFingerprint = Get-VideoFingerprint $afterCapture
     $afterColor = Get-ColorEvidence $afterCapture

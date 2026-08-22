@@ -893,6 +893,7 @@ impl ChannelController {
                         session.authority_revision,
                     )
                     .map_err(OrchestrationError::Storage)?;
+                self.on_air_asset_id = None;
                 self.mark_state(ChannelRuntimeState::Live, now_unix_ms);
                 Ok(LiveRunOutcome {
                     block_schedule: true,
@@ -1294,7 +1295,7 @@ impl ChannelController {
             .map_err(OrchestrationError::Worker)
     }
 
-    fn runtime_observation(&self, now_unix_ms: i64) -> ChannelRuntimeObservation {
+    pub fn runtime_observation(&self, now_unix_ms: i64) -> ChannelRuntimeObservation {
         ChannelRuntimeObservation {
             channel_id: self.channel_id.clone(),
             state: self.runtime_state,

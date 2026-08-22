@@ -722,6 +722,13 @@ fn long_live_takeover_hands_back_to_the_schedule_item_valid_now() {
         controller.run_once(starts_at + 200).unwrap(),
         Some(DispatchTransition::LiveOnAir { .. })
     ));
+    let live_runtime = controller.runtime_observation(starts_at + 200);
+    assert_eq!(live_runtime.state, ChannelRuntimeState::Live);
+    assert_eq!(live_runtime.on_air_asset_id, None);
+    StationStore::open(&database)
+        .unwrap()
+        .put_channel_runtime(&live_runtime)
+        .unwrap();
     assert_eq!(controller.run_once(starts_at + 2_000).unwrap(), None);
     let store = StationStore::open(&database).unwrap();
     store
