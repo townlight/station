@@ -338,10 +338,20 @@ fn spawned_worker_live_takeover_preserves_audible_audio() {
     fs::write(&capture_path, &transport_capture).unwrap();
 
     stream
+        .write_all(&encode_command_frame(&command("ping-live", 4, ChannelCommand::Ping)).unwrap())
+        .unwrap();
+    let heartbeat = read_event(&mut stream);
+    assert!(
+        matches!(heartbeat.event, WorkerEvent::Heartbeat { .. }),
+        "live worker did not answer its health poll: {:?}",
+        heartbeat.event
+    );
+
+    stream
         .write_all(
             &encode_command_frame(&command(
                 "return-live",
-                4,
+                5,
                 ChannelCommand::ReturnFromLive {
                     session_id: session_id.into(),
                     target: LiveReturnTarget::Fallback,
@@ -365,7 +375,7 @@ fn spawned_worker_live_takeover_preserves_audible_audio() {
         .write_all(
             &encode_command_frame(&command(
                 "disarm-live",
-                5,
+                6,
                 ChannelCommand::DisarmLive {
                     session_id: session_id.into(),
                 },
@@ -383,7 +393,7 @@ fn spawned_worker_live_takeover_preserves_audible_audio() {
     drop(sender);
     stream
         .write_all(
-            &encode_command_frame(&command("shutdown", 6, ChannelCommand::Shutdown)).unwrap(),
+            &encode_command_frame(&command("shutdown", 7, ChannelCommand::Shutdown)).unwrap(),
         )
         .unwrap();
     assert!(matches!(
@@ -427,9 +437,25 @@ fn spawned_worker_live_takeover_preserves_audible_audio() {
             (sum + u64::from(sample.unsigned_abs()), count + 1)
         });
     let mean_abs = sum as f64 / count.max(1) as f64;
+    let chunk_means = decoded
+        .stdout
+        .chunks_exact(96_000)
+        .map(|chunk| {
+            let (sum, count) = chunk
+                .chunks_exact(2)
+                .map(|bytes| i16::from_le_bytes([bytes[0], bytes[1]]))
+                .fold((0_u64, 0_u64), |(sum, count), sample| {
+                    (sum + u64::from(sample.unsigned_abs()), count + 1)
+                });
+            sum as f64 / count.max(1) as f64
+        })
+        .collect::<Vec<_>>();
     assert!(
-        count > 10_000 && mean_abs > 100.0,
-        "FFmpeg live audio was silent: {count} decoded samples, mean abs {mean_abs:.2}"
+        count > 300_000
+            && mean_abs > 100.0
+            && chunk_means.len() >= 6
+            && chunk_means.iter().all(|mean| *mean > 100.0),
+        "FFmpeg live audio was not sustained: {count} decoded samples, mean abs {mean_abs:.2}, half-second chunks {chunk_means:?}"
     );
 }
 

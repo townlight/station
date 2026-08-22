@@ -1355,6 +1355,7 @@ fn ffmpeg_udp_live_takeover_emits_audible_audio() {
         .arm_live_udp(([127, 0, 0, 1], input_port).into())
         .unwrap();
     playout.select(SourceRole::Live).unwrap();
+    let live_counts_before_capture = playout.live_buffer_counts().unwrap();
     clear_udp_backlog(&receiver);
     std::thread::sleep(Duration::from_millis(750));
     let transport_capture = capture_transport_for(&receiver, Duration::from_secs(4));
@@ -1364,6 +1365,30 @@ fn ffmpeg_udp_live_takeover_emits_audible_audio() {
         transport_capture.len()
     );
     fs::write(&capture_path, &transport_capture).unwrap();
+
+    let health_started = Instant::now();
+    let (video_buffers, audio_buffers) = playout
+        .live_buffer_counts()
+        .expect("selected live branch must retain health counters");
+    let video_delta = video_buffers.saturating_sub(live_counts_before_capture.0);
+    let audio_delta = audio_buffers.saturating_sub(live_counts_before_capture.1);
+    assert!(
+        video_delta > 90,
+        "live video advanced only {video_delta} buffers"
+    );
+    assert!(
+        audio_delta > 20,
+        "live audio advanced only {audio_delta} buffers"
+    );
+    let output_bytes = playout
+        .output_bytes_sent()
+        .expect("selected live branch must retain queryable output health");
+    assert!(output_bytes.iter().all(|bytes| *bytes > 0));
+    assert!(
+        health_started.elapsed() < Duration::from_secs(2),
+        "selected live output health query blocked for {:?}",
+        health_started.elapsed()
+    );
 
     let teardown_started = Instant::now();
     playout.take_program_at(1_000).unwrap();
@@ -1416,9 +1441,25 @@ fn ffmpeg_udp_live_takeover_emits_audible_audio() {
             (sum + u64::from(sample.unsigned_abs()), count + 1)
         });
     let mean_abs = sum as f64 / count.max(1) as f64;
+    let chunk_means = decoded
+        .stdout
+        .chunks_exact(96_000)
+        .map(|chunk| {
+            let (sum, count) = chunk
+                .chunks_exact(2)
+                .map(|bytes| i16::from_le_bytes([bytes[0], bytes[1]]))
+                .fold((0_u64, 0_u64), |(sum, count), sample| {
+                    (sum + u64::from(sample.unsigned_abs()), count + 1)
+                });
+            sum as f64 / count.max(1) as f64
+        })
+        .collect::<Vec<_>>();
     assert!(
-        count > 10_000 && mean_abs > 100.0,
-        "FFmpeg live audio was silent: {count} decoded samples, mean abs {mean_abs:.2}"
+        count > 300_000
+            && mean_abs > 100.0
+            && chunk_means.len() >= 6
+            && chunk_means.iter().all(|mean| *mean > 100.0),
+        "FFmpeg live audio was not sustained: {count} decoded samples, mean abs {mean_abs:.2}, half-second chunks {chunk_means:?}"
     );
     for _ in 0..20 {
         if fs::remove_dir_all(&root).is_ok() || !root.exists() {

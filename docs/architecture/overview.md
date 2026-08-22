@@ -127,12 +127,15 @@ worker, fails the takeover, raises the existing output-stall/off-air authority, 
 startup with bounded backoff. This is distinct from required-output heartbeat stalls, which use
 output byte counters.
 
-External feeds can carry timestamps established long before the operator arms them. The live audio
-branch therefore makes its source-local `audiorate` skip directly to the first observed buffer and
-uses `clocksync(sync-to-first)` as the sole running-time rebase. Adding the pipeline running time
-again at the selector pad would either encode synthetic silence up to the source timestamp or leave
-audio waiting in the future while video advances. The spawned-worker FFmpeg regression pre-rolls a
-real H.264/AAC MPEG-TS source before arm and decodes raw station UDP output to prove audible samples.
+External feeds can carry timestamps established long before the operator arms them. One offset,
+captured from the first demuxed A/V buffer, rebases both compressed legs to pipeline running time
+before parsing and decoding so their source-relative timing survives. The live video rate stage
+skips to its first real timestamp rather than manufacturing pre-roll, and source-local audio rate
+owns only input rounding; the shared post-selector `audiorate` retains sub-sample continuity across
+source changes. Decoded input health is counted before clock synchronization, so synthetic media
+cannot mask a dead feed. The spawned-worker FFmpeg regression pre-rolls a real H.264/AAC MPEG-TS
+source before arm, requires audible audio in every half-second of the capture window, and polls the
+private worker heartbeat while live remains selected.
 
 Failure is fail-closed. An expired pre-air arm is disarmed and failed. A worker restart while live
 is on air cannot recreate uncertain live authority: the session is failed and the worker returns

@@ -2,7 +2,7 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::{
     Arc,
-    atomic::{AtomicBool, AtomicU64, Ordering},
+    atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering},
 };
 use std::time::{Duration, Instant};
 
@@ -755,35 +755,6 @@ impl PersistentPlayout {
             &self.audio_selector,
             self.output_profile.profile(),
         )?;
-        let running_time = match self.pipeline.current_running_time() {
-            Some(value) => value,
-            None => {
-                remove_live_program(
-                    &self.pipeline,
-                    &self.video_selector,
-                    &self.audio_selector,
-                    &candidate,
-                );
-                return Err(EngineError::State(
-                    "the running pipeline has no clock time".into(),
-                ));
-            }
-        };
-        let offset = match i64::try_from(running_time.nseconds()) {
-            Ok(value) => value,
-            Err(_) => {
-                remove_live_program(
-                    &self.pipeline,
-                    &self.video_selector,
-                    &self.audio_selector,
-                    &candidate,
-                );
-                return Err(EngineError::State(
-                    "pipeline running time exceeded i64".into(),
-                ));
-            }
-        };
-        candidate.video_source_pad.set_offset(offset);
         for element in &candidate.elements {
             if let Err(error) = element.sync_state_with_parent() {
                 remove_live_program(
@@ -1286,7 +1257,11 @@ fn install_live_program(
     let video_decode = element("openh264dec", name("video-decode"))?;
     let video_convert = element("videoconvert", name("video-convert"))?;
     let video_scale = element("videoscale", name("video-scale"))?;
-    let video_rate = element("videorate", name("video-rate"))?;
+    let video_rate = gst::ElementFactory::make("videorate")
+        .name(name("video-rate"))
+        .property("skip-to-first", true)
+        .build()
+        .map_err(|error| build_error("videorate", error))?;
     let video_caps = video_caps_filter(name("canonical-video"), profile)?;
     let video_clock = gst::ElementFactory::make("clocksync")
         .name(name("video-clock"))
@@ -1417,6 +1392,19 @@ fn install_live_program(
                 element: "live-audio-decode-queue",
                 pad: "sink",
             })?;
+        let timeline_offset = Arc::new(AtomicI64::new(i64::MIN));
+        let video_pipeline = pipeline.clone();
+        let video_timeline_offset = Arc::clone(&timeline_offset);
+        video_sink.add_probe(gst::PadProbeType::BUFFER, move |_, info| {
+            rebase_live_buffer(info, &video_pipeline, &video_timeline_offset);
+            gst::PadProbeReturn::Ok
+        });
+        let audio_pipeline = pipeline.clone();
+        let audio_timeline_offset = Arc::clone(&timeline_offset);
+        audio_sink.add_probe(gst::PadProbeType::BUFFER, move |_, info| {
+            rebase_live_buffer(info, &audio_pipeline, &audio_timeline_offset);
+            gst::PadProbeReturn::Ok
+        });
         demux.connect_pad_added(move |_, source_pad| {
             let caps = source_pad
                 .current_caps()
@@ -1448,16 +1436,28 @@ fn install_live_program(
         let audio_ready = Arc::new(AtomicBool::new(false));
         let video_buffers = Arc::new(AtomicU64::new(0));
         let audio_buffers = Arc::new(AtomicU64::new(0));
+        let video_health_pad = video_scale
+            .static_pad("src")
+            .ok_or(EngineError::MissingPad {
+                element: "live-video-scale",
+                pad: "src",
+            })?;
+        let audio_health_pad = audio_caps
+            .static_pad("src")
+            .ok_or(EngineError::MissingPad {
+                element: "live-audio-canonical-caps",
+                pad: "src",
+            })?;
         let video_signal = Arc::clone(&video_ready);
         let video_count = Arc::clone(&video_buffers);
-        video_source_pad.add_probe(gst::PadProbeType::BUFFER, move |_, _| {
+        video_health_pad.add_probe(gst::PadProbeType::BUFFER, move |_, _| {
             video_signal.store(true, Ordering::Release);
             video_count.fetch_add(1, Ordering::AcqRel);
             gst::PadProbeReturn::Ok
         });
         let audio_signal = Arc::clone(&audio_ready);
         let audio_count = Arc::clone(&audio_buffers);
-        audio_source_pad.add_probe(gst::PadProbeType::BUFFER, move |_, _| {
+        audio_health_pad.add_probe(gst::PadProbeType::BUFFER, move |_, _| {
             audio_signal.store(true, Ordering::Release);
             audio_count.fetch_add(1, Ordering::AcqRel);
             gst::PadProbeReturn::Ok
@@ -1868,6 +1868,50 @@ fn element(
         .name(name)
         .build()
         .map_err(|error| build_error(factory, error))
+}
+
+fn rebase_live_buffer(
+    info: &mut gst::PadProbeInfo<'_>,
+    pipeline: &gst::Pipeline,
+    timeline_offset: &AtomicI64,
+) {
+    let Some(buffer) = info.buffer_mut() else {
+        return;
+    };
+    let Some(pts) = buffer.pts() else {
+        return;
+    };
+
+    let mut offset = timeline_offset.load(Ordering::Acquire);
+    if offset == i64::MIN
+        && let Some(running_time) = pipeline.current_running_time()
+    {
+        let candidate = i128::from(running_time.nseconds()) - i128::from(pts.nseconds());
+        if let Ok(candidate) = i64::try_from(candidate) {
+            let _ = timeline_offset.compare_exchange(
+                i64::MIN,
+                candidate,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            );
+            offset = timeline_offset.load(Ordering::Acquire);
+        }
+    }
+    if offset == i64::MIN {
+        return;
+    }
+
+    let buffer = buffer.make_mut();
+    buffer.set_pts(shift_clock_time(pts, offset));
+    if let Some(dts) = buffer.dts() {
+        buffer.set_dts(shift_clock_time(dts, offset));
+    }
+}
+
+fn shift_clock_time(value: gst::ClockTime, offset: i64) -> gst::ClockTime {
+    let shifted = i128::from(value.nseconds()) + i128::from(offset);
+    let bounded = shifted.clamp(0, i128::from(u64::MAX));
+    gst::ClockTime::from_nseconds(bounded as u64)
 }
 
 fn selector(name: &'static str) -> Result<gst::Element, EngineError> {

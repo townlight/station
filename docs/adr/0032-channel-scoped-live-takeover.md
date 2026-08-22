@@ -44,11 +44,14 @@ output branches running. Returning receives the current schedule or fallback tar
 [ADR 0033](0033-wall-clock-schedule-catch-up.md), then disarm removes the live branch only after it
 is no longer selected.
 
-Live audio may arrive with timestamps established before the station attaches. Its source-local
-`audiorate` uses `skip-to-first=true`, and the following `clocksync(sync-to-first)` is the sole audio
-running-time rebase. The audio selector pad does not add the pipeline running time again. This keeps
-an already-running standards-compatible MPEG-TS source audible instead of generating a timestamp-
-sized silent lead-in or holding subsequent samples in the future.
+Live feeds may arrive with timestamps established before the station attaches. The first demuxed
+video or audio buffer captures one source-to-pipeline offset; that same offset rebases PTS and DTS
+on both compressed legs before parsing and decoding, preserving the feed's A/V relationship. The
+source-local video rate stage skips directly to its first real timestamp instead of manufacturing
+pre-roll from zero, while the source-local audio rate stage owns only input rounding. Decoded
+source-health counters are sampled before the clock stages, and neither leg may generate media to
+conceal a stalled input. The shared post-selector `audiorate` still owns sub-sample continuity
+across source changes.
 
 While live is on air, the worker observes decoded video and audio buffer counters. Two consecutive
 non-advancing observations or two seconds without progress is a live-input stall. The worker

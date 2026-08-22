@@ -242,7 +242,7 @@ function Get-ColorEvidence([string]$Path) {
     return [ordered]@{ classification = $classification; dominant_fraction = [math]::Round($dominantFraction, 4); sample_count = $classifications.Count; y_average = $y; u_average = $u; v_average = $v }
 }
 
-function Get-DecodedEvidence([string]$Path) {
+function Get-DecodedEvidence([string]$Path, [int]$ExpectedSeconds) {
     $ffprobe = (Get-Command ffprobe.exe -ErrorAction Stop).Source
     $ffmpeg = (Get-Command ffmpeg.exe -ErrorAction Stop).Source
     $probe = Invoke-Native $ffprobe @('-v', 'error', '-count_frames', '-show_entries', 'stream=codec_type,codec_name,nb_read_frames', '-of', 'json', $Path)
@@ -250,7 +250,9 @@ function Get-DecodedEvidence([string]$Path) {
     $streams = ($probe.stdout | ConvertFrom-Json).streams
     $video = @($streams | Where-Object codec_type -eq 'video')[0]
     $audio = @($streams | Where-Object codec_type -eq 'audio')[0]
-    if (-not $video -or -not $audio -or [int]$video.nb_read_frames -lt 30 -or [int]$audio.nb_read_frames -lt 30) {
+    $minimumVideoFrames = [math]::Max(30, [math]::Floor(([math]::Max(1, $ExpectedSeconds - 2)) * 30 * 0.8))
+    $minimumAudioFrames = [math]::Floor($ExpectedSeconds * (48000 / 1024) * 0.8)
+    if (-not $video -or -not $audio -or [int]$video.nb_read_frames -lt $minimumVideoFrames -or [int]$audio.nb_read_frames -lt $minimumAudioFrames) {
         throw "Proof output did not contain continuous decodable H.264/AAC audio and video: $($probe.stdout)"
     }
     if ($video.codec_name -ne 'h264' -or $audio.codec_name -ne 'aac') {
@@ -262,6 +264,9 @@ function Get-DecodedEvidence([string]$Path) {
     }
     $maxVolume = [double]$Matches[1]
     if ($maxVolume -lt -60) { throw "Proof audio was effectively silent ($maxVolume dB)." }
+    $silence = Invoke-Native $ffmpeg @('-v', 'info', '-i', $Path, '-map', '0:a:0', '-af', 'silencedetect=noise=-60dB:d=0.25', '-f', 'null', 'NUL')
+    if ($silence.exit_code -ne 0) { throw "FFmpeg could not inspect proof audio continuity in $Path." }
+    if ($silence.stderr -match 'silence_duration:') { throw "Proof audio contained a sustained silent interval: $($Matches[0])" }
     return [ordered]@{
         video_codec = $video.codec_name
         audio_codec = $audio.codec_name
@@ -399,7 +404,7 @@ try {
     $calibrationTransport = Capture-Udp 3 $calibrationCapture
     $calibrationFingerprint = Get-VideoFingerprint $calibrationCapture
     $calibrationColor = Get-ColorEvidence $calibrationCapture
-    $calibrationDecoded = Get-DecodedEvidence $calibrationCapture
+    $calibrationDecoded = Get-DecodedEvidence $calibrationCapture 3
     if ($calibrationColor.classification -ne 'blue') { throw 'Independent item B calibration was not blue.' }
     Wait-For -Action { Invoke-Api 'Get' "/schedule/commits/$calibrationReportId" } -Predicate { param($value) $value.dispatch_status -eq 'completed' } -Description 'item B calibration completion' -Seconds 30 | Out-Null
 
@@ -408,7 +413,7 @@ try {
     $beforeTransport = Capture-Udp 3 $beforeCapture
     $beforeFingerprint = Get-VideoFingerprint $beforeCapture
     $beforeColor = Get-ColorEvidence $beforeCapture
-    $beforeDecoded = Get-DecodedEvidence $beforeCapture
+    $beforeDecoded = Get-DecodedEvidence $beforeCapture 3
     if ($beforeColor.classification -ne 'red') { throw 'Scheduled item A output was not red.' }
 
     # Arming is synchronous and requires decoded input, so start the sender first
@@ -434,7 +439,7 @@ try {
     $liveTransport = Capture-Udp 6 $liveCapture
     $liveFingerprint = Get-VideoFingerprint $liveCapture
     $liveColor = Get-ColorEvidence $liveCapture
-    $liveDecoded = Get-DecodedEvidence $liveCapture
+    $liveDecoded = Get-DecodedEvidence $liveCapture 6
     if ($liveColor.classification -ne 'green') { throw "Live output did not settle on the distinct green source: $($liveColor | ConvertTo-Json -Compress)" }
 
     $returnAt = $startB + 2000
@@ -457,7 +462,7 @@ try {
     $afterTransport = Capture-Udp 3 $afterCapture
     $afterFingerprint = Get-VideoFingerprint $afterCapture
     $afterColor = Get-ColorEvidence $afterCapture
-    $afterDecoded = Get-DecodedEvidence $afterCapture
+    $afterDecoded = Get-DecodedEvidence $afterCapture 3
     if ($afterColor.classification -ne 'blue') { throw 'Post-return output did not match the independently proven blue item B identity.' }
     if ($afterFingerprint -ne $calibrationFingerprint) { throw 'Post-return item B did not match its independently calibrated decoded-frame fingerprint.' }
     if ($beforeFingerprint -eq $calibrationFingerprint -or $liveFingerprint -in @($beforeFingerprint, $calibrationFingerprint)) {
