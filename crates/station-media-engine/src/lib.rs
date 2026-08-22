@@ -926,9 +926,7 @@ impl PersistentPlayout {
             .pipeline
             .current_running_time()
             .ok_or_else(|| EngineError::State("the running pipeline has no clock time".into()))?;
-        let timeline_offset =
-            i128::from(running_time.nseconds()) - i128::from(media_offset.nseconds());
-        let timeline_offset = i64::try_from(timeline_offset)
+        let timeline_offset = i64::try_from(running_time.nseconds())
             .map_err(|_| EngineError::State("program timeline offset exceeded i64".into()))?;
         program.video_source_pad.set_offset(timeline_offset);
         program.audio_source_pad.set_offset(timeline_offset);

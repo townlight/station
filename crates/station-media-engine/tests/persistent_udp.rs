@@ -1327,7 +1327,7 @@ fn ffmpeg_udp_live_takeover_emits_audible_audio() {
     let root = test_root("ffmpeg-live-program-return");
     fs::create_dir_all(&root).unwrap();
     let source = root.join("scheduled.ts");
-    generate_fixture(&source, "smpte");
+    generate_ffmpeg_color_tone_fixture(&source, "blue", 997, 20);
     let asset = ingest_media(&source, root.join("library")).unwrap();
     let receiver = UdpSocket::bind("127.0.0.1:0").unwrap();
     receiver
@@ -1336,12 +1336,11 @@ fn ffmpeg_udp_live_takeover_emits_audible_audio() {
     let output_address = receiver.local_addr().unwrap();
     let capture_path = test_root("ffmpeg-live-audio-proof").with_extension("ts");
     let _capture_cleanup = ProofCapture::new(capture_path.clone());
+    let returned_capture_path = test_root("ffmpeg-returned-audio-proof").with_extension("ts");
+    let _returned_capture_cleanup = ProofCapture::new(returned_capture_path.clone());
     let mut playout =
         PersistentPlayout::start_udp_with_profile(output_address, OutputProfileId::Proof360p30)
             .unwrap();
-    playout
-        .load_asset(&asset.asset_id, &asset.stored_path)
-        .unwrap();
 
     let input_probe = UdpSocket::bind("127.0.0.1:0").unwrap();
     let input_port = input_probe.local_addr().unwrap().port();
@@ -1391,7 +1390,10 @@ fn ffmpeg_udp_live_takeover_emits_audible_audio() {
     );
 
     let teardown_started = Instant::now();
-    playout.take_program_at(1_000).unwrap();
+    playout
+        .load_asset(&asset.asset_id, &asset.stored_path)
+        .unwrap();
+    playout.take_program_at(4_900).unwrap();
     playout.disarm_live().unwrap();
     eprintln!(
         "active FFmpeg live branch teardown: {:?}",
@@ -1405,8 +1407,36 @@ fn ffmpeg_udp_live_takeover_emits_audible_audio() {
     let rebound = UdpSocket::bind(("127.0.0.1", input_port))
         .expect("live input UDP port must be reusable after teardown");
     drop(rebound);
+    clear_udp_backlog(&receiver);
+    std::thread::sleep(Duration::from_millis(750));
+    let returned_capture = capture_transport_for(&receiver, Duration::from_secs(3));
+    assert!(
+        returned_capture.len() > 50_000,
+        "returned program capture was too short: {} bytes",
+        returned_capture.len()
+    );
+    fs::write(&returned_capture_path, &returned_capture).unwrap();
     drop(sender);
     playout.stop().unwrap();
+    assert_sustained_audible_audio(&returned_capture_path, 200_000, 4);
+    assert_sustained_audible_audio(&capture_path, 300_000, 6);
+    for _ in 0..20 {
+        if fs::remove_dir_all(&root).is_ok() || !root.exists() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(
+        !root.exists(),
+        "test media remained locked after playout stop"
+    );
+}
+
+fn assert_sustained_audible_audio(
+    capture_path: &Path,
+    minimum_samples: u64,
+    minimum_half_second_chunks: usize,
+) {
     let decoded = Command::new("ffmpeg.exe")
         .args([
             "-nostdin",
@@ -1454,22 +1484,17 @@ fn ffmpeg_udp_live_takeover_emits_audible_audio() {
             sum as f64 / count.max(1) as f64
         })
         .collect::<Vec<_>>();
-    assert!(
-        count > 300_000
-            && mean_abs > 100.0
-            && chunk_means.len() >= 6
-            && chunk_means.iter().all(|mean| *mean > 100.0),
-        "FFmpeg live audio was not sustained: {count} decoded samples, mean abs {mean_abs:.2}, half-second chunks {chunk_means:?}"
+    eprintln!(
+        "decoded audio in {}: {count} samples, mean abs {mean_abs:.2}, half-second chunks {chunk_means:?}",
+        capture_path.display()
     );
-    for _ in 0..20 {
-        if fs::remove_dir_all(&root).is_ok() || !root.exists() {
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(50));
-    }
     assert!(
-        !root.exists(),
-        "test media remained locked after playout stop"
+        count > minimum_samples
+            && mean_abs > 100.0
+            && chunk_means.len() >= minimum_half_second_chunks
+            && chunk_means.iter().all(|mean| *mean > 100.0),
+        "FFmpeg audio in {} was not sustained: {count} decoded samples, mean abs {mean_abs:.2}, half-second chunks {chunk_means:?}",
+        capture_path.display()
     );
 }
 
@@ -1850,6 +1875,53 @@ fn generate_black_then_white_fixture(path: &Path) {
     assert!(
         output.status.success(),
         "FFmpeg offset fixture generation failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+fn generate_ffmpeg_color_tone_fixture(
+    path: &Path,
+    color: &str,
+    frequency_hz: u32,
+    duration_seconds: u32,
+) {
+    let output = Command::new("ffmpeg.exe")
+        .args([
+            "-nostdin",
+            "-loglevel",
+            "error",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            &format!("color=c={color}:s=320x180:r=30"),
+            "-f",
+            "lavfi",
+            "-i",
+            &format!("sine=frequency={frequency_hz}:sample_rate=48000"),
+            "-t",
+            &duration_seconds.to_string(),
+            "-c:v",
+            "libx264",
+            "-preset",
+            "ultrafast",
+            "-g",
+            "30",
+            "-pix_fmt",
+            "yuv420p",
+            "-c:a",
+            "aac",
+            "-b:a",
+            "128k",
+            "-f",
+            "mpegts",
+            path.to_string_lossy().as_ref(),
+        ])
+        .output()
+        .expect("FFmpeg is required to generate the long catch-up fixture");
+    assert!(
+        output.status.success(),
+        "FFmpeg long catch-up fixture generation failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
 }
