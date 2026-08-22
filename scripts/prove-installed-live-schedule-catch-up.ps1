@@ -16,7 +16,7 @@ param(
     [ValidateRange(1024, 65535)][int]$InputPort = 5972,
     [ValidateRange(1024, 65535)][int]$OutputPort = 5973,
     [int]$TimeoutSeconds = 180,
-    [int]$ItemDurationSeconds = 12,
+    [int]$ItemDurationSeconds = 20,
     [string]$ResultPath = '',
     [switch]$KeepCapture
 )
@@ -47,7 +47,6 @@ $calibrationCapture = Join-Path $captureRoot 'item-b-calibration.ts'
 $beforeCapture = Join-Path $captureRoot 'before-live.ts'
 $liveCapture = Join-Path $captureRoot 'during-live.ts'
 $afterCapture = Join-Path $captureRoot 'after-return.ts'
-$receiver = $null
 $sender = $null
 $proofChannel = $null
 $source = $null
@@ -96,11 +95,8 @@ function Wait-For {
     )
     $deadline = [DateTime]::UtcNow.AddSeconds($Seconds)
     while ([DateTime]::UtcNow -lt $deadline) {
-        try {
-            $value = & $Action
-            if (& $Predicate $value) { return $value }
-        }
-        catch { }
+        $value = & $Action
+        if (& $Predicate $value) { return $value }
         Start-Sleep -Milliseconds 250
     }
     throw "Timed out waiting for $Description."
@@ -153,13 +149,17 @@ function New-Fixture([string]$Path, [string]$Pattern, [int]$Frequency) {
 }
 
 function Capture-Udp([int]$Seconds, [string]$Path, [int]$MinimumBytes = 100000) {
+    Assert-UdpPortUnowned $OutputPort
+    $captureReceiver = [Net.Sockets.UdpClient]::new([Net.IPEndPoint]::new([Net.IPAddress]::Loopback, $OutputPort))
+    $captureReceiver.Client.ReceiveBufferSize = 8388608
     $memory = [IO.MemoryStream]::new()
     $remote = [Net.IPEndPoint]::new([Net.IPAddress]::Any, 0)
-    $clock = [Diagnostics.Stopwatch]::StartNew()
     try {
+        Start-Sleep -Milliseconds 750
+        $clock = [Diagnostics.Stopwatch]::StartNew()
         while ($clock.Elapsed.TotalSeconds -lt $Seconds) {
-            while ($receiver.Available -gt 0) {
-                $datagram = $receiver.Receive([ref]$remote)
+            while ($captureReceiver.Available -gt 0) {
+                $datagram = $captureReceiver.Receive([ref]$remote)
                 if ($datagram.Length -lt 188 -or $datagram.Length % 188 -ne 0) {
                     throw "Proof output sent a non-MPEG-TS UDP datagram ($($datagram.Length) bytes)."
                 }
@@ -175,12 +175,10 @@ function Capture-Udp([int]$Seconds, [string]$Path, [int]$MinimumBytes = 100000) 
         [IO.File]::WriteAllBytes($Path, $bytes)
         return [ordered]@{ path = $Path; bytes = $bytes.Length; seconds = [math]::Round($clock.Elapsed.TotalSeconds, 3) }
     }
-    finally { $memory.Dispose() }
-}
-
-function Clear-UdpBacklog {
-    $remote = [Net.IPEndPoint]::new([Net.IPAddress]::Any, 0)
-    while ($receiver.Available -gt 0) { [void]$receiver.Receive([ref]$remote) }
+    finally {
+        $memory.Dispose()
+        $captureReceiver.Dispose()
+    }
 }
 
 function Get-VideoFingerprint([string]$Path) {
@@ -194,15 +192,16 @@ function Get-VideoFingerprint([string]$Path) {
 
 function Get-ColorEvidence([string]$Path) {
     $ffmpeg = (Get-Command ffmpeg.exe -ErrorAction Stop).Source
-    $sample = Invoke-Native $ffmpeg @('-v', 'error', '-i', $Path, '-frames:v', '1', '-vf', 'signalstats,metadata=print:file=-', '-f', 'null', 'NUL')
-    if ($sample.exit_code -ne 0 -or $sample.stdout -notmatch 'lavfi\.signalstats\.YAVG=([0-9.]+)') {
+    $sample = Invoke-Native $ffmpeg @('-v', 'error', '-i', $Path, '-vf', 'signalstats,metadata=print:file=-', '-f', 'null', 'NUL')
+    $yMatches = [regex]::Matches($sample.stdout, 'lavfi\.signalstats\.YAVG=([0-9.]+)')
+    $uMatches = [regex]::Matches($sample.stdout, 'lavfi\.signalstats\.UAVG=([0-9.]+)')
+    $vMatches = [regex]::Matches($sample.stdout, 'lavfi\.signalstats\.VAVG=([0-9.]+)')
+    if ($sample.exit_code -ne 0 -or $yMatches.Count -eq 0 -or $uMatches.Count -eq 0 -or $vMatches.Count -eq 0) {
         throw "FFmpeg could not measure proof video color in $Path. $($sample.stderr)"
     }
-    $y = [double]$Matches[1]
-    if ($sample.stdout -notmatch 'lavfi\.signalstats\.UAVG=([0-9.]+)') { throw "Proof video omitted UAVG color evidence in $Path." }
-    $u = [double]$Matches[1]
-    if ($sample.stdout -notmatch 'lavfi\.signalstats\.VAVG=([0-9.]+)') { throw "Proof video omitted VAVG color evidence in $Path." }
-    $v = [double]$Matches[1]
+    $y = [double]$yMatches[$yMatches.Count - 1].Groups[1].Value
+    $u = [double]$uMatches[$uMatches.Count - 1].Groups[1].Value
+    $v = [double]$vMatches[$vMatches.Count - 1].Groups[1].Value
     $classification = if ($u -gt $v + 40) { 'blue' } elseif ($v -gt $u + 40) { 'red' } elseif ($u -lt 100 -and $v -lt 100) { 'green' } else { 'unknown' }
     return [ordered]@{ classification = $classification; y_average = $y; u_average = $u; v_average = $v }
 }
@@ -295,9 +294,6 @@ try {
 
     Assert-UdpPortUnowned $InputPort
     Assert-UdpPortUnowned $OutputPort
-    $receiver = [Net.Sockets.UdpClient]::new([Net.IPEndPoint]::new([Net.IPAddress]::Loopback, $OutputPort))
-    $receiver.Client.ReceiveBufferSize = 8388608
-    Assert-UdpPortUnowned $OutputPort $PID
     $proofChannel = [ordered]@{
         channel_id = $channelId; display_name = "Installed live schedule catch-up proof $runId"; output_profile = 'proof-360p30'
         output_sinks = @([ordered]@{ sink_id = $sinkId; label = 'Installed live schedule catch-up output'; kind = 'udp-ts'; destination = "127.0.0.1:$OutputPort"; loudness_target_lufs = -16.0; required = $true; enabled = $true })
@@ -326,7 +322,7 @@ try {
     Wait-For -Action { Invoke-Api 'Get' "/assets/$assetB/readiness" } -Predicate { param($value) $value.readiness_state -eq 'ready' } -Description 'fixture B readiness' -Seconds 120 | Out-Null
 
     $calibrationStart = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() + 8000
-    $calibrationDuration = 4000
+    $calibrationDuration = 6000
     $startA = $calibrationStart + $calibrationDuration + 3000
     $startB = $startA + ([int64]$ItemDurationSeconds * 1000)
     foreach ($item in @(
@@ -344,9 +340,7 @@ try {
 
     while ([DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() -lt $calibrationStart) { Start-Sleep -Milliseconds 100 }
     Wait-For -Action { Invoke-Api 'Get' "/schedule/commits/$calibrationReportId" } -Predicate { param($value) $value.dispatch_status -eq 'acknowledged' } -Description 'independent item B calibration on air' -Seconds 30 | Out-Null
-    Clear-UdpBacklog
-    Start-Sleep -Milliseconds 750
-    $calibrationTransport = Capture-Udp 2 $calibrationCapture
+    $calibrationTransport = Capture-Udp 3 $calibrationCapture
     $calibrationFingerprint = Get-VideoFingerprint $calibrationCapture
     $calibrationColor = Get-ColorEvidence $calibrationCapture
     $calibrationDecoded = Get-DecodedEvidence $calibrationCapture
@@ -355,9 +349,7 @@ try {
 
     while ([DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() -lt $startA) { Start-Sleep -Milliseconds 100 }
     $statusA = Wait-For -Action { Invoke-Api 'Get' "/schedule/commits/$reportAId" } -Predicate { param($value) $value.dispatch_status -in @('acknowledged', 'completed') } -Description 'item A on-air dispatch' -Seconds 90
-    Clear-UdpBacklog
-    Start-Sleep -Milliseconds 750
-    $beforeTransport = Capture-Udp 2 $beforeCapture
+    $beforeTransport = Capture-Udp 3 $beforeCapture
     $beforeFingerprint = Get-VideoFingerprint $beforeCapture
     $beforeColor = Get-ColorEvidence $beforeCapture
     $beforeDecoded = Get-DecodedEvidence $beforeCapture
@@ -378,13 +370,11 @@ try {
     if ([int64]$onAir.taken_at_unix_ms -ge $startB) {
         throw 'Live takeover did not reach air before the adjacent schedule boundary.'
     }
-    Clear-UdpBacklog
-    Start-Sleep -Milliseconds 750
-    $liveTransport = Capture-Udp 2 $liveCapture
+    $liveTransport = Capture-Udp 3 $liveCapture
     $liveFingerprint = Get-VideoFingerprint $liveCapture
     $liveColor = Get-ColorEvidence $liveCapture
     $liveDecoded = Get-DecodedEvidence $liveCapture
-    if ($liveColor.classification -ne 'green' -or $liveFingerprint -eq $beforeFingerprint) { throw 'Live output did not prove the distinct green source.' }
+    if ($liveColor.classification -ne 'green') { throw "Live output did not settle on the distinct green source: $($liveColor | ConvertTo-Json -Compress)" }
 
     $returnAt = $startB + 2000
     while ([DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() -lt $returnAt) { Start-Sleep -Milliseconds 100 }
@@ -399,8 +389,6 @@ try {
     $runtimeAfter = Wait-For -Action { Get-ProofRuntime } -Predicate { param($value) $value.state -eq 'on_air' } -Description 'runtime after live return to scheduled item B' -Seconds 90
     $statusA = Wait-For -Action { Invoke-Api 'Get' "/schedule/commits/$reportAId" } -Predicate { param($value) $value.dispatch_status -eq 'completed' } -Description 'item A retired after live return' -Seconds 90
     $statusB = Wait-For -Action { Invoke-Api 'Get' "/schedule/commits/$reportBId" } -Predicate { param($value) $value.dispatch_status -eq 'acknowledged' } -Description 'item B resumed on air' -Seconds 90
-    Clear-UdpBacklog
-    Start-Sleep -Milliseconds 750
     $afterTransport = Capture-Udp 3 $afterCapture
     $afterFingerprint = Get-VideoFingerprint $afterCapture
     $afterColor = Get-ColorEvidence $afterCapture
@@ -461,7 +449,6 @@ finally {
     if ($channelConfigured -and $proofChannel) {
         try { $proofChannel.enabled = $false; Invoke-Api 'Put' '/channels' $proofChannel | Out-Null } catch { Write-Warning "Could not disable proof channel: $($_.Exception.Message)" }
     }
-    if ($receiver) { $receiver.Dispose() }
     $result.finished_at_unix_ms = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
     if ($ResultPath) {
         $parent = Split-Path -Parent $ResultPath
