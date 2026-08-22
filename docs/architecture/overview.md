@@ -143,8 +143,10 @@ The operator console presents source revision and enabled state, channel authori
 current session state, expiry, operator/reason, and the append-only audit trail. Take Live and
 Return to Schedule require explicit confirmation; stale authority is surfaced as a conflict and
 the operator must refresh. The current slice supports UDP MPEG-TS only. It does not claim exact
-schedule catch-up after a long takeover, additional live transports, or installed decoded proof of
-the complete takeover path.
+schedule catch-up after a long takeover or additional live transports. The exact installed
+fallback-to-live-to-fallback decoded evidence is recorded in the
+[installed live takeover proof](../proof/2026-08-21-installed-live-takeover.md); clean-machine and
+field-soak acceptance remain separate gates.
 
 ## Authority rules
 

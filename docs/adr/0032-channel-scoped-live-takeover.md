@@ -78,4 +78,6 @@ adds bounded decoded-A/V readiness and stall handling before a take can be accep
 
 This decision covers UDP MPEG-TS input only. Additional live transports, SDI/NDI, and remote SRT
 input are not implemented here. Exact schedule catch-up across a long takeover is not defined by
-this slice, and source-level tests are not installed decoded proof of the complete takeover path.
+this slice. The exact installed fallback-to-live-to-fallback decoded evidence is recorded in the
+[installed live takeover proof](../proof/2026-08-21-installed-live-takeover.md); it does not replace
+clean-machine or field-soak acceptance.
