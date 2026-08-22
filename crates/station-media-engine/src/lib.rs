@@ -1553,16 +1553,7 @@ fn cleanup_live_install(
     for element in parts.elements {
         let _ = element.set_state(gst::State::Null);
     }
-    let cleanup_started = Instant::now();
-    let cleanup_budget = Duration::from_secs(5);
-    for element in parts.elements {
-        let remaining = cleanup_budget.saturating_sub(cleanup_started.elapsed());
-        if remaining.is_zero() {
-            break;
-        }
-        let timeout_ns = u64::try_from(remaining.as_nanos()).unwrap_or(u64::MAX);
-        let _ = element.state(gst::ClockTime::from_nseconds(timeout_ns));
-    }
+    wait_for_branch_elements_to_stop(parts.elements);
     if let Some(pad) = parts.video_selector_pad {
         let _ = parts.video_source_pad.unlink(pad);
         video_selector.release_request_pad(pad);
@@ -1814,11 +1805,22 @@ fn remove_file_program(
     for element in &program.elements {
         let _ = element.set_state(gst::State::Null);
     }
-    for element in &program.elements {
-        let _ = element.state(gst::ClockTime::from_seconds(5));
-    }
+    wait_for_branch_elements_to_stop(&program.elements);
     for element in program.elements.iter().rev() {
         let _ = pipeline.remove(element);
+    }
+}
+
+fn wait_for_branch_elements_to_stop(elements: &[gst::Element]) {
+    let cleanup_started = Instant::now();
+    let cleanup_budget = Duration::from_secs(5);
+    for element in elements {
+        let remaining = cleanup_budget.saturating_sub(cleanup_started.elapsed());
+        if remaining.is_zero() {
+            break;
+        }
+        let timeout_ns = u64::try_from(remaining.as_nanos()).unwrap_or(u64::MAX);
+        let _ = element.state(gst::ClockTime::from_nseconds(timeout_ns));
     }
 }
 

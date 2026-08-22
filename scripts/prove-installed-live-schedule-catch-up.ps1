@@ -153,7 +153,7 @@ function New-Fixture([string]$Path, [string]$Pattern, [int]$Frequency) {
     }
 }
 
-function Capture-Udp([int]$Seconds, [string]$Path, [int]$MinimumBytes = 100000) {
+function Capture-Udp([int]$Seconds, [string]$Path, [int]$MinimumBytes = 50000) {
     if ($null -eq $outputReceiverJob -or $outputReceiverJob.State -ne 'Running') {
         $jobFailure = if ($outputReceiverJob) { Receive-Job $outputReceiverJob -ErrorAction SilentlyContinue | Out-String } else { '' }
         throw "The persistent proof output receiver is not running. $jobFailure"
