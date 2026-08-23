@@ -60,6 +60,7 @@ fn worker_bootstrap_preserves_mixed_per_sink_loudness_and_stable_configuration_o
             WorkerOutputConfiguration::UdpTs {
                 destination: actual_destination,
                 loudness_target_lufs: actual_loudness,
+                ..
             } => {
                 assert_eq!(actual_destination, destination);
                 assert_eq!(actual_loudness.as_lufs(), loudness);

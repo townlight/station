@@ -74,7 +74,14 @@ impl<'de> Deserialize<'de> for LoudnessTarget {
 }
 
 pub const MAX_FRAME_BYTES: usize = 65_536;
-pub const PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion { major: 2, minor: 0 };
+pub const PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion { major: 3, minor: 0 };
+
+pub const MAX_OUTPUT_PROOF_INDEX: u16 = 255;
+pub const MAX_OUTPUT_PROOF_DURATION_MS: u64 = 300_000;
+pub const MIN_OUTPUT_PROOF_DURATION_MS: u64 = 3_000;
+pub const MAX_OUTPUT_PROOF_BYTES: u64 = 256 * 1024 * 1024;
+const MAX_OUTPUT_PROOF_ARTIFACT_PATH_BYTES: usize = 2_048;
+const MAX_OUTPUT_PROOF_TEXT_BYTES: usize = 512;
 
 const MIN_LIVE_TOKEN_BYTES: usize = 16;
 const MAX_LIVE_TOKEN_BYTES: usize = 128;
@@ -289,6 +296,7 @@ pub struct ProtocolVersion {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct WorkerBootstrapEnvelope {
     pub version: ProtocolVersion,
     pub worker_id: String,
@@ -297,17 +305,21 @@ pub struct WorkerBootstrapEnvelope {
     /// Station-managed root used by the worker to resolve CG image identities.
     /// Overlay commands carry only an asset id and format, never a path.
     pub cg_image_root: String,
+    /// Station-managed root under which the worker writes output-proof artifacts.
+    pub proof_artifact_root: String,
     pub outputs: Vec<WorkerOutputConfiguration>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "kebab-case")]
+#[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
 pub enum WorkerOutputConfiguration {
     UdpTs {
+        sink_id: String,
         destination: String,
         loudness_target_lufs: LoudnessTarget,
     },
     Srt {
+        sink_id: String,
         uri: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         passphrase: Option<SrtPassphrase>,
@@ -316,6 +328,7 @@ pub enum WorkerOutputConfiguration {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CommandEnvelope {
     pub version: ProtocolVersion,
     pub channel_id: String,
@@ -325,7 +338,7 @@ pub struct CommandEnvelope {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ChannelCommand {
     Ping,
     ApplyPlan {
@@ -360,6 +373,17 @@ pub enum ChannelCommand {
     DisarmLive {
         session_id: String,
     },
+    StartOutputProof {
+        proof_id: String,
+        output_index: u16,
+        sink_id: String,
+        loudness_target_lufs: LoudnessTarget,
+        duration_ms: u64,
+        max_bytes: u64,
+    },
+    PollOutputProof {
+        proof_id: String,
+    },
     Shutdown,
 }
 
@@ -374,6 +398,7 @@ pub enum LiveReturnTarget {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct WorkerEventEnvelope {
     pub version: ProtocolVersion,
     pub worker_id: String,
@@ -390,7 +415,7 @@ pub struct OutputTransportObservation {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum WorkerEvent {
     Ready {
         graph_revision: u64,
@@ -435,6 +460,43 @@ pub enum WorkerEvent {
         outputs: Vec<OutputTransportObservation>,
     },
     ShutdownComplete,
+    OutputProofStarted {
+        proof_id: String,
+        output_index: u16,
+        sink_id: String,
+        loudness_target_lufs: LoudnessTarget,
+        duration_ms: u64,
+        max_bytes: u64,
+        artifact_relative_path: String,
+        worker_instance_id: String,
+        graph_revision: u64,
+    },
+    OutputProofPending {
+        proof_id: String,
+        artifact_relative_path: String,
+        worker_instance_id: String,
+        graph_revision: u64,
+    },
+    OutputProofReady {
+        proof_id: String,
+        output_index: u16,
+        sink_id: String,
+        loudness_target_lufs: LoudnessTarget,
+        artifact_relative_path: String,
+        worker_instance_id: String,
+        graph_revision: u64,
+        size_bytes: u64,
+        capture_sha256: String,
+        duration_ms: u64,
+    },
+    OutputProofFailed {
+        proof_id: String,
+        artifact_relative_path: String,
+        worker_instance_id: String,
+        graph_revision: u64,
+        code: String,
+        message: String,
+    },
 }
 
 #[cfg(test)]
@@ -481,12 +543,15 @@ pub enum ProtocolError {
     InvalidJson(String),
     UnsupportedMajor(u16),
     InvalidManagedCgImageRoot(String),
+    InvalidManagedProofRoot(String),
     InvalidLiveCommand(String),
     InvalidLiveEvent(String),
+    InvalidOutputProof(String),
 }
 
 pub fn encode_command_frame(command: &CommandEnvelope) -> Result<Vec<u8>, ProtocolError> {
     validate_live_command(&command.command).map_err(ProtocolError::InvalidLiveCommand)?;
+    validate_output_proof_command(&command.command).map_err(ProtocolError::InvalidOutputProof)?;
     encode_frame(command)
 }
 
@@ -495,6 +560,9 @@ pub fn encode_bootstrap_frame(
 ) -> Result<Vec<u8>, ProtocolError> {
     validate_cg_image_root(&bootstrap.cg_image_root)
         .map_err(ProtocolError::InvalidManagedCgImageRoot)?;
+    validate_proof_artifact_root(&bootstrap.proof_artifact_root)
+        .map_err(ProtocolError::InvalidManagedProofRoot)?;
+    validate_bootstrap_outputs(bootstrap).map_err(ProtocolError::InvalidOutputProof)?;
     encode_frame(bootstrap)
 }
 
@@ -505,6 +573,9 @@ pub fn decode_bootstrap_frame(frame: &[u8]) -> Result<WorkerBootstrapEnvelope, P
     }
     validate_cg_image_root(&bootstrap.cg_image_root)
         .map_err(ProtocolError::InvalidManagedCgImageRoot)?;
+    validate_proof_artifact_root(&bootstrap.proof_artifact_root)
+        .map_err(ProtocolError::InvalidManagedProofRoot)?;
+    validate_bootstrap_outputs(&bootstrap).map_err(ProtocolError::InvalidOutputProof)?;
     Ok(bootstrap)
 }
 
@@ -521,12 +592,296 @@ fn validate_cg_image_root(root: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn validate_proof_artifact_root(root: &str) -> Result<(), String> {
+    let trimmed = root.trim_end_matches(['\\', '/']);
+    if trimmed.is_empty()
+        || !Path::new(root).is_absolute()
+        || root.chars().any(char::is_control)
+        || trimmed.rsplit(['\\', '/']).next() != Some("output-proofs")
+        || root.split(['\\', '/']).any(|component| component == "..")
+    {
+        return Err("proof artifact root must be a safe managed output-proofs directory".into());
+    }
+    Ok(())
+}
+
+fn validate_canonical_uuid(value: &str, field: &str) -> Result<(), String> {
+    let bytes = value.as_bytes();
+    if bytes.len() != 36
+        || [8, 13, 18, 23].iter().any(|&index| bytes[index] != b'-')
+        || bytes.iter().enumerate().any(|(index, byte)| {
+            !matches!(index, 8 | 13 | 18 | 23)
+                && !byte.is_ascii_digit()
+                && !(b'a'..=b'f').contains(byte)
+        })
+    {
+        return Err(format!("{field} must be a lowercase canonical UUID"));
+    }
+    Ok(())
+}
+
+fn validate_proof_target(target: LoudnessTarget) -> Result<(), String> {
+    if target != LoudnessTarget::CABLE && target != LoudnessTarget::STREAMING {
+        return Err("output proof target must be exactly -24 or -16 LUFS".into());
+    }
+    Ok(())
+}
+
+fn validate_artifact_relative_path(path: &str) -> Result<(), String> {
+    if path.is_empty()
+        || path.len() > MAX_OUTPUT_PROOF_ARTIFACT_PATH_BYTES
+        || path.chars().any(char::is_control)
+        || path.starts_with(['\\', '/'])
+        || path.contains(':')
+        || path
+            .split(['\\', '/'])
+            .any(|part| part.is_empty() || part == "." || part == "..")
+    {
+        return Err("output proof artifact path must be a bounded relative managed path".into());
+    }
+    Ok(())
+}
+
+fn validate_worker_instance(value: &str) -> Result<(), String> {
+    if value.is_empty()
+        || value.len() > MAX_OUTPUT_PROOF_TEXT_BYTES
+        || value.chars().any(char::is_control)
+    {
+        return Err("output proof worker instance identity is invalid".into());
+    }
+    Ok(())
+}
+
+fn validate_proof_text(value: &str, field: &str) -> Result<(), String> {
+    if value.is_empty()
+        || value.len() > MAX_OUTPUT_PROOF_TEXT_BYTES
+        || value.chars().any(char::is_control)
+    {
+        return Err(format!("output proof {field} is invalid"));
+    }
+    Ok(())
+}
+
+fn validate_capture_hash(value: &str) -> Result<(), String> {
+    if value.len() != 64
+        || value
+            .bytes()
+            .any(|byte| !byte.is_ascii_digit() && !(b'a'..=b'f').contains(&byte))
+    {
+        return Err("output proof capture hash must be a lowercase SHA-256 identity".into());
+    }
+    Ok(())
+}
+
+fn validate_proof_bounds(duration_ms: u64, max_bytes: u64) -> Result<(), String> {
+    if !(MIN_OUTPUT_PROOF_DURATION_MS..=MAX_OUTPUT_PROOF_DURATION_MS).contains(&duration_ms) {
+        return Err("output proof duration is outside the bounded range".into());
+    }
+    if max_bytes == 0 || max_bytes > MAX_OUTPUT_PROOF_BYTES {
+        return Err("output proof byte bound is outside the bounded range".into());
+    }
+    Ok(())
+}
+
+fn validate_output_proof_command(command: &ChannelCommand) -> Result<(), String> {
+    match command {
+        ChannelCommand::StartOutputProof {
+            proof_id,
+            output_index,
+            sink_id,
+            loudness_target_lufs,
+            duration_ms,
+            max_bytes,
+        } => {
+            validate_canonical_uuid(proof_id, "proof_id")?;
+            validate_canonical_uuid(sink_id, "sink_id")?;
+            if *output_index > MAX_OUTPUT_PROOF_INDEX {
+                return Err("output proof output index is outside the bounded range".into());
+            }
+            validate_proof_target(*loudness_target_lufs)?;
+            validate_proof_bounds(*duration_ms, *max_bytes)
+        }
+        ChannelCommand::PollOutputProof { proof_id } => {
+            validate_canonical_uuid(proof_id, "proof_id")
+        }
+        _ => Ok(()),
+    }
+}
+
+fn validate_proof_identity_fields(
+    proof_id: &str,
+    output_index: u16,
+    sink_id: &str,
+    target: LoudnessTarget,
+) -> Result<(), String> {
+    validate_canonical_uuid(proof_id, "proof_id")?;
+    validate_canonical_uuid(sink_id, "sink_id")?;
+    if output_index > MAX_OUTPUT_PROOF_INDEX {
+        return Err("output proof output index is outside the bounded range".into());
+    }
+    validate_proof_target(target)
+}
+
+fn validate_output_proof_event(event: &WorkerEvent) -> Result<(), String> {
+    match event {
+        WorkerEvent::OutputProofStarted {
+            proof_id,
+            output_index,
+            sink_id,
+            loudness_target_lufs,
+            duration_ms,
+            max_bytes,
+            artifact_relative_path,
+            worker_instance_id,
+            graph_revision,
+        } => {
+            validate_proof_identity_fields(
+                proof_id,
+                *output_index,
+                sink_id,
+                *loudness_target_lufs,
+            )?;
+            validate_proof_bounds(*duration_ms, *max_bytes)?;
+            validate_artifact_relative_path(artifact_relative_path)?;
+            validate_worker_instance(worker_instance_id)?;
+            if *graph_revision == 0 {
+                return Err("output proof graph revision must be nonzero".into());
+            }
+            Ok(())
+        }
+        WorkerEvent::OutputProofPending {
+            proof_id,
+            artifact_relative_path,
+            worker_instance_id,
+            graph_revision,
+        } => {
+            validate_canonical_uuid(proof_id, "proof_id")?;
+            validate_artifact_relative_path(artifact_relative_path)?;
+            validate_worker_instance(worker_instance_id)?;
+            if *graph_revision == 0 {
+                return Err("output proof graph revision must be nonzero".into());
+            }
+            Ok(())
+        }
+        WorkerEvent::OutputProofReady {
+            proof_id,
+            output_index,
+            sink_id,
+            loudness_target_lufs,
+            artifact_relative_path,
+            worker_instance_id,
+            graph_revision,
+            size_bytes,
+            capture_sha256,
+            duration_ms,
+        } => {
+            validate_proof_identity_fields(
+                proof_id,
+                *output_index,
+                sink_id,
+                *loudness_target_lufs,
+            )?;
+            validate_artifact_relative_path(artifact_relative_path)?;
+            validate_worker_instance(worker_instance_id)?;
+            if *graph_revision == 0 {
+                return Err("output proof graph revision must be nonzero".into());
+            }
+            if *size_bytes == 0 || *size_bytes > MAX_OUTPUT_PROOF_BYTES {
+                return Err("output proof ready size is outside the bounded range".into());
+            }
+            validate_capture_hash(capture_sha256)?;
+            if !(MIN_OUTPUT_PROOF_DURATION_MS..=MAX_OUTPUT_PROOF_DURATION_MS).contains(duration_ms)
+            {
+                return Err("output proof ready duration is outside the bounded range".into());
+            }
+            Ok(())
+        }
+        WorkerEvent::OutputProofFailed {
+            proof_id,
+            artifact_relative_path,
+            worker_instance_id,
+            graph_revision,
+            code,
+            message,
+        } => {
+            validate_canonical_uuid(proof_id, "proof_id")?;
+            validate_artifact_relative_path(artifact_relative_path)?;
+            validate_worker_instance(worker_instance_id)?;
+            if *graph_revision == 0 {
+                return Err("output proof graph revision must be nonzero".into());
+            }
+            validate_proof_text(code, "failure code")?;
+            validate_proof_text(message, "failure message")
+        }
+        _ => Ok(()),
+    }
+}
+
+fn validate_bootstrap_outputs(bootstrap: &WorkerBootstrapEnvelope) -> Result<(), String> {
+    if bootstrap.outputs.len() > usize::from(MAX_OUTPUT_PROOF_INDEX) + 1 {
+        return Err("worker bootstrap has more outputs than the proof index can address".into());
+    }
+    let mut seen = std::collections::HashSet::new();
+    for output in &bootstrap.outputs {
+        let (sink_id, target) = match output {
+            WorkerOutputConfiguration::UdpTs {
+                sink_id,
+                loudness_target_lufs,
+                ..
+            }
+            | WorkerOutputConfiguration::Srt {
+                sink_id,
+                loudness_target_lufs,
+                ..
+            } => (sink_id, *loudness_target_lufs),
+        };
+        validate_canonical_uuid(sink_id, "sink_id")?;
+        if !seen.insert(sink_id) {
+            return Err("worker bootstrap output sink identities must be unique".into());
+        }
+        validate_proof_target(target)?;
+    }
+    Ok(())
+}
+
+impl WorkerBootstrapEnvelope {
+    pub fn validate_output_proof_binding(
+        &self,
+        output_index: u16,
+        sink_id: &str,
+        target: LoudnessTarget,
+    ) -> Result<(), String> {
+        validate_canonical_uuid(sink_id, "sink_id")?;
+        validate_proof_target(target)?;
+        if usize::from(output_index) >= self.outputs.len() {
+            return Err("output proof output index is not configured".into());
+        }
+        let configured = match &self.outputs[usize::from(output_index)] {
+            WorkerOutputConfiguration::UdpTs {
+                sink_id,
+                loudness_target_lufs,
+                ..
+            }
+            | WorkerOutputConfiguration::Srt {
+                sink_id,
+                loudness_target_lufs,
+                ..
+            } => (sink_id, *loudness_target_lufs),
+        };
+        if configured.0 != sink_id || configured.1 != target {
+            return Err("output proof identity does not match bootstrap output".into());
+        }
+        Ok(())
+    }
+}
+
 pub fn decode_command_frame(frame: &[u8]) -> Result<CommandEnvelope, ProtocolError> {
     let command: CommandEnvelope = decode_frame(frame)?;
     if command.version.major != PROTOCOL_VERSION.major {
         return Err(ProtocolError::UnsupportedMajor(command.version.major));
     }
     validate_live_command(&command.command).map_err(ProtocolError::InvalidLiveCommand)?;
+    validate_output_proof_command(&command.command).map_err(ProtocolError::InvalidOutputProof)?;
     Ok(command)
 }
 
@@ -544,6 +899,7 @@ fn validate_live_command(command: &ChannelCommand) -> Result<(), String> {
 
 pub fn encode_event_frame(event: &WorkerEventEnvelope) -> Result<Vec<u8>, ProtocolError> {
     validate_live_event(&event.event).map_err(ProtocolError::InvalidLiveEvent)?;
+    validate_output_proof_event(&event.event).map_err(ProtocolError::InvalidOutputProof)?;
     encode_frame(event)
 }
 
@@ -553,6 +909,7 @@ pub fn decode_event_frame(frame: &[u8]) -> Result<WorkerEventEnvelope, ProtocolE
         return Err(ProtocolError::UnsupportedMajor(event.version.major));
     }
     validate_live_event(&event.event).map_err(ProtocolError::InvalidLiveEvent)?;
+    validate_output_proof_event(&event.event).map_err(ProtocolError::InvalidOutputProof)?;
     Ok(event)
 }
 

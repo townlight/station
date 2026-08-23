@@ -13,15 +13,18 @@ fn bootstrap_with_per_sink_targets() -> serde_json::Value {
         "worker_id": "worker-1",
         "channel_id": "channel-1",
         "output_profile": "atsc-720p5994",
-        "cg_image_root": "C:\\ProgramData\\TownLight Station\\cg",
+        "cg_image_root": "C:\\ProgramData\\TownLight Station\\cg-images",
+        "proof_artifact_root": "C:\\ProgramData\\TownLight Station\\output-proofs",
         "outputs": [
             {
                 "kind": "udp-ts",
+                "sink_id": "11111111-2222-4333-8444-555555555555",
                 "destination": "127.0.0.1:5500",
                 "loudness_target_lufs": CABLE_TARGET_LUFS
             },
             {
                 "kind": "srt",
+                "sink_id": "22222222-3333-4444-8555-666666666666",
                 "uri": "srt://127.0.0.1:5600",
                 "loudness_target_lufs": STREAMING_TARGET_LUFS
             }

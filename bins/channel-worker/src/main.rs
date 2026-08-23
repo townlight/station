@@ -1,14 +1,19 @@
+use std::collections::HashMap;
 use std::io::{ErrorKind, Read, Write};
 use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
 use std::time::Instant;
 
-use station_media_engine::{ConfiguredTransportOutput, PersistentPlayout, SourceRole};
+use station_media_engine::{
+    ConfiguredTransportOutput, OutputCaptureRequest, OutputCaptureStatus, PersistentPlayout,
+    SourceRole,
+};
 use station_media_journal::JournalWriter;
 use station_media_protocol::{
     ChannelCommand, CommandEnvelope, LiveArmToken, LiveReturnTarget, MAX_FRAME_BYTES,
-    OutputTransportObservation, PROTOCOL_VERSION, WorkerEvent, WorkerEventEnvelope,
-    WorkerOutputConfiguration, decode_bootstrap_frame, decode_command_frame, encode_event_frame,
+    OutputTransportObservation, PROTOCOL_VERSION, WorkerBootstrapEnvelope, WorkerEvent,
+    WorkerEventEnvelope, WorkerOutputConfiguration, decode_bootstrap_frame, decode_command_frame,
+    encode_event_frame,
 };
 use station_schedule::OutputProfileId;
 use station_windows_ipc::PipeStream;
@@ -120,7 +125,7 @@ fn main() {
         eprintln!("{message}");
         std::process::exit(2);
     });
-    let mut journal = JournalWriter::open(journal_path, &worker_id, &channel_id)
+    let mut journal = JournalWriter::open(&journal_path, &worker_id, &channel_id)
         .unwrap_or_else(|error| fatal(3, "open its journal", &format!("{error:?}")));
     let started = Instant::now();
     let mut pipe = PipeStream::connect(&pipe_name)
@@ -158,6 +163,60 @@ fn main() {
             "the managed CG image root is not a directory",
         );
     }
+    std::fs::create_dir_all(&bootstrap.proof_artifact_root).unwrap_or_else(|error| {
+        fatal(
+            6,
+            "create its managed output proof root",
+            &format!("{}: {error}", bootstrap.proof_artifact_root),
+        )
+    });
+    let proof_artifact_root =
+        std::fs::canonicalize(&bootstrap.proof_artifact_root).unwrap_or_else(|error| {
+            fatal(
+                6,
+                "validate its managed output proof root",
+                &format!("{}: {error}", bootstrap.proof_artifact_root),
+            )
+        });
+    if !proof_artifact_root.is_dir() {
+        fatal(
+            6,
+            "validate its managed output proof root",
+            "the managed output proof root is not a directory",
+        );
+    }
+    let journal_directory = journal_path.parent().unwrap_or_else(|| {
+        fatal(
+            6,
+            "validate its managed data root",
+            "the journal path has no managed parent directory",
+        )
+    });
+    let managed_data_root = if journal_directory.file_name().and_then(|name| name.to_str())
+        == Some("channel-journals")
+    {
+        journal_directory.parent().unwrap_or(journal_directory)
+    } else {
+        journal_directory
+    };
+    let managed_data_root = std::fs::canonicalize(managed_data_root)
+        .ok()
+        .unwrap_or_else(|| {
+            fatal(
+                6,
+                "validate its managed data root",
+                "the journal path does not identify a readable managed data root",
+            )
+        });
+    if proof_artifact_root.parent() != Some(managed_data_root.as_path()) {
+        fatal(
+            6,
+            "validate its managed output proof root",
+            "the output proof root escapes the journal-owned managed data root",
+        );
+    }
+    remove_stale_proof_parts(&proof_artifact_root)
+        .unwrap_or_else(|error| fatal(6, "clean stale output proof parts", &error));
     let output_profile = OutputProfileId::from_storage_name(&bootstrap.output_profile)
         .unwrap_or_else(|error| fatal(6, "validate its output profile", &format!("{error:?}")));
     if !output_profile.is_runnable() {
@@ -169,23 +228,31 @@ fn main() {
     }
     let outputs = bootstrap
         .outputs
-        .into_iter()
+        .iter()
+        .cloned()
         .map(|output| match output {
             WorkerOutputConfiguration::UdpTs {
+                sink_id,
                 destination,
                 loudness_target_lufs,
             } => destination
                 .parse::<SocketAddr>()
                 .map(|destination| {
-                    ConfiguredTransportOutput::udp(destination, loudness_target_lufs)
+                    ConfiguredTransportOutput::udp_identified(
+                        sink_id,
+                        destination,
+                        loudness_target_lufs,
+                    )
                 })
                 .map_err(|error| error.to_string()),
             WorkerOutputConfiguration::Srt {
+                sink_id,
                 uri,
                 passphrase,
                 loudness_target_lufs,
             } => validate_srt_uri(&uri).map(|()| {
-                ConfiguredTransportOutput::srt(
+                ConfiguredTransportOutput::srt_identified(
+                    sink_id,
                     uri,
                     passphrase.map(|value| value.expose().to_string()),
                     loudness_target_lufs,
@@ -202,10 +269,11 @@ fn main() {
         );
     }
     let mut media = Some(
-        PersistentPlayout::start_configured_outputs_with_profile_and_cg_root(
+        PersistentPlayout::start_configured_outputs_with_profile_and_roots(
             &outputs,
             output_profile,
             Some(&cg_image_root),
+            Some(&proof_artifact_root),
         )
         .unwrap_or_else(|error| fatal(8, "start its fallback graph", &format!("{error:?}"))),
     );
@@ -215,11 +283,14 @@ fn main() {
         &mut pipe,
         &worker_id,
         &channel_id,
-        WorkerEvent::Ready { graph_revision: 0 },
+        WorkerEvent::Ready { graph_revision: 1 },
     )
     .unwrap_or_else(|error| fatal(4, "record and emit readiness", &error));
     let mut loaded_asset = None;
     let mut live_state = None;
+    let worker_instance_id = format!("{worker_id}-{}", std::process::id());
+    let mut graph_revision = 1_u64;
+    let mut proof_graph_revisions = HashMap::new();
 
     loop {
         let frame = match read_command_frame(&mut pipe) {
@@ -239,6 +310,10 @@ fn main() {
                 .expect("a running worker owns its media graph"),
             &mut loaded_asset,
             &mut live_state,
+            &bootstrap,
+            &worker_instance_id,
+            &mut graph_revision,
+            &mut proof_graph_revisions,
         );
         if should_stop {
             media
@@ -269,6 +344,39 @@ fn validate_srt_uri(uri: &str) -> Result<(), String> {
         return Err("SRT output port must be nonzero".into());
     }
     Ok(())
+}
+
+fn remove_stale_proof_parts(root: &std::path::Path) -> Result<(), String> {
+    for entry in std::fs::read_dir(root).map_err(|error| error.to_string())? {
+        let entry = entry.map_err(|error| error.to_string())?;
+        let file_type = entry.file_type().map_err(|error| error.to_string())?;
+        if !file_type.is_file() {
+            continue;
+        }
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        let Some(proof_id) = name.strip_suffix(".ts.part") else {
+            continue;
+        };
+        if is_canonical_uuid(proof_id) {
+            std::fs::remove_file(entry.path()).map_err(|error| {
+                format!("could not remove stale managed proof part {name}: {error}")
+            })?;
+        }
+    }
+    Ok(())
+}
+
+fn is_canonical_uuid(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    bytes.len() == 36
+        && [8, 13, 18, 23].iter().all(|&index| bytes[index] == b'-')
+        && bytes
+            .iter()
+            .enumerate()
+            .all(|(index, byte)| matches!(index, 8 | 13 | 18 | 23) || byte.is_ascii_hexdigit())
 }
 
 fn arguments() -> Result<WorkerArguments, String> {
@@ -321,6 +429,7 @@ fn read_command_frame(input: &mut impl Read) -> Result<Option<Vec<u8>>, String> 
     Ok(Some(frame))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn decide_event(
     command: &CommandEnvelope,
     channel_id: &str,
@@ -329,6 +438,10 @@ fn decide_event(
     media: &mut PersistentPlayout,
     loaded_asset: &mut Option<String>,
     live_state: &mut Option<LiveState>,
+    bootstrap: &WorkerBootstrapEnvelope,
+    worker_instance_id: &str,
+    graph_revision: &mut u64,
+    proof_graph_revisions: &mut HashMap<String, u64>,
 ) -> (WorkerEvent, bool) {
     if command.channel_id != channel_id {
         return (
@@ -430,12 +543,15 @@ fn decide_event(
                 ),
             }
         }
-        ChannelCommand::ApplyPlan { revision, .. } => (
-            WorkerEvent::Ready {
-                graph_revision: *revision,
-            },
-            false,
-        ),
+        ChannelCommand::ApplyPlan { revision, .. } => {
+            *graph_revision = (*revision).max(1);
+            (
+                WorkerEvent::Ready {
+                    graph_revision: *graph_revision,
+                },
+                false,
+            )
+        }
         ChannelCommand::ApplyCgSnapshot { snapshot } => match media.apply_cg_snapshot(snapshot) {
             Ok(()) => (
                 WorkerEvent::CgApplied {
@@ -549,6 +665,154 @@ fn decide_event(
                         false,
                     ),
                 }
+            }
+        }
+        ChannelCommand::StartOutputProof {
+            proof_id,
+            output_index,
+            sink_id,
+            loudness_target_lufs,
+            duration_ms,
+            max_bytes,
+        } => {
+            if let Err(message) = bootstrap.validate_output_proof_binding(
+                *output_index,
+                sink_id,
+                *loudness_target_lufs,
+            ) {
+                return (
+                    rejection(command, "output_proof_binding_invalid", &message),
+                    false,
+                );
+            }
+            match media.start_output_capture(OutputCaptureRequest {
+                proof_id: proof_id.clone(),
+                output_index: *output_index,
+                sink_id: sink_id.clone(),
+                loudness_target: *loudness_target_lufs,
+                duration_ms: *duration_ms,
+                max_bytes: *max_bytes,
+            }) {
+                Ok(started) => {
+                    proof_graph_revisions.insert(proof_id.clone(), *graph_revision);
+                    (
+                        WorkerEvent::OutputProofStarted {
+                            proof_id: proof_id.clone(),
+                            output_index: *output_index,
+                            sink_id: sink_id.clone(),
+                            loudness_target_lufs: *loudness_target_lufs,
+                            duration_ms: *duration_ms,
+                            max_bytes: *max_bytes,
+                            artifact_relative_path: started.artifact_relative_path,
+                            worker_instance_id: worker_instance_id.into(),
+                            graph_revision: *graph_revision,
+                        },
+                        false,
+                    )
+                }
+                Err(error) => (
+                    rejection(
+                        command,
+                        "output_proof_start_failed",
+                        &format!("The output proof could not start: {error:?}"),
+                    ),
+                    false,
+                ),
+            }
+        }
+        ChannelCommand::PollOutputProof { proof_id } => {
+            let capture_graph_revision = proof_graph_revisions
+                .get(proof_id)
+                .copied()
+                .unwrap_or(*graph_revision);
+            if capture_graph_revision != *graph_revision {
+                let artifact_relative_path = media
+                    .poll_output_capture(proof_id)
+                    .ok()
+                    .map(|status| match status {
+                        OutputCaptureStatus::Pending {
+                            artifact_relative_path,
+                            ..
+                        }
+                        | OutputCaptureStatus::Failed {
+                            artifact_relative_path,
+                            ..
+                        } => artifact_relative_path,
+                        OutputCaptureStatus::Ready(ready) => ready.artifact_relative_path,
+                    })
+                    .unwrap_or_else(|| format!("{proof_id}.ts"));
+                let _ = media.abort_output_capture(proof_id);
+                proof_graph_revisions.remove(proof_id);
+                return (
+                    WorkerEvent::OutputProofFailed {
+                        proof_id: proof_id.clone(),
+                        artifact_relative_path,
+                        worker_instance_id: worker_instance_id.into(),
+                        graph_revision: capture_graph_revision,
+                        code: "graph_revision_changed".into(),
+                        message: "output graph revision changed during capture".into(),
+                    },
+                    false,
+                );
+            }
+            match media.poll_output_capture(proof_id) {
+                Ok(OutputCaptureStatus::Pending {
+                    artifact_relative_path,
+                    ..
+                }) => (
+                    WorkerEvent::OutputProofPending {
+                        proof_id: proof_id.clone(),
+                        artifact_relative_path,
+                        worker_instance_id: worker_instance_id.into(),
+                        graph_revision: capture_graph_revision,
+                    },
+                    false,
+                ),
+                Ok(OutputCaptureStatus::Ready(ready)) => {
+                    proof_graph_revisions.remove(proof_id);
+                    (
+                        WorkerEvent::OutputProofReady {
+                            proof_id: ready.proof_id,
+                            output_index: ready.output_index,
+                            sink_id: ready.sink_id,
+                            loudness_target_lufs: ready.loudness_target,
+                            artifact_relative_path: ready.artifact_relative_path,
+                            worker_instance_id: worker_instance_id.into(),
+                            graph_revision: capture_graph_revision,
+                            size_bytes: ready.capture_bytes,
+                            capture_sha256: ready.capture_sha256,
+                            duration_ms: ready.capture_duration_ms,
+                        },
+                        false,
+                    )
+                }
+                Ok(OutputCaptureStatus::Failed {
+                    artifact_relative_path,
+                    code,
+                    message,
+                    ..
+                }) => {
+                    proof_graph_revisions.remove(proof_id);
+                    (
+                        WorkerEvent::OutputProofFailed {
+                            proof_id: proof_id.clone(),
+                            artifact_relative_path,
+                            worker_instance_id: worker_instance_id.into(),
+                            graph_revision: capture_graph_revision,
+                            code,
+                            message,
+                        },
+                        false,
+                    )
+                }
+                Err(error) => (
+                    rejection(
+                        command,
+                        "output_proof_poll_failed",
+                        &format!("The output proof could not be polled: {error:?}"),
+                    ),
+                    false,
+                ),
             }
         }
         ChannelCommand::Shutdown => (WorkerEvent::ShutdownComplete, true),

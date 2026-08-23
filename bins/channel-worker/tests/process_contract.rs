@@ -2,7 +2,7 @@ use std::fs;
 use std::io::{Read, Write};
 use std::net::UdpSocket;
 use std::num::NonZeroU16;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -90,7 +90,14 @@ fn run_worker(
             .join("cg-images")
             .to_string_lossy()
             .into_owned(),
+        proof_artifact_root: journal
+            .parent()
+            .unwrap()
+            .join("output-proofs")
+            .to_string_lossy()
+            .into_owned(),
         outputs: vec![WorkerOutputConfiguration::UdpTs {
+            sink_id: "22222222-3333-4444-8555-666666666666".into(),
             destination: udp.local_addr().unwrap().to_string(),
             loudness_target_lufs: LoudnessTarget::STREAMING,
         }],
@@ -139,7 +146,14 @@ fn worker_rejects_a_staged_profile_before_starting_the_media_graph() {
             .join("cg-images")
             .to_string_lossy()
             .into_owned(),
+        proof_artifact_root: journal
+            .parent()
+            .unwrap()
+            .join("output-proofs")
+            .to_string_lossy()
+            .into_owned(),
         outputs: vec![WorkerOutputConfiguration::UdpTs {
+            sink_id: "22222222-3333-4444-8555-666666666666".into(),
             destination: udp.local_addr().unwrap().to_string(),
             loudness_target_lufs: LoudnessTarget::CABLE,
         }],
@@ -190,6 +204,14 @@ impl Drop for TempFiles {
     }
 }
 
+struct TempDirectory(PathBuf);
+
+impl Drop for TempDirectory {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
+}
+
 fn start_ffmpeg_live_sender(port: u16) -> ChildGuard {
     ChildGuard::new(
         Command::new("ffmpeg.exe")
@@ -232,18 +254,39 @@ fn start_ffmpeg_live_sender(port: u16) -> ChildGuard {
     )
 }
 
-fn capture_transport_for(receiver: &UdpSocket, duration: Duration) -> Vec<u8> {
+fn capture_transport_for(
+    receiver: &UdpSocket,
+    worker: &mut ChildGuard,
+    duration: Duration,
+) -> Vec<u8> {
     receiver
-        .set_read_timeout(Some(Duration::from_secs(2)))
+        .set_read_timeout(Some(Duration::from_secs(8)))
+        .unwrap();
+    let mut datagram = [0_u8; 65_536];
+    let received = receiver.recv(&mut datagram).unwrap_or_else(|error| {
+        let worker_status = worker.try_wait().map_or_else(
+            |status_error| format!("status error: {status_error}"),
+            |status| format!("{status:?}"),
+        );
+        panic!(
+            "worker produced no first MPEG-TS datagram within eight seconds: {error}; worker status: {worker_status}"
+        )
+    });
+    let mut capture = Vec::from(&datagram[..received]);
+    receiver
+        .set_read_timeout(Some(Duration::from_millis(500)))
         .unwrap();
     let started = Instant::now();
-    let mut datagram = [0_u8; 65_536];
-    let mut capture = Vec::new();
     while started.elapsed() < duration {
-        let received = receiver
-            .recv(&mut datagram)
-            .expect("worker UDP output stopped during live capture");
-        capture.extend_from_slice(&datagram[..received]);
+        match receiver.recv(&mut datagram) {
+            Ok(received) => capture.extend_from_slice(&datagram[..received]),
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) => {}
+            Err(error) => panic!("could not capture active worker MPEG-TS output: {error}"),
+        }
     }
     capture
 }
@@ -259,6 +302,261 @@ fn clear_udp_backlog(receiver: &UdpSocket) {
         }
     }
     receiver.set_nonblocking(false).unwrap();
+}
+
+fn certutil_sha256(path: &Path) -> String {
+    let output = Command::new("certutil.exe")
+        .args(["-hashfile", path.to_string_lossy().as_ref(), "SHA256"])
+        .output()
+        .expect("CertUtil is required to independently verify the output proof hash");
+    assert!(
+        output.status.success(),
+        "CertUtil failed to hash output proof: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(str::trim)
+        .find(|line| line.len() == 64 && line.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        .expect("CertUtil did not return a SHA-256 digest")
+        .to_ascii_lowercase()
+}
+
+#[test]
+fn spawned_worker_output_proof_reaches_ready_with_artifact_hash_and_health() {
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock is before Unix epoch")
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!(
+        "townlight-worker-output-proof-{}-{nonce}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&root).unwrap();
+    let _temp_dir = TempDirectory(root.clone());
+    let journal = root.join("worker.tlj");
+    let proof_root = root.join("output-proofs");
+    let server = PipeServer::bind(
+        &journal
+            .file_stem()
+            .unwrap()
+            .to_string_lossy()
+            .replace('.', "-"),
+    )
+    .unwrap();
+    let output = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let child = Command::new(env!("CARGO_BIN_EXE_channel-worker"))
+        .args([WORKER_ID, CHANNEL_ID])
+        .arg(&journal)
+        .arg(server.name())
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut worker = ChildGuard::new(child);
+    let mut stream = server.accept().unwrap();
+    let sink_id = "22222222-3333-4444-8555-666666666666";
+    let bootstrap = WorkerBootstrapEnvelope {
+        version: PROTOCOL_VERSION,
+        worker_id: WORKER_ID.into(),
+        channel_id: CHANNEL_ID.into(),
+        output_profile: "proof-360p30".into(),
+        cg_image_root: root.join("cg-images").to_string_lossy().into_owned(),
+        proof_artifact_root: proof_root.to_string_lossy().into_owned(),
+        outputs: vec![WorkerOutputConfiguration::UdpTs {
+            sink_id: sink_id.into(),
+            destination: output.local_addr().unwrap().to_string(),
+            loudness_target_lufs: LoudnessTarget::CABLE,
+        }],
+    };
+    stream
+        .write_all(&encode_bootstrap_frame(&bootstrap).unwrap())
+        .unwrap();
+    let ready = read_event(&mut stream);
+    assert!(matches!(
+        ready.event,
+        WorkerEvent::Ready { graph_revision: 1 }
+    ));
+
+    let mut expected_sequence = 2;
+    let health_deadline = Instant::now() + Duration::from_secs(12);
+    let health_before = loop {
+        assert!(
+            Instant::now() < health_deadline,
+            "worker output health did not advance"
+        );
+        let command_id = format!("health-before-{expected_sequence}");
+        stream
+            .write_all(
+                &encode_command_frame(&command(
+                    &command_id,
+                    expected_sequence,
+                    ChannelCommand::Ping,
+                ))
+                .unwrap(),
+            )
+            .unwrap();
+        let event = read_event(&mut stream);
+        let health = match event.event {
+            WorkerEvent::Heartbeat { outputs, .. } => outputs
+                .into_iter()
+                .next()
+                .expect("worker heartbeat omitted configured output"),
+            other => panic!("unexpected health event: {other:?}"),
+        };
+        expected_sequence += 1;
+        if health.bytes_sent_total > 0 && health.audio_buffers_total > 0 {
+            break health;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    };
+
+    let proof_id = "11111111-2222-4333-8444-555555555555";
+    stream
+        .write_all(
+            &encode_command_frame(&command(
+                "start-output-proof",
+                expected_sequence,
+                ChannelCommand::StartOutputProof {
+                    proof_id: proof_id.into(),
+                    output_index: 0,
+                    sink_id: sink_id.into(),
+                    loudness_target_lufs: LoudnessTarget::CABLE,
+                    duration_ms: 3_000,
+                    max_bytes: 16 * 1024 * 1024,
+                },
+            ))
+            .unwrap(),
+        )
+        .unwrap();
+    let started = read_event(&mut stream);
+    let artifact_relative_path = match started.event {
+        WorkerEvent::OutputProofStarted {
+            proof_id: event_proof_id,
+            output_index,
+            sink_id: event_sink_id,
+            loudness_target_lufs,
+            graph_revision,
+            artifact_relative_path,
+            ..
+        } => {
+            assert_eq!(event_proof_id, proof_id);
+            assert_eq!(output_index, 0);
+            assert_eq!(event_sink_id, sink_id);
+            assert_eq!(loudness_target_lufs, LoudnessTarget::CABLE);
+            assert_eq!(graph_revision, 1);
+            artifact_relative_path
+        }
+        other => panic!("unexpected proof start event: {other:?}"),
+    };
+    expected_sequence += 1;
+
+    let deadline = Instant::now() + Duration::from_secs(12);
+    let ready_proof = loop {
+        assert!(
+            Instant::now() < deadline,
+            "output proof did not reach terminal state"
+        );
+        stream
+            .write_all(
+                &encode_command_frame(&command(
+                    "poll-output-proof",
+                    expected_sequence,
+                    ChannelCommand::PollOutputProof {
+                        proof_id: proof_id.into(),
+                    },
+                ))
+                .unwrap(),
+            )
+            .unwrap();
+        let event = read_event(&mut stream);
+        expected_sequence += 1;
+        match event.event {
+            WorkerEvent::OutputProofPending {
+                proof_id: event_proof_id,
+                graph_revision,
+                ..
+            } => {
+                assert_eq!(event_proof_id, proof_id);
+                assert_eq!(graph_revision, 1);
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            WorkerEvent::OutputProofReady {
+                proof_id: event_proof_id,
+                output_index,
+                sink_id: event_sink_id,
+                loudness_target_lufs,
+                artifact_relative_path: event_path,
+                graph_revision,
+                size_bytes,
+                capture_sha256,
+                duration_ms,
+                ..
+            } => {
+                assert_eq!(event_proof_id, proof_id);
+                assert_eq!(output_index, 0);
+                assert_eq!(event_sink_id, sink_id);
+                assert_eq!(loudness_target_lufs, LoudnessTarget::CABLE);
+                assert_eq!(event_path, artifact_relative_path);
+                assert_eq!(graph_revision, 1);
+                assert!(size_bytes > 0 && size_bytes <= 16 * 1024 * 1024);
+                assert!(duration_ms >= 3_000);
+                break (event_path, size_bytes, capture_sha256, duration_ms);
+            }
+            WorkerEvent::OutputProofFailed { code, message, .. } => {
+                panic!("output proof failed: {code}: {message}")
+            }
+            other => panic!("unexpected output proof event: {other:?}"),
+        }
+    };
+    let (artifact_relative_path, size_bytes, capture_sha256, duration_ms) = ready_proof;
+    assert!(duration_ms >= 3_000);
+    let artifact = proof_root.join(&artifact_relative_path);
+    assert!(artifact.is_file(), "proof artifact was not published");
+    let bytes = fs::read(&artifact).unwrap();
+    assert_eq!(bytes.len() as u64, size_bytes);
+    assert_eq!(certutil_sha256(&artifact), capture_sha256);
+    assert!(health_before.bytes_sent_total > 0);
+
+    stream
+        .write_all(
+            &encode_command_frame(&command(
+                "health-after",
+                expected_sequence,
+                ChannelCommand::Ping,
+            ))
+            .unwrap(),
+        )
+        .unwrap();
+    let health_after_event = read_event(&mut stream);
+    let health_after = match health_after_event.event {
+        WorkerEvent::Heartbeat { outputs, .. } => outputs
+            .into_iter()
+            .next()
+            .expect("worker heartbeat omitted configured output"),
+        other => panic!("unexpected post-proof health event: {other:?}"),
+    };
+    expected_sequence += 1;
+    assert!(health_after.bytes_sent_total > health_before.bytes_sent_total);
+    assert!(health_after.audio_buffers_total > health_before.audio_buffers_total);
+
+    stream
+        .write_all(
+            &encode_command_frame(&command(
+                "shutdown",
+                expected_sequence,
+                ChannelCommand::Shutdown,
+            ))
+            .unwrap(),
+        )
+        .unwrap();
+    assert!(matches!(
+        read_event(&mut stream).event,
+        WorkerEvent::ShutdownComplete
+    ));
+    let status = worker.wait().unwrap();
+    assert!(status.success());
 }
 
 #[test]
@@ -297,7 +595,14 @@ fn spawned_worker_live_takeover_preserves_audible_audio() {
             .join("cg-images")
             .to_string_lossy()
             .into_owned(),
+        proof_artifact_root: journal
+            .parent()
+            .unwrap()
+            .join("output-proofs")
+            .to_string_lossy()
+            .into_owned(),
         outputs: vec![WorkerOutputConfiguration::UdpTs {
+            sink_id: "22222222-3333-4444-8555-666666666666".into(),
             destination: output.local_addr().unwrap().to_string(),
             loudness_target_lufs: LoudnessTarget::STREAMING,
         }],
@@ -308,7 +613,7 @@ fn spawned_worker_live_takeover_preserves_audible_audio() {
     let ready = read_event(&mut stream);
     assert!(matches!(
         ready.event,
-        WorkerEvent::Ready { graph_revision: 0 }
+        WorkerEvent::Ready { graph_revision: 1 }
     ));
 
     let input_probe = UdpSocket::bind("127.0.0.1:0").unwrap();
@@ -379,7 +684,7 @@ fn spawned_worker_live_takeover_preserves_audible_audio() {
 
     clear_udp_backlog(&output);
     std::thread::sleep(Duration::from_millis(750));
-    let transport_capture = capture_transport_for(&output, Duration::from_secs(4));
+    let transport_capture = capture_transport_for(&output, &mut worker, Duration::from_secs(4));
     assert!(
         transport_capture.len() > 100_000,
         "live capture was too short: {} bytes",
@@ -531,7 +836,7 @@ fn journals_each_event_before_emitting_it_and_recovers_sequence_after_restart() 
     assert_eq!(emitted.len(), 3);
     assert!(matches!(
         emitted[0].event,
-        WorkerEvent::Ready { graph_revision: 0 }
+        WorkerEvent::Ready { graph_revision: 1 }
     ));
     assert!(matches!(emitted[1].event, WorkerEvent::Heartbeat { .. }));
     assert!(matches!(emitted[2].event, WorkerEvent::ShutdownComplete));
@@ -550,7 +855,7 @@ fn journals_each_event_before_emitting_it_and_recovers_sequence_after_restart() 
     assert_eq!(restart_emitted[0].sequence, 4);
     assert!(matches!(
         restart_emitted[0].event,
-        WorkerEvent::Ready { graph_revision: 0 }
+        WorkerEvent::Ready { graph_revision: 1 }
     ));
     assert_eq!(restart_emitted[1].sequence, 5);
     assert!(matches!(
@@ -575,7 +880,7 @@ fn spawned_worker_recovers_sequence_from_a_compacted_heartbeat_journal() {
             worker_id: WORKER_ID.into(),
             channel_id: CHANNEL_ID.into(),
             sequence: 1,
-            event: WorkerEvent::Ready { graph_revision: 0 },
+            event: WorkerEvent::Ready { graph_revision: 1 },
         })
         .unwrap();
     for sequence in 2..=514 {
@@ -613,7 +918,7 @@ fn spawned_worker_recovers_sequence_from_a_compacted_heartbeat_journal() {
     assert_eq!(emitted[0].sequence, 515);
     assert!(matches!(
         emitted[0].event,
-        WorkerEvent::Ready { graph_revision: 0 }
+        WorkerEvent::Ready { graph_revision: 1 }
     ));
     assert_eq!(emitted[1].sequence, 516);
     assert!(matches!(emitted[1].event, WorkerEvent::ShutdownComplete));

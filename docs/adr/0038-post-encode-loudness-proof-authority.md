@@ -22,7 +22,7 @@ A proof is current only when its validated outcome, candidate version, verified 
 
 ## Proof boundary
 
-This decision implements the proof model, immutable persistence, independent decode/measurement primitive, and read surface. It does not yet trigger a capture from a running channel. The next executable slice must capture bounded bytes immediately after the target group's `mpegtsmux`, without rebuilding or stopping playout, and finalize them through durable orchestration work.
+This decision implements the proof model, immutable persistence, independent decode/measurement primitive, and read surface. [ADR 0039](0039-bounded-active-output-proof-capture.md) adds bounded capture from the running target group's post-`mpegtsmux` fanout and durable job state. The remaining executable slice must expose operator intent, claim the durable job, drive the asynchronous worker capture, independently analyze the artifact, and append the immutable proof.
 
 Even after that capture path exists, a local post-mux pass will prove only that the candidate produced a decodable target-group transport whose measured integrated loudness was within tolerance. It will not prove UDP delivery, SRT receiver acceptance, per-sink packet loss, cable-headend acceptance, or field operation.
 
@@ -31,4 +31,4 @@ Even after that capture path exists, a local post-mux pass will prove only that 
 - Configuration, execution health, decoded post-mux measurement, external receiver acceptance, and field proof remain separate authorities.
 - A reconfigured output or different/unverified candidate cannot inherit a prior green result.
 - Evidence history is append-only and remains readable after reconfiguration.
-- The product still reports `not_run` until the bounded active-worker capture/orchestration job is implemented and executed.
+- The product still reports `not_run` until durable orchestration completes capture, independent analysis, and immutable proof append.

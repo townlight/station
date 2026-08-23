@@ -1,9 +1,13 @@
+use std::fs::{self, OpenOptions};
+use std::io::Write;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::{
-    Arc,
+    Arc, Mutex, TryLockError,
     atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering},
+    mpsc::{self, SyncSender, TrySendError},
 };
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use gdk_pixbuf::Pixbuf;
@@ -39,6 +43,7 @@ pub enum TransportOutput {
 pub struct ConfiguredTransportOutput {
     transport: TransportOutput,
     loudness_target: LoudnessTarget,
+    sink_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -47,11 +52,67 @@ pub struct OutputHealthObservation {
     pub audio_buffers_total: u64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OutputCaptureRequest {
+    pub proof_id: String,
+    pub output_index: u16,
+    pub sink_id: String,
+    pub loudness_target: LoudnessTarget,
+    pub duration_ms: u64,
+    pub max_bytes: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OutputCaptureStarted {
+    pub proof_id: String,
+    pub artifact_relative_path: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OutputCaptureReady {
+    pub proof_id: String,
+    pub output_index: u16,
+    pub sink_id: String,
+    pub loudness_target: LoudnessTarget,
+    pub artifact_relative_path: String,
+    pub capture_bytes: u64,
+    pub capture_sha256: String,
+    pub capture_duration_ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OutputCaptureStatus {
+    Pending {
+        proof_id: String,
+        artifact_relative_path: String,
+    },
+    Ready(OutputCaptureReady),
+    Failed {
+        proof_id: String,
+        artifact_relative_path: String,
+        code: String,
+        message: String,
+    },
+}
+
 impl ConfiguredTransportOutput {
     pub fn udp(destination: SocketAddr, loudness_target: LoudnessTarget) -> Self {
         Self {
             transport: TransportOutput::Udp(destination),
             loudness_target,
+            sink_id: None,
+        }
+    }
+
+    pub fn udp_identified(
+        sink_id: impl Into<String>,
+        destination: SocketAddr,
+        loudness_target: LoudnessTarget,
+    ) -> Self {
+        Self {
+            transport: TransportOutput::Udp(destination),
+            loudness_target,
+            sink_id: Some(sink_id.into()),
         }
     }
 
@@ -66,6 +127,23 @@ impl ConfiguredTransportOutput {
                 passphrase,
             },
             loudness_target,
+            sink_id: None,
+        }
+    }
+
+    pub fn srt_identified(
+        sink_id: impl Into<String>,
+        uri: impl Into<String>,
+        passphrase: Option<String>,
+        loudness_target: LoudnessTarget,
+    ) -> Self {
+        Self {
+            transport: TransportOutput::Srt {
+                uri: uri.into(),
+                passphrase,
+            },
+            loudness_target,
+            sink_id: Some(sink_id.into()),
         }
     }
 }
@@ -122,6 +200,7 @@ pub enum EngineError {
     UnsupportedLoudnessTarget {
         target_milli_lufs: i32,
     },
+    OutputCapture(String),
 }
 
 pub struct PersistentPlayout {
@@ -142,7 +221,32 @@ pub struct PersistentPlayout {
     cg_image_root: Option<PathBuf>,
     cg_revision: Option<CgSnapshot>,
     output_variant_count: usize,
+    output_capture_bindings: Vec<OutputCaptureBinding>,
+    output_capture_ingresses: Vec<Arc<CaptureIngress>>,
+    proof_artifact_root: Option<PathBuf>,
     stopped: bool,
+}
+
+#[derive(Clone)]
+struct OutputCaptureBinding {
+    sink_id: Option<String>,
+    variant_index: usize,
+    loudness_target: LoudnessTarget,
+}
+
+struct CaptureIngress {
+    active: AtomicBool,
+    aborted: AtomicBool,
+    generation: AtomicU64,
+    callback_failed: AtomicBool,
+    sender: Mutex<Option<SyncSender<(u64, gst::Buffer)>>>,
+    proof: Mutex<Option<ActiveOutputCapture>>,
+    writer: Mutex<Option<JoinHandle<()>>>,
+}
+
+struct ActiveOutputCapture {
+    proof_id: String,
+    status: Arc<Mutex<OutputCaptureStatus>>,
 }
 
 struct CgSlot {
@@ -178,6 +282,7 @@ struct LoudnessVariant {
     audio_buffers: Arc<AtomicU64>,
     mux: gst::Element,
     transport_fanout: gst::Element,
+    capture_ingress: Arc<CaptureIngress>,
 }
 
 impl PersistentPlayout {
@@ -228,9 +333,16 @@ impl PersistentPlayout {
             .map(|transport| ConfiguredTransportOutput {
                 transport,
                 loudness_target,
+                sink_id: None,
             })
             .collect::<Vec<_>>();
-        Self::start_outputs_with_program(&configured_outputs, None, output_profile, cg_image_root)
+        Self::start_outputs_with_program(
+            &configured_outputs,
+            None,
+            output_profile,
+            cg_image_root,
+            None,
+        )
     }
 
     pub fn start_file_udp(
@@ -253,6 +365,7 @@ impl PersistentPlayout {
             Some(media_path.as_ref()),
             output_profile,
             None,
+            None,
         )
     }
 
@@ -273,7 +386,27 @@ impl PersistentPlayout {
                 "at least one transport output is required".into(),
             ));
         }
-        Self::start_outputs_with_program(outputs, None, output_profile, cg_image_root)
+        Self::start_outputs_with_program(outputs, None, output_profile, cg_image_root, None)
+    }
+
+    pub fn start_configured_outputs_with_profile_and_roots(
+        outputs: &[ConfiguredTransportOutput],
+        output_profile: OutputProfileId,
+        cg_image_root: Option<&Path>,
+        proof_artifact_root: Option<&Path>,
+    ) -> Result<Self, EngineError> {
+        if outputs.is_empty() {
+            return Err(EngineError::Pipeline(
+                "at least one transport output is required".into(),
+            ));
+        }
+        Self::start_outputs_with_program(
+            outputs,
+            None,
+            output_profile,
+            cg_image_root,
+            proof_artifact_root,
+        )
     }
 
     fn start_outputs_with_program(
@@ -281,6 +414,7 @@ impl PersistentPlayout {
         media_path: Option<&Path>,
         output_profile: OutputProfileId,
         cg_image_root: Option<&Path>,
+        proof_artifact_root: Option<&Path>,
     ) -> Result<Self, EngineError> {
         if !output_profile.is_runnable() {
             return Err(EngineError::ProfileNotRunnable {
@@ -290,6 +424,9 @@ impl PersistentPlayout {
         let startup_started = Instant::now();
         gst::init().map_err(|error| EngineError::Initialization(error.to_string()))?;
         let profile = output_profile.profile();
+        let proof_artifact_root = proof_artifact_root
+            .map(validate_proof_artifact_root)
+            .transpose()?;
 
         let pipeline = gst::Pipeline::with_name("townlight-synthetic-playout");
         let fallback = gst::ElementFactory::make("videotestsrc")
@@ -659,6 +796,20 @@ impl PersistentPlayout {
             }
         };
 
+        let output_capture_bindings = outputs
+            .iter()
+            .zip(&output_branches)
+            .map(|(output, branch)| OutputCaptureBinding {
+                sink_id: output.sink_id.clone(),
+                variant_index: branch.variant_index,
+                loudness_target: output.loudness_target,
+            })
+            .collect();
+        let output_capture_ingresses = loudness_variants
+            .iter()
+            .map(|variant| Arc::clone(&variant.capture_ingress))
+            .collect();
+        let output_variant_count = loudness_variants.len();
         let playout = Self {
             pipeline,
             video_selector,
@@ -676,7 +827,10 @@ impl PersistentPlayout {
             cg_canvas_pad,
             cg_image_root: cg_image_root.map(Path::to_path_buf),
             cg_revision: None,
-            output_variant_count: loudness_variants.len(),
+            output_variant_count,
+            output_capture_bindings,
+            output_capture_ingresses,
+            proof_artifact_root,
             stopped: false,
         };
         playout.cg_canvas_pad.set_property("alpha", 0.0_f64);
@@ -750,6 +904,87 @@ impl PersistentPlayout {
                 })
             })
             .collect()
+    }
+
+    pub fn start_output_capture(
+        &mut self,
+        request: OutputCaptureRequest,
+    ) -> Result<OutputCaptureStarted, EngineError> {
+        if self.stopped {
+            return Err(EngineError::OutputCapture(
+                "output capture requires a running graph".into(),
+            ));
+        }
+        if !is_canonical_uuid(&request.proof_id) || !is_canonical_uuid(&request.sink_id) {
+            return Err(EngineError::OutputCapture(
+                "output capture identities must be canonical UUIDs".into(),
+            ));
+        }
+        if !(3_000..=300_000).contains(&request.duration_ms) {
+            return Err(EngineError::OutputCapture(
+                "output capture duration must be between 3000 and 300000 milliseconds".into(),
+            ));
+        }
+        if !(1..=256 * 1024 * 1024).contains(&request.max_bytes) {
+            return Err(EngineError::OutputCapture(
+                "output capture byte limit must be between 1 and 268435456".into(),
+            ));
+        }
+        let output_index = usize::from(request.output_index);
+        let binding = self
+            .output_capture_bindings
+            .get(output_index)
+            .ok_or_else(|| {
+                EngineError::OutputCapture("output capture index is not configured".into())
+            })?;
+        if binding.sink_id.as_deref() != Some(request.sink_id.as_str()) {
+            return Err(EngineError::OutputCapture(
+                "output capture sink does not match the configured output index".into(),
+            ));
+        }
+        if binding.loudness_target != request.loudness_target {
+            return Err(EngineError::OutputCapture(
+                "output capture target does not match the configured output".into(),
+            ));
+        }
+        let root = self.proof_artifact_root.as_ref().ok_or_else(|| {
+            EngineError::OutputCapture("managed output proof root is unavailable".into())
+        })?;
+        self.output_capture_ingresses[binding.variant_index].begin(request, root)
+    }
+
+    pub fn poll_output_capture(
+        &mut self,
+        proof_id: &str,
+    ) -> Result<OutputCaptureStatus, EngineError> {
+        if !is_canonical_uuid(proof_id) {
+            return Err(EngineError::OutputCapture(
+                "output capture identity must be a canonical UUID".into(),
+            ));
+        }
+        for ingress in &self.output_capture_ingresses {
+            if let Some(status) = ingress.status_for(proof_id)? {
+                return Ok(status);
+            }
+        }
+        Err(EngineError::OutputCapture(
+            "output capture identity is not active in this graph".into(),
+        ))
+    }
+
+    pub fn abort_output_capture(&mut self, proof_id: &str) -> Result<(), EngineError> {
+        for ingress in &self.output_capture_ingresses {
+            if ingress.abort_if_matches(
+                proof_id,
+                "capture_aborted",
+                "output capture was aborted",
+            )? {
+                return Ok(());
+            }
+        }
+        Err(EngineError::OutputCapture(
+            "output capture identity is not active in this graph".into(),
+        ))
     }
 
     pub fn apply_cg_snapshot(
@@ -1133,6 +1368,7 @@ impl PersistentPlayout {
     }
 
     pub fn stop(mut self) -> Result<(), EngineError> {
+        let capture_result = self.abort_all_output_captures(Duration::from_secs(2));
         self.pipeline
             .set_state(gst::State::Null)
             .map_err(|error| EngineError::State(format!("{error:?}")))?;
@@ -1141,6 +1377,17 @@ impl PersistentPlayout {
             .0
             .map_err(|error| EngineError::State(format!("{error:?}")))?;
         self.stopped = true;
+        capture_result
+    }
+
+    fn abort_all_output_captures(&mut self, timeout: Duration) -> Result<(), EngineError> {
+        let deadline = Instant::now() + timeout;
+        for ingress in &self.output_capture_ingresses {
+            ingress.abort_any("graph_stopped", "output graph stopped during capture")?;
+        }
+        for ingress in &self.output_capture_ingresses {
+            ingress.join_finished_by(deadline)?;
+        }
         Ok(())
     }
 
@@ -2039,9 +2286,520 @@ fn active_role(
 impl Drop for PersistentPlayout {
     fn drop(&mut self) {
         if !self.stopped {
+            for ingress in &self.output_capture_ingresses {
+                let _ = ingress.abort_any("graph_dropped", "output graph dropped during capture");
+            }
+            let deadline = Instant::now() + Duration::from_secs(2);
+            for ingress in &self.output_capture_ingresses {
+                let _ = ingress.join_finished_by(deadline);
+            }
             let _ = self.pipeline.set_state(gst::State::Null);
         }
     }
+}
+
+impl CaptureIngress {
+    fn new() -> Self {
+        Self {
+            active: AtomicBool::new(false),
+            aborted: AtomicBool::new(false),
+            generation: AtomicU64::new(0),
+            callback_failed: AtomicBool::new(false),
+            sender: Mutex::new(None),
+            proof: Mutex::new(None),
+            writer: Mutex::new(None),
+        }
+    }
+
+    fn offer(&self, buffer: &gst::BufferRef) {
+        let generation = self.generation.load(Ordering::Acquire);
+        if !self.active.load(Ordering::Acquire) {
+            return;
+        }
+        match self.sender.try_lock() {
+            Ok(sender) => {
+                // Recheck while holding the same lock used to deactivate an
+                // ingress. This closes the natural-completion race between
+                // the fast-path atomic read above and sender removal.
+                if !self.active.load(Ordering::Acquire)
+                    || self.generation.load(Ordering::Acquire) != generation
+                {
+                    return;
+                }
+                let Some(sender) = sender.as_ref() else {
+                    self.callback_failed.store(true, Ordering::Release);
+                    return;
+                };
+                if matches!(
+                    sender.try_send((generation, buffer.to_owned())),
+                    Err(TrySendError::Full(_) | TrySendError::Disconnected(_))
+                ) {
+                    self.callback_failed.store(true, Ordering::Release);
+                }
+            }
+            Err(TryLockError::WouldBlock | TryLockError::Poisoned(_)) => {
+                if self.active.load(Ordering::Acquire)
+                    && self.generation.load(Ordering::Acquire) == generation
+                {
+                    self.callback_failed.store(true, Ordering::Release);
+                }
+            }
+        }
+    }
+
+    fn begin(
+        self: &Arc<Self>,
+        request: OutputCaptureRequest,
+        root: &Path,
+    ) -> Result<OutputCaptureStarted, EngineError> {
+        self.reap_writer()?;
+        if self.active.load(Ordering::Acquire) {
+            return Err(EngineError::OutputCapture(
+                "a proof capture is already active for this target group".into(),
+            ));
+        }
+        if self
+            .writer
+            .lock()
+            .map_err(|_| EngineError::OutputCapture("capture writer lock is poisoned".into()))?
+            .is_some()
+        {
+            return Err(EngineError::OutputCapture(
+                "the previous target-group capture is still finalizing".into(),
+            ));
+        }
+
+        fs::create_dir_all(root).map_err(|error| {
+            EngineError::OutputCapture(format!("could not create managed proof root: {error}"))
+        })?;
+        let artifact_relative_path = format!("{}.ts", request.proof_id);
+        let final_path = root.join(&artifact_relative_path);
+        let part_path = root.join(format!("{}.ts.part", request.proof_id));
+        if final_path.exists() || part_path.exists() {
+            return Err(EngineError::OutputCapture(
+                "proof artifact identity already exists in the managed root".into(),
+            ));
+        }
+        let file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&part_path)
+            .map_err(|error| {
+                EngineError::OutputCapture(format!("could not create proof part file: {error}"))
+            })?;
+        let pending = OutputCaptureStatus::Pending {
+            proof_id: request.proof_id.clone(),
+            artifact_relative_path: artifact_relative_path.clone(),
+        };
+        let status = Arc::new(Mutex::new(pending));
+        let (sender, receiver) = mpsc::sync_channel(64);
+        let mut sender_guard = self
+            .sender
+            .lock()
+            .map_err(|_| EngineError::OutputCapture("capture sender lock is poisoned".into()))?;
+        self.callback_failed.store(false, Ordering::Release);
+        self.aborted.store(false, Ordering::Release);
+        let generation = self.generation.fetch_add(1, Ordering::AcqRel) + 1;
+        *sender_guard = Some(sender);
+        *self
+            .proof
+            .lock()
+            .map_err(|_| EngineError::OutputCapture("capture state lock is poisoned".into()))? =
+            Some(ActiveOutputCapture {
+                proof_id: request.proof_id.clone(),
+                status: Arc::clone(&status),
+            });
+        self.active.store(true, Ordering::Release);
+        drop(sender_guard);
+
+        let started = OutputCaptureStarted {
+            proof_id: request.proof_id.clone(),
+            artifact_relative_path: artifact_relative_path.clone(),
+        };
+        let cleanup_part_path = part_path.clone();
+        let ingress = Arc::clone(self);
+        let handle = std::thread::Builder::new()
+            .name(format!("output-proof-{}", request.proof_id))
+            .spawn(move || {
+                run_capture_writer(
+                    ingress,
+                    request,
+                    artifact_relative_path,
+                    part_path,
+                    final_path,
+                    file,
+                    receiver,
+                    generation,
+                    status,
+                );
+            })
+            .map_err(|error| {
+                self.active.store(false, Ordering::Release);
+                let _ = self.sender.lock().map(|mut sender| sender.take());
+                let _ = fs::remove_file(&cleanup_part_path);
+                EngineError::OutputCapture(format!("could not start capture writer: {error}"))
+            })?;
+        *self
+            .writer
+            .lock()
+            .map_err(|_| EngineError::OutputCapture("capture writer lock is poisoned".into()))? =
+            Some(handle);
+        Ok(started)
+    }
+
+    fn status_for(&self, proof_id: &str) -> Result<Option<OutputCaptureStatus>, EngineError> {
+        let proof = self
+            .proof
+            .lock()
+            .map_err(|_| EngineError::OutputCapture("capture state lock is poisoned".into()))?;
+        let Some(proof) = proof.as_ref().filter(|proof| proof.proof_id == proof_id) else {
+            return Ok(None);
+        };
+        let status = proof
+            .status
+            .lock()
+            .map_err(|_| EngineError::OutputCapture("capture result lock is poisoned".into()))?
+            .clone();
+        Ok(Some(status))
+    }
+
+    fn abort_if_matches(
+        &self,
+        proof_id: &str,
+        code: &str,
+        message: &str,
+    ) -> Result<bool, EngineError> {
+        let matches = self
+            .proof
+            .lock()
+            .map_err(|_| EngineError::OutputCapture("capture state lock is poisoned".into()))?
+            .as_ref()
+            .is_some_and(|proof| proof.proof_id == proof_id);
+        if matches {
+            self.abort_any(code, message)?;
+        }
+        Ok(matches)
+    }
+
+    fn abort_any(&self, code: &str, message: &str) -> Result<(), EngineError> {
+        let proof = self
+            .proof
+            .lock()
+            .map_err(|_| EngineError::OutputCapture("capture state lock is poisoned".into()))?
+            .as_ref()
+            .map(|proof| (proof.proof_id.clone(), Arc::clone(&proof.status)));
+        let mut aborted_pending = false;
+        if let Some((proof_id, status)) = proof {
+            let mut status = status.lock().map_err(|_| {
+                EngineError::OutputCapture("capture result lock is poisoned".into())
+            })?;
+            if let OutputCaptureStatus::Pending {
+                artifact_relative_path,
+                ..
+            } = &*status
+            {
+                let artifact_relative_path = artifact_relative_path.clone();
+                // The abort flag and terminal status are committed under the
+                // same mutex used by the writer. Whichever side acquires this
+                // lock first owns the terminal transition.
+                self.aborted.store(true, Ordering::Release);
+                *status = OutputCaptureStatus::Failed {
+                    proof_id,
+                    artifact_relative_path,
+                    code: code.into(),
+                    message: message.into(),
+                };
+                aborted_pending = true;
+            }
+        }
+        if !aborted_pending {
+            return Ok(());
+        }
+        self.callback_failed.store(true, Ordering::Release);
+        let mut sender = self
+            .sender
+            .lock()
+            .map_err(|_| EngineError::OutputCapture("capture sender lock is poisoned".into()))?;
+        self.active.store(false, Ordering::Release);
+        sender.take();
+        drop(sender);
+        Ok(())
+    }
+
+    fn reap_writer(&self) -> Result<(), EngineError> {
+        let handle = self
+            .writer
+            .lock()
+            .map_err(|_| EngineError::OutputCapture("capture writer lock is poisoned".into()))?
+            .take();
+        if let Some(handle) = handle {
+            if !handle.is_finished() {
+                *self.writer.lock().map_err(|_| {
+                    EngineError::OutputCapture("capture writer lock is poisoned".into())
+                })? = Some(handle);
+                return Ok(());
+            }
+            handle
+                .join()
+                .map_err(|_| EngineError::OutputCapture("capture writer thread panicked".into()))?;
+        }
+        Ok(())
+    }
+
+    fn join_finished_by(&self, deadline: Instant) -> Result<(), EngineError> {
+        loop {
+            self.reap_writer()?;
+            if self
+                .writer
+                .lock()
+                .map_err(|_| EngineError::OutputCapture("capture writer lock is poisoned".into()))?
+                .is_none()
+            {
+                return Ok(());
+            }
+            if Instant::now() >= deadline {
+                return Err(EngineError::OutputCapture(
+                    "capture writer did not stop before the shutdown deadline".into(),
+                ));
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_capture_writer(
+    ingress: Arc<CaptureIngress>,
+    request: OutputCaptureRequest,
+    artifact_relative_path: String,
+    part_path: PathBuf,
+    final_path: PathBuf,
+    mut file: std::fs::File,
+    receiver: mpsc::Receiver<(u64, gst::Buffer)>,
+    generation: u64,
+    status: Arc<Mutex<OutputCaptureStatus>>,
+) {
+    let started = Instant::now();
+    let deadline = started + Duration::from_millis(request.duration_ms);
+    let mut digest = Sha256::new();
+    let mut capture_bytes = 0_u64;
+    let failure_proof_id = request.proof_id.clone();
+    let failure_artifact_relative_path = artifact_relative_path.clone();
+    let result = (|| -> Result<OutputCaptureReady, (&'static str, String)> {
+        loop {
+            if ingress.callback_failed.load(Ordering::Acquire) {
+                return Err((
+                    "capture_ingress_failed",
+                    "post-mux capture ingress overflowed or became unavailable".into(),
+                ));
+            }
+            let now = Instant::now();
+            if now >= deadline {
+                break;
+            }
+            let remaining = deadline.saturating_duration_since(now);
+            match receiver.recv_timeout(remaining.min(Duration::from_millis(50))) {
+                Ok((buffer_generation, buffer)) => {
+                    if buffer_generation == generation {
+                        write_capture_buffer(
+                            &mut file,
+                            &mut digest,
+                            &mut capture_bytes,
+                            request.max_bytes,
+                            &buffer,
+                        )?;
+                    }
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    return Err((
+                        "capture_interrupted",
+                        "post-mux capture ingress disconnected before its deadline".into(),
+                    ));
+                }
+            }
+        }
+
+        // Publish deactivation before taking the sender lock. A streaming
+        // callback that loses this lock race can now distinguish ordinary
+        // finalization from an active-ingress contention failure.
+        ingress.active.store(false, Ordering::Release);
+        let mut sender = ingress.sender.lock().map_err(|_| {
+            (
+                "capture_state_failed",
+                "capture sender lock is poisoned".into(),
+            )
+        })?;
+        sender.take();
+        drop(sender);
+        while let Ok((buffer_generation, buffer)) = receiver.try_recv() {
+            if buffer_generation == generation {
+                write_capture_buffer(
+                    &mut file,
+                    &mut digest,
+                    &mut capture_bytes,
+                    request.max_bytes,
+                    &buffer,
+                )?;
+            }
+        }
+        if ingress.callback_failed.load(Ordering::Acquire) {
+            return Err((
+                "capture_ingress_failed",
+                "post-mux capture ingress overflowed or became unavailable".into(),
+            ));
+        }
+        if capture_bytes == 0 {
+            return Err((
+                "capture_empty",
+                "post-mux capture produced no transport bytes".into(),
+            ));
+        }
+        file.flush().map_err(|error| {
+            (
+                "capture_write_failed",
+                format!("could not flush proof artifact: {error}"),
+            )
+        })?;
+        file.sync_all().map_err(|error| {
+            (
+                "capture_sync_failed",
+                format!("could not sync proof artifact: {error}"),
+            )
+        })?;
+        drop(file);
+        if ingress.aborted.load(Ordering::Acquire) {
+            return Err((
+                "capture_interrupted",
+                "post-mux capture was aborted before publication".into(),
+            ));
+        }
+        if final_path.exists() {
+            return Err((
+                "capture_identity_conflict",
+                "final proof artifact already exists".into(),
+            ));
+        }
+        fs::rename(&part_path, &final_path).map_err(|error| {
+            (
+                "capture_publish_failed",
+                format!("could not publish proof artifact atomically: {error}"),
+            )
+        })?;
+        if ingress.aborted.load(Ordering::Acquire) {
+            let _ = fs::remove_file(&final_path);
+            return Err((
+                "capture_interrupted",
+                "post-mux capture was aborted during publication".into(),
+            ));
+        }
+        Ok(OutputCaptureReady {
+            proof_id: request.proof_id,
+            output_index: request.output_index,
+            sink_id: request.sink_id,
+            loudness_target: request.loudness_target,
+            artifact_relative_path,
+            capture_bytes,
+            capture_sha256: format!("{:x}", digest.finalize()),
+            capture_duration_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+        })
+    })();
+
+    ingress.active.store(false, Ordering::Release);
+    let _ = ingress.sender.lock().map(|mut sender| sender.take());
+    if result.is_err() {
+        let _ = fs::remove_file(&part_path);
+    }
+    let mut remove_published_artifact = false;
+    if let Ok(mut current) = status.lock() {
+        if matches!(*current, OutputCaptureStatus::Pending { .. }) {
+            if ingress.aborted.load(Ordering::Acquire) {
+                remove_published_artifact = result.is_ok();
+                *current = OutputCaptureStatus::Failed {
+                    proof_id: failure_proof_id,
+                    artifact_relative_path: failure_artifact_relative_path,
+                    code: "capture_interrupted".into(),
+                    message: "post-mux capture was aborted before terminal publication".into(),
+                };
+            } else {
+                *current = match result {
+                    Ok(ready) => OutputCaptureStatus::Ready(ready),
+                    Err((code, message)) => OutputCaptureStatus::Failed {
+                        proof_id: failure_proof_id,
+                        artifact_relative_path: failure_artifact_relative_path,
+                        code: code.into(),
+                        message,
+                    },
+                };
+            }
+        } else if result.is_ok() {
+            remove_published_artifact = true;
+        }
+    }
+    if remove_published_artifact {
+        let _ = fs::remove_file(&final_path);
+    }
+}
+
+fn write_capture_buffer(
+    file: &mut std::fs::File,
+    digest: &mut Sha256,
+    capture_bytes: &mut u64,
+    max_bytes: u64,
+    buffer: &gst::Buffer,
+) -> Result<(), (&'static str, String)> {
+    let map = buffer.map_readable().map_err(|_| {
+        (
+            "capture_map_failed",
+            "post-mux transport buffer could not be mapped".into(),
+        )
+    })?;
+    let bytes = map.as_slice();
+    let next = capture_bytes
+        .checked_add(bytes.len() as u64)
+        .ok_or(("capture_too_large", "capture byte count overflowed".into()))?;
+    if next > max_bytes {
+        return Err((
+            "capture_too_large",
+            "post-mux capture exceeded its hard byte limit".into(),
+        ));
+    }
+    file.write_all(bytes).map_err(|error| {
+        (
+            "capture_write_failed",
+            format!("could not write proof artifact: {error}"),
+        )
+    })?;
+    digest.update(bytes);
+    *capture_bytes = next;
+    Ok(())
+}
+
+fn validate_proof_artifact_root(root: &Path) -> Result<PathBuf, EngineError> {
+    use std::path::Component;
+
+    if !root.is_absolute()
+        || root.file_name().and_then(|name| name.to_str()) != Some("output-proofs")
+        || root.to_string_lossy().chars().any(char::is_control)
+        || root
+            .components()
+            .any(|component| matches!(component, Component::ParentDir | Component::CurDir))
+    {
+        return Err(EngineError::OutputCapture(
+            "proof artifact root must be an absolute managed output-proofs directory".into(),
+        ));
+    }
+    Ok(root.to_path_buf())
+}
+
+fn is_canonical_uuid(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    bytes.len() == 36
+        && [8, 13, 18, 23].iter().all(|&index| bytes[index] == b'-')
+        && bytes
+            .iter()
+            .enumerate()
+            .all(|(index, byte)| matches!(index, 8 | 13 | 18 | 23) || byte.is_ascii_hexdigit())
 }
 
 pub type SyntheticPlayout = PersistentPlayout;
@@ -2223,6 +2981,33 @@ fn build_loudness_variant(
         audio_count.fetch_add(1, Ordering::AcqRel);
         gst::PadProbeReturn::Ok
     });
+    let transport_fanout = element("tee", format!("{prefix}-transport-fanout"))?;
+    let capture_ingress = Arc::new(CaptureIngress::new());
+    let capture_pad = transport_fanout
+        .static_pad("sink")
+        .ok_or(EngineError::MissingPad {
+            element: "transport-fanout",
+            pad: "sink",
+        })?;
+    let ingress = Arc::clone(&capture_ingress);
+    capture_pad.add_probe(
+        gst::PadProbeType::BUFFER | gst::PadProbeType::BUFFER_LIST,
+        move |_, info| {
+            if !ingress.active.load(Ordering::Acquire) {
+                return gst::PadProbeReturn::Ok;
+            }
+            if let Some(buffer) = info.buffer() {
+                ingress.offer(buffer.as_ref());
+            } else if let Some(list) = info.buffer_list() {
+                for buffer in list.iter() {
+                    ingress.offer(buffer);
+                }
+            } else {
+                ingress.callback_failed.store(true, Ordering::Release);
+            }
+            gst::PadProbeReturn::Ok
+        },
+    );
     Ok(LoudnessVariant {
         video_queue: bounded_queue(format!("{prefix}-video-queue"))?,
         audio_queue: bounded_queue(format!("{prefix}-audio-queue"))?,
@@ -2242,7 +3027,8 @@ fn build_loudness_variant(
         audio_parser,
         audio_buffers,
         mux,
-        transport_fanout: element("tee", format!("{prefix}-transport-fanout"))?,
+        transport_fanout,
+        capture_ingress,
     })
 }
 

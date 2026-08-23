@@ -46,6 +46,19 @@ pub fn managed_cg_image_root(database_path: &Path) -> PathBuf {
     parent.join(station_cg::CG_IMAGE_SUBDIRECTORY)
 }
 
+pub fn managed_output_proof_root(database_path: &Path) -> PathBuf {
+    let parent = database_path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .to_path_buf();
+    let parent = if parent.is_absolute() {
+        parent
+    } else {
+        std::env::current_dir().map_or(parent.clone(), |current| current.join(parent))
+    };
+    parent.join("output-proofs")
+}
+
 fn expire_due_bulletins(
     store: &StationStore,
     channel_id: &str,
@@ -343,6 +356,7 @@ pub fn worker_output_configurations(
                 .map_err(|error| OrchestrationError::InvalidDestination(error.into()))?;
             match sink.kind {
                 OutputSinkKind::UdpTs => Ok(WorkerOutputConfiguration::UdpTs {
+                    sink_id: sink.sink_id.clone(),
                     destination: sink.destination.clone(),
                     loudness_target_lufs: loudness_target,
                 }),
@@ -363,6 +377,7 @@ pub fn worker_output_configurations(
                         None
                     };
                     Ok(WorkerOutputConfiguration::Srt {
+                        sink_id: sink.sink_id.clone(),
                         uri: sink.destination.clone(),
                         passphrase,
                         loudness_target_lufs: loudness_target,
@@ -432,13 +447,14 @@ impl ChannelController {
             })
             .collect();
         let worker_id = format!("station-worker-{}", channel.channel_id);
-        let supervisor = WorkerSupervisor::launch_with_outputs_and_cg_image_root(
+        let supervisor = WorkerSupervisor::launch_with_outputs_and_roots(
             worker_executable,
             &worker_id,
             &channel.channel_id,
             journal_path,
             &outputs,
             &managed_cg_image_root(database_path),
+            &managed_output_proof_root(database_path),
             channel.output_profile,
             timeout.max(MINIMUM_WORKER_BOOTSTRAP_TIMEOUT),
         )

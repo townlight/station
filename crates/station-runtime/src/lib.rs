@@ -1,6 +1,6 @@
 use std::io::{Read, Write};
 use std::net::SocketAddr;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
@@ -148,6 +148,32 @@ impl WorkerSupervisor {
         output_profile: OutputProfileId,
         timeout: Duration,
     ) -> Result<Self, SupervisorError> {
+        let proof_artifact_root = default_output_proof_root(journal_path);
+        Self::launch_with_outputs_and_roots(
+            executable,
+            worker_id,
+            channel_id,
+            journal_path,
+            outputs,
+            cg_image_root,
+            &proof_artifact_root,
+            output_profile,
+            timeout,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn launch_with_outputs_and_roots(
+        executable: &Path,
+        worker_id: &str,
+        channel_id: &str,
+        journal_path: &Path,
+        outputs: &[WorkerOutputConfiguration],
+        cg_image_root: &Path,
+        proof_artifact_root: &Path,
+        output_profile: OutputProfileId,
+        timeout: Duration,
+    ) -> Result<Self, SupervisorError> {
         let cg_image_root = if cg_image_root.is_absolute() {
             cg_image_root.to_path_buf()
         } else {
@@ -155,12 +181,20 @@ impl WorkerSupervisor {
                 .map_err(|error| io_error("resolve CG image root", error))?
                 .join(cg_image_root)
         };
+        let proof_artifact_root = if proof_artifact_root.is_absolute() {
+            proof_artifact_root.to_path_buf()
+        } else {
+            std::env::current_dir()
+                .map_err(|error| io_error("resolve output proof root", error))?
+                .join(proof_artifact_root)
+        };
         let bootstrap = WorkerBootstrapEnvelope {
             version: PROTOCOL_VERSION,
             worker_id: worker_id.to_string(),
             channel_id: channel_id.to_string(),
             output_profile: output_profile.storage_name().to_string(),
             cg_image_root: cg_image_root.to_string_lossy().into_owned(),
+            proof_artifact_root: proof_artifact_root.to_string_lossy().into_owned(),
             outputs: outputs.to_vec(),
         };
         let bootstrap_frame =
@@ -299,6 +333,18 @@ impl WorkerSupervisor {
     }
 }
 
+fn default_output_proof_root(journal_path: &Path) -> PathBuf {
+    let journal_directory = journal_path.parent().unwrap_or_else(|| Path::new("."));
+    let managed_data_root = if journal_directory.file_name().and_then(|name| name.to_str())
+        == Some("channel-journals")
+    {
+        journal_directory.parent().unwrap_or(journal_directory)
+    } else {
+        journal_directory
+    };
+    managed_data_root.join("output-proofs")
+}
+
 fn udp_outputs_for_profile(
     destinations: &[SocketAddr],
     output_profile: OutputProfileId,
@@ -311,7 +357,9 @@ fn udp_outputs_for_profile(
             })?;
     Ok(destinations
         .iter()
-        .map(|destination| WorkerOutputConfiguration::UdpTs {
+        .enumerate()
+        .map(|(index, destination)| WorkerOutputConfiguration::UdpTs {
+            sink_id: format!("00000000-0000-4000-8000-{:012x}", index + 1),
             destination: destination.to_string(),
             loudness_target_lufs,
         })
@@ -415,6 +463,20 @@ mod tests {
     }
 
     #[test]
+    fn default_proof_root_is_a_sibling_of_the_production_journal_directory() {
+        assert_eq!(
+            default_output_proof_root(Path::new(
+                r"C:\ProgramData\TownLight Station\channel-journals\channel.tlj",
+            )),
+            PathBuf::from(r"C:\ProgramData\TownLight Station\output-proofs")
+        );
+        assert_eq!(
+            default_output_proof_root(Path::new(r"C:\temp\channel.tlj")),
+            PathBuf::from(r"C:\temp\output-proofs")
+        );
+    }
+
+    #[test]
     fn udp_bootstrap_outputs_use_the_selected_profile_target() {
         let proof = udp_outputs_for_profile(
             &[destination("127.0.0.1:5500")],
@@ -460,6 +522,7 @@ mod tests {
             let WorkerOutputConfiguration::UdpTs {
                 destination,
                 loudness_target_lufs,
+                ..
             } = output
             else {
                 panic!("all configured destinations must remain UDP outputs");

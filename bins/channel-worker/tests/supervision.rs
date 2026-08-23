@@ -65,7 +65,7 @@ fn launches_handshakes_commands_and_cleanly_stops_the_real_worker() {
     assert_eq!(ready.sequence, 1);
     assert!(matches!(
         ready.event,
-        WorkerEvent::Ready { graph_revision: 0 }
+        WorkerEvent::Ready { graph_revision: 1 }
     ));
     let mut datagram = [0_u8; 65_536];
     let received = output.recv(&mut datagram).unwrap();

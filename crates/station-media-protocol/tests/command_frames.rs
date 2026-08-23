@@ -144,16 +144,20 @@ fn round_trips_private_worker_bootstrap_without_process_arguments() {
         channel_id: "62a47b7e-2a03-48d6-8703-a6e5ce986527".into(),
         output_profile: "atsc-720p5994".into(),
         cg_image_root: r"C:\ProgramData\TownLight Station\cg-images".into(),
+        proof_artifact_root: r"C:\ProgramData\TownLight Station\output-proofs".into(),
         outputs: vec![
             WorkerOutputConfiguration::UdpTs {
+                sink_id: "11111111-2222-4333-8444-555555555555".into(),
                 destination: "127.0.0.1:5500".into(),
                 loudness_target_lufs: LoudnessTarget::STREAMING,
             },
             WorkerOutputConfiguration::UdpTs {
+                sink_id: "22222222-3333-4444-8555-666666666666".into(),
                 destination: "127.0.0.1:5501".into(),
                 loudness_target_lufs: LoudnessTarget::STREAMING,
             },
             WorkerOutputConfiguration::Srt {
+                sink_id: "33333333-4444-4555-8666-777777777777".into(),
                 uri: "srt://127.0.0.1:5600".into(),
                 passphrase: Some(SrtPassphrase::new("private-srt-proof".into()).unwrap()),
                 loudness_target_lufs: LoudnessTarget::STREAMING,
@@ -217,6 +221,7 @@ fn bootstrap_rejects_relative_traversing_or_wrong_managed_image_roots() {
             channel_id: "channel".into(),
             output_profile: "profile".into(),
             cg_image_root: root.into(),
+            proof_artifact_root: r"C:\ProgramData\TownLight Station\output-proofs".into(),
             outputs: Vec::new(),
         };
         assert!(matches!(
@@ -253,11 +258,11 @@ fn round_trips_asset_load_and_take_commands() {
 #[test]
 fn rejects_a_command_from_an_incompatible_future_major_version() {
     let mut command = take_live_command();
-    command.version = ProtocolVersion { major: 3, minor: 0 };
+    command.version = ProtocolVersion { major: 4, minor: 0 };
     let frame = encode_command_frame(&command).expect("command encodes");
     assert_eq!(
         decode_command_frame(&frame),
-        Err(ProtocolError::UnsupportedMajor(3))
+        Err(ProtocolError::UnsupportedMajor(4))
     );
 }
 
