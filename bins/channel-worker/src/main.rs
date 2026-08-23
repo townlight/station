@@ -815,6 +815,62 @@ fn decide_event(
                 ),
             }
         }
+        ChannelCommand::AbortOutputProof { proof_id } => {
+            let capture_graph_revision = proof_graph_revisions
+                .get(proof_id)
+                .copied()
+                .unwrap_or(*graph_revision);
+            let artifact_relative_path = match media.poll_output_capture(proof_id) {
+                Ok(OutputCaptureStatus::Pending {
+                    artifact_relative_path,
+                    ..
+                }) => artifact_relative_path,
+                Ok(OutputCaptureStatus::Failed { .. }) | Ok(OutputCaptureStatus::Ready(_)) => {
+                    return (
+                        rejection(
+                            command,
+                            "output_proof_already_terminal",
+                            "The output proof reached a terminal state before it could be aborted.",
+                        ),
+                        false,
+                    );
+                }
+                Err(error) => {
+                    return (
+                        rejection(
+                            command,
+                            "output_proof_abort_failed",
+                            &format!("The output proof could not be located for abort: {error:?}"),
+                        ),
+                        false,
+                    );
+                }
+            };
+            match media.abort_output_capture(proof_id) {
+                Ok(()) => {
+                    proof_graph_revisions.remove(proof_id);
+                    (
+                        WorkerEvent::OutputProofFailed {
+                            proof_id: proof_id.clone(),
+                            artifact_relative_path,
+                            worker_instance_id: worker_instance_id.into(),
+                            graph_revision: capture_graph_revision,
+                            code: "capture_aborted".into(),
+                            message: "output capture was aborted".into(),
+                        },
+                        false,
+                    )
+                }
+                Err(error) => (
+                    rejection(
+                        command,
+                        "output_proof_abort_failed",
+                        &format!("The output proof could not be aborted: {error:?}"),
+                    ),
+                    false,
+                ),
+            }
+        }
         ChannelCommand::Shutdown => (WorkerEvent::ShutdownComplete, true),
         ChannelCommand::ArmLive { input, arm_token } => {
             if live_state.is_some() {

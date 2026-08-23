@@ -29,7 +29,7 @@ fn start_command() -> CommandEnvelope {
 }
 
 #[test]
-fn start_and_poll_proof_commands_round_trip_without_blocking_shape() {
+fn start_poll_and_abort_proof_commands_round_trip_without_blocking_shape() {
     let start = start_command();
     let decoded = decode_command_frame(&encode_command_frame(&start).unwrap()).unwrap();
     assert_eq!(decoded, start);
@@ -46,6 +46,20 @@ fn start_and_poll_proof_commands_round_trip_without_blocking_shape() {
     assert_eq!(
         decode_command_frame(&encode_command_frame(&poll).unwrap()).unwrap(),
         poll
+    );
+
+    let abort = CommandEnvelope {
+        version: PROTOCOL_VERSION,
+        channel_id: "channel-1".into(),
+        command_id: "command-3".into(),
+        expected_sequence: 8,
+        command: ChannelCommand::AbortOutputProof {
+            proof_id: PROOF_ID.into(),
+        },
+    };
+    assert_eq!(
+        decode_command_frame(&encode_command_frame(&abort).unwrap()).unwrap(),
+        abort
     );
 }
 
@@ -119,7 +133,7 @@ fn malformed_proof_identity_bounds_and_artifact_paths_fail_closed() {
 
     let mut command = start_command();
     if let ChannelCommand::StartOutputProof { duration_ms, .. } = &mut command.command {
-        *duration_ms = 300_001;
+        *duration_ms = 302_001;
     }
     assert!(encode_command_frame(&command).is_err());
 
@@ -140,6 +154,12 @@ fn malformed_proof_identity_bounds_and_artifact_paths_fail_closed() {
         proof_id: "bad-proof-id".into(),
     };
     assert!(encode_command_frame(&poll).is_err());
+
+    let mut abort = start_command();
+    abort.command = ChannelCommand::AbortOutputProof {
+        proof_id: "BAD-PROOF-ID".into(),
+    };
+    assert!(encode_command_frame(&abort).is_err());
 }
 
 #[test]

@@ -26,7 +26,7 @@ use station_domain::{
     validate_alert_channel_target,
 };
 use station_live::{LiveSource, LiveSourceWriteError, TakeoverSession, TakeoverState};
-use station_maintenance::{read_active_slot_receipt, verify_active_application};
+use station_maintenance::read_verified_candidate_identity;
 use station_media_lifecycle::{
     AssetLoudnessAnalysis, AssetReadinessView, IngestJobStatus, IngestSourceKind,
     LoudnessGateStatus, MediaIngestJob, MissingMediaAlert, ReadinessDashboard, ReadinessState,
@@ -46,7 +46,8 @@ use station_schedule::{
 };
 use station_storage::{
     AlertChannelSecret, CgSnapshotReadError, CgWriteError, ChannelWriteError, CommitWriteError,
-    HeadendProfileWriteError, ProfileWriteError, StationStore, StoredSinkLoudnessProof,
+    HeadendProfileWriteError, OutputLoudnessProofJob, OutputLoudnessProofJobRecord,
+    OutputLoudnessProofJobState, ProfileWriteError, StationStore, StoredSinkLoudnessProof,
 };
 use station_update::UpdateCheckTrigger;
 use station_update_coordinator::CoordinatorError;
@@ -59,6 +60,9 @@ const MAX_SMALL_REQUEST_BODY: usize = 65_536;
 const MAX_CG_IMAGE_BODY: usize = 8 * 1024 * 1024;
 const STATION_BOX_CACHE_TTL: Duration = Duration::from_secs(60);
 const LOUDNESS_PROOF_MAX_AGE_MS: i64 = 24 * 60 * 60 * 1_000;
+const LOUDNESS_PROOF_MIN_DURATION_MS: u64 = 3_000;
+const LOUDNESS_PROOF_MAX_DURATION_MS: u64 = 300_000;
+const LOUDNESS_PROOF_MAX_CAPTURE_BYTES: u64 = 256 * 1024 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -113,6 +117,44 @@ struct SinkLoudnessProofResponse {
     measurement_method: Option<String>,
     detail: Option<String>,
     artifact_relative_path: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RequestLoudnessProofJob {
+    sink_id: String,
+    sample_duration_ms: u64,
+    max_capture_bytes: u64,
+}
+
+#[derive(Debug, Serialize)]
+struct LoudnessProofJobResponse {
+    job_id: String,
+    channel_id: String,
+    target_group: String,
+    sink_id: String,
+    target_lufs_milli: i32,
+    candidate_version: String,
+    source_commit: String,
+    configuration_hash: String,
+    sample_duration_ms: u64,
+    max_capture_bytes: u64,
+    state: &'static str,
+    created_at_unix_ms: i64,
+    updated_at_unix_ms: i64,
+    lease_expires_at_unix_ms: Option<i64>,
+    capture: Option<LoudnessProofJobCaptureResponse>,
+    completed_at_unix_ms: Option<i64>,
+    failed_at_unix_ms: Option<i64>,
+    failure_detail: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct LoudnessProofJobCaptureResponse {
+    artifact_relative_path: String,
+    capture_bytes: u64,
+    sample_duration_ms: u64,
+    capture_sha256: String,
 }
 
 #[derive(Deserialize)]
@@ -469,6 +511,17 @@ impl Api {
                 if path.starts_with("/api/v1/channels/") && path.ends_with("/loudness-proof") =>
             {
                 self.channel_loudness_proof(path)
+            }
+            ("POST", path)
+                if path.starts_with("/api/v1/channels/") && path.ends_with("/loudness-proof") =>
+            {
+                self.request_channel_loudness_proof(path, body)
+            }
+            ("GET", path)
+                if path.starts_with("/api/v1/channels/")
+                    && path.contains("/loudness-proof/jobs/") =>
+            {
+                self.channel_loudness_proof_job(path)
             }
             ("POST", path)
                 if path.starts_with("/api/v1/channels/") && path.ends_with("/headend-profile") =>
@@ -1622,6 +1675,177 @@ impl Api {
         )
     }
 
+    fn request_channel_loudness_proof(&self, path: &str, body: Option<&[u8]>) -> ApiResponse {
+        let Some(channel_id) = path_identity(path, "/api/v1/channels/", "/loudness-proof") else {
+            return error_response(400, "invalid_path", "The channel identity is invalid.");
+        };
+        if !is_api_uuid(channel_id) {
+            return error_response(400, "invalid_path", "The channel identity is invalid.");
+        }
+        let Some(request) = parse_body::<RequestLoudnessProofJob>(body) else {
+            return error_response(
+                400,
+                "invalid_json",
+                "A loudness proof job request body is required.",
+            );
+        };
+        if !is_canonical_api_uuid(&request.sink_id)
+            || !(LOUDNESS_PROOF_MIN_DURATION_MS..=LOUDNESS_PROOF_MAX_DURATION_MS)
+                .contains(&request.sample_duration_ms)
+            || !(1..=LOUDNESS_PROOF_MAX_CAPTURE_BYTES).contains(&request.max_capture_bytes)
+        {
+            return error_response(
+                422,
+                "validation_failed",
+                "The sink identity, sample duration, or capture limit is invalid or unbounded.",
+            );
+        }
+
+        let station_box = match self.station_box_profile_uncached() {
+            Ok(profile) => profile,
+            Err(message) => return error_response(500, "readiness_probe_failed", &message),
+        };
+        if !station_box.release.candidate_verified {
+            return error_response(
+                409,
+                "candidate_not_verified",
+                "A verified installed candidate is required before requesting loudness proof.",
+            );
+        }
+        let Some(source_commit) = station_box.source_commit.as_deref() else {
+            return error_response(
+                409,
+                "candidate_not_verified",
+                "The verified candidate has no usable source commit identity.",
+            );
+        };
+        if !is_api_source_commit(source_commit) {
+            return error_response(
+                409,
+                "candidate_not_verified",
+                "The verified candidate source commit identity is invalid.",
+            );
+        }
+
+        let snapshot = match self
+            .storage
+            .read_channel_loudness_proof_snapshot(channel_id)
+        {
+            Ok(Some(snapshot)) => snapshot,
+            Ok(None) => {
+                return error_response(404, "channel_not_found", "The channel does not exist.");
+            }
+            Err(message) => return error_response(500, "storage_error", &message),
+        };
+        let Some(sink) = snapshot
+            .output_sinks
+            .iter()
+            .find(|sink| sink.sink_id == request.sink_id)
+        else {
+            return error_response(
+                409,
+                "sink_not_enabled",
+                "The requested sink is not an enabled UDP or SRT output.",
+            );
+        };
+        let target_lufs_milli = (sink.loudness_target_lufs * 1_000.0).round() as i32;
+        let target_group = match target_lufs_milli {
+            -24_000 => "cable",
+            -16_000 => "streaming",
+            _ => {
+                return error_response(
+                    409,
+                    "unsupported_loudness_target",
+                    "The requested sink has no executable loudness target.",
+                );
+            }
+        };
+        let created_at_unix_ms = match system_time_millis() {
+            Ok(value) => value,
+            Err(message) => return error_response(500, "clock_error", &message),
+        };
+        let job_id = match secure_canonical_uuid() {
+            Ok(value) => value,
+            Err(message) => return error_response(500, "entropy_unavailable", &message),
+        };
+        let job = OutputLoudnessProofJob {
+            job_id,
+            channel_id: channel_id.into(),
+            target_group: target_group.into(),
+            sink_id: sink.sink_id.clone(),
+            target_lufs_milli,
+            candidate_version: station_box.product_version,
+            source_commit: Some(source_commit.into()),
+            configuration_hash: snapshot.configuration_hash,
+            sample_duration_ms: request.sample_duration_ms,
+            max_capture_bytes: request.max_capture_bytes,
+            created_at_unix_ms,
+        };
+        let created = match self.storage.create_output_loudness_job(&job) {
+            Ok(created) => created,
+            Err(message) => return loudness_job_storage_error(&message),
+        };
+        if !created {
+            return error_response(
+                409,
+                "job_already_active",
+                "An active loudness proof job already exists for this target group.",
+            );
+        }
+        let record = match self.storage.read_output_loudness_job(&job.job_id) {
+            Ok(Some(record)) => record,
+            Ok(None) => {
+                return error_response(500, "storage_error", "The created job disappeared.");
+            }
+            Err(message) => return error_response(500, "storage_error", &message),
+        };
+        json_response(
+            202,
+            serde_json::to_vec(&loudness_job_response(record))
+                .expect("serializing loudness proof job response cannot fail"),
+        )
+    }
+
+    fn channel_loudness_proof_job(&self, path: &str) -> ApiResponse {
+        let Some((channel_id, job_id)) = loudness_job_path(path) else {
+            return error_response(
+                400,
+                "invalid_path",
+                "The channel or job identity is invalid.",
+            );
+        };
+        if !is_api_uuid(channel_id) || !is_canonical_api_uuid(job_id) {
+            return error_response(
+                400,
+                "invalid_path",
+                "The channel or job identity is invalid.",
+            );
+        }
+        let record = match self.storage.read_output_loudness_job(job_id) {
+            Ok(Some(record)) => record,
+            Ok(None) => {
+                return error_response(
+                    404,
+                    "job_not_found",
+                    "The loudness proof job does not exist.",
+                );
+            }
+            Err(message) => return error_response(500, "storage_error", &message),
+        };
+        if record.channel_id != channel_id {
+            return error_response(
+                404,
+                "job_not_found",
+                "The loudness proof job does not exist.",
+            );
+        }
+        json_response(
+            200,
+            serde_json::to_vec(&loudness_job_response(record))
+                .expect("serializing loudness proof job response cannot fail"),
+        )
+    }
+
     fn apply_channel_headend_profile(&self, path: &str, body: Option<&[u8]>) -> ApiResponse {
         let Some(channel_id) = path_identity(path, "/api/v1/channels/", "/headend-profile") else {
             return error_response(400, "invalid_path", "The channel identity is invalid.");
@@ -1663,13 +1887,13 @@ impl Api {
     }
 
     fn headend_readiness(&self, channel_id: Option<&str>) -> ApiResponse {
-        let generated_at_unix_ms = match system_time_millis() {
-            Ok(value) => value,
-            Err(message) => return error_response(500, "clock_error", &message),
-        };
         let station_box = match self.cached_station_box_profile() {
             Ok(profile) => profile,
             Err(message) => return error_response(500, "readiness_probe_failed", &message),
+        };
+        let generated_at_unix_ms = match system_time_millis() {
+            Ok(value) => value.max(station_box.generated_at_unix_ms),
+            Err(message) => return error_response(500, "clock_error", &message),
         };
         let probe = match collect_headend_probe(&self.storage, generated_at_unix_ms, channel_id) {
             Ok(Some(probe)) => probe,
@@ -1722,8 +1946,12 @@ impl Api {
     }
 
     fn commissioning_report(&self) -> ApiResponse {
+        let station_box = match self.cached_station_box_profile() {
+            Ok(profile) => profile,
+            Err(message) => return error_response(500, "readiness_probe_failed", &message),
+        };
         let generated_at_unix_ms = match system_time_millis() {
-            Ok(value) => value,
+            Ok(value) => value.max(station_box.generated_at_unix_ms),
             Err(message) => return error_response(500, "clock_error", &message),
         };
         let mut checks = Vec::new();
@@ -1835,10 +2063,6 @@ impl Api {
             });
         }
 
-        let station_box = match self.cached_station_box_profile() {
-            Ok(profile) => profile,
-            Err(message) => return error_response(500, "readiness_probe_failed", &message),
-        };
         let headend_probe = match collect_headend_probe(&self.storage, generated_at_unix_ms, None) {
             Ok(Some(probe)) => probe,
             Ok(None) => unreachable!("the aggregate headend probe is always present"),
@@ -3215,6 +3439,52 @@ fn is_api_uuid(value: &str) -> bool {
             .all(|(index, byte)| matches!(index, 8 | 13 | 18 | 23) || byte.is_ascii_hexdigit())
 }
 
+fn is_canonical_api_uuid(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    bytes.len() == 36
+        && [8, 13, 18, 23].iter().all(|&index| bytes[index] == b'-')
+        && bytes.iter().enumerate().all(|(index, byte)| {
+            matches!(index, 8 | 13 | 18 | 23)
+                || byte.is_ascii_digit()
+                || (b'a'..=b'f').contains(byte)
+        })
+}
+
+fn is_api_source_commit(value: &str) -> bool {
+    value.len() == 40
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+}
+
+fn secure_canonical_uuid() -> Result<String, String> {
+    let mut bytes = [0_u8; 16];
+    getrandom::fill(&mut bytes).map_err(|error| {
+        format!("the operating system could not generate a job identity: {error:?}")
+    })?;
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    Ok(format!(
+        "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+        bytes[0],
+        bytes[1],
+        bytes[2],
+        bytes[3],
+        bytes[4],
+        bytes[5],
+        bytes[6],
+        bytes[7],
+        bytes[8],
+        bytes[9],
+        bytes[10],
+        bytes[11],
+        bytes[12],
+        bytes[13],
+        bytes[14],
+        bytes[15],
+    ))
+}
+
 fn live_storage_error(message: &str) -> ApiResponse {
     if message.contains("does not exist") {
         return error_response(404, "not_found", message);
@@ -3415,6 +3685,75 @@ fn loudness_proof_response(
     }
 }
 
+fn loudness_job_path(path: &str) -> Option<(&str, &str)> {
+    let remainder = path.strip_prefix("/api/v1/channels/")?;
+    let (channel_id, job_id) = remainder.split_once("/loudness-proof/jobs/")?;
+    (!channel_id.is_empty()
+        && !job_id.is_empty()
+        && !channel_id.contains('/')
+        && !job_id.contains('/')
+        && !channel_id.contains(['?', '%', '\\'])
+        && !job_id.contains(['?', '%', '\\']))
+    .then_some((channel_id, job_id))
+}
+
+fn loudness_job_state_name(state: OutputLoudnessProofJobState) -> &'static str {
+    match state {
+        OutputLoudnessProofJobState::Pending => "pending",
+        OutputLoudnessProofJobState::Claimed => "claimed",
+        OutputLoudnessProofJobState::CapturePending => "capture_pending",
+        OutputLoudnessProofJobState::Analyzing => "analyzing",
+        OutputLoudnessProofJobState::Completed => "completed",
+        OutputLoudnessProofJobState::Failed => "failed",
+    }
+}
+
+fn loudness_job_response(record: OutputLoudnessProofJobRecord) -> LoudnessProofJobResponse {
+    LoudnessProofJobResponse {
+        job_id: record.job_id,
+        channel_id: record.channel_id,
+        target_group: record.target_group,
+        sink_id: record.sink_id,
+        target_lufs_milli: record.target_lufs_milli,
+        candidate_version: record.candidate_version,
+        source_commit: record.source_commit.unwrap_or_default(),
+        configuration_hash: record.configuration_hash,
+        sample_duration_ms: record.sample_duration_ms,
+        max_capture_bytes: record.max_capture_bytes,
+        state: loudness_job_state_name(record.state),
+        created_at_unix_ms: record.created_at_unix_ms,
+        updated_at_unix_ms: record.updated_at_unix_ms,
+        lease_expires_at_unix_ms: record.lease_expires_at_unix_ms,
+        capture: record
+            .capture
+            .map(|capture| LoudnessProofJobCaptureResponse {
+                artifact_relative_path: capture.artifact_relative_path,
+                capture_bytes: capture.capture_bytes,
+                sample_duration_ms: capture.sample_duration_ms,
+                capture_sha256: capture.capture_sha256,
+            }),
+        completed_at_unix_ms: record.completed_at_unix_ms,
+        failed_at_unix_ms: record.failed_at_unix_ms,
+        failure_detail: record.failure_detail,
+    }
+}
+
+fn loudness_job_storage_error(message: &str) -> ApiResponse {
+    if message.contains("already") || message.contains("active") {
+        return error_response(409, "job_already_active", message);
+    }
+    if message.contains("stale") || message.contains("changed") {
+        return error_response(409, "configuration_changed", message);
+    }
+    if message.contains("not currently configured") || message.contains("not an enabled") {
+        return error_response(409, "sink_not_enabled", message);
+    }
+    if message.contains("invalid") || message.contains("must ") || message.contains("unbounded") {
+        return error_response(422, "validation_failed", message);
+    }
+    error_response(500, "storage_error", message)
+}
+
 fn collect_headend_probe(
     storage: &StationStore,
     generated_at_unix_ms: i64,
@@ -3525,7 +3864,15 @@ fn collect_station_box_probe(
         .parent()
         .ok_or_else(|| "station database has no parent directory".to_string())?;
     let (receipt_version, receipt_commit, receipt_verified, receipt_detail) =
-        read_release_receipts(data_directory, application_directory);
+        match read_verified_candidate_identity(data_directory, application_directory) {
+            Ok(identity) => (
+                Some(identity.version),
+                Some(identity.source_commit),
+                true,
+                "The active application manifest files and recorded approved media-runtime SHA-256 identity are verified; live engine and factory readiness remains a separate probe.".into(),
+            ),
+            Err(detail) => (None, None, false, detail),
+        };
     let backup_writable = resources.backup_volume_writable;
     let clock_sync = probe_windows_clock_sync();
     Ok(StationBoxProbeInput {
@@ -3796,53 +4143,6 @@ fn run_bounded_command(
         success: status.success(),
         stdout,
     })
-}
-
-fn read_release_receipts(
-    data_directory: &Path,
-    application_directory: &Path,
-) -> (Option<String>, Option<String>, bool, String) {
-    let install = read_bounded_json(&data_directory.join("install-receipt.json"));
-    let install_version = install
-        .as_ref()
-        .and_then(|value| value.get("version"))
-        .and_then(serde_json::Value::as_str)
-        .map(str::to_string);
-    let install_commit = install
-        .as_ref()
-        .and_then(|value| value.get("source_commit"))
-        .and_then(serde_json::Value::as_str)
-        .map(str::to_string);
-    let active = read_active_slot_receipt(&data_directory.join("active-slot.json")).ok();
-    let active_version = active
-        .as_ref()
-        .map(|receipt| receipt.active.package_manifest.version.as_str());
-    let active_commit = active
-        .as_ref()
-        .map(|receipt| receipt.active.package_manifest.source_commit.as_str());
-    let application_verified = install_version.as_deref() == active_version
-        && install_commit.as_deref() == active_commit
-        && active.as_ref().is_some_and(|receipt| {
-            verify_active_application(application_directory, &receipt.active).is_ok()
-        });
-    (
-        install_version,
-        install_commit,
-        false,
-        if application_verified {
-            "The install and active-slot receipts agree and both active binaries match their manifest hashes; the private media-runtime hash is not yet live-verified.".into()
-        } else {
-            "A matching install/active-slot receipt pair is not available.".into()
-        },
-    )
-}
-
-fn read_bounded_json(path: &Path) -> Option<serde_json::Value> {
-    let metadata = std::fs::symlink_metadata(path).ok()?;
-    if !metadata.file_type().is_file() || metadata.len() > 65_536 {
-        return None;
-    }
-    serde_json::from_slice(&std::fs::read(path).ok()?).ok()
 }
 
 fn system_time_millis() -> Result<i64, String> {
@@ -4667,6 +4967,241 @@ mod tests {
         let expired: serde_json::Value = serde_json::from_slice(&expired.body).unwrap();
         assert_eq!(expired["sinks"][0]["measurement_status"], "expired");
         assert_eq!(expired["sinks"][0]["receiver_acceptance"], "unknown");
+
+        std::fs::remove_dir_all(application).unwrap();
+        let _ = std::fs::remove_file(database);
+    }
+
+    #[test]
+    fn loudness_proof_job_post_creates_durable_job_and_get_returns_its_status() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let database = std::env::temp_dir().join(format!(
+            "townlight-loudness-job-api-{}-{nonce}.db",
+            std::process::id()
+        ));
+        let application = database.with_extension("application");
+        std::fs::create_dir_all(&application).unwrap();
+        let api =
+            Api::open_with_station_box_probe(&database, &application, station_box_probe()).unwrap();
+        let channel_id = "11111111-2222-4333-8444-555555555555";
+        let sink_id = "22222222-3333-4444-8555-666666666666";
+        api.storage
+            .put_channel(&ChannelConfiguration {
+                channel_id: channel_id.into(),
+                display_name: "Measured output".into(),
+                output_profile: station_schedule::OutputProfileId::Atsc720p5994,
+                output_sinks: vec![
+                    station_schedule::OutputSinkConfiguration::required_udp(
+                        sink_id,
+                        "Cable primary",
+                        "127.0.0.1:5500",
+                        -24.0,
+                    ),
+                    station_schedule::OutputSinkConfiguration::required_udp(
+                        "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+                        "Streaming primary",
+                        "127.0.0.1:5501",
+                        -16.0,
+                    ),
+                ],
+                enabled: true,
+            })
+            .unwrap();
+        let configuration_hash = api
+            .storage
+            .current_channel_output_configuration_hash(channel_id)
+            .unwrap();
+        let response = api.handle(
+            "POST",
+            &format!("/api/v1/channels/{channel_id}/loudness-proof"),
+            Some(
+                format!(
+                    r#"{{"sink_id":"{sink_id}","sample_duration_ms":3000,"max_capture_bytes":1000000}}"#
+                )
+                .as_bytes(),
+            ),
+        );
+        assert_eq!(
+            response.status,
+            202,
+            "{}",
+            String::from_utf8_lossy(&response.body)
+        );
+        let created: serde_json::Value = serde_json::from_slice(&response.body).unwrap();
+        let job_id = created["job_id"].as_str().unwrap().to_string();
+        assert_eq!(created["state"], "pending");
+        assert_eq!(created["target_group"], "cable");
+        assert_eq!(created["target_lufs_milli"], -24_000);
+        assert_eq!(created["configuration_hash"], configuration_hash);
+        assert_eq!(
+            created["source_commit"],
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        );
+
+        let status = api.handle(
+            "GET",
+            &format!("/api/v1/channels/{channel_id}/loudness-proof/jobs/{job_id}"),
+            None,
+        );
+        assert_eq!(
+            status.status,
+            200,
+            "{}",
+            String::from_utf8_lossy(&status.body)
+        );
+        let status: serde_json::Value = serde_json::from_slice(&status.body).unwrap();
+        assert_eq!(status["job_id"], job_id);
+        assert_eq!(status["sink_id"], sink_id);
+        assert_eq!(status["state"], "pending");
+        assert!(status["capture"].is_null());
+
+        std::fs::remove_dir_all(application).unwrap();
+        let _ = std::fs::remove_file(database);
+    }
+
+    #[test]
+    fn loudness_proof_job_post_rejects_an_unverified_candidate() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let database = std::env::temp_dir().join(format!(
+            "townlight-loudness-job-unverified-api-{}-{nonce}.db",
+            std::process::id()
+        ));
+        let application = database.with_extension("application");
+        std::fs::create_dir_all(&application).unwrap();
+        let mut probe = station_box_probe();
+        probe.release.candidate_verified = false;
+        probe.release.state = StationReadinessState::Blocked;
+        let api = Api::open_with_station_box_probe(&database, &application, probe).unwrap();
+        let channel_id = "11111111-2222-4333-8444-555555555555";
+        let sink_id = "22222222-3333-4444-8555-666666666666";
+        api.storage
+            .put_channel(&ChannelConfiguration {
+                channel_id: channel_id.into(),
+                display_name: "Measured output".into(),
+                output_profile: station_schedule::OutputProfileId::Atsc720p5994,
+                output_sinks: vec![station_schedule::OutputSinkConfiguration::required_udp(
+                    sink_id,
+                    "Cable primary",
+                    "127.0.0.1:5500",
+                    -24.0,
+                )],
+                enabled: true,
+            })
+            .unwrap();
+        let response = api.handle(
+            "POST",
+            &format!("/api/v1/channels/{channel_id}/loudness-proof"),
+            Some(
+                format!(
+                    r#"{{"sink_id":"{sink_id}","sample_duration_ms":3000,"max_capture_bytes":1000000}}"#
+                )
+                .as_bytes(),
+            ),
+        );
+        assert_eq!(response.status, 409);
+        let body: serde_json::Value = serde_json::from_slice(&response.body).unwrap();
+        assert_eq!(body["error"]["code"], "candidate_not_verified");
+
+        std::fs::remove_dir_all(application).unwrap();
+        let _ = std::fs::remove_file(database);
+    }
+
+    #[test]
+    fn loudness_proof_job_post_rejects_duplicate_active_target_group() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let database = std::env::temp_dir().join(format!(
+            "townlight-loudness-job-duplicate-api-{}-{nonce}.db",
+            std::process::id()
+        ));
+        let application = database.with_extension("application");
+        std::fs::create_dir_all(&application).unwrap();
+        let api =
+            Api::open_with_station_box_probe(&database, &application, station_box_probe()).unwrap();
+        let channel_id = "11111111-2222-4333-8444-555555555555";
+        let sink_id = "22222222-3333-4444-8555-666666666666";
+        api.storage
+            .put_channel(&ChannelConfiguration {
+                channel_id: channel_id.into(),
+                display_name: "Measured output".into(),
+                output_profile: station_schedule::OutputProfileId::Atsc720p5994,
+                output_sinks: vec![station_schedule::OutputSinkConfiguration::required_udp(
+                    sink_id,
+                    "Cable primary",
+                    "127.0.0.1:5500",
+                    -24.0,
+                )],
+                enabled: true,
+            })
+            .unwrap();
+        let body = format!(
+            r#"{{"sink_id":"{sink_id}","sample_duration_ms":3000,"max_capture_bytes":1000000}}"#
+        );
+        let first = api.handle(
+            "POST",
+            &format!("/api/v1/channels/{channel_id}/loudness-proof"),
+            Some(body.as_bytes()),
+        );
+        assert_eq!(first.status, 202);
+        let second = api.handle(
+            "POST",
+            &format!("/api/v1/channels/{channel_id}/loudness-proof"),
+            Some(body.as_bytes()),
+        );
+        assert_eq!(second.status, 409);
+        let body: serde_json::Value = serde_json::from_slice(&second.body).unwrap();
+        assert_eq!(body["error"]["code"], "job_already_active");
+
+        std::fs::remove_dir_all(application).unwrap();
+        let _ = std::fs::remove_file(database);
+    }
+
+    #[test]
+    fn loudness_proof_job_post_rejects_unbounded_request_fields() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let database = std::env::temp_dir().join(format!(
+            "townlight-loudness-job-bounds-api-{}-{nonce}.db",
+            std::process::id()
+        ));
+        let application = database.with_extension("application");
+        std::fs::create_dir_all(&application).unwrap();
+        let api =
+            Api::open_with_station_box_probe(&database, &application, station_box_probe()).unwrap();
+        let channel_id = "11111111-2222-4333-8444-555555555555";
+        let sink_id = "22222222-3333-4444-8555-666666666666";
+        let response = api.handle(
+            "POST",
+            &format!("/api/v1/channels/{channel_id}/loudness-proof"),
+            Some(
+                format!(
+                    r#"{{"sink_id":"{sink_id}","sample_duration_ms":2999,"max_capture_bytes":1000000}}"#
+                )
+                .as_bytes(),
+            ),
+        );
+        assert_eq!(response.status, 422);
+        let response = api.handle(
+            "POST",
+            &format!("/api/v1/channels/{channel_id}/loudness-proof"),
+            Some(
+                format!(
+                    r#"{{"sink_id":"{sink_id}","sample_duration_ms":3000,"max_capture_bytes":268435457}}"#
+                )
+                .as_bytes(),
+            ),
+        );
+        assert_eq!(response.status, 422);
 
         std::fs::remove_dir_all(application).unwrap();
         let _ = std::fs::remove_file(database);

@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use station_readiness::{LoudnessProofOutcome, ReceiverAcceptance, SinkLoudnessProof};
 use station_schedule::{ChannelConfiguration, OutputProfileId, OutputSinkConfiguration};
 use station_storage::{
     OutputLoudnessCaptureFacts, OutputLoudnessProofJob, OutputLoudnessProofJobState, StationStore,
@@ -46,6 +47,29 @@ fn capture() -> OutputLoudnessCaptureFacts {
         capture_bytes: 900_000,
         sample_duration_ms: 29_500,
         capture_sha256: CAPTURE_HASH.into(),
+    }
+}
+
+fn proof(configuration_hash: &str) -> SinkLoudnessProof {
+    SinkLoudnessProof {
+        proof_id: JOB_ID.into(),
+        channel_id: CHANNEL_ID.into(),
+        sink_id: SINK_ID.into(),
+        target_lufs_milli: -24_000,
+        measured_lufs_milli: Some(-23_500),
+        tolerance_lufs_milli: 2_000,
+        outcome: LoudnessProofOutcome::Pass,
+        receiver_acceptance: ReceiverAcceptance::NotAttempted,
+        captured_at_unix_ms: 4_000,
+        sample_duration_ms: 29_500,
+        capture_bytes: 900_000,
+        capture_sha256: CAPTURE_HASH.into(),
+        candidate_version: "0.3.0".into(),
+        source_commit: Some(SOURCE_COMMIT.into()),
+        configuration_hash: configuration_hash.into(),
+        measurement_engine: "GStreamer ebur128level".into(),
+        measurement_method: "decoded post-mux MPEG-TS integrated loudness".into(),
+        detail: "Measured from the active target-group transport.".into(),
     }
 }
 
@@ -236,6 +260,238 @@ fn expired_leases_recover_to_pending_and_can_be_reclaimed_after_restart() {
             .claim_output_loudness_job(JOB_ID, 13_000, 10_000)
             .unwrap()
             .is_some()
+    );
+}
+
+#[test]
+fn next_pending_job_is_claimed_in_creation_order_for_one_channel() {
+    let database = temporary_database("loudness-job-claim-next");
+    let store = StationStore::open(&database).unwrap();
+    let configuration_hash = configure(&store);
+
+    let mut first = configured_job(JOB_ID, &configuration_hash);
+    first.created_at_unix_ms = 2_000;
+    store.create_output_loudness_job(&first).unwrap();
+
+    let mut second = configured_job(SECOND_JOB_ID, &configuration_hash);
+    second.target_group = "streaming".into();
+    second.sink_id = STREAMING_SINK_ID.into();
+    second.target_lufs_milli = -16_000;
+    second.created_at_unix_ms = 3_000;
+    store.create_output_loudness_job(&second).unwrap();
+
+    assert!(
+        store
+            .claim_next_output_loudness_job("55555555-6666-4777-8888-999999999999", 4_000, 10_000,)
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        store
+            .claim_next_output_loudness_job(CHANNEL_ID, 4_000, 10_000)
+            .unwrap()
+            .unwrap()
+            .job_id,
+        JOB_ID
+    );
+    assert_eq!(
+        store
+            .claim_next_output_loudness_job(CHANNEL_ID, 4_001, 10_000)
+            .unwrap()
+            .unwrap()
+            .job_id,
+        SECOND_JOB_ID
+    );
+    assert!(
+        store
+            .claim_next_output_loudness_job(CHANNEL_ID, 4_002, 10_000)
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[test]
+fn active_job_lease_renews_only_before_expiry_and_in_the_expected_state() {
+    let database = temporary_database("loudness-job-renew-lease");
+    let store = StationStore::open(&database).unwrap();
+    let configuration_hash = configure(&store);
+    store
+        .create_output_loudness_job(&configured_job(JOB_ID, &configuration_hash))
+        .unwrap();
+    store
+        .claim_output_loudness_job(JOB_ID, 2_000, 10_000)
+        .unwrap()
+        .unwrap();
+
+    let renewed = store
+        .renew_output_loudness_job_lease(
+            JOB_ID,
+            OutputLoudnessProofJobState::Claimed,
+            11_999,
+            20_000,
+        )
+        .unwrap();
+    assert_eq!(renewed.lease_expires_at_unix_ms, Some(31_999));
+    assert!(
+        store
+            .renew_output_loudness_job_lease(
+                JOB_ID,
+                OutputLoudnessProofJobState::CapturePending,
+                12_000,
+                10_000,
+            )
+            .is_err()
+    );
+    assert!(
+        store
+            .renew_output_loudness_job_lease(
+                JOB_ID,
+                OutputLoudnessProofJobState::Claimed,
+                31_999,
+                10_000,
+            )
+            .is_err()
+    );
+}
+
+#[test]
+fn proof_append_and_job_completion_are_one_atomic_terminal_transition() {
+    let database = temporary_database("loudness-job-atomic-completion");
+    let store = StationStore::open(&database).unwrap();
+    let configuration_hash = configure(&store);
+    store
+        .create_output_loudness_job(&configured_job(JOB_ID, &configuration_hash))
+        .unwrap();
+    store
+        .claim_output_loudness_job(JOB_ID, 2_000, 10_000)
+        .unwrap()
+        .unwrap();
+    store
+        .advance_output_loudness_job(
+            JOB_ID,
+            OutputLoudnessProofJobState::Claimed,
+            OutputLoudnessProofJobState::CapturePending,
+            2_100,
+            10_000,
+            None,
+        )
+        .unwrap();
+    store
+        .advance_output_loudness_job(
+            JOB_ID,
+            OutputLoudnessProofJobState::CapturePending,
+            OutputLoudnessProofJobState::Analyzing,
+            3_000,
+            10_000,
+            Some(&capture()),
+        )
+        .unwrap();
+
+    let mut mismatched = proof(&configuration_hash);
+    mismatched.capture_sha256 = CONFIGURATION_HASH.into();
+    assert!(
+        store
+            .complete_output_loudness_job_with_proof(
+                JOB_ID,
+                4_000,
+                &mismatched,
+                Some("proofs/jobs/cable.ts"),
+            )
+            .is_err()
+    );
+    assert_eq!(
+        store
+            .read_output_loudness_job(JOB_ID)
+            .unwrap()
+            .unwrap()
+            .state,
+        OutputLoudnessProofJobState::Analyzing
+    );
+    assert!(
+        store
+            .read_latest_sink_loudness_proof(CHANNEL_ID, SINK_ID)
+            .unwrap()
+            .is_none()
+    );
+
+    let completed = store
+        .complete_output_loudness_job_with_proof(
+            JOB_ID,
+            4_001,
+            &proof(&configuration_hash),
+            Some("proofs/jobs/cable.ts"),
+        )
+        .unwrap();
+    assert_eq!(completed.state, OutputLoudnessProofJobState::Completed);
+    assert!(
+        store
+            .complete_output_loudness_job_with_proof(
+                JOB_ID,
+                4_002,
+                &proof(&configuration_hash),
+                Some("proofs/jobs/cable.ts"),
+            )
+            .is_err()
+    );
+    assert_eq!(
+        store
+            .list_sink_loudness_proofs(CHANNEL_ID, Some(SINK_ID), 10)
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+#[test]
+fn analysis_failure_is_terminal_and_retains_bounded_capture_facts() {
+    let database = temporary_database("loudness-job-analysis-failure");
+    let store = StationStore::open(&database).unwrap();
+    let configuration_hash = configure(&store);
+    store
+        .create_output_loudness_job(&configured_job(JOB_ID, &configuration_hash))
+        .unwrap();
+    store
+        .claim_output_loudness_job(JOB_ID, 2_000, 10_000)
+        .unwrap()
+        .unwrap();
+    store
+        .advance_output_loudness_job(
+            JOB_ID,
+            OutputLoudnessProofJobState::Claimed,
+            OutputLoudnessProofJobState::CapturePending,
+            2_100,
+            10_000,
+            None,
+        )
+        .unwrap();
+    store
+        .advance_output_loudness_job(
+            JOB_ID,
+            OutputLoudnessProofJobState::CapturePending,
+            OutputLoudnessProofJobState::Analyzing,
+            3_000,
+            10_000,
+            Some(&capture()),
+        )
+        .unwrap();
+
+    let failed = store
+        .fail_output_loudness_job(
+            JOB_ID,
+            OutputLoudnessProofJobState::Analyzing,
+            4_000,
+            "independent analyzer rejected the captured transport",
+        )
+        .unwrap();
+    assert_eq!(failed.state, OutputLoudnessProofJobState::Failed);
+    assert_eq!(failed.capture, Some(capture()));
+    assert_eq!(
+        store
+            .read_output_loudness_job(JOB_ID)
+            .unwrap()
+            .unwrap()
+            .capture,
+        Some(capture())
     );
 }
 

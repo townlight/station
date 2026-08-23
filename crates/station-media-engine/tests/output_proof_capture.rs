@@ -13,6 +13,7 @@ use station_schedule::OutputProfileId;
 const PROOF_ID: &str = "11111111-2222-4333-8444-555555555555";
 const SINK_ID: &str = "22222222-3333-4444-8555-666666666666";
 const SECOND_SINK_ID: &str = "33333333-4444-4555-8666-777777777777";
+const MAX_DURATION_PROOF_ID: &str = "44444444-5555-4666-8777-888888888888";
 
 #[test]
 fn post_mux_capture_is_bounded_decodable_and_does_not_interrupt_playout() {
@@ -88,7 +89,7 @@ fn post_mux_capture_is_bounded_decodable_and_does_not_interrupt_playout() {
     assert!(ready.capture_bytes > 0);
     assert!(ready.capture_bytes <= 16 * 1024 * 1024);
     assert_eq!(ready.capture_sha256.len(), 64);
-    assert!(ready.capture_duration_ms >= 4_000);
+    assert_eq!(ready.capture_duration_ms, 4_000);
 
     let observations = playout.output_health_observations().unwrap();
     let during = observations[0];
@@ -102,6 +103,24 @@ fn post_mux_capture_is_bounded_decodable_and_does_not_interrupt_playout() {
         .expect("captured post-mux bytes must independently decode and measure");
     assert!(measured.integrated_lufs.is_finite());
     assert!(measured.analyzed_duration_ms >= 3_000);
+
+    playout
+        .start_output_capture(OutputCaptureRequest {
+            proof_id: MAX_DURATION_PROOF_ID.into(),
+            output_index: 0,
+            sink_id: SINK_ID.into(),
+            loudness_target: LoudnessTarget::CABLE,
+            duration_ms: 302_000,
+            max_bytes: 16 * 1024 * 1024,
+        })
+        .expect("the 300-second sample plus decode headroom must be accepted");
+    playout
+        .abort_output_capture(MAX_DURATION_PROOF_ID)
+        .expect("the maximum-duration validation capture must abort cleanly");
+    assert!(matches!(
+        playout.poll_output_capture(MAX_DURATION_PROOF_ID).unwrap(),
+        OutputCaptureStatus::Failed { ref code, .. } if code == "capture_aborted"
+    ));
 
     let before_after = playout.output_health_observations().unwrap()[0];
     std::thread::sleep(Duration::from_millis(300));

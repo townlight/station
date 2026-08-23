@@ -5,7 +5,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$expectedRuntimeHash = '059251444D1267B486EBA390B18D25FED87E10315E72F757EC6C7E912FA746B5'
+$expectedRuntimeHash = '059251444d1267b486eba390b18d25fed87e10315e72f757ec6c7e912fa746b5'
 $repository = Split-Path $PSScriptRoot -Parent
 $outputDirectory = Join-Path $repository 'dist'
 $stationd = Join-Path $repository 'target\release\stationd.exe'
@@ -21,7 +21,7 @@ foreach ($requiredFile in @($GStreamerInstaller, $InnoCompiler, $contract, $inno
     }
 }
 
-$runtimeHash = (Get-FileHash -LiteralPath $GStreamerInstaller -Algorithm SHA256).Hash
+$runtimeHash = (Get-FileHash -LiteralPath $GStreamerInstaller -Algorithm SHA256).Hash.ToLowerInvariant()
 if ($runtimeHash -ne $expectedRuntimeHash) {
     throw "GStreamer runtime hash mismatch. Expected $expectedRuntimeHash, got $runtimeHash."
 }
@@ -74,9 +74,9 @@ try {
         throw 'Could not resolve an immutable source commit.'
     }
 
-    $stationdHash = (Get-FileHash -LiteralPath $stationd -Algorithm SHA256).Hash
-    $workerHash = (Get-FileHash -LiteralPath $channelWorker -Algorithm SHA256).Hash
-    $updaterHash = (Get-FileHash -LiteralPath $stationUpdater -Algorithm SHA256).Hash
+    $stationdHash = (Get-FileHash -LiteralPath $stationd -Algorithm SHA256).Hash.ToLowerInvariant()
+    $workerHash = (Get-FileHash -LiteralPath $channelWorker -Algorithm SHA256).Hash.ToLowerInvariant()
+    $updaterHash = (Get-FileHash -LiteralPath $stationUpdater -Algorithm SHA256).Hash.ToLowerInvariant()
     $stationdSize = (Get-Item -LiteralPath $stationd).Length
     $workerSize = (Get-Item -LiteralPath $channelWorker).Length
     $updaterSize = (Get-Item -LiteralPath $stationUpdater).Length
@@ -97,7 +97,7 @@ try {
         version = '0.1.0'
         source_commit = $sourceCommit
         installer = [IO.Path]::GetFileName($installer)
-        installer_sha256 = (Get-FileHash -LiteralPath $installer -Algorithm SHA256).Hash
+        installer_sha256 = (Get-FileHash -LiteralPath $installer -Algorithm SHA256).Hash.ToLowerInvariant()
         stationd_sha256 = $stationdHash
         channel_worker_sha256 = $workerHash
         station_updater_sha256 = $updaterHash

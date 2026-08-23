@@ -15,6 +15,7 @@ Each channel worker is a fault-isolated process that owns live media execution. 
 - The supervisor creates a unique, exclusive, ACL-protected pipe before launching the worker.
 - Worker standard input and output are null handles; only the named pipe carries protocol traffic.
 - One total startup deadline covers process creation, pipe connection, and the first event.
+- Product orchestration grants that bootstrap at least 30 seconds because loading the private media runtime and constructing real output graphs can exceed 20 seconds on a busy station. This does not relax the shorter steady-state command/response deadlines after readiness.
 - The first event must be a nonzero `Ready` from the configured worker and channel. Its durable sequence may be greater than one after journal recovery.
 - Each command carries the next expected sequence. Every response must match the configured identities and that exact sequence before supervisor state advances.
 - Reads are bounded by response deadlines; incomplete or missing responses fail visibly.

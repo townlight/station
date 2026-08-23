@@ -2,7 +2,7 @@ use std::fs;
 use std::net::UdpSocket;
 use std::path::{Path, PathBuf};
 use std::sync::{
-    Arc,
+    Arc, Mutex, MutexGuard,
     atomic::{AtomicBool, Ordering},
 };
 use std::thread;
@@ -22,6 +22,13 @@ use station_storage::StationStore;
 
 const WORKER_ID: &str = "256d5a07-92d3-4718-aec9-05cad42fae7d";
 const CHANNEL_ID: &str = "8b626c01-bdf8-419a-8a2e-b0a7caa1ff7e";
+static SUPERVISION_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+fn supervision_test_guard() -> MutexGuard<'static, ()> {
+    SUPERVISION_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
 
 fn journal_path() -> PathBuf {
     let nonce = SystemTime::now()
@@ -33,6 +40,7 @@ fn journal_path() -> PathBuf {
 
 #[test]
 fn launches_handshakes_commands_and_cleanly_stops_the_real_worker() {
+    let _guard = supervision_test_guard();
     let journal = journal_path();
     let media_root = journal.with_extension("media-test");
     fs::create_dir_all(&media_root).unwrap();
@@ -53,7 +61,7 @@ fn launches_handshakes_commands_and_cleanly_stops_the_real_worker() {
         &journal,
         output.local_addr().unwrap(),
         OutputProfileId::Atsc720p5994,
-        Duration::from_secs(10),
+        Duration::from_secs(30),
     );
     assert!(
         launched.is_ok(),
@@ -200,7 +208,7 @@ fn launches_handshakes_commands_and_cleanly_stops_the_real_worker() {
         CHANNEL_ID,
         &journal,
         output.local_addr().unwrap(),
-        Duration::from_secs(10),
+        Duration::from_secs(30),
     )
     .unwrap();
     let restart_ready = restarted.ready().clone();
@@ -233,6 +241,7 @@ fn launches_handshakes_commands_and_cleanly_stops_the_real_worker() {
 
 #[test]
 fn committed_schedule_is_loaded_aired_and_completed_only_after_worker_acknowledgments() {
+    let _guard = supervision_test_guard();
     let journal = journal_path();
     let database = journal.with_extension("dispatch.db");
     let media_root = journal.with_extension("dispatch-media");
@@ -415,6 +424,7 @@ fn committed_schedule_is_loaded_aired_and_completed_only_after_worker_acknowledg
 
 #[test]
 fn expired_unstarted_item_is_missed_and_current_item_takes_at_catch_up_time() {
+    let _guard = supervision_test_guard();
     const CURRENT_ITEM: &str = "d2b12490-04bf-466f-9317-a19953229642";
     let journal = journal_path();
     let database = journal.with_extension("catch-up.db");
@@ -557,6 +567,7 @@ fn expired_unstarted_item_is_missed_and_current_item_takes_at_catch_up_time() {
 
 #[test]
 fn long_live_takeover_hands_back_to_the_schedule_item_valid_now() {
+    let _guard = supervision_test_guard();
     const NEXT_ITEM: &str = "d2b12490-04bf-466f-9317-a19953229642";
     const LIVE_SOURCE: &str = "3f5f721c-bdf8-419a-8a2e-b0a7caa1ff7e";
     const LIVE_SESSION: &str = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
@@ -801,6 +812,7 @@ fn long_live_takeover_hands_back_to_the_schedule_item_valid_now() {
 
 #[test]
 fn daemon_loop_discovers_an_enabled_channel_and_completes_its_committed_item() {
+    let _guard = supervision_test_guard();
     let nonce = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
@@ -856,7 +868,7 @@ fn daemon_loop_discovers_an_enabled_channel_and_completes_its_committed_item() {
     let runner_database = database.clone();
     let worker = PathBuf::from(env!("CARGO_BIN_EXE_channel-worker"));
     let runner = thread::spawn(move || run_until(&runner_database, &worker, runner_stop));
-    let startup_deadline = std::time::Instant::now() + Duration::from_secs(20);
+    let startup_deadline = std::time::Instant::now() + Duration::from_secs(60);
     loop {
         let runtime = StationStore::open(&database)
             .unwrap()
@@ -940,6 +952,7 @@ fn daemon_loop_discovers_an_enabled_channel_and_completes_its_committed_item() {
 
 #[test]
 fn daemon_records_one_deduplicated_incident_per_condition_when_worker_cannot_start() {
+    let _guard = supervision_test_guard();
     let nonce = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()

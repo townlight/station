@@ -21,3 +21,4 @@ station-media-assets.workspace = true
 station-media-journal.workspace = true
 station-runtime.workspace = true
 station-media-protocol.workspace = true
+station-readiness.workspace = true

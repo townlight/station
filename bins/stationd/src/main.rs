@@ -2,6 +2,7 @@ mod config;
 
 use std::ffi::OsString;
 use std::net::TcpListener;
+use std::path::{Path, PathBuf};
 use std::sync::{
     Arc, Mutex, OnceLock,
     atomic::{AtomicBool, Ordering},
@@ -9,6 +10,8 @@ use std::sync::{
 use std::time::Duration;
 
 use config::{DaemonConfig, LaunchMode};
+use station_orchestration::CandidateAuthority;
+use station_readiness::CandidateIdentity;
 use station_storage::StationStore;
 use windows_service::define_windows_service;
 use windows_service::service::{
@@ -22,6 +25,24 @@ use windows_service::service_dispatcher;
 const SERVICE_NAME: &str = "TownLightStation";
 const SERVICE_TYPE: ServiceType = ServiceType::OWN_PROCESS;
 static SERVICE_CONFIG: OnceLock<DaemonConfig> = OnceLock::new();
+
+struct InstalledCandidateAuthority {
+    data_directory: PathBuf,
+    application_root: PathBuf,
+}
+
+impl CandidateAuthority for InstalledCandidateAuthority {
+    fn current_candidate(&self) -> Result<CandidateIdentity, String> {
+        let identity = station_maintenance::read_verified_candidate_identity(
+            &self.data_directory,
+            &self.application_root,
+        )?;
+        Ok(CandidateIdentity {
+            version: identity.version,
+            source_commit: Some(identity.source_commit),
+        })
+    }
+}
 
 define_windows_service!(ffi_service_main, service_main);
 
@@ -43,6 +64,8 @@ fn run_console(config: DaemonConfig) -> Result<(), String> {
     let worker_executable = worker_executable()?;
     let update_application = application_directory()?;
     let api_application = update_application.clone();
+    let proof_candidate_authority =
+        installed_candidate_authority(&config.database, update_application.clone())?;
     let stop = Arc::new(AtomicBool::new(false));
     let feed_receipt = config.database.with_file_name("feed-fetch-error.txt");
     let feed_fetch =
@@ -50,10 +73,11 @@ fn run_console(config: DaemonConfig) -> Result<(), String> {
     let orchestration_database = config.database.clone();
     let orchestration_stop = Arc::clone(&stop);
     let orchestration = std::thread::spawn(move || {
-        station_orchestration::run_until(
+        station_orchestration::run_until_with_candidate_authority(
             &orchestration_database,
             &worker_executable,
             orchestration_stop,
+            Some(proof_candidate_authority),
         )
     });
     let ingest_database = config.database.clone();
@@ -184,6 +208,8 @@ fn run_service(config: DaemonConfig) -> Result<(), String> {
     let worker_executable = worker_executable()?;
     let update_application = application_directory()?;
     let api_application = update_application.clone();
+    let proof_candidate_authority =
+        installed_candidate_authority(&config.database, update_application.clone())?;
     let feed_receipt = config.database.with_file_name("feed-fetch-error.txt");
     let feed_fetch =
         spawn_feed_fetch_worker(&config.database, Arc::clone(&stop), Some(feed_receipt))?;
@@ -191,10 +217,11 @@ fn run_service(config: DaemonConfig) -> Result<(), String> {
     let orchestration_stop = Arc::clone(&stop);
     let orchestration_receipt = config.database.with_file_name("orchestration-error.txt");
     let orchestration = std::thread::spawn(move || {
-        let result = station_orchestration::run_until(
+        let result = station_orchestration::run_until_with_candidate_authority(
             &orchestration_database,
             &worker_executable,
             orchestration_stop,
+            Some(proof_candidate_authority),
         );
         if let Err(error) = &result {
             let _ = std::fs::write(&orchestration_receipt, format!("{error:?}"));
@@ -313,6 +340,20 @@ fn application_directory() -> Result<std::path::PathBuf, String> {
     let executable = std::env::current_exe()
         .map_err(|error| format!("could not locate station application: {error}"))?;
     application_root_for_executable(&executable)
+}
+
+fn installed_candidate_authority(
+    database: &Path,
+    application_root: PathBuf,
+) -> Result<Arc<dyn CandidateAuthority>, String> {
+    let data_directory = database
+        .parent()
+        .ok_or_else(|| "station database has no data directory".to_string())?
+        .to_path_buf();
+    Ok(Arc::new(InstalledCandidateAuthority {
+        data_directory,
+        application_root,
+    }))
 }
 
 fn application_root_for_executable(

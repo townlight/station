@@ -4,6 +4,7 @@ use std::io::Cursor;
 use std::net::UdpSocket;
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
+use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use gst::prelude::*;
@@ -16,8 +17,17 @@ use station_media_engine::{EngineError, PersistentPlayout, SourceRole, Transport
 use station_media_protocol::{CgImageFormat, CgOverlay, CgOverlayContent, CgRect, CgSnapshot};
 use station_schedule::OutputProfileId;
 
+static PERSISTENT_GRAPH_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+fn persistent_graph_test_guard() -> MutexGuard<'static, ()> {
+    PERSISTENT_GRAPH_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 #[test]
 fn fans_one_persistent_transport_out_to_two_independent_udp_sinks() {
+    let _guard = persistent_graph_test_guard();
     let primary = UdpSocket::bind("127.0.0.1:0").unwrap();
     let redundant = UdpSocket::bind("127.0.0.1:0").unwrap();
     for receiver in [&primary, &redundant] {
@@ -59,6 +69,7 @@ fn fans_one_persistent_transport_out_to_two_independent_udp_sinks() {
 
 #[test]
 fn sends_the_persistent_transport_to_an_srt_listener() {
+    let _guard = persistent_graph_test_guard();
     gst::init().unwrap();
     let reservation = UdpSocket::bind("127.0.0.1:0").unwrap();
     let destination = reservation.local_addr().unwrap();
@@ -117,6 +128,7 @@ fn sends_the_persistent_transport_to_an_srt_listener() {
 
 #[test]
 fn sends_an_aes256_srt_transport_only_to_a_matching_listener() {
+    let _guard = persistent_graph_test_guard();
     gst::init().unwrap();
     let reservation = UdpSocket::bind("127.0.0.1:0").unwrap();
     let destination = reservation.local_addr().unwrap();
@@ -165,6 +177,7 @@ fn sends_an_aes256_srt_transport_only_to_a_matching_listener() {
 
 #[test]
 fn refuses_encrypted_srt_readiness_for_a_mismatched_passphrase() {
+    let _guard = persistent_graph_test_guard();
     gst::init().unwrap();
     let reservation = UdpSocket::bind("127.0.0.1:0").unwrap();
     let destination = reservation.local_addr().unwrap();
@@ -201,6 +214,7 @@ fn refuses_encrypted_srt_readiness_for_a_mismatched_passphrase() {
 
 #[test]
 fn refuses_srt_readiness_when_the_required_listener_is_absent() {
+    let _guard = persistent_graph_test_guard();
     let reservation = UdpSocket::bind("127.0.0.1:0").unwrap();
     let destination = reservation.local_addr().unwrap();
     drop(reservation);
@@ -224,6 +238,7 @@ fn refuses_srt_readiness_when_the_required_listener_is_absent() {
 
 #[test]
 fn repeats_codec_configuration_for_a_receiver_that_joins_after_startup() {
+    let _guard = persistent_graph_test_guard();
     let primary_reservation = UdpSocket::bind("127.0.0.1:0").unwrap();
     let redundant_reservation = UdpSocket::bind("127.0.0.1:0").unwrap();
     let primary_destination = primary_reservation.local_addr().unwrap();
@@ -259,6 +274,7 @@ fn repeats_codec_configuration_for_a_receiver_that_joins_after_startup() {
 
 #[test]
 fn emits_the_selected_720p5994_constant_bitrate_transport_contract() {
+    let _guard = persistent_graph_test_guard();
     let receiver = UdpSocket::bind("127.0.0.1:0").unwrap();
     receiver
         .set_read_timeout(Some(Duration::from_secs(2)))
@@ -320,6 +336,7 @@ fn emits_the_selected_720p5994_constant_bitrate_transport_contract() {
 
 #[test]
 fn keeps_one_pipeline_running_while_switching_sources_and_emits_mpeg_ts() {
+    let _guard = persistent_graph_test_guard();
     let receiver = UdpSocket::bind("127.0.0.1:0").unwrap();
     receiver
         .set_read_timeout(Some(Duration::from_secs(5)))
@@ -375,6 +392,7 @@ fn keeps_one_pipeline_running_while_switching_sources_and_emits_mpeg_ts() {
 
 #[test]
 fn applies_and_clears_cg_while_transport_counters_continue() {
+    let _guard = persistent_graph_test_guard();
     let receiver = UdpSocket::bind("127.0.0.1:0").unwrap();
     receiver
         .set_read_timeout(Some(Duration::from_secs(5)))
@@ -415,6 +433,7 @@ fn applies_and_clears_cg_while_transport_counters_continue() {
 
 #[test]
 fn cg_text_overlay_changes_pixels_in_its_declared_region() {
+    let _guard = persistent_graph_test_guard();
     let reservation = UdpSocket::bind("127.0.0.1:0").unwrap();
     let port = reservation.local_addr().unwrap().port();
     drop(reservation);
@@ -644,6 +663,7 @@ fn cg_text_overlay_changes_pixels_in_its_declared_region() {
 
 #[test]
 fn managed_png_jpeg_image_apply_clear_reapply_and_invalid_retain_pixels() {
+    let _guard = persistent_graph_test_guard();
     gst::init().unwrap();
     let root = test_root("cg-images");
     fs::create_dir_all(&root).unwrap();
@@ -1018,6 +1038,7 @@ fn start_ffmpeg_live_sender(port: u16) -> FfmpegLiveSender {
 
 #[test]
 fn invalid_cg_update_keeps_the_last_valid_revision_active() {
+    let _guard = persistent_graph_test_guard();
     let receiver = UdpSocket::bind("127.0.0.1:0").unwrap();
     let mut playout = PersistentPlayout::start_udp_with_profile(
         receiver.local_addr().unwrap(),
@@ -1113,6 +1134,7 @@ fn frame_signature(frame: &DecodedFrame) -> u64 {
 
 #[test]
 fn plays_a_validated_ingested_file_without_rebuilding_the_output_graph() {
+    let _guard = persistent_graph_test_guard();
     let root = test_root("file-playout");
     let source = root.join("incoming.ts");
     let second_source = root.join("second.ts");
@@ -1146,7 +1168,10 @@ fn plays_a_validated_ingested_file_without_rebuilding_the_output_graph() {
     clear_udp_backlog(&receiver);
     continuity = ContinuityTracker::default();
     playout.select(SourceRole::Program).unwrap();
-    assert_transport_stream(&receiver, &mut continuity, 120);
+    // 120 datagrams can cover fewer than three complete video PES timestamps
+    // when sampling begins near a mux boundary. Keep a bounded wider window so
+    // the continuity assertion is deterministic on loaded machines.
+    assert_transport_stream(&receiver, &mut continuity, 240);
     assert_eq!(playout.active_source().unwrap(), SourceRole::Program);
     playout.select(SourceRole::Fallback).unwrap();
     assert_transport_stream(&receiver, &mut continuity, 12);
@@ -1162,7 +1187,7 @@ fn plays_a_validated_ingested_file_without_rebuilding_the_output_graph() {
     clear_udp_backlog(&receiver);
     continuity = ContinuityTracker::default();
     playout.select(SourceRole::Program).unwrap();
-    assert_transport_stream(&receiver, &mut continuity, 120);
+    assert_transport_stream(&receiver, &mut continuity, 240);
     assert_eq!(playout.active_source().unwrap(), SourceRole::Program);
     playout.select(SourceRole::Fallback).unwrap();
     assert_transport_stream(&receiver, &mut continuity, 12);
@@ -1177,6 +1202,7 @@ fn plays_a_validated_ingested_file_without_rebuilding_the_output_graph() {
 
 #[test]
 fn prepared_file_stays_parked_and_can_take_at_a_wall_clock_offset() {
+    let _guard = persistent_graph_test_guard();
     let root = test_root("parked-offset-playout");
     let source = root.join("timed-source.ts");
     let library = root.join("library");
@@ -1222,6 +1248,7 @@ fn prepared_file_stays_parked_and_can_take_at_a_wall_clock_offset() {
 
 #[test]
 fn arms_udp_live_av_takes_it_without_rebuilding_output_and_returns_to_fallback() {
+    let _guard = persistent_graph_test_guard();
     gst::init().unwrap();
     let output_probe = UdpSocket::bind("127.0.0.1:0").unwrap();
     let output_port = output_probe.local_addr().unwrap().port();
@@ -1337,6 +1364,7 @@ fn arms_udp_live_av_takes_it_without_rebuilding_output_and_returns_to_fallback()
 
 #[test]
 fn ffmpeg_udp_live_takeover_emits_audible_audio() {
+    let _guard = persistent_graph_test_guard();
     gst::init().unwrap();
     let root = test_root("ffmpeg-live-program-return");
     fs::create_dir_all(&root).unwrap();
@@ -1371,7 +1399,11 @@ fn ffmpeg_udp_live_takeover_emits_audible_audio() {
     let live_counts_before_capture = playout.live_buffer_counts().unwrap();
     clear_udp_backlog(&receiver);
     std::thread::sleep(Duration::from_millis(750));
-    let transport_capture = capture_transport_for(&receiver, Duration::from_secs(4));
+    // A transport capture beginning at an arbitrary mux boundary can lose
+    // leading audio during FFmpeg discovery. Eight seconds leaves a stable
+    // six-half-second decoded window without weakening the sustained-audio
+    // requirement below.
+    let transport_capture = capture_transport_for(&receiver, Duration::from_secs(8));
     assert!(
         transport_capture.len() > 100_000,
         "live capture was too short: {} bytes",
@@ -1986,6 +2018,7 @@ fn test_root(label: &str) -> std::path::PathBuf {
 }
 #[test]
 fn refuses_a_staged_interlaced_profile_before_building_a_graph() {
+    let _guard = persistent_graph_test_guard();
     let result = PersistentPlayout::start_udp_with_profile(
         "127.0.0.1:5500".parse().unwrap(),
         OutputProfileId::Atsc1080i5994,

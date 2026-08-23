@@ -3,7 +3,8 @@ use station_maintenance::{
     ACTIVE_SLOT_RECEIPT_NAME, ACTIVE_SLOT_SCHEMA_VERSION, ActiveApplication, ActiveSlotReceipt,
     INSTALL_RECEIPT_NAME, MAINTENANCE_SCHEMA_VERSION, MaintenanceHost, MaintenancePhase,
     MaintenanceRequest, TRANSACTION_DIRECTORY_NAME, activate_prepared_slot,
-    latest_maintenance_transaction, read_active_slot_receipt, recover_incomplete_transaction,
+    latest_maintenance_transaction, read_active_slot_receipt, read_verified_candidate_identity,
+    recover_incomplete_transaction,
 };
 use station_update::{
     PreparedSlotRecord, ReleaseManifest, UPDATE_PACKAGE_SCHEMA_VERSION, UpdatePackageFile,
@@ -20,6 +21,7 @@ const CANDIDATE_COMMIT: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 struct FakeHost {
     operations: Vec<String>,
     fail_candidate_proof: bool,
+    fail_candidate_proof_on_call: Option<usize>,
     fail_previous_proof: bool,
     panic_candidate_proof: bool,
     fail_stop_on_call: Option<usize>,
@@ -27,6 +29,7 @@ struct FakeHost {
     mutate_candidate_journal: bool,
     journal_directory: Option<PathBuf>,
     candidate_configured: bool,
+    candidate_proof_calls: usize,
 }
 
 impl MaintenanceHost for FakeHost {
@@ -68,10 +71,15 @@ impl MaintenanceHost for FakeHost {
     ) -> Result<(), String> {
         let version = expected.package_manifest.version.clone();
         self.operations.push(format!("prove:{version}"));
+        if version == "0.2.0" {
+            self.candidate_proof_calls += 1;
+        }
         if version == "0.2.0" && self.panic_candidate_proof {
             panic!("injected crash during candidate proof");
         }
         if (version == "0.2.0" && self.fail_candidate_proof)
+            || (version == "0.2.0"
+                && self.fail_candidate_proof_on_call == Some(self.candidate_proof_calls))
             || (version == "0.1.0" && self.fail_previous_proof)
         {
             Err(format!("proof failed for {version}"))
@@ -110,6 +118,9 @@ fn commits_only_after_candidate_proof_and_records_the_previous_application() {
             ),
             "start",
             "prove:0.2.0",
+            "stop",
+            "start",
+            "prove:0.2.0",
         ]
     );
     let active = read_active_slot_receipt(&fixture.data.join(ACTIVE_SLOT_RECEIPT_NAME)).unwrap();
@@ -120,7 +131,10 @@ fn commits_only_after_candidate_proof_and_records_the_previous_application() {
         serde_json::from_slice(&std::fs::read(fixture.data.join(INSTALL_RECEIPT_NAME)).unwrap())
             .unwrap();
     assert_eq!(install["version"], "0.2.0");
-    assert_eq!(install["media_runtime_sha256"], "C".repeat(64));
+    assert_eq!(install["media_runtime_sha256"], "c".repeat(64));
+    let verified = read_verified_candidate_identity(&fixture.data, &fixture.application).unwrap();
+    assert_eq!(verified.version, "0.2.0");
+    assert_eq!(verified.media_runtime_sha256, "c".repeat(64));
     assert_eq!(
         latest_maintenance_transaction(&fixture.data)
             .unwrap()
@@ -128,6 +142,35 @@ fn commits_only_after_candidate_proof_and_records_the_previous_application() {
             .phase,
         MaintenancePhase::Committed
     );
+    cleanup(&fixture.root);
+}
+
+#[test]
+fn rolls_back_when_the_committed_candidate_cannot_restart_and_prove() {
+    let fixture = fixture();
+    let mut host = FakeHost {
+        fail_candidate_proof_on_call: Some(2),
+        ..FakeHost::default()
+    };
+
+    let result = activate_prepared_slot(
+        &fixture.request,
+        &fixture.database,
+        &fixture.application,
+        NOW + 10,
+        &mut host,
+    )
+    .unwrap();
+
+    assert_eq!(result.phase, MaintenancePhase::RolledBack);
+    assert_eq!(host.operations.last().unwrap(), "prove:0.1.0");
+    let active = read_active_slot_receipt(&fixture.data.join(ACTIVE_SLOT_RECEIPT_NAME)).unwrap();
+    assert_eq!(active.active.package_manifest.version, "0.1.0");
+    let install: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(fixture.data.join(INSTALL_RECEIPT_NAME)).unwrap())
+            .unwrap();
+    assert_eq!(install["version"], "0.1.0");
+    assert_eq!(install["source_commit"], CURRENT_COMMIT);
     cleanup(&fixture.root);
 }
 

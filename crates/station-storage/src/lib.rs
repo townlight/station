@@ -6089,6 +6089,62 @@ impl StationStore {
         }
     }
 
+    pub fn claim_next_output_loudness_job(
+        &self,
+        channel_id: &str,
+        now_unix_ms: i64,
+        lease_duration_ms: i64,
+    ) -> Result<Option<OutputLoudnessProofJobRecord>, String> {
+        validate_output_loudness_lease(now_unix_ms, lease_duration_ms)?;
+        if !is_canonical_uuid(channel_id) {
+            return Err("output loudness channel identity must be a canonical UUID".into());
+        }
+        let lease_expires_at_unix_ms = now_unix_ms
+            .checked_add(lease_duration_ms)
+            .ok_or_else(|| "output loudness lease time overflowed".to_string())?;
+        let channel_id = c_string(channel_id, "output loudness channel identity")?;
+        self.execute("BEGIN IMMEDIATE")?;
+        let outcome = (|| {
+            recover_expired_output_loudness_jobs_in_transaction(self, now_unix_ms)?;
+            let select = self.prepare(
+                "SELECT job_id FROM output_loudness_jobs WHERE channel_id=?1 AND state='pending' ORDER BY created_at_unix_ms, job_id LIMIT 1",
+            )?;
+            bind_text(self.database, select.raw, 1, &channel_id)?;
+            let job_id = match unsafe { sqlite3_step(select.raw) } {
+                SQLITE_ROW => column_text(select.raw, 0)?,
+                SQLITE_DONE => return Ok(None),
+                _ => return Err(sqlite_error(self.database)),
+            };
+            drop(select);
+            let job_id_value = c_string(&job_id, "output loudness job identity")?;
+            let update = self.prepare(
+                "UPDATE output_loudness_jobs SET state='claimed', updated_at_unix_ms=?1, lease_expires_at_unix_ms=?2 WHERE job_id=?3 AND channel_id=?4 AND state='pending'",
+            )?;
+            bind_i64(self.database, update.raw, 1, now_unix_ms)?;
+            bind_i64(self.database, update.raw, 2, lease_expires_at_unix_ms)?;
+            bind_text(self.database, update.raw, 3, &job_id_value)?;
+            bind_text(self.database, update.raw, 4, &channel_id)?;
+            expect_done(self.database, update.raw)?;
+            if self.changes() != 1 {
+                return Err("output loudness next-job claim lost its write lock".into());
+            }
+            self.read_output_loudness_job(&job_id)
+        })();
+        match outcome {
+            Ok(job) => match self.execute("COMMIT") {
+                Ok(()) => Ok(job),
+                Err(error) => {
+                    let _ = self.execute("ROLLBACK");
+                    Err(error)
+                }
+            },
+            Err(error) => {
+                let _ = self.execute("ROLLBACK");
+                Err(error)
+            }
+        }
+    }
+
     pub fn advance_output_loudness_job(
         &self,
         job_id: &str,
@@ -6187,6 +6243,64 @@ impl StationStore {
         }
     }
 
+    pub fn renew_output_loudness_job_lease(
+        &self,
+        job_id: &str,
+        expected_state: OutputLoudnessProofJobState,
+        now_unix_ms: i64,
+        lease_duration_ms: i64,
+    ) -> Result<OutputLoudnessProofJobRecord, String> {
+        validate_output_loudness_lease(now_unix_ms, lease_duration_ms)?;
+        validate_output_loudness_job_id(job_id)?;
+        if !matches!(
+            expected_state,
+            OutputLoudnessProofJobState::Claimed
+                | OutputLoudnessProofJobState::CapturePending
+                | OutputLoudnessProofJobState::Analyzing
+        ) {
+            return Err("only an active output loudness job lease can be renewed".into());
+        }
+        let lease_expires_at_unix_ms = now_unix_ms
+            .checked_add(lease_duration_ms)
+            .ok_or_else(|| "output loudness lease time overflowed".to_string())?;
+        let job_id = c_string(job_id, "output loudness job identity")?;
+        let expected_state = c_string(
+            output_loudness_job_state_name(expected_state),
+            "output loudness expected state",
+        )?;
+        self.execute("BEGIN IMMEDIATE")?;
+        let outcome = (|| {
+            let statement = self.prepare(
+                "UPDATE output_loudness_jobs SET updated_at_unix_ms=?1, lease_expires_at_unix_ms=?2 WHERE job_id=?3 AND state=?4 AND state NOT IN ('completed','failed') AND lease_expires_at_unix_ms>?1",
+            )?;
+            bind_i64(self.database, statement.raw, 1, now_unix_ms)?;
+            bind_i64(self.database, statement.raw, 2, lease_expires_at_unix_ms)?;
+            bind_text(self.database, statement.raw, 3, &job_id)?;
+            bind_text(self.database, statement.raw, 4, &expected_state)?;
+            expect_done(self.database, statement.raw)?;
+            if self.changes() != 1 {
+                return Err(
+                    "output loudness lease renewal compare-and-set failed or lease expired".into(),
+                );
+            }
+            self.read_output_loudness_job(&job_id.to_string_lossy())?
+                .ok_or_else(|| "renewed output loudness job disappeared".into())
+        })();
+        match outcome {
+            Ok(job) => match self.execute("COMMIT") {
+                Ok(()) => Ok(job),
+                Err(error) => {
+                    let _ = self.execute("ROLLBACK");
+                    Err(error)
+                }
+            },
+            Err(error) => {
+                let _ = self.execute("ROLLBACK");
+                Err(error)
+            }
+        }
+    }
+
     pub fn fail_output_loudness_job(
         &self,
         job_id: &str,
@@ -6232,6 +6346,74 @@ impl StationStore {
         match outcome {
             Ok(job) => match self.execute("COMMIT") {
                 Ok(()) => Ok(job),
+                Err(error) => {
+                    let _ = self.execute("ROLLBACK");
+                    Err(error)
+                }
+            },
+            Err(error) => {
+                let _ = self.execute("ROLLBACK");
+                Err(error)
+            }
+        }
+    }
+
+    pub fn complete_output_loudness_job_with_proof(
+        &self,
+        job_id: &str,
+        now_unix_ms: i64,
+        proof: &SinkLoudnessProof,
+        artifact_relative_path: Option<&str>,
+    ) -> Result<OutputLoudnessProofJobRecord, String> {
+        validate_output_loudness_lease(now_unix_ms, 1_000)?;
+        validate_output_loudness_job_id(job_id)?;
+        let job_id_value = c_string(job_id, "output loudness job identity")?;
+        self.execute("BEGIN IMMEDIATE")?;
+        let outcome = (|| {
+            let current = self
+                .read_output_loudness_job(job_id)?
+                .ok_or_else(|| "output loudness job does not exist".to_string())?;
+            if current.state != OutputLoudnessProofJobState::Analyzing
+                || current
+                    .lease_expires_at_unix_ms
+                    .is_none_or(|expires| expires <= now_unix_ms)
+            {
+                return Err("output loudness job is not analyzing under a current lease".into());
+            }
+            let capture = current
+                .capture
+                .as_ref()
+                .ok_or_else(|| "output loudness job has no captured evidence".to_string())?;
+            if proof.proof_id != current.job_id
+                || proof.channel_id != current.channel_id
+                || proof.sink_id != current.sink_id
+                || proof.target_lufs_milli != current.target_lufs_milli
+                || proof.candidate_version != current.candidate_version
+                || proof.source_commit != current.source_commit
+                || proof.configuration_hash != current.configuration_hash
+                || proof.sample_duration_ms != capture.sample_duration_ms
+                || proof.capture_bytes != capture.capture_bytes
+                || proof.capture_sha256 != capture.capture_sha256
+                || artifact_relative_path != Some(capture.artifact_relative_path.as_str())
+            {
+                return Err("output loudness proof does not match its durable job facts".into());
+            }
+            self.append_sink_loudness_proof_in_transaction(proof, artifact_relative_path)?;
+            let statement = self.prepare(
+                "UPDATE output_loudness_jobs SET state='completed', updated_at_unix_ms=?1, lease_expires_at_unix_ms=-1, completed_at_unix_ms=?1 WHERE job_id=?2 AND state='analyzing' AND lease_expires_at_unix_ms>?1",
+            )?;
+            bind_i64(self.database, statement.raw, 1, now_unix_ms)?;
+            bind_text(self.database, statement.raw, 2, &job_id_value)?;
+            expect_done(self.database, statement.raw)?;
+            if self.changes() != 1 {
+                return Err("output loudness completion compare-and-set failed".into());
+            }
+            self.read_output_loudness_job(job_id)?
+                .ok_or_else(|| "completed output loudness job disappeared".into())
+        })();
+        match outcome {
+            Ok(record) => match self.execute("COMMIT") {
+                Ok(()) => Ok(record),
                 Err(error) => {
                     let _ = self.execute("ROLLBACK");
                     Err(error)
@@ -6324,6 +6506,16 @@ impl StationStore {
         proof: &SinkLoudnessProof,
         artifact_relative_path: Option<&str>,
     ) -> Result<(), String> {
+        self.execute("BEGIN IMMEDIATE")?;
+        let outcome = self.append_sink_loudness_proof_in_transaction(proof, artifact_relative_path);
+        self.finish_transaction(outcome)
+    }
+
+    fn append_sink_loudness_proof_in_transaction(
+        &self,
+        proof: &SinkLoudnessProof,
+        artifact_relative_path: Option<&str>,
+    ) -> Result<(), String> {
         proof.validate().map_err(|error| format!("{error:?}"))?;
         if !matches!(
             proof.receiver_acceptance,
@@ -6334,8 +6526,7 @@ impl StationStore {
         if let Some(path) = artifact_relative_path {
             validate_artifact_relative_path(path)?;
         }
-        self.execute("BEGIN IMMEDIATE")?;
-        let outcome = (|| {
+        (|| {
             let current_hash = self.current_channel_output_configuration_hash(&proof.channel_id)?;
             if proof.configuration_hash != current_hash {
                 return Err("loudness proof configuration hash is stale".into());
@@ -6433,8 +6624,7 @@ impl StationStore {
                 bind_text(self.database, statement.raw, (index + 12) as c_int, value)?;
             }
             expect_done(self.database, statement.raw)
-        })();
-        self.finish_transaction(outcome)
+        })()
     }
 
     pub fn read_latest_sink_loudness_proof(
@@ -8536,7 +8726,9 @@ fn read_output_loudness_job_row(
     if record.capture.is_some()
         && !matches!(
             record.state,
-            OutputLoudnessProofJobState::Analyzing | OutputLoudnessProofJobState::Completed
+            OutputLoudnessProofJobState::Analyzing
+                | OutputLoudnessProofJobState::Completed
+                | OutputLoudnessProofJobState::Failed
         )
     {
         return Err("output loudness capture facts are attached to an invalid state".into());

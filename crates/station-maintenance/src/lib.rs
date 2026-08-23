@@ -325,13 +325,6 @@ pub fn activate_prepared_slot(
         );
     }
 
-    advance(
-        &transaction_path,
-        &mut transaction,
-        MaintenancePhase::CommitStarted,
-        now_unix_ms,
-        "Candidate proof passed; durable receipt commit started.",
-    )?;
     let receipt = ActiveSlotReceipt {
         schema_version: ACTIVE_SLOT_SCHEMA_VERSION,
         generation: current.generation.saturating_add(1),
@@ -340,16 +333,43 @@ pub fn activate_prepared_slot(
         active: candidate,
         previous: Some(current.active),
     };
-    receipt.validate()?;
-    write_json_atomic(&active_path, &receipt, "active-slot receipt")?;
-    write_install_identity(data_directory, &receipt.active, now_unix_ms)?;
-    advance(
-        &transaction_path,
-        &mut transaction,
-        MaintenancePhase::Committed,
-        now_unix_ms,
-        "Candidate passed post-update proof and is now active.",
-    )?;
+    let commit_result = (|| {
+        // The first proof runs the candidate against the old receipts. Stop it
+        // again before changing candidate authority so no running stationd can
+        // append evidence across the receipt-generation boundary.
+        host.stop_station(Duration::from_secs(30))?;
+        advance(
+            &transaction_path,
+            &mut transaction,
+            MaintenancePhase::CommitStarted,
+            now_unix_ms,
+            "Candidate proof passed; candidate stopped and durable receipt commit started.",
+        )?;
+        receipt.validate()?;
+        write_json_atomic(&active_path, &receipt, "active-slot receipt")?;
+        write_install_identity(data_directory, &receipt.active, now_unix_ms)?;
+        host.start_station()?;
+        host.prove_station(&receipt.active, Duration::from_secs(60))?;
+        advance(
+            &transaction_path,
+            &mut transaction,
+            MaintenancePhase::Committed,
+            now_unix_ms,
+            "Committed candidate restarted, proved against current receipts, and is active.",
+        )?;
+        Ok::<(), String>(())
+    })();
+    if let Err(commit_error) = commit_result {
+        return rollback(
+            &transaction_path,
+            &mut transaction,
+            database_path,
+            application_root,
+            now_unix_ms,
+            host,
+            &commit_error,
+        );
+    }
     if let Some(snapshot) = &transaction.journal_snapshot {
         discard_journal_snapshot(&transaction_directory, snapshot)?;
     }
@@ -1074,6 +1094,10 @@ fn rollback(
     host: &mut impl MaintenanceHost,
     activation_error: &str,
 ) -> Result<MaintenanceTransactionRecord, String> {
+    let restore_candidate_receipts = matches!(
+        transaction.phase,
+        MaintenancePhase::CommitStarted | MaintenancePhase::Committed
+    );
     advance(
         transaction_path,
         transaction,
@@ -1097,6 +1121,20 @@ fn rollback(
                     .parent()
                     .ok_or_else(|| "maintenance transaction has no parent directory".to_string())?,
                 snapshot,
+            )?;
+        }
+        if restore_candidate_receipts {
+            write_json_atomic(
+                &database_path.with_file_name(ACTIVE_SLOT_RECEIPT_NAME),
+                &transaction.previous_receipt,
+                "active-slot receipt",
+            )?;
+            write_install_identity(
+                database_path
+                    .parent()
+                    .ok_or_else(|| "station database has no data directory".to_string())?,
+                &transaction.previous_receipt.active,
+                now_unix_ms,
             )?;
         }
         host.start_station()?;
@@ -1327,6 +1365,66 @@ pub fn read_active_slot_receipt(path: &Path) -> Result<ActiveSlotReceipt, String
     Ok(receipt)
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerifiedCandidateIdentity {
+    pub product: String,
+    pub version: String,
+    pub source_commit: String,
+    pub media_runtime_sha256: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct InstallReceiptIdentity {
+    product: String,
+    version: String,
+    source_commit: String,
+    media_runtime_sha256: String,
+    #[serde(default)]
+    installed_at_unix_ms: Option<i64>,
+    #[serde(default)]
+    health_uri: Option<String>,
+}
+
+pub fn read_verified_candidate_identity(
+    data_directory: &Path,
+    application_root: &Path,
+) -> Result<VerifiedCandidateIdentity, String> {
+    let install_bytes = read_bounded_file(
+        &data_directory.join(INSTALL_RECEIPT_NAME),
+        64 * 1024,
+        "installation receipt",
+    )?;
+    let install: InstallReceiptIdentity = serde_json::from_slice(&install_bytes)
+        .map_err(|error| format!("installation receipt is invalid: {error}"))?;
+    let _receipt_metadata = (&install.installed_at_unix_ms, &install.health_uri);
+    if install.product != "TownLight Station" {
+        return Err("installation receipt product identity is invalid".into());
+    }
+    if !is_commit_hash_lowercase(&install.source_commit) {
+        return Err("installation receipt source commit is not canonical lowercase".into());
+    }
+    if !is_sha256(&install.media_runtime_sha256) {
+        return Err("installation receipt runtime SHA-256 is invalid".into());
+    }
+
+    let active = read_active_slot_receipt(&data_directory.join(ACTIVE_SLOT_RECEIPT_NAME))?;
+    let manifest = &active.active.package_manifest;
+    if manifest.product != install.product
+        || manifest.version != install.version
+        || manifest.source_commit != install.source_commit
+    {
+        return Err("installation and active-slot receipt identities do not agree".into());
+    }
+    verify_active_application(application_root, &active.active)
+        .map_err(|error| format!("active application verification failed: {error}"))?;
+    Ok(VerifiedCandidateIdentity {
+        product: install.product,
+        version: install.version,
+        source_commit: install.source_commit,
+        media_runtime_sha256: install.media_runtime_sha256.to_ascii_lowercase(),
+    })
+}
+
 pub fn verify_active_application(
     application_root: &Path,
     application: &ActiveApplication,
@@ -1372,7 +1470,8 @@ fn write_install_identity(
         .ok()
         .and_then(|bytes| serde_json::from_slice::<PreviousInstallIdentity>(&bytes).ok())
         .and_then(|identity| identity.media_runtime_sha256)
-        .filter(|hash| is_sha256(hash));
+        .filter(|hash| is_sha256(hash))
+        .map(|hash| hash.to_ascii_lowercase());
     write_json_atomic(
         &previous_path,
         &InstallIdentity {
@@ -1566,6 +1665,13 @@ fn visible_identifier(value: &str, maximum: usize) -> bool {
 
 fn is_sha256(value: &str) -> bool {
     value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn is_commit_hash_lowercase(value: &str) -> bool {
+    value.len() == 40
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
 fn visible_operator(value: &str) -> bool {

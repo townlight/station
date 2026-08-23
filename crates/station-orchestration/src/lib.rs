@@ -1,11 +1,15 @@
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
+use std::fs;
+use std::io::Read;
 use std::num::NonZeroU16;
 use std::path::{Path, PathBuf};
 use std::sync::{
     Arc,
     atomic::{AtomicBool, AtomicU64, Ordering},
+    mpsc::{self, Receiver},
 };
+use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use sha2::{Digest, Sha256};
@@ -15,20 +19,28 @@ use station_domain::{
     ChannelRuntimeState,
 };
 use station_live::{LiveEndpoint, TakeoverSession, TakeoverState};
+use station_media_assets::measure_output_loudness;
 use station_media_protocol::{
     CgImageFormat, CgOverlay, CgOverlayContent, CgRect, CgSnapshot, ChannelCommand, LiveArmToken,
     LiveInputConfiguration, LiveReturnTarget, LoudnessTarget, MAX_CG_SLOTS, MAX_CG_TEXT_BYTES,
     SrtPassphrase, WorkerEvent, WorkerOutputConfiguration,
 };
+use station_readiness::derive_loudness_outcome;
+use station_readiness::{
+    CandidateIdentity, LoudnessProofOutcome, ReceiverAcceptance, SinkLoudnessProof,
+};
 use station_runtime::{SupervisorError, WorkerSupervisor};
 use station_schedule::{
     ChannelConfiguration, DispatchJob, DispatchStatus, OutputSinkKind, ScheduleWindow,
 };
-use station_storage::{CgSnapshotReadError, CgWriteError, StationStore};
+use station_storage::{
+    CgSnapshotReadError, CgWriteError, OutputLoudnessCaptureFacts, OutputLoudnessProofJobRecord,
+    OutputLoudnessProofJobState, StationStore,
+};
 
 static ALERT_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 const HEARTBEAT_INTERVAL_MS: i64 = 5_000;
-const MINIMUM_WORKER_BOOTSTRAP_TIMEOUT: Duration = Duration::from_secs(15);
+const MINIMUM_WORKER_BOOTSTRAP_TIMEOUT: Duration = Duration::from_secs(30);
 const MEDIA_LOAD_TIMEOUT: Duration = Duration::from_secs(25);
 const MEDIA_TEARDOWN_TIMEOUT: Duration = Duration::from_secs(30);
 const CG_EXPIRER_OPERATOR_ID: &str = "stationd-cg-expirer";
@@ -334,6 +346,164 @@ struct OutputExpectation {
     required: bool,
 }
 
+const OUTPUT_PROOF_LEASE_MS: i64 = 300_000;
+const OUTPUT_PROOF_POLL_INTERVAL_MS: i64 = 250;
+const OUTPUT_PROOF_LEASE_RENEW_MARGIN_MS: i64 = 30_000;
+const OUTPUT_PROOF_TOLERANCE_MILLI: i32 = 2_000;
+const OUTPUT_PROOF_MAX_SAMPLE_DURATION_MS: u64 = 300_000;
+const OUTPUT_PROOF_CAPTURE_HEADROOM_MS: u64 = 2_000;
+const OUTPUT_PROOF_MAX_CAPTURE_DURATION_MS: u64 =
+    OUTPUT_PROOF_MAX_SAMPLE_DURATION_MS + OUTPUT_PROOF_CAPTURE_HEADROOM_MS;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ProofOutputBinding {
+    sink_id: String,
+    target_lufs_milli: i32,
+}
+
+#[derive(Debug)]
+struct OutputProofAnalysis {
+    measured_lufs_milli: i32,
+    analyzed_duration_ms: u64,
+}
+
+#[derive(Debug)]
+struct OutputProofAnalyzing {
+    job: OutputLoudnessProofJobRecord,
+    artifact_relative_path: String,
+    worker_instance_id: String,
+    graph_revision: u64,
+    worker_capture_duration_ms: u64,
+    analysis: Receiver<Result<OutputProofAnalysis, String>>,
+}
+
+#[derive(Debug, Default)]
+enum OutputProofState {
+    #[default]
+    Idle,
+    Capturing {
+        job: OutputLoudnessProofJobRecord,
+        output_index: u16,
+        capture_duration_ms: u64,
+        artifact_relative_path: String,
+        worker_instance_id: String,
+        graph_revision: u64,
+        next_poll_at_unix_ms: i64,
+    },
+    Analyzing(OutputProofAnalyzing),
+}
+
+fn proof_artifact_path(root: &Path, relative: &str) -> Result<PathBuf, String> {
+    let relative_path = Path::new(relative);
+    if relative.is_empty()
+        || relative_path.is_absolute()
+        || relative_path
+            .components()
+            .any(|component| !matches!(component, std::path::Component::Normal(_)))
+    {
+        return Err("worker returned an unsafe output proof artifact path".into());
+    }
+    let root =
+        fs::canonicalize(root).map_err(|error| format!("canonicalize proof root: {error}"))?;
+    let path = root.join(relative_path);
+    let parent = path
+        .parent()
+        .ok_or_else(|| "output proof artifact has no parent".to_string())?;
+    let parent = fs::canonicalize(parent)
+        .map_err(|error| format!("canonicalize output proof artifact parent: {error}"))?;
+    if parent != root {
+        return Err("output proof artifact escaped its managed root".into());
+    }
+    Ok(path)
+}
+
+fn hash_capture(path: &Path, max_bytes: u64) -> Result<(u64, String), String> {
+    let link_metadata = fs::symlink_metadata(path)
+        .map_err(|error| format!("inspect output proof artifact: {error}"))?;
+    if !link_metadata.file_type().is_file() {
+        return Err("output proof artifact is not a regular file".into());
+    }
+    if link_metadata.len() == 0 || link_metadata.len() > max_bytes {
+        return Err("output proof artifact exceeds its durable size bound".into());
+    }
+    let mut file =
+        fs::File::open(path).map_err(|error| format!("open output proof artifact: {error}"))?;
+    let mut hasher = Sha256::new();
+    let mut bytes = 0_u64;
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let count = file
+            .read(&mut buffer)
+            .map_err(|error| format!("read output proof artifact: {error}"))?;
+        if count == 0 {
+            break;
+        }
+        bytes = bytes
+            .checked_add(count as u64)
+            .ok_or_else(|| "output proof artifact size overflowed".to_string())?;
+        if bytes > max_bytes {
+            return Err(
+                "output proof artifact exceeded its durable size bound while hashing".into(),
+            );
+        }
+        hasher.update(&buffer[..count]);
+    }
+    Ok((bytes, format!("{:x}", hasher.finalize())))
+}
+
+fn proof_bindings_match(expected: &[ProofOutputBinding], actual: &[ProofOutputBinding]) -> bool {
+    expected == actual
+}
+
+fn capture_duration_for_sample(sample_duration_ms: u64) -> Option<u64> {
+    (3_000..=OUTPUT_PROOF_MAX_SAMPLE_DURATION_MS)
+        .contains(&sample_duration_ms)
+        .then(|| sample_duration_ms + OUTPUT_PROOF_CAPTURE_HEADROOM_MS)
+}
+
+fn ready_duration_is_bounded(actual_ms: u64, requested_capture_ms: u64) -> bool {
+    actual_ms >= requested_capture_ms && actual_ms <= OUTPUT_PROOF_MAX_CAPTURE_DURATION_MS
+}
+
+fn lease_renewal_due(now_unix_ms: i64, expires_at_unix_ms: Option<i64>) -> bool {
+    expires_at_unix_ms.is_none_or(|expires| {
+        now_unix_ms.saturating_add(OUTPUT_PROOF_LEASE_RENEW_MARGIN_MS) >= expires
+    })
+}
+
+fn remove_managed_file(path: &Path) -> Result<(), String> {
+    let metadata = fs::symlink_metadata(path)
+        .map_err(|error| format!("inspect managed output proof artifact: {error}"))?;
+    if !metadata.file_type().is_file() {
+        return Err("managed output proof artifact is not a regular file".into());
+    }
+    fs::remove_file(path).map_err(|error| format!("remove managed output proof artifact: {error}"))
+}
+
+fn cleanup_orphan_output_proof_artifacts(root: &Path, job_id: &str) -> Result<(), String> {
+    for suffix in [".ts", ".ts.part"] {
+        let relative = format!("{job_id}{suffix}");
+        let path = proof_artifact_path(root, &relative)?;
+        match fs::symlink_metadata(&path) {
+            Ok(_) => remove_managed_file(&path)?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(format!("inspect orphan output proof artifact: {error}")),
+        }
+    }
+    Ok(())
+}
+
+fn is_abort_confirmation(event: &WorkerEvent, proof_id: &str) -> bool {
+    matches!(
+        event,
+        WorkerEvent::OutputProofFailed {
+            proof_id: event_proof_id,
+            code,
+            ..
+        } if event_proof_id == proof_id && code == "capture_aborted"
+    )
+}
+
 /// Convert the durable channel sink sequence into the exact ordered worker
 /// bootstrap outputs. The channel is the authority for ordering and loudness;
 /// neither value is inferred or defaulted here. Encrypted SRT material is
@@ -405,6 +575,14 @@ struct LiveHandbackPlan {
     detail: String,
 }
 
+/// Supplies the candidate identity that is actually running on the station.
+/// Proof jobs fail closed when this authority has not been connected by the
+/// service host; a job's originally requested identity is never treated as
+/// current merely because it was durable.
+pub trait CandidateAuthority: Send + Sync {
+    fn current_candidate(&self) -> Result<CandidateIdentity, String>;
+}
+
 pub struct ChannelController {
     supervisor: WorkerSupervisor,
     database_path: PathBuf,
@@ -416,6 +594,9 @@ pub struct ChannelController {
     state_started_at_unix_ms: i64,
     last_heartbeat_at_unix_ms: i64,
     output_expectations: Vec<OutputExpectation>,
+    proof_output_bindings: Vec<ProofOutputBinding>,
+    output_proof: OutputProofState,
+    candidate_authority: Option<Arc<dyn CandidateAuthority>>,
     last_output_bytes: Option<Vec<u64>>,
     last_output_audio_buffers: Option<Vec<u64>>,
     cg_state: CgSnapshotState,
@@ -446,6 +627,19 @@ impl ChannelController {
                 required: sink.required,
             })
             .collect();
+        let proof_output_bindings = channel
+            .output_sinks
+            .iter()
+            .filter(|sink| sink.enabled)
+            .map(|sink| {
+                let target_lufs_milli =
+                    (f64::from(sink.loudness_target_lufs) * 1_000.0).round() as i32;
+                ProofOutputBinding {
+                    sink_id: sink.sink_id.clone(),
+                    target_lufs_milli,
+                }
+            })
+            .collect();
         let worker_id = format!("station-worker-{}", channel.channel_id);
         let supervisor = WorkerSupervisor::launch_with_outputs_and_roots(
             worker_executable,
@@ -471,6 +665,9 @@ impl ChannelController {
             state_started_at_unix_ms: started_at_unix_ms,
             last_heartbeat_at_unix_ms: started_at_unix_ms,
             output_expectations,
+            proof_output_bindings,
+            output_proof: OutputProofState::Idle,
+            candidate_authority: None,
             last_output_bytes: None,
             last_output_audio_buffers: None,
             cg_state: CgSnapshotState::default(),
@@ -505,6 +702,649 @@ impl ChannelController {
 
     pub fn cg_state(&self) -> CgSnapshotState {
         self.cg_state.clone()
+    }
+
+    pub fn set_candidate_authority(&mut self, authority: Arc<dyn CandidateAuthority>) {
+        self.candidate_authority = Some(authority);
+    }
+
+    fn fail_output_proof_job(
+        &self,
+        store: &StationStore,
+        job: &OutputLoudnessProofJobRecord,
+        now_unix_ms: i64,
+        detail: impl Into<String>,
+    ) -> Result<(), OrchestrationError> {
+        store
+            .fail_output_loudness_job(&job.job_id, job.state, now_unix_ms, &detail.into())
+            .map(|_| ())
+            .map_err(OrchestrationError::Storage)
+    }
+
+    fn fail_output_proof_job_after_cleanup(
+        &self,
+        store: &StationStore,
+        job: &OutputLoudnessProofJobRecord,
+        now_unix_ms: i64,
+        detail: impl Into<String>,
+    ) -> Result<(), OrchestrationError> {
+        let detail = detail.into();
+        let detail = match cleanup_orphan_output_proof_artifacts(
+            &managed_output_proof_root(&self.database_path),
+            &job.job_id,
+        ) {
+            Ok(()) => detail,
+            Err(cleanup_error) => {
+                format!("{detail}; managed artifact cleanup also failed: {cleanup_error}")
+            }
+        };
+        self.fail_output_proof_job(store, job, now_unix_ms, detail)
+    }
+
+    fn abort_output_proof(&mut self, proof_id: &str) -> Result<(), OrchestrationError> {
+        let response = self
+            .supervisor
+            .command(
+                &format!("output-proof-abort-{proof_id}"),
+                ChannelCommand::AbortOutputProof {
+                    proof_id: proof_id.to_string(),
+                },
+                self.command_timeout,
+            )
+            .map_err(OrchestrationError::Worker)?;
+        if is_abort_confirmation(&response.event, proof_id) {
+            Ok(())
+        } else {
+            Err(OrchestrationError::UnexpectedWorkerEvent)
+        }
+    }
+
+    fn abort_or_terminate_output_proof(&mut self, proof_id: &str) -> Option<String> {
+        match self.abort_output_proof(proof_id) {
+            Ok(()) => None,
+            Err(error) => {
+                self.supervisor.force_terminate();
+                Some(format!(
+                    "worker proof abort was ambiguous and the worker was terminated: {error:?}"
+                ))
+            }
+        }
+    }
+
+    fn verify_current_candidate(&self, job: &OutputLoudnessProofJobRecord) -> Result<(), String> {
+        let authority = self
+            .candidate_authority
+            .as_ref()
+            .ok_or_else(|| "output proof candidate authority is not connected".to_string())?;
+        let current = authority.current_candidate()?;
+        if current.version != job.candidate_version || current.source_commit != job.source_commit {
+            return Err("output proof candidate identity is stale".into());
+        }
+        Ok(())
+    }
+
+    fn fail_analyzing_output_proof_job(
+        &self,
+        store: &StationStore,
+        analyzing: &OutputProofAnalyzing,
+        now_unix_ms: i64,
+        detail: impl Into<String>,
+    ) -> Result<(), OrchestrationError> {
+        let path = proof_artifact_path(
+            &managed_output_proof_root(&self.database_path),
+            &analyzing.artifact_relative_path,
+        )
+        .map_err(OrchestrationError::Storage)?;
+        match fs::symlink_metadata(&path) {
+            Ok(_) => remove_managed_file(&path).map_err(OrchestrationError::Storage)?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(OrchestrationError::Storage(format!(
+                    "inspect output proof artifact for cleanup: {error}"
+                )));
+            }
+        }
+        self.fail_output_proof_job(store, &analyzing.job, now_unix_ms, detail)
+    }
+
+    fn proof_binding(
+        &self,
+        store: &StationStore,
+        job: &OutputLoudnessProofJobRecord,
+    ) -> Result<(u16, LoudnessTarget), String> {
+        let snapshot = store
+            .read_channel_loudness_proof_snapshot(&self.channel_id)?
+            .ok_or_else(|| "output proof channel no longer exists".to_string())?;
+        if snapshot.configuration_hash != job.configuration_hash {
+            return Err("output proof configuration hash is stale".into());
+        }
+        let snapshot_bindings = snapshot
+            .output_sinks
+            .iter()
+            .map(|sink| ProofOutputBinding {
+                sink_id: sink.sink_id.clone(),
+                target_lufs_milli: (f64::from(sink.loudness_target_lufs) * 1_000.0).round() as i32,
+            })
+            .collect::<Vec<_>>();
+        if !proof_bindings_match(&self.proof_output_bindings, &snapshot_bindings) {
+            return Err("output proof sink ordering or target changed".into());
+        }
+        let (index, sink) = snapshot
+            .output_sinks
+            .iter()
+            .enumerate()
+            .find(|(_, sink)| sink.sink_id == job.sink_id)
+            .ok_or_else(|| "output proof sink is no longer configured".to_string())?;
+        if sink.loudness_target_lufs.mul_add(1_000.0, 0.0).round() as i32 != job.target_lufs_milli {
+            return Err("output proof sink target changed".into());
+        }
+        let binding = self
+            .proof_output_bindings
+            .get(index)
+            .ok_or_else(|| "output proof sink is absent from the worker bootstrap".to_string())?;
+        if binding.sink_id != sink.sink_id || binding.target_lufs_milli != job.target_lufs_milli {
+            return Err("output proof worker binding is stale".into());
+        }
+        let target =
+            LoudnessTarget::from_milli_lufs(job.target_lufs_milli).map_err(str::to_string)?;
+        Ok((
+            u16::try_from(index).map_err(|_| "output proof index exceeds protocol range")?,
+            target,
+        ))
+    }
+
+    fn begin_output_proof(
+        &mut self,
+        store: &StationStore,
+        job: OutputLoudnessProofJobRecord,
+        now_unix_ms: i64,
+    ) -> Result<OutputProofState, OrchestrationError> {
+        let (output_index, target) = match self.proof_binding(store, &job) {
+            Ok(binding) => binding,
+            Err(detail) => {
+                self.fail_output_proof_job(store, &job, now_unix_ms, detail)?;
+                return Ok(OutputProofState::Idle);
+            }
+        };
+        if let Err(detail) = self.verify_current_candidate(&job) {
+            self.fail_output_proof_job(store, &job, now_unix_ms, detail)?;
+            return Ok(OutputProofState::Idle);
+        }
+        if let Err(detail) = cleanup_orphan_output_proof_artifacts(
+            &managed_output_proof_root(&self.database_path),
+            &job.job_id,
+        ) {
+            self.fail_output_proof_job(store, &job, now_unix_ms, detail)?;
+            return Ok(OutputProofState::Idle);
+        }
+        let Some(capture_duration_ms) = capture_duration_for_sample(job.sample_duration_ms) else {
+            self.fail_output_proof_job(
+                store,
+                &job,
+                now_unix_ms,
+                "output proof sample duration is outside the bounded range",
+            )?;
+            return Ok(OutputProofState::Idle);
+        };
+        let response = match self.supervisor.command(
+            &format!("output-proof-start-{}", job.job_id),
+            ChannelCommand::StartOutputProof {
+                proof_id: job.job_id.clone(),
+                output_index,
+                sink_id: job.sink_id.clone(),
+                loudness_target_lufs: target,
+                duration_ms: capture_duration_ms,
+                max_bytes: job.max_capture_bytes,
+            },
+            self.command_timeout,
+        ) {
+            Ok(response) => response,
+            Err(error) => {
+                // The worker may have accepted StartOutputProof before its
+                // reply was lost. Sequence state is ambiguous, so no later
+                // pipe command can safely reconcile it.
+                self.supervisor.force_terminate();
+                self.fail_output_proof_job_after_cleanup(
+                    store,
+                    &job,
+                    now_unix_ms,
+                    format!(
+                        "worker output proof start was ambiguous; worker terminated: {error:?}"
+                    ),
+                )?;
+                return Ok(OutputProofState::Idle);
+            }
+        };
+        let WorkerEvent::OutputProofStarted {
+            proof_id,
+            output_index: event_index,
+            sink_id,
+            loudness_target_lufs,
+            duration_ms,
+            max_bytes,
+            artifact_relative_path,
+            worker_instance_id,
+            graph_revision,
+        } = response.event
+        else {
+            self.supervisor.force_terminate();
+            self.fail_output_proof_job_after_cleanup(
+                store,
+                &job,
+                now_unix_ms,
+                "worker returned an invalid output proof start response and was terminated",
+            )?;
+            return Ok(OutputProofState::Idle);
+        };
+        if proof_id != job.job_id
+            || event_index != output_index
+            || sink_id != job.sink_id
+            || loudness_target_lufs != target
+            || duration_ms != capture_duration_ms
+            || max_bytes != job.max_capture_bytes
+            || worker_instance_id.is_empty()
+        {
+            let abort_detail = self.abort_or_terminate_output_proof(&job.job_id);
+            self.fail_output_proof_job_after_cleanup(
+                store,
+                &job,
+                now_unix_ms,
+                abort_detail.map_or_else(
+                    || {
+                        "worker output proof start identity or bounds did not match the durable job"
+                            .to_string()
+                    },
+                    |abort| {
+                        format!(
+                            "worker output proof start identity or bounds did not match the durable job; {abort}"
+                        )
+                    },
+                ),
+            )?;
+            return Ok(OutputProofState::Idle);
+        }
+        if let Err(error) = proof_artifact_path(
+            &managed_output_proof_root(&self.database_path),
+            &artifact_relative_path,
+        ) {
+            let abort_detail = self.abort_or_terminate_output_proof(&job.job_id);
+            let detail = abort_detail.map_or(error.clone(), |abort| format!("{error}; {abort}"));
+            self.fail_output_proof_job_after_cleanup(store, &job, now_unix_ms, detail)?;
+            return Ok(OutputProofState::Idle);
+        }
+        store
+            .advance_output_loudness_job(
+                &job.job_id,
+                OutputLoudnessProofJobState::Claimed,
+                OutputLoudnessProofJobState::CapturePending,
+                now_unix_ms,
+                OUTPUT_PROOF_LEASE_MS,
+                None,
+            )
+            .map_err(OrchestrationError::Storage)?;
+        Ok(OutputProofState::Capturing {
+            job,
+            output_index,
+            capture_duration_ms,
+            artifact_relative_path,
+            worker_instance_id,
+            graph_revision,
+            next_poll_at_unix_ms: now_unix_ms,
+        })
+    }
+
+    fn poll_output_proof(
+        &mut self,
+        store: &StationStore,
+        mut capture: OutputProofState,
+        now_unix_ms: i64,
+    ) -> Result<OutputProofState, OrchestrationError> {
+        let OutputProofState::Capturing {
+            job,
+            output_index,
+            capture_duration_ms,
+            artifact_relative_path,
+            worker_instance_id,
+            graph_revision,
+            next_poll_at_unix_ms,
+        } = &mut capture
+        else {
+            return Ok(capture);
+        };
+        if lease_renewal_due(now_unix_ms, job.lease_expires_at_unix_ms) {
+            *job = store
+                .renew_output_loudness_job_lease(
+                    &job.job_id,
+                    OutputLoudnessProofJobState::CapturePending,
+                    now_unix_ms,
+                    OUTPUT_PROOF_LEASE_MS,
+                )
+                .map_err(OrchestrationError::Storage)?;
+        }
+        if now_unix_ms < *next_poll_at_unix_ms {
+            return Ok(capture);
+        }
+        let response = match self.supervisor.command(
+            &format!("output-proof-poll-{}-{now_unix_ms}", job.job_id),
+            ChannelCommand::PollOutputProof {
+                proof_id: job.job_id.clone(),
+            },
+            self.command_timeout,
+        ) {
+            Ok(response) => response,
+            Err(error) => {
+                let abort_detail = self.abort_or_terminate_output_proof(&job.job_id);
+                let detail = abort_detail.map_or_else(
+                    || format!("worker could not poll output proof: {error:?}"),
+                    |abort| format!("worker could not poll output proof: {error:?}; {abort}"),
+                );
+                self.fail_output_proof_job_after_cleanup(store, job, now_unix_ms, detail)?;
+                return Ok(OutputProofState::Idle);
+            }
+        };
+        match response.event {
+            WorkerEvent::OutputProofPending {
+                proof_id,
+                artifact_relative_path: event_path,
+                worker_instance_id: event_worker,
+                graph_revision: event_graph,
+            } if proof_id == job.job_id
+                && event_path == *artifact_relative_path
+                && event_worker == *worker_instance_id
+                && event_graph == *graph_revision =>
+            {
+                *next_poll_at_unix_ms = now_unix_ms.saturating_add(OUTPUT_PROOF_POLL_INTERVAL_MS);
+                Ok(capture)
+            }
+            WorkerEvent::OutputProofReady {
+                proof_id,
+                output_index: event_index,
+                sink_id,
+                loudness_target_lufs,
+                artifact_relative_path: event_path,
+                worker_instance_id: event_worker,
+                graph_revision: event_graph,
+                size_bytes,
+                capture_sha256,
+                duration_ms,
+            } if proof_id == job.job_id
+                && event_index == *output_index
+                && sink_id == job.sink_id
+                && loudness_target_lufs.milli_lufs() == job.target_lufs_milli
+                && event_path == *artifact_relative_path
+                && event_worker == *worker_instance_id
+                && event_graph == *graph_revision
+                && ready_duration_is_bounded(duration_ms, *capture_duration_ms) =>
+            {
+                let path = match proof_artifact_path(
+                    &managed_output_proof_root(&self.database_path),
+                    artifact_relative_path,
+                ) {
+                    Ok(path) => path,
+                    Err(error) => {
+                        self.fail_output_proof_job_after_cleanup(store, job, now_unix_ms, error)?;
+                        return Ok(OutputProofState::Idle);
+                    }
+                };
+                let (actual_bytes, actual_hash) = match hash_capture(&path, job.max_capture_bytes) {
+                    Ok(facts) => facts,
+                    Err(error) => {
+                        self.fail_output_proof_job_after_cleanup(store, job, now_unix_ms, error)?;
+                        return Ok(OutputProofState::Idle);
+                    }
+                };
+                if actual_bytes != size_bytes
+                    || actual_bytes > job.max_capture_bytes
+                    || actual_hash != capture_sha256
+                {
+                    self.fail_output_proof_job_after_cleanup(
+                        store,
+                        job,
+                        now_unix_ms,
+                        "output proof artifact identity did not match the worker report",
+                    )?;
+                    return Ok(OutputProofState::Idle);
+                }
+                let facts = OutputLoudnessCaptureFacts {
+                    artifact_relative_path: artifact_relative_path.clone(),
+                    capture_bytes: actual_bytes,
+                    // The durable proof claims the requested lower-bound
+                    // sample. The worker's wall-clock capture duration may be
+                    // slightly longer and is retained separately for audit.
+                    sample_duration_ms: job.sample_duration_ms,
+                    capture_sha256: actual_hash,
+                };
+                let analyzing_job = store
+                    .advance_output_loudness_job(
+                        &job.job_id,
+                        OutputLoudnessProofJobState::CapturePending,
+                        OutputLoudnessProofJobState::Analyzing,
+                        now_unix_ms,
+                        OUTPUT_PROOF_LEASE_MS,
+                        Some(&facts),
+                    )
+                    .map_err(OrchestrationError::Storage)?;
+                let (sender, receiver) = mpsc::channel();
+                let path_for_analysis = path.clone();
+                let minimum_duration_ms = job.sample_duration_ms;
+                thread::spawn(move || {
+                    let result = measure_output_loudness(&path_for_analysis, minimum_duration_ms)
+                        .map(|measurement| OutputProofAnalysis {
+                            measured_lufs_milli: (measurement.integrated_lufs * 1_000.0).round()
+                                as i32,
+                            analyzed_duration_ms: measurement.analyzed_duration_ms,
+                        })
+                        .map_err(|error| {
+                            format!("independent output loudness analysis failed: {error:?}")
+                        });
+                    let _ = sender.send(result);
+                });
+                Ok(OutputProofState::Analyzing(OutputProofAnalyzing {
+                    job: analyzing_job,
+                    artifact_relative_path: artifact_relative_path.clone(),
+                    worker_instance_id: worker_instance_id.clone(),
+                    graph_revision: *graph_revision,
+                    worker_capture_duration_ms: duration_ms,
+                    analysis: receiver,
+                }))
+            }
+            WorkerEvent::OutputProofReady { proof_id, .. } if proof_id == job.job_id => {
+                self.fail_output_proof_job_after_cleanup(
+                    store,
+                    job,
+                    now_unix_ms,
+                    "worker output proof ready identity, bounds, or duration was invalid",
+                )?;
+                Ok(OutputProofState::Idle)
+            }
+            WorkerEvent::OutputProofFailed {
+                proof_id,
+                worker_instance_id: event_worker,
+                graph_revision: event_graph,
+                code,
+                message,
+                ..
+            } if proof_id == job.job_id
+                && event_worker == *worker_instance_id
+                && event_graph == *graph_revision =>
+            {
+                self.fail_output_proof_job_after_cleanup(
+                    store,
+                    job,
+                    now_unix_ms,
+                    format!("worker output proof failed ({code}): {message}"),
+                )?;
+                Ok(OutputProofState::Idle)
+            }
+            _ => {
+                let abort_detail = self.abort_or_terminate_output_proof(&job.job_id);
+                let detail = abort_detail.map_or_else(
+                    || "worker output proof poll identity or state was invalid".to_string(),
+                    |abort| {
+                        format!("worker output proof poll identity or state was invalid; {abort}")
+                    },
+                );
+                self.fail_output_proof_job_after_cleanup(store, job, now_unix_ms, detail)?;
+                Ok(OutputProofState::Idle)
+            }
+        }
+    }
+
+    fn finish_output_proof(
+        &mut self,
+        store: &StationStore,
+        mut analyzing: OutputProofAnalyzing,
+        now_unix_ms: i64,
+    ) -> Result<OutputProofState, OrchestrationError> {
+        if lease_renewal_due(now_unix_ms, analyzing.job.lease_expires_at_unix_ms) {
+            analyzing.job = store
+                .renew_output_loudness_job_lease(
+                    &analyzing.job.job_id,
+                    OutputLoudnessProofJobState::Analyzing,
+                    now_unix_ms,
+                    OUTPUT_PROOF_LEASE_MS,
+                )
+                .map_err(OrchestrationError::Storage)?;
+        }
+        let result = match analyzing.analysis.try_recv() {
+            Ok(result) => result,
+            Err(mpsc::TryRecvError::Empty) => {
+                return Ok(OutputProofState::Analyzing(analyzing));
+            }
+            Err(mpsc::TryRecvError::Disconnected) => {
+                self.fail_analyzing_output_proof_job(
+                    store,
+                    &analyzing,
+                    now_unix_ms,
+                    "output proof analysis worker disconnected without a result",
+                )?;
+                return Ok(OutputProofState::Idle);
+            }
+        };
+        let analysis = match result {
+            Ok(analysis) => analysis,
+            Err(error) => {
+                self.fail_analyzing_output_proof_job(store, &analyzing, now_unix_ms, error)?;
+                return Ok(OutputProofState::Idle);
+            }
+        };
+        if analysis.analyzed_duration_ms < analyzing.job.sample_duration_ms {
+            self.fail_analyzing_output_proof_job(
+                store,
+                &analyzing,
+                now_unix_ms,
+                "independent output proof analysis covered less time than requested",
+            )?;
+            return Ok(OutputProofState::Idle);
+        }
+        if let Err(detail) = self.verify_current_candidate(&analyzing.job) {
+            self.fail_analyzing_output_proof_job(store, &analyzing, now_unix_ms, detail)?;
+            return Ok(OutputProofState::Idle);
+        }
+        let current_hash = store
+            .current_channel_output_configuration_hash(&self.channel_id)
+            .map_err(OrchestrationError::Storage)?;
+        if current_hash != analyzing.job.configuration_hash {
+            self.fail_analyzing_output_proof_job(
+                store,
+                &analyzing,
+                now_unix_ms,
+                "output proof configuration changed during analysis",
+            )?;
+            return Ok(OutputProofState::Idle);
+        }
+        let outcome = derive_loudness_outcome(
+            analyzing.job.target_lufs_milli,
+            Some(analysis.measured_lufs_milli),
+            OUTPUT_PROOF_TOLERANCE_MILLI,
+        );
+        if matches!(outcome, LoudnessProofOutcome::Invalid) {
+            self.fail_analyzing_output_proof_job(
+                store,
+                &analyzing,
+                now_unix_ms,
+                "independent output proof produced an unsupported loudness measurement",
+            )?;
+            return Ok(OutputProofState::Idle);
+        }
+        let capture = analyzing.job.capture.as_ref().ok_or_else(|| {
+            OrchestrationError::Storage("analyzing output proof has no capture facts".into())
+        })?;
+        let proof = SinkLoudnessProof {
+            proof_id: analyzing.job.job_id.clone(),
+            channel_id: analyzing.job.channel_id.clone(),
+            sink_id: analyzing.job.sink_id.clone(),
+            target_lufs_milli: analyzing.job.target_lufs_milli,
+            measured_lufs_milli: Some(analysis.measured_lufs_milli),
+            tolerance_lufs_milli: OUTPUT_PROOF_TOLERANCE_MILLI,
+            outcome,
+            receiver_acceptance: ReceiverAcceptance::NotAttempted,
+            captured_at_unix_ms: now_unix_ms,
+            sample_duration_ms: capture.sample_duration_ms,
+            capture_bytes: capture.capture_bytes,
+            capture_sha256: capture.capture_sha256.clone(),
+            candidate_version: analyzing.job.candidate_version.clone(),
+            source_commit: analyzing.job.source_commit.clone(),
+            configuration_hash: analyzing.job.configuration_hash.clone(),
+            measurement_engine: "gstreamer-ebur128".into(),
+            measurement_method: "station-media-assets::measure_output_loudness".into(),
+            detail: format!(
+                "worker_instance_id={} graph_revision={} capture_window_ms={} analyzed_duration_ms={}",
+                analyzing.worker_instance_id,
+                analyzing.graph_revision,
+                analyzing.worker_capture_duration_ms,
+                analysis.analyzed_duration_ms
+            ),
+        };
+        // Formal slot activation stops stationd before replacing candidate
+        // receipts. Recheck at the final write boundary as well so any
+        // out-of-band receipt change during analysis rolls the job back to an
+        // explicit failure instead of appending evidence for stale identity.
+        if let Err(detail) = self.verify_current_candidate(&analyzing.job) {
+            self.fail_analyzing_output_proof_job(store, &analyzing, now_unix_ms, detail)?;
+            return Ok(OutputProofState::Idle);
+        }
+        store
+            .complete_output_loudness_job_with_proof(
+                &analyzing.job.job_id,
+                now_unix_ms,
+                &proof,
+                Some(&analyzing.artifact_relative_path),
+            )
+            .map_err(|error| {
+                OrchestrationError::Storage(format!("complete output proof: {error}"))
+            })?;
+        Ok(OutputProofState::Idle)
+    }
+
+    fn output_proof_tick(
+        &mut self,
+        store: &StationStore,
+        now_unix_ms: i64,
+    ) -> Result<(), OrchestrationError> {
+        let state = std::mem::take(&mut self.output_proof);
+        self.output_proof = match state {
+            OutputProofState::Idle => {
+                let job = store
+                    .claim_next_output_loudness_job(
+                        &self.channel_id,
+                        now_unix_ms,
+                        OUTPUT_PROOF_LEASE_MS,
+                    )
+                    .map_err(OrchestrationError::Storage)?;
+                match job {
+                    Some(job) => self.begin_output_proof(store, job, now_unix_ms)?,
+                    None => OutputProofState::Idle,
+                }
+            }
+            state @ OutputProofState::Capturing { .. } => {
+                self.poll_output_proof(store, state, now_unix_ms)?
+            }
+            OutputProofState::Analyzing(analyzing) => {
+                self.finish_output_proof(store, analyzing, now_unix_ms)?
+            }
+        };
+        Ok(())
     }
 
     fn poll_health(&mut self, now_unix_ms: i64) -> Result<(), OrchestrationError> {
@@ -1141,6 +1981,7 @@ impl ChannelController {
             .ensure_running()
             .map_err(OrchestrationError::Worker)?;
         let store = StationStore::open(&self.database_path).map_err(OrchestrationError::Storage)?;
+        self.output_proof_tick(&store, now_unix_ms)?;
         if now_unix_ms >= self.next_cg_sync_at_unix_ms {
             self.next_cg_sync_at_unix_ms = now_unix_ms.saturating_add(CG_SYNC_INTERVAL_MS);
             expire_due_bulletins(&store, &self.channel_id, now_unix_ms)?;
@@ -1443,6 +2284,15 @@ pub fn run_until(
     worker_executable: &Path,
     stop: Arc<AtomicBool>,
 ) -> Result<(), OrchestrationError> {
+    run_until_with_candidate_authority(database_path, worker_executable, stop, None)
+}
+
+pub fn run_until_with_candidate_authority(
+    database_path: &Path,
+    worker_executable: &Path,
+    stop: Arc<AtomicBool>,
+    candidate_authority: Option<Arc<dyn CandidateAuthority>>,
+) -> Result<(), OrchestrationError> {
     let journal_root = database_path
         .parent()
         .unwrap_or_else(|| Path::new("."))
@@ -1528,6 +2378,9 @@ pub fn run_until(
                     }
                 };
                 let mut controller = controller;
+                if let Some(authority) = candidate_authority.as_ref() {
+                    controller.set_candidate_authority(Arc::clone(authority));
+                }
                 if let Some(state) = cg_states.remove(&channel.channel_id) {
                     controller.seed_cg_state(state);
                 }
@@ -1779,9 +2632,11 @@ fn system_time_millis() -> Result<i64, OrchestrationError> {
 #[cfg(test)]
 mod tests {
     use super::{
-        CgSnapshotState, OrchestrationError, OutputExpectation, expire_due_bulletins,
-        generate_live_arm_token, managed_cg_image_root, resolved_snapshot_to_protocol,
-        stalled_required_output,
+        CgSnapshotState, OrchestrationError, OutputExpectation, capture_duration_for_sample,
+        cleanup_orphan_output_proof_artifacts, expire_due_bulletins, generate_live_arm_token,
+        hash_capture, is_abort_confirmation, lease_renewal_due, managed_cg_image_root,
+        proof_artifact_path, proof_bindings_match, ready_duration_is_bounded,
+        resolved_snapshot_to_protocol, stalled_required_output,
     };
     use station_cg::{
         CgAuditEvent, CgAuditEventKind, CgBoard, CgBulletin, CgBulletinContent, CgBulletinState,
@@ -1791,6 +2646,7 @@ mod tests {
         CgContentSource, CgRect, CgResolvedContent, CgResolvedSnapshot, CgResolvedZone,
         CgTemplateKind, CgZoneKind,
     };
+    use station_media_protocol::WorkerEvent;
     use station_schedule::{ChannelConfiguration, OutputProfileId, OutputSinkConfiguration};
     use station_storage::StationStore;
     use std::collections::BTreeMap;
@@ -1834,6 +2690,112 @@ mod tests {
         for suffix in ["", "-wal", "-shm"] {
             let _ = std::fs::remove_file(format!("{}{}", path.display(), suffix));
         }
+    }
+
+    #[test]
+    fn proof_artifact_path_rejects_escape_and_hashes_managed_file() {
+        let root = std::env::temp_dir().join(format!(
+            "townlight-proof-root-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let artifact = root.join("capture.ts");
+        std::fs::write(&artifact, b"proof-bytes").unwrap();
+        let resolved = proof_artifact_path(&root, "capture.ts").unwrap();
+        assert_eq!(resolved, std::fs::canonicalize(&artifact).unwrap());
+        assert_eq!(hash_capture(&resolved, 11).unwrap().0, 11);
+        assert!(proof_artifact_path(&root, "../capture.ts").is_err());
+        let _ = std::fs::remove_file(artifact);
+        let _ = std::fs::remove_dir(root);
+    }
+
+    #[test]
+    fn proof_binding_order_is_authoritative_and_rejects_reordering() {
+        let first = super::ProofOutputBinding {
+            sink_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".into(),
+            target_lufs_milli: -24_000,
+        };
+        let second = super::ProofOutputBinding {
+            sink_id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb".into(),
+            target_lufs_milli: -16_000,
+        };
+        assert!(proof_bindings_match(
+            &[first.clone(), second.clone()],
+            &[first.clone(), second.clone()]
+        ));
+        assert!(!proof_bindings_match(
+            &[first, second.clone()],
+            std::slice::from_ref(&second)
+        ));
+        assert!(!proof_bindings_match(
+            &[second.clone(), second.clone()],
+            &[second]
+        ));
+    }
+
+    #[test]
+    fn capture_duration_adds_bounded_decode_headroom() {
+        assert_eq!(capture_duration_for_sample(2_999), None);
+        assert_eq!(capture_duration_for_sample(3_000), Some(5_000));
+        assert_eq!(capture_duration_for_sample(300_000), Some(302_000));
+        assert_eq!(capture_duration_for_sample(300_001), None);
+
+        assert!(!ready_duration_is_bounded(4_999, 5_000));
+        assert!(ready_duration_is_bounded(5_000, 5_000));
+        assert!(ready_duration_is_bounded(5_250, 5_000));
+        assert!(!ready_duration_is_bounded(302_001, 5_000));
+    }
+
+    #[test]
+    fn lease_renewal_is_due_only_near_expiry() {
+        assert!(!lease_renewal_due(1_000, Some(100_000)));
+        assert!(lease_renewal_due(70_000, Some(100_000)));
+        assert!(lease_renewal_due(100_000, Some(100_000)));
+        assert!(lease_renewal_due(1_000, None));
+    }
+
+    #[test]
+    fn orphan_cleanup_removes_only_deterministic_regular_artifacts() {
+        let root = std::env::temp_dir().join(format!(
+            "townlight-proof-cleanup-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let job_id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+        std::fs::write(root.join(format!("{job_id}.ts")), b"old-final").unwrap();
+        std::fs::write(root.join(format!("{job_id}.ts.part")), b"old-part").unwrap();
+        cleanup_orphan_output_proof_artifacts(&root, job_id).unwrap();
+        assert!(!root.join(format!("{job_id}.ts")).exists());
+        assert!(!root.join(format!("{job_id}.ts.part")).exists());
+        let _ = std::fs::remove_dir(root);
+    }
+
+    #[test]
+    fn abort_requires_the_worker_terminal_abort_confirmation() {
+        let aborted = WorkerEvent::OutputProofFailed {
+            proof_id: "proof-1".into(),
+            artifact_relative_path: "proof-1.ts".into(),
+            worker_instance_id: "worker-1".into(),
+            graph_revision: 1,
+            code: "capture_aborted".into(),
+            message: "aborted".into(),
+        };
+        let rejected = WorkerEvent::CommandRejected {
+            command_id: "abort".into(),
+            code: "capture_aborted".into(),
+            message: "not active".into(),
+        };
+        assert!(is_abort_confirmation(&aborted, "proof-1"));
+        assert!(!is_abort_confirmation(&aborted, "proof-2"));
+        assert!(!is_abort_confirmation(&rejected, "proof-1"));
     }
 
     fn put_channel(store: &StationStore, channel_id: &str) {

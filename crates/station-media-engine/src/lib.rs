@@ -17,6 +17,7 @@ use image::{ImageReader, Limits};
 use sha2::{Digest, Sha256};
 use station_media_protocol::{
     CgImageFormat, CgOverlayContent, CgSnapshot, LoudnessTarget, MAX_CG_SLOTS, MAX_CG_TEXT_BYTES,
+    MAX_OUTPUT_PROOF_BYTES, MAX_OUTPUT_PROOF_DURATION_MS, MIN_OUTPUT_PROOF_DURATION_MS,
 };
 use station_schedule::{OutputProfile, OutputProfileId};
 
@@ -920,15 +921,17 @@ impl PersistentPlayout {
                 "output capture identities must be canonical UUIDs".into(),
             ));
         }
-        if !(3_000..=300_000).contains(&request.duration_ms) {
-            return Err(EngineError::OutputCapture(
-                "output capture duration must be between 3000 and 300000 milliseconds".into(),
-            ));
+        if !(MIN_OUTPUT_PROOF_DURATION_MS..=MAX_OUTPUT_PROOF_DURATION_MS)
+            .contains(&request.duration_ms)
+        {
+            return Err(EngineError::OutputCapture(format!(
+                "output capture duration must be between {MIN_OUTPUT_PROOF_DURATION_MS} and {MAX_OUTPUT_PROOF_DURATION_MS} milliseconds"
+            )));
         }
-        if !(1..=256 * 1024 * 1024).contains(&request.max_bytes) {
-            return Err(EngineError::OutputCapture(
-                "output capture byte limit must be between 1 and 268435456".into(),
-            ));
+        if !(1..=MAX_OUTPUT_PROOF_BYTES).contains(&request.max_bytes) {
+            return Err(EngineError::OutputCapture(format!(
+                "output capture byte limit must be between 1 and {MAX_OUTPUT_PROOF_BYTES}"
+            )));
         }
         let output_index = usize::from(request.output_index);
         let binding = self
@@ -2701,7 +2704,11 @@ fn run_capture_writer(
             artifact_relative_path,
             capture_bytes,
             capture_sha256: format!("{:x}", digest.finalize()),
-            capture_duration_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+            // A ready capture proves that the writer remained active until the
+            // requested lower bound elapsed. Report that bounded contractual
+            // sample duration; independent decode measures the artifact's
+            // actual media duration before any proof is accepted.
+            capture_duration_ms: request.duration_ms,
         })
     })();
 

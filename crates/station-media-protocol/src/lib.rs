@@ -77,7 +77,10 @@ pub const MAX_FRAME_BYTES: usize = 65_536;
 pub const PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion { major: 3, minor: 0 };
 
 pub const MAX_OUTPUT_PROOF_INDEX: u16 = 255;
-pub const MAX_OUTPUT_PROOF_DURATION_MS: u64 = 300_000;
+// Operator-requested analyzable program is capped at 300 seconds. The worker
+// protocol permits two additional seconds so a bounded MPEG-TS capture can
+// include enough leading transport context for independent decode.
+pub const MAX_OUTPUT_PROOF_DURATION_MS: u64 = 302_000;
 pub const MIN_OUTPUT_PROOF_DURATION_MS: u64 = 3_000;
 pub const MAX_OUTPUT_PROOF_BYTES: u64 = 256 * 1024 * 1024;
 const MAX_OUTPUT_PROOF_ARTIFACT_PATH_BYTES: usize = 2_048;
@@ -382,6 +385,9 @@ pub enum ChannelCommand {
         max_bytes: u64,
     },
     PollOutputProof {
+        proof_id: String,
+    },
+    AbortOutputProof {
         proof_id: String,
     },
     Shutdown,
@@ -701,7 +707,8 @@ fn validate_output_proof_command(command: &ChannelCommand) -> Result<(), String>
             validate_proof_target(*loudness_target_lufs)?;
             validate_proof_bounds(*duration_ms, *max_bytes)
         }
-        ChannelCommand::PollOutputProof { proof_id } => {
+        ChannelCommand::PollOutputProof { proof_id }
+        | ChannelCommand::AbortOutputProof { proof_id } => {
             validate_canonical_uuid(proof_id, "proof_id")
         }
         _ => Ok(()),

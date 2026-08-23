@@ -4,6 +4,7 @@ use std::net::UdpSocket;
 use std::num::NonZeroU16;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
+use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use station_media_journal::{JournalWriter, read_events};
@@ -17,6 +18,13 @@ use station_windows_ipc::PipeServer;
 
 const WORKER_ID: &str = "ae819b97-2920-434b-9d96-0b51a8ea9abb";
 const CHANNEL_ID: &str = "62a47b7e-2a03-48d6-8703-a6e5ce986527";
+static PROCESS_CONTRACT_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+fn process_contract_test_guard() -> MutexGuard<'static, ()> {
+    PROCESS_CONTRACT_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
 
 fn journal_path(name: &str) -> PathBuf {
     let nonce = SystemTime::now()
@@ -114,6 +122,7 @@ fn run_worker(
 
 #[test]
 fn worker_rejects_a_staged_profile_before_starting_the_media_graph() {
+    let _guard = process_contract_test_guard();
     let journal = journal_path("staged-profile-rejected");
     let _temp_files = TempFiles(vec![journal.clone()]);
     let server = PipeServer::bind(
@@ -324,6 +333,7 @@ fn certutil_sha256(path: &Path) -> String {
 
 #[test]
 fn spawned_worker_output_proof_reaches_ready_with_artifact_hash_and_health() {
+    let _guard = process_contract_test_guard();
     let nonce = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .expect("system clock is before Unix epoch")
@@ -355,7 +365,7 @@ fn spawned_worker_output_proof_reaches_ready_with_artifact_hash_and_health() {
         .spawn()
         .unwrap();
     let mut worker = ChildGuard::new(child);
-    let mut stream = server.accept().unwrap();
+    let mut stream = server.accept_timeout(Duration::from_secs(10)).unwrap();
     let sink_id = "22222222-3333-4444-8555-666666666666";
     let bootstrap = WorkerBootstrapEnvelope {
         version: PROTOCOL_VERSION,
@@ -541,6 +551,75 @@ fn spawned_worker_output_proof_reaches_ready_with_artifact_hash_and_health() {
     assert!(health_after.bytes_sent_total > health_before.bytes_sent_total);
     assert!(health_after.audio_buffers_total > health_before.audio_buffers_total);
 
+    let aborted_proof_id = "33333333-4444-4555-8666-777777777777";
+    stream
+        .write_all(
+            &encode_command_frame(&command(
+                "start-aborted-output-proof",
+                expected_sequence,
+                ChannelCommand::StartOutputProof {
+                    proof_id: aborted_proof_id.into(),
+                    output_index: 0,
+                    sink_id: sink_id.into(),
+                    loudness_target_lufs: LoudnessTarget::CABLE,
+                    duration_ms: 30_000,
+                    max_bytes: 16 * 1024 * 1024,
+                },
+            ))
+            .unwrap(),
+        )
+        .unwrap();
+    let aborted_artifact = match read_event(&mut stream).event {
+        WorkerEvent::OutputProofStarted {
+            proof_id,
+            artifact_relative_path,
+            ..
+        } => {
+            assert_eq!(proof_id, aborted_proof_id);
+            artifact_relative_path
+        }
+        other => panic!("unexpected aborted proof start event: {other:?}"),
+    };
+    expected_sequence += 1;
+    stream
+        .write_all(
+            &encode_command_frame(&command(
+                "abort-output-proof",
+                expected_sequence,
+                ChannelCommand::AbortOutputProof {
+                    proof_id: aborted_proof_id.into(),
+                },
+            ))
+            .unwrap(),
+        )
+        .unwrap();
+    match read_event(&mut stream).event {
+        WorkerEvent::OutputProofFailed {
+            proof_id,
+            artifact_relative_path,
+            code,
+            graph_revision,
+            ..
+        } => {
+            assert_eq!(proof_id, aborted_proof_id);
+            assert_eq!(artifact_relative_path, aborted_artifact);
+            assert_eq!(code, "capture_aborted");
+            assert_eq!(graph_revision, 1);
+        }
+        other => panic!("unexpected output proof abort event: {other:?}"),
+    }
+    expected_sequence += 1;
+    let abort_cleanup_deadline = Instant::now() + Duration::from_secs(2);
+    let aborted_part = proof_root.join(format!("{aborted_proof_id}.ts.part"));
+    while aborted_part.exists() && Instant::now() < abort_cleanup_deadline {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(!aborted_part.exists(), "aborted proof part was not removed");
+    assert!(
+        !proof_root.join(&aborted_artifact).exists(),
+        "aborted proof artifact was published"
+    );
+
     stream
         .write_all(
             &encode_command_frame(&command(
@@ -561,6 +640,7 @@ fn spawned_worker_output_proof_reaches_ready_with_artifact_hash_and_health() {
 
 #[test]
 fn spawned_worker_live_takeover_preserves_audible_audio() {
+    let _guard = process_contract_test_guard();
     let journal = journal_path("live-audio");
     let capture_path = journal.with_extension("ts");
     let _temp_files = TempFiles(vec![journal.clone(), capture_path.clone()]);
@@ -684,7 +764,11 @@ fn spawned_worker_live_takeover_preserves_audible_audio() {
 
     clear_udp_backlog(&output);
     std::thread::sleep(Duration::from_millis(750));
-    let transport_capture = capture_transport_for(&output, &mut worker, Duration::from_secs(4));
+    // A transport capture beginning at an arbitrary mux boundary can lose
+    // leading audio during FFmpeg discovery. Eight seconds leaves a stable
+    // six-half-second decoded window without weakening the sustained-audio
+    // requirement below.
+    let transport_capture = capture_transport_for(&output, &mut worker, Duration::from_secs(8));
     assert!(
         transport_capture.len() > 100_000,
         "live capture was too short: {} bytes",
@@ -816,6 +900,7 @@ fn spawned_worker_live_takeover_preserves_audible_audio() {
 
 #[test]
 fn journals_each_event_before_emitting_it_and_recovers_sequence_after_restart() {
+    let _guard = process_contract_test_guard();
     let journal = journal_path("lifecycle");
     let mut input = Vec::new();
     input.extend_from_slice(
@@ -872,6 +957,7 @@ fn journals_each_event_before_emitting_it_and_recovers_sequence_after_restart() 
 
 #[test]
 fn spawned_worker_recovers_sequence_from_a_compacted_heartbeat_journal() {
+    let _guard = process_contract_test_guard();
     let journal = journal_path("compacted-heartbeat-restart");
     let mut writer = JournalWriter::open(&journal, WORKER_ID, CHANNEL_ID).unwrap();
     writer
@@ -931,6 +1017,7 @@ fn spawned_worker_recovers_sequence_from_a_compacted_heartbeat_journal() {
 
 #[test]
 fn rejects_a_stale_command_and_durably_records_the_rejection() {
+    let _guard = process_contract_test_guard();
     let journal = journal_path("stale-command");
     let mut input =
         encode_command_frame(&command("stale-command", 99, ChannelCommand::Shutdown)).unwrap();
@@ -959,6 +1046,7 @@ fn rejects_a_stale_command_and_durably_records_the_rejection() {
 
 #[test]
 fn applies_and_clears_cg_without_restarting_the_worker_graph() {
+    let _guard = process_contract_test_guard();
     let journal = journal_path("cg-lifecycle");
     let snapshot = CgSnapshot {
         board_id: "board-1".into(),

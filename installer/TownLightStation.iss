@@ -40,7 +40,7 @@
 #define ServiceName "TownLightStation"
 #define UpdaterServiceName "TownLightStationUpdater"
 #define GStreamerFile "gstreamer-1.0-msvc-x86_64-1.28.6.exe"
-#define GStreamerSha256 "059251444D1267B486EBA390B18D25FED87E10315E72F757EC6C7E912FA746B5"
+#define GStreamerSha256 "059251444d1267b486eba390b18d25fed87e10315e72f757ec6c7e912fa746b5"
 
 [Setup]
 AppId={{D70BC1A2-A047-4F3A-87D9-811385248D2C}

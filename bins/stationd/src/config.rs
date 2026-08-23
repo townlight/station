@@ -87,8 +87,8 @@ pub fn parse(arguments: impl IntoIterator<Item = OsString>) -> Result<DaemonConf
     if mode == LaunchMode::Service && !database.is_absolute() {
         return Err("service mode requires an absolute --database path".into());
     }
-    if mode == LaunchMode::Service && !address.ip().is_loopback() {
-        return Err("service mode address must remain on loopback".into());
+    if !address.ip().is_loopback() {
+        return Err("station control address must remain on loopback".into());
     }
     Ok(DaemonConfig {
         mode,
@@ -151,5 +151,11 @@ mod tests {
         assert_eq!(config.mode, LaunchMode::Console);
         assert_eq!(config.database, PathBuf::from("custom.db"));
         assert_eq!(config.address, "127.0.0.1:4800".parse().unwrap());
+    }
+
+    #[test]
+    fn rejects_a_non_loopback_console_address() {
+        let error = parse(["custom.db", "0.0.0.0:4800"].map(OsString::from)).unwrap_err();
+        assert!(error.contains("loopback"), "unexpected error: {error}");
     }
 }

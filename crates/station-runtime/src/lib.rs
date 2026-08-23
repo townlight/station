@@ -275,6 +275,16 @@ impl WorkerSupervisor {
         }
     }
 
+    /// Ends an ambiguously synchronized worker session. Once a protected-pipe
+    /// command times out, the supervisor cannot know whether the worker acted
+    /// before its reply was lost; process termination is the only fail-closed
+    /// way to prevent that command from continuing in the background.
+    pub fn force_terminate(&mut self) {
+        if let Some(mut child) = self.child.take() {
+            terminate(&mut child);
+        }
+    }
+
     pub fn command(
         &mut self,
         command_id: &str,
