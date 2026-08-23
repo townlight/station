@@ -17,10 +17,14 @@ The script proves one exact installed candidate, on one Windows machine, in this
 
 ## Invocation
 
-The fixture must already be a non-empty, real media file suitable for the installed media pipeline. The harness never copies or edits it.
+The fixture must already be a non-empty, real media file suitable for the installed media pipeline. The harness never copies or edits it. Supply an existing local operator account through an in-memory `PSCredential`; the harness does not accept a plaintext password argument, environment variable, or credential file. `Get-Credential` keeps the password out of the command line, transcript text, and JSON evidence.
 
 ```powershell
+$proofCredential = Get-Credential -Message 'TownLight Station installed-proof operator'
+if ($null -eq $proofCredential) { throw 'An operator credential is required.' }
+
 .\scripts\prove-installed-commissioning.ps1 `
+  -Credential $proofCredential `
   -FixturePath 'C:\proof-fixtures\real-h264-aac.ts' `
   -ExpectedSourceCommit '<installed-candidate-commit>' `
   -CandidateManifestPath '.\dist\candidate-manifest.json' `
@@ -33,7 +37,7 @@ The proof channel and schedule IDs are new UUIDs per run, so sequential and conc
 
 ## What this does not claim
 
-This is not the required field acceptance: one live station for a week followed by three stations for another week. It does not prove every S6/S18 source variant, a seven-day soak, operator authentication, installer creation, or pixel parity for non-image CG content. It also cannot prove a candidate that is not actually installed; static parsing of the script and a successful local API call are not substitutes for this gate.
+This is not the required field acceptance: one live station for a week followed by three stations for another week. It does not prove every S6/S18 source variant, a seven-day soak, installer creation or first-account bootstrap, recovery, restart-driven session invalidation, or pixel parity for non-image CG content. It also cannot prove a candidate that is not actually installed; static parsing of the script and a successful authenticated local API call are not substitutes for those gates.
 
 The harness itself was validated end to end against the already-installed candidate `c2cf23d7302695214ed27711b50e61e2eb2ae31f`. Run `3b00c091-41de-4bb5-9f54-0a1ce735aa48` passed exact manifest/hash checks, both LocalSystem services, decoded CG red-to-green-to-clear, real canonical ingest and -23.973 LUFS readiness, observed `pending → queued → acknowledged → completed`, station-service restart, preserved station identity, a persisted completed report, and green safe-to-air recovery. Its JSON evidence is retained outside the repository at `C:\Users\scott\Documents\Codex\commissioning-proof-c2cf23d-elevated.json`.
 
