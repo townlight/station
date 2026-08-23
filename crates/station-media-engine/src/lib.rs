@@ -24,6 +24,10 @@ use station_schedule::{OutputProfile, OutputProfileId};
 static FILE_PROGRAM_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 static LIVE_PROGRAM_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 const AUDIO_TIMESTAMP_TOLERANCE_NS: u64 = 40_000_000;
+const MPEG_TS_PACKET_BYTES: u16 = 188;
+const DEFAULT_MPEG_TS_PACKET_SIZE_BYTES: u16 = 1_316;
+const MAX_UDP_PAYLOAD_BYTES: u16 = 65_507;
+const MAX_TRANSPORT_BITRATE_BPS: u64 = 100_000_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SourceRole {
@@ -46,6 +50,30 @@ pub struct ConfiguredTransportOutput {
     transport: TransportOutput,
     loudness_target: LoudnessTarget,
     sink_id: Option<String>,
+    mux_contract: Option<MpegTsMuxContract>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MpegTsMuxContract {
+    transport_bitrate_bps: u64,
+    packet_size_bytes: u16,
+}
+
+impl MpegTsMuxContract {
+    pub const fn new(transport_bitrate_bps: u64, packet_size_bytes: u16) -> Self {
+        Self {
+            transport_bitrate_bps,
+            packet_size_bytes,
+        }
+    }
+
+    pub const fn transport_bitrate_bps(self) -> u64 {
+        self.transport_bitrate_bps
+    }
+
+    pub const fn packet_size_bytes(self) -> u16 {
+        self.packet_size_bytes
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -103,6 +131,20 @@ impl ConfiguredTransportOutput {
             transport: TransportOutput::Udp(destination),
             loudness_target,
             sink_id: None,
+            mux_contract: None,
+        }
+    }
+
+    pub fn udp_with_mux_contract(
+        destination: SocketAddr,
+        loudness_target: LoudnessTarget,
+        mux_contract: MpegTsMuxContract,
+    ) -> Self {
+        Self {
+            transport: TransportOutput::Udp(destination),
+            loudness_target,
+            sink_id: None,
+            mux_contract: Some(mux_contract),
         }
     }
 
@@ -115,6 +157,21 @@ impl ConfiguredTransportOutput {
             transport: TransportOutput::Udp(destination),
             loudness_target,
             sink_id: Some(sink_id.into()),
+            mux_contract: None,
+        }
+    }
+
+    pub fn udp_identified_with_mux_contract(
+        sink_id: impl Into<String>,
+        destination: SocketAddr,
+        loudness_target: LoudnessTarget,
+        mux_contract: MpegTsMuxContract,
+    ) -> Self {
+        Self {
+            transport: TransportOutput::Udp(destination),
+            loudness_target,
+            sink_id: Some(sink_id.into()),
+            mux_contract: Some(mux_contract),
         }
     }
 
@@ -130,6 +187,7 @@ impl ConfiguredTransportOutput {
             },
             loudness_target,
             sink_id: None,
+            mux_contract: None,
         }
     }
 
@@ -146,6 +204,7 @@ impl ConfiguredTransportOutput {
             },
             loudness_target,
             sink_id: Some(sink_id.into()),
+            mux_contract: None,
         }
     }
 }
@@ -201,6 +260,11 @@ pub enum EngineError {
     CgInvalid(String),
     UnsupportedLoudnessTarget {
         target_milli_lufs: i32,
+    },
+    UnsupportedMuxContract {
+        transport_bitrate_bps: u64,
+        packet_size_bytes: u16,
+        reason: &'static str,
     },
     OutputCapture(String),
 }
@@ -336,6 +400,7 @@ impl PersistentPlayout {
                 transport,
                 loudness_target,
                 sink_id: None,
+                mux_contract: None,
             })
             .collect::<Vec<_>>();
         Self::start_outputs_with_program(
@@ -423,9 +488,10 @@ impl PersistentPlayout {
                 profile_id: output_profile.storage_name().into(),
             });
         }
+        let profile = output_profile.profile();
+        let variant_contracts = output_variant_contracts(outputs, profile)?;
         let startup_started = Instant::now();
         gst::init().map_err(|error| EngineError::Initialization(error.to_string()))?;
-        let profile = output_profile.profile();
         let proof_artifact_root = proof_artifact_root
             .map(validate_proof_artifact_root)
             .transpose()?;
@@ -529,10 +595,9 @@ impl PersistentPlayout {
             .map_err(|error| build_error("audiorate", error))?;
         let audio_output_queue = element("queue", "audio-output-queue")?;
         let audio_variant_fanout = element("tee", "audio-variant-fanout")?;
-        let variant_targets = output_variant_targets(outputs)?;
-        let loudness_variants = variant_targets
+        let loudness_variants = variant_contracts
             .iter()
-            .map(|target| build_loudness_variant(*target, profile))
+            .map(|contract| build_loudness_variant(*contract, profile))
             .collect::<Result<Vec<_>, _>>()?;
         let video_variant_fanout = element("tee", "video-variant-fanout")?;
         let mut output_branches = Vec::with_capacity(outputs.len());
@@ -579,10 +644,11 @@ impl PersistentPlayout {
                     output_counters.push(OutputCounter::Srt(sink.clone()));
                 }
             }
-            let variant_index = variant_targets
+            let output_contract = effective_output_variant_contract(output, profile);
+            let variant_index = variant_contracts
                 .iter()
-                .position(|target| target == &output.loudness_target)
-                .ok_or_else(|| EngineError::Pipeline("missing loudness variant".into()))?;
+                .position(|contract| contract == &output_contract)
+                .ok_or_else(|| EngineError::Pipeline("missing output variant".into()))?;
             output_audio_counters.push(Arc::clone(&loudness_variants[variant_index].audio_buffers));
             output_branches.push(OutputBranch {
                 queue,
@@ -2915,18 +2981,79 @@ fn validate_loudness_target(target: LoudnessTarget) -> Result<(), EngineError> {
     Ok(())
 }
 
-fn output_variant_targets(
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct OutputVariantContract {
+    loudness_target: LoudnessTarget,
+    mux: MpegTsMuxContract,
+}
+
+fn effective_output_variant_contract(
+    output: &ConfiguredTransportOutput,
+    profile: &OutputProfile,
+) -> OutputVariantContract {
+    OutputVariantContract {
+        loudness_target: output.loudness_target,
+        mux: output.mux_contract.unwrap_or_else(|| {
+            MpegTsMuxContract::new(
+                profile.transport_bitrate_bps,
+                DEFAULT_MPEG_TS_PACKET_SIZE_BYTES,
+            )
+        }),
+    }
+}
+
+fn output_variant_contracts(
     outputs: &[ConfiguredTransportOutput],
-) -> Result<Vec<LoudnessTarget>, EngineError> {
-    let mut targets = Vec::new();
+    profile: &OutputProfile,
+) -> Result<Vec<OutputVariantContract>, EngineError> {
+    let mut contracts = Vec::new();
     for output in outputs {
         validate_loudness_target(output.loudness_target)?;
-        if !targets.contains(&output.loudness_target) {
-            targets.push(output.loudness_target);
+        let contract = effective_output_variant_contract(output, profile);
+        validate_mux_contract(contract.mux, profile)?;
+        if !contracts.contains(&contract) {
+            contracts.push(contract);
         }
     }
-    targets.sort_by_key(|target| target.milli_lufs());
-    Ok(targets)
+    contracts.sort_by_key(|contract| {
+        (
+            contract.loudness_target.milli_lufs(),
+            contract.mux.transport_bitrate_bps,
+            contract.mux.packet_size_bytes,
+        )
+    });
+    Ok(contracts)
+}
+
+fn validate_mux_contract(
+    contract: MpegTsMuxContract,
+    profile: &OutputProfile,
+) -> Result<(), EngineError> {
+    let encoded_bitrate_bps =
+        u64::from(profile.video_bitrate_bps) + u64::from(profile.audio_bitrate_bps);
+    let reason = if contract.transport_bitrate_bps <= encoded_bitrate_bps {
+        Some("transport bitrate must exceed the encoded elementary-stream bitrate")
+    } else if contract.transport_bitrate_bps > MAX_TRANSPORT_BITRATE_BPS {
+        Some("transport bitrate exceeds the supported 100 Mbps ceiling")
+    } else if contract.packet_size_bytes < MPEG_TS_PACKET_BYTES
+        || !contract
+            .packet_size_bytes
+            .is_multiple_of(MPEG_TS_PACKET_BYTES)
+    {
+        Some("packet size must contain whole 188-byte MPEG-TS packets")
+    } else if contract.packet_size_bytes > MAX_UDP_PAYLOAD_BYTES {
+        Some("packet size exceeds the maximum UDP payload")
+    } else {
+        None
+    };
+    if let Some(reason) = reason {
+        return Err(EngineError::UnsupportedMuxContract {
+            transport_bitrate_bps: contract.transport_bitrate_bps,
+            packet_size_bytes: contract.packet_size_bytes,
+            reason,
+        });
+    }
+    Ok(())
 }
 
 fn bounded_queue(name: impl Into<gst::glib::GString>) -> Result<gst::Element, EngineError> {
@@ -2954,11 +3081,18 @@ fn loudness_input_caps(name: impl Into<gst::glib::GString>) -> Result<gst::Eleme
 }
 
 fn build_loudness_variant(
-    target: LoudnessTarget,
+    contract: OutputVariantContract,
     profile: &OutputProfile,
 ) -> Result<LoudnessVariant, EngineError> {
+    let target = contract.loudness_target;
     validate_loudness_target(target)?;
-    let prefix = format!("loudness-{}", target.milli_lufs().unsigned_abs());
+    validate_mux_contract(contract.mux, profile)?;
+    let prefix = format!(
+        "variant-{}-{}-{}",
+        target.milli_lufs().unsigned_abs(),
+        contract.mux.transport_bitrate_bps,
+        contract.mux.packet_size_bytes
+    );
     let normalizer = gst::ElementFactory::make("audioloudnorm")
         .name(format!("{prefix}-normalizer"))
         .property("loudness-target", target.as_lufs())
@@ -2969,8 +3103,11 @@ fn build_loudness_variant(
     let audio_output_caps = audio_caps_filter(format!("{prefix}-output-caps"), profile)?;
     let mux = gst::ElementFactory::make("mpegtsmux")
         .name(format!("{prefix}-mux"))
-        .property("alignment", 7_i32)
-        .property("bitrate", profile.transport_bitrate_bps)
+        .property(
+            "alignment",
+            i32::from(contract.mux.packet_size_bytes / MPEG_TS_PACKET_BYTES),
+        )
+        .property("bitrate", contract.mux.transport_bitrate_bps)
         .property("pat-interval", 9_000_u32)
         .property("pmt-interval", 9_000_u32)
         .property("pcr-interval", 3_600_u32)

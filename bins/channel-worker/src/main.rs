@@ -5,8 +5,8 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 use station_media_engine::{
-    ConfiguredTransportOutput, OutputCaptureRequest, OutputCaptureStatus, PersistentPlayout,
-    SourceRole,
+    ConfiguredTransportOutput, MpegTsMuxContract, OutputCaptureRequest, OutputCaptureStatus,
+    PersistentPlayout, SourceRole,
 };
 use station_media_journal::JournalWriter;
 use station_media_protocol::{
@@ -235,14 +235,27 @@ fn main() {
                 sink_id,
                 destination,
                 loudness_target_lufs,
+                headend,
             } => destination
                 .parse::<SocketAddr>()
                 .map(|destination| {
-                    ConfiguredTransportOutput::udp_identified(
-                        sink_id,
-                        destination,
-                        loudness_target_lufs,
-                    )
+                    if let Some(headend) = headend {
+                        ConfiguredTransportOutput::udp_identified_with_mux_contract(
+                            sink_id,
+                            destination,
+                            loudness_target_lufs,
+                            MpegTsMuxContract::new(
+                                u64::from(headend.muxrate_kbps) * 1_000,
+                                headend.packet_size_bytes,
+                            ),
+                        )
+                    } else {
+                        ConfiguredTransportOutput::udp_identified(
+                            sink_id,
+                            destination,
+                            loudness_target_lufs,
+                        )
+                    }
                 })
                 .map_err(|error| error.to_string()),
             WorkerOutputConfiguration::Srt {

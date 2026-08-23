@@ -243,6 +243,7 @@ pub enum HeadendTransport {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum HeadendProfileExecutionState {
+    Runnable,
     StagedOnly,
     Unimplemented,
 }
@@ -295,8 +296,8 @@ pub const HEADEND_PROFILES: [HeadendProfile; 6] = [
         minimum_port: 1,
         operator_must_supply: DESTINATION_AND_RATE,
         not_claimed: &[FIELD_PROOF_BOUNDARY],
-        execution_state: HeadendProfileExecutionState::StagedOnly,
-        execution_detail: "Configuration may be staged while stopped; the per-sink loudness output variant must be implemented and proved before enablement.",
+        execution_state: HeadendProfileExecutionState::Runnable,
+        execution_detail: "The progressive H.264/AAC 8 Mb/s UDP SPTS path is locally executable; downstream headend acceptance still requires receiver evidence.",
     },
     HeadendProfile {
         profile_id: HeadendProfileId::ComcastMtdSd,
@@ -355,8 +356,8 @@ pub const HEADEND_PROFILES: [HeadendProfile; 6] = [
             "A feed Max Bit Rate matching the selected multiplex rate.",
         ],
         not_claimed: &[FIELD_PROOF_BOUNDARY],
-        execution_state: HeadendProfileExecutionState::StagedOnly,
-        execution_detail: "Configuration may be staged while stopped; the per-sink loudness output variant must be implemented and proved before enablement.",
+        execution_state: HeadendProfileExecutionState::Runnable,
+        execution_detail: "The progressive H.264/AAC 8 Mb/s UDP input path is locally executable; HyperCaster acceptance still requires receiver evidence.",
     },
     HeadendProfile {
         profile_id: HeadendProfileId::HarmonicSpectrumTs,
@@ -937,9 +938,19 @@ impl ChannelConfiguration {
                     ));
                 }
                 if self.enabled {
-                    return Err(ScheduleError::Invalid(
-                        "headend output cannot be enabled until its output variant is enforced by the media engine",
-                    ));
+                    if named.execution_state != HeadendProfileExecutionState::Runnable {
+                        return Err(ScheduleError::Invalid(
+                            "headend output cannot be enabled until its profile is executable",
+                        ));
+                    }
+                    let emitted_muxrate_kbps = profile.transport_bitrate_bps / 1_000;
+                    if !profile.transport_bitrate_bps.is_multiple_of(1_000)
+                        || u64::from(headend.muxrate_kbps) != emitted_muxrate_kbps
+                    {
+                        return Err(ScheduleError::Invalid(
+                            "headend muxrate cannot be enabled until the media engine emits that exact rate",
+                        ));
+                    }
                 }
             }
         }

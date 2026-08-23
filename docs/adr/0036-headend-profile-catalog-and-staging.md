@@ -46,21 +46,20 @@ packet size. SQLite migration adds those fields with empty/zero defaults for exi
 outputs. Profile proof boundaries remain derived from the immutable catalog; no mutable
 `headend_proven` field is persisted.
 
-The current worker still has one shared audio encoder and transport mux, so it cannot enforce two
-different per-sink loudness targets. All network headend entries therefore report `staged_only`,
-and a channel carrying a staged headend contract cannot be enabled. The Leightronix entry reports
-`unimplemented` and cannot yet be applied because file delivery is a separate output worker, not a
-UDP sink. The worker and media engine also independently reject every profile absent from the
-runnable catalog, preventing a bypassed bootstrap from rendering an interlaced contract as
-progressive video. These gates are removed only with corresponding executable and proof-bearing
-slices.
+ADR 0041 subsequently made the Generic CBR SPTS and TelVue HyperCaster IP entries `runnable` at
+their exact progressive 720p59.94, H.264/AAC, `-24 LUFS`, 8,000 kb/s, 1,316-byte UDP contract.
+Comcast SD, Comcast HD, and Harmonic remain `staged_only`; their MPEG-2/AC-3 and/or interlaced
+execution paths do not exist. Leightronix remains `unimplemented` and cannot yet be applied because
+file delivery is a separate output worker, not a UDP sink. A custom mux rate may be stored while a
+channel is stopped, but cannot be enabled until the complete worker path can emit that exact
+contract. The worker and media engine independently reject unsupported or mismatched contracts,
+preventing a bypassed bootstrap from rendering an interlaced contract as progressive video.
 
 ## Consequences
 
 The complete product contract is visible and persistable without creating a false runnable or
 field-proven claim. Staged headend choices survive restart and retain cable `-24 LUFS` separately
-from an existing streaming `-16 LUFS` sink. The next engine slice must group outputs by loudness
-target, keep one video encoder, and create one audio-normalization/encoder/mux chain per distinct
-target before any staged headend channel may be enabled. AC-3, MPEG-2, interlaced execution,
-file-drop delivery, compliance measurement, receiver acceptance, and field operation remain
-separate gates.
+from an existing streaming `-16 LUFS` sink. The executable progressive profiles now retain one
+video encoder while selecting an audio-normalization/encoder/mux variant by loudness, bitrate, and
+packet contract. AC-3, MPEG-2, interlaced execution, file-drop delivery, receiver acceptance, and
+field operation remain separate gates.

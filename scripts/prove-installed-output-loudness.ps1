@@ -31,6 +31,7 @@ param(
     [long]$MaxCaptureBytes = 64MB,
     [ValidateRange(60, 1800)]
     [int]$TimeoutSeconds = 600,
+    [string]$HeadendProfileId = '',
     [string]$ResultPath = ''
 )
 
@@ -45,12 +46,18 @@ $scheduleItemId = [guid]::NewGuid().ToString()
 $planId = "output-loudness-$runId"
 $reportId = "output-loudness-$runId"
 $operatorId = 'installed-output-loudness-proof'
+$targetLufs = -16.0
+$targetLufsMilli = -16000
+$udpReceiver = $null
 $proofChannel = $null
 $channelConfigured = $false
+$primaryFailure = $null
+$cleanupFailure = $null
 $result = [ordered]@{
     run_id = $runId
     channel_id = $channelId
     sink_id = $sinkId
+    headend_profile_id = $HeadendProfileId
     started_at_unix_ms = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
     status = 'not_run'
     evidence = [ordered]@{}
@@ -112,6 +119,60 @@ function Get-FreeUdpPort {
     $probe = [Net.Sockets.UdpClient]::new(0)
     try { return ([Net.IPEndPoint]$probe.Client.LocalEndPoint).Port }
     finally { $probe.Dispose() }
+}
+
+function Measure-HeadendUdp {
+    param(
+        [Net.Sockets.UdpClient]$Receiver,
+        [ValidateRange(2, 30)]
+        [int]$Seconds = 5
+    )
+    $Receiver.Client.ReceiveTimeout = 2000
+    $remote = [Net.IPEndPoint]::new([Net.IPAddress]::Any, 0)
+    $packetLengths = [Collections.Generic.HashSet[int]]::new()
+    $drainDeadline = [DateTime]::UtcNow.AddSeconds(2)
+    while ($Receiver.Available -gt 0 -and [DateTime]::UtcNow -lt $drainDeadline) {
+        [void]$Receiver.Receive([ref]$remote)
+    }
+    if ($Receiver.Available -gt 0) {
+        throw 'Could not establish a bounded clean UDP measurement interval.'
+    }
+    try {
+        $firstPacket = $Receiver.Receive([ref]$remote)
+    }
+    catch [Net.Sockets.SocketException] {
+        throw 'No UDP transport packets reached the local headend receiver.'
+    }
+    [void]$packetLengths.Add($firstPacket.Length)
+    $packets = 1L
+    $bytes = [int64]$firstPacket.Length
+    $watch = [Diagnostics.Stopwatch]::StartNew()
+    while ($watch.Elapsed.TotalSeconds -lt $Seconds) {
+        try {
+            $packet = $Receiver.Receive([ref]$remote)
+        }
+        catch [Net.Sockets.SocketException] { continue }
+        [void]$packetLengths.Add($packet.Length)
+        $packets++
+        $bytes += $packet.Length
+    }
+    $watch.Stop()
+    if ($packets -lt 100 -or $packetLengths.Count -ne 1 -or -not $packetLengths.Contains(1316)) {
+        throw 'Installed headend UDP output did not preserve the 1,316-byte datagram contract.'
+    }
+    $bitrateBps = [int64][Math]::Round(($bytes * 8.0) / $watch.Elapsed.TotalSeconds)
+    if ($bitrateBps -lt 7200000 -or $bitrateBps -gt 8800000) {
+        throw "Installed headend UDP output bitrate $bitrateBps bps is outside the 8 Mb/s contract tolerance."
+    }
+    return [ordered]@{
+        sample_duration_ms = [int64][Math]::Round($watch.Elapsed.TotalMilliseconds)
+        packet_count = $packets
+        received_bytes = $bytes
+        packet_sizes_bytes = @($packetLengths)
+        measured_bitrate_bps = $bitrateBps
+        expected_bitrate_bps = 8000000
+        expected_packet_size_bytes = 1316
+    }
 }
 
 function Assert-InstalledIdentity {
@@ -184,6 +245,13 @@ try {
         $baseAddress.Host -notin @('127.0.0.1', '::1', 'localhost')) {
         throw 'BaseUri must be an installed loopback HTTP API address.'
     }
+    if ($HeadendProfileId -notin @('', 'generic-udp-spts', 'telvue-hypercaster-ip')) {
+        throw 'HeadendProfileId must be empty, generic-udp-spts, or telvue-hypercaster-ip.'
+    }
+    if ($HeadendProfileId) {
+        $targetLufs = -24.0
+        $targetLufsMilli = -24000
+    }
     $fixture = Resolve-Path -LiteralPath $FixturePath -ErrorAction Stop
     $fixtureInfo = Get-Item -LiteralPath $fixture.Path
     if ($fixtureInfo.PSIsContainer -or $fixtureInfo.Length -le 0) {
@@ -198,24 +266,68 @@ try {
         -Description 'installed database health' -Seconds 30
     $result.evidence.health = $health
 
-    $port = Get-FreeUdpPort
-    $proofChannel = [ordered]@{
-        channel_id = $channelId
-        display_name = "Installed output loudness proof $runId"
-        output_profile = 'proof-360p30'
-        output_sinks = @([ordered]@{
-            sink_id = $sinkId
-            label = 'Installed output loudness proof'
-            kind = 'udp-ts'
-            destination = "127.0.0.1:$port"
-            loudness_target_lufs = -16.0
-            required = $true
-            enabled = $true
-        })
-        enabled = $true
+    if ($HeadendProfileId) {
+        $udpReceiver = [Net.Sockets.UdpClient]::new(0)
+        $port = ([Net.IPEndPoint]$udpReceiver.Client.LocalEndPoint).Port
     }
-    Invoke-Api 'Put' '/channels' $proofChannel | Out-Null
-    $channelConfigured = $true
+    else {
+        $port = Get-FreeUdpPort
+    }
+    if ($HeadendProfileId) {
+        $proofChannel = [ordered]@{
+            channel_id = $channelId
+            display_name = "Installed headend output proof $runId"
+            output_profile = 'proof-360p30'
+            output_sinks = @()
+            enabled = $false
+        }
+        Invoke-Api 'Put' '/channels' $proofChannel | Out-Null
+        $channelConfigured = $true
+        $application = Invoke-Api 'Post' "/channels/$channelId/headend-profile" ([ordered]@{
+            profile_id = $HeadendProfileId
+            destination_uri = "udp://127.0.0.1:$port"
+            muxrate_kbps = $null
+            keep_existing_sinks = $false
+        })
+        if ($application.profile_id -ne $HeadendProfileId -or
+            $application.muxrate_kbps -ne 8000 -or
+            $application.channel.output_profile -ne 'atsc-720p5994' -or
+            $application.channel.enabled) {
+            throw 'Applied headend profile did not return the exact stopped 720p/8000 contract.'
+        }
+        $headendSink = @($application.channel.output_sinks | Where-Object {
+            $null -ne $_.headend -and $_.headend.profile_id -eq $HeadendProfileId
+        }) | Select-Object -First 1
+        if ($null -eq $headendSink -or $headendSink.headend.packet_size_bytes -ne 1316 -or
+            $headendSink.loudness_target_lufs -ne $targetLufs) {
+            throw 'Applied headend sink did not retain the exact 1316-byte/-24 LUFS contract.'
+        }
+        $sinkId = [string]$headendSink.sink_id
+        $result.sink_id = $sinkId
+        $proofChannel = $application.channel
+        $proofChannel.enabled = $true
+        Invoke-Api 'Put' '/channels' $proofChannel | Out-Null
+        $result.evidence.headend_application = $application
+    }
+    else {
+        $proofChannel = [ordered]@{
+            channel_id = $channelId
+            display_name = "Installed output loudness proof $runId"
+            output_profile = 'proof-360p30'
+            output_sinks = @([ordered]@{
+                sink_id = $sinkId
+                label = 'Installed output loudness proof'
+                kind = 'udp-ts'
+                destination = "127.0.0.1:$port"
+                loudness_target_lufs = $targetLufs
+                required = $true
+                enabled = $true
+            })
+            enabled = $true
+        }
+        Invoke-Api 'Put' '/channels' $proofChannel | Out-Null
+        $channelConfigured = $true
+    }
     $runtimeReady = Wait-Until -Action { Invoke-Api 'Get' '/runtime-safe-to-air' } `
         -Predicate {
             param($value)
@@ -223,6 +335,21 @@ try {
             $null -ne $runtime -and $runtime.state -in @('healthy_fallback', 'on_air')
         } -Description 'proof channel runtime readiness' -Seconds 90
     $result.evidence.proof_channel_runtime_before_schedule = $runtimeReady
+    if ($HeadendProfileId) {
+        $headendReadiness = Invoke-Api 'Get' "/channels/$channelId/headend-readiness"
+        $readinessChannel = @($headendReadiness.channels | Where-Object {
+            $_.channel_id -eq $channelId
+        }) | Select-Object -First 1
+        $readinessSink = @($readinessChannel.sinks | Where-Object {
+            $_.sink_id -eq $sinkId
+        }) | Select-Object -First 1
+        if ($null -eq $readinessSink -or $readinessSink.local_transport -ne 'pass' -or
+            $readinessSink.external_receiver -notin @('not_attempted', 'unknown') -or
+            $readinessSink.state -eq 'pass' -or $headendReadiness.rollup.color -eq 'green') {
+            throw 'Headend readiness did not preserve local progress and the unverified receiver boundary.'
+        }
+        $result.evidence.headend_readiness = $headendReadiness
+    }
 
     Invoke-Api 'Post' '/assets/ingest' ([ordered]@{ job_id = $ingestJobId; source_path = $fixture.Path }) | Out-Null
     $ingest = Wait-Until -Action { Invoke-Api 'Get' "/assets/ingest/jobs/$ingestJobId" } `
@@ -290,6 +417,9 @@ try {
         dispatch = $dispatch
         on_air_runtime = $onAir
     }
+    if ($HeadendProfileId) {
+        $result.evidence.headend_udp_transport = Measure-HeadendUdp -Receiver $udpReceiver -Seconds 5
+    }
 
     $request = Invoke-Api 'Post' "/channels/$channelId/loudness-proof" ([ordered]@{
         sink_id = $sinkId
@@ -303,7 +433,7 @@ try {
         receiver_acceptance_boundary = 'not_attempted_or_unknown'
     }
     if ($request.state -ne 'pending' -or $request.channel_id -ne $channelId -or
-        $request.sink_id -ne $sinkId -or $request.target_lufs_milli -ne -16000 -or
+        $request.sink_id -ne $sinkId -or $request.target_lufs_milli -ne $targetLufsMilli -or
         $request.source_commit -ne $identity.source_commit -or $request.candidate_version -ne $identity.version) {
         throw 'Created loudness-proof job did not bind to the exact proof channel or installed candidate.'
     }
@@ -319,7 +449,7 @@ try {
         throw "Installed output loudness proof failed: $($job.failure_detail)"
     }
     if ($job.job_id -ne $jobId -or $job.channel_id -ne $channelId -or $job.sink_id -ne $sinkId -or
-        $job.target_lufs_milli -ne -16000 -or $job.configuration_hash -ne $configurationHash -or
+        $job.target_lufs_milli -ne $targetLufsMilli -or $job.configuration_hash -ne $configurationHash -or
         $job.source_commit -ne $identity.source_commit -or $job.candidate_version -ne $identity.version -or
         $null -eq $job.capture -or $job.capture.sample_duration_ms -lt $sampleDurationMs -or
         $job.capture.capture_bytes -le 0 -or [string]::IsNullOrWhiteSpace($job.capture.capture_sha256)) {
@@ -334,6 +464,9 @@ try {
         $sinkProof.sample_duration_ms -ne $job.capture.sample_duration_ms -or
         $sinkProof.capture_bytes -ne $job.capture.capture_bytes -or
         $sinkProof.capture_sha256 -ne $job.capture.capture_sha256 -or
+        $sinkProof.configured_target_lufs -ne $targetLufs -or
+        [double]$sinkProof.measured_lufs -lt ($targetLufs - 2.0) -or
+        [double]$sinkProof.measured_lufs -gt ($targetLufs + 2.0) -or
         $sinkProof.receiver_acceptance -notin @('not_attempted', 'unknown')) {
         throw 'Immutable per-sink proof is not bound to the completed job, candidate, configuration, or receiver-acceptance boundary.'
     }
@@ -345,16 +478,33 @@ try {
 catch {
     $result.status = 'failed'
     $result.failure = $_.Exception.Message
-    throw
+    $primaryFailure = $_.Exception
 }
 finally {
     if ($channelConfigured -and $proofChannel) {
         try {
             $proofChannel.enabled = $false
             Invoke-Api 'Put' '/channels' $proofChannel | Out-Null
+            $storedChannels = @(Invoke-Api 'Get' '/channels')
+            $storedProofChannel = @($storedChannels | Where-Object {
+                $_.channel_id -eq $channelId
+            }) | Select-Object -First 1
+            if ($null -eq $storedProofChannel -or $storedProofChannel.enabled) {
+                throw 'The proof channel disable operation was not confirmed by public API readback.'
+            }
+            $result.evidence.cleanup = [ordered]@{
+                channel_id = $channelId
+                disabled = $true
+                verified_by = 'GET /api/v1/channels'
+            }
         }
-        catch { Write-Warning "Could not disable the proof channel: $($_.Exception.Message)" }
+        catch {
+            $cleanupFailure = $_.Exception
+            $result.status = 'failed'
+            $result.cleanup_failure = $_.Exception.Message
+        }
     }
+    if ($null -ne $udpReceiver) { $udpReceiver.Dispose() }
     $result.finished_at_unix_ms = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
     if ($ResultPath) {
         $parent = Split-Path -Parent $ResultPath
@@ -367,3 +517,5 @@ finally {
         $result | ConvertTo-Json -Depth 30
     }
 }
+if ($null -ne $primaryFailure) { throw $primaryFailure }
+if ($null -ne $cleanupFailure) { throw $cleanupFailure }

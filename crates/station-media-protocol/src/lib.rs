@@ -74,7 +74,7 @@ impl<'de> Deserialize<'de> for LoudnessTarget {
 }
 
 pub const MAX_FRAME_BYTES: usize = 65_536;
-pub const PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion { major: 3, minor: 0 };
+pub const PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion { major: 4, minor: 0 };
 
 pub const MAX_OUTPUT_PROOF_INDEX: u16 = 255;
 // Operator-requested analyzable program is capped at 300 seconds. The worker
@@ -320,6 +320,8 @@ pub enum WorkerOutputConfiguration {
         sink_id: String,
         destination: String,
         loudness_target_lufs: LoudnessTarget,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        headend: Option<WorkerHeadendTransportContract>,
     },
     Srt {
         sink_id: String,
@@ -328,6 +330,26 @@ pub enum WorkerOutputConfiguration {
         passphrase: Option<SrtPassphrase>,
         loudness_target_lufs: LoudnessTarget,
     },
+}
+
+/// A headend profile the local media worker can execute completely. Profiles
+/// that are catalogued for future engines are intentionally not representable
+/// on this private worker boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum WorkerHeadendProfileId {
+    GenericUdpSpts,
+    TelvueHypercasterIp,
+}
+
+/// The exact transport contract independently enforced by a worker for a
+/// locally executable headend output.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkerHeadendTransportContract {
+    pub profile_id: WorkerHeadendProfileId,
+    pub muxrate_kbps: u32,
+    pub packet_size_bytes: u16,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -553,6 +575,7 @@ pub enum ProtocolError {
     InvalidLiveCommand(String),
     InvalidLiveEvent(String),
     InvalidOutputProof(String),
+    InvalidOutputConfiguration(String),
 }
 
 pub fn encode_command_frame(command: &CommandEnvelope) -> Result<Vec<u8>, ProtocolError> {
@@ -568,7 +591,7 @@ pub fn encode_bootstrap_frame(
         .map_err(ProtocolError::InvalidManagedCgImageRoot)?;
     validate_proof_artifact_root(&bootstrap.proof_artifact_root)
         .map_err(ProtocolError::InvalidManagedProofRoot)?;
-    validate_bootstrap_outputs(bootstrap).map_err(ProtocolError::InvalidOutputProof)?;
+    validate_bootstrap_outputs(bootstrap).map_err(ProtocolError::InvalidOutputConfiguration)?;
     encode_frame(bootstrap)
 }
 
@@ -581,7 +604,7 @@ pub fn decode_bootstrap_frame(frame: &[u8]) -> Result<WorkerBootstrapEnvelope, P
         .map_err(ProtocolError::InvalidManagedCgImageRoot)?;
     validate_proof_artifact_root(&bootstrap.proof_artifact_root)
         .map_err(ProtocolError::InvalidManagedProofRoot)?;
-    validate_bootstrap_outputs(&bootstrap).map_err(ProtocolError::InvalidOutputProof)?;
+    validate_bootstrap_outputs(&bootstrap).map_err(ProtocolError::InvalidOutputConfiguration)?;
     Ok(bootstrap)
 }
 
@@ -833,10 +856,21 @@ fn validate_bootstrap_outputs(bootstrap: &WorkerBootstrapEnvelope) -> Result<(),
         let (sink_id, target) = match output {
             WorkerOutputConfiguration::UdpTs {
                 sink_id,
+                destination,
                 loudness_target_lufs,
-                ..
+                headend,
+            } => {
+                if let Some(contract) = headend {
+                    validate_headend_output_contract(
+                        &bootstrap.output_profile,
+                        *loudness_target_lufs,
+                        destination,
+                        contract,
+                    )?;
+                }
+                (sink_id, *loudness_target_lufs)
             }
-            | WorkerOutputConfiguration::Srt {
+            WorkerOutputConfiguration::Srt {
                 sink_id,
                 loudness_target_lufs,
                 ..
@@ -847,6 +881,40 @@ fn validate_bootstrap_outputs(bootstrap: &WorkerBootstrapEnvelope) -> Result<(),
             return Err("worker bootstrap output sink identities must be unique".into());
         }
         validate_proof_target(target)?;
+    }
+    Ok(())
+}
+
+fn validate_headend_output_contract(
+    output_profile: &str,
+    loudness_target: LoudnessTarget,
+    destination: &str,
+    contract: &WorkerHeadendTransportContract,
+) -> Result<(), String> {
+    if output_profile != "atsc-720p5994" {
+        return Err("headend output profile must be atsc-720p5994".into());
+    }
+    if loudness_target != LoudnessTarget::CABLE {
+        return Err("headend output loudness target must be exactly -24 LUFS".into());
+    }
+    if contract.muxrate_kbps != 8_000 {
+        return Err("headend output muxrate must be exactly 8000 kbps".into());
+    }
+    if contract.packet_size_bytes != 1_316 {
+        return Err("headend output packet size must be exactly 1316 bytes".into());
+    }
+    let destination = destination
+        .parse::<std::net::SocketAddr>()
+        .map_err(|_| "headend output destination must be an IP address and port")?;
+    if destination.ip().is_multicast() {
+        return Err("runnable headend output destination must be unicast".into());
+    }
+    let minimum_port = match contract.profile_id {
+        WorkerHeadendProfileId::GenericUdpSpts => 1,
+        WorkerHeadendProfileId::TelvueHypercasterIp => 1_024,
+    };
+    if destination.port() < minimum_port {
+        return Err("headend output destination port is below the profile minimum".into());
     }
     Ok(())
 }

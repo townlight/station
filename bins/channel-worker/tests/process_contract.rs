@@ -11,8 +11,9 @@ use station_media_journal::{JournalWriter, read_events};
 use station_media_protocol::{
     CgOverlay, CgOverlayContent, CgRect, CgSnapshot, ChannelCommand, CommandEnvelope, LiveArmToken,
     LiveInputConfiguration, LiveReturnTarget, LoudnessTarget, PROTOCOL_VERSION,
-    WorkerBootstrapEnvelope, WorkerEvent, WorkerEventEnvelope, WorkerOutputConfiguration,
-    decode_event_frame, encode_bootstrap_frame, encode_command_frame,
+    WorkerBootstrapEnvelope, WorkerEvent, WorkerEventEnvelope, WorkerHeadendProfileId,
+    WorkerHeadendTransportContract, WorkerOutputConfiguration, decode_event_frame,
+    encode_bootstrap_frame, encode_command_frame,
 };
 use station_windows_ipc::PipeServer;
 
@@ -108,6 +109,7 @@ fn run_worker(
             sink_id: "22222222-3333-4444-8555-666666666666".into(),
             destination: udp.local_addr().unwrap().to_string(),
             loudness_target_lufs: LoudnessTarget::STREAMING,
+            headend: None,
         }],
     };
     stream
@@ -165,6 +167,7 @@ fn worker_rejects_a_staged_profile_before_starting_the_media_graph() {
             sink_id: "22222222-3333-4444-8555-666666666666".into(),
             destination: udp.local_addr().unwrap().to_string(),
             loudness_target_lufs: LoudnessTarget::CABLE,
+            headend: None,
         }],
     };
     stream
@@ -174,6 +177,108 @@ fn worker_rejects_a_staged_profile_before_starting_the_media_graph() {
     let output = child.wait_with_output().unwrap();
     assert_eq!(output.status.code(), Some(6));
     assert!(String::from_utf8_lossy(&output.stderr).contains("not runnable"));
+}
+
+#[test]
+fn spawned_worker_enforces_a_runnable_headend_transport_contract() {
+    let _guard = process_contract_test_guard();
+    let journal = journal_path("runnable-headend-contract");
+    let _temp_files = TempFiles(vec![journal.clone()]);
+    let server = PipeServer::bind(
+        &journal
+            .file_stem()
+            .unwrap()
+            .to_string_lossy()
+            .replace('.', "-"),
+    )
+    .unwrap();
+    let receiver = UdpSocket::bind("127.0.0.1:0").unwrap();
+    receiver
+        .set_read_timeout(Some(Duration::from_secs(15)))
+        .unwrap();
+    let child = Command::new(env!("CARGO_BIN_EXE_channel-worker"))
+        .args([WORKER_ID, CHANNEL_ID])
+        .arg(&journal)
+        .arg(server.name())
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut worker = ChildGuard::new(child);
+    let mut stream = match server.accept_timeout(Duration::from_secs(30)) {
+        Ok(stream) => stream,
+        Err(error) => {
+            let status = worker.try_wait().unwrap();
+            let mut stderr = String::new();
+            if status.is_some() {
+                worker
+                    .child
+                    .stderr
+                    .as_mut()
+                    .unwrap()
+                    .read_to_string(&mut stderr)
+                    .unwrap();
+            }
+            panic!(
+                "headend worker did not connect to its control pipe: {error:?}; status={status:?}; stderr={stderr}"
+            );
+        }
+    };
+    let bootstrap = WorkerBootstrapEnvelope {
+        version: PROTOCOL_VERSION,
+        worker_id: WORKER_ID.into(),
+        channel_id: CHANNEL_ID.into(),
+        output_profile: "atsc-720p5994".into(),
+        cg_image_root: journal
+            .parent()
+            .unwrap()
+            .join("cg-images")
+            .to_string_lossy()
+            .into_owned(),
+        proof_artifact_root: journal
+            .parent()
+            .unwrap()
+            .join("output-proofs")
+            .to_string_lossy()
+            .into_owned(),
+        outputs: vec![WorkerOutputConfiguration::UdpTs {
+            sink_id: "22222222-3333-4444-8555-666666666666".into(),
+            destination: receiver.local_addr().unwrap().to_string(),
+            loudness_target_lufs: LoudnessTarget::CABLE,
+            headend: Some(WorkerHeadendTransportContract {
+                profile_id: WorkerHeadendProfileId::GenericUdpSpts,
+                muxrate_kbps: 8_000,
+                packet_size_bytes: 1_316,
+            }),
+        }],
+    };
+    stream
+        .write_all(&encode_bootstrap_frame(&bootstrap).unwrap())
+        .unwrap();
+    assert!(matches!(
+        read_event(&mut stream).event,
+        WorkerEvent::Ready { graph_revision: 1 }
+    ));
+
+    let mut datagram = [0_u8; 2_048];
+    let received = receiver
+        .recv(&mut datagram)
+        .expect("runnable headend bootstrap must emit MPEG-TS UDP");
+    assert_eq!(received, 1_316);
+    assert_eq!(datagram[0], 0x47);
+
+    stream
+        .write_all(
+            &encode_command_frame(&command("shutdown-headend", 2, ChannelCommand::Shutdown))
+                .unwrap(),
+        )
+        .unwrap();
+    assert!(matches!(
+        read_event(&mut stream).event,
+        WorkerEvent::ShutdownComplete
+    ));
+    assert!(worker.wait().unwrap().success());
 }
 
 struct ChildGuard {
@@ -378,6 +483,7 @@ fn spawned_worker_output_proof_reaches_ready_with_artifact_hash_and_health() {
             sink_id: sink_id.into(),
             destination: output.local_addr().unwrap().to_string(),
             loudness_target_lufs: LoudnessTarget::CABLE,
+            headend: None,
         }],
     };
     stream
@@ -685,6 +791,7 @@ fn spawned_worker_live_takeover_preserves_audible_audio() {
             sink_id: "22222222-3333-4444-8555-666666666666".into(),
             destination: output.local_addr().unwrap().to_string(),
             loudness_target_lufs: LoudnessTarget::STREAMING,
+            headend: None,
         }],
     };
     stream

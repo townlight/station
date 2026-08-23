@@ -21,6 +21,10 @@ Control commands and observed worker events use typed envelopes from `station-me
 - Unknown major versions, truncated frames, conflicting lengths, and invalid JSON fail closed.
 - Minor versions are forward-compatible when added fields are optional.
 - Protocol 1.1 adds identity-bound asset loading, asset take, fallback return, and durable asset-loaded/on-air events without changing the framing contract.
+- Protocol 4.0 adds the typed headend transport contract. The major version changes because prior
+  output variants deny unknown fields and therefore cannot safely consume a headend-bearing
+  bootstrap. Candidate activation ships the service and worker together; mixed 3.x/4.x processes
+  fail closed rather than silently dropping mux semantics.
 
 The transport is a duplex byte-mode Windows named pipe in the product-scoped `\\.\pipe\townlight-station\` namespace. The server permits a single instance, rejects remote clients, and uses a protected ACL granting access only to SYSTEM, Administrators, and the creating user. The worker opens the client handle at security-identification impersonation level. Standard input and output are not part of the protocol.
 

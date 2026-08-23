@@ -23,7 +23,8 @@ use station_media_assets::measure_output_loudness;
 use station_media_protocol::{
     CgImageFormat, CgOverlay, CgOverlayContent, CgRect, CgSnapshot, ChannelCommand, LiveArmToken,
     LiveInputConfiguration, LiveReturnTarget, LoudnessTarget, MAX_CG_SLOTS, MAX_CG_TEXT_BYTES,
-    SrtPassphrase, WorkerEvent, WorkerOutputConfiguration,
+    SrtPassphrase, WorkerEvent, WorkerHeadendProfileId, WorkerHeadendTransportContract,
+    WorkerOutputConfiguration,
 };
 use station_readiness::derive_loudness_outcome;
 use station_readiness::{
@@ -31,7 +32,8 @@ use station_readiness::{
 };
 use station_runtime::{SupervisorError, WorkerSupervisor};
 use station_schedule::{
-    ChannelConfiguration, DispatchJob, DispatchStatus, OutputSinkKind, ScheduleWindow,
+    ChannelConfiguration, DispatchJob, DispatchStatus, HeadendProfileId, HeadendSinkContract,
+    OutputProfileId, OutputSinkKind, ScheduleWindow,
 };
 use station_storage::{
     CgSnapshotReadError, CgWriteError, OutputLoudnessCaptureFacts, OutputLoudnessProofJobRecord,
@@ -525,11 +527,25 @@ pub fn worker_output_configurations(
             let loudness_target = LoudnessTarget::from_milli_lufs(milli_lufs)
                 .map_err(|error| OrchestrationError::InvalidDestination(error.into()))?;
             match sink.kind {
-                OutputSinkKind::UdpTs => Ok(WorkerOutputConfiguration::UdpTs {
-                    sink_id: sink.sink_id.clone(),
-                    destination: sink.destination.clone(),
-                    loudness_target_lufs: loudness_target,
-                }),
+                OutputSinkKind::UdpTs => {
+                    let headend = sink
+                        .headend
+                        .as_ref()
+                        .map(|contract| {
+                            worker_headend_contract(
+                                channel.output_profile,
+                                loudness_target,
+                                contract,
+                            )
+                        })
+                        .transpose()?;
+                    Ok(WorkerOutputConfiguration::UdpTs {
+                        sink_id: sink.sink_id.clone(),
+                        destination: sink.destination.clone(),
+                        loudness_target_lufs: loudness_target,
+                        headend,
+                    })
+                }
                 OutputSinkKind::Srt => {
                     let passphrase = if sink.encryption_configured {
                         let secret = store
@@ -556,6 +572,37 @@ pub fn worker_output_configurations(
             }
         })
         .collect()
+}
+
+fn worker_headend_contract(
+    output_profile: OutputProfileId,
+    loudness_target: LoudnessTarget,
+    contract: &HeadendSinkContract,
+) -> Result<WorkerHeadendTransportContract, OrchestrationError> {
+    let profile_id = match contract.profile_id {
+        HeadendProfileId::GenericUdpSpts => WorkerHeadendProfileId::GenericUdpSpts,
+        HeadendProfileId::TelvueHypercasterIp => WorkerHeadendProfileId::TelvueHypercasterIp,
+        _ => {
+            return Err(OrchestrationError::InvalidDestination(
+                "headend profile has no executable worker contract".into(),
+            ));
+        }
+    };
+    if output_profile != OutputProfileId::Atsc720p5994
+        || loudness_target != LoudnessTarget::CABLE
+        || contract.muxrate_kbps != 8_000
+        || contract.packet_size_bytes != 1_316
+    {
+        return Err(OrchestrationError::InvalidDestination(
+            "headend worker contract must use atsc-720p5994, -24 LUFS, 8000 kbps, and 1316-byte packets"
+                .into(),
+        ));
+    }
+    Ok(WorkerHeadendTransportContract {
+        profile_id,
+        muxrate_kbps: contract.muxrate_kbps,
+        packet_size_bytes: contract.packet_size_bytes,
+    })
 }
 
 struct LiveControlState {

@@ -372,6 +372,7 @@ fn udp_outputs_for_profile(
             sink_id: format!("00000000-0000-4000-8000-{:012x}", index + 1),
             destination: destination.to_string(),
             loudness_target_lufs,
+            headend: None,
         })
         .collect())
 }

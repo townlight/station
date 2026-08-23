@@ -1,7 +1,7 @@
 use station_schedule::{
-    ChannelConfiguration, HEADEND_PROFILES, HeadendProfileApplyRequest, HeadendTransport,
-    OutputProfileId, OutputSinkConfiguration, ScheduleError, apply_headend_profile,
-    headend_profile,
+    ChannelConfiguration, HEADEND_PROFILES, HeadendProfileApplyRequest,
+    HeadendProfileExecutionState, HeadendTransport, OutputProfileId, OutputSinkConfiguration,
+    ScheduleError, apply_headend_profile, headend_profile,
 };
 
 const CHANNEL_ID: &str = "8b626c01-bdf8-419a-8a2e-b0a7caa1ff7e";
@@ -66,6 +66,30 @@ fn catalog_contains_exactly_six_named_profiles_with_honest_metadata() {
             "{profile_id} must preserve the field-proof boundary"
         );
     }
+}
+
+#[test]
+fn only_the_locally_executable_progressive_udp_profiles_are_runnable() {
+    for profile_id in ["generic-udp-spts", "telvue-hypercaster-ip"] {
+        assert_eq!(
+            headend_profile(profile_id).unwrap().execution_state,
+            HeadendProfileExecutionState::Runnable,
+            "{profile_id} must expose the proved progressive UDP execution path"
+        );
+    }
+    for profile_id in ["comcast-mtd-sd", "comcast-mtd-hd", "harmonic-spectrum-ts"] {
+        assert_eq!(
+            headend_profile(profile_id).unwrap().execution_state,
+            HeadendProfileExecutionState::StagedOnly,
+            "{profile_id} must remain blocked until its interlaced codec path exists"
+        );
+    }
+    assert_eq!(
+        headend_profile("leightronix-file-drop")
+            .unwrap()
+            .execution_state,
+        HeadendProfileExecutionState::Unimplemented
+    );
 }
 
 #[test]
@@ -236,15 +260,41 @@ fn every_network_profile_can_be_staged_with_its_default_muxrate() {
 }
 
 #[test]
-fn staged_headend_contract_cannot_be_enabled_before_the_engine_enforces_it() {
-    let mut applied = apply_headend_profile(
-        &existing_channel(),
-        &request("generic-udp-spts", "udp://192.0.2.10:9000", false),
-    )
-    .unwrap()
-    .channel;
-    applied.enabled = true;
-    assert!(matches!(applied.validate(), Err(ScheduleError::Invalid(_))));
+fn runnable_default_rate_headend_contracts_can_be_enabled() {
+    for (profile_id, destination) in [
+        ("generic-udp-spts", "udp://192.0.2.10:9000"),
+        ("telvue-hypercaster-ip", "udp://192.0.2.11:9000"),
+    ] {
+        let mut applied = apply_headend_profile(
+            &existing_channel(),
+            &request(profile_id, destination, false),
+        )
+        .unwrap()
+        .channel;
+        applied.enabled = true;
+        applied
+            .validate()
+            .unwrap_or_else(|error| panic!("{profile_id} must be executable: {error:?}"));
+    }
+}
+
+#[test]
+fn runnable_headend_rejects_a_muxrate_the_engine_does_not_emit() {
+    let mut custom = request("generic-udp-spts", "udp://192.0.2.10:9000", false);
+    custom.muxrate_kbps = Some(9_000);
+    let mut staged = apply_headend_profile(&existing_channel(), &custom)
+        .unwrap()
+        .channel;
+    assert!(
+        staged.validate().is_ok(),
+        "a stopped channel may retain the requested contract"
+    );
+    staged.enabled = true;
+    let error = staged.validate().unwrap_err();
+    assert!(
+        format!("{error:?}").contains("muxrate"),
+        "the enablement failure must identify the unenforced muxrate: {error:?}"
+    );
 }
 
 #[test]

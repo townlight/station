@@ -222,11 +222,13 @@ fn proof_start_must_bind_sink_and_target_to_bootstrap_output_index() {
                 sink_id: SINK_ID.into(),
                 destination: "127.0.0.1:5500".into(),
                 loudness_target_lufs: LoudnessTarget::CABLE,
+                headend: None,
             },
             WorkerOutputConfiguration::UdpTs {
                 sink_id: "33333333-4444-4555-8666-777777777777".into(),
                 destination: "127.0.0.1:5501".into(),
                 loudness_target_lufs: LoudnessTarget::STREAMING,
+                headend: None,
             },
         ],
     };
@@ -276,11 +278,13 @@ fn bootstrap_rejects_unsafe_managed_proof_roots_and_duplicate_sink_ids() {
             sink_id: SINK_ID.into(),
             destination: "127.0.0.1:5500".into(),
             loudness_target_lufs: LoudnessTarget::CABLE,
+            headend: None,
         },
         WorkerOutputConfiguration::UdpTs {
             sink_id: SINK_ID.into(),
             destination: "127.0.0.1:5501".into(),
             loudness_target_lufs: LoudnessTarget::CABLE,
+            headend: None,
         },
     ];
     assert!(encode_bootstrap_frame(&bootstrap).is_err());

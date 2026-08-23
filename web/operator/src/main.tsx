@@ -3,6 +3,14 @@ import { createRoot } from "react-dom/client";
 import "./styles.css";
 import { CgOperator, CG_ROUTES, CgRoute } from "./cg";
 import { LoudnessProofPanel } from "./loudness-proof";
+import {
+  HeadendProfile,
+  HeadendReadiness,
+  canApplyHeadendProfile,
+  canStartHeadendProfile,
+  readinessLabel,
+  receiverAcceptanceLabel,
+} from "./headend-contract";
 
 type CoreView = "overview" | "media" | "channels" | "schedule" | "live" | "health" | "commissioning";
 type View = CoreView | CgRoute;
@@ -126,6 +134,11 @@ interface OutputSink {
   required: boolean;
   enabled: boolean;
   encryption_configured: boolean;
+  headend?: {
+    profile_id: string;
+    muxrate_kbps: number;
+    packet_size_bytes: number;
+  } | null;
 }
 
 interface OutputProfile {
@@ -541,8 +554,120 @@ function Media({ dashboard, onRefresh }: { dashboard: Dashboard | null; onRefres
   </>;
 }
 
+function HeadendWorkflow({ channels, profiles, loadingCatalog, catalogError, onReloadProfiles, onRefresh }: { channels: Channel[]; profiles: HeadendProfile[] | null; loadingCatalog: boolean; catalogError: string | null; onReloadProfiles: () => Promise<void>; onRefresh: () => Promise<void> }) {
+  const [readiness, setReadiness] = useState<HeadendReadiness | null>(null);
+  const [selectedChannelId, setSelectedChannelId] = useState("");
+  const [selectedProfileId, setSelectedProfileId] = useState("");
+  const [destination, setDestination] = useState("");
+  const [muxrateKbps, setMuxrateKbps] = useState("");
+  const [keepExistingSinks, setKeepExistingSinks] = useState(false);
+  const [loadingReadiness, setLoadingReadiness] = useState(true);
+  const [applying, setApplying] = useState(false);
+  const [readinessError, setReadinessError] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
+  const [message, setMessage] = useState<string | null>(null);
+  const channelFingerprint = channels.map((channel) => `${channel.channel_id}:${channel.enabled}:${channel.output_sinks.length}`).join("|");
+
+  const loadReadiness = useCallback(async () => {
+    setLoadingReadiness(true);
+    try {
+      setReadiness(await request<HeadendReadiness>("/api/v1/headend-readiness"));
+      setReadinessError(null);
+    } catch (problem) {
+      setReadiness(null);
+      setReadinessError(problem instanceof Error ? problem.message : "Headend readiness could not be read.");
+    } finally {
+      setLoadingReadiness(false);
+    }
+  }, []);
+
+  useEffect(() => { void loadReadiness(); }, [loadReadiness, channelFingerprint]);
+  useEffect(() => {
+    if (!channels.some((channel) => channel.channel_id === selectedChannelId)) {
+      setSelectedChannelId(channels.find((channel) => !channel.enabled)?.channel_id ?? channels[0]?.channel_id ?? "");
+    }
+  }, [channels, selectedChannelId]);
+  useEffect(() => {
+    if (!profiles?.some((profile) => profile.profile_id === selectedProfileId)) {
+      const first = profiles?.find((profile) => profile.execution_state === "runnable") ?? profiles?.[0];
+      setSelectedProfileId(first?.profile_id ?? "");
+      setMuxrateKbps(first ? String(first.muxrate_kbps) : "");
+    }
+  }, [profiles, selectedProfileId]);
+
+  const selectedChannel = channels.find((channel) => channel.channel_id === selectedChannelId);
+  const selectedProfile = profiles?.find((profile) => profile.profile_id === selectedProfileId);
+  const selectedReadiness = readiness?.channels.find((channel) => channel.channel_id === selectedChannelId);
+  const canApply = Boolean(selectedChannel && selectedProfile && destination.trim() && Number.isInteger(Number(muxrateKbps)) && Number(muxrateKbps) > 0 && canApplyHeadendProfile(selectedProfile.execution_state, selectedChannel.enabled));
+
+  function chooseProfile(profile: HeadendProfile) {
+    setSelectedProfileId(profile.profile_id);
+    setMuxrateKbps(profile.muxrate_kbps ? String(profile.muxrate_kbps) : "");
+    setActionError(null);
+    setMessage(null);
+  }
+
+  async function applyProfile(event: FormEvent) {
+    event.preventDefault();
+    if (!selectedChannel || !selectedProfile || !canApply) return;
+    setApplying(true); setActionError(null); setMessage(null);
+    try {
+      await request(`/api/v1/channels/${selectedChannel.channel_id}/headend-profile`, {
+        method: "POST",
+        body: JSON.stringify({
+          profile_id: selectedProfile.profile_id,
+          destination_uri: destination.trim(),
+          muxrate_kbps: Number(muxrateKbps),
+          keep_existing_sinks: keepExistingSinks,
+        }),
+      });
+      setMessage(selectedProfile.execution_state === "runnable"
+        ? `${selectedProfile.label} is applied to ${selectedChannel.display_name}. Review readiness, then use Start output above.`
+        : `${selectedProfile.label} is saved on ${selectedChannel.display_name} for future execution. This installed engine will keep Start output blocked.`);
+      await onRefresh();
+      await loadReadiness();
+    } catch (problem) {
+      setActionError(problem instanceof Error ? problem.message : "The headend profile could not be applied.");
+    } finally {
+      setApplying(false);
+    }
+  }
+
+  return <section className="panel headend-panel">
+    <div className="panel-head"><div><p className="eyebrow">Headend handoff</p><h2>Configure a carriage profile</h2></div>{readiness && <span className={`headend-rollup headend-${readiness.rollup.color}`}>{readiness.rollup.color} · {readiness.rollup.passing_channels}/{readiness.rollup.enabled_channels} ready</span>}</div>
+    <div className="headend-boundary"><strong>Two proofs, kept separate</strong><p>“Verified locally” means this station is producing the configured transport. Receiver acceptance remains unknown until a cable operator or headend integrator verifies it.</p></div>
+    {!channels.length ? <Empty title="Create a channel first" detail="A headend profile is applied to an existing, stopped channel." action="Use the channel form above" onAction={() => document.querySelector<HTMLInputElement>("#channel-name")?.focus()} /> : <div className="headend-layout">
+      <form className="headend-config" onSubmit={applyProfile}>
+        <label>Channel<select value={selectedChannelId} onChange={(event) => { setSelectedChannelId(event.target.value); setActionError(null); setMessage(null); }}>{channels.map((channel) => <option value={channel.channel_id} key={channel.channel_id}>{channel.display_name}{channel.enabled ? " · running" : " · stopped"}</option>)}</select><small>{selectedChannel?.enabled ? "Stop this channel with the control above before changing its carriage contract." : "Stopped and available for profile configuration."}</small></label>
+        <fieldset className="headend-profile-picker"><legend>Headend profile</legend>{loadingCatalog ? <p className="muted">Loading the installed profile catalog…</p> : catalogError ? <div className="headend-catalog-error"><div className="error-box" role="alert">{catalogError}</div><button className="secondary" type="button" onClick={() => void onReloadProfiles()}>Retry catalog</button></div> : !profiles?.length ? <p className="muted">No headend profiles are installed.</p> : <div className="headend-profile-grid">{profiles.map((profile) => <button type="button" className={`headend-profile-card ${selectedProfileId === profile.profile_id ? "selected" : ""} profile-${profile.execution_state}`} aria-pressed={selectedProfileId === profile.profile_id} onClick={() => chooseProfile(profile)} key={profile.profile_id}><span><strong>{profile.label}</strong><small>{profile.vendor}</small></span><b>{profile.execution_state === "runnable" ? "Runnable locally" : profile.execution_state === "staged_only" ? "Staging only" : "Not implemented"}</b><p>{profile.execution_detail}</p></button>)}</div>}</fieldset>
+        {selectedProfile && <div className={`headend-profile-detail profile-${selectedProfile.execution_state}`}><div><strong>{selectedProfile.execution_state === "runnable" ? "Local execution available" : "Execution blocked"}</strong><span>{selectedProfile.canonical_profile} · {(selectedProfile.muxrate_kbps / 1000).toFixed(1)} Mb/s · {selectedProfile.packet_size_bytes}-byte UDP payload</span></div><p>{selectedProfile.execution_detail}</p><ul>{selectedProfile.operator_must_supply.map((item) => <li key={item}>{item}</li>)}</ul>{selectedProfile.not_claimed.map((item) => <small key={item}>{item}</small>)}</div>}
+        <div className="form-pair"><label>Assigned destination<input required value={destination} onChange={(event) => setDestination(event.target.value)} placeholder="udp://192.168.10.20:5000" disabled={!selectedProfile || selectedProfile.execution_state === "unimplemented"} /><small>Enter the address and port supplied by the receiving facility.</small></label><label>{selectedProfile?.execution_state === "runnable" ? "Executable" : "Staged"} multiplex rate (kb/s)<input required type="number" min="1" max="100000" value={muxrateKbps} readOnly={selectedProfile?.execution_state === "runnable"} onChange={(event) => setMuxrateKbps(event.target.value)} disabled={!selectedProfile || selectedProfile.execution_state === "unimplemented"} /><small>{selectedProfile?.execution_state === "runnable" ? "This installed profile is locked to its locally proved catalog rate." : "Stored for future execution; this profile cannot be started by the installed engine."}</small></label></div>
+        <label className="headend-check"><span><input type="checkbox" checked={keepExistingSinks} onChange={(event) => setKeepExistingSinks(event.target.checked)} />Keep existing output sinks</span><small>Off replaces existing sinks with the required headend output. On retains them as additional branches.</small></label>
+        {selectedChannel?.enabled && <div className="headend-warning" role="status">Profile changes are locked while this channel is running. Stop output above; the current output remains untouched.</div>}
+        {selectedProfile && selectedProfile.execution_state === "staged_only" && <div className="headend-warning" role="status">This contract can be staged while stopped, but TownLight Station will reject Start output until its execution path is implemented and proved.</div>}
+        {selectedProfile && selectedProfile.execution_state === "unimplemented" && <div className="headend-warning" role="status">This catalog entry is visible for planning and cannot yet be applied: {selectedProfile.execution_detail}</div>}
+        {actionError && <div className="error-box" role="alert">{actionError}</div>}
+        {message && <div className="notice" role="status">{message}</div>}
+        <button className="primary wide" disabled={!canApply || applying}>{applying ? "Applying profile…" : selectedChannel?.enabled ? "Stop channel to apply" : selectedProfile?.execution_state === "staged_only" ? "Stage blocked profile" : selectedProfile?.execution_state === "unimplemented" ? "Profile not implemented" : "Apply profile to stopped channel"}</button>
+      </form>
+      <aside className="headend-readiness" aria-live="polite">
+        <div className="panel-head"><div><p className="eyebrow">Current evidence</p><h2>{selectedChannel?.display_name ?? "Channel readiness"}</h2></div>{selectedReadiness && <StatusPill status={selectedReadiness.state} />}</div>
+        {loadingReadiness ? <p className="muted">Reading current output evidence…</p> : readinessError ? <div className="headend-empty"><div className="error-box" role="alert">{readinessError}</div><button className="secondary" type="button" onClick={() => void loadReadiness()}>Retry readiness</button></div> : !selectedReadiness ? <div className="headend-empty"><strong>No readiness record</strong><p>Refresh after the channel has been saved.</p><button className="secondary" type="button" onClick={() => void loadReadiness()}>Retry</button></div> : <><p className="headend-readiness-detail">{selectedReadiness.detail}</p><div className="headend-evidence-list">{selectedReadiness.sinks.map((sink) => <article key={sink.sink_id}><div className="headend-evidence-head"><div><strong>{sink.label}</strong><small>{sink.kind.replaceAll("_", " ")} · {sink.required ? "required" : "optional"}</small></div><StatusPill status={sink.state} /></div><div className="headend-proof-split"><div><span>Local transport</span><strong>{readinessLabel(sink.local_transport)}</strong><small>{sink.evidence}</small></div><div><span>Receiver acceptance</span><strong>{receiverAcceptanceLabel(sink.external_receiver)}</strong><small>{sink.external_receiver === "verified" ? "An external receiver receipt supports this state." : "No external receiver receipt is recorded; local output is not proof of reception."}</small></div></div><p>{sink.detail}</p></article>)}</div><button className="text-button" type="button" onClick={() => void loadReadiness()}>Refresh evidence →</button></>}
+      </aside>
+    </div>}
+  </section>;
+}
+
 function Channels({ channels, outputProfiles, onRefresh }: { channels: Channel[]; outputProfiles: OutputProfile[]; onRefresh: () => Promise<void> }) {
   const [name, setName] = useState(""); const [transportKind, setTransportKind] = useState<OutputSink["kind"]>("udp-ts"); const [destination, setDestination] = useState("127.0.0.1:5500"); const [redundantDestination, setRedundantDestination] = useState(""); const [passphrase, setPassphrase] = useState(""); const [redundantPassphrase, setRedundantPassphrase] = useState(""); const [outputProfile, setOutputProfile] = useState<Channel["output_profile"]>("proof-360p30"); const [busy, setBusy] = useState(false); const [error, setError] = useState<string | null>(null);
+  const [headendProfiles, setHeadendProfiles] = useState<HeadendProfile[] | null>(null); const [headendProfilesLoading, setHeadendProfilesLoading] = useState(true); const [headendProfilesError, setHeadendProfilesError] = useState<string | null>(null);
+  const loadHeadendProfiles = useCallback(async () => {
+    setHeadendProfilesLoading(true);
+    try { setHeadendProfiles(await request<HeadendProfile[]>("/api/v1/headend-profiles")); setHeadendProfilesError(null); }
+    catch (problem) { setHeadendProfilesError(problem instanceof Error ? problem.message : "Headend profiles could not be read."); }
+    finally { setHeadendProfilesLoading(false); }
+  }, []);
+  useEffect(() => { void loadHeadendProfiles(); }, [loadHeadendProfiles]);
   async function save(event: FormEvent) {
     event.preventDefault(); setBusy(true); setError(null);
     try {
@@ -563,7 +688,7 @@ function Channels({ channels, outputProfiles, onRefresh }: { channels: Channel[]
   }
   async function toggle(channel: Channel) { await request<Channel>("/api/v1/channels", { method: "PUT", body: JSON.stringify({ ...channel, enabled: !channel.enabled }) }); await onRefresh(); }
   const selected = outputProfiles.find((profile) => profile.profile_id === outputProfile);
-  return <><header className="page-header"><div><p className="eyebrow">Output control</p><h1>Channels</h1><p>Each enabled channel owns an isolated persistent media worker and explicit stable output branches.</p></div></header><section className="split-grid channels-layout"><article className="panel"><p className="eyebrow">Configured outputs</p><h2>{channels.length || "No"} channel{channels.length === 1 ? "" : "s"}</h2>{channels.length ? <div className="channel-cards">{channels.map((channel) => { const profile = outputProfiles.find((item) => item.profile_id === channel.output_profile); return <article className="channel-card" key={channel.channel_id}><div className="channel-top"><div className="signal-icon">◉</div><StatusPill status={channel.enabled ? "enabled" : "disabled"} /></div><h3>{channel.display_name}</h3><p>{profile?.display_name ?? channel.output_profile} · {channel.output_sinks.filter((sink) => sink.enabled).length} sink{channel.output_sinks.filter((sink) => sink.enabled).length === 1 ? "" : "s"}</p>{channel.output_sinks.map((sink) => <code key={sink.sink_id}>{sink.label} ({sink.kind.toUpperCase()}{sink.encryption_configured ? " · encrypted" : ""}): {sink.destination}</code>)}<button className="secondary wide" onClick={() => void toggle(channel)}>{channel.enabled ? "Stop output" : "Start output"}</button></article>; })}</div> : <Empty title="No output configured" detail="Create the first persistent channel worker." action="Use the form" onAction={() => document.querySelector<HTMLInputElement>("#channel-name")?.focus()} />}</article><article className="panel sticky-form"><p className="eyebrow">New output</p><h2>Add a channel</h2><form onSubmit={save}><label>Channel name<input id="channel-name" required minLength={2} value={name} onChange={(event) => setName(event.target.value)} placeholder="Government Channel 12" /></label><label>Output profile<select required value={outputProfile} onChange={(event) => setOutputProfile(event.target.value as Channel["output_profile"])}>{outputProfiles.map((profile) => <option key={profile.profile_id} value={profile.profile_id}>{profile.display_name}</option>)}</select>{selected && <small>{selected.intended_use} · {(selected.transport_bitrate_bps / 1_000_000).toFixed(1)} Mb/s CBR transport</small>}</label><label>Transport<select value={transportKind} onChange={(event) => { const next = event.target.value as OutputSink["kind"]; setTransportKind(next); setDestination(next === "srt" ? "srt://127.0.0.1:5600" : "127.0.0.1:5500"); setRedundantDestination(""); setPassphrase(""); setRedundantPassphrase(""); }}><option value="udp-ts">UDP MPEG-TS</option><option value="srt">SRT caller</option></select><small>SRT uses caller mode with a fixed 200 ms latency and optional AES-256 encryption.</small></label><label>Primary {transportKind === "srt" ? "SRT URI" : "UDP destination"}<input required value={destination} onChange={(event) => setDestination(event.target.value)} placeholder={transportKind === "srt" ? "srt://192.168.1.100:5600" : "192.168.1.100:5000"} /><small>{transportKind === "srt" ? "Use a credential-free srt://IP:port URI." : "Use 127.0.0.1 for a local proof channel."}</small></label>{transportKind === "srt" && <label>Primary passphrase <small>Optional</small><input type="password" minLength={10} maxLength={79} autoComplete="new-password" value={passphrase} onChange={(event) => setPassphrase(event.target.value)} /><small>Stored with Windows machine encryption and never returned by the API.</small></label>}<label>Redundant {transportKind === "srt" ? "SRT URI" : "UDP destination"} <small>Optional</small><input value={redundantDestination} onChange={(event) => setRedundantDestination(event.target.value)} placeholder={transportKind === "srt" ? "srt://192.168.2.100:5600" : "192.168.2.100:5000"} /><small>The persistent graph sends the same encoded transport to both required branches.</small></label>{transportKind === "srt" && redundantDestination.trim() && <label>Redundant passphrase <small>Optional</small><input type="password" minLength={10} maxLength={79} autoComplete="new-password" value={redundantPassphrase} onChange={(event) => setRedundantPassphrase(event.target.value)} /></label>}{error && <div className="error-box">{error}</div>}<button className="primary wide" disabled={busy || outputProfiles.length === 0}>{busy ? "Saving…" : "Create & start channel"}</button></form></article></section>{channels.filter((channel) => channel.enabled).map((channel) => <LoudnessProofPanel key={channel.channel_id} channelId={channel.channel_id} sinks={channel.output_sinks} />)}</>;
+  return <><header className="page-header"><div><p className="eyebrow">Output control</p><h1>Channels</h1><p>Each enabled channel owns an isolated persistent media worker and explicit stable output branches.</p></div></header><section className="split-grid channels-layout"><article className="panel"><p className="eyebrow">Configured outputs</p><h2>{channels.length || "No"} channel{channels.length === 1 ? "" : "s"}</h2>{channels.length ? <div className="channel-cards">{channels.map((channel) => { const profile = outputProfiles.find((item) => item.profile_id === channel.output_profile); const headend = channel.output_sinks.find((sink) => sink.headend)?.headend; const namedHeadend = headendProfiles?.find((item) => item.profile_id === headend?.profile_id); const blockedHeadendStart = !channel.enabled && headend !== undefined && !canStartHeadendProfile(namedHeadend?.execution_state ?? null); const blockedStartLabel = namedHeadend ? "Headend profile blocked" : "Headend status unavailable"; return <article className="channel-card" key={channel.channel_id}><div className="channel-top"><div className="signal-icon">◉</div><StatusPill status={channel.enabled ? "enabled" : "disabled"} /></div><h3>{channel.display_name}</h3><p>{profile?.display_name ?? channel.output_profile} · {channel.output_sinks.filter((sink) => sink.enabled).length} sink{channel.output_sinks.filter((sink) => sink.enabled).length === 1 ? "" : "s"}</p>{headend && <span className="channel-headend-tag">{headend.profile_id.replaceAll("-", " ")} · {(headend.muxrate_kbps / 1000).toFixed(1)} Mb/s{namedHeadend?.execution_state === "staged_only" ? " · staging only" : ""}</span>}{channel.output_sinks.map((sink) => <code key={sink.sink_id}>{sink.label} ({sink.kind.toUpperCase()}{sink.encryption_configured ? " · encrypted" : ""}): {sink.destination}</code>)}<button className="secondary wide" disabled={blockedHeadendStart} title={blockedHeadendStart ? namedHeadend?.execution_detail ?? headendProfilesError ?? "The installed headend catalog has not been verified." : undefined} onClick={() => void toggle(channel)}>{channel.enabled ? "Stop output" : blockedHeadendStart ? blockedStartLabel : "Start output"}</button></article>; })}</div> : <Empty title="No output configured" detail="Create the first persistent channel worker." action="Use the form" onAction={() => document.querySelector<HTMLInputElement>("#channel-name")?.focus()} />}</article><article className="panel sticky-form"><p className="eyebrow">New output</p><h2>Add a channel</h2><form onSubmit={save}><label>Channel name<input id="channel-name" required minLength={2} value={name} onChange={(event) => setName(event.target.value)} placeholder="Government Channel 12" /></label><label>Output profile<select required value={outputProfile} onChange={(event) => setOutputProfile(event.target.value as Channel["output_profile"])}>{outputProfiles.map((profile) => <option key={profile.profile_id} value={profile.profile_id}>{profile.display_name}</option>)}</select>{selected && <small>{selected.intended_use} · {(selected.transport_bitrate_bps / 1_000_000).toFixed(1)} Mb/s CBR transport</small>}</label><label>Transport<select value={transportKind} onChange={(event) => { const next = event.target.value as OutputSink["kind"]; setTransportKind(next); setDestination(next === "srt" ? "srt://127.0.0.1:5600" : "127.0.0.1:5500"); setRedundantDestination(""); setPassphrase(""); setRedundantPassphrase(""); }}><option value="udp-ts">UDP MPEG-TS</option><option value="srt">SRT caller</option></select><small>SRT uses caller mode with a fixed 200 ms latency and optional AES-256 encryption.</small></label><label>Primary {transportKind === "srt" ? "SRT URI" : "UDP destination"}<input required value={destination} onChange={(event) => setDestination(event.target.value)} placeholder={transportKind === "srt" ? "srt://192.168.1.100:5600" : "192.168.1.100:5000"} /><small>{transportKind === "srt" ? "Use a credential-free srt://IP:port URI." : "Use 127.0.0.1 for a local proof channel."}</small></label>{transportKind === "srt" && <label>Primary passphrase <small>Optional</small><input type="password" minLength={10} maxLength={79} autoComplete="new-password" value={passphrase} onChange={(event) => setPassphrase(event.target.value)} /><small>Stored with Windows machine encryption and never returned by the API.</small></label>}<label>Redundant {transportKind === "srt" ? "SRT URI" : "UDP destination"} <small>Optional</small><input value={redundantDestination} onChange={(event) => setRedundantDestination(event.target.value)} placeholder={transportKind === "srt" ? "srt://192.168.2.100:5600" : "192.168.2.100:5000"} /><small>The persistent graph sends the same encoded transport to both required branches.</small></label>{transportKind === "srt" && redundantDestination.trim() && <label>Redundant passphrase <small>Optional</small><input type="password" minLength={10} maxLength={79} autoComplete="new-password" value={redundantPassphrase} onChange={(event) => setRedundantPassphrase(event.target.value)} /></label>}{error && <div className="error-box">{error}</div>}<button className="primary wide" disabled={busy || outputProfiles.length === 0}>{busy ? "Saving…" : "Create & start channel"}</button></form></article></section><HeadendWorkflow channels={channels} profiles={headendProfiles} loadingCatalog={headendProfilesLoading} catalogError={headendProfilesError} onReloadProfiles={loadHeadendProfiles} onRefresh={onRefresh} />{channels.filter((channel) => channel.enabled).map((channel) => <LoudnessProofPanel key={channel.channel_id} channelId={channel.channel_id} sinks={channel.output_sinks} />)}</>;
 }
 
 function Schedule({ dashboard, channels }: { dashboard: Dashboard | null; channels: Channel[] }) {

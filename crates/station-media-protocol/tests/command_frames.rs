@@ -150,11 +150,13 @@ fn round_trips_private_worker_bootstrap_without_process_arguments() {
                 sink_id: "11111111-2222-4333-8444-555555555555".into(),
                 destination: "127.0.0.1:5500".into(),
                 loudness_target_lufs: LoudnessTarget::STREAMING,
+                headend: None,
             },
             WorkerOutputConfiguration::UdpTs {
                 sink_id: "22222222-3333-4444-8555-666666666666".into(),
                 destination: "127.0.0.1:5501".into(),
                 loudness_target_lufs: LoudnessTarget::STREAMING,
+                headend: None,
             },
             WorkerOutputConfiguration::Srt {
                 sink_id: "33333333-4444-4555-8666-777777777777".into(),
@@ -258,11 +260,15 @@ fn round_trips_asset_load_and_take_commands() {
 #[test]
 fn rejects_a_command_from_an_incompatible_future_major_version() {
     let mut command = take_live_command();
-    command.version = ProtocolVersion { major: 4, minor: 0 };
+    let future_major = PROTOCOL_VERSION.major + 1;
+    command.version = ProtocolVersion {
+        major: future_major,
+        minor: 0,
+    };
     let frame = encode_command_frame(&command).expect("command encodes");
     assert_eq!(
         decode_command_frame(&frame),
-        Err(ProtocolError::UnsupportedMajor(4))
+        Err(ProtocolError::UnsupportedMajor(future_major))
     );
 }
 
