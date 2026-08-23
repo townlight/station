@@ -130,6 +130,11 @@ fn commissioning_report_is_ordered_and_does_not_claim_field_proof() {
     let checks = report["checks"].as_array().unwrap();
     assert_eq!(checks[0]["id"], "station_profile");
     assert_eq!(checks[1]["id"], "runtime_api");
+    let headend = checks
+        .iter()
+        .find(|check| check["id"] == "headend_output_setup")
+        .expect("commissioning must include the authoritative headend gate");
+    assert_eq!(headend["status"], "blocked");
     assert_eq!(checks.last().unwrap()["id"], "installed_field_proof");
     assert_eq!(checks.last().unwrap()["status"], "not_verified");
     assert_eq!(checks.last().unwrap()["blocking"], false);

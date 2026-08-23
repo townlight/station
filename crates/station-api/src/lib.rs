@@ -21,8 +21,9 @@ use station_cg::{
 };
 use station_domain::{
     AlertChannel, AlertChannelKind, AlertConditionKind, AlertEventState, AlertRule, AlertSeverity,
-    SafeToAirColor, SelfTestKind, SelfTestSchedule, SelfTestTrigger, StationProfile,
-    derive_runtime_safe_to_air, redact_alert_channel_target, validate_alert_channel_target,
+    ChannelRuntimeState, SafeToAirColor, SelfTestKind, SelfTestSchedule, SelfTestTrigger,
+    StationProfile, derive_runtime_safe_to_air, redact_alert_channel_target,
+    validate_alert_channel_target,
 };
 use station_live::{LiveSource, LiveSourceWriteError, TakeoverSession, TakeoverState};
 use station_maintenance::{read_active_slot_receipt, verify_active_application};
@@ -32,9 +33,12 @@ use station_media_lifecycle::{
     TranscodeJobStatus, WatchFolderConfig,
 };
 use station_readiness::{
-    BackupProbeInput, CapabilitySupport, ClockProbeInput, ClockSyncStatus, EngineProbeInput,
-    HardwareProbeInput, NetworkProbeInput, ReadinessState as StationReadinessState,
-    ReleaseProbeInput, StationBoxProbeInput, StationBoxProfile, derive_station_box_profile,
+    BackupProbeInput, CapabilitySupport, ChannelOutputRuntimeProbe, ClockProbeInput,
+    ClockSyncStatus, EngineProbeInput, ExternalReceiverState, HardwareProbeInput,
+    HeadendChannelProbeInput, HeadendProbeInput, HeadendProfileProbeInput, HeadendSinkKind,
+    HeadendSinkProbeInput, NetworkProbeInput, ReadinessState as StationReadinessState,
+    ReleaseProbeInput, StationBoxProbeInput, StationBoxProfile, derive_headend_readiness,
+    derive_station_box_profile,
 };
 use station_schedule::{
     AssetReadiness, ChannelConfiguration, DispatchStatus, MediaAsset, OUTPUT_PROFILES,
@@ -406,6 +410,7 @@ impl Api {
             ("GET", "/api/v1/commissioning/report") => self.commissioning_report(),
             ("GET", "/api/v1/station-box-profile") => self.station_box_profile(false),
             ("GET", "/api/v1/station-box-profile/readiness") => self.station_box_profile(true),
+            ("GET", "/api/v1/headend-readiness") => self.headend_readiness(None),
             ("PUT", "/api/v1/station") => self.put_profile(body),
             ("POST", "/api/v1/assets/ingest") => self.ingest_media(body),
             ("GET", "/api/v1/assets/readiness-dashboard") => self.readiness_dashboard(),
@@ -418,6 +423,12 @@ impl Api {
                 if path.starts_with("/api/v1/channels/") && path.ends_with("/live-sources") =>
             {
                 self.list_live_sources(path)
+            }
+            ("GET", path)
+                if path.starts_with("/api/v1/channels/")
+                    && path.ends_with("/headend-readiness") =>
+            {
+                self.channel_headend_readiness(path)
             }
             ("GET", path)
                 if path.starts_with("/api/v1/channels/") && path.ends_with("/live-authority") =>
@@ -1460,6 +1471,42 @@ impl Api {
         }
     }
 
+    fn channel_headend_readiness(&self, path: &str) -> ApiResponse {
+        let Some(channel_id) = path_identity(path, "/api/v1/channels/", "/headend-readiness")
+        else {
+            return error_response(400, "invalid_path", "The channel identity is invalid.");
+        };
+        if !is_api_uuid(channel_id) {
+            return error_response(400, "invalid_path", "The channel identity is invalid.");
+        }
+        self.headend_readiness(Some(channel_id))
+    }
+
+    fn headend_readiness(&self, channel_id: Option<&str>) -> ApiResponse {
+        let generated_at_unix_ms = match system_time_millis() {
+            Ok(value) => value,
+            Err(message) => return error_response(500, "clock_error", &message),
+        };
+        let station_box = match self.cached_station_box_profile() {
+            Ok(profile) => profile,
+            Err(message) => return error_response(500, "readiness_probe_failed", &message),
+        };
+        let probe = match collect_headend_probe(&self.storage, generated_at_unix_ms, channel_id) {
+            Ok(Some(probe)) => probe,
+            Ok(None) => {
+                return error_response(404, "channel_not_found", "The channel does not exist.");
+            }
+            Err(message) => return error_response(500, "storage_error", &message),
+        };
+        match derive_headend_readiness(&station_box, probe) {
+            Ok(readiness) => json_response(
+                200,
+                serde_json::to_vec(&readiness).expect("serializing headend readiness cannot fail"),
+            ),
+            Err(error) => error_response(500, "headend_readiness_invalid", &error.to_string()),
+        }
+    }
+
     fn cached_station_box_profile(&self) -> Result<StationBoxProfile, String> {
         let cache_checked_at = Instant::now();
         let mut cache = self
@@ -1603,6 +1650,35 @@ impl Api {
                 ),
             });
         }
+
+        let station_box = match self.cached_station_box_profile() {
+            Ok(profile) => profile,
+            Err(message) => return error_response(500, "readiness_probe_failed", &message),
+        };
+        let headend_probe = match collect_headend_probe(&self.storage, generated_at_unix_ms, None) {
+            Ok(Some(probe)) => probe,
+            Ok(None) => unreachable!("the aggregate headend probe is always present"),
+            Err(message) => return error_response(500, "storage_error", &message),
+        };
+        let headend = match derive_headend_readiness(&station_box, headend_probe) {
+            Ok(readiness) => readiness,
+            Err(error) => {
+                return error_response(500, "headend_readiness_invalid", &error.to_string());
+            }
+        };
+        let headend_status = match headend.rollup.color {
+            station_readiness::PegReadinessColor::Green => CommissioningCheckStatus::Pass,
+            station_readiness::PegReadinessColor::Yellow => CommissioningCheckStatus::Warning,
+            station_readiness::PegReadinessColor::Red => CommissioningCheckStatus::Blocked,
+        };
+        checks.push(CommissioningCheck {
+            id: "headend_output_setup",
+            label: "Headend output setup and local transport",
+            status: headend_status,
+            blocking: headend_status == CommissioningCheckStatus::Blocked,
+            detail: headend.rollup.detail,
+            evidence: "current StationBox capability, channel configuration, and worker heartbeat authority; external receiver acceptance remains separate".into(),
+        });
 
         let assets = match self.storage.list_media_assets() {
             Ok(assets) => assets,
@@ -3090,6 +3166,97 @@ const REQUIRED_MEDIA_FACTORIES: [&str; 22] = [
     "jpegdec",
 ];
 
+fn collect_headend_probe(
+    storage: &StationStore,
+    generated_at_unix_ms: i64,
+    channel_id: Option<&str>,
+) -> Result<Option<HeadendProbeInput>, String> {
+    let mut channels = storage.list_channels()?;
+    if let Some(channel_id) = channel_id {
+        channels.retain(|channel| channel.channel_id == channel_id);
+        if channels.is_empty() {
+            return Ok(None);
+        }
+    }
+    let mut probes = Vec::with_capacity(channels.len());
+    for channel in channels {
+        let profile = channel.output_profile.profile();
+        let runtime = storage.read_channel_runtime(&channel.channel_id)?;
+        let runtime = match runtime {
+            Some(runtime) => {
+                let heartbeat_age_ms = generated_at_unix_ms
+                    .checked_sub(runtime.heartbeat_at_unix_ms)
+                    .ok_or_else(|| "channel heartbeat age overflowed".to_string())?;
+                if heartbeat_age_ms < 0 {
+                    return Err("channel heartbeat cannot be in the future".into());
+                }
+                ChannelOutputRuntimeProbe {
+                    state: match runtime.state {
+                        ChannelRuntimeState::HealthyFallback
+                        | ChannelRuntimeState::OnAir
+                        | ChannelRuntimeState::Live => StationReadinessState::Pass,
+                        ChannelRuntimeState::Starting => StationReadinessState::Unknown,
+                        ChannelRuntimeState::Error | ChannelRuntimeState::Stopped => {
+                            StationReadinessState::Blocked
+                        }
+                    },
+                    heartbeat_age_ms: Some(heartbeat_age_ms),
+                    evidence: format!(
+                        "authoritative worker state {:?}, heartbeat age {heartbeat_age_ms} ms",
+                        runtime.state
+                    ),
+                }
+            }
+            None => ChannelOutputRuntimeProbe {
+                state: StationReadinessState::Unknown,
+                heartbeat_age_ms: None,
+                evidence: "no authoritative worker runtime observation exists".into(),
+            },
+        };
+        probes.push(HeadendChannelProbeInput {
+            channel_id: channel.channel_id,
+            display_name: channel.display_name,
+            enabled: channel.enabled,
+            profile: HeadendProfileProbeInput {
+                profile_id: profile.profile_id.storage_name().into(),
+                width: profile.width,
+                height: profile.height,
+                frame_rate_numerator: profile.frame_rate_numerator,
+                frame_rate_denominator: profile.frame_rate_denominator,
+                interlaced: profile.interlaced,
+                video_bitrate_bps: profile.video_bitrate_bps,
+                audio_bitrate_bps: profile.audio_bitrate_bps,
+                transport_bitrate_bps: profile.transport_bitrate_bps,
+                audio_sample_rate_hz: profile.audio_sample_rate_hz,
+                loudness_target_lufs: profile.loudness_target_lufs,
+            },
+            sinks: channel
+                .output_sinks
+                .into_iter()
+                .map(|sink| HeadendSinkProbeInput {
+                    sink_id: sink.sink_id,
+                    label: sink.label,
+                    kind: match sink.kind {
+                        station_schedule::OutputSinkKind::UdpTs => HeadendSinkKind::UdpTs,
+                        station_schedule::OutputSinkKind::Srt => HeadendSinkKind::Srt,
+                    },
+                    required: sink.required,
+                    enabled: sink.enabled,
+                    // Local worker progress is not cable-operator decode or
+                    // receiver acceptance. Only an external evidence receipt
+                    // may change this in a later proof slice.
+                    external_receiver: ExternalReceiverState::Unknown,
+                })
+                .collect(),
+            runtime,
+        });
+    }
+    Ok(Some(HeadendProbeInput {
+        generated_at_unix_ms,
+        channels: probes,
+    }))
+}
+
 fn collect_station_box_probe(
     storage: &StationStore,
     database_path: &Path,
@@ -4019,6 +4186,94 @@ mod tests {
         command.args(["/D", "/S", "/C", "echo 0123456789"]);
         let error = run_bounded_command(command, Duration::from_secs(2), 4).unwrap_err();
         assert!(error.contains("output exceeded its byte limit"));
+    }
+
+    #[test]
+    fn headend_routes_report_fresh_local_progress_without_claiming_receiver_acceptance() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let database = std::env::temp_dir().join(format!(
+            "townlight-headend-api-{}-{nonce}.db",
+            std::process::id()
+        ));
+        let application = database.with_extension("application");
+        std::fs::create_dir_all(&application).unwrap();
+        let api =
+            Api::open_with_station_box_probe(&database, &application, station_box_probe()).unwrap();
+        let channel_id = "8b626c01-bdf8-419a-8a2e-b0a7caa1ff7e";
+        api.storage
+            .put_channel(&ChannelConfiguration {
+                channel_id: channel_id.into(),
+                display_name: "Government".into(),
+                output_profile: station_schedule::OutputProfileId::Atsc720p5994,
+                output_sinks: vec![station_schedule::OutputSinkConfiguration::required_udp(
+                    "22222222-3333-4444-8555-666666666666",
+                    "Cable primary",
+                    "127.0.0.1:5500",
+                    -24.0,
+                )],
+                enabled: true,
+            })
+            .unwrap();
+        let now = system_time_millis().unwrap();
+        api.storage
+            .put_channel_runtime(&station_domain::ChannelRuntimeObservation {
+                channel_id: channel_id.into(),
+                state: ChannelRuntimeState::HealthyFallback,
+                on_air_asset_id: None,
+                state_started_at_unix_ms: now,
+                heartbeat_at_unix_ms: now,
+                detail: Some("all required branches advancing".into()),
+            })
+            .unwrap();
+
+        let aggregate = api.handle("GET", "/api/v1/headend-readiness", None);
+        assert_eq!(aggregate.status, 200);
+        let aggregate: serde_json::Value = serde_json::from_slice(&aggregate.body).unwrap();
+        assert_eq!(aggregate["rollup"]["color"], "yellow");
+        assert_eq!(
+            aggregate["channels"][0]["sinks"][0]["local_transport"],
+            "pass"
+        );
+        assert_eq!(
+            aggregate["channels"][0]["sinks"][0]["external_receiver"],
+            "unknown"
+        );
+
+        let one = api.handle(
+            "GET",
+            &format!("/api/v1/channels/{channel_id}/headend-readiness"),
+            None,
+        );
+        assert_eq!(one.status, 200);
+        let one: serde_json::Value = serde_json::from_slice(&one.body).unwrap();
+        assert_eq!(
+            one["channels"][0]["channel_id"],
+            aggregate["channels"][0]["channel_id"]
+        );
+        assert_eq!(
+            one["channels"][0]["sinks"][0]["state"],
+            aggregate["channels"][0]["sinks"][0]["state"]
+        );
+
+        api.storage
+            .put_channel_runtime(&station_domain::ChannelRuntimeObservation {
+                channel_id: channel_id.into(),
+                state: ChannelRuntimeState::Stopped,
+                on_air_asset_id: None,
+                state_started_at_unix_ms: now,
+                heartbeat_at_unix_ms: now + 1,
+                detail: Some("operator stopped output".into()),
+            })
+            .unwrap();
+        let stopped = api.handle("GET", "/api/v1/headend-readiness", None);
+        let stopped: serde_json::Value = serde_json::from_slice(&stopped.body).unwrap();
+        assert_eq!(stopped["rollup"]["color"], "red");
+
+        std::fs::remove_dir_all(application).unwrap();
+        let _ = std::fs::remove_file(database);
     }
 
     #[test]

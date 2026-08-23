@@ -6,6 +6,10 @@
 
 use serde::{Deserialize, Serialize};
 
+mod headend;
+
+pub use headend::*;
+
 const SCHEMA_VERSION: u32 = 1;
 const MAX_TEXT: usize = 200;
 const MAX_FACTORY_NAME: usize = 120;
