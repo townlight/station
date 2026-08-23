@@ -56,6 +56,26 @@ export function authGateForStatus(status: number): "login_required" | "bootstrap
   return status === 401 ? "login_required" : status === 428 ? "bootstrap_required" : null;
 }
 
+export function authGateForResponse(path: string, status: number): "login_required" | "bootstrap_required" | null {
+  const requestPath = path.split("?", 1)[0];
+  const publicCredentialSubmission = new Set([
+    "/api/v1/auth/bootstrap",
+    "/api/v1/auth/login",
+    "/api/v1/auth/recover",
+  ]).has(requestPath);
+  if (status === 401 && publicCredentialSubmission) return null;
+  return authGateForStatus(status);
+}
+
+export async function retainRecoveryCodesBeforeSessionVerification<T>(
+  recoveryCodes: string[],
+  retain: (codes: string[]) => void,
+  verifySession: () => Promise<T>,
+): Promise<T> {
+  retain([...recoveryCodes]);
+  return verifySession();
+}
+
 export function withoutBrowserIdentity<T>(value: T): T {
   const forbidden = new Set(["operator_id", "actor_id", "approved_by", "acknowledged_by", "updated_by", "requested_by", "submitted_by", "moderated_by", "created_by"]);
   const visit = (item: unknown, parentKey: string | null): unknown => {

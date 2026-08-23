@@ -3,10 +3,12 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   authenticatedRequestInit,
+  authGateForResponse,
   authGateForStatus,
   consumeBootstrapCapability,
   csrfCookieValue,
   submitBootstrapCapability,
+  retainRecoveryCodesBeforeSessionVerification,
   withoutBrowserIdentity,
 } from "./auth-contract.ts";
 
@@ -81,4 +83,29 @@ test("401 and 428 responses transition to the correct fail-closed gate", () => {
   assert.equal(authGateForStatus(401), "login_required");
   assert.equal(authGateForStatus(428), "bootstrap_required");
   assert.equal(authGateForStatus(403), null);
+});
+
+test("public credential submissions keep the active form on a 401 while protected requests still gate", () => {
+  assert.equal(authGateForResponse("/api/v1/auth/login", 401), null);
+  assert.equal(authGateForResponse("/api/v1/auth/recover", 401), null);
+  assert.equal(authGateForResponse("/api/v1/auth/bootstrap", 401), null);
+  assert.equal(authGateForResponse("/api/v1/auth/session", 401), "login_required");
+  assert.equal(authGateForResponse("/api/v1/channels", 401), "login_required");
+  assert.equal(authGateForResponse("/api/v1/auth/login", 428), "bootstrap_required");
+});
+
+test("bootstrap recovery codes are retained before session confirmation and survive its failure", async () => {
+  const events: string[] = [];
+  const codes = ["one-time-a", "one-time-b"];
+  await assert.rejects(
+    retainRecoveryCodesBeforeSessionVerification(codes, (retained) => {
+      assert.deepEqual(retained, codes);
+      events.push("codes-retained");
+    }, async () => {
+      events.push("session-verification");
+      throw new Error("transient session confirmation failure");
+    }),
+    /transient session confirmation failure/,
+  );
+  assert.deepEqual(events, ["codes-retained", "session-verification"]);
 });

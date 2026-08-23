@@ -1,4 +1,4 @@
-import { authenticatedRequestInit, authGateForStatus } from "./auth-contract";
+import { authenticatedRequestInit, authGateForResponse } from "./auth-contract";
 
 export type AuthGate = "login_required" | "bootstrap_required";
 export const AUTH_GATE_EVENT = "townlight-auth-gate";
@@ -13,7 +13,7 @@ export async function apiRequest<T>(path: string, init?: RequestInit): Promise<T
   const response = await fetch(path, authenticatedRequestInit(init, document.cookie));
   const body = await response.json().catch(() => null) as { error?: string | { code?: string; message?: string }; detail?: string; message?: string } | T | null;
   if (!response.ok) {
-    const gate = authGateForStatus(response.status);
+    const gate = authGateForResponse(path, response.status);
     if (gate) window.dispatchEvent(new CustomEvent<AuthGate>(AUTH_GATE_EVENT, { detail: gate }));
     const errorBody = body && typeof body === "object" ? body as { error?: string | { code?: string; message?: string }; detail?: string; message?: string } : null;
     const nested = errorBody?.error && typeof errorBody.error === "object" ? errorBody.error : null;
