@@ -48,6 +48,8 @@ Run `installer\verify-installed.ps1` after installation to compare installed has
 
 The exact commissioning candidate `8e9a27d3286815e0b34a0fad961cb2e5dc9a5a84` passed post-install hash/service verification and the complete installed commissioning harness, including decoded CG apply/change/clear, canonical media admission, all four acknowledged dispatch states, service restart, and green recovery. See the [installed commissioning proof](docs/proof/2026-08-21-installed-commissioning.md). Clean-machine, headend, and field-duration gates remain separate.
 
+Exact candidate `bd032f00f142dfd3475a76b406391fde611b5788` passed installed Generic UDP SPTS and TelVue HyperCaster IP transport/loudness proofs after an adversarial arbitrary-GOP regression established the bounded four-second decode-headroom contract. See the [installed progressive headend proof](docs/proof/2026-08-23-installed-progressive-headend.md). External receiver acceptance and field-duration gates remain separate.
+
 ## API
 
 `GET /health` reports local database availability plus current-boot orchestration liveness. It returns HTTP 503 until the orchestration loop completes its first reconcile and after a supervisor failure or stale-progress deadline. This is a control-plane health contract, not a safe-to-air or receiver-acceptance claim; those remain on their dedicated runtime and headend-readiness endpoints.
