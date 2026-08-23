@@ -60,6 +60,7 @@ OutputBaseFilename=TownLight-Station-{#ProductVersion}-x64-setup
 Compression=lzma2/fast
 SolidCompression=yes
 SetupLogging=yes
+SetupMutex=Global\TownLightStationSetup-D70BC1A2-A047-4F3A-87D9-811385248D2C
 CloseApplications=yes
 RestartApplications=no
 UninstallDisplayName=TownLight Station
@@ -102,11 +103,45 @@ const
   StationdSize = '{#StationdSize}';
   ChannelWorkerSize = '{#ChannelWorkerSize}';
   StationUpdaterSize = '{#StationUpdaterSize}';
+  AuthStateBootstrapRequired = 1;
+  AuthStateLoginRequired = 2;
+  AuthStateAuthenticated = 3;
+  OperatorRootUrl = 'http://127.0.0.1:4070/';
+  AuthStatusUrl = 'http://127.0.0.1:4070/api/v1/auth/status';
 
 var
   RuntimeWasInstalled: Boolean;
   CandidateActivated: Boolean;
   SetupCompleted: Boolean;
+  BootstrapHandoffOwned: Boolean;
+
+function NativeShellExecute(hWnd: Integer; lpOperation, lpFile,
+  lpParameters, lpDirectory: String; nShowCmd: Integer): Integer;
+  external 'ShellExecuteW@shell32.dll stdcall';
+function NativeSetEnvironmentVariable(lpName, lpValue: String): Boolean;
+  external 'SetEnvironmentVariableW@kernel32.dll stdcall';
+
+function StationDatabasePath: String;
+begin
+  Result := ExpandConstant(
+    '{commonappdata}\TownLight Station\station.db');
+end;
+
+function BootstrapHandoffPath: String;
+begin
+  Result := ExpandConstant(
+    '{commonappdata}\TownLight Station\operator-bootstrap.capability');
+end;
+
+procedure DeleteBootstrapHandoff;
+var
+  HandoffPath: String;
+begin
+  HandoffPath := BootstrapHandoffPath;
+  if FileExists(HandoffPath) then
+    if not DeleteFile(HandoffPath) then
+      RaiseException('The protected one-time setup file could not be removed.');
+end;
 
 function RunSc(const Arguments: String; var ResultCode: Integer): Boolean;
 begin
@@ -166,6 +201,15 @@ end;
 
 procedure RollbackInstallation;
 begin
+  if BootstrapHandoffOwned then
+  begin
+    try
+      DeleteBootstrapHandoff;
+      BootstrapHandoffOwned := False;
+    except
+      Log('Rollback could not remove the exact protected bootstrap handoff.');
+    end;
+  end;
   RollbackService;
   if RuntimeWasInstalled then
     RemovePrivateRuntime;
@@ -173,6 +217,165 @@ begin
     '{commonappdata}\TownLight Station\install-receipt.json'));
   DeleteFile(ExpandConstant(
     '{commonappdata}\TownLight Station\active-slot.json'));
+end;
+
+function QueryAuthState: Integer;
+var
+  Http: Variant;
+  Matches: Integer;
+  Response: String;
+begin
+  try
+    Http := CreateOleObject('WinHttp.WinHttpRequest.5.1');
+    Http.SetTimeouts(1000, 1000, 1000, 1000);
+    Http.Open('GET', AuthStatusUrl, False);
+    Http.Send('');
+    if Http.Status <> 200 then
+      RaiseException('The authentication state endpoint was not ready.');
+    Response := Http.ResponseText;
+  except
+    RaiseException('TownLight Station authentication state could not be verified.');
+  end;
+
+  if Pos('"schema_version":1', Response) = 0 then
+    RaiseException('TownLight Station returned an unsupported authentication state.');
+  Result := 0;
+  Matches := 0;
+  if Pos('"state":"bootstrap_required"', Response) > 0 then
+  begin
+    Result := AuthStateBootstrapRequired;
+    Matches := Matches + 1;
+  end;
+  if Pos('"state":"login_required"', Response) > 0 then
+  begin
+    Result := AuthStateLoginRequired;
+    Matches := Matches + 1;
+  end;
+  if Pos('"state":"authenticated"', Response) > 0 then
+  begin
+    Result := AuthStateAuthenticated;
+    Matches := Matches + 1;
+  end;
+  if Matches <> 1 then
+    RaiseException('TownLight Station returned an ambiguous authentication state.');
+end;
+
+procedure RejectCrashRemnantHandoff;
+var
+  HandoffPath: String;
+begin
+  HandoffPath := BootstrapHandoffPath;
+  if not FileExists(HandoffPath) then
+    Exit;
+  DeleteBootstrapHandoff;
+  BootstrapHandoffOwned := False;
+  RaiseException(
+    'A protected one-time setup file from an incomplete attempt was removed. ' +
+    'Run setup again; if setup still reports pending initialization, wait 15 minutes and retry.');
+end;
+
+procedure IssueBootstrapHandoff;
+var
+  DatabasePath: String;
+  HandoffPath: String;
+  OldPath: String;
+  Parameters: String;
+  ResultCode: Integer;
+  RuntimeBin: String;
+  StationdPath: String;
+begin
+  DatabasePath := StationDatabasePath;
+  HandoffPath := BootstrapHandoffPath;
+  StationdPath := ExpandConstant('{app}\stationd.exe');
+  RuntimeBin := ExpandConstant('{app}\runtime\gstreamer\bin');
+  Parameters := 'auth issue-bootstrap-handoff --database "' +
+    DatabasePath + '" --handoff "' + HandoffPath + '"';
+  OldPath := GetEnv('PATH');
+  if not NativeSetEnvironmentVariable('PATH', RuntimeBin + ';' + OldPath) then
+    RaiseException('The setup process could not prepare the private runtime environment.');
+  BootstrapHandoffOwned := True;
+  try
+    if (not Exec(StationdPath, Parameters, '', SW_HIDE,
+      ewWaitUntilTerminated, ResultCode)) or (ResultCode <> 0) then
+      RaiseException(
+        'The one-time operator setup could not be initialized. ' +
+        'If another setup attempt just ended, wait 15 minutes and retry.');
+  finally
+    if not NativeSetEnvironmentVariable('PATH', OldPath) then
+      Log('The setup process could not restore its private runtime environment.');
+  end;
+end;
+
+function IsBase64UrlCharacter(Value: Char): Boolean;
+begin
+  Result := ((Value >= 'A') and (Value <= 'Z')) or
+    ((Value >= 'a') and (Value <= 'z')) or
+    ((Value >= '0') and (Value <= '9')) or
+    (Value = '_') or (Value = '-');
+end;
+
+procedure LaunchOperatorUrl(const Url: String);
+var
+  LaunchResult: Integer;
+begin
+  LaunchResult := NativeShellExecute(0, 'open', Url, '', '', SW_SHOWNORMAL);
+  if LaunchResult <= 32 then
+    RaiseException('TownLight Station could not open the operator console.');
+end;
+
+procedure ReadDeleteAndLaunchBootstrap;
+var
+  Capability: String;
+  HandoffPath: String;
+  Index: Integer;
+  RawCapability: AnsiString;
+  SetupUrl: String;
+begin
+  HandoffPath := BootstrapHandoffPath;
+  RawCapability := '';
+  Capability := '';
+  SetupUrl := '';
+  try
+    if not LoadStringFromFile(HandoffPath, RawCapability) then
+      RaiseException('The protected one-time setup file could not be read.');
+    if Length(RawCapability) <> 44 then
+      RaiseException('The protected one-time setup file had an invalid length.');
+    if RawCapability[44] <> #10 then
+      RaiseException('The protected one-time setup file had an invalid terminator.');
+    for Index := 1 to 43 do
+      if not IsBase64UrlCharacter(RawCapability[Index]) then
+        RaiseException('The protected one-time setup file had an invalid format.');
+    Capability := Copy(RawCapability, 1, 43);
+    if not DeleteFile(HandoffPath) then
+      RaiseException('The protected one-time setup file could not be removed.');
+    BootstrapHandoffOwned := False;
+    SetupUrl := OperatorRootUrl + '#/setup/' + Capability;
+    LaunchOperatorUrl(SetupUrl);
+  finally
+    RawCapability := '';
+    Capability := '';
+    SetupUrl := '';
+  end;
+end;
+
+procedure PrepareOperatorAuthentication;
+var
+  AuthState: Integer;
+begin
+  AuthState := QueryAuthState;
+  if (AuthState = AuthStateLoginRequired) or
+    (AuthState = AuthStateAuthenticated) then
+  begin
+    DeleteBootstrapHandoff;
+    BootstrapHandoffOwned := False;
+    LaunchOperatorUrl(OperatorRootUrl);
+    Exit;
+  end;
+  if AuthState <> AuthStateBootstrapRequired then
+    RaiseException('TownLight Station returned an unsupported authentication state.');
+  RejectCrashRemnantHandoff;
+  IssueBootstrapHandoff;
+  ReadDeleteAndLaunchBootstrap;
 end;
 
 function PrivateRuntimeIsComplete(const RuntimeRoot: String): Boolean;
@@ -443,6 +646,7 @@ begin
       WriteInstallReceipt;
       WriteActiveSlotReceipt;
       CreateAndStartUpdaterService;
+      PrepareOperatorAuthentication;
       CandidateActivated := True;
     except
       RollbackInstallation;
