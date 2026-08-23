@@ -1,4 +1,6 @@
 param(
+    [Parameter(Mandatory = $true)]
+    [Management.Automation.PSCredential]$Credential,
     [string]$BaseUri = 'http://127.0.0.1:4070',
     [int]$DestinationPort = 5940,
     [int]$CaptureSeconds = 5,
@@ -6,6 +8,24 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'installed-proof-api.ps1')
+$apiSession = New-TownLightProofSession -BaseUri $BaseUri -Credential $Credential
+
+function Invoke-InstalledProofApi {
+    [CmdletBinding()]
+    param(
+        [Parameter(Position = 0, Mandatory = $true)][string]$Uri,
+        [string]$Method = 'Get',
+        [string]$ContentType = 'application/json',
+        $Body = $null,
+        [int]$TimeoutSec = 30
+    )
+    $requestUri = [uri]$Uri
+    $path = $requestUri.PathAndQuery -replace '^/api/v1', ''
+    $parameters = @{ Session = $apiSession; Method = $Method; Path = $path; TimeoutSec = $TimeoutSec }
+    if ($PSBoundParameters.ContainsKey('Body')) { $parameters.Body = $Body; $parameters.ContentType = $ContentType }
+    Invoke-TownLightProofApi @parameters
+}
 $channelId = 'c8c8c8c8-7d4e-4b31-9b3f-1f7b9a0c5940'
 $boardId = 'b8b8b8b8-4d3e-4a21-8b2f-2f6a8b0c5940'
 $zoneId = 'd8d8d8d8-5e4f-4a32-9c4f-3f7b9a0c5940'
@@ -34,7 +54,7 @@ function Invoke-Json {
         $params.ContentType = 'application/json'
         $params.Body = ($Body | ConvertTo-Json -Depth 20 -Compress)
     }
-    Invoke-RestMethod @params
+    Invoke-InstalledProofApi @params
 }
 
 function New-Audit {
@@ -44,7 +64,6 @@ function New-Audit {
         board_id = $Board
         channel_id = $channelId
         event_kind = $Kind
-        operator_id = 'installed-cg-image-proof'
         occurred_at_unix_ms = $Time
         details = [ordered]@{}
     }
@@ -81,10 +100,9 @@ function New-ImageBytes {
 
 function Upload-CgImage {
     param([byte[]]$Bytes)
-    $response = Invoke-WebRequest -Method Post -Uri "$BaseUri/api/v1/cg/images" `
-        -ContentType 'application/octet-stream' -Body $Bytes -TimeoutSec 15
-    if ($response.StatusCode -ne 200) { throw "CG image upload failed: HTTP $($response.StatusCode)" }
-    $response.Content | ConvertFrom-Json
+    [byte[]]$response = Invoke-TownLightProofApi -Session $apiSession -Method Post -Path '/cg/images' `
+        -ContentType 'application/octet-stream' -Body $Bytes -ResponseMode Raw -TimeoutSec 15
+    [Text.Encoding]::UTF8.GetString($response) | ConvertFrom-Json
 }
 
 function Capture-Udp {
@@ -168,7 +186,7 @@ function Wait-PreviewCleared {
                 Where-Object { $_.kind -eq 'image' } | Select-Object -First 1
             if (-not $image) { return }
         } catch {
-            if ($_.Exception.Response -and $_.Exception.Response.StatusCode.value__ -in @(409, 422)) { return }
+            if ($_.Exception.Message -match 'HTTP (409|422)') { return }
         }
         Start-Sleep -Milliseconds 250
     } while ([DateTime]::UtcNow -lt $deadline)
@@ -194,20 +212,19 @@ try {
     try {
         $existingBoard = Invoke-Json 'Get' "/api/v1/cg/board?channel_id=$channelId" $null
         if ($existingBoard -and ($existingBoard.board_id -ne $boardId -or
-            $existingBoard.created_by -ne 'installed-cg-image-proof' -or
             $existingBoard.template_id -ne 'l-bar')) {
             throw "Refusing stale CG image proof board $($existingBoard.board_id)."
         }
     } catch {
         if ($_.Exception.Message -like '*Refusing stale*' -or
-            (-not $_.Exception.Response) -or $_.Exception.Response.StatusCode.value__ -ne 404) { throw }
+            $_.Exception.Message -notmatch 'HTTP 404') { throw }
     }
     try {
         $existingZones = Invoke-Json 'Get' "/api/v1/cg/zones?board_id=$boardId" $null
         if ($existingZones.Count -gt 0) { throw "Refusing stale CG image proof zones for board $boardId." }
     } catch {
         if ($_.Exception.Message -like '*Refusing stale*' -or
-            (-not $_.Exception.Response) -or $_.Exception.Response.StatusCode.value__ -ne 404) { throw }
+            $_.Exception.Message -notmatch 'HTTP 404') { throw }
     }
 
     $channel = [ordered]@{
@@ -264,7 +281,7 @@ try {
         board_id = $boardId; channel_id = $channelId; template_id = 'l-bar'; active = $true
         background_audio_asset_id = $null; revision = $boardRevision
         created_at_unix_ms = if ($existingBoard) { [int64]$existingBoard.created_at_unix_ms } else { $now }
-        updated_at_unix_ms = $now; created_by = 'installed-cg-image-proof'
+        updated_at_unix_ms = $now
     }
     $boardAuditKind = if ($existingBoard) { 'board_updated' } else { 'board_created' }
     Write-Cg '/api/v1/cg/board' 'board' $board $priorBoardRevision (New-Audit $boardAuditKind $boardId $now 'board') | Out-Null

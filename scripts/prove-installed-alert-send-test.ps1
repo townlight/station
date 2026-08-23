@@ -1,9 +1,29 @@
 param(
+    [Parameter(Mandatory = $true)]
+    [Management.Automation.PSCredential]$Credential,
     [string]$BaseUrl = 'http://127.0.0.1:4070/api/v1',
     [int]$Port = 47882
 )
 
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'installed-proof-api.ps1')
+$apiSession = New-TownLightProofSession -BaseUri $BaseUrl -Credential $Credential
+
+function Invoke-InstalledProofApi {
+    [CmdletBinding()]
+    param(
+        [Parameter(Position = 0, Mandatory = $true)][string]$Uri,
+        [string]$Method = 'Get',
+        [string]$ContentType = 'application/json',
+        $Body = $null,
+        [int]$TimeoutSec = 30
+    )
+    $requestUri = [uri]$Uri
+    $path = $requestUri.PathAndQuery -replace '^/api/v1', ''
+    $parameters = @{ Session = $apiSession; Method = $Method; Path = $path; TimeoutSec = $TimeoutSec }
+    if ($PSBoundParameters.ContainsKey('Body')) { $parameters.Body = $Body; $parameters.ContentType = $ContentType }
+    Invoke-TownLightProofApi @parameters
+}
 $alertChannelId = '83d2171d-993f-4d8e-8dc4-40573c1f5f86'
 $signingSecret = 'installed-send-test-signing-key'
 $target = "http://127.0.0.1:$Port/operator-test"
@@ -75,13 +95,13 @@ try {
         target = $target
         credential = $signingSecret
     } | ConvertTo-Json -Compress
-    $publicChannel = Invoke-RestMethod -Method Put -Uri "$BaseUrl/alert-channels" -ContentType 'application/json' -Body $configuration
+    $publicChannel = Invoke-InstalledProofApi -Method Put -Uri "$BaseUrl/alert-channels" -ContentType 'application/json' -Body $configuration
     if ($publicChannel.enabled) { throw 'The proof destination was not stored disabled.' }
     if ($publicChannel.PSObject.Properties.Name -contains 'target' -or $publicChannel.PSObject.Properties.Name -contains 'credential') {
         throw 'The public destination response exposed a secret field.'
     }
 
-    $queued = Invoke-RestMethod -Method Post -Uri "$BaseUrl/alert-channels/$alertChannelId/test" -ContentType 'application/json' -Body ''
+    $queued = Invoke-InstalledProofApi -Method Post -Uri "$BaseUrl/alert-channels/$alertChannelId/test" -ContentType 'application/json' -Body ''
     if ($queued.notification_kind -ne 'test' -or $queued.state -ne 'pending') {
         throw 'The send-test request did not return a pending test delivery.'
     }
@@ -100,12 +120,12 @@ try {
     $delivery = $null
     $deadline = [DateTime]::UtcNow.AddSeconds(10)
     while (-not $delivery -and [DateTime]::UtcNow -lt $deadline) {
-        $ledger = Invoke-RestMethod -Uri "$BaseUrl/alert-deliveries"
+        $ledger = Invoke-InstalledProofApi -Uri "$BaseUrl/alert-deliveries"
         $delivery = $ledger.Where({ $_.delivery_id -eq $queued.delivery_id -and $_.state -eq 'sent' }, 'First')
         if (-not $delivery) { Start-Sleep -Milliseconds 100 }
     }
     if (-not $delivery) { throw 'The installed delivery ledger did not reach sent.' }
-    $alertLedger = Invoke-RestMethod -Uri "$BaseUrl/alerts"
+    $alertLedger = Invoke-InstalledProofApi -Uri "$BaseUrl/alerts"
     $auditEvent = $alertLedger.Where({ $_.event_id -eq $queued.event_id }, 'First')
     if (-not $auditEvent -or $auditEvent.state -ne 'resolved' -or $auditEvent.severity -ne 'info') {
         throw 'The installed audit event was missing or unhealthy.'

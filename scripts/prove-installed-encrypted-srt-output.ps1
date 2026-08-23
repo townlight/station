@@ -1,4 +1,6 @@
 param(
+    [Parameter(Mandatory = $true)]
+    [Management.Automation.PSCredential]$Credential,
     [string]$BaseUri = 'http://127.0.0.1:4070',
     [int]$ListenerPort = 5937,
     [int]$CaptureSeconds = 5,
@@ -7,6 +9,24 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'installed-proof-api.ps1')
+$apiSession = New-TownLightProofSession -BaseUri $BaseUri -Credential $Credential
+
+function Invoke-InstalledProofApi {
+    [CmdletBinding()]
+    param(
+        [Parameter(Position = 0, Mandatory = $true)][string]$Uri,
+        [string]$Method = 'Get',
+        [string]$ContentType = 'application/json',
+        $Body = $null,
+        [int]$TimeoutSec = 30
+    )
+    $requestUri = [uri]$Uri
+    $path = $requestUri.PathAndQuery -replace '^/api/v1', ''
+    $parameters = @{ Session = $apiSession; Method = $Method; Path = $path; TimeoutSec = $TimeoutSec }
+    if ($PSBoundParameters.ContainsKey('Body')) { $parameters.Body = $Body; $parameters.ContentType = $ContentType }
+    Invoke-TownLightProofApi @parameters
+}
 $channelId = '9f55c6a1-12c7-4a90-9f90-7dbd4b6663f8'
 $sinkId = '7a8dd98f-bcaa-46fe-b237-846ceae42e86'
 $channel = [ordered]@{
@@ -30,6 +50,18 @@ $runtime = Join-Path $env:ProgramFiles 'TownLight Station\runtime\gstreamer'
 $launcher = Join-Path $runtime 'bin\gst-launch-1.0.exe'
 $listener = $null
 $configured = $false
+
+function Connect-AfterServiceBoundary {
+    $deadline = [DateTime]::UtcNow.AddSeconds(60)
+    while ([DateTime]::UtcNow -lt $deadline) {
+        try {
+            Connect-TownLightProofSession -Session $apiSession -Credential $Credential | Out-Null
+            return
+        }
+        catch { Start-Sleep -Milliseconds 250 }
+    }
+    throw 'The installed station did not accept a fresh authenticated session after its service boundary.'
+}
 $serviceStopped = $false
 
 function Test-ContainsBytes([byte[]]$Bytes, [byte[]]$Needle) {
@@ -56,14 +88,14 @@ try {
     $write = [ordered]@{}
     foreach ($entry in $channel.GetEnumerator()) { $write[$entry.Key] = $entry.Value }
     $write.srt_passphrases = $passphrases
-    $response = Invoke-RestMethod -Method Put -Uri "$BaseUri/api/v1/channels" `
+    $response = Invoke-InstalledProofApi -Method Put -Uri "$BaseUri/api/v1/channels" `
         -ContentType 'application/json' -Body ($write | ConvertTo-Json -Depth 8 -Compress) -TimeoutSec 10
     $configured = $true
     if (-not $response.output_sinks[0].encryption_configured) {
         throw 'The public channel record did not report encrypted SRT presence.'
     }
-    $publicJson = & curl.exe --silent --show-error --fail-with-body "$BaseUri/api/v1/channels"
-    if ($LASTEXITCODE -ne 0 -or $publicJson.Contains($Passphrase) -or $publicJson.Contains('srt_passphrases')) {
+    $publicJson = Invoke-TownLightProofApi -Session $apiSession -Method Get -Path '/channels' -ResponseMode Text
+    if ($publicJson.Contains($Passphrase) -or $publicJson.Contains('srt_passphrases')) {
         throw 'The public channel API exposed the write-only SRT passphrase contract.'
     }
 
@@ -92,6 +124,7 @@ try {
     if (-not $health -or $health.status -ne 'ready') {
         throw 'The station service did not recover after the encrypted-secret persistence restart.'
     }
+    Connect-AfterServiceBoundary
 
     $env:PATH = (Join-Path $runtime 'bin') + ';' + $env:PATH
     $env:GST_PLUGIN_PATH_1_0 = Join-Path $runtime 'lib\gstreamer-1.0'
@@ -119,7 +152,7 @@ try {
     if (-not $listenerBound) { throw 'The encrypted SRT listener did not bind within 20 seconds.' }
 
     $channel.enabled = $true
-    Invoke-RestMethod -Method Put -Uri "$BaseUri/api/v1/channels" -ContentType 'application/json' `
+    Invoke-InstalledProofApi -Method Put -Uri "$BaseUri/api/v1/channels" -ContentType 'application/json' `
         -Body ($channel | ConvertTo-Json -Depth 8 -Compress) -TimeoutSec 10 | Out-Null
     $readyClock = [Diagnostics.Stopwatch]::StartNew()
     do {
@@ -147,7 +180,7 @@ try {
     }
 
     $channel.enabled = $false
-    Invoke-RestMethod -Method Put -Uri "$BaseUri/api/v1/channels" -ContentType 'application/json' `
+    Invoke-InstalledProofApi -Method Put -Uri "$BaseUri/api/v1/channels" -ContentType 'application/json' `
         -Body ($channel | ConvertTo-Json -Depth 8 -Compress) -TimeoutSec 10 | Out-Null
     $configured = $false
     Start-Sleep -Milliseconds 500
@@ -200,13 +233,16 @@ try {
 }
 finally {
     if ($serviceStopped) {
-        try { Start-Service -Name TownLightStation }
+        try {
+            Start-Service -Name TownLightStation
+            Connect-AfterServiceBoundary
+        }
         catch { Write-Warning "Could not restart the station service: $($_.Exception.Message)" }
     }
     if ($configured) {
         try {
             $channel.enabled = $false
-            Invoke-RestMethod -Method Put -Uri "$BaseUri/api/v1/channels" -ContentType 'application/json' `
+            Invoke-InstalledProofApi -Method Put -Uri "$BaseUri/api/v1/channels" -ContentType 'application/json' `
                 -Body ($channel | ConvertTo-Json -Depth 8 -Compress) -TimeoutSec 10 | Out-Null
         }
         catch { Write-Warning "Could not disable the encrypted SRT proof: $($_.Exception.Message)" }

@@ -1,5 +1,7 @@
 param(
     [Parameter(Mandatory = $true)]
+    [Management.Automation.PSCredential]$Credential,
+    [Parameter(Mandatory = $true)]
     [string]$FixtureDirectory,
     [Parameter(Mandatory = $true)]
     [string]$ExpectedSourceCommit,
@@ -9,6 +11,24 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'installed-proof-api.ps1')
+$apiSession = New-TownLightProofSession -BaseUri $BaseUrl -Credential $Credential
+
+function Invoke-InstalledProofApi {
+    [CmdletBinding()]
+    param(
+        [Parameter(Position = 0, Mandatory = $true)][string]$Uri,
+        [string]$Method = 'Get',
+        [string]$ContentType = 'application/json',
+        $Body = $null,
+        [int]$TimeoutSec = 30
+    )
+    $requestUri = [uri]$Uri
+    $path = $requestUri.PathAndQuery -replace '^/api/v1', ''
+    $parameters = @{ Session = $apiSession; Method = $Method; Path = $path; TimeoutSec = $TimeoutSec }
+    if ($PSBoundParameters.ContainsKey('Body')) { $parameters.Body = $Body; $parameters.ContentType = $ContentType }
+    Invoke-TownLightProofApi @parameters
+}
 $applicationDirectory = Join-Path $env:ProgramFiles 'TownLight Station'
 $dataDirectory = Join-Path $env:ProgramData 'TownLight Station'
 $trustPath = Join-Path $applicationDirectory 'release-trust.json'
@@ -20,6 +40,18 @@ $stopPath = Join-Path $FixtureDirectory 'server-stop.txt'
 $logPath = Join-Path $FixtureDirectory 'server-log.txt'
 $server = $null
 $trustInstalled = $false
+
+function Connect-AfterServiceBoundary {
+    $deadline = [DateTime]::UtcNow.AddSeconds(60)
+    while ([DateTime]::UtcNow -lt $deadline) {
+        try {
+            Connect-TownLightProofSession -Session $apiSession -Credential $Credential | Out-Null
+            return
+        }
+        catch { Start-Sleep -Milliseconds 250 }
+    }
+    throw 'The installed station did not accept a fresh authenticated session after its service boundary.'
+}
 
 function Wait-Until {
     param([scriptblock]$Action, [scriptblock]$Predicate, [int]$TimeoutSeconds = 90)
@@ -60,8 +92,8 @@ try {
         output_sinks = @([ordered]@{ sink_id = '70707070-8080-4090-80a0-b0b0b0b0b0b0'; label = 'Primary transport'; kind = 'udp-ts'; destination = '127.0.0.1:5910'; loudness_target_lufs = -16.0; required = $true; enabled = $true })
         enabled = $true
     } | ConvertTo-Json
-    Invoke-RestMethod -Uri "$BaseUrl/channels" -Method Put -ContentType 'application/json' -Body $channel | Out-Null
-    $greenBefore = Wait-Until -Action { Invoke-RestMethod -Uri "$BaseUrl/runtime-safe-to-air" } `
+    Invoke-InstalledProofApi -Uri "$BaseUrl/channels" -Method Put -ContentType 'application/json' -Body $channel | Out-Null
+    $greenBefore = Wait-Until -Action { Invoke-InstalledProofApi -Uri "$BaseUrl/runtime-safe-to-air" } `
         -Predicate { param($value) $value.color -eq 'green' -and $value.channels.Count -eq 1 }
 
     Remove-Item -LiteralPath $readyPath,$stopPath,$logPath -Force -ErrorAction SilentlyContinue
@@ -86,14 +118,15 @@ try {
     Copy-Item -LiteralPath $fixtureTrustPath -Destination $trustPath -Force
     $trustInstalled = $true
     Restart-Service -Name TownLightStation -Force
-    $available = Wait-Until -Action { Invoke-RestMethod -Uri "$BaseUrl/updates/status" } `
+    Connect-AfterServiceBoundary
+    $available = Wait-Until -Action { Invoke-InstalledProofApi -Uri "$BaseUrl/updates/status" } `
         -Predicate { param($value) $value.latest_check.outcome -eq 'update_available' }
     if ($available.latest_check.offered_release.version -ne '0.2.0' -or
         $available.latest_check.offered_release.source_commit -ne $ExpectedSourceCommit) {
         throw 'Signed offer identity did not match the real candidate.'
     }
-    Invoke-RestMethod -Uri "$BaseUrl/updates/stage" -Method Post | Out-Null
-    $prepared = Invoke-RestMethod -Uri "$BaseUrl/updates/prepare" -Method Post
+    Invoke-InstalledProofApi -Uri "$BaseUrl/updates/stage" -Method Post | Out-Null
+    $prepared = Invoke-InstalledProofApi -Uri "$BaseUrl/updates/prepare" -Method Post
     $slotPath = Join-Path (Join-Path $applicationDirectory 'slots') $prepared.slot_directory_name
     $candidateStationd = Join-Path $slotPath 'stationd.exe'
     $expectedCandidateHash = (Get-FileHash -LiteralPath $candidateStationd -Algorithm SHA256).Hash
@@ -101,10 +134,10 @@ try {
         throw 'The candidate payload is not the exact real station binary under proof.'
     }
 
-    $greenForGate = Wait-Until -Action { Invoke-RestMethod -Uri "$BaseUrl/runtime-safe-to-air" } `
+    $greenForGate = Wait-Until -Action { Invoke-InstalledProofApi -Uri "$BaseUrl/runtime-safe-to-air" } `
         -Predicate { param($value) $value.color -eq 'green' }
-    $applyBody = @{ requested_by = 'installed-machine-proof'; confirmation = 'INSTALL UPDATE' } | ConvertTo-Json
-    $request = Invoke-RestMethod -Uri "$BaseUrl/updates/apply" -Method Post `
+    $applyBody = @{ confirmation = 'INSTALL UPDATE' } | ConvertTo-Json
+    $request = Invoke-InstalledProofApi -Uri "$BaseUrl/updates/apply" -Method Post `
         -ContentType 'application/json' -Body $applyBody
     if ($request.prepared_slot.slot_directory_name -ne $prepared.slot_directory_name) {
         throw 'Maintenance request did not preserve the prepared candidate identity.'
@@ -124,7 +157,8 @@ try {
     if ($stationService.PathName -notlike ('"*\slots\' + $prepared.slot_directory_name + '\stationd.exe" service *')) {
         throw "The SCM command does not point to the candidate slot: $($stationService.PathName)"
     }
-    $greenAfter = Wait-Until -Action { Invoke-RestMethod -Uri "$BaseUrl/runtime-safe-to-air" } `
+    Connect-AfterServiceBoundary
+    $greenAfter = Wait-Until -Action { Invoke-InstalledProofApi -Uri "$BaseUrl/runtime-safe-to-air" } `
         -Predicate { param($value) $value.color -eq 'green' }
     $transactionPath = Join-Path (Join-Path $dataDirectory 'updates\maintenance-transactions') ($request.transaction_id + '.json')
     $transaction = Get-Content -LiteralPath $transactionPath -Raw | ConvertFrom-Json
@@ -150,7 +184,8 @@ try {
     Remove-Item -LiteralPath $trustPath -Force
     $trustInstalled = $false
     Restart-Service -Name TownLightStation -Force
-    $rootResolution = Wait-Until -Action { Invoke-RestMethod -Uri "$BaseUrl/updates/status" } `
+    Connect-AfterServiceBoundary
+    $rootResolution = Wait-Until -Action { Invoke-InstalledProofApi -Uri "$BaseUrl/updates/status" } `
         -Predicate { param($value) -not $value.configured -and $value.current_version -eq '0.2.0' }
     $stationAfterRestart = Get-CimInstance Win32_Service -Filter "Name='TownLightStation'"
     $processAfterRestart = Get-CimInstance Win32_Process -Filter "ProcessId=$($stationAfterRestart.ProcessId)"

@@ -1,4 +1,6 @@
 param(
+    [Parameter(Mandatory = $true)]
+    [Management.Automation.PSCredential]$Credential,
     [string]$BaseUri = 'http://127.0.0.1:4070',
     [string]$Manifest = (Join-Path (Split-Path $PSScriptRoot -Parent) 'dist\candidate-manifest.json'),
     [int]$ListenerPort = 5941,
@@ -6,6 +8,24 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'installed-proof-api.ps1')
+$apiSession = New-TownLightProofSession -BaseUri $BaseUri -Credential $Credential
+
+function Invoke-InstalledProofApi {
+    [CmdletBinding()]
+    param(
+        [Parameter(Position = 0, Mandatory = $true)][string]$Uri,
+        [string]$Method = 'Get',
+        [string]$ContentType = 'application/json',
+        $Body = $null,
+        [int]$TimeoutSec = 30
+    )
+    $requestUri = [uri]$Uri
+    $path = $requestUri.PathAndQuery -replace '^/api/v1', ''
+    $parameters = @{ Session = $apiSession; Method = $Method; Path = $path; TimeoutSec = $TimeoutSec }
+    if ($PSBoundParameters.ContainsKey('Body')) { $parameters.Body = $Body; $parameters.ContentType = $ContentType }
+    Invoke-TownLightProofApi @parameters
+}
 $channelId = '5fc64b78-bf2d-4fd9-8295-0cfc78cd7482'
 $sinkId = '14a23aa9-eb09-4209-a308-c4865ebacdef'
 $channel = [ordered]@{
@@ -66,7 +86,7 @@ function Stop-ProofListener($Process) {
 }
 
 function Get-ProofRuntime {
-    $status = Invoke-RestMethod -Uri "$BaseUri/api/v1/runtime-safe-to-air" -TimeoutSec 5
+    $status = Invoke-InstalledProofApi -Uri "$BaseUri/api/v1/runtime-safe-to-air" -TimeoutSec 5
     return $status.channels | Where-Object channel_id -eq $channelId | Select-Object -First 1
 }
 
@@ -95,7 +115,7 @@ try {
     )
 
     $listener = Start-ProofListener $firstCapture
-    Invoke-RestMethod -Method Put -Uri "$BaseUri/api/v1/channels" -ContentType 'application/json' `
+    Invoke-InstalledProofApi -Method Put -Uri "$BaseUri/api/v1/channels" -ContentType 'application/json' `
         -Body ($channel | ConvertTo-Json -Depth 8 -Compress) -TimeoutSec 10 | Out-Null
     $configured = $true
 
@@ -127,7 +147,7 @@ try {
     $failureDeadline = [DateTime]::UtcNow.AddSeconds(45)
     do {
         $failedRuntime = Get-ProofRuntime
-        $alerts = Invoke-RestMethod -Uri "$BaseUri/api/v1/alerts" -TimeoutSec 5
+        $alerts = Invoke-InstalledProofApi -Uri "$BaseUri/api/v1/alerts" -TimeoutSec 5
         $outputStall = $alerts | Where-Object {
             $_.resource_ref -eq $channelId -and $_.condition -eq 'output-stall' -and $_.state -eq 'firing'
         } | Select-Object -First 1
@@ -179,7 +199,7 @@ try {
     Start-Sleep -Seconds 11
     $recoveredRuntime = Get-ProofRuntime
     $replacementWorker = Get-Process -Id $replacementWorkerId -ErrorAction SilentlyContinue
-    $alerts = Invoke-RestMethod -Uri "$BaseUri/api/v1/alerts" -TimeoutSec 5
+    $alerts = Invoke-InstalledProofApi -Uri "$BaseUri/api/v1/alerts" -TimeoutSec 5
     $unresolved = $alerts | Where-Object {
         $_.resource_ref -eq $channelId -and $_.condition -in @('output-stall', 'off-air') -and $_.state -eq 'firing'
     }
@@ -220,7 +240,7 @@ finally {
     if ($configured) {
         try {
             $channel.enabled = $false
-            Invoke-RestMethod -Method Put -Uri "$BaseUri/api/v1/channels" -ContentType 'application/json' `
+            Invoke-InstalledProofApi -Method Put -Uri "$BaseUri/api/v1/channels" -ContentType 'application/json' `
                 -Body ($channel | ConvertTo-Json -Depth 8 -Compress) -TimeoutSec 10 | Out-Null
         }
         catch {

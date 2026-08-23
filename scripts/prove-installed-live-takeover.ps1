@@ -12,6 +12,8 @@
     otherwise the run refuses to guess who owns it.
 #>
 param(
+    [Parameter(Mandatory = $true)]
+    [Management.Automation.PSCredential]$Credential,
     [string]$BaseUri = 'http://127.0.0.1:4070',
     [string]$Manifest = (Join-Path (Split-Path $PSScriptRoot -Parent) 'dist\candidate-manifest.json'),
     [ValidateRange(1024, 65535)][int]$InputPort = 5962,
@@ -23,12 +25,29 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'installed-proof-api.ps1')
+$apiSession = New-TownLightProofSession -BaseUri $BaseUri -Credential $Credential
+
+function Invoke-InstalledProofApi {
+    [CmdletBinding()]
+    param(
+        [Parameter(Position = 0, Mandatory = $true)][string]$Uri,
+        [string]$Method = 'Get',
+        [string]$ContentType = 'application/json',
+        $Body = $null,
+        [int]$TimeoutSec = 30
+    )
+    $requestUri = [uri]$Uri
+    $path = $requestUri.PathAndQuery -replace '^/api/v1', ''
+    $parameters = @{ Session = $apiSession; Method = $Method; Path = $path; TimeoutSec = $TimeoutSec }
+    if ($PSBoundParameters.ContainsKey('Body')) { $parameters.Body = $Body; $parameters.ContentType = $ContentType }
+    Invoke-TownLightProofApi @parameters
+}
 $serviceUri = $BaseUri.TrimEnd('/') -replace '/api/v1$', ''
 $apiUri = "$serviceUri/api/v1"
 $channelId = 'b0177d6f-58d3-4ad0-9ad9-ec18bb4d7d13'
 $sourceId = 'a1177d6f-58d3-4ad0-9ad9-ec18bb4d7d13'
 $sinkId = 'c1177d6f-58d3-4ad0-9ad9-ec18bb4d7d13'
-$operatorId = 'installed-live-takeover-proof'
 $reason = 'Installed loopback live-takeover proof.'
 $runId = [guid]::NewGuid().ToString()
 $sessionId = [guid]::NewGuid().ToString()
@@ -69,7 +88,7 @@ function Invoke-Api {
             $parameters.ContentType = 'application/json'
             $parameters.Body = $Body | ConvertTo-Json -Depth 12 -Compress
         }
-        $response = Invoke-RestMethod @parameters
+        $response = Invoke-InstalledProofApi @parameters
         if ($response -is [string] -and $response.Trim() -eq 'null') { return $null }
         return $response
     }
@@ -364,10 +383,12 @@ try {
     $authority = Invoke-Api 'Get' "/channels/$channelId/live-authority"
     $expires = [DateTimeOffset]::UtcNow.AddMinutes(5).ToUnixTimeMilliseconds()
     $requested = Invoke-Api 'Post' '/live-takeovers' ([ordered]@{
-        session_id = $sessionId; channel_id = $channelId; source_id = $sourceId; operator_id = $operatorId
+        session_id = $sessionId; channel_id = $channelId; source_id = $sourceId
         reason = $reason; expires_at_unix_ms = $expires; expected_authority_revision = [uint64]$authority.authority_revision
     })
     if ($requested.state -ne 'arming') { throw 'Live takeover did not begin in arming state.' }
+    $authenticatedOperatorId = [string]$requested.operator_id
+    if ([string]::IsNullOrWhiteSpace($authenticatedOperatorId)) { throw 'Live takeover response did not expose server-attributed operator identity.' }
     $armed = Wait-For -Action {
         $value = Invoke-Api 'Get' "/live-takeovers/$sessionId"
         if ($value.state -eq 'failed') { throw "Live takeover failed while arming: $($value.failure_detail)" }
@@ -376,7 +397,7 @@ try {
         -Predicate { param($value) $value.state -eq 'armed' } -Description 'durable Armed takeover state'
 
     $authority = Invoke-Api 'Get' "/channels/$channelId/live-authority"
-    Invoke-Api 'Post' "/live-takeovers/$sessionId/take" ([ordered]@{ actor_id = $operatorId; expected_authority_revision = [uint64]$authority.authority_revision }) | Out-Null
+    Invoke-Api 'Post' "/live-takeovers/$sessionId/take" ([ordered]@{ expected_authority_revision = [uint64]$authority.authority_revision }) | Out-Null
     $onAir = Wait-For -Action {
         $value = Invoke-Api 'Get' "/live-takeovers/$sessionId"
         if ($value.state -eq 'failed') { throw "Live takeover failed while taking air: $($value.failure_detail)" }
@@ -395,13 +416,13 @@ try {
     $takeAudit = Invoke-Api 'Get' "/live-takeovers/$sessionId/audit"
     $takeStates = @($takeAudit | ForEach-Object state)
     if ($takeStates -notcontains 'arming' -or $takeStates -notcontains 'armed' -or $takeStates -notcontains 'take_requested' -or
-        $takeStates -notcontains 'on_air' -or -not (@($takeAudit | Where-Object { $_.operator_id -eq $operatorId -and $_.detail -eq $reason }).Count -ge 1) -or
+        $takeStates -notcontains 'on_air' -or -not (@($takeAudit | Where-Object { $_.operator_id -eq $authenticatedOperatorId -and $_.detail -eq $reason }).Count -ge 1) -or
         -not (@($takeAudit | Where-Object { $_.operator_id -eq 'stationd-live-controller' }).Count -ge 1)) {
         throw 'Takeover audit lacks the requested actors, reason, or durable state trail.'
     }
 
     $authority = Invoke-Api 'Get' "/channels/$channelId/live-authority"
-    Invoke-Api 'Post' "/live-takeovers/$sessionId/return" ([ordered]@{ actor_id = $operatorId; expected_authority_revision = [uint64]$authority.authority_revision }) | Out-Null
+    Invoke-Api 'Post' "/live-takeovers/$sessionId/return" ([ordered]@{ expected_authority_revision = [uint64]$authority.authority_revision }) | Out-Null
     $completed = Wait-For -Action {
         $value = Invoke-Api 'Get' "/live-takeovers/$sessionId"
         if ($value.state -eq 'failed') { throw "Live takeover failed while returning: $($value.failure_detail)" }
@@ -434,7 +455,7 @@ try {
         completion_audit_states = $completionStates
         runtime_live_state = $liveRuntime.state
         recovery_runtime_state = $recoveryRuntime.state
-        requested_by = $operatorId
+        authenticated_operator_id = $authenticatedOperatorId
         reason = $reason
         controller_actor_observed = $true
         audit_timestamps_valid = $true

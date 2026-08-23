@@ -1,5 +1,7 @@
 param(
     [Parameter(Mandatory = $true)]
+    [Management.Automation.PSCredential]$Credential,
+    [Parameter(Mandatory = $true)]
     [string]$FixtureDirectory,
     [Parameter(Mandatory = $true)]
     [string]$ExpectedSourceCommit,
@@ -9,6 +11,24 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'installed-proof-api.ps1')
+$apiSession = New-TownLightProofSession -BaseUri $BaseUrl -Credential $Credential
+
+function Invoke-InstalledProofApi {
+    [CmdletBinding()]
+    param(
+        [Parameter(Position = 0, Mandatory = $true)][string]$Uri,
+        [string]$Method = 'Get',
+        [string]$ContentType = 'application/json',
+        $Body = $null,
+        [int]$TimeoutSec = 30
+    )
+    $requestUri = [uri]$Uri
+    $path = $requestUri.PathAndQuery -replace '^/api/v1', ''
+    $parameters = @{ Session = $apiSession; Method = $Method; Path = $path; TimeoutSec = $TimeoutSec }
+    if ($PSBoundParameters.ContainsKey('Body')) { $parameters.Body = $Body; $parameters.ContentType = $ContentType }
+    Invoke-TownLightProofApi @parameters
+}
 $applicationDirectory = Join-Path $env:ProgramFiles 'TownLight Station'
 $dataDirectory = Join-Path $env:ProgramData 'TownLight Station'
 $receiptPath = Join-Path $dataDirectory 'install-receipt.json'
@@ -24,12 +44,24 @@ $trustInstalled = $false
 $stagedProofPath = ''
 $preparedProofPath = ''
 
+function Connect-AfterServiceBoundary {
+    $deadline = [DateTime]::UtcNow.AddSeconds(60)
+    while ([DateTime]::UtcNow -lt $deadline) {
+        try {
+            Connect-TownLightProofSession -Session $apiSession -Credential $Credential | Out-Null
+            return
+        }
+        catch { Start-Sleep -Milliseconds 250 }
+    }
+    throw 'The installed station did not accept a fresh authenticated session after its service boundary.'
+}
+
 function Wait-ForUpdateStatus {
     param([scriptblock]$Predicate, [int]$TimeoutSeconds = 30)
     $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
     while ([DateTime]::UtcNow -lt $deadline) {
         try {
-            $value = Invoke-RestMethod -Uri "$BaseUrl/updates/status" -Method Get
+            $value = Invoke-InstalledProofApi -Uri "$BaseUrl/updates/status" -Method Get
             if (& $Predicate $value) { return $value }
         }
         catch {}
@@ -76,6 +108,7 @@ try {
     Copy-Item -LiteralPath $fixtureTrustPath -Destination $trustPath -Force
     $trustInstalled = $true
     Restart-Service -Name TownLightStation -Force
+    Connect-AfterServiceBoundary
     $available = Wait-ForUpdateStatus -Predicate {
         param($Status)
         $Status.configured -and $Status.latest_check.outcome -eq 'update_available' -and
@@ -90,11 +123,12 @@ try {
         $available.latest_check.error) {
         throw 'The installed automatic check did not preserve the verified release identity.'
     }
-    $notes = (Invoke-WebRequest -Uri "$BaseUrl/updates/release-notes?version=0.2.0" -UseBasicParsing).Content
+    $notes = Invoke-TownLightProofApi -Session $apiSession -Method Get `
+        -Path '/updates/release-notes?version=0.2.0' -ResponseMode Text
     if ($notes -ne "# TownLight Station 0.2.0`n`nInstalled signed-discovery proof release.") {
         throw 'The installed API did not return the exact verified release notes.'
     }
-    $alerts = Invoke-RestMethod -Uri "$BaseUrl/alerts"
+    $alerts = Invoke-InstalledProofApi -Uri "$BaseUrl/alerts"
     $availableAlerts = @($alerts.Where({
         $_.condition -eq 'update-available' -and $_.severity -eq 'info' -and
         $_.state -eq 'firing' -and $_.resource_ref -eq '0.2.0'
@@ -111,7 +145,7 @@ try {
         throw 'Discovery downloaded or staged a package without operator approval.'
     }
 
-    $staged = Invoke-RestMethod -Uri "$BaseUrl/updates/stage" -Method Post
+    $staged = Invoke-InstalledProofApi -Uri "$BaseUrl/updates/stage" -Method Post
     $stagedProofPath = Join-Path (Join-Path $dataDirectory 'updates\staged') $staged.package_file_name
     if ($staged.manifest.version -ne '0.2.0' -or
         $staged.manifest.source_commit -ne ('b' * 40) -or
@@ -140,7 +174,7 @@ try {
     if ($quarantineLeaks.Count -ne 0) {
         throw 'Verified staging left quarantine fragments behind.'
     }
-    $prepared = Invoke-RestMethod -Uri "$BaseUrl/updates/prepare" -Method Post
+    $prepared = Invoke-InstalledProofApi -Uri "$BaseUrl/updates/prepare" -Method Post
     $preparedProofPath = Join-Path (Join-Path $applicationDirectory 'slots') $prepared.slot_directory_name
     if ($prepared.manifest.version -ne '0.2.0' -or
         $prepared.manifest.source_commit -ne ('b' * 40) -or
@@ -184,6 +218,7 @@ try {
     Remove-Item -LiteralPath $trustPath -Force
     $trustInstalled = $false
     Restart-Service -Name TownLightStation -Force
+    Connect-AfterServiceBoundary
     $clean = Wait-ForUpdateStatus -Predicate {
         param($Status)
         -not $Status.configured -and $null -eq $Status.latest_check -and
@@ -192,7 +227,7 @@ try {
     $resolvedAlert = $null
     $alertDeadline = [DateTime]::UtcNow.AddSeconds(10)
     while (-not $resolvedAlert -and [DateTime]::UtcNow -lt $alertDeadline) {
-        $cleanAlerts = Invoke-RestMethod -Uri "$BaseUrl/alerts"
+        $cleanAlerts = Invoke-InstalledProofApi -Uri "$BaseUrl/alerts"
         $firingOffers = @($cleanAlerts.Where({
             $_.condition -eq 'update-available' -and $_.resource_ref -eq '0.2.0' -and
             $_.state -eq 'firing'
@@ -246,7 +281,7 @@ try {
 catch {
     if ($ResultPath) {
         $latestStatus = try {
-            Invoke-RestMethod -Uri "$BaseUrl/updates/status" -Method Get
+            Invoke-InstalledProofApi -Uri "$BaseUrl/updates/status" -Method Get
         }
         catch { $null }
         [ordered]@{

@@ -1,9 +1,29 @@
 param(
+    [Parameter(Mandatory = $true)]
+    [Management.Automation.PSCredential]$Credential,
     [string]$BaseUrl = 'http://127.0.0.1:4070/api/v1',
     [int]$Port = 47881
 )
 
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'installed-proof-api.ps1')
+$apiSession = New-TownLightProofSession -BaseUri $BaseUrl -Credential $Credential
+
+function Invoke-InstalledProofApi {
+    [CmdletBinding()]
+    param(
+        [Parameter(Position = 0, Mandatory = $true)][string]$Uri,
+        [string]$Method = 'Get',
+        [string]$ContentType = 'application/json',
+        $Body = $null,
+        [int]$TimeoutSec = 30
+    )
+    $requestUri = [uri]$Uri
+    $path = $requestUri.PathAndQuery -replace '^/api/v1', ''
+    $parameters = @{ Session = $apiSession; Method = $Method; Path = $path; TimeoutSec = $TimeoutSec }
+    if ($PSBoundParameters.ContainsKey('Body')) { $parameters.Body = $Body; $parameters.ContentType = $ContentType }
+    Invoke-TownLightProofApi @parameters
+}
 $channelId = '4b46ea93-86c3-483d-8b72-dbe5f119f008'
 $alertChannelId = '93669cb1-949c-4ca0-b27d-41359d54e6ac'
 $signingSecret = 'installed-machine-proof-signing-key'
@@ -91,7 +111,7 @@ try {
         target = $target
         credential = $signingSecret
     } | ConvertTo-Json -Compress
-    Invoke-RestMethod -Method Put -Uri "$BaseUrl/alert-channels" -ContentType 'application/json' -Body $alertBody | Out-Null
+    Invoke-InstalledProofApi -Method Put -Uri "$BaseUrl/alert-channels" -ContentType 'application/json' -Body $alertBody | Out-Null
 
     $channelBody = @{
         channel_id = $channelId
@@ -100,7 +120,7 @@ try {
         output_sinks = @([ordered]@{ sink_id = $channelId; label = 'Primary transport'; kind = 'udp-ts'; destination = '127.0.0.1:5791'; loudness_target_lufs = -16.0; required = $true; enabled = $true })
         enabled = $true
     } | ConvertTo-Json -Compress
-    Invoke-RestMethod -Method Put -Uri "$BaseUrl/channels" -ContentType 'application/json' -Body $channelBody | Out-Null
+    Invoke-InstalledProofApi -Method Put -Uri "$BaseUrl/channels" -ContentType 'application/json' -Body $channelBody | Out-Null
 
     $worker = $null
     $workerDeadline = [DateTime]::UtcNow.AddSeconds(10)
@@ -140,7 +160,7 @@ try {
     if (-not ($parsed.notification_kind -contains 'firing')) {
         throw 'Installed proof did not deliver a firing notification.'
     }
-    $alerts = @(Invoke-RestMethod -Uri "$BaseUrl/alerts")
+    $alerts = @(Invoke-InstalledProofApi -Uri "$BaseUrl/alerts")
     [pscustomobject]@{
         killed_worker_id = $killedWorkerId
         signed_deliveries_received = $deliveries.Count
@@ -159,7 +179,7 @@ finally {
         target = $target
         credential = $signingSecret
     } | ConvertTo-Json -Compress
-    try { Invoke-RestMethod -Method Put -Uri "$BaseUrl/alert-channels" -ContentType 'application/json' -Body $disabledAlertBody | Out-Null } catch {}
+    try { Invoke-InstalledProofApi -Method Put -Uri "$BaseUrl/alert-channels" -ContentType 'application/json' -Body $disabledAlertBody | Out-Null } catch {}
     $disabledChannelBody = @{
         channel_id = $channelId
         display_name = 'Installed alert delivery proof'
@@ -167,7 +187,7 @@ finally {
         output_sinks = @([ordered]@{ sink_id = $channelId; label = 'Primary transport'; kind = 'udp-ts'; destination = '127.0.0.1:5791'; loudness_target_lufs = -16.0; required = $true; enabled = $true })
         enabled = $false
     } | ConvertTo-Json -Compress
-    try { Invoke-RestMethod -Method Put -Uri "$BaseUrl/channels" -ContentType 'application/json' -Body $disabledChannelBody | Out-Null } catch {}
+    try { Invoke-InstalledProofApi -Method Put -Uri "$BaseUrl/channels" -ContentType 'application/json' -Body $disabledChannelBody | Out-Null } catch {}
     if ($receiver) {
         Stop-Job -Job $receiver -ErrorAction SilentlyContinue
         Remove-Job -Job $receiver -Force -ErrorAction SilentlyContinue

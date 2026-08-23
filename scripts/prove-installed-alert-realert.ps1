@@ -1,9 +1,29 @@
 param(
+    [Parameter(Mandatory = $true)]
+    [Management.Automation.PSCredential]$Credential,
     [string]$BaseUrl = 'http://127.0.0.1:4070/api/v1',
     [int]$Port = 47884
 )
 
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'installed-proof-api.ps1')
+$apiSession = New-TownLightProofSession -BaseUri $BaseUrl -Credential $Credential
+
+function Invoke-InstalledProofApi {
+    [CmdletBinding()]
+    param(
+        [Parameter(Position = 0, Mandatory = $true)][string]$Uri,
+        [string]$Method = 'Get',
+        [string]$ContentType = 'application/json',
+        $Body = $null,
+        [int]$TimeoutSec = 30
+    )
+    $requestUri = [uri]$Uri
+    $path = $requestUri.PathAndQuery -replace '^/api/v1', ''
+    $parameters = @{ Session = $apiSession; Method = $Method; Path = $path; TimeoutSec = $TimeoutSec }
+    if ($PSBoundParameters.ContainsKey('Body')) { $parameters.Body = $Body; $parameters.ContentType = $ContentType }
+    Invoke-TownLightProofApi @parameters
+}
 $channelId = 'b9482efd-ee4c-451e-ab67-7fc118cf39a6'
 $alertChannelId = 'bb72f9e4-40d5-42ed-ae4e-d78174d144ed'
 $signingSecret = 'installed-realert-proof-signing-key'
@@ -22,9 +42,8 @@ function Write-Rule([object]$Rule, [string[]]$DestinationIds, [int]$RealertSecon
         re_alert_after_seconds = $RealertSeconds
         scope_channel_id = $Rule.scope_channel_id
         notify_on_resolve = $Rule.notify_on_resolve
-        updated_by = 'installed-proof'
     } | ConvertTo-Json -Depth 5 -Compress
-    Invoke-RestMethod -Method Put -Uri "$BaseUrl/alert-rules/$($Rule.rule_id)" -ContentType 'application/json' -Body $body
+    Invoke-InstalledProofApi -Method Put -Uri "$BaseUrl/alert-rules/$($Rule.rule_id)" -ContentType 'application/json' -Body $body
 }
 
 $receiver = Start-Job -ArgumentList $Port, $signingSecret -ScriptBlock {
@@ -95,9 +114,9 @@ try {
         target = $target
         credential = $signingSecret
     } | ConvertTo-Json -Compress
-    Invoke-RestMethod -Method Put -Uri "$BaseUrl/alert-channels" -ContentType 'application/json' -Body $alertBody | Out-Null
+    Invoke-InstalledProofApi -Method Put -Uri "$BaseUrl/alert-channels" -ContentType 'application/json' -Body $alertBody | Out-Null
 
-    $rules = Invoke-RestMethod "$BaseUrl/alert-rules"
+    $rules = Invoke-InstalledProofApi "$BaseUrl/alert-rules"
     $originalRules = @($rules.Where({ $_.condition -in @('encoder-death', 'off-air') }))
     if ($originalRules.Count -ne 2) { throw 'The installed encoder-death/off-air rules are missing.' }
     foreach ($rule in $originalRules) { Write-Rule -Rule $rule -DestinationIds @($alertChannelId) -RealertSeconds 1 | Out-Null }
@@ -109,7 +128,7 @@ try {
         output_sinks = @([ordered]@{ sink_id = $channelId; label = 'Primary transport'; kind = 'udp-ts'; destination = '127.0.0.1:5794'; loudness_target_lufs = -16.0; required = $true; enabled = $true })
         enabled = $true
     } | ConvertTo-Json -Compress
-    Invoke-RestMethod -Method Put -Uri "$BaseUrl/channels" -ContentType 'application/json' -Body $channelBody | Out-Null
+    Invoke-InstalledProofApi -Method Put -Uri "$BaseUrl/channels" -ContentType 'application/json' -Body $channelBody | Out-Null
 
     $workerDeadline = [DateTime]::UtcNow.AddSeconds(10)
     do {
@@ -124,7 +143,7 @@ try {
     $recovered = $false
     $recoveryDeadline = [DateTime]::UtcNow.AddSeconds(70)
     while (-not $recovered -and [DateTime]::UtcNow -lt $recoveryDeadline) {
-        $events = Invoke-RestMethod "$BaseUrl/alerts"
+        $events = Invoke-InstalledProofApi "$BaseUrl/alerts"
         $proofEvents = @($events.Where({ $_.resource_ref -eq $channelId }))
         $recovered = $proofEvents.Count -ge 1 -and -not ($proofEvents.state -contains 'firing')
         if (-not $recovered) { Start-Sleep -Milliseconds 200 }
@@ -138,7 +157,7 @@ try {
     if (-not ($payloads.notification_kind -contains 'firing') -or -not ($payloads.notification_kind -contains 'realert') -or -not ($payloads.notification_kind -contains 'resolved')) {
         throw 'The installed proof did not deliver firing, re-alert, and resolution notifications.'
     }
-    $ledger = Invoke-RestMethod "$BaseUrl/alert-deliveries"
+    $ledger = Invoke-InstalledProofApi "$BaseUrl/alert-deliveries"
     $proofLedger = @($ledger.Where({ $_.alert_channel_id -eq $alertChannelId -and $_.state -eq 'sent' }))
     $realertIds = @($proofLedger.Where({ $_.notification_kind -eq 'realert' }).delivery_id | Sort-Object -Unique)
     if ($realertIds.Count -lt 1) { throw 'The installed ledger contains no distinct sent re-alert.' }
@@ -163,7 +182,7 @@ finally {
         output_sinks = @([ordered]@{ sink_id = $channelId; label = 'Primary transport'; kind = 'udp-ts'; destination = '127.0.0.1:5794'; loudness_target_lufs = -16.0; required = $true; enabled = $true })
         enabled = $false
     } | ConvertTo-Json -Compress
-    try { Invoke-RestMethod -Method Put -Uri "$BaseUrl/channels" -ContentType 'application/json' -Body $disabledChannelBody | Out-Null } catch {}
+    try { Invoke-InstalledProofApi -Method Put -Uri "$BaseUrl/channels" -ContentType 'application/json' -Body $disabledChannelBody | Out-Null } catch {}
     $disabledAlertBody = @{
         channel_id = $alertChannelId
         kind = 'webhook'
@@ -172,7 +191,7 @@ finally {
         target = $target
         credential = $signingSecret
     } | ConvertTo-Json -Compress
-    try { Invoke-RestMethod -Method Put -Uri "$BaseUrl/alert-channels" -ContentType 'application/json' -Body $disabledAlertBody | Out-Null } catch {}
+    try { Invoke-InstalledProofApi -Method Put -Uri "$BaseUrl/alert-channels" -ContentType 'application/json' -Body $disabledAlertBody | Out-Null } catch {}
     if ($receiver) {
         Stop-Job -Job $receiver -ErrorAction SilentlyContinue
         Remove-Job -Job $receiver -Force -ErrorAction SilentlyContinue

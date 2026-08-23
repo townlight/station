@@ -1,4 +1,6 @@
 param(
+    [Parameter(Mandatory = $true)]
+    [Management.Automation.PSCredential]$Credential,
     [string]$BaseUri = 'http://127.0.0.1:4070',
     [int]$DestinationPort = 5920,
     [int]$RedundantDestinationPort = 5921,
@@ -7,6 +9,24 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'installed-proof-api.ps1')
+$apiSession = New-TownLightProofSession -BaseUri $BaseUri -Credential $Credential
+
+function Invoke-InstalledProofApi {
+    [CmdletBinding()]
+    param(
+        [Parameter(Position = 0, Mandatory = $true)][string]$Uri,
+        [string]$Method = 'Get',
+        [string]$ContentType = 'application/json',
+        $Body = $null,
+        [int]$TimeoutSec = 30
+    )
+    $requestUri = [uri]$Uri
+    $path = $requestUri.PathAndQuery -replace '^/api/v1', ''
+    $parameters = @{ Session = $apiSession; Method = $Method; Path = $path; TimeoutSec = $TimeoutSec }
+    if ($PSBoundParameters.ContainsKey('Body')) { $parameters.Body = $Body; $parameters.ContentType = $ContentType }
+    Invoke-TownLightProofApi @parameters
+}
 $channel = [ordered]@{
     channel_id = '205ba78d-eb32-4464-9e3f-5ba780dcd2c4'
     display_name = 'Installed 720p59.94 profile proof'
@@ -27,7 +47,7 @@ $memory = [IO.MemoryStream]::new()
 $redundantMemory = [IO.MemoryStream]::new()
 
 try {
-    $profiles = Invoke-RestMethod -Uri "$BaseUri/api/v1/output-profiles" -TimeoutSec 5
+    $profiles = Invoke-InstalledProofApi -Uri "$BaseUri/api/v1/output-profiles" -TimeoutSec 5
     $profile = $profiles | Where-Object profile_id -eq 'atsc-720p5994'
     if (-not $profile -or $profile.width -ne 1280 -or $profile.height -ne 720 -or
         $profile.frame_rate_numerator -ne 60000 -or $profile.frame_rate_denominator -ne 1001 -or
@@ -37,7 +57,7 @@ try {
 
     $baselineWorkerIds = @(Get-CimInstance Win32_Process -Filter "Name='channel-worker.exe'" |
         Select-Object -ExpandProperty ProcessId)
-    Invoke-RestMethod -Method Put -Uri "$BaseUri/api/v1/channels" -ContentType 'application/json' `
+    Invoke-InstalledProofApi -Method Put -Uri "$BaseUri/api/v1/channels" -ContentType 'application/json' `
         -Body ($channel | ConvertTo-Json -Compress) -TimeoutSec 10 | Out-Null
     $processClock = [Diagnostics.Stopwatch]::StartNew()
     do {
@@ -225,7 +245,7 @@ try {
 finally {
     try {
         $channel.enabled = $false
-        Invoke-RestMethod -Method Put -Uri "$BaseUri/api/v1/channels" -ContentType 'application/json' `
+        Invoke-InstalledProofApi -Method Put -Uri "$BaseUri/api/v1/channels" -ContentType 'application/json' `
             -Body ($channel | ConvertTo-Json -Compress) -TimeoutSec 10 | Out-Null
     }
     catch {

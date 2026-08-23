@@ -1,10 +1,30 @@
 param(
+    [Parameter(Mandatory = $true)]
+    [Management.Automation.PSCredential]$Credential,
     [string]$BaseUrl = 'http://127.0.0.1:4070/api/v1',
     [string]$Manifest = (Join-Path (Split-Path $PSScriptRoot -Parent) 'dist\candidate-manifest.json'),
     [int]$WebhookPort = 47885
 )
 
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'installed-proof-api.ps1')
+$apiSession = New-TownLightProofSession -BaseUri $BaseUrl -Credential $Credential
+
+function Invoke-InstalledProofApi {
+    [CmdletBinding()]
+    param(
+        [Parameter(Position = 0, Mandatory = $true)][string]$Uri,
+        [string]$Method = 'Get',
+        [string]$ContentType = 'application/json',
+        $Body = $null,
+        [int]$TimeoutSec = 30
+    )
+    $requestUri = [uri]$Uri
+    $path = $requestUri.PathAndQuery -replace '^/api/v1', ''
+    $parameters = @{ Session = $apiSession; Method = $Method; Path = $path; TimeoutSec = $TimeoutSec }
+    if ($PSBoundParameters.ContainsKey('Body')) { $parameters.Body = $Body; $parameters.ContentType = $ContentType }
+    Invoke-TownLightProofApi @parameters
+}
 $dataDirectory = Join-Path $env:ProgramData 'TownLight Station'
 $receiptPath = Join-Path $dataDirectory 'install-receipt.json'
 $outputChannelId = '5f0ea69e-63b5-4ea2-9748-85540fc669fa'
@@ -67,7 +87,7 @@ $receiver = $null
 $outputConfigured = $false
 $alertConfigured = $false
 try {
-    $schedules = Invoke-RestMethod -Uri "$BaseUrl/self-test-schedules"
+    $schedules = Invoke-InstalledProofApi -Uri "$BaseUrl/self-test-schedules"
     $dailySchedule = $schedules.Where({ $_.kind -eq 'daily' }, 'First')
     $weeklySchedule = $schedules.Where({ $_.kind -eq 'weekly' }, 'First')
     if ($schedules.Count -ne 2 -or -not $dailySchedule -or -not $weeklySchedule -or
@@ -85,13 +105,13 @@ try {
         output_sinks = @([ordered]@{ sink_id = $outputChannelId; label = 'Primary transport'; kind = 'udp-ts'; destination = '127.0.0.1:5795'; loudness_target_lufs = -16.0; required = $true; enabled = $true })
         enabled = $true
     } | ConvertTo-Json -Compress
-    Invoke-RestMethod -Method Put -Uri "$BaseUrl/channels" -ContentType 'application/json' -Body $outputBody | Out-Null
+    Invoke-InstalledProofApi -Method Put -Uri "$BaseUrl/channels" -ContentType 'application/json' -Body $outputBody | Out-Null
     $outputConfigured = $true
 
     $runtimeChannel = $null
     $runtimeDeadline = [DateTime]::UtcNow.AddSeconds(15)
     while (-not $runtimeChannel -and [DateTime]::UtcNow -lt $runtimeDeadline) {
-        $runtime = Invoke-RestMethod -Uri "$BaseUrl/runtime-safe-to-air"
+        $runtime = Invoke-InstalledProofApi -Uri "$BaseUrl/runtime-safe-to-air"
         $runtimeChannel = @($runtime.channels).Where({
             $_.channel_id -eq $outputChannelId -and $_.color -eq 'green' -and
             ($_.state -eq 'healthy_fallback' -or $_.state -eq 'on_air')
@@ -105,7 +125,7 @@ try {
     $resource = $null
     $resourceDeadline = [DateTime]::UtcNow.AddSeconds(75)
     while (-not $resource -and [DateTime]::UtcNow -lt $resourceDeadline) {
-        $candidate = Invoke-RestMethod -Uri "$BaseUrl/system-resources/latest"
+        $candidate = Invoke-InstalledProofApi -Uri "$BaseUrl/system-resources/latest"
         $age = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() - [int64]$candidate.sampled_at_unix_ms
         if ($age -ge -5000 -and $age -le 90000 -and $candidate.database_reachable -and
             $candidate.backup_volume_writable -and $candidate.service_running) {
@@ -120,7 +140,7 @@ try {
         'channel_worker_binary', 'private_media_runtime', 'station_profile_configured',
         'enabled_output_configured', 'enabled_output_health', 'recent_resource_sample'
     )
-    $daily = Invoke-RestMethod -Method Post -Uri "$BaseUrl/self-tests/run?kind=daily"
+    $daily = Invoke-InstalledProofApi -Method Post -Uri "$BaseUrl/self-tests/run?kind=daily"
     Assert-SelfTestRecord -Record $daily -ExpectedKind 'daily' -ExpectedChecks $dailyChecks
 
     $alertBody = @{
@@ -131,7 +151,7 @@ try {
         target = $target
         credential = $signingSecret
     } | ConvertTo-Json -Compress
-    Invoke-RestMethod -Method Put -Uri "$BaseUrl/alert-channels" -ContentType 'application/json' -Body $alertBody | Out-Null
+    Invoke-InstalledProofApi -Method Put -Uri "$BaseUrl/alert-channels" -ContentType 'application/json' -Body $alertBody | Out-Null
     $alertConfigured = $true
 
     $receiver = Start-Job -ArgumentList $WebhookPort, $signingSecret -ScriptBlock {
@@ -199,7 +219,7 @@ try {
     Start-Sleep -Milliseconds 500
 
     $weeklyChecks = $dailyChecks + @('database_restore_rehearsal', 'alert_destination_test_queued')
-    $weekly = Invoke-RestMethod -Method Post -Uri "$BaseUrl/self-tests/run?kind=weekly"
+    $weekly = Invoke-InstalledProofApi -Method Post -Uri "$BaseUrl/self-tests/run?kind=weekly"
     Assert-SelfTestRecord -Record $weekly -ExpectedKind 'weekly' -ExpectedChecks $weeklyChecks
 
     if (-not (Wait-Job -Job $receiver -Timeout 35)) {
@@ -214,7 +234,7 @@ try {
         throw 'The installed weekly destination payload did not preserve safe test semantics.'
     }
 
-    $history = Invoke-RestMethod -Uri "$BaseUrl/self-tests"
+    $history = Invoke-InstalledProofApi -Uri "$BaseUrl/self-tests"
     foreach ($record in @($daily, $weekly)) {
         if (-not $history.Where({ $_.self_test_id -eq $record.self_test_id }, 'First')) {
             throw "The installed history omitted $($record.self_test_id)."
@@ -223,7 +243,7 @@ try {
     $delivery = $null
     $deliveryDeadline = [DateTime]::UtcNow.AddSeconds(10)
     while (-not $delivery -and [DateTime]::UtcNow -lt $deliveryDeadline) {
-        $ledger = Invoke-RestMethod -Uri "$BaseUrl/alert-deliveries"
+        $ledger = Invoke-InstalledProofApi -Uri "$BaseUrl/alert-deliveries"
         $delivery = $ledger.Where({
             $_.event_id -eq $payload.event.event_id -and $_.alert_channel_id -eq $alertChannelId -and
             $_.notification_kind -eq 'test' -and $_.state -eq 'sent'
@@ -269,7 +289,7 @@ finally {
             credential = $signingSecret
         } | ConvertTo-Json -Compress
         try {
-            Invoke-RestMethod -Method Put -Uri "$BaseUrl/alert-channels" `
+            Invoke-InstalledProofApi -Method Put -Uri "$BaseUrl/alert-channels" `
                 -ContentType 'application/json' -Body $disabledAlertBody | Out-Null
         }
         catch {}
@@ -283,7 +303,7 @@ finally {
             enabled = $false
         } | ConvertTo-Json -Compress
         try {
-            Invoke-RestMethod -Method Put -Uri "$BaseUrl/channels" `
+            Invoke-InstalledProofApi -Method Put -Uri "$BaseUrl/channels" `
                 -ContentType 'application/json' -Body $disabledOutputBody | Out-Null
         }
         catch {}

@@ -11,6 +11,8 @@
     station database, worker journal, or station runtime state directly.
 #>
 param(
+    [Parameter(Mandatory = $true)]
+    [Management.Automation.PSCredential]$Credential,
     [string]$BaseUri = 'http://127.0.0.1:4070',
     [string]$Manifest = (Join-Path (Split-Path $PSScriptRoot -Parent) 'dist\candidate-manifest.json'),
     [ValidateRange(1024, 65535)][int]$InputPort = 5972,
@@ -22,6 +24,24 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'installed-proof-api.ps1')
+$apiSession = New-TownLightProofSession -BaseUri $BaseUri -Credential $Credential
+
+function Invoke-InstalledProofApi {
+    [CmdletBinding()]
+    param(
+        [Parameter(Position = 0, Mandatory = $true)][string]$Uri,
+        [string]$Method = 'Get',
+        [string]$ContentType = 'application/json',
+        $Body = $null,
+        [int]$TimeoutSec = 30
+    )
+    $requestUri = [uri]$Uri
+    $path = $requestUri.PathAndQuery -replace '^/api/v1', ''
+    $parameters = @{ Session = $apiSession; Method = $Method; Path = $path; TimeoutSec = $TimeoutSec }
+    if ($PSBoundParameters.ContainsKey('Body')) { $parameters.Body = $Body; $parameters.ContentType = $ContentType }
+    Invoke-TownLightProofApi @parameters
+}
 $serviceUri = $BaseUri.TrimEnd('/') -replace '/api/v1$', ''
 $apiUri = "$serviceUri/api/v1"
 $runId = [guid]::NewGuid().ToString()
@@ -38,7 +58,6 @@ $planAId = "catch-up-a-$runId"
 $planBId = "catch-up-b-$runId"
 $reportAId = "catch-up-report-a-$runId"
 $reportBId = "catch-up-report-b-$runId"
-$operatorId = 'installed-live-schedule-catch-up-proof'
 $reason = 'Installed live schedule catch-up proof.'
 $captureRoot = Join-Path ([IO.Path]::GetTempPath()) "townlight-live-schedule-catch-up-$PID-$runId"
 $fixtureA = Join-Path $captureRoot 'item-a.ts'
@@ -82,7 +101,7 @@ function Invoke-Api {
             $parameters.ContentType = 'application/json'
             $parameters.Body = $Body | ConvertTo-Json -Depth 30 -Compress
         }
-        $value = Invoke-RestMethod @parameters
+        $value = Invoke-InstalledProofApi @parameters
         if ($value -is [string] -and $value.Trim() -eq 'null') { return $null }
         return $value
     }
@@ -412,9 +431,9 @@ try {
     $planA = Invoke-Api 'Post' '/schedule/prepare' ([ordered]@{ plan_id = $planAId; schedule_item_id = $itemAId })
     $planB = Invoke-Api 'Post' '/schedule/prepare' ([ordered]@{ plan_id = $planBId; schedule_item_id = $itemBId })
     if (-not $calibrationPlan.dry_run_passed -or -not $planA.dry_run_passed -or -not $planB.dry_run_passed) { throw 'Schedule prepare rejected one of the proof items.' }
-    Invoke-Api 'Post' '/schedule/commit' ([ordered]@{ report_id = $calibrationReportId; plan_id = $calibrationPlanId; schedule_item_id = $calibrationItemId; approved_by = $operatorId; operator_notes = 'Independent item B transport calibration.' }) | Out-Null
-    Invoke-Api 'Post' '/schedule/commit' ([ordered]@{ report_id = $reportAId; plan_id = $planAId; schedule_item_id = $itemAId; approved_by = $operatorId; operator_notes = 'Installed catch-up item A.' }) | Out-Null
-    Invoke-Api 'Post' '/schedule/commit' ([ordered]@{ report_id = $reportBId; plan_id = $planBId; schedule_item_id = $itemBId; approved_by = $operatorId; operator_notes = 'Installed catch-up item B.' }) | Out-Null
+    Invoke-Api 'Post' '/schedule/commit' ([ordered]@{ report_id = $calibrationReportId; plan_id = $calibrationPlanId; schedule_item_id = $calibrationItemId; operator_notes = 'Independent item B transport calibration.' }) | Out-Null
+    Invoke-Api 'Post' '/schedule/commit' ([ordered]@{ report_id = $reportAId; plan_id = $planAId; schedule_item_id = $itemAId; operator_notes = 'Installed catch-up item A.' }) | Out-Null
+    Invoke-Api 'Post' '/schedule/commit' ([ordered]@{ report_id = $reportBId; plan_id = $planBId; schedule_item_id = $itemBId; operator_notes = 'Installed catch-up item B.' }) | Out-Null
 
     while ([DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() -lt $calibrationStart) { Start-Sleep -Milliseconds 100 }
     Wait-For -Action { Invoke-Api 'Get' "/schedule/commits/$calibrationReportId" } -Predicate { param($value) $value.dispatch_status -eq 'acknowledged' } -Description 'independent item B calibration on air' -Seconds 30 | Out-Null
@@ -444,10 +463,10 @@ try {
     }
     $authority = Invoke-Api 'Get' "/channels/$channelId/live-authority"
     $expires = [DateTimeOffset]::UtcNow.AddMinutes(5).ToUnixTimeMilliseconds()
-    Invoke-Api 'Post' '/live-takeovers' ([ordered]@{ session_id = $sessionId; channel_id = $channelId; source_id = $sourceId; operator_id = $operatorId; reason = $reason; expires_at_unix_ms = $expires; expected_authority_revision = [uint64]$authority.authority_revision }) | Out-Null
+    Invoke-Api 'Post' '/live-takeovers' ([ordered]@{ session_id = $sessionId; channel_id = $channelId; source_id = $sourceId; reason = $reason; expires_at_unix_ms = $expires; expected_authority_revision = [uint64]$authority.authority_revision }) | Out-Null
     Wait-For -Action { Invoke-Api 'Get' "/live-takeovers/$sessionId" } -Predicate { param($value) if ($value.state -eq 'failed') { throw 'Takeover arming failed.' }; $value.state -eq 'armed' } -Description 'live takeover armed' | Out-Null
     $authority = Invoke-Api 'Get' "/channels/$channelId/live-authority"
-    Invoke-Api 'Post' "/live-takeovers/$sessionId/take" ([ordered]@{ actor_id = $operatorId; expected_authority_revision = [uint64]$authority.authority_revision }) | Out-Null
+    Invoke-Api 'Post' "/live-takeovers/$sessionId/take" ([ordered]@{ expected_authority_revision = [uint64]$authority.authority_revision }) | Out-Null
     $onAir = Wait-For -Action { Invoke-Api 'Get' "/live-takeovers/$sessionId" } -Predicate { param($value) if ($value.state -eq 'failed') { throw 'Takeover take failed.' }; $value.state -eq 'on_air' } -Description 'live takeover on air'
     $runtimeLive = Wait-For -Action { Get-ProofRuntime } -Predicate { param($value) $value.state -eq 'live' } -Description 'runtime live state' -Seconds 90
     if ([int64]$onAir.taken_at_unix_ms -ge $startB) {
@@ -471,7 +490,7 @@ try {
         throw "FFmpeg live sender exited before return with code $($sender.ExitCode). $senderError"
     }
     $authority = Invoke-Api 'Get' "/channels/$channelId/live-authority"
-    Invoke-Api 'Post' "/live-takeovers/$sessionId/return" ([ordered]@{ actor_id = $operatorId; expected_authority_revision = [uint64]$authority.authority_revision }) | Out-Null
+    Invoke-Api 'Post' "/live-takeovers/$sessionId/return" ([ordered]@{ expected_authority_revision = [uint64]$authority.authority_revision }) | Out-Null
     $completed = Wait-For -Action { Invoke-Api 'Get' "/live-takeovers/$sessionId" } -Predicate { param($value) if ($value.state -eq 'failed') { throw 'Takeover return failed.' }; $value.state -eq 'completed' -and $null -ne $value.returned_at_unix_ms } -Description 'live takeover completed' -Seconds 90
     $runtimeAfter = Wait-For -Action { Get-ProofRuntime } -Predicate { param($value) $value.state -eq 'on_air' } -Description 'runtime after live return to scheduled item B' -Seconds 90
     $statusA = Wait-For -Action { Invoke-Api 'Get' "/schedule/commits/$reportAId" } -Predicate { param($value) $value.dispatch_status -eq 'completed' } -Description 'item A retired after live return' -Seconds 90
@@ -519,7 +538,7 @@ finally {
             $active = Invoke-Api 'Get' "/channels/$channelId/active-live-takeover"
             if ($null -ne $active -and $active.state -eq 'on_air') {
                 $authority = Invoke-Api 'Get' "/channels/$channelId/live-authority"
-                Invoke-Api 'Post' "/live-takeovers/$($active.session_id)/return" ([ordered]@{ actor_id = $operatorId; expected_authority_revision = [uint64]$authority.authority_revision }) | Out-Null
+            Invoke-Api 'Post' "/live-takeovers/$($active.session_id)/return" ([ordered]@{ expected_authority_revision = [uint64]$authority.authority_revision }) | Out-Null
                 $active = Invoke-Api 'Get' "/live-takeovers/$($active.session_id)"
             }
             if ($null -ne $active -and $active.state -in @('return_requested', 'returning')) {

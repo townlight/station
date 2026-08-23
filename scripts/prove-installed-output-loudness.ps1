@@ -19,6 +19,8 @@
 ##>
 param(
     [Parameter(Mandatory = $true)]
+    [Management.Automation.PSCredential]$Credential,
+    [Parameter(Mandatory = $true)]
     [string]$FixturePath,
     [string]$CandidateManifestPath = (Join-Path (Split-Path $PSScriptRoot -Parent) 'dist\candidate-manifest.json'),
     [string]$ExpectedSourceCommit = '',
@@ -38,6 +40,24 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'installed-proof-api.ps1')
+$apiSession = New-TownLightProofSession -BaseUri $BaseUri -Credential $Credential
+
+function Invoke-InstalledProofApi {
+    [CmdletBinding()]
+    param(
+        [Parameter(Position = 0, Mandatory = $true)][string]$Uri,
+        [string]$Method = 'Get',
+        [string]$ContentType = 'application/json',
+        $Body = $null,
+        [int]$TimeoutSec = 30
+    )
+    $requestUri = [uri]$Uri
+    $path = $requestUri.PathAndQuery -replace '^/api/v1', ''
+    $parameters = @{ Session = $apiSession; Method = $Method; Path = $path; TimeoutSec = $TimeoutSec }
+    if ($PSBoundParameters.ContainsKey('Body')) { $parameters.Body = $Body; $parameters.ContentType = $ContentType }
+    Invoke-TownLightProofApi @parameters
+}
 $serviceUri = $BaseUri.TrimEnd('/') -replace '/api/v1$', ''
 $apiUri = "$serviceUri/api/v1"
 $runId = [guid]::NewGuid().ToString()
@@ -47,7 +67,6 @@ $ingestJobId = [guid]::NewGuid().ToString()
 $scheduleItemId = [guid]::NewGuid().ToString()
 $planId = "output-loudness-$runId"
 $reportId = "output-loudness-$runId"
-$operatorId = 'installed-output-loudness-proof'
 $targetLufs = -16.0
 $targetLufsMilli = -16000
 $udpReceiver = $null
@@ -79,7 +98,7 @@ function Invoke-Api {
             $parameters.ContentType = 'application/json'
             $parameters.Body = $Body | ConvertTo-Json -Depth 30 -Compress
         }
-        $value = Invoke-RestMethod @parameters
+        $value = Invoke-InstalledProofApi @parameters
         if ($value -is [string] -and $value.Trim() -eq 'null') { return $null }
         return $value
     }
@@ -406,7 +425,6 @@ try {
         report_id = $reportId
         plan_id = $planId
         schedule_item_id = $scheduleItemId
-        approved_by = $operatorId
         operator_notes = 'Installed output loudness proof.'
     })
     $dispatch = Wait-Until -Action { Invoke-Api 'Get' "/schedule/commits/$reportId" } `

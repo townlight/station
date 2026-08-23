@@ -1,10 +1,30 @@
 param(
+    [Parameter(Mandatory = $true)]
+    [Management.Automation.PSCredential]$Credential,
     [string]$BaseUrl = 'http://127.0.0.1:4070/api/v1',
     [string]$Manifest = (Join-Path (Split-Path $PSScriptRoot -Parent) 'dist\candidate-manifest.json'),
     [int]$CadenceDeadlineSeconds = 75
 )
 
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'installed-proof-api.ps1')
+$apiSession = New-TownLightProofSession -BaseUri $BaseUrl -Credential $Credential
+
+function Invoke-InstalledProofApi {
+    [CmdletBinding()]
+    param(
+        [Parameter(Position = 0, Mandatory = $true)][string]$Uri,
+        [string]$Method = 'Get',
+        [string]$ContentType = 'application/json',
+        $Body = $null,
+        [int]$TimeoutSec = 30
+    )
+    $requestUri = [uri]$Uri
+    $path = $requestUri.PathAndQuery -replace '^/api/v1', ''
+    $parameters = @{ Session = $apiSession; Method = $Method; Path = $path; TimeoutSec = $TimeoutSec }
+    if ($PSBoundParameters.ContainsKey('Body')) { $parameters.Body = $Body; $parameters.ContentType = $ContentType }
+    Invoke-TownLightProofApi @parameters
+}
 $dataDirectory = Join-Path $env:ProgramData 'TownLight Station'
 $backupDirectory = Join-Path $dataDirectory 'backups'
 $receiptPath = Join-Path $dataDirectory 'install-receipt.json'
@@ -47,14 +67,14 @@ function Assert-HealthySample {
     }
 }
 
-$first = Invoke-RestMethod -Uri "$BaseUrl/system-resources/latest"
+$first = Invoke-InstalledProofApi -Uri "$BaseUrl/system-resources/latest"
 Assert-HealthySample $first
 
 $deadline = [DateTime]::UtcNow.AddSeconds($CadenceDeadlineSeconds)
 $second = $null
 while ($null -eq $second -and [DateTime]::UtcNow -lt $deadline) {
     Start-Sleep -Seconds 2
-    $candidate = Invoke-RestMethod -Uri "$BaseUrl/system-resources/latest"
+    $candidate = Invoke-InstalledProofApi -Uri "$BaseUrl/system-resources/latest"
     if ([uint64]$candidate.sample_id -gt [uint64]$first.sample_id) {
         $second = $candidate
     }

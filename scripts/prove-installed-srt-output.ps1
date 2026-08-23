@@ -1,10 +1,30 @@
 param(
+    [Parameter(Mandatory = $true)]
+    [Management.Automation.PSCredential]$Credential,
     [string]$BaseUri = 'http://127.0.0.1:4070',
     [int]$ListenerPort = 5930,
     [int]$CaptureSeconds = 5
 )
 
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'installed-proof-api.ps1')
+$apiSession = New-TownLightProofSession -BaseUri $BaseUri -Credential $Credential
+
+function Invoke-InstalledProofApi {
+    [CmdletBinding()]
+    param(
+        [Parameter(Position = 0, Mandatory = $true)][string]$Uri,
+        [string]$Method = 'Get',
+        [string]$ContentType = 'application/json',
+        $Body = $null,
+        [int]$TimeoutSec = 30
+    )
+    $requestUri = [uri]$Uri
+    $path = $requestUri.PathAndQuery -replace '^/api/v1', ''
+    $parameters = @{ Session = $apiSession; Method = $Method; Path = $path; TimeoutSec = $TimeoutSec }
+    if ($PSBoundParameters.ContainsKey('Body')) { $parameters.Body = $Body; $parameters.ContentType = $ContentType }
+    Invoke-TownLightProofApi @parameters
+}
 $channel = [ordered]@{
     channel_id = '3157bcad-9395-43c5-bc77-915c77c67717'
     display_name = 'Installed SRT caller proof'
@@ -58,7 +78,7 @@ try {
         throw 'The installed SRT listener did not bind within 20 seconds.'
     }
 
-    Invoke-RestMethod -Method Put -Uri "$BaseUri/api/v1/channels" -ContentType 'application/json' `
+    Invoke-InstalledProofApi -Method Put -Uri "$BaseUri/api/v1/channels" -ContentType 'application/json' `
         -Body ($channel | ConvertTo-Json -Compress) -TimeoutSec 10 | Out-Null
     $configured = $true
     $readyClock = [Diagnostics.Stopwatch]::StartNew()
@@ -83,7 +103,7 @@ try {
     }
 
     $channel.enabled = $false
-    Invoke-RestMethod -Method Put -Uri "$BaseUri/api/v1/channels" -ContentType 'application/json' `
+    Invoke-InstalledProofApi -Method Put -Uri "$BaseUri/api/v1/channels" -ContentType 'application/json' `
         -Body ($channel | ConvertTo-Json -Compress) -TimeoutSec 10 | Out-Null
     $configured = $false
     Start-Sleep -Milliseconds 500
@@ -139,7 +159,7 @@ finally {
     if ($configured) {
         try {
             $channel.enabled = $false
-            Invoke-RestMethod -Method Put -Uri "$BaseUri/api/v1/channels" -ContentType 'application/json' `
+            Invoke-InstalledProofApi -Method Put -Uri "$BaseUri/api/v1/channels" -ContentType 'application/json' `
                 -Body ($channel | ConvertTo-Json -Compress) -TimeoutSec 10 | Out-Null
         }
         catch {

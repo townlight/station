@@ -1,9 +1,29 @@
 param(
+    [Parameter(Mandatory = $true)]
+    [Management.Automation.PSCredential]$Credential,
     [string]$BaseUrl = 'http://127.0.0.1:4070/api/v1',
     [string]$Manifest = (Join-Path (Split-Path $PSScriptRoot -Parent) 'dist\candidate-manifest.json')
 )
 
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'installed-proof-api.ps1')
+$apiSession = New-TownLightProofSession -BaseUri $BaseUrl -Credential $Credential
+
+function Invoke-InstalledProofApi {
+    [CmdletBinding()]
+    param(
+        [Parameter(Position = 0, Mandatory = $true)][string]$Uri,
+        [string]$Method = 'Get',
+        [string]$ContentType = 'application/json',
+        $Body = $null,
+        [int]$TimeoutSec = 30
+    )
+    $requestUri = [uri]$Uri
+    $path = $requestUri.PathAndQuery -replace '^/api/v1', ''
+    $parameters = @{ Session = $apiSession; Method = $Method; Path = $path; TimeoutSec = $TimeoutSec }
+    if ($PSBoundParameters.ContainsKey('Body')) { $parameters.Body = $Body; $parameters.ContentType = $ContentType }
+    Invoke-TownLightProofApi @parameters
+}
 $dataDirectory = Join-Path $env:ProgramData 'TownLight Station'
 $bundleDirectory = Join-Path $dataDirectory 'support-bundles'
 $receiptPath = Join-Path $dataDirectory 'install-receipt.json'
@@ -90,7 +110,7 @@ try {
         target = $fullTargetCanary
         credential = $credentialCanary
     } | ConvertTo-Json -Compress
-    $redactedChannel = Invoke-RestMethod -Method Put -Uri "$BaseUrl/alert-channels" `
+    $redactedChannel = Invoke-InstalledProofApi -Method Put -Uri "$BaseUrl/alert-channels" `
         -ContentType 'application/json' -Body $channelBody
     $configured = $true
     if ($redactedChannel.target_redacted -eq $fullTargetCanary -or
@@ -98,7 +118,7 @@ try {
         throw 'The alert-channel API exposed the redaction canary before bundle creation.'
     }
 
-    $first = Invoke-RestMethod -Method Post -Uri "$BaseUrl/support-bundles"
+    $first = Invoke-InstalledProofApi -Method Post -Uri "$BaseUrl/support-bundles"
     $managedRoot = [IO.Path]::GetFullPath($bundleDirectory) + [IO.Path]::DirectorySeparatorChar
     $storedPath = [IO.Path]::GetFullPath([string]$first.path)
     if (-not $storedPath.StartsWith($managedRoot, [StringComparison]::OrdinalIgnoreCase)) {
@@ -120,8 +140,10 @@ try {
     }
     if ($first.retention_warning) { throw "Retention warning: $($first.retention_warning)" }
 
-    $download = Invoke-WebRequest -Uri ("http://127.0.0.1:4070" + $first.download_uri) `
-        -OutFile $downloadPath -PassThru
+    $downloadUri = [uri]("http://127.0.0.1:4070" + $first.download_uri)
+    $downloadApiPath = $downloadUri.PathAndQuery -replace '^/api/v1', ''
+    $download = Invoke-TownLightProofApi -Session $apiSession -Method Get -Path $downloadApiPath `
+        -ResponseMode Download -OutFile $downloadPath
     if ($download.StatusCode -ne 200 -or
         $download.Headers['Content-Type'] -notmatch '^application/zip' -or
         $download.Headers['Content-Disposition'] -notmatch [Regex]::Escape($first.file_name) -or
@@ -206,7 +228,7 @@ try {
     $created.Add($first)
     for ($index = 0; $index -lt 10; $index++) {
         Start-Sleep -Milliseconds 10
-        $record = Invoke-RestMethod -Method Post -Uri "$BaseUrl/support-bundles"
+        $record = Invoke-InstalledProofApi -Method Post -Uri "$BaseUrl/support-bundles"
         if ($record.retention_warning) { throw "Retention warning: $($record.retention_warning)" }
         $created.Add($record)
     }
@@ -251,7 +273,7 @@ try {
 finally {
     if ($configured) {
         try {
-            Invoke-RestMethod -Method Put -Uri "$BaseUrl/alert-channels" `
+            Invoke-InstalledProofApi -Method Put -Uri "$BaseUrl/alert-channels" `
                 -ContentType 'application/json' -Body $channelBody | Out-Null
         }
         catch {}

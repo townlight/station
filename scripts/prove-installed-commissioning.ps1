@@ -16,6 +16,8 @@
 ##>
 param(
     [Parameter(Mandatory = $true)]
+    [Management.Automation.PSCredential]$Credential,
+    [Parameter(Mandatory = $true)]
     [string]$FixturePath,
     [string]$ExpectedSourceCommit = '',
     [string]$CandidateManifestPath = (Join-Path (Split-Path $PSScriptRoot -Parent) 'dist\candidate-manifest.json'),
@@ -28,6 +30,24 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'installed-proof-api.ps1')
+$apiSession = New-TownLightProofSession -BaseUri $BaseUri -Credential $Credential
+
+function Invoke-InstalledProofApi {
+    [CmdletBinding()]
+    param(
+        [Parameter(Position = 0, Mandatory = $true)][string]$Uri,
+        [string]$Method = 'Get',
+        [string]$ContentType = 'application/json',
+        $Body = $null,
+        [int]$TimeoutSec = 30
+    )
+    $requestUri = [uri]$Uri
+    $path = $requestUri.PathAndQuery -replace '^/api/v1', ''
+    $parameters = @{ Session = $apiSession; Method = $Method; Path = $path; TimeoutSec = $TimeoutSec }
+    if ($PSBoundParameters.ContainsKey('Body')) { $parameters.Body = $Body; $parameters.ContentType = $ContentType }
+    Invoke-TownLightProofApi @parameters
+}
 $serviceUri = $BaseUri.TrimEnd('/') -replace '/api/v1$', ''
 $apiUri = "$serviceUri/api/v1"
 $runId = [guid]::NewGuid().ToString()
@@ -37,7 +57,6 @@ $ingestJobId = [guid]::NewGuid().ToString()
 $scheduleItemId = [guid]::NewGuid().ToString()
 $planId = "commissioning-$runId"
 $reportId = "commissioning-$runId"
-$operatorId = 'installed-commissioning-proof'
 $proofChannel = $null
 $result = [ordered]@{
     run_id = $runId
@@ -60,7 +79,7 @@ function Invoke-Api {
             $parameters.ContentType = 'application/json'
             $parameters.Body = $Body | ConvertTo-Json -Depth 30 -Compress
         }
-        return Invoke-RestMethod @parameters
+        return Invoke-InstalledProofApi @parameters
     }
     catch {
         # Do not echo response bodies: an API error must not become a place where
@@ -115,10 +134,8 @@ function Invoke-CgProof {
         if (-not (Test-Path -LiteralPath $script -PathType Leaf)) {
             throw "The existing CG proof script is missing: $script"
         }
-        $hostPath = (Get-Process -Id $PID).Path
-        $output = & $hostPath -NoProfile -ExecutionPolicy Bypass -File $script `
-            -BaseUri $serviceUri -DestinationPort (Get-FreeUdpPort) -ValidateClear 2>&1
-        if ($LASTEXITCODE -ne 0) { throw 'The composed installed CG proof failed.' }
+        $output = & $script -Credential $Credential -BaseUri $serviceUri `
+            -DestinationPort (Get-FreeUdpPort) -ValidateClear 2>&1
         $text = ($output | ForEach-Object { [string]$_ }) -join "`n"
         $firstBrace = $text.IndexOf('{')
         $lastBrace = $text.LastIndexOf('}')
@@ -266,7 +283,6 @@ try {
         report_id = $reportId
         plan_id = $planId
         schedule_item_id = $scheduleItemId
-        approved_by = $operatorId
         operator_notes = 'Installed commissioning proof.'
     })
     $dispatchStatuses = [Collections.Generic.List[string]]::new()
@@ -302,6 +318,7 @@ try {
         $healthAfter = Wait-Until -Action { Invoke-RestMethod -Uri "$serviceUri/health" -TimeoutSec 5 } `
             -Predicate { param($value) $value.status -eq 'ready' -and $value.database -eq 'ready' } `
             -Description 'health after installed service restart' -Seconds 60
+        Connect-TownLightProofSession -Session $apiSession -Credential $Credential | Out-Null
         $profileAfter = Invoke-Api 'Get' '/station'
         if ($profileAfter.station_id -ne $profileBefore.station_id -or
             $profileAfter.display_name -ne $profileBefore.display_name -or
