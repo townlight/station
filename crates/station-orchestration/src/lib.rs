@@ -23,8 +23,9 @@ use station_media_assets::measure_output_loudness;
 use station_media_protocol::{
     CgImageFormat, CgOverlay, CgOverlayContent, CgRect, CgSnapshot, ChannelCommand, LiveArmToken,
     LiveInputConfiguration, LiveReturnTarget, LoudnessTarget, MAX_CG_SLOTS, MAX_CG_TEXT_BYTES,
-    SrtPassphrase, WorkerEvent, WorkerHeadendProfileId, WorkerHeadendTransportContract,
-    WorkerOutputConfiguration,
+    MAX_OUTPUT_PROOF_DURATION_MS, MAX_OUTPUT_PROOF_SAMPLE_DURATION_MS,
+    OUTPUT_PROOF_CAPTURE_HEADROOM_MS, SrtPassphrase, WorkerEvent, WorkerHeadendProfileId,
+    WorkerHeadendTransportContract, WorkerOutputConfiguration,
 };
 use station_readiness::derive_loudness_outcome;
 use station_readiness::{
@@ -352,10 +353,6 @@ const OUTPUT_PROOF_LEASE_MS: i64 = 300_000;
 const OUTPUT_PROOF_POLL_INTERVAL_MS: i64 = 250;
 const OUTPUT_PROOF_LEASE_RENEW_MARGIN_MS: i64 = 30_000;
 const OUTPUT_PROOF_TOLERANCE_MILLI: i32 = 2_000;
-const OUTPUT_PROOF_MAX_SAMPLE_DURATION_MS: u64 = 300_000;
-const OUTPUT_PROOF_CAPTURE_HEADROOM_MS: u64 = 2_000;
-const OUTPUT_PROOF_MAX_CAPTURE_DURATION_MS: u64 =
-    OUTPUT_PROOF_MAX_SAMPLE_DURATION_MS + OUTPUT_PROOF_CAPTURE_HEADROOM_MS;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ProofOutputBinding {
@@ -458,13 +455,13 @@ fn proof_bindings_match(expected: &[ProofOutputBinding], actual: &[ProofOutputBi
 }
 
 fn capture_duration_for_sample(sample_duration_ms: u64) -> Option<u64> {
-    (3_000..=OUTPUT_PROOF_MAX_SAMPLE_DURATION_MS)
+    (3_000..=MAX_OUTPUT_PROOF_SAMPLE_DURATION_MS)
         .contains(&sample_duration_ms)
         .then(|| sample_duration_ms + OUTPUT_PROOF_CAPTURE_HEADROOM_MS)
 }
 
 fn ready_duration_is_bounded(actual_ms: u64, requested_capture_ms: u64) -> bool {
-    actual_ms >= requested_capture_ms && actual_ms <= OUTPUT_PROOF_MAX_CAPTURE_DURATION_MS
+    actual_ms >= requested_capture_ms && actual_ms <= MAX_OUTPUT_PROOF_DURATION_MS
 }
 
 fn lease_renewal_due(now_unix_ms: i64, expires_at_unix_ms: Option<i64>) -> bool {
@@ -3121,14 +3118,14 @@ mod tests {
     #[test]
     fn capture_duration_adds_bounded_decode_headroom() {
         assert_eq!(capture_duration_for_sample(2_999), None);
-        assert_eq!(capture_duration_for_sample(3_000), Some(5_000));
-        assert_eq!(capture_duration_for_sample(300_000), Some(302_000));
+        assert_eq!(capture_duration_for_sample(3_000), Some(7_000));
+        assert_eq!(capture_duration_for_sample(300_000), Some(304_000));
         assert_eq!(capture_duration_for_sample(300_001), None);
 
-        assert!(!ready_duration_is_bounded(4_999, 5_000));
-        assert!(ready_duration_is_bounded(5_000, 5_000));
-        assert!(ready_duration_is_bounded(5_250, 5_000));
-        assert!(!ready_duration_is_bounded(302_001, 5_000));
+        assert!(!ready_duration_is_bounded(6_999, 7_000));
+        assert!(ready_duration_is_bounded(7_000, 7_000));
+        assert!(ready_duration_is_bounded(7_250, 7_000));
+        assert!(!ready_duration_is_bounded(304_001, 7_000));
     }
 
     #[test]

@@ -1,7 +1,10 @@
 use std::fs;
 use std::net::UdpSocket;
+use std::path::Path;
+use std::process::Command;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use station_media_assets::{ingest_media, measure_output_loudness};
 use station_media_engine::{
     ConfiguredTransportOutput, EngineError, MpegTsMuxContract, OutputCaptureRequest,
     OutputCaptureStatus, PersistentPlayout,
@@ -85,6 +88,10 @@ fn generic_headend_mux_supports_bounded_post_mux_capture_without_stalling_output
     ));
     let proof_root = test_root.join("output-proofs");
     fs::create_dir_all(&proof_root).unwrap();
+    let source = test_root.join("audible-source.ts");
+    generate_audible_fixture(&source, 15);
+    let asset = ingest_media(&source, test_root.join("library"))
+        .expect("the audible fixture must enter the content-addressed library");
     let output = ConfiguredTransportOutput::udp_identified_with_mux_contract(
         GENERIC_CAPTURE_SINK_ID,
         receiver.local_addr().unwrap(),
@@ -98,7 +105,17 @@ fn generic_headend_mux_supports_bounded_post_mux_capture_without_stalling_output
         Some(&proof_root),
     )
     .expect("the runnable Generic headend graph must start");
+    playout
+        .load_asset(&asset.asset_id, &asset.stored_path)
+        .expect("the audible fixture must load while fallback remains on air");
+    playout
+        .take_program_at(0)
+        .expect("the audible fixture must be on air before capture");
     assert_datagram_size(&receiver, 1_316);
+    // Move beyond the initial keyframe/configuration burst so the capture
+    // begins at an arbitrary in-GOP transport boundary, like an operator
+    // request against an already-running channel.
+    std::thread::sleep(Duration::from_millis(250));
 
     let before = playout.output_health_observations().unwrap()[0];
     playout
@@ -107,7 +124,7 @@ fn generic_headend_mux_supports_bounded_post_mux_capture_without_stalling_output
             output_index: 0,
             sink_id: GENERIC_CAPTURE_SINK_ID.into(),
             loudness_target: LoudnessTarget::CABLE,
-            duration_ms: 3_000,
+            duration_ms: 7_000,
             max_bytes: 8 * 1024 * 1024,
         })
         .expect("the Generic post-mux capture must start");
@@ -137,8 +154,12 @@ fn generic_headend_mux_supports_bounded_post_mux_capture_without_stalling_output
     assert!(ready.capture_bytes > 0);
     assert!(ready.capture_bytes <= 8 * 1024 * 1024);
     assert_eq!(ready.capture_bytes % 188, 0);
-    assert_eq!(ready.capture_duration_ms, 3_000);
-    assert!(proof_root.join(ready.artifact_relative_path).is_file());
+    assert_eq!(ready.capture_duration_ms, 7_000);
+    let artifact = proof_root.join(ready.artifact_relative_path);
+    assert!(artifact.is_file());
+    let measurement = measure_output_loudness(&artifact, 3_000)
+        .expect("bounded GOP and analyzer headroom must preserve three analyzable seconds");
+    assert!(measurement.analyzed_duration_ms >= 3_000);
 
     let after = playout.output_health_observations().unwrap()[0];
     assert!(after.bytes_sent_total > before.bytes_sent_total);
@@ -220,4 +241,46 @@ fn assert_datagram_size(receiver: &UdpSocket, expected: usize) {
         .expect("configured output must emit transport packets");
     assert_eq!(size, expected);
     assert_eq!(datagram[0], 0x47);
+}
+
+fn generate_audible_fixture(path: &Path, duration_seconds: u32) {
+    let output = Command::new("ffmpeg.exe")
+        .args([
+            "-nostdin",
+            "-loglevel",
+            "error",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=blue:s=320x180:r=30",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=997:sample_rate=48000",
+            "-t",
+            &duration_seconds.to_string(),
+            "-c:v",
+            "libx264",
+            "-preset",
+            "ultrafast",
+            "-g",
+            "30",
+            "-pix_fmt",
+            "yuv420p",
+            "-c:a",
+            "aac",
+            "-b:a",
+            "128k",
+            "-f",
+            "mpegts",
+            path.to_string_lossy().as_ref(),
+        ])
+        .output()
+        .expect("FFmpeg is required to generate the audible fixture");
+    assert!(
+        output.status.success(),
+        "FFmpeg audible fixture generation failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }

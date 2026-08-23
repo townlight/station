@@ -376,8 +376,8 @@ try {
             if ($value.readiness_state -in @('missing_file', 'rejected')) { throw 'Installed audible fixture was rejected.' }
             $value.readiness_state -eq 'ready'
         } -Description 'audible fixture readiness' -Seconds 180
-    if ([int64]$readiness.duration_ms -lt ($sampleDurationMs + 2000)) {
-        throw "Fixture duration $($readiness.duration_ms) ms is shorter than the requested proof plus two-second capture headroom."
+    if ([int64]$readiness.duration_ms -lt ($sampleDurationMs + 4000)) {
+        throw "Fixture duration $($readiness.duration_ms) ms is shorter than the requested proof plus four-second capture headroom."
     }
     $result.evidence.media = [ordered]@{
         fixture_path = $fixture.Path

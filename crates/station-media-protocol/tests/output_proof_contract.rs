@@ -1,9 +1,10 @@
 use serde_json::json;
 use station_media_protocol::{
-    ChannelCommand, CommandEnvelope, LoudnessTarget, PROTOCOL_VERSION, WorkerBootstrapEnvelope,
-    WorkerEvent, WorkerEventEnvelope, WorkerOutputConfiguration, decode_bootstrap_frame,
-    decode_command_frame, decode_event_frame, encode_bootstrap_frame, encode_command_frame,
-    encode_event_frame,
+    ChannelCommand, CommandEnvelope, LoudnessTarget, MAX_OUTPUT_PROOF_DURATION_MS,
+    MAX_OUTPUT_PROOF_SAMPLE_DURATION_MS, OUTPUT_PROOF_CAPTURE_HEADROOM_MS, PROTOCOL_VERSION,
+    WorkerBootstrapEnvelope, WorkerEvent, WorkerEventEnvelope, WorkerOutputConfiguration,
+    decode_bootstrap_frame, decode_command_frame, decode_event_frame, encode_bootstrap_frame,
+    encode_command_frame, encode_event_frame,
 };
 
 const PROOF_ID: &str = "11111111-2222-4333-8444-555555555555";
@@ -26,6 +27,13 @@ fn start_command() -> CommandEnvelope {
             max_bytes: 1_000_000,
         },
     }
+}
+
+#[test]
+fn physical_capture_bound_preserves_operator_limit_and_decode_headroom() {
+    assert_eq!(MAX_OUTPUT_PROOF_SAMPLE_DURATION_MS, 300_000);
+    assert_eq!(OUTPUT_PROOF_CAPTURE_HEADROOM_MS, 4_000);
+    assert_eq!(MAX_OUTPUT_PROOF_DURATION_MS, 304_000);
 }
 
 #[test]
@@ -133,9 +141,15 @@ fn malformed_proof_identity_bounds_and_artifact_paths_fail_closed() {
 
     let mut command = start_command();
     if let ChannelCommand::StartOutputProof { duration_ms, .. } = &mut command.command {
-        *duration_ms = 302_001;
+        *duration_ms = MAX_OUTPUT_PROOF_DURATION_MS + 1;
     }
     assert!(encode_command_frame(&command).is_err());
+
+    let mut command = start_command();
+    if let ChannelCommand::StartOutputProof { duration_ms, .. } = &mut command.command {
+        *duration_ms = MAX_OUTPUT_PROOF_DURATION_MS;
+    }
+    assert!(encode_command_frame(&command).is_ok());
 
     let mut command = start_command();
     if let ChannelCommand::StartOutputProof { duration_ms, .. } = &mut command.command {

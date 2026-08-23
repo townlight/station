@@ -78,9 +78,14 @@ pub const PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion { major: 4, minor:
 
 pub const MAX_OUTPUT_PROOF_INDEX: u16 = 255;
 // Operator-requested analyzable program is capped at 300 seconds. The worker
-// protocol permits two additional seconds so a bounded MPEG-TS capture can
-// include enough leading transport context for independent decode.
-pub const MAX_OUTPUT_PROOF_DURATION_MS: u64 = 302_000;
+// protocol permits four additional seconds: a late 720p59.94 capture can wait
+// one 120-frame GOP (2.002 seconds) for random access, after which the
+// one-second analyzer reporting interval must complete. The remaining margin
+// avoids making success depend on frame phase at that boundary.
+pub const MAX_OUTPUT_PROOF_SAMPLE_DURATION_MS: u64 = 300_000;
+pub const OUTPUT_PROOF_CAPTURE_HEADROOM_MS: u64 = 4_000;
+pub const MAX_OUTPUT_PROOF_DURATION_MS: u64 =
+    MAX_OUTPUT_PROOF_SAMPLE_DURATION_MS + OUTPUT_PROOF_CAPTURE_HEADROOM_MS;
 pub const MIN_OUTPUT_PROOF_DURATION_MS: u64 = 3_000;
 pub const MAX_OUTPUT_PROOF_BYTES: u64 = 256 * 1024 * 1024;
 const MAX_OUTPUT_PROOF_ARTIFACT_PATH_BYTES: usize = 2_048;

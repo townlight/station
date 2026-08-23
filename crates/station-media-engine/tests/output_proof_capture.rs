@@ -133,7 +133,7 @@ fn post_mux_capture_is_bounded_decodable_and_does_not_interrupt_playout() {
             output_index: 0,
             sink_id: SINK_ID.into(),
             loudness_target: LoudnessTarget::STREAMING,
-            duration_ms: 302_000,
+            duration_ms: 304_000,
             max_bytes: 16 * 1024 * 1024,
         })
         .expect("the 300-second sample plus decode headroom must be accepted");

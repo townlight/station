@@ -5504,6 +5504,17 @@ mod tests {
             &format!("/api/v1/channels/{channel_id}/loudness-proof"),
             Some(
                 format!(
+                    r#"{{"sink_id":"{sink_id}","sample_duration_ms":300001,"max_capture_bytes":1000000}}"#
+                )
+                .as_bytes(),
+            ),
+        );
+        assert_eq!(response.status, 422);
+        let response = api.handle(
+            "POST",
+            &format!("/api/v1/channels/{channel_id}/loudness-proof"),
+            Some(
+                format!(
                     r#"{{"sink_id":"{sink_id}","sample_duration_ms":3000,"max_capture_bytes":268435457}}"#
                 )
                 .as_bytes(),
