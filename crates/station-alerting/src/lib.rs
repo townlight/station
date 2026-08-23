@@ -490,31 +490,14 @@ pub fn sample_and_record_system_resources(
     database_path: &Path,
     sampled_at_unix_ms: i64,
 ) -> Result<SystemResourceSample, String> {
-    let (ram_used_gb, ram_total_gb) = memory_usage()?;
-    let cpu_percent = cpu_usage()?;
-    let data_directory = database_path
-        .parent()
-        .ok_or_else(|| "station database has no parent directory".to_string())?;
-    let media_volume_free_gb = disk_free_gb(data_directory)?;
-    let backup_directory = data_directory.join("backups");
-    let backup_volume_writable = backup_write_probe(&backup_directory);
-    let backup_volume_free_gb = disk_free_gb(data_directory)?;
-    let sample = SystemResourceSample {
-        sample_id: None,
-        sampled_at_unix_ms,
-        cpu_percent: Some(cpu_percent),
-        ram_used_gb: Some(ram_used_gb),
-        ram_total_gb: Some(ram_total_gb),
-        gpu_percent: None,
-        gpu_vram_used_gb: None,
-        media_volume_free_gb: Some(media_volume_free_gb),
-        backup_volume_free_gb: Some(backup_volume_free_gb),
-        database_reachable: true,
-        backup_volume_writable,
-        service_running: true,
-        clock_skew_seconds: None,
-    };
-    sample.validate().map_err(str::to_string)?;
+    let sample = probe_system_resources(database_path, sampled_at_unix_ms)?;
+    let media_volume_free_gb = sample
+        .media_volume_free_gb
+        .expect("the Windows resource probe always measures media free space");
+    let backup_volume_free_gb = sample
+        .backup_volume_free_gb
+        .expect("the Windows resource probe always measures backup free space");
+    let backup_volume_writable = sample.backup_volume_writable;
     let store = StationStore::open(database_path)?;
     let recorded = store.record_system_resource_sample(&sample)?;
     let disk_unhealthy = media_volume_free_gb < LOW_DISK_GB
@@ -548,6 +531,38 @@ pub fn sample_and_record_system_resources(
         )?;
     }
     Ok(recorded)
+}
+
+pub fn probe_system_resources(
+    database_path: &Path,
+    sampled_at_unix_ms: i64,
+) -> Result<SystemResourceSample, String> {
+    let (ram_used_gb, ram_total_gb) = memory_usage()?;
+    let cpu_percent = cpu_usage()?;
+    let data_directory = database_path
+        .parent()
+        .ok_or_else(|| "station database has no parent directory".to_string())?;
+    let media_volume_free_gb = disk_free_gb(data_directory)?;
+    let backup_directory = data_directory.join("backups");
+    let backup_volume_writable = backup_write_probe(&backup_directory);
+    let backup_volume_free_gb = disk_free_gb(data_directory)?;
+    let sample = SystemResourceSample {
+        sample_id: None,
+        sampled_at_unix_ms,
+        cpu_percent: Some(cpu_percent),
+        ram_used_gb: Some(ram_used_gb),
+        ram_total_gb: Some(ram_total_gb),
+        gpu_percent: None,
+        gpu_vram_used_gb: None,
+        media_volume_free_gb: Some(media_volume_free_gb),
+        backup_volume_free_gb: Some(backup_volume_free_gb),
+        database_reachable: true,
+        backup_volume_writable,
+        service_running: true,
+        clock_skew_seconds: None,
+    };
+    sample.validate().map_err(str::to_string)?;
+    Ok(sample)
 }
 
 fn memory_usage() -> Result<(f64, f64), String> {
