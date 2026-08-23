@@ -1,3 +1,4 @@
+mod auth_handoff;
 mod config;
 
 use std::ffi::OsString;
@@ -54,9 +55,12 @@ define_windows_service!(ffi_service_main, service_main);
 fn main() {
     let config =
         config::parse(std::env::args_os().skip(1)).unwrap_or_else(|message| fatal(&message));
-    let result = match config.mode {
+    let result = match config.mode.clone() {
         LaunchMode::Console => run_console(config),
         LaunchMode::Service => run_dispatcher(config),
+        LaunchMode::AuthIssueBootstrapHandoff { handoff } => {
+            auth_handoff::issue_bootstrap_handoff(&config.database, &handoff)
+        }
     };
     if let Err(message) = result {
         fatal(&message);

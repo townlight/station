@@ -6,6 +6,7 @@ use std::path::PathBuf;
 pub enum LaunchMode {
     Console,
     Service,
+    AuthIssueBootstrapHandoff { handoff: PathBuf },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -17,6 +18,10 @@ pub struct DaemonConfig {
 
 pub fn parse(arguments: impl IntoIterator<Item = OsString>) -> Result<DaemonConfig, String> {
     let mut arguments = arguments.into_iter().peekable();
+    if arguments.peek().and_then(|value| value.to_str()) == Some("auth") {
+        arguments.next();
+        return parse_auth(arguments);
+    }
     let mode = match arguments.peek().and_then(|value| value.to_str()) {
         Some("service") => {
             arguments.next();
@@ -97,6 +102,58 @@ pub fn parse(arguments: impl IntoIterator<Item = OsString>) -> Result<DaemonConf
     })
 }
 
+fn parse_auth(mut arguments: impl Iterator<Item = OsString>) -> Result<DaemonConfig, String> {
+    if arguments
+        .next()
+        .and_then(|value| value.into_string().ok())
+        .as_deref()
+        != Some("issue-bootstrap-handoff")
+    {
+        return Err("auth requires the issue-bootstrap-handoff command".into());
+    }
+
+    let mut database = None;
+    let mut handoff = None;
+    while let Some(argument) = arguments.next() {
+        match argument.to_str() {
+            Some("--database") if database.is_none() => {
+                database = Some(PathBuf::from(
+                    arguments
+                        .next()
+                        .ok_or("bootstrap handoff --database requires a path")?,
+                ));
+            }
+            Some("--handoff") if handoff.is_none() => {
+                handoff = Some(PathBuf::from(
+                    arguments
+                        .next()
+                        .ok_or("bootstrap handoff --handoff requires a path")?,
+                ));
+            }
+            Some("--database") => {
+                return Err("bootstrap handoff --database may be specified only once".into());
+            }
+            Some("--handoff") => {
+                return Err("bootstrap handoff --handoff may be specified only once".into());
+            }
+            _ => {
+                return Err("bootstrap handoff mode accepts only --database and --handoff".into());
+            }
+        }
+    }
+
+    let database = database.ok_or("bootstrap handoff requires --database")?;
+    let handoff = handoff.ok_or("bootstrap handoff requires --handoff")?;
+    if !database.is_absolute() || !handoff.is_absolute() {
+        return Err("bootstrap handoff requires absolute --database and --handoff paths".into());
+    }
+    Ok(DaemonConfig {
+        mode: LaunchMode::AuthIssueBootstrapHandoff { handoff },
+        database,
+        address: "127.0.0.1:4070".parse().expect("default address is valid"),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -157,5 +214,122 @@ mod tests {
     fn rejects_a_non_loopback_console_address() {
         let error = parse(["custom.db", "0.0.0.0:4800"].map(OsString::from)).unwrap_err();
         assert!(error.contains("loopback"), "unexpected error: {error}");
+    }
+
+    #[test]
+    fn parses_only_absolute_paths_for_bootstrap_handoff_mode() {
+        let result = parse(
+            [
+                "auth",
+                "issue-bootstrap-handoff",
+                "--database",
+                r"C:\ProgramData\TownLight Station\station.db",
+                "--handoff",
+                r"C:\ProgramData\TownLight Station\bootstrap.capability",
+            ]
+            .map(OsString::from),
+        );
+
+        let config = result.unwrap();
+        assert_eq!(
+            config.database,
+            PathBuf::from(r"C:\ProgramData\TownLight Station\station.db")
+        );
+        assert_eq!(
+            config.mode,
+            LaunchMode::AuthIssueBootstrapHandoff {
+                handoff: PathBuf::from(r"C:\ProgramData\TownLight Station\bootstrap.capability")
+            }
+        );
+    }
+
+    #[test]
+    fn bootstrap_handoff_mode_rejects_network_relative_or_extra_arguments() {
+        for arguments in [
+            vec![
+                "auth",
+                "issue-bootstrap-handoff",
+                "--database",
+                "station.db",
+                "--handoff",
+                r"C:\bootstrap.capability",
+            ],
+            vec![
+                "auth",
+                "issue-bootstrap-handoff",
+                "--database",
+                r"C:\station.db",
+                "--handoff",
+                "bootstrap.capability",
+            ],
+            vec![
+                "auth",
+                "issue-bootstrap-handoff",
+                "--database",
+                r"C:\station.db",
+                "--handoff",
+                r"C:\bootstrap.capability",
+                "--address",
+                "127.0.0.1:4070",
+            ],
+            vec![
+                "auth",
+                "issue-bootstrap-handoff",
+                "--database",
+                r"C:\station.db",
+                "--handoff",
+                r"C:\bootstrap.capability",
+                "unexpected",
+            ],
+            vec![
+                "auth",
+                "issue-bootstrap-handoff",
+                "--database",
+                r"C:\station.db",
+            ],
+            vec![
+                "auth",
+                "issue-bootstrap-handoff",
+                "--handoff",
+                r"C:\bootstrap.capability",
+            ],
+            vec![
+                "auth",
+                "issue-bootstrap-handoff",
+                "--database",
+                r"C:\station.db",
+                "--database",
+                r"C:\other.db",
+                "--handoff",
+                r"C:\bootstrap.capability",
+            ],
+        ] {
+            let error = parse(arguments.into_iter().map(OsString::from)).unwrap_err();
+            assert!(
+                error.contains("bootstrap handoff"),
+                "unexpected error: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn bootstrap_handoff_mode_never_accepts_or_echoes_an_argv_secret() {
+        let secret = "must-not-appear-in-errors";
+        let error = parse(
+            [
+                "auth",
+                "issue-bootstrap-handoff",
+                "--database",
+                r"C:\station.db",
+                "--handoff",
+                r"C:\bootstrap.capability",
+                "--token",
+                secret,
+            ]
+            .map(OsString::from),
+        )
+        .unwrap_err();
+
+        assert!(!error.contains(secret), "argv secret was echoed: {error}");
     }
 }
