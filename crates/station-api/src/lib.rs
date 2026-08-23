@@ -41,12 +41,12 @@ use station_readiness::{
     derive_station_box_profile,
 };
 use station_schedule::{
-    AssetReadiness, ChannelConfiguration, DispatchStatus, MediaAsset, OUTPUT_PROFILES,
-    ScheduleItem, ScheduleState,
+    AssetReadiness, ChannelConfiguration, DispatchStatus, HEADEND_PROFILES,
+    HeadendProfileApplyRequest, MediaAsset, OUTPUT_PROFILES, ScheduleItem, ScheduleState,
 };
 use station_storage::{
-    AlertChannelSecret, CgSnapshotReadError, CgWriteError, CommitWriteError, ProfileWriteError,
-    StationStore,
+    AlertChannelSecret, CgSnapshotReadError, CgWriteError, ChannelWriteError, CommitWriteError,
+    HeadendProfileWriteError, ProfileWriteError, StationStore,
 };
 use station_update::UpdateCheckTrigger;
 use station_update_coordinator::CoordinatorError;
@@ -411,6 +411,11 @@ impl Api {
             ("GET", "/api/v1/station-box-profile") => self.station_box_profile(false),
             ("GET", "/api/v1/station-box-profile/readiness") => self.station_box_profile(true),
             ("GET", "/api/v1/headend-readiness") => self.headend_readiness(None),
+            ("GET", "/api/v1/headend-profiles") => json_response(
+                200,
+                serde_json::to_vec(&HEADEND_PROFILES)
+                    .expect("serializing the static headend profile catalog cannot fail"),
+            ),
             ("PUT", "/api/v1/station") => self.put_profile(body),
             ("POST", "/api/v1/assets/ingest") => self.ingest_media(body),
             ("GET", "/api/v1/assets/readiness-dashboard") => self.readiness_dashboard(),
@@ -429,6 +434,11 @@ impl Api {
                     && path.ends_with("/headend-readiness") =>
             {
                 self.channel_headend_readiness(path)
+            }
+            ("POST", path)
+                if path.starts_with("/api/v1/channels/") && path.ends_with("/headend-profile") =>
+            {
+                self.apply_channel_headend_profile(path, body)
             }
             ("GET", path)
                 if path.starts_with("/api/v1/channels/") && path.ends_with("/live-authority") =>
@@ -984,6 +994,32 @@ impl Api {
                 }
             }
         }
+        let headend_contract_changed = existing.as_ref().is_some_and(|existing| {
+            let prior = existing
+                .output_sinks
+                .iter()
+                .filter(|sink| sink.headend.is_some())
+                .collect::<Vec<_>>();
+            let proposed = command
+                .channel
+                .output_sinks
+                .iter()
+                .filter(|sink| sink.headend.is_some())
+                .collect::<Vec<_>>();
+            prior != proposed
+        }) || (existing.is_none()
+            && command
+                .channel
+                .output_sinks
+                .iter()
+                .any(|sink| sink.headend.is_some()));
+        if headend_contract_changed {
+            return error_response(
+                422,
+                "headend_profile_route_required",
+                "Create or change a headend sink through the headend profile application route.",
+            );
+        }
         let channel = command.channel;
         if let Err(error) = channel.validate() {
             return error_response(422, "validation_failed", &format!("{error:?}"));
@@ -1017,16 +1053,24 @@ impl Api {
                 "A new encrypted SRT output requires its write-only passphrase.",
             );
         }
-        match self
-            .storage
-            .put_channel_with_srt_passphrases(&channel, &command.srt_passphrases)
-        {
+        match self.storage.put_channel_with_srt_passphrases_if_current(
+            &channel,
+            &command.srt_passphrases,
+            existing.as_ref(),
+        ) {
             Ok(()) => json_response(
                 200,
                 serde_json::to_vec(&channel)
                     .expect("serializing a channel configuration cannot fail"),
             ),
-            Err(message) => error_response(500, "storage_error", &message),
+            Err(ChannelWriteError::Conflict) => error_response(
+                409,
+                "channel_configuration_changed",
+                "The channel changed while this update was being prepared. Reload and try again.",
+            ),
+            Err(ChannelWriteError::Storage(message)) => {
+                error_response(500, "storage_error", &message)
+            }
         }
     }
 
@@ -1480,6 +1524,46 @@ impl Api {
             return error_response(400, "invalid_path", "The channel identity is invalid.");
         }
         self.headend_readiness(Some(channel_id))
+    }
+
+    fn apply_channel_headend_profile(&self, path: &str, body: Option<&[u8]>) -> ApiResponse {
+        let Some(channel_id) = path_identity(path, "/api/v1/channels/", "/headend-profile") else {
+            return error_response(400, "invalid_path", "The channel identity is invalid.");
+        };
+        if !is_api_uuid(channel_id) {
+            return error_response(400, "invalid_path", "The channel identity is invalid.");
+        }
+        let Some(request) = parse_body::<HeadendProfileApplyRequest>(body) else {
+            return error_response(
+                400,
+                "invalid_json",
+                "A headend profile application body is required.",
+            );
+        };
+        let application = match self.storage.stage_headend_profile(channel_id, &request) {
+            Ok(application) => application,
+            Err(HeadendProfileWriteError::NotFound) => {
+                return error_response(404, "channel_not_found", "The channel does not exist.");
+            }
+            Err(HeadendProfileWriteError::MustBeStopped) => {
+                return error_response(
+                    409,
+                    "channel_must_be_stopped",
+                    "Stop this output before applying a headend profile.",
+                );
+            }
+            Err(HeadendProfileWriteError::Invalid(message)) => {
+                return error_response(422, "validation_failed", &message);
+            }
+            Err(HeadendProfileWriteError::Storage(message)) => {
+                return error_response(500, "storage_error", &message);
+            }
+        };
+        json_response(
+            200,
+            serde_json::to_vec(&application)
+                .expect("serializing a headend profile application cannot fail"),
+        )
     }
 
     fn headend_readiness(&self, channel_id: Option<&str>) -> ApiResponse {

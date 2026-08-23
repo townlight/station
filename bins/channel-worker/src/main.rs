@@ -160,6 +160,13 @@ fn main() {
     }
     let output_profile = OutputProfileId::from_storage_name(&bootstrap.output_profile)
         .unwrap_or_else(|error| fatal(6, "validate its output profile", &format!("{error:?}")));
+    if !output_profile.is_runnable() {
+        fatal(
+            6,
+            "validate its output profile",
+            "the staged output profile is not runnable by this worker",
+        );
+    }
     let outputs = bootstrap
         .outputs
         .into_iter()

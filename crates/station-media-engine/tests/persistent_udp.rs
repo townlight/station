@@ -1957,3 +1957,15 @@ fn test_root(label: &str) -> std::path::PathBuf {
         std::thread::current().name().unwrap_or("test")
     ))
 }
+#[test]
+fn refuses_a_staged_interlaced_profile_before_building_a_graph() {
+    let result = PersistentPlayout::start_udp_with_profile(
+        "127.0.0.1:5500".parse().unwrap(),
+        OutputProfileId::Atsc1080i5994,
+    );
+    assert!(matches!(
+        result,
+        Err(station_media_engine::EngineError::ProfileNotRunnable { profile_id })
+            if profile_id == "atsc-1080i5994"
+    ));
+}

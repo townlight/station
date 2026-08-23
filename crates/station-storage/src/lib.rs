@@ -37,8 +37,9 @@ use station_media_lifecycle::{
 };
 use station_schedule::{
     AssetReadiness, ChannelConfiguration, CommitPlan, CommitReport, DispatchJob, DispatchStatus,
+    HeadendProfileApplication, HeadendProfileApplyRequest, HeadendProfileId, HeadendSinkContract,
     MediaAsset, OutputProfileId, OutputSinkConfiguration, OutputSinkKind, ScheduleItem,
-    ScheduleState, prepare_commit,
+    ScheduleState, apply_headend_profile, prepare_commit,
 };
 use station_update::{
     PreparedSlotRecord, StagedPackageRecord, UpdateCheckOutcome, UpdateCheckRecord,
@@ -172,6 +173,20 @@ pub enum CgWriteError {
     NotFound,
     Conflict(u64),
     Invalid(&'static str),
+    Storage(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HeadendProfileWriteError {
+    NotFound,
+    MustBeStopped,
+    Invalid(String),
+    Storage(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ChannelWriteError {
+    Conflict,
     Storage(String),
 }
 
@@ -416,6 +431,9 @@ impl StationStore {
                loudness_target_milli INTEGER NOT NULL,\
                required INTEGER NOT NULL CHECK (required IN (0,1)),\
                enabled INTEGER NOT NULL CHECK (enabled IN (0,1)),\
+               headend_profile TEXT NOT NULL DEFAULT '',\
+               headend_muxrate_kbps INTEGER NOT NULL DEFAULT 0 CHECK (headend_muxrate_kbps >= 0),\
+               headend_packet_size INTEGER NOT NULL DEFAULT 0 CHECK (headend_packet_size >= 0),\
                PRIMARY KEY(channel_id, sink_id),\
                UNIQUE(channel_id, label COLLATE NOCASE),\
                FOREIGN KEY(channel_id) REFERENCES channels(channel_id) ON DELETE CASCADE\
@@ -636,6 +654,7 @@ impl StationStore {
         store.migrate_alert_delivery_realerts()?;
         store.migrate_channel_output_profile()?;
         store.migrate_channel_output_sink_kinds()?;
+        store.migrate_headend_sink_contract()?;
         store.migrate_channel_output_sinks()?;
         store.initialize_cg_schema()?;
         store.migrate_cg_feed_cache_schema()?;
@@ -1779,26 +1798,90 @@ impl StationStore {
         self.put_channel_with_srt_passphrases(channel, &HashMap::new())
     }
 
+    pub fn stage_headend_profile(
+        &self,
+        channel_id: &str,
+        request: &HeadendProfileApplyRequest,
+    ) -> Result<HeadendProfileApplication, HeadendProfileWriteError> {
+        self.execute("BEGIN IMMEDIATE")
+            .map_err(HeadendProfileWriteError::Storage)?;
+        let outcome = (|| {
+            let channel = self
+                .list_channels()
+                .map_err(HeadendProfileWriteError::Storage)?
+                .into_iter()
+                .find(|channel| channel.channel_id == channel_id)
+                .ok_or(HeadendProfileWriteError::NotFound)?;
+            if channel.enabled {
+                return Err(HeadendProfileWriteError::MustBeStopped);
+            }
+            let application = apply_headend_profile(&channel, request)
+                .map_err(|error| HeadendProfileWriteError::Invalid(format!("{error:?}")))?;
+            self.put_channel_transaction(&application.channel, &HashMap::new())
+                .map_err(HeadendProfileWriteError::Storage)?;
+            Ok(application)
+        })();
+        match outcome {
+            Ok(application) => {
+                if let Err(message) = self.execute("COMMIT") {
+                    let _ = self.execute("ROLLBACK");
+                    return Err(HeadendProfileWriteError::Storage(message));
+                }
+                Ok(application)
+            }
+            Err(error) => {
+                let _ = self.execute("ROLLBACK");
+                Err(error)
+            }
+        }
+    }
+
     pub fn put_channel_with_srt_passphrases(
         &self,
         channel: &ChannelConfiguration,
         passphrases: &HashMap<String, String>,
     ) -> Result<(), String> {
         channel.validate().map_err(|error| format!("{error:?}"))?;
-        for (sink_id, passphrase) in passphrases {
-            let valid_sink = channel.output_sinks.iter().any(|sink| {
-                sink.sink_id == *sink_id
-                    && sink.kind == OutputSinkKind::Srt
-                    && sink.encryption_configured
-            });
-            if !valid_sink {
-                return Err("SRT passphrases must identify an encrypted SRT output sink".into());
-            }
-            validate_srt_passphrase(passphrase)?;
-        }
+        validate_channel_passphrases(channel, passphrases)?;
         self.execute("BEGIN IMMEDIATE")?;
         let outcome = self.put_channel_transaction(channel, passphrases);
         self.finish_transaction(outcome)
+    }
+
+    pub fn put_channel_with_srt_passphrases_if_current(
+        &self,
+        channel: &ChannelConfiguration,
+        passphrases: &HashMap<String, String>,
+        expected: Option<&ChannelConfiguration>,
+    ) -> Result<(), ChannelWriteError> {
+        channel
+            .validate()
+            .map_err(|error| ChannelWriteError::Storage(format!("{error:?}")))?;
+        validate_channel_passphrases(channel, passphrases).map_err(ChannelWriteError::Storage)?;
+        self.execute("BEGIN IMMEDIATE")
+            .map_err(ChannelWriteError::Storage)?;
+        let outcome = (|| {
+            let current = self
+                .list_channels()
+                .map_err(ChannelWriteError::Storage)?
+                .into_iter()
+                .find(|current| current.channel_id == channel.channel_id);
+            if current.as_ref() != expected {
+                return Err(ChannelWriteError::Conflict);
+            }
+            self.put_channel_transaction(channel, passphrases)
+                .map_err(ChannelWriteError::Storage)
+        })();
+        match outcome {
+            Ok(()) => self.execute("COMMIT").map_err(|message| {
+                let _ = self.execute("ROLLBACK");
+                ChannelWriteError::Storage(message)
+            }),
+            Err(error) => {
+                let _ = self.execute("ROLLBACK");
+                Err(error)
+            }
+        }
     }
 
     fn put_channel_transaction(
@@ -1834,8 +1917,8 @@ impl StationStore {
         drop(delete);
         for sink in &channel.output_sinks {
             let insert = self.prepare(
-                "INSERT INTO channel_output_sinks(channel_id, sink_id, label, kind, destination, loudness_target_milli, required, enabled) \
-                 VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                "INSERT INTO channel_output_sinks(channel_id, sink_id, label, kind, destination, loudness_target_milli, required, enabled, headend_profile, headend_muxrate_kbps, headend_packet_size) \
+                 VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
             )?;
             let sink_id = c_string(&sink.sink_id, "output sink identity")?;
             let label = c_string(&sink.label, "output sink label")?;
@@ -1854,6 +1937,33 @@ impl StationStore {
             )?;
             bind_i64(self.database, insert.raw, 7, i64::from(sink.required))?;
             bind_i64(self.database, insert.raw, 8, i64::from(sink.enabled))?;
+            let headend_profile = c_string(
+                sink.headend
+                    .as_ref()
+                    .map_or("", |headend| headend.profile_id.storage_name()),
+                "headend profile identity",
+            )?;
+            bind_text(self.database, insert.raw, 9, &headend_profile)?;
+            bind_i64(
+                self.database,
+                insert.raw,
+                10,
+                i64::from(
+                    sink.headend
+                        .as_ref()
+                        .map_or(0, |headend| headend.muxrate_kbps),
+                ),
+            )?;
+            bind_i64(
+                self.database,
+                insert.raw,
+                11,
+                i64::from(
+                    sink.headend
+                        .as_ref()
+                        .map_or(0, |headend| headend.packet_size_bytes),
+                ),
+            )?;
             expect_done(self.database, insert.raw)?;
             drop(insert);
             if sink.kind == OutputSinkKind::Srt && sink.encryption_configured {
@@ -3727,7 +3837,8 @@ impl StationStore {
             "SELECT sink_id, label, kind, destination, loudness_target_milli, required, enabled, \
              EXISTS(SELECT 1 FROM srt_output_secrets secret \
                     WHERE secret.channel_id=channel_output_sinks.channel_id \
-                      AND secret.sink_id=channel_output_sinks.sink_id) \
+                      AND secret.sink_id=channel_output_sinks.sink_id), \
+             headend_profile, headend_muxrate_kbps, headend_packet_size \
              FROM channel_output_sinks WHERE channel_id=?1 ORDER BY sink_id",
         )?;
         let channel_id = c_string(channel_id, "channel identity")?;
@@ -3735,17 +3846,39 @@ impl StationStore {
         let mut sinks = Vec::new();
         loop {
             match unsafe { sqlite3_step(statement.raw) } {
-                SQLITE_ROW => sinks.push(OutputSinkConfiguration {
-                    sink_id: column_text(statement.raw, 0)?,
-                    label: column_text(statement.raw, 1)?,
-                    kind: parse_output_sink_kind(&column_text(statement.raw, 2)?)?,
-                    destination: column_text(statement.raw, 3)?,
-                    loudness_target_lufs: unsafe { sqlite3_column_int64(statement.raw, 4) } as f32
-                        / 1_000.0,
-                    required: unsafe { sqlite3_column_int64(statement.raw, 5) } == 1,
-                    enabled: unsafe { sqlite3_column_int64(statement.raw, 6) } == 1,
-                    encryption_configured: unsafe { sqlite3_column_int64(statement.raw, 7) } == 1,
-                }),
+                SQLITE_ROW => {
+                    let headend_profile = column_text(statement.raw, 8)?;
+                    let headend = if headend_profile.is_empty() {
+                        None
+                    } else {
+                        Some(HeadendSinkContract {
+                            profile_id: HeadendProfileId::from_storage_name(&headend_profile)
+                                .map_err(|error| format!("{error:?}"))?,
+                            muxrate_kbps: u32::try_from(unsafe {
+                                sqlite3_column_int64(statement.raw, 9)
+                            })
+                            .map_err(|_| "database returned an invalid headend muxrate")?,
+                            packet_size_bytes: u16::try_from(unsafe {
+                                sqlite3_column_int64(statement.raw, 10)
+                            })
+                            .map_err(|_| "database returned an invalid headend packet size")?,
+                        })
+                    };
+                    sinks.push(OutputSinkConfiguration {
+                        sink_id: column_text(statement.raw, 0)?,
+                        label: column_text(statement.raw, 1)?,
+                        kind: parse_output_sink_kind(&column_text(statement.raw, 2)?)?,
+                        destination: column_text(statement.raw, 3)?,
+                        loudness_target_lufs: unsafe { sqlite3_column_int64(statement.raw, 4) }
+                            as f32
+                            / 1_000.0,
+                        required: unsafe { sqlite3_column_int64(statement.raw, 5) } == 1,
+                        enabled: unsafe { sqlite3_column_int64(statement.raw, 6) } == 1,
+                        encryption_configured: unsafe { sqlite3_column_int64(statement.raw, 7) }
+                            == 1,
+                        headend,
+                    })
+                }
                 SQLITE_DONE => return Ok(sinks),
                 _ => return Err(sqlite_error(self.database)),
             }
@@ -6591,6 +6724,27 @@ impl StationStore {
         )
     }
 
+    fn migrate_headend_sink_contract(&self) -> Result<(), String> {
+        let statement = self.prepare(
+            "SELECT COUNT(*) FROM pragma_table_info('channel_output_sinks') WHERE name='headend_profile'",
+        )?;
+        let exists = match unsafe { sqlite3_step(statement.raw) } {
+            SQLITE_ROW => (unsafe { sqlite3_column_int64(statement.raw, 0) }) == 1,
+            _ => return Err(sqlite_error(self.database)),
+        };
+        drop(statement);
+        if exists {
+            return Ok(());
+        }
+        self.execute(
+            "BEGIN IMMEDIATE;\
+             ALTER TABLE channel_output_sinks ADD COLUMN headend_profile TEXT NOT NULL DEFAULT '';\
+             ALTER TABLE channel_output_sinks ADD COLUMN headend_muxrate_kbps INTEGER NOT NULL DEFAULT 0 CHECK (headend_muxrate_kbps >= 0);\
+             ALTER TABLE channel_output_sinks ADD COLUMN headend_packet_size INTEGER NOT NULL DEFAULT 0 CHECK (headend_packet_size >= 0);\
+             COMMIT",
+        )
+    }
+
     fn migrate_channel_output_sinks(&self) -> Result<(), String> {
         self.execute(
             "INSERT INTO channel_output_sinks(\
@@ -8345,6 +8499,24 @@ fn validate_srt_passphrase(value: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn validate_channel_passphrases(
+    channel: &ChannelConfiguration,
+    passphrases: &HashMap<String, String>,
+) -> Result<(), String> {
+    for (sink_id, passphrase) in passphrases {
+        let valid_sink = channel.output_sinks.iter().any(|sink| {
+            sink.sink_id == *sink_id
+                && sink.kind == OutputSinkKind::Srt
+                && sink.encryption_configured
+        });
+        if !valid_sink {
+            return Err("SRT passphrases must identify an encrypted SRT output sink".into());
+        }
+        validate_srt_passphrase(passphrase)?;
+    }
+    Ok(())
+}
+
 fn valid_smtp_endpoint(value: &str) -> bool {
     if value.trim() != value
         || value.is_empty()
@@ -8485,6 +8657,57 @@ mod tests {
                 && channel.output_sinks[0].kind == OutputSinkKind::UdpTs
         }));
         assert!(channels.iter().any(|channel| channel == &srt));
+        drop(migrated);
+        for candidate in [
+            database.clone(),
+            PathBuf::from(format!("{}-wal", database.display())),
+            PathBuf::from(format!("{}-shm", database.display())),
+        ] {
+            let _ = std::fs::remove_file(candidate);
+        }
+    }
+
+    #[test]
+    fn adds_headend_contract_columns_without_losing_existing_output_sinks() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let database = std::env::temp_dir().join(format!("townlight-headend-migration-{nonce}.db"));
+        let store = StationStore::open(&database).unwrap();
+        store
+            .execute(
+                "DROP TABLE srt_output_secrets;\
+                 DROP TABLE channel_output_sinks;\
+                 CREATE TABLE channel_output_sinks (\
+                   channel_id TEXT NOT NULL, sink_id TEXT NOT NULL, label TEXT NOT NULL,\
+                   kind TEXT NOT NULL CHECK (kind IN ('udp-ts','srt')), destination TEXT NOT NULL,\
+                   loudness_target_milli INTEGER NOT NULL,\
+                   required INTEGER NOT NULL CHECK (required IN (0,1)),\
+                   enabled INTEGER NOT NULL CHECK (enabled IN (0,1)),\
+                   PRIMARY KEY(channel_id, sink_id), UNIQUE(channel_id, label),\
+                   FOREIGN KEY(channel_id) REFERENCES channels(channel_id) ON DELETE CASCADE);\
+                 INSERT INTO channels(channel_id, display_name, udp_destination, output_profile, enabled)\
+                   VALUES('11111111-2222-4333-8444-555555555555','Preserved output',\
+                     '127.0.0.1:5500','atsc-720p5994',0);\
+                 INSERT INTO channel_output_sinks VALUES(\
+                   '11111111-2222-4333-8444-555555555555',\
+                   '11111111-2222-4333-8444-555555555555',\
+                   'Primary transport','udp-ts','127.0.0.1:5500',-24000,1,1)",
+            )
+            .unwrap();
+        drop(store);
+
+        let migrated = StationStore::open(&database).unwrap();
+        let channel = migrated
+            .list_channels()
+            .unwrap()
+            .into_iter()
+            .find(|channel| channel.display_name == "Preserved output")
+            .unwrap();
+        assert_eq!(channel.output_sinks.len(), 1);
+        assert_eq!(channel.output_sinks[0].destination, "127.0.0.1:5500");
+        assert!(channel.output_sinks[0].headend.is_none());
         drop(migrated);
         for candidate in [
             database.clone(),

@@ -104,6 +104,53 @@ fn run_worker(
     (child.wait_with_output().unwrap(), events)
 }
 
+#[test]
+fn worker_rejects_a_staged_profile_before_starting_the_media_graph() {
+    let journal = journal_path("staged-profile-rejected");
+    let _temp_files = TempFiles(vec![journal.clone()]);
+    let server = PipeServer::bind(
+        &journal
+            .file_stem()
+            .unwrap()
+            .to_string_lossy()
+            .replace('.', "-"),
+    )
+    .unwrap();
+    let udp = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let child = Command::new(env!("CARGO_BIN_EXE_channel-worker"))
+        .args([WORKER_ID, CHANNEL_ID])
+        .arg(&journal)
+        .arg(server.name())
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stream = server.accept().unwrap();
+    let bootstrap = WorkerBootstrapEnvelope {
+        version: PROTOCOL_VERSION,
+        worker_id: WORKER_ID.into(),
+        channel_id: CHANNEL_ID.into(),
+        output_profile: "atsc-1080i5994".into(),
+        cg_image_root: journal
+            .parent()
+            .unwrap()
+            .join("cg-images")
+            .to_string_lossy()
+            .into_owned(),
+        outputs: vec![WorkerOutputConfiguration::UdpTs {
+            destination: udp.local_addr().unwrap().to_string(),
+        }],
+    };
+    stream
+        .write_all(&encode_bootstrap_frame(&bootstrap).unwrap())
+        .unwrap();
+    drop(stream);
+    let output = child.wait_with_output().unwrap();
+    assert_eq!(output.status.code(), Some(6));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("not runnable"));
+}
+
 struct ChildGuard {
     child: Child,
 }

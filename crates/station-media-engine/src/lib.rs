@@ -38,6 +38,9 @@ pub enum TransportOutput {
 #[derive(Debug)]
 pub enum EngineError {
     Initialization(String),
+    ProfileNotRunnable {
+        profile_id: String,
+    },
     ElementBuild {
         factory: &'static str,
         message: String,
@@ -186,6 +189,11 @@ impl PersistentPlayout {
         output_profile: OutputProfileId,
         cg_image_root: Option<&Path>,
     ) -> Result<Self, EngineError> {
+        if !output_profile.is_runnable() {
+            return Err(EngineError::ProfileNotRunnable {
+                profile_id: output_profile.storage_name().into(),
+            });
+        }
         let startup_started = Instant::now();
         gst::init().map_err(|error| EngineError::Initialization(error.to_string()))?;
         let profile = output_profile.profile();

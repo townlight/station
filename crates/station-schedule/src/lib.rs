@@ -8,6 +8,10 @@ pub enum OutputProfileId {
     Proof360p30,
     #[serde(rename = "atsc-720p5994")]
     Atsc720p5994,
+    #[serde(rename = "atsc-1080i5994")]
+    Atsc1080i5994,
+    #[serde(rename = "ntsc-480i2997")]
+    Ntsc480i2997,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize)]
@@ -27,7 +31,7 @@ pub struct OutputProfile {
     pub loudness_target_lufs: f32,
 }
 
-pub const OUTPUT_PROFILES: [OutputProfile; 2] = [
+pub const OUTPUT_PROFILE_CONTRACTS: [OutputProfile; 4] = [
     OutputProfile {
         profile_id: OutputProfileId::Proof360p30,
         display_name: "Local proof — 360p30",
@@ -58,11 +62,47 @@ pub const OUTPUT_PROFILES: [OutputProfile; 2] = [
         audio_sample_rate_hz: 48_000,
         loudness_target_lufs: -24.0,
     },
+    OutputProfile {
+        profile_id: OutputProfileId::Atsc1080i5994,
+        display_name: "ATSC cable — 1080i59.94",
+        intended_use: "Interlaced HD cable-headend delivery contract; execution is not yet implemented",
+        width: 1_920,
+        height: 1_080,
+        frame_rate_numerator: 30_000,
+        frame_rate_denominator: 1_001,
+        interlaced: true,
+        video_bitrate_bps: 10_000_000,
+        audio_bitrate_bps: 384_000,
+        transport_bitrate_bps: 12_000_000,
+        audio_sample_rate_hz: 48_000,
+        loudness_target_lufs: -24.0,
+    },
+    OutputProfile {
+        profile_id: OutputProfileId::Ntsc480i2997,
+        display_name: "NTSC cable — 480i29.97",
+        intended_use: "Interlaced SD cable-headend delivery contract; execution is not yet implemented",
+        width: 720,
+        height: 480,
+        frame_rate_numerator: 30_000,
+        frame_rate_denominator: 1_001,
+        interlaced: true,
+        video_bitrate_bps: 3_180_000,
+        audio_bitrate_bps: 192_000,
+        transport_bitrate_bps: 3_750_000,
+        audio_sample_rate_hz: 48_000,
+        loudness_target_lufs: -24.0,
+    },
 ];
+
+/// Profiles that the current engine can actually execute and the operator may select.
+/// Interlaced contracts remain available to headend staging/readiness without becoming
+/// selectable output until their engine path is implemented and proved.
+pub const OUTPUT_PROFILES: [OutputProfile; 2] =
+    [OUTPUT_PROFILE_CONTRACTS[0], OUTPUT_PROFILE_CONTRACTS[1]];
 
 impl OutputProfileId {
     pub fn profile(self) -> &'static OutputProfile {
-        OUTPUT_PROFILES
+        OUTPUT_PROFILE_CONTRACTS
             .iter()
             .find(|profile| profile.profile_id == self)
             .expect("every output profile identifier has one specification")
@@ -72,6 +112,8 @@ impl OutputProfileId {
         match self {
             Self::Proof360p30 => "proof-360p30",
             Self::Atsc720p5994 => "atsc-720p5994",
+            Self::Atsc1080i5994 => "atsc-1080i5994",
+            Self::Ntsc480i2997 => "ntsc-480i2997",
         }
     }
 
@@ -79,8 +121,16 @@ impl OutputProfileId {
         match value {
             "proof-360p30" => Ok(Self::Proof360p30),
             "atsc-720p5994" => Ok(Self::Atsc720p5994),
+            "atsc-1080i5994" => Ok(Self::Atsc1080i5994),
+            "ntsc-480i2997" => Ok(Self::Ntsc480i2997),
             _ => Err(ScheduleError::Invalid("output_profile is unsupported")),
         }
+    }
+
+    pub fn is_runnable(self) -> bool {
+        OUTPUT_PROFILES
+            .iter()
+            .any(|profile| profile.profile_id == self)
     }
 }
 
@@ -102,6 +152,8 @@ pub struct OutputSinkConfiguration {
     pub enabled: bool,
     #[serde(default)]
     pub encryption_configured: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub headend: Option<HeadendSinkContract>,
 }
 
 impl OutputSinkConfiguration {
@@ -120,6 +172,7 @@ impl OutputSinkConfiguration {
             required: true,
             enabled: true,
             encryption_configured: false,
+            headend: None,
         }
     }
 
@@ -138,8 +191,403 @@ impl OutputSinkConfiguration {
             required: true,
             enabled: true,
             encryption_configured: false,
+            headend: None,
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum HeadendProfileId {
+    GenericUdpSpts,
+    ComcastMtdSd,
+    ComcastMtdHd,
+    TelvueHypercasterIp,
+    HarmonicSpectrumTs,
+    LeightronixFileDrop,
+}
+
+impl HeadendProfileId {
+    pub const fn storage_name(self) -> &'static str {
+        match self {
+            Self::GenericUdpSpts => "generic-udp-spts",
+            Self::ComcastMtdSd => "comcast-mtd-sd",
+            Self::ComcastMtdHd => "comcast-mtd-hd",
+            Self::TelvueHypercasterIp => "telvue-hypercaster-ip",
+            Self::HarmonicSpectrumTs => "harmonic-spectrum-ts",
+            Self::LeightronixFileDrop => "leightronix-file-drop",
+        }
+    }
+
+    pub fn from_storage_name(value: &str) -> Result<Self, ScheduleError> {
+        match value {
+            "generic-udp-spts" => Ok(Self::GenericUdpSpts),
+            "comcast-mtd-sd" => Ok(Self::ComcastMtdSd),
+            "comcast-mtd-hd" => Ok(Self::ComcastMtdHd),
+            "telvue-hypercaster-ip" => Ok(Self::TelvueHypercasterIp),
+            "harmonic-spectrum-ts" => Ok(Self::HarmonicSpectrumTs),
+            "leightronix-file-drop" => Ok(Self::LeightronixFileDrop),
+            _ => Err(ScheduleError::Invalid("headend profile is unsupported")),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum HeadendTransport {
+    UdpUnicast,
+    UdpMulticast,
+    FileDrop,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HeadendProfileExecutionState {
+    StagedOnly,
+    Unimplemented,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HeadendSinkContract {
+    pub profile_id: HeadendProfileId,
+    pub muxrate_kbps: u32,
+    pub packet_size_bytes: u16,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+pub struct HeadendProfile {
+    pub profile_id: HeadendProfileId,
+    pub label: &'static str,
+    pub vendor: &'static str,
+    pub source_urls: &'static [&'static str],
+    pub canonical_profile: OutputProfileId,
+    pub muxrate_kbps: u32,
+    pub transport: HeadendTransport,
+    pub packet_size_bytes: u16,
+    pub minimum_port: u16,
+    pub operator_must_supply: &'static [&'static str],
+    pub not_claimed: &'static [&'static str],
+    pub execution_state: HeadendProfileExecutionState,
+    pub execution_detail: &'static str,
+}
+
+const FIELD_PROOF_BOUNDARY: &str =
+    "Built from published vendor contracts; field and headend acceptance are not claimed.";
+const DESTINATION_AND_RATE: &[&str] = &[
+    "Destination address and UDP port assigned by the cable operator or headend integrator.",
+    "Constant multiplex rate when the carriage agreement sets one.",
+];
+
+pub const HEADEND_PROFILES: [HeadendProfile; 6] = [
+    HeadendProfile {
+        profile_id: HeadendProfileId::GenericUdpSpts,
+        label: "Generic CBR SPTS over UDP",
+        vendor: "Any constant-rate MPEG transport-stream headend",
+        source_urls: &[
+            "https://telvue.com/knowledgebase/feed-setup-encoder-configuration/",
+            "https://www.pixeltools.com/tech_tip_cablelabs.html",
+        ],
+        canonical_profile: OutputProfileId::Atsc720p5994,
+        muxrate_kbps: 8_000,
+        transport: HeadendTransport::UdpUnicast,
+        packet_size_bytes: 1_316,
+        minimum_port: 1,
+        operator_must_supply: DESTINATION_AND_RATE,
+        not_claimed: &[FIELD_PROOF_BOUNDARY],
+        execution_state: HeadendProfileExecutionState::StagedOnly,
+        execution_detail: "Configuration may be staged while stopped; the per-sink loudness output variant must be implemented and proved before enablement.",
+    },
+    HeadendProfile {
+        profile_id: HeadendProfileId::ComcastMtdSd,
+        label: "Comcast MTD — SD",
+        vendor: "Comcast Technology Solutions, Managed Terrestrial Distribution",
+        source_urls: &[
+            "https://www.comcasttechnologysolutions.com/managed-terrestrial-distribution",
+            "https://www.pixeltools.com/tech_tip_cablelabs.html",
+        ],
+        canonical_profile: OutputProfileId::Ntsc480i2997,
+        muxrate_kbps: 3_750,
+        transport: HeadendTransport::UdpMulticast,
+        packet_size_bytes: 1_316,
+        minimum_port: 1,
+        operator_must_supply: &["Multicast group address and UDP port assigned by Comcast."],
+        not_claimed: &[FIELD_PROOF_BOUNDARY],
+        execution_state: HeadendProfileExecutionState::StagedOnly,
+        execution_detail: "Configuration may be staged while stopped; interlaced MPEG-2/AC-3 execution must be implemented and proved before enablement.",
+    },
+    HeadendProfile {
+        profile_id: HeadendProfileId::ComcastMtdHd,
+        label: "Comcast MTD — HD",
+        vendor: "Comcast Technology Solutions, Managed Terrestrial Distribution",
+        source_urls: &[
+            "https://www.comcasttechnologysolutions.com/managed-terrestrial-distribution",
+        ],
+        canonical_profile: OutputProfileId::Atsc1080i5994,
+        muxrate_kbps: 12_000,
+        transport: HeadendTransport::UdpMulticast,
+        packet_size_bytes: 1_316,
+        minimum_port: 1,
+        operator_must_supply: &[
+            "Multicast group address and UDP port assigned by Comcast.",
+            "Constant multiplex rate from the carriage agreement; 12 Mbps is only the catalog default.",
+        ],
+        not_claimed: &[FIELD_PROOF_BOUNDARY],
+        execution_state: HeadendProfileExecutionState::StagedOnly,
+        execution_detail: "Configuration may be staged while stopped; interlaced AC-3 execution must be implemented and proved before enablement.",
+    },
+    HeadendProfile {
+        profile_id: HeadendProfileId::TelvueHypercasterIp,
+        label: "TelVue HyperCaster — IP transport stream input",
+        vendor: "TelVue HyperCaster",
+        source_urls: &[
+            "https://telvue.com/knowledgebase/feed-setup-encoder-configuration/",
+            "https://telvue.com/knowledgebase/preparing-content-for-the-hypercaster/",
+            "https://telvue.com/knowledgebase/configure-inout-ports/",
+        ],
+        canonical_profile: OutputProfileId::Atsc720p5994,
+        muxrate_kbps: 8_000,
+        transport: HeadendTransport::UdpUnicast,
+        packet_size_bytes: 1_316,
+        minimum_port: 1_024,
+        operator_must_supply: &[
+            "HyperCaster feed address and port from 1024 through 65535.",
+            "A feed Max Bit Rate matching the selected multiplex rate.",
+        ],
+        not_claimed: &[FIELD_PROOF_BOUNDARY],
+        execution_state: HeadendProfileExecutionState::StagedOnly,
+        execution_detail: "Configuration may be staged while stopped; the per-sink loudness output variant must be implemented and proved before enablement.",
+    },
+    HeadendProfile {
+        profile_id: HeadendProfileId::HarmonicSpectrumTs,
+        label: "Harmonic Spectrum — transport stream ingest",
+        vendor: "Harmonic Spectrum X / XE",
+        source_urls: &[
+            "https://www.harmonicinc.com/hubfs/datasheet/spectrum-x.pdf",
+            "https://www.harmonicinc.com/hubfs/datasheet/spectrum-xe.pdf",
+        ],
+        canonical_profile: OutputProfileId::Atsc1080i5994,
+        muxrate_kbps: 12_000,
+        transport: HeadendTransport::UdpUnicast,
+        packet_size_bytes: 1_316,
+        minimum_port: 1,
+        operator_must_supply: DESTINATION_AND_RATE,
+        not_claimed: &[FIELD_PROOF_BOUNDARY],
+        execution_state: HeadendProfileExecutionState::StagedOnly,
+        execution_detail: "Configuration may be staged while stopped; interlaced AC-3 execution must be implemented and proved before enablement.",
+    },
+    HeadendProfile {
+        profile_id: HeadendProfileId::LeightronixFileDrop,
+        label: "Leightronix UltraNEXUS — file handoff",
+        vendor: "Leightronix UltraNEXUS-HD",
+        source_urls: &[
+            "https://www.leightronix.com/ultranexus-hd-series.html",
+            "https://support.leightronix.com/ultranexus-hd",
+        ],
+        canonical_profile: OutputProfileId::Atsc720p5994,
+        muxrate_kbps: 0,
+        transport: HeadendTransport::FileDrop,
+        packet_size_bytes: 1_316,
+        minimum_port: 1,
+        operator_must_supply: &["Drop-folder path monitored by the UltraNEXUS."],
+        not_claimed: &[FIELD_PROOF_BOUNDARY],
+        execution_state: HeadendProfileExecutionState::Unimplemented,
+        execution_detail: "The file-drop delivery worker is not implemented and this profile cannot yet be applied.",
+    },
+];
+
+impl HeadendProfile {
+    pub fn validate(&self) -> Result<(), ScheduleError> {
+        if self.label.trim().is_empty()
+            || self.vendor.trim().is_empty()
+            || self.source_urls.is_empty()
+            || self.operator_must_supply.is_empty()
+            || self.not_claimed.is_empty()
+            || self.execution_detail.trim().is_empty()
+            || self.packet_size_bytes != 1_316
+            || (self.transport != HeadendTransport::FileDrop && self.muxrate_kbps == 0)
+            || (self.transport == HeadendTransport::FileDrop && self.muxrate_kbps != 0)
+        {
+            return Err(ScheduleError::Invalid(
+                "headend profile metadata is invalid",
+            ));
+        }
+        Ok(())
+    }
+}
+
+pub fn headend_profile(profile_id: &str) -> Option<&'static HeadendProfile> {
+    HEADEND_PROFILES
+        .iter()
+        .find(|profile| profile.profile_id.storage_name() == profile_id)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HeadendProfileApplyRequest {
+    pub profile_id: String,
+    pub destination_uri: String,
+    pub muxrate_kbps: Option<u32>,
+    #[serde(default)]
+    pub keep_existing_sinks: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct HeadendProfileApplication {
+    pub channel: ChannelConfiguration,
+    pub profile_id: HeadendProfileId,
+    pub muxrate_kbps: u32,
+    pub packet_size_bytes: u16,
+    pub not_claimed: Vec<String>,
+}
+
+pub fn apply_headend_profile(
+    channel: &ChannelConfiguration,
+    request: &HeadendProfileApplyRequest,
+) -> Result<HeadendProfileApplication, ScheduleError> {
+    channel.validate()?;
+    if channel.enabled {
+        return Err(ScheduleError::Invalid(
+            "a channel must be stopped before applying a headend profile",
+        ));
+    }
+    let profile = headend_profile(&request.profile_id)
+        .ok_or(ScheduleError::Invalid("headend profile is unsupported"))?;
+    profile.validate()?;
+    if profile.transport == HeadendTransport::FileDrop {
+        return Err(ScheduleError::Invalid(
+            "file-drop headend execution is not implemented",
+        ));
+    }
+    let destination = parse_headend_udp_destination(profile, &request.destination_uri)?;
+    let muxrate_kbps = request.muxrate_kbps.unwrap_or(profile.muxrate_kbps);
+    let encoded_kbps = (u64::from(profile.canonical_profile.profile().video_bitrate_bps)
+        + u64::from(profile.canonical_profile.profile().audio_bitrate_bps))
+        / 1_000;
+    if u64::from(muxrate_kbps) <= encoded_kbps || muxrate_kbps > 100_000 {
+        return Err(ScheduleError::Invalid(
+            "headend muxrate must exceed encoded payload and be at most 100000 kbps",
+        ));
+    }
+    let sink_id = deterministic_headend_sink_id(&channel.channel_id);
+    let sink = OutputSinkConfiguration {
+        sink_id,
+        label: "Cable headend".into(),
+        kind: OutputSinkKind::UdpTs,
+        destination,
+        loudness_target_lufs: -24.0,
+        required: true,
+        enabled: true,
+        encryption_configured: false,
+        headend: Some(HeadendSinkContract {
+            profile_id: profile.profile_id,
+            muxrate_kbps,
+            packet_size_bytes: profile.packet_size_bytes,
+        }),
+    };
+    let mut sinks = if request.keep_existing_sinks {
+        channel
+            .output_sinks
+            .iter()
+            .filter(|existing| existing.headend.is_none())
+            .cloned()
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
+    sinks.push(sink);
+    let applied = ChannelConfiguration {
+        channel_id: channel.channel_id.clone(),
+        display_name: channel.display_name.clone(),
+        output_profile: profile.canonical_profile,
+        output_sinks: sinks,
+        enabled: false,
+    };
+    applied.validate()?;
+    Ok(HeadendProfileApplication {
+        channel: applied,
+        profile_id: profile.profile_id,
+        muxrate_kbps,
+        packet_size_bytes: profile.packet_size_bytes,
+        not_claimed: profile
+            .not_claimed
+            .iter()
+            .map(|value| (*value).into())
+            .collect(),
+    })
+}
+
+fn parse_headend_udp_destination(
+    profile: &HeadendProfile,
+    destination_uri: &str,
+) -> Result<String, ScheduleError> {
+    let authority = destination_uri
+        .strip_prefix("udp://")
+        .ok_or(ScheduleError::Invalid(
+            "headend destination must use udp:// followed by an IP address and port",
+        ))?;
+    if authority.contains(['/', '?', '#', '@']) {
+        return Err(ScheduleError::Invalid(
+            "headend destination cannot contain paths, options, or credentials",
+        ));
+    }
+    let destination = authority.parse::<std::net::SocketAddr>().map_err(|_| {
+        ScheduleError::Invalid("headend destination must contain an IP address and explicit port")
+    })?;
+    if destination.port() < profile.minimum_port {
+        return Err(ScheduleError::Invalid(
+            "headend destination port is below the vendor contract minimum",
+        ));
+    }
+    let multicast = destination.ip().is_multicast();
+    if (profile.transport == HeadendTransport::UdpMulticast && !multicast)
+        || (profile.transport == HeadendTransport::UdpUnicast && multicast)
+    {
+        return Err(ScheduleError::Invalid(
+            "headend destination address does not match the profile transport",
+        ));
+    }
+    Ok(destination.to_string())
+}
+
+fn deterministic_headend_sink_id(channel_id: &str) -> String {
+    let mut bytes = [0_u8; 16];
+    for (index, byte) in channel_id.bytes().filter(|byte| *byte != b'-').enumerate() {
+        let value = match byte {
+            b'0'..=b'9' => byte - b'0',
+            b'a'..=b'f' => byte - b'a' + 10,
+            _ => 0,
+        };
+        if index % 2 == 0 {
+            bytes[index / 2] = value << 4;
+        } else {
+            bytes[index / 2] |= value;
+        }
+    }
+    for (index, byte) in b"townlight-headend".iter().enumerate() {
+        bytes[index % 16] ^= *byte;
+    }
+    bytes[6] = (bytes[6] & 0x0f) | 0x50;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    format!(
+        "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+        bytes[0],
+        bytes[1],
+        bytes[2],
+        bytes[3],
+        bytes[4],
+        bytes[5],
+        bytes[6],
+        bytes[7],
+        bytes[8],
+        bytes[9],
+        bytes[10],
+        bytes[11],
+        bytes[12],
+        bytes[13],
+        bytes[14],
+        bytes[15]
+    )
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -343,8 +791,7 @@ impl ChannelConfiguration {
             ));
         }
         let profile = self.output_profile.profile();
-        if profile.interlaced
-            || profile.width == 0
+        if profile.width == 0
             || profile.height == 0
             || profile.frame_rate_numerator == 0
             || profile.frame_rate_denominator == 0
@@ -356,6 +803,11 @@ impl ChannelConfiguration {
         {
             return Err(ScheduleError::Invalid(
                 "output_profile does not define a runnable broadcast contract",
+            ));
+        }
+        if self.enabled && profile.interlaced {
+            return Err(ScheduleError::Invalid(
+                "interlaced output cannot be enabled until the media engine implements it",
             ));
         }
         if self.output_sinks.is_empty() {
@@ -437,10 +889,52 @@ impl ChannelConfiguration {
                     "output sink loudness targets must be finite and between -70 and -5 LUFS",
                 ));
             }
-            if (sink.loudness_target_lufs - profile.loudness_target_lufs).abs() > f32::EPSILON {
+            if (sink.loudness_target_lufs - profile.loudness_target_lufs).abs() > f32::EPSILON
+                && self.enabled
+            {
                 return Err(ScheduleError::Invalid(
-                    "transport sink loudness must match the selected encoded profile",
+                    "differing per-sink loudness cannot be enabled until output variants are enforced by the media engine",
                 ));
+            }
+            if let Some(headend) = &sink.headend {
+                let named = HEADEND_PROFILES
+                    .iter()
+                    .find(|profile| profile.profile_id == headend.profile_id)
+                    .ok_or(ScheduleError::Invalid(
+                        "headend sink profile is unsupported",
+                    ))?;
+                let destination =
+                    sink.destination
+                        .parse::<std::net::SocketAddr>()
+                        .map_err(|_| {
+                            ScheduleError::Invalid(
+                                "headend sink destination is not an IP address and port",
+                            )
+                        })?;
+                let multicast = destination.ip().is_multicast();
+                let encoded_kbps = (u64::from(profile.video_bitrate_bps)
+                    + u64::from(profile.audio_bitrate_bps))
+                    / 1_000;
+                if sink.kind != OutputSinkKind::UdpTs
+                    || named.transport == HeadendTransport::FileDrop
+                    || named.canonical_profile != self.output_profile
+                    || headend.packet_size_bytes != named.packet_size_bytes
+                    || u64::from(headend.muxrate_kbps) <= encoded_kbps
+                    || headend.muxrate_kbps > 100_000
+                    || destination.port() < named.minimum_port
+                    || (named.transport == HeadendTransport::UdpMulticast && !multicast)
+                    || (named.transport == HeadendTransport::UdpUnicast && multicast)
+                    || (sink.loudness_target_lufs - (-24.0)).abs() > f32::EPSILON
+                {
+                    return Err(ScheduleError::Invalid(
+                        "headend sink contract does not match the selected profile",
+                    ));
+                }
+                if self.enabled {
+                    return Err(ScheduleError::Invalid(
+                        "headend output cannot be enabled until its output variant is enforced by the media engine",
+                    ));
+                }
             }
         }
         if self.enabled && !self.output_sinks.iter().any(|sink| sink.enabled) {
