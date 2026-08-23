@@ -566,7 +566,49 @@ pub struct ApiResponse {
     pub status: u16,
     pub content_type: &'static str,
     pub attachment_name: Option<String>,
+    pub headers: Vec<ApiResponseHeader>,
     pub body: Vec<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ApiResponseHeader {
+    pub name: &'static str,
+    pub value: String,
+}
+
+impl ApiResponse {
+    pub fn with_header(
+        mut self,
+        name: &'static str,
+        value: impl Into<String>,
+    ) -> Result<Self, String> {
+        const ALLOWED_RESPONSE_HEADERS: &[&str] = &[
+            "Cache-Control",
+            "Content-Security-Policy",
+            "Pragma",
+            "Referrer-Policy",
+            "Retry-After",
+            "Set-Cookie",
+            "X-Content-Type-Options",
+        ];
+        let value = value.into();
+        if !ALLOWED_RESPONSE_HEADERS.contains(&name) {
+            return Err(format!("response header {name} is not allowed"));
+        }
+        if self.headers.len() >= 16 {
+            return Err("response headers exceed the bounded count".into());
+        }
+        if value.is_empty()
+            || value.len() > 4096
+            || value
+                .bytes()
+                .any(|byte| byte == b'\r' || byte == b'\n' || byte == 0)
+        {
+            return Err(format!("response header {name} has an invalid value"));
+        }
+        self.headers.push(ApiResponseHeader { name, value });
+        Ok(self)
+    }
 }
 
 pub struct Api {
@@ -4167,6 +4209,7 @@ fn cg_delete_response(result: Result<(), CgWriteError>) -> ApiResponse {
             status: 204,
             content_type: "application/json",
             attachment_name: None,
+            headers: Vec::new(),
             body: Vec::new(),
         },
         Err(CgWriteError::NotFound) => error_response(
@@ -4874,11 +4917,16 @@ fn write_response(stream: &mut TcpStream, response: ApiResponse) -> Result<(), S
         200 => "OK",
         201 => "Created",
         202 => "Accepted",
+        204 => "No Content",
         400 => "Bad Request",
+        401 => "Unauthorized",
+        403 => "Forbidden",
         404 => "Not Found",
         409 => "Conflict",
         413 => "Content Too Large",
         422 => "Unprocessable Content",
+        428 => "Precondition Required",
+        429 => "Too Many Requests",
         503 => "Service Unavailable",
         _ => "Internal Server Error",
     };
@@ -4891,12 +4939,18 @@ fn write_response(stream: &mut TcpStream, response: ApiResponse) -> Result<(), S
                  Cache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\n"
             )
         });
+    let additional_headers = response
+        .headers
+        .iter()
+        .map(|header| format!("{}: {}\r\n", header.name, header.value))
+        .collect::<String>();
     let headers = format!(
-        "HTTP/1.1 {} {}\r\nContent-Type: {}\r\n{}Content-Length: {}\r\nConnection: close\r\n\r\n",
+        "HTTP/1.1 {} {}\r\nContent-Type: {}\r\n{}{}Content-Length: {}\r\nConnection: close\r\n\r\n",
         response.status,
         reason,
         response.content_type,
         attachment_header,
+        additional_headers,
         response.body.len()
     );
     stream
@@ -5057,17 +5111,58 @@ fn read_http_request(stream: &mut TcpStream) -> Result<Vec<u8>, ApiResponse> {
     }
 }
 
-fn dispatch_http(api: &Api, request: &[u8]) -> ApiResponse {
+#[derive(Debug)]
+struct HttpRequest<'a> {
+    method: &'a str,
+    path: &'a str,
+    headers: Vec<(&'a str, &'a str)>,
+    body: &'a [u8],
+}
+
+impl<'a> HttpRequest<'a> {
+    fn unique_header(&self, name: &str) -> Result<Option<&'a str>, ApiResponse> {
+        let mut values = self
+            .headers
+            .iter()
+            .filter(|(candidate, _)| candidate.eq_ignore_ascii_case(name))
+            .map(|(_, value)| *value);
+        let first = values.next();
+        if values.next().is_some() {
+            return Err(error_response(
+                400,
+                "ambiguous_header",
+                &format!("{name} may appear only once."),
+            ));
+        }
+        Ok(first)
+    }
+}
+
+fn parse_http_request(request: &[u8]) -> Result<HttpRequest<'_>, ApiResponse> {
     let Some(header_end) = request.windows(4).position(|window| window == b"\r\n\r\n") else {
-        return error_response(400, "malformed_request", "The HTTP headers are incomplete.");
+        return Err(error_response(
+            400,
+            "malformed_request",
+            "The HTTP headers are incomplete.",
+        ));
     };
     let headers = match std::str::from_utf8(&request[..header_end]) {
         Ok(headers) => headers,
-        Err(_) => return error_response(400, "malformed_request", "HTTP headers must be UTF-8."),
+        Err(_) => {
+            return Err(error_response(
+                400,
+                "malformed_request",
+                "HTTP headers must be UTF-8.",
+            ));
+        }
     };
     let mut lines = headers.split("\r\n");
     let Some(request_line) = lines.next() else {
-        return error_response(400, "malformed_request", "The request line is missing.");
+        return Err(error_response(
+            400,
+            "malformed_request",
+            "The request line is missing.",
+        ));
     };
     let mut request_parts = request_line.split_whitespace();
     let (Some(method), Some(path), Some(version), None) = (
@@ -5076,43 +5171,116 @@ fn dispatch_http(api: &Api, request: &[u8]) -> ApiResponse {
         request_parts.next(),
         request_parts.next(),
     ) else {
-        return error_response(400, "malformed_request", "The request line is invalid.");
+        return Err(error_response(
+            400,
+            "malformed_request",
+            "The request line is invalid.",
+        ));
     };
     if version != "HTTP/1.1" {
-        return error_response(400, "malformed_request", "Only HTTP/1.1 is supported.");
+        return Err(error_response(
+            400,
+            "malformed_request",
+            "Only HTTP/1.1 is supported.",
+        ));
+    }
+    if !path.starts_with('/') || path.starts_with("//") || path.contains('#') {
+        return Err(error_response(
+            400,
+            "invalid_request_target",
+            "Only an origin-form HTTP request target is accepted.",
+        ));
     }
 
-    let mut content_length = 0usize;
+    let mut parsed_headers = Vec::new();
     for line in lines {
         let Some((name, value)) = line.split_once(':') else {
-            return error_response(400, "malformed_request", "An HTTP header is invalid.");
+            return Err(error_response(
+                400,
+                "malformed_request",
+                "An HTTP header is invalid.",
+            ));
         };
-        if name.eq_ignore_ascii_case("content-length") {
-            content_length = match value.trim().parse() {
-                Ok(length) => length,
-                Err(_) => {
-                    return error_response(400, "malformed_request", "Content-Length is invalid.");
-                }
-            };
+        let value = value.trim();
+        if name.is_empty()
+            || !name
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+            || value
+                .bytes()
+                .any(|byte| byte == 0 || byte == b'\r' || byte == b'\n')
+        {
+            return Err(error_response(
+                400,
+                "malformed_request",
+                "An HTTP header is invalid.",
+            ));
+        }
+        parsed_headers.push((name, value));
+        if parsed_headers.len() > 128 {
+            return Err(error_response(
+                400,
+                "too_many_headers",
+                "HTTP requests may not contain more than 128 headers.",
+            ));
         }
     }
-    let body = &request[header_end + 4..];
-    if body.len() != content_length {
-        return error_response(
+    let parsed = HttpRequest {
+        method,
+        path,
+        headers: parsed_headers,
+        body: &request[header_end + 4..],
+    };
+    let Some(host) = parsed.unique_header("host")? else {
+        return Err(error_response(
+            400,
+            "missing_host",
+            "HTTP/1.1 requests require exactly one Host header.",
+        ));
+    };
+    if host.is_empty() {
+        return Err(error_response(
+            400,
+            "missing_host",
+            "The Host header may not be empty.",
+        ));
+    }
+    parsed.unique_header("origin")?;
+    parsed.unique_header("cookie")?;
+    parsed.unique_header("x-townlight-csrf")?;
+    let content_length = match parsed.unique_header("content-length")? {
+        Some(value) => value
+            .parse::<usize>()
+            .map_err(|_| error_response(400, "malformed_request", "Content-Length is invalid."))?,
+        None => 0,
+    };
+    if parsed.body.len() != content_length {
+        return Err(error_response(
             400,
             "malformed_request",
             "Content-Length does not match the request body.",
-        );
+        ));
     }
     let body_limit = request_body_limit(method, path);
-    if body.len() > body_limit {
-        return error_response(
+    if parsed.body.len() > body_limit {
+        return Err(error_response(
             413,
             "request_too_large",
             request_too_large_message(method, path),
-        );
+        ));
     }
-    api.handle(method, path, (!body.is_empty()).then_some(body))
+    Ok(parsed)
+}
+
+fn dispatch_http(api: &Api, request: &[u8]) -> ApiResponse {
+    match parse_http_request(request) {
+        Ok(request) => api.handle(
+            request.method,
+            request.path,
+            (!request.body.is_empty()).then_some(request.body),
+        ),
+        Err(response) => response,
+    }
 }
 
 fn request_body_limit(method: &str, path: &str) -> usize {
@@ -5136,6 +5304,7 @@ fn json_response(status: u16, body: Vec<u8>) -> ApiResponse {
         status,
         content_type: "application/json",
         attachment_name: None,
+        headers: Vec::new(),
         body,
     }
 }
@@ -5145,6 +5314,7 @@ fn static_response(status: u16, content_type: &'static str, body: &[u8]) -> ApiR
         status,
         content_type,
         attachment_name: None,
+        headers: Vec::new(),
         body: body.to_vec(),
     }
 }
@@ -5154,6 +5324,7 @@ fn dynamic_response(status: u16, content_type: &'static str, body: Vec<u8>) -> A
         status,
         content_type,
         attachment_name: None,
+        headers: Vec::new(),
         body,
     }
 }
@@ -5208,6 +5379,7 @@ fn attachment_response(
         status,
         content_type,
         attachment_name: Some(attachment_name),
+        headers: Vec::new(),
         body,
     }
 }
@@ -6124,5 +6296,56 @@ mod tests {
         let rejection = read_request_over_tcp(unrelated).unwrap_err();
         assert_eq!(rejection.status, 413);
         let _ = std::fs::remove_file(&database);
+    }
+
+    #[test]
+    fn http_parser_preserves_unambiguous_security_headers() {
+        let request = b"POST /api/v1/auth/login HTTP/1.1\r\nHost: 127.0.0.1:4070\r\nOrigin: http://127.0.0.1:4070\r\nCookie: townlight_csrf_v1=csrf-token\r\nX-TownLight-CSRF: csrf-token\r\nContent-Length: 2\r\n\r\n{}";
+        let parsed = parse_http_request(request).expect("security headers should parse");
+        assert_eq!(parsed.method, "POST");
+        assert_eq!(parsed.path, "/api/v1/auth/login");
+        assert_eq!(
+            parsed.unique_header("host").unwrap(),
+            Some("127.0.0.1:4070")
+        );
+        assert_eq!(
+            parsed.unique_header("origin").unwrap(),
+            Some("http://127.0.0.1:4070")
+        );
+        assert_eq!(
+            parsed.unique_header("x-townlight-csrf").unwrap(),
+            Some("csrf-token")
+        );
+        assert_eq!(parsed.body, b"{}");
+    }
+
+    #[test]
+    fn http_parser_rejects_ambiguous_security_headers_and_absolute_targets() {
+        for request in [
+            b"GET /health HTTP/1.1\r\nHost: one\r\nHost: two\r\n\r\n".as_slice(),
+            b"POST /api/v1/auth/login HTTP/1.1\r\nHost: 127.0.0.1:4070\r\nOrigin: http://127.0.0.1:4070\r\nOrigin: http://evil.invalid\r\nContent-Length: 0\r\n\r\n".as_slice(),
+            b"GET http://127.0.0.1:4070/health HTTP/1.1\r\nHost: 127.0.0.1:4070\r\n\r\n".as_slice(),
+        ] {
+            let rejection = parse_http_request(request).unwrap_err();
+            assert_eq!(rejection.status, 400);
+        }
+    }
+
+    #[test]
+    fn response_writer_emits_only_validated_additional_headers() {
+        let response = json_response(200, br#"{"ok":true}"#.to_vec())
+            .with_header(
+                "Set-Cookie",
+                "townlight_session_v1=opaque; HttpOnly; SameSite=Strict; Path=/api/v1/",
+            )
+            .expect("a bounded cookie header should be valid")
+            .with_header("Cache-Control", "no-store")
+            .expect("a bounded cache header should be valid");
+        assert_eq!(response.headers.len(), 2);
+        assert!(
+            json_response(200, Vec::new())
+                .with_header("Set-Cookie", "safe=value\r\nX-Injected: true")
+                .is_err()
+        );
     }
 }
