@@ -1,15 +1,20 @@
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::io::{Read, Write};
+use std::net::UdpSocket;
 use std::net::{TcpListener, TcpStream};
+use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::process::Stdio;
 use std::sync::{
-    Arc,
+    Arc, Mutex,
     atomic::{AtomicBool, AtomicUsize, Ordering},
 };
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
+use station_alerting::probe_system_resources;
 use station_cg::{
     CgAuditEvent, CgBoard, CgBulletin, CgFeedItem, CgFeedItemApproval, CgFeedSource, CgZoneConfig,
     built_in_templates,
@@ -20,10 +25,16 @@ use station_domain::{
     derive_runtime_safe_to_air, redact_alert_channel_target, validate_alert_channel_target,
 };
 use station_live::{LiveSource, LiveSourceWriteError, TakeoverSession, TakeoverState};
+use station_maintenance::{read_active_slot_receipt, verify_active_application};
 use station_media_lifecycle::{
     AssetLoudnessAnalysis, AssetReadinessView, IngestJobStatus, IngestSourceKind,
     LoudnessGateStatus, MediaIngestJob, MissingMediaAlert, ReadinessDashboard, ReadinessState,
     TranscodeJobStatus, WatchFolderConfig,
+};
+use station_readiness::{
+    BackupProbeInput, CapabilitySupport, ClockProbeInput, ClockSyncStatus, EngineProbeInput,
+    HardwareProbeInput, NetworkProbeInput, ReadinessState as StationReadinessState,
+    ReleaseProbeInput, StationBoxProbeInput, StationBoxProfile, derive_station_box_profile,
 };
 use station_schedule::{
     AssetReadiness, ChannelConfiguration, DispatchStatus, MediaAsset, OUTPUT_PROFILES,
@@ -42,6 +53,7 @@ const OPERATOR_STYLES: &[u8] = include_bytes!("../../../web/operator/dist/operat
 const MAX_CONCURRENT_REQUESTS: usize = 16;
 const MAX_SMALL_REQUEST_BODY: usize = 65_536;
 const MAX_CG_IMAGE_BODY: usize = 8 * 1024 * 1024;
+const STATION_BOX_CACHE_TTL: Duration = Duration::from_secs(60);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -310,6 +322,8 @@ pub struct Api {
     storage: StationStore,
     database_path: PathBuf,
     application_directory: PathBuf,
+    station_box_probe_override: Option<StationBoxProbeInput>,
+    station_box_cache: Arc<Mutex<Option<(Instant, StationBoxProfile)>>>,
 }
 
 impl Api {
@@ -325,11 +339,41 @@ impl Api {
         database_path: impl AsRef<Path>,
         application_directory: impl AsRef<Path>,
     ) -> Result<Self, String> {
+        Self::open_with_application_directory_and_cache(
+            database_path,
+            application_directory,
+            Arc::new(Mutex::new(None)),
+        )
+    }
+
+    fn open_with_application_directory_and_cache(
+        database_path: impl AsRef<Path>,
+        application_directory: impl AsRef<Path>,
+        station_box_cache: Arc<Mutex<Option<(Instant, StationBoxProfile)>>>,
+    ) -> Result<Self, String> {
         let database_path = database_path.as_ref().to_path_buf();
         Ok(Self {
             storage: StationStore::open(&database_path)?,
             database_path,
             application_directory: application_directory.as_ref().to_path_buf(),
+            station_box_probe_override: None,
+            station_box_cache,
+        })
+    }
+
+    #[cfg(test)]
+    fn open_with_station_box_probe(
+        database_path: impl AsRef<Path>,
+        application_directory: impl AsRef<Path>,
+        probe: StationBoxProbeInput,
+    ) -> Result<Self, String> {
+        let database_path = database_path.as_ref().to_path_buf();
+        Ok(Self {
+            storage: StationStore::open(&database_path)?,
+            database_path,
+            application_directory: application_directory.as_ref().to_path_buf(),
+            station_box_probe_override: Some(probe),
+            station_box_cache: Arc::new(Mutex::new(None)),
         })
     }
 
@@ -360,6 +404,8 @@ impl Api {
                 Err(message) => error_response(500, "storage_error", &message),
             },
             ("GET", "/api/v1/commissioning/report") => self.commissioning_report(),
+            ("GET", "/api/v1/station-box-profile") => self.station_box_profile(false),
+            ("GET", "/api/v1/station-box-profile/readiness") => self.station_box_profile(true),
             ("PUT", "/api/v1/station") => self.put_profile(body),
             ("POST", "/api/v1/assets/ingest") => self.ingest_media(body),
             ("GET", "/api/v1/assets/readiness-dashboard") => self.readiness_dashboard(),
@@ -545,10 +591,15 @@ impl Api {
             .storage
             .write_profile(&command.profile, command.expected_revision)
         {
-            Ok(document) => json_response(
-                200,
-                serde_json::to_vec(&document).expect("serializing a profile cannot fail"),
-            ),
+            Ok(document) => {
+                if let Ok(mut cache) = self.station_box_cache.lock() {
+                    *cache = None;
+                }
+                json_response(
+                    200,
+                    serde_json::to_vec(&document).expect("serializing a profile cannot fail"),
+                )
+            }
             Err(ProfileWriteError::Conflict(current_revision)) => error_response(
                 409,
                 "revision_conflict",
@@ -1387,6 +1438,56 @@ impl Api {
             ),
             Err(message) => error_response(500, "runtime_state_invalid", message),
         }
+    }
+
+    fn station_box_profile(&self, readiness_only: bool) -> ApiResponse {
+        let profile = match self.cached_station_box_profile() {
+            Ok(profile) => profile,
+            Err(message) => return error_response(500, "readiness_probe_failed", &message),
+        };
+        if readiness_only {
+            json_response(
+                200,
+                serde_json::to_vec(&profile.peg_readiness)
+                    .expect("serializing StationBox readiness cannot fail"),
+            )
+        } else {
+            json_response(
+                200,
+                serde_json::to_vec(&profile)
+                    .expect("serializing the StationBox profile cannot fail"),
+            )
+        }
+    }
+
+    fn cached_station_box_profile(&self) -> Result<StationBoxProfile, String> {
+        let cache_checked_at = Instant::now();
+        let mut cache = self
+            .station_box_cache
+            .lock()
+            .map_err(|_| "the StationBox readiness cache is unavailable".to_string())?;
+        if let Some((_, profile)) = cache.as_ref().filter(|(cached_at, _)| {
+            cache_checked_at.duration_since(*cached_at) <= STATION_BOX_CACHE_TTL
+        }) {
+            return Ok(profile.clone());
+        }
+        let generated_at_unix_ms = match system_time_millis() {
+            Ok(value) => value,
+            Err(message) => return Err(format!("station clock is unavailable: {message}")),
+        };
+        let probe = match &self.station_box_probe_override {
+            Some(probe) => probe.clone(),
+            None => collect_station_box_probe(
+                &self.storage,
+                &self.database_path,
+                &self.application_directory,
+                generated_at_unix_ms,
+            )?,
+        };
+        let profile = derive_station_box_profile(probe)
+            .map_err(|error| format!("readiness probe is invalid: {error}"))?;
+        *cache = Some((cache_checked_at, profile.clone()));
+        Ok(profile)
     }
 
     fn commissioning_report(&self) -> ApiResponse {
@@ -2964,6 +3065,370 @@ fn cg_delete_response(result: Result<(), CgWriteError>) -> ApiResponse {
     }
 }
 
+const REQUIRED_MEDIA_FACTORIES: [&str; 22] = [
+    "input-selector",
+    "audiotestsrc",
+    "audioconvert",
+    "audioresample",
+    "audiorate",
+    "ebur128level",
+    "videorate",
+    "clocksync",
+    "voaacenc",
+    "aacparse",
+    "uridecodebin",
+    "tsdemux",
+    "openh264dec",
+    "avdec_aac",
+    "openh264enc",
+    "h264parse",
+    "mpegtsmux",
+    "udpsink",
+    "srtsink",
+    "gdkpixbufoverlay",
+    "pngdec",
+    "jpegdec",
+];
+
+fn collect_station_box_probe(
+    storage: &StationStore,
+    database_path: &Path,
+    application_directory: &Path,
+    generated_at_unix_ms: i64,
+) -> Result<StationBoxProbeInput, String> {
+    let resources = probe_system_resources(database_path, generated_at_unix_ms)?;
+    let station = storage.read_profile()?;
+    let engine = probe_installed_engine(application_directory);
+    let network_up = UdpSocket::bind("0.0.0.0:0")
+        .and_then(|socket| {
+            socket.connect("192.0.2.1:9")?;
+            socket.local_addr()
+        })
+        .is_ok_and(|address| !address.ip().is_loopback() && !address.ip().is_unspecified());
+    let data_directory = database_path
+        .parent()
+        .ok_or_else(|| "station database has no parent directory".to_string())?;
+    let (receipt_version, receipt_commit, receipt_verified, receipt_detail) =
+        read_release_receipts(data_directory, application_directory);
+    let backup_writable = resources.backup_volume_writable;
+    let clock_sync = probe_windows_clock_sync();
+    Ok(StationBoxProbeInput {
+        generated_at_unix_ms,
+        probe_collected_at_unix_ms: generated_at_unix_ms,
+        max_probe_age_ms: 300_000,
+        product_version: receipt_version.unwrap_or_else(|| env!("CARGO_PKG_VERSION").into()),
+        source_commit: receipt_commit,
+        station_id: station
+            .as_ref()
+            .map(|value| value.profile.station_id.clone()),
+        station_name: station
+            .as_ref()
+            .map(|value| value.profile.display_name.clone()),
+        timezone: station.as_ref().map(|value| value.profile.timezone.clone()),
+        hardware: HardwareProbeInput {
+            logical_cpus: std::thread::available_parallelism()
+                .map(|value| value.get() as u32)
+                .unwrap_or(1),
+            ram_total_gb: resources
+                .ram_total_gb
+                .ok_or_else(|| "live RAM total is unavailable".to_string())?,
+            media_disk_free_gb: resources
+                .media_volume_free_gb
+                .ok_or_else(|| "live media free space is unavailable".to_string())?,
+        },
+        clock: ClockProbeInput {
+            configured_timezone: station.as_ref().map(|value| value.profile.timezone.clone()),
+            utc_offset_seconds: None,
+            sync_status: clock_sync,
+        },
+        network: NetworkProbeInput {
+            state: if network_up {
+                StationReadinessState::Unknown
+            } else {
+                StationReadinessState::Blocked
+            },
+            hostname: std::env::var("COMPUTERNAME")
+                .ok()
+                .filter(|value| !value.is_empty()),
+            interface_up: network_up,
+            dns_working: None,
+            // A UDP connect proves route selection only; it does not prove that
+            // packets can reach a headend or remote receiver.
+            outbound_udp: CapabilitySupport::Unknown,
+            outbound_srt: CapabilitySupport::Unknown,
+        },
+        backup: BackupProbeInput {
+            state: if backup_writable {
+                StationReadinessState::Pass
+            } else {
+                StationReadinessState::Blocked
+            },
+            destination_configured: true,
+            writable: Some(backup_writable),
+            detail: Some(if backup_writable {
+                "The managed backup directory passed a synchronized write/read/delete probe.".into()
+            } else {
+                "The managed backup directory failed its write/read/delete probe.".into()
+            }),
+        },
+        release: ReleaseProbeInput {
+            state: if receipt_verified {
+                StationReadinessState::Pass
+            } else {
+                StationReadinessState::Unknown
+            },
+            candidate_verified: receipt_verified,
+            update_available: false,
+            detail: Some(receipt_detail),
+        },
+        engine,
+    })
+}
+
+fn probe_installed_engine(application_directory: &Path) -> EngineProbeInput {
+    let runtime = application_directory.join("runtime").join("gstreamer");
+    let executable = runtime.join("bin").join("gst-inspect-1.0.exe");
+    let required_factories = REQUIRED_MEDIA_FACTORIES
+        .iter()
+        .map(|name| (*name).to_string())
+        .collect::<Vec<_>>();
+    let mut available = BTreeSet::new();
+    let mut version = None;
+    if executable.is_file() {
+        let mut inventory = hidden_command(&executable);
+        configure_gstreamer_command(&mut inventory, &runtime);
+        inventory.arg("--print-plugin-auto-install-info");
+        if let Ok(output) = run_bounded_command(inventory, Duration::from_secs(5), 4 * 1024 * 1024)
+            && output.success
+        {
+            for line in String::from_utf8_lossy(&output.stdout).lines() {
+                if let Some(factory) = line.strip_prefix("element-") {
+                    available.insert(factory.trim().to_string());
+                }
+            }
+        }
+        let mut version_command = hidden_command(&executable);
+        configure_gstreamer_command(&mut version_command, &runtime);
+        version_command.arg("--version");
+        if let Ok(output) = run_bounded_command(version_command, Duration::from_secs(5), 64 * 1024)
+            && output.success
+        {
+            version = String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .find_map(|line| line.trim().strip_prefix("GStreamer ").map(str::to_string));
+        }
+    }
+    let available_factories = required_factories
+        .iter()
+        .filter(|factory| available.contains(factory.as_str()))
+        .cloned()
+        .collect::<Vec<_>>();
+    let available_encoders = ["openh264enc", "mfh264enc", "nvh264enc", "amfh264enc"]
+        .into_iter()
+        .filter(|factory| available.contains(*factory))
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    let base_ready = version.is_some() && available_factories.len() == required_factories.len();
+    let state = if base_ready {
+        StationReadinessState::Pass
+    } else {
+        StationReadinessState::Blocked
+    };
+    EngineProbeInput {
+        gstreamer_version: version,
+        required_factories,
+        available_factories,
+        available_encoders,
+        playout: state.clone(),
+        runtime: state.clone(),
+        output: state,
+        udp: if base_ready {
+            CapabilitySupport::Supported
+        } else {
+            CapabilitySupport::Unknown
+        },
+        srt: if available.contains("srtsink") {
+            CapabilitySupport::Supported
+        } else {
+            CapabilitySupport::Unknown
+        },
+        sdi: CapabilitySupport::Unimplemented,
+        ndi: CapabilitySupport::Unimplemented,
+        interlaced: CapabilitySupport::Unimplemented,
+    }
+}
+
+fn configure_gstreamer_command(command: &mut Command, runtime: &Path) {
+    let plugin_path = runtime.join("lib").join("gstreamer-1.0");
+    let runtime_bin = runtime.join("bin");
+    let mut path = runtime_bin.into_os_string();
+    path.push(";");
+    path.push(std::env::var_os("PATH").unwrap_or_default());
+    command
+        .env("PATH", path)
+        .env("GST_PLUGIN_PATH_1_0", &plugin_path)
+        .env("GST_PLUGIN_SYSTEM_PATH_1_0", plugin_path);
+}
+
+fn probe_windows_clock_sync() -> ClockSyncStatus {
+    let mut command = hidden_command("w32tm.exe");
+    command.args(["/query", "/status"]);
+    // A successful w32tm query means only that status was returned. Its text is
+    // localized and can describe an unsynchronized clock, so do not infer green.
+    let _ = run_bounded_command(command, Duration::from_secs(5), 64 * 1024);
+    ClockSyncStatus::Unknown
+}
+
+fn hidden_command(program: impl AsRef<std::ffi::OsStr>) -> Command {
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    let mut command = Command::new(program);
+    command.creation_flags(CREATE_NO_WINDOW);
+    command
+}
+
+#[derive(Debug)]
+struct BoundedCommandOutput {
+    success: bool,
+    stdout: Vec<u8>,
+}
+
+fn run_bounded_command(
+    mut command: Command,
+    timeout: Duration,
+    max_output_bytes: u64,
+) -> Result<BoundedCommandOutput, String> {
+    command.stdout(Stdio::piped()).stderr(Stdio::null());
+    let mut child = command
+        .spawn()
+        .map_err(|error| format!("could not start readiness command: {error}"))?;
+    let Some(mut stdout) = child.stdout.take() else {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err("readiness command stdout was not captured".into());
+    };
+    let output_limit = usize::try_from(max_output_bytes).unwrap_or(usize::MAX);
+    let (output_sender, output_receiver) = std::sync::mpsc::sync_channel(1);
+    let reader = std::thread::spawn(move || {
+        let mut collected = Vec::new();
+        let mut chunk = [0_u8; 8 * 1024];
+        let result = loop {
+            match stdout.read(&mut chunk) {
+                Ok(0) => break Ok(collected),
+                Ok(read) if read <= output_limit.saturating_sub(collected.len()) => {
+                    collected.extend_from_slice(&chunk[..read]);
+                }
+                Ok(_) => break Err("readiness command output exceeded its byte limit".to_string()),
+                Err(error) => {
+                    break Err(format!("could not read readiness command output: {error}"));
+                }
+            }
+        };
+        let _ = output_sender.send(result);
+    });
+    let started = Instant::now();
+    let mut captured_output = None;
+    let status = loop {
+        match output_receiver.try_recv() {
+            Ok(Ok(output)) => captured_output = Some(output),
+            Ok(Err(message)) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = reader.join();
+                return Err(message);
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => {}
+            Err(std::sync::mpsc::TryRecvError::Disconnected) if captured_output.is_some() => {}
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = reader.join();
+                return Err("readiness command output reader stopped unexpectedly".into());
+            }
+        }
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if started.elapsed() < timeout => {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                // A descendant may have inherited stdout. Detach the bounded
+                // reader instead of allowing that inherited handle to defeat
+                // this request's deadline.
+                drop(reader);
+                return Err("readiness command exceeded its bounded deadline".into());
+            }
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                drop(reader);
+                return Err(format!("could not poll readiness command: {error}"));
+            }
+        }
+    };
+    let stdout = match captured_output {
+        Some(output) => output,
+        None => output_receiver
+            .recv_timeout(Duration::from_secs(1))
+            .map_err(|_| "readiness command output reader did not finish".to_string())??,
+    };
+    reader
+        .join()
+        .map_err(|_| "readiness command output reader panicked".to_string())?;
+    Ok(BoundedCommandOutput {
+        success: status.success(),
+        stdout,
+    })
+}
+
+fn read_release_receipts(
+    data_directory: &Path,
+    application_directory: &Path,
+) -> (Option<String>, Option<String>, bool, String) {
+    let install = read_bounded_json(&data_directory.join("install-receipt.json"));
+    let install_version = install
+        .as_ref()
+        .and_then(|value| value.get("version"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string);
+    let install_commit = install
+        .as_ref()
+        .and_then(|value| value.get("source_commit"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string);
+    let active = read_active_slot_receipt(&data_directory.join("active-slot.json")).ok();
+    let active_version = active
+        .as_ref()
+        .map(|receipt| receipt.active.package_manifest.version.as_str());
+    let active_commit = active
+        .as_ref()
+        .map(|receipt| receipt.active.package_manifest.source_commit.as_str());
+    let application_verified = install_version.as_deref() == active_version
+        && install_commit.as_deref() == active_commit
+        && active.as_ref().is_some_and(|receipt| {
+            verify_active_application(application_directory, &receipt.active).is_ok()
+        });
+    (
+        install_version,
+        install_commit,
+        false,
+        if application_verified {
+            "The install and active-slot receipts agree and both active binaries match their manifest hashes; the private media-runtime hash is not yet live-verified.".into()
+        } else {
+            "A matching install/active-slot receipt pair is not available.".into()
+        },
+    )
+}
+
+fn read_bounded_json(path: &Path) -> Option<serde_json::Value> {
+    let metadata = std::fs::symlink_metadata(path).ok()?;
+    if !metadata.file_type().is_file() || metadata.len() > 65_536 {
+        return None;
+    }
+    serde_json::from_slice(&std::fs::read(path).ok()?).ok()
+}
+
 fn system_time_millis() -> Result<i64, String> {
     let millis = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -3002,7 +3467,12 @@ pub fn serve_until_with_application_directory(
 ) -> Result<(), String> {
     let database_path = database_path.as_ref().to_path_buf();
     let application_directory = application_directory.as_ref().to_path_buf();
-    Api::open_with_application_directory(&database_path, &application_directory)?;
+    let station_box_cache = Arc::new(Mutex::new(None));
+    Api::open_with_application_directory_and_cache(
+        &database_path,
+        &application_directory,
+        Arc::clone(&station_box_cache),
+    )?;
     let active_requests = Arc::new(AtomicUsize::new(0));
     listener
         .set_nonblocking(true)
@@ -3028,12 +3498,14 @@ pub fn serve_until_with_application_directory(
                 }
                 let request_database = database_path.clone();
                 let request_application = application_directory.clone();
+                let request_station_box_cache = Arc::clone(&station_box_cache);
                 let request_count = Arc::clone(&active_requests);
                 std::thread::spawn(move || {
                     let _guard = ActiveRequestGuard(request_count);
-                    let result = Api::open_with_application_directory(
+                    let result = Api::open_with_application_directory_and_cache(
                         &request_database,
                         &request_application,
+                        request_station_box_cache,
                     )
                     .and_then(|api| serve_stream(&mut stream, &api));
                     if let Err(error) = result {
@@ -3435,6 +3907,118 @@ mod tests {
         let result = read_http_request(&mut stream);
         sender.join().unwrap();
         result
+    }
+
+    fn station_box_probe() -> StationBoxProbeInput {
+        StationBoxProbeInput {
+            generated_at_unix_ms: 1_777_000_000_000,
+            probe_collected_at_unix_ms: 1_777_000_000_000,
+            max_probe_age_ms: 300_000,
+            product_version: "0.1.0".into(),
+            source_commit: Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into()),
+            station_id: Some("3f5f721f-96c7-48b1-b061-1bf1ad1e62c2".into()),
+            station_name: Some("KTLT".into()),
+            timezone: Some("America/Denver".into()),
+            hardware: HardwareProbeInput {
+                logical_cpus: 8,
+                ram_total_gb: 16.0,
+                media_disk_free_gb: 200.0,
+            },
+            engine: EngineProbeInput {
+                gstreamer_version: Some("1.28.6".into()),
+                required_factories: vec![
+                    "input-selector".into(),
+                    "mpegtsmux".into(),
+                    "udpsink".into(),
+                ],
+                available_factories: vec![
+                    "input-selector".into(),
+                    "mpegtsmux".into(),
+                    "udpsink".into(),
+                ],
+                available_encoders: vec!["openh264enc".into()],
+                playout: StationReadinessState::Pass,
+                runtime: StationReadinessState::Pass,
+                output: StationReadinessState::Pass,
+                udp: CapabilitySupport::Supported,
+                srt: CapabilitySupport::Supported,
+                sdi: CapabilitySupport::Unimplemented,
+                ndi: CapabilitySupport::Unimplemented,
+                interlaced: CapabilitySupport::Unimplemented,
+            },
+            clock: ClockProbeInput {
+                configured_timezone: Some("America/Denver".into()),
+                utc_offset_seconds: None,
+                sync_status: ClockSyncStatus::Synchronized,
+            },
+            network: NetworkProbeInput {
+                state: StationReadinessState::Pass,
+                hostname: Some("station-one".into()),
+                interface_up: true,
+                dns_working: Some(true),
+                outbound_udp: CapabilitySupport::Supported,
+                outbound_srt: CapabilitySupport::Supported,
+            },
+            backup: BackupProbeInput {
+                state: StationReadinessState::Pass,
+                destination_configured: true,
+                writable: Some(true),
+                detail: Some("Backup probe passed.".into()),
+            },
+            release: ReleaseProbeInput {
+                state: StationReadinessState::Pass,
+                candidate_verified: true,
+                update_available: false,
+                detail: Some("Receipts match.".into()),
+            },
+        }
+    }
+
+    #[test]
+    fn station_box_routes_share_one_cached_authority_without_public_fact_injection() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let database = std::env::temp_dir().join(format!(
+            "townlight-station-box-api-{}-{nonce}.db",
+            std::process::id()
+        ));
+        let application = database.with_extension("application");
+        std::fs::create_dir_all(&application).unwrap();
+        let api =
+            Api::open_with_station_box_probe(&database, &application, station_box_probe()).unwrap();
+
+        let full = api.handle("GET", "/api/v1/station-box-profile", None);
+        assert_eq!(full.status, 200);
+        let full: serde_json::Value = serde_json::from_slice(&full.body).unwrap();
+        assert_eq!(full["schema_version"], 1);
+        assert_eq!(full["peg_readiness"]["color"], "yellow");
+        assert_eq!(full["engine"]["sdi"], "unimplemented");
+        assert!(api.station_box_cache.lock().unwrap().is_some());
+
+        let rollup = api.handle("GET", "/api/v1/station-box-profile/readiness", None);
+        assert_eq!(rollup.status, 200);
+        let rollup: serde_json::Value = serde_json::from_slice(&rollup.body).unwrap();
+        assert_eq!(rollup, full["peg_readiness"]);
+
+        let profile = br#"{"station_id":"3f5f721f-96c7-48b1-b061-1bf1ad1e62c2","display_name":"KTLT","timezone":"America/Denver"}"#;
+        assert_eq!(
+            api.handle("PUT", "/api/v1/station", Some(profile)).status,
+            200
+        );
+        assert!(api.station_box_cache.lock().unwrap().is_none());
+
+        std::fs::remove_dir_all(application).unwrap();
+        let _ = std::fs::remove_file(database);
+    }
+
+    #[test]
+    fn readiness_subprocess_output_is_rejected_at_the_configured_byte_limit() {
+        let mut command = hidden_command("cmd.exe");
+        command.args(["/D", "/S", "/C", "echo 0123456789"]);
+        let error = run_bounded_command(command, Duration::from_secs(2), 4).unwrap_err();
+        assert!(error.contains("output exceeded its byte limit"));
     }
 
     #[test]

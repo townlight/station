@@ -21,7 +21,7 @@ Status vocabulary:
 
 | ID | Capability | Product status | Current truth | Remaining product work |
 |---|---|---|---|---|
-| S1 | StationBox profile and reference station | partial | Station identity, display name, IANA timezone, resource samples, and a narrow commissioning report exist. | Computed live hardware/engine/clock/network/backup/release profile, tier qualification, and PEG readiness roll-up. |
+| S1 | StationBox profile and reference station | partial | One typed authority now derives live hardware, installed-engine factories, clock, route selection, backup, release-integrity limits, output gaps, and a fail-closed PEG readiness roll-up. | Reference hardware tiers, verified time/outbound/headend probes, authenticated installed-runtime manifest, operator workflow, and machine proof. |
 | S2 | Headend handoff | partial | Typed 360p30 and 720p59.94 profiles, UDP/SRT outputs, redundant fanout, per-sink loudness, and local transport proof exist. | Full headend profile catalog, 1080i59.94 and 480i29.97, readiness/device probes, SDI/NDI paths, and headend workflow. |
 | S3 | Commissioning | partial | Identity/timezone setup, channel configuration, authoritative core checks, and first-air guidance exist. | Full StationBox checks, headend/output setup, bounded output proof, final evidence report, and phone-first completion workflow. |
 | S4 | Commit to air | implemented | Draft, prepare, conflict/missing-media checks, operator approval, durable report, and acknowledged worker dispatch exist. | Same-candidate clean-machine and field proof; richer schedule authoring belongs to S19. |

@@ -1672,7 +1672,9 @@ dependencies = [
  "station-domain",
  "station-ingest",
  "station-live",
+ "station-maintenance",
  "station-media-lifecycle",
+ "station-readiness",
  "station-schedule",
  "station-storage",
  "station-support",
@@ -1817,6 +1819,13 @@ dependencies = [
  "station-runtime",
  "station-schedule",
  "station-storage",
+]
+
+[[package]]
+name = "station-readiness"
+version = "0.1.0"
+dependencies = [
+ "serde",
 ]
 
 [[package]]

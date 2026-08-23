@@ -17,6 +17,7 @@ members = [
     "crates/station-maintenance",
     "crates/station-orchestration",
     "crates/station-runtime",
+    "crates/station-readiness",
     "crates/station-schedule",
     "crates/station-live",
     "crates/station-feed-normalization",
@@ -65,6 +66,7 @@ station-media-protocol = { path = "crates/station-media-protocol" }
 station-maintenance = { path = "crates/station-maintenance" }
 station-orchestration = { path = "crates/station-orchestration" }
 station-runtime = { path = "crates/station-runtime" }
+station-readiness = { path = "crates/station-readiness" }
 station-schedule = { path = "crates/station-schedule" }
 station-feed-normalization = { path = "crates/station-feed-normalization" }
 station-feed-fetch = { path = "crates/station-feed-fetch" }
