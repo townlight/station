@@ -10,6 +10,7 @@ use std::sync::{
 use std::time::Duration;
 
 use config::{DaemonConfig, LaunchMode};
+use station_api::{OrchestrationHealth, OrchestrationHealthStatus};
 use station_orchestration::CandidateAuthority;
 use station_readiness::CandidateIdentity;
 use station_storage::StationStore;
@@ -24,6 +25,10 @@ use windows_service::service_dispatcher;
 
 const SERVICE_NAME: &str = "TownLightStation";
 const SERVICE_TYPE: ServiceType = ServiceType::OWN_PROCESS;
+const ORCHESTRATION_STALE_AFTER: Duration = Duration::from_secs(45);
+const ORCHESTRATION_STARTUP_TIMEOUT: Duration = Duration::from_secs(60);
+const ORCHESTRATION_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(35);
+const WORKER_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(35);
 static SERVICE_CONFIG: OnceLock<DaemonConfig> = OnceLock::new();
 
 struct InstalledCandidateAuthority {
@@ -67,19 +72,50 @@ fn run_console(config: DaemonConfig) -> Result<(), String> {
     let proof_candidate_authority =
         installed_candidate_authority(&config.database, update_application.clone())?;
     let stop = Arc::new(AtomicBool::new(false));
+    let orchestration_health = Arc::new(OrchestrationHealth::new(ORCHESTRATION_STALE_AFTER));
+    let orchestration_database = config.database.clone();
+    let orchestration = spawn_supervised_orchestration(
+        Arc::clone(&stop),
+        Arc::clone(&orchestration_health),
+        None,
+        move |orchestration_stop, health| {
+            let reconciled_health = Arc::clone(&health);
+            station_orchestration::run_until_with_candidate_authority_and_liveness(
+                &orchestration_database,
+                &worker_executable,
+                orchestration_stop,
+                Some(proof_candidate_authority),
+                move || health.mark_alive(),
+                move || reconciled_health.mark_progress(),
+            )
+            .map_err(|error| format!("channel orchestration stopped: {error:?}"))
+        },
+    )?;
+    if let Err(startup_error) =
+        wait_for_orchestration_ready(&orchestration_health, &stop, ORCHESTRATION_STARTUP_TIMEOUT)
+    {
+        stop.store(true, Ordering::Release);
+        let cleanup = join_worker(
+            "channel orchestration",
+            orchestration,
+            orchestration_join_timeout(&orchestration_health),
+        );
+        return Err(append_cleanup_error(startup_error, cleanup.result));
+    }
     let feed_receipt = config.database.with_file_name("feed-fetch-error.txt");
     let feed_fetch =
-        spawn_feed_fetch_worker(&config.database, Arc::clone(&stop), Some(feed_receipt))?;
-    let orchestration_database = config.database.clone();
-    let orchestration_stop = Arc::clone(&stop);
-    let orchestration = std::thread::spawn(move || {
-        station_orchestration::run_until_with_candidate_authority(
-            &orchestration_database,
-            &worker_executable,
-            orchestration_stop,
-            Some(proof_candidate_authority),
-        )
-    });
+        match spawn_feed_fetch_worker(&config.database, Arc::clone(&stop), Some(feed_receipt)) {
+            Ok(worker) => worker,
+            Err(error) => {
+                stop.store(true, Ordering::Release);
+                let cleanup = join_worker(
+                    "channel orchestration",
+                    orchestration,
+                    orchestration_join_timeout(&orchestration_health),
+                );
+                return Err(append_cleanup_error(error, cleanup.result));
+            }
+        };
     let ingest_database = config.database.clone();
     let ingest_library = media_library(&config.database);
     let ingest_stop = Arc::clone(&stop);
@@ -99,39 +135,26 @@ fn run_console(config: DaemonConfig) -> Result<(), String> {
         "TownLight Station is listening on http://{}",
         config.address
     );
-    let result = station_api::serve_until_with_application_directory(
+    let result = station_api::serve_until_with_application_directory_and_health(
         listener,
         &config.database,
         api_application,
         Arc::clone(&stop),
+        Arc::clone(&orchestration_health),
     );
     stop.store(true, Ordering::Release);
-    let orchestration_result = orchestration
-        .join()
-        .map_err(|_| "channel orchestration thread panicked".to_string())?
-        .map_err(|error| format!("channel orchestration stopped: {error:?}"));
-    let ingest_result = ingest
-        .join()
-        .map_err(|_| "media ingest thread panicked".to_string())?
-        .map_err(|error| format!("media ingest stopped: {error:?}"));
-    let alerting_result = alerting
-        .join()
-        .map_err(|_| "operator alerting thread panicked".to_string())?
-        .map_err(|error| format!("operator alerting stopped: {error}"));
-    let update_result = updates
-        .join()
-        .map_err(|_| "update monitor thread panicked".to_string())?
-        .map_err(|error| format!("update monitor stopped: {error}"));
-    let feed_fetch_result = feed_fetch
-        .join()
-        .map_err(|_| "feed fetch worker thread panicked".to_string())?
-        .map_err(|error| format!("feed fetch worker stopped: {error}"));
-    result
-        .and(orchestration_result)
-        .and(ingest_result)
-        .and(alerting_result)
-        .and(update_result)
-        .and(feed_fetch_result)
+    let worker_cleanup = combine_worker_joins(vec![
+        join_worker(
+            "channel orchestration",
+            orchestration,
+            orchestration_join_timeout(&orchestration_health),
+        ),
+        join_worker("media ingest", ingest, WORKER_SHUTDOWN_TIMEOUT),
+        join_worker("operator alerting", alerting, WORKER_SHUTDOWN_TIMEOUT),
+        join_worker("update monitor", updates, WORKER_SHUTDOWN_TIMEOUT),
+        join_worker("feed fetch worker", feed_fetch, WORKER_SHUTDOWN_TIMEOUT),
+    ]);
+    result.and(worker_cleanup.result)
 }
 
 fn run_dispatcher(config: DaemonConfig) -> Result<(), String> {
@@ -149,11 +172,13 @@ fn service_main(_arguments: Vec<OsString>) {
     if let Err(message) = run_service(config.clone()) {
         let receipt = config.database.with_file_name("stationd-startup-error.txt");
         let _ = std::fs::write(receipt, message);
+        std::process::exit(1);
     }
 }
 
 fn run_service(config: DaemonConfig) -> Result<(), String> {
     let stop = Arc::new(AtomicBool::new(false));
+    let orchestration_health = Arc::new(OrchestrationHealth::new(ORCHESTRATION_STALE_AFTER));
     let handler_stop = Arc::clone(&stop);
     let status_slot: Arc<Mutex<Option<ServiceStatusHandle>>> = Arc::new(Mutex::new(None));
     let handler_status = Arc::clone(&status_slot);
@@ -186,7 +211,7 @@ fn run_service(config: DaemonConfig) -> Result<(), String> {
             ServiceState::StartPending,
             ServiceControlAccept::empty(),
             1,
-            Duration::from_secs(10),
+            ORCHESTRATION_STARTUP_TIMEOUT + Duration::from_secs(5),
             ServiceExitCode::NO_ERROR,
         ))
         .map_err(|error| error.to_string())?;
@@ -210,24 +235,68 @@ fn run_service(config: DaemonConfig) -> Result<(), String> {
     let api_application = update_application.clone();
     let proof_candidate_authority =
         installed_candidate_authority(&config.database, update_application.clone())?;
+    let orchestration_database = config.database.clone();
+    let orchestration_receipt = config.database.with_file_name("orchestration-error.txt");
+    let orchestration = spawn_supervised_orchestration(
+        Arc::clone(&stop),
+        Arc::clone(&orchestration_health),
+        Some(orchestration_receipt),
+        move |orchestration_stop, health| {
+            let reconciled_health = Arc::clone(&health);
+            station_orchestration::run_until_with_candidate_authority_and_liveness(
+                &orchestration_database,
+                &worker_executable,
+                orchestration_stop,
+                Some(proof_candidate_authority),
+                move || health.mark_alive(),
+                move || reconciled_health.mark_progress(),
+            )
+            .map_err(|error| format!("channel orchestration stopped: {error:?}"))
+        },
+    )?;
+    if let Err(startup_error) =
+        wait_for_orchestration_ready(&orchestration_health, &stop, ORCHESTRATION_STARTUP_TIMEOUT)
+    {
+        stop.store(true, Ordering::Release);
+        let cleanup = join_worker(
+            "channel orchestration",
+            orchestration,
+            orchestration_join_timeout(&orchestration_health),
+        );
+        if cleanup.joined {
+            let _ = status.set_service_status(service_status(
+                ServiceState::Stopped,
+                ServiceControlAccept::empty(),
+                0,
+                Duration::ZERO,
+                ServiceExitCode::ServiceSpecific(1),
+            ));
+        }
+        return Err(append_cleanup_error(startup_error, cleanup.result));
+    }
     let feed_receipt = config.database.with_file_name("feed-fetch-error.txt");
     let feed_fetch =
-        spawn_feed_fetch_worker(&config.database, Arc::clone(&stop), Some(feed_receipt))?;
-    let orchestration_database = config.database.clone();
-    let orchestration_stop = Arc::clone(&stop);
-    let orchestration_receipt = config.database.with_file_name("orchestration-error.txt");
-    let orchestration = std::thread::spawn(move || {
-        let result = station_orchestration::run_until_with_candidate_authority(
-            &orchestration_database,
-            &worker_executable,
-            orchestration_stop,
-            Some(proof_candidate_authority),
-        );
-        if let Err(error) = &result {
-            let _ = std::fs::write(&orchestration_receipt, format!("{error:?}"));
-        }
-        result
-    });
+        match spawn_feed_fetch_worker(&config.database, Arc::clone(&stop), Some(feed_receipt)) {
+            Ok(worker) => worker,
+            Err(error) => {
+                stop.store(true, Ordering::Release);
+                let cleanup = join_worker(
+                    "channel orchestration",
+                    orchestration,
+                    orchestration_join_timeout(&orchestration_health),
+                );
+                if cleanup.joined {
+                    let _ = status.set_service_status(service_status(
+                        ServiceState::Stopped,
+                        ServiceControlAccept::empty(),
+                        0,
+                        Duration::ZERO,
+                        ServiceExitCode::ServiceSpecific(1),
+                    ));
+                }
+                return Err(append_cleanup_error(error, cleanup.result));
+            }
+        };
     let ingest_database = config.database.clone();
     let ingest_library = media_library(&config.database);
     let ingest_stop = Arc::clone(&stop);
@@ -263,48 +332,59 @@ fn run_service(config: DaemonConfig) -> Result<(), String> {
         }
         result
     });
-    status
-        .set_service_status(service_status(
-            ServiceState::Running,
-            ServiceControlAccept::STOP | ServiceControlAccept::SHUTDOWN,
-            0,
-            Duration::ZERO,
-            ServiceExitCode::NO_ERROR,
-        ))
-        .map_err(|error| error.to_string())?;
-    let result = station_api::serve_until_with_application_directory(
+    if let Err(error) = status.set_service_status(service_status(
+        ServiceState::Running,
+        ServiceControlAccept::STOP | ServiceControlAccept::SHUTDOWN,
+        0,
+        Duration::ZERO,
+        ServiceExitCode::NO_ERROR,
+    )) {
+        stop.store(true, Ordering::Release);
+        let cleanup = combine_worker_joins(vec![
+            join_worker(
+                "channel orchestration",
+                orchestration,
+                orchestration_join_timeout(&orchestration_health),
+            ),
+            join_worker("media ingest", ingest, WORKER_SHUTDOWN_TIMEOUT),
+            join_worker("operator alerting", alerting, WORKER_SHUTDOWN_TIMEOUT),
+            join_worker("update monitor", updates, WORKER_SHUTDOWN_TIMEOUT),
+            join_worker("feed fetch worker", feed_fetch, WORKER_SHUTDOWN_TIMEOUT),
+        ]);
+        if cleanup.joined {
+            let _ = status.set_service_status(service_status(
+                ServiceState::Stopped,
+                ServiceControlAccept::empty(),
+                0,
+                Duration::ZERO,
+                ServiceExitCode::ServiceSpecific(1),
+            ));
+        }
+        return Err(append_cleanup_error(error.to_string(), cleanup.result));
+    }
+    let result = station_api::serve_until_with_application_directory_and_health(
         listener,
         &config.database,
         api_application,
         Arc::clone(&stop),
+        Arc::clone(&orchestration_health),
     );
     stop.store(true, Ordering::Release);
-    let orchestration_result = orchestration
-        .join()
-        .map_err(|_| "channel orchestration thread panicked".to_string())?
-        .map_err(|error| format!("channel orchestration stopped: {error:?}"));
-    let ingest_result = ingest
-        .join()
-        .map_err(|_| "media ingest thread panicked".to_string())?
-        .map_err(|error| format!("media ingest stopped: {error:?}"));
-    let alerting_result = alerting
-        .join()
-        .map_err(|_| "operator alerting thread panicked".to_string())?
-        .map_err(|error| format!("operator alerting stopped: {error}"));
-    let update_result = updates
-        .join()
-        .map_err(|_| "update monitor thread panicked".to_string())?
-        .map_err(|error| format!("update monitor stopped: {error}"));
-    let feed_fetch_result = feed_fetch
-        .join()
-        .map_err(|_| "feed fetch worker thread panicked".to_string())?
-        .map_err(|error| format!("feed fetch worker stopped: {error}"));
-    let result = result
-        .and(orchestration_result)
-        .and(ingest_result)
-        .and(alerting_result)
-        .and(update_result)
-        .and(feed_fetch_result);
+    let worker_cleanup = combine_worker_joins(vec![
+        join_worker(
+            "channel orchestration",
+            orchestration,
+            orchestration_join_timeout(&orchestration_health),
+        ),
+        join_worker("media ingest", ingest, WORKER_SHUTDOWN_TIMEOUT),
+        join_worker("operator alerting", alerting, WORKER_SHUTDOWN_TIMEOUT),
+        join_worker("update monitor", updates, WORKER_SHUTDOWN_TIMEOUT),
+        join_worker("feed fetch worker", feed_fetch, WORKER_SHUTDOWN_TIMEOUT),
+    ]);
+    let result = result.and(worker_cleanup.result);
+    if !worker_cleanup.joined {
+        return result;
+    }
     let exit_code = if result.is_ok() {
         ServiceExitCode::NO_ERROR
     } else {
@@ -383,6 +463,130 @@ fn media_library(database: &std::path::Path) -> std::path::PathBuf {
         .join("media")
 }
 
+fn spawn_supervised_orchestration<F>(
+    stop: Arc<AtomicBool>,
+    health: Arc<OrchestrationHealth>,
+    receipt: Option<PathBuf>,
+    run: F,
+) -> Result<std::thread::JoinHandle<Result<(), String>>, String>
+where
+    F: FnOnce(Arc<AtomicBool>, Arc<OrchestrationHealth>) -> Result<(), String> + Send + 'static,
+{
+    let worker_stop = Arc::clone(&stop);
+    let worker_health = Arc::clone(&health);
+    std::thread::Builder::new()
+        .name("station-orchestration".into())
+        .spawn(move || {
+            let result = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                run(Arc::clone(&worker_stop), Arc::clone(&worker_health))
+            })) {
+                Ok(Ok(())) if worker_stop.load(Ordering::Acquire) => Ok(()),
+                Ok(Ok(())) => Err("channel orchestration stopped unexpectedly".into()),
+                Ok(Err(error)) => Err(error),
+                Err(_) => Err("channel orchestration thread panicked".into()),
+            };
+            if let Err(error) = &result {
+                worker_health.mark_failed();
+                worker_stop.store(true, Ordering::Release);
+                if let Some(receipt) = receipt {
+                    let _ = std::fs::write(receipt, error);
+                }
+            }
+            result
+        })
+        .map_err(|error| format!("could not start channel orchestration thread: {error}"))
+}
+
+fn wait_for_orchestration_ready(
+    health: &OrchestrationHealth,
+    stop: &AtomicBool,
+    timeout: Duration,
+) -> Result<(), String> {
+    let started = std::time::Instant::now();
+    loop {
+        if stop.load(Ordering::Acquire) {
+            return Err(
+                "service stop was requested before channel orchestration became ready".into(),
+            );
+        }
+        match health.status() {
+            OrchestrationHealthStatus::Ready => return Ok(()),
+            OrchestrationHealthStatus::Failed => {
+                return Err("channel orchestration failed before service readiness".into());
+            }
+            OrchestrationHealthStatus::Stale => {
+                return Err("channel orchestration became stale before service readiness".into());
+            }
+            OrchestrationHealthStatus::Starting => {}
+        }
+        if started.elapsed() >= timeout {
+            health.mark_failed();
+            stop.store(true, Ordering::Release);
+            return Err(
+                "channel orchestration did not become ready before its startup deadline".into(),
+            );
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+fn orchestration_join_timeout(health: &OrchestrationHealth) -> Duration {
+    if health.status() == OrchestrationHealthStatus::Stale {
+        Duration::from_secs(1)
+    } else {
+        ORCHESTRATION_SHUTDOWN_TIMEOUT
+    }
+}
+
+struct WorkerJoinOutcome {
+    joined: bool,
+    result: Result<(), String>,
+}
+
+fn combine_worker_joins(outcomes: Vec<WorkerJoinOutcome>) -> WorkerJoinOutcome {
+    let joined = outcomes.iter().all(|outcome| outcome.joined);
+    let result = outcomes
+        .into_iter()
+        .try_fold((), |(), outcome| outcome.result);
+    WorkerJoinOutcome { joined, result }
+}
+
+fn append_cleanup_error(primary: String, cleanup: Result<(), String>) -> String {
+    match cleanup {
+        Ok(()) => primary,
+        Err(cleanup_error) => format!("{primary}; {cleanup_error}"),
+    }
+}
+
+fn join_worker<E>(
+    name: &'static str,
+    worker: std::thread::JoinHandle<Result<(), E>>,
+    timeout: Duration,
+) -> WorkerJoinOutcome
+where
+    E: std::fmt::Debug + Send + 'static,
+{
+    let started = std::time::Instant::now();
+    while !worker.is_finished() {
+        if started.elapsed() >= timeout {
+            return WorkerJoinOutcome {
+                joined: false,
+                result: Err(format!("{name} did not stop before its shutdown deadline")),
+            };
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let result = match worker.join() {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(error)) => Err(format!("{name} stopped: {error:?}")),
+        Err(_) => Err(format!("{name} thread panicked")),
+    };
+    WorkerJoinOutcome {
+        joined: true,
+        result,
+    }
+}
+
 fn spawn_feed_fetch_worker(
     database: &std::path::Path,
     stop: Arc<AtomicBool>,
@@ -454,6 +658,77 @@ fn fatal(message: &str) -> ! {
 mod startup_tests {
     use super::*;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn orchestration_error_fails_current_boot_health_and_requests_service_stop() {
+        let stop = Arc::new(AtomicBool::new(false));
+        let health = Arc::new(OrchestrationHealth::new(Duration::from_secs(45)));
+
+        let worker = spawn_supervised_orchestration(
+            Arc::clone(&stop),
+            Arc::clone(&health),
+            None,
+            |_stop, _health| Err("injected orchestration failure".into()),
+        )
+        .unwrap();
+        let result = worker.join().unwrap();
+
+        assert_eq!(result, Err("injected orchestration failure".into()));
+        assert_eq!(health.status(), OrchestrationHealthStatus::Failed);
+        assert!(stop.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn orchestration_panic_fails_current_boot_health_and_requests_service_stop() {
+        let stop = Arc::new(AtomicBool::new(false));
+        let health = Arc::new(OrchestrationHealth::new(Duration::from_secs(45)));
+
+        let worker = spawn_supervised_orchestration(
+            Arc::clone(&stop),
+            Arc::clone(&health),
+            None,
+            |_stop, _health| panic!("injected orchestration panic"),
+        )
+        .unwrap();
+        let result = worker.join().unwrap();
+
+        assert_eq!(result, Err("channel orchestration thread panicked".into()));
+        assert_eq!(health.status(), OrchestrationHealthStatus::Failed);
+        assert!(stop.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn service_readiness_requires_current_boot_orchestration_progress() {
+        let starting = OrchestrationHealth::new(Duration::from_secs(45));
+        let stop = AtomicBool::new(false);
+
+        assert!(wait_for_orchestration_ready(&starting, &stop, Duration::ZERO).is_err());
+        assert_eq!(starting.status(), OrchestrationHealthStatus::Failed);
+
+        let ready = OrchestrationHealth::new(Duration::from_secs(45));
+        ready.mark_progress();
+        let running = AtomicBool::new(false);
+        wait_for_orchestration_ready(&ready, &running, Duration::ZERO).unwrap();
+
+        let stopped = AtomicBool::new(true);
+        assert!(wait_for_orchestration_ready(&ready, &stopped, Duration::ZERO).is_err());
+    }
+
+    #[test]
+    fn worker_join_is_bounded_when_the_worker_does_not_stop() {
+        let worker = std::thread::spawn(|| {
+            std::thread::sleep(Duration::from_millis(50));
+            Ok::<(), String>(())
+        });
+
+        let outcome = join_worker("test worker", worker, Duration::ZERO);
+
+        assert!(!outcome.joined);
+        assert_eq!(
+            outcome.result,
+            Err("test worker did not stop before its shutdown deadline".into())
+        );
+    }
 
     #[test]
     fn initializes_a_fresh_database_before_concurrent_subsystems_start() {

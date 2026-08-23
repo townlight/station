@@ -66,6 +66,102 @@ const LOUDNESS_PROOF_MAX_CAPTURE_BYTES: u64 = 256 * 1024 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
+pub enum OrchestrationHealthStatus {
+    Starting,
+    Ready,
+    Failed,
+    Stale,
+}
+
+pub struct OrchestrationHealth {
+    stale_after: Duration,
+    inner: Mutex<OrchestrationHealthInner>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OrchestrationLifecycle {
+    Starting,
+    Ready,
+    Failed,
+}
+
+struct OrchestrationHealthInner {
+    lifecycle: OrchestrationLifecycle,
+    last_progress: Option<Instant>,
+}
+
+impl OrchestrationHealth {
+    pub fn new(stale_after: Duration) -> Self {
+        Self {
+            stale_after,
+            inner: Mutex::new(OrchestrationHealthInner {
+                lifecycle: OrchestrationLifecycle::Starting,
+                last_progress: None,
+            }),
+        }
+    }
+
+    fn ready_without_supervisor() -> Arc<Self> {
+        let health = Arc::new(Self::new(Duration::MAX));
+        health.mark_progress();
+        health
+    }
+
+    pub fn status(&self) -> OrchestrationHealthStatus {
+        self.status_at(Instant::now())
+    }
+
+    pub fn mark_progress(&self) {
+        let mut inner = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if inner.lifecycle != OrchestrationLifecycle::Failed {
+            inner.lifecycle = OrchestrationLifecycle::Ready;
+            inner.last_progress = Some(Instant::now());
+        }
+    }
+
+    pub fn mark_alive(&self) {
+        let mut inner = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if inner.lifecycle == OrchestrationLifecycle::Ready {
+            inner.last_progress = Some(Instant::now());
+        }
+    }
+
+    pub fn mark_failed(&self) {
+        let mut inner = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        inner.lifecycle = OrchestrationLifecycle::Failed;
+    }
+
+    fn status_at(&self, now: Instant) -> OrchestrationHealthStatus {
+        let inner = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match inner.lifecycle {
+            OrchestrationLifecycle::Starting => OrchestrationHealthStatus::Starting,
+            OrchestrationLifecycle::Failed => OrchestrationHealthStatus::Failed,
+            OrchestrationLifecycle::Ready
+                if inner.last_progress.is_some_and(|progress| {
+                    now.saturating_duration_since(progress) > self.stale_after
+                }) =>
+            {
+                OrchestrationHealthStatus::Stale
+            }
+            OrchestrationLifecycle::Ready => OrchestrationHealthStatus::Ready,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
 enum CommissioningCheckStatus {
     Pass,
     Warning,
@@ -400,6 +496,7 @@ pub struct Api {
     application_directory: PathBuf,
     station_box_probe_override: Option<StationBoxProbeInput>,
     station_box_cache: Arc<Mutex<Option<(Instant, StationBoxProfile)>>>,
+    orchestration_health: Arc<OrchestrationHealth>,
 }
 
 impl Api {
@@ -415,10 +512,23 @@ impl Api {
         database_path: impl AsRef<Path>,
         application_directory: impl AsRef<Path>,
     ) -> Result<Self, String> {
+        Self::open_with_application_directory_and_health(
+            database_path,
+            application_directory,
+            OrchestrationHealth::ready_without_supervisor(),
+        )
+    }
+
+    pub fn open_with_application_directory_and_health(
+        database_path: impl AsRef<Path>,
+        application_directory: impl AsRef<Path>,
+        orchestration_health: Arc<OrchestrationHealth>,
+    ) -> Result<Self, String> {
         Self::open_with_application_directory_and_cache(
             database_path,
             application_directory,
             Arc::new(Mutex::new(None)),
+            orchestration_health,
         )
     }
 
@@ -426,6 +536,7 @@ impl Api {
         database_path: impl AsRef<Path>,
         application_directory: impl AsRef<Path>,
         station_box_cache: Arc<Mutex<Option<(Instant, StationBoxProfile)>>>,
+        orchestration_health: Arc<OrchestrationHealth>,
     ) -> Result<Self, String> {
         let database_path = database_path.as_ref().to_path_buf();
         Ok(Self {
@@ -434,6 +545,7 @@ impl Api {
             application_directory: application_directory.as_ref().to_path_buf(),
             station_box_probe_override: None,
             station_box_cache,
+            orchestration_health,
         })
     }
 
@@ -450,6 +562,7 @@ impl Api {
             application_directory: application_directory.as_ref().to_path_buf(),
             station_box_probe_override: Some(probe),
             station_box_cache: Arc::new(Mutex::new(None)),
+            orchestration_health: OrchestrationHealth::ready_without_supervisor(),
         })
     }
 
@@ -464,9 +577,7 @@ impl Api {
             ("GET", "/operator.css") => {
                 static_response(200, "text/css; charset=utf-8", OPERATOR_STYLES)
             }
-            ("GET", "/health") => {
-                json_response(200, br#"{"database":"ready","status":"ready"}"#.to_vec())
-            }
+            ("GET", "/health") => self.health(),
             ("GET", "/api/v1/station") => match self.storage.read_profile() {
                 Ok(Some(profile)) => json_response(
                     200,
@@ -677,6 +788,24 @@ impl Api {
             ("GET", path) if path.starts_with("/api/v1/assets/") => self.read_media_asset(path),
             _ => error_response(404, "not_found", "The requested route does not exist."),
         }
+    }
+
+    fn health(&self) -> ApiResponse {
+        let status = self.orchestration_health.status();
+        let http_status = if status == OrchestrationHealthStatus::Ready {
+            200
+        } else {
+            503
+        };
+        json_response(
+            http_status,
+            serde_json::to_vec(&serde_json::json!({
+                "database": "ready",
+                "orchestration": { "status": status },
+                "status": status,
+            }))
+            .expect("serializing health cannot fail"),
+        )
     }
 
     fn put_profile(&self, body: Option<&[u8]>) -> ApiResponse {
@@ -4181,6 +4310,22 @@ pub fn serve_until_with_application_directory(
     application_directory: impl AsRef<Path>,
     stop: Arc<AtomicBool>,
 ) -> Result<(), String> {
+    serve_until_with_application_directory_and_health(
+        listener,
+        database_path,
+        application_directory,
+        stop,
+        OrchestrationHealth::ready_without_supervisor(),
+    )
+}
+
+pub fn serve_until_with_application_directory_and_health(
+    listener: TcpListener,
+    database_path: impl AsRef<Path>,
+    application_directory: impl AsRef<Path>,
+    stop: Arc<AtomicBool>,
+    orchestration_health: Arc<OrchestrationHealth>,
+) -> Result<(), String> {
     let database_path = database_path.as_ref().to_path_buf();
     let application_directory = application_directory.as_ref().to_path_buf();
     let station_box_cache = Arc::new(Mutex::new(None));
@@ -4188,12 +4333,25 @@ pub fn serve_until_with_application_directory(
         &database_path,
         &application_directory,
         Arc::clone(&station_box_cache),
+        Arc::clone(&orchestration_health),
     )?;
     let active_requests = Arc::new(AtomicUsize::new(0));
     listener
         .set_nonblocking(true)
         .map_err(|error| error.to_string())?;
     while !stop.load(Ordering::Acquire) {
+        match orchestration_health.status() {
+            OrchestrationHealthStatus::Failed => {
+                return Err("channel orchestration failed during the current service boot".into());
+            }
+            OrchestrationHealthStatus::Stale => {
+                return Err(
+                    "channel orchestration stopped making progress during the current service boot"
+                        .into(),
+                );
+            }
+            OrchestrationHealthStatus::Starting | OrchestrationHealthStatus::Ready => {}
+        }
         match listener.accept() {
             Ok((mut stream, _)) => {
                 stream
@@ -4215,6 +4373,7 @@ pub fn serve_until_with_application_directory(
                 let request_database = database_path.clone();
                 let request_application = application_directory.clone();
                 let request_station_box_cache = Arc::clone(&station_box_cache);
+                let request_orchestration_health = Arc::clone(&orchestration_health);
                 let request_count = Arc::clone(&active_requests);
                 std::thread::spawn(move || {
                     let _guard = ActiveRequestGuard(request_count);
@@ -4222,6 +4381,7 @@ pub fn serve_until_with_application_directory(
                         &request_database,
                         &request_application,
                         request_station_box_cache,
+                        request_orchestration_health,
                     )
                     .and_then(|api| serve_stream(&mut stream, &api));
                     if let Err(error) = result {
@@ -4611,6 +4771,154 @@ mod tests {
         0, 0, 0, 31, 21, 196, 137, 0, 0, 0, 13, 73, 68, 65, 84, 120, 156, 99, 248, 207, 192, 240,
         31, 0, 5, 0, 1, 255, 137, 153, 61, 29, 0, 0, 0, 0, 73, 69, 78, 68, 174, 66, 96, 130,
     ];
+
+    #[test]
+    fn health_is_not_ready_before_current_boot_orchestration_progress() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let database = std::env::temp_dir().join(format!(
+            "townlight-health-starting-api-{}-{nonce}.db",
+            std::process::id()
+        ));
+        let application = database.with_extension("application");
+        std::fs::create_dir_all(&application).unwrap();
+        let api = Api::open_with_application_directory_and_health(
+            &database,
+            &application,
+            Arc::new(OrchestrationHealth::new(Duration::from_secs(45))),
+        )
+        .unwrap();
+
+        let response = api.handle("GET", "/health", None);
+
+        assert_eq!(response.status, 503);
+        let body: serde_json::Value = serde_json::from_slice(&response.body).unwrap();
+        assert_eq!(body["status"], "starting");
+        assert_eq!(body["orchestration"]["status"], "starting");
+
+        std::fs::remove_dir_all(application).unwrap();
+        let _ = std::fs::remove_file(database);
+    }
+
+    #[test]
+    fn health_becomes_ready_after_current_boot_orchestration_progress() {
+        let health = OrchestrationHealth::new(Duration::from_secs(45));
+
+        health.mark_progress();
+
+        assert_eq!(health.status(), OrchestrationHealthStatus::Ready);
+    }
+
+    #[test]
+    fn liveness_refresh_cannot_make_an_unreconciled_boot_ready() {
+        let health = OrchestrationHealth::new(Duration::from_secs(45));
+
+        health.mark_alive();
+
+        assert_eq!(health.status(), OrchestrationHealthStatus::Starting);
+    }
+
+    #[test]
+    fn liveness_refresh_extends_an_already_reconciled_boot() {
+        let health = OrchestrationHealth::new(Duration::from_secs(45));
+        health.mark_progress();
+        let first_progress = health.inner.lock().unwrap().last_progress.unwrap();
+
+        health.mark_alive();
+        let refreshed_progress = health.inner.lock().unwrap().last_progress.unwrap();
+
+        assert!(refreshed_progress >= first_progress);
+        assert_eq!(health.status(), OrchestrationHealthStatus::Ready);
+    }
+
+    #[test]
+    fn health_fails_closed_after_current_boot_orchestration_failure() {
+        let health = OrchestrationHealth::new(Duration::from_secs(45));
+        health.mark_progress();
+
+        health.mark_failed();
+
+        assert_eq!(health.status(), OrchestrationHealthStatus::Failed);
+    }
+
+    #[test]
+    fn health_becomes_stale_after_the_progress_deadline() {
+        let health = OrchestrationHealth::new(Duration::from_secs(45));
+        health.mark_progress();
+        let progress = health.inner.lock().unwrap().last_progress.unwrap();
+
+        assert_eq!(
+            health.status_at(progress + Duration::from_secs(46)),
+            OrchestrationHealthStatus::Stale
+        );
+    }
+
+    #[test]
+    fn health_route_tracks_the_shared_current_boot_state() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let database = std::env::temp_dir().join(format!(
+            "townlight-health-shared-api-{}-{nonce}.db",
+            std::process::id()
+        ));
+        let application = database.with_extension("application");
+        std::fs::create_dir_all(&application).unwrap();
+        let health = Arc::new(OrchestrationHealth::new(Duration::from_secs(45)));
+        let api = Api::open_with_application_directory_and_health(
+            &database,
+            &application,
+            Arc::clone(&health),
+        )
+        .unwrap();
+
+        health.mark_progress();
+        let ready = api.handle("GET", "/health", None);
+        assert_eq!(ready.status, 200);
+        let ready: serde_json::Value = serde_json::from_slice(&ready.body).unwrap();
+        assert_eq!(ready["status"], "ready");
+
+        health.mark_failed();
+        let failed = api.handle("GET", "/health", None);
+        assert_eq!(failed.status, 503);
+        let failed: serde_json::Value = serde_json::from_slice(&failed.body).unwrap();
+        assert_eq!(failed["status"], "failed");
+
+        std::fs::remove_dir_all(application).unwrap();
+        let _ = std::fs::remove_file(database);
+    }
+
+    #[test]
+    fn api_server_stops_when_orchestration_is_failed() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let database = std::env::temp_dir().join(format!(
+            "townlight-health-failed-server-{}-{nonce}.db",
+            std::process::id()
+        ));
+        let application = database.with_extension("application");
+        std::fs::create_dir_all(&application).unwrap();
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let stop = Arc::new(AtomicBool::new(false));
+        let health = Arc::new(OrchestrationHealth::new(Duration::from_secs(45)));
+        health.mark_failed();
+        let result = serve_until_with_application_directory_and_health(
+            listener,
+            &database,
+            &application,
+            stop,
+            health,
+        );
+
+        assert!(result.is_err());
+        std::fs::remove_dir_all(application).unwrap();
+        let _ = std::fs::remove_file(database);
+    }
 
     fn read_request_over_tcp(request: Vec<u8>) -> Result<Vec<u8>, ApiResponse> {
         let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();

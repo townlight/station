@@ -10,6 +10,7 @@ use station_storage::{
 const JOB_ID: &str = "11111111-2222-4333-8444-555555555555";
 const SECOND_JOB_ID: &str = "11111111-2222-4333-8444-555555555556";
 const THIRD_JOB_ID: &str = "11111111-2222-4333-8444-555555555557";
+const FOURTH_JOB_ID: &str = "11111111-2222-4333-8444-555555555558";
 const CHANNEL_ID: &str = "22222222-3333-4444-8555-666666666666";
 const SINK_ID: &str = "33333333-4444-4555-8666-777777777777";
 const STREAMING_SINK_ID: &str = "44444444-5555-4666-8777-888888888888";
@@ -260,6 +261,95 @@ fn expired_leases_recover_to_pending_and_can_be_reclaimed_after_restart() {
             .claim_output_loudness_job(JOB_ID, 13_000, 10_000)
             .unwrap()
             .is_some()
+    );
+}
+
+#[test]
+fn abandoned_unfinished_jobs_fail_by_state_cas_even_after_lease_expiry() {
+    let database = temporary_database("loudness-job-abandonment");
+    let store = StationStore::open(&database).unwrap();
+    let configuration_hash = configure(&store);
+
+    for (job_id, target_state) in [
+        (JOB_ID, OutputLoudnessProofJobState::Pending),
+        (SECOND_JOB_ID, OutputLoudnessProofJobState::Claimed),
+        (THIRD_JOB_ID, OutputLoudnessProofJobState::CapturePending),
+        (FOURTH_JOB_ID, OutputLoudnessProofJobState::Analyzing),
+    ] {
+        store
+            .create_output_loudness_job(&configured_job(job_id, &configuration_hash))
+            .unwrap();
+        if target_state != OutputLoudnessProofJobState::Pending {
+            store
+                .claim_output_loudness_job(job_id, 2_000, 1_000)
+                .unwrap()
+                .unwrap();
+        }
+        if matches!(
+            target_state,
+            OutputLoudnessProofJobState::CapturePending | OutputLoudnessProofJobState::Analyzing
+        ) {
+            store
+                .advance_output_loudness_job(
+                    job_id,
+                    OutputLoudnessProofJobState::Claimed,
+                    OutputLoudnessProofJobState::CapturePending,
+                    2_100,
+                    1_000,
+                    None,
+                )
+                .unwrap();
+        }
+        if target_state == OutputLoudnessProofJobState::Analyzing {
+            store
+                .advance_output_loudness_job(
+                    job_id,
+                    OutputLoudnessProofJobState::CapturePending,
+                    OutputLoudnessProofJobState::Analyzing,
+                    2_200,
+                    1_000,
+                    Some(&capture()),
+                )
+                .unwrap();
+        }
+
+        let active = store
+            .list_unfinished_output_loudness_jobs_for_channel(CHANNEL_ID)
+            .unwrap();
+        assert_eq!(active.len(), 1);
+        assert_eq!(active[0].job_id, job_id);
+        assert_eq!(active[0].state, target_state);
+
+        let failed = store
+            .fail_abandoned_output_loudness_job(
+                job_id,
+                target_state,
+                5_000,
+                "channel has no active controller",
+            )
+            .unwrap();
+        assert_eq!(failed.state, OutputLoudnessProofJobState::Failed);
+        assert_eq!(failed.failed_at_unix_ms, Some(5_000));
+        assert_eq!(
+            failed.failure_detail.as_deref(),
+            Some("channel has no active controller")
+        );
+        assert!(
+            store
+                .fail_abandoned_output_loudness_job(job_id, target_state, 6_000, "late overwrite",)
+                .is_err()
+        );
+    }
+
+    assert!(
+        store
+            .list_unfinished_output_loudness_jobs_for_channel(CHANNEL_ID)
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        store.recover_expired_output_loudness_jobs(7_000).unwrap(),
+        0
     );
 }
 

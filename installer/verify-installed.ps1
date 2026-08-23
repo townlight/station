@@ -32,9 +32,21 @@ if ($updaterService.PathName -notlike '"*\TownLight Station\station-updater.exe"
     throw "Unexpected updater service command line: $($updaterService.PathName)"
 }
 
-$health = & curl.exe --silent --show-error --fail-with-body --max-time 5 'http://127.0.0.1:4070/health'
-if ($LASTEXITCODE -ne 0 -or $health -ne '{"database":"ready","status":"ready"}') {
-    throw "Installed health contract failed: $health"
+$healthDocument = & curl.exe --silent --show-error --fail-with-body --max-time 5 'http://127.0.0.1:4070/health'
+if ($LASTEXITCODE -ne 0) {
+    throw "Installed health endpoint failed: $healthDocument"
+}
+try {
+    $health = ConvertFrom-Json -InputObject $healthDocument -ErrorAction Stop
+}
+catch {
+    throw "Installed health endpoint returned invalid JSON: $healthDocument"
+}
+if ($health.database -ne 'ready' -or
+    $health.status -ne 'ready' -or
+    $null -eq $health.orchestration -or
+    $health.orchestration.status -ne 'ready') {
+    throw "Installed health contract failed: $healthDocument"
 }
 
 $stationdHash = (Get-FileHash -LiteralPath (Join-Path $application 'stationd.exe') -Algorithm SHA256).Hash

@@ -6047,6 +6047,28 @@ impl StationStore {
         }
     }
 
+    pub fn list_unfinished_output_loudness_jobs_for_channel(
+        &self,
+        channel_id: &str,
+    ) -> Result<Vec<OutputLoudnessProofJobRecord>, String> {
+        if !is_canonical_uuid(channel_id) {
+            return Err("output loudness channel identity must be a canonical UUID".into());
+        }
+        let statement = self.prepare(
+            "SELECT job_id, channel_id, target_group, sink_id, target_lufs_milli, candidate_version, source_commit, configuration_hash, sample_duration_ms, max_capture_bytes, state, created_at_unix_ms, updated_at_unix_ms, lease_expires_at_unix_ms, capture_relative_path, capture_bytes, capture_sample_duration_ms, capture_sha256, completed_at_unix_ms, failed_at_unix_ms, failure_detail FROM output_loudness_jobs WHERE channel_id=?1 AND state IN ('pending','claimed','capture_pending','analyzing') ORDER BY created_at_unix_ms, job_id",
+        )?;
+        let channel_id = c_string(channel_id, "output loudness channel identity")?;
+        bind_text(self.database, statement.raw, 1, &channel_id)?;
+        let mut jobs = Vec::new();
+        loop {
+            match unsafe { sqlite3_step(statement.raw) } {
+                SQLITE_ROW => jobs.push(read_output_loudness_job_row(statement.raw)?),
+                SQLITE_DONE => return Ok(jobs),
+                _ => return Err(sqlite_error(self.database)),
+            }
+        }
+    }
+
     pub fn claim_output_loudness_job(
         &self,
         job_id: &str,
@@ -6342,6 +6364,66 @@ impl StationStore {
             }
             self.read_output_loudness_job(&job_id.to_string_lossy())?
                 .ok_or_else(|| "failed output loudness job disappeared".into())
+        })();
+        match outcome {
+            Ok(job) => match self.execute("COMMIT") {
+                Ok(()) => Ok(job),
+                Err(error) => {
+                    let _ = self.execute("ROLLBACK");
+                    Err(error)
+                }
+            },
+            Err(error) => {
+                let _ = self.execute("ROLLBACK");
+                Err(error)
+            }
+        }
+    }
+
+    pub fn fail_abandoned_output_loudness_job(
+        &self,
+        job_id: &str,
+        expected_state: OutputLoudnessProofJobState,
+        now_unix_ms: i64,
+        error_detail: &str,
+    ) -> Result<OutputLoudnessProofJobRecord, String> {
+        if now_unix_ms < 0 {
+            return Err("output loudness abandonment time is invalid".into());
+        }
+        validate_output_loudness_job_id(job_id)?;
+        if !matches!(
+            expected_state,
+            OutputLoudnessProofJobState::Pending
+                | OutputLoudnessProofJobState::Claimed
+                | OutputLoudnessProofJobState::CapturePending
+                | OutputLoudnessProofJobState::Analyzing
+        ) {
+            return Err("only an unfinished output loudness job can be abandoned".into());
+        }
+        if !secret_field(error_detail, 4_000) {
+            return Err("output loudness failure detail is invalid or unbounded".into());
+        }
+        let job_id = c_string(job_id, "output loudness job identity")?;
+        let expected_state = c_string(
+            output_loudness_job_state_name(expected_state),
+            "output loudness expected state",
+        )?;
+        let error_detail = c_string(error_detail, "output loudness failure detail")?;
+        self.execute("BEGIN IMMEDIATE")?;
+        let outcome = (|| {
+            let statement = self.prepare(
+                "UPDATE output_loudness_jobs SET state='failed', updated_at_unix_ms=?1, lease_expires_at_unix_ms=-1, failed_at_unix_ms=?1, failure_detail=?2 WHERE job_id=?3 AND state=?4 AND state IN ('pending','claimed','capture_pending','analyzing')",
+            )?;
+            bind_i64(self.database, statement.raw, 1, now_unix_ms)?;
+            bind_text(self.database, statement.raw, 2, &error_detail)?;
+            bind_text(self.database, statement.raw, 3, &job_id)?;
+            bind_text(self.database, statement.raw, 4, &expected_state)?;
+            expect_done(self.database, statement.raw)?;
+            if self.changes() != 1 {
+                return Err("output loudness abandonment compare-and-set failed".into());
+            }
+            self.read_output_loudness_job(&job_id.to_string_lossy())?
+                .ok_or_else(|| "abandoned output loudness job disappeared".into())
         })();
         match outcome {
             Ok(job) => match self.execute("COMMIT") {

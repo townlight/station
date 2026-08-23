@@ -483,6 +483,12 @@ fn remove_managed_file(path: &Path) -> Result<(), String> {
 }
 
 fn cleanup_orphan_output_proof_artifacts(root: &Path, job_id: &str) -> Result<(), String> {
+    match fs::symlink_metadata(root) {
+        Ok(metadata) if metadata.file_type().is_dir() => {}
+        Ok(_) => return Err("managed output proof root is not a directory".into()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(format!("inspect managed output proof root: {error}")),
+    }
     for suffix in [".ts", ".ts.part"] {
         let relative = format!("{job_id}{suffix}");
         let path = proof_artifact_path(root, &relative)?;
@@ -491,6 +497,34 @@ fn cleanup_orphan_output_proof_artifacts(root: &Path, job_id: &str) -> Result<()
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => return Err(format!("inspect orphan output proof artifact: {error}")),
         }
+    }
+    Ok(())
+}
+
+fn fail_output_proofs_without_controller(
+    store: &StationStore,
+    database_path: &Path,
+    channel_id: &str,
+    now_unix_ms: i64,
+    detail: &str,
+) -> Result<(), OrchestrationError> {
+    let jobs = store
+        .list_unfinished_output_loudness_jobs_for_channel(channel_id)
+        .map_err(OrchestrationError::Storage)?;
+    let proof_root = managed_output_proof_root(database_path);
+    for job in jobs {
+        let failure_detail = match cleanup_orphan_output_proof_artifacts(&proof_root, &job.job_id) {
+            Ok(()) => detail.to_string(),
+            Err(error) => format!("{detail}; managed artifact cleanup also failed: {error}"),
+        };
+        store
+            .fail_abandoned_output_loudness_job(
+                &job.job_id,
+                job.state,
+                now_unix_ms,
+                &failure_detail,
+            )
+            .map_err(OrchestrationError::Storage)?;
     }
     Ok(())
 }
@@ -1019,7 +1053,7 @@ impl ChannelController {
             self.fail_output_proof_job_after_cleanup(store, &job, now_unix_ms, detail)?;
             return Ok(OutputProofState::Idle);
         }
-        store
+        let capture_pending_job = store
             .advance_output_loudness_job(
                 &job.job_id,
                 OutputLoudnessProofJobState::Claimed,
@@ -1030,7 +1064,7 @@ impl ChannelController {
             )
             .map_err(OrchestrationError::Storage)?;
         Ok(OutputProofState::Capturing {
-            job,
+            job: capture_pending_job,
             output_index,
             capture_duration_ms,
             artifact_relative_path,
@@ -2340,6 +2374,47 @@ pub fn run_until_with_candidate_authority(
     stop: Arc<AtomicBool>,
     candidate_authority: Option<Arc<dyn CandidateAuthority>>,
 ) -> Result<(), OrchestrationError> {
+    run_until_with_candidate_authority_and_progress(
+        database_path,
+        worker_executable,
+        stop,
+        candidate_authority,
+        || {},
+    )
+}
+
+pub fn run_until_with_candidate_authority_and_progress<F>(
+    database_path: &Path,
+    worker_executable: &Path,
+    stop: Arc<AtomicBool>,
+    candidate_authority: Option<Arc<dyn CandidateAuthority>>,
+    on_progress: F,
+) -> Result<(), OrchestrationError>
+where
+    F: FnMut(),
+{
+    run_until_with_candidate_authority_and_liveness(
+        database_path,
+        worker_executable,
+        stop,
+        candidate_authority,
+        || {},
+        on_progress,
+    )
+}
+
+pub fn run_until_with_candidate_authority_and_liveness<A, R>(
+    database_path: &Path,
+    worker_executable: &Path,
+    stop: Arc<AtomicBool>,
+    candidate_authority: Option<Arc<dyn CandidateAuthority>>,
+    mut on_alive: A,
+    mut on_reconciled: R,
+) -> Result<(), OrchestrationError>
+where
+    A: FnMut(),
+    R: FnMut(),
+{
     let journal_root = database_path
         .parent()
         .unwrap_or_else(|| Path::new("."))
@@ -2389,11 +2464,12 @@ pub fn run_until_with_candidate_authority(
                 };
                 let _ = store.put_channel_runtime(&stopped);
                 let _ = controller.shutdown(Duration::from_secs(3));
+                on_alive();
             }
             restart_attempts.remove(&channel_id);
             restart_after.remove(&channel_id);
         }
-        for channel in channels.into_iter().filter(|channel| channel.enabled) {
+        for channel in channels.iter().filter(|channel| channel.enabled) {
             if !controllers.contains_key(&channel.channel_id) {
                 if restart_after
                     .get(&channel.channel_id)
@@ -2402,13 +2478,15 @@ pub fn run_until_with_candidate_authority(
                     continue;
                 }
                 let journal = journal_root.join(format!("{}.tlj", channel.channel_id));
-                let controller = match ChannelController::launch(
+                let launch_result = ChannelController::launch(
                     worker_executable,
                     database_path,
                     &journal,
-                    &channel,
+                    channel,
                     Duration::from_secs(7),
-                ) {
+                );
+                on_alive();
+                let controller = match launch_result {
                     Ok(controller) => controller,
                     Err(error) => {
                         fail_active_takeover(&store, &channel.channel_id, now, &error)?;
@@ -2451,6 +2529,7 @@ pub fn run_until_with_candidate_authority(
                 }
                 controller.run_once(dispatch_now)
             })();
+            on_alive();
             match result {
                 Ok(transition) => {
                     if transition.is_some() || heartbeat_due {
@@ -2478,6 +2557,23 @@ pub fn run_until_with_candidate_authority(
                 cg_states.insert(channel_id, controller.cg_state());
             }
         }
+        for channel in &channels {
+            if !channel.enabled || !controllers.contains_key(&channel.channel_id) {
+                let detail = if channel.enabled {
+                    "Output loudness proof failed because the channel has no active controller; restore channel output and submit a new proof job."
+                } else {
+                    "Output loudness proof failed because the channel was disabled; enable channel output and submit a new proof job."
+                };
+                fail_output_proofs_without_controller(
+                    &store,
+                    database_path,
+                    &channel.channel_id,
+                    dispatch_now,
+                    detail,
+                )?;
+            }
+        }
+        on_reconciled();
         std::thread::sleep(Duration::from_millis(50));
     }
     let stopped_at = system_time_millis()?;
@@ -2695,9 +2791,13 @@ mod tests {
     };
     use station_media_protocol::WorkerEvent;
     use station_schedule::{ChannelConfiguration, OutputProfileId, OutputSinkConfiguration};
-    use station_storage::StationStore;
+    use station_storage::{OutputLoudnessProofJob, OutputLoudnessProofJobState, StationStore};
     use std::collections::BTreeMap;
     use std::path::PathBuf;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+    };
     use std::time::{SystemTime, UNIX_EPOCH};
 
     const CHANNEL_ID: &str = "5d85189a-cd1f-43dc-a619-66a2aeb09ac4";
@@ -2706,6 +2806,9 @@ mod tests {
     const ZONE_ID: &str = "8f4f0f70-5c30-48c6-819a-fb22b34353c5";
     const BULLETIN_ID: &str = "597f52ae-f16c-4ff8-ab32-60379cd950c4";
     const OTHER_BULLETIN_ID: &str = "697f52ae-f16c-48f8-ab32-60379cd950c4";
+    const OUTPUT_PROOF_JOB_ID: &str = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+    const OUTPUT_SINK_ID: &str = "bbbbbbbb-cccc-4ddd-8eee-ffffffffffff";
+    const SOURCE_COMMIT: &str = "0123456789abcdef0123456789abcdef01234567";
 
     fn database_path(label: &str) -> PathBuf {
         let nonce = SystemTime::now()
@@ -2722,6 +2825,237 @@ mod tests {
             managed_cg_image_root(&database),
             PathBuf::from(r"C:\ProgramData\TownLight Station\cg-images")
         );
+    }
+
+    #[test]
+    fn orchestration_does_not_report_progress_before_a_successful_reconcile() {
+        let root = database_path("progress-failure").with_extension("root");
+        std::fs::create_dir_all(&root).unwrap();
+        let database = root.join("station.db");
+        std::fs::create_dir_all(&database).unwrap();
+        let stop = Arc::new(AtomicBool::new(false));
+        let progress = Arc::new(AtomicUsize::new(0));
+        let observed = Arc::clone(&progress);
+
+        let result = super::run_until_with_candidate_authority_and_progress(
+            &database,
+            PathBuf::from("missing-worker.exe").as_path(),
+            stop,
+            None,
+            move || {
+                observed.fetch_add(1, Ordering::AcqRel);
+            },
+        );
+
+        assert!(result.is_err());
+        assert_eq!(progress.load(Ordering::Acquire), 0);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn orchestration_reports_progress_after_a_successful_empty_reconcile() {
+        let database = database_path("progress-success");
+        let root = database.parent().unwrap().to_path_buf();
+        let stop = Arc::new(AtomicBool::new(false));
+        let callback_stop = Arc::clone(&stop);
+        let progress = Arc::new(AtomicUsize::new(0));
+        let observed = Arc::clone(&progress);
+
+        super::run_until_with_candidate_authority_and_progress(
+            &database,
+            PathBuf::from("missing-worker.exe").as_path(),
+            stop,
+            None,
+            move || {
+                observed.fetch_add(1, Ordering::AcqRel);
+                callback_stop.store(true, Ordering::Release);
+            },
+        )
+        .unwrap();
+
+        assert_eq!(progress.load(Ordering::Acquire), 1);
+        let _ = std::fs::remove_file(database);
+        let _ = std::fs::remove_dir(root.join("channel-journals"));
+    }
+
+    #[test]
+    fn disabled_channel_reconcile_fails_expired_output_proof_and_removes_artifacts() {
+        let root = database_path("disabled-output-proof").with_extension("root");
+        std::fs::create_dir_all(&root).unwrap();
+        let database = root.join("station.db");
+        let store = StationStore::open(&database).unwrap();
+        let channel = output_proof_channel(false);
+        store.put_channel(&channel).unwrap();
+        create_claimed_output_proof(&store, &database, 2_000, 1_000);
+        assert_eq!(
+            store.recover_expired_output_loudness_jobs(3_000).unwrap(),
+            1
+        );
+        assert_eq!(
+            store
+                .read_output_loudness_job(OUTPUT_PROOF_JOB_ID)
+                .unwrap()
+                .unwrap()
+                .state,
+            OutputLoudnessProofJobState::Pending
+        );
+        let proof_root = super::managed_output_proof_root(&database);
+        std::fs::create_dir_all(&proof_root).unwrap();
+        std::fs::write(
+            proof_root.join(format!("{OUTPUT_PROOF_JOB_ID}.ts")),
+            b"orphan-final",
+        )
+        .unwrap();
+        std::fs::write(
+            proof_root.join(format!("{OUTPUT_PROOF_JOB_ID}.ts.part")),
+            b"orphan-part",
+        )
+        .unwrap();
+        drop(store);
+
+        reconcile_once(&database);
+
+        let store = StationStore::open(&database).unwrap();
+        let job = store
+            .read_output_loudness_job(OUTPUT_PROOF_JOB_ID)
+            .unwrap()
+            .unwrap();
+        assert_eq!(job.state, OutputLoudnessProofJobState::Failed);
+        assert!(
+            job.failure_detail
+                .as_deref()
+                .is_some_and(|detail| detail.contains("disabled"))
+        );
+        assert!(
+            !proof_root
+                .join(format!("{OUTPUT_PROOF_JOB_ID}.ts"))
+                .exists()
+        );
+        assert!(
+            !proof_root
+                .join(format!("{OUTPUT_PROOF_JOB_ID}.ts.part"))
+                .exists()
+        );
+        assert_eq!(
+            store
+                .recover_expired_output_loudness_jobs(i64::MAX)
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            store
+                .read_output_loudness_job(OUTPUT_PROOF_JOB_ID)
+                .unwrap()
+                .unwrap()
+                .state,
+            OutputLoudnessProofJobState::Failed
+        );
+        drop(store);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn enabled_channel_without_a_controller_fails_its_active_output_proof() {
+        let root = database_path("controllerless-output-proof").with_extension("root");
+        std::fs::create_dir_all(&root).unwrap();
+        let database = root.join("station.db");
+        let store = StationStore::open(&database).unwrap();
+        let channel = output_proof_channel(true);
+        store.put_channel(&channel).unwrap();
+        create_claimed_output_proof(
+            &store,
+            &database,
+            super::system_time_millis().unwrap(),
+            300_000,
+        );
+        let proof_root = super::managed_output_proof_root(&database);
+        std::fs::write(&proof_root, b"not-a-directory").unwrap();
+        drop(store);
+
+        reconcile_once(&database);
+
+        let store = StationStore::open(&database).unwrap();
+        let job = store
+            .read_output_loudness_job(OUTPUT_PROOF_JOB_ID)
+            .unwrap()
+            .unwrap();
+        assert_eq!(job.state, OutputLoudnessProofJobState::Failed);
+        assert!(
+            job.failure_detail
+                .as_deref()
+                .is_some_and(|detail| detail.contains("no active controller"))
+        );
+        assert!(
+            job.failure_detail
+                .as_deref()
+                .is_some_and(|detail| detail.contains("artifact cleanup also failed"))
+        );
+        drop(store);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    fn output_proof_channel(enabled: bool) -> ChannelConfiguration {
+        ChannelConfiguration {
+            channel_id: CHANNEL_ID.into(),
+            display_name: "Output proof reconcile".into(),
+            output_profile: OutputProfileId::Proof360p30,
+            output_sinks: vec![OutputSinkConfiguration::required_udp(
+                OUTPUT_SINK_ID,
+                "Cable output",
+                "127.0.0.1:5500",
+                -24.0,
+            )],
+            enabled,
+        }
+    }
+
+    fn create_claimed_output_proof(
+        store: &StationStore,
+        database: &std::path::Path,
+        claimed_at_unix_ms: i64,
+        lease_duration_ms: i64,
+    ) {
+        let configuration_hash = store
+            .current_channel_output_configuration_hash(CHANNEL_ID)
+            .unwrap();
+        assert!(
+            store
+                .create_output_loudness_job(&OutputLoudnessProofJob {
+                    job_id: OUTPUT_PROOF_JOB_ID.into(),
+                    channel_id: CHANNEL_ID.into(),
+                    target_group: "cable".into(),
+                    sink_id: OUTPUT_SINK_ID.into(),
+                    target_lufs_milli: -24_000,
+                    candidate_version: "0.1.0".into(),
+                    source_commit: Some(SOURCE_COMMIT.into()),
+                    configuration_hash,
+                    sample_duration_ms: 3_000,
+                    max_capture_bytes: 8 * 1024 * 1024,
+                    created_at_unix_ms: 1_000,
+                })
+                .unwrap()
+        );
+        store
+            .claim_output_loudness_job(OUTPUT_PROOF_JOB_ID, claimed_at_unix_ms, lease_duration_ms)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            super::managed_output_proof_root(database),
+            database.parent().unwrap().join("output-proofs")
+        );
+    }
+
+    fn reconcile_once(database: &std::path::Path) {
+        let stop = Arc::new(AtomicBool::new(false));
+        let callback_stop = Arc::clone(&stop);
+        super::run_until_with_candidate_authority_and_progress(
+            database,
+            PathBuf::from("missing-worker.exe").as_path(),
+            stop,
+            None,
+            move || callback_stop.store(true, Ordering::Release),
+        )
+        .unwrap();
     }
 
     #[test]

@@ -1,5 +1,5 @@
 use std::fs::{self, OpenOptions};
-use std::io::Write;
+use std::io::{BufWriter, Write};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::{
@@ -28,6 +28,14 @@ const MPEG_TS_PACKET_BYTES: u16 = 188;
 const DEFAULT_MPEG_TS_PACKET_SIZE_BYTES: u16 = 1_316;
 const MAX_UDP_PAYLOAD_BYTES: u16 = 65_507;
 const MAX_TRANSPORT_BITRATE_BPS: u64 = 100_000_000;
+// The executable 8 Mb/s headend contract emits 1,316-byte buffers. 4,096
+// buffers retain at most 5,390,336 of those bytes (about 5.4 seconds), while
+// the independent byte ceiling keeps larger legal UDP payloads below 8 MiB.
+// Either bound overflowing remains a terminal capture failure.
+const OUTPUT_CAPTURE_QUEUE_BUFFERS: usize = 4_096;
+const OUTPUT_CAPTURE_QUEUE_BYTES: u64 = 8 * 1024 * 1024;
+const OUTPUT_CAPTURE_WRITE_BUFFER_BYTES: usize = 256 * 1024;
+const OUTPUT_CAPTURE_WRITER_READY_TIMEOUT: Duration = Duration::from_secs(1);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SourceRole {
@@ -305,6 +313,7 @@ struct CaptureIngress {
     aborted: AtomicBool,
     generation: AtomicU64,
     callback_failed: AtomicBool,
+    queued_bytes: AtomicU64,
     sender: Mutex<Option<SyncSender<(u64, gst::Buffer)>>>,
     proof: Mutex<Option<ActiveOutputCapture>>,
     writer: Mutex<Option<JoinHandle<()>>>,
@@ -2375,6 +2384,7 @@ impl CaptureIngress {
             aborted: AtomicBool::new(false),
             generation: AtomicU64::new(0),
             callback_failed: AtomicBool::new(false),
+            queued_bytes: AtomicU64::new(0),
             sender: Mutex::new(None),
             proof: Mutex::new(None),
             writer: Mutex::new(None),
@@ -2400,10 +2410,16 @@ impl CaptureIngress {
                     self.callback_failed.store(true, Ordering::Release);
                     return;
                 };
+                let buffer_bytes = buffer.size() as u64;
+                if !self.reserve_queued_bytes(buffer_bytes) {
+                    self.callback_failed.store(true, Ordering::Release);
+                    return;
+                }
                 if matches!(
                     sender.try_send((generation, buffer.to_owned())),
                     Err(TrySendError::Full(_) | TrySendError::Disconnected(_))
                 ) {
+                    self.release_queued_bytes(buffer_bytes);
                     self.callback_failed.store(true, Ordering::Release);
                 }
             }
@@ -2415,6 +2431,31 @@ impl CaptureIngress {
                 }
             }
         }
+    }
+
+    fn reserve_queued_bytes(&self, buffer_bytes: u64) -> bool {
+        let mut current = self.queued_bytes.load(Ordering::Acquire);
+        loop {
+            let Some(next) = current.checked_add(buffer_bytes) else {
+                return false;
+            };
+            if next > OUTPUT_CAPTURE_QUEUE_BYTES {
+                return false;
+            }
+            match self.queued_bytes.compare_exchange_weak(
+                current,
+                next,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return true,
+                Err(observed) => current = observed,
+            }
+        }
+    }
+
+    fn release_queued_bytes(&self, buffer_bytes: u64) {
+        self.queued_bytes.fetch_sub(buffer_bytes, Ordering::AcqRel);
     }
 
     fn begin(
@@ -2462,12 +2503,15 @@ impl CaptureIngress {
             artifact_relative_path: artifact_relative_path.clone(),
         };
         let status = Arc::new(Mutex::new(pending));
-        let (sender, receiver) = mpsc::sync_channel(64);
+        let (sender, receiver) = mpsc::sync_channel(OUTPUT_CAPTURE_QUEUE_BUFFERS);
+        let (ready_sender, ready_receiver) = mpsc::sync_channel(0);
+        let (start_sender, start_receiver) = mpsc::channel();
         let mut sender_guard = self
             .sender
             .lock()
             .map_err(|_| EngineError::OutputCapture("capture sender lock is poisoned".into()))?;
         self.callback_failed.store(false, Ordering::Release);
+        self.queued_bytes.store(0, Ordering::Release);
         self.aborted.store(false, Ordering::Release);
         let generation = self.generation.fetch_add(1, Ordering::AcqRel) + 1;
         *sender_guard = Some(sender);
@@ -2479,7 +2523,6 @@ impl CaptureIngress {
                 proof_id: request.proof_id.clone(),
                 status: Arc::clone(&status),
             });
-        self.active.store(true, Ordering::Release);
         drop(sender_guard);
 
         let started = OutputCaptureStarted {
@@ -2491,6 +2534,9 @@ impl CaptureIngress {
         let handle = std::thread::Builder::new()
             .name(format!("output-proof-{}", request.proof_id))
             .spawn(move || {
+                if ready_sender.send(()).is_err() || start_receiver.recv().is_err() {
+                    return;
+                }
                 run_capture_writer(
                     ingress,
                     request,
@@ -2514,6 +2560,32 @@ impl CaptureIngress {
             .lock()
             .map_err(|_| EngineError::OutputCapture("capture writer lock is poisoned".into()))? =
             Some(handle);
+        if ready_receiver
+            .recv_timeout(OUTPUT_CAPTURE_WRITER_READY_TIMEOUT)
+            .is_err()
+        {
+            let _ = self.abort_any(
+                "capture_writer_unavailable",
+                "output capture writer did not become ready before its deadline",
+            );
+            let _ = self.join_finished_by(Instant::now() + OUTPUT_CAPTURE_WRITER_READY_TIMEOUT);
+            let _ = fs::remove_file(&cleanup_part_path);
+            return Err(EngineError::OutputCapture(
+                "capture writer did not become ready before its deadline".into(),
+            ));
+        }
+        self.active.store(true, Ordering::Release);
+        if start_sender.send(()).is_err() {
+            let _ = self.abort_any(
+                "capture_writer_unavailable",
+                "output capture writer stopped before capture began",
+            );
+            let _ = self.join_finished_by(Instant::now() + OUTPUT_CAPTURE_WRITER_READY_TIMEOUT);
+            let _ = fs::remove_file(&cleanup_part_path);
+            return Err(EngineError::OutputCapture(
+                "capture writer stopped before capture began".into(),
+            ));
+        }
         Ok(started)
     }
 
@@ -2644,11 +2716,12 @@ fn run_capture_writer(
     artifact_relative_path: String,
     part_path: PathBuf,
     final_path: PathBuf,
-    mut file: std::fs::File,
+    file: std::fs::File,
     receiver: mpsc::Receiver<(u64, gst::Buffer)>,
     generation: u64,
     status: Arc<Mutex<OutputCaptureStatus>>,
 ) {
+    let mut file = BufWriter::with_capacity(OUTPUT_CAPTURE_WRITE_BUFFER_BYTES, file);
     let started = Instant::now();
     let deadline = started + Duration::from_millis(request.duration_ms);
     let mut digest = Sha256::new();
@@ -2670,6 +2743,7 @@ fn run_capture_writer(
             let remaining = deadline.saturating_duration_since(now);
             match receiver.recv_timeout(remaining.min(Duration::from_millis(50))) {
                 Ok((buffer_generation, buffer)) => {
+                    ingress.release_queued_bytes(buffer.size() as u64);
                     if buffer_generation == generation {
                         write_capture_buffer(
                             &mut file,
@@ -2703,6 +2777,7 @@ fn run_capture_writer(
         sender.take();
         drop(sender);
         while let Ok((buffer_generation, buffer)) = receiver.try_recv() {
+            ingress.release_queued_bytes(buffer.size() as u64);
             if buffer_generation == generation {
                 write_capture_buffer(
                     &mut file,
@@ -2731,7 +2806,7 @@ fn run_capture_writer(
                 format!("could not flush proof artifact: {error}"),
             )
         })?;
-        file.sync_all().map_err(|error| {
+        file.get_ref().sync_all().map_err(|error| {
             (
                 "capture_sync_failed",
                 format!("could not sync proof artifact: {error}"),
@@ -2816,7 +2891,7 @@ fn run_capture_writer(
 }
 
 fn write_capture_buffer(
-    file: &mut std::fs::File,
+    file: &mut impl Write,
     digest: &mut Sha256,
     capture_bytes: &mut u64,
     max_bytes: u64,
@@ -3504,4 +3579,20 @@ fn connect_source(
         .link(&selector_pad)
         .map_err(|error| EngineError::PadLink(format!("{error:?}")))?;
     Ok(selector_pad)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn capture_ingress_byte_reservation_is_bounded_and_releasable() {
+        let ingress = CaptureIngress::new();
+
+        assert!(ingress.reserve_queued_bytes(OUTPUT_CAPTURE_QUEUE_BYTES));
+        assert!(!ingress.reserve_queued_bytes(1));
+
+        ingress.release_queued_bytes(OUTPUT_CAPTURE_QUEUE_BYTES);
+        assert!(ingress.reserve_queued_bytes(1));
+    }
 }

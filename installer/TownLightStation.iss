@@ -133,7 +133,7 @@ begin
 
   RunSc('stop ' + Name, ResultCode);
   RunSc('delete ' + Name, ResultCode);
-  for Attempt := 1 to 60 do
+  for Attempt := 1 to 300 do
   begin
     if not ServiceExists(Name) then
       Exit;
@@ -439,7 +439,7 @@ begin
       InstallPrivateRuntime;
       CreateAndStartService;
       if not WaitForHealthyStation then
-        RaiseException('TownLight Station did not become healthy within 15 seconds.');
+        RaiseException('TownLight Station did not become healthy within 75 seconds.');
       WriteInstallReceipt;
       WriteActiveSlotReceipt;
       CreateAndStartUpdaterService;

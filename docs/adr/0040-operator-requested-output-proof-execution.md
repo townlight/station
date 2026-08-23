@@ -18,6 +18,8 @@ The worker capture result supplies a managed relative path, byte count, SHA-256,
 
 Only the final storage transaction can append the immutable sink proof and change the job to completed. That transaction rechecks sink, target, and configuration identity. Capture facts can remain on a failed job for diagnosis without becoming proof. Deterministic stale `.ts.part` and recovered-job `.ts` artifacts are cleaned inside the managed root. Every terminal failure after a worker reports ready—including unsafe path, hash, size, duration, or identity failure—attempts deterministic managed cleanup before failing the job and records any cleanup error. Terminal rows cannot be overwritten.
 
+An unfinished job cannot outlive the controller that could execute it. Each reconcile finds `pending`, `claimed`, `capture_pending`, and `analyzing` jobs for disabled channels or enabled channels without an active controller, attempts deterministic managed cleanup, and moves them to `failed` with an operator-readable reason through an expected-state compare-and-set that does not depend on lease freshness. Cleanup failure is included in the bounded durable reason and does not take down orchestration. This prevents an expired job from recovering to `pending` forever after its channel has been disabled.
+
 The operator console lists enabled sink targets separately, applies the same request bounds, polls status, and displays local measurement/result independently from receiver acceptance. It does not convert a job state, transport counter, local pass, or candidate receipt into an external delivery claim. Service and console launch modes both bind the unauthenticated control plane only to loopback.
 
 ## Proof boundary

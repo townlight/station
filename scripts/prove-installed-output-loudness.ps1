@@ -31,6 +31,8 @@ param(
     [long]$MaxCaptureBytes = 64MB,
     [ValidateRange(60, 1800)]
     [int]$TimeoutSeconds = 600,
+    [ValidateRange(3, 60)]
+    [int]$ClaimTimeoutSeconds = 15,
     [string]$HeadendProfileId = '',
     [string]$ResultPath = ''
 )
@@ -278,7 +280,15 @@ try {
             channel_id = $channelId
             display_name = "Installed headend output proof $runId"
             output_profile = 'proof-360p30'
-            output_sinks = @()
+            output_sinks = @([ordered]@{
+                sink_id = $sinkId
+                label = 'Temporary profile-application sink'
+                kind = 'udp-ts'
+                destination = "127.0.0.1:$port"
+                loudness_target_lufs = -16.0
+                required = $true
+                enabled = $true
+            })
             enabled = $false
         }
         Invoke-Api 'Put' '/channels' $proofChannel | Out-Null
@@ -349,6 +359,7 @@ try {
             throw 'Headend readiness did not preserve local progress and the unverified receiver boundary.'
         }
         $result.evidence.headend_readiness = $headendReadiness
+        $result.evidence.headend_udp_transport = Measure-HeadendUdp -Receiver $udpReceiver -Seconds 5
     }
 
     Invoke-Api 'Post' '/assets/ingest' ([ordered]@{ job_id = $ingestJobId; source_path = $fixture.Path }) | Out-Null
@@ -417,10 +428,6 @@ try {
         dispatch = $dispatch
         on_air_runtime = $onAir
     }
-    if ($HeadendProfileId) {
-        $result.evidence.headend_udp_transport = Measure-HeadendUdp -Receiver $udpReceiver -Seconds 5
-    }
-
     $request = Invoke-Api 'Post' "/channels/$channelId/loudness-proof" ([ordered]@{
         sink_id = $sinkId
         sample_duration_ms = $sampleDurationMs
@@ -428,6 +435,7 @@ try {
     })
     $result.evidence.output_loudness = [ordered]@{
         request = $request
+        claimed_job = $null
         completed_job = $null
         per_sink_proof = $null
         receiver_acceptance_boundary = 'not_attempted_or_unknown'
@@ -439,6 +447,22 @@ try {
     }
     $configurationHash = [string]$request.configuration_hash
     $jobId = [string]$request.job_id
+    try {
+        $claimedJob = Wait-Until -Action {
+            Invoke-Api 'Get' "/channels/$channelId/loudness-proof/jobs/$jobId"
+        } -Predicate {
+            param($value)
+            $value.state -ne 'pending'
+        } -Description 'output loudness proof executor claim' -Seconds $ClaimTimeoutSeconds
+        $result.evidence.output_loudness.claimed_job = $claimedJob
+    }
+    catch {
+        $result.evidence.output_loudness.executor_diagnostic = [ordered]@{
+            job = Invoke-Api 'Get' "/channels/$channelId/loudness-proof/jobs/$jobId"
+            runtime = Invoke-Api 'Get' '/runtime-safe-to-air'
+        }
+        throw
+    }
     $job = Wait-Until -Action { Invoke-Api 'Get' "/channels/$channelId/loudness-proof/jobs/$jobId" } `
         -Predicate {
             param($value)

@@ -14,7 +14,7 @@ An operator-installed broadcast appliance must start without an interactive logi
 
 - Windows Service Control Manager starts `stationd service` under the fixed internal name `TownLightStation`.
 - The installer supplies an absolute database path and a loopback-only HTTP address. Service mode rejects weaker configuration before dispatch.
-- The service reports start-pending before binding, running only after the data directory and listener are ready, stop-pending when a stop or system-shutdown control arrives, and stopped after the API accept loop exits.
+- The service reports start-pending before binding, running only after the data directory and listener are ready and current-boot orchestration completes its first reconcile, stop-pending when a stop or system-shutdown control arrives, and stopped only after every supervised subsystem confirms shutdown. [ADR 0042](0042-current-boot-orchestration-health.md) defines the current-boot health and bounded teardown contract.
 - The HTTP listener stops accepting new connections after the cooperative signal. A connection already accepted may finish within its bounded five-second read deadline; the SCM stop wait hint is seven seconds.
 - Only the listener is nonblocking so it can observe the cooperative stop signal. Every accepted Windows socket is explicitly returned to blocking mode before applying the five-second request deadline; otherwise a client pause between connect and send is misread as an immediate timeout.
 - Startup failures produce both a service-specific stopped status and a local `stationd-startup-error.txt` receipt beside the database.

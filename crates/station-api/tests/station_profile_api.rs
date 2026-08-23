@@ -114,7 +114,10 @@ fn health_reports_database_readiness_and_unknown_routes_are_not_found() {
     let api = Api::open(&database).expect("database opens");
     let health = api.handle("GET", "/health", None);
     assert_eq!(health.status, 200);
-    assert_eq!(health.body, br#"{"database":"ready","status":"ready"}"#);
+    assert_eq!(
+        health.body,
+        br#"{"database":"ready","orchestration":{"status":"ready"},"status":"ready"}"#
+    );
     assert_eq!(api.handle("GET", "/not-a-route", None).status, 404);
     let _ = std::fs::remove_file(database);
 }
