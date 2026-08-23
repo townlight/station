@@ -14,6 +14,7 @@ import type {
   CommissioningAction,
   CommissioningStatus,
 } from "./commissioning-contract";
+import { apiRequest } from "./api-client";
 
 type CommissioningDestination = "health" | "media" | "channels" | "schedule";
 
@@ -36,19 +37,6 @@ interface StationBoxProfile {
 
 interface CommissioningProps {
   onNavigate: (view: CommissioningDestination) => void;
-}
-
-async function readJson<T>(path: string): Promise<T> {
-  const response = await fetch(path, { headers: { Accept: "application/json" } });
-  if (!response.ok) {
-    let detail = `${response.status} ${response.statusText}`;
-    try {
-      const body = await response.json() as { error?: string; detail?: string; message?: string };
-      detail = body.detail ?? body.error ?? body.message ?? detail;
-    } catch { /* Preserve the HTTP status when the body is not JSON. */ }
-    throw new Error(detail);
-  }
-  return response.json() as Promise<T>;
 }
 
 function actionView(action: CommissioningAction | null): CommissioningDestination | null {
@@ -78,8 +66,8 @@ export function AuthoritativeCommissioning({ onNavigate }: CommissioningProps) {
   const load = useCallback(async () => {
     try {
       const [nextReport, nextStationBox] = await Promise.all([
-        readJson<AuthoritativeCommissioningReport>("/api/v1/commissioning/report"),
-        readJson<StationBoxProfile>("/api/v1/station-box-profile").catch(() => null),
+        apiRequest<AuthoritativeCommissioningReport>("/api/v1/commissioning/report"),
+        apiRequest<StationBoxProfile>("/api/v1/station-box-profile").catch(() => null),
       ]);
       setReport(nextReport);
       setStationBox(nextStationBox);

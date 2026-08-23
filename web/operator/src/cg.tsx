@@ -1,4 +1,6 @@
 import { ReactNode, useCallback, useEffect, useMemo, useState } from "react";
+import { ApiError, apiRequest } from "./api-client";
+import { withoutBrowserIdentity } from "./auth-contract";
 
 export type CgRoute = "cg-moderation" | "cg-board" | "cg-feeds" | "cg-preview" | "cg-settings";
 
@@ -223,35 +225,22 @@ export class CgApiError extends Error {
 }
 
 async function cgRequest<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(path, { ...init, headers: { "Content-Type": "application/json", ...init?.headers } });
-  const body = await response.json().catch(() => null) as { message?: string; error?: { message?: string } } | T | null;
-  if (!response.ok) {
-    const message = body && typeof body === "object" && "message" in body
-      ? String(body.message)
-      : body && typeof body === "object" && "error" in body && body.error && typeof body.error === "object" && "message" in body.error
-        ? String(body.error.message)
-      : `CG request failed with HTTP ${response.status}.`;
-    throw new CgApiError(response.status, message);
-  }
-  return body as T;
+  try { return await apiRequest<T>(path, init); }
+  catch (problem) { if (problem instanceof ApiError) throw new CgApiError(problem.status, problem.message); throw problem; }
 }
 
 async function cgUploadImage(file: File): Promise<CgImageAsset> {
-  const response = await fetch("/api/v1/cg/images", {
-    method: "POST",
-    headers: file.type ? { "Content-Type": file.type } : undefined,
-    body: file,
-  });
-  const body = await response.json().catch(() => null) as { message?: string; error?: { message?: string } } | CgImageAsset | null;
-  if (!response.ok) {
-    const message = body && typeof body === "object" && "message" in body
-      ? String(body.message)
-      : body && typeof body === "object" && "error" in body && body.error && typeof body.error === "object" && "message" in body.error
-        ? String(body.error.message)
-        : `CG image upload failed with HTTP ${response.status}.`;
-    throw new CgApiError(response.status, message);
-  }
-  return body as CgImageAsset;
+  return cgRequest<CgImageAsset>("/api/v1/cg/images", { method: "POST", headers: file.type ? { "Content-Type": file.type } : undefined, body: file });
+}
+
+type AuthenticatedCgAuditWrite = Omit<CgAuditEvent, "operator_id">;
+type AuthenticatedCgBoardWrite = Omit<CgBoard, "created_by">;
+type AuthenticatedCgFeedWrite = Omit<CgFeed, "created_by">;
+type AuthenticatedCgBulletinWrite = Omit<CgBulletin, "submitted_by" | "moderated_by">;
+type AuthenticatedCgApprovalWrite = Omit<CgFeedItemApproval, "approved_by">;
+
+function authenticatedCgBody<T>(body: T): string {
+  return JSON.stringify(withoutBrowserIdentity(body));
 }
 
 export const cgApi = {
@@ -265,14 +254,14 @@ export const cgApi = {
   audit: (channelId: string) => cgRequest<CgAuditEvent[]>(`/api/v1/cg/audit?channel_id=${encodeURIComponent(channelId)}&limit=50`),
   imageAssets: () => cgRequest<CgImageAsset[]>("/api/v1/cg/images"),
   uploadImage: cgUploadImage,
-  writeBoard: (body: { board: CgBoard; expected_revision: number; audit: CgAuditEvent }) => cgRequest<CgBoard>("/api/v1/cg/board", { method: "PUT", body: JSON.stringify(body) }),
-  writeZone: (body: { zone: CgZone; expected_revision: number; audit: CgAuditEvent }) => cgRequest<CgZone>("/api/v1/cg/zones", { method: "PUT", body: JSON.stringify(body) }),
-  deleteZone: (zoneId: string, body: { expected_revision: number; audit: CgAuditEvent }) => cgRequest<void>(`/api/v1/cg/zones/${encodeURIComponent(zoneId)}`, { method: "DELETE", body: JSON.stringify(body) }),
-  writeFeed: (body: { feed: CgFeed; expected_revision: number; audit: CgAuditEvent }) => cgRequest<CgFeed>("/api/v1/cg/feeds", { method: "PUT", body: JSON.stringify(body) }),
-  deleteFeed: (feedId: string, body: { expected_revision: number; audit: CgAuditEvent }) => cgRequest<void>(`/api/v1/cg/feeds/${encodeURIComponent(feedId)}`, { method: "DELETE", body: JSON.stringify(body) }),
-  writeBulletin: (body: { bulletin: CgBulletin; expected_revision: number; audit: CgAuditEvent }) => cgRequest<CgBulletin>("/api/v1/cg/bulletins", { method: "PUT", body: JSON.stringify(body) }),
-  expireBulletins: (body: { channel_id: string; now_unix_ms: number; operator_id: string }) => cgRequest<CgBulletinExpirationResponse>("/api/v1/cg/bulletins/expire", { method: "POST", body: JSON.stringify(body) }),
-  approveFeedItem: (body: { approval: CgFeedItemApproval; audit: CgAuditEvent }) => cgRequest<CgFeedItemApproval>("/api/v1/cg/feed-items/approve", { method: "POST", body: JSON.stringify(body) }),
+  writeBoard: (body: { board: AuthenticatedCgBoardWrite; expected_revision: number; audit: AuthenticatedCgAuditWrite }) => cgRequest<CgBoard>("/api/v1/cg/board", { method: "PUT", body: authenticatedCgBody(body) }),
+  writeZone: (body: { zone: CgZone; expected_revision: number; audit: AuthenticatedCgAuditWrite }) => cgRequest<CgZone>("/api/v1/cg/zones", { method: "PUT", body: authenticatedCgBody(body) }),
+  deleteZone: (zoneId: string, body: { expected_revision: number; audit: AuthenticatedCgAuditWrite }) => cgRequest<void>(`/api/v1/cg/zones/${encodeURIComponent(zoneId)}`, { method: "DELETE", body: authenticatedCgBody(body) }),
+  writeFeed: (body: { feed: AuthenticatedCgFeedWrite; expected_revision: number; audit: AuthenticatedCgAuditWrite }) => cgRequest<CgFeed>("/api/v1/cg/feeds", { method: "PUT", body: authenticatedCgBody(body) }),
+  deleteFeed: (feedId: string, body: { expected_revision: number; audit: AuthenticatedCgAuditWrite }) => cgRequest<void>(`/api/v1/cg/feeds/${encodeURIComponent(feedId)}`, { method: "DELETE", body: authenticatedCgBody(body) }),
+  writeBulletin: (body: { bulletin: AuthenticatedCgBulletinWrite; expected_revision: number; audit: AuthenticatedCgAuditWrite }) => cgRequest<CgBulletin>("/api/v1/cg/bulletins", { method: "PUT", body: authenticatedCgBody(body) }),
+  expireBulletins: (body: { channel_id: string; now_unix_ms: number }) => cgRequest<CgBulletinExpirationResponse>("/api/v1/cg/bulletins/expire", { method: "POST", body: authenticatedCgBody(body) }),
+  approveFeedItem: (body: { approval: AuthenticatedCgApprovalWrite; audit: AuthenticatedCgAuditWrite }) => cgRequest<CgFeedItemApproval>("/api/v1/cg/feed-items/approve", { method: "POST", body: authenticatedCgBody(body) }),
 };
 
 export const CG_ROUTES: Array<{ id: CgRoute; label: string; shortLabel: string }> = [
@@ -403,33 +392,15 @@ function newUuid(): string {
   return crypto.randomUUID();
 }
 
-function buildAudit(channelId: string, boardId: string | null, eventKind: string, operatorId: string, details: Record<string, string>, occurredAtUnixMs: number): CgAuditEvent {
+function buildAudit(channelId: string, boardId: string | null, eventKind: string, details: Record<string, string>, occurredAtUnixMs: number): AuthenticatedCgAuditWrite {
   return {
     audit_id: newUuid(),
     board_id: boardId,
     channel_id: channelId,
     event_kind: eventKind,
-    operator_id: operatorId.trim(),
     occurred_at_unix_ms: occurredAtUnixMs,
     details,
   };
-}
-
-function readSessionOperator(): string {
-  try {
-    return sessionStorage.getItem("townlight.cg.operator") ?? "";
-  } catch {
-    return "";
-  }
-}
-
-function writeSessionOperator(value: string): void {
-  try {
-    if (value.trim()) sessionStorage.setItem("townlight.cg.operator", value);
-    else sessionStorage.removeItem("townlight.cg.operator");
-  } catch {
-    // Some embedded WebViews disable storage; the field remains usable in memory.
-  }
 }
 
 function CgLoading() {
@@ -448,10 +419,6 @@ function MutationNotice({ children = "Editing is read-only in this slice." }: { 
   return <div className="cg-notice"><span aria-hidden="true">i</span><p>{children} The station API requires an explicit revision and append-only audit payload; no un-audited changes are offered here.</p></div>;
 }
 
-function OperatorIdentity({ value, onChange }: { value: string; onChange: (value: string) => void }) {
-  return <label className="cg-operator-identity">Operator name <span>(session-local; not authentication)</span><input value={value} maxLength={120} onChange={(event) => onChange(event.target.value)} placeholder="Enter your operator name" /></label>;
-}
-
 function MutationResult({ error, message }: { error: string | null; message: string | null }) {
   return <>{error && <div className="error-box" role="alert">{error}</div>}{message && <div className="notice" role="status">{message}</div>}</>;
 }
@@ -460,7 +427,7 @@ function CgTabs({ route, onNavigate }: { route: CgRoute; onNavigate: (route: CgR
   return <nav className="cg-tabs" aria-label="CG operator screens">{CG_ROUTES.map((item) => <button key={item.id} className={route === item.id ? "selected" : ""} onClick={() => onNavigate(item.id)}>{item.label}</button>)}</nav>;
 }
 
-function BulletinExpirationAction({ channelId, operatorId, onRefresh }: { channelId: string; operatorId: string; onRefresh: () => Promise<void> }) {
+function BulletinExpirationAction({ channelId, onRefresh }: { channelId: string; onRefresh: () => Promise<void> }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
@@ -468,15 +435,11 @@ function BulletinExpirationAction({ channelId, operatorId, onRefresh }: { channe
   async function expireDueBulletins() {
     setError(null);
     setMessage(null);
-    if (!operatorId.trim()) {
-      setError("Enter an operator name before expiring bulletins.");
-      return;
-    }
     if (!window.confirm("Expire due bulletins now? Only Scheduled bulletins whose end time is at or before the current station observation time will be affected. This is a manual command; it does not create automatic scheduling.")) return;
     const now = Date.now();
     setBusy(true);
     try {
-      const expired = await cgApi.expireBulletins({ channel_id: channelId, now_unix_ms: now, operator_id: operatorId.trim() });
+      const expired = await cgApi.expireBulletins({ channel_id: channelId, now_unix_ms: now });
       try {
         await onRefresh();
       } catch (refreshProblem) {
@@ -496,10 +459,10 @@ function BulletinExpirationAction({ channelId, operatorId, onRefresh }: { channe
     }
   }
 
-  return <section className="panel cg-expiration-panel"><div className="panel-head"><div><p className="eyebrow">Manual lifecycle command</p><h2>Expire due bulletins</h2></div><span className="cg-state-pill cg-state-submitted">operator action</span></div><MutationNotice>This is an explicit audited command for channel <code>{channelId}</code>. It does not imply an automatic scheduler exists.</MutationNotice><button className="secondary" disabled={busy || !operatorId.trim()} onClick={() => void expireDueBulletins()}>{busy ? "Expiring due bulletins…" : "Expire due bulletins now"}</button><MutationResult error={error} message={message} /></section>;
+  return <section className="panel cg-expiration-panel"><div className="panel-head"><div><p className="eyebrow">Manual lifecycle command</p><h2>Expire due bulletins</h2></div><span className="cg-state-pill cg-state-submitted">operator action</span></div><MutationNotice>This is an explicit audited command for channel <code>{channelId}</code>. It does not imply an automatic scheduler exists.</MutationNotice><button className="secondary" disabled={busy} onClick={() => void expireDueBulletins()}>{busy ? "Expiring due bulletins…" : "Expire due bulletins now"}</button><MutationResult error={error} message={message} /></section>;
 }
 
-function ModerationQueue({ data, channelId, operatorId, onRefresh }: { data: CgData; channelId: string; operatorId: string; onRefresh: () => Promise<void> }) {
+function ModerationQueue({ data, channelId, onRefresh }: { data: CgData; channelId: string; onRefresh: () => Promise<void> }) {
   const counts = useMemo(() => data.bulletins.reduce<Record<string, number>>((result, bulletin) => ({ ...result, [bulletin.state]: (result[bulletin.state] ?? 0) + 1 }), {}), [data.bulletins]);
   const [title, setTitle] = useState("");
   const [body, setBody] = useState("");
@@ -528,10 +491,6 @@ function ModerationQueue({ data, channelId, operatorId, onRefresh }: { data: CgD
     clearResult();
     const parsedTags = parseTags(tags);
     const seconds = Number(displaySeconds);
-    if (!operatorId.trim()) {
-      setError("Enter an operator name before submitting a bulletin.");
-      return;
-    }
     if (!title.trim() || !body.trim() || !parsedTags || !Number.isInteger(seconds) || seconds < 3 || seconds > 300) {
       setError("Enter a title, body, valid tags, and a display duration from 3 to 300 seconds.");
       return;
@@ -539,7 +498,7 @@ function ModerationQueue({ data, channelId, operatorId, onRefresh }: { data: CgD
     setBusy("submit");
     try {
       const now = Date.now();
-      const bulletin: CgBulletin = {
+      const bulletin: AuthenticatedCgBulletinWrite = {
         bulletin_id: newUuid(),
         channel_id: channelId,
         content: { kind: "text", title: title.trim(), body: body.trim() },
@@ -549,14 +508,12 @@ function ModerationQueue({ data, channelId, operatorId, onRefresh }: { data: CgD
         requested_end_at_unix_ms: null,
         display_seconds: seconds,
         audio_asset_id: null,
-        submitted_by: operatorId.trim(),
         moderation_notes: null,
-        moderated_by: null,
         revision: 1,
         created_at_unix_ms: now,
         updated_at_unix_ms: now,
       };
-      await cgApi.writeBulletin({ bulletin, expected_revision: 0, audit: buildAudit(channelId, data.board?.board_id ?? null, "bulletin_submitted", operatorId, { content_kind: "text" }, bulletin.updated_at_unix_ms) });
+      await cgApi.writeBulletin({ bulletin, expected_revision: 0, audit: buildAudit(channelId, data.board?.board_id ?? null, "bulletin_submitted", { content_kind: "text" }, bulletin.updated_at_unix_ms) });
       await onRefresh();
       setTitle("");
       setBody("");
@@ -573,10 +530,6 @@ function ModerationQueue({ data, channelId, operatorId, onRefresh }: { data: CgD
   async function moderateBulletin(bulletin: CgBulletin, nextState: "needs_changes" | "accepted" | "declined") {
     clearResult();
     const note = notesById[bulletin.bulletin_id]?.trim() ?? "";
-    if (!operatorId.trim()) {
-      setError("Enter an operator name before moderating a bulletin.");
-      return;
-    }
     if ((nextState === "needs_changes" || nextState === "declined") && !note) {
       setError(nextState === "declined" ? "A decline reason is required." : "A request-changes note is required.");
       return;
@@ -585,17 +538,16 @@ function ModerationQueue({ data, channelId, operatorId, onRefresh }: { data: CgD
     setBusy(`${nextState}-${bulletin.bulletin_id}`);
     try {
       const now = Math.max(Date.now(), bulletin.updated_at_unix_ms);
-      const updated: CgBulletin = {
+      const updated: AuthenticatedCgBulletinWrite = {
         ...bulletin,
         state: nextState,
         requested_start_at_unix_ms: nextState === "accepted" ? null : bulletin.requested_start_at_unix_ms,
         requested_end_at_unix_ms: nextState === "accepted" ? null : bulletin.requested_end_at_unix_ms,
         moderation_notes: note || bulletin.moderation_notes,
-        moderated_by: operatorId.trim(),
         revision: bulletin.revision + 1,
         updated_at_unix_ms: now,
       };
-      await cgApi.writeBulletin({ bulletin: updated, expected_revision: bulletin.revision, audit: buildAudit(channelId, data.board?.board_id ?? null, "bulletin_moderated", operatorId, { state: nextState }, updated.updated_at_unix_ms) });
+      await cgApi.writeBulletin({ bulletin: updated, expected_revision: bulletin.revision, audit: buildAudit(channelId, data.board?.board_id ?? null, "bulletin_moderated", { state: nextState }, updated.updated_at_unix_ms) });
       await onRefresh();
       setMessage(`Bulletin ${displayKind(nextState)} and audit evidence recorded.`);
     } catch (problem) {
@@ -614,10 +566,6 @@ function ModerationQueue({ data, channelId, operatorId, onRefresh }: { data: CgD
 
   async function scheduleBulletin(bulletin: CgBulletin) {
     clearResult();
-    if (!operatorId.trim()) {
-      setError("Enter an operator name before scheduling a bulletin.");
-      return;
-    }
     const start = new Date(scheduleStart).getTime();
     const end = new Date(scheduleEnd).getTime();
     if (!scheduleStart || !scheduleEnd || !Number.isFinite(start) || !Number.isFinite(end) || end <= start) {
@@ -627,17 +575,16 @@ function ModerationQueue({ data, channelId, operatorId, onRefresh }: { data: CgD
     setBusy(`schedule-${bulletin.bulletin_id}`);
     try {
       const now = Math.max(Date.now(), bulletin.updated_at_unix_ms);
-      const updated: CgBulletin = {
+      const updated: AuthenticatedCgBulletinWrite = {
         ...bulletin,
         state: "scheduled",
         requested_start_at_unix_ms: start,
         requested_end_at_unix_ms: end,
-        moderated_by: operatorId.trim(),
         moderation_notes: notesById[bulletin.bulletin_id]?.trim() || bulletin.moderation_notes,
         revision: bulletin.revision + 1,
         updated_at_unix_ms: now,
       };
-      await cgApi.writeBulletin({ bulletin: updated, expected_revision: bulletin.revision, audit: buildAudit(channelId, data.board?.board_id ?? null, "bulletin_moderated", operatorId, { state: "scheduled" }, updated.updated_at_unix_ms) });
+      await cgApi.writeBulletin({ bulletin: updated, expected_revision: bulletin.revision, audit: buildAudit(channelId, data.board?.board_id ?? null, "bulletin_moderated", { state: "scheduled" }, updated.updated_at_unix_ms) });
       await onRefresh();
       setSchedulingId(null);
       setMessage("Bulletin scheduled and audit evidence recorded.");
@@ -651,14 +598,14 @@ function ModerationQueue({ data, channelId, operatorId, onRefresh }: { data: CgD
   const textBulletins = data.bulletins.filter((bulletin) => bulletin.content.kind === "text");
   return <>
     <div className="cg-stat-strip">{["submitted", "needs_changes", "accepted", "scheduled", "declined"].map((state) => <div key={state}><span>{displayKind(state)}</span><strong>{counts[state] ?? 0}</strong></div>)}</div>
-    <BulletinExpirationAction channelId={channelId} operatorId={operatorId} onRefresh={onRefresh} />
-    <section className="panel"><div className="panel-head"><div><p className="eyebrow">Text bulletin intake</p><h2>Submit for review</h2></div><span className="cg-state-pill cg-state-submitted">submitted</span></div><MutationNotice>Only text bulletins are admitted here. Media uploads, live-video sources, deletion, and role authentication are not offered.</MutationNotice><div className="cg-editor-grid"><label>Title<input maxLength={160} value={title} onChange={(event) => setTitle(event.target.value)} placeholder="Library board meeting" /></label><label>Display seconds<input type="number" min={3} max={300} value={displaySeconds} onChange={(event) => setDisplaySeconds(event.target.value)} /></label><label>Tags <span className="cg-form-help">comma-separated slugs</span><input value={tags} onChange={(event) => setTags(event.target.value)} placeholder="community, public-safety" /></label><label>Body<textarea maxLength={4000} value={body} onChange={(event) => setBody(event.target.value)} placeholder="Tuesday at 6 PM in the community room." /></label></div><button className="primary" disabled={busy !== null || !operatorId.trim()} onClick={() => void submitTextBulletin()}>{busy === "submit" ? "Submitting…" : "Submit text bulletin"}</button><MutationResult error={error} message={message} /></section>
-    <section className="panel"><div className="panel-head"><div><p className="eyebrow">Durable bulletin lifecycle</p><h2>Review queue</h2></div><span className="count">{data.bulletins.length}</span></div>{data.bulletins.length === 0 ? <CgEmpty title="No bulletins in the queue" detail="Submit the first text bulletin above." /> : <div className="cg-list">{data.bulletins.map((bulletin) => { const isText = bulletin.content.kind === "text"; const note = notesById[bulletin.bulletin_id] ?? bulletin.moderation_notes ?? ""; const busyAction = busy?.endsWith(bulletin.bulletin_id) ?? false; return <article className="cg-card" key={bulletin.bulletin_id}><div className="cg-card-top"><div><strong>{bulletin.content.title ?? displayKind(bulletin.content.kind)}</strong><small>{bulletin.submitted_by} · {formatCgTime(bulletin.created_at_unix_ms)}</small></div><span className={`cg-state-pill cg-state-${bulletin.state}`}>{displayKind(bulletin.state)}</span></div><p>{bulletin.content.body ?? bulletin.content.alt_text ?? "Media bulletin; this screen only mutates text submissions."}</p><div className="cg-tags">{bulletin.tags.length ? bulletin.tags.map((tag) => <span key={tag}>{tag}</span>) : <span>untagged</span>}<small>{bulletin.display_seconds}s · revision {bulletin.revision}</small></div>{isText ? <>{bulletin.state === "needs_changes" && <div className="cg-notice"><span aria-hidden="true">i</span><p>Resubmission is not exposed here; this item remains in needs-changes until the submitter resubmits through a supported intake path.</p></div>}{bulletin.state === "declined" && <div className="cg-notice"><span aria-hidden="true">i</span><p>Declined is terminal in the current lifecycle; no revival control is offered.</p></div>}<label>Moderation note <textarea maxLength={2000} value={note} onChange={(event) => setNotesById((previous) => ({ ...previous, [bulletin.bulletin_id]: event.target.value }))} placeholder="Required for request changes or decline" /></label><div className="cg-inline-actions cg-moderation-actions">{bulletin.state === "submitted" && <><button className="secondary" disabled={busyAction || !operatorId.trim()} onClick={() => void moderateBulletin(bulletin, "needs_changes")}>Request changes</button><button className="primary" disabled={busyAction || !operatorId.trim()} onClick={() => void moderateBulletin(bulletin, "accepted")}>Accept</button></>}{(bulletin.state === "submitted" || bulletin.state === "accepted" || bulletin.state === "scheduled") && <button className="secondary" disabled={busyAction || !operatorId.trim()} onClick={() => beginSchedule(bulletin)}>Schedule</button>}{(bulletin.state === "submitted" || bulletin.state === "accepted" || bulletin.state === "scheduled") && <button className="secondary danger-button" disabled={busyAction || !operatorId.trim()} onClick={() => void moderateBulletin(bulletin, "declined")}>Decline</button>}</div>{schedulingId === bulletin.bulletin_id && <div className="cg-schedule-editor"><label>Start<input type="datetime-local" value={scheduleStart} onChange={(event) => setScheduleStart(event.target.value)} /></label><label>End<input type="datetime-local" value={scheduleEnd} onChange={(event) => setScheduleEnd(event.target.value)} /></label><div className="cg-inline-actions"><button className="primary" disabled={busyAction || !operatorId.trim()} onClick={() => void scheduleBulletin(bulletin)}>{busy === `schedule-${bulletin.bulletin_id}` ? "Scheduling…" : "Save schedule"}</button><button className="secondary" onClick={() => setSchedulingId(null)}>Cancel</button></div></div>}</> : <div className="cg-notice"><span aria-hidden="true">i</span><p>Media and live-video bulletin moderation is not enabled in this text-only screen.</p></div>}</article>; })}</div>}</section>
+    <BulletinExpirationAction channelId={channelId} onRefresh={onRefresh} />
+    <section className="panel"><div className="panel-head"><div><p className="eyebrow">Text bulletin intake</p><h2>Submit for review</h2></div><span className="cg-state-pill cg-state-submitted">submitted</span></div><MutationNotice>Only text bulletins are admitted here. Media uploads, live-video sources, and deletion are not offered in this text-only intake. Operator authority comes from the signed-in session.</MutationNotice><div className="cg-editor-grid"><label>Title<input maxLength={160} value={title} onChange={(event) => setTitle(event.target.value)} placeholder="Library board meeting" /></label><label>Display seconds<input type="number" min={3} max={300} value={displaySeconds} onChange={(event) => setDisplaySeconds(event.target.value)} /></label><label>Tags <span className="cg-form-help">comma-separated slugs</span><input value={tags} onChange={(event) => setTags(event.target.value)} placeholder="community, public-safety" /></label><label>Body<textarea maxLength={4000} value={body} onChange={(event) => setBody(event.target.value)} placeholder="Tuesday at 6 PM in the community room." /></label></div><button className="primary" disabled={busy !== null} onClick={() => void submitTextBulletin()}>{busy === "submit" ? "Submitting…" : "Submit text bulletin"}</button><MutationResult error={error} message={message} /></section>
+    <section className="panel"><div className="panel-head"><div><p className="eyebrow">Durable bulletin lifecycle</p><h2>Review queue</h2></div><span className="count">{data.bulletins.length}</span></div>{data.bulletins.length === 0 ? <CgEmpty title="No bulletins in the queue" detail="Submit the first text bulletin above." /> : <div className="cg-list">{data.bulletins.map((bulletin) => { const isText = bulletin.content.kind === "text"; const note = notesById[bulletin.bulletin_id] ?? bulletin.moderation_notes ?? ""; const busyAction = busy?.endsWith(bulletin.bulletin_id) ?? false; return <article className="cg-card" key={bulletin.bulletin_id}><div className="cg-card-top"><div><strong>{bulletin.content.title ?? displayKind(bulletin.content.kind)}</strong><small>{bulletin.submitted_by} · {formatCgTime(bulletin.created_at_unix_ms)}</small></div><span className={`cg-state-pill cg-state-${bulletin.state}`}>{displayKind(bulletin.state)}</span></div><p>{bulletin.content.body ?? bulletin.content.alt_text ?? "Media bulletin; this screen only mutates text submissions."}</p><div className="cg-tags">{bulletin.tags.length ? bulletin.tags.map((tag) => <span key={tag}>{tag}</span>) : <span>untagged</span>}<small>{bulletin.display_seconds}s · revision {bulletin.revision}</small></div>{isText ? <>{bulletin.state === "needs_changes" && <div className="cg-notice"><span aria-hidden="true">i</span><p>Resubmission is not exposed here; this item remains in needs-changes until the submitter resubmits through a supported intake path.</p></div>}{bulletin.state === "declined" && <div className="cg-notice"><span aria-hidden="true">i</span><p>Declined is terminal in the current lifecycle; no revival control is offered.</p></div>}<label>Moderation note <textarea maxLength={2000} value={note} onChange={(event) => setNotesById((previous) => ({ ...previous, [bulletin.bulletin_id]: event.target.value }))} placeholder="Required for request changes or decline" /></label><div className="cg-inline-actions cg-moderation-actions">{bulletin.state === "submitted" && <><button className="secondary" disabled={busyAction} onClick={() => void moderateBulletin(bulletin, "needs_changes")}>Request changes</button><button className="primary" disabled={busyAction} onClick={() => void moderateBulletin(bulletin, "accepted")}>Accept</button></>}{(bulletin.state === "submitted" || bulletin.state === "accepted" || bulletin.state === "scheduled") && <button className="secondary" disabled={busyAction} onClick={() => beginSchedule(bulletin)}>Schedule</button>}{(bulletin.state === "submitted" || bulletin.state === "accepted" || bulletin.state === "scheduled") && <button className="secondary danger-button" disabled={busyAction} onClick={() => void moderateBulletin(bulletin, "declined")}>Decline</button>}</div>{schedulingId === bulletin.bulletin_id && <div className="cg-schedule-editor"><label>Start<input type="datetime-local" value={scheduleStart} onChange={(event) => setScheduleStart(event.target.value)} /></label><label>End<input type="datetime-local" value={scheduleEnd} onChange={(event) => setScheduleEnd(event.target.value)} /></label><div className="cg-inline-actions"><button className="primary" disabled={busyAction} onClick={() => void scheduleBulletin(bulletin)}>{busy === `schedule-${bulletin.bulletin_id}` ? "Scheduling…" : "Save schedule"}</button><button className="secondary" onClick={() => setSchedulingId(null)}>Cancel</button></div></div>}</> : <div className="cg-notice"><span aria-hidden="true">i</span><p>Media and live-video bulletin moderation is not enabled in this text-only screen.</p></div>}</article>; })}</div>}</section>
     {textBulletins.length === 0 && data.bulletins.length > 0 && <section className="panel"><CgEmpty title="No text bulletins available" detail="Existing non-text bulletins remain visible but cannot be changed by this text-only workflow." /></section>}
   </>;
 }
 
-function BoardDesigner({ data, channelId, operatorId, onRefresh }: { data: CgData; channelId: string; operatorId: string; onRefresh: () => Promise<void> }) {
+function BoardDesigner({ data, channelId, onRefresh }: { data: CgData; channelId: string; onRefresh: () => Promise<void> }) {
   const template = data.templates.find((item) => item.template_id === data.board?.template_id);
   const [templateId, setTemplateId] = useState(data.board?.template_id ?? data.templates[0]?.template_id ?? "");
   const [active, setActive] = useState(data.board?.active ?? true);
@@ -758,10 +705,6 @@ function BoardDesigner({ data, channelId, operatorId, onRefresh }: { data: CgDat
 
   async function saveBoard() {
     clearResult();
-    if (!operatorId.trim()) {
-      setError("Enter an operator name before making an audited change.");
-      return;
-    }
     const chosenTemplate = data.templates.find((item) => item.template_id === templateId);
     if (!chosenTemplate) {
       setError("Choose one of the built-in templates.");
@@ -770,10 +713,10 @@ function BoardDesigner({ data, channelId, operatorId, onRefresh }: { data: CgDat
     setBusy("board");
     try {
       const now = Date.now();
-      const board: CgBoard = data.board
+      const board: AuthenticatedCgBoardWrite = data.board
         ? { ...data.board, template_id: templateId, active, revision: data.board.revision + 1, updated_at_unix_ms: Math.max(now, data.board.updated_at_unix_ms) }
-        : { board_id: newUuid(), channel_id: channelId, template_id: templateId, active, background_audio_asset_id: null, revision: 1, created_at_unix_ms: now, updated_at_unix_ms: now, created_by: operatorId.trim() };
-      await cgApi.writeBoard({ board, expected_revision: data.board?.revision ?? 0, audit: buildAudit(board.channel_id, board.board_id, data.board ? "board_updated" : "board_created", operatorId, { template_id: templateId, active: String(active) }, board.updated_at_unix_ms) });
+        : { board_id: newUuid(), channel_id: channelId, template_id: templateId, active, background_audio_asset_id: null, revision: 1, created_at_unix_ms: now, updated_at_unix_ms: now };
+      await cgApi.writeBoard({ board, expected_revision: data.board?.revision ?? 0, audit: buildAudit(board.channel_id, board.board_id, data.board ? "board_updated" : "board_created", { template_id: templateId, active: String(active) }, board.updated_at_unix_ms) });
       await onRefresh();
       setMessage(data.board ? "Board updated and audit evidence recorded." : "Board created and audit evidence recorded.");
     } catch (problem) {
@@ -785,10 +728,6 @@ function BoardDesigner({ data, channelId, operatorId, onRefresh }: { data: CgDat
 
   async function saveZone() {
     clearResult();
-    if (!operatorId.trim()) {
-      setError("Enter an operator name before making an audited change.");
-      return;
-    }
     if (!data.board || !selectedTemplate || !zoneKey) {
       setError("Choose a built-in template zone key.");
       return;
@@ -844,7 +783,7 @@ function BoardDesigner({ data, channelId, operatorId, onRefresh }: { data: CgDat
       const zone: CgZone = editing
         ? { ...editing, content_source: contentSource, rotation_seconds: rotation, approval_required: sourceUsesApproval && approvalRequired, allowed_tags: sourceUsesApproval ? parsedTags : [], revision: editing.revision + 1, updated_at_unix_ms: Math.max(now, editing.updated_at_unix_ms) }
         : { zone_id: newUuid(), board_id: data.board.board_id, template_zone_key: zoneKey, zone_kind: templateZone.zone_kind, content_source: contentSource, rotation_seconds: rotation, approval_required: sourceUsesApproval && approvalRequired, allowed_tags: sourceUsesApproval ? parsedTags : [], revision: 1, created_at_unix_ms: now, updated_at_unix_ms: now };
-      await cgApi.writeZone({ zone, expected_revision: editing?.revision ?? 0, audit: buildAudit(data.board.channel_id, data.board.board_id, editing ? "zone_updated" : "zone_created", operatorId, { template_zone_key: zone.template_zone_key, content_source: sourceKind }, zone.updated_at_unix_ms) });
+      await cgApi.writeZone({ zone, expected_revision: editing?.revision ?? 0, audit: buildAudit(data.board.channel_id, data.board.board_id, editing ? "zone_updated" : "zone_created", { template_zone_key: zone.template_zone_key, content_source: sourceKind }, zone.updated_at_unix_ms) });
       await onRefresh();
       clearZoneForm();
       setMessage(editing ? "Zone source updated and audit evidence recorded." : "Zone source added and audit evidence recorded.");
@@ -856,11 +795,11 @@ function BoardDesigner({ data, channelId, operatorId, onRefresh }: { data: CgDat
   }
 
   async function removeZone(zone: CgZone) {
-    if (!data.board || !operatorId.trim() || !window.confirm(`Delete the ${displayKind(zone.content_source.kind)} zone “${zone.template_zone_key}”?`)) return;
+    if (!data.board || !window.confirm(`Delete the ${displayKind(zone.content_source.kind)} zone “${zone.template_zone_key}”?`)) return;
     clearResult();
     setBusy(zone.zone_id);
     try {
-      await cgApi.deleteZone(zone.zone_id, { expected_revision: zone.revision, audit: buildAudit(data.board.channel_id, data.board.board_id, "zone_removed", operatorId, { template_zone_key: zone.template_zone_key }, Math.max(Date.now(), zone.updated_at_unix_ms)) });
+      await cgApi.deleteZone(zone.zone_id, { expected_revision: zone.revision, audit: buildAudit(data.board.channel_id, data.board.board_id, "zone_removed", { template_zone_key: zone.template_zone_key }, Math.max(Date.now(), zone.updated_at_unix_ms)) });
       await onRefresh();
       setMessage("Zone deleted and audit evidence recorded.");
     } catch (problem) {
@@ -871,13 +810,13 @@ function BoardDesigner({ data, channelId, operatorId, onRefresh }: { data: CgDat
   }
 
   return <>
-    <section className="panel"><div className="panel-head"><div><p className="eyebrow">Board configuration</p><h2>Layout designer</h2></div><span className={`cg-state-pill ${data.board?.active ? "cg-state-accepted" : "cg-state-declined"}`}>{data.board ? (data.board.active ? "active" : "inactive") : "not configured"}</span></div><div className="cg-editor-grid"><label>Built-in template<select value={templateId} onChange={(event) => setTemplateId(event.target.value)}>{data.templates.map((item) => <option key={item.template_id} value={item.template_id}>{item.display_name}</option>)}</select></label><label className="cg-checkbox"><input type="checkbox" checked={active} onChange={(event) => setActive(event.target.checked)} />Board active</label></div><p className="cg-form-help">Writes use the current revision and append a {data.board ? "board-updated" : "board-created"} audit event. The operator name below is session-local and is not authentication.</p><button className="primary" disabled={busy !== null || !operatorId.trim() || !templateId} onClick={() => void saveBoard()}>{busy === "board" ? "Saving board…" : data.board ? "Save board" : "Create board"}</button><MutationResult error={error} message={message} />{!data.board && <CgEmpty title="No CG board configured" detail="Create a board from one of the six built-in templates to unlock zones." />}{data.board && <><div className="cg-board-meta"><div><span>Template</span><strong>{template?.display_name ?? data.board.template_id}</strong><small>{data.board.template_id} · revision {data.board.revision}</small></div><div><span>Created by</span><strong>{data.board.created_by}</strong><small>Updated {formatCgTime(data.board.updated_at_unix_ms)}</small></div></div><div className="cg-zone-list">{data.zones.length ? data.zones.map((zone) => <article className="cg-zone-row" key={zone.zone_id}><div className="cg-zone-index">{zone.template_zone_key.slice(0, 2).toUpperCase()}</div><div><strong>{displayKind(zone.template_zone_key)}</strong><small>{displayKind(zone.zone_kind)} · {displayKind(zone.content_source.kind)}{zone.approval_required ? " · approval gate" : ""}</small>{zone.allowed_tags.length > 0 && <small>Tags: {zone.allowed_tags.join(", ")}</small>}</div><span className="cg-zone-dim"><button className="text-button" onClick={() => editZone(zone)}>Edit</button><button className="text-button danger-text" disabled={busy === zone.zone_id || !operatorId.trim()} onClick={() => void removeZone(zone)}>{busy === zone.zone_id ? "Deleting…" : "Delete"}</button></span></article>) : <CgEmpty title="No zones configured" detail="Add the first source binding below." />}</div></>}</section>
-    {data.board && <section className="panel"><div className="panel-head"><div><p className="eyebrow">Zone source binding</p><h2>{editingZoneId ? "Edit zone source" : "Add a zone source"}</h2></div><span className="count">{availableZoneKeys.length}</span></div><MutationNotice>All source kinds are stored as typed bindings. Feed and bulletin tags filter content; readiness, network fetching, schedule data, emergency state, image assets, and live sources are resolved elsewhere and remain visibly unresolved until proven.</MutationNotice><div className="cg-editor-grid"><label>Template zone<select value={zoneKey} disabled={Boolean(editingZoneId)} onChange={(event) => setZoneKey(event.target.value)}><option value="">Choose a built-in zone key</option>{editableZoneOptions.map((item) => <option key={item.template_zone_key} value={item.template_zone_key}>{item.template_zone_key} · {displayKind(item.zone_kind)}</option>)}</select></label><label>Content source<select value={sourceKind} onChange={(event) => { const next = event.target.value as CgContentSource["kind"]; setSourceKind(next); if (next !== "feed" && next !== "bulletin_rotation") setApprovalRequired(false); }}>{CG_SOURCE_KINDS.map((item) => <option key={item.kind} value={item.kind}>{item.label}</option>)}</select></label>{sourceKind === "manual" && <label>Manual text<textarea value={manualText} maxLength={2000} onChange={(event) => setManualText(event.target.value)} placeholder="Text shown in this zone" /></label>}{sourceKind === "clock" && <label>Clock format<input maxLength={80} value={clockFormat} onChange={(event) => setClockFormat(event.target.value)} placeholder={DEFAULT_CLOCK_FORMAT} /><span className="cg-form-help">Uses strftime syntax, for example %H:%M or %I:%M %p. The renderer supplies the actual time.</span></label>}{sourceKind === "feed" && <label>Feed source<select value={feedSourceId} onChange={(event) => setFeedSourceId(event.target.value)}><option value="">Choose a configured feed</option>{data.feeds.map((feed) => <option key={feed.feed_source_id} value={feed.feed_source_id}>{feed.label} · {feed.feed_source_id}</option>)}</select>{data.feeds.length === 0 && <span className="cg-form-help">No configured feeds are available. Register one in Feed manager first.</span>}</label>}{sourceKind === "schedule" && <label>Schedule field<select value={scheduleMode} onChange={(event) => setScheduleMode(event.target.value as CgScheduleDisplayMode)}>{CG_SCHEDULE_MODES.map((mode) => <option key={mode.value} value={mode.value}>{mode.label}</option>)}</select><span className="cg-form-help">Schedule data is not fabricated in this configuration screen.</span></label>}{sourceKind === "image" && <div className="cg-field"><label htmlFor="cg-image-asset">Managed image asset</label><select id="cg-image-asset" value={imageAssetId} onChange={(event) => setImageAssetId(event.target.value)} aria-describedby="cg-image-asset-help"><option value="">Choose a ready image</option>{imageAssetId && !selectedImageAsset && <option value={imageAssetId} disabled>Configured asset is not in the managed library</option>}{data.imageAssets.map((asset) => <option key={asset.asset_id} value={asset.asset_id} disabled={!isUsableCgImageAsset(asset)}>{asset.asset_id.slice(0, 12)}… · {formatCgImageAsset(asset)}</option>)}</select><span id="cg-image-asset-help" className="cg-form-help">Only ready, bounded PNG/JPEG assets can be saved. Select an existing asset or upload one below.</span>{selectedImageAsset && <span className={`cg-form-help ${isUsableCgImageAsset(selectedImageAsset) ? "" : "danger-text"}`} role={!isUsableCgImageAsset(selectedImageAsset) ? "alert" : undefined}>{isUsableCgImageAsset(selectedImageAsset) ? `Selected: ${formatCgImageAsset(selectedImageAsset)}` : `Selected asset is not ready or has invalid metadata (${displayKind(selectedImageAsset.readiness)}).`}</span>}{data.imageAssets.length === 0 && <span className="cg-form-help">No managed images exist yet.</span>}<label htmlFor="cg-image-upload">Upload PNG or JPEG</label><input id="cg-image-upload" type="file" accept="image/png,image/jpeg" disabled={uploadingImage || busy !== null} onChange={(event) => { void uploadImage(event.target.files?.[0]); event.currentTarget.value = ""; }} />{uploadingImage && <span className="cg-form-help">Uploading and validating image…</span>}</div>}{sourceKind === "live_video" && <label>Live source ID<input value={liveSourceId} onChange={(event) => setLiveSourceId(event.target.value)} placeholder="00000000-0000-0000-0000-000000000000" /><span className="cg-form-help">Source readiness and on-air output are not claimed here.</span></label>}{(sourceKind === "feed" || sourceKind === "bulletin_rotation") && <label>Allowed tags <span className="cg-form-help">comma-separated slugs; empty means no tag filter</span><input value={zoneTags} onChange={(event) => setZoneTags(event.target.value)} placeholder="public-safety, community" /></label>}<label>Rotation seconds <span className="cg-form-help">optional; 3–3,600</span><input type="number" min={3} max={3600} value={rotationSeconds} onChange={(event) => setRotationSeconds(event.target.value)} placeholder="No rotation" /></label>{sourceUsesApproval && <label className="cg-checkbox"><input type="checkbox" checked={approvalRequired} onChange={(event) => setApprovalRequired(event.target.checked)} />Require approval for this source</label>}</div><div className="button-row"><button className="primary" disabled={busy !== null || uploadingImage || !operatorId.trim() || !zoneKey} onClick={() => void saveZone()}>{busy === "zone" ? "Saving zone…" : editingZoneId ? "Save source binding" : "Add source binding"}</button>{editingZoneId && <button className="secondary" onClick={clearZoneForm}>Cancel</button>}</div><MutationResult error={error} message={message} /></section>}
+    <section className="panel"><div className="panel-head"><div><p className="eyebrow">Board configuration</p><h2>Layout designer</h2></div><span className={`cg-state-pill ${data.board?.active ? "cg-state-accepted" : "cg-state-declined"}`}>{data.board ? (data.board.active ? "active" : "inactive") : "not configured"}</span></div><div className="cg-editor-grid"><label>Built-in template<select value={templateId} onChange={(event) => setTemplateId(event.target.value)}>{data.templates.map((item) => <option key={item.template_id} value={item.template_id}>{item.display_name}</option>)}</select></label><label className="cg-checkbox"><input type="checkbox" checked={active} onChange={(event) => setActive(event.target.checked)} />Board active</label></div><p className="cg-form-help">Writes use the current revision and append a {data.board ? "board-updated" : "board-created"} audit event. The server records the signed-in operator from the authenticated session.</p><button className="primary" disabled={busy !== null || !templateId} onClick={() => void saveBoard()}>{busy === "board" ? "Saving board…" : data.board ? "Save board" : "Create board"}</button><MutationResult error={error} message={message} />{!data.board && <CgEmpty title="No CG board configured" detail="Create a board from one of the six built-in templates to unlock zones." />}{data.board && <><div className="cg-board-meta"><div><span>Template</span><strong>{template?.display_name ?? data.board.template_id}</strong><small>{data.board.template_id} · revision {data.board.revision}</small></div><div><span>Created by</span><strong>{data.board.created_by}</strong><small>Updated {formatCgTime(data.board.updated_at_unix_ms)}</small></div></div><div className="cg-zone-list">{data.zones.length ? data.zones.map((zone) => <article className="cg-zone-row" key={zone.zone_id}><div className="cg-zone-index">{zone.template_zone_key.slice(0, 2).toUpperCase()}</div><div><strong>{displayKind(zone.template_zone_key)}</strong><small>{displayKind(zone.zone_kind)} · {displayKind(zone.content_source.kind)}{zone.approval_required ? " · approval gate" : ""}</small>{zone.allowed_tags.length > 0 && <small>Tags: {zone.allowed_tags.join(", ")}</small>}</div><span className="cg-zone-dim"><button className="text-button" onClick={() => editZone(zone)}>Edit</button><button className="text-button danger-text" disabled={busy === zone.zone_id} onClick={() => void removeZone(zone)}>{busy === zone.zone_id ? "Deleting…" : "Delete"}</button></span></article>) : <CgEmpty title="No zones configured" detail="Add the first source binding below." />}</div></>}</section>
+    {data.board && <section className="panel"><div className="panel-head"><div><p className="eyebrow">Zone source binding</p><h2>{editingZoneId ? "Edit zone source" : "Add a zone source"}</h2></div><span className="count">{availableZoneKeys.length}</span></div><MutationNotice>All source kinds are stored as typed bindings. Feed and bulletin tags filter content; readiness, network fetching, schedule data, emergency state, image assets, and live sources are resolved elsewhere and remain visibly unresolved until proven.</MutationNotice><div className="cg-editor-grid"><label>Template zone<select value={zoneKey} disabled={Boolean(editingZoneId)} onChange={(event) => setZoneKey(event.target.value)}><option value="">Choose a built-in zone key</option>{editableZoneOptions.map((item) => <option key={item.template_zone_key} value={item.template_zone_key}>{item.template_zone_key} · {displayKind(item.zone_kind)}</option>)}</select></label><label>Content source<select value={sourceKind} onChange={(event) => { const next = event.target.value as CgContentSource["kind"]; setSourceKind(next); if (next !== "feed" && next !== "bulletin_rotation") setApprovalRequired(false); }}>{CG_SOURCE_KINDS.map((item) => <option key={item.kind} value={item.kind}>{item.label}</option>)}</select></label>{sourceKind === "manual" && <label>Manual text<textarea value={manualText} maxLength={2000} onChange={(event) => setManualText(event.target.value)} placeholder="Text shown in this zone" /></label>}{sourceKind === "clock" && <label>Clock format<input maxLength={80} value={clockFormat} onChange={(event) => setClockFormat(event.target.value)} placeholder={DEFAULT_CLOCK_FORMAT} /><span className="cg-form-help">Uses strftime syntax, for example %H:%M or %I:%M %p. The renderer supplies the actual time.</span></label>}{sourceKind === "feed" && <label>Feed source<select value={feedSourceId} onChange={(event) => setFeedSourceId(event.target.value)}><option value="">Choose a configured feed</option>{data.feeds.map((feed) => <option key={feed.feed_source_id} value={feed.feed_source_id}>{feed.label} · {feed.feed_source_id}</option>)}</select>{data.feeds.length === 0 && <span className="cg-form-help">No configured feeds are available. Register one in Feed manager first.</span>}</label>}{sourceKind === "schedule" && <label>Schedule field<select value={scheduleMode} onChange={(event) => setScheduleMode(event.target.value as CgScheduleDisplayMode)}>{CG_SCHEDULE_MODES.map((mode) => <option key={mode.value} value={mode.value}>{mode.label}</option>)}</select><span className="cg-form-help">Schedule data is not fabricated in this configuration screen.</span></label>}{sourceKind === "image" && <div className="cg-field"><label htmlFor="cg-image-asset">Managed image asset</label><select id="cg-image-asset" value={imageAssetId} onChange={(event) => setImageAssetId(event.target.value)} aria-describedby="cg-image-asset-help"><option value="">Choose a ready image</option>{imageAssetId && !selectedImageAsset && <option value={imageAssetId} disabled>Configured asset is not in the managed library</option>}{data.imageAssets.map((asset) => <option key={asset.asset_id} value={asset.asset_id} disabled={!isUsableCgImageAsset(asset)}>{asset.asset_id.slice(0, 12)}… · {formatCgImageAsset(asset)}</option>)}</select><span id="cg-image-asset-help" className="cg-form-help">Only ready, bounded PNG/JPEG assets can be saved. Select an existing asset or upload one below.</span>{selectedImageAsset && <span className={`cg-form-help ${isUsableCgImageAsset(selectedImageAsset) ? "" : "danger-text"}`} role={!isUsableCgImageAsset(selectedImageAsset) ? "alert" : undefined}>{isUsableCgImageAsset(selectedImageAsset) ? `Selected: ${formatCgImageAsset(selectedImageAsset)}` : `Selected asset is not ready or has invalid metadata (${displayKind(selectedImageAsset.readiness)}).`}</span>}{data.imageAssets.length === 0 && <span className="cg-form-help">No managed images exist yet.</span>}<label htmlFor="cg-image-upload">Upload PNG or JPEG</label><input id="cg-image-upload" type="file" accept="image/png,image/jpeg" disabled={uploadingImage || busy !== null} onChange={(event) => { void uploadImage(event.target.files?.[0]); event.currentTarget.value = ""; }} />{uploadingImage && <span className="cg-form-help">Uploading and validating image…</span>}</div>}{sourceKind === "live_video" && <label>Live source ID<input value={liveSourceId} onChange={(event) => setLiveSourceId(event.target.value)} placeholder="00000000-0000-0000-0000-000000000000" /><span className="cg-form-help">Source readiness and on-air output are not claimed here.</span></label>}{(sourceKind === "feed" || sourceKind === "bulletin_rotation") && <label>Allowed tags <span className="cg-form-help">comma-separated slugs; empty means no tag filter</span><input value={zoneTags} onChange={(event) => setZoneTags(event.target.value)} placeholder="public-safety, community" /></label>}<label>Rotation seconds <span className="cg-form-help">optional; 3–3,600</span><input type="number" min={3} max={3600} value={rotationSeconds} onChange={(event) => setRotationSeconds(event.target.value)} placeholder="No rotation" /></label>{sourceUsesApproval && <label className="cg-checkbox"><input type="checkbox" checked={approvalRequired} onChange={(event) => setApprovalRequired(event.target.checked)} />Require approval for this source</label>}</div><div className="button-row"><button className="primary" disabled={busy !== null || uploadingImage || !zoneKey} onClick={() => void saveZone()}>{busy === "zone" ? "Saving zone…" : editingZoneId ? "Save source binding" : "Add source binding"}</button>{editingZoneId && <button className="secondary" onClick={clearZoneForm}>Cancel</button>}</div><MutationResult error={error} message={message} /></section>}
     <section className="panel"><div className="panel-head"><div><p className="eyebrow">Built-in library</p><h2>Templates</h2></div><span className="count">{data.templates.length}</span></div><div className="cg-template-grid">{data.templates.map((item) => <article className={`cg-template-card ${item.template_id === data.board?.template_id ? "selected" : ""}`} key={item.template_id}><div className="cg-template-mini" data-kind={item.kind}><span>{item.zones.length} zones</span></div><strong>{item.display_name}</strong><small>{item.template_id} · {displayKind(item.kind)}</small></article>)}</div></section>
   </>;
 }
 
-function FeedManager({ data, channelId, operatorId, onRefresh }: { data: CgData; channelId: string; operatorId: string; onRefresh: () => Promise<void> }) {
+function FeedManager({ data, channelId, onRefresh }: { data: CgData; channelId: string; onRefresh: () => Promise<void> }) {
   const [editingFeedId, setEditingFeedId] = useState<string | null>(null);
   const [kind, setKind] = useState("rss");
   const [label, setLabel] = useState("");
@@ -917,10 +856,6 @@ function FeedManager({ data, channelId, operatorId, onRefresh }: { data: CgData;
   async function saveFeed() {
     setError(null);
     setMessage(null);
-    if (!operatorId.trim()) {
-      setError("Enter an operator name before making an audited change.");
-      return;
-    }
     const refresh = Number(refreshSeconds);
     if (!label.trim() || !sourceUrl.trim() || !sourceUrl.startsWith("https://") || !Number.isInteger(refresh) || refresh < 60 || refresh > 86400) {
       setError("Enter a label, an HTTPS source URL, and a refresh interval from 60 to 86,400 seconds.");
@@ -935,10 +870,10 @@ function FeedManager({ data, channelId, operatorId, onRefresh }: { data: CgData;
     try {
       const now = Date.now();
       const existing = editingFeedId ? data.feeds.find((feed) => feed.feed_source_id === editingFeedId) : undefined;
-      const feed: CgFeed = existing
+      const feed: AuthenticatedCgFeedWrite = existing
         ? { ...existing, kind, label: label.trim(), source_url: sourceUrl.trim(), trust_tier: trustTier, tags: tagValues, refresh_seconds: refresh, enabled, revision: existing.revision + 1, updated_at_unix_ms: Math.max(now, existing.updated_at_unix_ms) }
-        : { feed_source_id: newUuid(), channel_id: channelId, kind, label: label.trim(), source_url: sourceUrl.trim(), trust_tier: trustTier, tags: tagValues, refresh_seconds: refresh, enabled, revision: 1, created_at_unix_ms: now, updated_at_unix_ms: now, created_by: operatorId.trim(), last_fetched_at_unix_ms: null, last_fetch_error: null };
-      await cgApi.writeFeed({ feed, expected_revision: existing?.revision ?? 0, audit: buildAudit(channelId, data.board?.board_id ?? null, existing ? "feed_updated" : "feed_created", operatorId, { kind, enabled: String(enabled) }, feed.updated_at_unix_ms) });
+        : { feed_source_id: newUuid(), channel_id: channelId, kind, label: label.trim(), source_url: sourceUrl.trim(), trust_tier: trustTier, tags: tagValues, refresh_seconds: refresh, enabled, revision: 1, created_at_unix_ms: now, updated_at_unix_ms: now, last_fetched_at_unix_ms: null, last_fetch_error: null };
+      await cgApi.writeFeed({ feed, expected_revision: existing?.revision ?? 0, audit: buildAudit(channelId, data.board?.board_id ?? null, existing ? "feed_updated" : "feed_created", { kind, enabled: String(enabled) }, feed.updated_at_unix_ms) });
       await onRefresh();
       clearForm();
       setMessage(existing ? "Feed source updated and audit evidence recorded." : "Feed source registered and audit evidence recorded.");
@@ -950,12 +885,12 @@ function FeedManager({ data, channelId, operatorId, onRefresh }: { data: CgData;
   }
 
   async function removeFeed(feed: CgFeed) {
-    if (!operatorId.trim() || !window.confirm(`Delete the feed source “${feed.label}”?`)) return;
+    if (!window.confirm(`Delete the feed source “${feed.label}”?`)) return;
     setError(null);
     setMessage(null);
     setBusy(feed.feed_source_id);
     try {
-      await cgApi.deleteFeed(feed.feed_source_id, { expected_revision: feed.revision, audit: buildAudit(channelId, data.board?.board_id ?? null, "feed_removed", operatorId, { label: feed.label }, Math.max(Date.now(), feed.updated_at_unix_ms)) });
+      await cgApi.deleteFeed(feed.feed_source_id, { expected_revision: feed.revision, audit: buildAudit(channelId, data.board?.board_id ?? null, "feed_removed", { label: feed.label }, Math.max(Date.now(), feed.updated_at_unix_ms)) });
       await onRefresh();
       if (editingFeedId === feed.feed_source_id) clearForm();
       setMessage("Feed source deleted and audit evidence recorded.");
@@ -967,13 +902,13 @@ function FeedManager({ data, channelId, operatorId, onRefresh }: { data: CgData;
   }
 
   return <>
-    <section className="panel"><div className="panel-head"><div><p className="eyebrow">External sources</p><h2>{editingFeedId ? "Edit feed source" : "Add feed source"}</h2></div><span className="count">{data.feeds.length}</span></div><MutationNotice>These sources are unauthenticated HTTPS registrations. No credentials are collected or implied; fetch receipts and failures remain visible below.</MutationNotice><div className="cg-editor-grid"><label>Kind<select value={kind} onChange={(event) => setKind(event.target.value)}><option value="rss">RSS</option><option value="ical">iCal</option><option value="caldav">CalDAV</option><option value="weather">Weather</option><option value="social">Social</option></select></label><label>Trust tier<select value={trustTier} onChange={(event) => setTrustTier(event.target.value)}><option value="station">Station</option><option value="trusted">Trusted</option><option value="moderated">Moderated</option></select></label><label>Label<input maxLength={160} value={label} onChange={(event) => setLabel(event.target.value)} placeholder="Town notices" /></label><label>HTTPS source URL<input type="url" maxLength={500} value={sourceUrl} onChange={(event) => setSourceUrl(event.target.value)} placeholder="https://example.gov/notices.xml" /></label><label>Refresh seconds<input type="number" min={60} max={86400} value={refreshSeconds} onChange={(event) => setRefreshSeconds(event.target.value)} /></label><label>Tags <span className="cg-form-help">comma-separated slugs</span><input value={tags} onChange={(event) => setTags(event.target.value)} placeholder="public-safety, community" /></label></div><label className="cg-checkbox"><input type="checkbox" checked={enabled} onChange={(event) => setEnabled(event.target.checked)} />Source enabled</label><div className="button-row"><button className="primary" disabled={busy !== null || !operatorId.trim()} onClick={() => void saveFeed()}>{busy === "feed" ? "Saving feed…" : editingFeedId ? "Save feed" : "Register feed"}</button>{editingFeedId && <button className="secondary" onClick={clearForm}>Cancel</button>}</div><MutationResult error={error} message={message} /></section>
-    <section className="panel"><div className="panel-head"><div><p className="eyebrow">Registered sources</p><h2>Feed health</h2></div><span className="count">{data.feeds.length}</span></div>{data.feeds.length === 0 ? <CgEmpty title="No feeds registered" detail="Add an unauthenticated HTTPS source above. The fetcher will report its first receipt or failure here." /> : <div className="cg-list">{data.feeds.map((feed) => <article className="cg-card" key={feed.feed_source_id}><div className="cg-card-top"><div><strong>{feed.label}</strong><small>{displayKind(feed.kind)} · {displayKind(feed.trust_tier)} · every {feed.refresh_seconds}s</small></div><span className={`cg-state-pill ${feed.enabled ? "cg-state-accepted" : "cg-state-declined"}`}>{feed.enabled ? "enabled" : "disabled"}</span></div><code className="cg-url">{feed.source_url}</code>{feed.last_fetch_error ? <p className="cg-feed-error">{feed.last_fetch_error}</p> : <p>{feed.last_fetched_at_unix_ms ? `Last fetched ${formatCgTime(feed.last_fetched_at_unix_ms)}.` : "No fetch receipt yet; no content is fabricated in preview."}</p>}<div className="cg-card-foot"><small>Owner {feed.created_by} · revision {feed.revision}{feed.tags?.length ? ` · tags ${feed.tags.join(", ")}` : ""}</small><div className="cg-inline-actions"><button className="secondary" onClick={() => editFeed(feed)}>Edit</button><button className="secondary danger-button" disabled={busy === feed.feed_source_id || !operatorId.trim()} onClick={() => void removeFeed(feed)}>{busy === feed.feed_source_id ? "Deleting…" : "Delete"}</button></div></div></article>)}</div>}</section>
-    <FeedItemApprovalQueue data={data} channelId={channelId} operatorId={operatorId} onRefresh={onRefresh} />
+    <section className="panel"><div className="panel-head"><div><p className="eyebrow">External sources</p><h2>{editingFeedId ? "Edit feed source" : "Add feed source"}</h2></div><span className="count">{data.feeds.length}</span></div><MutationNotice>These sources are unauthenticated HTTPS registrations. No credentials are collected or implied; fetch receipts and failures remain visible below.</MutationNotice><div className="cg-editor-grid"><label>Kind<select value={kind} onChange={(event) => setKind(event.target.value)}><option value="rss">RSS</option><option value="ical">iCal</option><option value="caldav">CalDAV</option><option value="weather">Weather</option><option value="social">Social</option></select></label><label>Trust tier<select value={trustTier} onChange={(event) => setTrustTier(event.target.value)}><option value="station">Station</option><option value="trusted">Trusted</option><option value="moderated">Moderated</option></select></label><label>Label<input maxLength={160} value={label} onChange={(event) => setLabel(event.target.value)} placeholder="Town notices" /></label><label>HTTPS source URL<input type="url" maxLength={500} value={sourceUrl} onChange={(event) => setSourceUrl(event.target.value)} placeholder="https://example.gov/notices.xml" /></label><label>Refresh seconds<input type="number" min={60} max={86400} value={refreshSeconds} onChange={(event) => setRefreshSeconds(event.target.value)} /></label><label>Tags <span className="cg-form-help">comma-separated slugs</span><input value={tags} onChange={(event) => setTags(event.target.value)} placeholder="public-safety, community" /></label></div><label className="cg-checkbox"><input type="checkbox" checked={enabled} onChange={(event) => setEnabled(event.target.checked)} />Source enabled</label><div className="button-row"><button className="primary" disabled={busy !== null} onClick={() => void saveFeed()}>{busy === "feed" ? "Saving feed…" : editingFeedId ? "Save feed" : "Register feed"}</button>{editingFeedId && <button className="secondary" onClick={clearForm}>Cancel</button>}</div><MutationResult error={error} message={message} /></section>
+    <section className="panel"><div className="panel-head"><div><p className="eyebrow">Registered sources</p><h2>Feed health</h2></div><span className="count">{data.feeds.length}</span></div>{data.feeds.length === 0 ? <CgEmpty title="No feeds registered" detail="Add an unauthenticated HTTPS source above. The fetcher will report its first receipt or failure here." /> : <div className="cg-list">{data.feeds.map((feed) => <article className="cg-card" key={feed.feed_source_id}><div className="cg-card-top"><div><strong>{feed.label}</strong><small>{displayKind(feed.kind)} · {displayKind(feed.trust_tier)} · every {feed.refresh_seconds}s</small></div><span className={`cg-state-pill ${feed.enabled ? "cg-state-accepted" : "cg-state-declined"}`}>{feed.enabled ? "enabled" : "disabled"}</span></div><code className="cg-url">{feed.source_url}</code>{feed.last_fetch_error ? <p className="cg-feed-error">{feed.last_fetch_error}</p> : <p>{feed.last_fetched_at_unix_ms ? `Last fetched ${formatCgTime(feed.last_fetched_at_unix_ms)}.` : "No fetch receipt yet; no content is fabricated in preview."}</p>}<div className="cg-card-foot"><small>Owner {feed.created_by} · revision {feed.revision}{feed.tags?.length ? ` · tags ${feed.tags.join(", ")}` : ""}</small><div className="cg-inline-actions"><button className="secondary" onClick={() => editFeed(feed)}>Edit</button><button className="secondary danger-button" disabled={busy === feed.feed_source_id} onClick={() => void removeFeed(feed)}>{busy === feed.feed_source_id ? "Deleting…" : "Delete"}</button></div></div></article>)}</div>}</section>
+    <FeedItemApprovalQueue data={data} channelId={channelId} onRefresh={onRefresh} />
   </>;
 }
 
-function FeedItemApprovalQueue({ data, channelId, operatorId, onRefresh }: { data: CgData; channelId: string; operatorId: string; onRefresh: () => Promise<void> }) {
+function FeedItemApprovalQueue({ data, channelId, onRefresh }: { data: CgData; channelId: string; onRefresh: () => Promise<void> }) {
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
@@ -981,7 +916,7 @@ function FeedItemApprovalQueue({ data, channelId, operatorId, onRefresh }: { dat
   const pendingCount = feeds.reduce((total, feed) => total + feed.items.filter((item) => !item.approved).length, 0);
 
   async function approve(feed: CgFeedRead, item: CgFeedItemRead) {
-    if (item.approved || busy || !operatorId.trim()) return;
+    if (item.approved || busy) return;
     setError(null);
     setMessage(null);
     const now = Date.now();
@@ -991,10 +926,9 @@ function FeedItemApprovalQueue({ data, channelId, operatorId, onRefresh }: { dat
         approval: {
           feed_source_id: feed.feed_source_id,
           item_id: item.item_id,
-          approved_by: operatorId.trim(),
           approved_at_unix_ms: now,
         },
-        audit: buildAudit(channelId, data.board?.board_id ?? null, "feed_item_approved", operatorId, { feed_source_id: feed.feed_source_id, item_id: item.item_id }, now),
+        audit: buildAudit(channelId, data.board?.board_id ?? null, "feed_item_approved", { feed_source_id: feed.feed_source_id, item_id: item.item_id }, now),
       });
       await onRefresh();
       setMessage(`Approved “${item.title}”; audit evidence recorded.`);
@@ -1005,7 +939,7 @@ function FeedItemApprovalQueue({ data, channelId, operatorId, onRefresh }: { dat
     }
   }
 
-  return <section className="panel"><div className="panel-head"><div><p className="eyebrow">Moderated cache</p><h2>Feed-item approvals</h2></div><span className="count">{pendingCount} pending</span></div><MutationNotice>Only cached items are shown. This screen does not fetch the network; approval is durable, channel-scoped, and append-only.</MutationNotice>{feeds.length === 0 ? <CgEmpty title="No configured feeds" detail="Register a feed source before reviewing cached items." /> : <div className="cg-list">{feeds.map((feed) => { const fetchError = feed.last_fetch_error ?? feed.cache_last_error; const state = feed.never_fetched ? "never fetched" : fetchError ? "fetch error" : feed.stale ? "stale cache" : "fresh cache"; return <article className="cg-card" key={feed.feed_source_id}><div className="cg-card-top"><div><strong>{feed.label}</strong><small>{displayKind(feed.kind)} · {feed.items.length} cached item{feed.items.length === 1 ? "" : "s"}</small></div><span className={`cg-state-pill ${feed.never_fetched || fetchError ? "cg-state-declined" : feed.stale ? "cg-state-submitted" : "cg-state-accepted"}`}>{state}</span></div>{feed.never_fetched ? <p>No successful cache exists yet. Network fetching is not part of this slice.</p> : fetchError ? <p className="cg-feed-error">{fetchError}</p> : <p>Cache fetched {feed.cache_fetched_at_unix_ms ? formatCgTime(feed.cache_fetched_at_unix_ms) : "at an unknown time"}{feed.cache_expires_at_unix_ms ? ` · expires ${formatCgTime(feed.cache_expires_at_unix_ms)}` : ""}.</p>}{feed.items.length > 0 && <div className="cg-feed-item-list">{feed.items.map((item) => <div className="cg-feed-item" key={item.item_id}><div><strong>{item.title}</strong><small>{item.tags.length ? item.tags.join(", ") : "untagged"}{item.starts_at_unix_ms ? ` · ${formatCgTime(item.starts_at_unix_ms)}` : ""}</small>{item.summary && <p>{item.summary}</p>}</div><button className={item.approved ? "secondary" : "primary"} disabled={item.approved || busy !== null || !operatorId.trim()} onClick={() => void approve(feed, item)}>{item.approved ? `Approved by ${item.approved_by ?? "operator"}` : busy === `${feed.feed_source_id}:${item.item_id}` ? "Approving…" : "Approve"}</button></div>)}</div>}</article>; })}</div>}<MutationResult error={error} message={message} /></section>;
+  return <section className="panel"><div className="panel-head"><div><p className="eyebrow">Moderated cache</p><h2>Feed-item approvals</h2></div><span className="count">{pendingCount} pending</span></div><MutationNotice>Only cached items are shown. This screen does not fetch the network; approval is durable, channel-scoped, and append-only.</MutationNotice>{feeds.length === 0 ? <CgEmpty title="No configured feeds" detail="Register a feed source before reviewing cached items." /> : <div className="cg-list">{feeds.map((feed) => { const fetchError = feed.last_fetch_error ?? feed.cache_last_error; const state = feed.never_fetched ? "never fetched" : fetchError ? "fetch error" : feed.stale ? "stale cache" : "fresh cache"; return <article className="cg-card" key={feed.feed_source_id}><div className="cg-card-top"><div><strong>{feed.label}</strong><small>{displayKind(feed.kind)} · {feed.items.length} cached item{feed.items.length === 1 ? "" : "s"}</small></div><span className={`cg-state-pill ${feed.never_fetched || fetchError ? "cg-state-declined" : feed.stale ? "cg-state-submitted" : "cg-state-accepted"}`}>{state}</span></div>{feed.never_fetched ? <p>No successful cache exists yet. Network fetching is not part of this slice.</p> : fetchError ? <p className="cg-feed-error">{fetchError}</p> : <p>Cache fetched {feed.cache_fetched_at_unix_ms ? formatCgTime(feed.cache_fetched_at_unix_ms) : "at an unknown time"}{feed.cache_expires_at_unix_ms ? ` · expires ${formatCgTime(feed.cache_expires_at_unix_ms)}` : ""}.</p>}{feed.items.length > 0 && <div className="cg-feed-item-list">{feed.items.map((item) => <div className="cg-feed-item" key={item.item_id}><div><strong>{item.title}</strong><small>{item.tags.length ? item.tags.join(", ") : "untagged"}{item.starts_at_unix_ms ? ` · ${formatCgTime(item.starts_at_unix_ms)}` : ""}</small>{item.summary && <p>{item.summary}</p>}</div><button className={item.approved ? "secondary" : "primary"} disabled={item.approved || busy !== null} onClick={() => void approve(feed, item)}>{item.approved ? `Approved by ${item.approved_by ?? "operator"}` : busy === `${feed.feed_source_id}:${item.item_id}` ? "Approving…" : "Approve"}</button></div>)}</div>}</article>; })}</div>}<MutationResult error={error} message={message} /></section>;
 }
 
 function ResolvedContent({ content }: { content: CgResolvedContent }) {
@@ -1088,16 +1022,11 @@ async function loadCgData(channelId: string): Promise<CgData> {
 
 export function CgOperator({ channelId, channels, route, onNavigate }: { channelId: string | undefined; channels: CgChannelOption[]; route: CgRoute; onNavigate: (route: CgRoute) => void }) {
   const [selectedChannelId, setSelectedChannelId] = useState(channelId);
-  const [operatorId, setOperatorId] = useState(readSessionOperator);
   const [data, setData] = useState<CgData | undefined>();
   const [error, setError] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   useEffect(() => { setSelectedChannelId(channelId); }, [channelId]);
   const activeChannelId = selectedChannelId ?? channelId;
-  function updateOperatorId(value: string) {
-    setOperatorId(value);
-    writeSessionOperator(value);
-  }
   const load = useCallback(async () => {
     if (!activeChannelId) return;
     setRefreshing(true);
@@ -1113,8 +1042,8 @@ export function CgOperator({ channelId, channels, route, onNavigate }: { channel
   useEffect(() => { setData(undefined); void load(); }, [load]);
   if (!activeChannelId) return <><header className="page-header"><div><p className="eyebrow">CG / Bulletin board</p><h1>Choose a channel first.</h1><p>CG boards are durable per-channel configurations.</p></div></header><section className="panel"><CgEmpty title="No output channel configured" detail="Configure a channel before opening its CG board, feeds, or bulletin queue." /></section></>;
   return <>
-    <header className="page-header"><div><p className="eyebrow">CG / Bulletin board</p><h1>{CG_ROUTES.find((item) => item.id === route)?.label ?? "Operator tools"}</h1><p>Authoring and management contract</p></div><div className="header-actions"><OperatorIdentity value={operatorId} onChange={updateOperatorId} /><label className="cg-channel-picker">Channel<select value={activeChannelId} onChange={(event) => setSelectedChannelId(event.target.value)}>{channels.map((channel) => <option key={channel.channel_id} value={channel.channel_id}>{channel.display_name}</option>)}</select></label><span className="cg-channel-badge">{data?.board?.active ? "Board active" : "Board not configured"}</span><button className="secondary" onClick={() => void load()} disabled={refreshing}>{refreshing ? "Reading…" : "Refresh"}</button></div></header>
+    <header className="page-header"><div><p className="eyebrow">CG / Bulletin board</p><h1>{CG_ROUTES.find((item) => item.id === route)?.label ?? "Operator tools"}</h1><p>Authenticated authoring and management contract</p></div><div className="header-actions"><span className="cg-channel-badge">Signed-in identity</span><label className="cg-channel-picker">Channel<select value={activeChannelId} onChange={(event) => setSelectedChannelId(event.target.value)}>{channels.map((channel) => <option key={channel.channel_id} value={channel.channel_id}>{channel.display_name}</option>)}</select></label><span className="cg-channel-badge">{data?.board?.active ? "Board active" : "Board not configured"}</span><button className="secondary" onClick={() => void load()} disabled={refreshing}>{refreshing ? "Reading…" : "Refresh"}</button></div></header>
     <CgTabs route={route} onNavigate={onNavigate} />
-    {error ? <CgError error={error} onRetry={() => void load()} /> : !data ? <CgLoading /> : route === "cg-moderation" ? <ModerationQueue data={data} channelId={activeChannelId} operatorId={operatorId} onRefresh={load} /> : route === "cg-board" ? <BoardDesigner data={data} channelId={activeChannelId} operatorId={operatorId} onRefresh={load} /> : route === "cg-feeds" ? <FeedManager data={data} channelId={activeChannelId} operatorId={operatorId} onRefresh={load} /> : route === "cg-preview" ? <LivePreview data={data} channelId={activeChannelId} /> : <SettingsHistory data={data} />}
+    {error ? <CgError error={error} onRetry={() => void load()} /> : !data ? <CgLoading /> : route === "cg-moderation" ? <ModerationQueue data={data} channelId={activeChannelId} onRefresh={load} /> : route === "cg-board" ? <BoardDesigner data={data} channelId={activeChannelId} onRefresh={load} /> : route === "cg-feeds" ? <FeedManager data={data} channelId={activeChannelId} onRefresh={load} /> : route === "cg-preview" ? <LivePreview data={data} channelId={activeChannelId} /> : <SettingsHistory data={data} />}
   </>;
 }

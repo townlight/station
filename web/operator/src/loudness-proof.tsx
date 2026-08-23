@@ -7,6 +7,7 @@ import {
   validateLoudnessProofRequest,
   type LoudnessProofJobState,
 } from "./loudness-proof-contract";
+import { ApiError, apiRequest } from "./api-client";
 
 const DEFAULT_SAMPLE_DURATION_MS = 30_000;
 const DEFAULT_CAPTURE_BYTES = 64 * 1024 * 1024;
@@ -69,19 +70,8 @@ class ProofApiError extends Error {
 }
 
 async function proofRequest<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(path, {
-    ...init,
-    headers: { "Content-Type": "application/json", ...init?.headers },
-  });
-  const body = await response.json().catch(() => null) as { error?: { code?: string; message?: string } } | T | null;
-  if (!response.ok) {
-    const failure = body && typeof body === "object" && "error" in body ? body.error : undefined;
-    const message = failure?.message
-      ? String(failure.message)
-      : `Request failed with HTTP ${response.status}.`;
-    throw new ProofApiError(response.status, failure?.code ? String(failure.code) : null, message);
-  }
-  return body as T;
+  try { return await apiRequest<T>(path, init); }
+  catch (problem) { if (problem instanceof ApiError) throw new ProofApiError(problem.status, problem.code, problem.message); throw problem; }
 }
 
 function proofStateLabel(state: LoudnessProofJobState): string {
