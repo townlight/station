@@ -15,6 +15,8 @@ The repository also contains a supervised isolated channel worker, a length-fram
 - The appliance remains locally operable when optional cloud services are unavailable.
 
 See [the architecture overview](docs/architecture/overview.md) for boundaries and non-negotiable design rules.
+See [the capability ledger](CAPABILITIES.md) for the complete, unchanged product scope and the
+honest implementation/proof status of every required section.
 
 ## Requirements
 
