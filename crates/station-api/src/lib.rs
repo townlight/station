@@ -1,3 +1,5 @@
+pub mod auth;
+
 use std::collections::{BTreeSet, HashMap};
 use std::io::{Read, Write};
 use std::net::UdpSocket;

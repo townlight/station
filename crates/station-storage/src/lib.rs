@@ -14,6 +14,10 @@ use std::{
 };
 
 use sha2::{Digest, Sha256};
+use station_auth::{
+    AccountId, BootstrapCredential, CredentialVersion, OperatorAccount, OperatorDisplayName,
+    OperatorRole, OperatorSession, OperatorUsername, PasswordPhc, RecoveryCredential, SecretDigest,
+};
 use station_cg::{
     CgAuditEvent, CgAuditEventKind, CgBoard, CgBulletin, CgBulletinContent, CgBulletinState,
     CgContentSource, CgFeedCacheEntry, CgFeedItem, CgFeedItemApproval, CgFeedKind, CgFeedSource,
@@ -415,6 +419,27 @@ pub struct OutputLoudnessProofJobRecord {
     pub failure_detail: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OperatorLoginAuthority {
+    pub account: OperatorAccount,
+    pub failed_attempts: u32,
+    pub first_failure_at_unix_ms: Option<i64>,
+    pub locked_until_unix_ms: Option<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OperatorBootstrapInstallation {
+    pub account: OperatorAccount,
+    pub session: OperatorSession,
+    pub recovery_digests: Vec<SecretDigest>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OperatorSessionAuthority {
+    pub account: OperatorAccount,
+    pub session: OperatorSession,
+}
+
 pub struct StationStore {
     database: *mut Sqlite3,
     _data_root: PathBuf,
@@ -806,6 +831,7 @@ impl StationStore {
         store.migrate_output_loudness_jobs()?;
         store.initialize_cg_schema()?;
         store.migrate_cg_feed_cache_schema()?;
+        store.initialize_operator_auth_schema()?;
         store.execute(
             "CREATE TABLE IF NOT EXISTS srt_output_secrets (\
                channel_id TEXT NOT NULL,\
@@ -818,6 +844,858 @@ impl StationStore {
         store.seed_default_alert_rules()?;
         store.seed_default_self_test_schedules()?;
         Ok(store)
+    }
+
+    fn initialize_operator_auth_schema(&self) -> Result<(), String> {
+        self.execute(
+            "CREATE TABLE IF NOT EXISTS operator_accounts (\
+               account_id TEXT PRIMARY KEY,\
+               username TEXT NOT NULL COLLATE NOCASE UNIQUE,\
+               display_name TEXT NOT NULL,\
+               password_phc TEXT NOT NULL,\
+               credential_version INTEGER NOT NULL CHECK (credential_version >= 1),\
+               enabled INTEGER NOT NULL CHECK (enabled IN (0,1)),\
+               failed_attempts INTEGER NOT NULL DEFAULT 0 CHECK (failed_attempts >= 0),\
+               first_failure_at_unix_ms INTEGER NOT NULL DEFAULT -1 CHECK (first_failure_at_unix_ms >= -1),\
+               locked_until_unix_ms INTEGER NOT NULL DEFAULT -1 CHECK (locked_until_unix_ms >= -1),\
+               created_at_unix_ms INTEGER NOT NULL CHECK (created_at_unix_ms >= 0),\
+               updated_at_unix_ms INTEGER NOT NULL CHECK (updated_at_unix_ms >= created_at_unix_ms)\
+             );\
+             CREATE TABLE IF NOT EXISTS account_roles (\
+               account_id TEXT NOT NULL,\
+               role TEXT NOT NULL CHECK (role IN ('setup_admin','meeting_operator','records_clerk','publish_operator','support_admin')),\
+               PRIMARY KEY(account_id, role),\
+               FOREIGN KEY(account_id) REFERENCES operator_accounts(account_id) ON DELETE CASCADE\
+             );\
+             CREATE TABLE IF NOT EXISTS operator_sessions (\
+               session_digest BLOB PRIMARY KEY CHECK (length(session_digest) = 32),\
+               csrf_digest BLOB NOT NULL UNIQUE CHECK (length(csrf_digest) = 32),\
+               account_id TEXT NOT NULL,\
+               credential_version INTEGER NOT NULL CHECK (credential_version >= 1),\
+               boot_id BLOB NOT NULL CHECK (length(boot_id) = 32),\
+               created_at_unix_ms INTEGER NOT NULL CHECK (created_at_unix_ms >= 0),\
+               last_seen_at_unix_ms INTEGER NOT NULL CHECK (last_seen_at_unix_ms >= created_at_unix_ms),\
+               idle_expires_at_unix_ms INTEGER NOT NULL CHECK (idle_expires_at_unix_ms > last_seen_at_unix_ms),\
+               absolute_expires_at_unix_ms INTEGER NOT NULL CHECK (absolute_expires_at_unix_ms >= idle_expires_at_unix_ms),\
+               revoked_at_unix_ms INTEGER NOT NULL DEFAULT -1 CHECK (revoked_at_unix_ms >= -1),\
+               FOREIGN KEY(account_id) REFERENCES operator_accounts(account_id) ON DELETE CASCADE\
+             );\
+             CREATE INDEX IF NOT EXISTS operator_sessions_account \
+               ON operator_sessions(account_id, credential_version);\
+             CREATE INDEX IF NOT EXISTS operator_sessions_expiry \
+               ON operator_sessions(idle_expires_at_unix_ms, absolute_expires_at_unix_ms);\
+             CREATE TABLE IF NOT EXISTS operator_bootstrap (\
+               singleton INTEGER PRIMARY KEY CHECK (singleton = 1),\
+               secret_digest BLOB NOT NULL UNIQUE CHECK (length(secret_digest) = 32),\
+               expires_at_unix_ms INTEGER NOT NULL CHECK (expires_at_unix_ms >= 0),\
+               consumed_at_unix_ms INTEGER NOT NULL DEFAULT -1 CHECK (consumed_at_unix_ms >= -1),\
+               created_at_unix_ms INTEGER NOT NULL CHECK (created_at_unix_ms >= 0),\
+               CHECK (expires_at_unix_ms > created_at_unix_ms),\
+               CHECK (consumed_at_unix_ms = -1 OR consumed_at_unix_ms >= created_at_unix_ms)\
+             );\
+             CREATE TABLE IF NOT EXISTS operator_recovery_hashes (\
+               account_id TEXT NOT NULL,\
+               recovery_digest BLOB NOT NULL CHECK (length(recovery_digest) = 32),\
+               created_at_unix_ms INTEGER NOT NULL CHECK (created_at_unix_ms >= 0),\
+               consumed_at_unix_ms INTEGER NOT NULL DEFAULT -1 CHECK (consumed_at_unix_ms >= -1),\
+               PRIMARY KEY(account_id, recovery_digest),\
+               FOREIGN KEY(account_id) REFERENCES operator_accounts(account_id) ON DELETE CASCADE\
+             );\
+             CREATE TABLE IF NOT EXISTS operator_auth_audit (\
+               audit_id INTEGER PRIMARY KEY AUTOINCREMENT,\
+               event_kind TEXT NOT NULL CHECK (length(event_kind) BETWEEN 1 AND 64),\
+               account_id TEXT,\
+               session_digest BLOB CHECK (session_digest IS NULL OR length(session_digest) = 32),\
+               occurred_at_unix_ms INTEGER NOT NULL CHECK (occurred_at_unix_ms >= 0),\
+               detail TEXT NOT NULL CHECK (length(detail) <= 2048)\
+             );\
+             CREATE INDEX IF NOT EXISTS operator_auth_audit_account_time \
+               ON operator_auth_audit(account_id, occurred_at_unix_ms, audit_id);\
+             CREATE TRIGGER IF NOT EXISTS operator_auth_audit_no_update \
+               BEFORE UPDATE ON operator_auth_audit \
+               BEGIN SELECT RAISE(ABORT, 'operator auth audit is append-only'); END;\
+             CREATE TRIGGER IF NOT EXISTS operator_auth_audit_no_delete \
+               BEFORE DELETE ON operator_auth_audit \
+               BEGIN SELECT RAISE(ABORT, 'operator auth audit is append-only'); END;",
+        )
+    }
+
+    pub fn read_operator_login(
+        &self,
+        username: &OperatorUsername,
+    ) -> Result<Option<OperatorLoginAuthority>, String> {
+        let statement = self.prepare(
+            "SELECT account_id,username,display_name,password_phc,credential_version,enabled,\
+             failed_attempts,first_failure_at_unix_ms,locked_until_unix_ms,\
+             created_at_unix_ms,updated_at_unix_ms \
+             FROM operator_accounts WHERE username=?1 COLLATE NOCASE",
+        )?;
+        let username_text = c_string(username.as_str(), "operator username")?;
+        bind_text(self.database, statement.raw, 1, &username_text)?;
+        match unsafe { sqlite3_step(statement.raw) } {
+            SQLITE_DONE => Ok(None),
+            SQLITE_ROW => {
+                let account_id = AccountId::try_from(column_text(statement.raw, 0)?)
+                    .map_err(|error| format!("database returned invalid account id: {error}"))?;
+                let stored_username = OperatorUsername::try_from(column_text(statement.raw, 1)?)
+                    .map_err(|error| format!("database returned invalid username: {error}"))?;
+                let display_name = OperatorDisplayName::try_from(column_text(statement.raw, 2)?)
+                    .map_err(|error| format!("database returned invalid display name: {error}"))?;
+                let password_phc = PasswordPhc::try_from(column_text(statement.raw, 3)?)
+                    .map_err(|error| format!("database returned invalid password hash: {error}"))?;
+                let credential_version = CredentialVersion::new(
+                    u64::try_from(unsafe { sqlite3_column_int64(statement.raw, 4) })
+                        .map_err(|_| "database returned invalid credential version".to_string())?,
+                )
+                .map_err(|error| {
+                    format!("database returned invalid credential version: {error}")
+                })?;
+                let enabled = unsafe { sqlite3_column_int64(statement.raw, 5) } == 1;
+                let failed_attempts =
+                    u32::try_from(unsafe { sqlite3_column_int64(statement.raw, 6) }).map_err(
+                        |_| "database returned invalid failed-attempt count".to_string(),
+                    )?;
+                let first_failure_at_unix_ms = optional_nonnegative_column(statement.raw, 7)?;
+                let locked_until_unix_ms = optional_nonnegative_column(statement.raw, 8)?;
+                let created_at_unix_ms = unsafe { sqlite3_column_int64(statement.raw, 9) };
+                let updated_at_unix_ms = unsafe { sqlite3_column_int64(statement.raw, 10) };
+                let roles = self.read_operator_roles(&account_id)?;
+                let account = OperatorAccount::new(
+                    account_id,
+                    stored_username,
+                    display_name,
+                    password_phc,
+                    roles,
+                    credential_version,
+                    enabled,
+                    created_at_unix_ms,
+                    updated_at_unix_ms,
+                )
+                .map_err(|error| format!("database returned invalid operator account: {error}"))?;
+                Ok(Some(OperatorLoginAuthority {
+                    account,
+                    failed_attempts,
+                    first_failure_at_unix_ms,
+                    locked_until_unix_ms,
+                }))
+            }
+            _ => Err(sqlite_error(self.database)),
+        }
+    }
+
+    pub fn record_operator_login_failure(
+        &self,
+        account_id: &AccountId,
+        occurred_at_unix_ms: i64,
+        locked_until_unix_ms: Option<i64>,
+    ) -> Result<bool, String> {
+        if occurred_at_unix_ms < 0
+            || locked_until_unix_ms.is_some_and(|locked| locked < occurred_at_unix_ms)
+        {
+            return Err("operator login failure timestamps are invalid".into());
+        }
+        self.execute("BEGIN IMMEDIATE")?;
+        let outcome = (|| {
+            let statement = self.prepare(
+                "UPDATE operator_accounts SET \
+                 failed_attempts=failed_attempts+1,\
+                 first_failure_at_unix_ms=CASE WHEN first_failure_at_unix_ms=-1 THEN ?1 ELSE first_failure_at_unix_ms END,\
+                 locked_until_unix_ms=MAX(locked_until_unix_ms,?2),\
+                 updated_at_unix_ms=MAX(updated_at_unix_ms,?1) \
+                 WHERE account_id=?3 AND enabled=1",
+            )?;
+            bind_i64(self.database, statement.raw, 1, occurred_at_unix_ms)?;
+            bind_i64(
+                self.database,
+                statement.raw,
+                2,
+                locked_until_unix_ms.unwrap_or(-1),
+            )?;
+            let id = c_string(account_id.as_str(), "account id")?;
+            bind_text(self.database, statement.raw, 3, &id)?;
+            expect_done(self.database, statement.raw)?;
+            let changed = self.changes() == 1;
+            if changed {
+                self.append_operator_auth_audit(
+                    "login_failed",
+                    account_id,
+                    None,
+                    occurred_at_unix_ms,
+                    "operator login failed",
+                )?;
+            }
+            Ok(changed)
+        })();
+        self.finish_value_transaction(outcome)
+    }
+
+    pub fn clear_operator_login_failures(
+        &self,
+        account_id: &AccountId,
+        occurred_at_unix_ms: i64,
+    ) -> Result<bool, String> {
+        if occurred_at_unix_ms < 0 {
+            return Err("operator login success timestamp is invalid".into());
+        }
+        self.execute("BEGIN IMMEDIATE")?;
+        let outcome = (|| {
+            let statement = self.prepare(
+                "UPDATE operator_accounts SET failed_attempts=0,first_failure_at_unix_ms=-1,\
+                 locked_until_unix_ms=-1,updated_at_unix_ms=MAX(updated_at_unix_ms,?1) \
+                 WHERE account_id=?2 AND enabled=1",
+            )?;
+            bind_i64(self.database, statement.raw, 1, occurred_at_unix_ms)?;
+            let id = c_string(account_id.as_str(), "account id")?;
+            bind_text(self.database, statement.raw, 2, &id)?;
+            expect_done(self.database, statement.raw)?;
+            let changed = self.changes() == 1;
+            if changed {
+                self.append_operator_auth_audit(
+                    "login_succeeded",
+                    account_id,
+                    None,
+                    occurred_at_unix_ms,
+                    "operator login succeeded",
+                )?;
+            }
+            Ok(changed)
+        })();
+        self.finish_value_transaction(outcome)
+    }
+
+    fn read_operator_roles(
+        &self,
+        account_id: &AccountId,
+    ) -> Result<BTreeSet<OperatorRole>, String> {
+        let statement =
+            self.prepare("SELECT role FROM account_roles WHERE account_id=?1 ORDER BY role")?;
+        let id = c_string(account_id.as_str(), "account id")?;
+        bind_text(self.database, statement.raw, 1, &id)?;
+        let mut roles = BTreeSet::new();
+        loop {
+            match unsafe { sqlite3_step(statement.raw) } {
+                SQLITE_ROW => {
+                    let role_text = column_text(statement.raw, 0)?;
+                    roles.insert(OperatorRole::try_from(role_text.as_str()).map_err(|error| {
+                        format!("database returned invalid operator role: {error}")
+                    })?);
+                }
+                SQLITE_DONE => return Ok(roles),
+                _ => return Err(sqlite_error(self.database)),
+            }
+        }
+    }
+
+    pub fn provision_operator_bootstrap(
+        &self,
+        bootstrap: &BootstrapCredential,
+    ) -> Result<bool, String> {
+        if bootstrap.issued_at_unix_ms() < 0
+            || bootstrap.expires_at_unix_ms() <= bootstrap.issued_at_unix_ms()
+            || bootstrap.consumed_at_unix_ms().is_some()
+        {
+            return Err("bootstrap credential is not an unconsumed bounded credential".into());
+        }
+        self.execute("BEGIN IMMEDIATE")?;
+        let outcome = (|| {
+            let statement = self.prepare(
+                "INSERT INTO operator_bootstrap(singleton,secret_digest,expires_at_unix_ms,consumed_at_unix_ms,created_at_unix_ms) \
+                 SELECT 1,?1,?2,-1,?3 WHERE NOT EXISTS(SELECT 1 FROM operator_accounts) \
+                 ON CONFLICT(singleton) DO UPDATE SET secret_digest=excluded.secret_digest,\
+                 expires_at_unix_ms=excluded.expires_at_unix_ms,consumed_at_unix_ms=-1,\
+                 created_at_unix_ms=excluded.created_at_unix_ms \
+                 WHERE operator_bootstrap.consumed_at_unix_ms=-1 \
+                 AND operator_bootstrap.expires_at_unix_ms<=excluded.created_at_unix_ms \
+                 AND NOT EXISTS(SELECT 1 FROM operator_accounts)",
+            )?;
+            bind_blob(
+                self.database,
+                statement.raw,
+                1,
+                bootstrap.token_digest().as_bytes(),
+            )?;
+            bind_i64(
+                self.database,
+                statement.raw,
+                2,
+                bootstrap.expires_at_unix_ms(),
+            )?;
+            bind_i64(
+                self.database,
+                statement.raw,
+                3,
+                bootstrap.issued_at_unix_ms(),
+            )?;
+            expect_done(self.database, statement.raw)?;
+            Ok(self.changes() == 1)
+        })();
+        self.finish_value_transaction(outcome)
+    }
+
+    pub fn read_operator_bootstrap(&self) -> Result<Option<BootstrapCredential>, String> {
+        let statement = self.prepare(
+            "SELECT secret_digest,created_at_unix_ms,expires_at_unix_ms,consumed_at_unix_ms \
+             FROM operator_bootstrap WHERE singleton=1",
+        )?;
+        match unsafe { sqlite3_step(statement.raw) } {
+            SQLITE_DONE => Ok(None),
+            SQLITE_ROW => BootstrapCredential::new(
+                secret_digest_column(statement.raw, 0)?,
+                unsafe { sqlite3_column_int64(statement.raw, 1) },
+                unsafe { sqlite3_column_int64(statement.raw, 2) },
+                optional_nonnegative_column(statement.raw, 3)?,
+            )
+            .map(Some)
+            .map_err(|error| format!("database returned invalid bootstrap authority: {error}")),
+            _ => Err(sqlite_error(self.database)),
+        }
+    }
+
+    pub fn has_operator_accounts(&self) -> Result<bool, String> {
+        let statement = self.prepare("SELECT EXISTS(SELECT 1 FROM operator_accounts)")?;
+        match unsafe { sqlite3_step(statement.raw) } {
+            SQLITE_ROW => Ok(unsafe { sqlite3_column_int64(statement.raw, 0) } == 1),
+            _ => Err(sqlite_error(self.database)),
+        }
+    }
+
+    pub fn consume_operator_bootstrap(
+        &self,
+        presented_digest: &SecretDigest,
+        installation: &OperatorBootstrapInstallation,
+        occurred_at_unix_ms: i64,
+    ) -> Result<bool, String> {
+        if occurred_at_unix_ms < 0
+            || !installation
+                .account
+                .roles()
+                .contains(&OperatorRole::SetupAdmin)
+            || installation.session.account_id() != installation.account.account_id()
+            || installation.session.credential_version()
+                != installation.account.credential_version()
+            || installation.recovery_digests.is_empty()
+            || installation.recovery_digests.len() > 32
+            || installation
+                .recovery_digests
+                .iter()
+                .enumerate()
+                .any(|(index, digest)| installation.recovery_digests[..index].contains(digest))
+        {
+            return Err("bootstrap installation authority is invalid or unbounded".into());
+        }
+        self.execute("BEGIN IMMEDIATE")?;
+        let outcome = (|| {
+            let consume = self.prepare(
+                "UPDATE operator_bootstrap SET consumed_at_unix_ms=?1 \
+                 WHERE singleton=1 AND secret_digest=?2 AND consumed_at_unix_ms=-1 \
+                 AND created_at_unix_ms<=?1 AND expires_at_unix_ms>?1 \
+                 AND NOT EXISTS(SELECT 1 FROM operator_accounts)",
+            )?;
+            bind_i64(self.database, consume.raw, 1, occurred_at_unix_ms)?;
+            bind_blob(self.database, consume.raw, 2, presented_digest.as_bytes())?;
+            expect_done(self.database, consume.raw)?;
+            if self.changes() != 1 {
+                return Ok(false);
+            }
+            self.insert_operator_account_rows(&installation.account)
+                .map_err(|error| format!("insert bootstrap account: {error}"))?;
+            self.insert_operator_session_rows(&installation.session)
+                .map_err(|error| format!("insert bootstrap session: {error}"))?;
+            for digest in &installation.recovery_digests {
+                let recovery = self.prepare(
+                    "INSERT INTO operator_recovery_hashes(account_id,recovery_digest,created_at_unix_ms,consumed_at_unix_ms) \
+                     VALUES(?1,?2,?3,-1)",
+                )?;
+                let id = c_string(installation.account.account_id().as_str(), "account id")?;
+                bind_text(self.database, recovery.raw, 1, &id)?;
+                bind_blob(self.database, recovery.raw, 2, digest.as_bytes())?;
+                bind_i64(self.database, recovery.raw, 3, occurred_at_unix_ms)?;
+                expect_done(self.database, recovery.raw)
+                    .map_err(|error| format!("insert bootstrap recovery digest: {error}"))?;
+            }
+            self.append_operator_auth_audit(
+                "bootstrap_consumed",
+                installation.account.account_id(),
+                Some(&installation.session.session_digest()),
+                occurred_at_unix_ms,
+                "setup administrator authority created",
+            )
+            .map_err(|error| format!("append bootstrap audit: {error}"))?;
+            Ok(true)
+        })();
+        self.finish_value_transaction(outcome)
+    }
+
+    pub fn insert_operator_account(&self, account: &OperatorAccount) -> Result<(), String> {
+        self.execute("BEGIN IMMEDIATE")?;
+        let outcome = (|| {
+            self.insert_operator_account_rows(account)?;
+            self.append_operator_auth_audit(
+                "account_created",
+                account.account_id(),
+                None,
+                account.created_at_unix_ms(),
+                "operator account created",
+            )
+        })();
+        self.finish_transaction(outcome)
+    }
+
+    pub fn create_operator_session(
+        &self,
+        session: &OperatorSession,
+        occurred_at_unix_ms: i64,
+    ) -> Result<(), String> {
+        if occurred_at_unix_ms < 0 {
+            return Err("session creation timestamp is invalid".into());
+        }
+        self.execute("BEGIN IMMEDIATE")?;
+        let outcome = (|| {
+            let authority = self.read_account_version_and_enabled(session.account_id())?;
+            if authority != Some((session.credential_version(), true)) {
+                return Err("session account authority is disabled, absent, or stale".into());
+            }
+            self.ensure_operator_session_capacity(session.account_id(), occurred_at_unix_ms)?;
+            self.insert_operator_session_rows(session)?;
+            self.append_operator_auth_audit(
+                "session_created",
+                session.account_id(),
+                Some(&session.session_digest()),
+                occurred_at_unix_ms,
+                "operator session created",
+            )
+        })();
+        self.finish_transaction(outcome)
+    }
+
+    pub fn validate_operator_session(
+        &self,
+        session_digest: &SecretDigest,
+        csrf_digest: &SecretDigest,
+        now_unix_ms: i64,
+        current_boot_id: &SecretDigest,
+    ) -> Result<Option<OperatorSessionAuthority>, String> {
+        if now_unix_ms < 0 {
+            return Ok(None);
+        }
+        let statement = self.prepare(
+            "SELECT account_id,credential_version,boot_id,created_at_unix_ms,last_seen_at_unix_ms,\
+             idle_expires_at_unix_ms,absolute_expires_at_unix_ms \
+             FROM operator_sessions WHERE session_digest=?1 AND csrf_digest=?2 AND revoked_at_unix_ms=-1",
+        )?;
+        bind_blob(self.database, statement.raw, 1, session_digest.as_bytes())?;
+        bind_blob(self.database, statement.raw, 2, csrf_digest.as_bytes())?;
+        match unsafe { sqlite3_step(statement.raw) } {
+            SQLITE_DONE => Ok(None),
+            SQLITE_ROW => {
+                let account_id =
+                    AccountId::try_from(column_text(statement.raw, 0)?).map_err(|error| {
+                        format!("database returned invalid session account: {error}")
+                    })?;
+                let version = credential_version_column(statement.raw, 1)?;
+                let session = OperatorSession::new(
+                    *session_digest,
+                    *csrf_digest,
+                    account_id.clone(),
+                    version,
+                    secret_digest_column(statement.raw, 2)?,
+                    unsafe { sqlite3_column_int64(statement.raw, 3) },
+                    unsafe { sqlite3_column_int64(statement.raw, 4) },
+                    unsafe { sqlite3_column_int64(statement.raw, 5) },
+                    unsafe { sqlite3_column_int64(statement.raw, 6) },
+                )
+                .map_err(|error| format!("database returned invalid session authority: {error}"))?;
+                let account = self
+                    .read_operator_account_by_id(&account_id)?
+                    .ok_or_else(|| "session referenced a missing operator account".to_string())?;
+                if session
+                    .validate_at(
+                        now_unix_ms,
+                        current_boot_id,
+                        account.credential_version(),
+                        account.enabled(),
+                    )
+                    .is_err()
+                {
+                    return Ok(None);
+                }
+                Ok(Some(OperatorSessionAuthority { account, session }))
+            }
+            _ => Err(sqlite_error(self.database)),
+        }
+    }
+
+    pub fn touch_operator_session(
+        &self,
+        session_digest: &SecretDigest,
+        last_seen_at_unix_ms: i64,
+        idle_expires_at_unix_ms: i64,
+    ) -> Result<bool, String> {
+        if last_seen_at_unix_ms < 0 || idle_expires_at_unix_ms <= last_seen_at_unix_ms {
+            return Err("session touch timestamps are invalid".into());
+        }
+        let statement = self.prepare(
+            "UPDATE operator_sessions SET last_seen_at_unix_ms=?1,idle_expires_at_unix_ms=?2 \
+             WHERE session_digest=?3 AND revoked_at_unix_ms=-1 \
+             AND last_seen_at_unix_ms<=?1 AND absolute_expires_at_unix_ms>=?2",
+        )?;
+        bind_i64(self.database, statement.raw, 1, last_seen_at_unix_ms)?;
+        bind_i64(self.database, statement.raw, 2, idle_expires_at_unix_ms)?;
+        bind_blob(self.database, statement.raw, 3, session_digest.as_bytes())?;
+        expect_done(self.database, statement.raw)?;
+        Ok(self.changes() == 1)
+    }
+
+    pub fn revoke_operator_session(
+        &self,
+        session_digest: &SecretDigest,
+        occurred_at_unix_ms: i64,
+    ) -> Result<bool, String> {
+        if occurred_at_unix_ms < 0 {
+            return Err("session revocation timestamp is invalid".into());
+        }
+        let statement = self.prepare(
+            "UPDATE operator_sessions SET revoked_at_unix_ms=?1 \
+             WHERE session_digest=?2 AND revoked_at_unix_ms=-1",
+        )?;
+        bind_i64(self.database, statement.raw, 1, occurred_at_unix_ms)?;
+        bind_blob(self.database, statement.raw, 2, session_digest.as_bytes())?;
+        expect_done(self.database, statement.raw)?;
+        Ok(self.changes() == 1)
+    }
+
+    pub fn purge_operator_sessions_for_boot(
+        &self,
+        current_boot_id: &SecretDigest,
+        occurred_at_unix_ms: i64,
+    ) -> Result<usize, String> {
+        if occurred_at_unix_ms < 0 {
+            return Err("session purge timestamp is invalid".into());
+        }
+        let statement = self.prepare("DELETE FROM operator_sessions WHERE boot_id<>?1")?;
+        bind_blob(self.database, statement.raw, 1, current_boot_id.as_bytes())?;
+        expect_done(self.database, statement.raw)?;
+        usize::try_from(self.changes()).map_err(|_| "invalid purged session count".into())
+    }
+
+    pub fn purge_operator_sessions_for_credential_version(
+        &self,
+        account_id: &AccountId,
+        current_version: CredentialVersion,
+        occurred_at_unix_ms: i64,
+    ) -> Result<usize, String> {
+        if occurred_at_unix_ms < 0 {
+            return Err("session purge timestamp is invalid".into());
+        }
+        let statement = self.prepare(
+            "DELETE FROM operator_sessions WHERE account_id=?1 AND credential_version<>?2",
+        )?;
+        let id = c_string(account_id.as_str(), "account id")?;
+        bind_text(self.database, statement.raw, 1, &id)?;
+        bind_i64(
+            self.database,
+            statement.raw,
+            2,
+            checked_i64(current_version.get(), "credential version")?,
+        )?;
+        expect_done(self.database, statement.raw)?;
+        usize::try_from(self.changes()).map_err(|_| "invalid purged session count".into())
+    }
+
+    pub fn consume_operator_recovery(
+        &self,
+        account_id: &AccountId,
+        recovery_digest: &SecretDigest,
+        new_password_phc: &PasswordPhc,
+        occurred_at_unix_ms: i64,
+    ) -> Result<Option<CredentialVersion>, String> {
+        if occurred_at_unix_ms < 0 {
+            return Err("recovery timestamp is invalid".into());
+        }
+        self.execute("BEGIN IMMEDIATE")?;
+        let outcome = (|| {
+            let recovery = self.prepare(
+                "UPDATE operator_recovery_hashes SET consumed_at_unix_ms=?1 \
+                 WHERE account_id=?2 AND recovery_digest=?3 AND consumed_at_unix_ms=-1",
+            )?;
+            bind_i64(self.database, recovery.raw, 1, occurred_at_unix_ms)?;
+            let id = c_string(account_id.as_str(), "account id")?;
+            bind_text(self.database, recovery.raw, 2, &id)?;
+            bind_blob(self.database, recovery.raw, 3, recovery_digest.as_bytes())?;
+            expect_done(self.database, recovery.raw)?;
+            if self.changes() != 1 {
+                return Ok(None);
+            }
+            let (current_version, _) = self
+                .read_account_version_and_enabled(account_id)?
+                .ok_or_else(|| "recovery referenced a missing operator account".to_string())?;
+            let next_version = current_version
+                .next()
+                .map_err(|error| format!("credential version cannot rotate: {error}"))?;
+            let account = self.prepare(
+                "UPDATE operator_accounts SET password_phc=?1,credential_version=?2,\
+                 failed_attempts=0,first_failure_at_unix_ms=-1,locked_until_unix_ms=-1,\
+                 updated_at_unix_ms=MAX(updated_at_unix_ms,?3) WHERE account_id=?4 AND credential_version=?5",
+            )?;
+            let phc = c_string(new_password_phc.as_str(), "password hash")?;
+            bind_text(self.database, account.raw, 1, &phc)?;
+            bind_i64(
+                self.database,
+                account.raw,
+                2,
+                checked_i64(next_version.get(), "credential version")?,
+            )?;
+            bind_i64(self.database, account.raw, 3, occurred_at_unix_ms)?;
+            bind_text(self.database, account.raw, 4, &id)?;
+            bind_i64(
+                self.database,
+                account.raw,
+                5,
+                checked_i64(current_version.get(), "credential version")?,
+            )?;
+            expect_done(self.database, account.raw)?;
+            if self.changes() != 1 {
+                return Err("credential rotation lost account authority".into());
+            }
+            let sessions = self.prepare("DELETE FROM operator_sessions WHERE account_id=?1")?;
+            bind_text(self.database, sessions.raw, 1, &id)?;
+            expect_done(self.database, sessions.raw)?;
+            self.append_operator_auth_audit(
+                "recovery_consumed",
+                account_id,
+                None,
+                occurred_at_unix_ms,
+                "credential version rotated and sessions invalidated",
+            )?;
+            Ok(Some(next_version))
+        })();
+        self.finish_value_transaction(outcome)
+    }
+
+    pub fn list_operator_recovery_credentials(
+        &self,
+        account_id: &AccountId,
+    ) -> Result<Vec<RecoveryCredential>, String> {
+        let statement = self.prepare(
+            "SELECT recovery_digest,created_at_unix_ms,consumed_at_unix_ms \
+             FROM operator_recovery_hashes WHERE account_id=?1 ORDER BY recovery_digest",
+        )?;
+        let id = c_string(account_id.as_str(), "account id")?;
+        bind_text(self.database, statement.raw, 1, &id)?;
+        let mut credentials = Vec::new();
+        loop {
+            match unsafe { sqlite3_step(statement.raw) } {
+                SQLITE_ROW => credentials.push(
+                    RecoveryCredential::new(
+                        secret_digest_column(statement.raw, 0)?,
+                        account_id.clone(),
+                        unsafe { sqlite3_column_int64(statement.raw, 1) },
+                        optional_nonnegative_column(statement.raw, 2)?,
+                    )
+                    .map_err(|error| {
+                        format!("database returned invalid recovery authority: {error}")
+                    })?,
+                ),
+                SQLITE_DONE => return Ok(credentials),
+                _ => return Err(sqlite_error(self.database)),
+            }
+        }
+    }
+
+    fn insert_operator_account_rows(&self, account: &OperatorAccount) -> Result<(), String> {
+        let statement = self.prepare(
+            "INSERT INTO operator_accounts(account_id,username,display_name,password_phc,credential_version,enabled,\
+             failed_attempts,first_failure_at_unix_ms,locked_until_unix_ms,created_at_unix_ms,updated_at_unix_ms) \
+             VALUES(?1,?2,?3,?4,?5,?6,0,-1,-1,?7,?8)",
+        )?;
+        let account_id = c_string(account.account_id().as_str(), "account id")?;
+        let username = c_string(account.username().as_str(), "operator username")?;
+        let display_name = c_string(account.display_name().as_str(), "operator display name")?;
+        let password_phc = c_string(account.password_phc().as_str(), "password hash")?;
+        bind_text(self.database, statement.raw, 1, &account_id)?;
+        bind_text(self.database, statement.raw, 2, &username)?;
+        bind_text(self.database, statement.raw, 3, &display_name)?;
+        bind_text(self.database, statement.raw, 4, &password_phc)?;
+        bind_i64(
+            self.database,
+            statement.raw,
+            5,
+            checked_i64(account.credential_version().get(), "credential version")?,
+        )?;
+        bind_i64(
+            self.database,
+            statement.raw,
+            6,
+            i64::from(account.enabled()),
+        )?;
+        bind_i64(
+            self.database,
+            statement.raw,
+            7,
+            account.created_at_unix_ms(),
+        )?;
+        bind_i64(
+            self.database,
+            statement.raw,
+            8,
+            account.updated_at_unix_ms(),
+        )?;
+        expect_done(self.database, statement.raw)?;
+        for role in account.roles() {
+            let statement =
+                self.prepare("INSERT INTO account_roles(account_id,role) VALUES(?1,?2)")?;
+            let id = c_string(account.account_id().as_str(), "account id")?;
+            let role = c_string(role.as_str(), "operator role")?;
+            bind_text(self.database, statement.raw, 1, &id)?;
+            bind_text(self.database, statement.raw, 2, &role)?;
+            expect_done(self.database, statement.raw)?;
+        }
+        Ok(())
+    }
+
+    fn insert_operator_session_rows(&self, session: &OperatorSession) -> Result<(), String> {
+        let statement = self.prepare(
+            "INSERT INTO operator_sessions(session_digest,csrf_digest,account_id,credential_version,boot_id,\
+             created_at_unix_ms,last_seen_at_unix_ms,idle_expires_at_unix_ms,absolute_expires_at_unix_ms,revoked_at_unix_ms) \
+             VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,-1)",
+        )?;
+        bind_blob(
+            self.database,
+            statement.raw,
+            1,
+            session.session_digest().as_bytes(),
+        )?;
+        bind_blob(
+            self.database,
+            statement.raw,
+            2,
+            session.csrf_digest().as_bytes(),
+        )?;
+        let id = c_string(session.account_id().as_str(), "account id")?;
+        bind_text(self.database, statement.raw, 3, &id)?;
+        bind_i64(
+            self.database,
+            statement.raw,
+            4,
+            checked_i64(session.credential_version().get(), "credential version")?,
+        )?;
+        bind_blob(
+            self.database,
+            statement.raw,
+            5,
+            session.boot_id().as_bytes(),
+        )?;
+        for (index, value) in [
+            session.created_at_unix_ms(),
+            session.last_seen_at_unix_ms(),
+            session.idle_expires_at_unix_ms(),
+            session.absolute_expires_at_unix_ms(),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            bind_i64(self.database, statement.raw, (index + 6) as c_int, value)?;
+        }
+        expect_done(self.database, statement.raw)
+    }
+
+    fn ensure_operator_session_capacity(
+        &self,
+        account_id: &AccountId,
+        now_unix_ms: i64,
+    ) -> Result<(), String> {
+        let statement = self.prepare(
+            "SELECT COUNT(*) FROM operator_sessions WHERE account_id=?1 AND revoked_at_unix_ms=-1 \
+             AND idle_expires_at_unix_ms>?2 AND absolute_expires_at_unix_ms>?2",
+        )?;
+        let id = c_string(account_id.as_str(), "account id")?;
+        bind_text(self.database, statement.raw, 1, &id)?;
+        bind_i64(self.database, statement.raw, 2, now_unix_ms)?;
+        match unsafe { sqlite3_step(statement.raw) } {
+            SQLITE_ROW if unsafe { sqlite3_column_int64(statement.raw, 0) } < 8 => Ok(()),
+            SQLITE_ROW => {
+                Err("operator account already has the maximum of 8 active sessions".into())
+            }
+            _ => Err(sqlite_error(self.database)),
+        }
+    }
+
+    fn read_operator_account_by_id(
+        &self,
+        account_id: &AccountId,
+    ) -> Result<Option<OperatorAccount>, String> {
+        let statement =
+            self.prepare("SELECT username FROM operator_accounts WHERE account_id=?1")?;
+        let id = c_string(account_id.as_str(), "account id")?;
+        bind_text(self.database, statement.raw, 1, &id)?;
+        match unsafe { sqlite3_step(statement.raw) } {
+            SQLITE_DONE => Ok(None),
+            SQLITE_ROW => {
+                let username = OperatorUsername::try_from(column_text(statement.raw, 0)?)
+                    .map_err(|error| format!("database returned invalid username: {error}"))?;
+                self.read_operator_login(&username)
+                    .map(|authority| authority.map(|authority| authority.account))
+            }
+            _ => Err(sqlite_error(self.database)),
+        }
+    }
+
+    fn read_account_version_and_enabled(
+        &self,
+        account_id: &AccountId,
+    ) -> Result<Option<(CredentialVersion, bool)>, String> {
+        let statement = self.prepare(
+            "SELECT credential_version,enabled FROM operator_accounts WHERE account_id=?1",
+        )?;
+        let id = c_string(account_id.as_str(), "account id")?;
+        bind_text(self.database, statement.raw, 1, &id)?;
+        match unsafe { sqlite3_step(statement.raw) } {
+            SQLITE_DONE => Ok(None),
+            SQLITE_ROW => Ok(Some((
+                credential_version_column(statement.raw, 0)?,
+                unsafe { sqlite3_column_int64(statement.raw, 1) } == 1,
+            ))),
+            _ => Err(sqlite_error(self.database)),
+        }
+    }
+
+    fn append_operator_auth_audit(
+        &self,
+        event_kind: &str,
+        account_id: &AccountId,
+        session_digest: Option<&SecretDigest>,
+        occurred_at_unix_ms: i64,
+        detail: &str,
+    ) -> Result<(), String> {
+        let (sql, has_session) = if session_digest.is_some() {
+            (
+                "INSERT INTO operator_auth_audit(event_kind,account_id,session_digest,occurred_at_unix_ms,detail) VALUES(?1,?2,?3,?4,?5)",
+                true,
+            )
+        } else {
+            (
+                "INSERT INTO operator_auth_audit(event_kind,account_id,session_digest,occurred_at_unix_ms,detail) VALUES(?1,?2,NULL,?3,?4)",
+                false,
+            )
+        };
+        let statement = self.prepare(sql)?;
+        let kind = c_string(event_kind, "auth audit event kind")?;
+        let id = c_string(account_id.as_str(), "account id")?;
+        let detail = c_string(detail, "auth audit detail")?;
+        bind_text(self.database, statement.raw, 1, &kind)?;
+        bind_text(self.database, statement.raw, 2, &id)?;
+        if let Some(digest) = session_digest {
+            bind_blob(self.database, statement.raw, 3, digest.as_bytes())?;
+        }
+        let time_index = if has_session { 4 } else { 3 };
+        bind_i64(
+            self.database,
+            statement.raw,
+            time_index,
+            occurred_at_unix_ms,
+        )?;
+        bind_text(self.database, statement.raw, time_index + 1, &detail)?;
+        expect_done(self.database, statement.raw)
     }
 
     pub fn write_profile(
@@ -8022,6 +8900,22 @@ impl StationStore {
             }
         }
     }
+
+    fn finish_value_transaction<T>(&self, outcome: Result<T, String>) -> Result<T, String> {
+        match outcome {
+            Ok(value) => match self.execute("COMMIT") {
+                Ok(()) => Ok(value),
+                Err(error) => {
+                    let _ = self.execute("ROLLBACK");
+                    Err(error)
+                }
+            },
+            Err(error) => {
+                let _ = self.execute("ROLLBACK");
+                Err(error)
+            }
+        }
+    }
 }
 
 fn station_data_root(database_path: &Path) -> Result<PathBuf, String> {
@@ -9841,6 +10735,39 @@ fn column_text(statement: *mut SqliteStatement, column: c_int) -> Result<String,
         .into_owned())
 }
 
+fn optional_nonnegative_column(
+    statement: *mut SqliteStatement,
+    column: c_int,
+) -> Result<Option<i64>, String> {
+    let value = unsafe { sqlite3_column_int64(statement, column) };
+    match value {
+        -1 => Ok(None),
+        0.. => Ok(Some(value)),
+        _ => Err("database returned an invalid optional timestamp".into()),
+    }
+}
+
+fn credential_version_column(
+    statement: *mut SqliteStatement,
+    column: c_int,
+) -> Result<CredentialVersion, String> {
+    let value = u64::try_from(unsafe { sqlite3_column_int64(statement, column) })
+        .map_err(|_| "database returned invalid credential version".to_string())?;
+    CredentialVersion::new(value)
+        .map_err(|error| format!("database returned invalid credential version: {error}"))
+}
+
+fn secret_digest_column(
+    statement: *mut SqliteStatement,
+    column: c_int,
+) -> Result<SecretDigest, String> {
+    let bytes = column_blob(statement, column)?;
+    let digest: [u8; 32] = bytes
+        .try_into()
+        .map_err(|_| "database returned an invalid secret digest".to_string())?;
+    Ok(SecretDigest::from_bytes(digest))
+}
+
 fn column_blob(statement: *mut SqliteStatement, column: c_int) -> Result<Vec<u8>, String> {
     let byte_count = unsafe { sqlite3_column_bytes(statement, column) };
     if byte_count <= 0 {
@@ -10012,6 +10939,629 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn row_count(store: &StationStore, sql: &str) -> i64 {
+        let statement = store.prepare(sql).unwrap();
+        assert_eq!(unsafe { sqlite3_step(statement.raw) }, SQLITE_ROW);
+        unsafe { sqlite3_column_int64(statement.raw, 0) }
+    }
+
+    #[test]
+    fn auth_schema_migrates_without_creating_an_account_or_bootstrap_default() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let database = std::env::temp_dir().join(format!("townlight-auth-migration-{nonce}.db"));
+        let store = StationStore::open(&database).unwrap();
+        store
+            .execute("INSERT INTO media_assets VALUES('preserved','C:\\preserved.ts',1000,'ready')")
+            .unwrap();
+        drop(store);
+
+        let migrated = StationStore::open(&database).unwrap();
+        assert_eq!(
+            row_count(&migrated, "SELECT COUNT(*) FROM operator_accounts"),
+            0
+        );
+        assert_eq!(
+            row_count(&migrated, "SELECT COUNT(*) FROM operator_bootstrap"),
+            0
+        );
+        assert_eq!(
+            row_count(&migrated, "SELECT COUNT(*) FROM operator_sessions"),
+            0
+        );
+        assert_eq!(
+            row_count(
+                &migrated,
+                "SELECT COUNT(*) FROM media_assets WHERE asset_id='preserved'",
+            ),
+            1
+        );
+        drop(migrated);
+
+        let reopened = StationStore::open(&database).unwrap();
+        assert_eq!(
+            row_count(&reopened, "SELECT COUNT(*) FROM operator_accounts"),
+            0
+        );
+        assert_eq!(
+            row_count(&reopened, "SELECT COUNT(*) FROM operator_auth_audit"),
+            0
+        );
+        drop(reopened);
+        for candidate in [
+            database.clone(),
+            PathBuf::from(format!("{}-wal", database.display())),
+            PathBuf::from(format!("{}-shm", database.display())),
+        ] {
+            let _ = std::fs::remove_file(candidate);
+        }
+    }
+
+    #[test]
+    fn auth_roles_are_constrained_and_audit_rows_are_append_only() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let database = std::env::temp_dir().join(format!("townlight-auth-constraints-{nonce}.db"));
+        let store = StationStore::open(&database).unwrap();
+        store
+            .execute(
+                "INSERT INTO operator_accounts(account_id,username,display_name,password_phc,credential_version,enabled,failed_attempts,first_failure_at_unix_ms,locked_until_unix_ms,created_at_unix_ms,updated_at_unix_ms)\
+                 VALUES('account-1','operator','Operator','$argon2id$redacted',1,1,0,-1,-1,1,1)",
+            )
+            .unwrap();
+        assert!(
+            store
+                .execute("INSERT INTO account_roles(account_id,role) VALUES('account-1','owner')")
+                .is_err()
+        );
+        store
+            .execute(
+                "INSERT INTO operator_auth_audit(event_kind,account_id,session_digest,occurred_at_unix_ms,detail)\
+                 VALUES('bootstrap_consumed','account-1',NULL,1,'created')",
+            )
+            .unwrap();
+        assert!(
+            store
+                .execute("UPDATE operator_auth_audit SET detail='tampered' WHERE audit_id=1")
+                .is_err()
+        );
+        assert!(
+            store
+                .execute("DELETE FROM operator_auth_audit WHERE audit_id=1")
+                .is_err()
+        );
+        drop(store);
+        for candidate in [
+            database.clone(),
+            PathBuf::from(format!("{}-wal", database.display())),
+            PathBuf::from(format!("{}-shm", database.display())),
+        ] {
+            let _ = std::fs::remove_file(candidate);
+        }
+    }
+
+    #[test]
+    fn operator_login_authority_round_trips_roles_and_throttle_state() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let database = std::env::temp_dir().join(format!("townlight-auth-login-{nonce}.db"));
+        let store = StationStore::open(&database).unwrap();
+        store
+            .insert_operator_account(
+                &OperatorAccount::new(
+                    AccountId::try_from("11111111-2222-4333-8444-555555555555").unwrap(),
+                    OperatorUsername::try_from("meeting.operator").unwrap(),
+                    OperatorDisplayName::try_from("Meeting Operator").unwrap(),
+                    test_password_phc(),
+                    BTreeSet::from([OperatorRole::MeetingOperator, OperatorRole::RecordsClerk]),
+                    CredentialVersion::new(1).unwrap(),
+                    true,
+                    1,
+                    1,
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        let username = OperatorUsername::try_from("meeting.operator").unwrap();
+        let initial = store.read_operator_login(&username).unwrap().unwrap();
+        assert_eq!(initial.account.username(), &username);
+        assert_eq!(initial.account.roles().len(), 2);
+        assert_eq!(initial.failed_attempts, 0);
+        assert_eq!(initial.locked_until_unix_ms, None);
+
+        assert!(
+            store
+                .record_operator_login_failure(initial.account.account_id(), 10, Some(30))
+                .unwrap()
+        );
+        assert!(
+            store
+                .record_operator_login_failure(initial.account.account_id(), 11, Some(40))
+                .unwrap()
+        );
+        let throttled = store.read_operator_login(&username).unwrap().unwrap();
+        assert_eq!(throttled.failed_attempts, 2);
+        assert_eq!(throttled.first_failure_at_unix_ms, Some(10));
+        assert_eq!(throttled.locked_until_unix_ms, Some(40));
+
+        assert!(
+            store
+                .clear_operator_login_failures(initial.account.account_id(), 41)
+                .unwrap()
+        );
+        let cleared = store.read_operator_login(&username).unwrap().unwrap();
+        assert_eq!(cleared.failed_attempts, 0);
+        assert_eq!(cleared.first_failure_at_unix_ms, None);
+        assert_eq!(cleared.locked_until_unix_ms, None);
+        assert_eq!(
+            row_count(
+                &store,
+                "SELECT COUNT(*) FROM operator_auth_audit WHERE event_kind IN ('login_failed','login_succeeded')",
+            ),
+            3
+        );
+        drop(store);
+        for candidate in [
+            database.clone(),
+            PathBuf::from(format!("{}-wal", database.display())),
+            PathBuf::from(format!("{}-shm", database.display())),
+        ] {
+            let _ = std::fs::remove_file(candidate);
+        }
+    }
+
+    fn test_password_phc() -> PasswordPhc {
+        station_auth::hash_password(
+            &station_auth::OperatorPassword::new("Correct Horse Battery Staple").unwrap(),
+        )
+        .unwrap()
+    }
+
+    fn test_operator_account(version: u64) -> OperatorAccount {
+        OperatorAccount::new(
+            AccountId::try_from("11111111-2222-4333-8444-555555555555").unwrap(),
+            OperatorUsername::try_from("setup.admin").unwrap(),
+            OperatorDisplayName::try_from("Setup Administrator").unwrap(),
+            test_password_phc(),
+            BTreeSet::from([OperatorRole::SetupAdmin]),
+            CredentialVersion::new(version).unwrap(),
+            true,
+            10,
+            10,
+        )
+        .unwrap()
+    }
+
+    fn test_operator_session(version: u64, suffix: u8) -> OperatorSession {
+        OperatorSession::new(
+            SecretDigest::from_bytes([suffix; 32]),
+            SecretDigest::from_bytes([suffix.wrapping_add(1); 32]),
+            AccountId::try_from("11111111-2222-4333-8444-555555555555").unwrap(),
+            CredentialVersion::new(version).unwrap(),
+            SecretDigest::from_bytes([99; 32]),
+            10,
+            10,
+            110,
+            210,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn bootstrap_is_atomic_one_time_and_recovery_rotates_all_session_authority() {
+        use std::sync::{Arc, Barrier};
+
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let database = std::env::temp_dir().join(format!("townlight-auth-bootstrap-{nonce}.db"));
+        let bootstrap =
+            BootstrapCredential::new(SecretDigest::from_bytes([7; 32]), 1, 100, None).unwrap();
+        let store = StationStore::open(&database).unwrap();
+        assert!(!store.has_operator_accounts().unwrap());
+        assert!(store.provision_operator_bootstrap(&bootstrap).unwrap());
+        drop(store);
+
+        let barrier = Arc::new(Barrier::new(2));
+        let mut contenders = Vec::new();
+        for _ in 0..2 {
+            let path = database.clone();
+            let barrier = Arc::clone(&barrier);
+            contenders.push(std::thread::spawn(move || {
+                let store = StationStore::open(path).unwrap();
+                let installation = OperatorBootstrapInstallation {
+                    account: test_operator_account(1),
+                    session: test_operator_session(1, 20),
+                    recovery_digests: vec![
+                        SecretDigest::from_bytes([40; 32]),
+                        SecretDigest::from_bytes([41; 32]),
+                    ],
+                };
+                barrier.wait();
+                store
+                    .consume_operator_bootstrap(
+                        &SecretDigest::from_bytes([7; 32]),
+                        &installation,
+                        20,
+                    )
+                    .unwrap()
+            }));
+        }
+        let outcomes = contenders
+            .into_iter()
+            .map(|contender| contender.join().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(outcomes.iter().filter(|outcome| **outcome).count(), 1);
+
+        let store = StationStore::open(&database).unwrap();
+        assert!(store.has_operator_accounts().unwrap());
+        assert_eq!(
+            row_count(&store, "SELECT COUNT(*) FROM operator_accounts"),
+            1
+        );
+        assert_eq!(
+            row_count(&store, "SELECT COUNT(*) FROM operator_sessions"),
+            1
+        );
+        assert_eq!(
+            row_count(&store, "SELECT COUNT(*) FROM operator_recovery_hashes"),
+            2
+        );
+        assert_eq!(
+            row_count(
+                &store,
+                "SELECT COUNT(*) FROM account_roles WHERE role='setup_admin'",
+            ),
+            1
+        );
+        assert!(
+            store
+                .validate_operator_session(
+                    &SecretDigest::from_bytes([20; 32]),
+                    &SecretDigest::from_bytes([21; 32]),
+                    30,
+                    &SecretDigest::from_bytes([99; 32]),
+                )
+                .unwrap()
+                .is_some()
+        );
+
+        let rotated = store
+            .consume_operator_recovery(
+                test_operator_account(1).account_id(),
+                &SecretDigest::from_bytes([40; 32]),
+                &test_password_phc(),
+                40,
+            )
+            .unwrap();
+        assert_eq!(rotated.unwrap().get(), 2);
+        assert!(
+            store
+                .consume_operator_recovery(
+                    test_operator_account(1).account_id(),
+                    &SecretDigest::from_bytes([40; 32]),
+                    &test_password_phc(),
+                    41,
+                )
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            row_count(&store, "SELECT COUNT(*) FROM operator_sessions"),
+            0
+        );
+        assert_eq!(
+            store
+                .read_operator_login(&OperatorUsername::try_from("setup.admin").unwrap())
+                .unwrap()
+                .unwrap()
+                .account
+                .credential_version()
+                .get(),
+            2
+        );
+        drop(store);
+        for candidate in [
+            database.clone(),
+            PathBuf::from(format!("{}-wal", database.display())),
+            PathBuf::from(format!("{}-shm", database.display())),
+        ] {
+            let _ = std::fs::remove_file(candidate);
+        }
+    }
+
+    #[test]
+    fn expired_bootstrap_is_fail_closed_and_can_be_reissued_only_without_accounts() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let database =
+            std::env::temp_dir().join(format!("townlight-auth-bootstrap-expiry-{nonce}.db"));
+        let store = StationStore::open(&database).unwrap();
+        let expired =
+            BootstrapCredential::new(SecretDigest::from_bytes([1; 32]), 1, 10, None).unwrap();
+        assert!(store.provision_operator_bootstrap(&expired).unwrap());
+        let installation = OperatorBootstrapInstallation {
+            account: test_operator_account(1),
+            session: test_operator_session(1, 2),
+            recovery_digests: vec![SecretDigest::from_bytes([4; 32])],
+        };
+        assert!(
+            !store
+                .consume_operator_bootstrap(
+                    &expired.token_digest(),
+                    &installation,
+                    expired.expires_at_unix_ms(),
+                )
+                .unwrap()
+        );
+        let premature =
+            BootstrapCredential::new(SecretDigest::from_bytes([5; 32]), 9, 20, None).unwrap();
+        assert!(!store.provision_operator_bootstrap(&premature).unwrap());
+        let replacement =
+            BootstrapCredential::new(SecretDigest::from_bytes([6; 32]), 10, 20, None).unwrap();
+        assert!(store.provision_operator_bootstrap(&replacement).unwrap());
+        assert!(
+            store
+                .consume_operator_bootstrap(&replacement.token_digest(), &installation, 11)
+                .unwrap()
+        );
+        let later =
+            BootstrapCredential::new(SecretDigest::from_bytes([7; 32]), 20, 30, None).unwrap();
+        assert!(!store.provision_operator_bootstrap(&later).unwrap());
+        drop(store);
+        for candidate in [
+            database.clone(),
+            PathBuf::from(format!("{}-wal", database.display())),
+            PathBuf::from(format!("{}-shm", database.display())),
+        ] {
+            let _ = std::fs::remove_file(candidate);
+        }
+    }
+
+    #[test]
+    fn account_session_capacity_is_bounded_at_eight_active_sessions() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let database = std::env::temp_dir().join(format!("townlight-auth-session-cap-{nonce}.db"));
+        let store = StationStore::open(&database).unwrap();
+        store
+            .insert_operator_account(&test_operator_account(1))
+            .unwrap();
+        for suffix in 80..88 {
+            store
+                .create_operator_session(&test_operator_session(1, suffix), 20)
+                .unwrap();
+        }
+        assert!(
+            store
+                .create_operator_session(&test_operator_session(1, 88), 20)
+                .unwrap_err()
+                .contains("maximum of 8 active sessions")
+        );
+        assert_eq!(
+            row_count(&store, "SELECT COUNT(*) FROM operator_sessions"),
+            8
+        );
+        drop(store);
+        for candidate in [
+            database.clone(),
+            PathBuf::from(format!("{}-wal", database.display())),
+            PathBuf::from(format!("{}-shm", database.display())),
+        ] {
+            let _ = std::fs::remove_file(candidate);
+        }
+    }
+
+    #[test]
+    fn plaintext_password_tokens_and_recovery_codes_never_reach_sqlite() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let database = std::env::temp_dir().join(format!("townlight-auth-no-plaintext-{nonce}.db"));
+        let password_plaintext = "A unique station password 9!";
+        let password = station_auth::OperatorPassword::new(password_plaintext).unwrap();
+        let password_phc = station_auth::hash_password(&password).unwrap();
+        let bootstrap_token = station_auth::generate_secret_token().unwrap();
+        let session_token = station_auth::generate_secret_token().unwrap();
+        let csrf_token = station_auth::generate_secret_token().unwrap();
+        let recovery = station_auth::generate_recovery_codes().unwrap();
+        let recovery_plaintexts = recovery
+            .display_codes
+            .iter()
+            .map(|code| code.expose_secret().to_owned())
+            .collect::<Vec<_>>();
+        let account = OperatorAccount::new(
+            AccountId::try_from("11111111-2222-4333-8444-555555555555").unwrap(),
+            OperatorUsername::try_from("secure.admin").unwrap(),
+            OperatorDisplayName::try_from("Secure Administrator").unwrap(),
+            password_phc,
+            BTreeSet::from([OperatorRole::SetupAdmin]),
+            CredentialVersion::new(1).unwrap(),
+            true,
+            10,
+            10,
+        )
+        .unwrap();
+        let session = OperatorSession::new(
+            station_auth::digest_secret(&session_token),
+            station_auth::digest_secret(&csrf_token),
+            account.account_id().clone(),
+            account.credential_version(),
+            SecretDigest::from_bytes([99; 32]),
+            10,
+            10,
+            110,
+            210,
+        )
+        .unwrap();
+        let store = StationStore::open(&database).unwrap();
+        store
+            .provision_operator_bootstrap(
+                &BootstrapCredential::new(
+                    station_auth::digest_secret(&bootstrap_token),
+                    1,
+                    100,
+                    None,
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        assert!(
+            store
+                .consume_operator_bootstrap(
+                    &station_auth::digest_secret(&bootstrap_token),
+                    &OperatorBootstrapInstallation {
+                        account,
+                        session,
+                        recovery_digests: recovery.storage_digests.to_vec(),
+                    },
+                    20,
+                )
+                .unwrap()
+        );
+        drop(store);
+
+        let mut forbidden = vec![
+            password_plaintext.to_owned(),
+            bootstrap_token.expose_secret().to_owned(),
+            session_token.expose_secret().to_owned(),
+            csrf_token.expose_secret().to_owned(),
+        ];
+        forbidden.extend(recovery_plaintexts);
+        for candidate in [
+            database.clone(),
+            PathBuf::from(format!("{}-wal", database.display())),
+            PathBuf::from(format!("{}-shm", database.display())),
+        ] {
+            if let Ok(bytes) = std::fs::read(&candidate) {
+                for secret in &forbidden {
+                    assert!(
+                        !bytes
+                            .windows(secret.len())
+                            .any(|window| window == secret.as_bytes()),
+                        "plaintext auth secret was found in {}",
+                        candidate.display()
+                    );
+                }
+            }
+            let _ = std::fs::remove_file(candidate);
+        }
+    }
+
+    #[test]
+    fn sessions_touch_revoke_and_purge_by_boot_or_credential_version() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let database = std::env::temp_dir().join(format!("townlight-auth-sessions-{nonce}.db"));
+        let store = StationStore::open(&database).unwrap();
+        store
+            .insert_operator_account(&test_operator_account(1))
+            .unwrap();
+        let first = test_operator_session(1, 50);
+        store.create_operator_session(&first, 11).unwrap();
+        assert!(
+            store
+                .touch_operator_session(&first.session_digest(), -1, 120)
+                .is_err()
+        );
+        assert!(
+            store
+                .revoke_operator_session(&first.session_digest(), -1)
+                .is_err()
+        );
+        assert!(
+            store
+                .purge_operator_sessions_for_boot(&first.boot_id(), -1)
+                .is_err()
+        );
+        assert!(
+            store
+                .purge_operator_sessions_for_credential_version(
+                    first.account_id(),
+                    CredentialVersion::new(1).unwrap(),
+                    -1,
+                )
+                .is_err()
+        );
+        assert!(
+            store
+                .touch_operator_session(&first.session_digest(), 20, 120)
+                .unwrap()
+        );
+        assert!(
+            store
+                .revoke_operator_session(&first.session_digest(), 21)
+                .unwrap()
+        );
+        assert!(
+            store
+                .validate_operator_session(
+                    &first.session_digest(),
+                    &first.csrf_digest(),
+                    22,
+                    &first.boot_id(),
+                )
+                .unwrap()
+                .is_none()
+        );
+
+        let other_boot = OperatorSession::new(
+            SecretDigest::from_bytes([60; 32]),
+            SecretDigest::from_bytes([61; 32]),
+            first.account_id().clone(),
+            CredentialVersion::new(1).unwrap(),
+            SecretDigest::from_bytes([98; 32]),
+            10,
+            10,
+            110,
+            210,
+        )
+        .unwrap();
+        store.create_operator_session(&other_boot, 12).unwrap();
+        assert_eq!(
+            store
+                .purge_operator_sessions_for_boot(&first.boot_id(), 30)
+                .unwrap(),
+            1
+        );
+        let current_boot_old_credential = test_operator_session(1, 70);
+        store
+            .create_operator_session(&current_boot_old_credential, 31)
+            .unwrap();
+        assert_eq!(
+            store
+                .purge_operator_sessions_for_credential_version(
+                    first.account_id(),
+                    CredentialVersion::new(2).unwrap(),
+                    32,
+                )
+                .unwrap(),
+            2
+        );
+        drop(store);
+        for candidate in [
+            database.clone(),
+            PathBuf::from(format!("{}-wal", database.display())),
+            PathBuf::from(format!("{}-shm", database.display())),
+        ] {
+            let _ = std::fs::remove_file(candidate);
+        }
+    }
 
     #[test]
     fn loudness_proof_history_is_rejected_by_update_and_delete_triggers() {
