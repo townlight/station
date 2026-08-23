@@ -223,6 +223,23 @@ function Clear-UdpBacklog {
     while ($receiver.Available -gt 0) { [void]$receiver.Receive([ref]$remote) }
 }
 
+function Resolve-FFmpegExecutable {
+    $launcher = (Get-Command ffmpeg.exe -CommandType Application -ErrorAction Stop).Source
+    $shimMetadata = [IO.Path]::ChangeExtension($launcher, '.shim')
+    if (-not (Test-Path -LiteralPath $shimMetadata -PathType Leaf)) {
+        return (Resolve-Path -LiteralPath $launcher -ErrorAction Stop).Path
+    }
+    $metadata = (Get-Content -LiteralPath $shimMetadata -Raw -ErrorAction Stop).Trim()
+    if ($metadata -notmatch '^path\s*=\s*"([^"]+)"$') {
+        throw "FFmpeg shim metadata is malformed: $shimMetadata"
+    }
+    $target = (Resolve-Path -LiteralPath $Matches[1] -ErrorAction Stop).Path
+    if ([IO.Path]::GetFileName($target) -ne 'ffmpeg.exe') {
+        throw "FFmpeg shim target is not ffmpeg.exe: $target"
+    }
+    return $target
+}
+
 function Stop-ProofSender {
     if ($sender) {
         if (-not $sender.HasExited) {
@@ -336,7 +353,7 @@ try {
     $fallbackTransport = Capture-UdpTransport $CaptureSeconds $fallbackCapture
     $fallbackDecoded = Get-DecodedEvidence $fallbackCapture
 
-    $ffmpeg = (Get-Command ffmpeg.exe -ErrorAction Stop).Source
+    $ffmpeg = Resolve-FFmpegExecutable
     $senderArgs = @('-re', '-f', 'lavfi', '-i', 'testsrc2=size=640x360:rate=30', '-re', '-f', 'lavfi', '-i',
         'sine=frequency=997:sample_rate=48000', '-c:v', 'libx264', '-preset', 'ultrafast', '-tune', 'zerolatency',
         '-g', '30', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '128k', '-f', 'mpegts', "udp://127.0.0.1:${inputPortNumber}?pkt_size=1316")

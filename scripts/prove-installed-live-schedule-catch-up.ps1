@@ -281,6 +281,23 @@ function Get-ProofRuntime {
         Where-Object channel_id -eq $channelId | Select-Object -First 1
 }
 
+function Resolve-FFmpegExecutable {
+    $launcher = (Get-Command ffmpeg.exe -CommandType Application -ErrorAction Stop).Source
+    $shimMetadata = [IO.Path]::ChangeExtension($launcher, '.shim')
+    if (-not (Test-Path -LiteralPath $shimMetadata -PathType Leaf)) {
+        return (Resolve-Path -LiteralPath $launcher -ErrorAction Stop).Path
+    }
+    $metadata = (Get-Content -LiteralPath $shimMetadata -Raw -ErrorAction Stop).Trim()
+    if ($metadata -notmatch '^path\s*=\s*"([^"]+)"$') {
+        throw "FFmpeg shim metadata is malformed: $shimMetadata"
+    }
+    $target = (Resolve-Path -LiteralPath $Matches[1] -ErrorAction Stop).Path
+    if ([IO.Path]::GetFileName($target) -ne 'ffmpeg.exe') {
+        throw "FFmpeg shim target is not ffmpeg.exe: $target"
+    }
+    return $target
+}
+
 function Stop-Sender {
     if ($sender) {
         if (-not $sender.HasExited) {
@@ -419,7 +436,7 @@ try {
     # Arming is synchronous and requires decoded input, so start the sender first
     # and immediately request arming. The persistent output receiver runs in an
     # independent process so proof analysis cannot back-pressure the media graph.
-    $ffmpeg = (Get-Command ffmpeg.exe -ErrorAction Stop).Source
+    $ffmpeg = Resolve-FFmpegExecutable
     $sender = Start-Process -FilePath $ffmpeg -ArgumentList @('-nostdin', '-loglevel', 'warning', '-re', '-f', 'lavfi', '-i', 'color=c=green:size=640x360:rate=30', '-re', '-f', 'lavfi', '-i', 'sine=frequency=1231:sample_rate=48000', '-c:v', 'libx264', '-preset', 'ultrafast', '-tune', 'zerolatency', '-g', '30', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '128k', '-f', 'mpegts', "udp://127.0.0.1:${InputPort}?pkt_size=1316&connect=0") -PassThru -WindowStyle Hidden -RedirectStandardOutput $senderStdout -RedirectStandardError $senderStderr
     if ($sender.HasExited) {
         $senderError = Get-Content -LiteralPath $senderStderr -Raw -ErrorAction SilentlyContinue
