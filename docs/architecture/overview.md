@@ -14,7 +14,7 @@ flowchart LR
   Worker --> Outputs[Station outputs]
 ```
 
-`stationd` is a modular monolith and the only writer to the authoritative station database. A separate persistent worker owns each channel's GStreamer graph, media clock, output switching, and logically append-only as-run journal. File processing and optional local AI run outside both timing-critical and authoritative paths.
+`stationd` is a modular monolith and the only writer to the authoritative station database. A separate persistent worker owns each channel's GStreamer graph, media clock, output switching, and logically append-only as-run journal. File processing runs outside both timing-critical and authoritative paths. Future optional local AI will use the same sidecar boundary; no AI runtime or selection capability is implemented yet.
 
 On an installed station, Windows Service Control Manager owns the `stationd` process. Service startup requires an absolute database path and a loopback HTTP address. The process reports start-pending, running, stop-pending, and stopped states; both an operator stop and operating-system shutdown drain through the same cooperative API stop signal. See [ADR 0005](../adr/0005-native-windows-service.md).
 

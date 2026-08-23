@@ -1,6 +1,6 @@
 # TownLight Station
 
-TownLight Station is a locally installed Windows broadcast appliance for LPM and PEG operations. It is being built as one traceable product: station control, deterministic media execution, operator workflows, installation, recovery, distribution, and proof all ship from this repository.
+TownLight Station is a locally installed Windows broadcast appliance for LPM and PEG operations. It is being built as one traceable product: station control, deterministic media execution, operator workflows, installation, recovery, distribution, and proof will all ship from this repository.
 
 The current foundation provides a versioned station-profile API, strict commissioning validation, an authoritative commissioning report and guided operator workflow, SQLite persistence in WAL mode, a native Windows service, an installed same-origin operator console, durable runtime health/incident authority, encrypted email/SMS/webhook operator alert delivery, editable re-alert policy, service-owned Windows resource sampling, scheduled evidence-bearing self-tests, redacted manifested support-bundle export, and a signed immutable update lifecycle with out-of-process activation, post-update proof, and automatic rollback. It is a working vertical slice of the station control plane, not a feature-complete release.
 
