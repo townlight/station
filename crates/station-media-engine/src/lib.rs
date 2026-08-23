@@ -23,6 +23,7 @@ use station_schedule::{OutputProfile, OutputProfileId};
 
 static FILE_PROGRAM_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 static LIVE_PROGRAM_SEQUENCE: AtomicU64 = AtomicU64::new(1);
+const AUDIO_TIMESTAMP_TOLERANCE_NS: u64 = 40_000_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SourceRole {
@@ -523,7 +524,7 @@ impl PersistentPlayout {
         let audio_rate = gst::ElementFactory::make("audiorate")
             .name("canonical-audio-rate")
             .property("skip-to-first", true)
-            .property("tolerance", 0_u64)
+            .property("tolerance", AUDIO_TIMESTAMP_TOLERANCE_NS)
             .build()
             .map_err(|error| build_error("audiorate", error))?;
         let audio_output_queue = element("queue", "audio-output-queue")?;
@@ -1715,7 +1716,7 @@ fn install_live_program(
     let audio_rate = gst::ElementFactory::make("audiorate")
         .name(name("audio-rate"))
         .property("skip-to-first", true)
-        .property("tolerance", 0_u64)
+        .property("tolerance", AUDIO_TIMESTAMP_TOLERANCE_NS)
         .build()
         .map_err(|error| build_error("audiorate", error))?;
     let audio_clock = gst::ElementFactory::make("clocksync")
@@ -2054,7 +2055,7 @@ fn install_file_program(
     let audio_rate = gst::ElementFactory::make("audiorate")
         .name(name("audio-rate"))
         .property("skip-to-first", true)
-        .property("tolerance", 0_u64)
+        .property("tolerance", AUDIO_TIMESTAMP_TOLERANCE_NS)
         .build()
         .map_err(|error| build_error("audiorate", error))?;
     let audio_clock = gst::ElementFactory::make("clocksync")
