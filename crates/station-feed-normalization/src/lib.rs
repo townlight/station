@@ -1,4 +1,4 @@
-use quick_xml::{Reader, escape::unescape, events::Event};
+use quick_xml::{Reader, XmlVersion, escape::unescape, events::Event};
 use sha2::{Digest, Sha256};
 use station_cg::CgFeedItem;
 use std::collections::BTreeSet;
@@ -62,7 +62,7 @@ pub fn normalize_rss_or_atom(
                         let attribute =
                             attribute.map_err(|e| NormalizeError::Malformed(e.to_string()))?;
                         let value = attribute
-                            .unescape_value()
+                            .normalized_value(XmlVersion::Implicit1_0)
                             .map_err(|e| NormalizeError::Malformed(e.to_string()))?
                             .into_owned();
                         match attribute.key.as_ref() {
@@ -92,7 +92,7 @@ pub fn normalize_rss_or_atom(
                         let attribute =
                             attribute.map_err(|e| NormalizeError::Malformed(e.to_string()))?;
                         let value = attribute
-                            .unescape_value()
+                            .normalized_value(XmlVersion::Implicit1_0)
                             .map_err(|e| NormalizeError::Malformed(e.to_string()))?
                             .into_owned();
                         match attribute.key.as_ref() {
