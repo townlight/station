@@ -23,7 +23,7 @@ fn manages_cg_authority_through_the_operator_api() {
     put_channel(&database);
     let api = Api::open(&database).unwrap();
 
-    let templates = api.handle("GET", "/api/v1/cg/templates", None);
+    let templates = api.handle_in_process("GET", "/api/v1/cg/templates", None);
     assert_eq!(templates.status, 200);
     let templates: Vec<CgTemplate> = serde_json::from_slice(&templates.body).unwrap();
     assert_eq!(templates.len(), 6);
@@ -39,7 +39,7 @@ fn manages_cg_authority_through_the_operator_api() {
         updated_at_unix_ms: 1_000,
         created_by: "station-operator".into(),
     };
-    let response = api.handle(
+    let response = api.handle_in_process(
         "PUT",
         "/api/v1/cg/board",
         Some(&write_body(
@@ -76,7 +76,7 @@ fn manages_cg_authority_through_the_operator_api() {
         last_fetched_at_unix_ms: None,
         last_fetch_error: None,
     };
-    let response = api.handle(
+    let response = api.handle_in_process(
         "PUT",
         "/api/v1/cg/feeds",
         Some(&write_body(
@@ -109,7 +109,7 @@ fn manages_cg_authority_through_the_operator_api() {
         last_fetched_at_unix_ms: None,
         last_fetch_error: None,
     };
-    let response = api.handle(
+    let response = api.handle_in_process(
         "PUT",
         "/api/v1/cg/feeds",
         Some(&write_body(
@@ -144,7 +144,7 @@ fn manages_cg_authority_through_the_operator_api() {
         .unwrap();
     feed.last_fetched_at_unix_ms = Some(1_350);
 
-    let feed_items = api.handle(
+    let feed_items = api.handle_in_process(
         "GET",
         &format!("/api/v1/cg/feed-items?channel_id={CHANNEL_ID}&at_unix_ms=2000"),
         None,
@@ -168,7 +168,7 @@ fn manages_cg_authority_through_the_operator_api() {
     assert_eq!(cached_row["stale"], false);
     assert_eq!(cached_row["items"][0]["approved"], false);
 
-    let stale_read: serde_json::Value = response_json(&api.handle(
+    let stale_read: serde_json::Value = response_json(&api.handle_in_process(
         "GET",
         &format!("/api/v1/cg/feed-items?channel_id={CHANNEL_ID}&at_unix_ms=301351"),
         None,
@@ -196,7 +196,7 @@ fn manages_cg_authority_through_the_operator_api() {
         created_at_unix_ms: 1_200,
         updated_at_unix_ms: 1_200,
     };
-    let response = api.handle(
+    let response = api.handle_in_process(
         "PUT",
         "/api/v1/cg/zones",
         Some(&write_body(
@@ -232,7 +232,7 @@ fn manages_cg_authority_through_the_operator_api() {
         created_at_unix_ms: 1_300,
         updated_at_unix_ms: 1_300,
     };
-    let response = api.handle(
+    let response = api.handle_in_process(
         "PUT",
         "/api/v1/cg/bulletins",
         Some(&write_body(
@@ -263,14 +263,14 @@ fn manages_cg_authority_through_the_operator_api() {
         ),
     }))
     .unwrap();
-    let response = api.handle(
+    let response = api.handle_in_process(
         "POST",
         "/api/v1/cg/feed-items/approve",
         Some(&approval_body),
     );
     assert_eq!(response.status, 200, "{}", body_text(&response.body));
 
-    let feed_items: serde_json::Value = response_json(&api.handle(
+    let feed_items: serde_json::Value = response_json(&api.handle_in_process(
         "GET",
         &format!("/api/v1/cg/feed-items?channel_id={CHANNEL_ID}&at_unix_ms=2000"),
         None,
@@ -284,7 +284,7 @@ fn manages_cg_authority_through_the_operator_api() {
     assert_eq!(approved_feed["items"][0]["approved"], true);
     assert_eq!(approved_feed["items"][0]["approved_by"], "station-operator");
 
-    let snapshot: CgResolvedSnapshot = response_json(&api.handle(
+    let snapshot: CgResolvedSnapshot = response_json(&api.handle_in_process(
         "GET",
         &format!("/api/v1/cg/snapshot?channel_id={CHANNEL_ID}"),
         None,
@@ -293,7 +293,7 @@ fn manages_cg_authority_through_the_operator_api() {
         snapshot.zones[0].content,
         CgResolvedContent::FeedItems { stale: true, .. }
     ));
-    let preview = api.handle(
+    let preview = api.handle_in_process(
         "GET",
         &format!("/api/v1/cg/preview?channel_id={CHANNEL_ID}&at_unix_ms=2000"),
         None,
@@ -311,10 +311,14 @@ fn manages_cg_authority_through_the_operator_api() {
         "/api/v1/cg/feed-items?channel_id=bad&unexpected=true",
         "/api/v1/cg/feed-items?channel_id=bad&at_unix_ms=-1",
     ] {
-        assert_eq!(api.handle("GET", path, None).status, 400, "{path}");
+        assert_eq!(
+            api.handle_in_process("GET", path, None).status,
+            400,
+            "{path}"
+        );
     }
 
-    let board_response = api.handle(
+    let board_response = api.handle_in_process(
         "GET",
         &format!("/api/v1/cg/board?channel_id={CHANNEL_ID}"),
         None,
@@ -324,33 +328,33 @@ fn manages_cg_authority_through_the_operator_api() {
         serde_json::from_slice::<CgBoard>(&board_response.body).unwrap(),
         board
     );
-    let zones: Vec<CgZoneConfig> = response_json(&api.handle(
+    let zones: Vec<CgZoneConfig> = response_json(&api.handle_in_process(
         "GET",
         &format!("/api/v1/cg/zones?board_id={BOARD_ID}"),
         None,
     ));
     assert_eq!(zones, vec![zone]);
-    let feeds: Vec<CgFeedSource> = response_json(&api.handle(
+    let feeds: Vec<CgFeedSource> = response_json(&api.handle_in_process(
         "GET",
         &format!("/api/v1/cg/feeds?channel_id={CHANNEL_ID}"),
         None,
     ));
     assert_eq!(feeds.len(), 2);
     assert!(feeds.contains(&feed));
-    let bulletins: Vec<CgBulletin> = response_json(&api.handle(
+    let bulletins: Vec<CgBulletin> = response_json(&api.handle_in_process(
         "GET",
         &format!("/api/v1/cg/bulletins?channel_id={CHANNEL_ID}"),
         None,
     ));
     assert_eq!(bulletins, vec![bulletin]);
-    let audit_events: Vec<CgAuditEvent> = response_json(&api.handle(
+    let audit_events: Vec<CgAuditEvent> = response_json(&api.handle_in_process(
         "GET",
         &format!("/api/v1/cg/audit?channel_id={CHANNEL_ID}&limit=20"),
         None,
     ));
     assert_eq!(audit_events.len(), 6);
 
-    let conflict = api.handle(
+    let conflict = api.handle_in_process(
         "PUT",
         "/api/v1/cg/board",
         Some(&write_body(
@@ -367,7 +371,7 @@ fn manages_cg_authority_through_the_operator_api() {
     assert_eq!(conflict.status, 409);
     assert!(body_text(&conflict.body).contains("revision_conflict"));
     assert_eq!(
-        api.handle(
+        api.handle_in_process(
             "GET",
             &format!("/api/v1/cg/feeds?channel_id={CHANNEL_ID}&unexpected=true"),
             None,
@@ -376,7 +380,7 @@ fn manages_cg_authority_through_the_operator_api() {
         400
     );
 
-    let removed_zone = api.handle(
+    let removed_zone = api.handle_in_process(
         "DELETE",
         &format!("/api/v1/cg/zones/{ZONE_ID}"),
         Some(&delete_body(
@@ -394,7 +398,7 @@ fn manages_cg_authority_through_the_operator_api() {
         "{}",
         body_text(&removed_zone.body)
     );
-    let removed_feed = api.handle(
+    let removed_feed = api.handle_in_process(
         "DELETE",
         &format!("/api/v1/cg/feeds/{FEED_ID}"),
         Some(&delete_body(
@@ -412,7 +416,7 @@ fn manages_cg_authority_through_the_operator_api() {
         "{}",
         body_text(&removed_feed.body)
     );
-    let removed_empty_feed = api.handle(
+    let removed_empty_feed = api.handle_in_process(
         "DELETE",
         &format!("/api/v1/cg/feeds/{EMPTY_FEED_ID}"),
         Some(&delete_body(
@@ -431,7 +435,7 @@ fn manages_cg_authority_through_the_operator_api() {
         body_text(&removed_empty_feed.body)
     );
     assert!(
-        response_json::<Vec<CgZoneConfig>>(&api.handle(
+        response_json::<Vec<CgZoneConfig>>(&api.handle_in_process(
             "GET",
             &format!("/api/v1/cg/zones?board_id={BOARD_ID}"),
             None,
@@ -439,7 +443,7 @@ fn manages_cg_authority_through_the_operator_api() {
         .is_empty()
     );
     assert!(
-        response_json::<Vec<CgFeedSource>>(&api.handle(
+        response_json::<Vec<CgFeedSource>>(&api.handle_in_process(
             "GET",
             &format!("/api/v1/cg/feeds?channel_id={CHANNEL_ID}"),
             None,
@@ -461,16 +465,16 @@ fn manages_cg_images_through_raw_upload_and_list_routes() {
         0, 0, 0, 31, 21, 196, 137, 0, 0, 0, 13, 73, 68, 65, 84, 120, 156, 99, 248, 207, 192, 240,
         31, 0, 5, 0, 1, 255, 137, 153, 61, 29, 0, 0, 0, 0, 73, 69, 78, 68, 174, 66, 96, 130,
     ];
-    let uploaded = api.handle("POST", "/api/v1/cg/images", Some(png));
+    let uploaded = api.handle_in_process("POST", "/api/v1/cg/images", Some(png));
     assert_eq!(uploaded.status, 200, "{}", body_text(&uploaded.body));
     let asset: station_cg::CgImageAsset = serde_json::from_slice(&uploaded.body).unwrap();
     assert_eq!(asset.mime_type, "image/png");
     assert_eq!(asset.width, 1);
     assert_eq!(asset.height, 1);
-    let duplicate = api.handle("POST", "/api/v1/cg/images", Some(png));
+    let duplicate = api.handle_in_process("POST", "/api/v1/cg/images", Some(png));
     assert_eq!(duplicate.status, 200);
     assert_eq!(duplicate.body, uploaded.body);
-    let listed = api.handle("GET", "/api/v1/cg/images", None);
+    let listed = api.handle_in_process("GET", "/api/v1/cg/images", None);
     assert_eq!(listed.status, 200);
     let images: Vec<station_cg::CgImageAsset> = serde_json::from_slice(&listed.body).unwrap();
     assert_eq!(images, vec![asset.clone()]);
@@ -486,7 +490,7 @@ fn manages_cg_images_through_raw_upload_and_list_routes() {
         updated_at_unix_ms: 1_000,
         created_by: "station-operator".into(),
     };
-    let response = api.handle(
+    let response = api.handle_in_process(
         "PUT",
         "/api/v1/cg/board",
         Some(&write_body(
@@ -516,7 +520,7 @@ fn manages_cg_images_through_raw_upload_and_list_routes() {
         created_at_unix_ms: 1_100,
         updated_at_unix_ms: 1_100,
     };
-    let response = api.handle(
+    let response = api.handle_in_process(
         "PUT",
         "/api/v1/cg/zones",
         Some(&write_body(
@@ -533,7 +537,7 @@ fn manages_cg_images_through_raw_upload_and_list_routes() {
     assert_eq!(response.status, 200, "{}", body_text(&response.body));
 
     let reopened = Api::open(&database).unwrap();
-    let zones = reopened.handle(
+    let zones = reopened.handle_in_process(
         "GET",
         &format!("/api/v1/cg/zones?board_id={BOARD_ID}"),
         None,
@@ -543,7 +547,7 @@ fn manages_cg_images_through_raw_upload_and_list_routes() {
         serde_json::from_slice::<Vec<CgZoneConfig>>(&zones.body).unwrap(),
         vec![zone]
     );
-    let snapshot = reopened.handle(
+    let snapshot = reopened.handle_in_process(
         "GET",
         &format!("/api/v1/cg/preview?channel_id={CHANNEL_ID}&at_unix_ms=2000"),
         None,
@@ -555,17 +559,21 @@ fn manages_cg_images_through_raw_upload_and_list_routes() {
         CgResolvedContent::Image { ref asset } if asset.asset_id == images[0].asset_id
     ));
     assert_eq!(
-        api.handle("POST", "/api/v1/cg/images", Some(b"not-an-image"))
+        api.handle_in_process("POST", "/api/v1/cg/images", Some(b"not-an-image"))
             .status,
         400
     );
     let oversized = vec![0_u8; 8 * 1024 * 1024 + 1];
     assert_eq!(
-        api.handle("POST", "/api/v1/cg/images", Some(&oversized))
+        api.handle_in_process("POST", "/api/v1/cg/images", Some(&oversized))
             .status,
         413
     );
-    assert_eq!(api.handle("POST", "/api/v1/cg/images", None).status, 400);
+    assert_eq!(
+        api.handle_in_process("POST", "/api/v1/cg/images", None)
+            .status,
+        400
+    );
     remove_database(&database);
 }
 
@@ -595,7 +603,7 @@ fn expires_due_bulletins_through_idempotent_local_command() {
             created_at_unix_ms: 900,
             updated_at_unix_ms: 1_000,
         };
-        let submitted_response = api.handle(
+        let submitted_response = api.handle_in_process(
             "PUT",
             "/api/v1/cg/bulletins",
             Some(&write_body(
@@ -620,7 +628,7 @@ fn expires_due_bulletins_through_idempotent_local_command() {
         scheduled.moderated_by = Some("station-operator".into());
         scheduled.revision = 2;
         scheduled.updated_at_unix_ms = 1_500;
-        let scheduled_response = api.handle(
+        let scheduled_response = api.handle_in_process(
             "PUT",
             "/api/v1/cg/bulletins",
             Some(&write_body(
@@ -649,7 +657,7 @@ fn expires_due_bulletins_through_idempotent_local_command() {
         "now_unix_ms": 2_000,
         "operator_id": "station-operator"
     });
-    let first = api.handle(
+    let first = api.handle_in_process(
         "POST",
         "/api/v1/cg/bulletins/expire",
         Some(&serde_json::to_vec(&command).unwrap()),
@@ -660,7 +668,7 @@ fn expires_due_bulletins_through_idempotent_local_command() {
     assert_eq!(expired[0].revision, 3);
     assert_eq!(expired[0].updated_at_unix_ms, 2_000);
 
-    let second = api.handle(
+    let second = api.handle_in_process(
         "POST",
         "/api/v1/cg/bulletins/expire",
         Some(&serde_json::to_vec(&command).unwrap()),
@@ -668,7 +676,7 @@ fn expires_due_bulletins_through_idempotent_local_command() {
     assert_eq!(second.status, 200);
     let expired_again: Vec<CgBulletin> = response_json(&second);
     assert!(expired_again.is_empty());
-    let audit_events: Vec<CgAuditEvent> = response_json(&api.handle(
+    let audit_events: Vec<CgAuditEvent> = response_json(&api.handle_in_process(
         "GET",
         &format!("/api/v1/cg/audit?channel_id={CHANNEL_ID}&limit=50"),
         None,
@@ -680,7 +688,7 @@ fn expires_due_bulletins_through_idempotent_local_command() {
             .count(),
         1
     );
-    let invalid_time = api.handle(
+    let invalid_time = api.handle_in_process(
         "POST",
         "/api/v1/cg/bulletins/expire",
         Some(
@@ -693,7 +701,7 @@ fn expires_due_bulletins_through_idempotent_local_command() {
         ),
     );
     assert_eq!(invalid_time.status, 422);
-    let unknown_field = api.handle(
+    let unknown_field = api.handle_in_process(
         "POST",
         "/api/v1/cg/bulletins/expire",
         Some(
@@ -710,7 +718,7 @@ fn expires_due_bulletins_through_idempotent_local_command() {
 
     drop(api);
     let reopened = Api::open(&database).unwrap();
-    let after_reopen = reopened.handle(
+    let after_reopen = reopened.handle_in_process(
         "POST",
         "/api/v1/cg/bulletins/expire",
         Some(&serde_json::to_vec(&command).unwrap()),
@@ -718,7 +726,7 @@ fn expires_due_bulletins_through_idempotent_local_command() {
     assert_eq!(after_reopen.status, 200);
     let expired_after_reopen: Vec<CgBulletin> = response_json(&after_reopen);
     assert!(expired_after_reopen.is_empty());
-    let audit_after_reopen: Vec<CgAuditEvent> = response_json(&reopened.handle(
+    let audit_after_reopen: Vec<CgAuditEvent> = response_json(&reopened.handle_in_process(
         "GET",
         &format!("/api/v1/cg/audit?channel_id={CHANNEL_ID}&limit=50"),
         None,

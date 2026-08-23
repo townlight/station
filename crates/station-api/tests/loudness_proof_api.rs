@@ -37,7 +37,7 @@ fn configured_channel() -> ChannelConfiguration {
 }
 
 fn save_channel(api: &Api, channel: &ChannelConfiguration) {
-    let response = api.handle(
+    let response = api.handle_in_process(
         "PUT",
         "/api/v1/channels",
         Some(&serde_json::to_vec(channel).expect("channel serializes")),
@@ -57,7 +57,7 @@ fn returns_not_run_entries_for_enabled_udp_and_srt_sinks_in_configured_order() {
     let channel = configured_channel();
     save_channel(&api, &channel);
 
-    let response = api.handle(
+    let response = api.handle_in_process(
         "GET",
         &format!("/api/v1/channels/{}/loudness-proof", channel.channel_id),
         None,
@@ -91,10 +91,10 @@ fn rejects_invalid_or_unknown_loudness_proof_channel_paths() {
     let database = temporary_database("loudness-proof-api-path");
     let api = Api::open(&database).expect("database opens");
 
-    let invalid = api.handle("GET", "/api/v1/channels/not-a-uuid/loudness-proof", None);
+    let invalid = api.handle_in_process("GET", "/api/v1/channels/not-a-uuid/loudness-proof", None);
     assert_eq!(invalid.status, 400);
 
-    let missing = api.handle(
+    let missing = api.handle_in_process(
         "GET",
         "/api/v1/channels/11111111-2222-4333-8444-555555555555/loudness-proof",
         None,

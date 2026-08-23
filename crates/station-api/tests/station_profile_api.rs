@@ -46,7 +46,21 @@ fn http_request(database: &Path, request: &[u8]) -> Vec<u8> {
     client
         .set_read_timeout(Some(Duration::from_secs(1)))
         .unwrap();
-    client.write_all(request).unwrap();
+    let header_end = request
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .map(|index| index + 4)
+        .unwrap_or(request.len());
+    let header = String::from_utf8(request[..header_end].to_vec())
+        .unwrap()
+        .replace("Host: localhost", &format!("Host: {address}"))
+        .replace(
+            "Origin: http://localhost",
+            &format!("Origin: http://{address}"),
+        );
+    let mut bound_request = header.into_bytes();
+    bound_request.extend_from_slice(&request[header_end..]);
+    client.write_all(&bound_request).unwrap();
     let mut response = Vec::new();
     match client.read_to_end(&mut response) {
         Ok(_) => {}
@@ -71,7 +85,7 @@ fn persists_a_valid_station_profile_and_reads_it_back() {
         display_name: "KTLT Community Television".into(),
         timezone: "America/Denver".into(),
     };
-    let put = api.handle(
+    let put = api.handle_in_process(
         "PUT",
         "/api/v1/station",
         Some(&serde_json::to_vec(&profile).unwrap()),
@@ -79,7 +93,7 @@ fn persists_a_valid_station_profile_and_reads_it_back() {
     assert_eq!(put.status, 200);
     drop(api);
     let restarted = Api::open(&database).expect("database reopens");
-    let get = restarted.handle("GET", "/api/v1/station", None);
+    let get = restarted.handle_in_process("GET", "/api/v1/station", None);
     assert_eq!(get.status, 200);
     assert_eq!(
         serde_json::from_slice::<StationProfile>(&get.body).unwrap(),
@@ -94,18 +108,19 @@ fn rejects_an_invalid_station_profile_without_replacing_the_current_profile() {
     let api = Api::open(&database).expect("database opens");
     let valid = br#"{"station_id":"3f5f721f-96c7-48b1-b061-1bf1ad1e62c2","display_name":"KTLT","timezone":"America/Denver"}"#;
     assert_eq!(
-        api.handle("PUT", "/api/v1/station", Some(valid)).status,
+        api.handle_in_process("PUT", "/api/v1/station", Some(valid))
+            .status,
         200
     );
     let invalid = br#"{"station_id":"not-an-id","display_name":"","timezone":"UTC+7"}"#;
-    let response = api.handle("PUT", "/api/v1/station", Some(invalid));
+    let response = api.handle_in_process("PUT", "/api/v1/station", Some(invalid));
     assert_eq!(response.status, 422);
     assert!(
         String::from_utf8(response.body)
             .unwrap()
             .contains("validation_failed")
     );
-    let get = api.handle("GET", "/api/v1/station", None);
+    let get = api.handle_in_process("GET", "/api/v1/station", None);
     let stored: StationProfile = serde_json::from_slice(&get.body).unwrap();
     assert_eq!(stored.display_name, "KTLT");
     let _ = std::fs::remove_file(database);
@@ -115,13 +130,16 @@ fn rejects_an_invalid_station_profile_without_replacing_the_current_profile() {
 fn health_reports_database_readiness_and_unknown_routes_are_not_found() {
     let database = temporary_database("health");
     let api = Api::open(&database).expect("database opens");
-    let health = api.handle("GET", "/health", None);
+    let health = api.handle_in_process("GET", "/health", None);
     assert_eq!(health.status, 200);
     assert_eq!(
         health.body,
         br#"{"database":"ready","orchestration":{"status":"ready"},"status":"ready"}"#
     );
-    assert_eq!(api.handle("GET", "/not-a-route", None).status, 404);
+    assert_eq!(
+        api.handle_in_process("GET", "/not-a-route", None).status,
+        404
+    );
     let _ = std::fs::remove_file(database);
 }
 
@@ -129,7 +147,7 @@ fn health_reports_database_readiness_and_unknown_routes_are_not_found() {
 fn commissioning_report_is_ordered_and_does_not_claim_field_proof() {
     let database = temporary_database("commissioning-report");
     let api = Api::open(&database).expect("database opens");
-    let empty = api.handle("GET", "/api/v1/commissioning/report", None);
+    let empty = api.handle_in_process("GET", "/api/v1/commissioning/report", None);
     assert_eq!(empty.status, 200);
     let report: serde_json::Value = serde_json::from_slice(&empty.body).unwrap();
     assert_eq!(report["schema_version"], 2);
@@ -201,10 +219,11 @@ fn commissioning_report_is_ordered_and_does_not_claim_field_proof() {
 
     let profile = br#"{"station_id":"3f5f721f-96c7-48b1-b061-1bf1ad1e62c2","display_name":"KTLT","timezone":"America/Denver"}"#;
     assert_eq!(
-        api.handle("PUT", "/api/v1/station", Some(profile)).status,
+        api.handle_in_process("PUT", "/api/v1/station", Some(profile))
+            .status,
         200
     );
-    let commissioned = api.handle("GET", "/api/v1/commissioning/report", None);
+    let commissioned = api.handle_in_process("GET", "/api/v1/commissioning/report", None);
     assert_eq!(
         commissioned.status,
         200,
@@ -235,7 +254,7 @@ fn commissioning_watch_folder_requires_durable_success_and_present_directory_aft
         last_error: None,
     };
     assert_eq!(
-        api.handle(
+        api.handle_in_process(
             "PUT",
             "/api/v1/watch-folders",
             Some(&serde_json::to_vec(&config).unwrap()),
@@ -243,7 +262,7 @@ fn commissioning_watch_folder_requires_durable_success_and_present_directory_aft
         .status,
         200
     );
-    let pending = api.handle("GET", "/api/v1/commissioning/report", None);
+    let pending = api.handle_in_process("GET", "/api/v1/commissioning/report", None);
     let pending: serde_json::Value = serde_json::from_slice(&pending.body).unwrap();
     let pending = pending["checks"]
         .as_array()
@@ -259,7 +278,7 @@ fn commissioning_watch_folder_requires_durable_success_and_present_directory_aft
         .record_watch_folder_scan(config_id, system_time_millis_for_test(), None)
         .unwrap();
     let restarted = Api::open(&database).unwrap();
-    let passed = restarted.handle("GET", "/api/v1/commissioning/report", None);
+    let passed = restarted.handle_in_process("GET", "/api/v1/commissioning/report", None);
     let passed: serde_json::Value = serde_json::from_slice(&passed.body).unwrap();
     let passed = passed["checks"]
         .as_array()
@@ -273,7 +292,7 @@ fn commissioning_watch_folder_requires_durable_success_and_present_directory_aft
 
     std::fs::remove_dir_all(&watch_directory).unwrap();
     let missing = Api::open(&database).unwrap();
-    let missing = missing.handle("GET", "/api/v1/commissioning/report", None);
+    let missing = missing.handle_in_process("GET", "/api/v1/commissioning/report", None);
     let missing: serde_json::Value = serde_json::from_slice(&missing.body).unwrap();
     let missing = missing["checks"]
         .as_array()
@@ -297,7 +316,8 @@ fn commissioning_report_separates_schedule_authority_from_dispatch_execution() {
     let api = Api::open(&database).unwrap();
     let profile = br#"{"station_id":"3f5f721f-96c7-48b1-b061-1bf1ad1e62c2","display_name":"KTLT","timezone":"America/Denver"}"#;
     assert_eq!(
-        api.handle("PUT", "/api/v1/station", Some(profile)).status,
+        api.handle_in_process("PUT", "/api/v1/station", Some(profile))
+            .status,
         200
     );
     let channel = ChannelConfiguration {
@@ -313,7 +333,7 @@ fn commissioning_report_separates_schedule_authority_from_dispatch_execution() {
         enabled: true,
     };
     assert_eq!(
-        api.handle(
+        api.handle_in_process(
             "PUT",
             "/api/v1/channels",
             Some(&serde_json::to_vec(&channel).unwrap()),
@@ -367,7 +387,7 @@ fn commissioning_report_separates_schedule_authority_from_dispatch_execution() {
     drop(store);
 
     let api = Api::open(&database).unwrap();
-    let response = api.handle("GET", "/api/v1/commissioning/report", None);
+    let response = api.handle_in_process("GET", "/api/v1/commissioning/report", None);
     assert_eq!(response.status, 200);
     let report: serde_json::Value = serde_json::from_slice(&response.body).unwrap();
     let checks = report["checks"].as_array().unwrap();
@@ -407,7 +427,7 @@ fn commissioning_report_separates_schedule_authority_from_dispatch_execution() {
     );
     drop(store);
     let api = Api::open(&database).unwrap();
-    let completed = api.handle("GET", "/api/v1/commissioning/report", None);
+    let completed = api.handle_in_process("GET", "/api/v1/commissioning/report", None);
     assert_eq!(
         completed.status,
         200,
@@ -439,7 +459,7 @@ fn commissioning_guided_air_proof_requires_one_persisted_causal_chain() {
     let now = system_time_millis_for_test();
     let api = Api::open(&database).unwrap();
     assert_eq!(
-        api.handle(
+        api.handle_in_process(
             "PUT",
             "/api/v1/station",
             Some(br#"{"station_id":"3f5f721f-96c7-48b1-b061-1bf1ad1e62c2","display_name":"KTLT","timezone":"America/Denver"}"#),
@@ -448,7 +468,7 @@ fn commissioning_guided_air_proof_requires_one_persisted_causal_chain() {
         200
     );
     assert_eq!(
-        api.handle(
+        api.handle_in_process(
             "PUT",
             "/api/v1/channels",
             Some(
@@ -587,7 +607,7 @@ fn commissioning_guided_air_proof_requires_one_persisted_causal_chain() {
 
     let read_status = |id: &str| {
         let api = Api::open(&database).unwrap();
-        let response = api.handle("GET", "/api/v1/commissioning/report", None);
+        let response = api.handle_in_process("GET", "/api/v1/commissioning/report", None);
         assert_eq!(response.status, 200);
         let report: serde_json::Value = serde_json::from_slice(&response.body).unwrap();
         report["checks"]
@@ -667,7 +687,7 @@ fn commissioning_guided_air_proof_requires_one_persisted_causal_chain() {
     drop(store);
     assert_eq!(read_status("first_broadcast_report"), "pass");
     let api = Api::open(&database).unwrap();
-    let response = api.handle("GET", "/api/v1/commissioning/report", None);
+    let response = api.handle_in_process("GET", "/api/v1/commissioning/report", None);
     let report: serde_json::Value = serde_json::from_slice(&response.body).unwrap();
     let air_proof = report["checks"]
         .as_array()
@@ -705,20 +725,20 @@ fn system_time_millis_for_test() -> i64 {
 fn serves_the_embedded_operator_console_from_the_station_origin() {
     let database = temporary_database("operator-console");
     let api = Api::open(&database).expect("database opens");
-    let shell = api.handle("GET", "/", None);
+    let shell = api.handle_in_process("GET", "/", None);
     assert_eq!(shell.status, 200);
     assert_eq!(shell.content_type, "text/html; charset=utf-8");
     let html = String::from_utf8(shell.body).unwrap();
     assert!(html.contains("TownLight Station"));
     assert!(html.contains("/operator.js"));
-    let deep_link = api.handle("GET", "/?view=health", None);
+    let deep_link = api.handle_in_process("GET", "/?view=health", None);
     assert_eq!(deep_link.status, 200);
     assert_eq!(deep_link.content_type, "text/html; charset=utf-8");
-    let script = api.handle("GET", "/operator.js", None);
+    let script = api.handle_in_process("GET", "/operator.js", None);
     assert_eq!(script.status, 200);
     assert_eq!(script.content_type, "text/javascript; charset=utf-8");
     assert!(script.body.len() > 1_000);
-    let styles = api.handle("GET", "/operator.css", None);
+    let styles = api.handle_in_process("GET", "/operator.css", None);
     assert_eq!(styles.status, 200);
     assert_eq!(styles.content_type, "text/css; charset=utf-8");
     assert!(styles.body.len() > 1_000);
@@ -755,19 +775,19 @@ fn persists_validated_channel_output_configuration() {
         ],
         enabled: true,
     };
-    let put = api.handle(
+    let put = api.handle_in_process(
         "PUT",
         "/api/v1/channels",
         Some(&serde_json::to_vec(&channel).unwrap()),
     );
     assert_eq!(put.status, 200);
-    let listed = api.handle("GET", "/api/v1/channels", None);
+    let listed = api.handle_in_process("GET", "/api/v1/channels", None);
     assert_eq!(listed.status, 200);
     assert_eq!(
         serde_json::from_slice::<Vec<ChannelConfiguration>>(&listed.body).unwrap(),
         vec![channel.clone()]
     );
-    let profiles = api.handle("GET", "/api/v1/output-profiles", None);
+    let profiles = api.handle_in_process("GET", "/api/v1/output-profiles", None);
     assert_eq!(profiles.status, 200);
     let profiles: serde_json::Value = serde_json::from_slice(&profiles.body).unwrap();
     assert_eq!(profiles.as_array().unwrap().len(), 2);
@@ -777,7 +797,7 @@ fn persists_validated_channel_output_configuration() {
     assert_eq!(profiles[1]["frame_rate_denominator"], 1_001);
     let mut rerouted = channel.clone();
     rerouted.output_sinks[1].destination = "127.0.0.1:5502".into();
-    let blocked_reroute = api.handle(
+    let blocked_reroute = api.handle_in_process(
         "PUT",
         "/api/v1/channels",
         Some(&serde_json::to_vec(&rerouted).unwrap()),
@@ -788,7 +808,7 @@ fn persists_validated_channel_output_configuration() {
     for sink in &mut changed.output_sinks {
         sink.loudness_target_lufs = -16.0;
     }
-    let blocked = api.handle(
+    let blocked = api.handle_in_process(
         "PUT",
         "/api/v1/channels",
         Some(&serde_json::to_vec(&changed).unwrap()),
@@ -797,7 +817,7 @@ fn persists_validated_channel_output_configuration() {
     let mut stopped = channel.clone();
     stopped.enabled = false;
     assert_eq!(
-        api.handle(
+        api.handle_in_process(
             "PUT",
             "/api/v1/channels",
             Some(&serde_json::to_vec(&stopped).unwrap())
@@ -807,7 +827,7 @@ fn persists_validated_channel_output_configuration() {
     );
     changed.enabled = false;
     assert_eq!(
-        api.handle(
+        api.handle_in_process(
             "PUT",
             "/api/v1/channels",
             Some(&serde_json::to_vec(&changed).unwrap())
@@ -815,7 +835,7 @@ fn persists_validated_channel_output_configuration() {
         .status,
         200
     );
-    let invalid = api.handle(
+    let invalid = api.handle_in_process(
         "PUT",
         "/api/v1/channels",
         Some(br#"{"channel_id":"not-a-uuid","display_name":"Bad","output_profile":"proof-360p30","output_sinks":[{"sink_id":"11111111-2222-4333-8444-555555555555","label":"Bad transport","kind":"udp-ts","destination":"nowhere","loudness_target_lufs":-16.0,"required":true,"enabled":true}],"enabled":true}"#),
@@ -827,7 +847,7 @@ fn persists_validated_channel_output_configuration() {
         sink.enabled = false;
     }
     assert_eq!(
-        api.handle(
+        api.handle_in_process(
             "PUT",
             "/api/v1/channels",
             Some(&serde_json::to_vec(&no_live_sink).unwrap())
@@ -861,7 +881,7 @@ fn stores_srt_passphrases_with_machine_protection_and_returns_only_presence() {
     command["srt_passphrases"] = serde_json::json!({
         channel.output_sinks[0].sink_id.clone(): passphrase
     });
-    let put = api.handle(
+    let put = api.handle_in_process(
         "PUT",
         "/api/v1/channels",
         Some(&serde_json::to_vec(&command).unwrap()),
@@ -882,7 +902,7 @@ fn stores_srt_passphrases_with_machine_protection_and_returns_only_presence() {
         channel.output_sinks[0].sink_id.clone(): replacement
     });
     assert_eq!(
-        api.handle(
+        api.handle_in_process(
             "PUT",
             "/api/v1/channels",
             Some(&serde_json::to_vec(&command).unwrap())
@@ -893,7 +913,7 @@ fn stores_srt_passphrases_with_machine_protection_and_returns_only_presence() {
     );
     channel.enabled = false;
     assert_eq!(
-        api.handle(
+        api.handle_in_process(
             "PUT",
             "/api/v1/channels",
             Some(&serde_json::to_vec(&channel).unwrap())
@@ -904,7 +924,7 @@ fn stores_srt_passphrases_with_machine_protection_and_returns_only_presence() {
     );
     let mut legacy_client = serde_json::to_value(&channel).unwrap();
     legacy_client["output_sinks"][0]["encryption_configured"] = serde_json::json!(false);
-    let preserved = api.handle(
+    let preserved = api.handle_in_process(
         "PUT",
         "/api/v1/channels",
         Some(&serde_json::to_vec(&legacy_client).unwrap()),
@@ -920,7 +940,7 @@ fn stores_srt_passphrases_with_machine_protection_and_returns_only_presence() {
         channel.output_sinks[0].sink_id.clone(): replacement
     });
     assert_eq!(
-        api.handle(
+        api.handle_in_process(
             "PUT",
             "/api/v1/channels",
             Some(&serde_json::to_vec(&stopped).unwrap())
@@ -979,7 +999,7 @@ fn clears_a_stopped_srt_passphrase_only_when_explicitly_requested() {
         channel.output_sinks[0].sink_id.clone(): "clear-me-safely"
     });
     assert_eq!(
-        api.handle(
+        api.handle_in_process(
             "PUT",
             "/api/v1/channels",
             Some(&serde_json::to_vec(&create).unwrap())
@@ -990,7 +1010,7 @@ fn clears_a_stopped_srt_passphrase_only_when_explicitly_requested() {
 
     let mut clear = serde_json::to_value(&channel).unwrap();
     clear["clear_srt_passphrases"] = serde_json::json!([channel.output_sinks[0].sink_id.clone()]);
-    let response = api.handle(
+    let response = api.handle_in_process(
         "PUT",
         "/api/v1/channels",
         Some(&serde_json::to_vec(&clear).unwrap()),
@@ -1076,19 +1096,19 @@ fn exposes_runtime_safe_to_air_and_acknowledges_durable_alerts() {
     drop(store);
 
     let api = Api::open(&database).unwrap();
-    let runtime = api.handle("GET", "/api/v1/runtime-safe-to-air", None);
+    let runtime = api.handle_in_process("GET", "/api/v1/runtime-safe-to-air", None);
     assert_eq!(runtime.status, 200);
     let runtime: RuntimeSafeToAirStatus = serde_json::from_slice(&runtime.body).unwrap();
     assert_eq!(runtime.color, SafeToAirColor::Yellow);
     assert!(runtime.channels[0].on_healthy_fallback);
     assert_eq!(runtime.active_warning_alerts, 1);
 
-    let listed = api.handle("GET", "/api/v1/alerts", None);
+    let listed = api.handle_in_process("GET", "/api/v1/alerts", None);
     let alerts: Vec<AlertEvent> = serde_json::from_slice(&listed.body).unwrap();
     assert_eq!(alerts.len(), 1);
     assert!(alerts[0].acknowledged_at_unix_ms.is_none());
 
-    let acknowledged = api.handle(
+    let acknowledged = api.handle_in_process(
         "POST",
         "/api/v1/alerts/alert-runtime-test/acknowledge",
         Some(br#"{"acknowledged_by":"station-operator"}"#),
@@ -1106,7 +1126,7 @@ fn exposes_runtime_safe_to_air_and_acknowledges_durable_alerts() {
 fn stores_and_lists_only_a_redacted_alert_destination_across_restart() {
     let database = temporary_database("alert-channel-redaction");
     let api = Api::open(&database).unwrap();
-    let configured = api.handle(
+    let configured = api.handle_in_process(
         "PUT",
         "/api/v1/alert-channels",
         Some(
@@ -1128,7 +1148,7 @@ fn stores_and_lists_only_a_redacted_alert_destination_across_restart() {
     drop(api);
 
     let restarted = Api::open(&database).unwrap();
-    let listed = restarted.handle("GET", "/api/v1/alert-channels", None);
+    let listed = restarted.handle_in_process("GET", "/api/v1/alert-channels", None);
     assert_eq!(listed.status, 200);
     let listed: serde_json::Value = serde_json::from_slice(&listed.body).unwrap();
     assert_eq!(listed.as_array().unwrap().len(), 1);
@@ -1160,7 +1180,7 @@ fn alert_destination_plaintext_never_reaches_sqlite_files() {
     }))
     .unwrap();
     assert_eq!(
-        api.handle("PUT", "/api/v1/alert-channels", Some(&body))
+        api.handle_in_process("PUT", "/api/v1/alert-channels", Some(&body))
             .status,
         200
     );
@@ -1191,7 +1211,7 @@ fn alert_destination_plaintext_never_reaches_sqlite_files() {
 fn rejects_insecure_remote_webhook_destinations() {
     let database = temporary_database("alert-channel-insecure");
     let api = Api::open(&database).unwrap();
-    let response = api.handle(
+    let response = api.handle_in_process(
         "PUT",
         "/api/v1/alert-channels",
         Some(
@@ -1200,7 +1220,7 @@ fn rejects_insecure_remote_webhook_destinations() {
     );
     assert_eq!(response.status, 422);
     assert!(String::from_utf8(response.body).unwrap().contains("https"));
-    let listed = api.handle("GET", "/api/v1/alert-channels", None);
+    let listed = api.handle_in_process("GET", "/api/v1/alert-channels", None);
     assert_eq!(listed.status, 200);
     assert_eq!(listed.body, b"[]");
     let _ = std::fs::remove_file(database);
@@ -1222,7 +1242,7 @@ fn rejects_control_characters_in_alert_provider_endpoints() {
         "credential": "provider-auth-token"
     }))
     .unwrap();
-    let response = api.handle("PUT", "/api/v1/alert-channels", Some(&body));
+    let response = api.handle_in_process("PUT", "/api/v1/alert-channels", Some(&body));
     assert_eq!(
         response.status,
         422,
@@ -1230,7 +1250,8 @@ fn rejects_control_characters_in_alert_provider_endpoints() {
         String::from_utf8_lossy(&response.body)
     );
     assert_eq!(
-        api.handle("GET", "/api/v1/alert-channels", None).body,
+        api.handle_in_process("GET", "/api/v1/alert-channels", None)
+            .body,
         b"[]"
     );
     let _ = std::fs::remove_file(database);
@@ -1252,7 +1273,7 @@ fn rejects_control_characters_in_smtp_endpoints() {
         "credential": "smtp-password"
     }))
     .unwrap();
-    let response = api.handle("PUT", "/api/v1/alert-channels", Some(&body));
+    let response = api.handle_in_process("PUT", "/api/v1/alert-channels", Some(&body));
     assert_eq!(
         response.status,
         422,
@@ -1260,7 +1281,8 @@ fn rejects_control_characters_in_smtp_endpoints() {
         String::from_utf8_lossy(&response.body)
     );
     assert_eq!(
-        api.handle("GET", "/api/v1/alert-channels", None).body,
+        api.handle_in_process("GET", "/api/v1/alert-channels", None)
+            .body,
         b"[]"
     );
     let _ = std::fs::remove_file(database);
@@ -1271,7 +1293,7 @@ fn queues_a_visible_send_test_without_exposing_destination_secrets() {
     let database = temporary_database("alert-channel-send-test");
     let api = Api::open(&database).unwrap();
     let channel_id = "24fcb252-8f00-4e15-a4c9-7de8637beb3c";
-    let configured = api.handle(
+    let configured = api.handle_in_process(
         "PUT",
         "/api/v1/alert-channels",
         Some(
@@ -1280,7 +1302,7 @@ fn queues_a_visible_send_test_without_exposing_destination_secrets() {
     );
     assert_eq!(configured.status, 200);
 
-    let queued = api.handle(
+    let queued = api.handle_in_process(
         "POST",
         &format!("/api/v1/alert-channels/{channel_id}/test"),
         None,
@@ -1298,7 +1320,7 @@ fn queues_a_visible_send_test_without_exposing_destination_secrets() {
     assert!(!String::from_utf8_lossy(&queued.body).contains("send-test-secret"));
     assert!(!String::from_utf8_lossy(&queued.body).contains("127.0.0.1"));
 
-    let listed = api.handle("GET", "/api/v1/alert-deliveries", None);
+    let listed = api.handle_in_process("GET", "/api/v1/alert-deliveries", None);
     assert_eq!(listed.status, 200);
     let deliveries: Vec<AlertDelivery> = serde_json::from_slice(&listed.body).unwrap();
     assert_eq!(deliveries, vec![delivery]);
@@ -1316,7 +1338,7 @@ fn queues_a_visible_send_test_without_exposing_destination_secrets() {
 fn lists_seeded_alert_rules_and_persists_an_operator_policy_edit() {
     let database = temporary_database("alert-rule-edit");
     let api = Api::open(&database).unwrap();
-    let listed = api.handle("GET", "/api/v1/alert-rules", None);
+    let listed = api.handle_in_process("GET", "/api/v1/alert-rules", None);
     assert_eq!(listed.status, 200);
     let rules: Vec<AlertRule> = serde_json::from_slice(&listed.body).unwrap();
     let rule = rules
@@ -1326,7 +1348,7 @@ fn lists_seeded_alert_rules_and_persists_an_operator_policy_edit() {
     assert_eq!(rule.severity, AlertSeverity::Critical);
     assert_eq!(rule.re_alert_after_seconds, 3_600);
 
-    let edited = api.handle(
+    let edited = api.handle_in_process(
         "PUT",
         &format!("/api/v1/alert-rules/{}", rule.rule_id),
         Some(
@@ -1348,8 +1370,12 @@ fn lists_seeded_alert_rules_and_persists_an_operator_policy_edit() {
     assert!(edited.updated_at_unix_ms > 0);
 
     let reopened = Api::open(&database).unwrap();
-    let persisted: Vec<AlertRule> =
-        serde_json::from_slice(&reopened.handle("GET", "/api/v1/alert-rules", None).body).unwrap();
+    let persisted: Vec<AlertRule> = serde_json::from_slice(
+        &reopened
+            .handle_in_process("GET", "/api/v1/alert-rules", None)
+            .body,
+    )
+    .unwrap();
     assert!(persisted.contains(&edited));
     let _ = std::fs::remove_file(database);
 }
@@ -1359,7 +1385,7 @@ fn exposes_the_latest_persisted_system_resource_sample() {
     let database = temporary_database("system-resources-api");
     let api = Api::open(&database).unwrap();
     assert_eq!(
-        api.handle("GET", "/api/v1/system-resources/latest", None)
+        api.handle_in_process("GET", "/api/v1/system-resources/latest", None)
             .body,
         b"null"
     );
@@ -1381,7 +1407,7 @@ fn exposes_the_latest_persisted_system_resource_sample() {
             clock_skew_seconds: None,
         })
         .unwrap();
-    let response = api.handle("GET", "/api/v1/system-resources/latest", None);
+    let response = api.handle_in_process("GET", "/api/v1/system-resources/latest", None);
     assert_eq!(response.status, 200);
     assert_eq!(
         serde_json::from_slice::<SystemResourceSample>(&response.body).unwrap(),
@@ -1394,14 +1420,16 @@ fn exposes_the_latest_persisted_system_resource_sample() {
 fn exposes_editable_self_test_schedules_and_runs_a_durable_manual_check() {
     let database = temporary_database("self-tests-api");
     let api = Api::open(&database).unwrap();
-    let schedules: Vec<SelfTestSchedule> =
-        serde_json::from_slice(&api.handle("GET", "/api/v1/self-test-schedules", None).body)
-            .unwrap();
+    let schedules: Vec<SelfTestSchedule> = serde_json::from_slice(
+        &api.handle_in_process("GET", "/api/v1/self-test-schedules", None)
+            .body,
+    )
+    .unwrap();
     assert_eq!(schedules.len(), 2);
     assert_eq!(schedules[0].kind, SelfTestKind::Daily);
     assert_eq!(schedules[1].kind, SelfTestKind::Weekly);
 
-    let edited = api.handle(
+    let edited = api.handle_in_process(
         "PUT",
         "/api/v1/self-test-schedules/daily",
         Some(
@@ -1414,7 +1442,7 @@ fn exposes_editable_self_test_schedules_and_runs_a_durable_manual_check() {
     assert_eq!(edited.local_minute, 30);
     assert_eq!(edited.updated_by, "station-operator");
     assert_eq!(
-        api.handle(
+        api.handle_in_process(
             "PUT",
             "/api/v1/self-test-schedules/daily",
             Some(
@@ -1425,14 +1453,17 @@ fn exposes_editable_self_test_schedules_and_runs_a_durable_manual_check() {
         422
     );
 
-    let run = api.handle("POST", "/api/v1/self-tests/run?kind=daily", None);
+    let run = api.handle_in_process("POST", "/api/v1/self-tests/run?kind=daily", None);
     assert_eq!(run.status, 201, "{}", String::from_utf8_lossy(&run.body));
     let record: SystemSelfTest = serde_json::from_slice(&run.body).unwrap();
     assert_eq!(record.kind, SelfTestKind::Daily);
     assert_eq!(record.trigger, SelfTestTrigger::Manual);
     assert_eq!(record.schedule_period_key, None);
-    let history: Vec<SystemSelfTest> =
-        serde_json::from_slice(&api.handle("GET", "/api/v1/self-tests", None).body).unwrap();
+    let history: Vec<SystemSelfTest> = serde_json::from_slice(
+        &api.handle_in_process("GET", "/api/v1/self-tests", None)
+            .body,
+    )
+    .unwrap();
     assert_eq!(history, vec![record.clone()]);
 
     drop(api);
@@ -1447,7 +1478,7 @@ fn creates_and_downloads_a_manifested_support_bundle_without_path_escape() {
     let database = root.join("station.db");
     let api = Api::open(&database).expect("database opens");
 
-    let created = api.handle("POST", "/api/v1/support-bundles", None);
+    let created = api.handle_in_process("POST", "/api/v1/support-bundles", None);
     assert_eq!(created.status, 201);
     let record: station_support::SupportBundleRecord =
         serde_json::from_slice(&created.body).unwrap();
@@ -1461,7 +1492,7 @@ fn creates_and_downloads_a_manifested_support_bundle_without_path_escape() {
             .any(|item| item.contains("credentials"))
     );
 
-    let downloaded = api.handle("GET", &record.download_uri, None);
+    let downloaded = api.handle_in_process("GET", &record.download_uri, None);
     assert_eq!(downloaded.status, 200);
     assert_eq!(downloaded.content_type, "application/zip");
     assert_eq!(
@@ -1472,7 +1503,8 @@ fn creates_and_downloads_a_manifested_support_bundle_without_path_escape() {
     let archive = zip::ZipArchive::new(std::io::Cursor::new(&downloaded.body)).unwrap();
     assert!(archive.file_names().any(|name| name == "manifest.json"));
 
-    let escaped = api.handle("GET", "/api/v1/support-bundles/..%2Fstation/download", None);
+    let escaped =
+        api.handle_in_process("GET", "/api/v1/support-bundles/..%2Fstation/download", None);
     assert_eq!(escaped.status, 404);
 
     let wire = http_request(
@@ -1488,12 +1520,9 @@ fn creates_and_downloads_a_manifested_support_bundle_without_path_escape() {
         .position(|window| window == b"\r\n\r\n")
         .unwrap();
     let headers = String::from_utf8(wire[..header_end].to_vec()).unwrap();
-    assert!(headers.starts_with("HTTP/1.1 200 OK\r\n"));
-    assert!(headers.contains("Content-Type: application/zip\r\n"));
-    assert!(headers.contains(&format!(
-        "Content-Disposition: attachment; filename=\"{}\"\r\n",
-        record.file_name
-    )));
+    assert!(headers.starts_with("HTTP/1.1 428 Precondition Required\r\n"));
+    assert!(headers.contains("Content-Type: application/json\r\n"));
+    assert!(!headers.contains("Content-Disposition:"));
     assert!(headers.contains("Cache-Control: no-store\r\n"));
     assert!(headers.contains("X-Content-Type-Options: nosniff\r\n"));
 
@@ -1516,7 +1545,7 @@ fn reports_an_honest_unconfigured_update_state_and_refuses_a_network_check() {
     .unwrap();
     let api = Api::open_with_application_directory(&database, &application).unwrap();
 
-    let status = api.handle("GET", "/api/v1/updates/status", None);
+    let status = api.handle_in_process("GET", "/api/v1/updates/status", None);
     assert_eq!(status.status, 200);
     let document: serde_json::Value = serde_json::from_slice(&status.body).unwrap();
     assert_eq!(document["configured"], false);
@@ -1531,25 +1560,25 @@ fn reports_an_honest_unconfigured_update_state_and_refuses_a_network_check() {
             .contains("trust file")
     );
 
-    let check = api.handle("POST", "/api/v1/updates/check", None);
+    let check = api.handle_in_process("POST", "/api/v1/updates/check", None);
     assert_eq!(check.status, 409);
     assert_eq!(
         serde_json::from_slice::<serde_json::Value>(&check.body).unwrap()["error"]["code"],
         "updates_not_configured"
     );
-    let stage = api.handle("POST", "/api/v1/updates/stage", None);
+    let stage = api.handle_in_process("POST", "/api/v1/updates/stage", None);
     assert_eq!(stage.status, 409);
     assert_eq!(
         serde_json::from_slice::<serde_json::Value>(&stage.body).unwrap()["error"]["code"],
         "updates_not_configured"
     );
-    let prepare = api.handle("POST", "/api/v1/updates/prepare", None);
+    let prepare = api.handle_in_process("POST", "/api/v1/updates/prepare", None);
     assert_eq!(prepare.status, 409);
     assert_eq!(
         serde_json::from_slice::<serde_json::Value>(&prepare.body).unwrap()["error"]["code"],
         "updates_not_configured"
     );
-    let notes = api.handle("GET", "/api/v1/updates/release-notes?version=0.2.0", None);
+    let notes = api.handle_in_process("GET", "/api/v1/updates/release-notes?version=0.2.0", None);
     assert_eq!(notes.status, 404);
 
     drop(api);
@@ -1573,7 +1602,7 @@ fn configures_watch_folders_without_allowing_clients_to_forge_scan_health() {
         last_scan_at_unix_ms: None,
         last_error: None,
     };
-    let stored = api.handle(
+    let stored = api.handle_in_process(
         "PUT",
         "/api/v1/watch-folders",
         Some(&serde_json::to_vec(&config).unwrap()),
@@ -1584,7 +1613,7 @@ fn configures_watch_folders_without_allowing_clients_to_forge_scan_health() {
         "{}",
         String::from_utf8_lossy(&stored.body)
     );
-    let listed = api.handle("GET", "/api/v1/watch-folders", None);
+    let listed = api.handle_in_process("GET", "/api/v1/watch-folders", None);
     assert_eq!(listed.status, 200);
     assert_eq!(
         serde_json::from_slice::<Vec<WatchFolderConfig>>(&listed.body).unwrap(),
@@ -1594,7 +1623,7 @@ fn configures_watch_folders_without_allowing_clients_to_forge_scan_health() {
     let mut forged = config;
     forged.last_error = Some("Everything is fine".into());
     assert_eq!(
-        api.handle(
+        api.handle_in_process(
             "PUT",
             "/api/v1/watch-folders",
             Some(&serde_json::to_vec(&forged).unwrap()),
@@ -1621,7 +1650,7 @@ fn admits_real_media_into_the_managed_library_and_refuses_declared_readiness() {
         "source_path": source.to_string_lossy()
     }))
     .unwrap();
-    let admitted = api.handle("POST", "/api/v1/assets/ingest", Some(&body));
+    let admitted = api.handle_in_process("POST", "/api/v1/assets/ingest", Some(&body));
     assert_eq!(
         admitted.status,
         202,
@@ -1635,7 +1664,7 @@ fn admits_real_media_into_the_managed_library_and_refuses_declared_readiness() {
         !library.exists(),
         "the API request must not perform ingest work"
     );
-    let fetched = api.handle(
+    let fetched = api.handle_in_process(
         "GET",
         "/api/v1/assets/ingest/jobs/7a49c96c-12da-4c3c-a144-739049eb19af",
         None,
@@ -1655,7 +1684,7 @@ fn admits_real_media_into_the_managed_library_and_refuses_declared_readiness() {
         } => transcode_job_id,
         other => panic!("real media did not reach transcode: {other:?}"),
     };
-    let queued_transcode = api.handle(
+    let queued_transcode = api.handle_in_process(
         "GET",
         &format!("/api/v1/assets/transcode/jobs/{transcode_job_id}"),
         None,
@@ -1664,7 +1693,7 @@ fn admits_real_media_into_the_managed_library_and_refuses_declared_readiness() {
     let queued_transcode: serde_json::Value =
         serde_json::from_slice(&queued_transcode.body).unwrap();
     assert_eq!(queued_transcode["status"], "pending");
-    let processing = api.handle("GET", "/api/v1/assets/readiness-dashboard", None);
+    let processing = api.handle_in_process("GET", "/api/v1/assets/readiness-dashboard", None);
     let processing: serde_json::Value = serde_json::from_slice(&processing.body).unwrap();
     assert_eq!(processing["awaiting_transcode_ingest_count"], 1);
     assert_eq!(processing["pending_transcode_count"], 1);
@@ -1679,7 +1708,7 @@ fn admits_real_media_into_the_managed_library_and_refuses_declared_readiness() {
         TranscodeOutcome::Completed { asset_id, .. } => asset_id,
         other => panic!("real media did not complete canonical transcode: {other:?}"),
     };
-    let completed = api.handle(
+    let completed = api.handle_in_process(
         "GET",
         "/api/v1/assets/ingest/jobs/7a49c96c-12da-4c3c-a144-739049eb19af",
         None,
@@ -1688,12 +1717,13 @@ fn admits_real_media_into_the_managed_library_and_refuses_declared_readiness() {
     assert_eq!(completed["status"], "completed");
     assert_eq!(completed["progress_percent"], 100);
     assert_eq!(completed["asset_id"], asset_id);
-    let fetched_asset = api.handle("GET", &format!("/api/v1/assets/{asset_id}"), None);
+    let fetched_asset = api.handle_in_process("GET", &format!("/api/v1/assets/{asset_id}"), None);
     let asset: MediaAsset = serde_json::from_slice(&fetched_asset.body).unwrap();
     assert_eq!(fetched_asset.status, 200);
     assert_eq!(asset.readiness, AssetReadiness::Ready);
     assert!(Path::new(&asset.media_path).starts_with(std::fs::canonicalize(&library).unwrap()));
-    let readiness = api.handle("GET", &format!("/api/v1/assets/{asset_id}/readiness"), None);
+    let readiness =
+        api.handle_in_process("GET", &format!("/api/v1/assets/{asset_id}/readiness"), None);
     assert_eq!(readiness.status, 200);
     let readiness: serde_json::Value = serde_json::from_slice(&readiness.body).unwrap();
     assert_eq!(readiness["loudness_status"], "ok");
@@ -1707,7 +1737,7 @@ fn admits_real_media_into_the_managed_library_and_refuses_declared_readiness() {
         readiness: AssetReadiness::Ready,
     };
     assert_eq!(
-        api.handle(
+        api.handle_in_process(
             "PUT",
             "/api/v1/assets",
             Some(&serde_json::to_vec(&forged).unwrap()),
@@ -1716,7 +1746,7 @@ fn admits_real_media_into_the_managed_library_and_refuses_declared_readiness() {
         404
     );
     assert_eq!(
-        api.handle(
+        api.handle_in_process(
             "POST",
             "/api/v1/assets/ingest",
             Some(
@@ -1735,7 +1765,7 @@ fn admits_real_media_into_the_managed_library_and_refuses_declared_readiness() {
     }))
     .unwrap();
     assert_eq!(
-        api.handle("POST", "/api/v1/assets/ingest", Some(&invalid_body))
+        api.handle_in_process("POST", "/api/v1/assets/ingest", Some(&invalid_body))
             .status,
         202
     );
@@ -1743,7 +1773,7 @@ fn admits_real_media_into_the_managed_library_and_refuses_declared_readiness() {
         IngestWorker::new(&database, &library).run_once().unwrap(),
         Some(IngestOutcome::Failed { .. })
     ));
-    let failed = api.handle(
+    let failed = api.handle_in_process(
         "GET",
         "/api/v1/assets/ingest/jobs/640068de-2886-46f5-981a-0144597ce2aa",
         None,
@@ -1773,13 +1803,13 @@ fn admits_real_media_into_the_managed_library_and_refuses_declared_readiness() {
         })
         .unwrap();
     drop(store);
-    let dashboard = api.handle("GET", "/api/v1/assets/readiness-dashboard", None);
+    let dashboard = api.handle_in_process("GET", "/api/v1/assets/readiness-dashboard", None);
     assert_eq!(dashboard.status, 200);
     let dashboard: serde_json::Value = serde_json::from_slice(&dashboard.body).unwrap();
     assert_eq!(dashboard["ready_count"], 1);
     assert_eq!(dashboard["missing_count"], 1);
     assert_eq!(dashboard["failed_ingest_count"], 1);
-    let missing = api.handle(
+    let missing = api.handle_in_process(
         "GET",
         &format!("/api/v1/assets/missing-scheduled?now_unix_ms={now}&horizon_ms=604800000"),
         None,
@@ -1793,7 +1823,7 @@ fn admits_real_media_into_the_managed_library_and_refuses_declared_readiness() {
     );
     assert_eq!(missing[0]["readiness_state"], "missing_file");
     assert_eq!(
-        api.handle(
+        api.handle_in_process(
             "GET",
             "/api/v1/assets/missing-scheduled?now_unix_ms=1",
             None,
@@ -1802,7 +1832,7 @@ fn admits_real_media_into_the_managed_library_and_refuses_declared_readiness() {
         400
     );
     assert_eq!(
-        api.handle(
+        api.handle_in_process(
             "GET",
             "/api/v1/assets/missing-scheduled?now_unix_ms=1&horizon_ms=2678400001",
             None,
@@ -1811,7 +1841,7 @@ fn admits_real_media_into_the_managed_library_and_refuses_declared_readiness() {
         422
     );
     assert_eq!(
-        api.handle("POST", "/api/v1/assets/ingest", Some(&body))
+        api.handle_in_process("POST", "/api/v1/assets/ingest", Some(&body))
             .status,
         409
     );
@@ -1821,7 +1851,7 @@ fn admits_real_media_into_the_managed_library_and_refuses_declared_readiness() {
     }))
     .unwrap();
     assert_eq!(
-        api.handle("POST", "/api/v1/assets/ingest", Some(&invalid_job))
+        api.handle_in_process("POST", "/api/v1/assets/ingest", Some(&invalid_job))
             .status,
         422
     );
@@ -1831,12 +1861,12 @@ fn admits_real_media_into_the_managed_library_and_refuses_declared_readiness() {
     }))
     .unwrap();
     assert_eq!(
-        api.handle("POST", "/api/v1/assets/ingest", Some(&missing_source),)
+        api.handle_in_process("POST", "/api/v1/assets/ingest", Some(&missing_source),)
             .status,
         422
     );
     assert_eq!(
-        api.handle("GET", "/api/v1/assets/not-a-digest", None)
+        api.handle_in_process("GET", "/api/v1/assets/not-a-digest", None)
             .status,
         400
     );
@@ -1954,7 +1984,7 @@ fn prepares_commits_and_persists_an_operator_approval_through_the_api() {
         state: ScheduleState::Draft,
     };
     assert_eq!(
-        api.handle(
+        api.handle_in_process(
             "PUT",
             "/api/v1/schedule/items",
             Some(&serde_json::to_vec(&item).unwrap())
@@ -1962,7 +1992,7 @@ fn prepares_commits_and_persists_an_operator_approval_through_the_api() {
         .status,
         200
     );
-    let prepare = api.handle(
+    let prepare = api.handle_in_process(
         "POST",
         "/api/v1/schedule/prepare",
         Some(br#"{"plan_id":"plan-1","schedule_item_id":"256d5a07-92d3-4718-aec9-05cad42fae7d"}"#),
@@ -1974,7 +2004,7 @@ fn prepares_commits_and_persists_an_operator_approval_through_the_api() {
             .dry_run_passed
     );
 
-    let commit = api.handle(
+    let commit = api.handle_in_process(
         "POST",
         "/api/v1/schedule/commit",
         Some(br#"{"report_id":"report-1","plan_id":"plan-1","schedule_item_id":"256d5a07-92d3-4718-aec9-05cad42fae7d","approved_by":"operator-scott","operator_notes":"Reviewed."}"#),
@@ -1982,13 +2012,13 @@ fn prepares_commits_and_persists_an_operator_approval_through_the_api() {
     assert_eq!(commit.status, 201);
     let report: CommitReport = serde_json::from_slice(&commit.body).unwrap();
     assert_eq!(report.dispatch_status, DispatchStatus::Pending);
-    let fetched = api.handle("GET", "/api/v1/schedule/commits/report-1", None);
+    let fetched = api.handle_in_process("GET", "/api/v1/schedule/commits/report-1", None);
     assert_eq!(fetched.status, 200);
     assert_eq!(
         serde_json::from_slice::<CommitReport>(&fetched.body).unwrap(),
         report
     );
-    let listed = api.handle(
+    let listed = api.handle_in_process(
         "GET",
         "/api/v1/schedule/items?channel_id=8b626c01-bdf8-419a-8a2e-b0a7caa1ff7e",
         None,
@@ -2002,22 +2032,21 @@ fn prepares_commits_and_persists_an_operator_approval_through_the_api() {
 }
 
 #[test]
-fn serves_the_station_profile_through_the_http_boundary() {
+fn production_http_boundary_requires_auth_for_station_profile_mutation() {
     let database = temporary_database("http");
     let body = br#"{"station_id":"3f5f721f-96c7-48b1-b061-1bf1ad1e62c2","display_name":"KTLT","timezone":"America/Denver"}"#;
     let request = format!(
-        "PUT /api/v1/station HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n",
+        "PUT /api/v1/station HTTP/1.1\r\nHost: localhost\r\nOrigin: http://localhost\r\nSec-Fetch-Site: same-origin\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n",
         body.len()
     );
     let mut bytes = request.into_bytes();
     bytes.extend_from_slice(body);
     let response = String::from_utf8(http_request(&database, &bytes)).unwrap();
-    assert!(response.starts_with("HTTP/1.1 200 OK\r\n"));
+    assert!(response.starts_with("HTTP/1.1 428 Precondition Required\r\n"));
     assert!(response.contains("\r\nContent-Type: application/json\r\n"));
     let response_body = response.split("\r\n\r\n").nth(1).unwrap();
-    let stored: serde_json::Value = serde_json::from_str(response_body).unwrap();
-    assert_eq!(stored["display_name"], "KTLT");
-    assert_eq!(stored["revision"], 1);
+    let error: serde_json::Value = serde_json::from_str(response_body).unwrap();
+    assert_eq!(error["error"]["code"], "operator_bootstrap_required");
     let _ = std::fs::remove_file(database);
 }
 
@@ -2030,8 +2059,8 @@ fn acknowledges_expect_continue_before_waiting_for_the_request_body() {
     let server = thread::spawn(move || serve_one(listener, server_database));
     let body = br#"{"station_id":"3f5f721f-96c7-48b1-b061-1bf1ad1e62c2","display_name":"KTLT","timezone":"America/Denver"}"#;
     let headers = format!(
-        "PUT /api/v1/station HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\nExpect: 100-continue\r\n\r\n",
-        body.len()
+        "PUT /api/v1/station HTTP/1.1\r\nHost: {address}\r\nOrigin: http://{address}\r\nSec-Fetch-Site: same-origin\r\nContent-Type: application/json\r\nContent-Length: {}\r\nExpect: 100-continue\r\n\r\n",
+        body.len(),
     );
     let mut client = TcpStream::connect(address).unwrap();
     client
@@ -2046,7 +2075,7 @@ fn acknowledges_expect_continue_before_waiting_for_the_request_body() {
     client.write_all(body).unwrap();
     let mut response = Vec::new();
     client.read_to_end(&mut response).unwrap();
-    assert!(response.starts_with(b"HTTP/1.1 200 OK\r\n"));
+    assert!(response.starts_with(b"HTTP/1.1 428 Precondition Required\r\n"));
     server.join().unwrap().unwrap();
     let _ = std::fs::remove_file(database);
 }
@@ -2057,16 +2086,18 @@ fn rejects_a_stale_profile_revision_without_losing_the_winning_update() {
     let api = Api::open(&database).expect("database opens");
     let initial = br#"{"station_id":"3f5f721f-96c7-48b1-b061-1bf1ad1e62c2","display_name":"KTLT","timezone":"America/Denver","expected_revision":0}"#;
     assert_eq!(
-        api.handle("PUT", "/api/v1/station", Some(initial)).status,
+        api.handle_in_process("PUT", "/api/v1/station", Some(initial))
+            .status,
         200
     );
     let winning = br#"{"station_id":"3f5f721f-96c7-48b1-b061-1bf1ad1e62c2","display_name":"KTLT Updated","timezone":"America/Denver","expected_revision":1}"#;
     assert_eq!(
-        api.handle("PUT", "/api/v1/station", Some(winning)).status,
+        api.handle_in_process("PUT", "/api/v1/station", Some(winning))
+            .status,
         200
     );
     let stale = br#"{"station_id":"3f5f721f-96c7-48b1-b061-1bf1ad1e62c2","display_name":"KTLT Stale","timezone":"America/Denver","expected_revision":1}"#;
-    let conflict = api.handle("PUT", "/api/v1/station", Some(stale));
+    let conflict = api.handle_in_process("PUT", "/api/v1/station", Some(stale));
     assert_eq!(conflict.status, 409);
     assert!(
         String::from_utf8(conflict.body)
@@ -2074,7 +2105,8 @@ fn rejects_a_stale_profile_revision_without_losing_the_winning_update() {
             .contains("revision_conflict")
     );
     let stored: serde_json::Value =
-        serde_json::from_slice(&api.handle("GET", "/api/v1/station", None).body).unwrap();
+        serde_json::from_slice(&api.handle_in_process("GET", "/api/v1/station", None).body)
+            .unwrap();
     assert_eq!(stored["display_name"], "KTLT Updated");
     assert_eq!(stored["revision"], 2);
     drop(api);
@@ -2099,7 +2131,7 @@ fn serves_requests_until_a_cooperative_stop_is_requested() {
         .set_read_timeout(Some(Duration::from_millis(500)))
         .unwrap();
     client
-        .write_all(b"GET /health HTTP/1.1\r\nHost: localhost\r\n\r\n")
+        .write_all(format!("GET /health HTTP/1.1\r\nHost: {address}\r\n\r\n").as_bytes())
         .unwrap();
     let mut response = Vec::new();
     let _ = client.read_to_end(&mut response);
@@ -2130,7 +2162,7 @@ fn allows_an_accepted_client_time_to_send_its_request() {
         .unwrap();
     thread::sleep(Duration::from_millis(100));
     client
-        .write_all(b"GET /health HTTP/1.1\r\nHost: localhost\r\n\r\n")
+        .write_all(format!("GET /health HTTP/1.1\r\nHost: {address}\r\n\r\n").as_bytes())
         .unwrap();
     let mut response = Vec::new();
     client.read_to_end(&mut response).unwrap();
@@ -2161,7 +2193,7 @@ fn keeps_health_responsive_while_another_request_is_stalled() {
 
     let mut stalled = TcpStream::connect(address).unwrap();
     stalled
-        .write_all(b"POST /api/v1/updates/stage HTTP/1.1\r\nHost: localhost\r\n")
+        .write_all(format!("POST /api/v1/updates/stage HTTP/1.1\r\nHost: {address}\r\n").as_bytes())
         .unwrap();
     thread::sleep(Duration::from_millis(50));
 
@@ -2170,7 +2202,7 @@ fn keeps_health_responsive_while_another_request_is_stalled() {
         .set_read_timeout(Some(Duration::from_secs(1)))
         .unwrap();
     health
-        .write_all(b"GET /health HTTP/1.1\r\nHost: localhost\r\n\r\n")
+        .write_all(format!("GET /health HTTP/1.1\r\nHost: {address}\r\n\r\n").as_bytes())
         .unwrap();
     let mut response = Vec::new();
     health.read_to_end(&mut response).unwrap();

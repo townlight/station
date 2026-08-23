@@ -17,9 +17,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use station_alerting::probe_system_resources;
+use station_auth::{OperatorAccount, SecretToken, digest_secret};
 use station_cg::{
-    CgAuditEvent, CgBoard, CgBulletin, CgFeedItem, CgFeedItemApproval, CgFeedSource, CgZoneConfig,
-    built_in_templates,
+    CgAuditEvent, CgBoard, CgBulletin, CgBulletinState, CgFeedItem, CgFeedItemApproval,
+    CgFeedSource, CgZoneConfig, built_in_templates,
 };
 use station_domain::{
     AlertChannel, AlertChannelKind, AlertConditionKind, AlertEventState, AlertRule, AlertSeverity,
@@ -563,6 +564,37 @@ struct CgFeedItemsRead {
     feeds: Vec<CgFeedRead>,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BootstrapRequest {
+    capability: String,
+    username: String,
+    display_name: String,
+    password: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LoginRequest {
+    username: String,
+    password: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RecoverRequest {
+    username: String,
+    recovery_code: String,
+    new_password: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ChangePasswordRequest {
+    current_password: String,
+    new_password: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ApiResponse {
     pub status: u16,
@@ -689,7 +721,35 @@ impl Api {
         })
     }
 
+    /// Legacy alias for in-process tests and trusted embedding only.
+    /// Production requests never call this entrypoint.
     pub fn handle(&self, method: &str, path: &str, body: Option<&[u8]>) -> ApiResponse {
+        self.handle_in_process(method, path, body)
+    }
+
+    /// Bypasses HTTP authentication by explicit in-process authority.
+    /// This exists for tests and trusted embedding; it is not used by the production dispatcher.
+    pub fn handle_in_process(&self, method: &str, path: &str, body: Option<&[u8]>) -> ApiResponse {
+        self.route(method, path, body, None)
+    }
+
+    fn handle_authenticated(
+        &self,
+        method: &str,
+        path: &str,
+        body: Option<&[u8]>,
+        actor: &OperatorAccount,
+    ) -> ApiResponse {
+        self.route(method, path, body, Some(actor))
+    }
+
+    fn route(
+        &self,
+        method: &str,
+        path: &str,
+        body: Option<&[u8]>,
+        actor: Option<&OperatorAccount>,
+    ) -> ApiResponse {
         match (method, path) {
             ("GET", path) if path == "/" || path.starts_with("/?") => {
                 static_response(200, "text/html; charset=utf-8", OPERATOR_HTML)
@@ -713,7 +773,14 @@ impl Api {
                 ),
                 Err(message) => error_response(500, "storage_error", &message),
             },
-            ("GET", "/api/v1/commissioning/report") => self.commissioning_report(),
+            ("GET", "/api/v1/commissioning/report") => {
+                self.commissioning_report(actor.is_some_and(|account| {
+                    account.enabled()
+                        && account
+                            .roles()
+                            .contains(&station_auth::OperatorRole::SetupAdmin)
+                }))
+            }
             ("GET", "/api/v1/station-box-profile") => self.station_box_profile(false),
             ("GET", "/api/v1/station-box-profile/readiness") => self.station_box_profile(true),
             ("GET", "/api/v1/headend-readiness") => self.headend_readiness(None),
@@ -776,7 +843,7 @@ impl Api {
             ("PUT", path) if path.starts_with("/api/v1/live-sources/") => {
                 self.put_live_source(path, body)
             }
-            ("POST", "/api/v1/live-takeovers") => self.request_live_takeover(body),
+            ("POST", "/api/v1/live-takeovers") => self.request_live_takeover(body, actor),
             ("GET", path)
                 if path.starts_with("/api/v1/live-takeovers/")
                     && !path.ends_with("/take")
@@ -788,12 +855,12 @@ impl Api {
             ("POST", path)
                 if path.starts_with("/api/v1/live-takeovers/") && path.ends_with("/take") =>
             {
-                self.confirm_live_take(path, body)
+                self.confirm_live_take(path, body, actor)
             }
             ("POST", path)
                 if path.starts_with("/api/v1/live-takeovers/") && path.ends_with("/return") =>
             {
-                self.request_live_return(path, body)
+                self.request_live_return(path, body, actor)
             }
             ("GET", path)
                 if path.starts_with("/api/v1/live-takeovers/") && path.ends_with("/audit") =>
@@ -809,11 +876,11 @@ impl Api {
             ("GET", "/api/v1/system-resources/latest") => self.latest_system_resources(),
             ("GET", "/api/v1/self-tests") => self.list_self_tests(),
             ("POST", path) if path.starts_with("/api/v1/self-tests/run?") => {
-                self.run_self_test(path)
+                self.run_self_test(path, actor)
             }
             ("GET", "/api/v1/self-test-schedules") => self.list_self_test_schedules(),
             ("PUT", path) if path.starts_with("/api/v1/self-test-schedules/") => {
-                self.put_self_test_schedule(path, body)
+                self.put_self_test_schedule(path, body, actor)
             }
             ("POST", "/api/v1/support-bundles") => self.create_support_bundle(),
             ("GET", path)
@@ -825,7 +892,7 @@ impl Api {
             ("POST", "/api/v1/updates/check") => self.check_updates(),
             ("POST", "/api/v1/updates/stage") => self.stage_update(),
             ("POST", "/api/v1/updates/prepare") => self.prepare_update(),
-            ("POST", "/api/v1/updates/apply") => self.apply_update(body),
+            ("POST", "/api/v1/updates/apply") => self.apply_update(body, actor),
             ("GET", path) if path.starts_with("/api/v1/updates/release-notes?") => {
                 self.update_release_notes(path)
             }
@@ -833,7 +900,7 @@ impl Api {
             ("GET", "/api/v1/alert-channels") => self.list_alert_channels(),
             ("GET", "/api/v1/alert-rules") => self.list_alert_rules(),
             ("PUT", path) if path.starts_with("/api/v1/alert-rules/") => {
-                self.put_alert_rule(path, body)
+                self.put_alert_rule(path, body, actor)
             }
             ("GET", "/api/v1/alert-deliveries") => self.list_alert_deliveries(),
             ("POST", path)
@@ -845,7 +912,7 @@ impl Api {
             ("POST", path)
                 if path.starts_with("/api/v1/alerts/") && path.ends_with("/acknowledge") =>
             {
-                self.acknowledge_alert(path, body)
+                self.acknowledge_alert(path, body, actor)
             }
             ("PUT", "/api/v1/watch-folders") => self.put_watch_folder(body),
             ("GET", "/api/v1/watch-folders") => self.list_watch_folders(),
@@ -867,30 +934,30 @@ impl Api {
             {
                 self.read_cg_snapshot(path, "/api/v1/cg/snapshot", false)
             }
-            ("PUT", "/api/v1/cg/board") => self.write_cg_board(body),
+            ("PUT", "/api/v1/cg/board") => self.write_cg_board(body, actor),
             ("GET", path) if path.starts_with("/api/v1/cg/zones?") => self.list_cg_zones(path),
-            ("PUT", "/api/v1/cg/zones") => self.write_cg_zone(body),
+            ("PUT", "/api/v1/cg/zones") => self.write_cg_zone(body, actor),
             ("DELETE", path) if path.starts_with("/api/v1/cg/zones/") => {
-                self.delete_cg_zone(path, body)
+                self.delete_cg_zone(path, body, actor)
             }
             ("GET", path) if path.starts_with("/api/v1/cg/feeds?") => self.list_cg_feeds(path),
-            ("PUT", "/api/v1/cg/feeds") => self.write_cg_feed(body),
+            ("PUT", "/api/v1/cg/feeds") => self.write_cg_feed(body, actor),
             ("DELETE", path) if path.starts_with("/api/v1/cg/feeds/") => {
-                self.delete_cg_feed(path, body)
+                self.delete_cg_feed(path, body, actor)
             }
             ("GET", path) if path.starts_with("/api/v1/cg/feed-items?") => {
                 self.list_cg_feed_items(path)
             }
-            ("POST", "/api/v1/cg/feed-items/approve") => self.approve_cg_feed_item(body),
+            ("POST", "/api/v1/cg/feed-items/approve") => self.approve_cg_feed_item(body, actor),
             ("GET", path) if path.starts_with("/api/v1/cg/bulletins?") => {
                 self.list_cg_bulletins(path)
             }
-            ("PUT", "/api/v1/cg/bulletins") => self.write_cg_bulletin(body),
-            ("POST", "/api/v1/cg/bulletins/expire") => self.expire_cg_bulletins(body),
+            ("PUT", "/api/v1/cg/bulletins") => self.write_cg_bulletin(body, actor),
+            ("POST", "/api/v1/cg/bulletins/expire") => self.expire_cg_bulletins(body, actor),
             ("GET", path) if path.starts_with("/api/v1/cg/audit?") => self.list_cg_audit(path),
             ("PUT", "/api/v1/schedule/items") => self.put_schedule_item(body),
             ("POST", "/api/v1/schedule/prepare") => self.prepare_schedule_commit(body),
-            ("POST", "/api/v1/schedule/commit") => self.commit_schedule(body),
+            ("POST", "/api/v1/schedule/commit") => self.commit_schedule(body, actor),
             ("GET", path) if path.starts_with("/api/v1/schedule/items?") => {
                 self.list_schedule(path)
             }
@@ -1566,8 +1633,14 @@ impl Api {
         }
     }
 
-    fn request_live_takeover(&self, body: Option<&[u8]>) -> ApiResponse {
-        let Some(command) = parse_body::<RequestLiveTakeover>(body) else {
+    fn request_live_takeover(
+        &self,
+        body: Option<&[u8]>,
+        actor: Option<&OperatorAccount>,
+    ) -> ApiResponse {
+        let Some(command) =
+            parse_authenticated_body::<RequestLiveTakeover>(body, actor, &[&["operator_id"]])
+        else {
             return error_response(
                 400,
                 "invalid_json",
@@ -1615,7 +1688,7 @@ impl Api {
             source_id: command.source_id,
             source_revision: source.revision,
             authority_revision: command.expected_authority_revision.saturating_add(1),
-            operator_id: command.operator_id,
+            operator_id: mutation_actor(actor, &command.operator_id),
             reason: command.reason,
             requested_at_unix_ms: now,
             expires_at_unix_ms: command.expires_at_unix_ms,
@@ -1668,21 +1741,33 @@ impl Api {
         }
     }
 
-    fn confirm_live_take(&self, path: &str, body: Option<&[u8]>) -> ApiResponse {
+    fn confirm_live_take(
+        &self,
+        path: &str,
+        body: Option<&[u8]>,
+        actor: Option<&OperatorAccount>,
+    ) -> ApiResponse {
         self.transition_live_takeover(
             path,
             body,
             TakeoverState::Armed,
             TakeoverState::TakeRequested,
+            actor,
         )
     }
 
-    fn request_live_return(&self, path: &str, body: Option<&[u8]>) -> ApiResponse {
+    fn request_live_return(
+        &self,
+        path: &str,
+        body: Option<&[u8]>,
+        actor: Option<&OperatorAccount>,
+    ) -> ApiResponse {
         self.transition_live_takeover(
             path,
             body,
             TakeoverState::OnAir,
             TakeoverState::ReturnRequested,
+            actor,
         )
     }
 
@@ -1692,6 +1777,7 @@ impl Api {
         body: Option<&[u8]>,
         expected: TakeoverState,
         next: TakeoverState,
+        actor: Option<&OperatorAccount>,
     ) -> ApiResponse {
         let Some(session_id) = path
             .strip_prefix("/api/v1/live-takeovers/")
@@ -1716,17 +1802,20 @@ impl Api {
                 "The takeover session identity is invalid.",
             );
         }
-        let Some(command) = parse_body::<ConfirmLiveTransition>(body) else {
+        let Some(command) =
+            parse_authenticated_body::<ConfirmLiveTransition>(body, actor, &[&["actor_id"]])
+        else {
             return error_response(
                 400,
                 "invalid_json",
                 "A takeover transition body is required.",
             );
         };
-        if command.actor_id.trim().is_empty()
-            || command.actor_id.trim() != command.actor_id
-            || command.actor_id.chars().any(char::is_control)
-            || command.actor_id.len() > 120
+        let actor_id = mutation_actor(actor, &command.actor_id);
+        if actor_id.trim().is_empty()
+            || actor_id.trim() != actor_id
+            || actor_id.chars().any(char::is_control)
+            || actor_id.len() > 120
         {
             return error_response(
                 422,
@@ -1744,7 +1833,7 @@ impl Api {
             next,
             now,
             None,
-            &command.actor_id,
+            &actor_id,
             command.expected_authority_revision,
         ) {
             Ok(session) => json_response(
@@ -2197,7 +2286,7 @@ impl Api {
             .map_err(|error| format!("readiness probe is invalid: {error}"))
     }
 
-    fn commissioning_report(&self) -> ApiResponse {
+    fn commissioning_report(&self, authenticated_setup_admin: bool) -> ApiResponse {
         let station_box = match self.cached_station_box_profile() {
             Ok(profile) => profile,
             Err(message) => return error_response(500, "readiness_probe_failed", &message),
@@ -2243,11 +2332,23 @@ impl Api {
             "operator_account_auth",
             "Operator account and authentication",
             CommissioningPhase::Identity,
-            CommissioningCheckStatus::Blocked,
+            if authenticated_setup_admin {
+                CommissioningCheckStatus::Pass
+            } else {
+                CommissioningCheckStatus::Blocked
+            },
             true,
             None,
-            "No server-authoritative operator account, credential, role, or authenticated session authority exists yet.",
-            "the current loopback API has no operator account/authentication authority",
+            if authenticated_setup_admin {
+                "An enabled setup administrator reached this report through a valid current-boot session."
+            } else {
+                "This report was not reached through an enabled setup administrator session."
+            },
+            if authenticated_setup_admin {
+                "current authenticated setup_admin account and session authority"
+            } else {
+                "authenticated setup_admin report authority is absent"
+            },
             CommissioningBoundary::LocalAuthority,
         ));
         checks.push(commissioning_check(
@@ -2881,7 +2982,7 @@ impl Api {
         }
     }
 
-    fn run_self_test(&self, path: &str) -> ApiResponse {
+    fn run_self_test(&self, path: &str, actor: Option<&OperatorAccount>) -> ApiResponse {
         let Some(kind_value) = path.strip_prefix("/api/v1/self-tests/run?kind=") else {
             return error_response(400, "invalid_query", "A self-test kind is required.");
         };
@@ -2904,7 +3005,7 @@ impl Api {
             &self.database_path,
             kind,
             SelfTestTrigger::Manual,
-            None,
+            actor.map(|account| account.account_id().as_str().to_owned()),
             now,
         ) {
             Ok(record) => json_response(
@@ -2926,7 +3027,12 @@ impl Api {
         }
     }
 
-    fn put_self_test_schedule(&self, path: &str, body: Option<&[u8]>) -> ApiResponse {
+    fn put_self_test_schedule(
+        &self,
+        path: &str,
+        body: Option<&[u8]>,
+        actor: Option<&OperatorAccount>,
+    ) -> ApiResponse {
         let Some(kind_value) = path.strip_prefix("/api/v1/self-test-schedules/") else {
             unreachable!("the self-test schedule route was checked")
         };
@@ -2941,7 +3047,9 @@ impl Api {
                 );
             }
         };
-        let Some(command) = parse_body::<PutSelfTestSchedule>(body) else {
+        let Some(command) =
+            parse_authenticated_body::<PutSelfTestSchedule>(body, actor, &[&["updated_by"]])
+        else {
             return error_response(
                 400,
                 "invalid_json",
@@ -2959,7 +3067,7 @@ impl Api {
             local_minute: command.local_minute,
             weekday: command.weekday,
             updated_at_unix_ms: now,
-            updated_by: command.updated_by,
+            updated_by: mutation_actor(actor, &command.updated_by),
         };
         if let Err(message) = schedule.validate() {
             return error_response(422, "validation_failed", message);
@@ -3059,8 +3167,10 @@ impl Api {
         }
     }
 
-    fn apply_update(&self, body: Option<&[u8]>) -> ApiResponse {
-        let Some(command) = parse_body::<ApplyUpdate>(body) else {
+    fn apply_update(&self, body: Option<&[u8]>, actor: Option<&OperatorAccount>) -> ApiResponse {
+        let Some(command) =
+            parse_authenticated_body::<ApplyUpdate>(body, actor, &[&["requested_by"]])
+        else {
             return error_response(
                 400,
                 "invalid_json",
@@ -3074,7 +3184,7 @@ impl Api {
         match station_update_coordinator::request_maintenance_activation(
             &self.database_path,
             &self.application_directory,
-            &command.requested_by,
+            &mutation_actor(actor, &command.requested_by),
             &command.confirmation,
             now,
         ) {
@@ -3211,14 +3321,21 @@ impl Api {
         }
     }
 
-    fn put_alert_rule(&self, path: &str, body: Option<&[u8]>) -> ApiResponse {
+    fn put_alert_rule(
+        &self,
+        path: &str,
+        body: Option<&[u8]>,
+        actor: Option<&OperatorAccount>,
+    ) -> ApiResponse {
         let Some(rule_id) = path.strip_prefix("/api/v1/alert-rules/") else {
             unreachable!("the alert-rule route was checked")
         };
         if rule_id.is_empty() || rule_id.contains('/') {
             return error_response(400, "invalid_path", "The alert rule identity is invalid.");
         }
-        let Some(command) = parse_body::<PutAlertRule>(body) else {
+        let Some(command) =
+            parse_authenticated_body::<PutAlertRule>(body, actor, &[&["updated_by"]])
+        else {
             return error_response(
                 400,
                 "invalid_json",
@@ -3240,7 +3357,7 @@ impl Api {
             scope_channel_id: command.scope_channel_id,
             notify_on_resolve: command.notify_on_resolve,
             updated_at_unix_ms: now,
-            updated_by: command.updated_by,
+            updated_by: mutation_actor(actor, &command.updated_by),
         };
         if let Err(message) = rule.validate() {
             return error_response(422, "validation_failed", message);
@@ -3317,7 +3434,12 @@ impl Api {
         }
     }
 
-    fn acknowledge_alert(&self, path: &str, body: Option<&[u8]>) -> ApiResponse {
+    fn acknowledge_alert(
+        &self,
+        path: &str,
+        body: Option<&[u8]>,
+        actor: Option<&OperatorAccount>,
+    ) -> ApiResponse {
         let Some(event_id) = path
             .strip_prefix("/api/v1/alerts/")
             .and_then(|value| value.strip_suffix("/acknowledge"))
@@ -3327,14 +3449,17 @@ impl Api {
         if event_id.is_empty() || event_id.contains('/') {
             return error_response(400, "invalid_path", "The alert identity is invalid.");
         }
-        let Some(command) = parse_body::<AcknowledgeAlert>(body) else {
+        let Some(command) =
+            parse_authenticated_body::<AcknowledgeAlert>(body, actor, &[&["acknowledged_by"]])
+        else {
             return error_response(
                 400,
                 "invalid_json",
                 "An alert acknowledgment body is required.",
             );
         };
-        if command.acknowledged_by.trim().is_empty() || command.acknowledged_by.len() > 120 {
+        let acknowledged_by = mutation_actor(actor, &command.acknowledged_by);
+        if acknowledged_by.trim().is_empty() || acknowledged_by.len() > 120 {
             return error_response(
                 422,
                 "validation_failed",
@@ -3347,7 +3472,7 @@ impl Api {
         };
         match self
             .storage
-            .acknowledge_alert(event_id, now, &command.acknowledged_by)
+            .acknowledge_alert(event_id, now, &acknowledged_by)
         {
             Ok(Some(event)) => json_response(
                 200,
@@ -3451,8 +3576,10 @@ impl Api {
         }
     }
 
-    fn commit_schedule(&self, body: Option<&[u8]>) -> ApiResponse {
-        let Some(command) = parse_body::<CommitSchedule>(body) else {
+    fn commit_schedule(&self, body: Option<&[u8]>, actor: Option<&OperatorAccount>) -> ApiResponse {
+        let Some(command) =
+            parse_authenticated_body::<CommitSchedule>(body, actor, &[&["approved_by"]])
+        else {
             return error_response(400, "invalid_json", "A schedule commit body is required.");
         };
         let approved_at = match system_time_millis() {
@@ -3463,7 +3590,7 @@ impl Api {
             &command.report_id,
             &command.plan_id,
             &command.schedule_item_id,
-            &command.approved_by,
+            &mutation_actor(actor, &command.approved_by),
             approved_at,
             &command.operator_notes,
         ) {
@@ -3576,10 +3703,21 @@ impl Api {
         }
     }
 
-    fn write_cg_board(&self, body: Option<&[u8]>) -> ApiResponse {
-        let Some(command) = parse_body::<WriteCgBoard>(body) else {
+    fn write_cg_board(&self, body: Option<&[u8]>, actor: Option<&OperatorAccount>) -> ApiResponse {
+        let Some(mut command) = parse_authenticated_body::<WriteCgBoard>(
+            body,
+            actor,
+            &[&["board", "created_by"], &["audit", "operator_id"]],
+        ) else {
             return error_response(400, "invalid_json", "A CG board write body is required.");
         };
+        if actor.is_some() {
+            match self.storage.read_cg_board(&command.board.channel_id) {
+                Ok(Some(existing)) => command.board.created_by = existing.created_by,
+                Ok(None) => {}
+                Err(message) => return error_response(500, "storage_error", &message),
+            }
+        }
         cg_write_response(self.storage.write_cg_board(
             &command.board,
             command.expected_revision,
@@ -3603,8 +3741,10 @@ impl Api {
         }
     }
 
-    fn write_cg_zone(&self, body: Option<&[u8]>) -> ApiResponse {
-        let Some(command) = parse_body::<WriteCgZone>(body) else {
+    fn write_cg_zone(&self, body: Option<&[u8]>, actor: Option<&OperatorAccount>) -> ApiResponse {
+        let Some(command) =
+            parse_authenticated_body::<WriteCgZone>(body, actor, &[&["audit", "operator_id"]])
+        else {
             return error_response(400, "invalid_json", "A CG zone write body is required.");
         };
         cg_write_response(self.storage.write_cg_zone(
@@ -3614,11 +3754,18 @@ impl Api {
         ))
     }
 
-    fn delete_cg_zone(&self, path: &str, body: Option<&[u8]>) -> ApiResponse {
+    fn delete_cg_zone(
+        &self,
+        path: &str,
+        body: Option<&[u8]>,
+        actor: Option<&OperatorAccount>,
+    ) -> ApiResponse {
         let Some(zone_id) = cg_resource_id(path, "/api/v1/cg/zones/") else {
             return error_response(400, "invalid_path", "The CG zone identity is invalid.");
         };
-        let Some(command) = parse_body::<DeleteCgResource>(body) else {
+        let Some(command) =
+            parse_authenticated_body::<DeleteCgResource>(body, actor, &[&["audit", "operator_id"]])
+        else {
             return error_response(400, "invalid_json", "A CG zone deletion body is required.");
         };
         cg_delete_response(self.storage.delete_cg_zone(
@@ -3766,10 +3913,24 @@ impl Api {
         )
     }
 
-    fn write_cg_feed(&self, body: Option<&[u8]>) -> ApiResponse {
-        let Some(command) = parse_body::<WriteCgFeedSource>(body) else {
+    fn write_cg_feed(&self, body: Option<&[u8]>, actor: Option<&OperatorAccount>) -> ApiResponse {
+        let Some(mut command) = parse_authenticated_body::<WriteCgFeedSource>(
+            body,
+            actor,
+            &[&["feed", "created_by"], &["audit", "operator_id"]],
+        ) else {
             return error_response(400, "invalid_json", "A CG feed write body is required.");
         };
+        if actor.is_some() {
+            match self
+                .storage
+                .read_cg_feed_source(&command.feed.feed_source_id)
+            {
+                Ok(Some(existing)) => command.feed.created_by = existing.created_by,
+                Ok(None) => {}
+                Err(message) => return error_response(500, "storage_error", &message),
+            }
+        }
         cg_write_response(self.storage.write_cg_feed_source(
             &command.feed,
             command.expected_revision,
@@ -3777,11 +3938,18 @@ impl Api {
         ))
     }
 
-    fn delete_cg_feed(&self, path: &str, body: Option<&[u8]>) -> ApiResponse {
+    fn delete_cg_feed(
+        &self,
+        path: &str,
+        body: Option<&[u8]>,
+        actor: Option<&OperatorAccount>,
+    ) -> ApiResponse {
         let Some(feed_id) = cg_resource_id(path, "/api/v1/cg/feeds/") else {
             return error_response(400, "invalid_path", "The CG feed identity is invalid.");
         };
-        let Some(command) = parse_body::<DeleteCgResource>(body) else {
+        let Some(command) =
+            parse_authenticated_body::<DeleteCgResource>(body, actor, &[&["audit", "operator_id"]])
+        else {
             return error_response(400, "invalid_json", "A CG feed deletion body is required.");
         };
         cg_delete_response(self.storage.delete_cg_feed_source(
@@ -3791,8 +3959,16 @@ impl Api {
         ))
     }
 
-    fn approve_cg_feed_item(&self, body: Option<&[u8]>) -> ApiResponse {
-        let Some(command) = parse_body::<ApproveCgFeedItem>(body) else {
+    fn approve_cg_feed_item(
+        &self,
+        body: Option<&[u8]>,
+        actor: Option<&OperatorAccount>,
+    ) -> ApiResponse {
+        let Some(command) = parse_authenticated_body::<ApproveCgFeedItem>(
+            body,
+            actor,
+            &[&["approval", "approved_by"], &["audit", "operator_id"]],
+        ) else {
             return error_response(
                 400,
                 "invalid_json",
@@ -3840,10 +4016,40 @@ impl Api {
         }
     }
 
-    fn write_cg_bulletin(&self, body: Option<&[u8]>) -> ApiResponse {
-        let Some(command) = parse_body::<WriteCgBulletin>(body) else {
+    fn write_cg_bulletin(
+        &self,
+        body: Option<&[u8]>,
+        actor: Option<&OperatorAccount>,
+    ) -> ApiResponse {
+        let Some(mut command) = parse_authenticated_body::<WriteCgBulletin>(
+            body,
+            actor,
+            &[&["bulletin", "submitted_by"], &["audit", "operator_id"]],
+        ) else {
             return error_response(400, "invalid_json", "A CG bulletin write body is required.");
         };
+        if let Some(actor) = actor {
+            match self.storage.read_cg_bulletin(&command.bulletin.bulletin_id) {
+                Ok(Some(existing)) => {
+                    command.bulletin.submitted_by = existing.submitted_by;
+                    let moderation_transition = existing.state != command.bulletin.state
+                        && (matches!(
+                            command.bulletin.state,
+                            CgBulletinState::NeedsChanges
+                                | CgBulletinState::Accepted
+                                | CgBulletinState::Declined
+                        ) || (existing.moderated_by.is_none()
+                            && command.bulletin.state == CgBulletinState::Scheduled));
+                    command.bulletin.moderated_by = if moderation_transition {
+                        Some(actor.account_id().as_str().to_owned())
+                    } else {
+                        existing.moderated_by
+                    };
+                }
+                Ok(None) => command.bulletin.moderated_by = None,
+                Err(message) => return error_response(500, "storage_error", &message),
+            }
+        }
         cg_write_response(self.storage.write_cg_bulletin(
             &command.bulletin,
             command.expected_revision,
@@ -3851,8 +4057,14 @@ impl Api {
         ))
     }
 
-    fn expire_cg_bulletins(&self, body: Option<&[u8]>) -> ApiResponse {
-        let Some(command) = parse_body::<ExpireCgBulletins>(body) else {
+    fn expire_cg_bulletins(
+        &self,
+        body: Option<&[u8]>,
+        actor: Option<&OperatorAccount>,
+    ) -> ApiResponse {
+        let Some(command) =
+            parse_authenticated_body::<ExpireCgBulletins>(body, actor, &[&["operator_id"]])
+        else {
             return error_response(
                 400,
                 "invalid_json",
@@ -3862,7 +4074,7 @@ impl Api {
         cg_write_response(self.storage.expire_due_cg_bulletins(
             &command.channel_id,
             command.now_unix_ms,
-            &command.operator_id,
+            &mutation_actor(actor, &command.operator_id),
         ))
     }
 
@@ -4054,6 +4266,29 @@ fn parse_window_query(query: &str) -> Option<(i64, i64)> {
 
 fn parse_body<T: serde::de::DeserializeOwned>(body: Option<&[u8]>) -> Option<T> {
     body.and_then(|body| serde_json::from_slice(body).ok())
+}
+
+fn parse_authenticated_body<T: serde::de::DeserializeOwned>(
+    body: Option<&[u8]>,
+    actor: Option<&OperatorAccount>,
+    identity_paths: &[&[&str]],
+) -> Option<T> {
+    let Some(actor) = actor else {
+        return parse_body(body);
+    };
+    let mut value: serde_json::Value = serde_json::from_slice(body?).ok()?;
+    for path in identity_paths {
+        let (field, parents) = path.split_last()?;
+        let mut object = value.as_object_mut()?;
+        for parent in parents {
+            object = object.get_mut(*parent)?.as_object_mut()?;
+        }
+        object.insert(
+            (*field).to_owned(),
+            serde_json::Value::String(actor.account_id().as_str().to_owned()),
+        );
+    }
+    serde_json::from_value(value).ok()
 }
 
 fn path_identity<'a>(path: &'a str, prefix: &str, suffix: &str) -> Option<&'a str> {
@@ -4788,9 +5023,11 @@ fn system_time_millis() -> Result<i64, String> {
 }
 
 pub fn serve_one(listener: TcpListener, database_path: impl AsRef<Path>) -> Result<(), String> {
+    let database_path = database_path.as_ref();
+    let runtime = initialize_auth_runtime(&listener, database_path)?;
     let api = Api::open(database_path)?;
     let (mut stream, _) = listener.accept().map_err(|error| error.to_string())?;
-    serve_stream(&mut stream, &api)
+    serve_stream(&mut stream, &api, &runtime)
 }
 
 pub fn serve(listener: TcpListener, database_path: impl AsRef<Path>) -> Result<(), String> {
@@ -4833,6 +5070,7 @@ pub fn serve_until_with_application_directory_and_health(
 ) -> Result<(), String> {
     let database_path = database_path.as_ref().to_path_buf();
     let application_directory = application_directory.as_ref().to_path_buf();
+    let auth_runtime = Arc::new(initialize_auth_runtime(&listener, &database_path)?);
     let station_box_cache = Arc::new(Mutex::new(None));
     Api::open_with_application_directory_and_cache(
         &database_path,
@@ -4880,6 +5118,7 @@ pub fn serve_until_with_application_directory_and_health(
                 let request_station_box_cache = Arc::clone(&station_box_cache);
                 let request_orchestration_health = Arc::clone(&orchestration_health);
                 let request_count = Arc::clone(&active_requests);
+                let request_auth_runtime = Arc::clone(&auth_runtime);
                 std::thread::spawn(move || {
                     let _guard = ActiveRequestGuard(request_count);
                     let result = Api::open_with_application_directory_and_cache(
@@ -4888,7 +5127,7 @@ pub fn serve_until_with_application_directory_and_health(
                         request_station_box_cache,
                         request_orchestration_health,
                     )
-                    .and_then(|api| serve_stream(&mut stream, &api));
+                    .and_then(|api| serve_stream(&mut stream, &api, &request_auth_runtime));
                     if let Err(error) = result {
                         eprintln!("TownLight Station request failed: {error}");
                     }
@@ -4903,12 +5142,27 @@ pub fn serve_until_with_application_directory_and_health(
     Ok(())
 }
 
-fn serve_stream(stream: &mut TcpStream, api: &Api) -> Result<(), String> {
+fn initialize_auth_runtime(
+    listener: &TcpListener,
+    database_path: &Path,
+) -> Result<auth::AuthRuntime, String> {
+    let address = listener.local_addr().map_err(|error| error.to_string())?;
+    let runtime = auth::AuthRuntime::new(address).map_err(|error| error.to_string())?;
+    let now = system_time_millis()?;
+    StationStore::open(database_path)?.purge_operator_sessions_for_boot(&runtime.boot_id(), now)?;
+    Ok(runtime)
+}
+
+fn serve_stream(
+    stream: &mut TcpStream,
+    api: &Api,
+    auth_runtime: &auth::AuthRuntime,
+) -> Result<(), String> {
     stream
         .set_read_timeout(Some(Duration::from_secs(5)))
         .map_err(|error| error.to_string())?;
     let response = match read_http_request(stream) {
-        Ok(request) => dispatch_http(api, &request),
+        Ok(request) => dispatch_http(api, auth_runtime, &request),
         Err(response) => response,
     };
     write_response(stream, response)
@@ -5250,6 +5504,7 @@ fn parse_http_request(request: &[u8]) -> Result<HttpRequest<'_>, ApiResponse> {
     parsed.unique_header("origin")?;
     parsed.unique_header("cookie")?;
     parsed.unique_header("x-townlight-csrf")?;
+    parsed.unique_header("sec-fetch-site")?;
     let content_length = match parsed.unique_header("content-length")? {
         Some(value) => value
             .parse::<usize>()
@@ -5274,15 +5529,383 @@ fn parse_http_request(request: &[u8]) -> Result<HttpRequest<'_>, ApiResponse> {
     Ok(parsed)
 }
 
-fn dispatch_http(api: &Api, request: &[u8]) -> ApiResponse {
-    match parse_http_request(request) {
-        Ok(request) => api.handle(
-            request.method,
-            request.path,
-            (!request.body.is_empty()).then_some(request.body),
-        ),
+fn dispatch_http(api: &Api, runtime: &auth::AuthRuntime, request: &[u8]) -> ApiResponse {
+    let response = match parse_http_request(request) {
+        Ok(request) => dispatch_parsed_http(api, runtime, &request),
         Err(response) => response,
+    };
+    security_headers(response)
+}
+
+fn dispatch_parsed_http(
+    api: &Api,
+    runtime: &auth::AuthRuntime,
+    request: &HttpRequest<'_>,
+) -> ApiResponse {
+    let host = match request.unique_header("host") {
+        Ok(Some(host)) if host == runtime.expected_host() => host,
+        Ok(_) => {
+            return error_response(
+                400,
+                "invalid_host",
+                "The Host header does not match this station listener.",
+            );
+        }
+        Err(response) => return response,
+    };
+    debug_assert_eq!(host, runtime.expected_host());
+    let unsafe_request = !matches!(request.method, "GET" | "HEAD" | "OPTIONS");
+    if unsafe_request {
+        if request.unique_header("origin").ok().flatten() != Some(runtime.expected_origin()) {
+            return error_response(
+                403,
+                "cross_origin_denied",
+                "Unsafe requests require this station's exact Origin.",
+            );
+        }
+        if request.unique_header("sec-fetch-site").ok().flatten() != Some("same-origin") {
+            return error_response(
+                403,
+                "cross_site_denied",
+                "Unsafe requests require Sec-Fetch-Site: same-origin.",
+            );
+        }
     }
+    let cookie_header = match request.unique_header("cookie") {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    let cookies = match auth::AuthCookies::parse(cookie_header) {
+        Ok(cookies) => cookies,
+        Err(message) => return error_response(400, "invalid_cookie", message),
+    };
+    let now = match system_time_millis() {
+        Ok(now) => now,
+        Err(message) => return error_response(500, "clock_error", &message),
+    };
+    let body = (!request.body.is_empty()).then_some(request.body);
+
+    match (request.method, request.path) {
+        ("GET", path) if path == "/" || path.starts_with("/?") => {
+            return api.route("GET", path, None, None);
+        }
+        ("GET", "/operator.js" | "/operator.css" | "/health") => {
+            return api.route(request.method, request.path, None, None);
+        }
+        ("GET", "/api/v1/auth/status") => {
+            let authority =
+                match auth::authenticate_session(&api.storage, runtime, &cookies, now, false) {
+                    Ok(authority) => authority,
+                    Err(error) => return auth_failure_response(error),
+                };
+            let state = if authority.is_some() {
+                "authenticated"
+            } else {
+                match api.storage.has_operator_accounts() {
+                    Ok(true) => "login_required",
+                    Ok(false) => "bootstrap_required",
+                    Err(_) => return auth_storage_error_response(),
+                }
+            };
+            return json_response(
+                200,
+                serde_json::to_vec(&serde_json::json!({
+                    "schema_version": 1,
+                    "state": state,
+                    "session": authority.as_ref().map(session_json),
+                }))
+                .expect("serializing auth status cannot fail"),
+            );
+        }
+        ("POST", "/api/v1/auth/bootstrap") => {
+            let Some(command) = parse_body::<BootstrapRequest>(body) else {
+                return error_response(400, "invalid_json", "A bootstrap request is required.");
+            };
+            return match auth::bootstrap(
+                &api.storage,
+                runtime,
+                &command.capability,
+                &command.username,
+                &command.display_name,
+                &command.password,
+                now,
+            ) {
+                Ok(result) => issued_session_response(
+                    201,
+                    &result.issued,
+                    serde_json::json!({
+                        "session": session_json(&result.issued.authority),
+                        "recovery_codes": result.recovery_codes,
+                    }),
+                ),
+                Err(auth::AuthFailure::Unauthorized) => error_response(
+                    403,
+                    "invalid_bootstrap_capability",
+                    "The one-time bootstrap capability is invalid or expired.",
+                ),
+                Err(error) => auth_failure_response(error),
+            };
+        }
+        ("POST", "/api/v1/auth/login") => {
+            let Some(command) = parse_body::<LoginRequest>(body) else {
+                return error_response(400, "invalid_json", "A login request is required.");
+            };
+            return match auth::login(
+                &api.storage,
+                runtime,
+                &command.username,
+                &command.password,
+                now,
+            ) {
+                Ok(issued) => issued_session_response(
+                    200,
+                    &issued,
+                    serde_json::json!({ "session": session_json(&issued.authority) }),
+                ),
+                Err(error) => auth_failure_response(error),
+            };
+        }
+        ("POST", "/api/v1/auth/recover") => {
+            let Some(command) = parse_body::<RecoverRequest>(body) else {
+                return error_response(400, "invalid_json", "A recovery request is required.");
+            };
+            return match auth::recover(
+                &api.storage,
+                runtime,
+                &command.username,
+                &command.recovery_code,
+                &command.new_password,
+                now,
+            ) {
+                Ok(()) => clear_auth_cookies(json_response(200, br#"{"recovered":true}"#.to_vec())),
+                Err(error) => auth_failure_response(error),
+            };
+        }
+        _ => {}
+    }
+
+    let authority = match auth::authenticate_session(&api.storage, runtime, &cookies, now, true) {
+        Ok(Some(authority)) => authority,
+        Ok(None) => return auth_gate_response(api),
+        Err(error) => return auth_failure_response(error),
+    };
+    if unsafe_request && !valid_csrf(request, &cookies) {
+        return error_response(
+            403,
+            "csrf_failed",
+            "Unsafe authenticated requests require the matching CSRF cookie and header.",
+        );
+    }
+    match (request.method, request.path) {
+        ("GET", "/api/v1/auth/session") => json_response(
+            200,
+            serde_json::to_vec(&serde_json::json!({ "session": session_json(&authority) }))
+                .expect("serializing session cannot fail"),
+        ),
+        ("POST", "/api/v1/auth/logout") => {
+            let Some(session) = cookies.session.as_ref() else {
+                return auth_gate_response(api);
+            };
+            if let Err(message) = api
+                .storage
+                .revoke_operator_session(&digest_secret(session), now)
+            {
+                let _ = message;
+                return auth_storage_error_response();
+            }
+            clear_auth_cookies(json_response(200, br#"{"logged_out":true}"#.to_vec()))
+        }
+        ("POST", "/api/v1/auth/change-password") => {
+            let Some(command) = parse_body::<ChangePasswordRequest>(body) else {
+                return error_response(
+                    400,
+                    "invalid_json",
+                    "A password-change request is required.",
+                );
+            };
+            if let Err(error) = auth::verify_current_password(
+                runtime,
+                &authority.account,
+                &command.current_password,
+            ) {
+                return auth_failure_response(error);
+            }
+            let password_phc = match auth::hash_new_password(runtime, &command.new_password) {
+                Ok(password_phc) => password_phc,
+                Err(error) => return auth_failure_response(error),
+            };
+            match api.storage.rotate_operator_password(
+                authority.account.account_id(),
+                authority.account.credential_version(),
+                &password_phc,
+                now,
+            ) {
+                Ok(Some(_)) => clear_auth_cookies(json_response(
+                    200,
+                    br#"{"changed":true,"reauthenticate":true}"#.to_vec(),
+                )),
+                Ok(None) => auth_gate_response(api),
+                Err(_) => auth_storage_error_response(),
+            }
+        }
+        _ => api.handle_authenticated(request.method, request.path, body, &authority.account),
+    }
+}
+
+fn valid_csrf(request: &HttpRequest<'_>, cookies: &auth::AuthCookies) -> bool {
+    let (Some(cookie), Ok(Some(header))) = (
+        cookies.csrf.as_ref(),
+        request.unique_header(auth::CSRF_HEADER_NAME),
+    ) else {
+        return false;
+    };
+    SecretToken::try_from(header)
+        .is_ok_and(|header| digest_secret(&header) == digest_secret(cookie))
+}
+
+fn mutation_actor(actor: Option<&OperatorAccount>, supplied: &str) -> String {
+    actor
+        .map(|account| account.account_id().as_str())
+        .unwrap_or(supplied)
+        .to_owned()
+}
+
+fn auth_gate_response(api: &Api) -> ApiResponse {
+    match api.storage.has_operator_accounts() {
+        Ok(true) => error_response(
+            401,
+            "authentication_required",
+            "Operator sign-in is required.",
+        ),
+        Ok(false) => error_response(
+            428,
+            "operator_bootstrap_required",
+            "The first operator account must be created before this station API is available.",
+        ),
+        Err(_) => auth_storage_error_response(),
+    }
+}
+
+fn auth_failure_response(error: auth::AuthFailure) -> ApiResponse {
+    match error {
+        auth::AuthFailure::Invalid(message) => error_response(422, "validation_failed", message),
+        auth::AuthFailure::Unauthorized => error_response(
+            401,
+            "invalid_credentials",
+            "The supplied authentication authority is invalid.",
+        ),
+        auth::AuthFailure::BootstrapRequired => error_response(
+            428,
+            "operator_bootstrap_required",
+            "The first operator account must be created before login.",
+        ),
+        auth::AuthFailure::Conflict(message) => error_response(409, "auth_conflict", message),
+        auth::AuthFailure::Busy => error_response(
+            503,
+            "auth_busy",
+            "The station is processing the maximum number of password verifications.",
+        ),
+        auth::AuthFailure::Throttled(seconds) => error_response(
+            429,
+            "login_throttled",
+            "Login is temporarily throttled after repeated failures.",
+        )
+        .with_header("Retry-After", seconds.max(1).to_string())
+        .unwrap_or_else(|message| error_response(500, "response_error", &message)),
+        auth::AuthFailure::Storage(_) => error_response(
+            500,
+            "authentication_error",
+            "Authentication authority could not be read or updated.",
+        ),
+    }
+}
+
+fn auth_storage_error_response() -> ApiResponse {
+    error_response(
+        500,
+        "authentication_error",
+        "Authentication authority could not be read or updated.",
+    )
+}
+
+fn session_json(authority: &station_storage::OperatorSessionAuthority) -> serde_json::Value {
+    serde_json::json!({
+        "account_id": authority.account.account_id().as_str(),
+        "username": authority.account.username().as_str(),
+        "display_name": authority.account.display_name().as_str(),
+        "roles": authority.account.roles().iter().map(|role| role.as_str()).collect::<Vec<_>>(),
+        "absolute_expires_at_unix_ms": authority.session.absolute_expires_at_unix_ms(),
+    })
+}
+
+fn issued_session_response(
+    status: u16,
+    issued: &auth::IssuedSession,
+    body: serde_json::Value,
+) -> ApiResponse {
+    let response = json_response(
+        status,
+        serde_json::to_vec(&body).expect("serializing issued session cannot fail"),
+    );
+    response
+        .with_header(
+            "Set-Cookie",
+            format!(
+                "{}={}; HttpOnly; SameSite=Strict; Path=/api/v1/; Max-Age=43200",
+                auth::SESSION_COOKIE_NAME,
+                issued.session_token.expose_secret()
+            ),
+        )
+        .and_then(|response| {
+            response.with_header(
+                "Set-Cookie",
+                format!(
+                    "{}={}; SameSite=Strict; Path=/; Max-Age=43200",
+                    auth::CSRF_COOKIE_NAME,
+                    issued.csrf_token.expose_secret()
+                ),
+            )
+        })
+        .unwrap_or_else(|message| error_response(500, "response_error", &message))
+}
+
+fn clear_auth_cookies(response: ApiResponse) -> ApiResponse {
+    response
+        .with_header(
+            "Set-Cookie",
+            format!(
+                "{}=; HttpOnly; SameSite=Strict; Path=/api/v1/; Max-Age=0",
+                auth::SESSION_COOKIE_NAME
+            ),
+        )
+        .and_then(|response| {
+            response.with_header(
+                "Set-Cookie",
+                format!(
+                    "{}=; SameSite=Strict; Path=/; Max-Age=0",
+                    auth::CSRF_COOKIE_NAME
+                ),
+            )
+        })
+        .unwrap_or_else(|message| error_response(500, "response_error", &message))
+}
+
+fn security_headers(response: ApiResponse) -> ApiResponse {
+    [
+        ("Cache-Control", "no-store"),
+        ("Pragma", "no-cache"),
+        ("X-Content-Type-Options", "nosniff"),
+        ("Referrer-Policy", "no-referrer"),
+        (
+            "Content-Security-Policy",
+            "default-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
+        ),
+    ]
+    .into_iter()
+    .try_fold(response, |response, (name, value)| {
+        response.with_header(name, value)
+    })
+    .unwrap_or_else(|message| error_response(500, "response_error", &message))
 }
 
 fn request_body_limit(method: &str, path: &str) -> usize {
@@ -5406,6 +6029,841 @@ mod tests {
         31, 0, 5, 0, 1, 255, 137, 153, 61, 29, 0, 0, 0, 0, 73, 69, 78, 68, 174, 66, 96, 130,
     ];
 
+    fn raw_request(method: &str, path: &str, headers: &[(&str, &str)], body: &[u8]) -> Vec<u8> {
+        let mut request = format!(
+            "{method} {path} HTTP/1.1\r\nContent-Length: {}\r\n",
+            body.len()
+        );
+        for (name, value) in headers {
+            request.push_str(name);
+            request.push_str(": ");
+            request.push_str(value);
+            request.push_str("\r\n");
+        }
+        request.push_str("\r\n");
+        let mut request = request.into_bytes();
+        request.extend_from_slice(body);
+        request
+    }
+
+    fn auth_cookie_header(response: &ApiResponse) -> (String, String) {
+        let values = response
+            .headers
+            .iter()
+            .filter(|header| header.name.eq_ignore_ascii_case("set-cookie"))
+            .map(|header| header.value.as_str())
+            .collect::<Vec<_>>();
+        let session = values
+            .iter()
+            .find_map(|value| value.split(';').next())
+            .filter(|value| value.starts_with(auth::SESSION_COOKIE_NAME))
+            .unwrap();
+        let csrf = values
+            .iter()
+            .find_map(|value| {
+                value
+                    .split(';')
+                    .next()
+                    .filter(|cookie| cookie.starts_with(auth::CSRF_COOKIE_NAME))
+            })
+            .unwrap();
+        let csrf_value = csrf.split_once('=').unwrap().1.to_owned();
+        (format!("{session}; {csrf}"), csrf_value)
+    }
+
+    #[test]
+    fn production_dispatcher_enforces_boot_host_origin_csrf_and_cookie_contract() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let database = std::env::temp_dir().join(format!("townlight-auth-http-{nonce}.db"));
+        let api = Api::open(&database).unwrap();
+        let runtime = auth::AuthRuntime::new("127.0.0.1:4070".parse().unwrap()).unwrap();
+        let now = system_time_millis().unwrap();
+        let capability = station_auth::generate_secret_token().unwrap();
+        let bootstrap = station_auth::BootstrapCredential::new(
+            digest_secret(&capability),
+            now.saturating_sub(1_000),
+            now.saturating_add(5 * 60 * 1_000),
+            None,
+        )
+        .unwrap();
+        assert!(
+            api.storage
+                .provision_operator_bootstrap(&bootstrap)
+                .unwrap()
+        );
+        let exact_headers = [("Host", runtime.expected_host())];
+
+        let gated = dispatch_http(
+            &api,
+            &runtime,
+            &raw_request("GET", "/api/v1/channels", &exact_headers, b""),
+        );
+        assert_eq!(gated.status, 428);
+        assert!(
+            gated
+                .headers
+                .iter()
+                .any(|header| header.name == "Cache-Control" && header.value == "no-store")
+        );
+
+        let wrong_host = dispatch_http(
+            &api,
+            &runtime,
+            &raw_request("GET", "/health", &[("Host", "localhost:4070")], b""),
+        );
+        assert_eq!(wrong_host.status, 400);
+
+        let bootstrap_body = serde_json::to_vec(&serde_json::json!({
+            "capability": capability.expose_secret(),
+            "username": "setup.admin",
+            "display_name": "Setup Administrator",
+            "password": "A-strong-bootstrap-password-47!",
+        }))
+        .unwrap();
+        let missing_fetch_metadata = dispatch_http(
+            &api,
+            &runtime,
+            &raw_request(
+                "POST",
+                "/api/v1/auth/bootstrap",
+                &[
+                    ("Host", runtime.expected_host()),
+                    ("Origin", runtime.expected_origin()),
+                ],
+                &bootstrap_body,
+            ),
+        );
+        assert_eq!(missing_fetch_metadata.status, 403);
+
+        let cross_origin = dispatch_http(
+            &api,
+            &runtime,
+            &raw_request(
+                "POST",
+                "/api/v1/auth/bootstrap",
+                &[
+                    ("Host", runtime.expected_host()),
+                    ("Origin", "http://evil.invalid"),
+                    ("Sec-Fetch-Site", "same-origin"),
+                ],
+                &bootstrap_body,
+            ),
+        );
+        assert_eq!(cross_origin.status, 403);
+
+        let wrong_capability = station_auth::generate_secret_token().unwrap();
+        let wrong_bootstrap_body = serde_json::to_vec(&serde_json::json!({
+            "capability": wrong_capability.expose_secret(),
+            "username": "setup.admin",
+            "display_name": "Setup Administrator",
+            "password": "A-strong-bootstrap-password-47!",
+        }))
+        .unwrap();
+        let invalid_bootstrap = dispatch_http(
+            &api,
+            &runtime,
+            &raw_request(
+                "POST",
+                "/api/v1/auth/bootstrap",
+                &[
+                    ("Host", runtime.expected_host()),
+                    ("Origin", runtime.expected_origin()),
+                    ("Sec-Fetch-Site", "same-origin"),
+                ],
+                &wrong_bootstrap_body,
+            ),
+        );
+        assert_eq!(invalid_bootstrap.status, 403);
+        assert!(
+            String::from_utf8_lossy(&invalid_bootstrap.body)
+                .contains("invalid_bootstrap_capability")
+        );
+
+        let issued = dispatch_http(
+            &api,
+            &runtime,
+            &raw_request(
+                "POST",
+                "/api/v1/auth/bootstrap",
+                &[
+                    ("Host", runtime.expected_host()),
+                    ("Origin", runtime.expected_origin()),
+                    ("Sec-Fetch-Site", "same-origin"),
+                ],
+                &bootstrap_body,
+            ),
+        );
+        assert_eq!(
+            issued.status,
+            201,
+            "{}",
+            String::from_utf8_lossy(&issued.body)
+        );
+        assert!(issued.headers.iter().any(|header| {
+            header.name == "Set-Cookie"
+                && header.value.starts_with(auth::SESSION_COOKIE_NAME)
+                && header.value.contains("HttpOnly")
+                && header.value.contains("Path=/api/v1/")
+        }));
+        assert!(issued.headers.iter().any(|header| {
+            header.name == "Set-Cookie"
+                && header.value.starts_with(auth::CSRF_COOKIE_NAME)
+                && !header.value.contains("HttpOnly")
+                && header.value.contains("Path=/;")
+        }));
+        let (cookie, csrf) = auth_cookie_header(&issued);
+
+        let session = dispatch_http(
+            &api,
+            &runtime,
+            &raw_request(
+                "GET",
+                "/api/v1/auth/session",
+                &[("Host", runtime.expected_host()), ("Cookie", &cookie)],
+                b"",
+            ),
+        );
+        assert_eq!(session.status, 200);
+
+        let account = api
+            .storage
+            .read_operator_login(&station_auth::OperatorUsername::try_from("setup.admin").unwrap())
+            .unwrap()
+            .unwrap()
+            .account;
+        let actor_id = account.account_id().as_str().to_owned();
+        let channel_id = "5d85189a-cd1f-43dc-a619-66a2aeb09ac4";
+        let board_id = "94a0dc01-d314-4b55-b2e4-cba39cc3f1dc";
+        api.storage
+            .put_channel(&ChannelConfiguration {
+                channel_id: channel_id.into(),
+                display_name: "Government Channel".into(),
+                output_profile: station_schedule::OutputProfileId::Proof360p30,
+                output_sinks: vec![station_schedule::OutputSinkConfiguration::required_udp(
+                    "f103968a-640b-42dc-8084-3fe9e847ff7f",
+                    "Proof output",
+                    "127.0.0.1:5500",
+                    -16.0,
+                )],
+                enabled: false,
+            })
+            .unwrap();
+        let seeded_board = CgBoard {
+            board_id: board_id.into(),
+            channel_id: channel_id.into(),
+            template_id: "l-bar".into(),
+            active: true,
+            background_audio_asset_id: None,
+            revision: 1,
+            created_at_unix_ms: now,
+            updated_at_unix_ms: now,
+            created_by: "historical.creator".into(),
+        };
+        let seed_audit = CgAuditEvent {
+            audit_id: "7bb32e14-fe69-47cb-a921-dc3fc84499bf".into(),
+            board_id: Some(board_id.into()),
+            channel_id: channel_id.into(),
+            event_kind: station_cg::CgAuditEventKind::BoardCreated,
+            operator_id: "legacy.in_process".into(),
+            occurred_at_unix_ms: now,
+            details: std::collections::BTreeMap::new(),
+        };
+        let seed_response = api.handle_in_process(
+            "PUT",
+            "/api/v1/cg/board",
+            Some(
+                &serde_json::to_vec(&serde_json::json!({
+                    "board": seeded_board,
+                    "expected_revision": 0,
+                    "audit": seed_audit,
+                }))
+                .unwrap(),
+            ),
+        );
+        assert_eq!(seed_response.status, 200);
+        let board_update = serde_json::to_vec(&serde_json::json!({
+            "board": {
+                "board_id": board_id,
+                "channel_id": channel_id,
+                "template_id": "l-bar",
+                "active": false,
+                "background_audio_asset_id": null,
+                "revision": 2,
+                "created_at_unix_ms": now,
+                "updated_at_unix_ms": now.saturating_add(1)
+            },
+            "expected_revision": 1,
+            "audit": {
+                "audit_id": "919ccff6-f20c-4787-8916-a4b96101ec8e",
+                "board_id": board_id,
+                "channel_id": channel_id,
+                "event_kind": "board_updated",
+                "occurred_at_unix_ms": now.saturating_add(1),
+                "details": {}
+            }
+        }))
+        .unwrap();
+        let updated_board = dispatch_http(
+            &api,
+            &runtime,
+            &raw_request(
+                "PUT",
+                "/api/v1/cg/board",
+                &[
+                    ("Host", runtime.expected_host()),
+                    ("Origin", runtime.expected_origin()),
+                    ("Sec-Fetch-Site", "same-origin"),
+                    ("Cookie", &cookie),
+                    (auth::CSRF_HEADER_NAME, &csrf),
+                ],
+                &board_update,
+            ),
+        );
+        assert_eq!(
+            updated_board.status,
+            200,
+            "{}",
+            String::from_utf8_lossy(&updated_board.body)
+        );
+        assert_eq!(
+            serde_json::from_slice::<CgBoard>(&updated_board.body)
+                .unwrap()
+                .created_by,
+            "historical.creator"
+        );
+        let board_audit = api.storage.list_cg_audit_events(channel_id, 10).unwrap();
+        assert_eq!(
+            board_audit
+                .iter()
+                .find(|event| event.audit_id == "919ccff6-f20c-4787-8916-a4b96101ec8e")
+                .unwrap()
+                .operator_id,
+            actor_id
+        );
+
+        let feed_id = "796ca80a-9cc2-4fc1-84a2-2a88d8f92f24";
+        let seeded_feed = CgFeedSource {
+            feed_source_id: feed_id.into(),
+            channel_id: channel_id.into(),
+            kind: station_cg::CgFeedKind::Rss,
+            label: "Historical feed".into(),
+            source_url: "https://notices.example.test/rss".into(),
+            trust_tier: station_cg::CgFeedTrustTier::Moderated,
+            tags: vec![],
+            refresh_seconds: 300,
+            enabled: true,
+            revision: 1,
+            created_at_unix_ms: now,
+            updated_at_unix_ms: now,
+            created_by: "historical.feed.creator".into(),
+            last_fetched_at_unix_ms: None,
+            last_fetch_error: None,
+        };
+        let feed_seed = api.handle_in_process(
+            "PUT",
+            "/api/v1/cg/feeds",
+            Some(
+                &serde_json::to_vec(&serde_json::json!({
+                    "feed": seeded_feed,
+                    "expected_revision": 0,
+                    "audit": {
+                        "audit_id": "2c60c2ac-fc66-4e88-acb4-060127f0ea90",
+                        "board_id": board_id,
+                        "channel_id": channel_id,
+                        "event_kind": "feed_created",
+                        "operator_id": "legacy.in_process",
+                        "occurred_at_unix_ms": now,
+                        "details": {}
+                    }
+                }))
+                .unwrap(),
+            ),
+        );
+        assert_eq!(feed_seed.status, 200);
+        let feed_update = serde_json::to_vec(&serde_json::json!({
+            "feed": {
+                "feed_source_id": feed_id,
+                "channel_id": channel_id,
+                "kind": "rss",
+                "label": "Updated feed",
+                "source_url": "https://notices.example.test/rss",
+                "trust_tier": "moderated",
+                "tags": [],
+                "refresh_seconds": 600,
+                "enabled": true,
+                "revision": 2,
+                "created_at_unix_ms": now,
+                "updated_at_unix_ms": now.saturating_add(2),
+                "created_by": "browser.forgery",
+                "last_fetched_at_unix_ms": null,
+                "last_fetch_error": null
+            },
+            "expected_revision": 1,
+            "audit": {
+                "audit_id": "5f7b9535-d3a3-4ea2-bf96-2e8be5e85bc1",
+                "board_id": board_id,
+                "channel_id": channel_id,
+                "event_kind": "feed_updated",
+                "operator_id": "browser.forgery",
+                "occurred_at_unix_ms": now.saturating_add(2),
+                "details": {}
+            }
+        }))
+        .unwrap();
+        let updated_feed = dispatch_http(
+            &api,
+            &runtime,
+            &raw_request(
+                "PUT",
+                "/api/v1/cg/feeds",
+                &[
+                    ("Host", runtime.expected_host()),
+                    ("Origin", runtime.expected_origin()),
+                    ("Sec-Fetch-Site", "same-origin"),
+                    ("Cookie", &cookie),
+                    (auth::CSRF_HEADER_NAME, &csrf),
+                ],
+                &feed_update,
+            ),
+        );
+        assert_eq!(updated_feed.status, 200);
+        assert_eq!(
+            serde_json::from_slice::<CgFeedSource>(&updated_feed.body)
+                .unwrap()
+                .created_by,
+            "historical.feed.creator"
+        );
+        let feed_audit = api.storage.list_cg_audit_events(channel_id, 20).unwrap();
+        assert_eq!(
+            feed_audit
+                .iter()
+                .find(|event| event.audit_id == "5f7b9535-d3a3-4ea2-bf96-2e8be5e85bc1")
+                .unwrap()
+                .operator_id,
+            actor_id
+        );
+
+        let bulletin_id = "597f52ae-f16c-4ff8-ab32-60379cd950c4";
+        let bulletin_seed = api.handle_in_process(
+            "PUT",
+            "/api/v1/cg/bulletins",
+            Some(
+                &serde_json::to_vec(&serde_json::json!({
+                    "bulletin": {
+                        "bulletin_id": bulletin_id,
+                        "channel_id": channel_id,
+                        "content": {"kind":"text","title":"Meeting","body":"Tuesday at six."},
+                        "state": "submitted",
+                        "tags": ["community"],
+                        "requested_start_at_unix_ms": now.saturating_add(10_000),
+                        "requested_end_at_unix_ms": now.saturating_add(20_000),
+                        "display_seconds": 12,
+                        "audio_asset_id": null,
+                        "submitted_by": "historical.submitter",
+                        "moderation_notes": null,
+                        "moderated_by": null,
+                        "revision": 1,
+                        "created_at_unix_ms": now,
+                        "updated_at_unix_ms": now
+                    },
+                    "expected_revision": 0,
+                    "audit": {
+                        "audit_id": "88a6d930-bbfc-472c-a60a-58f2327bb8b0",
+                        "board_id": board_id,
+                        "channel_id": channel_id,
+                        "event_kind": "bulletin_submitted",
+                        "operator_id": "legacy.in_process",
+                        "occurred_at_unix_ms": now,
+                        "details": {}
+                    }
+                }))
+                .unwrap(),
+            ),
+        );
+        assert_eq!(bulletin_seed.status, 200);
+        let bulletin_accept = serde_json::to_vec(&serde_json::json!({
+            "bulletin": {
+                "bulletin_id": bulletin_id,
+                "channel_id": channel_id,
+                "content": {"kind":"text","title":"Meeting","body":"Tuesday at six."},
+                "state": "accepted",
+                "tags": ["community"],
+                "requested_start_at_unix_ms": now.saturating_add(10_000),
+                "requested_end_at_unix_ms": now.saturating_add(20_000),
+                "display_seconds": 12,
+                "audio_asset_id": null,
+                "submitted_by": "browser.forgery",
+                "moderation_notes": null,
+                "moderated_by": "browser.forgery",
+                "revision": 2,
+                "created_at_unix_ms": now,
+                "updated_at_unix_ms": now.saturating_add(3)
+            },
+            "expected_revision": 1,
+            "audit": {
+                "audit_id": "f8a1f8d7-3808-45e6-9775-399b6bf7808f",
+                "board_id": board_id,
+                "channel_id": channel_id,
+                "event_kind": "bulletin_moderated",
+                "operator_id": "browser.forgery",
+                "occurred_at_unix_ms": now.saturating_add(3),
+                "details": {}
+            }
+        }))
+        .unwrap();
+        let accepted = dispatch_http(
+            &api,
+            &runtime,
+            &raw_request(
+                "PUT",
+                "/api/v1/cg/bulletins",
+                &[
+                    ("Host", runtime.expected_host()),
+                    ("Origin", runtime.expected_origin()),
+                    ("Sec-Fetch-Site", "same-origin"),
+                    ("Cookie", &cookie),
+                    (auth::CSRF_HEADER_NAME, &csrf),
+                ],
+                &bulletin_accept,
+            ),
+        );
+        assert_eq!(accepted.status, 200);
+        let accepted: CgBulletin = serde_json::from_slice(&accepted.body).unwrap();
+        assert_eq!(accepted.submitted_by, "historical.submitter");
+        assert_eq!(accepted.moderated_by.as_deref(), Some(actor_id.as_str()));
+
+        let bulletin_schedule = serde_json::to_vec(&serde_json::json!({
+            "bulletin": {
+                "bulletin_id": bulletin_id,
+                "channel_id": channel_id,
+                "content": {"kind":"text","title":"Meeting","body":"Tuesday at six."},
+                "state": "scheduled",
+                "tags": ["community"],
+                "requested_start_at_unix_ms": now.saturating_add(10_000),
+                "requested_end_at_unix_ms": now.saturating_add(20_000),
+                "display_seconds": 12,
+                "audio_asset_id": null,
+                "submitted_by": "browser.forgery",
+                "moderation_notes": null,
+                "moderated_by": "second.browser.forgery",
+                "revision": 3,
+                "created_at_unix_ms": now,
+                "updated_at_unix_ms": now.saturating_add(4)
+            },
+            "expected_revision": 2,
+            "audit": {
+                "audit_id": "7f773412-dd9f-47a7-9724-64fc0ad81dee",
+                "board_id": board_id,
+                "channel_id": channel_id,
+                "event_kind": "bulletin_moderated",
+                "operator_id": "browser.forgery",
+                "occurred_at_unix_ms": now.saturating_add(4),
+                "details": {}
+            }
+        }))
+        .unwrap();
+        let scheduled = dispatch_http(
+            &api,
+            &runtime,
+            &raw_request(
+                "PUT",
+                "/api/v1/cg/bulletins",
+                &[
+                    ("Host", runtime.expected_host()),
+                    ("Origin", runtime.expected_origin()),
+                    ("Sec-Fetch-Site", "same-origin"),
+                    ("Cookie", &cookie),
+                    (auth::CSRF_HEADER_NAME, &csrf),
+                ],
+                &bulletin_schedule,
+            ),
+        );
+        assert_eq!(scheduled.status, 200);
+        let scheduled: CgBulletin = serde_json::from_slice(&scheduled.body).unwrap();
+        assert_eq!(scheduled.submitted_by, "historical.submitter");
+        assert_eq!(scheduled.moderated_by.as_deref(), Some(actor_id.as_str()));
+
+        let expire_body = serde_json::to_vec(&serde_json::json!({
+            "channel_id": channel_id,
+            "now_unix_ms": now.saturating_add(20_000)
+        }))
+        .unwrap();
+        let expired = dispatch_http(
+            &api,
+            &runtime,
+            &raw_request(
+                "POST",
+                "/api/v1/cg/bulletins/expire",
+                &[
+                    ("Host", runtime.expected_host()),
+                    ("Origin", runtime.expected_origin()),
+                    ("Sec-Fetch-Site", "same-origin"),
+                    ("Cookie", &cookie),
+                    (auth::CSRF_HEADER_NAME, &csrf),
+                ],
+                &expire_body,
+            ),
+        );
+        assert_eq!(expired.status, 200);
+        let expired: Vec<CgBulletin> = serde_json::from_slice(&expired.body).unwrap();
+        assert_eq!(expired.len(), 1);
+        assert_eq!(expired[0].bulletin_id, bulletin_id);
+        assert_eq!(
+            api.storage
+                .list_cg_audit_events(channel_id, 50)
+                .unwrap()
+                .iter()
+                .find(|event| { event.event_kind == station_cg::CgAuditEventKind::BulletinExpired })
+                .unwrap()
+                .operator_id,
+            actor_id
+        );
+
+        let new_bulletin_id = "65b6f5e3-a51e-4a66-936c-c8434f07baf1";
+        let new_submission = serde_json::to_vec(&serde_json::json!({
+            "bulletin": {
+                "bulletin_id": new_bulletin_id,
+                "channel_id": channel_id,
+                "content": {"kind":"text","title":"Notice","body":"Identity-free submission."},
+                "state": "submitted",
+                "tags": [],
+                "requested_start_at_unix_ms": null,
+                "requested_end_at_unix_ms": null,
+                "display_seconds": 10,
+                "audio_asset_id": null,
+                "moderation_notes": null,
+                "revision": 1,
+                "created_at_unix_ms": now,
+                "updated_at_unix_ms": now
+            },
+            "expected_revision": 0,
+            "audit": {
+                "audit_id": "9cf47b10-3297-42b2-a355-3ad0821323df",
+                "board_id": board_id,
+                "channel_id": channel_id,
+                "event_kind": "bulletin_submitted",
+                "occurred_at_unix_ms": now,
+                "details": {}
+            }
+        }))
+        .unwrap();
+        let submitted = dispatch_http(
+            &api,
+            &runtime,
+            &raw_request(
+                "PUT",
+                "/api/v1/cg/bulletins",
+                &[
+                    ("Host", runtime.expected_host()),
+                    ("Origin", runtime.expected_origin()),
+                    ("Sec-Fetch-Site", "same-origin"),
+                    ("Cookie", &cookie),
+                    (auth::CSRF_HEADER_NAME, &csrf),
+                ],
+                &new_submission,
+            ),
+        );
+        assert_eq!(submitted.status, 200);
+        let submitted: CgBulletin = serde_json::from_slice(&submitted.body).unwrap();
+        assert_eq!(submitted.submitted_by, actor_id);
+        assert_eq!(submitted.moderated_by, None);
+
+        let item_id = "a".repeat(64);
+        api.storage
+            .replace_cg_feed_cache(
+                feed_id,
+                now.saturating_add(5),
+                &[CgFeedItem {
+                    item_id: item_id.clone(),
+                    title: "Town notice".into(),
+                    summary: None,
+                    starts_at_unix_ms: None,
+                    url: None,
+                    tags: vec![],
+                }],
+                None,
+                None,
+            )
+            .unwrap();
+        let approval_body = serde_json::to_vec(&serde_json::json!({
+            "approval": {
+                "feed_source_id": feed_id,
+                "item_id": item_id,
+                "approved_by": "browser.forgery",
+                "approved_at_unix_ms": now.saturating_add(6)
+            },
+            "audit": {
+                "audit_id": "df4ef773-e673-4279-a87e-6a3936692dd0",
+                "board_id": board_id,
+                "channel_id": channel_id,
+                "event_kind": "feed_item_approved",
+                "operator_id": "browser.forgery",
+                "occurred_at_unix_ms": now.saturating_add(6),
+                "details": {}
+            }
+        }))
+        .unwrap();
+        let approval_response = dispatch_http(
+            &api,
+            &runtime,
+            &raw_request(
+                "POST",
+                "/api/v1/cg/feed-items/approve",
+                &[
+                    ("Host", runtime.expected_host()),
+                    ("Origin", runtime.expected_origin()),
+                    ("Sec-Fetch-Site", "same-origin"),
+                    ("Cookie", &cookie),
+                    (auth::CSRF_HEADER_NAME, &csrf),
+                ],
+                &approval_body,
+            ),
+        );
+        assert_eq!(approval_response.status, 200);
+        assert_eq!(
+            api.storage
+                .read_cg_feed_item_approval(feed_id, &item_id)
+                .unwrap()
+                .unwrap()
+                .approved_by,
+            actor_id
+        );
+        assert_eq!(
+            api.storage
+                .list_cg_audit_events(channel_id, 50)
+                .unwrap()
+                .iter()
+                .find(|event| event.audit_id == "df4ef773-e673-4279-a87e-6a3936692dd0")
+                .unwrap()
+                .operator_id,
+            actor_id
+        );
+
+        let self_test_schedule = dispatch_http(
+            &api,
+            &runtime,
+            &raw_request(
+                "PUT",
+                "/api/v1/self-test-schedules/daily",
+                &[
+                    ("Host", runtime.expected_host()),
+                    ("Origin", runtime.expected_origin()),
+                    ("Sec-Fetch-Site", "same-origin"),
+                    ("Cookie", &cookie),
+                    (auth::CSRF_HEADER_NAME, &csrf),
+                ],
+                br#"{"enabled":true,"local_hour":3,"local_minute":15,"weekday":null,"updated_by":"browser.forgery"}"#,
+            ),
+        );
+        assert_eq!(self_test_schedule.status, 200);
+        assert_eq!(
+            serde_json::from_slice::<SelfTestSchedule>(&self_test_schedule.body)
+                .unwrap()
+                .updated_by,
+            actor_id
+        );
+
+        let missing_csrf = dispatch_http(
+            &api,
+            &runtime,
+            &raw_request(
+                "POST",
+                "/api/v1/auth/logout",
+                &[
+                    ("Host", runtime.expected_host()),
+                    ("Origin", runtime.expected_origin()),
+                    ("Sec-Fetch-Site", "same-origin"),
+                    ("Cookie", &cookie),
+                ],
+                b"{}",
+            ),
+        );
+        assert_eq!(missing_csrf.status, 403);
+
+        let old_boot = auth::AuthRuntime::new("127.0.0.1:4070".parse().unwrap()).unwrap();
+        let rejected_old_boot = dispatch_http(
+            &api,
+            &old_boot,
+            &raw_request(
+                "GET",
+                "/api/v1/auth/session",
+                &[("Host", old_boot.expected_host()), ("Cookie", &cookie)],
+                b"",
+            ),
+        );
+        assert_eq!(rejected_old_boot.status, 401);
+
+        let expired_session_token = station_auth::generate_secret_token().unwrap();
+        let expired_csrf_token = station_auth::generate_secret_token().unwrap();
+        let created = now.saturating_sub(2_000);
+        let expired_session = station_auth::OperatorSession::new(
+            digest_secret(&expired_session_token),
+            digest_secret(&expired_csrf_token),
+            account.account_id().clone(),
+            account.credential_version(),
+            runtime.boot_id(),
+            created,
+            created,
+            now.saturating_sub(1),
+            now.saturating_add(60_000),
+        )
+        .unwrap();
+        api.storage
+            .create_operator_session(&expired_session, created)
+            .unwrap();
+        let expired_cookie = format!(
+            "{}={}; {}={}",
+            auth::SESSION_COOKIE_NAME,
+            expired_session_token.expose_secret(),
+            auth::CSRF_COOKIE_NAME,
+            expired_csrf_token.expose_secret()
+        );
+        let expired_rejection = dispatch_http(
+            &api,
+            &runtime,
+            &raw_request(
+                "GET",
+                "/api/v1/auth/session",
+                &[
+                    ("Host", runtime.expected_host()),
+                    ("Cookie", &expired_cookie),
+                ],
+                b"",
+            ),
+        );
+        assert_eq!(expired_rejection.status, 401);
+
+        let logout = dispatch_http(
+            &api,
+            &runtime,
+            &raw_request(
+                "POST",
+                "/api/v1/auth/logout",
+                &[
+                    ("Host", runtime.expected_host()),
+                    ("Origin", runtime.expected_origin()),
+                    ("Sec-Fetch-Site", "same-origin"),
+                    ("Cookie", &cookie),
+                    (auth::CSRF_HEADER_NAME, &csrf),
+                ],
+                b"{}",
+            ),
+        );
+        assert_eq!(logout.status, 200);
+        assert_eq!(logout.body, br#"{"logged_out":true}"#);
+        assert!(logout.headers.iter().any(|header| {
+            header.name == "Set-Cookie"
+                && header.value.starts_with(auth::CSRF_COOKIE_NAME)
+                && header.value.contains("Path=/;")
+                && header.value.contains("Max-Age=0")
+        }));
+
+        let _ = std::fs::remove_file(database);
+    }
+
     #[test]
     fn health_is_not_ready_before_current_boot_orchestration_progress() {
         let nonce = SystemTime::now()
@@ -5425,7 +6883,7 @@ mod tests {
         )
         .unwrap();
 
-        let response = api.handle("GET", "/health", None);
+        let response = api.handle_in_process("GET", "/health", None);
 
         assert_eq!(response.status, 503);
         let body: serde_json::Value = serde_json::from_slice(&response.body).unwrap();
@@ -5510,13 +6968,13 @@ mod tests {
         .unwrap();
 
         health.mark_progress();
-        let ready = api.handle("GET", "/health", None);
+        let ready = api.handle_in_process("GET", "/health", None);
         assert_eq!(ready.status, 200);
         let ready: serde_json::Value = serde_json::from_slice(&ready.body).unwrap();
         assert_eq!(ready["status"], "ready");
 
         health.mark_failed();
-        let failed = api.handle("GET", "/health", None);
+        let failed = api.handle_in_process("GET", "/health", None);
         assert_eq!(failed.status, 503);
         let failed: serde_json::Value = serde_json::from_slice(&failed.body).unwrap();
         assert_eq!(failed["status"], "failed");
@@ -5705,7 +7163,7 @@ mod tests {
         let api =
             Api::open_with_station_box_probe(&database, &application, station_box_probe()).unwrap();
 
-        let full = api.handle("GET", "/api/v1/station-box-profile", None);
+        let full = api.handle_in_process("GET", "/api/v1/station-box-profile", None);
         assert_eq!(full.status, 200);
         let full: serde_json::Value = serde_json::from_slice(&full.body).unwrap();
         assert_eq!(full["schema_version"], 1);
@@ -5713,14 +7171,15 @@ mod tests {
         assert_eq!(full["engine"]["sdi"], "unimplemented");
         assert!(api.station_box_cache.lock().unwrap().is_some());
 
-        let rollup = api.handle("GET", "/api/v1/station-box-profile/readiness", None);
+        let rollup = api.handle_in_process("GET", "/api/v1/station-box-profile/readiness", None);
         assert_eq!(rollup.status, 200);
         let rollup: serde_json::Value = serde_json::from_slice(&rollup.body).unwrap();
         assert_eq!(rollup, full["peg_readiness"]);
 
         let profile = br#"{"station_id":"3f5f721f-96c7-48b1-b061-1bf1ad1e62c2","display_name":"KTLT","timezone":"America/Denver"}"#;
         assert_eq!(
-            api.handle("PUT", "/api/v1/station", Some(profile)).status,
+            api.handle_in_process("PUT", "/api/v1/station", Some(profile))
+                .status,
             200
         );
         assert!(api.station_box_cache.lock().unwrap().is_none());
@@ -5744,7 +7203,7 @@ mod tests {
         let mut api =
             Api::open_with_station_box_probe(&database, &application, station_box_probe()).unwrap();
 
-        let passing = api.handle("GET", "/api/v1/commissioning/report", None);
+        let passing = api.handle_in_process("GET", "/api/v1/commissioning/report", None);
         let passing: serde_json::Value = serde_json::from_slice(&passing.body).unwrap();
         for id in ["station_box_storage", "station_time", "station_backup"] {
             let check = passing["checks"]
@@ -5763,7 +7222,7 @@ mod tests {
         failed_probe.backup.writable = Some(false);
         api.station_box_probe_override = Some(failed_probe);
         *api.station_box_cache.lock().unwrap() = None;
-        let failed = api.handle("GET", "/api/v1/commissioning/report", None);
+        let failed = api.handle_in_process("GET", "/api/v1/commissioning/report", None);
         let failed: serde_json::Value = serde_json::from_slice(&failed.body).unwrap();
         for id in ["station_box_storage", "station_time", "station_backup"] {
             let check = failed["checks"]
@@ -5829,7 +7288,7 @@ mod tests {
             })
             .unwrap();
 
-        let aggregate = api.handle("GET", "/api/v1/headend-readiness", None);
+        let aggregate = api.handle_in_process("GET", "/api/v1/headend-readiness", None);
         assert_eq!(aggregate.status, 200);
         let aggregate: serde_json::Value = serde_json::from_slice(&aggregate.body).unwrap();
         assert_eq!(aggregate["rollup"]["color"], "yellow");
@@ -5842,7 +7301,7 @@ mod tests {
             "unknown"
         );
 
-        let one = api.handle(
+        let one = api.handle_in_process(
             "GET",
             &format!("/api/v1/channels/{channel_id}/headend-readiness"),
             None,
@@ -5868,7 +7327,7 @@ mod tests {
                 detail: Some("operator stopped output".into()),
             })
             .unwrap();
-        let stopped = api.handle("GET", "/api/v1/headend-readiness", None);
+        let stopped = api.handle_in_process("GET", "/api/v1/headend-readiness", None);
         let stopped: serde_json::Value = serde_json::from_slice(&stopped.body).unwrap();
         assert_eq!(stopped["rollup"]["color"], "red");
 
@@ -5977,7 +7436,7 @@ mod tests {
                 .unwrap();
         }
 
-        let current = api.handle(
+        let current = api.handle_in_process(
             "GET",
             &format!("/api/v1/channels/{channel_id}/loudness-proof"),
             None,
@@ -5993,7 +7452,7 @@ mod tests {
         unverified_probe.release.state = StationReadinessState::Blocked;
         unverified_probe.release.candidate_verified = false;
         api.station_box_probe_override = Some(unverified_probe);
-        let unverified = api.handle(
+        let unverified = api.handle_in_process(
             "GET",
             &format!("/api/v1/channels/{channel_id}/loudness-proof"),
             None,
@@ -6010,7 +7469,7 @@ mod tests {
         api.station_box_probe_override = Some(station_box_probe());
         channel.output_sinks[0].destination = "127.0.0.1:5510".into();
         api.storage.put_channel(&channel).unwrap();
-        let expired = api.handle(
+        let expired = api.handle_in_process(
             "GET",
             &format!("/api/v1/channels/{channel_id}/loudness-proof"),
             None,
@@ -6065,7 +7524,7 @@ mod tests {
             .storage
             .current_channel_output_configuration_hash(channel_id)
             .unwrap();
-        let response = api.handle(
+        let response = api.handle_in_process(
             "POST",
             &format!("/api/v1/channels/{channel_id}/loudness-proof"),
             Some(
@@ -6092,7 +7551,7 @@ mod tests {
             "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
         );
 
-        let status = api.handle(
+        let status = api.handle_in_process(
             "GET",
             &format!("/api/v1/channels/{channel_id}/loudness-proof/jobs/{job_id}"),
             None,
@@ -6145,7 +7604,7 @@ mod tests {
                 enabled: true,
             })
             .unwrap();
-        let response = api.handle(
+        let response = api.handle_in_process(
             "POST",
             &format!("/api/v1/channels/{channel_id}/loudness-proof"),
             Some(
@@ -6196,13 +7655,13 @@ mod tests {
         let body = format!(
             r#"{{"sink_id":"{sink_id}","sample_duration_ms":3000,"max_capture_bytes":1000000}}"#
         );
-        let first = api.handle(
+        let first = api.handle_in_process(
             "POST",
             &format!("/api/v1/channels/{channel_id}/loudness-proof"),
             Some(body.as_bytes()),
         );
         assert_eq!(first.status, 202);
-        let second = api.handle(
+        let second = api.handle_in_process(
             "POST",
             &format!("/api/v1/channels/{channel_id}/loudness-proof"),
             Some(body.as_bytes()),
@@ -6231,7 +7690,7 @@ mod tests {
             Api::open_with_station_box_probe(&database, &application, station_box_probe()).unwrap();
         let channel_id = "11111111-2222-4333-8444-555555555555";
         let sink_id = "22222222-3333-4444-8555-666666666666";
-        let response = api.handle(
+        let response = api.handle_in_process(
             "POST",
             &format!("/api/v1/channels/{channel_id}/loudness-proof"),
             Some(
@@ -6242,7 +7701,7 @@ mod tests {
             ),
         );
         assert_eq!(response.status, 422);
-        let response = api.handle(
+        let response = api.handle_in_process(
             "POST",
             &format!("/api/v1/channels/{channel_id}/loudness-proof"),
             Some(
@@ -6253,7 +7712,7 @@ mod tests {
             ),
         );
         assert_eq!(response.status, 422);
-        let response = api.handle(
+        let response = api.handle_in_process(
             "POST",
             &format!("/api/v1/channels/{channel_id}/loudness-proof"),
             Some(
@@ -6286,7 +7745,8 @@ mod tests {
         let database =
             std::env::temp_dir().join(format!("townlight-api-parser-{}.db", std::process::id()));
         let api = Api::open(&database).unwrap();
-        let image_response = dispatch_http(&api, &parsed);
+        let runtime = auth::AuthRuntime::new("127.0.0.1:4070".parse().unwrap()).unwrap();
+        let image_response = dispatch_http(&api, &runtime, &parsed);
         assert_ne!(image_response.status, 413);
 
         let mut unrelated = format!(
@@ -6326,6 +7786,7 @@ mod tests {
         for request in [
             b"GET /health HTTP/1.1\r\nHost: one\r\nHost: two\r\n\r\n".as_slice(),
             b"POST /api/v1/auth/login HTTP/1.1\r\nHost: 127.0.0.1:4070\r\nOrigin: http://127.0.0.1:4070\r\nOrigin: http://evil.invalid\r\nContent-Length: 0\r\n\r\n".as_slice(),
+            b"POST /api/v1/auth/login HTTP/1.1\r\nHost: 127.0.0.1:4070\r\nOrigin: http://127.0.0.1:4070\r\nSec-Fetch-Site: same-origin\r\nSec-Fetch-Site: cross-site\r\nContent-Length: 0\r\n\r\n".as_slice(),
             b"GET http://127.0.0.1:4070/health HTTP/1.1\r\nHost: 127.0.0.1:4070\r\n\r\n".as_slice(),
         ] {
             let rejection = parse_http_request(request).unwrap_err();
@@ -6349,5 +7810,20 @@ mod tests {
                 .with_header("Set-Cookie", "safe=value\r\nX-Injected: true")
                 .is_err()
         );
+    }
+
+    #[test]
+    fn authentication_storage_failures_never_expose_internal_details() {
+        let secret = r#"C:\ProgramData\TownLight\station.db: operator_sessions malformed"#;
+        for response in [
+            auth_storage_error_response(),
+            auth_failure_response(auth::AuthFailure::Storage(secret.into())),
+        ] {
+            assert_eq!(response.status, 500);
+            let body = String::from_utf8(response.body).unwrap();
+            assert!(body.contains("authentication_error"));
+            assert!(!body.contains(secret));
+            assert!(!body.contains("station.db"));
+        }
     }
 }

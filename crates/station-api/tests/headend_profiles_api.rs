@@ -40,7 +40,7 @@ fn lists_the_six_static_profiles_before_station_commissioning() {
     let database = temporary_database();
     let api = Api::open(&database).unwrap();
 
-    let response = api.handle("GET", "/api/v1/headend-profiles", None);
+    let response = api.handle_in_process("GET", "/api/v1/headend-profiles", None);
     assert_eq!(response.status, 200);
     let profiles: serde_json::Value = serde_json::from_slice(&response.body).unwrap();
     assert_eq!(profiles.as_array().unwrap().len(), 6);
@@ -67,7 +67,7 @@ fn applies_and_persists_a_profile_only_to_a_stopped_channel() {
         "keep_existing_sinks":true
     }"#;
 
-    let response = api.handle(
+    let response = api.handle_in_process(
         "POST",
         &format!("/api/v1/channels/{CHANNEL_ID}/headend-profile"),
         Some(body),
@@ -111,7 +111,7 @@ fn applies_and_persists_a_profile_only_to_a_stopped_channel() {
         .find(|sink| !sink["headend"].is_null())
         .unwrap();
     headend_sink["headend"]["muxrate_kbps"] = 10_000.into();
-    let forged = api.handle(
+    let forged = api.handle_in_process(
         "PUT",
         "/api/v1/channels",
         Some(&serde_json::to_vec(&forged).unwrap()),
@@ -133,13 +133,13 @@ fn rejects_unknown_channels_and_unimplemented_file_drop_without_writing() {
         "keep_existing_sinks":false
     }"#;
 
-    let missing = api.handle(
+    let missing = api.handle_in_process(
         "POST",
         "/api/v1/channels/11111111-2222-4333-8444-555555555555/headend-profile",
         Some(body),
     );
     assert_eq!(missing.status, 404);
-    let unsupported = api.handle(
+    let unsupported = api.handle_in_process(
         "POST",
         &format!("/api/v1/channels/{CHANNEL_ID}/headend-profile"),
         Some(body),
@@ -178,7 +178,7 @@ fn active_channel_profile_application_returns_conflict_without_writing() {
         .put_channel(&channel)
         .unwrap();
     let api = Api::open(&database).unwrap();
-    let response = api.handle(
+    let response = api.handle_in_process(
         "POST",
         &format!("/api/v1/channels/{CHANNEL_ID}/headend-profile"),
         Some(

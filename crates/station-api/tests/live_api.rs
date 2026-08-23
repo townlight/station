@@ -34,7 +34,7 @@ fn setup(name: &str) -> (Api, std::path::PathBuf) {
         enabled: true,
     };
     assert_eq!(
-        api.handle(
+        api.handle_in_process(
             "PUT",
             "/api/v1/channels",
             Some(&serde_json::to_vec(&channel).unwrap())
@@ -66,7 +66,7 @@ fn response_json(response: &station_api::ApiResponse) -> Value {
 fn exposes_revisioned_sources_and_rejects_stale_source_writes() {
     let (api, path) = setup("sources");
     assert_eq!(
-        api.handle(
+        api.handle_in_process(
             "PUT",
             &format!("/api/v1/live-sources/{SOURCE}"),
             Some(&source_body(1, 0)),
@@ -74,7 +74,7 @@ fn exposes_revisioned_sources_and_rejects_stale_source_writes() {
         .status,
         200
     );
-    let listed = api.handle(
+    let listed = api.handle_in_process(
         "GET",
         &format!("/api/v1/channels/{CHANNEL}/live-sources"),
         None,
@@ -89,7 +89,7 @@ fn exposes_revisioned_sources_and_rejects_stale_source_writes() {
         }
     );
     assert_eq!(
-        api.handle(
+        api.handle_in_process(
             "PUT",
             &format!("/api/v1/live-sources/{SOURCE}"),
             Some(&source_body(2, 0)),
@@ -97,7 +97,7 @@ fn exposes_revisioned_sources_and_rejects_stale_source_writes() {
         .status,
         409
     );
-    let authority = api.handle(
+    let authority = api.handle_in_process(
         "GET",
         &format!("/api/v1/channels/{CHANNEL}/live-authority"),
         None,
@@ -110,7 +110,7 @@ fn exposes_revisioned_sources_and_rejects_stale_source_writes() {
 fn requires_arming_then_take_and_on_air_then_return_with_audited_actors() {
     let (api, path) = setup("takeover");
     assert_eq!(
-        api.handle(
+        api.handle_in_process(
             "PUT",
             &format!("/api/v1/live-sources/{SOURCE}"),
             Some(&source_body(1, 0)),
@@ -122,7 +122,7 @@ fn requires_arming_then_take_and_on_air_then_return_with_audited_actors() {
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_millis() as i64;
-    let requested = api.handle(
+    let requested = api.handle_in_process(
         "POST",
         "/api/v1/live-takeovers",
         Some(
@@ -139,14 +139,14 @@ fn requires_arming_then_take_and_on_air_then_return_with_audited_actors() {
         ),
     );
     assert_eq!(requested.status, 201);
-    let active = api.handle(
+    let active = api.handle_in_process(
         "GET",
         &format!("/api/v1/channels/{CHANNEL}/active-live-takeover"),
         None,
     );
     assert_eq!(active.status, 200);
     assert_eq!(response_json(&active)["session_id"], SESSION);
-    let take_before_armed = api.handle(
+    let take_before_armed = api.handle_in_process(
         "POST",
         &format!("/api/v1/live-takeovers/{SESSION}/take"),
         Some(
@@ -170,7 +170,7 @@ fn requires_arming_then_take_and_on_air_then_return_with_audited_actors() {
             1,
         )
         .unwrap();
-    let taken = api.handle(
+    let taken = api.handle_in_process(
         "POST",
         &format!("/api/v1/live-takeovers/{SESSION}/take"),
         Some(
@@ -181,7 +181,7 @@ fn requires_arming_then_take_and_on_air_then_return_with_audited_actors() {
         ),
     );
     assert_eq!(taken.status, 200);
-    let return_before_on_air = api.handle(
+    let return_before_on_air = api.handle_in_process(
         "POST",
         &format!("/api/v1/live-takeovers/{SESSION}/return"),
         Some(
@@ -204,7 +204,7 @@ fn requires_arming_then_take_and_on_air_then_return_with_audited_actors() {
         )
         .unwrap();
     assert_eq!(
-        api.handle(
+        api.handle_in_process(
             "POST",
             &format!("/api/v1/live-takeovers/{SESSION}/return"),
             Some(
@@ -218,7 +218,7 @@ fn requires_arming_then_take_and_on_air_then_return_with_audited_actors() {
         200
     );
     assert_eq!(
-        api.handle(
+        api.handle_in_process(
             "POST",
             &format!("/api/v1/live-takeovers/{SESSION}/return"),
             Some(
@@ -253,14 +253,14 @@ fn requires_arming_then_take_and_on_air_then_return_with_audited_actors() {
             6,
         )
         .unwrap();
-    let active = api.handle(
+    let active = api.handle_in_process(
         "GET",
         &format!("/api/v1/channels/{CHANNEL}/active-live-takeover"),
         None,
     );
     assert_eq!(active.status, 200);
     assert_eq!(response_json(&active), Value::Null);
-    let audit = api.handle(
+    let audit = api.handle_in_process(
         "GET",
         &format!("/api/v1/live-takeovers/{SESSION}/audit"),
         None,

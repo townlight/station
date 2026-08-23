@@ -1472,6 +1472,63 @@ impl StationStore {
         self.finish_value_transaction(outcome)
     }
 
+    pub fn rotate_operator_password(
+        &self,
+        account_id: &AccountId,
+        expected_version: CredentialVersion,
+        new_password_phc: &PasswordPhc,
+        occurred_at_unix_ms: i64,
+    ) -> Result<Option<CredentialVersion>, String> {
+        if occurred_at_unix_ms < 0 {
+            return Err("password rotation timestamp is invalid".into());
+        }
+        let next_version = expected_version
+            .next()
+            .map_err(|error| format!("credential version cannot rotate: {error}"))?;
+        self.execute("BEGIN IMMEDIATE")?;
+        let outcome = (|| {
+            let statement = self.prepare(
+                "UPDATE operator_accounts SET password_phc=?1,credential_version=?2,\
+                 failed_attempts=0,first_failure_at_unix_ms=-1,locked_until_unix_ms=-1,\
+                 updated_at_unix_ms=MAX(updated_at_unix_ms,?3) \
+                 WHERE account_id=?4 AND credential_version=?5 AND enabled=1",
+            )?;
+            let phc = c_string(new_password_phc.as_str(), "password hash")?;
+            let id = c_string(account_id.as_str(), "account id")?;
+            bind_text(self.database, statement.raw, 1, &phc)?;
+            bind_i64(
+                self.database,
+                statement.raw,
+                2,
+                checked_i64(next_version.get(), "credential version")?,
+            )?;
+            bind_i64(self.database, statement.raw, 3, occurred_at_unix_ms)?;
+            bind_text(self.database, statement.raw, 4, &id)?;
+            bind_i64(
+                self.database,
+                statement.raw,
+                5,
+                checked_i64(expected_version.get(), "credential version")?,
+            )?;
+            expect_done(self.database, statement.raw)?;
+            if self.changes() != 1 {
+                return Ok(None);
+            }
+            let sessions = self.prepare("DELETE FROM operator_sessions WHERE account_id=?1")?;
+            bind_text(self.database, sessions.raw, 1, &id)?;
+            expect_done(self.database, sessions.raw)?;
+            self.append_operator_auth_audit(
+                "password_changed",
+                account_id,
+                None,
+                occurred_at_unix_ms,
+                "credential version rotated and sessions invalidated",
+            )?;
+            Ok(Some(next_version))
+        })();
+        self.finish_value_transaction(outcome)
+    }
+
     pub fn list_operator_recovery_credentials(
         &self,
         account_id: &AccountId,
@@ -11978,6 +12035,61 @@ mod tests {
         assert_eq!(delivery.state, AlertDeliveryState::Sent);
         assert_eq!(migrated.list_alert_rules().unwrap().len(), 19);
         drop(migrated);
+        for candidate in [
+            database.clone(),
+            PathBuf::from(format!("{}-wal", database.display())),
+            PathBuf::from(format!("{}-shm", database.display())),
+        ] {
+            let _ = std::fs::remove_file(candidate);
+        }
+    }
+
+    #[test]
+    fn password_rotation_is_version_cas_and_invalidates_every_session() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let database = std::env::temp_dir().join(format!("townlight-auth-password-{nonce}.db"));
+        let store = StationStore::open(&database).unwrap();
+        let account = test_operator_account(1);
+        store.insert_operator_account(&account).unwrap();
+        store
+            .create_operator_session(&test_operator_session(1, 90), 11)
+            .unwrap();
+        let next = store
+            .rotate_operator_password(
+                account.account_id(),
+                CredentialVersion::new(1).unwrap(),
+                &test_password_phc(),
+                20,
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(next.get(), 2);
+        assert_eq!(
+            row_count(&store, "SELECT COUNT(*) FROM operator_sessions"),
+            0
+        );
+        assert!(
+            store
+                .rotate_operator_password(
+                    account.account_id(),
+                    CredentialVersion::new(1).unwrap(),
+                    &test_password_phc(),
+                    21,
+                )
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            row_count(
+                &store,
+                "SELECT COUNT(*) FROM operator_auth_audit WHERE event_kind='password_changed'",
+            ),
+            1
+        );
+        drop(store);
         for candidate in [
             database.clone(),
             PathBuf::from(format!("{}-wal", database.display())),
