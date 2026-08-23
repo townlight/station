@@ -4,7 +4,8 @@ use std::path::Path;
 use gst::prelude::*;
 use gstreamer as gst;
 use station_media_assets::{
-    ingest_media, measure_loudness, transcode_playout_asset, validate_media, verify_media_identity,
+    AssetError, ingest_media, measure_loudness, measure_output_loudness, transcode_playout_asset,
+    validate_media, verify_media_identity,
 };
 
 #[test]
@@ -101,6 +102,66 @@ fn transcodes_to_verified_h264_aac_transport_with_target_loudness() {
     fs::remove_dir_all(root).unwrap();
 }
 
+#[test]
+fn measures_post_encode_mpeg_ts_loudness_with_analyzed_duration() {
+    let root = test_root("output-loudness");
+    let source = root.join("capture.ts");
+    fs::create_dir_all(&root).unwrap();
+    generate_fixture(&source);
+
+    let measurement = measure_output_loudness(&source, 3_000)
+        .expect("a real MPEG-TS AAC capture must produce bounded loudness evidence");
+    assert!(measurement.integrated_lufs.is_finite());
+    assert!(measurement.analyzed_duration_ms >= 3_000);
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn rejects_empty_output_loudness_evidence() {
+    let root = test_root("output-loudness-empty");
+    let source = root.join("empty.ts");
+    fs::create_dir_all(&root).unwrap();
+    fs::write(&source, []).unwrap();
+
+    assert!(matches!(
+        measure_output_loudness(&source, 3_000),
+        Err(AssetError::InvalidSource(_))
+    ));
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn rejects_mpeg_ts_output_without_audio() {
+    let root = test_root("output-loudness-no-audio");
+    let source = root.join("video-only.ts");
+    fs::create_dir_all(&root).unwrap();
+    generate_video_only_fixture(&source);
+
+    assert!(matches!(
+        measure_output_loudness(&source, 3_000),
+        Err(AssetError::UnsupportedMedia(_))
+    ));
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn rejects_output_loudness_evidence_shorter_than_required() {
+    let root = test_root("output-loudness-too-short");
+    let source = root.join("short.ts");
+    fs::create_dir_all(&root).unwrap();
+    generate_fixture(&source);
+
+    assert!(matches!(
+        measure_output_loudness(&source, 4_000),
+        Err(AssetError::Discovery(_))
+    ));
+
+    fs::remove_dir_all(root).unwrap();
+}
+
 fn generate_fixture(path: &Path) {
     gst::init().unwrap();
     let pipeline = gst::Pipeline::new();
@@ -169,6 +230,67 @@ fn generate_fixture(path: &Path) {
         &audio_encoder,
         &audio_parser,
         &mux,
+    ])
+    .unwrap();
+    pipeline.set_state(gst::State::Playing).unwrap();
+    let bus = pipeline.bus().unwrap();
+    for message in bus.iter_timed(gst::ClockTime::from_seconds(10)) {
+        match message.view() {
+            gst::MessageView::Eos(_) => break,
+            gst::MessageView::Error(error) => panic!("fixture pipeline failed: {}", error.error()),
+            _ => {}
+        }
+    }
+    pipeline.set_state(gst::State::Null).unwrap();
+    assert!(path.exists());
+}
+
+fn generate_video_only_fixture(path: &Path) {
+    gst::init().unwrap();
+    let pipeline = gst::Pipeline::new();
+    let video = gst::ElementFactory::make("videotestsrc")
+        .property("num-buffers", 90_i32)
+        .build()
+        .unwrap();
+    let video_convert = gst::ElementFactory::make("videoconvert").build().unwrap();
+    let video_caps = gst::ElementFactory::make("capsfilter")
+        .property(
+            "caps",
+            gst::Caps::builder("video/x-raw")
+                .field("format", "I420")
+                .field("width", 320_i32)
+                .field("height", 180_i32)
+                .field("framerate", gst::Fraction::new(30, 1))
+                .build(),
+        )
+        .build()
+        .unwrap();
+    let video_encoder = gst::ElementFactory::make("openh264enc").build().unwrap();
+    let video_parser = gst::ElementFactory::make("h264parse").build().unwrap();
+    let mux = gst::ElementFactory::make("mpegtsmux").build().unwrap();
+    let sink = gst::ElementFactory::make("filesink")
+        .property("location", path.to_string_lossy().as_ref())
+        .build()
+        .unwrap();
+    pipeline
+        .add_many([
+            &video,
+            &video_convert,
+            &video_caps,
+            &video_encoder,
+            &video_parser,
+            &mux,
+            &sink,
+        ])
+        .unwrap();
+    gst::Element::link_many([
+        &video,
+        &video_convert,
+        &video_caps,
+        &video_encoder,
+        &video_parser,
+        &mux,
+        &sink,
     ])
     .unwrap();
     pipeline.set_state(gst::State::Playing).unwrap();

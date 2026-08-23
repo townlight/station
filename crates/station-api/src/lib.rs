@@ -33,12 +33,12 @@ use station_media_lifecycle::{
     TranscodeJobStatus, WatchFolderConfig,
 };
 use station_readiness::{
-    BackupProbeInput, CapabilitySupport, ChannelOutputRuntimeProbe, ClockProbeInput,
-    ClockSyncStatus, EngineProbeInput, ExternalReceiverState, HardwareProbeInput,
-    HeadendChannelProbeInput, HeadendProbeInput, HeadendProfileProbeInput, HeadendSinkKind,
-    HeadendSinkProbeInput, NetworkProbeInput, ReadinessState as StationReadinessState,
-    ReleaseProbeInput, StationBoxProbeInput, StationBoxProfile, derive_headend_readiness,
-    derive_station_box_profile,
+    BackupProbeInput, CandidateIdentity, CapabilitySupport, ChannelOutputRuntimeProbe,
+    ClockProbeInput, ClockSyncStatus, EffectiveLoudnessStatus, EngineProbeInput,
+    ExternalReceiverState, HardwareProbeInput, HeadendChannelProbeInput, HeadendProbeInput,
+    HeadendProfileProbeInput, HeadendSinkKind, HeadendSinkProbeInput, NetworkProbeInput,
+    ReadinessState as StationReadinessState, ReceiverAcceptance, ReleaseProbeInput,
+    StationBoxProbeInput, StationBoxProfile, derive_headend_readiness, derive_station_box_profile,
 };
 use station_schedule::{
     AssetReadiness, ChannelConfiguration, DispatchStatus, HEADEND_PROFILES,
@@ -46,7 +46,7 @@ use station_schedule::{
 };
 use station_storage::{
     AlertChannelSecret, CgSnapshotReadError, CgWriteError, ChannelWriteError, CommitWriteError,
-    HeadendProfileWriteError, ProfileWriteError, StationStore,
+    HeadendProfileWriteError, ProfileWriteError, StationStore, StoredSinkLoudnessProof,
 };
 use station_update::UpdateCheckTrigger;
 use station_update_coordinator::CoordinatorError;
@@ -58,6 +58,7 @@ const MAX_CONCURRENT_REQUESTS: usize = 16;
 const MAX_SMALL_REQUEST_BODY: usize = 65_536;
 const MAX_CG_IMAGE_BODY: usize = 8 * 1024 * 1024;
 const STATION_BOX_CACHE_TTL: Duration = Duration::from_secs(60);
+const LOUDNESS_PROOF_MAX_AGE_MS: i64 = 24 * 60 * 60 * 1_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -83,6 +84,35 @@ struct CommissioningReport {
     generated_at_unix_ms: i64,
     overall_status: CommissioningCheckStatus,
     checks: Vec<CommissioningCheck>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct ChannelLoudnessProofResponse {
+    channel_id: String,
+    sinks: Vec<SinkLoudnessProofResponse>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct SinkLoudnessProofResponse {
+    sink_id: String,
+    label: String,
+    kind: station_schedule::OutputSinkKind,
+    configured_target_lufs: f64,
+    measured_lufs: Option<f64>,
+    measurement_status: EffectiveLoudnessStatus,
+    receiver_acceptance: ReceiverAcceptance,
+    proof_id: Option<String>,
+    captured_at_unix_ms: Option<i64>,
+    sample_duration_ms: Option<u64>,
+    capture_bytes: Option<u64>,
+    capture_sha256: Option<String>,
+    candidate_version: Option<String>,
+    source_commit: Option<String>,
+    configuration_hash: Option<String>,
+    measurement_engine: Option<String>,
+    measurement_method: Option<String>,
+    detail: Option<String>,
+    artifact_relative_path: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -434,6 +464,11 @@ impl Api {
                     && path.ends_with("/headend-readiness") =>
             {
                 self.channel_headend_readiness(path)
+            }
+            ("GET", path)
+                if path.starts_with("/api/v1/channels/") && path.ends_with("/loudness-proof") =>
+            {
+                self.channel_loudness_proof(path)
             }
             ("POST", path)
                 if path.starts_with("/api/v1/channels/") && path.ends_with("/headend-profile") =>
@@ -1526,6 +1561,67 @@ impl Api {
         self.headend_readiness(Some(channel_id))
     }
 
+    fn channel_loudness_proof(&self, path: &str) -> ApiResponse {
+        let Some(channel_id) = path_identity(path, "/api/v1/channels/", "/loudness-proof") else {
+            return error_response(400, "invalid_path", "The channel identity is invalid.");
+        };
+        if !is_api_uuid(channel_id) {
+            return error_response(400, "invalid_path", "The channel identity is invalid.");
+        }
+        let snapshot = match self
+            .storage
+            .read_channel_loudness_proof_snapshot(channel_id)
+        {
+            Ok(Some(snapshot)) => snapshot,
+            Ok(None) => {
+                return error_response(404, "channel_not_found", "The channel does not exist.");
+            }
+            Err(message) => return error_response(500, "storage_error", &message),
+        };
+        let mut latest_by_sink = HashMap::new();
+        for stored in snapshot.latest_proofs {
+            latest_by_sink.insert(stored.proof.sink_id.clone(), stored);
+        }
+        let candidate = if latest_by_sink.is_empty() {
+            None
+        } else {
+            match self.station_box_profile_uncached() {
+                Ok(profile) if profile.release.candidate_verified => Some(CandidateIdentity {
+                    version: profile.product_version,
+                    source_commit: profile.source_commit,
+                }),
+                Ok(_) => None,
+                Err(message) => return error_response(500, "readiness_probe_failed", &message),
+            }
+        };
+        let now = match system_time_millis() {
+            Ok(value) => value,
+            Err(message) => return error_response(500, "clock_error", &message),
+        };
+        let sinks = snapshot
+            .output_sinks
+            .into_iter()
+            .map(|sink| {
+                let stored = latest_by_sink.remove(&sink.sink_id);
+                loudness_proof_response(
+                    sink,
+                    stored,
+                    candidate.as_ref(),
+                    &snapshot.configuration_hash,
+                    now,
+                )
+            })
+            .collect();
+        json_response(
+            200,
+            serde_json::to_vec(&ChannelLoudnessProofResponse {
+                channel_id: channel_id.to_string(),
+                sinks,
+            })
+            .expect("serializing loudness proof response cannot fail"),
+        )
+    }
+
     fn apply_channel_headend_profile(&self, path: &str, body: Option<&[u8]>) -> ApiResponse {
         let Some(channel_id) = path_identity(path, "/api/v1/channels/", "/headend-profile") else {
             return error_response(400, "invalid_path", "The channel identity is invalid.");
@@ -1602,6 +1698,12 @@ impl Api {
         }) {
             return Ok(profile.clone());
         }
+        let profile = self.station_box_profile_uncached()?;
+        *cache = Some((cache_checked_at, profile.clone()));
+        Ok(profile)
+    }
+
+    fn station_box_profile_uncached(&self) -> Result<StationBoxProfile, String> {
         let generated_at_unix_ms = match system_time_millis() {
             Ok(value) => value,
             Err(message) => return Err(format!("station clock is unavailable: {message}")),
@@ -1615,10 +1717,8 @@ impl Api {
                 generated_at_unix_ms,
             )?,
         };
-        let profile = derive_station_box_profile(probe)
-            .map_err(|error| format!("readiness probe is invalid: {error}"))?;
-        *cache = Some((cache_checked_at, profile.clone()));
-        Ok(profile)
+        derive_station_box_profile(probe)
+            .map_err(|error| format!("readiness probe is invalid: {error}"))
     }
 
     fn commissioning_report(&self) -> ApiResponse {
@@ -3250,6 +3350,71 @@ const REQUIRED_MEDIA_FACTORIES: [&str; 22] = [
     "jpegdec",
 ];
 
+fn loudness_proof_response(
+    sink: station_schedule::OutputSinkConfiguration,
+    stored: Option<StoredSinkLoudnessProof>,
+    candidate: Option<&CandidateIdentity>,
+    current_configuration_hash: &str,
+    now_unix_ms: i64,
+) -> SinkLoudnessProofResponse {
+    let configured_target_lufs = f64::from(sink.loudness_target_lufs);
+    let Some(stored) = stored else {
+        return SinkLoudnessProofResponse {
+            sink_id: sink.sink_id,
+            label: sink.label,
+            kind: sink.kind,
+            configured_target_lufs,
+            measured_lufs: None,
+            measurement_status: EffectiveLoudnessStatus::NotRun,
+            receiver_acceptance: ReceiverAcceptance::Unknown,
+            proof_id: None,
+            captured_at_unix_ms: None,
+            sample_duration_ms: None,
+            capture_bytes: None,
+            capture_sha256: None,
+            candidate_version: None,
+            source_commit: None,
+            configuration_hash: None,
+            measurement_engine: None,
+            measurement_method: None,
+            detail: None,
+            artifact_relative_path: None,
+        };
+    };
+    let proof = stored.proof;
+    let measurement_status = candidate.map_or(EffectiveLoudnessStatus::Expired, |candidate| {
+        proof.effective_status(
+            candidate,
+            current_configuration_hash,
+            now_unix_ms,
+            LOUDNESS_PROOF_MAX_AGE_MS,
+        )
+    });
+    SinkLoudnessProofResponse {
+        sink_id: sink.sink_id,
+        label: sink.label,
+        kind: sink.kind,
+        configured_target_lufs,
+        measured_lufs: proof
+            .measured_lufs_milli
+            .map(|value| f64::from(value) / 1_000.0),
+        measurement_status,
+        receiver_acceptance: proof.receiver_acceptance,
+        proof_id: Some(proof.proof_id),
+        captured_at_unix_ms: Some(proof.captured_at_unix_ms),
+        sample_duration_ms: Some(proof.sample_duration_ms),
+        capture_bytes: Some(proof.capture_bytes),
+        capture_sha256: Some(proof.capture_sha256),
+        candidate_version: Some(proof.candidate_version),
+        source_commit: proof.source_commit,
+        configuration_hash: Some(proof.configuration_hash),
+        measurement_engine: Some(proof.measurement_engine),
+        measurement_method: Some(proof.measurement_method),
+        detail: Some(proof.detail),
+        artifact_relative_path: stored.artifact_relative_path,
+    }
+}
+
 fn collect_headend_probe(
     storage: &StationStore,
     generated_at_unix_ms: i64,
@@ -4355,6 +4520,153 @@ mod tests {
         let stopped = api.handle("GET", "/api/v1/headend-readiness", None);
         let stopped: serde_json::Value = serde_json::from_slice(&stopped.body).unwrap();
         assert_eq!(stopped["rollup"]["color"], "red");
+
+        std::fs::remove_dir_all(application).unwrap();
+        let _ = std::fs::remove_file(database);
+    }
+
+    #[test]
+    fn loudness_proof_route_expires_historical_pass_after_output_reconfiguration() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let database = std::env::temp_dir().join(format!(
+            "townlight-loudness-proof-api-{}-{nonce}.db",
+            std::process::id()
+        ));
+        let application = database.with_extension("application");
+        std::fs::create_dir_all(&application).unwrap();
+        let mut api =
+            Api::open_with_station_box_probe(&database, &application, station_box_probe()).unwrap();
+        let channel_id = "11111111-2222-4333-8444-555555555555";
+        let sink_id = "22222222-3333-4444-8555-666666666666";
+        let mut channel = ChannelConfiguration {
+            channel_id: channel_id.into(),
+            display_name: "Measured output".into(),
+            output_profile: station_schedule::OutputProfileId::Atsc720p5994,
+            output_sinks: vec![
+                station_schedule::OutputSinkConfiguration::required_udp(
+                    sink_id,
+                    "Cable primary",
+                    "127.0.0.1:5500",
+                    -24.0,
+                ),
+                station_schedule::OutputSinkConfiguration::required_udp(
+                    "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+                    "Streaming primary",
+                    "127.0.0.1:5501",
+                    -16.0,
+                ),
+            ],
+            enabled: true,
+        };
+        api.storage.put_channel(&channel).unwrap();
+        let configuration_hash = api
+            .storage
+            .current_channel_output_configuration_hash(channel_id)
+            .unwrap();
+        let captured_at_unix_ms = system_time_millis().unwrap();
+        api.storage
+            .append_sink_loudness_proof(
+                &station_readiness::SinkLoudnessProof {
+                    proof_id: "33333333-4444-4555-8666-777777777777".into(),
+                    channel_id: channel_id.into(),
+                    sink_id: sink_id.into(),
+                    target_lufs_milli: -24_000,
+                    measured_lufs_milli: Some(-23_600),
+                    tolerance_lufs_milli: 2_000,
+                    outcome: station_readiness::LoudnessProofOutcome::Pass,
+                    receiver_acceptance: ReceiverAcceptance::Unknown,
+                    captured_at_unix_ms: captured_at_unix_ms - 2_000,
+                    sample_duration_ms: 30_000,
+                    capture_bytes: 1_000_000,
+                    capture_sha256:
+                        "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+                    candidate_version: "0.1.0".into(),
+                    source_commit: Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into()),
+                    configuration_hash,
+                    measurement_engine: "GStreamer 1.28.6".into(),
+                    measurement_method: "decoded post-mux MPEG-TS ebur128".into(),
+                    detail: "local target-group proof; receiver acceptance not attempted".into(),
+                },
+                Some("proofs/run-1/cable.ts"),
+            )
+            .unwrap();
+        for index in 0_i64..1_000 {
+            api.storage
+                .append_sink_loudness_proof(
+                    &station_readiness::SinkLoudnessProof {
+                        proof_id: format!("{index:08x}-0000-4000-8000-000000000000"),
+                        channel_id: channel_id.into(),
+                        sink_id: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee".into(),
+                        target_lufs_milli: -16_000,
+                        measured_lufs_milli: Some(-15_900),
+                        tolerance_lufs_milli: 2_000,
+                        outcome: station_readiness::LoudnessProofOutcome::Pass,
+                        receiver_acceptance: ReceiverAcceptance::Unknown,
+                        captured_at_unix_ms: captured_at_unix_ms - 1_000 + index,
+                        sample_duration_ms: 30_000,
+                        capture_bytes: 1_000_000,
+                        capture_sha256:
+                            "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+                                .into(),
+                        candidate_version: "0.1.0".into(),
+                        source_commit: Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into()),
+                        configuration_hash: api
+                            .storage
+                            .current_channel_output_configuration_hash(channel_id)
+                            .unwrap(),
+                        measurement_engine: "GStreamer 1.28.6".into(),
+                        measurement_method: "decoded post-mux MPEG-TS ebur128".into(),
+                        detail: "bounded per-sink history regression fixture".into(),
+                    },
+                    None,
+                )
+                .unwrap();
+        }
+
+        let current = api.handle(
+            "GET",
+            &format!("/api/v1/channels/{channel_id}/loudness-proof"),
+            None,
+        );
+        assert_eq!(current.status, 200);
+        let current: serde_json::Value = serde_json::from_slice(&current.body).unwrap();
+        assert_eq!(current["sinks"][0]["measurement_status"], "pass");
+        assert_eq!(current["sinks"][0]["measured_lufs"], -23.6);
+        assert_eq!(current["sinks"][0]["receiver_acceptance"], "unknown");
+
+        api.cached_station_box_profile().unwrap();
+        let mut unverified_probe = station_box_probe();
+        unverified_probe.release.state = StationReadinessState::Blocked;
+        unverified_probe.release.candidate_verified = false;
+        api.station_box_probe_override = Some(unverified_probe);
+        let unverified = api.handle(
+            "GET",
+            &format!("/api/v1/channels/{channel_id}/loudness-proof"),
+            None,
+        );
+        assert_eq!(
+            unverified.status,
+            200,
+            "{}",
+            String::from_utf8_lossy(&unverified.body)
+        );
+        let unverified: serde_json::Value = serde_json::from_slice(&unverified.body).unwrap();
+        assert_eq!(unverified["sinks"][0]["measurement_status"], "expired");
+
+        api.station_box_probe_override = Some(station_box_probe());
+        channel.output_sinks[0].destination = "127.0.0.1:5510".into();
+        api.storage.put_channel(&channel).unwrap();
+        let expired = api.handle(
+            "GET",
+            &format!("/api/v1/channels/{channel_id}/loudness-proof"),
+            None,
+        );
+        let expired: serde_json::Value = serde_json::from_slice(&expired.body).unwrap();
+        assert_eq!(expired["sinks"][0]["measurement_status"], "expired");
+        assert_eq!(expired["sinks"][0]["receiver_acceptance"], "unknown");
 
         std::fs::remove_dir_all(application).unwrap();
         let _ = std::fs::remove_file(database);

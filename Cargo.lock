@@ -1855,6 +1855,7 @@ dependencies = [
  "station-domain",
  "station-live",
  "station-media-lifecycle",
+ "station-readiness",
  "station-schedule",
  "station-update",
 ]

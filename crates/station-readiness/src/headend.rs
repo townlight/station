@@ -10,6 +10,202 @@ use super::{
 const SCHEMA_VERSION: u32 = 1;
 const MAX_HEARTBEAT_AGE_MS: i64 = 15_000;
 const MAX_TEXT: usize = 1_000;
+const DEFAULT_LOUDNESS_TOLERANCE_MILLI: i32 = 2_000;
+const MAX_PROOF_SAMPLE_DURATION_MS: u64 = 300_000;
+const MAX_PROOF_CAPTURE_BYTES: u64 = 256 * 1024 * 1024;
+const MAX_PROOF_ENGINE_TEXT: usize = 200;
+const MAX_PROOF_METHOD_TEXT: usize = 500;
+const MAX_PROOF_DETAIL_TEXT: usize = 4_000;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CandidateIdentity {
+    pub version: String,
+    pub source_commit: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LoudnessProofOutcome {
+    Pass,
+    Fail,
+    NotRun,
+    Invalid,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EffectiveLoudnessStatus {
+    Pass,
+    Fail,
+    NotRun,
+    Invalid,
+    Expired,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReceiverAcceptance {
+    NotAttempted,
+    Unknown,
+    Verified,
+    Rejected,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SinkLoudnessProof {
+    pub proof_id: String,
+    pub channel_id: String,
+    pub sink_id: String,
+    pub target_lufs_milli: i32,
+    pub measured_lufs_milli: Option<i32>,
+    pub tolerance_lufs_milli: i32,
+    pub outcome: LoudnessProofOutcome,
+    pub receiver_acceptance: ReceiverAcceptance,
+    pub captured_at_unix_ms: i64,
+    pub sample_duration_ms: u64,
+    pub capture_bytes: u64,
+    pub capture_sha256: String,
+    pub candidate_version: String,
+    pub source_commit: Option<String>,
+    pub configuration_hash: String,
+    pub measurement_engine: String,
+    pub measurement_method: String,
+    pub detail: String,
+}
+
+impl SinkLoudnessProof {
+    pub fn validate(&self) -> Result<(), ValidationError> {
+        if !is_uuid(&self.proof_id) || !is_uuid(&self.channel_id) || !is_uuid(&self.sink_id) {
+            return invalid("loudness proof identities must be canonical UUIDs");
+        }
+        if !is_executable_loudness_target(self.target_lufs_milli)
+            || self.tolerance_lufs_milli != DEFAULT_LOUDNESS_TOLERANCE_MILLI
+        {
+            return invalid("loudness proof target or tolerance is unsupported");
+        }
+        if self
+            .measured_lufs_milli
+            .is_some_and(|value| !(-200_000..=20_000).contains(&value))
+        {
+            return invalid("loudness proof measurement is outside the supported range");
+        }
+        match (self.outcome, self.measured_lufs_milli) {
+            (LoudnessProofOutcome::Pass | LoudnessProofOutcome::Fail, None) => {
+                return invalid("a completed loudness proof requires a measurement");
+            }
+            (LoudnessProofOutcome::NotRun | LoudnessProofOutcome::Invalid, Some(_)) => {
+                return invalid(
+                    "an incomplete or invalid loudness proof cannot contain a measurement",
+                );
+            }
+            _ => {}
+        }
+        if matches!(
+            self.outcome,
+            LoudnessProofOutcome::Pass | LoudnessProofOutcome::Fail
+        ) && derive_loudness_outcome(
+            self.target_lufs_milli,
+            self.measured_lufs_milli,
+            self.tolerance_lufs_milli,
+        ) != self.outcome
+        {
+            return invalid("loudness proof outcome does not match its measurement");
+        }
+        if self.captured_at_unix_ms < 0
+            || self.sample_duration_ms == 0
+            || self.sample_duration_ms > MAX_PROOF_SAMPLE_DURATION_MS
+            || self.capture_bytes == 0
+            || self.capture_bytes > MAX_PROOF_CAPTURE_BYTES
+            || !is_sha256_hash(&self.capture_sha256)
+            || !is_sha256_hash(&self.configuration_hash)
+        {
+            return invalid("loudness proof capture facts are invalid or unbounded");
+        }
+        visible_bounded(
+            &self.candidate_version,
+            "loudness proof candidate version",
+            MAX_PROOF_ENGINE_TEXT,
+        )?;
+        if let Some(source_commit) = &self.source_commit
+            && !is_source_commit(source_commit)
+        {
+            return invalid("loudness proof source commit must be a lowercase SHA-1 identity");
+        }
+        visible_bounded(
+            &self.measurement_engine,
+            "loudness proof measurement engine",
+            MAX_PROOF_ENGINE_TEXT,
+        )?;
+        visible_bounded(
+            &self.measurement_method,
+            "loudness proof measurement method",
+            MAX_PROOF_METHOD_TEXT,
+        )?;
+        visible_bounded(&self.detail, "loudness proof detail", MAX_PROOF_DETAIL_TEXT)
+    }
+
+    pub fn effective_status(
+        &self,
+        current_candidate: &CandidateIdentity,
+        current_configuration_hash: &str,
+        now_unix_ms: i64,
+        max_age_ms: i64,
+    ) -> EffectiveLoudnessStatus {
+        if self.validate().is_err()
+            || now_unix_ms < self.captured_at_unix_ms
+            || max_age_ms <= 0
+            || !is_sha256_hash(current_configuration_hash)
+            || current_candidate.source_commit.is_none()
+            || !current_candidate
+                .source_commit
+                .as_deref()
+                .is_some_and(is_source_commit)
+            || self.candidate_version != current_candidate.version
+            || self.source_commit != current_candidate.source_commit
+            || self.configuration_hash != current_configuration_hash
+            || now_unix_ms - self.captured_at_unix_ms > max_age_ms
+        {
+            return EffectiveLoudnessStatus::Expired;
+        }
+        match self.outcome {
+            LoudnessProofOutcome::Pass => EffectiveLoudnessStatus::Pass,
+            LoudnessProofOutcome::Fail => EffectiveLoudnessStatus::Fail,
+            LoudnessProofOutcome::NotRun => EffectiveLoudnessStatus::NotRun,
+            LoudnessProofOutcome::Invalid => EffectiveLoudnessStatus::Invalid,
+        }
+    }
+
+    pub fn claims_receiver_acceptance(&self) -> bool {
+        self.outcome == LoudnessProofOutcome::Pass
+            && self.receiver_acceptance == ReceiverAcceptance::Verified
+    }
+}
+
+pub fn derive_loudness_outcome(
+    target_lufs_milli: i32,
+    measured_lufs_milli: Option<i32>,
+    tolerance_lufs_milli: i32,
+) -> LoudnessProofOutcome {
+    if !is_executable_loudness_target(target_lufs_milli)
+        || tolerance_lufs_milli != DEFAULT_LOUDNESS_TOLERANCE_MILLI
+    {
+        return LoudnessProofOutcome::Invalid;
+    }
+    let Some(measured_lufs_milli) = measured_lufs_milli else {
+        return LoudnessProofOutcome::NotRun;
+    };
+    if !(-200_000..=20_000).contains(&measured_lufs_milli) {
+        return LoudnessProofOutcome::Invalid;
+    }
+    let distance = i64::from(measured_lufs_milli) - i64::from(target_lufs_milli);
+    if distance.abs() <= i64::from(tolerance_lufs_milli) {
+        LoudnessProofOutcome::Pass
+    } else {
+        LoudnessProofOutcome::Fail
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -503,6 +699,31 @@ fn visible(value: &str, field: &str) -> Result<(), ValidationError> {
         return invalid(format!("{field} must contain visible bounded text"));
     }
     Ok(())
+}
+
+fn visible_bounded(value: &str, field: &str, max_length: usize) -> Result<(), ValidationError> {
+    if value.trim().is_empty() || value.len() > max_length || value.chars().any(char::is_control) {
+        return invalid(format!("{field} must contain visible bounded text"));
+    }
+    Ok(())
+}
+
+fn is_executable_loudness_target(value: i32) -> bool {
+    value == -24_000 || value == -16_000
+}
+
+fn is_sha256_hash(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+fn is_source_commit(value: &str) -> bool {
+    value.len() == 40
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
 fn invalid<T>(message: impl Into<String>) -> Result<T, ValidationError> {

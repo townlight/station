@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::ffi::{CStr, CString, c_char, c_int, c_longlong, c_void};
 use std::os::windows::fs::MetadataExt;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::ptr;
 use std::{
     fs,
@@ -35,6 +35,7 @@ use station_media_lifecycle::{
     AssetLoudnessAnalysis, IngestJobStatus, IngestSourceKind, LoudnessGateStatus, MediaIngestJob,
     TranscodeFormat, TranscodeJob, TranscodeJobStatus, WatchFileObservation, WatchFolderConfig,
 };
+use station_readiness::{LoudnessProofOutcome, ReceiverAcceptance, SinkLoudnessProof};
 use station_schedule::{
     AssetReadiness, ChannelConfiguration, CommitPlan, CommitReport, DispatchJob, DispatchStatus,
     HeadendProfileApplication, HeadendProfileApplyRequest, HeadendProfileId, HeadendSinkContract,
@@ -269,6 +270,20 @@ impl SrtOutputSecret {
     pub fn expose(&self) -> &str {
         &self.passphrase
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredSinkLoudnessProof {
+    pub proof: SinkLoudnessProof,
+    pub artifact_relative_path: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ChannelLoudnessProofSnapshot {
+    pub channel_id: String,
+    pub output_sinks: Vec<OutputSinkConfiguration>,
+    pub configuration_hash: String,
+    pub latest_proofs: Vec<StoredSinkLoudnessProof>,
 }
 
 pub struct StationStore {
@@ -658,6 +673,7 @@ impl StationStore {
         store.migrate_headend_sink_contract()?;
         store.migrate_channel_output_sink_order()?;
         store.migrate_channel_output_sinks()?;
+        store.migrate_sink_loudness_proofs()?;
         store.initialize_cg_schema()?;
         store.migrate_cg_feed_cache_schema()?;
         store.execute(
@@ -5737,6 +5753,281 @@ impl StationStore {
         }
     }
 
+    pub fn read_channel_loudness_proof_snapshot(
+        &self,
+        channel_id: &str,
+    ) -> Result<Option<ChannelLoudnessProofSnapshot>, String> {
+        self.execute("BEGIN DEFERRED")?;
+        let outcome: Result<Option<ChannelLoudnessProofSnapshot>, String> = (|| {
+            let Some(channel) = self
+                .list_channels()?
+                .into_iter()
+                .find(|channel| channel.channel_id == channel_id)
+            else {
+                return Ok(None);
+            };
+            let output_sinks = channel
+                .output_sinks
+                .into_iter()
+                .filter(|sink| {
+                    sink.enabled && matches!(sink.kind, OutputSinkKind::UdpTs | OutputSinkKind::Srt)
+                })
+                .collect::<Vec<_>>();
+            let configuration_hash = self.current_channel_output_configuration_hash(channel_id)?;
+            let mut latest_proofs = Vec::with_capacity(output_sinks.len());
+            for sink in &output_sinks {
+                if let Some(proof) =
+                    self.read_latest_sink_loudness_proof(channel_id, &sink.sink_id)?
+                {
+                    latest_proofs.push(proof);
+                }
+            }
+            Ok(Some(ChannelLoudnessProofSnapshot {
+                channel_id: channel_id.to_string(),
+                output_sinks,
+                configuration_hash,
+                latest_proofs,
+            }))
+        })();
+        match outcome {
+            Ok(snapshot) => match self.execute("COMMIT") {
+                Ok(()) => Ok(snapshot),
+                Err(error) => {
+                    let _ = self.execute("ROLLBACK");
+                    Err(error)
+                }
+            },
+            Err(error) => {
+                let _ = self.execute("ROLLBACK");
+                Err(error)
+            }
+        }
+    }
+
+    pub fn current_channel_output_configuration_hash(
+        &self,
+        channel_id: &str,
+    ) -> Result<String, String> {
+        let statement = self.prepare(
+            "SELECT channels.output_profile, channels.enabled, channel_output_sinks.sink_order, channel_output_sinks.sink_id, channel_output_sinks.label, channel_output_sinks.kind, channel_output_sinks.destination, channel_output_sinks.loudness_target_milli, channel_output_sinks.required, channel_output_sinks.enabled, channel_output_sinks.headend_profile, channel_output_sinks.headend_muxrate_kbps, channel_output_sinks.headend_packet_size FROM channels JOIN channel_output_sinks ON channel_output_sinks.channel_id=channels.channel_id WHERE channels.channel_id=?1 ORDER BY channel_output_sinks.sink_order, channel_output_sinks.sink_id",
+        )?;
+        let channel_id = c_string(channel_id, "channel identity")?;
+        bind_text(self.database, statement.raw, 1, &channel_id)?;
+        let mut digest = Sha256::new();
+        digest.update(b"townlight-channel-output-configuration-v1");
+        hash_field(
+            &mut digest,
+            channel_id.as_c_str().to_string_lossy().as_ref(),
+        );
+        let mut row_count = 0_u32;
+        loop {
+            match unsafe { sqlite3_step(statement.raw) } {
+                SQLITE_ROW => {
+                    if row_count == 0 {
+                        hash_field(&mut digest, &column_text(statement.raw, 0)?);
+                        hash_field(
+                            &mut digest,
+                            if unsafe { sqlite3_column_int64(statement.raw, 1) } == 1 {
+                                "enabled"
+                            } else {
+                                "disabled"
+                            },
+                        );
+                    }
+                    for column in [2, 3, 4, 5, 6, 10] {
+                        hash_field(&mut digest, &column_text(statement.raw, column)?);
+                    }
+                    for column in [7, 8, 9, 11, 12] {
+                        hash_field(
+                            &mut digest,
+                            &unsafe { sqlite3_column_int64(statement.raw, column) }.to_string(),
+                        );
+                    }
+                    row_count = row_count
+                        .checked_add(1)
+                        .ok_or("channel output sink count exceeds hash range")?;
+                }
+                SQLITE_DONE => {
+                    if row_count == 0 {
+                        return Err("channel has no current output sinks".into());
+                    }
+                    return Ok(format!("{:x}", digest.finalize()));
+                }
+                _ => return Err(sqlite_error(self.database)),
+            }
+        }
+    }
+
+    pub fn append_sink_loudness_proof(
+        &self,
+        proof: &SinkLoudnessProof,
+        artifact_relative_path: Option<&str>,
+    ) -> Result<(), String> {
+        proof.validate().map_err(|error| format!("{error:?}"))?;
+        if !matches!(
+            proof.receiver_acceptance,
+            ReceiverAcceptance::NotAttempted | ReceiverAcceptance::Unknown
+        ) {
+            return Err("local loudness proof cannot claim independent receiver acceptance".into());
+        }
+        if let Some(path) = artifact_relative_path {
+            validate_artifact_relative_path(path)?;
+        }
+        self.execute("BEGIN IMMEDIATE")?;
+        let outcome = (|| {
+            let current_hash = self.current_channel_output_configuration_hash(&proof.channel_id)?;
+            if proof.configuration_hash != current_hash {
+                return Err("loudness proof configuration hash is stale".into());
+            }
+            let statement = self.prepare(
+                "SELECT loudness_target_milli FROM channel_output_sinks WHERE channel_id=?1 AND sink_id=?2",
+            )?;
+            let channel_id = c_string(&proof.channel_id, "loudness proof channel identity")?;
+            let sink_id = c_string(&proof.sink_id, "loudness proof sink identity")?;
+            bind_text(self.database, statement.raw, 1, &channel_id)?;
+            bind_text(self.database, statement.raw, 2, &sink_id)?;
+            let target = match unsafe { sqlite3_step(statement.raw) } {
+                SQLITE_ROW => unsafe { sqlite3_column_int64(statement.raw, 0) },
+                SQLITE_DONE => return Err("loudness proof sink is not currently configured".into()),
+                _ => return Err(sqlite_error(self.database)),
+            };
+            if target != i64::from(proof.target_lufs_milli) {
+                return Err("loudness proof target does not match current sink".into());
+            }
+            let statement = self.prepare(
+                "INSERT INTO channel_output_loudness_proofs(proof_id, channel_id, sink_id, target_lufs_milli, measured_lufs_milli, tolerance_lufs_milli, outcome, receiver_acceptance, captured_at_unix_ms, sample_duration_ms, capture_bytes, capture_sha256, candidate_version, source_commit, configuration_hash, measurement_engine, measurement_method, detail, artifact_relative_path) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
+            )?;
+            let values = [
+                c_string(&proof.proof_id, "loudness proof identity")?,
+                c_string(&proof.channel_id, "loudness proof channel identity")?,
+                c_string(&proof.sink_id, "loudness proof sink identity")?,
+                c_string(outcome_name(proof.outcome), "loudness proof outcome")?,
+                c_string(
+                    receiver_acceptance_name(proof.receiver_acceptance),
+                    "loudness proof receiver acceptance",
+                )?,
+                c_string(&proof.capture_sha256, "loudness proof capture hash")?,
+                c_string(&proof.candidate_version, "loudness proof candidate version")?,
+                c_string(
+                    proof.source_commit.as_deref().unwrap_or_default(),
+                    "loudness proof source commit",
+                )?,
+                c_string(
+                    &proof.configuration_hash,
+                    "loudness proof configuration hash",
+                )?,
+                c_string(
+                    &proof.measurement_engine,
+                    "loudness proof measurement engine",
+                )?,
+                c_string(
+                    &proof.measurement_method,
+                    "loudness proof measurement method",
+                )?,
+                c_string(&proof.detail, "loudness proof detail")?,
+                c_string(
+                    artifact_relative_path.unwrap_or_default(),
+                    "loudness proof artifact path",
+                )?,
+            ];
+            for (index, value) in values[..3].iter().enumerate() {
+                bind_text(self.database, statement.raw, (index + 1) as c_int, value)?;
+            }
+            bind_i64(
+                self.database,
+                statement.raw,
+                4,
+                i64::from(proof.target_lufs_milli),
+            )?;
+            bind_i64(
+                self.database,
+                statement.raw,
+                5,
+                proof
+                    .measured_lufs_milli
+                    .map_or(i64::from(i32::MIN), i64::from),
+            )?;
+            bind_i64(
+                self.database,
+                statement.raw,
+                6,
+                i64::from(proof.tolerance_lufs_milli),
+            )?;
+            bind_text(self.database, statement.raw, 7, &values[3])?;
+            bind_text(self.database, statement.raw, 8, &values[4])?;
+            bind_i64(self.database, statement.raw, 9, proof.captured_at_unix_ms)?;
+            bind_i64(
+                self.database,
+                statement.raw,
+                10,
+                checked_i64(proof.sample_duration_ms, "loudness proof sample duration")?,
+            )?;
+            bind_i64(
+                self.database,
+                statement.raw,
+                11,
+                checked_i64(proof.capture_bytes, "loudness proof capture size")?,
+            )?;
+            for (index, value) in values[5..].iter().enumerate() {
+                bind_text(self.database, statement.raw, (index + 12) as c_int, value)?;
+            }
+            expect_done(self.database, statement.raw)
+        })();
+        self.finish_transaction(outcome)
+    }
+
+    pub fn read_latest_sink_loudness_proof(
+        &self,
+        channel_id: &str,
+        sink_id: &str,
+    ) -> Result<Option<StoredSinkLoudnessProof>, String> {
+        Ok(self
+            .list_sink_loudness_proofs(channel_id, Some(sink_id), 1)?
+            .into_iter()
+            .next())
+    }
+
+    pub fn list_sink_loudness_proofs(
+        &self,
+        channel_id: &str,
+        sink_id: Option<&str>,
+        limit: u32,
+    ) -> Result<Vec<StoredSinkLoudnessProof>, String> {
+        if !(1..=1_000).contains(&limit) {
+            return Err("loudness proof listing limit must be between 1 and 1000".into());
+        }
+        let statement = if sink_id.is_some() {
+            self.prepare(
+                "SELECT proof_id, channel_id, sink_id, target_lufs_milli, measured_lufs_milli, tolerance_lufs_milli, outcome, receiver_acceptance, captured_at_unix_ms, sample_duration_ms, capture_bytes, capture_sha256, candidate_version, source_commit, configuration_hash, measurement_engine, measurement_method, detail, artifact_relative_path FROM channel_output_loudness_proofs WHERE channel_id=? AND sink_id=? ORDER BY captured_at_unix_ms DESC, proof_id DESC LIMIT 1000",
+            )?
+        } else {
+            self.prepare(
+                "SELECT proof_id, channel_id, sink_id, target_lufs_milli, measured_lufs_milli, tolerance_lufs_milli, outcome, receiver_acceptance, captured_at_unix_ms, sample_duration_ms, capture_bytes, capture_sha256, candidate_version, source_commit, configuration_hash, measurement_engine, measurement_method, detail, artifact_relative_path FROM channel_output_loudness_proofs WHERE channel_id=? ORDER BY captured_at_unix_ms DESC, proof_id DESC LIMIT 1000",
+            )?
+        };
+        let channel_id = c_string(channel_id, "loudness proof channel identity")?;
+        let sink_id = sink_id
+            .map(|sink_id| c_string(sink_id, "loudness proof sink identity"))
+            .transpose()?;
+        bind_text(self.database, statement.raw, 1, &channel_id)?;
+        if let Some(sink_id) = &sink_id {
+            bind_text(self.database, statement.raw, 2, sink_id)?;
+        }
+        let mut proofs = Vec::new();
+        loop {
+            match unsafe { sqlite3_step(statement.raw) } {
+                SQLITE_ROW => {
+                    proofs.push(read_sink_loudness_proof_row(statement.raw)?);
+                    if proofs.len() >= limit as usize {
+                        return Ok(proofs);
+                    }
+                }
+                SQLITE_DONE => return Ok(proofs),
+                _ => return Err(sqlite_error(self.database)),
+            }
+        }
+    }
+
     pub fn put_asset_loudness(&self, analysis: &AssetLoudnessAnalysis) -> Result<(), String> {
         analysis.validate().map_err(|error| format!("{error:?}"))?;
         let statement = self.prepare(
@@ -6794,6 +7085,44 @@ impl StationStore {
         )
     }
 
+    fn migrate_sink_loudness_proofs(&self) -> Result<(), String> {
+        self.execute(
+            "CREATE TABLE IF NOT EXISTS channel_output_loudness_proofs (\
+               proof_id TEXT PRIMARY KEY,\
+               channel_id TEXT NOT NULL,\
+               sink_id TEXT NOT NULL,\
+               target_lufs_milli INTEGER NOT NULL CHECK (target_lufs_milli IN (-24000,-16000)),\
+               measured_lufs_milli INTEGER NOT NULL DEFAULT -2147483648,\
+               tolerance_lufs_milli INTEGER NOT NULL CHECK (tolerance_lufs_milli = 2000),\
+               outcome TEXT NOT NULL CHECK (outcome IN ('pass','fail','not_run','invalid')),\
+               receiver_acceptance TEXT NOT NULL CHECK (receiver_acceptance IN ('not_attempted','unknown','verified','rejected')),\
+               captured_at_unix_ms INTEGER NOT NULL CHECK (captured_at_unix_ms >= 0),\
+               sample_duration_ms INTEGER NOT NULL CHECK (sample_duration_ms BETWEEN 1 AND 300000),\
+               capture_bytes INTEGER NOT NULL CHECK (capture_bytes BETWEEN 1 AND 268435456),\
+               capture_sha256 TEXT NOT NULL,\
+               candidate_version TEXT NOT NULL,\
+               source_commit TEXT NOT NULL DEFAULT '',\
+               configuration_hash TEXT NOT NULL,\
+               measurement_engine TEXT NOT NULL,\
+               measurement_method TEXT NOT NULL,\
+               detail TEXT NOT NULL,\
+               artifact_relative_path TEXT NOT NULL DEFAULT ''\
+             );",
+        )?;
+        self.execute(
+            "CREATE INDEX IF NOT EXISTS channel_output_loudness_proofs_sink_time ON channel_output_loudness_proofs(channel_id, sink_id, captured_at_unix_ms, proof_id)",
+        )
+        .map_err(|error| format!("create loudness proof index: {error}"))?;
+        self.execute(
+            "CREATE TRIGGER IF NOT EXISTS channel_output_loudness_proofs_no_update BEFORE UPDATE ON channel_output_loudness_proofs BEGIN SELECT RAISE(ABORT, 'loudness proofs are append-only'); END;",
+        )
+        .map_err(|error| format!("create loudness proof update trigger: {error}"))?;
+        self.execute(
+            "CREATE TRIGGER IF NOT EXISTS channel_output_loudness_proofs_no_delete BEFORE DELETE ON channel_output_loudness_proofs BEGIN SELECT RAISE(ABORT, 'loudness proofs are append-only'); END;",
+        )
+        .map_err(|error| format!("create loudness proof delete trigger: {error}"))
+    }
+
     fn migrate_ingest_transcode_status(&self) -> Result<(), String> {
         let statement = self.prepare(
             "SELECT sql FROM sqlite_master WHERE type='table' AND name='media_ingest_jobs'",
@@ -7038,6 +7367,32 @@ fn expect_done(database: *mut Sqlite3, statement: *mut SqliteStatement) -> Resul
 
 fn c_string(value: &str, field: &str) -> Result<CString, String> {
     CString::new(value).map_err(|_| format!("{field} contains a null byte"))
+}
+
+fn hash_field(digest: &mut Sha256, value: &str) {
+    digest.update((value.len() as u64).to_le_bytes());
+    digest.update(value.as_bytes());
+}
+
+fn validate_artifact_relative_path(value: &str) -> Result<(), String> {
+    if value.is_empty() || value.len() > 2_048 || value.chars().any(char::is_control) {
+        return Err("loudness proof artifact path must be a bounded visible relative path".into());
+    }
+    let path = Path::new(value);
+    if path.is_absolute()
+        || path.components().any(|component| {
+            matches!(
+                component,
+                Component::Prefix(_)
+                    | Component::RootDir
+                    | Component::ParentDir
+                    | Component::CurDir
+            )
+        })
+    {
+        return Err("loudness proof artifact path must not escape its managed root".into());
+    }
+    Ok(())
 }
 
 fn checked_i64(value: u64, field: &str) -> Result<i64, String> {
@@ -7540,6 +7895,52 @@ fn read_asset_loudness_row(
     };
     analysis.validate().map_err(|error| format!("{error:?}"))?;
     Ok(analysis)
+}
+
+fn read_sink_loudness_proof_row(
+    statement: *mut SqliteStatement,
+) -> Result<StoredSinkLoudnessProof, String> {
+    let measured = unsafe { sqlite3_column_int64(statement, 4) };
+    let source_commit = column_text(statement, 13)?;
+    let artifact_relative_path = column_text(statement, 18)?;
+    if !artifact_relative_path.is_empty() {
+        validate_artifact_relative_path(&artifact_relative_path)?;
+    }
+    let proof =
+        SinkLoudnessProof {
+            proof_id: column_text(statement, 0)?,
+            channel_id: column_text(statement, 1)?,
+            sink_id: column_text(statement, 2)?,
+            target_lufs_milli: i32::try_from(unsafe { sqlite3_column_int64(statement, 3) })
+                .map_err(|_| "database returned invalid loudness proof target".to_string())?,
+            measured_lufs_milli: if measured == i64::from(i32::MIN) {
+                None
+            } else {
+                Some(i32::try_from(measured).map_err(|_| {
+                    "database returned invalid loudness proof measurement".to_string()
+                })?)
+            },
+            tolerance_lufs_milli: i32::try_from(unsafe { sqlite3_column_int64(statement, 5) })
+                .map_err(|_| "database returned invalid loudness proof tolerance".to_string())?,
+            outcome: parse_loudness_proof_outcome(&column_text(statement, 6)?)?,
+            receiver_acceptance: parse_receiver_acceptance(&column_text(statement, 7)?)?,
+            captured_at_unix_ms: unsafe { sqlite3_column_int64(statement, 8) },
+            sample_duration_ms: column_u64(statement, 9, "loudness proof sample duration")?,
+            capture_bytes: column_u64(statement, 10, "loudness proof capture size")?,
+            capture_sha256: column_text(statement, 11)?,
+            candidate_version: column_text(statement, 12)?,
+            source_commit: (!source_commit.is_empty()).then_some(source_commit),
+            configuration_hash: column_text(statement, 14)?,
+            measurement_engine: column_text(statement, 15)?,
+            measurement_method: column_text(statement, 16)?,
+            detail: column_text(statement, 17)?,
+        };
+    proof.validate().map_err(|error| format!("{error:?}"))?;
+    Ok(StoredSinkLoudnessProof {
+        proof,
+        artifact_relative_path: (!artifact_relative_path.is_empty())
+            .then_some(artifact_relative_path),
+    })
 }
 
 fn read_ingest_job_row(statement: *mut SqliteStatement) -> Result<MediaIngestJob, String> {
@@ -8277,6 +8678,48 @@ fn parse_loudness_status(value: &str) -> Result<LoudnessGateStatus, String> {
     }
 }
 
+fn outcome_name(value: LoudnessProofOutcome) -> &'static str {
+    match value {
+        LoudnessProofOutcome::Pass => "pass",
+        LoudnessProofOutcome::Fail => "fail",
+        LoudnessProofOutcome::NotRun => "not_run",
+        LoudnessProofOutcome::Invalid => "invalid",
+    }
+}
+
+fn parse_loudness_proof_outcome(value: &str) -> Result<LoudnessProofOutcome, String> {
+    match value {
+        "pass" => Ok(LoudnessProofOutcome::Pass),
+        "fail" => Ok(LoudnessProofOutcome::Fail),
+        "not_run" => Ok(LoudnessProofOutcome::NotRun),
+        "invalid" => Ok(LoudnessProofOutcome::Invalid),
+        _ => Err(format!(
+            "database returned invalid loudness proof outcome {value}"
+        )),
+    }
+}
+
+fn receiver_acceptance_name(value: ReceiverAcceptance) -> &'static str {
+    match value {
+        ReceiverAcceptance::NotAttempted => "not_attempted",
+        ReceiverAcceptance::Unknown => "unknown",
+        ReceiverAcceptance::Verified => "verified",
+        ReceiverAcceptance::Rejected => "rejected",
+    }
+}
+
+fn parse_receiver_acceptance(value: &str) -> Result<ReceiverAcceptance, String> {
+    match value {
+        "not_attempted" => Ok(ReceiverAcceptance::NotAttempted),
+        "unknown" => Ok(ReceiverAcceptance::Unknown),
+        "verified" => Ok(ReceiverAcceptance::Verified),
+        "rejected" => Ok(ReceiverAcceptance::Rejected),
+        _ => Err(format!(
+            "database returned invalid loudness proof receiver acceptance {value}"
+        )),
+    }
+}
+
 fn ingest_source_kind_name(value: IngestSourceKind) -> &'static str {
     match value {
         IngestSourceKind::OperatorPath => "operator_path",
@@ -8596,6 +9039,57 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn loudness_proof_history_is_rejected_by_update_and_delete_triggers() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let database = std::env::temp_dir().join(format!("townlight-proof-trigger-{nonce}.db"));
+        let store = StationStore::open(&database).unwrap();
+        store
+            .execute(
+                "INSERT INTO channel_output_loudness_proofs(\
+                 proof_id, channel_id, sink_id, target_lufs_milli, measured_lufs_milli,\
+                 tolerance_lufs_milli, outcome, receiver_acceptance, captured_at_unix_ms,\
+                 sample_duration_ms, capture_bytes, capture_sha256, candidate_version, source_commit,\
+                 configuration_hash, measurement_engine, measurement_method, detail, artifact_relative_path)\
+                 VALUES('11111111-2222-4333-8444-555555555555',\
+                   '22222222-3333-4444-8555-666666666666',\
+                   '33333333-4444-4555-8666-777777777777', -24000, -24000, 2000,\
+                   'pass', 'unknown', 1, 1, 1,\
+                   'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',\
+                   '0.3.0', '',\
+                   'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',\
+                   'test', 'test', '', '')",
+            )
+            .unwrap();
+        assert!(
+            store
+                .execute(
+                    "UPDATE channel_output_loudness_proofs SET detail='tampered'\
+                 WHERE proof_id='11111111-2222-4333-8444-555555555555'",
+                )
+                .is_err()
+        );
+        assert!(
+            store
+                .execute(
+                    "DELETE FROM channel_output_loudness_proofs\
+                 WHERE proof_id='11111111-2222-4333-8444-555555555555'",
+                )
+                .is_err()
+        );
+        drop(store);
+        for candidate in [
+            database.clone(),
+            PathBuf::from(format!("{}-wal", database.display())),
+            PathBuf::from(format!("{}-shm", database.display())),
+        ] {
+            let _ = std::fs::remove_file(candidate);
+        }
+    }
 
     #[test]
     fn bare_database_filename_uses_the_current_directory_as_its_data_root() {

@@ -33,6 +33,8 @@ pub struct IngestedAsset {
 #[derive(Debug, Clone, PartialEq)]
 pub struct LoudnessMeasurement {
     pub integrated_lufs: f64,
+    /// Rounded-up running time covered by valid ebur128 analyzer messages.
+    pub analyzed_duration_ms: u64,
 }
 
 #[derive(Debug)]
@@ -194,6 +196,38 @@ pub fn verify_media_identity(
 }
 
 pub fn measure_loudness(path: impl AsRef<Path>) -> Result<LoudnessMeasurement, AssetError> {
+    measure_loudness_with_minimum(path, None)
+}
+
+/// Measures decoded MPEG-TS or other media loudness and requires a minimum
+/// amount of analyzer-covered running time before returning evidence.
+pub fn measure_output_loudness(
+    path: impl AsRef<Path>,
+    minimum_duration_ms: u64,
+) -> Result<LoudnessMeasurement, AssetError> {
+    if minimum_duration_ms == 0 {
+        return Err(AssetError::InvalidSource(
+            "minimum analyzed loudness duration must be positive".into(),
+        ));
+    }
+    let metadata = fs::metadata(path.as_ref())
+        .map_err(|error| AssetError::InvalidSource(error.to_string()))?;
+    if !metadata.is_file() || metadata.len() == 0 {
+        return Err(AssetError::InvalidSource(
+            "the output capture must be a non-empty regular file".into(),
+        ));
+    }
+    // Output proof is stricter than general loudness analysis: discover the
+    // captured transport first so a missing audio program fails explicitly
+    // instead of leaving an unlinked analyzer branch to reach its deadline.
+    validate_media(path.as_ref())?;
+    measure_loudness_with_minimum(path, Some(minimum_duration_ms))
+}
+
+fn measure_loudness_with_minimum(
+    path: impl AsRef<Path>,
+    minimum_duration_ms: Option<u64>,
+) -> Result<LoudnessMeasurement, AssetError> {
     gst::init().map_err(|error| AssetError::Discovery(error.to_string()))?;
     let canonical = fs::canonicalize(path).map_err(|error| AssetError::Io(error.to_string()))?;
     let uri = gst::glib::filename_to_uri(&canonical, None)
@@ -270,7 +304,7 @@ pub fn measure_loudness(path: impl AsRef<Path>) -> Result<LoudnessMeasurement, A
     pipeline
         .set_state(gst::State::Playing)
         .map_err(|error| AssetError::Discovery(error.to_string()))?;
-    let result = collect_loudness(&pipeline, &level, &audio_linked);
+    let result = collect_loudness(&pipeline, &level, &audio_linked, minimum_duration_ms);
     let _ = pipeline.set_state(gst::State::Null);
     result
 }
@@ -503,12 +537,14 @@ fn collect_loudness(
     pipeline: &gst::Pipeline,
     level: &gst::Element,
     audio_linked: &AtomicBool,
+    minimum_duration_ms: Option<u64>,
 ) -> Result<LoudnessMeasurement, AssetError> {
     let bus = pipeline
         .bus()
         .ok_or_else(|| AssetError::Discovery("loudness pipeline has no bus".into()))?;
     let deadline = Instant::now() + Duration::from_secs(120);
     let mut integrated_lufs = None;
+    let mut analyzed_duration_ns = None;
     while Instant::now() < deadline {
         let remaining = deadline.saturating_duration_since(Instant::now());
         let Some(message) = bus.timed_pop(gst::ClockTime::from_nseconds(
@@ -525,10 +561,17 @@ fn collect_loudness(
                     && message
                         .src()
                         .is_some_and(|source| source == level.upcast_ref::<gst::Object>())
-                    && let Ok(value) = structure.get::<f64>("global-loudness")
-                    && value.is_finite()
                 {
-                    integrated_lufs = Some(value);
+                    if let Ok(value) = structure.get::<f64>("global-loudness")
+                        && value.is_finite()
+                    {
+                        integrated_lufs = Some(value);
+                    }
+                    if let Ok(value) = structure.get::<u64>("running-time")
+                        && value != u64::MAX
+                    {
+                        analyzed_duration_ns = Some(analyzed_duration_ns.unwrap_or(0).max(value));
+                    }
                 }
             }
             gst::MessageView::Eos(_) => {
@@ -537,11 +580,27 @@ fn collect_loudness(
                         "media contains no decodable audio stream".into(),
                     ));
                 }
-                return integrated_lufs
-                    .map(|integrated_lufs| LoudnessMeasurement { integrated_lufs })
-                    .ok_or_else(|| {
-                        AssetError::Discovery("loudness analyzer produced no measurement".into())
-                    });
+                let integrated_lufs = integrated_lufs.ok_or_else(|| {
+                    AssetError::Discovery("loudness analyzer produced no measurement".into())
+                })?;
+                let analyzed_duration_ns = analyzed_duration_ns.ok_or_else(|| {
+                    AssetError::Discovery("loudness analyzer produced no duration".into())
+                })?;
+                let analyzed_duration_ms = analyzed_duration_ns
+                    .saturating_add(999_999)
+                    .checked_div(1_000_000)
+                    .unwrap_or(u64::MAX);
+                if let Some(minimum_duration_ms) = minimum_duration_ms
+                    && analyzed_duration_ms < minimum_duration_ms
+                {
+                    return Err(AssetError::Discovery(format!(
+                        "loudness evidence covered {analyzed_duration_ms} ms, below the required {minimum_duration_ms} ms"
+                    )));
+                }
+                return Ok(LoudnessMeasurement {
+                    integrated_lufs,
+                    analyzed_duration_ms,
+                });
             }
             gst::MessageView::Error(error) => {
                 return Err(AssetError::Discovery(format!(

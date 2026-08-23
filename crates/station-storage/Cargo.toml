@@ -11,6 +11,7 @@ station-cg.workspace = true
 station-domain.workspace = true
 station-media-lifecycle.workspace = true
 station-live.workspace = true
+station-readiness.workspace = true
 station-schedule.workspace = true
 station-update.workspace = true
 

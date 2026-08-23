@@ -151,6 +151,12 @@ fn commissioning_report_is_ordered_and_does_not_claim_field_proof() {
         200
     );
     let commissioned = api.handle("GET", "/api/v1/commissioning/report", None);
+    assert_eq!(
+        commissioned.status,
+        200,
+        "{}",
+        String::from_utf8_lossy(&commissioned.body)
+    );
     let report: serde_json::Value = serde_json::from_slice(&commissioned.body).unwrap();
     assert_eq!(report["checks"][0]["status"], "pass");
     assert_eq!(report["overall_status"], "blocked");
@@ -285,6 +291,12 @@ fn commissioning_report_separates_schedule_authority_from_dispatch_execution() {
     drop(store);
     let api = Api::open(&database).unwrap();
     let completed = api.handle("GET", "/api/v1/commissioning/report", None);
+    assert_eq!(
+        completed.status,
+        200,
+        "{}",
+        String::from_utf8_lossy(&completed.body)
+    );
     let completed: serde_json::Value = serde_json::from_slice(&completed.body).unwrap();
     let completed_dispatch = completed["checks"]
         .as_array()
