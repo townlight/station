@@ -19,7 +19,10 @@ use station_domain::{
     SelfTestTrigger, StationProfile, SystemResourceSample, SystemSelfTest,
 };
 use station_ingest::{IngestOutcome, IngestWorker, TranscodeOutcome, TranscodeWorker};
-use station_media_lifecycle::WatchFolderConfig;
+use station_media_lifecycle::{
+    AssetLoudnessAnalysis, IngestJobStatus, IngestSourceKind, LoudnessGateStatus, MediaIngestJob,
+    WatchFolderConfig,
+};
 use station_schedule::{
     AssetReadiness, ChannelConfiguration, CommitPlan, CommitReport, DispatchStatus, MediaAsset,
     OutputProfileId, OutputSinkConfiguration, ScheduleItem, ScheduleState,
@@ -129,24 +132,72 @@ fn commissioning_report_is_ordered_and_does_not_claim_field_proof() {
     let empty = api.handle("GET", "/api/v1/commissioning/report", None);
     assert_eq!(empty.status, 200);
     let report: serde_json::Value = serde_json::from_slice(&empty.body).unwrap();
+    assert_eq!(report["schema_version"], 2);
     assert_eq!(report["overall_status"], "blocked");
+    assert_eq!(report["current_step_id"], "station_profile");
+    assert_eq!(report["core_complete"], false);
+    assert_eq!(report["core_progress"]["total"], 19);
     let checks = report["checks"].as_array().unwrap();
-    assert_eq!(checks[0]["id"], "station_profile");
-    assert_eq!(checks[1]["id"], "runtime_api");
+    assert_eq!(
+        checks
+            .iter()
+            .map(|check| check["id"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        vec![
+            "station_profile",
+            "operator_account_auth",
+            "runtime_api",
+            "station_box_storage",
+            "station_time",
+            "station_backup",
+            "channel_watch_folder",
+            "fallback_slate",
+            "cea708_captions",
+            "publish_targets",
+            "automation_model_policy",
+            "headend_output_setup",
+            "cable_transport_validation",
+            "guided_ingest",
+            "guided_schedule",
+            "guided_air_proof",
+            "selected_sink_ten_minute_proof",
+            "support_bundle",
+            "first_broadcast_report",
+            "external_receiver_proof",
+            "clean_machine_install_proof",
+            "one_station_week_proof",
+            "three_station_week_proof",
+        ]
+    );
+    let account = checks
+        .iter()
+        .find(|check| check["id"] == "operator_account_auth")
+        .unwrap();
+    assert_eq!(account["status"], "blocked");
+    assert_eq!(account["required"], true);
+    assert_eq!(account["blocking"], true);
+    assert_eq!(account["boundary"], "local_authority");
     let headend = checks
         .iter()
         .find(|check| check["id"] == "headend_output_setup")
         .expect("commissioning must include the authoritative headend gate");
     assert_eq!(headend["status"], "blocked");
-    assert_eq!(checks.last().unwrap()["id"], "installed_field_proof");
+    assert_eq!(checks.last().unwrap()["id"], "three_station_week_proof");
     assert_eq!(checks.last().unwrap()["status"], "not_verified");
     assert_eq!(checks.last().unwrap()["blocking"], false);
+    assert_eq!(checks.last().unwrap()["required"], false);
+    assert_eq!(checks.last().unwrap()["boundary"], "external_evidence");
     assert!(
         checks.last().unwrap()["detail"]
             .as_str()
             .unwrap()
-            .contains("does not claim")
+            .contains("not verified")
     );
+    let receiver = checks
+        .iter()
+        .find(|check| check["id"] == "external_receiver_proof")
+        .unwrap();
+    assert_eq!(receiver["status"], "not_verified");
 
     let profile = br#"{"station_id":"3f5f721f-96c7-48b1-b061-1bf1ad1e62c2","display_name":"KTLT","timezone":"America/Denver"}"#;
     assert_eq!(
@@ -163,6 +214,75 @@ fn commissioning_report_is_ordered_and_does_not_claim_field_proof() {
     let report: serde_json::Value = serde_json::from_slice(&commissioned.body).unwrap();
     assert_eq!(report["checks"][0]["status"], "pass");
     assert_eq!(report["overall_status"], "blocked");
+    let _ = std::fs::remove_file(database);
+}
+
+#[test]
+fn commissioning_watch_folder_requires_durable_success_and_present_directory_after_restart() {
+    let database = temporary_database("commissioning-watch-folder");
+    let watch_directory = database.with_extension("watch");
+    std::fs::create_dir_all(&watch_directory).unwrap();
+    let config_id = "9d4bd9b9-65df-4f79-9f6e-056af667c20d";
+    let api = Api::open(&database).unwrap();
+    let config = WatchFolderConfig {
+        config_id: config_id.into(),
+        display_name: "Commissioning intake".into(),
+        monitor_path: watch_directory.to_string_lossy().into_owned(),
+        extensions: vec![".ts".into()],
+        settle_seconds: 5,
+        enabled: true,
+        last_scan_at_unix_ms: None,
+        last_error: None,
+    };
+    assert_eq!(
+        api.handle(
+            "PUT",
+            "/api/v1/watch-folders",
+            Some(&serde_json::to_vec(&config).unwrap()),
+        )
+        .status,
+        200
+    );
+    let pending = api.handle("GET", "/api/v1/commissioning/report", None);
+    let pending: serde_json::Value = serde_json::from_slice(&pending.body).unwrap();
+    let pending = pending["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|check| check["id"] == "channel_watch_folder")
+        .unwrap();
+    assert_eq!(pending["status"], "blocked");
+    drop(api);
+
+    StationStore::open(&database)
+        .unwrap()
+        .record_watch_folder_scan(config_id, system_time_millis_for_test(), None)
+        .unwrap();
+    let restarted = Api::open(&database).unwrap();
+    let passed = restarted.handle("GET", "/api/v1/commissioning/report", None);
+    let passed: serde_json::Value = serde_json::from_slice(&passed.body).unwrap();
+    let passed = passed["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|check| check["id"] == "channel_watch_folder")
+        .unwrap();
+    assert_eq!(passed["status"], "pass");
+    assert!(passed["evidence"].as_str().unwrap().contains(config_id));
+    drop(restarted);
+
+    std::fs::remove_dir_all(&watch_directory).unwrap();
+    let missing = Api::open(&database).unwrap();
+    let missing = missing.handle("GET", "/api/v1/commissioning/report", None);
+    let missing: serde_json::Value = serde_json::from_slice(&missing.body).unwrap();
+    let missing = missing["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|check| check["id"] == "channel_watch_folder")
+        .unwrap();
+    assert_eq!(missing["status"], "blocked");
+
     let _ = std::fs::remove_file(database);
 }
 
@@ -252,16 +372,10 @@ fn commissioning_report_separates_schedule_authority_from_dispatch_execution() {
     let report: serde_json::Value = serde_json::from_slice(&response.body).unwrap();
     let checks = report["checks"].as_array().unwrap();
     let find = |id: &str| checks.iter().find(|check| check["id"] == id).unwrap();
-    assert_eq!(find("enabled_channel")["status"], "pass");
-    assert_eq!(find("ready_media")["status"], "pass");
-    assert_eq!(find("schedule_authority")["status"], "pass");
-    assert_eq!(find("dispatch_execution")["status"], "warning");
-    assert!(
-        find("dispatch_execution")["detail"]
-            .as_str()
-            .unwrap()
-            .contains("0 completed")
-    );
+    assert_eq!(find("publish_targets")["status"], "blocked");
+    assert_eq!(find("guided_ingest")["status"], "blocked");
+    assert_eq!(find("guided_schedule")["status"], "blocked");
+    assert_eq!(find("guided_air_proof")["status"], "blocked");
     drop(api);
     let store = StationStore::open(&database).unwrap();
     assert!(
@@ -305,12 +419,279 @@ fn commissioning_report_separates_schedule_authority_from_dispatch_execution() {
         .as_array()
         .unwrap()
         .iter()
-        .find(|check| check["id"] == "dispatch_execution")
+        .find(|check| check["id"] == "guided_air_proof")
         .unwrap();
-    assert_eq!(completed_dispatch["status"], "pass");
+    assert_eq!(completed_dispatch["status"], "blocked");
     drop(api);
     let _ = std::fs::remove_file(database);
     let _ = std::fs::remove_file(media);
+}
+
+#[test]
+fn commissioning_guided_air_proof_requires_one_persisted_causal_chain() {
+    let database = temporary_database("commissioning-causal-chain");
+    let historical_media = database.with_extension("historical.ts");
+    let guided_media = database.with_extension("guided.ts");
+    std::fs::write(&historical_media, b"historical media").unwrap();
+    std::fs::write(&guided_media, b"guided managed media").unwrap();
+    let channel_id = "8b626c01-bdf8-419a-8a2e-b0a7caa1ff7e";
+    let guided_asset_id = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    let now = system_time_millis_for_test();
+    let api = Api::open(&database).unwrap();
+    assert_eq!(
+        api.handle(
+            "PUT",
+            "/api/v1/station",
+            Some(br#"{"station_id":"3f5f721f-96c7-48b1-b061-1bf1ad1e62c2","display_name":"KTLT","timezone":"America/Denver"}"#),
+        )
+        .status,
+        200
+    );
+    assert_eq!(
+        api.handle(
+            "PUT",
+            "/api/v1/channels",
+            Some(
+                &serde_json::to_vec(&ChannelConfiguration {
+                    channel_id: channel_id.into(),
+                    display_name: "Primary".into(),
+                    output_profile: Default::default(),
+                    output_sinks: vec![OutputSinkConfiguration::required_udp(
+                        "22222222-3333-4444-8555-666666666666",
+                        "Primary",
+                        "127.0.0.1:5500",
+                        -16.0,
+                    )],
+                    enabled: true,
+                })
+                .unwrap(),
+            ),
+        )
+        .status,
+        200
+    );
+    drop(api);
+
+    let store = StationStore::open(&database).unwrap();
+    store
+        .put_channel_runtime(&ChannelRuntimeObservation {
+            channel_id: channel_id.into(),
+            state: ChannelRuntimeState::HealthyFallback,
+            on_air_asset_id: None,
+            state_started_at_unix_ms: now,
+            heartbeat_at_unix_ms: now,
+            detail: None,
+        })
+        .unwrap();
+    store
+        .put_media_asset(&MediaAsset {
+            asset_id: guided_asset_id.into(),
+            media_path: historical_media.to_string_lossy().into_owned(),
+            duration_ms: 30_000,
+            readiness: AssetReadiness::Ready,
+        })
+        .unwrap();
+    store
+        .put_schedule_item(&ScheduleItem {
+            item_id: "256d5a07-92d3-4718-aec9-05cad42fae7d".into(),
+            channel_id: channel_id.into(),
+            asset_id: guided_asset_id.into(),
+            title: "Unrelated historical item".into(),
+            starts_at_unix_ms: now + 60_000,
+            duration_ms: 30_000,
+            state: ScheduleState::Draft,
+        })
+        .unwrap();
+    store
+        .commit_schedule(
+            "report-historical",
+            "plan-historical",
+            "256d5a07-92d3-4718-aec9-05cad42fae7d",
+            "operator",
+            now,
+            "",
+        )
+        .unwrap();
+    assert!(
+        store
+            .advance_dispatch_status(
+                "report-historical",
+                DispatchStatus::Pending,
+                DispatchStatus::Queued,
+            )
+            .unwrap()
+    );
+    assert!(
+        store
+            .advance_dispatch_status(
+                "report-historical",
+                DispatchStatus::Queued,
+                DispatchStatus::Acknowledged,
+            )
+            .unwrap()
+    );
+    assert!(
+        store
+            .advance_dispatch_status(
+                "report-historical",
+                DispatchStatus::Acknowledged,
+                DispatchStatus::Completed,
+            )
+            .unwrap()
+    );
+
+    store
+        .create_ingest_job(&MediaIngestJob {
+            job_id: "388f654d-a5dd-4641-8f28-84048c4dbe09".into(),
+            source_kind: IngestSourceKind::OperatorPath,
+            source_path: guided_media.to_string_lossy().into_owned(),
+            status: IngestJobStatus::Pending,
+            progress_percent: 0,
+            created_at_unix_ms: now + 1,
+            started_at_unix_ms: None,
+            completed_at_unix_ms: None,
+            error_detail: None,
+            asset_id: None,
+            attempts: 0,
+            next_attempt_at_unix_ms: None,
+        })
+        .unwrap();
+    assert_eq!(
+        store
+            .claim_next_ingest_job(now + 2)
+            .unwrap()
+            .unwrap()
+            .job_id,
+        "388f654d-a5dd-4641-8f28-84048c4dbe09"
+    );
+    store
+        .complete_ingest_job(
+            "388f654d-a5dd-4641-8f28-84048c4dbe09",
+            &MediaAsset {
+                asset_id: guided_asset_id.into(),
+                media_path: guided_media.to_string_lossy().into_owned(),
+                duration_ms: 30_000,
+                readiness: AssetReadiness::Ready,
+            },
+            &AssetLoudnessAnalysis {
+                asset_id: guided_asset_id.into(),
+                status: LoudnessGateStatus::NotChecked,
+                measured_lufs_milli: None,
+                target_lufs_milli: -24_000,
+                detail: None,
+            },
+            now + 3,
+        )
+        .unwrap();
+    drop(store);
+
+    let read_status = |id: &str| {
+        let api = Api::open(&database).unwrap();
+        let response = api.handle("GET", "/api/v1/commissioning/report", None);
+        assert_eq!(response.status, 200);
+        let report: serde_json::Value = serde_json::from_slice(&response.body).unwrap();
+        report["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|check| check["id"] == id)
+            .unwrap()["status"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    };
+    assert_eq!(read_status("guided_ingest"), "pass");
+    assert_eq!(read_status("guided_schedule"), "blocked");
+    assert_eq!(read_status("guided_air_proof"), "blocked");
+    assert_eq!(read_status("first_broadcast_report"), "blocked");
+
+    let store = StationStore::open(&database).unwrap();
+    store
+        .put_schedule_item(&ScheduleItem {
+            item_id: "7e6e36ae-c6ea-4986-99d7-e848f4248815".into(),
+            channel_id: channel_id.into(),
+            asset_id: guided_asset_id.into(),
+            title: "Guided first broadcast".into(),
+            starts_at_unix_ms: now + 180_000,
+            duration_ms: 30_000,
+            state: ScheduleState::Draft,
+        })
+        .unwrap();
+    store
+        .commit_schedule(
+            "report-guided",
+            "plan-guided",
+            "7e6e36ae-c6ea-4986-99d7-e848f4248815",
+            "operator",
+            now + 4,
+            "",
+        )
+        .unwrap();
+    drop(store);
+    assert_eq!(read_status("guided_schedule"), "pass");
+    assert_eq!(read_status("guided_air_proof"), "blocked");
+
+    let store = StationStore::open(&database).unwrap();
+    assert!(
+        store
+            .advance_dispatch_status(
+                "report-guided",
+                DispatchStatus::Pending,
+                DispatchStatus::Queued,
+            )
+            .unwrap()
+    );
+    assert!(
+        store
+            .advance_dispatch_status(
+                "report-guided",
+                DispatchStatus::Queued,
+                DispatchStatus::Acknowledged,
+            )
+            .unwrap()
+    );
+    drop(store);
+    assert_eq!(read_status("guided_air_proof"), "pass");
+    assert_eq!(read_status("first_broadcast_report"), "blocked");
+
+    let store = StationStore::open(&database).unwrap();
+    assert!(
+        store
+            .advance_dispatch_status(
+                "report-guided",
+                DispatchStatus::Acknowledged,
+                DispatchStatus::Completed,
+            )
+            .unwrap()
+    );
+    drop(store);
+    assert_eq!(read_status("first_broadcast_report"), "pass");
+    let api = Api::open(&database).unwrap();
+    let response = api.handle("GET", "/api/v1/commissioning/report", None);
+    let report: serde_json::Value = serde_json::from_slice(&response.body).unwrap();
+    let air_proof = report["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|check| check["id"] == "guided_air_proof")
+        .unwrap();
+    assert!(
+        air_proof["evidence"]
+            .as_str()
+            .unwrap()
+            .contains("report-guided")
+    );
+    assert!(
+        air_proof["evidence"]
+            .as_str()
+            .unwrap()
+            .contains(guided_asset_id)
+    );
+    drop(api);
+
+    let _ = std::fs::remove_file(database);
+    let _ = std::fs::remove_file(historical_media);
+    let _ = std::fs::remove_file(guided_media);
 }
 
 fn system_time_millis_for_test() -> i64 {

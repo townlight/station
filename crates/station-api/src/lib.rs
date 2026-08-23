@@ -169,21 +169,100 @@ enum CommissioningCheckStatus {
     NotVerified,
 }
 
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum CommissioningPhase {
+    Identity,
+    StationBox,
+    SourcesOutputs,
+    GuidedAirProof,
+    ExternalProof,
+}
+
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum CommissioningBoundary {
+    LocalAuthority,
+    ExternalEvidence,
+}
+
 #[derive(Debug, Clone, Serialize)]
 struct CommissioningCheck {
     id: &'static str,
     label: &'static str,
+    phase: CommissioningPhase,
     status: CommissioningCheckStatus,
+    required: bool,
     blocking: bool,
+    action: Option<&'static str>,
     detail: String,
     evidence: String,
+    boundary: CommissioningBoundary,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct CommissioningCoreProgress {
+    passed: usize,
+    total: usize,
 }
 
 #[derive(Debug, Clone, Serialize)]
 struct CommissioningReport {
+    schema_version: u32,
     generated_at_unix_ms: i64,
     overall_status: CommissioningCheckStatus,
+    current_step_id: Option<&'static str>,
+    core_progress: CommissioningCoreProgress,
+    core_complete: bool,
     checks: Vec<CommissioningCheck>,
+}
+
+// Keeping every serialized policy field visible at each ordered call site makes
+// this safety checklist auditable; hiding them in positional defaults would be
+// more error-prone than this deliberately explicit constructor.
+#[allow(clippy::too_many_arguments)]
+fn commissioning_check(
+    id: &'static str,
+    label: &'static str,
+    phase: CommissioningPhase,
+    status: CommissioningCheckStatus,
+    required: bool,
+    action: Option<&'static str>,
+    detail: impl Into<String>,
+    evidence: impl Into<String>,
+    boundary: CommissioningBoundary,
+) -> CommissioningCheck {
+    CommissioningCheck {
+        id,
+        label,
+        phase,
+        status,
+        required,
+        blocking: required && status != CommissioningCheckStatus::Pass,
+        action,
+        detail: detail.into(),
+        evidence: evidence.into(),
+        boundary,
+    }
+}
+
+fn headend_receiver_verified(headend: &station_readiness::HeadendReadiness) -> bool {
+    headend.channels.iter().any(|channel| channel.enabled)
+        && headend
+            .channels
+            .iter()
+            .filter(|channel| channel.enabled)
+            .all(|channel| {
+                channel
+                    .sinks
+                    .iter()
+                    .any(|sink| sink.enabled && sink.required)
+                    && channel
+                        .sinks
+                        .iter()
+                        .filter(|sink| sink.enabled && sink.required)
+                        .all(|sink| sink.external_receiver == ExternalReceiverState::Verified)
+            })
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -2089,54 +2168,179 @@ impl Api {
             Ok(profile) => profile,
             Err(message) => return error_response(500, "storage_error", &message),
         };
-        checks.push(match profile {
-            Some(profile) => CommissioningCheck {
-                id: "station_profile",
-                label: "Station profile commissioned",
-                status: CommissioningCheckStatus::Pass,
-                blocking: false,
-                detail: format!(
-                    "{} (revision {})",
-                    profile.profile.display_name, profile.revision
+        checks.push(match profile.as_ref() {
+            Some(profile) => commissioning_check(
+                "station_profile",
+                "Station identity",
+                CommissioningPhase::Identity,
+                CommissioningCheckStatus::Pass,
+                true,
+                Some("station"),
+                format!(
+                    "{} · {} (revision {})",
+                    profile.profile.display_name, profile.profile.timezone, profile.revision
                 ),
-                evidence: "authoritative station profile in SQLite".into(),
-            },
-            None => CommissioningCheck {
-                id: "station_profile",
-                label: "Station profile commissioned",
-                status: CommissioningCheckStatus::Blocked,
-                blocking: true,
-                detail: "No station profile has been commissioned.".into(),
-                evidence: "GET /api/v1/station returned no profile".into(),
-            },
+                "authoritative station profile in SQLite",
+                CommissioningBoundary::LocalAuthority,
+            ),
+            None => commissioning_check(
+                "station_profile",
+                "Station identity",
+                CommissioningPhase::Identity,
+                CommissioningCheckStatus::Blocked,
+                true,
+                Some("station"),
+                "No station identity and IANA timezone have been commissioned.",
+                "GET /api/v1/station returned no profile",
+                CommissioningBoundary::LocalAuthority,
+            ),
         });
+        checks.push(commissioning_check(
+            "operator_account_auth",
+            "Operator account and authentication",
+            CommissioningPhase::Identity,
+            CommissioningCheckStatus::Blocked,
+            true,
+            None,
+            "No server-authoritative operator account, credential, role, or authenticated session authority exists yet.",
+            "the current loopback API has no operator account/authentication authority",
+            CommissioningBoundary::LocalAuthority,
+        ));
+        checks.push(commissioning_check(
+            "runtime_api",
+            "Local runtime and database authority",
+            CommissioningPhase::StationBox,
+            CommissioningCheckStatus::Pass,
+            true,
+            None,
+            "The station API and SQLite authority are serving this report.",
+            "current stationd request and successful SQLite reads",
+            CommissioningBoundary::LocalAuthority,
+        ));
 
-        checks.push(CommissioningCheck {
-            id: "runtime_api",
-            label: "Station runtime is serving authoritative state",
-            status: CommissioningCheckStatus::Pass,
-            blocking: false,
-            detail: "The station API and SQLite authority are serving this report.".into(),
-            evidence: "current stationd request".into(),
-        });
+        let station_box_storage_pass = station_box.hardware.state == StationReadinessState::Pass
+            && station_box.engine.state == StationReadinessState::Pass;
+        checks.push(commissioning_check(
+            "station_box_storage",
+            "StationBox hardware, engine, and media storage",
+            CommissioningPhase::StationBox,
+            if station_box_storage_pass {
+                CommissioningCheckStatus::Pass
+            } else {
+                CommissioningCheckStatus::Blocked
+            },
+            true,
+            Some("health"),
+            format!(
+                "{} logical processors, {:.1} GB RAM, {:.1} GB media storage free; engine state {:?}.",
+                station_box.hardware.logical_cpus,
+                station_box.hardware.ram_total_gb,
+                station_box.hardware.media_disk_free_gb,
+                station_box.engine.state
+            ),
+            "current StationBox Windows resource and installed-engine probes",
+            CommissioningBoundary::LocalAuthority,
+        ));
+        checks.push(commissioning_check(
+            "station_time",
+            "Station timezone and synchronized time",
+            CommissioningPhase::StationBox,
+            if station_box.clock.state == StationReadinessState::Pass {
+                CommissioningCheckStatus::Pass
+            } else {
+                CommissioningCheckStatus::Blocked
+            },
+            true,
+            Some("health"),
+            format!(
+                "Configured timezone: {}; clock synchronization: {:?}.",
+                station_box
+                    .clock
+                    .configured_timezone
+                    .as_deref()
+                    .unwrap_or("not configured"),
+                station_box.clock.sync_status
+            ),
+            "configured station timezone and current operating-system clock probe",
+            CommissioningBoundary::LocalAuthority,
+        ));
+        checks.push(commissioning_check(
+            "station_backup",
+            "Writable station backup",
+            CommissioningPhase::StationBox,
+            if station_box.backup.state == StationReadinessState::Pass {
+                CommissioningCheckStatus::Pass
+            } else {
+                CommissioningCheckStatus::Blocked
+            },
+            true,
+            Some("health"),
+            station_box
+                .backup
+                .detail
+                .clone()
+                .unwrap_or_else(|| "Backup readiness has no current evidence.".into()),
+            "current synchronized backup write/read/delete probe",
+            CommissioningBoundary::LocalAuthority,
+        ));
+
+        let watch_folders = match self.storage.list_watch_folders() {
+            Ok(configs) => configs,
+            Err(message) => return error_response(500, "storage_error", &message),
+        };
+        let ready_watch_folders = watch_folders
+            .iter()
+            .filter(|config| {
+                config.enabled
+                    && Path::new(&config.monitor_path).is_dir()
+                    && config.last_scan_at_unix_ms.is_some()
+                    && config.last_error.is_none()
+            })
+            .collect::<Vec<_>>();
+        let ready_watch_folder_count = ready_watch_folders.len();
+        checks.push(commissioning_check(
+            "channel_watch_folder",
+            "Channel watch folder",
+            CommissioningPhase::SourcesOutputs,
+            if ready_watch_folder_count > 0 {
+                CommissioningCheckStatus::Pass
+            } else {
+                CommissioningCheckStatus::Blocked
+            },
+            true,
+            Some("media"),
+            if ready_watch_folder_count > 0 {
+                format!("{ready_watch_folder_count} enabled watch folder(s) have a present directory and successful scan evidence.")
+            } else if watch_folders.is_empty() {
+                "No watch folder is configured.".into()
+            } else {
+                "No enabled watch folder has both a present directory and successful scan evidence.".into()
+            },
+            if ready_watch_folders.is_empty() {
+                "no enabled watch-folder identity has current directory and scan evidence".into()
+            } else {
+                format!(
+                    "watch folder(s) {} have authoritative configuration, filesystem presence, and durable successful scan results",
+                    ready_watch_folders
+                        .iter()
+                        .map(|config| config.config_id.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            },
+            CommissioningBoundary::LocalAuthority,
+        ));
 
         let channels = match self.storage.list_channels() {
             Ok(channels) => channels,
             Err(message) => return error_response(500, "storage_error", &message),
         };
         let enabled: Vec<_> = channels.iter().filter(|channel| channel.enabled).collect();
-        if enabled.is_empty() {
-            checks.push(CommissioningCheck {
-                id: "enabled_channel",
-                label: "Enabled channel reaches safe-to-air runtime",
-                status: CommissioningCheckStatus::Blocked,
-                blocking: true,
-                detail: "No enabled output channel is configured.".into(),
-                evidence: "authoritative channel configuration".into(),
-            });
+        let safe_to_air = if enabled.is_empty() {
+            None
         } else {
             let mut runtime_channels = Vec::with_capacity(enabled.len());
-            for channel in enabled {
+            for channel in &enabled {
                 let observation = match self.storage.read_channel_runtime(&channel.channel_id) {
                     Ok(observation) => observation,
                     Err(message) => return error_response(500, "storage_error", &message),
@@ -2174,23 +2378,63 @@ impl Api {
                 Ok(status) => status,
                 Err(message) => return error_response(500, "runtime_state_invalid", message),
             };
-            let status = match safe_to_air.color {
-                SafeToAirColor::Green => CommissioningCheckStatus::Pass,
-                SafeToAirColor::Yellow => CommissioningCheckStatus::Warning,
-                SafeToAirColor::Red => CommissioningCheckStatus::Blocked,
-            };
-            checks.push(CommissioningCheck {
-                id: "enabled_channel",
-                label: "Enabled channel reaches safe-to-air runtime",
-                blocking: status == CommissioningCheckStatus::Blocked,
-                status,
-                detail: safe_to_air.operator_message,
-                evidence: format!(
-                    "current heartbeat-derived runtime status; {} critical and {} warning alert(s)",
-                    safe_to_air.active_critical_alerts, safe_to_air.active_warning_alerts
+            Some(safe_to_air)
+        };
+        checks.push(commissioning_check(
+            "fallback_slate",
+            "Fallback output and configured station slate",
+            CommissioningPhase::SourcesOutputs,
+            CommissioningCheckStatus::Blocked,
+            true,
+            Some("channels"),
+            match safe_to_air.as_ref() {
+                Some(status) if status.color == SafeToAirColor::Green => format!(
+                    "{} No durable operator-selected fallback/slate authority exists yet.",
+                    status.operator_message
                 ),
-            });
-        }
+                Some(status) => format!(
+                    "{} A durable operator-selected fallback/slate authority is also missing.",
+                    status.operator_message
+                ),
+                None => "No enabled channel or durable operator-selected fallback/slate authority exists.".into(),
+            },
+            "current heartbeat-derived runtime plus absence of a durable fallback/slate configuration record",
+            CommissioningBoundary::LocalAuthority,
+        ));
+        checks.push(commissioning_check(
+            "cea708_captions",
+            "CEA-708 caption path",
+            CommissioningPhase::SourcesOutputs,
+            CommissioningCheckStatus::Blocked,
+            true,
+            Some("channels"),
+            "No typed CEA-708 ingest, preservation, playout, or output-proof authority exists yet.",
+            "CEA-708 is absent from current media, schedule, worker, and output contracts",
+            CommissioningBoundary::LocalAuthority,
+        ));
+
+        checks.push(commissioning_check(
+            "publish_targets",
+            "Required publish targets",
+            CommissioningPhase::SourcesOutputs,
+            CommissioningCheckStatus::Blocked,
+            true,
+            None,
+            "Generic channel output sinks and headend destinations are not publish-target account authority. No server-authoritative publish-target model exists yet.",
+            "the current control plane has no publish-target credential/account model",
+            CommissioningBoundary::LocalAuthority,
+        ));
+        checks.push(commissioning_check(
+            "automation_model_policy",
+            "Automation and model policy",
+            CommissioningPhase::SourcesOutputs,
+            CommissioningCheckStatus::Blocked,
+            true,
+            None,
+            "No server-authoritative automation policy, model selection policy, or approval boundary exists yet.",
+            "the current control plane has no automation/model policy authority",
+            CommissioningBoundary::LocalAuthority,
+        ));
 
         let headend_probe = match collect_headend_probe(&self.storage, generated_at_unix_ms, None) {
             Ok(Some(probe)) => probe,
@@ -2203,127 +2447,336 @@ impl Api {
                 return error_response(500, "headend_readiness_invalid", &error.to_string());
             }
         };
-        let headend_status = match headend.rollup.color {
-            station_readiness::PegReadinessColor::Green => CommissioningCheckStatus::Pass,
-            station_readiness::PegReadinessColor::Yellow => CommissioningCheckStatus::Warning,
-            station_readiness::PegReadinessColor::Red => CommissioningCheckStatus::Blocked,
-        };
-        checks.push(CommissioningCheck {
-            id: "headend_output_setup",
-            label: "Headend output setup and local transport",
-            status: headend_status,
-            blocking: headend_status == CommissioningCheckStatus::Blocked,
-            detail: headend.rollup.detail,
-            evidence: "current StationBox capability, channel configuration, and worker heartbeat authority; external receiver acceptance remains separate".into(),
-        });
+        let named_headend_ready = !enabled.is_empty()
+            && enabled.iter().all(|channel| {
+                channel
+                    .output_sinks
+                    .iter()
+                    .any(|sink| sink.enabled && sink.required && sink.headend.is_some())
+            });
+        let local_headend_ready = named_headend_ready
+            && headend
+                .channels
+                .iter()
+                .filter(|channel| channel.enabled)
+                .all(|channel| {
+                    channel.profile_state == StationReadinessState::Pass
+                        && channel
+                            .sinks
+                            .iter()
+                            .filter(|sink| sink.enabled && sink.required)
+                            .all(|sink| sink.local_transport == StationReadinessState::Pass)
+                });
+        checks.push(commissioning_check(
+            "headend_output_setup",
+            "Named headend output and fresh local transport",
+            CommissioningPhase::SourcesOutputs,
+            if local_headend_ready {
+                CommissioningCheckStatus::Pass
+            } else {
+                CommissioningCheckStatus::Blocked
+            },
+            true,
+            Some("channels"),
+            if local_headend_ready {
+                String::from("Every enabled channel has a named headend contract and fresh required-sink local transport progress. Receiver acceptance remains separate.")
+            } else if !named_headend_ready {
+                String::from("Every enabled channel requires an enabled required sink with a named headend profile.")
+            } else {
+                String::from("Named headend configuration exists, but required local transport is missing, stale, unsupported, or failed.")
+            },
+            "current StationBox capability, named sink contract, and worker heartbeat authority",
+            CommissioningBoundary::LocalAuthority,
+        ));
+        checks.push(commissioning_check(
+            "cable_transport_validation",
+            "Cable transport analysis and device reachability",
+            CommissioningPhase::SourcesOutputs,
+            CommissioningCheckStatus::Blocked,
+            true,
+            Some("health"),
+            "No durable TSDuck transport-analysis result and no authenticated target-device reachability result are stored yet.",
+            "the current control plane has no TSDuck/device-reachability evidence authority",
+            CommissioningBoundary::LocalAuthority,
+        ));
 
         let assets = match self.storage.list_media_assets() {
             Ok(assets) => assets,
             Err(message) => return error_response(500, "storage_error", &message),
         };
-        let ready_assets = assets
+        let ready_asset_ids = assets
             .iter()
             .filter(|asset| {
                 asset.readiness == AssetReadiness::Ready && Path::new(&asset.media_path).is_file()
             })
-            .count();
-        checks.push(if ready_assets > 0 {
-            CommissioningCheck {
-                id: "ready_media",
-                label: "At least one air-ready media asset exists",
-                status: CommissioningCheckStatus::Pass,
-                blocking: false,
-                detail: format!("{ready_assets} ready asset(s) have present files."),
-                evidence: "current media catalog and filesystem presence".into(),
-            }
-        } else {
-            CommissioningCheck {
-                id: "ready_media",
-                label: "At least one air-ready media asset exists",
-                status: CommissioningCheckStatus::Blocked,
-                blocking: true,
-                detail: "No ready media asset with a present file is available.".into(),
-                evidence: "current media catalog and filesystem presence".into(),
-            }
-        });
+            .map(|asset| asset.asset_id.clone())
+            .collect::<BTreeSet<_>>();
+        let ingest_jobs = match self.storage.list_ingest_jobs() {
+            Ok(jobs) => jobs,
+            Err(message) => return error_response(500, "storage_error", &message),
+        };
+        let guided_asset_completion = ingest_jobs
+            .iter()
+            .filter(|job| job.status == IngestJobStatus::Completed)
+            .filter_map(|job| Some((job.asset_id.as_ref()?, job.completed_at_unix_ms?)))
+            .filter(|(asset_id, _)| ready_asset_ids.contains(*asset_id))
+            .fold(
+                HashMap::<String, i64>::new(),
+                |mut completed, (asset_id, at)| {
+                    completed
+                        .entry(asset_id.clone())
+                        .and_modify(|existing| *existing = (*existing).min(at))
+                        .or_insert(at);
+                    completed
+                },
+            );
+        let guided_asset_ids = guided_asset_completion
+            .keys()
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        checks.push(commissioning_check(
+            "guided_ingest",
+            "Guided real media ingest",
+            CommissioningPhase::GuidedAirProof,
+            if guided_asset_ids.is_empty() {
+                CommissioningCheckStatus::Blocked
+            } else {
+                CommissioningCheckStatus::Pass
+            },
+            true,
+            Some("media"),
+            if guided_asset_ids.is_empty() {
+                "No completed ingest job resolves to a ready managed asset whose bytes are still present.".into()
+            } else {
+                format!("{} completed ingest chain(s) resolve to ready managed media with present bytes.", guided_asset_ids.len())
+            },
+            "durable ingest job linked to current media catalog and filesystem bytes",
+            CommissioningBoundary::LocalAuthority,
+        ));
 
-        let mut committed = 0usize;
+        let mut schedule_items = Vec::new();
         let mut reports = Vec::new();
         for channel in &channels {
             let schedule = match self.storage.list_channel_schedule(&channel.channel_id) {
                 Ok(schedule) => schedule,
                 Err(message) => return error_response(500, "storage_error", &message),
             };
-            committed += schedule
-                .iter()
-                .filter(|item| item.state == ScheduleState::Committed)
-                .count();
+            schedule_items.extend(schedule);
             let channel_reports = match self.storage.list_commit_reports(&channel.channel_id) {
                 Ok(reports) => reports,
                 Err(message) => return error_response(500, "storage_error", &message),
             };
             reports.extend(channel_reports);
         }
-        checks.push(if committed > 0 {
-            CommissioningCheck {
-                id: "schedule_authority",
-                label: "Committed scheduling authority exists",
-                status: CommissioningCheckStatus::Pass,
-                blocking: false,
-                detail: format!("{committed} committed schedule item(s) are recorded."),
-                evidence: "authoritative channel schedule rows".into(),
-            }
-        } else {
-            CommissioningCheck {
-                id: "schedule_authority",
-                label: "Committed scheduling authority exists",
-                status: CommissioningCheckStatus::Warning,
-                blocking: false,
-                detail: "No committed schedule item is recorded yet.".into(),
-                evidence: "authoritative channel schedule rows".into(),
-            }
-        });
-
-        let completed = reports
+        let linked_reports = reports
+            .iter()
+            .filter(|report| {
+                guided_asset_completion
+                    .get(&report.asset_id)
+                    .is_some_and(|completed_at| *completed_at <= report.approved_at_unix_ms)
+            })
+            .filter(|report| {
+                schedule_items.iter().any(|item| {
+                    item.state == ScheduleState::Committed
+                        && item.item_id == report.schedule_item_id
+                        && item.channel_id == report.channel_id
+                        && item.asset_id == report.asset_id
+                })
+            })
+            .collect::<Vec<_>>();
+        checks.push(commissioning_check(
+            "guided_schedule",
+            "Guided schedule approval",
+            CommissioningPhase::GuidedAirProof,
+            if linked_reports.is_empty() {
+                CommissioningCheckStatus::Blocked
+            } else {
+                CommissioningCheckStatus::Pass
+            },
+            true,
+            Some("schedule"),
+            if linked_reports.is_empty() {
+                "No committed schedule report is linked to the guided ingested asset.".into()
+            } else {
+                format!(
+                    "{} committed report(s) are linked to guided ingested media.",
+                    linked_reports.len()
+                )
+            },
+            "exact asset, schedule item, channel, and commit-report linkage in SQLite",
+            CommissioningBoundary::LocalAuthority,
+        ));
+        let acknowledged = linked_reports
+            .iter()
+            .filter(|report| {
+                matches!(
+                    report.dispatch_status,
+                    DispatchStatus::Acknowledged | DispatchStatus::Completed
+                )
+            })
+            .count();
+        let acknowledged_evidence = linked_reports
+            .iter()
+            .find(|report| {
+                matches!(
+                    report.dispatch_status,
+                    DispatchStatus::Acknowledged | DispatchStatus::Completed
+                )
+            })
+            .map_or_else(
+                || "no linked commit report has worker air acknowledgment".into(),
+                |report| {
+                    format!(
+                        "commit report {} links asset {}, schedule item {}, and channel {} under worker status {:?}",
+                        report.report_id,
+                        report.asset_id,
+                        report.schedule_item_id,
+                        report.channel_id,
+                        report.dispatch_status
+                    )
+                },
+            );
+        checks.push(commissioning_check(
+            "guided_air_proof",
+            "Worker-acknowledged guided air proof",
+            CommissioningPhase::GuidedAirProof,
+            if acknowledged > 0 {
+                CommissioningCheckStatus::Pass
+            } else {
+                CommissioningCheckStatus::Blocked
+            },
+            true,
+            Some("schedule"),
+            if acknowledged > 0 {
+                format!("{acknowledged} causally linked report(s) reached worker acknowledged or completed.")
+            } else {
+                "The linked guided schedule has not reached worker acknowledged or completed.".into()
+            },
+            acknowledged_evidence,
+            CommissioningBoundary::LocalAuthority,
+        ));
+        checks.push(commissioning_check(
+            "selected_sink_ten_minute_proof",
+            "Ten-minute selected-sink output proof",
+            CommissioningPhase::GuidedAirProof,
+            CommissioningCheckStatus::Blocked,
+            true,
+            Some("health"),
+            "Current output proof is bounded below ten minutes and cannot satisfy the required selected-sink report.",
+            "no durable ten-minute selected-sink output proof authority exists",
+            CommissioningBoundary::LocalAuthority,
+        ));
+        checks.push(commissioning_check(
+            "support_bundle",
+            "Durable commissioning support bundle",
+            CommissioningPhase::GuidedAirProof,
+            CommissioningCheckStatus::Blocked,
+            true,
+            Some("health"),
+            "Support bundles can be generated, but no durable commissioning-linked bundle receipt is stored yet.",
+            "the current support-bundle response is not commissioning persistence authority",
+            CommissioningBoundary::LocalAuthority,
+        ));
+        let completed = linked_reports
             .iter()
             .filter(|report| report.dispatch_status == DispatchStatus::Completed)
             .count();
-        let acknowledged = reports
+        let completed_evidence = linked_reports
             .iter()
-            .filter(|report| report.dispatch_status == DispatchStatus::Acknowledged)
-            .count();
-        checks.push(CommissioningCheck {
-            id: "dispatch_execution",
-            label: "Dispatch execution evidence exists",
-            status: if completed > 0 {
+            .find(|report| report.dispatch_status == DispatchStatus::Completed)
+            .map_or_else(
+                || "no linked commit report has completed under worker authority".into(),
+                |report| {
+                    format!(
+                        "completed commit report {} links asset {}, schedule item {}, and channel {}",
+                        report.report_id,
+                        report.asset_id,
+                        report.schedule_item_id,
+                        report.channel_id
+                    )
+                },
+            );
+        checks.push(commissioning_check(
+            "first_broadcast_report",
+            "First broadcast completion report",
+            CommissioningPhase::GuidedAirProof,
+            if completed > 0 {
                 CommissioningCheckStatus::Pass
             } else {
-                CommissioningCheckStatus::Warning
+                CommissioningCheckStatus::Blocked
             },
-            blocking: false,
-            detail: if reports.is_empty() {
-                "No commit report is recorded; dispatch execution is not verified.".into()
+            true,
+            Some("schedule"),
+            if completed > 0 {
+                format!("{completed} causally linked first-broadcast report(s) completed after worker return.")
             } else {
-                format!(
-                    "{} commit report(s), including {} acknowledged and {} completed.",
-                    reports.len(),
-                    acknowledged,
-                    completed
-                )
+                "No causally linked guided broadcast has completed and returned under worker authority.".into()
             },
-            evidence: "authoritative commit_reports rows, distinct from schedule authority".into(),
-        });
+            completed_evidence,
+            CommissioningBoundary::LocalAuthority,
+        ));
 
-        checks.push(CommissioningCheck {
-            id: "installed_field_proof",
-            label: "Installed and field proof",
-            status: CommissioningCheckStatus::NotVerified,
-            blocking: false,
-            detail: "This report does not claim clean-machine installation, external receiver proof, or one-/three-station field operation.".into(),
-            evidence: "no authoritative field-proof record is stored by the current control plane".into(),
-        });
+        let receiver_verified = headend_receiver_verified(&headend);
+        checks.push(commissioning_check(
+            "external_receiver_proof",
+            "External receiver acceptance",
+            CommissioningPhase::ExternalProof,
+            if receiver_verified {
+                CommissioningCheckStatus::Pass
+            } else {
+                CommissioningCheckStatus::NotVerified
+            },
+            false,
+            None,
+            if receiver_verified {
+                String::from("Every enabled required headend sink has authenticated receiver acceptance evidence.")
+            } else {
+                String::from("Local transport does not prove that a cable receiver decoded or accepted the signal.")
+            },
+            "external receiver evidence boundary; current worker progress is insufficient",
+            CommissioningBoundary::ExternalEvidence,
+        ));
+        for (id, label, detail) in [
+            (
+                "clean_machine_install_proof",
+                "Clean-machine installation proof",
+                "No clean-machine installation receipt is authoritative in this station database.",
+            ),
+            (
+                "one_station_week_proof",
+                "One-station one-week field proof",
+                "The required one-station week of field operation is not verified by this control plane.",
+            ),
+            (
+                "three_station_week_proof",
+                "Three-station one-week field proof",
+                "The required three-station week of field operation is not verified by this control plane.",
+            ),
+        ] {
+            checks.push(commissioning_check(
+                id,
+                label,
+                CommissioningPhase::ExternalProof,
+                CommissioningCheckStatus::NotVerified,
+                false,
+                None,
+                detail,
+                "no authenticated external proof record is stored by the current control plane",
+                CommissioningBoundary::ExternalEvidence,
+            ));
+        }
 
-        let overall_status = if checks.iter().any(|check| check.blocking) {
+        let required_total = checks.iter().filter(|check| check.required).count();
+        let required_passed = checks
+            .iter()
+            .filter(|check| check.required && check.status == CommissioningCheckStatus::Pass)
+            .count();
+        let current_step_id = checks
+            .iter()
+            .find(|check| check.required && check.status != CommissioningCheckStatus::Pass)
+            .map(|check| check.id);
+        let core_complete = required_passed == required_total;
+        let overall_status = if !core_complete {
             CommissioningCheckStatus::Blocked
         } else if checks.iter().any(|check| {
             matches!(
@@ -2338,8 +2791,15 @@ impl Api {
         json_response(
             200,
             serde_json::to_vec(&CommissioningReport {
+                schema_version: 2,
                 generated_at_unix_ms,
                 overall_status,
+                current_step_id,
+                core_progress: CommissioningCoreProgress {
+                    passed: required_passed,
+                    total: required_total,
+                },
+                core_complete,
                 checks,
             })
             .expect("serializing commissioning report cannot fail"),
@@ -4998,6 +5458,64 @@ mod tests {
         }
     }
 
+    fn receiver_test_headend(
+        enabled: bool,
+        sinks: Vec<station_readiness::SinkHeadendReadiness>,
+    ) -> station_readiness::HeadendReadiness {
+        station_readiness::HeadendReadiness {
+            schema_version: 1,
+            generated_at_unix_ms: 1,
+            channels: vec![station_readiness::ChannelHeadendReadiness {
+                channel_id: "8b626c01-bdf8-419a-8a2e-b0a7caa1ff7e".into(),
+                display_name: "Primary".into(),
+                enabled,
+                profile_id: "atsc-720p5994".into(),
+                profile_state: StationReadinessState::Pass,
+                sinks,
+                state: StationReadinessState::Pass,
+                detail: "test fixture".into(),
+                evidence: "test fixture".into(),
+            }],
+            rollup: station_readiness::HeadendReadinessRollup {
+                color: station_readiness::PegReadinessColor::Green,
+                enabled_channels: usize::from(enabled),
+                passing_channels: usize::from(enabled),
+                blocked_channels: 0,
+                detail: "test fixture".into(),
+            },
+            detail: "test fixture".into(),
+        }
+    }
+
+    #[test]
+    fn external_receiver_proof_rejects_a_disabled_only_headend() {
+        let headend = receiver_test_headend(
+            false,
+            vec![station_readiness::SinkHeadendReadiness {
+                sink_id: "22222222-3333-4444-8555-666666666666".into(),
+                label: "Cable".into(),
+                kind: HeadendSinkKind::UdpTs,
+                required: true,
+                enabled: true,
+                capability: CapabilitySupport::Supported,
+                local_transport: StationReadinessState::Pass,
+                external_receiver: ExternalReceiverState::Verified,
+                state: StationReadinessState::Pass,
+                detail: "test fixture".into(),
+                evidence: "test fixture".into(),
+            }],
+        );
+
+        assert!(!headend_receiver_verified(&headend));
+    }
+
+    #[test]
+    fn external_receiver_proof_requires_an_enabled_required_sink() {
+        let headend = receiver_test_headend(true, Vec::new());
+
+        assert!(!headend_receiver_verified(&headend));
+    }
+
     #[test]
     fn station_box_routes_share_one_cached_authority_without_public_fact_injection() {
         let nonce = SystemTime::now()
@@ -5032,6 +5550,57 @@ mod tests {
             200
         );
         assert!(api.station_box_cache.lock().unwrap().is_none());
+
+        std::fs::remove_dir_all(application).unwrap();
+        let _ = std::fs::remove_file(database);
+    }
+
+    #[test]
+    fn commissioning_progress_uses_current_station_box_storage_time_and_backup_truth() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let database = std::env::temp_dir().join(format!(
+            "townlight-commissioning-station-box-{}-{nonce}.db",
+            std::process::id()
+        ));
+        let application = database.with_extension("application");
+        std::fs::create_dir_all(&application).unwrap();
+        let mut api =
+            Api::open_with_station_box_probe(&database, &application, station_box_probe()).unwrap();
+
+        let passing = api.handle("GET", "/api/v1/commissioning/report", None);
+        let passing: serde_json::Value = serde_json::from_slice(&passing.body).unwrap();
+        for id in ["station_box_storage", "station_time", "station_backup"] {
+            let check = passing["checks"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|check| check["id"] == id)
+                .unwrap();
+            assert_eq!(check["status"], "pass", "{id}");
+        }
+
+        let mut failed_probe = station_box_probe();
+        failed_probe.hardware.media_disk_free_gb = 10.0;
+        failed_probe.clock.sync_status = ClockSyncStatus::Unknown;
+        failed_probe.backup.state = StationReadinessState::Blocked;
+        failed_probe.backup.writable = Some(false);
+        api.station_box_probe_override = Some(failed_probe);
+        *api.station_box_cache.lock().unwrap() = None;
+        let failed = api.handle("GET", "/api/v1/commissioning/report", None);
+        let failed: serde_json::Value = serde_json::from_slice(&failed.body).unwrap();
+        for id in ["station_box_storage", "station_time", "station_backup"] {
+            let check = failed["checks"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|check| check["id"] == id)
+                .unwrap();
+            assert_eq!(check["status"], "blocked", "{id}");
+            assert_eq!(check["blocking"], true, "{id}");
+        }
 
         std::fs::remove_dir_all(application).unwrap();
         let _ = std::fs::remove_file(database);
