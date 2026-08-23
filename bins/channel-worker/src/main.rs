@@ -3,7 +3,7 @@ use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
 use std::time::Instant;
 
-use station_media_engine::{PersistentPlayout, SourceRole, TransportOutput};
+use station_media_engine::{ConfiguredTransportOutput, PersistentPlayout, SourceRole};
 use station_media_journal::JournalWriter;
 use station_media_protocol::{
     ChannelCommand, CommandEnvelope, LiveArmToken, LiveReturnTarget, MAX_FRAME_BYTES,
@@ -171,16 +171,26 @@ fn main() {
         .outputs
         .into_iter()
         .map(|output| match output {
-            WorkerOutputConfiguration::UdpTs { destination } => destination
+            WorkerOutputConfiguration::UdpTs {
+                destination,
+                loudness_target_lufs,
+            } => destination
                 .parse::<SocketAddr>()
-                .map(TransportOutput::Udp)
-                .map_err(|error| error.to_string()),
-            WorkerOutputConfiguration::Srt { uri, passphrase } => {
-                validate_srt_uri(&uri).map(|()| TransportOutput::Srt {
-                    uri,
-                    passphrase: passphrase.map(|value| value.expose().to_string()),
+                .map(|destination| {
+                    ConfiguredTransportOutput::udp(destination, loudness_target_lufs)
                 })
-            }
+                .map_err(|error| error.to_string()),
+            WorkerOutputConfiguration::Srt {
+                uri,
+                passphrase,
+                loudness_target_lufs,
+            } => validate_srt_uri(&uri).map(|()| {
+                ConfiguredTransportOutput::srt(
+                    uri,
+                    passphrase.map(|value| value.expose().to_string()),
+                    loudness_target_lufs,
+                )
+            }),
         })
         .collect::<Result<Vec<_>, _>>()
         .unwrap_or_else(|error| fatal(6, "validate its output destinations", &error.to_string()));
@@ -192,7 +202,7 @@ fn main() {
         );
     }
     let mut media = Some(
-        PersistentPlayout::start_outputs_with_profile_and_cg_root(
+        PersistentPlayout::start_configured_outputs_with_profile_and_cg_root(
             &outputs,
             output_profile,
             Some(&cg_image_root),
@@ -384,15 +394,16 @@ fn decide_event(
                     }
                 }
             }
-            match media.output_bytes_sent().and_then(|bytes_sent| {
-                bytes_sent
+            match media.output_health_observations().and_then(|observations| {
+                observations
                     .into_iter()
                     .enumerate()
-                    .map(|(output_index, bytes_sent_total)| {
+                    .map(|(output_index, observation)| {
                         u16::try_from(output_index)
                             .map(|output_index| OutputTransportObservation {
                                 output_index,
-                                bytes_sent_total,
+                                bytes_sent_total: observation.bytes_sent_total,
+                                audio_buffers_total: observation.audio_buffers_total,
                             })
                             .map_err(|_| {
                                 station_media_engine::EngineError::State(

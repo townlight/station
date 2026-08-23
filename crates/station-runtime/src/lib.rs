@@ -6,9 +6,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use station_media_protocol::{
-    ChannelCommand, CommandEnvelope, MAX_FRAME_BYTES, PROTOCOL_VERSION, ProtocolError,
-    WorkerBootstrapEnvelope, WorkerEvent, WorkerEventEnvelope, WorkerOutputConfiguration,
-    decode_event_frame, encode_bootstrap_frame, encode_command_frame,
+    ChannelCommand, CommandEnvelope, LoudnessTarget, MAX_FRAME_BYTES, PROTOCOL_VERSION,
+    ProtocolError, WorkerBootstrapEnvelope, WorkerEvent, WorkerEventEnvelope,
+    WorkerOutputConfiguration, decode_event_frame, encode_bootstrap_frame, encode_command_frame,
 };
 use station_schedule::OutputProfileId;
 use station_windows_ipc::{IpcError, PipeServer, PipeStream};
@@ -101,12 +101,7 @@ impl WorkerSupervisor {
         output_profile: OutputProfileId,
         timeout: Duration,
     ) -> Result<Self, SupervisorError> {
-        let outputs = udp_destinations
-            .iter()
-            .map(|destination| WorkerOutputConfiguration::UdpTs {
-                destination: destination.to_string(),
-            })
-            .collect::<Vec<_>>();
+        let outputs = udp_outputs_for_profile(udp_destinations, output_profile)?;
         Self::launch_with_outputs(
             executable,
             worker_id,
@@ -304,6 +299,25 @@ impl WorkerSupervisor {
     }
 }
 
+fn udp_outputs_for_profile(
+    destinations: &[SocketAddr],
+    output_profile: OutputProfileId,
+) -> Result<Vec<WorkerOutputConfiguration>, SupervisorError> {
+    let loudness_target_lufs =
+        LoudnessTarget::from_lufs(f64::from(output_profile.profile().loudness_target_lufs))
+            .map_err(|message| SupervisorError::Io {
+                operation: "resolve output profile loudness target",
+                message: message.into(),
+            })?;
+    Ok(destinations
+        .iter()
+        .map(|destination| WorkerOutputConfiguration::UdpTs {
+            destination: destination.to_string(),
+            loudness_target_lufs,
+        })
+        .collect())
+}
+
 impl Drop for WorkerSupervisor {
     fn drop(&mut self) {
         if let Some(mut child) = self.child.take() {
@@ -389,5 +403,69 @@ fn io_error(operation: &'static str, error: std::io::Error) -> SupervisorError {
     SupervisorError::Io {
         operation,
         message: error.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn destination(value: &str) -> SocketAddr {
+        value.parse().expect("test destination is valid")
+    }
+
+    #[test]
+    fn udp_bootstrap_outputs_use_the_selected_profile_target() {
+        let proof = udp_outputs_for_profile(
+            &[destination("127.0.0.1:5500")],
+            OutputProfileId::Proof360p30,
+        )
+        .expect("the proof profile target is valid");
+        let hd = udp_outputs_for_profile(
+            &[destination("127.0.0.1:5501")],
+            OutputProfileId::Atsc720p5994,
+        )
+        .expect("the HD profile target is valid");
+
+        let WorkerOutputConfiguration::UdpTs {
+            loudness_target_lufs: proof_target,
+            ..
+        } = proof[0]
+        else {
+            panic!("the proof profile must produce a UDP output");
+        };
+        let WorkerOutputConfiguration::UdpTs {
+            loudness_target_lufs: hd_target,
+            ..
+        } = hd[0]
+        else {
+            panic!("the HD profile must produce a UDP output");
+        };
+        assert_eq!(proof_target, LoudnessTarget::STREAMING);
+        assert_eq!(hd_target, LoudnessTarget::CABLE);
+    }
+
+    #[test]
+    fn every_udp_branch_keeps_the_selected_target_and_stable_destination_order() {
+        let outputs = udp_outputs_for_profile(
+            &[destination("127.0.0.1:5500"), destination("127.0.0.1:5501")],
+            OutputProfileId::Atsc720p5994,
+        )
+        .expect("the selected profile target is valid");
+
+        assert_eq!(outputs.len(), 2);
+        for (output, expected_destination) in
+            outputs.iter().zip(["127.0.0.1:5500", "127.0.0.1:5501"])
+        {
+            let WorkerOutputConfiguration::UdpTs {
+                destination,
+                loudness_target_lufs,
+            } = output
+            else {
+                panic!("all configured destinations must remain UDP outputs");
+            };
+            assert_eq!(destination, expected_destination);
+            assert_eq!(*loudness_target_lufs, LoudnessTarget::CABLE);
+        }
     }
 }

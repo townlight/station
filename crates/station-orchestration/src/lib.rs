@@ -17,8 +17,8 @@ use station_domain::{
 use station_live::{LiveEndpoint, TakeoverSession, TakeoverState};
 use station_media_protocol::{
     CgImageFormat, CgOverlay, CgOverlayContent, CgRect, CgSnapshot, ChannelCommand, LiveArmToken,
-    LiveInputConfiguration, LiveReturnTarget, MAX_CG_SLOTS, MAX_CG_TEXT_BYTES, SrtPassphrase,
-    WorkerEvent, WorkerOutputConfiguration,
+    LiveInputConfiguration, LiveReturnTarget, LoudnessTarget, MAX_CG_SLOTS, MAX_CG_TEXT_BYTES,
+    SrtPassphrase, WorkerEvent, WorkerOutputConfiguration,
 };
 use station_runtime::{SupervisorError, WorkerSupervisor};
 use station_schedule::{
@@ -321,6 +321,58 @@ struct OutputExpectation {
     required: bool,
 }
 
+/// Convert the durable channel sink sequence into the exact ordered worker
+/// bootstrap outputs. The channel is the authority for ordering and loudness;
+/// neither value is inferred or defaulted here. Encrypted SRT material is
+/// resolved only through the station store and is never taken from the public
+/// channel configuration.
+pub fn worker_output_configurations(
+    channel: &ChannelConfiguration,
+    store: &StationStore,
+) -> Result<Vec<WorkerOutputConfiguration>, OrchestrationError> {
+    channel
+        .validate()
+        .map_err(|error| OrchestrationError::InvalidDestination(format!("{error:?}")))?;
+    channel
+        .output_sinks
+        .iter()
+        .filter(|sink| sink.enabled)
+        .map(|sink| {
+            let milli_lufs = (f64::from(sink.loudness_target_lufs) * 1_000.0).round() as i32;
+            let loudness_target = LoudnessTarget::from_milli_lufs(milli_lufs)
+                .map_err(|error| OrchestrationError::InvalidDestination(error.into()))?;
+            match sink.kind {
+                OutputSinkKind::UdpTs => Ok(WorkerOutputConfiguration::UdpTs {
+                    destination: sink.destination.clone(),
+                    loudness_target_lufs: loudness_target,
+                }),
+                OutputSinkKind::Srt => {
+                    let passphrase = if sink.encryption_configured {
+                        let secret = store
+                            .read_srt_output_secret(&channel.channel_id, &sink.sink_id)
+                            .map_err(OrchestrationError::Storage)?
+                            .ok_or_else(|| {
+                                OrchestrationError::Storage(
+                                    "encrypted SRT output secret is missing".into(),
+                                )
+                            })?;
+                        Some(SrtPassphrase::new(secret.expose().to_string()).map_err(
+                            |message| OrchestrationError::InvalidDestination(message.into()),
+                        )?)
+                    } else {
+                        None
+                    };
+                    Ok(WorkerOutputConfiguration::Srt {
+                        uri: sink.destination.clone(),
+                        passphrase,
+                        loudness_target_lufs: loudness_target,
+                    })
+                }
+            }
+        })
+        .collect()
+}
+
 struct LiveControlState {
     session_id: String,
     arm_token: Option<LiveArmToken>,
@@ -350,6 +402,7 @@ pub struct ChannelController {
     last_heartbeat_at_unix_ms: i64,
     output_expectations: Vec<OutputExpectation>,
     last_output_bytes: Option<Vec<u64>>,
+    last_output_audio_buffers: Option<Vec<u64>>,
     cg_state: CgSnapshotState,
     next_cg_sync_at_unix_ms: i64,
     live_control: Option<LiveControlState>,
@@ -367,37 +420,7 @@ impl ChannelController {
             .validate()
             .map_err(|error| OrchestrationError::InvalidDestination(format!("{error:?}")))?;
         let store = StationStore::open(database_path).map_err(OrchestrationError::Storage)?;
-        let outputs = channel
-            .output_sinks
-            .iter()
-            .filter(|sink| sink.enabled)
-            .map(|sink| match sink.kind {
-                OutputSinkKind::UdpTs => Ok(WorkerOutputConfiguration::UdpTs {
-                    destination: sink.destination.clone(),
-                }),
-                OutputSinkKind::Srt => {
-                    let passphrase = if sink.encryption_configured {
-                        let secret = store
-                            .read_srt_output_secret(&channel.channel_id, &sink.sink_id)
-                            .map_err(OrchestrationError::Storage)?
-                            .ok_or_else(|| {
-                                OrchestrationError::Storage(
-                                    "encrypted SRT output secret is missing".into(),
-                                )
-                            })?;
-                        Some(SrtPassphrase::new(secret.expose().to_string()).map_err(
-                            |message| OrchestrationError::InvalidDestination(message.into()),
-                        )?)
-                    } else {
-                        None
-                    };
-                    Ok(WorkerOutputConfiguration::Srt {
-                        uri: sink.destination.clone(),
-                        passphrase,
-                    })
-                }
-            })
-            .collect::<Result<Vec<_>, OrchestrationError>>()?;
+        let outputs = worker_output_configurations(channel, &store)?;
         let output_expectations = channel
             .output_sinks
             .iter()
@@ -433,6 +456,7 @@ impl ChannelController {
             last_heartbeat_at_unix_ms: started_at_unix_ms,
             output_expectations,
             last_output_bytes: None,
+            last_output_audio_buffers: None,
             cg_state: CgSnapshotState::default(),
             next_cg_sync_at_unix_ms: 0,
             live_control: None,
@@ -503,8 +527,12 @@ impl ChannelController {
             return Err(OrchestrationError::UnexpectedWorkerEvent);
         }
         let current = outputs
-            .into_iter()
+            .iter()
             .map(|output| output.bytes_sent_total)
+            .collect::<Vec<_>>();
+        let current_audio = outputs
+            .iter()
+            .map(|output| output.audio_buffers_total)
             .collect::<Vec<_>>();
         if let Some(index) = stalled_required_output(
             &self.output_expectations,
@@ -519,7 +547,21 @@ impl ChannelController {
                     .into(),
             });
         }
+        if let Some(index) = stalled_required_output(
+            &self.output_expectations,
+            self.last_output_audio_buffers.as_deref(),
+            &current_audio,
+        ) {
+            let expectation = &self.output_expectations[index];
+            return Err(OrchestrationError::RequiredOutputStalled {
+                sink_id: expectation.sink_id.clone(),
+                label: expectation.label.clone(),
+                detail: "The encoded audio buffer counter did not advance between heartbeat polls."
+                    .into(),
+            });
+        }
         self.last_output_bytes = Some(current);
+        self.last_output_audio_buffers = Some(current_audio);
         Ok(())
     }
 

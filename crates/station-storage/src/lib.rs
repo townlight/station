@@ -425,6 +425,7 @@ impl StationStore {
              CREATE TABLE IF NOT EXISTS channel_output_sinks (\
                channel_id TEXT NOT NULL,\
                sink_id TEXT NOT NULL,\
+               sink_order INTEGER NOT NULL CHECK (sink_order >= 0),\
                label TEXT NOT NULL,\
                kind TEXT NOT NULL CHECK (kind IN ('udp-ts','srt')),\
                destination TEXT NOT NULL,\
@@ -655,6 +656,7 @@ impl StationStore {
         store.migrate_channel_output_profile()?;
         store.migrate_channel_output_sink_kinds()?;
         store.migrate_headend_sink_contract()?;
+        store.migrate_channel_output_sink_order()?;
         store.migrate_channel_output_sinks()?;
         store.initialize_cg_schema()?;
         store.migrate_cg_feed_cache_schema()?;
@@ -1915,10 +1917,10 @@ impl StationStore {
         bind_text(self.database, delete.raw, 1, &channel_id)?;
         expect_done(self.database, delete.raw)?;
         drop(delete);
-        for sink in &channel.output_sinks {
+        for (sink_order, sink) in channel.output_sinks.iter().enumerate() {
             let insert = self.prepare(
-                "INSERT INTO channel_output_sinks(channel_id, sink_id, label, kind, destination, loudness_target_milli, required, enabled, headend_profile, headend_muxrate_kbps, headend_packet_size) \
-                 VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                "INSERT INTO channel_output_sinks(channel_id, sink_id, label, kind, destination, loudness_target_milli, required, enabled, headend_profile, headend_muxrate_kbps, headend_packet_size, sink_order) \
+                 VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
             )?;
             let sink_id = c_string(&sink.sink_id, "output sink identity")?;
             let label = c_string(&sink.label, "output sink label")?;
@@ -1963,6 +1965,13 @@ impl StationStore {
                         .as_ref()
                         .map_or(0, |headend| headend.packet_size_bytes),
                 ),
+            )?;
+            bind_i64(
+                self.database,
+                insert.raw,
+                12,
+                i64::try_from(sink_order)
+                    .map_err(|_| "channel output sink order exceeds database range")?,
             )?;
             expect_done(self.database, insert.raw)?;
             drop(insert);
@@ -3839,7 +3848,7 @@ impl StationStore {
                     WHERE secret.channel_id=channel_output_sinks.channel_id \
                       AND secret.sink_id=channel_output_sinks.sink_id), \
              headend_profile, headend_muxrate_kbps, headend_packet_size \
-             FROM channel_output_sinks WHERE channel_id=?1 ORDER BY sink_id",
+             FROM channel_output_sinks WHERE channel_id=?1 ORDER BY sink_order, sink_id",
         )?;
         let channel_id = c_string(channel_id, "channel identity")?;
         bind_text(self.database, statement.raw, 1, &channel_id)?;
@@ -6745,12 +6754,41 @@ impl StationStore {
         )
     }
 
+    fn migrate_channel_output_sink_order(&self) -> Result<(), String> {
+        let statement = self.prepare(
+            "SELECT COUNT(*) FROM pragma_table_info('channel_output_sinks') WHERE name='sink_order'",
+        )?;
+        let exists = match unsafe { sqlite3_step(statement.raw) } {
+            SQLITE_ROW => (unsafe { sqlite3_column_int64(statement.raw, 0) }) == 1,
+            _ => return Err(sqlite_error(self.database)),
+        };
+        drop(statement);
+        if exists {
+            return self.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS channel_output_sinks_channel_order \
+                 ON channel_output_sinks(channel_id, sink_order)",
+            );
+        }
+        self.execute(
+            "BEGIN IMMEDIATE;\
+             ALTER TABLE channel_output_sinks ADD COLUMN sink_order INTEGER NOT NULL DEFAULT 0 CHECK (sink_order >= 0);\
+             UPDATE channel_output_sinks SET sink_order=(\
+               SELECT COUNT(*) FROM channel_output_sinks AS ordered \
+               WHERE ordered.channel_id=channel_output_sinks.channel_id \
+                 AND ordered.sink_id < channel_output_sinks.sink_id\
+             );\
+             CREATE UNIQUE INDEX channel_output_sinks_channel_order \
+               ON channel_output_sinks(channel_id, sink_order);\
+             COMMIT",
+        )
+    }
+
     fn migrate_channel_output_sinks(&self) -> Result<(), String> {
         self.execute(
             "INSERT INTO channel_output_sinks(\
-               channel_id, sink_id, label, kind, destination, loudness_target_milli, required, enabled) \
+               channel_id, sink_id, label, kind, destination, loudness_target_milli, required, enabled, sink_order) \
              SELECT channel_id, channel_id, 'Primary transport', 'udp-ts', udp_destination,\
-               CASE output_profile WHEN 'atsc-720p5994' THEN -24000 ELSE -16000 END, 1, 1 \
+               CASE output_profile WHEN 'atsc-720p5994' THEN -24000 ELSE -16000 END, 1, 1, 0 \
              FROM channels WHERE NOT EXISTS (\
                SELECT 1 FROM channel_output_sinks WHERE channel_output_sinks.channel_id=channels.channel_id)",
         )

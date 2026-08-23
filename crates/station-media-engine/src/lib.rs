@@ -12,7 +12,7 @@ use gstreamer as gst;
 use image::{ImageReader, Limits};
 use sha2::{Digest, Sha256};
 use station_media_protocol::{
-    CgImageFormat, CgOverlayContent, CgSnapshot, MAX_CG_SLOTS, MAX_CG_TEXT_BYTES,
+    CgImageFormat, CgOverlayContent, CgSnapshot, LoudnessTarget, MAX_CG_SLOTS, MAX_CG_TEXT_BYTES,
 };
 use station_schedule::{OutputProfile, OutputProfileId};
 
@@ -33,6 +33,41 @@ pub enum TransportOutput {
         uri: String,
         passphrase: Option<String>,
     },
+}
+
+#[derive(Clone, PartialEq, Eq)]
+pub struct ConfiguredTransportOutput {
+    transport: TransportOutput,
+    loudness_target: LoudnessTarget,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OutputHealthObservation {
+    pub bytes_sent_total: u64,
+    pub audio_buffers_total: u64,
+}
+
+impl ConfiguredTransportOutput {
+    pub fn udp(destination: SocketAddr, loudness_target: LoudnessTarget) -> Self {
+        Self {
+            transport: TransportOutput::Udp(destination),
+            loudness_target,
+        }
+    }
+
+    pub fn srt(
+        uri: impl Into<String>,
+        passphrase: Option<String>,
+        loudness_target: LoudnessTarget,
+    ) -> Self {
+        Self {
+            transport: TransportOutput::Srt {
+                uri: uri.into(),
+                passphrase,
+            },
+            loudness_target,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -84,6 +119,9 @@ pub enum EngineError {
         audio_buffers: u64,
     },
     CgInvalid(String),
+    UnsupportedLoudnessTarget {
+        target_milli_lufs: i32,
+    },
 }
 
 pub struct PersistentPlayout {
@@ -95,6 +133,7 @@ pub struct PersistentPlayout {
     audio_fallback_pad: gst::Pad,
     audio_program_pad: gst::Pad,
     output_counters: Vec<OutputCounter>,
+    output_audio_counters: Vec<Arc<AtomicU64>>,
     output_profile: OutputProfileId,
     file_program: Option<FileProgram>,
     live_program: Option<LiveProgram>,
@@ -102,6 +141,7 @@ pub struct PersistentPlayout {
     cg_canvas_pad: gst::Pad,
     cg_image_root: Option<PathBuf>,
     cg_revision: Option<CgSnapshot>,
+    output_variant_count: usize,
     stopped: bool,
 }
 
@@ -115,6 +155,29 @@ struct CgSlot {
 enum OutputCounter {
     Udp(gst::Element),
     Srt(gst::Element),
+}
+
+struct OutputBranch {
+    queue: gst::Element,
+    sink: gst::Element,
+    variant_index: usize,
+}
+
+struct LoudnessVariant {
+    video_queue: gst::Element,
+    audio_queue: gst::Element,
+    audio_convert_in: gst::Element,
+    audio_resample_in: gst::Element,
+    audio_input_caps: gst::Element,
+    normalizer: gst::Element,
+    audio_convert_out: gst::Element,
+    audio_resample_out: gst::Element,
+    audio_output_caps: gst::Element,
+    audio_encoder: gst::Element,
+    audio_parser: gst::Element,
+    audio_buffers: Arc<AtomicU64>,
+    mux: gst::Element,
+    transport_fanout: gst::Element,
 }
 
 impl PersistentPlayout {
@@ -158,7 +221,16 @@ impl PersistentPlayout {
                 "at least one transport output is required".into(),
             ));
         }
-        Self::start_outputs_with_program(outputs, None, output_profile, cg_image_root)
+        let loudness_target = profile_loudness_target(output_profile.profile())?;
+        let configured_outputs = outputs
+            .iter()
+            .cloned()
+            .map(|transport| ConfiguredTransportOutput {
+                transport,
+                loudness_target,
+            })
+            .collect::<Vec<_>>();
+        Self::start_outputs_with_program(&configured_outputs, None, output_profile, cg_image_root)
     }
 
     pub fn start_file_udp(
@@ -175,16 +247,37 @@ impl PersistentPlayout {
     ) -> Result<Self, EngineError> {
         station_media_assets::validate_media(media_path.as_ref())
             .map_err(|error| EngineError::MediaRejected(format!("{error:?}")))?;
+        let loudness_target = profile_loudness_target(output_profile.profile())?;
         Self::start_outputs_with_program(
-            &[TransportOutput::Udp(destination)],
+            &[ConfiguredTransportOutput::udp(destination, loudness_target)],
             Some(media_path.as_ref()),
             output_profile,
             None,
         )
     }
 
+    pub fn start_configured_outputs_with_profile(
+        outputs: &[ConfiguredTransportOutput],
+        output_profile: OutputProfileId,
+    ) -> Result<Self, EngineError> {
+        Self::start_configured_outputs_with_profile_and_cg_root(outputs, output_profile, None)
+    }
+
+    pub fn start_configured_outputs_with_profile_and_cg_root(
+        outputs: &[ConfiguredTransportOutput],
+        output_profile: OutputProfileId,
+        cg_image_root: Option<&Path>,
+    ) -> Result<Self, EngineError> {
+        if outputs.is_empty() {
+            return Err(EngineError::Pipeline(
+                "at least one transport output is required".into(),
+            ));
+        }
+        Self::start_outputs_with_program(outputs, None, output_profile, cg_image_root)
+    }
+
     fn start_outputs_with_program(
-        outputs: &[TransportOutput],
+        outputs: &[ConfiguredTransportOutput],
         media_path: Option<&Path>,
         output_profile: OutputProfileId,
         cg_image_root: Option<&Path>,
@@ -296,29 +389,20 @@ impl PersistentPlayout {
             .build()
             .map_err(|error| build_error("audiorate", error))?;
         let audio_output_queue = element("queue", "audio-output-queue")?;
-        let audio_encoder = gst::ElementFactory::make("voaacenc")
-            .name("audio-encoder")
-            .property("bitrate", profile.audio_bitrate_bps as i32)
-            .property("perfect-timestamp", true)
-            .build()
-            .map_err(|error| build_error("voaacenc", error))?;
-        let audio_parser = element("aacparse", "audio-parser")?;
-        let mux = gst::ElementFactory::make("mpegtsmux")
-            .name("transport-mux")
-            .property("alignment", 7_i32)
-            .property("bitrate", profile.transport_bitrate_bps)
-            .property("pat-interval", 9_000_u32)
-            .property("pmt-interval", 9_000_u32)
-            .property("pcr-interval", 3_600_u32)
-            .build()
-            .map_err(|error| build_error("mpegtsmux", error))?;
-        let transport_fanout = element("tee", "transport-fanout")?;
+        let audio_variant_fanout = element("tee", "audio-variant-fanout")?;
+        let variant_targets = output_variant_targets(outputs)?;
+        let loudness_variants = variant_targets
+            .iter()
+            .map(|target| build_loudness_variant(*target, profile))
+            .collect::<Result<Vec<_>, _>>()?;
+        let video_variant_fanout = element("tee", "video-variant-fanout")?;
         let mut output_branches = Vec::with_capacity(outputs.len());
         let mut output_counters = Vec::with_capacity(outputs.len());
+        let mut output_audio_counters = Vec::with_capacity(outputs.len());
         let mut srt_sinks = Vec::new();
         for (index, output) in outputs.iter().enumerate() {
             let queue = element("queue", format!("transport-output-queue-{index}"))?;
-            let sink = match output {
+            let sink = match &output.transport {
                 TransportOutput::Udp(destination) => gst::ElementFactory::make("udpsink")
                     .name(format!("udp-output-{index}"))
                     .property("host", destination.ip().to_string())
@@ -349,14 +433,23 @@ impl PersistentPlayout {
                         .map_err(|error| build_error("srtsink", error))?
                 }
             };
-            match output {
+            match &output.transport {
                 TransportOutput::Udp(_) => output_counters.push(OutputCounter::Udp(sink.clone())),
                 TransportOutput::Srt { .. } => {
                     srt_sinks.push(sink.clone());
                     output_counters.push(OutputCounter::Srt(sink.clone()));
                 }
             }
-            output_branches.push((queue, sink));
+            let variant_index = variant_targets
+                .iter()
+                .position(|target| target == &output.loudness_target)
+                .ok_or_else(|| EngineError::Pipeline("missing loudness variant".into()))?;
+            output_audio_counters.push(Arc::clone(&loudness_variants[variant_index].audio_buffers));
+            output_branches.push(OutputBranch {
+                queue,
+                sink,
+                variant_index,
+            });
         }
 
         pipeline
@@ -386,15 +479,32 @@ impl PersistentPlayout {
                 &audio_timeline,
                 &audio_rate,
                 &audio_output_queue,
-                &audio_encoder,
-                &audio_parser,
-                &mux,
-                &transport_fanout,
+                &audio_variant_fanout,
+                &video_variant_fanout,
             ])
             .map_err(|error| EngineError::Pipeline(error.to_string()))?;
-        for (queue, sink) in &output_branches {
+        for branch in &output_branches {
             pipeline
-                .add_many([queue, sink])
+                .add_many([&branch.queue, &branch.sink])
+                .map_err(|error| EngineError::Pipeline(error.to_string()))?;
+        }
+        for variant in &loudness_variants {
+            pipeline
+                .add_many([
+                    &variant.video_queue,
+                    &variant.audio_queue,
+                    &variant.audio_convert_in,
+                    &variant.audio_resample_in,
+                    &variant.audio_input_caps,
+                    &variant.normalizer,
+                    &variant.audio_convert_out,
+                    &variant.audio_resample_out,
+                    &variant.audio_output_caps,
+                    &variant.audio_encoder,
+                    &variant.audio_parser,
+                    &variant.mux,
+                    &variant.transport_fanout,
+                ])
                 .map_err(|error| EngineError::Pipeline(error.to_string()))?;
         }
         link(&fallback, &fallback_queue, "videotestsrc", "queue")?;
@@ -438,18 +548,40 @@ impl PersistentPlayout {
             &caps_filter,
             &encoder,
             &parser,
-            &mux,
-            &transport_fanout,
+            &video_variant_fanout,
         ])
         .map_err(|_| EngineError::Link {
             from: "cg-compositor",
-            to: "transport-fanout",
+            to: "video-variant-fanout",
         })?;
-        for (queue, sink) in &output_branches {
-            gst::Element::link_many([&transport_fanout, queue, sink]).map_err(|_| {
+        for variant in &loudness_variants {
+            gst::Element::link_many([&video_variant_fanout, &variant.video_queue, &variant.mux])
+                .map_err(|_| EngineError::Link {
+                    from: "video-variant-fanout",
+                    to: "mpegtsmux",
+                })?;
+            gst::Element::link_many([
+                &audio_variant_fanout,
+                &variant.audio_queue,
+                &variant.audio_convert_in,
+                &variant.audio_resample_in,
+                &variant.audio_input_caps,
+                &variant.normalizer,
+                &variant.audio_convert_out,
+                &variant.audio_resample_out,
+                &variant.audio_output_caps,
+                &variant.audio_encoder,
+                &variant.audio_parser,
+                &variant.mux,
+            ])
+            .map_err(|_| EngineError::Link {
+                from: "audio-variant-fanout",
+                to: "mpegtsmux",
+            })?;
+            gst::Element::link_many([&variant.mux, &variant.transport_fanout]).map_err(|_| {
                 EngineError::Link {
-                    from: "transport-fanout",
-                    to: "udpsink",
+                    from: "mpegtsmux",
+                    to: "transport-fanout",
                 }
             })?;
         }
@@ -458,14 +590,20 @@ impl PersistentPlayout {
             &audio_timeline,
             &audio_rate,
             &audio_output_queue,
-            &audio_encoder,
-            &audio_parser,
-            &mux,
+            &audio_variant_fanout,
         ])
         .map_err(|_| EngineError::Link {
             from: "input-selector",
-            to: "mpegtsmux",
+            to: "audio-variant-fanout",
         })?;
+        for branch in &output_branches {
+            let variant = &loudness_variants[branch.variant_index];
+            gst::Element::link_many([&variant.transport_fanout, &branch.queue, &branch.sink])
+                .map_err(|_| EngineError::Link {
+                    from: "transport-fanout",
+                    to: "transport-output",
+                })?;
+        }
 
         let fallback_pad = connect_source(&fallback_queue, &video_selector, "fallback-queue")?;
         let synthetic_program_pad =
@@ -530,6 +668,7 @@ impl PersistentPlayout {
             audio_fallback_pad,
             audio_program_pad,
             output_counters,
+            output_audio_counters,
             output_profile,
             file_program,
             live_program: None,
@@ -537,14 +676,48 @@ impl PersistentPlayout {
             cg_canvas_pad,
             cg_image_root: cg_image_root.map(Path::to_path_buf),
             cg_revision: None,
+            output_variant_count: loudness_variants.len(),
             stopped: false,
         };
-        playout.wait_for_source(SourceRole::Fallback, Duration::from_secs(2))?;
         playout.cg_canvas_pad.set_property("alpha", 0.0_f64);
+        playout.wait_for_source(SourceRole::Fallback, Duration::from_secs(2))?;
+        playout.wait_for_output_startup(Duration::from_secs(12))?;
         Ok(playout)
     }
 
+    fn wait_for_output_startup(&self, timeout: Duration) -> Result<(), EngineError> {
+        let deadline = Instant::now() + timeout;
+        loop {
+            let observations = self.output_health_observations()?;
+            if observations.iter().all(|observation| {
+                observation.bytes_sent_total > 0 && observation.audio_buffers_total > 0
+            }) {
+                return Ok(());
+            }
+            if Instant::now() >= deadline {
+                return Err(EngineError::State(
+                    "required output audio and transport did not start before the readiness deadline"
+                        .into(),
+                ));
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    pub fn output_variant_count(&self) -> usize {
+        self.output_variant_count
+    }
+
     pub fn output_bytes_sent(&self) -> Result<Vec<u64>, EngineError> {
+        self.output_health_observations().map(|observations| {
+            observations
+                .into_iter()
+                .map(|observation| observation.bytes_sent_total)
+                .collect()
+        })
+    }
+
+    pub fn output_health_observations(&self) -> Result<Vec<OutputHealthObservation>, EngineError> {
         if let Some(message) = self
             .pipeline
             .bus()
@@ -558,16 +731,23 @@ impl PersistentPlayout {
         }
         self.output_counters
             .iter()
-            .map(|counter| match counter {
-                OutputCounter::Udp(sink) => Ok(sink.property::<u64>("bytes-served")),
-                OutputCounter::Srt(sink) => sink
-                    .property::<gst::Structure>("stats")
-                    .get::<u64>("bytes-sent-total")
-                    .map_err(|error| {
-                        EngineError::State(format!(
-                            "could not read required SRT output statistics: {error}"
-                        ))
-                    }),
+            .zip(&self.output_audio_counters)
+            .map(|(counter, audio_buffers)| {
+                let bytes_sent_total = match counter {
+                    OutputCounter::Udp(sink) => sink.property::<u64>("bytes-served"),
+                    OutputCounter::Srt(sink) => sink
+                        .property::<gst::Structure>("stats")
+                        .get::<u64>("bytes-sent-total")
+                        .map_err(|error| {
+                            EngineError::State(format!(
+                                "could not read required SRT output statistics: {error}"
+                            ))
+                        })?,
+                };
+                Ok(OutputHealthObservation {
+                    bytes_sent_total,
+                    audio_buffers_total: audio_buffers.load(Ordering::Acquire),
+                })
             })
             .collect()
     }
@@ -1948,6 +2128,122 @@ fn audio_caps_filter(
         .property("caps", &caps)
         .build()
         .map_err(|error| build_error("capsfilter", error))
+}
+
+fn profile_loudness_target(profile: &OutputProfile) -> Result<LoudnessTarget, EngineError> {
+    let target = LoudnessTarget::from_lufs(profile.loudness_target_lufs as f64).map_err(|_| {
+        EngineError::UnsupportedLoudnessTarget {
+            target_milli_lufs: (profile.loudness_target_lufs * 1_000.0) as i32,
+        }
+    })?;
+    validate_loudness_target(target)?;
+    Ok(target)
+}
+
+fn validate_loudness_target(target: LoudnessTarget) -> Result<(), EngineError> {
+    if target != LoudnessTarget::CABLE && target != LoudnessTarget::STREAMING {
+        return Err(EngineError::UnsupportedLoudnessTarget {
+            target_milli_lufs: target.milli_lufs(),
+        });
+    }
+    Ok(())
+}
+
+fn output_variant_targets(
+    outputs: &[ConfiguredTransportOutput],
+) -> Result<Vec<LoudnessTarget>, EngineError> {
+    let mut targets = Vec::new();
+    for output in outputs {
+        validate_loudness_target(output.loudness_target)?;
+        if !targets.contains(&output.loudness_target) {
+            targets.push(output.loudness_target);
+        }
+    }
+    targets.sort_by_key(|target| target.milli_lufs());
+    Ok(targets)
+}
+
+fn bounded_queue(name: impl Into<gst::glib::GString>) -> Result<gst::Element, EngineError> {
+    gst::ElementFactory::make("queue")
+        .name(name)
+        .property("max-size-buffers", 0_u32)
+        .property("max-size-bytes", 4_u32 * 1024 * 1024)
+        .property("max-size-time", 2_000_000_000_u64)
+        .build()
+        .map_err(|error| build_error("queue", error))
+}
+
+fn loudness_input_caps(name: impl Into<gst::glib::GString>) -> Result<gst::Element, EngineError> {
+    let caps = gst::Caps::builder("audio/x-raw")
+        .field("format", "F64LE")
+        .field("layout", "interleaved")
+        .field("rate", 192_000_i32)
+        .field("channels", 2_i32)
+        .build();
+    gst::ElementFactory::make("capsfilter")
+        .name(name)
+        .property("caps", &caps)
+        .build()
+        .map_err(|error| build_error("capsfilter", error))
+}
+
+fn build_loudness_variant(
+    target: LoudnessTarget,
+    profile: &OutputProfile,
+) -> Result<LoudnessVariant, EngineError> {
+    validate_loudness_target(target)?;
+    let prefix = format!("loudness-{}", target.milli_lufs().unsigned_abs());
+    let normalizer = gst::ElementFactory::make("audioloudnorm")
+        .name(format!("{prefix}-normalizer"))
+        .property("loudness-target", target.as_lufs())
+        .property("max-true-peak", -2.0_f64)
+        .property("loudness-range-target", 7.0_f64)
+        .build()
+        .map_err(|error| build_error("audioloudnorm", error))?;
+    let audio_output_caps = audio_caps_filter(format!("{prefix}-output-caps"), profile)?;
+    let mux = gst::ElementFactory::make("mpegtsmux")
+        .name(format!("{prefix}-mux"))
+        .property("alignment", 7_i32)
+        .property("bitrate", profile.transport_bitrate_bps)
+        .property("pat-interval", 9_000_u32)
+        .property("pmt-interval", 9_000_u32)
+        .property("pcr-interval", 3_600_u32)
+        .build()
+        .map_err(|error| build_error("mpegtsmux", error))?;
+    let audio_parser = element("aacparse", format!("{prefix}-audio-parser"))?;
+    let audio_buffers = Arc::new(AtomicU64::new(0));
+    let audio_health_pad = audio_parser
+        .static_pad("src")
+        .ok_or(EngineError::MissingPad {
+            element: "aacparse",
+            pad: "src",
+        })?;
+    let audio_count = Arc::clone(&audio_buffers);
+    audio_health_pad.add_probe(gst::PadProbeType::BUFFER, move |_, _| {
+        audio_count.fetch_add(1, Ordering::AcqRel);
+        gst::PadProbeReturn::Ok
+    });
+    Ok(LoudnessVariant {
+        video_queue: bounded_queue(format!("{prefix}-video-queue"))?,
+        audio_queue: bounded_queue(format!("{prefix}-audio-queue"))?,
+        audio_convert_in: element("audioconvert", format!("{prefix}-convert-in"))?,
+        audio_resample_in: element("audioresample", format!("{prefix}-resample-in"))?,
+        audio_input_caps: loudness_input_caps(format!("{prefix}-input-caps"))?,
+        normalizer,
+        audio_convert_out: element("audioconvert", format!("{prefix}-convert-out"))?,
+        audio_resample_out: element("audioresample", format!("{prefix}-resample-out"))?,
+        audio_output_caps,
+        audio_encoder: gst::ElementFactory::make("voaacenc")
+            .name(format!("{prefix}-audio-encoder"))
+            .property("bitrate", profile.audio_bitrate_bps as i32)
+            .property("perfect-timestamp", true)
+            .build()
+            .map_err(|error| build_error("voaacenc", error))?,
+        audio_parser,
+        audio_buffers,
+        mux,
+        transport_fanout: element("tee", format!("{prefix}-transport-fanout"))?,
+    })
 }
 
 fn video_caps(profile: &OutputProfile) -> Result<gst::Caps, EngineError> {

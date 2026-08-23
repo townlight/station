@@ -9,9 +9,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use station_media_journal::{JournalWriter, read_events};
 use station_media_protocol::{
     CgOverlay, CgOverlayContent, CgRect, CgSnapshot, ChannelCommand, CommandEnvelope, LiveArmToken,
-    LiveInputConfiguration, LiveReturnTarget, PROTOCOL_VERSION, WorkerBootstrapEnvelope,
-    WorkerEvent, WorkerEventEnvelope, WorkerOutputConfiguration, decode_event_frame,
-    encode_bootstrap_frame, encode_command_frame,
+    LiveInputConfiguration, LiveReturnTarget, LoudnessTarget, PROTOCOL_VERSION,
+    WorkerBootstrapEnvelope, WorkerEvent, WorkerEventEnvelope, WorkerOutputConfiguration,
+    decode_event_frame, encode_bootstrap_frame, encode_command_frame,
 };
 use station_windows_ipc::PipeServer;
 
@@ -92,6 +92,7 @@ fn run_worker(
             .into_owned(),
         outputs: vec![WorkerOutputConfiguration::UdpTs {
             destination: udp.local_addr().unwrap().to_string(),
+            loudness_target_lufs: LoudnessTarget::STREAMING,
         }],
     };
     stream
@@ -140,6 +141,7 @@ fn worker_rejects_a_staged_profile_before_starting_the_media_graph() {
             .into_owned(),
         outputs: vec![WorkerOutputConfiguration::UdpTs {
             destination: udp.local_addr().unwrap().to_string(),
+            loudness_target_lufs: LoudnessTarget::CABLE,
         }],
     };
     stream
@@ -297,6 +299,7 @@ fn spawned_worker_live_takeover_preserves_audible_audio() {
             .into_owned(),
         outputs: vec![WorkerOutputConfiguration::UdpTs {
             destination: output.local_addr().unwrap().to_string(),
+            loudness_target_lufs: LoudnessTarget::STREAMING,
         }],
     };
     stream

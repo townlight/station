@@ -591,6 +591,7 @@ fn rejects_summary_output_endpoints_that_change_identity() {
                     outputs: vec![OutputTransportObservation {
                         output_index: 0,
                         bytes_sent_total: sequence * 1_000,
+                        audio_buffers_total: sequence * 10,
                     }],
                 },
             ))

@@ -889,11 +889,17 @@ impl ChannelConfiguration {
                     "output sink loudness targets must be finite and between -70 and -5 LUFS",
                 ));
             }
-            if (sink.loudness_target_lufs - profile.loudness_target_lufs).abs() > f32::EPSILON
-                && self.enabled
+            let milli_lufs = sink.loudness_target_lufs * 1_000.0;
+            if (milli_lufs - milli_lufs.round()).abs() > 0.01 {
+                return Err(ScheduleError::Invalid(
+                    "output sink loudness targets must have at most three decimal places",
+                ));
+            }
+            if (sink.loudness_target_lufs - (-24.0)).abs() > f32::EPSILON
+                && (sink.loudness_target_lufs - (-16.0)).abs() > f32::EPSILON
             {
                 return Err(ScheduleError::Invalid(
-                    "differing per-sink loudness cannot be enabled until output variants are enforced by the media engine",
+                    "output sink loudness target must be an executable -24 or -16 LUFS variant",
                 ));
             }
             if let Some(headend) = &sink.headend {

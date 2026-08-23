@@ -3,8 +3,78 @@ use std::net::IpAddr;
 use std::num::NonZeroU16;
 use std::path::Path;
 
+/// A finite, quantized loudness target carried with one output branch.
+///
+/// The wire representation remains the familiar `loudness_target_lufs` decimal,
+/// while the authority is an integer number of milli-LUFS so NaN and infinity
+/// cannot enter the worker contract or compare ambiguously.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct LoudnessTarget(i32);
+
+impl LoudnessTarget {
+    pub const CABLE: Self = Self(-24_000);
+    pub const STREAMING: Self = Self(-16_000);
+
+    pub fn from_lufs(value: f64) -> Result<Self, &'static str> {
+        if !value.is_finite() {
+            return Err("loudness target must be finite");
+        }
+        let milli = (value * 1_000.0).round();
+        if !(-70_000.0..=-5_000.0).contains(&milli) {
+            return Err("loudness target must be between -70 and -5 LUFS");
+        }
+        if (value * 1_000.0 - milli).abs() > 1e-6 {
+            return Err("loudness target must have at most three decimal places");
+        }
+        Ok(Self(milli as i32))
+    }
+
+    pub const fn from_milli_lufs(value: i32) -> Result<Self, &'static str> {
+        if value < -70_000 || value > -5_000 {
+            return Err("loudness target must be between -70 and -5 LUFS");
+        }
+        Ok(Self(value))
+    }
+
+    pub const fn milli_lufs(self) -> i32 {
+        self.0
+    }
+
+    pub const fn as_lufs(self) -> f64 {
+        self.0 as f64 / 1_000.0
+    }
+}
+
+impl std::fmt::Debug for LoudnessTarget {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_tuple("LoudnessTarget")
+            .field(&self.as_lufs())
+            .finish()
+    }
+}
+
+impl Serialize for LoudnessTarget {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_f64(self.as_lufs())
+    }
+}
+
+impl<'de> Deserialize<'de> for LoudnessTarget {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = f64::deserialize(deserializer)?;
+        Self::from_lufs(value).map_err(serde::de::Error::custom)
+    }
+}
+
 pub const MAX_FRAME_BYTES: usize = 65_536;
-pub const PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion { major: 1, minor: 8 };
+pub const PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion { major: 2, minor: 0 };
 
 const MIN_LIVE_TOKEN_BYTES: usize = 16;
 const MAX_LIVE_TOKEN_BYTES: usize = 128;
@@ -235,11 +305,13 @@ pub struct WorkerBootstrapEnvelope {
 pub enum WorkerOutputConfiguration {
     UdpTs {
         destination: String,
+        loudness_target_lufs: LoudnessTarget,
     },
     Srt {
         uri: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         passphrase: Option<SrtPassphrase>,
+        loudness_target_lufs: LoudnessTarget,
     },
 }
 
@@ -314,6 +386,7 @@ pub struct WorkerEventEnvelope {
 pub struct OutputTransportObservation {
     pub output_index: u16,
     pub bytes_sent_total: u64,
+    pub audio_buffers_total: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

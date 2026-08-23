@@ -1,9 +1,9 @@
 use station_media_protocol::{
     ChannelCommand, CommandEnvelope, LiveArmToken, LiveInputConfiguration, LiveReturnTarget,
-    OutputTransportObservation, PROTOCOL_VERSION, ProtocolError, ProtocolVersion, SrtPassphrase,
-    WorkerBootstrapEnvelope, WorkerEvent, WorkerEventEnvelope, WorkerOutputConfiguration,
-    decode_bootstrap_frame, decode_command_frame, decode_event_frame, encode_bootstrap_frame,
-    encode_command_frame, encode_event_frame,
+    LoudnessTarget, OutputTransportObservation, PROTOCOL_VERSION, ProtocolError, ProtocolVersion,
+    SrtPassphrase, WorkerBootstrapEnvelope, WorkerEvent, WorkerEventEnvelope,
+    WorkerOutputConfiguration, decode_bootstrap_frame, decode_command_frame, decode_event_frame,
+    encode_bootstrap_frame, encode_command_frame, encode_event_frame,
 };
 use std::num::NonZeroU16;
 
@@ -147,13 +147,16 @@ fn round_trips_private_worker_bootstrap_without_process_arguments() {
         outputs: vec![
             WorkerOutputConfiguration::UdpTs {
                 destination: "127.0.0.1:5500".into(),
+                loudness_target_lufs: LoudnessTarget::STREAMING,
             },
             WorkerOutputConfiguration::UdpTs {
                 destination: "127.0.0.1:5501".into(),
+                loudness_target_lufs: LoudnessTarget::STREAMING,
             },
             WorkerOutputConfiguration::Srt {
                 uri: "srt://127.0.0.1:5600".into(),
                 passphrase: Some(SrtPassphrase::new("private-srt-proof".into()).unwrap()),
+                loudness_target_lufs: LoudnessTarget::STREAMING,
             },
         ],
     };
@@ -250,11 +253,11 @@ fn round_trips_asset_load_and_take_commands() {
 #[test]
 fn rejects_a_command_from_an_incompatible_future_major_version() {
     let mut command = take_live_command();
-    command.version = ProtocolVersion { major: 2, minor: 0 };
+    command.version = ProtocolVersion { major: 3, minor: 0 };
     let frame = encode_command_frame(&command).expect("command encodes");
     assert_eq!(
         decode_command_frame(&frame),
-        Err(ProtocolError::UnsupportedMajor(2))
+        Err(ProtocolError::UnsupportedMajor(3))
     );
 }
 
@@ -299,10 +302,12 @@ fn round_trips_worker_events_and_rejects_an_incompatible_major() {
                 OutputTransportObservation {
                     output_index: 0,
                     bytes_sent_total: 4_000_000,
+                    audio_buffers_total: 4_000,
                 },
                 OutputTransportObservation {
                     output_index: 1,
                     bytes_sent_total: 4_000_100,
+                    audio_buffers_total: 4_001,
                 },
             ],
         },

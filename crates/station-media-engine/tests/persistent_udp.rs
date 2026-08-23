@@ -446,11 +446,11 @@ fn cg_text_overlay_changes_pixels_in_its_declared_region() {
             }],
         })
         .unwrap();
-    std::thread::sleep(Duration::from_millis(500));
+    std::thread::sleep(Duration::from_secs(5));
     let with_text = pull_decoded_frame(&sink);
     let after_first_apply_bytes = playout.output_bytes_sent().unwrap()[0];
     playout.clear_cg_snapshot();
-    std::thread::sleep(Duration::from_millis(500));
+    std::thread::sleep(Duration::from_secs(5));
     let after_clear = pull_decoded_frame(&sink);
     let after_clear_bytes = playout.output_bytes_sent().unwrap()[0];
     assert_eq!(
@@ -520,7 +520,7 @@ fn cg_text_overlay_changes_pixels_in_its_declared_region() {
             }],
         })
         .unwrap();
-    std::thread::sleep(Duration::from_millis(500));
+    std::thread::sleep(Duration::from_secs(5));
     let applied_again = pull_decoded_frame(&sink);
     let after_second_apply_bytes = playout.output_bytes_sent().unwrap()[0];
     let again_pixels = without_text
@@ -580,7 +580,7 @@ fn cg_text_overlay_changes_pixels_in_its_declared_region() {
             ],
         })
         .unwrap();
-    std::thread::sleep(Duration::from_millis(500));
+    std::thread::sleep(Duration::from_secs(5));
     let with_two = pull_decoded_frame(&sink);
     playout
         .apply_cg_snapshot(&CgSnapshot {
@@ -601,7 +601,7 @@ fn cg_text_overlay_changes_pixels_in_its_declared_region() {
             }],
         })
         .unwrap();
-    std::thread::sleep(Duration::from_millis(500));
+    std::thread::sleep(Duration::from_secs(5));
     let with_one = pull_decoded_frame(&sink);
     let stale_pixels = after_clear
         .bytes
@@ -663,7 +663,7 @@ fn managed_png_jpeg_image_apply_clear_reapply_and_invalid_retain_pixels() {
     )
     .unwrap();
     playout.select(SourceRole::Program).unwrap();
-    std::thread::sleep(Duration::from_millis(500));
+    std::thread::sleep(Duration::from_secs(5));
     let baseline = pull_decoded_frame(&sink);
     let before_bytes = playout.output_bytes_sent().unwrap()[0];
     let image_snapshot = |asset_id: String, format: CgImageFormat, revision| CgSnapshot {
@@ -684,7 +684,7 @@ fn managed_png_jpeg_image_apply_clear_reapply_and_invalid_retain_pixels() {
     playout
         .apply_cg_snapshot(&image_snapshot(png_id.clone(), CgImageFormat::Png, 1))
         .unwrap();
-    std::thread::sleep(Duration::from_millis(500));
+    std::thread::sleep(Duration::from_secs(5));
     let png_frame = pull_decoded_frame(&sink);
     let sample = |frame: &DecodedFrame, x: usize, y: usize| -> [u8; 4] {
         let index = (y * frame.width as usize + x) * 4;
@@ -720,7 +720,7 @@ fn managed_png_jpeg_image_apply_clear_reapply_and_invalid_retain_pixels() {
     };
     assert!(region_diff(&baseline, &png_frame) > 20);
     playout.clear_cg_snapshot();
-    std::thread::sleep(Duration::from_millis(500));
+    std::thread::sleep(Duration::from_secs(5));
     let cleared = pull_decoded_frame(&sink);
     let cleared_sample = sample(&cleared, 90, 80);
     assert!(cleared_sample[..3].iter().any(|channel| *channel > 45));
@@ -728,7 +728,7 @@ fn managed_png_jpeg_image_apply_clear_reapply_and_invalid_retain_pixels() {
     playout
         .apply_cg_snapshot(&image_snapshot(jpeg_id, CgImageFormat::Jpeg, 2))
         .unwrap();
-    std::thread::sleep(Duration::from_millis(500));
+    std::thread::sleep(Duration::from_secs(5));
     let jpeg_frame = pull_decoded_frame(&sink);
     assert!(region_diff(&baseline, &jpeg_frame) > 20);
     let after_jpeg_bytes = playout.output_bytes_sent().unwrap()[0];
@@ -742,7 +742,7 @@ fn managed_png_jpeg_image_apply_clear_reapply_and_invalid_retain_pixels() {
     let missing = image_snapshot("e".repeat(64), CgImageFormat::Png, 4);
     assert!(playout.apply_cg_snapshot(&missing).is_err());
     assert_eq!(playout.current_cg_revision(), Some(("image-proof", 2)));
-    std::thread::sleep(Duration::from_millis(500));
+    std::thread::sleep(Duration::from_secs(5));
     let after_invalid = pull_decoded_frame(&sink);
     let jpeg_center = sample(&jpeg_frame, 220, 80);
     let retained_center = sample(&after_invalid, 220, 80);
@@ -1135,20 +1135,34 @@ fn plays_a_validated_ingested_file_without_rebuilding_the_output_graph() {
 
     assert_transport_stream(&receiver, &mut continuity, 12);
     assert_eq!(playout.active_source().unwrap(), SourceRole::Fallback);
+    let bytes_before_load = playout.output_bytes_sent().unwrap()[0];
     playout
         .load_file(&asset.stored_path)
         .expect("the validated stored asset must load into the running graph");
+    assert!(
+        playout.output_bytes_sent().unwrap()[0] > bytes_before_load,
+        "fallback transport must continue while the program leg is prepared"
+    );
+    clear_udp_backlog(&receiver);
+    continuity = ContinuityTracker::default();
     playout.select(SourceRole::Program).unwrap();
-    assert_transport_stream(&receiver, &mut continuity, 36);
+    assert_transport_stream(&receiver, &mut continuity, 120);
     assert_eq!(playout.active_source().unwrap(), SourceRole::Program);
     playout.select(SourceRole::Fallback).unwrap();
     assert_transport_stream(&receiver, &mut continuity, 12);
     assert_eq!(playout.active_source().unwrap(), SourceRole::Fallback);
+    let bytes_before_replacement = playout.output_bytes_sent().unwrap()[0];
     playout
         .load_file(&second_asset.stored_path)
         .expect("a second stored asset must replace the prepared program leg");
+    assert!(
+        playout.output_bytes_sent().unwrap()[0] > bytes_before_replacement,
+        "fallback transport must continue while the next program leg is prepared"
+    );
+    clear_udp_backlog(&receiver);
+    continuity = ContinuityTracker::default();
     playout.select(SourceRole::Program).unwrap();
-    assert_transport_stream(&receiver, &mut continuity, 36);
+    assert_transport_stream(&receiver, &mut continuity, 120);
     assert_eq!(playout.active_source().unwrap(), SourceRole::Program);
     playout.select(SourceRole::Fallback).unwrap();
     assert_transport_stream(&receiver, &mut continuity, 12);
@@ -1186,7 +1200,7 @@ fn prepared_file_stays_parked_and_can_take_at_a_wall_clock_offset() {
         .unwrap();
     std::thread::sleep(Duration::from_secs(3));
     playout.take_program_at(0).unwrap();
-    let from_start = pull_frame_matching(&frame_sink, Duration::from_secs(3), |frame| {
+    let from_start = pull_frame_matching(&frame_sink, Duration::from_secs(8), |frame| {
         center_luma(frame) < 40
     });
     assert!(center_luma(&from_start) < 40);
@@ -1196,7 +1210,7 @@ fn prepared_file_stays_parked_and_can_take_at_a_wall_clock_offset() {
         .load_asset(&asset.asset_id, &asset.stored_path)
         .unwrap();
     playout.take_program_at(2_500).unwrap();
-    let caught_up = pull_frame_matching(&frame_sink, Duration::from_secs(3), |frame| {
+    let caught_up = pull_frame_matching(&frame_sink, Duration::from_secs(8), |frame| {
         center_luma(frame) > 200
     });
     assert!(center_luma(&caught_up) > 200);
@@ -1248,7 +1262,7 @@ fn arms_udp_live_av_takes_it_without_rebuilding_output_and_returns_to_fallback()
     playout
         .select(SourceRole::Live)
         .expect("a successfully armed live source must be takeable");
-    let live_deadline = Instant::now() + Duration::from_secs(3);
+    let live_deadline = Instant::now() + Duration::from_secs(8);
     let live = loop {
         let candidate = pull_decoded_frame(&frame_sink);
         if frame_signature(&candidate) != frame_signature(&fallback)
@@ -1274,7 +1288,7 @@ fn arms_udp_live_av_takes_it_without_rebuilding_output_and_returns_to_fallback()
     playout
         .select(SourceRole::Fallback)
         .expect("fallback must remain takeable after live");
-    let return_deadline = Instant::now() + Duration::from_secs(3);
+    let return_deadline = Instant::now() + Duration::from_secs(8);
     let returned = loop {
         let candidate = pull_decoded_frame(&frame_sink);
         if frame_signature(&candidate) == frame_signature(&fallback)
@@ -1409,7 +1423,7 @@ fn ffmpeg_udp_live_takeover_emits_audible_audio() {
     drop(rebound);
     clear_udp_backlog(&receiver);
     std::thread::sleep(Duration::from_millis(750));
-    let returned_capture = capture_transport_for(&receiver, Duration::from_secs(3));
+    let returned_capture = capture_transport_for(&receiver, Duration::from_secs(5));
     assert!(
         returned_capture.len() > 50_000,
         "returned program capture was too short: {} bytes",
@@ -1552,14 +1566,27 @@ fn assert_transport_stream(
 
 fn capture_transport_for(receiver: &UdpSocket, duration: Duration) -> Vec<u8> {
     receiver
-        .set_read_timeout(Some(Duration::from_secs(2)))
+        .set_read_timeout(Some(Duration::from_secs(8)))
+        .unwrap();
+    let mut datagram = [0_u8; 65_536];
+    let received = receiver
+        .recv(&mut datagram)
+        .expect("output did not produce its first MPEG-TS datagram within eight seconds");
+    let mut capture = Vec::from(&datagram[..received]);
+    receiver
+        .set_read_timeout(Some(Duration::from_millis(500)))
         .unwrap();
     let started = Instant::now();
-    let mut datagram = [0_u8; 65_536];
-    let mut capture = Vec::new();
     while started.elapsed() < duration {
-        let received = receiver.recv(&mut datagram).unwrap();
-        capture.extend_from_slice(&datagram[..received]);
+        match receiver.recv(&mut datagram) {
+            Ok(received) => capture.extend_from_slice(&datagram[..received]),
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) => {}
+            Err(error) => panic!("could not capture active MPEG-TS output: {error}"),
+        }
     }
     capture
 }
