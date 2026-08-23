@@ -20,6 +20,14 @@ pub const INSTALL_RECEIPT_NAME: &str = "install-receipt.json";
 pub const TRANSACTION_DIRECTORY_NAME: &str = "maintenance-transactions";
 pub const REQUEST_DIRECTORY_NAME: &str = "maintenance-requests";
 pub const COMPLETED_REQUEST_DIRECTORY_NAME: &str = "maintenance-requests-completed";
+pub const JOURNAL_SNAPSHOT_SCHEMA_VERSION: u32 = 1;
+const JOURNAL_SNAPSHOT_DIRECTORY_SUFFIX: &str = ".journal-snapshot";
+const JOURNAL_SNAPSHOT_MANIFEST_NAME: &str = "manifest.json";
+const JOURNAL_RESTORE_STAGE_NAME: &str = "restore-stage";
+const JOURNAL_RESTORE_QUARANTINE_NAME: &str = "restore-quarantine";
+const MAX_JOURNAL_SNAPSHOT_ENTRIES: usize = 10_000;
+const MAX_JOURNAL_SNAPSHOT_PATH_BYTES: usize = 512;
+const MAX_JOURNAL_SNAPSHOT_PATH_DEPTH: usize = 32;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -125,6 +133,49 @@ pub enum MaintenancePhase {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct JournalSnapshot {
+    pub schema_version: u32,
+    pub relative_directory: String,
+    pub manifest_name: String,
+}
+
+impl JournalSnapshot {
+    fn validate(&self) -> Result<(), String> {
+        let transaction_id = self
+            .relative_directory
+            .strip_suffix(JOURNAL_SNAPSHOT_DIRECTORY_SUFFIX);
+        if self.schema_version != JOURNAL_SNAPSHOT_SCHEMA_VERSION
+            || !transaction_id.is_some_and(|transaction_id| {
+                visible_identifier(transaction_id, 120)
+                    && transaction_id.chars().any(|character| character != '.')
+            })
+            || self.manifest_name != JOURNAL_SNAPSHOT_MANIFEST_NAME
+        {
+            return Err("journal snapshot fields are invalid".into());
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct JournalSnapshotManifest {
+    pub schema_version: u32,
+    pub entries: Vec<JournalSnapshotEntry>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct JournalSnapshotEntry {
+    pub relative_path: String,
+    pub present: bool,
+    pub directory: bool,
+    pub size_bytes: u64,
+    pub sha256: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct MaintenanceTransactionRecord {
     pub schema_version: u32,
     pub request: MaintenanceRequest,
@@ -132,6 +183,8 @@ pub struct MaintenanceTransactionRecord {
     pub updated_at_unix_ms: i64,
     pub previous_receipt: ActiveSlotReceipt,
     pub candidate: ActiveApplication,
+    #[serde(default)]
+    pub journal_snapshot: Option<JournalSnapshot>,
     pub detail: String,
 }
 
@@ -146,6 +199,9 @@ impl MaintenanceTransactionRecord {
             || !bounded_detail(&self.detail)
         {
             return Err("maintenance transaction fields are invalid".into());
+        }
+        if let Some(snapshot) = &self.journal_snapshot {
+            snapshot.validate()?;
         }
         Ok(())
     }
@@ -215,6 +271,7 @@ pub fn activate_prepared_slot(
         updated_at_unix_ms: now_unix_ms,
         previous_receipt: current.clone(),
         candidate: candidate.clone(),
+        journal_snapshot: None,
         detail: "Maintenance request accepted; station service has not been stopped.".into(),
     };
     write_transaction(&transaction_path, &transaction)?;
@@ -228,6 +285,13 @@ pub fn activate_prepared_slot(
             now_unix_ms,
             "Station service stopped cleanly.",
         )?;
+        let snapshot = create_journal_snapshot(
+            data_directory,
+            &transaction_directory,
+            &request.transaction_id,
+        )?;
+        transaction.journal_snapshot = Some(snapshot);
+        write_transaction(&transaction_path, &transaction)?;
         let candidate_directory = candidate.directory(application_root)?;
         host.configure_station(&candidate_directory.join("stationd.exe"), database_path)?;
         advance(
@@ -286,7 +350,606 @@ pub fn activate_prepared_slot(
         now_unix_ms,
         "Candidate passed post-update proof and is now active.",
     )?;
+    if let Some(snapshot) = &transaction.journal_snapshot {
+        discard_journal_snapshot(&transaction_directory, snapshot)?;
+    }
     Ok(transaction)
+}
+
+fn create_journal_snapshot(
+    data_directory: &Path,
+    transaction_directory: &Path,
+    transaction_id: &str,
+) -> Result<JournalSnapshot, String> {
+    let snapshot = JournalSnapshot {
+        schema_version: JOURNAL_SNAPSHOT_SCHEMA_VERSION,
+        relative_directory: format!("{transaction_id}{JOURNAL_SNAPSHOT_DIRECTORY_SUFFIX}"),
+        manifest_name: JOURNAL_SNAPSHOT_MANIFEST_NAME.into(),
+    };
+    snapshot.validate()?;
+    let snapshot_directory = journal_snapshot_directory(transaction_directory, &snapshot)?;
+    if snapshot_directory.exists() {
+        return Err("journal snapshot directory already exists".into());
+    }
+    ensure_real_directory(&snapshot_directory)?;
+    let result = (|| {
+        let backup_root = snapshot_directory.join("tree").join("channel-journals");
+        let source_root = data_directory.join("channel-journals");
+        let mut entries = Vec::new();
+        snapshot_tree(&source_root, &backup_root, ".", &mut entries)?;
+        entries.sort_by(|left, right| left.relative_path.cmp(&right.relative_path));
+        let manifest = JournalSnapshotManifest {
+            schema_version: JOURNAL_SNAPSHOT_SCHEMA_VERSION,
+            entries,
+        };
+        validate_journal_snapshot_manifest(&manifest)?;
+        write_json_atomic(
+            &snapshot_directory.join(&snapshot.manifest_name),
+            &manifest,
+            "channel-journal snapshot manifest",
+        )?;
+        Ok(snapshot.clone())
+    })();
+    if result.is_err() {
+        let _ = remove_tree(&snapshot_directory);
+    }
+    result
+}
+
+fn snapshot_tree(
+    source: &Path,
+    destination: &Path,
+    relative_path: &str,
+    entries: &mut Vec<JournalSnapshotEntry>,
+) -> Result<(), String> {
+    let metadata = match std::fs::symlink_metadata(source) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            entries.push(JournalSnapshotEntry {
+                relative_path: relative_path.into(),
+                present: false,
+                directory: true,
+                size_bytes: 0,
+                sha256: String::new(),
+            });
+            return Ok(());
+        }
+        Err(error) => return Err(format!("could not inspect channel-journal tree: {error}")),
+    };
+    if metadata.file_type().is_symlink() {
+        return Err("channel-journal tree contains a symlink".into());
+    }
+    if metadata.is_dir() {
+        ensure_real_directory(destination)?;
+        entries.push(JournalSnapshotEntry {
+            relative_path: relative_path.into(),
+            present: true,
+            directory: true,
+            size_bytes: 0,
+            sha256: String::new(),
+        });
+        let mut children = std::fs::read_dir(source)
+            .map_err(|error| format!("could not list channel-journal tree: {error}"))?
+            .map(|entry| {
+                entry
+                    .map(|entry| entry.path())
+                    .map_err(|error| format!("could not inspect channel-journal tree: {error}"))
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        children.sort();
+        for child in children {
+            let name = child
+                .file_name()
+                .and_then(|name| name.to_str())
+                .ok_or_else(|| "channel-journal path is not valid UTF-8".to_string())?;
+            let child_relative = if relative_path == "." {
+                name.to_string()
+            } else {
+                format!("{relative_path}/{name}")
+            };
+            validate_snapshot_relative_path(&child_relative, false)?;
+            snapshot_tree(&child, &destination.join(name), &child_relative, entries)?;
+        }
+    } else if metadata.is_file() {
+        let (size_bytes, sha256) = copy_hashed_file(source, destination)?;
+        entries.push(JournalSnapshotEntry {
+            relative_path: relative_path.into(),
+            present: true,
+            directory: false,
+            size_bytes,
+            sha256,
+        });
+    } else {
+        return Err("channel-journal tree contains an unsupported entry".into());
+    }
+    Ok(())
+}
+
+fn restore_journal_snapshot(
+    data_directory: &Path,
+    transaction_directory: &Path,
+    snapshot: &JournalSnapshot,
+) -> Result<(), String> {
+    snapshot.validate()?;
+    let snapshot_directory = journal_snapshot_directory(transaction_directory, snapshot)?;
+    require_real_directory(&snapshot_directory, "journal snapshot directory")?;
+    let manifest_path = snapshot_directory.join(&snapshot.manifest_name);
+    let manifest_bytes = read_bounded_file(
+        &manifest_path,
+        32 * 1024 * 1024,
+        "channel-journal snapshot manifest",
+    )?;
+    let manifest: JournalSnapshotManifest = serde_json::from_slice(&manifest_bytes)
+        .map_err(|error| format!("channel-journal snapshot manifest is invalid: {error}"))?;
+    validate_journal_snapshot_manifest(&manifest)?;
+    let root = manifest
+        .entries
+        .iter()
+        .find(|entry| entry.relative_path == ".")
+        .expect("validated journal snapshot manifest has a root entry");
+    let live_root = data_directory.join("channel-journals");
+    let backup_root = snapshot_directory.join("tree").join("channel-journals");
+    let stage_root = snapshot_directory.join(JOURNAL_RESTORE_STAGE_NAME);
+    let quarantine_root = snapshot_directory.join(JOURNAL_RESTORE_QUARANTINE_NAME);
+
+    if path_entry_exists(&quarantine_root)? {
+        if root.present && tree_matches_manifest(&live_root, &manifest)? {
+            remove_tree(&quarantine_root)?;
+            remove_tree(&stage_root)?;
+            return Ok(());
+        }
+        if !root.present {
+            if path_entry_exists(&live_root)? {
+                return Err(
+                    "journal rollback recovery found an unexpected live tree beside quarantine"
+                        .into(),
+                );
+            }
+            remove_tree(&quarantine_root)?;
+            remove_tree(&stage_root)?;
+            return Ok(());
+        }
+    } else if tree_matches_manifest(&live_root, &manifest)? {
+        remove_tree(&stage_root)?;
+        return Ok(());
+    }
+
+    remove_tree(&stage_root)?;
+    if root.present {
+        require_real_directory(&backup_root, "channel-journal snapshot tree")?;
+        ensure_real_directory(&stage_root)?;
+        materialize_snapshot_tree(&backup_root, &stage_root, &manifest)?;
+        if !tree_matches_manifest(&stage_root, &manifest)? {
+            return Err("staged channel-journal restore does not match its manifest".into());
+        }
+    }
+
+    if !path_entry_exists(&quarantine_root)? && path_entry_exists(&live_root)? {
+        move_tree(&live_root, &quarantine_root).map_err(|error| {
+            format!("could not quarantine candidate channel-journal tree: {error}")
+        })?;
+    }
+    if root.present && !path_entry_exists(&live_root)? {
+        move_tree(&stage_root, &live_root)
+            .map_err(|error| format!("could not publish restored channel-journal tree: {error}"))?;
+    }
+    if root.present {
+        if !tree_matches_manifest(&live_root, &manifest)? {
+            if !path_entry_exists(&live_root)? && path_entry_exists(&quarantine_root)? {
+                let _ = move_tree(&quarantine_root, &live_root);
+            }
+            return Err("published channel-journal restore does not match its manifest".into());
+        }
+    } else if path_entry_exists(&live_root)? {
+        return Err("absent channel-journal snapshot restored an unexpected live tree".into());
+    }
+    remove_tree(&quarantine_root)?;
+    remove_tree(&stage_root)?;
+    Ok(())
+}
+
+fn materialize_snapshot_tree(
+    backup_root: &Path,
+    stage_root: &Path,
+    manifest: &JournalSnapshotManifest,
+) -> Result<(), String> {
+    let mut directories = manifest
+        .entries
+        .iter()
+        .filter(|entry| entry.present && entry.directory && entry.relative_path != ".")
+        .collect::<Vec<_>>();
+    directories.sort_by_key(|entry| entry.relative_path.matches('/').count());
+    for entry in directories {
+        ensure_real_directory(&stage_root.join(snapshot_relative_path(&entry.relative_path)?))?;
+    }
+    for entry in manifest
+        .entries
+        .iter()
+        .filter(|entry| entry.present && !entry.directory)
+    {
+        let relative = snapshot_relative_path(&entry.relative_path)?;
+        let source = backup_root.join(&relative);
+        let destination = stage_root.join(&relative);
+        let (size_bytes, sha256) = copy_hashed_file(&source, &destination)?;
+        if size_bytes != entry.size_bytes || !sha256.eq_ignore_ascii_case(&entry.sha256) {
+            return Err(format!(
+                "channel-journal snapshot entry does not match its manifest: {}",
+                entry.relative_path
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn tree_matches_manifest(root: &Path, manifest: &JournalSnapshotManifest) -> Result<bool, String> {
+    let expected_root = manifest
+        .entries
+        .iter()
+        .find(|entry| entry.relative_path == ".")
+        .expect("validated journal snapshot manifest has a root entry");
+    let metadata = match std::fs::symlink_metadata(root) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(!expected_root.present);
+        }
+        Err(error) => return Err(format!("could not inspect channel-journal tree: {error}")),
+    };
+    if !expected_root.present || !metadata.is_dir() || metadata.file_type().is_symlink() {
+        return Ok(false);
+    }
+    let mut actual = Vec::new();
+    collect_tree_evidence(root, ".", &mut actual)?;
+    actual.sort_by(|left, right| left.relative_path.cmp(&right.relative_path));
+    Ok(actual == manifest.entries)
+}
+
+fn collect_tree_evidence(
+    path: &Path,
+    relative_path: &str,
+    entries: &mut Vec<JournalSnapshotEntry>,
+) -> Result<(), String> {
+    if entries.len() >= MAX_JOURNAL_SNAPSHOT_ENTRIES {
+        return Err("channel-journal tree exceeds the snapshot entry bound".into());
+    }
+    let metadata = std::fs::symlink_metadata(path)
+        .map_err(|error| format!("could not inspect channel-journal tree: {error}"))?;
+    if metadata.file_type().is_symlink() {
+        return Err("channel-journal tree contains a symlink".into());
+    }
+    if metadata.is_dir() {
+        entries.push(JournalSnapshotEntry {
+            relative_path: relative_path.into(),
+            present: true,
+            directory: true,
+            size_bytes: 0,
+            sha256: String::new(),
+        });
+        let mut children = std::fs::read_dir(path)
+            .map_err(|error| format!("could not list channel-journal tree: {error}"))?
+            .map(|entry| {
+                entry
+                    .map(|entry| entry.path())
+                    .map_err(|error| format!("could not inspect channel-journal tree: {error}"))
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        children.sort();
+        for child in children {
+            let name = child
+                .file_name()
+                .and_then(|name| name.to_str())
+                .ok_or_else(|| "channel-journal path is not valid UTF-8".to_string())?;
+            let child_relative = if relative_path == "." {
+                name.to_string()
+            } else {
+                format!("{relative_path}/{name}")
+            };
+            validate_snapshot_relative_path(&child_relative, false)?;
+            collect_tree_evidence(&child, &child_relative, entries)?;
+        }
+    } else if metadata.is_file() {
+        let (size_bytes, sha256) = hash_file(path)?;
+        entries.push(JournalSnapshotEntry {
+            relative_path: relative_path.into(),
+            present: true,
+            directory: false,
+            size_bytes,
+            sha256,
+        });
+    } else {
+        return Err("channel-journal tree contains an unsupported entry".into());
+    }
+    Ok(())
+}
+
+fn discard_journal_snapshot(
+    transaction_directory: &Path,
+    snapshot: &JournalSnapshot,
+) -> Result<(), String> {
+    let snapshot_directory = journal_snapshot_directory(transaction_directory, snapshot)?;
+    if snapshot_directory.exists() {
+        require_real_directory(&snapshot_directory, "journal snapshot directory")?;
+    }
+    remove_tree(&snapshot_directory)
+}
+
+fn discover_journal_snapshot(
+    transaction_path: &Path,
+    transaction: &MaintenanceTransactionRecord,
+) -> Result<Option<JournalSnapshot>, String> {
+    if transaction.journal_snapshot.is_some() {
+        return Ok(transaction.journal_snapshot.clone());
+    }
+    let transaction_directory = transaction_path
+        .parent()
+        .ok_or_else(|| "maintenance transaction has no parent directory".to_string())?;
+    let snapshot = JournalSnapshot {
+        schema_version: JOURNAL_SNAPSHOT_SCHEMA_VERSION,
+        relative_directory: format!(
+            "{}{}",
+            transaction.request.transaction_id, JOURNAL_SNAPSHOT_DIRECTORY_SUFFIX
+        ),
+        manifest_name: JOURNAL_SNAPSHOT_MANIFEST_NAME.into(),
+    };
+    snapshot.validate()?;
+    let snapshot_directory = journal_snapshot_directory(transaction_directory, &snapshot)?;
+    match std::fs::symlink_metadata(&snapshot_directory) {
+        Ok(metadata) => {
+            if !metadata.is_dir() || metadata.file_type().is_symlink() {
+                return Err("journal snapshot directory is not a real directory".into());
+            }
+            let manifest_result = read_bounded_file(
+                &snapshot_directory.join(&snapshot.manifest_name),
+                32 * 1024 * 1024,
+                "channel-journal snapshot manifest",
+            )
+            .and_then(|manifest_bytes| {
+                let manifest: JournalSnapshotManifest = serde_json::from_slice(&manifest_bytes)
+                    .map_err(|error| {
+                        format!("channel-journal snapshot manifest is invalid: {error}")
+                    })?;
+                validate_journal_snapshot_manifest(&manifest)
+            });
+            match manifest_result {
+                Ok(()) => Ok(Some(snapshot)),
+                Err(_) if transaction.phase == MaintenancePhase::ServiceStopped => {
+                    remove_tree(&snapshot_directory)?;
+                    Ok(None)
+                }
+                Err(error) => Err(error),
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(format!(
+            "could not inspect journal snapshot directory: {error}"
+        )),
+    }
+}
+
+fn journal_snapshot_directory(
+    transaction_directory: &Path,
+    snapshot: &JournalSnapshot,
+) -> Result<PathBuf, String> {
+    snapshot.validate()?;
+    let directory = transaction_directory.join(&snapshot.relative_directory);
+    if directory.parent() != Some(transaction_directory) {
+        return Err("journal snapshot directory escapes its transaction directory".into());
+    }
+    Ok(directory)
+}
+
+fn validate_journal_snapshot_manifest(manifest: &JournalSnapshotManifest) -> Result<(), String> {
+    if manifest.schema_version != JOURNAL_SNAPSHOT_SCHEMA_VERSION
+        || manifest.entries.is_empty()
+        || manifest.entries.len() > MAX_JOURNAL_SNAPSHOT_ENTRIES
+    {
+        return Err("channel-journal snapshot manifest fields are invalid".into());
+    }
+    let mut paths = std::collections::BTreeSet::new();
+    for entry in &manifest.entries {
+        validate_snapshot_relative_path(&entry.relative_path, true)?;
+        if !paths.insert(entry.relative_path.clone()) {
+            return Err("channel-journal snapshot manifest contains duplicate paths".into());
+        }
+        if !entry.present {
+            if entry.relative_path != "."
+                || !entry.directory
+                || entry.size_bytes != 0
+                || !entry.sha256.is_empty()
+            {
+                return Err("channel-journal snapshot absence entry is invalid".into());
+            }
+        } else if entry.directory {
+            if entry.size_bytes != 0 || !entry.sha256.is_empty() {
+                return Err("channel-journal snapshot directory entry is invalid".into());
+            }
+        } else if !is_sha256(&entry.sha256) {
+            return Err("channel-journal snapshot file hash is invalid".into());
+        }
+    }
+    let root = manifest
+        .entries
+        .iter()
+        .find(|entry| entry.relative_path == ".")
+        .ok_or_else(|| "channel-journal snapshot manifest has no root entry".to_string())?;
+    if !root.directory {
+        return Err("channel-journal snapshot root entry is invalid".into());
+    }
+    if !root.present && manifest.entries.len() != 1 {
+        return Err("absent channel-journal snapshot root has child entries".into());
+    }
+    for entry in manifest
+        .entries
+        .iter()
+        .filter(|entry| entry.relative_path != ".")
+    {
+        let parent = entry
+            .relative_path
+            .rsplit_once('/')
+            .map_or(".", |(parent, _)| parent);
+        let Some(parent) = manifest
+            .entries
+            .iter()
+            .find(|candidate| candidate.relative_path == parent)
+        else {
+            return Err("channel-journal snapshot entry has no parent directory".into());
+        };
+        if !parent.present || !parent.directory {
+            return Err("channel-journal snapshot entry parent is invalid".into());
+        }
+    }
+    Ok(())
+}
+
+fn validate_snapshot_relative_path(path: &str, allow_root: bool) -> Result<(), String> {
+    if path.is_empty()
+        || path.len() > MAX_JOURNAL_SNAPSHOT_PATH_BYTES
+        || path.contains('\\')
+        || path.chars().any(char::is_control)
+        || (!allow_root && path == ".")
+    {
+        return Err("channel-journal snapshot path is invalid".into());
+    }
+    if path == "." {
+        return Ok(());
+    }
+    let candidate = Path::new(path);
+    let components = candidate.components().collect::<Vec<_>>();
+    if candidate.is_absolute()
+        || components.len() > MAX_JOURNAL_SNAPSHOT_PATH_DEPTH
+        || components
+            .iter()
+            .any(|component| !matches!(component, std::path::Component::Normal(_)))
+    {
+        return Err("channel-journal snapshot path is invalid".into());
+    }
+    Ok(())
+}
+
+fn snapshot_relative_path(path: &str) -> Result<PathBuf, String> {
+    validate_snapshot_relative_path(path, false)?;
+    Ok(path.split('/').collect())
+}
+
+fn copy_hashed_file(source: &Path, destination: &Path) -> Result<(u64, String), String> {
+    let metadata = std::fs::symlink_metadata(source)
+        .map_err(|error| format!("could not inspect channel-journal file: {error}"))?;
+    if !metadata.is_file() || metadata.file_type().is_symlink() {
+        return Err("channel-journal snapshot encountered a non-file entry".into());
+    }
+    if let Some(parent) = destination.parent() {
+        ensure_real_directory(parent)?;
+    }
+    let mut input = File::open(source)
+        .map_err(|error| format!("could not open channel-journal file: {error}"))?;
+    let mut output = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(destination)
+        .map_err(|error| format!("could not create channel-journal snapshot file: {error}"))?;
+    let mut digest = Sha256::new();
+    let mut total = 0_u64;
+    let mut buffer = [0_u8; 64 * 1024];
+    let result = (|| {
+        loop {
+            let count = input
+                .read(&mut buffer)
+                .map_err(|error| format!("could not read channel-journal file: {error}"))?;
+            if count == 0 {
+                break;
+            }
+            output.write_all(&buffer[..count]).map_err(|error| {
+                format!("could not write channel-journal snapshot file: {error}")
+            })?;
+            digest.update(&buffer[..count]);
+            total = total.saturating_add(count as u64);
+        }
+        output.sync_all().map_err(|error| {
+            format!("could not synchronize channel-journal snapshot file: {error}")
+        })?;
+        Ok::<_, String>(format!("{:X}", digest.finalize()))
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(destination);
+    }
+    Ok((total, result?))
+}
+
+fn hash_file(path: &Path) -> Result<(u64, String), String> {
+    let metadata = std::fs::symlink_metadata(path)
+        .map_err(|error| format!("could not inspect channel-journal file: {error}"))?;
+    if !metadata.is_file() || metadata.file_type().is_symlink() {
+        return Err("channel-journal evidence encountered a non-file entry".into());
+    }
+    let mut input = File::open(path)
+        .map_err(|error| format!("could not open channel-journal file: {error}"))?;
+    let mut digest = Sha256::new();
+    let mut total = 0_u64;
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let count = input
+            .read(&mut buffer)
+            .map_err(|error| format!("could not read channel-journal file: {error}"))?;
+        if count == 0 {
+            break;
+        }
+        digest.update(&buffer[..count]);
+        total = total.saturating_add(count as u64);
+    }
+    Ok((total, format!("{:X}", digest.finalize())))
+}
+
+fn require_real_directory(path: &Path, label: &str) -> Result<(), String> {
+    let metadata = std::fs::symlink_metadata(path)
+        .map_err(|error| format!("could not inspect {label}: {error}"))?;
+    if !metadata.is_dir() || metadata.file_type().is_symlink() {
+        return Err(format!("{label} is not a real directory"));
+    }
+    Ok(())
+}
+
+fn path_entry_exists(path: &Path) -> Result<bool, String> {
+    match std::fs::symlink_metadata(path) {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(format!("could not inspect maintenance tree entry: {error}")),
+    }
+}
+
+#[allow(clippy::permissions_set_readonly_false)]
+fn remove_tree(path: &Path) -> Result<(), String> {
+    let metadata = match std::fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(format!("could not inspect maintenance tree: {error}")),
+    };
+    if metadata.file_type().is_symlink() || metadata.is_file() {
+        if metadata.is_file() && !metadata.file_type().is_symlink() {
+            let mut permissions = metadata.permissions();
+            permissions.set_readonly(false);
+            let _ = std::fs::set_permissions(path, permissions);
+        }
+        return std::fs::remove_file(path)
+            .or_else(|file_error| {
+                if metadata.file_type().is_symlink() {
+                    std::fs::remove_dir(path).map_err(|_| file_error)
+                } else {
+                    Err(file_error)
+                }
+            })
+            .map_err(|error| format!("could not remove maintenance tree entry: {error}"));
+    }
+    if !metadata.is_dir() {
+        return Err("maintenance tree contains an unsupported entry".into());
+    }
+    let children = std::fs::read_dir(path)
+        .map_err(|error| format!("could not list maintenance tree: {error}"))?;
+    for child in children {
+        let child =
+            child.map_err(|error| format!("could not inspect maintenance tree: {error}"))?;
+        remove_tree(&child.path())?;
+    }
+    std::fs::remove_dir(path)
+        .map_err(|error| format!("could not remove maintenance tree directory: {error}"))
 }
 
 pub fn enqueue_maintenance_request(
@@ -419,12 +1082,23 @@ fn rollback(
         &format!("Candidate failed proof; rollback started: {activation_error}"),
     )?;
     let result = (|| {
-        let _ = host.stop_station(Duration::from_secs(30));
+        host.stop_station(Duration::from_secs(30))?;
         let previous_directory = transaction
             .previous_receipt
             .active
             .directory(application_root)?;
         host.configure_station(&previous_directory.join("stationd.exe"), database_path)?;
+        if let Some(snapshot) = &transaction.journal_snapshot {
+            restore_journal_snapshot(
+                database_path
+                    .parent()
+                    .ok_or_else(|| "station database has no data directory".to_string())?,
+                transaction_path
+                    .parent()
+                    .ok_or_else(|| "maintenance transaction has no parent directory".to_string())?,
+                snapshot,
+            )?;
+        }
         host.start_station()?;
         host.prove_station(
             &transaction.previous_receipt.active,
@@ -442,6 +1116,14 @@ fn rollback(
                     "Candidate failed and the prior application was restored: {activation_error}"
                 ),
             )?;
+            if let Some(snapshot) = &transaction.journal_snapshot {
+                discard_journal_snapshot(
+                    transaction_path.parent().ok_or_else(|| {
+                        "maintenance transaction has no parent directory".to_string()
+                    })?,
+                    snapshot,
+                )?;
+            }
             Ok(transaction.clone())
         }
         Err(rollback_error) => {
@@ -467,10 +1149,32 @@ pub fn recover_incomplete_transaction(
     host: &mut impl MaintenanceHost,
 ) -> Result<MaintenanceTransactionRecord, String> {
     let mut transaction = read_transaction(transaction_path)?;
-    if matches!(
-        transaction.phase,
-        MaintenancePhase::Committed | MaintenancePhase::RolledBack
-    ) {
+    if transaction.journal_snapshot.is_none() {
+        transaction.journal_snapshot = discover_journal_snapshot(transaction_path, &transaction)?;
+        if transaction.journal_snapshot.is_some() {
+            write_transaction(transaction_path, &transaction)?;
+        }
+    }
+    if transaction.phase == MaintenancePhase::RolledBack {
+        if let Some(snapshot) = &transaction.journal_snapshot {
+            discard_journal_snapshot(
+                transaction_path
+                    .parent()
+                    .ok_or_else(|| "maintenance transaction has no parent directory".to_string())?,
+                snapshot,
+            )?;
+        }
+        return Ok(transaction);
+    }
+    if transaction.phase == MaintenancePhase::Committed {
+        if let Some(snapshot) = &transaction.journal_snapshot {
+            discard_journal_snapshot(
+                transaction_path
+                    .parent()
+                    .ok_or_else(|| "maintenance transaction has no parent directory".to_string())?,
+                snapshot,
+            )?;
+        }
         return Ok(transaction);
     }
     verify_active_application(application_root, &transaction.previous_receipt.active)?;
@@ -482,12 +1186,23 @@ pub fn recover_incomplete_transaction(
         "Interrupted maintenance transaction detected; conservative rollback started.",
     )?;
     let recovery = (|| {
-        let _ = host.stop_station(Duration::from_secs(30));
+        host.stop_station(Duration::from_secs(30))?;
         let previous_directory = transaction
             .previous_receipt
             .active
             .directory(application_root)?;
         host.configure_station(&previous_directory.join("stationd.exe"), database_path)?;
+        if let Some(snapshot) = &transaction.journal_snapshot {
+            restore_journal_snapshot(
+                database_path
+                    .parent()
+                    .ok_or_else(|| "station database has no data directory".to_string())?,
+                transaction_path
+                    .parent()
+                    .ok_or_else(|| "maintenance transaction has no parent directory".to_string())?,
+                snapshot,
+            )?;
+        }
         host.start_station()?;
         host.prove_station(
             &transaction.previous_receipt.active,
@@ -515,6 +1230,14 @@ pub fn recover_incomplete_transaction(
                 now_unix_ms,
                 "Interrupted maintenance transaction rolled back and prior application proved.",
             )?;
+            if let Some(snapshot) = &transaction.journal_snapshot {
+                discard_journal_snapshot(
+                    transaction_path.parent().ok_or_else(|| {
+                        "maintenance transaction has no parent directory".to_string()
+                    })?,
+                    snapshot,
+                )?;
+            }
             Ok(transaction)
         }
         Err(error) => {
@@ -566,6 +1289,16 @@ pub fn latest_maintenance_transaction(
         let path = entry.path();
         let metadata = std::fs::symlink_metadata(&path)
             .map_err(|error| format!("could not inspect maintenance history entry: {error}"))?;
+        if metadata.is_dir()
+            && !metadata.file_type().is_symlink()
+            && path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .and_then(|name| name.strip_suffix(JOURNAL_SNAPSHOT_DIRECTORY_SUFFIX))
+                .is_some_and(|transaction_id| visible_identifier(transaction_id, 120))
+        {
+            continue;
+        }
         if !metadata.is_file()
             || metadata.file_type().is_symlink()
             || path.extension().and_then(|value| value.to_str()) != Some("json")
@@ -752,6 +1485,40 @@ fn replace_file(source: &Path, destination: &Path) -> std::io::Result<()> {
     }
 }
 
+fn move_tree(source: &Path, destination: &Path) -> std::io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+
+    if destination.exists() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            "tree move destination already exists",
+        ));
+    }
+    let source = source
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    let destination = destination
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    // SAFETY: both vectors contain valid NUL-terminated UTF-16 strings for the call.
+    let status = unsafe {
+        MoveFileExW(
+            source.as_ptr(),
+            destination.as_ptr(),
+            MOVEFILE_WRITE_THROUGH,
+        )
+    };
+    if status == 0 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
 fn ensure_real_directory(path: &Path) -> Result<(), String> {
     std::fs::create_dir_all(path)
         .map_err(|error| format!("could not create maintenance directory: {error}"))?;
@@ -818,4 +1585,138 @@ fn bounded(value: &str, maximum: usize) -> String {
         .filter(|character| *character != '\0')
         .collect::<String>();
     clean.chars().take(maximum).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    use super::*;
+
+    fn root(name: &str) -> PathBuf {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock is before Unix epoch")
+            .as_nanos();
+        std::env::temp_dir().join(format!("townlight-maintenance-{name}-{nonce}"))
+    }
+
+    #[test]
+    fn corrupt_snapshot_is_rejected_before_the_live_tree_is_touched() {
+        let root = root("corrupt-snapshot");
+        let data = root.join("data");
+        let transactions = data.join("updates").join(TRANSACTION_DIRECTORY_NAME);
+        let live = data.join("channel-journals");
+        ensure_real_directory(&transactions).unwrap();
+        ensure_real_directory(&live).unwrap();
+        std::fs::write(live.join("channel.tlj"), b"prior-v1").unwrap();
+        let snapshot = create_journal_snapshot(&data, &transactions, "corrupt-proof").unwrap();
+        std::fs::write(live.join("channel.tlj"), b"candidate-v2").unwrap();
+        let backup = transactions
+            .join(&snapshot.relative_directory)
+            .join("tree/channel-journals/channel.tlj");
+        std::fs::write(backup, b"corrupt").unwrap();
+
+        assert!(restore_journal_snapshot(&data, &transactions, &snapshot).is_err());
+        assert_eq!(
+            std::fs::read(live.join("channel.tlj")).unwrap(),
+            b"candidate-v2"
+        );
+        remove_tree(&root).unwrap();
+    }
+
+    #[test]
+    fn restore_resumes_after_the_candidate_tree_was_quarantined() {
+        let root = root("resume-quarantine");
+        let data = root.join("data");
+        let transactions = data.join("updates").join(TRANSACTION_DIRECTORY_NAME);
+        let live = data.join("channel-journals");
+        ensure_real_directory(&transactions).unwrap();
+        ensure_real_directory(&live).unwrap();
+        std::fs::write(live.join("channel.tlj"), b"prior-v1").unwrap();
+        let snapshot = create_journal_snapshot(&data, &transactions, "resume-proof").unwrap();
+        std::fs::write(live.join("channel.tlj"), b"candidate-v2").unwrap();
+        let snapshot_directory = transactions.join(&snapshot.relative_directory);
+        let manifest: JournalSnapshotManifest = serde_json::from_slice(
+            &read_bounded_file(
+                &snapshot_directory.join(JOURNAL_SNAPSHOT_MANIFEST_NAME),
+                32 * 1024 * 1024,
+                "snapshot manifest",
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let stage = snapshot_directory.join(JOURNAL_RESTORE_STAGE_NAME);
+        ensure_real_directory(&stage).unwrap();
+        materialize_snapshot_tree(
+            &snapshot_directory.join("tree/channel-journals"),
+            &stage,
+            &manifest,
+        )
+        .unwrap();
+        move_tree(
+            &live,
+            &snapshot_directory.join(JOURNAL_RESTORE_QUARANTINE_NAME),
+        )
+        .unwrap();
+
+        restore_journal_snapshot(&data, &transactions, &snapshot).unwrap();
+        assert_eq!(
+            std::fs::read(live.join("channel.tlj")).unwrap(),
+            b"prior-v1"
+        );
+        assert!(!snapshot_directory.join(JOURNAL_RESTORE_STAGE_NAME).exists());
+        assert!(
+            !snapshot_directory
+                .join(JOURNAL_RESTORE_QUARANTINE_NAME)
+                .exists()
+        );
+        remove_tree(&root).unwrap();
+    }
+
+    #[test]
+    fn dot_only_snapshot_paths_cannot_escape_or_delete_transaction_storage() {
+        let root = root("snapshot-confinement");
+        let transactions = root.join("updates/maintenance-transactions");
+        ensure_real_directory(&transactions).unwrap();
+        let sentinel = root.join("updates/sentinel.txt");
+        std::fs::write(&sentinel, b"retain").unwrap();
+        for relative_directory in [".", "..", ".journal-snapshot", "...journal-snapshot"] {
+            let snapshot = JournalSnapshot {
+                schema_version: JOURNAL_SNAPSHOT_SCHEMA_VERSION,
+                relative_directory: relative_directory.into(),
+                manifest_name: JOURNAL_SNAPSHOT_MANIFEST_NAME.into(),
+            };
+            assert!(discard_journal_snapshot(&transactions, &snapshot).is_err());
+            assert_eq!(std::fs::read(&sentinel).unwrap(), b"retain");
+            assert!(transactions.is_dir());
+        }
+        remove_tree(&root).unwrap();
+    }
+
+    #[test]
+    fn absent_snapshot_removes_a_dangling_live_root_symlink() {
+        use std::os::windows::fs::symlink_file;
+
+        let root = root("absent-dangling-root");
+        let data = root.join("data");
+        let transactions = data.join("updates").join(TRANSACTION_DIRECTORY_NAME);
+        ensure_real_directory(&transactions).unwrap();
+        let snapshot = create_journal_snapshot(&data, &transactions, "absent-proof").unwrap();
+        if let Err(error) = symlink_file(root.join("missing-target"), data.join("channel-journals"))
+        {
+            if error.raw_os_error() == Some(1314) {
+                remove_tree(&root).unwrap();
+                return;
+            }
+            panic!("could not create dangling symlink fixture: {error}");
+        }
+
+        restore_journal_snapshot(&data, &transactions, &snapshot).unwrap();
+        assert!(matches!(
+            std::fs::symlink_metadata(data.join("channel-journals")),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound
+        ));
+        remove_tree(&root).unwrap();
+    }
 }

@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use std::process::{Child, Command, Output, Stdio};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use station_media_journal::read_events;
+use station_media_journal::{JournalWriter, read_events};
 use station_media_protocol::{
     CgOverlay, CgOverlayContent, CgRect, CgSnapshot, ChannelCommand, CommandEnvelope, LiveArmToken,
     LiveInputConfiguration, LiveReturnTarget, PROTOCOL_VERSION, WorkerBootstrapEnvelope,
@@ -512,6 +512,65 @@ fn journals_each_event_before_emitting_it_and_recovers_sequence_after_restart() 
     assert_eq!(persisted.len(), 5);
     assert_eq!(&persisted[3..], restart_emitted.as_slice());
 
+    let _ = std::fs::remove_file(journal);
+}
+
+#[test]
+fn spawned_worker_recovers_sequence_from_a_compacted_heartbeat_journal() {
+    let journal = journal_path("compacted-heartbeat-restart");
+    let mut writer = JournalWriter::open(&journal, WORKER_ID, CHANNEL_ID).unwrap();
+    writer
+        .append(&WorkerEventEnvelope {
+            version: PROTOCOL_VERSION,
+            worker_id: WORKER_ID.into(),
+            channel_id: CHANNEL_ID.into(),
+            sequence: 1,
+            event: WorkerEvent::Ready { graph_revision: 0 },
+        })
+        .unwrap();
+    for sequence in 2..=514 {
+        writer
+            .append(&WorkerEventEnvelope {
+                version: PROTOCOL_VERSION,
+                worker_id: WORKER_ID.into(),
+                channel_id: CHANNEL_ID.into(),
+                sequence,
+                event: WorkerEvent::Heartbeat {
+                    monotonic_milliseconds: sequence * 5_000,
+                    outputs: Vec::new(),
+                },
+            })
+            .unwrap();
+    }
+    drop(writer);
+    assert!(
+        read_events(&journal).unwrap().len() < 514,
+        "the preloaded journal did not compact"
+    );
+
+    let input = encode_command_frame(&command(
+        "shutdown-after-compaction",
+        516,
+        ChannelCommand::Shutdown,
+    ))
+    .unwrap();
+    let (output, emitted) = run_worker(&journal, &input, 2);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(emitted[0].sequence, 515);
+    assert!(matches!(
+        emitted[0].event,
+        WorkerEvent::Ready { graph_revision: 0 }
+    ));
+    assert_eq!(emitted[1].sequence, 516);
+    assert!(matches!(emitted[1].event, WorkerEvent::ShutdownComplete));
+
+    let reopened = JournalWriter::open(&journal, WORKER_ID, CHANNEL_ID).unwrap();
+    assert_eq!(reopened.next_sequence(), 517);
+    drop(reopened);
     let _ = std::fs::remove_file(journal);
 }
 

@@ -1,10 +1,12 @@
 use std::fs::OpenOptions;
 use std::io::{Read, Seek, SeekFrom, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use station_media_journal::{JournalError, JournalWriter, read_events};
-use station_media_protocol::{PROTOCOL_VERSION, WorkerEvent, WorkerEventEnvelope};
+use station_media_journal::{JournalError, JournalWriter, inspect_journal, read_events};
+use station_media_protocol::{
+    OutputTransportObservation, PROTOCOL_VERSION, WorkerEvent, WorkerEventEnvelope,
+};
 
 const WORKER_ID: &str = "ae819b97-2920-434b-9d96-0b51a8ea9abb";
 const CHANNEL_ID: &str = "62a47b7e-2a03-48d6-8703-a6e5ce986527";
@@ -15,6 +17,24 @@ fn journal_path(name: &str) -> PathBuf {
         .expect("system clock is before Unix epoch")
         .as_nanos();
     std::env::temp_dir().join(format!("townlight-journal-{name}-{nonce}.tlj"))
+}
+
+fn compaction_temp_path(path: &Path) -> PathBuf {
+    let mut temporary = path.as_os_str().to_owned();
+    temporary.push(".compact.tmp");
+    temporary.into()
+}
+
+fn crc32(bytes: &[u8]) -> u32 {
+    let mut checksum = u32::MAX;
+    for byte in bytes {
+        checksum ^= u32::from(*byte);
+        for _ in 0..8 {
+            let mask = 0_u32.wrapping_sub(checksum & 1);
+            checksum = (checksum >> 1) ^ (0xedb8_8320 & mask);
+        }
+    }
+    !checksum
 }
 
 fn event(sequence: u64, event: WorkerEvent) -> WorkerEventEnvelope {
@@ -126,6 +146,475 @@ fn reports_a_partially_written_tail_instead_of_accepting_a_shorter_history() {
     assert!(matches!(
         read_events(&path),
         Err(JournalError::Corrupt { reason, .. }) if reason.contains("truncated event frame")
+    ));
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn bounds_raw_heartbeat_growth_without_losing_transition_or_sequence_truth() {
+    let path = journal_path("heartbeat-retention");
+    let ready = event(1, WorkerEvent::Ready { graph_revision: 1 });
+    let mut writer = JournalWriter::open(&path, WORKER_ID, CHANNEL_ID).unwrap();
+    writer.append(&ready).unwrap();
+    for sequence in 2..=701 {
+        writer
+            .append(&event(
+                sequence,
+                WorkerEvent::Heartbeat {
+                    monotonic_milliseconds: sequence * 5_000,
+                    outputs: Vec::new(),
+                },
+            ))
+            .unwrap();
+    }
+    let transition = event(
+        702,
+        WorkerEvent::OnAirChanged {
+            source_kind: "asset".into(),
+            source_id: "retained-asset".into(),
+        },
+    );
+    writer.append(&transition).unwrap();
+    drop(writer);
+
+    let retained = read_events(&path).unwrap();
+    let retained_heartbeats = retained
+        .iter()
+        .filter(|event| matches!(event.event, WorkerEvent::Heartbeat { .. }))
+        .count();
+    assert!(
+        retained_heartbeats <= 512,
+        "journal retained {retained_heartbeats} raw heartbeats"
+    );
+    assert!(retained.contains(&ready));
+    assert!(retained.contains(&transition));
+
+    let inspection = inspect_journal(&path).unwrap();
+    assert_eq!(inspection.next_sequence, 703);
+    assert_eq!(inspection.compacted_heartbeat_ranges[0].first_sequence, 2);
+    assert!(
+        inspection.compacted_heartbeat_ranges[0]
+            .digest_chain
+            .iter()
+            .any(|byte| *byte != 0)
+    );
+
+    let reopened = JournalWriter::open(&path, WORKER_ID, CHANNEL_ID).unwrap();
+    assert_eq!(reopened.next_sequence(), 703);
+    drop(reopened);
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn refuses_a_retained_sequence_gap_when_the_compaction_summary_is_missing() {
+    let path = journal_path("missing-summary");
+    let mut writer = JournalWriter::open(&path, WORKER_ID, CHANNEL_ID).unwrap();
+    writer
+        .append(&event(1, WorkerEvent::Ready { graph_revision: 1 }))
+        .unwrap();
+    for sequence in 2..=701 {
+        writer
+            .append(&event(
+                sequence,
+                WorkerEvent::Heartbeat {
+                    monotonic_milliseconds: sequence * 5_000,
+                    outputs: Vec::new(),
+                },
+            ))
+            .unwrap();
+    }
+    drop(writer);
+
+    let bytes = std::fs::read(&path).unwrap();
+    assert_eq!(u16::from_le_bytes(bytes[4..6].try_into().unwrap()), 2);
+    assert_eq!(u16::from_le_bytes(bytes[6..8].try_into().unwrap()), 1);
+    let summary_bytes = 16 + u32::from_le_bytes(bytes[8..12].try_into().unwrap()) as usize;
+    let mut without_compaction_records = Vec::new();
+    let mut cursor = 0_usize;
+    while cursor < bytes.len() {
+        let kind = u16::from_le_bytes(bytes[cursor + 6..cursor + 8].try_into().unwrap());
+        let payload = u32::from_le_bytes(bytes[cursor + 8..cursor + 12].try_into().unwrap());
+        let next = cursor + 16 + payload as usize;
+        if kind == 0 {
+            without_compaction_records.extend_from_slice(&bytes[cursor..next]);
+        }
+        cursor = next;
+    }
+    assert!(summary_bytes < bytes.len());
+    std::fs::write(&path, without_compaction_records).unwrap();
+
+    assert_eq!(
+        read_events(&path),
+        Err(JournalError::NonMonotonic {
+            expected: 2,
+            actual: 259,
+        })
+    );
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn refuses_a_compacted_active_journal_without_its_commit_record() {
+    let path = journal_path("missing-compaction-commit");
+    let mut writer = JournalWriter::open(&path, WORKER_ID, CHANNEL_ID).unwrap();
+    writer
+        .append(&event(1, WorkerEvent::Ready { graph_revision: 1 }))
+        .unwrap();
+    for sequence in 2..=514 {
+        writer
+            .append(&event(
+                sequence,
+                WorkerEvent::Heartbeat {
+                    monotonic_milliseconds: sequence * 5_000,
+                    outputs: Vec::new(),
+                },
+            ))
+            .unwrap();
+    }
+    drop(writer);
+
+    let bytes = std::fs::read(&path).unwrap();
+    let mut without_commit = Vec::new();
+    let mut cursor = 0_usize;
+    while cursor < bytes.len() {
+        let kind = u16::from_le_bytes(bytes[cursor + 6..cursor + 8].try_into().unwrap());
+        let payload = u32::from_le_bytes(bytes[cursor + 8..cursor + 12].try_into().unwrap());
+        let next = cursor + 16 + payload as usize;
+        if kind != 2 {
+            without_commit.extend_from_slice(&bytes[cursor..next]);
+        }
+        cursor = next;
+    }
+    std::fs::write(&path, without_commit).unwrap();
+
+    assert!(matches!(
+        inspect_journal(&path),
+        Err(JournalError::Corrupt { reason, .. }) if reason.contains("no compaction commit")
+    ));
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn recovers_a_synced_compaction_temp_when_the_active_file_is_missing() {
+    let path = journal_path("recover-temp");
+    let temporary = compaction_temp_path(&path);
+    let mut writer = JournalWriter::open(&path, WORKER_ID, CHANNEL_ID).unwrap();
+    writer
+        .append(&event(1, WorkerEvent::Ready { graph_revision: 1 }))
+        .unwrap();
+    for sequence in 2..=520 {
+        writer
+            .append(&event(
+                sequence,
+                WorkerEvent::Heartbeat {
+                    monotonic_milliseconds: sequence * 5_000,
+                    outputs: Vec::new(),
+                },
+            ))
+            .unwrap();
+    }
+    drop(writer);
+    std::fs::copy(&path, &temporary).unwrap();
+    std::fs::remove_file(&path).unwrap();
+
+    let recovered = JournalWriter::open(&path, WORKER_ID, CHANNEL_ID).unwrap();
+    assert_eq!(recovered.next_sequence(), 521);
+    assert!(path.is_file());
+    assert!(!temporary.exists());
+    drop(recovered);
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn does_not_mask_active_corruption_with_a_stale_compaction_temp() {
+    let path = journal_path("corrupt-active-with-temp");
+    let temporary = compaction_temp_path(&path);
+    let mut writer = JournalWriter::open(&path, WORKER_ID, CHANNEL_ID).unwrap();
+    writer
+        .append(&event(1, WorkerEvent::Ready { graph_revision: 1 }))
+        .unwrap();
+    drop(writer);
+    std::fs::copy(&path, &temporary).unwrap();
+    let mut bytes = std::fs::read(&path).unwrap();
+    let last = bytes.last_mut().unwrap();
+    *last ^= 0xff;
+    std::fs::write(&path, bytes).unwrap();
+
+    assert!(matches!(
+        JournalWriter::open(&path, WORKER_ID, CHANNEL_ID),
+        Err(JournalError::Corrupt { reason, .. }) if reason.contains("checksum")
+    ));
+    assert!(temporary.is_file());
+    let _ = std::fs::remove_file(path);
+    let _ = std::fs::remove_file(temporary);
+}
+
+#[test]
+fn does_not_promote_a_wrong_identity_compaction_temp() {
+    let path = journal_path("wrong-identity-temp");
+    let temporary = compaction_temp_path(&path);
+    let wrong_worker = "086a55f6-e6fc-4940-9234-da67b8a67ac9";
+    let mut writer = JournalWriter::open(&temporary, wrong_worker, CHANNEL_ID).unwrap();
+    let mut wrong_event = event(1, WorkerEvent::Ready { graph_revision: 1 });
+    wrong_event.worker_id = wrong_worker.into();
+    writer.append(&wrong_event).unwrap();
+    for sequence in 2..=520 {
+        let mut wrong_heartbeat = event(
+            sequence,
+            WorkerEvent::Heartbeat {
+                monotonic_milliseconds: sequence * 5_000,
+                outputs: Vec::new(),
+            },
+        );
+        wrong_heartbeat.worker_id = wrong_worker.into();
+        writer.append(&wrong_heartbeat).unwrap();
+    }
+    drop(writer);
+
+    assert!(matches!(
+        JournalWriter::open(&path, WORKER_ID, CHANNEL_ID),
+        Err(JournalError::WrongIdentity)
+    ));
+    assert!(
+        !path.exists(),
+        "wrong-identity temp became the active journal"
+    );
+    assert!(temporary.is_file());
+    let _ = std::fs::remove_file(temporary);
+}
+
+#[test]
+fn does_not_promote_an_empty_uncommitted_compaction_temp() {
+    let path = journal_path("empty-uncommitted-temp");
+    let temporary = compaction_temp_path(&path);
+    std::fs::write(&temporary, []).unwrap();
+
+    assert!(matches!(
+        JournalWriter::open(&path, WORKER_ID, CHANNEL_ID),
+        Err(JournalError::Corrupt { reason, .. }) if reason.contains("committed compaction")
+    ));
+    assert!(
+        !path.exists(),
+        "empty uncommitted temp became the active journal"
+    );
+    assert!(temporary.is_file());
+    let _ = std::fs::remove_file(temporary);
+}
+
+#[test]
+fn does_not_promote_a_truncated_compaction_commit() {
+    let path = journal_path("truncated-compaction-commit");
+    let temporary = compaction_temp_path(&path);
+    let mut writer = JournalWriter::open(&path, WORKER_ID, CHANNEL_ID).unwrap();
+    writer
+        .append(&event(1, WorkerEvent::Ready { graph_revision: 1 }))
+        .unwrap();
+    for sequence in 2..=514 {
+        writer
+            .append(&event(
+                sequence,
+                WorkerEvent::Heartbeat {
+                    monotonic_milliseconds: sequence * 5_000,
+                    outputs: Vec::new(),
+                },
+            ))
+            .unwrap();
+    }
+    drop(writer);
+    std::fs::rename(&path, &temporary).unwrap();
+    let file = OpenOptions::new().write(true).open(&temporary).unwrap();
+    file.set_len(file.metadata().unwrap().len() - 1).unwrap();
+    file.sync_all().unwrap();
+    drop(file);
+
+    assert!(matches!(
+        JournalWriter::open(&path, WORKER_ID, CHANNEL_ID),
+        Err(JournalError::Corrupt { reason, .. }) if reason.contains("truncated event frame")
+    ));
+    assert!(!path.exists());
+    assert!(temporary.is_file());
+    let _ = std::fs::remove_file(temporary);
+}
+
+#[test]
+fn reopens_a_legacy_v1_journal_and_appends_v2_without_sequence_loss() {
+    let path = journal_path("legacy-v1");
+    let first = event(1, WorkerEvent::Ready { graph_revision: 1 });
+    let second = event(
+        2,
+        WorkerEvent::Heartbeat {
+            monotonic_milliseconds: 5_000,
+            outputs: Vec::new(),
+        },
+    );
+    let third = event(3, WorkerEvent::ShutdownComplete);
+    let mut writer = JournalWriter::open(&path, WORKER_ID, CHANNEL_ID).unwrap();
+    writer.append(&first).unwrap();
+    writer.append(&second).unwrap();
+    drop(writer);
+
+    let mut bytes = std::fs::read(&path).unwrap();
+    let mut offset = 0_usize;
+    while offset < bytes.len() {
+        bytes[offset + 4..offset + 6].copy_from_slice(&1_u16.to_le_bytes());
+        let payload = u32::from_le_bytes(bytes[offset + 8..offset + 12].try_into().unwrap());
+        offset += 16 + payload as usize;
+    }
+    std::fs::write(&path, bytes).unwrap();
+
+    let mut reopened = JournalWriter::open(&path, WORKER_ID, CHANNEL_ID).unwrap();
+    assert_eq!(reopened.next_sequence(), 3);
+    reopened.append(&third).unwrap();
+    drop(reopened);
+    assert_eq!(read_events(&path).unwrap(), vec![first, second, third]);
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn repeated_compaction_retains_every_sparse_as_run_transition() {
+    let path = journal_path("repeated-compaction");
+    let mut writer = JournalWriter::open(&path, WORKER_ID, CHANNEL_ID).unwrap();
+    writer
+        .append(&event(1, WorkerEvent::Ready { graph_revision: 1 }))
+        .unwrap();
+    let mut transitions = Vec::new();
+    for sequence in 2..=1_601 {
+        let entry = if sequence % 400 == 0 {
+            let transition = event(
+                sequence,
+                WorkerEvent::OnAirChanged {
+                    source_kind: "asset".into(),
+                    source_id: format!("asset-{sequence}"),
+                },
+            );
+            transitions.push(transition.clone());
+            transition
+        } else {
+            event(
+                sequence,
+                WorkerEvent::Heartbeat {
+                    monotonic_milliseconds: sequence * 5_000,
+                    outputs: Vec::new(),
+                },
+            )
+        };
+        writer.append(&entry).unwrap();
+    }
+    drop(writer);
+
+    let retained = read_events(&path).unwrap();
+    for transition in &transitions {
+        assert!(retained.contains(transition));
+    }
+    assert!(
+        retained
+            .iter()
+            .filter(|event| matches!(event.event, WorkerEvent::Heartbeat { .. }))
+            .count()
+            <= 512
+    );
+    assert!(
+        retained.len() < 600,
+        "retained {} raw events",
+        retained.len()
+    );
+    let reopened = JournalWriter::open(&path, WORKER_ID, CHANNEL_ID).unwrap();
+    assert_eq!(reopened.next_sequence(), 1_602);
+    drop(reopened);
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn splits_many_sparse_heartbeat_ranges_across_bounded_summary_records() {
+    let path = journal_path("bounded-summary-records");
+    let mut writer = JournalWriter::open(&path, WORKER_ID, CHANNEL_ID).unwrap();
+    writer
+        .append(&event(1, WorkerEvent::Ready { graph_revision: 1 }))
+        .unwrap();
+    let mut sequence = 2_u64;
+    for heartbeat in 0..700_u64 {
+        writer
+            .append(&event(
+                sequence,
+                WorkerEvent::Heartbeat {
+                    monotonic_milliseconds: heartbeat * 5_000,
+                    outputs: Vec::new(),
+                },
+            ))
+            .unwrap();
+        sequence += 1;
+        writer
+            .append(&event(
+                sequence,
+                WorkerEvent::OnAirChanged {
+                    source_kind: "asset".into(),
+                    source_id: format!("asset-{heartbeat}"),
+                },
+            ))
+            .unwrap();
+        sequence += 1;
+    }
+    drop(writer);
+
+    let bytes = std::fs::read(&path).unwrap();
+    let mut offset = 0_usize;
+    let mut summary_records = 0_usize;
+    while offset < bytes.len() {
+        let kind = u16::from_le_bytes(bytes[offset + 6..offset + 8].try_into().unwrap());
+        let payload = u32::from_le_bytes(bytes[offset + 8..offset + 12].try_into().unwrap());
+        summary_records += usize::from(kind == 1);
+        offset += 16 + payload as usize;
+    }
+    assert!(
+        summary_records > 1,
+        "expected bounded summary chunks, found {summary_records}"
+    );
+    let reopened = JournalWriter::open(&path, WORKER_ID, CHANNEL_ID).unwrap();
+    assert_eq!(reopened.next_sequence(), sequence);
+    drop(reopened);
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn rejects_summary_output_endpoints_that_change_identity() {
+    let path = journal_path("invalid-summary-outputs");
+    let mut writer = JournalWriter::open(&path, WORKER_ID, CHANNEL_ID).unwrap();
+    writer
+        .append(&event(1, WorkerEvent::Ready { graph_revision: 1 }))
+        .unwrap();
+    for sequence in 2..=520 {
+        writer
+            .append(&event(
+                sequence,
+                WorkerEvent::Heartbeat {
+                    monotonic_milliseconds: sequence * 5_000,
+                    outputs: vec![OutputTransportObservation {
+                        output_index: 0,
+                        bytes_sent_total: sequence * 1_000,
+                    }],
+                },
+            ))
+            .unwrap();
+    }
+    drop(writer);
+
+    let bytes = std::fs::read(&path).unwrap();
+    let payload_length = u32::from_le_bytes(bytes[8..12].try_into().unwrap()) as usize;
+    let mut summary: serde_json::Value =
+        serde_json::from_slice(&bytes[16..16 + payload_length]).unwrap();
+    summary["ranges"][0]["last_outputs"][0]["output_index"] = 1.into();
+    let payload = serde_json::to_vec(&summary).unwrap();
+    let mut corrupted = Vec::with_capacity(bytes.len() - payload_length + payload.len());
+    corrupted.extend_from_slice(&bytes[..8]);
+    corrupted.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+    corrupted.extend_from_slice(&crc32(&payload).to_le_bytes());
+    corrupted.extend_from_slice(&payload);
+    corrupted.extend_from_slice(&bytes[16 + payload_length..]);
+    std::fs::write(&path, corrupted).unwrap();
+
+    assert!(matches!(
+        inspect_journal(&path),
+        Err(JournalError::Corrupt { reason, .. }) if reason.contains("output endpoints")
     ));
     let _ = std::fs::remove_file(path);
 }
