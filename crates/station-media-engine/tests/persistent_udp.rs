@@ -2,8 +2,10 @@ use std::collections::HashMap;
 use std::fs;
 use std::io::Cursor;
 use std::net::UdpSocket;
+use std::ops::Deref;
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
+use std::sync::mpsc::TryRecvError;
 use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
@@ -292,7 +294,11 @@ fn emits_the_selected_720p5994_constant_bitrate_transport_contract() {
     let started = Instant::now();
     let mut received_bytes = 0_u64;
     let mut null_packets = 0_u64;
-    let mut transport_capture = Vec::new();
+    // Keep the hot UDP receive loop allocation-free. At this profile's
+    // 8 Mbps contract, growing the capture Vec can briefly stop reads long
+    // enough for Windows to drop a datagram and manufacture a continuity gap
+    // in the proof harness rather than in the emitted transport.
+    let mut transport_capture = Vec::with_capacity(2_500_000);
     while started.elapsed() < Duration::from_secs(2) {
         let received = receiver.recv(&mut datagram).unwrap();
         received_bytes += received as u64;
@@ -658,7 +664,7 @@ fn cg_text_overlay_changes_pixels_in_its_declared_region() {
     );
     playout.clear_cg_snapshot();
     playout.stop().unwrap();
-    decoder.set_state(gst::State::Null).unwrap();
+    stop_test_pipeline(&decoder);
 }
 
 #[test]
@@ -776,7 +782,7 @@ fn managed_png_jpeg_image_apply_clear_reapply_and_invalid_retain_pixels() {
     assert!(after_jpeg_bytes > after_clear_bytes);
     assert!(after_invalid_bytes > after_jpeg_bytes);
     playout.stop().unwrap();
-    decoder.set_state(gst::State::Null).unwrap();
+    stop_test_pipeline(&decoder);
     let _ = fs::remove_dir_all(root);
 }
 
@@ -808,7 +814,26 @@ fn write_image_fixture(
     (id, path)
 }
 
-fn start_udp_decoder(port: u16) -> (gst::Pipeline, gst::Element) {
+struct TestPipeline {
+    pipeline: gst::Pipeline,
+}
+
+impl Deref for TestPipeline {
+    type Target = gst::Pipeline;
+
+    fn deref(&self) -> &Self::Target {
+        &self.pipeline
+    }
+}
+
+impl Drop for TestPipeline {
+    fn drop(&mut self) {
+        let _ = self.pipeline.set_state(gst::State::Null);
+        let _ = self.pipeline.state(gst::ClockTime::from_seconds(5)).0;
+    }
+}
+
+fn start_udp_decoder(port: u16) -> (TestPipeline, gst::Element) {
     let pipeline = gst::Pipeline::new();
     let source = gst::ElementFactory::make("udpsrc")
         .property("port", i32::from(port))
@@ -884,17 +909,30 @@ fn start_udp_decoder(port: u16) -> (gst::Pipeline, gst::Element) {
             .map(|structure| structure.name().to_string())
             .unwrap_or_default();
         let pad_name = pad.name();
-        if (media_type.starts_with("video/") || pad_name.starts_with("video_"))
-            && !queue_sink.is_linked()
-        {
-            let _ = pad.link(&queue_sink);
-        } else if (media_type.starts_with("audio/") || pad_name.starts_with("audio_"))
-            && !audio_queue_sink.is_linked()
-        {
-            let _ = pad.link(&audio_queue_sink);
+        let sink = if media_type.starts_with("video/") || pad_name.starts_with("video_") {
+            Some(&queue_sink)
+        } else if media_type.starts_with("audio/") || pad_name.starts_with("audio_") {
+            Some(&audio_queue_sink)
+        } else {
+            None
+        };
+        if let Some(sink) = sink {
+            if let Some(previous) = sink.peer() {
+                let _ = previous.unlink(sink);
+            }
+            let _ = pad.link(sink);
         }
     });
-    (pipeline, sink)
+    (TestPipeline { pipeline }, sink)
+}
+
+fn stop_test_pipeline(pipeline: &TestPipeline) {
+    pipeline.pipeline.set_state(gst::State::Null).unwrap();
+    pipeline
+        .pipeline
+        .state(gst::ClockTime::from_seconds(5))
+        .0
+        .unwrap();
 }
 
 fn start_udp_live_sender(port: u16) -> gst::Pipeline {
@@ -1157,14 +1195,10 @@ fn plays_a_validated_ingested_file_without_rebuilding_the_output_graph() {
 
     assert_transport_stream(&receiver, &mut continuity, 12);
     assert_eq!(playout.active_source().unwrap(), SourceRole::Fallback);
-    let bytes_before_load = playout.output_bytes_sent().unwrap()[0];
-    playout
-        .load_file(&asset.stored_path)
-        .expect("the validated stored asset must load into the running graph");
-    assert!(
-        playout.output_bytes_sent().unwrap()[0] > bytes_before_load,
-        "fallback transport must continue while the program leg is prepared"
-    );
+    prepare_while_draining_output(&receiver, &mut playout, |playout| {
+        playout.load_file(&asset.stored_path)
+    })
+    .expect("the validated stored asset must load into the running graph");
     clear_udp_backlog(&receiver);
     continuity = ContinuityTracker::default();
     playout.select(SourceRole::Program).unwrap();
@@ -1176,14 +1210,10 @@ fn plays_a_validated_ingested_file_without_rebuilding_the_output_graph() {
     playout.select(SourceRole::Fallback).unwrap();
     assert_transport_stream(&receiver, &mut continuity, 12);
     assert_eq!(playout.active_source().unwrap(), SourceRole::Fallback);
-    let bytes_before_replacement = playout.output_bytes_sent().unwrap()[0];
-    playout
-        .load_file(&second_asset.stored_path)
-        .expect("a second stored asset must replace the prepared program leg");
-    assert!(
-        playout.output_bytes_sent().unwrap()[0] > bytes_before_replacement,
-        "fallback transport must continue while the next program leg is prepared"
-    );
+    prepare_while_draining_output(&receiver, &mut playout, |playout| {
+        playout.load_file(&second_asset.stored_path)
+    })
+    .expect("a second stored asset must replace the prepared program leg");
     clear_udp_backlog(&receiver);
     continuity = ContinuityTracker::default();
     playout.select(SourceRole::Program).unwrap();
@@ -1198,6 +1228,61 @@ fn plays_a_validated_ingested_file_without_rebuilding_the_output_graph() {
 
     playout.stop().unwrap();
     fs::remove_dir_all(root).unwrap();
+}
+
+fn prepare_while_draining_output<T>(
+    receiver: &UdpSocket,
+    playout: &mut PersistentPlayout,
+    prepare: impl FnOnce(&mut PersistentPlayout) -> T,
+) -> T {
+    let drain_socket = receiver.try_clone().unwrap();
+    drain_socket
+        .set_read_timeout(Some(Duration::from_millis(100)))
+        .unwrap();
+    let baseline = playout.output_bytes_sent().unwrap()[0];
+    let (stop_tx, stop_rx) = std::sync::mpsc::channel::<()>();
+    let (result, advanced) = std::thread::scope(|scope| {
+        let drain = scope.spawn(move || {
+            let mut datagram = [0_u8; 65_536];
+            loop {
+                match stop_rx.try_recv() {
+                    Ok(()) | Err(TryRecvError::Disconnected) => break,
+                    Err(TryRecvError::Empty) => {}
+                }
+                match drain_socket.recv(&mut datagram) {
+                    Ok(_) => {}
+                    Err(error)
+                        if matches!(
+                            error.kind(),
+                            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                        ) => {}
+                    Err(error) => panic!("could not drain proof output: {error}"),
+                }
+            }
+        });
+        let result = prepare(playout);
+        let started = Instant::now();
+        let advanced = loop {
+            if playout.output_bytes_sent().unwrap()[0] > baseline {
+                break true;
+            }
+            if started.elapsed() >= Duration::from_secs(2) {
+                break false;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        let _ = stop_tx.send(());
+        drain.join().unwrap();
+        (result, advanced)
+    });
+    receiver
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    assert!(
+        advanced,
+        "fallback transport did not advance within 2s while program preparation output was drained"
+    );
+    result
 }
 
 #[test]
@@ -1242,7 +1327,7 @@ fn prepared_file_stays_parked_and_can_take_at_a_wall_clock_offset() {
     assert!(center_luma(&caught_up) > 200);
 
     playout.stop().unwrap();
-    decoder.set_state(gst::State::Null).unwrap();
+    stop_test_pipeline(&decoder);
     fs::remove_dir_all(root).unwrap();
 }
 
@@ -1358,7 +1443,7 @@ fn arms_udp_live_av_takes_it_without_rebuilding_output_and_returns_to_fallback()
         Err(EngineError::LiveNotArmed)
     ));
 
-    decoder.set_state(gst::State::Null).unwrap();
+    stop_test_pipeline(&decoder);
     playout.stop().unwrap();
 }
 

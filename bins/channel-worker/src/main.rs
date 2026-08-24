@@ -341,6 +341,16 @@ fn main() {
             break;
         }
     }
+
+    if let Some(media) = media.take() {
+        media.stop().unwrap_or_else(|error| {
+            fatal(
+                9,
+                "stop its media graph after the control pipe closed",
+                &format!("{error:?}"),
+            )
+        });
+    }
 }
 
 fn validate_srt_uri(uri: &str) -> Result<(), String> {

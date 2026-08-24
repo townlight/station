@@ -1448,15 +1448,20 @@ impl PersistentPlayout {
 
     pub fn stop(mut self) -> Result<(), EngineError> {
         let capture_result = self.abort_all_output_captures(Duration::from_secs(2));
+        self.stop_pipeline()?;
+        self.stopped = true;
+        capture_result
+    }
+
+    fn stop_pipeline(&self) -> Result<(), EngineError> {
         self.pipeline
             .set_state(gst::State::Null)
             .map_err(|error| EngineError::State(format!("{error:?}")))?;
         self.pipeline
             .state(gst::ClockTime::from_seconds(5))
             .0
-            .map_err(|error| EngineError::State(format!("{error:?}")))?;
-        self.stopped = true;
-        capture_result
+            .map(|_| ())
+            .map_err(|error| EngineError::State(format!("{error:?}")))
     }
 
     fn abort_all_output_captures(&mut self, timeout: Duration) -> Result<(), EngineError> {
@@ -2372,7 +2377,9 @@ impl Drop for PersistentPlayout {
             for ingress in &self.output_capture_ingresses {
                 let _ = ingress.join_finished_by(deadline);
             }
-            let _ = self.pipeline.set_state(gst::State::Null);
+            if let Err(error) = self.stop_pipeline() {
+                eprintln!("station media graph teardown did not reach Null: {error:?}");
+            }
         }
     }
 }

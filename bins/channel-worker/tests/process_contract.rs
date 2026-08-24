@@ -19,6 +19,7 @@ use station_windows_ipc::PipeServer;
 
 const WORKER_ID: &str = "ae819b97-2920-434b-9d96-0b51a8ea9abb";
 const CHANNEL_ID: &str = "62a47b7e-2a03-48d6-8703-a6e5ce986527";
+const WORKER_EXIT_TIMEOUT: Duration = Duration::from_secs(8);
 static PROCESS_CONTRACT_TEST_LOCK: Mutex<()> = Mutex::new(());
 
 fn process_contract_test_guard() -> MutexGuard<'static, ()> {
@@ -119,7 +120,8 @@ fn run_worker(
     let events = (0..expected_events)
         .map(|_| read_event(&mut stream))
         .collect();
-    (child.wait_with_output().unwrap(), events)
+    drop(stream);
+    (wait_for_worker_output(child, WORKER_EXIT_TIMEOUT), events)
 }
 
 #[test]
@@ -177,6 +179,26 @@ fn worker_rejects_a_staged_profile_before_starting_the_media_graph() {
     let output = child.wait_with_output().unwrap();
     assert_eq!(output.status.code(), Some(6));
     assert!(String::from_utf8_lossy(&output.stderr).contains("not runnable"));
+}
+
+#[test]
+fn spawned_worker_stops_cleanly_after_its_control_pipe_closes() {
+    let _guard = process_contract_test_guard();
+    let journal = journal_path("control-pipe-eof");
+    let _temp_files = TempFiles(vec![journal.clone()]);
+
+    let (output, emitted) = run_worker(&journal, &[], 1);
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(emitted.len(), 1);
+    assert!(matches!(
+        emitted[0].event,
+        WorkerEvent::Ready { graph_revision: 1 }
+    ));
 }
 
 #[test]
@@ -278,7 +300,7 @@ fn spawned_worker_enforces_a_runnable_headend_transport_contract() {
         read_event(&mut stream).event,
         WorkerEvent::ShutdownComplete
     ));
-    assert!(worker.wait().unwrap().success());
+    assert_clean_worker_exit(&mut worker, WORKER_EXIT_TIMEOUT);
 }
 
 struct ChildGuard {
@@ -293,9 +315,54 @@ impl ChildGuard {
     fn try_wait(&mut self) -> std::io::Result<Option<std::process::ExitStatus>> {
         self.child.try_wait()
     }
+}
 
-    fn wait(&mut self) -> std::io::Result<std::process::ExitStatus> {
-        self.child.wait()
+fn assert_clean_worker_exit(worker: &mut ChildGuard, timeout: Duration) {
+    let started = Instant::now();
+    let status = loop {
+        match worker.try_wait().expect("query worker process exit") {
+            Some(status) => break status,
+            None if started.elapsed() < timeout => std::thread::sleep(Duration::from_millis(10)),
+            None => panic!(
+                "worker acknowledged shutdown but did not exit within {timeout:?}; native teardown remained asynchronous"
+            ),
+        }
+    };
+    let mut stderr = String::new();
+    worker
+        .child
+        .stderr
+        .as_mut()
+        .expect("worker stderr is captured")
+        .read_to_string(&mut stderr)
+        .expect("read worker stderr after exit");
+    assert!(
+        status.success(),
+        "worker exited unsuccessfully after shutdown: {status:?}; stderr: {stderr}"
+    );
+    assert!(
+        stderr.trim().is_empty(),
+        "worker emitted native loader or teardown diagnostics: {stderr}"
+    );
+}
+
+fn wait_for_worker_output(mut child: Child, timeout: Duration) -> Output {
+    let started = Instant::now();
+    loop {
+        match child.try_wait().expect("query worker process exit") {
+            Some(_) => return child.wait_with_output().expect("collect worker output"),
+            None if started.elapsed() < timeout => std::thread::sleep(Duration::from_millis(10)),
+            None => {
+                child.kill().expect("terminate unresponsive worker");
+                let output = child
+                    .wait_with_output()
+                    .expect("collect terminated worker output");
+                panic!(
+                    "worker did not exit within {timeout:?} after its control pipe closed; stderr: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+            }
+        }
     }
 }
 
@@ -740,8 +807,7 @@ fn spawned_worker_output_proof_reaches_ready_with_artifact_hash_and_health() {
         read_event(&mut stream).event,
         WorkerEvent::ShutdownComplete
     ));
-    let status = worker.wait().unwrap();
-    assert!(status.success());
+    assert_clean_worker_exit(&mut worker, WORKER_EXIT_TIMEOUT);
 }
 
 #[test]
@@ -765,7 +831,7 @@ fn spawned_worker_live_takeover_preserves_audible_audio() {
         .arg(server.name())
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped())
         .spawn()
         .unwrap();
     let mut worker = ChildGuard::new(child);
@@ -946,8 +1012,7 @@ fn spawned_worker_live_takeover_preserves_audible_audio() {
         read_command_event(&mut stream).event,
         WorkerEvent::ShutdownComplete
     ));
-    let status = worker.wait().unwrap();
-    assert!(status.success());
+    assert_clean_worker_exit(&mut worker, WORKER_EXIT_TIMEOUT);
 
     let decoded = Command::new("ffmpeg.exe")
         .args([
