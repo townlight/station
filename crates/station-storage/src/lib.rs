@@ -350,6 +350,62 @@ pub struct ChannelFallbackSlateAuditEvent {
     pub occurred_at_unix_ms: i64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChannelCaptionMode {
+    Disabled,
+    Cea708,
+}
+
+impl ChannelCaptionMode {
+    fn storage_name(self) -> &'static str {
+        match self {
+            Self::Disabled => "disabled",
+            Self::Cea708 => "cea708",
+        }
+    }
+
+    fn from_storage(value: &str) -> Result<Self, String> {
+        match value {
+            "disabled" => Ok(Self::Disabled),
+            "cea708" => Ok(Self::Cea708),
+            _ => Err("database returned an invalid caption mode".into()),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CaptionPolicyWriteError {
+    NotFound,
+    MustBeStopped,
+    Conflict(u64),
+    Invalid(String),
+    Storage(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChannelCaptionPolicy {
+    pub channel_id: String,
+    pub mode: ChannelCaptionMode,
+    pub service_number: u8,
+    pub language: String,
+    pub revision: u64,
+    pub created_at_unix_ms: i64,
+    pub updated_at_unix_ms: i64,
+    pub updated_by: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChannelCaptionPolicyAuditEvent {
+    pub audit_id: String,
+    pub channel_id: String,
+    pub mode: ChannelCaptionMode,
+    pub service_number: u8,
+    pub language: String,
+    pub revision: u64,
+    pub actor: String,
+    pub occurred_at_unix_ms: i64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HeadendProfileWriteError {
     NotFound,
@@ -998,6 +1054,7 @@ impl StationStore {
         store.initialize_reference_station_tier_schema()?;
         store.initialize_cg_schema()?;
         store.initialize_fallback_slate_schema()?;
+        store.initialize_caption_policy_schema()?;
         store.migrate_cg_feed_cache_schema()?;
         store.initialize_operator_auth_schema()?;
         store.execute(
@@ -7360,6 +7417,205 @@ impl StationStore {
         }
     }
 
+    pub fn read_channel_caption_policy(
+        &self,
+        channel_id: &str,
+    ) -> Result<Option<ChannelCaptionPolicy>, String> {
+        if !is_canonical_uuid(channel_id) {
+            return Err("caption policy channel identity is invalid".into());
+        }
+        let statement = self.prepare(
+            "SELECT channel_id, mode, service_number, language, revision, \
+                    created_at_unix_ms, updated_at_unix_ms, updated_by \
+             FROM channel_caption_policies WHERE channel_id=?1",
+        )?;
+        let channel = c_string(channel_id, "caption policy channel identity")?;
+        bind_text(self.database, statement.raw, 1, &channel)?;
+        match unsafe { sqlite3_step(statement.raw) } {
+            SQLITE_ROW => Ok(Some(read_caption_policy_row(statement.raw)?)),
+            SQLITE_DONE => Ok(None),
+            _ => Err(sqlite_error(self.database)),
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn write_channel_caption_policy(
+        &self,
+        channel_id: &str,
+        mode: ChannelCaptionMode,
+        service_number: u8,
+        language: &str,
+        expected_revision: u64,
+        actor: &str,
+        occurred_at_unix_ms: i64,
+        audit_id: &str,
+    ) -> Result<ChannelCaptionPolicy, CaptionPolicyWriteError> {
+        if !is_canonical_uuid(channel_id)
+            || !is_canonical_uuid(audit_id)
+            || !(1..=63).contains(&service_number)
+            || !is_caption_language(language)
+            || occurred_at_unix_ms < 0
+            || !secret_field(actor, 200)
+        {
+            return Err(CaptionPolicyWriteError::Invalid(
+                "caption policy write facts are invalid or unbounded".into(),
+            ));
+        }
+        self.execute("BEGIN IMMEDIATE")
+            .map_err(CaptionPolicyWriteError::Storage)?;
+        let outcome = (|| {
+            let channel_configuration = self
+                .list_channels()
+                .map_err(CaptionPolicyWriteError::Storage)?
+                .into_iter()
+                .find(|channel| channel.channel_id == channel_id)
+                .ok_or(CaptionPolicyWriteError::NotFound)?;
+            if channel_configuration.enabled {
+                return Err(CaptionPolicyWriteError::MustBeStopped);
+            }
+            let current = self
+                .read_channel_caption_policy(channel_id)
+                .map_err(CaptionPolicyWriteError::Storage)?;
+            let current_revision = current.as_ref().map_or(0, |value| value.revision);
+            if current_revision != expected_revision {
+                return Err(CaptionPolicyWriteError::Conflict(current_revision));
+            }
+            if current
+                .as_ref()
+                .is_some_and(|value| occurred_at_unix_ms < value.updated_at_unix_ms)
+            {
+                return Err(CaptionPolicyWriteError::Invalid(
+                    "caption policy write time precedes current authority".into(),
+                ));
+            }
+            let revision = current_revision.checked_add(1).ok_or_else(|| {
+                CaptionPolicyWriteError::Invalid("caption policy revision overflow".into())
+            })?;
+            let created_at_unix_ms = current
+                .as_ref()
+                .map_or(occurred_at_unix_ms, |value| value.created_at_unix_ms);
+            let statement = self
+                .prepare(
+                    "INSERT INTO channel_caption_policies(\
+                       channel_id, mode, service_number, language, revision, \
+                       created_at_unix_ms, updated_at_unix_ms, updated_by\
+                     ) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8) \
+                     ON CONFLICT(channel_id) DO UPDATE SET \
+                       mode=excluded.mode, service_number=excluded.service_number, \
+                       language=excluded.language, revision=excluded.revision, \
+                       updated_at_unix_ms=excluded.updated_at_unix_ms, updated_by=excluded.updated_by",
+                )
+                .map_err(CaptionPolicyWriteError::Storage)?;
+            let channel = c_string(channel_id, "caption policy channel identity")
+                .map_err(CaptionPolicyWriteError::Storage)?;
+            let mode_value = c_string(mode.storage_name(), "caption mode")
+                .map_err(CaptionPolicyWriteError::Storage)?;
+            let language_value =
+                c_string(language, "caption language").map_err(CaptionPolicyWriteError::Storage)?;
+            let actor_value = c_string(actor, "caption policy actor")
+                .map_err(CaptionPolicyWriteError::Storage)?;
+            bind_text(self.database, statement.raw, 1, &channel)
+                .map_err(CaptionPolicyWriteError::Storage)?;
+            bind_text(self.database, statement.raw, 2, &mode_value)
+                .map_err(CaptionPolicyWriteError::Storage)?;
+            bind_i64(self.database, statement.raw, 3, i64::from(service_number))
+                .map_err(CaptionPolicyWriteError::Storage)?;
+            bind_text(self.database, statement.raw, 4, &language_value)
+                .map_err(CaptionPolicyWriteError::Storage)?;
+            bind_i64(
+                self.database,
+                statement.raw,
+                5,
+                checked_i64(revision, "caption policy revision")
+                    .map_err(CaptionPolicyWriteError::Storage)?,
+            )
+            .map_err(CaptionPolicyWriteError::Storage)?;
+            bind_i64(self.database, statement.raw, 6, created_at_unix_ms)
+                .map_err(CaptionPolicyWriteError::Storage)?;
+            bind_i64(self.database, statement.raw, 7, occurred_at_unix_ms)
+                .map_err(CaptionPolicyWriteError::Storage)?;
+            bind_text(self.database, statement.raw, 8, &actor_value)
+                .map_err(CaptionPolicyWriteError::Storage)?;
+            expect_done(self.database, statement.raw).map_err(CaptionPolicyWriteError::Storage)?;
+
+            let audit = self
+                .prepare(
+                    "INSERT INTO channel_caption_policy_audit(\
+                       audit_id, channel_id, mode, service_number, language, revision, actor, occurred_at_unix_ms\
+                     ) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                )
+                .map_err(CaptionPolicyWriteError::Storage)?;
+            let audit_identity = c_string(audit_id, "caption policy audit identity")
+                .map_err(CaptionPolicyWriteError::Storage)?;
+            bind_text(self.database, audit.raw, 1, &audit_identity)
+                .map_err(CaptionPolicyWriteError::Storage)?;
+            bind_text(self.database, audit.raw, 2, &channel)
+                .map_err(CaptionPolicyWriteError::Storage)?;
+            bind_text(self.database, audit.raw, 3, &mode_value)
+                .map_err(CaptionPolicyWriteError::Storage)?;
+            bind_i64(self.database, audit.raw, 4, i64::from(service_number))
+                .map_err(CaptionPolicyWriteError::Storage)?;
+            bind_text(self.database, audit.raw, 5, &language_value)
+                .map_err(CaptionPolicyWriteError::Storage)?;
+            bind_i64(
+                self.database,
+                audit.raw,
+                6,
+                checked_i64(revision, "caption policy audit revision")
+                    .map_err(CaptionPolicyWriteError::Storage)?,
+            )
+            .map_err(CaptionPolicyWriteError::Storage)?;
+            bind_text(self.database, audit.raw, 7, &actor_value)
+                .map_err(CaptionPolicyWriteError::Storage)?;
+            bind_i64(self.database, audit.raw, 8, occurred_at_unix_ms)
+                .map_err(CaptionPolicyWriteError::Storage)?;
+            expect_done(self.database, audit.raw).map_err(CaptionPolicyWriteError::Storage)?;
+            self.read_channel_caption_policy(channel_id)
+                .map_err(CaptionPolicyWriteError::Storage)?
+                .ok_or_else(|| {
+                    CaptionPolicyWriteError::Storage(
+                        "caption policy disappeared during its write transaction".into(),
+                    )
+                })
+        })();
+        match outcome {
+            Ok(policy) => match self.execute("COMMIT") {
+                Ok(()) => Ok(policy),
+                Err(error) => {
+                    let _ = self.execute("ROLLBACK");
+                    Err(CaptionPolicyWriteError::Storage(error))
+                }
+            },
+            Err(error) => {
+                let _ = self.execute("ROLLBACK");
+                Err(error)
+            }
+        }
+    }
+
+    pub fn list_channel_caption_policy_audit(
+        &self,
+        channel_id: &str,
+    ) -> Result<Vec<ChannelCaptionPolicyAuditEvent>, String> {
+        if !is_canonical_uuid(channel_id) {
+            return Err("caption policy channel identity is invalid".into());
+        }
+        let statement = self.prepare(
+            "SELECT audit_id, channel_id, mode, service_number, language, revision, actor, occurred_at_unix_ms \
+             FROM channel_caption_policy_audit WHERE channel_id=?1 ORDER BY revision, audit_id",
+        )?;
+        let channel = c_string(channel_id, "caption policy channel identity")?;
+        bind_text(self.database, statement.raw, 1, &channel)?;
+        let mut events = Vec::new();
+        loop {
+            match unsafe { sqlite3_step(statement.raw) } {
+                SQLITE_ROW => events.push(read_caption_policy_audit_row(statement.raw)?),
+                SQLITE_DONE => return Ok(events),
+                _ => return Err(sqlite_error(self.database)),
+            }
+        }
+    }
+
     pub fn list_media_assets(&self) -> Result<Vec<MediaAsset>, String> {
         let statement = self.prepare(
             "SELECT asset_id, media_path, duration_ms, readiness FROM media_assets ORDER BY asset_id",
@@ -9311,6 +9567,44 @@ impl StationStore {
         )
     }
 
+    fn initialize_caption_policy_schema(&self) -> Result<(), String> {
+        self.execute(
+            "CREATE TABLE IF NOT EXISTS channel_caption_policies (\
+               channel_id TEXT PRIMARY KEY,\
+               mode TEXT NOT NULL CHECK (mode IN ('disabled','cea708')),\
+               service_number INTEGER NOT NULL CHECK (service_number BETWEEN 1 AND 63),\
+               language TEXT NOT NULL CHECK (length(language) BETWEEN 2 AND 35),\
+               revision INTEGER NOT NULL CHECK (revision >= 1),\
+               created_at_unix_ms INTEGER NOT NULL CHECK (created_at_unix_ms >= 0),\
+               updated_at_unix_ms INTEGER NOT NULL CHECK (updated_at_unix_ms >= created_at_unix_ms),\
+               updated_by TEXT NOT NULL CHECK (length(updated_by) BETWEEN 1 AND 200),\
+               CHECK (updated_by = trim(updated_by)),\
+               FOREIGN KEY(channel_id) REFERENCES channels(channel_id)\
+             );\
+             CREATE TABLE IF NOT EXISTS channel_caption_policy_audit (\
+               audit_id TEXT PRIMARY KEY,\
+               channel_id TEXT NOT NULL,\
+               mode TEXT NOT NULL CHECK (mode IN ('disabled','cea708')),\
+               service_number INTEGER NOT NULL CHECK (service_number BETWEEN 1 AND 63),\
+               language TEXT NOT NULL CHECK (length(language) BETWEEN 2 AND 35),\
+               revision INTEGER NOT NULL CHECK (revision >= 1),\
+               actor TEXT NOT NULL CHECK (length(actor) BETWEEN 1 AND 200),\
+               occurred_at_unix_ms INTEGER NOT NULL CHECK (occurred_at_unix_ms >= 0),\
+               CHECK (actor = trim(actor)),\
+               UNIQUE(channel_id, revision),\
+               FOREIGN KEY(channel_id) REFERENCES channels(channel_id)\
+             );\
+             CREATE INDEX IF NOT EXISTS channel_caption_policy_audit_time \
+               ON channel_caption_policy_audit(channel_id, occurred_at_unix_ms, audit_id);\
+             CREATE TRIGGER IF NOT EXISTS channel_caption_policy_audit_no_update \
+               BEFORE UPDATE ON channel_caption_policy_audit \
+               BEGIN SELECT RAISE(ABORT, 'channel caption policy audit is append-only'); END;\
+             CREATE TRIGGER IF NOT EXISTS channel_caption_policy_audit_no_delete \
+               BEFORE DELETE ON channel_caption_policy_audit \
+               BEGIN SELECT RAISE(ABORT, 'channel caption policy audit is append-only'); END;",
+        )
+    }
+
     fn migrate_cg_feed_cache_schema(&self) -> Result<(), String> {
         let statement = self.prepare("PRAGMA table_info(cg_feed_sources)")?;
         let mut has_tags = false;
@@ -10234,6 +10528,72 @@ fn read_media_asset_row(statement: *mut SqliteStatement) -> Result<MediaAsset, S
 
 fn read_cg_image_asset_row(statement: *mut SqliteStatement) -> Result<CgImageAsset, String> {
     read_cg_image_asset_columns(statement, 0)
+}
+
+fn read_caption_policy_row(
+    statement: *mut SqliteStatement,
+) -> Result<ChannelCaptionPolicy, String> {
+    let service_number =
+        u8::try_from(column_u64(statement, 2, "caption policy service number")?)
+            .map_err(|_| "database returned an invalid caption service number".to_string())?;
+    let policy = ChannelCaptionPolicy {
+        channel_id: column_text(statement, 0)?,
+        mode: ChannelCaptionMode::from_storage(&column_text(statement, 1)?)?,
+        service_number,
+        language: column_text(statement, 3)?,
+        revision: column_u64(statement, 4, "caption policy revision")?,
+        created_at_unix_ms: unsafe { sqlite3_column_int64(statement, 5) },
+        updated_at_unix_ms: unsafe { sqlite3_column_int64(statement, 6) },
+        updated_by: column_text(statement, 7)?,
+    };
+    validate_caption_policy(&policy)?;
+    Ok(policy)
+}
+
+fn read_caption_policy_audit_row(
+    statement: *mut SqliteStatement,
+) -> Result<ChannelCaptionPolicyAuditEvent, String> {
+    let service_number = u8::try_from(column_u64(
+        statement,
+        3,
+        "caption policy audit service number",
+    )?)
+    .map_err(|_| "database returned an invalid caption audit service number".to_string())?;
+    let event = ChannelCaptionPolicyAuditEvent {
+        audit_id: column_text(statement, 0)?,
+        channel_id: column_text(statement, 1)?,
+        mode: ChannelCaptionMode::from_storage(&column_text(statement, 2)?)?,
+        service_number,
+        language: column_text(statement, 4)?,
+        revision: column_u64(statement, 5, "caption policy audit revision")?,
+        actor: column_text(statement, 6)?,
+        occurred_at_unix_ms: unsafe { sqlite3_column_int64(statement, 7) },
+    };
+    if !is_canonical_uuid(&event.audit_id)
+        || !is_canonical_uuid(&event.channel_id)
+        || !(1..=63).contains(&event.service_number)
+        || !is_caption_language(&event.language)
+        || event.revision == 0
+        || !secret_field(&event.actor, 200)
+        || event.occurred_at_unix_ms < 0
+    {
+        return Err("database returned an invalid caption policy audit event".into());
+    }
+    Ok(event)
+}
+
+fn validate_caption_policy(policy: &ChannelCaptionPolicy) -> Result<(), String> {
+    if !is_canonical_uuid(&policy.channel_id)
+        || !(1..=63).contains(&policy.service_number)
+        || !is_caption_language(&policy.language)
+        || policy.revision == 0
+        || policy.created_at_unix_ms < 0
+        || policy.updated_at_unix_ms < policy.created_at_unix_ms
+        || !secret_field(&policy.updated_by, 200)
+    {
+        return Err("database returned an invalid channel caption policy".into());
+    }
+    Ok(())
 }
 
 fn read_cg_image_asset_columns(
@@ -11905,6 +12265,17 @@ fn is_canonical_uuid(value: &str) -> bool {
             8 | 13 | 18 | 23 => byte == b'-',
             _ => byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte),
         })
+}
+
+fn is_caption_language(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    (2..=35).contains(&bytes.len())
+        && bytes.first().is_some_and(u8::is_ascii_alphabetic)
+        && bytes.last().is_some_and(u8::is_ascii_alphanumeric)
+        && bytes
+            .iter()
+            .all(|byte| byte.is_ascii_alphanumeric() || *byte == b'-')
+        && !value.contains("--")
 }
 
 fn parse_readiness(value: &str) -> Result<AssetReadiness, String> {
