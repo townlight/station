@@ -6,6 +6,7 @@
 use std::collections::{BTreeMap, HashSet};
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 pub const MAX_AS_RUN_FACTS: usize = 100_000;
 pub const MAX_REPORT_ROWS: usize = 10_000;
@@ -13,6 +14,9 @@ pub const MAX_EXPORT_ROWS: usize = 100_000;
 pub const MAX_EXPORT_RECEIPTS: usize = 100_000;
 pub const MAX_TEXT_BYTES: usize = 200;
 pub const MAX_WINDOW_MS: i64 = 366 * 86_400_000;
+pub const FACT_DIGEST_VERSION: u16 = 1;
+pub const JOURNAL_EVIDENCE_DIGEST_VERSION: u16 = 1;
+pub const EXPORT_DIGEST_VERSION: u16 = 1;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -31,19 +35,45 @@ pub struct UtcWindow {
     pub ends_at_unix_ms: i64,
 }
 
-/// A typed, immutable fact expected from the worker journal projection boundary.
+/// A future authenticated adapter's immutable binding to exact worker-journal evidence.
+/// The current worker journal does not yet provide the timing/content enrichment required
+/// to construct this value.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AuthenticatedJournalEvidenceBinding {
+    pub evidence_id: String,
+    pub journal_id: String,
+    pub journal_record_sequence_start: u64,
+    pub journal_record_sequence_end: u64,
+    pub journal_record_hash: String,
+    pub worker_candidate_hash: String,
+    pub projected_fact_digest: String,
+    pub authenticator_id: String,
+    pub authenticated_at_unix_ms: i64,
+    /// Digest of the future adapter's authentication proof; verification occurs at
+    /// that trusted input boundary, not in this pure projection crate.
+    pub authentication_proof_hash: String,
+    pub digest_version: u16,
+    pub binding_digest: String,
+}
+
+/// A typed, immutable future projection fact. Its digest is derived from every field
+/// except the digest itself and is bound to separately authenticated journal evidence.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AsRunFact {
     pub event_id: String,
     pub channel_id: String,
-    pub sequence: u64,
+    pub projection_sequence: u64,
     pub content_id: String,
     pub franchise_id: String,
     pub category: ContentCategory,
     pub started_at_unix_ms: i64,
     pub ended_at_unix_ms: i64,
-    pub provenance_hash: String,
+    pub journal_evidence_id: String,
+    pub journal_evidence_digest: String,
+    pub digest_version: u16,
+    pub fact_digest: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -52,6 +82,7 @@ pub struct AsRunProjection {
     pub projection_id: String,
     pub channel_id: String,
     pub window: UtcWindow,
+    pub authenticated_journal_evidence: Vec<AuthenticatedJournalEvidenceBinding>,
     pub facts: Vec<AsRunFact>,
     /// Exact ordered source fact hashes; a downstream report cannot substitute facts.
     pub source_fact_hashes: Vec<String>,
@@ -88,13 +119,12 @@ pub enum ExportFormat {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AsRunExportRow {
-    pub source_sequence: u64,
+    pub projection_sequence: u64,
     pub content_id: String,
     pub franchise_id: String,
     pub category: ContentCategory,
     pub starts_at_unix_ms: i64,
     pub ends_at_unix_ms: i64,
-    pub title: String,
 }
 
 /// A renderer input contract for X-List, XMLTV, or CSV. It is not rendered bytes.
@@ -109,6 +139,8 @@ pub struct AsRunExportContract {
     pub window: UtcWindow,
     pub source_fact_hashes: Vec<String>,
     pub rows: Vec<AsRunExportRow>,
+    pub digest_version: u16,
+    pub export_digest: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -135,6 +167,11 @@ pub enum ExportReceiptOutcome {
 pub struct ExportReceipt {
     pub receipt_id: String,
     pub export_id: String,
+    pub export_digest: String,
+    pub report_id: String,
+    pub projection_id: String,
+    pub projection_revision: u64,
+    pub source_fact_hashes: Vec<String>,
     pub recorded_at_unix_ms: i64,
     pub outcome: ExportReceiptOutcome,
     pub detail: String,
@@ -152,22 +189,58 @@ impl UtcWindow {
     }
 }
 
-impl AsRunFact {
+impl AuthenticatedJournalEvidenceBinding {
     pub fn validate(&self) -> Result<(), String> {
+        validate_uuid(&self.evidence_id, "journal evidence identity")?;
+        validate_uuid(&self.journal_id, "worker journal identity")?;
+        validate_uuid(
+            &self.authenticator_id,
+            "journal evidence authenticator identity",
+        )?;
+        if self.journal_record_sequence_start == 0
+            || self.journal_record_sequence_end < self.journal_record_sequence_start
+            || !is_sha256(&self.journal_record_hash)
+            || !is_sha256(&self.worker_candidate_hash)
+            || !is_sha256(&self.projected_fact_digest)
+            || self.authenticated_at_unix_ms < 0
+            || !is_sha256(&self.authentication_proof_hash)
+            || self.digest_version != JOURNAL_EVIDENCE_DIGEST_VERSION
+            || self.binding_digest != canonical_journal_evidence_digest(self)
+        {
+            return Err(
+                "journal evidence range, hashes, authentication, or canonical digest is invalid"
+                    .into(),
+            );
+        }
+        Ok(())
+    }
+}
+
+impl AsRunFact {
+    pub fn validate(&self, evidence: &AuthenticatedJournalEvidenceBinding) -> Result<(), String> {
         for (value, field) in [
             (&self.event_id, "as-run event identity"),
             (&self.channel_id, "as-run channel identity"),
             (&self.content_id, "as-run content identity"),
             (&self.franchise_id, "as-run franchise identity"),
+            (
+                &self.journal_evidence_id,
+                "as-run journal evidence identity",
+            ),
         ] {
             validate_uuid(value, field)?;
         }
-        if self.sequence == 0
+        evidence.validate()?;
+        if self.projection_sequence == 0
             || self.started_at_unix_ms < 0
             || self.ended_at_unix_ms <= self.started_at_unix_ms
-            || !is_sha256(&self.provenance_hash)
+            || self.journal_evidence_id != evidence.evidence_id
+            || self.journal_evidence_digest != evidence.binding_digest
+            || self.digest_version != FACT_DIGEST_VERSION
+            || self.fact_digest != canonical_fact_digest(self)
+            || self.fact_digest != evidence.projected_fact_digest
         {
-            return Err("as-run fact sequence, UTC interval, or provenance hash is invalid".into());
+            return Err("as-run fact sequence, UTC interval, journal binding, or canonical digest is invalid".into());
         }
         Ok(())
     }
@@ -186,23 +259,37 @@ impl AsRunProjection {
             || self.facts.is_empty()
             || self.facts.len() > MAX_AS_RUN_FACTS
             || self.source_fact_hashes.len() != self.facts.len()
+            || self.authenticated_journal_evidence.len() != self.facts.len()
         {
             return Err("as-run projection revision, fact count, or provenance count is invalid or unbounded".into());
         }
         let mut event_ids = HashSet::with_capacity(self.facts.len());
-        let mut expected_sequence = self.facts.first().map(|fact| fact.sequence);
+        let mut evidence_ids = HashSet::with_capacity(self.authenticated_journal_evidence.len());
+        let mut evidence_by_id =
+            std::collections::HashMap::with_capacity(self.authenticated_journal_evidence.len());
+        for evidence in &self.authenticated_journal_evidence {
+            evidence.validate()?;
+            if !evidence_ids.insert(evidence.evidence_id.as_str()) {
+                return Err("as-run projection journal evidence identities must be unique".into());
+            }
+            evidence_by_id.insert(evidence.evidence_id.as_str(), evidence);
+        }
+        let mut expected_sequence = self.facts.first().map(|fact| fact.projection_sequence);
         let mut expected_start = self.window.starts_at_unix_ms;
         for (index, fact) in self.facts.iter().enumerate() {
-            fact.validate()?;
+            let evidence = evidence_by_id
+                .get(fact.journal_evidence_id.as_str())
+                .ok_or("as-run fact has no authenticated journal evidence binding")?;
+            fact.validate(evidence)?;
             if fact.channel_id != self.channel_id
                 || !event_ids.insert(fact.event_id.as_str())
-                || expected_sequence != Some(fact.sequence)
+                || expected_sequence != Some(fact.projection_sequence)
                 || fact.started_at_unix_ms != expected_start
-                || self.source_fact_hashes[index] != fact.provenance_hash
+                || self.source_fact_hashes[index] != fact.fact_digest
             {
                 return Err("as-run projection has a duplicate, sequence gap, UTC gap, or mismatched provenance".into());
             }
-            expected_sequence = fact.sequence.checked_add(1);
+            expected_sequence = fact.projection_sequence.checked_add(1);
             expected_start = fact.ended_at_unix_ms;
         }
         if expected_start != self.window.ends_at_unix_ms {
@@ -228,8 +315,18 @@ impl ExportReceipt {
     pub fn validate(&self) -> Result<(), String> {
         validate_uuid(&self.receipt_id, "export receipt identity")?;
         validate_uuid(&self.export_id, "export receipt export identity")?;
-        if self.recorded_at_unix_ms < 0 {
-            return Err("export receipt time is invalid".into());
+        validate_uuid(&self.report_id, "export receipt report identity")?;
+        validate_uuid(&self.projection_id, "export receipt projection identity")?;
+        if !is_sha256(&self.export_digest)
+            || self.projection_revision == 0
+            || self.source_fact_hashes.is_empty()
+            || self.source_fact_hashes.len() > MAX_AS_RUN_FACTS
+            || self.source_fact_hashes.iter().any(|hash| !is_sha256(hash))
+            || self.recorded_at_unix_ms < 0
+        {
+            return Err(
+                "export receipt binding, source hashes, revision, or time is invalid".into(),
+            );
         }
         validate_export_text(&self.detail, "export receipt detail")
     }
@@ -297,6 +394,8 @@ pub fn validate_export_contract(
         || export.projection_revision != projection.revision
         || export.window != projection.window
         || export.source_fact_hashes != projection.source_fact_hashes
+        || export.digest_version != EXPORT_DIGEST_VERSION
+        || export.export_digest != canonical_export_digest(export)
         || epg.channel_id != projection.channel_id
         || matches!(export.format, ExportFormat::XmlTv) && !epg.xmltv_enabled
         || matches!(export.format, ExportFormat::XList) && !epg.x_list_enabled
@@ -309,8 +408,7 @@ pub fn validate_export_contract(
         return Err("as-run export rows must exactly represent the source facts".into());
     }
     for (row, fact) in export.rows.iter().zip(&projection.facts) {
-        validate_export_text(&row.title, "as-run export title")?;
-        if row.source_sequence != fact.sequence
+        if row.projection_sequence != fact.projection_sequence
             || row.content_id != fact.content_id
             || row.franchise_id != fact.franchise_id
             || row.category != fact.category
@@ -357,8 +455,22 @@ pub fn validate_epg_configuration_write(
 pub fn validate_export_receipt_append(
     existing: &[ExportReceipt],
     proposed: &ExportReceipt,
+    authoritative_export: &AsRunExportContract,
+    report: &FranchiseCategoryReport,
+    projection: &AsRunProjection,
+    epg: &EpgConfiguration,
 ) -> Result<(), String> {
     proposed.validate()?;
+    validate_export_contract(authoritative_export, report, projection, epg)?;
+    if proposed.export_id != authoritative_export.export_id
+        || proposed.export_digest != authoritative_export.export_digest
+        || proposed.report_id != authoritative_export.report_id
+        || proposed.projection_id != authoritative_export.projection_id
+        || proposed.projection_revision != authoritative_export.projection_revision
+        || proposed.source_fact_hashes != authoritative_export.source_fact_hashes
+    {
+        return Err("export receipt must bind the exact authoritative validated export".into());
+    }
     if existing.len() >= MAX_EXPORT_RECEIPTS {
         return Err("export receipt context exceeds its bounded record count".into());
     }
@@ -378,6 +490,122 @@ pub fn validate_export_receipt_append(
         return Err("export receipt identity and export may be recorded only once".into());
     }
     Ok(())
+}
+
+pub fn canonical_journal_evidence_digest(evidence: &AuthenticatedJournalEvidenceBinding) -> String {
+    let mut canonical = CanonicalDigest::new("townlight.reporting.journal-evidence");
+    canonical.u16(evidence.digest_version);
+    canonical.text(&evidence.evidence_id);
+    canonical.text(&evidence.journal_id);
+    canonical.u64(evidence.journal_record_sequence_start);
+    canonical.u64(evidence.journal_record_sequence_end);
+    canonical.text(&evidence.journal_record_hash);
+    canonical.text(&evidence.worker_candidate_hash);
+    canonical.text(&evidence.projected_fact_digest);
+    canonical.text(&evidence.authenticator_id);
+    canonical.i64(evidence.authenticated_at_unix_ms);
+    canonical.text(&evidence.authentication_proof_hash);
+    canonical.finish()
+}
+
+pub fn canonical_fact_digest(fact: &AsRunFact) -> String {
+    let mut canonical = CanonicalDigest::new("townlight.reporting.as-run-fact");
+    canonical.u16(fact.digest_version);
+    canonical.text(&fact.event_id);
+    canonical.text(&fact.channel_id);
+    canonical.u64(fact.projection_sequence);
+    canonical.text(&fact.content_id);
+    canonical.text(&fact.franchise_id);
+    canonical.byte(category_code(fact.category));
+    canonical.i64(fact.started_at_unix_ms);
+    canonical.i64(fact.ended_at_unix_ms);
+    canonical.text(&fact.journal_evidence_id);
+    canonical.finish()
+}
+
+pub fn canonical_export_digest(export: &AsRunExportContract) -> String {
+    let mut canonical = CanonicalDigest::new("townlight.reporting.export-contract");
+    canonical.u16(export.digest_version);
+    canonical.text(&export.export_id);
+    canonical.byte(export_format_code(export.format));
+    canonical.text(&export.report_id);
+    canonical.text(&export.projection_id);
+    canonical.u64(export.projection_revision);
+    canonical.i64(export.window.starts_at_unix_ms);
+    canonical.i64(export.window.ends_at_unix_ms);
+    canonical.u64(export.source_fact_hashes.len() as u64);
+    for hash in &export.source_fact_hashes {
+        canonical.text(hash);
+    }
+    canonical.u64(export.rows.len() as u64);
+    for row in &export.rows {
+        canonical.u64(row.projection_sequence);
+        canonical.text(&row.content_id);
+        canonical.text(&row.franchise_id);
+        canonical.byte(category_code(row.category));
+        canonical.i64(row.starts_at_unix_ms);
+        canonical.i64(row.ends_at_unix_ms);
+    }
+    canonical.finish()
+}
+
+struct CanonicalDigest(Sha256);
+
+impl CanonicalDigest {
+    fn new(domain: &str) -> Self {
+        let mut value = Self(Sha256::new());
+        value.text(domain);
+        value
+    }
+
+    fn byte(&mut self, value: u8) {
+        self.0.update([value]);
+    }
+
+    fn u16(&mut self, value: u16) {
+        self.0.update(value.to_be_bytes());
+    }
+
+    fn u64(&mut self, value: u64) {
+        self.0.update(value.to_be_bytes());
+    }
+
+    fn i64(&mut self, value: i64) {
+        self.0.update(value.to_be_bytes());
+    }
+
+    fn text(&mut self, value: &str) {
+        self.u64(value.len() as u64);
+        self.0.update(value.as_bytes());
+    }
+
+    fn finish(self) -> String {
+        let bytes = self.0.finalize();
+        let mut value = String::with_capacity(64);
+        for byte in bytes {
+            use std::fmt::Write;
+            let _ = write!(value, "{byte:02x}");
+        }
+        value
+    }
+}
+
+fn category_code(category: ContentCategory) -> u8 {
+    match category {
+        ContentCategory::Program => 1,
+        ContentCategory::News => 2,
+        ContentCategory::PublicAffairs => 3,
+        ContentCategory::Underwriting => 4,
+        ContentCategory::Interstitial => 5,
+    }
+}
+
+fn export_format_code(format: ExportFormat) -> u8 {
+    match format {
+        ExportFormat::XList => 1,
+        ExportFormat::XmlTv => 2,
+        ExportFormat::Csv => 3,
+    }
 }
 
 fn validate_uuid(value: &str, field: &str) -> Result<(), String> {
@@ -430,43 +658,72 @@ mod tests {
     const CONTENT_ONE: &str = "33333333-3333-4333-8333-333333333333";
     const CONTENT_TWO: &str = "44444444-4444-4444-8444-444444444444";
 
+    fn evidence(sequence: u64, hash: char) -> AuthenticatedJournalEvidenceBinding {
+        AuthenticatedJournalEvidenceBinding {
+            evidence_id: format!("{sequence:08x}-aaaa-4aaa-8aaa-aaaaaaaaaaaa"),
+            journal_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaab".into(),
+            journal_record_sequence_start: sequence * 10,
+            journal_record_sequence_end: sequence * 10 + 2,
+            journal_record_hash: hash.to_string().repeat(64),
+            worker_candidate_hash: "c".repeat(64),
+            projected_fact_digest: String::new(),
+            authenticator_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaac".into(),
+            authenticated_at_unix_ms: 1_700_000_000_000,
+            authentication_proof_hash: "d".repeat(64),
+            digest_version: JOURNAL_EVIDENCE_DIGEST_VERSION,
+            binding_digest: String::new(),
+        }
+    }
     fn fact(
-        sequence: u64,
+        projection_sequence: u64,
         content_id: &str,
         category: ContentCategory,
         start: i64,
         end: i64,
-        hash: char,
+        evidence: &AuthenticatedJournalEvidenceBinding,
     ) -> AsRunFact {
-        AsRunFact {
-            event_id: format!("{sequence:08x}-1111-4111-8111-111111111111"),
+        let mut fact = AsRunFact {
+            event_id: format!("{projection_sequence:08x}-1111-4111-8111-111111111111"),
             channel_id: CHANNEL.into(),
-            sequence,
+            projection_sequence,
             content_id: content_id.into(),
             franchise_id: FRANCHISE.into(),
             category,
             started_at_unix_ms: start,
             ended_at_unix_ms: end,
-            provenance_hash: hash.to_string().repeat(64),
-        }
+            journal_evidence_id: evidence.evidence_id.clone(),
+            journal_evidence_digest: evidence.binding_digest.clone(),
+            digest_version: FACT_DIGEST_VERSION,
+            fact_digest: String::new(),
+        };
+        fact.fact_digest = canonical_fact_digest(&fact);
+        fact
     }
     fn projection() -> AsRunProjection {
-        let first = fact(
+        let mut first_evidence = evidence(1, 'a');
+        let mut second_evidence = evidence(2, 'b');
+        let mut first = fact(
             1,
             CONTENT_ONE,
             ContentCategory::Program,
             1_700_000_000_000,
             1_700_000_600_000,
-            'a',
+            &first_evidence,
         );
-        let second = fact(
+        let mut second = fact(
             2,
             CONTENT_TWO,
             ContentCategory::PublicAffairs,
             1_700_000_600_000,
             1_700_001_200_000,
-            'b',
+            &second_evidence,
         );
+        first_evidence.projected_fact_digest = first.fact_digest.clone();
+        first_evidence.binding_digest = canonical_journal_evidence_digest(&first_evidence);
+        first.journal_evidence_digest = first_evidence.binding_digest.clone();
+        second_evidence.projected_fact_digest = second.fact_digest.clone();
+        second_evidence.binding_digest = canonical_journal_evidence_digest(&second_evidence);
+        second.journal_evidence_digest = second_evidence.binding_digest.clone();
         AsRunProjection {
             projection_id: "55555555-5555-4555-8555-555555555555".into(),
             channel_id: CHANNEL.into(),
@@ -474,10 +731,8 @@ mod tests {
                 starts_at_unix_ms: first.started_at_unix_ms,
                 ends_at_unix_ms: second.ended_at_unix_ms,
             },
-            source_fact_hashes: vec![
-                first.provenance_hash.clone(),
-                second.provenance_hash.clone(),
-            ],
+            source_fact_hashes: vec![first.fact_digest.clone(), second.fact_digest.clone()],
+            authenticated_journal_evidence: vec![first_evidence, second_evidence],
             facts: vec![first, second],
             revision: 1,
         }
@@ -511,7 +766,7 @@ mod tests {
     #[test]
     fn rejects_sequence_gaps_duplicates_utc_gaps_and_forged_totals() {
         let mut gap = projection();
-        gap.facts[1].sequence = 3;
+        gap.facts[1].projection_sequence = 3;
         assert!(gap.validate().is_err());
         let mut overlap = projection();
         overlap.facts[1].started_at_unix_ms -= 1;
@@ -529,6 +784,27 @@ mod tests {
     }
 
     #[test]
+    fn canonical_fact_and_journal_evidence_digests_reject_altered_fields_or_hashes() {
+        let mut altered_fact = projection();
+        altered_fact.facts[0].content_id = CONTENT_TWO.into();
+        assert!(altered_fact.validate().is_err());
+
+        let mut forged_fact_digest = projection();
+        forged_fact_digest.facts[0].fact_digest = "f".repeat(64);
+        forged_fact_digest.source_fact_hashes[0] = "f".repeat(64);
+        assert!(forged_fact_digest.validate().is_err());
+
+        let mut altered_evidence = projection();
+        altered_evidence.authenticated_journal_evidence[0].journal_record_sequence_end += 1;
+        assert!(altered_evidence.validate().is_err());
+
+        let mut altered_authentication = projection();
+        altered_authentication.authenticated_journal_evidence[0].authentication_proof_hash =
+            "e".repeat(64);
+        assert!(altered_authentication.validate().is_err());
+    }
+
+    #[test]
     fn validates_xlist_xmltv_csv_export_contracts_and_rejects_unsafe_fields() {
         let projection = projection();
         let report = FranchiseCategoryReport {
@@ -543,16 +819,15 @@ mod tests {
             .facts
             .iter()
             .map(|fact| AsRunExportRow {
-                source_sequence: fact.sequence,
+                projection_sequence: fact.projection_sequence,
                 content_id: fact.content_id.clone(),
                 franchise_id: fact.franchise_id.clone(),
                 category: fact.category,
                 starts_at_unix_ms: fact.started_at_unix_ms,
                 ends_at_unix_ms: fact.ended_at_unix_ms,
-                title: "Civic report".into(),
             })
             .collect();
-        let export = AsRunExportContract {
+        let mut export = AsRunExportContract {
             export_id: "88888888-8888-4888-8888-888888888888".into(),
             format: ExportFormat::XmlTv,
             report_id: report.report_id.clone(),
@@ -561,14 +836,17 @@ mod tests {
             window: projection.window.clone(),
             source_fact_hashes: projection.source_fact_hashes.clone(),
             rows,
+            digest_version: EXPORT_DIGEST_VERSION,
+            export_digest: String::new(),
         };
+        export.export_digest = canonical_export_digest(&export);
         assert!(validate_export_contract(&export, &report, &projection, &epg(1)).is_ok());
         let mut other_channel = epg(1);
         other_channel.channel_id = "99999999-9999-4999-8999-999999999999".into();
         assert!(validate_export_contract(&export, &report, &projection, &other_channel).is_err());
-        let mut unsafe_export = export;
-        unsafe_export.rows[0].title = "=FORMULA".into();
-        assert!(validate_export_contract(&unsafe_export, &report, &projection, &epg(1)).is_err());
+        let mut altered_export = export;
+        altered_export.rows[0].ends_at_unix_ms -= 1;
+        assert!(validate_export_contract(&altered_export, &report, &projection, &epg(1)).is_err());
     }
 
     #[test]
@@ -584,18 +862,99 @@ mod tests {
             )
             .is_err()
         );
+        let mut unsafe_service = epg(1);
+        unsafe_service.service_name = "=FORGED".into();
+        assert!(unsafe_service.validate().is_err());
     }
 
     #[test]
     fn export_receipts_are_immutable_not_delivery_claims() {
+        let projection = projection();
+        let report = FranchiseCategoryReport {
+            report_id: "77777777-7777-4777-8777-777777777777".into(),
+            projection_id: projection.projection_id.clone(),
+            projection_revision: projection.revision,
+            window: projection.window.clone(),
+            source_fact_hashes: projection.source_fact_hashes.clone(),
+            hours: aggregate_hours(&projection).expect("valid projection"),
+        };
+        let rows = projection
+            .facts
+            .iter()
+            .map(|fact| AsRunExportRow {
+                projection_sequence: fact.projection_sequence,
+                content_id: fact.content_id.clone(),
+                franchise_id: fact.franchise_id.clone(),
+                category: fact.category,
+                starts_at_unix_ms: fact.started_at_unix_ms,
+                ends_at_unix_ms: fact.ended_at_unix_ms,
+            })
+            .collect();
+        let mut export = AsRunExportContract {
+            export_id: "88888888-8888-4888-8888-888888888888".into(),
+            format: ExportFormat::Csv,
+            report_id: report.report_id.clone(),
+            projection_id: projection.projection_id.clone(),
+            projection_revision: projection.revision,
+            window: projection.window.clone(),
+            source_fact_hashes: projection.source_fact_hashes.clone(),
+            rows,
+            digest_version: EXPORT_DIGEST_VERSION,
+            export_digest: String::new(),
+        };
+        export.export_digest = canonical_export_digest(&export);
         let receipt = ExportReceipt {
             receipt_id: "99999999-9999-4999-8999-999999999999".into(),
-            export_id: "88888888-8888-4888-8888-888888888888".into(),
+            export_id: export.export_id.clone(),
+            export_digest: export.export_digest.clone(),
+            report_id: report.report_id.clone(),
+            projection_id: projection.projection_id.clone(),
+            projection_revision: projection.revision,
+            source_fact_hashes: projection.source_fact_hashes.clone(),
             recorded_at_unix_ms: 1_700_000_000_000,
             outcome: ExportReceiptOutcome::AcceptedForFutureRendering,
             detail: "queued for a later renderer".into(),
         };
-        assert!(validate_export_receipt_append(&[], &receipt).is_ok());
-        assert!(validate_export_receipt_append(std::slice::from_ref(&receipt), &receipt).is_err());
+        assert!(
+            validate_export_receipt_append(&[], &receipt, &export, &report, &projection, &epg(1))
+                .is_ok()
+        );
+        assert!(
+            validate_export_receipt_append(
+                std::slice::from_ref(&receipt),
+                &receipt,
+                &export,
+                &report,
+                &projection,
+                &epg(1)
+            )
+            .is_err()
+        );
+        let mut mismatched = receipt.clone();
+        mismatched.export_digest = "f".repeat(64);
+        assert!(
+            validate_export_receipt_append(
+                &[],
+                &mismatched,
+                &export,
+                &report,
+                &projection,
+                &epg(1)
+            )
+            .is_err()
+        );
+        let mut unknown_export = receipt;
+        unknown_export.export_id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".into();
+        assert!(
+            validate_export_receipt_append(
+                &[],
+                &unknown_export,
+                &export,
+                &report,
+                &projection,
+                &epg(1)
+            )
+            .is_err()
+        );
     }
 }
