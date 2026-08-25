@@ -5,9 +5,11 @@ edition.workspace = true
 publish.workspace = true
 
 [dependencies]
+serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 station-auth.workspace = true
+station-automation-policy.workspace = true
 station-cg.workspace = true
 station-captions.workspace = true
 station-domain.workspace = true

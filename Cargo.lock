@@ -1925,9 +1925,11 @@ name = "station-storage"
 version = "0.1.0"
 dependencies = [
  "image",
+ "serde",
  "serde_json",
  "sha2",
  "station-auth",
+ "station-automation-policy",
  "station-captions",
  "station-cg",
  "station-domain",

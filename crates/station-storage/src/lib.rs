@@ -13,10 +13,16 @@ use std::{
     time::{Instant, SystemTime},
 };
 
+use serde::de::DeserializeOwned;
 use sha2::{Digest, Sha256};
 use station_auth::{
     AccountId, BootstrapCredential, CredentialVersion, OperatorAccount, OperatorDisplayName,
     OperatorRole, OperatorSession, OperatorUsername, PasswordPhc, RecoveryCredential, SecretDigest,
+};
+use station_automation_policy::{
+    AutomationAdapterDescriptor, AutomationCandidateIdentity, AutomationConnectionTestEvidence,
+    AutomationFeature, AutomationFeaturePolicy, FeatureAutomationStatus,
+    derive_feature_automation_status,
 };
 use station_captions::{
     AssetCaptionCue, AssetCaptionTrack, AssetCaptionTrackAuditEvent, AssetCaptionTrackWrite,
@@ -674,6 +680,20 @@ pub struct StationStore {
     cg_image_verification_count: AtomicU64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AutomationAdapterDescriptorHistory {
+    pub descriptor: AutomationAdapterDescriptor,
+    pub changed_by: String,
+    pub occurred_at_unix_ms: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AutomationFeaturePolicyHistory {
+    pub policy: AutomationFeaturePolicy,
+    pub changed_by: String,
+    pub occurred_at_unix_ms: i64,
+}
+
 struct CachedCgImageVerification {
     byte_len: u64,
     modified: Option<SystemTime>,
@@ -1064,6 +1084,7 @@ impl StationStore {
         store.initialize_asset_caption_track_schema()?;
         store.initialize_caption_egress_proof_schema()?;
         store.initialize_caption_egress_job_schema()?;
+        store.initialize_automation_policy_schema()?;
         store.migrate_caption_egress_history_sink_foreign_keys()?;
         store.migrate_cg_feed_cache_schema()?;
         store.initialize_operator_auth_schema()?;
@@ -1100,6 +1121,74 @@ impl StationStore {
              CREATE TRIGGER IF NOT EXISTS commissioning_support_bundle_receipts_no_delete \
                BEFORE DELETE ON commissioning_support_bundle_receipts \
                BEGIN SELECT RAISE(ABORT, 'commissioning support bundle receipts are append-only'); END;",
+        )
+    }
+
+    fn initialize_automation_policy_schema(&self) -> Result<(), String> {
+        self.execute(
+            "CREATE TABLE IF NOT EXISTS automation_adapter_descriptors (\
+               adapter_id TEXT PRIMARY KEY,\
+               revision INTEGER NOT NULL CHECK (revision >= 1),\
+               record_json TEXT NOT NULL\
+             );\
+             CREATE TABLE IF NOT EXISTS automation_feature_policies (\
+               policy_id TEXT PRIMARY KEY,\
+               feature TEXT NOT NULL UNIQUE CHECK (feature IN ('captions','summaries','translation')),\
+               revision INTEGER NOT NULL CHECK (revision >= 1),\
+               record_json TEXT NOT NULL\
+             );\
+             CREATE TABLE IF NOT EXISTS automation_adapter_descriptor_history (\
+               adapter_id TEXT NOT NULL,\
+               revision INTEGER NOT NULL CHECK (revision >= 1),\
+               record_json TEXT NOT NULL,\
+               changed_by TEXT NOT NULL CHECK (length(changed_by) BETWEEN 1 AND 200),\
+               occurred_at_unix_ms INTEGER NOT NULL CHECK (occurred_at_unix_ms >= 0),\
+               PRIMARY KEY(adapter_id, revision)\
+             );\
+             CREATE TABLE IF NOT EXISTS automation_feature_policy_history (\
+               policy_id TEXT NOT NULL,\
+               feature TEXT NOT NULL CHECK (feature IN ('captions','summaries','translation')),\
+               revision INTEGER NOT NULL CHECK (revision >= 1),\
+               record_json TEXT NOT NULL,\
+               changed_by TEXT NOT NULL CHECK (length(changed_by) BETWEEN 1 AND 200),\
+               occurred_at_unix_ms INTEGER NOT NULL CHECK (occurred_at_unix_ms >= 0),\
+               PRIMARY KEY(policy_id, revision)\
+             );\
+             CREATE TABLE IF NOT EXISTS automation_connection_test_evidence (\
+               evidence_id TEXT PRIMARY KEY,\
+               policy_id TEXT NOT NULL,\
+               adapter_id TEXT NOT NULL,\
+               policy_revision INTEGER NOT NULL CHECK (policy_revision >= 1),\
+               adapter_revision INTEGER NOT NULL CHECK (adapter_revision >= 1),\
+               configuration_hash TEXT NOT NULL CHECK (length(configuration_hash)=64),\
+               candidate_version TEXT NOT NULL,\
+               source_commit TEXT NOT NULL CHECK (length(source_commit)=40),\
+               tested_at_unix_ms INTEGER NOT NULL CHECK (tested_at_unix_ms >= 0),\
+               expires_at_unix_ms INTEGER NOT NULL CHECK (expires_at_unix_ms > tested_at_unix_ms),\
+               record_json TEXT NOT NULL,\
+               FOREIGN KEY(policy_id) REFERENCES automation_feature_policies(policy_id),\
+               FOREIGN KEY(adapter_id) REFERENCES automation_adapter_descriptors(adapter_id)\
+             );\
+             CREATE INDEX IF NOT EXISTS automation_connection_test_evidence_current \
+               ON automation_connection_test_evidence(policy_id, candidate_version, source_commit, tested_at_unix_ms DESC, evidence_id DESC);\
+             CREATE TRIGGER IF NOT EXISTS automation_connection_test_evidence_no_update \
+               BEFORE UPDATE ON automation_connection_test_evidence \
+               BEGIN SELECT RAISE(ABORT, 'automation connection evidence is append-only'); END;\
+             CREATE TRIGGER IF NOT EXISTS automation_connection_test_evidence_no_delete \
+               BEFORE DELETE ON automation_connection_test_evidence \
+               BEGIN SELECT RAISE(ABORT, 'automation connection evidence is append-only'); END;\
+             CREATE TRIGGER IF NOT EXISTS automation_adapter_descriptor_history_no_update \
+               BEFORE UPDATE ON automation_adapter_descriptor_history \
+               BEGIN SELECT RAISE(ABORT, 'automation adapter history is append-only'); END;\
+             CREATE TRIGGER IF NOT EXISTS automation_adapter_descriptor_history_no_delete \
+               BEFORE DELETE ON automation_adapter_descriptor_history \
+               BEGIN SELECT RAISE(ABORT, 'automation adapter history is append-only'); END;\
+             CREATE TRIGGER IF NOT EXISTS automation_feature_policy_history_no_update \
+               BEFORE UPDATE ON automation_feature_policy_history \
+               BEGIN SELECT RAISE(ABORT, 'automation policy history is append-only'); END;\
+             CREATE TRIGGER IF NOT EXISTS automation_feature_policy_history_no_delete \
+               BEFORE DELETE ON automation_feature_policy_history \
+               BEGIN SELECT RAISE(ABORT, 'automation policy history is append-only'); END;",
         )
     }
 
@@ -7422,6 +7511,470 @@ impl StationStore {
                     events.push(event);
                 }
                 SQLITE_DONE => return Ok(events),
+                _ => return Err(sqlite_error(self.database)),
+            }
+        }
+    }
+
+    pub fn read_automation_adapter_descriptor(
+        &self,
+        adapter_id: &str,
+    ) -> Result<Option<AutomationAdapterDescriptor>, String> {
+        if !is_canonical_uuid(adapter_id) {
+            return Err("automation adapter identity is invalid".into());
+        }
+        let statement = self.prepare(
+            "SELECT adapter_id, revision, record_json FROM automation_adapter_descriptors WHERE adapter_id=?1",
+        )?;
+        let identity = c_string(adapter_id, "automation adapter identity")?;
+        bind_text(self.database, statement.raw, 1, &identity)?;
+        match unsafe { sqlite3_step(statement.raw) } {
+            SQLITE_ROW => {
+                let descriptor: AutomationAdapterDescriptor =
+                    read_automation_json(column_text(statement.raw, 2)?, "automation adapter")?;
+                if descriptor.adapter_id != column_text(statement.raw, 0)?
+                    || descriptor.revision
+                        != column_u64(statement.raw, 1, "automation adapter revision")?
+                {
+                    return Err("automation adapter row and record disagree".into());
+                }
+                Ok(Some(descriptor))
+            }
+            SQLITE_DONE => Ok(None),
+            _ => Err(sqlite_error(self.database)),
+        }
+    }
+
+    pub fn list_automation_adapter_descriptors(
+        &self,
+    ) -> Result<Vec<AutomationAdapterDescriptor>, String> {
+        let statement = self.prepare(
+            "SELECT adapter_id, revision, record_json FROM automation_adapter_descriptors ORDER BY adapter_id LIMIT 65",
+        )?;
+        let mut adapters = Vec::new();
+        loop {
+            match unsafe { sqlite3_step(statement.raw) } {
+                SQLITE_ROW => {
+                    let descriptor: AutomationAdapterDescriptor =
+                        read_automation_json(column_text(statement.raw, 2)?, "automation adapter")?;
+                    if descriptor.adapter_id != column_text(statement.raw, 0)?
+                        || descriptor.revision
+                            != column_u64(statement.raw, 1, "automation adapter revision")?
+                    {
+                        return Err("automation adapter row and record disagree".into());
+                    }
+                    adapters.push(descriptor);
+                }
+                SQLITE_DONE if adapters.len() <= 64 => return Ok(adapters),
+                SQLITE_DONE => return Err("automation adapter authority exceeds 64 records".into()),
+                _ => return Err(sqlite_error(self.database)),
+            }
+        }
+    }
+
+    pub fn write_automation_adapter_descriptor(
+        &self,
+        adapter: &AutomationAdapterDescriptor,
+        expected_revision: Option<u64>,
+        changed_by: &str,
+        occurred_at_unix_ms: i64,
+    ) -> Result<(), String> {
+        adapter.validate()?;
+        if occurred_at_unix_ms < 0 || !secret_field(changed_by, 200) {
+            return Err("automation adapter change attribution is invalid".into());
+        }
+        self.execute("BEGIN IMMEDIATE")?;
+        let outcome = (|| {
+            let current = self.read_automation_adapter_descriptor(&adapter.adapter_id)?;
+            validate_automation_revision(
+                current.as_ref().map(|item| item.revision),
+                adapter.revision,
+                expected_revision,
+            )?;
+            let record_json = serde_json::to_string(adapter)
+                .map_err(|error| format!("serialize automation adapter: {error}"))?;
+            let statement = self.prepare(
+                "INSERT INTO automation_adapter_descriptors(adapter_id, revision, record_json) VALUES(?1, ?2, ?3) \
+                 ON CONFLICT(adapter_id) DO UPDATE SET revision=excluded.revision, record_json=excluded.record_json",
+            )?;
+            let adapter_id = c_string(&adapter.adapter_id, "automation adapter identity")?;
+            let record_json = c_string(&record_json, "automation adapter record")?;
+            bind_text(self.database, statement.raw, 1, &adapter_id)?;
+            bind_i64(
+                self.database,
+                statement.raw,
+                2,
+                checked_i64(adapter.revision, "automation adapter revision")?,
+            )?;
+            bind_text(self.database, statement.raw, 3, &record_json)?;
+            expect_done(self.database, statement.raw)?;
+            let history = self.prepare(
+                "INSERT INTO automation_adapter_descriptor_history(adapter_id, revision, record_json, changed_by, occurred_at_unix_ms) VALUES(?1, ?2, ?3, ?4, ?5)",
+            )?;
+            let changed_by = c_string(changed_by, "automation adapter change actor")?;
+            bind_text(self.database, history.raw, 1, &adapter_id)?;
+            bind_i64(
+                self.database,
+                history.raw,
+                2,
+                checked_i64(adapter.revision, "automation adapter revision")?,
+            )?;
+            bind_text(self.database, history.raw, 3, &record_json)?;
+            bind_text(self.database, history.raw, 4, &changed_by)?;
+            bind_i64(self.database, history.raw, 5, occurred_at_unix_ms)?;
+            expect_done(self.database, history.raw)
+        })();
+        self.finish_transaction(outcome)
+    }
+
+    pub fn list_automation_adapter_descriptor_history(
+        &self,
+        adapter_id: &str,
+        limit: usize,
+    ) -> Result<Vec<AutomationAdapterDescriptorHistory>, String> {
+        if !is_canonical_uuid(adapter_id) || !(1..=128).contains(&limit) {
+            return Err("automation adapter history query is invalid or unbounded".into());
+        }
+        let statement = self.prepare(
+            "SELECT adapter_id, revision, record_json, changed_by, occurred_at_unix_ms FROM automation_adapter_descriptor_history WHERE adapter_id=?1 ORDER BY revision LIMIT ?2",
+        )?;
+        let adapter_id = c_string(adapter_id, "automation adapter identity")?;
+        bind_text(self.database, statement.raw, 1, &adapter_id)?;
+        bind_i64(self.database, statement.raw, 2, limit as i64)?;
+        let mut history = Vec::new();
+        loop {
+            match unsafe { sqlite3_step(statement.raw) } {
+                SQLITE_ROW => {
+                    let descriptor: AutomationAdapterDescriptor = read_automation_json(
+                        column_text(statement.raw, 2)?,
+                        "automation adapter history",
+                    )?;
+                    if descriptor.adapter_id != column_text(statement.raw, 0)?
+                        || descriptor.revision
+                            != column_u64(statement.raw, 1, "automation adapter revision")?
+                    {
+                        return Err("automation adapter history row and record disagree".into());
+                    }
+                    let changed_by = column_text(statement.raw, 3)?;
+                    let occurred_at_unix_ms = unsafe { sqlite3_column_int64(statement.raw, 4) };
+                    if !secret_field(&changed_by, 200) || occurred_at_unix_ms < 0 {
+                        return Err("automation adapter history attribution is invalid".into());
+                    }
+                    history.push(AutomationAdapterDescriptorHistory {
+                        descriptor,
+                        changed_by,
+                        occurred_at_unix_ms,
+                    });
+                }
+                SQLITE_DONE => return Ok(history),
+                _ => return Err(sqlite_error(self.database)),
+            }
+        }
+    }
+
+    pub fn read_automation_feature_policy(
+        &self,
+        policy_id: &str,
+    ) -> Result<Option<AutomationFeaturePolicy>, String> {
+        if !is_canonical_uuid(policy_id) {
+            return Err("automation policy identity is invalid".into());
+        }
+        let statement = self.prepare(
+            "SELECT policy_id, feature, revision, record_json FROM automation_feature_policies WHERE policy_id=?1",
+        )?;
+        let identity = c_string(policy_id, "automation policy identity")?;
+        bind_text(self.database, statement.raw, 1, &identity)?;
+        match unsafe { sqlite3_step(statement.raw) } {
+            SQLITE_ROW => {
+                let policy: AutomationFeaturePolicy =
+                    read_automation_json(column_text(statement.raw, 3)?, "automation policy")?;
+                if policy.policy_id != column_text(statement.raw, 0)?
+                    || automation_feature_name(policy.feature) != column_text(statement.raw, 1)?
+                    || policy.revision
+                        != column_u64(statement.raw, 2, "automation policy revision")?
+                {
+                    return Err("automation policy row and record disagree".into());
+                }
+                Ok(Some(policy))
+            }
+            SQLITE_DONE => Ok(None),
+            _ => Err(sqlite_error(self.database)),
+        }
+    }
+
+    pub fn list_automation_feature_policies(&self) -> Result<Vec<AutomationFeaturePolicy>, String> {
+        let statement = self.prepare(
+            "SELECT policy_id, feature, revision, record_json FROM automation_feature_policies ORDER BY feature LIMIT 4",
+        )?;
+        let mut policies = Vec::new();
+        loop {
+            match unsafe { sqlite3_step(statement.raw) } {
+                SQLITE_ROW => {
+                    let policy: AutomationFeaturePolicy =
+                        read_automation_json(column_text(statement.raw, 3)?, "automation policy")?;
+                    if policy.policy_id != column_text(statement.raw, 0)?
+                        || automation_feature_name(policy.feature) != column_text(statement.raw, 1)?
+                        || policy.revision
+                            != column_u64(statement.raw, 2, "automation policy revision")?
+                    {
+                        return Err("automation policy row and record disagree".into());
+                    }
+                    policies.push(policy);
+                }
+                SQLITE_DONE if policies.len() <= 3 => return Ok(policies),
+                SQLITE_DONE => return Err("automation policy authority exceeds 3 records".into()),
+                _ => return Err(sqlite_error(self.database)),
+            }
+        }
+    }
+
+    pub fn write_automation_feature_policy(
+        &self,
+        policy: &AutomationFeaturePolicy,
+        expected_revision: Option<u64>,
+        changed_by: &str,
+        occurred_at_unix_ms: i64,
+    ) -> Result<(), String> {
+        policy.validate()?;
+        if occurred_at_unix_ms < 0 || !secret_field(changed_by, 200) {
+            return Err("automation policy change attribution is invalid".into());
+        }
+        self.execute("BEGIN IMMEDIATE")?;
+        let outcome = (|| {
+            let current = self.read_automation_feature_policy(&policy.policy_id)?;
+            validate_automation_revision(
+                current.as_ref().map(|item| item.revision),
+                policy.revision,
+                expected_revision,
+            )?;
+            if current
+                .as_ref()
+                .is_some_and(|current| current.feature != policy.feature)
+            {
+                return Err(
+                    "automation policy identity cannot be rebound to another feature".into(),
+                );
+            }
+            validate_automation_policy_capabilities(
+                policy,
+                &self.list_automation_adapter_descriptors()?,
+            )?;
+            let record_json = serde_json::to_string(policy)
+                .map_err(|error| format!("serialize automation policy: {error}"))?;
+            let statement = self.prepare(
+                "INSERT INTO automation_feature_policies(policy_id, feature, revision, record_json) VALUES(?1, ?2, ?3, ?4) \
+                 ON CONFLICT(policy_id) DO UPDATE SET feature=excluded.feature, revision=excluded.revision, record_json=excluded.record_json",
+            )?;
+            let policy_id = c_string(&policy.policy_id, "automation policy identity")?;
+            let feature = c_string(
+                automation_feature_name(policy.feature),
+                "automation feature",
+            )?;
+            let record_json = c_string(&record_json, "automation policy record")?;
+            bind_text(self.database, statement.raw, 1, &policy_id)?;
+            bind_text(self.database, statement.raw, 2, &feature)?;
+            bind_i64(
+                self.database,
+                statement.raw,
+                3,
+                checked_i64(policy.revision, "automation policy revision")?,
+            )?;
+            bind_text(self.database, statement.raw, 4, &record_json)?;
+            expect_done(self.database, statement.raw)?;
+            let history = self.prepare(
+                "INSERT INTO automation_feature_policy_history(policy_id, feature, revision, record_json, changed_by, occurred_at_unix_ms) VALUES(?1, ?2, ?3, ?4, ?5, ?6)",
+            )?;
+            let changed_by = c_string(changed_by, "automation policy change actor")?;
+            bind_text(self.database, history.raw, 1, &policy_id)?;
+            bind_text(self.database, history.raw, 2, &feature)?;
+            bind_i64(
+                self.database,
+                history.raw,
+                3,
+                checked_i64(policy.revision, "automation policy revision")?,
+            )?;
+            bind_text(self.database, history.raw, 4, &record_json)?;
+            bind_text(self.database, history.raw, 5, &changed_by)?;
+            bind_i64(self.database, history.raw, 6, occurred_at_unix_ms)?;
+            expect_done(self.database, history.raw)
+        })();
+        self.finish_transaction(outcome)
+    }
+
+    pub fn list_automation_feature_policy_history(
+        &self,
+        policy_id: &str,
+        limit: usize,
+    ) -> Result<Vec<AutomationFeaturePolicyHistory>, String> {
+        if !is_canonical_uuid(policy_id) || !(1..=128).contains(&limit) {
+            return Err("automation policy history query is invalid or unbounded".into());
+        }
+        let statement = self.prepare(
+            "SELECT policy_id, feature, revision, record_json, changed_by, occurred_at_unix_ms FROM automation_feature_policy_history WHERE policy_id=?1 ORDER BY revision LIMIT ?2",
+        )?;
+        let policy_id = c_string(policy_id, "automation policy identity")?;
+        bind_text(self.database, statement.raw, 1, &policy_id)?;
+        bind_i64(self.database, statement.raw, 2, limit as i64)?;
+        let mut history = Vec::new();
+        loop {
+            match unsafe { sqlite3_step(statement.raw) } {
+                SQLITE_ROW => {
+                    let policy: AutomationFeaturePolicy = read_automation_json(
+                        column_text(statement.raw, 3)?,
+                        "automation policy history",
+                    )?;
+                    if policy.policy_id != column_text(statement.raw, 0)?
+                        || automation_feature_name(policy.feature) != column_text(statement.raw, 1)?
+                        || policy.revision
+                            != column_u64(statement.raw, 2, "automation policy revision")?
+                    {
+                        return Err("automation policy history row and record disagree".into());
+                    }
+                    let changed_by = column_text(statement.raw, 4)?;
+                    let occurred_at_unix_ms = unsafe { sqlite3_column_int64(statement.raw, 5) };
+                    if !secret_field(&changed_by, 200) || occurred_at_unix_ms < 0 {
+                        return Err("automation policy history attribution is invalid".into());
+                    }
+                    history.push(AutomationFeaturePolicyHistory {
+                        policy,
+                        changed_by,
+                        occurred_at_unix_ms,
+                    });
+                }
+                SQLITE_DONE => return Ok(history),
+                _ => return Err(sqlite_error(self.database)),
+            }
+        }
+    }
+
+    pub fn append_automation_connection_test_evidence(
+        &self,
+        evidence: &AutomationConnectionTestEvidence,
+        current_candidate: &AutomationCandidateIdentity,
+        now_unix_ms: i64,
+    ) -> Result<(), String> {
+        evidence.validate()?;
+        current_candidate.validate()?;
+        if now_unix_ms < 0 || evidence.candidate != *current_candidate {
+            return Err(
+                "automation connection evidence candidate binding is stale or invalid".into(),
+            );
+        }
+        self.execute("BEGIN IMMEDIATE")?;
+        let outcome = (|| {
+            let policy = self
+                .read_automation_feature_policy(&evidence.policy_id)?
+                .ok_or_else(|| {
+                    "automation connection evidence policy does not exist".to_string()
+                })?;
+            let adapters = self.list_automation_adapter_descriptors()?;
+            if !matches!(
+                derive_feature_automation_status(
+                    &policy,
+                    &adapters,
+                    Some(evidence),
+                    current_candidate,
+                    now_unix_ms
+                ),
+                FeatureAutomationStatus::Passed | FeatureAutomationStatus::Failed
+            ) {
+                return Err("automation connection evidence is not current for policy, adapter, configuration, candidate, or time".into());
+            }
+            let record_json = serde_json::to_string(evidence)
+                .map_err(|error| format!("serialize automation connection evidence: {error}"))?;
+            let statement = self.prepare(
+                "INSERT INTO automation_connection_test_evidence(evidence_id, policy_id, adapter_id, policy_revision, adapter_revision, configuration_hash, candidate_version, source_commit, tested_at_unix_ms, expires_at_unix_ms, record_json) \
+                 VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            )?;
+            let values = [
+                c_string(&evidence.evidence_id, "automation evidence identity")?,
+                c_string(&evidence.policy_id, "automation policy identity")?,
+                c_string(&evidence.adapter_id, "automation adapter identity")?,
+                c_string(
+                    &evidence.configuration_hash,
+                    "automation configuration hash",
+                )?,
+                c_string(&evidence.candidate.version, "automation candidate version")?,
+                c_string(
+                    &evidence.candidate.source_commit,
+                    "automation source commit",
+                )?,
+                c_string(&record_json, "automation evidence record")?,
+            ];
+            bind_text(self.database, statement.raw, 1, &values[0])?;
+            bind_text(self.database, statement.raw, 2, &values[1])?;
+            bind_text(self.database, statement.raw, 3, &values[2])?;
+            bind_i64(
+                self.database,
+                statement.raw,
+                4,
+                checked_i64(evidence.policy_revision, "automation policy revision")?,
+            )?;
+            bind_i64(
+                self.database,
+                statement.raw,
+                5,
+                checked_i64(evidence.adapter_revision, "automation adapter revision")?,
+            )?;
+            bind_text(self.database, statement.raw, 6, &values[3])?;
+            bind_text(self.database, statement.raw, 7, &values[4])?;
+            bind_text(self.database, statement.raw, 8, &values[5])?;
+            bind_i64(self.database, statement.raw, 9, evidence.tested_at_unix_ms)?;
+            bind_i64(
+                self.database,
+                statement.raw,
+                10,
+                evidence.expires_at_unix_ms,
+            )?;
+            bind_text(self.database, statement.raw, 11, &values[6])?;
+            expect_done(self.database, statement.raw)
+        })();
+        self.finish_transaction(outcome)
+    }
+
+    pub fn list_automation_connection_test_evidence(
+        &self,
+        policy_id: &str,
+        limit: usize,
+    ) -> Result<Vec<AutomationConnectionTestEvidence>, String> {
+        if !is_canonical_uuid(policy_id) || !(1..=128).contains(&limit) {
+            return Err("automation connection evidence query is invalid or unbounded".into());
+        }
+        let statement = self.prepare(
+            "SELECT evidence_id, policy_id, adapter_id, policy_revision, adapter_revision, configuration_hash, candidate_version, source_commit, tested_at_unix_ms, expires_at_unix_ms, record_json FROM automation_connection_test_evidence WHERE policy_id=?1 \
+             ORDER BY tested_at_unix_ms DESC, evidence_id DESC LIMIT ?2",
+        )?;
+        let policy_id = c_string(policy_id, "automation policy identity")?;
+        bind_text(self.database, statement.raw, 1, &policy_id)?;
+        bind_i64(self.database, statement.raw, 2, limit as i64)?;
+        let mut evidence = Vec::new();
+        loop {
+            match unsafe { sqlite3_step(statement.raw) } {
+                SQLITE_ROW => {
+                    let record: AutomationConnectionTestEvidence = read_automation_json(
+                        column_text(statement.raw, 10)?,
+                        "automation connection evidence",
+                    )?;
+                    if record.evidence_id != column_text(statement.raw, 0)?
+                        || record.policy_id != column_text(statement.raw, 1)?
+                        || record.adapter_id != column_text(statement.raw, 2)?
+                        || record.policy_revision
+                            != column_u64(statement.raw, 3, "automation evidence policy revision")?
+                        || record.adapter_revision
+                            != column_u64(statement.raw, 4, "automation evidence adapter revision")?
+                        || record.configuration_hash != column_text(statement.raw, 5)?
+                        || record.candidate.version != column_text(statement.raw, 6)?
+                        || record.candidate.source_commit != column_text(statement.raw, 7)?
+                        || record.tested_at_unix_ms
+                            != unsafe { sqlite3_column_int64(statement.raw, 8) }
+                        || record.expires_at_unix_ms
+                            != unsafe { sqlite3_column_int64(statement.raw, 9) }
+                    {
+                        return Err("automation connection evidence row and record disagree".into());
+                    }
+                    evidence.push(record);
+                }
+                SQLITE_DONE => return Ok(evidence),
                 _ => return Err(sqlite_error(self.database)),
             }
         }
@@ -13783,6 +14336,91 @@ fn parse_transcode_job_status(value: &str) -> Result<TranscodeJobStatus, String>
     }
 }
 
+trait ValidateAutomationRecord {
+    fn validate_automation_record(&self) -> Result<(), String>;
+}
+
+impl ValidateAutomationRecord for AutomationAdapterDescriptor {
+    fn validate_automation_record(&self) -> Result<(), String> {
+        self.validate()
+    }
+}
+
+impl ValidateAutomationRecord for AutomationFeaturePolicy {
+    fn validate_automation_record(&self) -> Result<(), String> {
+        self.validate()
+    }
+}
+
+impl ValidateAutomationRecord for AutomationConnectionTestEvidence {
+    fn validate_automation_record(&self) -> Result<(), String> {
+        self.validate()
+    }
+}
+
+fn read_automation_json<T>(record_json: String, record_name: &str) -> Result<T, String>
+where
+    T: DeserializeOwned + ValidateAutomationRecord,
+{
+    let record = serde_json::from_str::<T>(&record_json)
+        .map_err(|error| format!("database returned invalid {record_name} JSON: {error}"))?;
+    record
+        .validate_automation_record()
+        .map_err(|error| format!("database returned invalid {record_name}: {error}"))?;
+    Ok(record)
+}
+
+fn validate_automation_revision(
+    current_revision: Option<u64>,
+    incoming_revision: u64,
+    expected_revision: Option<u64>,
+) -> Result<(), String> {
+    match (current_revision, expected_revision) {
+        (None, None) if incoming_revision == 1 => Ok(()),
+        (Some(current), Some(expected))
+            if current == expected && incoming_revision == current.saturating_add(1) =>
+        {
+            Ok(())
+        }
+        _ => Err("automation authority revision conflict".into()),
+    }
+}
+
+fn validate_automation_policy_capabilities(
+    policy: &AutomationFeaturePolicy,
+    adapters: &[AutomationAdapterDescriptor],
+) -> Result<(), String> {
+    let supports_feature = |adapter_id: &str| {
+        adapters.iter().any(|adapter| {
+            adapter.adapter_id == adapter_id
+                && adapter.validate().is_ok()
+                && adapter.supported_features.contains(&policy.feature)
+        })
+    };
+    if policy
+        .operator_selected_adapter_id
+        .as_deref()
+        .is_some_and(|adapter_id| !supports_feature(adapter_id))
+    {
+        return Err("operator-selected automation adapter is missing or unsupported".into());
+    }
+    if let Some(hint) = &policy.adaptive_default
+        && (!supports_feature(&hint.preferred_adapter_id)
+            || !supports_feature(&hint.fallback_adapter_id))
+    {
+        return Err("adaptive automation adapter capability is missing or unsupported".into());
+    }
+    Ok(())
+}
+
+fn automation_feature_name(feature: AutomationFeature) -> &'static str {
+    match feature {
+        AutomationFeature::Captions => "captions",
+        AutomationFeature::Summaries => "summaries",
+        AutomationFeature::Translation => "translation",
+    }
+}
+
 fn is_sha256_identity(value: &str) -> bool {
     value.len() == 64
         && value
@@ -14105,6 +14743,129 @@ mod tests {
         let statement = store.prepare(sql).unwrap();
         assert_eq!(unsafe { sqlite3_step(statement.raw) }, SQLITE_ROW);
         unsafe { sqlite3_column_int64(statement.raw, 0) }
+    }
+
+    #[test]
+    fn automation_json_mismatch_is_fail_closed_on_every_authority_read() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let database =
+            std::env::temp_dir().join(format!("townlight-automation-row-mismatch-{nonce}.db"));
+        let store = StationStore::open(&database).unwrap();
+        let adapter = AutomationAdapterDescriptor {
+            adapter_id: "11111111-2222-4333-8444-555555555555".into(),
+            location: station_automation_policy::AdapterLocation::Local,
+            model_key: "model".into(),
+            model_identifier: "model:1".into(),
+            supported_features: vec![AutomationFeature::Summaries],
+            credential_availability: station_automation_policy::CredentialAvailability::NotRequired,
+            revision: 1,
+        };
+        let policy = AutomationFeaturePolicy {
+            policy_id: "22222222-2222-4333-8444-555555555555".into(),
+            feature: AutomationFeature::Summaries,
+            operator_selected_adapter_id: Some(adapter.adapter_id.clone()),
+            adaptive_default: None,
+            configuration_hash: "a".repeat(64),
+            revision: 1,
+        };
+        let candidate = AutomationCandidateIdentity {
+            version: "0.1.0".into(),
+            source_commit: "b".repeat(40),
+        };
+        let evidence = AutomationConnectionTestEvidence {
+            evidence_id: "33333333-2222-4333-8444-555555555555".into(),
+            policy_id: policy.policy_id.clone(),
+            adapter_id: adapter.adapter_id.clone(),
+            policy_revision: 1,
+            adapter_revision: 1,
+            configuration_hash: policy.configuration_hash.clone(),
+            candidate: candidate.clone(),
+            outcome: station_automation_policy::ConnectionTestOutcome::Passed,
+            tested_at_unix_ms: 10,
+            expires_at_unix_ms: 100,
+            detail: "passed".into(),
+        };
+        store
+            .write_automation_adapter_descriptor(&adapter, None, "setup-admin", 1)
+            .unwrap();
+        store
+            .write_automation_feature_policy(&policy, None, "setup-admin", 2)
+            .unwrap();
+        store
+            .append_automation_connection_test_evidence(&evidence, &candidate, 20)
+            .unwrap();
+
+        let mut mismatched_adapter = adapter.clone();
+        mismatched_adapter.revision = 2;
+        let statement = store
+            .prepare("UPDATE automation_adapter_descriptors SET record_json=?1 WHERE adapter_id=?2")
+            .unwrap();
+        let json = c_string(
+            &serde_json::to_string(&mismatched_adapter).unwrap(),
+            "test JSON",
+        )
+        .unwrap();
+        let identity = c_string(&adapter.adapter_id, "test adapter").unwrap();
+        bind_text(store.database, statement.raw, 1, &json).unwrap();
+        bind_text(store.database, statement.raw, 2, &identity).unwrap();
+        expect_done(store.database, statement.raw).unwrap();
+        assert!(
+            store
+                .read_automation_adapter_descriptor(&adapter.adapter_id)
+                .is_err()
+        );
+
+        let mut mismatched_policy = policy.clone();
+        mismatched_policy.revision = 2;
+        let statement = store
+            .prepare("UPDATE automation_feature_policies SET record_json=?1 WHERE policy_id=?2")
+            .unwrap();
+        let json = c_string(
+            &serde_json::to_string(&mismatched_policy).unwrap(),
+            "test JSON",
+        )
+        .unwrap();
+        let identity = c_string(&policy.policy_id, "test policy").unwrap();
+        bind_text(store.database, statement.raw, 1, &json).unwrap();
+        bind_text(store.database, statement.raw, 2, &identity).unwrap();
+        expect_done(store.database, statement.raw).unwrap();
+        assert!(
+            store
+                .read_automation_feature_policy(&policy.policy_id)
+                .is_err()
+        );
+
+        let mut mismatched_evidence = evidence.clone();
+        mismatched_evidence.adapter_revision = 2;
+        let statement = store
+            .prepare("UPDATE automation_connection_test_evidence SET record_json=?1 WHERE evidence_id=?2")
+            .unwrap();
+        let json = c_string(
+            &serde_json::to_string(&mismatched_evidence).unwrap(),
+            "test JSON",
+        )
+        .unwrap();
+        let identity = c_string(&evidence.evidence_id, "test evidence").unwrap();
+        bind_text(store.database, statement.raw, 1, &json).unwrap();
+        bind_text(store.database, statement.raw, 2, &identity).unwrap();
+        assert!(expect_done(store.database, statement.raw).is_err());
+
+        let statement = store
+            .prepare("DELETE FROM automation_feature_policy_history WHERE policy_id=?1")
+            .unwrap();
+        let identity = c_string(&policy.policy_id, "test policy").unwrap();
+        bind_text(store.database, statement.raw, 1, &identity).unwrap();
+        assert!(expect_done(store.database, statement.raw).is_err());
+
+        assert!(store.execute(
+            "INSERT INTO automation_adapter_descriptor_history(adapter_id, revision, record_json, changed_by, occurred_at_unix_ms) VALUES('99999999-2222-4333-8444-555555555555', 1, '{}', '', 0)",
+        ).is_err());
+
+        drop(store);
+        let _ = std::fs::remove_file(database);
     }
 
     #[test]
