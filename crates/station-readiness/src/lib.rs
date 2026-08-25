@@ -236,6 +236,91 @@ pub enum ReferenceStationTier {
     Tier2MultiStream,
 }
 
+/// The operator-selected target for this station, retained separately from the
+/// measured [`ReferenceStationCatalog`].  The catalog answers what the current
+/// probe can substantiate; this record answers which documented reference build
+/// the station is being commissioned to satisfy.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReferenceStationTierSelection {
+    pub catalog_version: u32,
+    pub tier: ReferenceStationTier,
+    pub revision: u64,
+    pub created_at_unix_ms: i64,
+    pub updated_at_unix_ms: i64,
+    pub updated_by: String,
+}
+
+/// An immutable audit row for an operator change to the selected reference
+/// station tier.  The selected tier and catalog version are copied into every
+/// row so later catalog revisions cannot rewrite historical intent.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReferenceStationTierAuditEvent {
+    pub revision: u64,
+    pub catalog_version: u32,
+    pub tier: ReferenceStationTier,
+    pub actor: String,
+    pub occurred_at_unix_ms: i64,
+}
+
+impl ReferenceStationTier {
+    /// Stable SQLite name. Do not derive this from `Debug` or serde output.
+    pub const fn persisted_name(&self) -> &'static str {
+        match self {
+            Self::Tier0BatchStream => "tier_0_batch_stream",
+            Self::Tier1Streaming => "tier_1_streaming",
+            Self::DevelopmentValidation => "development_validation",
+            Self::CableSdi => "cable_sdi",
+            Self::Tier2MultiStream => "tier_2_multi_stream",
+        }
+    }
+
+    /// Parses only names this release can safely interpret from persistent
+    /// storage. Unknown names must fail closed rather than being coerced.
+    pub fn parse_persisted_name(value: &str) -> Result<Self, String> {
+        match value {
+            "tier_0_batch_stream" => Ok(Self::Tier0BatchStream),
+            "tier_1_streaming" => Ok(Self::Tier1Streaming),
+            "development_validation" => Ok(Self::DevelopmentValidation),
+            "cable_sdi" => Ok(Self::CableSdi),
+            "tier_2_multi_stream" => Ok(Self::Tier2MultiStream),
+            _ => Err(format!(
+                "unknown persisted reference station tier {value:?}"
+            )),
+        }
+    }
+}
+
+impl ReferenceStationTierSelection {
+    pub fn validate(&self) -> Result<(), String> {
+        if self.revision == 0
+            || self.created_at_unix_ms < 0
+            || self.updated_at_unix_ms < self.created_at_unix_ms
+            || !valid_reference_station_actor(&self.updated_by)
+        {
+            return Err("reference station tier selection facts are invalid".into());
+        }
+        Ok(())
+    }
+
+    pub const fn uses_current_catalog(&self) -> bool {
+        self.catalog_version == REFERENCE_STATION_CATALOG_VERSION
+    }
+}
+
+impl ReferenceStationTierAuditEvent {
+    pub fn validate(&self) -> Result<(), String> {
+        if self.revision == 0
+            || self.occurred_at_unix_ms < 0
+            || !valid_reference_station_actor(&self.actor)
+        {
+            return Err("reference station tier audit facts are invalid".into());
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ReferenceStationRequirementName {
@@ -1296,6 +1381,13 @@ fn is_iana_timezone(value: &str) -> bool {
             }))
 }
 
+fn valid_reference_station_actor(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= MAX_TEXT
+        && value.trim() == value
+        && !value.chars().any(char::is_control)
+}
+
 fn invalid(message: impl Into<String>) -> Result<(), ValidationError> {
     Err(ValidationError::InvalidInput(message.into()))
 }
@@ -1326,5 +1418,36 @@ mod tests {
             reference_station_readiness_state(&catalog),
             ReadinessState::Unknown
         );
+    }
+
+    #[test]
+    fn reference_tier_persisted_names_are_stable_and_unknown_names_fail_closed() {
+        for tier in [
+            ReferenceStationTier::Tier0BatchStream,
+            ReferenceStationTier::Tier1Streaming,
+            ReferenceStationTier::DevelopmentValidation,
+            ReferenceStationTier::CableSdi,
+            ReferenceStationTier::Tier2MultiStream,
+        ] {
+            assert_eq!(
+                ReferenceStationTier::parse_persisted_name(tier.persisted_name()).unwrap(),
+                tier
+            );
+        }
+        assert!(ReferenceStationTier::parse_persisted_name("future_tier").is_err());
+    }
+
+    #[test]
+    fn persisted_selection_keeps_old_catalog_version_visible_but_not_current() {
+        let selection = ReferenceStationTierSelection {
+            catalog_version: REFERENCE_STATION_CATALOG_VERSION - 1,
+            tier: ReferenceStationTier::Tier1Streaming,
+            revision: 1,
+            created_at_unix_ms: 100,
+            updated_at_unix_ms: 100,
+            updated_by: "operator-1".into(),
+        };
+        selection.validate().unwrap();
+        assert!(!selection.uses_current_catalog());
     }
 }

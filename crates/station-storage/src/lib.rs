@@ -39,7 +39,11 @@ use station_media_lifecycle::{
     AssetLoudnessAnalysis, IngestJobStatus, IngestSourceKind, LoudnessGateStatus, MediaIngestJob,
     TranscodeFormat, TranscodeJob, TranscodeJobStatus, WatchFileObservation, WatchFolderConfig,
 };
-use station_readiness::{LoudnessProofOutcome, ReceiverAcceptance, SinkLoudnessProof};
+use station_readiness::{
+    LoudnessProofOutcome, REFERENCE_STATION_CATALOG_VERSION, ReceiverAcceptance,
+    ReferenceStationTier, ReferenceStationTierAuditEvent, ReferenceStationTierSelection,
+    SinkLoudnessProof,
+};
 use station_schedule::{
     AssetReadiness, ChannelConfiguration, CommitPlan, CommitReport, DispatchJob, DispatchStatus,
     HeadendProfileApplication, HeadendProfileApplyRequest, HeadendProfileId, HeadendSinkContract,
@@ -168,6 +172,42 @@ const CRYPTPROTECT_LOCAL_MACHINE: u32 = 0x4;
 pub enum ProfileWriteError {
     Conflict(u64),
     Storage(String),
+}
+
+/// A compare-and-swap rejection for the persisted Reference Station target.
+/// `None` means the singleton was absent at the time the write was attempted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReferenceStationTierWriteError {
+    Conflict { current_revision: Option<u64> },
+    CatalogVersionMismatch { expected: u32, actual: u32 },
+    Invalid(String),
+    Storage(String),
+}
+
+/// A complete, auditable change request. `expected_revision = None` is the
+/// first-write CAS value; subsequent writes must name the exact revision they
+/// replace.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReferenceStationTierWrite {
+    pub expected_revision: Option<u64>,
+    pub catalog_version: u32,
+    pub tier: ReferenceStationTier,
+    pub actor: String,
+    pub occurred_at_unix_ms: i64,
+}
+
+impl ReferenceStationTierWrite {
+    fn validate(&self) -> Result<(), String> {
+        if self.occurred_at_unix_ms < 0
+            || self.actor.is_empty()
+            || self.actor.len() > 200
+            || self.actor.trim() != self.actor
+            || self.actor.chars().any(char::is_control)
+        {
+            return Err("reference station tier write facts are invalid".into());
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -829,6 +869,7 @@ impl StationStore {
         store.migrate_channel_output_sinks()?;
         store.migrate_sink_loudness_proofs()?;
         store.migrate_output_loudness_jobs()?;
+        store.initialize_reference_station_tier_schema()?;
         store.initialize_cg_schema()?;
         store.migrate_cg_feed_cache_schema()?;
         store.initialize_operator_auth_schema()?;
@@ -1782,6 +1823,122 @@ impl StationStore {
                 Err(message) => {
                     let _ = self.execute("ROLLBACK");
                     Err(ProfileWriteError::Storage(message))
+                }
+            },
+            Err(error) => {
+                let _ = self.execute("ROLLBACK");
+                Err(error)
+            }
+        }
+    }
+
+    /// Returns the explicitly selected reference build, if commissioning has
+    /// recorded one. A returned selection may name an older catalog version;
+    /// callers must inspect `uses_current_catalog()` before treating it as a
+    /// current qualification target.
+    pub fn read_reference_station_tier_selection(
+        &self,
+    ) -> Result<Option<ReferenceStationTierSelection>, String> {
+        let statement = self.prepare(
+            "SELECT catalog_version,tier,revision,created_at_unix_ms,updated_at_unix_ms,updated_by \
+             FROM reference_station_tier_selection WHERE singleton=1",
+        )?;
+        match unsafe { sqlite3_step(statement.raw) } {
+            SQLITE_ROW => Ok(Some(read_reference_station_tier_selection_row(
+                statement.raw,
+            )?)),
+            SQLITE_DONE => Ok(None),
+            _ => Err(sqlite_error(self.database)),
+        }
+    }
+
+    /// Lists the immutable history in insertion (revision) order.
+    pub fn list_reference_station_tier_audit(
+        &self,
+    ) -> Result<Vec<ReferenceStationTierAuditEvent>, String> {
+        let statement = self.prepare(
+            "SELECT revision,catalog_version,tier,actor,occurred_at_unix_ms \
+             FROM reference_station_tier_audit ORDER BY revision",
+        )?;
+        let mut events = Vec::new();
+        loop {
+            match unsafe { sqlite3_step(statement.raw) } {
+                SQLITE_ROW => events.push(read_reference_station_tier_audit_row(statement.raw)?),
+                SQLITE_DONE => return Ok(events),
+                _ => return Err(sqlite_error(self.database)),
+            }
+        }
+    }
+
+    /// Atomically records a new selected tier and exactly one corresponding
+    /// append-only audit row. This is a CAS: `None` means create-only and a
+    /// concrete revision means replace-only.
+    pub fn write_reference_station_tier_selection(
+        &self,
+        request: &ReferenceStationTierWrite,
+    ) -> Result<ReferenceStationTierSelection, ReferenceStationTierWriteError> {
+        request
+            .validate()
+            .map_err(ReferenceStationTierWriteError::Invalid)?;
+        if request.catalog_version != REFERENCE_STATION_CATALOG_VERSION {
+            return Err(ReferenceStationTierWriteError::CatalogVersionMismatch {
+                expected: REFERENCE_STATION_CATALOG_VERSION,
+                actual: request.catalog_version,
+            });
+        }
+        self.execute("BEGIN IMMEDIATE")
+            .map_err(ReferenceStationTierWriteError::Storage)?;
+        let outcome = (|| {
+            let current = self
+                .read_reference_station_tier_selection()
+                .map_err(ReferenceStationTierWriteError::Storage)?;
+            let current_revision = current.as_ref().map(|selection| selection.revision);
+            if current_revision != request.expected_revision {
+                return Err(ReferenceStationTierWriteError::Conflict { current_revision });
+            }
+            if current
+                .as_ref()
+                .is_some_and(|selection| request.occurred_at_unix_ms < selection.updated_at_unix_ms)
+            {
+                return Err(ReferenceStationTierWriteError::Invalid(
+                    "reference station tier timestamp predates the current revision".into(),
+                ));
+            }
+            let selection = ReferenceStationTierSelection {
+                catalog_version: request.catalog_version,
+                tier: request.tier.clone(),
+                revision: current_revision.unwrap_or(0) + 1,
+                created_at_unix_ms: current
+                    .as_ref()
+                    .map_or(request.occurred_at_unix_ms, |item| item.created_at_unix_ms),
+                updated_at_unix_ms: request.occurred_at_unix_ms,
+                updated_by: request.actor.clone(),
+            };
+            selection
+                .validate()
+                .map_err(ReferenceStationTierWriteError::Invalid)?;
+            self.upsert_reference_station_tier_selection(&selection)
+                .map_err(ReferenceStationTierWriteError::Storage)?;
+            let audit = ReferenceStationTierAuditEvent {
+                revision: selection.revision,
+                catalog_version: selection.catalog_version,
+                tier: selection.tier.clone(),
+                actor: request.actor.clone(),
+                occurred_at_unix_ms: request.occurred_at_unix_ms,
+            };
+            audit
+                .validate()
+                .map_err(ReferenceStationTierWriteError::Invalid)?;
+            self.append_reference_station_tier_audit(&audit)
+                .map_err(ReferenceStationTierWriteError::Storage)?;
+            Ok(selection)
+        })();
+        match outcome {
+            Ok(selection) => match self.execute("COMMIT") {
+                Ok(()) => Ok(selection),
+                Err(error) => {
+                    let _ = self.execute("ROLLBACK");
+                    Err(ReferenceStationTierWriteError::Storage(error))
                 }
             },
             Err(error) => {
@@ -8313,6 +8470,41 @@ impl StationStore {
         }
     }
 
+    fn initialize_reference_station_tier_schema(&self) -> Result<(), String> {
+        self.execute(
+            "CREATE TABLE IF NOT EXISTS reference_station_tier_selection (\
+               singleton INTEGER PRIMARY KEY CHECK (singleton = 1),\
+               catalog_version INTEGER NOT NULL CHECK (catalog_version >= 0),\
+               tier TEXT NOT NULL CHECK (tier IN (\
+                 'tier_0_batch_stream','tier_1_streaming','development_validation','cable_sdi','tier_2_multi_stream')),\
+               revision INTEGER NOT NULL CHECK (revision >= 1),\
+               created_at_unix_ms INTEGER NOT NULL CHECK (created_at_unix_ms >= 0),\
+               updated_at_unix_ms INTEGER NOT NULL CHECK (updated_at_unix_ms >= created_at_unix_ms),\
+               updated_by TEXT NOT NULL CHECK (length(updated_by) BETWEEN 1 AND 200)\
+             );\
+             CREATE TABLE IF NOT EXISTS reference_station_tier_audit (\
+               audit_id INTEGER PRIMARY KEY AUTOINCREMENT,\
+               revision INTEGER NOT NULL CHECK (revision >= 1),\
+               catalog_version INTEGER NOT NULL CHECK (catalog_version >= 0),\
+               tier TEXT NOT NULL CHECK (tier IN (\
+                 'tier_0_batch_stream','tier_1_streaming','development_validation','cable_sdi','tier_2_multi_stream')),\
+               actor TEXT NOT NULL CHECK (length(actor) BETWEEN 1 AND 200),\
+               occurred_at_unix_ms INTEGER NOT NULL CHECK (occurred_at_unix_ms >= 0),\
+               CHECK (actor = trim(actor))\
+             );\
+             CREATE UNIQUE INDEX IF NOT EXISTS reference_station_tier_audit_revision \
+               ON reference_station_tier_audit(revision);\
+             CREATE INDEX IF NOT EXISTS reference_station_tier_audit_time \
+               ON reference_station_tier_audit(occurred_at_unix_ms, audit_id);\
+             CREATE TRIGGER IF NOT EXISTS reference_station_tier_audit_no_update \
+               BEFORE UPDATE ON reference_station_tier_audit \
+               BEGIN SELECT RAISE(ABORT, 'reference station tier audit is append-only'); END;\
+             CREATE TRIGGER IF NOT EXISTS reference_station_tier_audit_no_delete \
+               BEFORE DELETE ON reference_station_tier_audit \
+               BEGIN SELECT RAISE(ABORT, 'reference station tier audit is append-only'); END;",
+        )
+    }
+
     fn initialize_cg_schema(&self) -> Result<(), String> {
         self.execute(
             "CREATE TABLE IF NOT EXISTS cg_boards (\
@@ -8876,6 +9068,82 @@ impl StationStore {
         }
     }
 
+    fn upsert_reference_station_tier_selection(
+        &self,
+        selection: &ReferenceStationTierSelection,
+    ) -> Result<(), String> {
+        let statement = self.prepare(
+            "INSERT INTO reference_station_tier_selection(\
+               singleton,catalog_version,tier,revision,created_at_unix_ms,updated_at_unix_ms,updated_by) \
+             VALUES(1,?1,?2,?3,?4,?5,?6) \
+             ON CONFLICT(singleton) DO UPDATE SET \
+               catalog_version=excluded.catalog_version,tier=excluded.tier,revision=excluded.revision,\
+               updated_at_unix_ms=excluded.updated_at_unix_ms,updated_by=excluded.updated_by",
+        )?;
+        let tier = c_string(selection.tier.persisted_name(), "reference station tier")?;
+        let actor = c_string(&selection.updated_by, "reference station tier actor")?;
+        bind_i64(
+            self.database,
+            statement.raw,
+            1,
+            i64::from(selection.catalog_version),
+        )?;
+        bind_text(self.database, statement.raw, 2, &tier)?;
+        bind_i64(
+            self.database,
+            statement.raw,
+            3,
+            i64::try_from(selection.revision)
+                .map_err(|_| "reference station tier revision exceeds SQLite range")?,
+        )?;
+        bind_i64(
+            self.database,
+            statement.raw,
+            4,
+            selection.created_at_unix_ms,
+        )?;
+        bind_i64(
+            self.database,
+            statement.raw,
+            5,
+            selection.updated_at_unix_ms,
+        )?;
+        bind_text(self.database, statement.raw, 6, &actor)?;
+        expect_done(self.database, statement.raw)
+    }
+
+    fn append_reference_station_tier_audit(
+        &self,
+        audit: &ReferenceStationTierAuditEvent,
+    ) -> Result<(), String> {
+        let statement = self.prepare(
+            "INSERT INTO reference_station_tier_audit(\
+               revision,catalog_version,tier,actor,occurred_at_unix_ms) VALUES(?1,?2,?3,?4,?5)",
+        )?;
+        let tier = c_string(
+            audit.tier.persisted_name(),
+            "reference station tier audit tier",
+        )?;
+        let actor = c_string(&audit.actor, "reference station tier audit actor")?;
+        bind_i64(
+            self.database,
+            statement.raw,
+            1,
+            i64::try_from(audit.revision)
+                .map_err(|_| "reference station tier audit revision exceeds SQLite range")?,
+        )?;
+        bind_i64(
+            self.database,
+            statement.raw,
+            2,
+            i64::from(audit.catalog_version),
+        )?;
+        bind_text(self.database, statement.raw, 3, &tier)?;
+        bind_text(self.database, statement.raw, 4, &actor)?;
+        bind_i64(self.database, statement.raw, 5, audit.occurred_at_unix_ms)?;
+        expect_done(self.database, statement.raw)
+    }
+
     fn upsert_profile(&self, profile: &StationProfile) -> Result<(), String> {
         let sql = "INSERT INTO station_profile(singleton, station_id, display_name, timezone) VALUES(1, ?1, ?2, ?3) \
                    ON CONFLICT(singleton) DO UPDATE SET station_id=excluded.station_id, display_name=excluded.display_name, \
@@ -9115,6 +9383,48 @@ fn validate_artifact_relative_path(value: &str) -> Result<(), String> {
 
 fn checked_i64(value: u64, field: &str) -> Result<i64, String> {
     i64::try_from(value).map_err(|_| format!("{field} exceeds SQLite's integer range"))
+}
+
+fn read_reference_station_tier_selection_row(
+    statement: *mut SqliteStatement,
+) -> Result<ReferenceStationTierSelection, String> {
+    let catalog_version = u32::try_from(unsafe { sqlite3_column_int64(statement, 0) })
+        .map_err(|_| "database returned invalid reference station catalog version".to_string())?;
+    let selection = ReferenceStationTierSelection {
+        catalog_version,
+        tier: ReferenceStationTier::parse_persisted_name(&column_text(statement, 1)?)
+            .map_err(|error| format!("database returned {error}"))?,
+        revision: u64::try_from(unsafe { sqlite3_column_int64(statement, 2) })
+            .map_err(|_| "database returned invalid reference station tier revision".to_string())?,
+        created_at_unix_ms: unsafe { sqlite3_column_int64(statement, 3) },
+        updated_at_unix_ms: unsafe { sqlite3_column_int64(statement, 4) },
+        updated_by: column_text(statement, 5)?,
+    };
+    selection.validate().map_err(|error| {
+        format!("database returned invalid reference station tier selection: {error}")
+    })?;
+    Ok(selection)
+}
+
+fn read_reference_station_tier_audit_row(
+    statement: *mut SqliteStatement,
+) -> Result<ReferenceStationTierAuditEvent, String> {
+    let event = ReferenceStationTierAuditEvent {
+        revision: u64::try_from(unsafe { sqlite3_column_int64(statement, 0) }).map_err(|_| {
+            "database returned invalid reference station tier audit revision".to_string()
+        })?,
+        catalog_version: u32::try_from(unsafe { sqlite3_column_int64(statement, 1) }).map_err(
+            |_| "database returned invalid reference station audit catalog version".to_string(),
+        )?,
+        tier: ReferenceStationTier::parse_persisted_name(&column_text(statement, 2)?)
+            .map_err(|error| format!("database returned {error}"))?,
+        actor: column_text(statement, 3)?,
+        occurred_at_unix_ms: unsafe { sqlite3_column_int64(statement, 4) },
+    };
+    event.validate().map_err(|error| {
+        format!("database returned invalid reference station tier audit: {error}")
+    })?;
+    Ok(event)
 }
 
 fn read_media_asset_row(statement: *mut SqliteStatement) -> Result<MediaAsset, String> {
@@ -11001,6 +11311,79 @@ mod tests {
         let statement = store.prepare(sql).unwrap();
         assert_eq!(unsafe { sqlite3_step(statement.raw) }, SQLITE_ROW);
         unsafe { sqlite3_column_int64(statement.raw, 0) }
+    }
+
+    #[test]
+    fn reference_station_tier_audit_rejects_update_and_delete_tampering() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let database =
+            std::env::temp_dir().join(format!("townlight-reference-tier-tamper-{nonce}.db"));
+        let store = StationStore::open(&database).unwrap();
+        store
+            .write_reference_station_tier_selection(&ReferenceStationTierWrite {
+                expected_revision: None,
+                catalog_version: REFERENCE_STATION_CATALOG_VERSION,
+                tier: ReferenceStationTier::Tier0BatchStream,
+                actor: "setup-admin".into(),
+                occurred_at_unix_ms: 1,
+            })
+            .unwrap();
+        assert!(
+            store
+                .execute(
+                    "UPDATE reference_station_tier_audit SET actor='tampered' WHERE audit_id=1"
+                )
+                .is_err()
+        );
+        assert!(
+            store
+                .execute("DELETE FROM reference_station_tier_audit WHERE audit_id=1")
+                .is_err()
+        );
+        assert_eq!(store.list_reference_station_tier_audit().unwrap().len(), 1);
+        drop(store);
+        for candidate in [
+            database.clone(),
+            PathBuf::from(format!("{}-wal", database.display())),
+            PathBuf::from(format!("{}-shm", database.display())),
+        ] {
+            let _ = std::fs::remove_file(candidate);
+        }
+    }
+
+    #[test]
+    fn legacy_catalog_selection_remains_visible_but_is_not_reported_as_current() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let database =
+            std::env::temp_dir().join(format!("townlight-reference-tier-legacy-{nonce}.db"));
+        let store = StationStore::open(&database).unwrap();
+        store
+            .execute(
+                "INSERT INTO reference_station_tier_selection(\
+                   singleton,catalog_version,tier,revision,created_at_unix_ms,updated_at_unix_ms,updated_by) \
+                 VALUES(1,0,'tier_0_batch_stream',1,1,1,'legacy-import')",
+            )
+            .unwrap();
+        let selection = store
+            .read_reference_station_tier_selection()
+            .unwrap()
+            .unwrap();
+        assert_eq!(selection.catalog_version, 0);
+        assert!(!selection.uses_current_catalog());
+        drop(store);
+        for candidate in [
+            database.clone(),
+            PathBuf::from(format!("{}-wal", database.display())),
+            PathBuf::from(format!("{}-shm", database.display())),
+        ] {
+            let _ = std::fs::remove_file(candidate);
+        }
     }
 
     #[test]
