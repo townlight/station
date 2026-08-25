@@ -11,7 +11,11 @@ const MAX_QUERY_FILTERS: usize = 8;
 const MAX_QUERY_LIMIT: usize = 128;
 const MAX_WINDOW_MS: i64 = 60 * 86_400_000;
 const MAX_SLOTS: usize = 64;
-const MAX_EVIDENCE_RECEIPT_LIFETIME_MS: i64 = 300_000;
+/// A source projection is the deduplicated candidate union for every slot in
+/// one bounded materialization request. This is deliberately independent from
+/// a saved search's per-slot `query.limit`.
+pub const MAX_CANDIDATE_PROJECTION_ASSETS: usize = MAX_SLOTS * MAX_QUERY_LIMIT;
+pub const MAX_EVIDENCE_RECEIPT_LIFETIME_MS: i64 = 300_000;
 /// Version three binds each materialization to authenticated catalog and
 /// as-run projections. Version two intents did not contain that evidence and
 /// must not be silently reinterpreted as proved materializations.
@@ -527,7 +531,7 @@ pub fn resolve_asset(
     search.validate()?;
     rule.validate()?;
     if occurrence_starts_at_utc_ms < 0
-        || candidates.len() > MAX_QUERY_LIMIT
+        || candidates.len() > MAX_CANDIDATE_PROJECTION_ASSETS
         || prior_airings.len() > MAX_QUERY_LIMIT
     {
         return Err("asset resolution input is unbounded".into());
@@ -982,10 +986,8 @@ impl AuthenticatedMaterializationInputs {
         {
             return Err("candidate and prior-airings evidence must have distinct receipts".into());
         }
-        let candidate_projection_sha256 = projection_hash(
-            SourceEvidenceKind::CandidateProjection,
-            &canonical_candidate_projection_bytes(&self.candidate_projection.candidates)?,
-        );
+        let candidate_projection_sha256 =
+            canonical_candidate_projection_sha256(&self.candidate_projection.candidates)?;
         let prior_airings_sha256 = projection_hash(
             SourceEvidenceKind::PriorAirings,
             &canonical_prior_airings_bytes(&self.prior_airings.airings)?,
@@ -2186,6 +2188,18 @@ pub fn canonical_candidate_projection_bytes(
     Ok(bytes)
 }
 
+/// Digest the exact canonical candidate-projection bytes required by the S19
+/// evidence boundary. This is the value a future receipt issuer signs and a
+/// verifier receives; it is not a digest of a caller-selected subset.
+pub fn canonical_candidate_projection_sha256(
+    candidates: &[AssetCandidate],
+) -> Result<String, String> {
+    Ok(projection_hash(
+        SourceEvidenceKind::CandidateProjection,
+        &canonical_candidate_projection_bytes(candidates)?,
+    ))
+}
+
 /// Canonical, ordered as-run bytes. An empty sequence is not a no-airings
 /// claim unless a verifier accepts the receipt for its exact digest.
 pub fn canonical_prior_airings_bytes(airings: &[PriorAiring]) -> Result<Vec<u8>, String> {
@@ -2224,7 +2238,7 @@ pub fn canonical_unverified_input_binding_bytes(
 }
 
 fn validate_candidate_projection(candidates: &[AssetCandidate]) -> Result<(), String> {
-    if candidates.len() > MAX_QUERY_LIMIT {
+    if candidates.len() > MAX_CANDIDATE_PROJECTION_ASSETS {
         return Err("candidate projection is unbounded".into());
     }
     for candidate in candidates {

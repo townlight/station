@@ -2,12 +2,13 @@ use station_schedule_automation::{
     ArbitrationOutcome, ArbitrationPrecedence, AssetCandidate, AssetPickStrategy, AssetPredicate,
     AssetResolution, AuthenticatedCandidateProjection, AuthenticatedMaterializationInputs,
     AuthenticatedPriorAirings, BatchMaterializationRequest, CustomMetadataPredicate, DaypartBlock,
-    DstApplication, LocalDate, MaterializationAuthorities, MaterializationOutcome,
-    MaterializationPlan, MaterializationWindow, MetadataValue, PriorAiring, RecurrenceTimeZone,
-    RecurringRule, RuleSlotCandidate, SavedSearch, SavedSearchOrder, SavedSearchQuery,
-    SlotMaterializationOutcome, SourceEvidenceKind, SourceEvidenceReceipt, SourceEvidenceVerifier,
-    arbitrate_rule_slots, canonical_candidate_projection_bytes, canonical_intent_bytes,
-    canonical_source_bytes, derive_arbitrated_materialization_batch, derive_materialization_intent,
+    DstApplication, LocalDate, MAX_CANDIDATE_PROJECTION_ASSETS, MaterializationAuthorities,
+    MaterializationOutcome, MaterializationPlan, MaterializationWindow, MetadataValue, PriorAiring,
+    RecurrenceTimeZone, RecurringRule, RuleSlotCandidate, SavedSearch, SavedSearchOrder,
+    SavedSearchQuery, SlotMaterializationOutcome, SourceEvidenceKind, SourceEvidenceReceipt,
+    SourceEvidenceVerifier, arbitrate_rule_slots, canonical_candidate_projection_bytes,
+    canonical_candidate_projection_sha256, canonical_intent_bytes, canonical_source_bytes,
+    derive_arbitrated_materialization_batch, derive_materialization_intent,
     materialization_evidence_scope_sha256, materialization_prior_airings_coverage_window,
     resolve_asset,
 };
@@ -407,6 +408,28 @@ fn candidate_evidence_binds_metadata_authority_and_preserves_s22_value_bounds() 
         .indexed_custom_metadata
         .insert("long_notes".into(), MetadataValue::Text("x".repeat(2_049)));
     assert!(oversized.validate().is_err());
+}
+
+#[test]
+fn candidate_projection_capacity_is_the_bounded_multi_slot_union() {
+    let candidates = (0..MAX_CANDIDATE_PROJECTION_ASSETS)
+        .map(|index| {
+            let mut value = candidate('a', "Alpha council", 1_700_000_000_000);
+            value.asset_sha256 = format!("{index:064x}");
+            value
+        })
+        .collect::<Vec<_>>();
+    assert!(canonical_candidate_projection_bytes(&candidates).is_ok());
+    assert_eq!(
+        canonical_candidate_projection_sha256(&candidates).unwrap(),
+        canonical_candidate_projection_sha256(&candidates).unwrap()
+    );
+
+    let mut over_capacity = candidates;
+    let mut overflow = candidate('a', "Alpha council", 1_700_000_000_000);
+    overflow.asset_sha256 = format!("{MAX_CANDIDATE_PROJECTION_ASSETS:064x}");
+    over_capacity.push(overflow);
+    assert!(canonical_candidate_projection_bytes(&over_capacity).is_err());
 }
 
 #[test]

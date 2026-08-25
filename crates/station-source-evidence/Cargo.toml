@@ -1,0 +1,12 @@
+[package]
+name = "station-source-evidence"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+getrandom.workspace = true
+hmac.workspace = true
+sha2.workspace = true
+station-schedule-automation.workspace = true
+zeroize.workspace = true

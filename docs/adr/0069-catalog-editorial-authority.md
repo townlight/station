@@ -44,6 +44,17 @@ SHA-256 keyset pages, and bounded history reads return newest revisions first.
 Storage also rejects an event time that precedes the asset's latest historical event; the pure record stores
 first-publication time, not a complete transition journal.
 
+The authenticated station API exposes this authority through bounded catalog
+reads (`GET /api/v1/catalog/assets?limit=...`, exclusive SHA-256 cursor pages,
+current reads, and newest-first `/history?limit=...` reads) and server-attributed
+CAS writes. `PUT /api/v1/catalog/assets/{asset_sha256}` creates or edits only
+the editorial title and meeting-body fields; explicit `POST .../publish` and
+`POST .../withdraw` routes accept only the observed revision. Enabled Setup
+Admins and Meeting Operators may write; enabled Support Admins may inspect;
+other roles are denied. The operator console mirrors those boundaries and does
+not submit identity, lifecycle, actor, revision, publication time, or event
+time authority fields.
+
 ## Non-claims
 
 This crate does not provide or infer:
@@ -52,14 +63,15 @@ This crate does not provide or infer:
   capability;
 - S22 metadata schema identity/revision, asset-record revision, projected
   facets, or their provenance digest;
-- the trusted S19 candidate adapter that joins catalog, media-lifecycle, and
-  S22 authority into an authenticated candidate projection;
+- issuance of an authenticated S19 receipt for the storage-owned transactional
+  catalog/media/S22 candidate snapshot;
 - as-run history, prior-airing evidence, receipt issuance or verification;
 - saved-search resolution, schedule materialization, or schedule writes;
 - an API, UI, or operator authentication; or
 - installer, installed-machine, live-station, or field evidence.
 
 Catalog publication state must not be inferred from a filename, directory,
-ingest completion time, or an untrusted client payload. A later adapter may
-consume this authority, but it must bind the exact catalog revision and all
-other source revisions into the candidate authority required by S19/ADR 0066.
+ingest completion time, or an untrusted client payload. The storage snapshot
+adapter consumes this authority and binds the exact catalog revision plus media
+and S22 source revisions; a later stationd-owned adapter must authenticate that
+snapshot before S19 materialization may consume it.

@@ -67,13 +67,15 @@ evidence. ADR 0068 adds durable current/history storage for saved searches, bloc
 and rules. Authenticated API routes expose bounded current/list/history reads and
 server-attributed PUT create/update for those authorities, but not delete,
 saved-search preview, rule simulation, or materialization. ADR 0069 adds fixed
-catalog editorial authority and persistence, but no catalog/as-run adapter or
-materialization persistence. No production
-catalog/as-run receipt issuer or verifier exists yet. This contract therefore does
+catalog editorial authority and persistence. The storage layer now constructs a
+bounded transactionally consistent catalog/media/S22 candidate snapshot and its
+canonical digest. ADR 0070 adds the typed boot-scoped HMAC issuer/verifier
+mechanism, but stationd singleton ownership and the adapter that issues a receipt
+for that snapshot remain unwired; no trusted as-run adapter exists. This contract therefore does
 not establish that a saved search finds media, that a projection came from a real
 catalog or as-run journal, that an intent was stored, that a schedule item was
 created, that a worker received a dispatch, or that any item aired. Future work must
-connect trusted catalog and as-run adapters, persist later
+connect the candidate snapshot to the boot authority, add a trusted as-run adapter, persist later
 materialization authority through the single SQLite writer, materialize/commit
 through schedule authority, add filler-alert behavior and the S4 writer, and acquire
 installed-machine and field evidence.

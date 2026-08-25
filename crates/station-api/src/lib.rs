@@ -32,6 +32,7 @@ use station_captions::{
     CaptionTrackWriteError, MAX_CAPTION_PROOF_CAPTURE_BYTES, MAX_CAPTION_PROOF_CAPTURE_DURATION_MS,
     expected_caption_evidence_for_window,
 };
+use station_catalog::{CatalogAssetRecord, CatalogEditorialState};
 use station_cg::{
     CgAuditEvent, CgBoard, CgBulletin, CgBulletinState, CgFeedItem, CgFeedItemApproval,
     CgFeedSource, CgImageAsset, CgImageReadiness, CgZoneConfig, built_in_templates,
@@ -75,15 +76,15 @@ use station_schedule_automation::{
     SavedSearchQuery,
 };
 use station_storage::{
-    AlertChannelSecret, AssetMetadataWriteError, CaptionPolicyWriteError, CgSnapshotReadError,
-    CgWriteError, ChannelCaptionMode, ChannelCaptionPolicy, ChannelCaptionPolicyAuditEvent,
-    ChannelFallbackSlate, ChannelFallbackSlateAuditEvent, ChannelWriteError,
-    CommissioningSupportBundleReceipt, CommitWriteError, CustomMetadataSchemaWriteError,
-    ExternalReceiverAcceptanceReceipt, FallbackSlateWriteError, HeadendProfileWriteError,
-    OutputLoudnessProofJob, OutputLoudnessProofJobRecord, OutputLoudnessProofJobState,
-    ProfileWriteError, ReceiverAcceptanceOutcome, ReceiverEvidenceMethod,
-    ReferenceStationTierWrite, ReferenceStationTierWriteError, ScheduleAutomationWriteError,
-    ScheduleItemWrite, StationStore, StoredSinkLoudnessProof,
+    AlertChannelSecret, AssetMetadataWriteError, CaptionPolicyWriteError, CatalogAssetWriteError,
+    CgSnapshotReadError, CgWriteError, ChannelCaptionMode, ChannelCaptionPolicy,
+    ChannelCaptionPolicyAuditEvent, ChannelFallbackSlate, ChannelFallbackSlateAuditEvent,
+    ChannelWriteError, CommissioningSupportBundleReceipt, CommitWriteError,
+    CustomMetadataSchemaWriteError, ExternalReceiverAcceptanceReceipt, FallbackSlateWriteError,
+    HeadendProfileWriteError, OutputLoudnessProofJob, OutputLoudnessProofJobRecord,
+    OutputLoudnessProofJobState, ProfileWriteError, ReceiverAcceptanceOutcome,
+    ReceiverEvidenceMethod, ReferenceStationTierWrite, ReferenceStationTierWriteError,
+    ScheduleAutomationWriteError, ScheduleItemWrite, StationStore, StoredSinkLoudnessProof,
 };
 use station_update::UpdateCheckTrigger;
 use station_update_coordinator::CoordinatorError;
@@ -775,6 +776,38 @@ struct RecurringRuleHistoryResponse {
     rule: RecurringRule,
     changed_by: String,
     occurred_at_unix_ms: i64,
+}
+
+/// The browser proposes only mutable editorial text and CAS intent. Asset
+/// identity, revision, state, first-publication time, actor, and event time are
+/// derived by the server.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PutCatalogAssetRequest {
+    title: String,
+    meeting_body: Option<String>,
+    expected_revision: Option<u64>,
+}
+
+/// Publish and withdraw are explicit state transitions. The browser supplies
+/// only the exact revision it observed.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CatalogAssetTransitionRequest {
+    expected_revision: u64,
+}
+
+#[derive(Debug, Serialize)]
+struct CatalogAssetHistoryResponse {
+    record: CatalogAssetRecord,
+    changed_by: String,
+    occurred_at_utc_ms: i64,
+}
+
+#[derive(Debug, Serialize)]
+struct CatalogAssetPageResponse {
+    records: Vec<CatalogAssetRecord>,
+    next_after_asset_sha256: Option<String>,
 }
 
 /// Trusted adapter-to-server observation. Candidate identity and all timestamps are
@@ -1511,6 +1544,34 @@ impl Api {
                 405,
                 "method_not_allowed",
                 "Scheduling automation supports only its documented GET and PUT operations.",
+            ),
+            ("GET", path) if catalog_asset_history_path(path).is_some() => {
+                self.list_catalog_asset_history(path, actor)
+            }
+            ("POST", path) if catalog_asset_action_path(path, "publish").is_some() => {
+                self.transition_catalog_asset(path, body, actor, CatalogEditorialState::Published)
+            }
+            ("POST", path) if catalog_asset_action_path(path, "withdraw").is_some() => {
+                self.transition_catalog_asset(path, body, actor, CatalogEditorialState::Withdrawn)
+            }
+            ("GET", path) if catalog_asset_path(path).is_some() => {
+                self.read_catalog_asset(path, actor)
+            }
+            ("PUT", path) if catalog_asset_path(path).is_some() => {
+                self.put_catalog_asset(path, body, actor)
+            }
+            ("GET", path) if catalog_asset_list_path(path).is_some() => {
+                self.list_catalog_assets(path, actor)
+            }
+            ("GET" | "PUT", path) if path.starts_with("/api/v1/catalog/") => error_response(
+                400,
+                "invalid_path",
+                "The catalog path or bounded query is invalid.",
+            ),
+            (_, path) if path.starts_with("/api/v1/catalog/") => error_response(
+                405,
+                "method_not_allowed",
+                "The catalog supports only its documented GET, PUT, and POST operations.",
             ),
             ("GET", "/api/v1/custom-metadata/schemas") => self.list_custom_metadata_schemas(actor),
             ("GET", path) if custom_metadata_schema_history_path(path).is_some() => {
@@ -2692,6 +2753,232 @@ impl Api {
             .list_channels()?
             .iter()
             .any(|channel| channel.channel_id == channel_id))
+    }
+
+    fn list_catalog_assets(&self, path: &str, actor: Option<&OperatorAccount>) -> ApiResponse {
+        if !is_catalog_reader(actor) {
+            return catalog_reader_required();
+        }
+        let Some((after_asset_sha256, limit)) = catalog_asset_list_path(path) else {
+            return catalog_invalid_path();
+        };
+        match self
+            .storage
+            .list_catalog_asset_page(after_asset_sha256, limit)
+        {
+            Ok(page) => json_response(
+                200,
+                serde_json::to_vec(&CatalogAssetPageResponse {
+                    records: page.records,
+                    next_after_asset_sha256: page.next_after_asset_sha256,
+                })
+                .expect("serializing a catalog page cannot fail"),
+            ),
+            Err(message) => error_response(500, "storage_error", &message),
+        }
+    }
+
+    fn read_catalog_asset(&self, path: &str, actor: Option<&OperatorAccount>) -> ApiResponse {
+        if !is_catalog_reader(actor) {
+            return catalog_reader_required();
+        }
+        let Some(asset_sha256) = catalog_asset_path(path) else {
+            return catalog_invalid_path();
+        };
+        match self.storage.read_catalog_asset(asset_sha256) {
+            Ok(Some(record)) => json_response(
+                200,
+                serde_json::to_vec(&record).expect("serializing a catalog asset cannot fail"),
+            ),
+            Ok(None) => catalog_asset_not_found(),
+            Err(message) => error_response(500, "storage_error", &message),
+        }
+    }
+
+    fn list_catalog_asset_history(
+        &self,
+        path: &str,
+        actor: Option<&OperatorAccount>,
+    ) -> ApiResponse {
+        if !is_catalog_reader(actor) {
+            return catalog_reader_required();
+        }
+        let Some((asset_sha256, limit)) = catalog_asset_history_path(path) else {
+            return catalog_invalid_path();
+        };
+        match self.storage.read_catalog_asset(asset_sha256) {
+            Ok(Some(_)) => {}
+            Ok(None) => return catalog_asset_not_found(),
+            Err(message) => return error_response(500, "storage_error", &message),
+        }
+        match self.storage.list_catalog_asset_history(asset_sha256, limit) {
+            Ok(history) => {
+                let response = history
+                    .into_iter()
+                    .map(|entry| CatalogAssetHistoryResponse {
+                        record: entry.record,
+                        changed_by: entry.changed_by,
+                        occurred_at_utc_ms: entry.occurred_at_utc_ms,
+                    })
+                    .collect::<Vec<_>>();
+                json_response(
+                    200,
+                    serde_json::to_vec(&response).expect("serializing catalog history cannot fail"),
+                )
+            }
+            Err(message) => error_response(500, "storage_error", &message),
+        }
+    }
+
+    fn put_catalog_asset(
+        &self,
+        path: &str,
+        body: Option<&[u8]>,
+        actor: Option<&OperatorAccount>,
+    ) -> ApiResponse {
+        let Some(asset_sha256) = catalog_asset_path(path) else {
+            return catalog_invalid_path();
+        };
+        let Some(actor) = catalog_writer(actor) else {
+            return catalog_writer_required();
+        };
+        let Some(request) = parse_body::<PutCatalogAssetRequest>(body) else {
+            return error_response(
+                400,
+                "invalid_json",
+                "A complete catalog asset body is required.",
+            );
+        };
+        match self.storage.read_media_asset(asset_sha256) {
+            Ok(Some(_)) => {}
+            Ok(None) => return catalog_media_asset_not_found(),
+            Err(message) => return error_response(500, "storage_error", &message),
+        }
+        let current = match self.storage.read_catalog_asset(asset_sha256) {
+            Ok(current) => current,
+            Err(message) => return error_response(500, "storage_error", &message),
+        };
+        match (current.as_ref(), request.expected_revision) {
+            (None, None) => {}
+            (Some(record), Some(expected_revision)) if expected_revision == record.revision => {}
+            _ => {
+                return catalog_revision_conflict(current.as_ref().map(|record| record.revision));
+            }
+        }
+        let revision = match catalog_next_revision(request.expected_revision) {
+            Ok(revision) => revision,
+            Err(message) => return error_response(422, "validation_failed", &message),
+        };
+        let (editorial_state, published_at_utc_ms) = current
+            .as_ref()
+            .map_or((CatalogEditorialState::Draft, None), |record| {
+                (record.editorial_state, record.published_at_utc_ms)
+            });
+        let record = CatalogAssetRecord {
+            asset_sha256: asset_sha256.into(),
+            title: request.title,
+            meeting_body: request.meeting_body,
+            editorial_state,
+            published_at_utc_ms,
+            revision,
+        };
+        if let Err(error) = record.validate() {
+            return error_response(
+                422,
+                "validation_failed",
+                &format!("The catalog asset is invalid: {error:?}."),
+            );
+        }
+        let occurred_at_utc_ms = match system_time_millis() {
+            Ok(now) => now,
+            Err(message) => return error_response(500, "clock_error", &message),
+        };
+        match self.storage.write_catalog_asset(
+            asset_sha256,
+            &record,
+            request.expected_revision,
+            actor.account_id().as_str(),
+            occurred_at_utc_ms,
+        ) {
+            Ok(()) => json_response(
+                if current.is_none() { 201 } else { 200 },
+                serde_json::to_vec(&record).expect("serializing a catalog asset cannot fail"),
+            ),
+            Err(error) => catalog_write_error_response(error),
+        }
+    }
+
+    fn transition_catalog_asset(
+        &self,
+        path: &str,
+        body: Option<&[u8]>,
+        actor: Option<&OperatorAccount>,
+        requested_state: CatalogEditorialState,
+    ) -> ApiResponse {
+        let action = match requested_state {
+            CatalogEditorialState::Published => "publish",
+            CatalogEditorialState::Withdrawn => "withdraw",
+            CatalogEditorialState::Draft => return catalog_invalid_path(),
+        };
+        let Some(asset_sha256) = catalog_asset_action_path(path, action) else {
+            return catalog_invalid_path();
+        };
+        let Some(actor) = catalog_writer(actor) else {
+            return catalog_writer_required();
+        };
+        let Some(request) = parse_body::<CatalogAssetTransitionRequest>(body) else {
+            return error_response(
+                400,
+                "invalid_json",
+                "A catalog transition body with expected_revision is required.",
+            );
+        };
+        match self.storage.read_media_asset(asset_sha256) {
+            Ok(Some(_)) => {}
+            Ok(None) => return catalog_media_asset_not_found(),
+            Err(message) => return error_response(500, "storage_error", &message),
+        }
+        let current = match self.storage.read_catalog_asset(asset_sha256) {
+            Ok(Some(current)) => current,
+            Ok(None) => return catalog_asset_not_found(),
+            Err(message) => return error_response(500, "storage_error", &message),
+        };
+        if request.expected_revision != current.revision {
+            return catalog_revision_conflict(Some(current.revision));
+        }
+        match (current.editorial_state, requested_state) {
+            (CatalogEditorialState::Draft, CatalogEditorialState::Published)
+            | (CatalogEditorialState::Withdrawn, CatalogEditorialState::Published)
+            | (CatalogEditorialState::Published, CatalogEditorialState::Withdrawn) => {}
+            _ => return catalog_state_conflict(current.editorial_state, requested_state),
+        }
+        let revision = match catalog_next_revision(Some(request.expected_revision)) {
+            Ok(revision) => revision,
+            Err(message) => return error_response(422, "validation_failed", &message),
+        };
+        let occurred_at_utc_ms = match system_time_millis() {
+            Ok(now) => now,
+            Err(message) => return error_response(500, "clock_error", &message),
+        };
+        let mut record = current;
+        record.editorial_state = requested_state;
+        record.revision = revision;
+        if record.published_at_utc_ms.is_none() {
+            record.published_at_utc_ms = Some(occurred_at_utc_ms);
+        }
+        match self.storage.write_catalog_asset(
+            asset_sha256,
+            &record,
+            Some(request.expected_revision),
+            actor.account_id().as_str(),
+            occurred_at_utc_ms,
+        ) {
+            Ok(()) => json_response(
+                200,
+                serde_json::to_vec(&record).expect("serializing a catalog asset cannot fail"),
+            ),
+            Err(error) => catalog_write_error_response(error),
+        }
     }
 
     fn list_custom_metadata_schemas(&self, actor: Option<&OperatorAccount>) -> ApiResponse {
@@ -8242,6 +8529,118 @@ fn scheduling_write_error_response(
     }
 }
 
+fn is_catalog_reader(actor: Option<&OperatorAccount>) -> bool {
+    actor.is_some_and(|account| {
+        account.enabled()
+            && (account
+                .roles()
+                .contains(&station_auth::OperatorRole::SetupAdmin)
+                || account
+                    .roles()
+                    .contains(&station_auth::OperatorRole::MeetingOperator)
+                || account
+                    .roles()
+                    .contains(&station_auth::OperatorRole::SupportAdmin))
+    })
+}
+
+fn catalog_writer(actor: Option<&OperatorAccount>) -> Option<&OperatorAccount> {
+    actor.filter(|account| {
+        account.enabled()
+            && (account
+                .roles()
+                .contains(&station_auth::OperatorRole::SetupAdmin)
+                || account
+                    .roles()
+                    .contains(&station_auth::OperatorRole::MeetingOperator))
+    })
+}
+
+fn catalog_reader_required() -> ApiResponse {
+    error_response(
+        403,
+        "catalog_operator_required",
+        "Reading the catalog requires an enabled Setup Admin, Meeting Operator, or Support Admin account.",
+    )
+}
+
+fn catalog_writer_required() -> ApiResponse {
+    error_response(
+        403,
+        "catalog_writer_required",
+        "Changing the catalog requires an enabled Setup Admin or Meeting Operator account.",
+    )
+}
+
+fn catalog_invalid_path() -> ApiResponse {
+    error_response(
+        400,
+        "invalid_path",
+        "The catalog path or bounded query is invalid.",
+    )
+}
+
+fn catalog_media_asset_not_found() -> ApiResponse {
+    error_response(404, "asset_not_found", "The media asset does not exist.")
+}
+
+fn catalog_asset_not_found() -> ApiResponse {
+    error_response(
+        404,
+        "catalog_asset_not_found",
+        "The catalog asset does not exist.",
+    )
+}
+
+fn catalog_next_revision(expected_revision: Option<u64>) -> Result<u64, String> {
+    expected_revision.map_or(Ok(1), |revision| {
+        revision
+            .checked_add(1)
+            .ok_or_else(|| "The expected catalog revision is invalid.".to_string())
+    })
+}
+
+fn catalog_revision_conflict(current_revision: Option<u64>) -> ApiResponse {
+    error_response(
+        409,
+        "revision_conflict",
+        &format!("The catalog authority changed; current revision is {current_revision:?}."),
+    )
+}
+
+fn catalog_state_conflict(
+    current: CatalogEditorialState,
+    requested: CatalogEditorialState,
+) -> ApiResponse {
+    error_response(
+        409,
+        "catalog_state_conflict",
+        &format!("The catalog transition from {current:?} to {requested:?} is not available."),
+    )
+}
+
+fn catalog_write_error_response(error: CatalogAssetWriteError) -> ApiResponse {
+    match error {
+        CatalogAssetWriteError::Invalid(message) => {
+            error_response(422, "validation_failed", &message)
+        }
+        CatalogAssetWriteError::Conflict { current_revision } => {
+            catalog_revision_conflict(current_revision)
+        }
+        CatalogAssetWriteError::Rebound => error_response(
+            409,
+            "catalog_identity_rebound",
+            "An existing catalog asset identity cannot be rebound.",
+        ),
+        CatalogAssetWriteError::Capacity => error_response(
+            422,
+            "catalog_capacity_exceeded",
+            "The catalog has reached its bounded asset capacity.",
+        ),
+        CatalogAssetWriteError::Storage(message) => error_response(500, "storage_error", &message),
+    }
+}
+
 fn is_metadata_reader(actor: Option<&OperatorAccount>) -> bool {
     actor.is_some_and(|account| {
         account.enabled()
@@ -8481,6 +8880,48 @@ fn scheduling_channel_list_path<'a>(path: &'a str, prefix: &str) -> Option<(&'a 
     }
     let limit = limit.parse::<usize>().ok()?;
     (1..=128).contains(&limit).then_some((channel_id, limit))
+}
+
+fn catalog_asset_path(path: &str) -> Option<&str> {
+    path_identity(path, "/api/v1/catalog/assets/", "")
+        .filter(|identity| is_lowercase_sha256(identity))
+}
+
+fn catalog_asset_action_path<'a>(path: &'a str, action: &str) -> Option<&'a str> {
+    path_identity(path, "/api/v1/catalog/assets/", &format!("/{action}"))
+        .filter(|identity| is_lowercase_sha256(identity))
+}
+
+fn catalog_asset_history_path(path: &str) -> Option<(&str, usize)> {
+    let remainder = path.strip_prefix("/api/v1/catalog/assets/")?;
+    let (asset_sha256, query) = remainder.split_once("/history?")?;
+    if !is_lowercase_sha256(asset_sha256) || query.contains('&') {
+        return None;
+    }
+    let limit = query.strip_prefix("limit=")?.parse::<usize>().ok()?;
+    (1..=1_000)
+        .contains(&limit)
+        .then_some((asset_sha256, limit))
+}
+
+fn catalog_asset_list_path(path: &str) -> Option<(Option<&str>, usize)> {
+    let query = path.strip_prefix("/api/v1/catalog/assets?")?;
+    if let Some(limit) = query.strip_prefix("limit=") {
+        if limit.contains('&') {
+            return None;
+        }
+        let limit = limit.parse::<usize>().ok()?;
+        return (1..=1_000).contains(&limit).then_some((None, limit));
+    }
+    let (cursor, limit) = query.split_once("&limit=")?;
+    let cursor = cursor.strip_prefix("after_asset_sha256=")?;
+    if !is_lowercase_sha256(cursor) || limit.contains('&') {
+        return None;
+    }
+    let limit = limit.parse::<usize>().ok()?;
+    (1..=1_000)
+        .contains(&limit)
+        .then_some((Some(cursor), limit))
 }
 
 fn custom_metadata_schema_path(path: &str) -> Option<&str> {
@@ -10733,6 +11174,17 @@ mod tests {
 
     fn test_actor(role: station_auth::OperatorRole) -> OperatorAccount {
         test_actor_with_account("dc3c0d56-44c8-4c4f-bd32-b501c56d34f6", "setup.admin", role)
+    }
+
+    fn put_catalog_test_media(api: &Api, asset_sha256: &str, readiness: AssetReadiness) {
+        api.storage
+            .put_media_asset(&MediaAsset {
+                asset_id: asset_sha256.into(),
+                media_path: format!(r"C:\TownLight\media\{asset_sha256}.ts"),
+                duration_ms: 60_000,
+                readiness,
+            })
+            .unwrap();
     }
 
     #[test]
@@ -14528,6 +14980,503 @@ mod tests {
         drop(api);
         let _ = std::fs::remove_file(database);
         let _ = std::fs::remove_dir_all(application);
+    }
+
+    #[test]
+    fn catalog_api_derives_authority_and_preserves_editorial_lifecycle() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let database = std::env::temp_dir().join(format!("townlight-catalog-api-{nonce}.db"));
+        let api = Api::open(&database).unwrap();
+        let operator = test_actor_with_account(
+            "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+            "catalog.operator",
+            station_auth::OperatorRole::MeetingOperator,
+        );
+        let admin = test_actor_with_account(
+            "bbbbbbbb-cccc-4ddd-8eee-ffffffffffff",
+            "catalog.admin",
+            station_auth::OperatorRole::SetupAdmin,
+        );
+        let support = test_actor_with_account(
+            "cccccccc-dddd-4eee-8fff-000000000000",
+            "catalog.support",
+            station_auth::OperatorRole::SupportAdmin,
+        );
+        let first_asset = "a".repeat(64);
+        let second_asset = "b".repeat(64);
+        put_catalog_test_media(&api, &first_asset, AssetReadiness::Processing);
+        put_catalog_test_media(&api, &second_asset, AssetReadiness::Ready);
+        let first_path = format!("/api/v1/catalog/assets/{first_asset}");
+        let second_path = format!("/api/v1/catalog/assets/{second_asset}");
+
+        let create = serde_json::json!({
+            "title": "City Council",
+            "meeting_body": "City Council",
+            "expected_revision": null
+        });
+        let created = api.handle_authenticated(
+            "PUT",
+            &first_path,
+            Some(&serde_json::to_vec(&create).unwrap()),
+            &operator,
+        );
+        assert_eq!(
+            created.status,
+            201,
+            "{}",
+            String::from_utf8_lossy(&created.body)
+        );
+        let created: CatalogAssetRecord = serde_json::from_slice(&created.body).unwrap();
+        assert_eq!(created.asset_sha256, first_asset);
+        assert_eq!(created.revision, 1);
+        assert_eq!(created.editorial_state, CatalogEditorialState::Draft);
+        assert_eq!(created.published_at_utc_ms, None);
+
+        let before_publish = system_time_millis().unwrap();
+        let published = api.handle_authenticated(
+            "POST",
+            &format!("{first_path}/publish"),
+            Some(&serde_json::to_vec(&serde_json::json!({"expected_revision": 1})).unwrap()),
+            &admin,
+        );
+        assert_eq!(published.status, 200);
+        let published: CatalogAssetRecord = serde_json::from_slice(&published.body).unwrap();
+        let first_publication = published.published_at_utc_ms.unwrap();
+        assert!(first_publication >= before_publish);
+        assert_eq!(published.revision, 2);
+        assert_eq!(published.editorial_state, CatalogEditorialState::Published);
+
+        let edited = api.handle_authenticated(
+            "PUT",
+            &first_path,
+            Some(
+                &serde_json::to_vec(&serde_json::json!({
+                    "title": "City Council regular meeting",
+                    "meeting_body": "City Council",
+                    "expected_revision": 2
+                }))
+                .unwrap(),
+            ),
+            &operator,
+        );
+        assert_eq!(edited.status, 200);
+        let edited: CatalogAssetRecord = serde_json::from_slice(&edited.body).unwrap();
+        assert_eq!(edited.revision, 3);
+        assert_eq!(edited.editorial_state, CatalogEditorialState::Published);
+        assert_eq!(edited.published_at_utc_ms, Some(first_publication));
+
+        let withdrawn = api.handle_authenticated(
+            "POST",
+            &format!("{first_path}/withdraw"),
+            Some(&serde_json::to_vec(&serde_json::json!({"expected_revision": 3})).unwrap()),
+            &operator,
+        );
+        assert_eq!(withdrawn.status, 200);
+        let withdrawn: CatalogAssetRecord = serde_json::from_slice(&withdrawn.body).unwrap();
+        assert_eq!(withdrawn.editorial_state, CatalogEditorialState::Withdrawn);
+        assert_eq!(withdrawn.published_at_utc_ms, Some(first_publication));
+
+        let republished = api.handle_authenticated(
+            "POST",
+            &format!("{first_path}/publish"),
+            Some(&serde_json::to_vec(&serde_json::json!({"expected_revision": 4})).unwrap()),
+            &admin,
+        );
+        assert_eq!(republished.status, 200);
+        let republished: CatalogAssetRecord = serde_json::from_slice(&republished.body).unwrap();
+        assert_eq!(republished.revision, 5);
+        assert_eq!(
+            republished.editorial_state,
+            CatalogEditorialState::Published
+        );
+        assert_eq!(republished.published_at_utc_ms, Some(first_publication));
+
+        let history = api.handle_authenticated(
+            "GET",
+            &format!("{first_path}/history?limit=10"),
+            None,
+            &support,
+        );
+        assert_eq!(history.status, 200);
+        let history: serde_json::Value = serde_json::from_slice(&history.body).unwrap();
+        assert_eq!(history.as_array().unwrap().len(), 5);
+        assert_eq!(history[0]["record"]["revision"], 5);
+        let publish_history = history
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|entry| entry["record"]["revision"] == 2)
+            .unwrap();
+        assert_eq!(
+            publish_history["occurred_at_utc_ms"],
+            publish_history["record"]["published_at_utc_ms"]
+        );
+        assert_eq!(publish_history["changed_by"], admin.account_id().as_str());
+
+        assert_eq!(
+            api.handle_authenticated(
+                "PUT",
+                &second_path,
+                Some(
+                    &serde_json::to_vec(&serde_json::json!({
+                        "title": "School Board",
+                        "meeting_body": "School Board",
+                        "expected_revision": null
+                    }))
+                    .unwrap()
+                ),
+                &admin,
+            )
+            .status,
+            201
+        );
+        let first_page =
+            api.handle_authenticated("GET", "/api/v1/catalog/assets?limit=1", None, &support);
+        assert_eq!(first_page.status, 200);
+        let first_page: serde_json::Value = serde_json::from_slice(&first_page.body).unwrap();
+        assert_eq!(first_page["records"][0]["asset_sha256"], first_asset);
+        assert_eq!(first_page["next_after_asset_sha256"], first_asset);
+        let next_page = api.handle_authenticated(
+            "GET",
+            &format!("/api/v1/catalog/assets?after_asset_sha256={first_asset}&limit=1"),
+            None,
+            &support,
+        );
+        assert_eq!(next_page.status, 200);
+        let next_page: serde_json::Value = serde_json::from_slice(&next_page.body).unwrap();
+        assert_eq!(next_page["records"][0]["asset_sha256"], second_asset);
+        assert!(next_page["next_after_asset_sha256"].is_null());
+
+        assert_eq!(
+            api.handle_authenticated("GET", &first_path, None, &support)
+                .status,
+            200
+        );
+        assert_eq!(
+            api.handle_authenticated(
+                "PUT",
+                &first_path,
+                Some(&serde_json::to_vec(&create).unwrap()),
+                &support,
+            )
+            .status,
+            403
+        );
+        assert_eq!(api.handle_in_process("GET", &first_path, None).status, 403);
+
+        drop(api);
+        let _ = std::fs::remove_file(database);
+    }
+
+    #[test]
+    fn catalog_api_rejects_forged_authority_stale_writes_and_invalid_routes() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let database =
+            std::env::temp_dir().join(format!("townlight-catalog-api-errors-{nonce}.db"));
+        let api = Api::open(&database).unwrap();
+        let operator = test_actor(station_auth::OperatorRole::MeetingOperator);
+        let support = test_actor(station_auth::OperatorRole::SupportAdmin);
+        let records = test_actor(station_auth::OperatorRole::RecordsClerk);
+        let asset = "c".repeat(64);
+        let missing_asset = "d".repeat(64);
+        let path = format!("/api/v1/catalog/assets/{asset}");
+        let base = serde_json::json!({
+            "title": "Planning Commission",
+            "meeting_body": "Planning Commission",
+            "expected_revision": null
+        });
+
+        assert_eq!(
+            api.handle_authenticated(
+                "PUT",
+                &format!("/api/v1/catalog/assets/{missing_asset}"),
+                Some(&serde_json::to_vec(&base).unwrap()),
+                &operator,
+            )
+            .status,
+            404
+        );
+        put_catalog_test_media(&api, &asset, AssetReadiness::Missing);
+        assert_eq!(
+            api.handle_authenticated("GET", &path, None, &records)
+                .status,
+            403
+        );
+
+        for forged_field in [
+            "asset_sha256",
+            "revision",
+            "editorial_state",
+            "published_at_utc_ms",
+            "changed_by",
+            "occurred_at_utc_ms",
+        ] {
+            let mut forged = base.clone();
+            forged[forged_field] = serde_json::Value::String("forged".into());
+            assert_eq!(
+                api.handle_authenticated(
+                    "PUT",
+                    &path,
+                    Some(&serde_json::to_vec(&forged).unwrap()),
+                    &operator,
+                )
+                .status,
+                400,
+                "browser authority field {forged_field} must be rejected"
+            );
+        }
+        let invalid = serde_json::json!({
+            "title": "",
+            "meeting_body": null,
+            "expected_revision": null
+        });
+        assert_eq!(
+            api.handle_authenticated(
+                "PUT",
+                &path,
+                Some(&serde_json::to_vec(&invalid).unwrap()),
+                &operator,
+            )
+            .status,
+            422
+        );
+        assert_eq!(
+            api.handle_authenticated(
+                "PUT",
+                &path,
+                Some(&serde_json::to_vec(&base).unwrap()),
+                &operator,
+            )
+            .status,
+            201
+        );
+
+        let stale = serde_json::json!({
+            "title": "Planning Commission update",
+            "meeting_body": "Planning Commission",
+            "expected_revision": 0
+        });
+        let stale = api.handle_authenticated(
+            "PUT",
+            &path,
+            Some(&serde_json::to_vec(&stale).unwrap()),
+            &operator,
+        );
+        assert_eq!(stale.status, 409);
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&stale.body).unwrap()["error"]["code"],
+            "revision_conflict"
+        );
+        let overflow_stale = api.handle_authenticated(
+            "PUT",
+            &path,
+            Some(
+                &serde_json::to_vec(&serde_json::json!({
+                    "title": "Planning Commission update",
+                    "meeting_body": "Planning Commission",
+                    "expected_revision": u64::MAX
+                }))
+                .unwrap(),
+            ),
+            &operator,
+        );
+        assert_eq!(overflow_stale.status, 409);
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&overflow_stale.body).unwrap()["error"]["code"],
+            "revision_conflict"
+        );
+        let withdraw_draft = api.handle_authenticated(
+            "POST",
+            &format!("{path}/withdraw"),
+            Some(&serde_json::to_vec(&serde_json::json!({"expected_revision": 1})).unwrap()),
+            &operator,
+        );
+        assert_eq!(withdraw_draft.status, 409);
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&withdraw_draft.body).unwrap()["error"]["code"],
+            "catalog_state_conflict"
+        );
+        assert_eq!(
+            api.handle_authenticated(
+                "POST",
+                &format!("{path}/publish"),
+                Some(&serde_json::to_vec(&serde_json::json!({"expected_revision": 1})).unwrap()),
+                &operator,
+            )
+            .status,
+            200
+        );
+        assert_eq!(
+            api.handle_authenticated(
+                "POST",
+                &format!("{path}/publish"),
+                Some(&serde_json::to_vec(&serde_json::json!({"expected_revision": 2})).unwrap()),
+                &operator,
+            )
+            .status,
+            409
+        );
+        assert_eq!(
+            api.handle_authenticated(
+                "POST",
+                &format!("{path}/withdraw"),
+                Some(
+                    &serde_json::to_vec(&serde_json::json!({
+                        "expected_revision": 2,
+                        "actor": "forged"
+                    }))
+                    .unwrap()
+                ),
+                &operator,
+            )
+            .status,
+            400
+        );
+        assert_eq!(
+            api.handle_authenticated("POST", &format!("{path}/withdraw"), None, &operator)
+                .status,
+            400
+        );
+        assert_eq!(
+            api.handle_authenticated(
+                "POST",
+                &format!("{path}/withdraw"),
+                Some(&serde_json::to_vec(&serde_json::json!({"expected_revision": 2})).unwrap()),
+                &support,
+            )
+            .status,
+            403
+        );
+
+        for invalid_path in [
+            format!("/api/v1/catalog/assets/{}", asset.to_uppercase()),
+            format!("/api/v1/catalog/assets/{asset}/"),
+            "/api/v1/catalog/assets?limit=0".into(),
+            "/api/v1/catalog/assets?limit=1001".into(),
+            "/api/v1/catalog/assets?after_asset_sha256=bad&limit=1".into(),
+            format!("/api/v1/catalog/assets?limit=1&after_asset_sha256={asset}"),
+            format!("{path}/history?limit=0"),
+            format!("{path}/history?limit=1001"),
+        ] {
+            assert_eq!(
+                api.handle_authenticated("GET", &invalid_path, None, &operator)
+                    .status,
+                400,
+                "invalid catalog path must fail: {invalid_path}"
+            );
+        }
+        assert_eq!(
+            api.handle_authenticated("GET", &format!("{path}%2fextra"), None, &operator)
+                .status,
+            400
+        );
+        assert_eq!(
+            api.handle_authenticated("DELETE", &path, None, &operator)
+                .status,
+            405
+        );
+        assert_eq!(
+            api.handle_authenticated("PATCH", &path, Some(b"{}"), &operator)
+                .status,
+            405
+        );
+        assert_eq!(
+            api.handle_authenticated("POST", &path, Some(b"{}"), &operator)
+                .status,
+            405
+        );
+        assert_eq!(
+            api.handle_authenticated(
+                "GET",
+                &format!("/api/v1/catalog/assets/{}/history?limit=1", "e".repeat(64)),
+                None,
+                &operator,
+            )
+            .status,
+            404
+        );
+
+        let orphan_asset = "f".repeat(64);
+        assert_eq!(
+            api.storage.write_catalog_asset(
+                &orphan_asset,
+                &CatalogAssetRecord {
+                    asset_sha256: orphan_asset.clone(),
+                    title: "Orphan authority".into(),
+                    meeting_body: None,
+                    editorial_state: CatalogEditorialState::Draft,
+                    published_at_utc_ms: None,
+                    revision: 1,
+                },
+                None,
+                "test-harness",
+                1,
+            ),
+            Err(CatalogAssetWriteError::Invalid(
+                "catalog asset media dependency does not exist".into()
+            )),
+            "storage must make orphan catalog authority impossible"
+        );
+        assert_eq!(
+            api.handle_authenticated(
+                "POST",
+                &format!("/api/v1/catalog/assets/{orphan_asset}/publish"),
+                Some(&serde_json::to_vec(&serde_json::json!({"expected_revision": 1})).unwrap()),
+                &operator,
+            )
+            .status,
+            404,
+            "catalog transitions must reject identities without media authority"
+        );
+
+        drop(api);
+        let _ = std::fs::remove_file(database);
+    }
+
+    #[test]
+    fn catalog_write_errors_have_exact_client_boundaries() {
+        for (error, status, code) in [
+            (
+                CatalogAssetWriteError::Invalid("invalid catalog".into()),
+                422,
+                "validation_failed",
+            ),
+            (
+                CatalogAssetWriteError::Conflict {
+                    current_revision: Some(2),
+                },
+                409,
+                "revision_conflict",
+            ),
+            (
+                CatalogAssetWriteError::Rebound,
+                409,
+                "catalog_identity_rebound",
+            ),
+            (
+                CatalogAssetWriteError::Capacity,
+                422,
+                "catalog_capacity_exceeded",
+            ),
+            (
+                CatalogAssetWriteError::Storage("corrupt catalog".into()),
+                500,
+                "storage_error",
+            ),
+        ] {
+            let response = catalog_write_error_response(error);
+            assert_eq!(response.status, status);
+            assert_eq!(
+                serde_json::from_slice::<serde_json::Value>(&response.body).unwrap()["error"]["code"],
+                code
+            );
+        }
     }
 
     #[test]

@@ -82,6 +82,8 @@ pub use schedule_automation_authority::{
 };
 mod catalog_authority;
 pub use catalog_authority::{CatalogAssetHistoryEntry, CatalogAssetPage, CatalogAssetWriteError};
+mod catalog_candidate_projection;
+pub use catalog_candidate_projection::CatalogCandidateProjection;
 
 const SQLITE_OK: c_int = 0;
 const SQLITE_ROW: c_int = 100;

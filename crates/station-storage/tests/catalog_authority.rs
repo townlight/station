@@ -5,6 +5,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use station_catalog::{CatalogAssetRecord, CatalogEditorialState};
+use station_schedule::{AssetReadiness, MediaAsset};
 use station_storage::{CatalogAssetWriteError, StationStore};
 
 const ASSET: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -85,9 +86,21 @@ fn draft_for(asset_sha256: &str, revision: u64) -> CatalogAssetRecord {
     }
 }
 
+fn admit_media(store: &StationStore, asset_sha256: &str) {
+    store
+        .put_media_asset(&MediaAsset {
+            asset_id: asset_sha256.into(),
+            media_path: format!(r"C:\media\{asset_sha256}.ts"),
+            duration_ms: 1_000,
+            readiness: AssetReadiness::Ready,
+        })
+        .unwrap();
+}
+
 #[test]
 fn current_exact_history_and_first_publication_time_round_trip() {
     let store = StationStore::open(temporary_database("roundtrip")).unwrap();
+    admit_media(&store, ASSET);
     store
         .write_catalog_asset(ASSET, &draft(1), None, "catalog-admin", 10)
         .unwrap();
@@ -141,8 +154,21 @@ fn current_exact_history_and_first_publication_time_round_trip() {
 }
 
 #[test]
+fn catalog_writes_reject_assets_without_media_dependencies() {
+    let store = StationStore::open(temporary_database("missing-media")).unwrap();
+    assert_eq!(
+        store.write_catalog_asset(ASSET, &draft(1), None, "catalog-admin", 10),
+        Err(CatalogAssetWriteError::Invalid(
+            "catalog asset media dependency does not exist".into()
+        ))
+    );
+    assert_eq!(store.read_catalog_asset(ASSET).unwrap(), None);
+}
+
+#[test]
 fn writes_fail_closed_for_cas_rebound_invalid_time_and_invalid_authority() {
     let store = StationStore::open(temporary_database("write-failures")).unwrap();
+    admit_media(&store, ASSET);
     assert_eq!(
         store.write_catalog_asset(ASSET, &draft(1), Some(1), "catalog-admin", 10),
         Err(CatalogAssetWriteError::Conflict {
@@ -207,6 +233,7 @@ fn current_catalog_pages_are_exclusive_ordered_and_lossless() {
     let store = StationStore::open(temporary_database("current-pages")).unwrap();
     let third_asset = "c".repeat(64);
     for asset_sha256 in [ASSET, OTHER_ASSET, third_asset.as_str()] {
+        admit_media(&store, asset_sha256);
         store
             .write_catalog_asset(
                 asset_sha256,
@@ -249,6 +276,7 @@ fn current_and_history_rows_detect_tampering_and_history_is_append_only() {
     let database = temporary_database("tampering");
     {
         let store = StationStore::open(&database).unwrap();
+        admit_media(&store, ASSET);
         store
             .write_catalog_asset(ASSET, &draft(1), None, "catalog-admin", 10)
             .unwrap();
@@ -282,6 +310,7 @@ fn current_must_equal_the_latest_fully_validated_history_snapshot() {
     let database = temporary_database("history-parity");
     {
         let store = StationStore::open(&database).unwrap();
+        admit_media(&store, ASSET);
         store
             .write_catalog_asset(ASSET, &draft(1), None, "catalog-admin", 10)
             .unwrap();

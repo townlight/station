@@ -1721,6 +1721,7 @@ dependencies = [
  "station-auth",
  "station-automation-policy",
  "station-captions",
+ "station-catalog",
  "station-cg",
  "station-domain",
  "station-ingest",
@@ -2001,6 +2002,17 @@ dependencies = [
  "jiff",
  "serde",
  "sha2",
+]
+
+[[package]]
+name = "station-source-evidence"
+version = "0.1.0"
+dependencies = [
+ "getrandom 0.4.3",
+ "hmac",
+ "sha2",
+ "station-schedule-automation",
+ "zeroize",
 ]
 
 [[package]]

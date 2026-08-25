@@ -1,7 +1,7 @@
 use super::*;
 use station_catalog::{CatalogAssetRecord, CatalogAuthorityError, CatalogEditorialState};
 
-const MAX_CATALOG_ASSETS: usize = 100_000;
+pub(super) const MAX_CATALOG_ASSETS: usize = 100_000;
 const MAX_CATALOG_QUERY: usize = 1_000;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -221,6 +221,10 @@ impl StationStore {
                 expected_revision,
                 value.revision,
             )?;
+            // Catalog authority is only meaningful for an admitted media asset.
+            // Recheck this dependency after BEGIN IMMEDIATE so every API and
+            // trusted in-process write path observes one atomic authority view.
+            ensure_catalog_media_dependency(self, asset_sha256)?;
             if let Some(current) = &current {
                 let latest_history = self
                     .read_latest_catalog_history_entry(asset_sha256)
@@ -259,7 +263,7 @@ impl StationStore {
         finish_catalog_write(self, outcome)
     }
 
-    fn validate_current_catalog_snapshot(
+    pub(super) fn validate_current_catalog_snapshot(
         &self,
         current: &CatalogAssetRecord,
     ) -> Result<(), String> {
@@ -287,6 +291,21 @@ impl StationStore {
             SQLITE_DONE => Ok(None),
             _ => Err(sqlite_error(self.database)),
         }
+    }
+}
+
+fn ensure_catalog_media_dependency(
+    store: &StationStore,
+    asset_sha256: &str,
+) -> Result<(), CatalogAssetWriteError> {
+    match store
+        .read_media_asset(asset_sha256)
+        .map_err(CatalogAssetWriteError::Storage)?
+    {
+        Some(_) => Ok(()),
+        None => Err(CatalogAssetWriteError::Invalid(
+            "catalog asset media dependency does not exist".into(),
+        )),
     }
 }
 
@@ -454,7 +473,9 @@ fn read_catalog_history_entry(
     })
 }
 
-fn read_catalog_asset_row(statement: *mut SqliteStatement) -> Result<CatalogAssetRecord, String> {
+pub(super) fn read_catalog_asset_row(
+    statement: *mut SqliteStatement,
+) -> Result<CatalogAssetRecord, String> {
     let record: CatalogAssetRecord = serde_json::from_str(&column_text(statement, 6)?)
         .map_err(|error| format!("decode catalog asset authority: {error}"))?;
     record
