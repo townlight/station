@@ -4849,7 +4849,7 @@ fn collect_station_box_probe(
             Err(detail) => (None, None, false, detail),
         };
     let backup_writable = resources.backup_volume_writable;
-    let clock_sync = probe_windows_clock_sync();
+    let windows_time = probe_windows_time();
     let media_disk_free_gb = resources
         .media_volume_free_gb
         .ok_or_else(|| "live media free space is unavailable".to_string())?;
@@ -4893,22 +4893,25 @@ fn collect_station_box_probe(
         clock: ClockProbeInput {
             configured_timezone: station.as_ref().map(|value| value.profile.timezone.clone()),
             utc_offset_seconds: None,
-            sync_status: clock_sync,
+            sync_status: windows_time.sync_status,
         },
         network: NetworkProbeInput {
-            state: if network_up {
-                StationReadinessState::Unknown
-            } else {
+            state: if !network_up {
                 StationReadinessState::Blocked
+            } else if windows_time.outbound_udp == CapabilitySupport::Supported {
+                StationReadinessState::Pass
+            } else {
+                StationReadinessState::Unknown
             },
             hostname: std::env::var("COMPUTERNAME")
                 .ok()
                 .filter(|value| !value.is_empty()),
             interface_up: network_up,
-            dns_working: None,
-            // A UDP connect proves route selection only; it does not prove that
-            // packets can reach a headend or remote receiver.
-            outbound_udp: CapabilitySupport::Unknown,
+            dns_working: windows_time.dns_working,
+            // A complete request/reply exchange with the configured Windows
+            // Time source proves one outbound UDP path. It does not prove an
+            // arbitrary destination, SRT, a headend, or receiver acceptance.
+            outbound_udp: windows_time.outbound_udp,
             outbound_srt: CapabilitySupport::Unknown,
         },
         backup: BackupProbeInput {
@@ -5029,20 +5032,27 @@ $ErrorActionPreference = 'Stop'
 try {
     $sourceOutput = @(& w32tm.exe /query /source 2>$null)
     if (($LASTEXITCODE -ne 0) -or ($sourceOutput.Count -ne 1)) {
-        Write-Output 'unavailable'
+        Write-Output 'unavailable unknown unknown'
         exit 0
     }
 
     $source = ([string]$sourceOutput[0]).Split(',')[0].Trim()
     if (($source.Length -lt 1) -or ($source.Length -gt 255) -or
         ($source -notmatch '^[A-Za-z0-9._:-]+$')) {
-        Write-Output 'unknown'
+        Write-Output 'unknown unknown unknown'
         exit 0
+    }
+
+    $parsedAddress = $null
+    $sourceKind = if ([Net.IPAddress]::TryParse($source, [ref]$parsedAddress)) {
+        'literal'
+    } else {
+        'dns'
     }
 
     $stripOutput = @(& w32tm.exe /stripchart "/computer:$source" /period:1 /samples:3 /rdtsc 2>$null)
     if ($LASTEXITCODE -ne 0) {
-        Write-Output 'unavailable'
+        Write-Output 'unavailable unknown unknown'
         exit 0
     }
 
@@ -5061,43 +5071,81 @@ try {
                 [Globalization.NumberStyles]::Float,
                 [Globalization.CultureInfo]::CurrentCulture)
         } catch {
-            Write-Output 'unknown'
+            Write-Output 'unknown unknown unknown'
             exit 0
         }
         if ([double]::IsNaN($offset) -or [double]::IsInfinity($offset)) {
-            Write-Output 'unknown'
+            Write-Output 'unknown unknown unknown'
             exit 0
         }
         $samples.Add($offset)
     }
 
     if ($samples.Count -ne 3) {
-        Write-Output 'unknown'
+        Write-Output 'unknown unknown unknown'
         exit 0
     }
-    foreach ($offset in $samples) {
-        if ([Math]::Abs($offset) -gt 2.0) {
-            Write-Output 'unsynchronized'
-            exit 0
-        }
+    $clockStatus = if ($samples | Where-Object { [Math]::Abs($_) -gt 2.0 }) {
+        'unsynchronized'
+    } else {
+        'synchronized'
     }
-    Write-Output 'synchronized'
+    Write-Output "$clockStatus $sourceKind udp"
 } catch {
-    Write-Output 'unavailable'
+    Write-Output 'unavailable unknown unknown'
 }
 "#;
 
-fn parse_windows_clock_probe_result(output: &[u8]) -> ClockSyncStatus {
-    match output {
-        b"synchronized\n" | b"synchronized\r\n" => ClockSyncStatus::Synchronized,
-        b"unsynchronized\n" | b"unsynchronized\r\n" => ClockSyncStatus::Unsynchronized,
-        b"unavailable\n" | b"unavailable\r\n" => ClockSyncStatus::Unavailable,
-        b"unknown\n" | b"unknown\r\n" => ClockSyncStatus::Unknown,
-        _ => ClockSyncStatus::Unknown,
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct WindowsTimeProbeResult {
+    sync_status: ClockSyncStatus,
+    dns_working: Option<bool>,
+    outbound_udp: CapabilitySupport,
+}
+
+fn unknown_windows_time_probe(sync_status: ClockSyncStatus) -> WindowsTimeProbeResult {
+    WindowsTimeProbeResult {
+        sync_status,
+        dns_working: None,
+        outbound_udp: CapabilitySupport::Unknown,
     }
 }
 
-fn probe_windows_clock_sync() -> ClockSyncStatus {
+fn parse_windows_time_probe_result(output: &[u8]) -> WindowsTimeProbeResult {
+    match output {
+        b"synchronized dns udp\n" | b"synchronized dns udp\r\n" => WindowsTimeProbeResult {
+            sync_status: ClockSyncStatus::Synchronized,
+            dns_working: Some(true),
+            outbound_udp: CapabilitySupport::Supported,
+        },
+        b"synchronized literal udp\n" | b"synchronized literal udp\r\n" => WindowsTimeProbeResult {
+            sync_status: ClockSyncStatus::Synchronized,
+            dns_working: None,
+            outbound_udp: CapabilitySupport::Supported,
+        },
+        b"unsynchronized dns udp\n" | b"unsynchronized dns udp\r\n" => WindowsTimeProbeResult {
+            sync_status: ClockSyncStatus::Unsynchronized,
+            dns_working: Some(true),
+            outbound_udp: CapabilitySupport::Supported,
+        },
+        b"unsynchronized literal udp\n" | b"unsynchronized literal udp\r\n" => {
+            WindowsTimeProbeResult {
+                sync_status: ClockSyncStatus::Unsynchronized,
+                dns_working: None,
+                outbound_udp: CapabilitySupport::Supported,
+            }
+        }
+        b"unavailable unknown unknown\n" | b"unavailable unknown unknown\r\n" => {
+            unknown_windows_time_probe(ClockSyncStatus::Unavailable)
+        }
+        b"unknown unknown unknown\n" | b"unknown unknown unknown\r\n" => {
+            unknown_windows_time_probe(ClockSyncStatus::Unknown)
+        }
+        _ => unknown_windows_time_probe(ClockSyncStatus::Unknown),
+    }
+}
+
+fn probe_windows_time() -> WindowsTimeProbeResult {
     let mut command = hidden_command("powershell.exe");
     command.args([
         "-NoProfile",
@@ -5108,8 +5156,8 @@ fn probe_windows_clock_sync() -> ClockSyncStatus {
         WINDOWS_CLOCK_PROBE_SCRIPT,
     ]);
     match run_bounded_command(command, Duration::from_secs(8), 64 * 1024) {
-        Ok(output) if output.success => parse_windows_clock_probe_result(&output.stdout),
-        Ok(_) | Err(_) => ClockSyncStatus::Unavailable,
+        Ok(output) if output.success => parse_windows_time_probe_result(&output.stdout),
+        Ok(_) | Err(_) => unknown_windows_time_probe(ClockSyncStatus::Unavailable),
     }
 }
 
@@ -6292,43 +6340,96 @@ mod tests {
     }
 
     #[test]
-    fn windows_clock_probe_result_accepts_only_one_exact_ascii_status() {
+    fn windows_time_probe_result_accepts_only_exact_ascii_evidence() {
         assert_eq!(
-            parse_windows_clock_probe_result(b"synchronized\r\n"),
-            ClockSyncStatus::Synchronized
+            parse_windows_time_probe_result(b"synchronized dns udp\n"),
+            WindowsTimeProbeResult {
+                sync_status: ClockSyncStatus::Synchronized,
+                dns_working: Some(true),
+                outbound_udp: CapabilitySupport::Supported,
+            }
         );
         assert_eq!(
-            parse_windows_clock_probe_result(b"unsynchronized\n"),
-            ClockSyncStatus::Unsynchronized
+            parse_windows_time_probe_result(b"synchronized literal udp\r\n"),
+            WindowsTimeProbeResult {
+                sync_status: ClockSyncStatus::Synchronized,
+                dns_working: None,
+                outbound_udp: CapabilitySupport::Supported,
+            }
         );
         assert_eq!(
-            parse_windows_clock_probe_result(b"unavailable\n"),
-            ClockSyncStatus::Unavailable
+            parse_windows_time_probe_result(b"unsynchronized dns udp\n"),
+            WindowsTimeProbeResult {
+                sync_status: ClockSyncStatus::Unsynchronized,
+                dns_working: Some(true),
+                outbound_udp: CapabilitySupport::Supported,
+            }
         );
         assert_eq!(
-            parse_windows_clock_probe_result(b"unknown\n"),
-            ClockSyncStatus::Unknown
+            parse_windows_time_probe_result(b"unsynchronized literal udp\r\n"),
+            WindowsTimeProbeResult {
+                sync_status: ClockSyncStatus::Unsynchronized,
+                dns_working: None,
+                outbound_udp: CapabilitySupport::Supported,
+            }
         );
         assert_eq!(
-            parse_windows_clock_probe_result(b"synchronized\nextra\n"),
-            ClockSyncStatus::Unknown
+            parse_windows_time_probe_result(b"unavailable unknown unknown\n"),
+            unknown_windows_time_probe(ClockSyncStatus::Unavailable)
         );
         assert_eq!(
-            parse_windows_clock_probe_result(b"Synchronized\n"),
-            ClockSyncStatus::Unknown
+            parse_windows_time_probe_result(b"unknown unknown unknown\n"),
+            unknown_windows_time_probe(ClockSyncStatus::Unknown)
+        );
+        assert_eq!(
+            parse_windows_time_probe_result(b"synchronized dns udp\nextra\n"),
+            unknown_windows_time_probe(ClockSyncStatus::Unknown)
+        );
+        assert_eq!(
+            parse_windows_time_probe_result(b"Synchronized dns udp\n"),
+            unknown_windows_time_probe(ClockSyncStatus::Unknown)
+        );
+        assert_eq!(
+            parse_windows_time_probe_result(b"synchronized\n"),
+            unknown_windows_time_probe(ClockSyncStatus::Unknown)
+        );
+        assert_eq!(
+            parse_windows_time_probe_result(b"synchronized dns srt\n"),
+            unknown_windows_time_probe(ClockSyncStatus::Unknown)
         );
     }
 
     #[test]
-    fn windows_clock_probe_contract_measures_the_configured_source_fail_closed() {
+    fn windows_time_probe_contract_measures_the_configured_source_fail_closed() {
         assert!(WINDOWS_CLOCK_PROBE_SCRIPT.contains("w32tm.exe /query /source"));
         assert!(WINDOWS_CLOCK_PROBE_SCRIPT.contains(".Split(',')[0].Trim()"));
         assert!(WINDOWS_CLOCK_PROBE_SCRIPT.contains("/samples:3"));
         assert!(WINDOWS_CLOCK_PROBE_SCRIPT.contains("/rdtsc"));
         assert!(WINDOWS_CLOCK_PROBE_SCRIPT.contains("$samples.Count -ne 3"));
-        assert!(WINDOWS_CLOCK_PROBE_SCRIPT.contains("[Math]::Abs($offset) -gt 2.0"));
+        assert!(WINDOWS_CLOCK_PROBE_SCRIPT.contains("[Net.IPAddress]::TryParse"));
+        assert!(WINDOWS_CLOCK_PROBE_SCRIPT.contains("[Math]::Abs($_) -gt 2.0"));
+        assert!(WINDOWS_CLOCK_PROBE_SCRIPT.contains("$clockStatus $sourceKind udp"));
         assert!(WINDOWS_CLOCK_PROBE_SCRIPT.contains("CurrentCulture"));
         assert!(!WINDOWS_CLOCK_PROBE_SCRIPT.contains("Invoke-Expression"));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    #[ignore = "explicit Windows configured-source network proof lane"]
+    fn windows_time_probe_current_machine_completes_a_real_udp_exchange() {
+        let evidence = probe_windows_time();
+        assert_eq!(
+            evidence.outbound_udp,
+            CapabilitySupport::Supported,
+            "configured Windows Time source did not complete three UDP request/reply samples: {evidence:?}"
+        );
+        assert!(
+            matches!(
+                evidence.sync_status,
+                ClockSyncStatus::Synchronized | ClockSyncStatus::Unsynchronized
+            ),
+            "completed Windows Time samples must carry a finite clock verdict: {evidence:?}"
+        );
     }
 
     #[test]

@@ -27,13 +27,16 @@ resource sample, backup write probe, receipt hashing, or GStreamer subprocess wo
 
 Installed-engine inspection runs only the private `gst-inspect-1.0.exe`, with private plugin paths,
 a five-second deadline, discarded stderr, and a concurrently enforced byte limit. It accepts only
-the known required factory and encoder names. The current network probe proves local route selection,
-not outbound delivery, so it remains unknown. Clock evidence queries the current Windows Time source,
+the known required factory and encoder names. The clock and network probe queries the current Windows Time source,
 removes only its comma-delimited peer flags, and obtains exactly three one-second
 `w32tm /stripchart /rdtsc` offset samples. The fixed hidden PowerShell boundary parses each numeric
-offset with the current culture and emits one exact ASCII status. Every finite sample must be within
-two seconds for synchronized readiness; command failure, an unsafe source, malformed or missing
-samples, and excessive offsets remain unavailable, unknown, or unsynchronized rather than green. Application and
+offset with the current culture and emits one exact ASCII evidence line. Every finite sample must be
+within two seconds for synchronized readiness. Any complete three-sample exchange proves one real
+outbound UDP request/reply path to the configured source; when that source is a hostname, the same
+exchange proves working name resolution. An IP-literal source leaves DNS unknown. This evidence does
+not claim arbitrary UDP, SRT, a configured headend destination, or receiver acceptance. Command
+failure, an unsafe source, and malformed or missing samples leave clock and network evidence
+unavailable or unknown rather than green. Application and
 active-slot receipts must agree, and every application file is rehashed. The approved media-runtime
 package identity is bound to a full installed-file manifest whose exact bytes are SHA-256-bound into
 the installation receipt. Every runtime file is re-enumerated and rehashed; missing, extra,
@@ -59,6 +62,7 @@ readiness facts.
 
 StationBox status is now one typed authority that S2 headend checks and S3 commissioning can extend
 without inventing new readiness vocabularies. The current machine will correctly remain yellow or
-red for unavailable or excessive-offset clock evidence, outbound delivery, interlaced output, SDI, and
-NDI. That is an implementation result, not field evidence: clean-machine, headend, one-station-week,
-and three-station-week gates remain external and false until their evidence is captured.
+red for unavailable or excessive-offset clock evidence, unproved arbitrary/SRT/headend/receiver
+delivery, interlaced output, SDI, and NDI. That is an implementation result, not field evidence:
+clean-machine, headend, one-station-week, and three-station-week gates remain external and false until
+their evidence is captured.

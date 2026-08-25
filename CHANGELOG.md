@@ -8,6 +8,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- StationBox network readiness now uses the configured Windows Time source for a bounded
+  three-sample UDP request/reply proof. A hostname-backed completed exchange proves name resolution;
+  SRT, arbitrary destinations, headend delivery, and receiver acceptance remain explicitly unknown.
+
 - A shared-machine Windows Sandbox ownership guard now serializes pre-launch checks, rejects any
   active or unknown sandbox owner, records only exact harness-launched process identity in immutable
   evidence, and contains no broad cleanup or process-termination path.
