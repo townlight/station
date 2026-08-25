@@ -16,6 +16,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   actor, audit, path identity, stale revision, oversized body, or occupied service slots fail closed.
   The Media console now provides a responsive per-asset editor with bounded WebVTT/SRT import,
   timing/text validation, source provenance, current cue digest, and immutable revision visibility.
+  Scheduled playout now selects the channel-policy-matching track only after the exact asset take is
+  acknowledged, translates the committed media offset into bounded worker-relative cue delays,
+  catches up still-active cues, skips expired cues, and fails visibly on a mismatched worker
+  acknowledgment without treating dispatch as decode-back proof.
 
 - Setup Admins can now persist a stopped-channel CEA-708/disabled policy with bounded service and
   language metadata through the operator console and an audited revision-guarded API. Worker

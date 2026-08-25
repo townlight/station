@@ -26,9 +26,12 @@ CAS revisions, complete append-only snapshots, and on-air mutation refusal. Auth
 routes list compact track summaries and let Setup Admins read or replace exact cue authority while
 the server owns actor, time, path identity, and audit identity. The Media console imports and
 validates reviewed WebVTT/SRT, edits canonical WebVTT timing, displays immutable revisions, and saves
-through that exact contract. Tracks are not yet dispatched to the worker; live caption scheduling,
-live ASR, current proof receipts, and installed/field evidence remain separate work, so commissioning
-still reports the caption authority as blocked.
+through that exact contract. After an acknowledged scheduled take, the channel controller selects
+the exact policy-matching asset track, derives timing from the committed media offset, catches up an
+active cue, and sends bounded relative-delay cues only with worker acknowledgments. Live ASR,
+already-queued cue clearing at unscheduled source transitions, current decode-back proof receipts,
+and installed/field evidence remain separate work, so commissioning still reports the caption
+authority as blocked.
 
 ## Architecture
 

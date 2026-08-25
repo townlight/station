@@ -13,6 +13,7 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use sha2::{Digest, Sha256};
+use station_captions::AssetCaptionTrack;
 use station_cg::{CgBulletinContent, CgResolvedContent, CgResolvedSnapshot};
 use station_domain::{
     AlertConditionKind, AlertEvent, AlertEventState, AlertSeverity, ChannelRuntimeObservation,
@@ -21,12 +22,12 @@ use station_domain::{
 use station_live::{LiveEndpoint, TakeoverSession, TakeoverState};
 use station_media_assets::measure_output_loudness;
 use station_media_protocol::{
-    CgImageFormat, CgOverlay, CgOverlayContent, CgRect, CgSnapshot, ChannelCommand, LiveArmToken,
-    LiveInputConfiguration, LiveReturnTarget, LoudnessTarget, MAX_CG_SLOTS, MAX_CG_TEXT_BYTES,
-    MAX_OUTPUT_PROOF_DURATION_MS, MAX_OUTPUT_PROOF_SAMPLE_DURATION_MS,
-    OUTPUT_PROOF_CAPTURE_HEADROOM_MS, SrtPassphrase, WorkerCaptionMode, WorkerCaptionPolicy,
-    WorkerEvent, WorkerFallbackSlate, WorkerHeadendProfileId, WorkerHeadendTransportContract,
-    WorkerOutputConfiguration,
+    CaptionCue as WorkerCaptionCue, CgImageFormat, CgOverlay, CgOverlayContent, CgRect, CgSnapshot,
+    ChannelCommand, LiveArmToken, LiveInputConfiguration, LiveReturnTarget, LoudnessTarget,
+    MAX_CG_SLOTS, MAX_CG_TEXT_BYTES, MAX_OUTPUT_PROOF_DURATION_MS,
+    MAX_OUTPUT_PROOF_SAMPLE_DURATION_MS, OUTPUT_PROOF_CAPTURE_HEADROOM_MS, SrtPassphrase,
+    WorkerCaptionMode, WorkerCaptionPolicy, WorkerEvent, WorkerFallbackSlate,
+    WorkerHeadendProfileId, WorkerHeadendTransportContract, WorkerOutputConfiguration,
 };
 use station_readiness::derive_loudness_outcome;
 use station_readiness::{
@@ -49,6 +50,41 @@ const MEDIA_LOAD_TIMEOUT: Duration = Duration::from_secs(25);
 const MEDIA_TEARDOWN_TIMEOUT: Duration = Duration::from_secs(30);
 const CG_EXPIRER_OPERATOR_ID: &str = "stationd-cg-expirer";
 const CG_SYNC_INTERVAL_MS: i64 = 1_000;
+const MAX_CAPTION_CUES_PER_TICK: usize = 64;
+
+fn due_caption_cues(
+    track: &AssetCaptionTrack,
+    media_offset_ms: u64,
+    accepted_cue_ids: &HashSet<String>,
+) -> Vec<WorkerCaptionCue> {
+    track
+        .cues
+        .iter()
+        .filter(|cue| !accepted_cue_ids.contains(&cue.cue_id))
+        .filter_map(|cue| {
+            let end_ms = cue.start_ms.checked_add(cue.duration_ms)?;
+            if end_ms <= media_offset_ms {
+                return None;
+            }
+            let (start_after_ms, duration_ms) = if cue.start_ms <= media_offset_ms {
+                (0, end_ms - media_offset_ms)
+            } else {
+                let start_after_ms = cue.start_ms - media_offset_ms;
+                if start_after_ms > station_media_protocol::MAX_CAPTION_START_AFTER_MS {
+                    return None;
+                }
+                (start_after_ms, cue.duration_ms)
+            };
+            Some(WorkerCaptionCue {
+                cue_id: cue.cue_id.clone(),
+                start_after_ms,
+                duration_ms,
+                text: cue.text.clone(),
+            })
+        })
+        .take(MAX_CAPTION_CUES_PER_TICK)
+        .collect()
+}
 pub fn managed_cg_image_root(database_path: &Path) -> PathBuf {
     let parent = database_path
         .parent()
@@ -128,6 +164,7 @@ pub enum OrchestrationError {
         detail: String,
     },
     LiveControl(String),
+    CaptionAuthority(String),
     Clock(String),
     InvalidCgSnapshot(String),
 }
@@ -654,6 +691,14 @@ struct LiveHandbackPlan {
     detail: String,
 }
 
+struct CaptionDispatchState {
+    report_id: String,
+    track_id: String,
+    track_revision: u64,
+    cues_sha256: String,
+    accepted_cue_ids: HashSet<String>,
+}
+
 /// Supplies the candidate identity that is actually running on the station.
 /// Proof jobs fail closed when this authority has not been connected by the
 /// service host; a job's originally requested identity is never treated as
@@ -681,6 +726,7 @@ pub struct ChannelController {
     cg_state: CgSnapshotState,
     next_cg_sync_at_unix_ms: i64,
     live_control: Option<LiveControlState>,
+    caption_dispatch: Option<CaptionDispatchState>,
 }
 
 impl ChannelController {
@@ -777,6 +823,7 @@ impl ChannelController {
             cg_state: CgSnapshotState::default(),
             next_cg_sync_at_unix_ms: 0,
             live_control: None,
+            caption_dispatch: None,
         })
     }
 
@@ -1525,6 +1572,82 @@ impl ChannelController {
         Ok(())
     }
 
+    fn dispatch_due_caption_cues(
+        &mut self,
+        store: &StationStore,
+        job: &DispatchJob,
+        media_offset_ms: u64,
+    ) -> Result<(), OrchestrationError> {
+        let Some(policy) = store
+            .read_channel_caption_policy(&self.channel_id)
+            .map_err(OrchestrationError::Storage)?
+            .filter(|policy| policy.mode == ChannelCaptionMode::Cea708)
+        else {
+            self.caption_dispatch = None;
+            return Ok(());
+        };
+        let track = store
+            .list_asset_caption_tracks(&job.asset.asset_id)
+            .map_err(OrchestrationError::Storage)?
+            .into_iter()
+            .find(|track| {
+                track.language == policy.language && track.service_number == policy.service_number
+            });
+        let Some(track) = track else {
+            self.caption_dispatch = None;
+            return Ok(());
+        };
+        if self.caption_dispatch.as_ref().is_none_or(|state| {
+            state.report_id != job.report.report_id
+                || state.track_id != track.track_id
+                || state.track_revision != track.revision
+                || state.cues_sha256 != track.cues_sha256
+        }) {
+            self.caption_dispatch = Some(CaptionDispatchState {
+                report_id: job.report.report_id.clone(),
+                track_id: track.track_id.clone(),
+                track_revision: track.revision,
+                cues_sha256: track.cues_sha256.clone(),
+                accepted_cue_ids: HashSet::new(),
+            });
+        }
+        let due = due_caption_cues(
+            &track,
+            media_offset_ms,
+            &self
+                .caption_dispatch
+                .as_ref()
+                .expect("caption dispatch state was initialized")
+                .accepted_cue_ids,
+        );
+        for cue in due {
+            let event = self
+                .supervisor
+                .command(
+                    &format!(
+                        "caption-{}-{}-{}",
+                        job.report.report_id, track.revision, cue.cue_id
+                    ),
+                    ChannelCommand::PushCaptionCue { cue: cue.clone() },
+                    self.command_timeout,
+                )
+                .map_err(OrchestrationError::Worker)?;
+            if !matches!(event.event, WorkerEvent::CaptionCueAccepted { ref cue_id } if cue_id == &cue.cue_id)
+            {
+                return Err(OrchestrationError::CaptionAuthority(format!(
+                    "worker did not accept caption cue {} from track {} revision {}",
+                    cue.cue_id, track.track_id, track.revision
+                )));
+            }
+            self.caption_dispatch
+                .as_mut()
+                .expect("caption dispatch state remains active")
+                .accepted_cue_ids
+                .insert(cue.cue_id);
+        }
+        Ok(())
+    }
+
     fn ensure_live_armed(
         &mut self,
         store: &StationStore,
@@ -1898,6 +2021,7 @@ impl ChannelController {
                     )
                     .map_err(OrchestrationError::Storage)?;
                 self.on_air_asset_id = None;
+                self.caption_dispatch = None;
                 self.mark_state(ChannelRuntimeState::Live, now_unix_ms);
                 Ok(LiveRunOutcome {
                     block_schedule: true,
@@ -2147,6 +2271,7 @@ impl ChannelController {
                     DispatchStatus::Queued,
                     DispatchStatus::Acknowledged,
                 )?;
+                self.dispatch_due_caption_cues(&store, &job, media_offset_ms)?;
                 self.on_air_asset_id = Some(job.asset.asset_id);
                 self.mark_state(ChannelRuntimeState::OnAir, now_unix_ms);
                 Some(DispatchTransition::OnAir { report_id })
@@ -2174,9 +2299,14 @@ impl ChannelController {
                         DispatchStatus::Acknowledged,
                     );
                 }
+                self.dispatch_due_caption_cues(&store, &job, media_offset_ms)?;
                 self.on_air_asset_id = Some(job.asset.asset_id);
                 self.mark_state(ChannelRuntimeState::OnAir, now_unix_ms);
                 Some(DispatchTransition::OnAir { report_id })
+            }
+            (DispatchStatus::Acknowledged, ScheduleWindow::Active { media_offset_ms }) => {
+                self.dispatch_due_caption_cues(&store, &job, media_offset_ms)?;
+                None
             }
             (DispatchStatus::Acknowledged, ScheduleWindow::Ended) => {
                 let event = self
@@ -2203,13 +2333,11 @@ impl ChannelController {
                     DispatchStatus::Completed,
                 )?;
                 self.on_air_asset_id = None;
+                self.caption_dispatch = None;
                 self.mark_state(ChannelRuntimeState::HealthyFallback, now_unix_ms);
                 Some(DispatchTransition::Completed { report_id })
             }
-            (
-                DispatchStatus::Queued | DispatchStatus::Acknowledged,
-                ScheduleWindow::Future | ScheduleWindow::Active { .. },
-            ) => None,
+            (DispatchStatus::Queued | DispatchStatus::Acknowledged, ScheduleWindow::Future) => None,
             _ => None,
         };
         Ok(transition.or(live_transition).or(missed_transition))
@@ -2753,6 +2881,9 @@ fn operator_failure_detail(error: &OrchestrationError) -> String {
         OrchestrationError::LiveControl(detail) => format!(
             "The live takeover could not be reconciled safely; the worker was stopped rather than accept uncertain on-air authority. {detail}"
         ),
+        OrchestrationError::CaptionAuthority(detail) => format!(
+            "The scheduled caption authority was not acknowledged; the worker was stopped rather than claim uncertain caption output. {detail}"
+        ),
         OrchestrationError::Clock(_) =>
             "The station clock could not provide a valid dispatch time; verify Windows time service before returning this output to service.".into(),
         OrchestrationError::InvalidCgSnapshot(detail) => {
@@ -2799,11 +2930,12 @@ fn system_time_millis() -> Result<i64, OrchestrationError> {
 mod tests {
     use super::{
         CgSnapshotState, OrchestrationError, OutputExpectation, capture_duration_for_sample,
-        cleanup_orphan_output_proof_artifacts, expire_due_bulletins, generate_live_arm_token,
-        hash_capture, is_abort_confirmation, lease_renewal_due, managed_cg_image_root,
-        proof_artifact_path, proof_bindings_match, ready_duration_is_bounded,
-        resolved_snapshot_to_protocol, stalled_required_output,
+        cleanup_orphan_output_proof_artifacts, due_caption_cues, expire_due_bulletins,
+        generate_live_arm_token, hash_capture, is_abort_confirmation, lease_renewal_due,
+        managed_cg_image_root, proof_artifact_path, proof_bindings_match,
+        ready_duration_is_bounded, resolved_snapshot_to_protocol, stalled_required_output,
     };
+    use station_captions::{AssetCaptionCue, AssetCaptionTrack, CaptionTrackSourceKind};
     use station_cg::{
         CgAuditEvent, CgAuditEventKind, CgBoard, CgBulletin, CgBulletinContent, CgBulletinState,
         CgZoneConfig,
@@ -2815,7 +2947,7 @@ mod tests {
     use station_media_protocol::WorkerEvent;
     use station_schedule::{ChannelConfiguration, OutputProfileId, OutputSinkConfiguration};
     use station_storage::{OutputLoudnessProofJob, OutputLoudnessProofJobState, StationStore};
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, HashSet};
     use std::path::PathBuf;
     use std::sync::{
         Arc,
@@ -3708,5 +3840,77 @@ mod tests {
             resolved_snapshot_to_protocol(&resolved),
             Err(OrchestrationError::InvalidCgSnapshot(_))
         ));
+    }
+
+    #[test]
+    fn caption_dispatch_plans_only_live_or_near_future_asset_relative_cues() {
+        let track = AssetCaptionTrack {
+            track_id: "65a26343-0339-4654-a92c-4bf9384f18df".into(),
+            asset_id: "a".repeat(64),
+            language: "en-US".into(),
+            service_number: 1,
+            source_kind: CaptionTrackSourceKind::Sidecar,
+            label: "Reviewed English".into(),
+            cues: vec![
+                AssetCaptionCue {
+                    cue_id: "11111111-1111-4111-8111-111111111111".into(),
+                    start_ms: 0,
+                    duration_ms: 500,
+                    text: "Expired".into(),
+                },
+                AssetCaptionCue {
+                    cue_id: "22222222-2222-4222-8222-222222222222".into(),
+                    start_ms: 500,
+                    duration_ms: 1_000,
+                    text: "Resume this cue".into(),
+                },
+                AssetCaptionCue {
+                    cue_id: "33333333-3333-4333-8333-333333333333".into(),
+                    start_ms: 2_000,
+                    duration_ms: 1_000,
+                    text: "Near future".into(),
+                },
+                AssetCaptionCue {
+                    cue_id: "44444444-4444-4444-8444-444444444444".into(),
+                    start_ms: 61_000,
+                    duration_ms: 1_000,
+                    text: "At lookahead boundary".into(),
+                },
+                AssetCaptionCue {
+                    cue_id: "55555555-5555-4555-8555-555555555555".into(),
+                    start_ms: 62_000,
+                    duration_ms: 1_000,
+                    text: "Outside lookahead".into(),
+                },
+            ],
+            revision: 7,
+            cues_sha256: "b".repeat(64),
+            created_at_unix_ms: 1,
+            updated_at_unix_ms: 2,
+            updated_by: "caption-reviewer".into(),
+        };
+
+        let planned = due_caption_cues(&track, 1_000, &HashSet::new());
+        assert_eq!(planned.len(), 3);
+        assert_eq!(planned[0].cue_id, "22222222-2222-4222-8222-222222222222");
+        assert_eq!(planned[0].start_after_ms, 0);
+        assert_eq!(planned[0].duration_ms, 500);
+        assert_eq!(planned[1].cue_id, "33333333-3333-4333-8333-333333333333");
+        assert_eq!(planned[1].start_after_ms, 1_000);
+        assert_eq!(planned[2].start_after_ms, 60_000);
+
+        let accepted = HashSet::from(["33333333-3333-4333-8333-333333333333".into()]);
+        assert_eq!(due_caption_cues(&track, 1_000, &accepted).len(), 2);
+
+        let mut dense = track.clone();
+        dense.cues = (0..65)
+            .map(|index| AssetCaptionCue {
+                cue_id: format!("00000000-0000-4000-8000-{index:012}"),
+                start_ms: index * 10,
+                duration_ms: 1,
+                text: format!("Cue {index}"),
+            })
+            .collect();
+        assert_eq!(due_caption_cues(&dense, 0, &HashSet::new()).len(), 64);
     }
 }
