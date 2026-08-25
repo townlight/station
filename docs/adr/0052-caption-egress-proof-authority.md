@@ -21,8 +21,11 @@ never be converted into verified caption evidence.
 
 ## Boundaries
 
-This decision establishes the durable record and fail-closed append contract. The orchestration job
-that requests the selected-sink capture, derives the exact expected cue window, runs the independent
-CEA-708 decoder, rechecks the installed candidate at the final write boundary, and exposes current
-status through the API remains unfinished. Headend carriage and viewer rendering remain external
-acceptance evidence, not local decode-back proof.
+The independent decoder accepts only an absolute executable path, hashes the exact executable into
+the evidence, enforces capture/output/deadline bounds, parses SRT, removes only known FFmpeg-generated
+CEA-708 presentation wrappers, and hashes canonical semantic text. Its real graph test generates,
+captures, independently decodes, and matches an MPEG-TS cue. The orchestration job that requests the
+selected-sink capture, derives the exact expected cue window, invokes this decoder, rechecks the
+installed candidate at the final write boundary, and exposes current status through the API remains
+unfinished. Headend carriage and viewer rendering remain external acceptance evidence, not local
+decode-back proof.

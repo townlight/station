@@ -313,6 +313,31 @@ pub fn cues_sha256(cues: &[AssetCaptionCue]) -> String {
     format!("{:x}", digest.finalize())
 }
 
+pub fn canonical_caption_text_sha256(texts: &[String]) -> Result<String, String> {
+    if texts.is_empty() || texts.len() > MAX_CAPTION_CUES_PER_TRACK {
+        return Err("caption proof text set must be bounded and nonempty".into());
+    }
+    let mut digest = Sha256::new();
+    digest.update(b"townlight.caption-proof-text.v1\0");
+    digest.update((texts.len() as u64).to_be_bytes());
+    for text in texts {
+        if text.is_empty()
+            || text.len() > MAX_CAPTION_CUE_TEXT_BYTES
+            || text
+                .chars()
+                .any(|character| character.is_control() && !character.is_whitespace())
+        {
+            return Err("caption proof text is empty, unbounded, or contains controls".into());
+        }
+        let canonical = text.split_whitespace().collect::<Vec<_>>().join(" ");
+        if canonical.is_empty() {
+            return Err("caption proof text is empty after whitespace normalization".into());
+        }
+        update_length_prefixed(&mut digest, canonical.as_bytes());
+    }
+    Ok(format!("{:x}", digest.finalize()))
+}
+
 fn update_length_prefixed(digest: &mut Sha256, value: &[u8]) {
     digest.update((value.len() as u64).to_be_bytes());
     digest.update(value);
@@ -670,5 +695,27 @@ mod tests {
                 .all(|byte| { byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte) })
         );
         assert_ne!(original.cues_sha256(), changed.cues_sha256());
+    }
+
+    #[test]
+    fn proof_text_digest_normalizes_transport_whitespace_but_binds_sequence() {
+        let source = vec![
+            "Town Council\nRegular Meeting".to_string(),
+            "Agenda item 2".to_string(),
+        ];
+        let decoded = vec![
+            "Town  Council Regular\r\nMeeting".to_string(),
+            "Agenda item 2".to_string(),
+        ];
+        assert_eq!(
+            canonical_caption_text_sha256(&source).unwrap(),
+            canonical_caption_text_sha256(&decoded).unwrap()
+        );
+        let reversed = vec![decoded[1].clone(), decoded[0].clone()];
+        assert_ne!(
+            canonical_caption_text_sha256(&source).unwrap(),
+            canonical_caption_text_sha256(&reversed).unwrap()
+        );
+        assert!(canonical_caption_text_sha256(&[]).is_err());
     }
 }

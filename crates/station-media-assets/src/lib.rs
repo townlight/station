@@ -1,6 +1,7 @@
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -11,6 +12,9 @@ use gstreamer as gst;
 use gstreamer_pbutils as gst_pbutils;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use station_captions::{MAX_CAPTION_PROOF_CAPTURE_BYTES, canonical_caption_text_sha256};
+
+const MAX_DECODED_CAPTION_SRT_BYTES: u64 = 32 * 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MediaMetadata {
@@ -35,6 +39,14 @@ pub struct LoudnessMeasurement {
     pub integrated_lufs: f64,
     /// Rounded-up running time covered by valid ebur128 analyzer messages.
     pub analyzed_duration_ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DecodedCaptionEvidence {
+    pub cue_count: u32,
+    pub text_sha256: String,
+    pub decoder_engine: String,
+    pub decoder_method: String,
 }
 
 #[derive(Debug)]
@@ -222,6 +234,217 @@ pub fn measure_output_loudness(
     // instead of leaving an unlinked analyzer branch to reach its deadline.
     validate_media(path.as_ref())?;
     measure_loudness_with_minimum(path, Some(minimum_duration_ms))
+}
+
+/// Independently decodes CEA captions from a bounded MPEG-TS capture through
+/// an exact FFmpeg executable. The output is staged beside the proof-owned
+/// capture, bounded before reading, parsed as SRT, and removed on every path.
+pub fn decode_output_captions(
+    capture_path: impl AsRef<Path>,
+    ffmpeg_executable: impl AsRef<Path>,
+) -> Result<DecodedCaptionEvidence, AssetError> {
+    let capture_path = capture_path.as_ref();
+    let capture =
+        fs::metadata(capture_path).map_err(|error| AssetError::InvalidSource(error.to_string()))?;
+    if !capture.is_file() || capture.len() == 0 || capture.len() > MAX_CAPTION_PROOF_CAPTURE_BYTES {
+        return Err(AssetError::InvalidSource(
+            "caption proof capture must be a bounded nonempty regular file".into(),
+        ));
+    }
+    let canonical_capture = fs::canonicalize(capture_path)
+        .map_err(|error| AssetError::InvalidSource(error.to_string()))?;
+    let ffmpeg_executable = ffmpeg_executable.as_ref();
+    if !ffmpeg_executable.is_absolute() {
+        return Err(AssetError::InvalidSource(
+            "caption decoder executable path must be absolute".into(),
+        ));
+    }
+    let decoder = fs::metadata(ffmpeg_executable)
+        .map_err(|error| AssetError::InvalidSource(error.to_string()))?;
+    if !decoder.is_file() || decoder.len() == 0 {
+        return Err(AssetError::InvalidSource(
+            "caption decoder executable must be a nonempty regular file".into(),
+        ));
+    }
+    let canonical_decoder = fs::canonicalize(ffmpeg_executable)
+        .map_err(|error| AssetError::InvalidSource(error.to_string()))?;
+    let decoder_sha256 = hash_file(&canonical_decoder)?.0;
+    let capture_parent = canonical_capture
+        .parent()
+        .ok_or_else(|| AssetError::InvalidSource("caption capture has no parent".into()))?;
+    let capture_name = canonical_capture
+        .file_name()
+        .and_then(|value| value.to_str())
+        .filter(|value| {
+            !value
+                .chars()
+                .any(|character| matches!(character, ';' | '[' | ']'))
+        })
+        .ok_or_else(|| AssetError::InvalidSource("caption capture filename is unsafe".into()))?;
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|error| AssetError::Io(error.to_string()))?
+        .as_nanos();
+    let output_name = format!(".caption-decode-{}-{nonce}.srt.part", std::process::id());
+    let output_path = capture_parent.join(&output_name);
+    let _cleanup = TemporaryDecodeOutput(output_path.clone());
+    let error_path = capture_parent.join(format!(
+        ".caption-decode-{}-{nonce}.stderr.part",
+        std::process::id()
+    ));
+    let error_file = OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(&error_path)
+        .map_err(|error| AssetError::Io(format!("create caption decoder error log: {error}")))?;
+    let _error_cleanup = TemporaryDecodeOutput(error_path.clone());
+    let movie = format!("movie={capture_name}[out0+subcc]");
+    let mut child = Command::new(&canonical_decoder)
+        .current_dir(capture_parent)
+        .args([
+            "-nostdin",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-n",
+            "-f",
+            "lavfi",
+            "-i",
+            &movie,
+            "-map",
+            "0:1",
+            "-f",
+            "srt",
+            &output_name,
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::from(error_file))
+        .spawn()
+        .map_err(|error| AssetError::Discovery(format!("start caption decoder: {error}")))?;
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let status = loop {
+        match child
+            .try_wait()
+            .map_err(|error| AssetError::Discovery(format!("poll caption decoder: {error}")))?
+        {
+            Some(status) => break status,
+            None if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(20)),
+            None => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(AssetError::Discovery(
+                    "caption decoder exceeded its 30-second deadline".into(),
+                ));
+            }
+        }
+    };
+    if !status.success() {
+        let detail = read_bounded_decoder_error(&error_path);
+        return Err(AssetError::Discovery(format!(
+            "caption decoder exited unsuccessfully: {status}: {detail}"
+        )));
+    }
+    let output = fs::metadata(&output_path).map_err(|error| {
+        AssetError::Discovery(format!("inspect caption decoder output: {error}"))
+    })?;
+    if !output.is_file() || output.len() == 0 || output.len() > MAX_DECODED_CAPTION_SRT_BYTES {
+        return Err(AssetError::Discovery(
+            "caption decoder produced empty or unbounded SRT evidence".into(),
+        ));
+    }
+    let mut bytes = Vec::with_capacity(output.len() as usize);
+    File::open(&output_path)
+        .and_then(|file| {
+            file.take(MAX_DECODED_CAPTION_SRT_BYTES + 1)
+                .read_to_end(&mut bytes)
+        })
+        .map_err(|error| AssetError::Io(format!("read caption decoder output: {error}")))?;
+    if bytes.len() as u64 > MAX_DECODED_CAPTION_SRT_BYTES {
+        return Err(AssetError::Discovery(
+            "caption decoder output exceeded its read bound".into(),
+        ));
+    }
+    let srt = String::from_utf8(bytes)
+        .map_err(|_| AssetError::Discovery("caption decoder output is not UTF-8 SRT".into()))?;
+    let texts = parse_srt_caption_texts(&srt)?;
+    let cue_count = u32::try_from(texts.len())
+        .map_err(|_| AssetError::Discovery("decoded caption cue count overflowed".into()))?;
+    let text_sha256 = canonical_caption_text_sha256(&texts).map_err(AssetError::Discovery)?;
+    Ok(DecodedCaptionEvidence {
+        cue_count,
+        text_sha256,
+        decoder_engine: format!("ffmpeg-sha256={decoder_sha256}"),
+        decoder_method: "lavfi movie subcc to bounded SRT canonical text v1".into(),
+    })
+}
+
+fn read_bounded_decoder_error(path: &Path) -> String {
+    let mut bytes = Vec::with_capacity(4_096);
+    if File::open(path)
+        .and_then(|file| file.take(4_096).read_to_end(&mut bytes))
+        .is_err()
+    {
+        return "decoder error detail unavailable".into();
+    }
+    String::from_utf8_lossy(&bytes)
+        .chars()
+        .filter(|character| !character.is_control() || character.is_whitespace())
+        .collect::<String>()
+        .trim()
+        .to_string()
+}
+
+fn parse_srt_caption_texts(srt: &str) -> Result<Vec<String>, AssetError> {
+    let normalized = srt.replace("\r\n", "\n").replace('\r', "\n");
+    let mut texts = Vec::new();
+    for block in normalized.split("\n\n") {
+        let lines = block.lines().collect::<Vec<_>>();
+        if lines.iter().all(|line| line.trim().is_empty()) {
+            continue;
+        }
+        let timestamp_index = lines
+            .iter()
+            .position(|line| line.contains("-->"))
+            .ok_or_else(|| {
+                AssetError::Discovery("caption decoder returned malformed SRT".into())
+            })?;
+        let text = lines[timestamp_index + 1..]
+            .iter()
+            .map(|line| line.trim())
+            .filter(|line| !line.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n");
+        let text = normalize_ffmpeg_srt_presentation(&text);
+        if text.is_empty() {
+            return Err(AssetError::Discovery(
+                "caption decoder returned an SRT cue without text".into(),
+            ));
+        }
+        texts.push(text);
+    }
+    if texts.is_empty() {
+        return Err(AssetError::Discovery(
+            "caption decoder returned no caption cues".into(),
+        ));
+    }
+    Ok(texts)
+}
+
+fn normalize_ffmpeg_srt_presentation(text: &str) -> String {
+    let text = text
+        .strip_prefix("<font face=\"Monospace\">")
+        .unwrap_or(text);
+    let text = text.strip_suffix("</font>").unwrap_or(text);
+    text.strip_prefix("{\\an7}").unwrap_or(text).to_string()
+}
+
+struct TemporaryDecodeOutput(PathBuf);
+
+impl Drop for TemporaryDecodeOutput {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.0);
+    }
 }
 
 fn measure_loudness_with_minimum(
@@ -723,4 +946,39 @@ fn hash_file(path: &Path) -> Result<(String, u64), AssetError> {
         size += count as u64;
     }
     Ok((format!("{:x}", digest.finalize()), size))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_bounded_srt_into_ordered_caption_text() {
+        let texts = parse_srt_caption_texts(
+            "1\r\n00:00:00,100 --> 00:00:01,000\r\nTown Council\r\n\r\n2\r\n00:00:01,500 --> 00:00:02,000\r\nAgenda item 2\r\ncontinued\r\n",
+        )
+        .unwrap();
+        assert_eq!(texts, vec!["Town Council", "Agenda item 2\ncontinued"]);
+        assert_eq!(canonical_caption_text_sha256(&texts).unwrap().len(), 64);
+    }
+
+    #[test]
+    fn removes_only_ffmpeg_generated_cea708_presentation_wrappers() {
+        let texts = parse_srt_caption_texts(
+            "1\n00:00:00,100 --> 00:00:01,000\n<font face=\"Monospace\">{\\an7}TownLight CEA-708 proof</font>\n",
+        )
+        .unwrap();
+        assert_eq!(texts, vec!["TownLight CEA-708 proof"]);
+        assert_eq!(
+            normalize_ffmpeg_srt_presentation("<b>operator-authored markup</b>"),
+            "<b>operator-authored markup</b>"
+        );
+    }
+
+    #[test]
+    fn rejects_empty_or_malformed_decoder_output() {
+        assert!(parse_srt_caption_texts("").is_err());
+        assert!(parse_srt_caption_texts("1\nno timestamp\ntext\n").is_err());
+        assert!(parse_srt_caption_texts("1\n00:00:00,100 --> 00:00:01,000\n\n").is_err());
+    }
 }

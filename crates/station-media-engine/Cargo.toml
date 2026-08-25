@@ -16,3 +16,4 @@ serde_json.workspace = true
 
 [dev-dependencies]
 gstreamer-pbutils.workspace = true
+station-captions.workspace = true

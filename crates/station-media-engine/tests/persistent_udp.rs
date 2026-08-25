@@ -3,7 +3,7 @@ use std::fs;
 use std::io::Cursor;
 use std::net::UdpSocket;
 use std::ops::Deref;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc::TryRecvError;
 use std::sync::{Mutex, MutexGuard};
@@ -14,7 +14,8 @@ use gstreamer as gst;
 use gstreamer_pbutils as gst_pbutils;
 use image::{ImageBuffer, ImageFormat, Rgba};
 use sha2::{Digest, Sha256};
-use station_media_assets::ingest_media;
+use station_captions::canonical_caption_text_sha256;
+use station_media_assets::{decode_output_captions, ingest_media};
 use station_media_engine::{
     ConfiguredTransportOutput, EngineError, OutputCaptureRequest, OutputCaptureStatus,
     PersistentPlayout, SourceRole, TransportOutput,
@@ -143,40 +144,32 @@ fn accepts_a_typed_caption_cue_without_interrupting_transport() {
     playout.stop().unwrap();
     let artifact = proof_root.join(&ready.artifact_relative_path);
     assert!(artifact.is_file(), "caption proof artifact must exist");
-    let movie = format!(
-        "movie=output-proofs/{}[out0+subcc]",
-        ready.artifact_relative_path
-    );
-    let decoded = Command::new("ffmpeg.exe")
-        .current_dir(&root)
-        .args([
-            "-nostdin",
-            "-hide_banner",
-            "-loglevel",
-            "error",
-            "-f",
-            "lavfi",
-            "-i",
-            &movie,
-            "-map",
-            "0:1",
-            "-f",
-            "srt",
-            "pipe:1",
-        ])
-        .output()
-        .expect("FFmpeg caption decode-back tool starts");
-    assert!(
-        decoded.status.success(),
-        "caption decode-back failed: {}",
-        String::from_utf8_lossy(&decoded.stderr)
-    );
-    let text = String::from_utf8_lossy(&decoded.stdout);
-    assert!(
-        text.contains("TownLight CEA-708 proof"),
-        "emitted transport did not decode the expected caption: {text}"
-    );
+    let decoded = decode_output_captions(&artifact, ffmpeg_executable())
+        .expect("independent bounded caption decode-back succeeds");
+    let expected = canonical_caption_text_sha256(&["TownLight CEA-708 proof".into()]).unwrap();
+    assert_eq!(decoded.cue_count, 1);
+    assert_eq!(decoded.text_sha256, expected);
     fs::remove_dir_all(root).unwrap();
+}
+
+fn ffmpeg_executable() -> PathBuf {
+    if let Some(path) = std::env::var_os("TOWNLIGHT_FFMPEG") {
+        return PathBuf::from(path);
+    }
+    let located = Command::new("where.exe")
+        .arg("ffmpeg.exe")
+        .output()
+        .expect("where.exe locates FFmpeg");
+    assert!(
+        located.status.success(),
+        "FFmpeg must be installed for proof tests"
+    );
+    String::from_utf8(located.stdout)
+        .expect("where.exe output is UTF-8")
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .map(|line| PathBuf::from(line.trim()))
+        .expect("where.exe returned an FFmpeg path")
 }
 
 #[test]

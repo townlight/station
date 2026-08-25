@@ -9,6 +9,7 @@ gstreamer.workspace = true
 gstreamer-pbutils.workspace = true
 serde.workspace = true
 sha2.workspace = true
+station-captions.workspace = true
 
 [dev-dependencies]
 gstreamer.workspace = true

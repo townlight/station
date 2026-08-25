@@ -13,7 +13,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   asset, caption policy revision, caption track revision/digest, proof-owned MPEG-TS artifact hash,
   and independent decoded-text digest. Verified outcomes require nonempty decoded cues and exact
   expected/decoded count and digest equality; stale policy, track, schedule, or output bindings fail
-  closed. Worker capture/decode job execution remains a separate unfinished boundary.
+  closed. The independent decoder now accepts only an exact executable path, hashes that decoder,
+  bounds capture/output size and execution time, parses its SRT result, and hashes canonical semantic
+  text; a real generated CEA-708 MPEG-TS capture proves the path. Orchestration job execution remains
+  a separate unfinished boundary.
 
 - Asset caption authority now stores bounded, ordered, non-overlapping cue sets against the exact
   content-addressed media identity, language, and CEA service. Writes require ready media, reject
