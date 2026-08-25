@@ -5024,13 +5024,93 @@ fn configure_gstreamer_command(command: &mut Command, runtime: &Path) {
         .env("GST_PLUGIN_SYSTEM_PATH_1_0", plugin_path);
 }
 
+const WINDOWS_CLOCK_PROBE_SCRIPT: &str = r#"
+$ErrorActionPreference = 'Stop'
+try {
+    $sourceOutput = @(& w32tm.exe /query /source 2>$null)
+    if (($LASTEXITCODE -ne 0) -or ($sourceOutput.Count -ne 1)) {
+        Write-Output 'unavailable'
+        exit 0
+    }
+
+    $source = ([string]$sourceOutput[0]).Split(',')[0].Trim()
+    if (($source.Length -lt 1) -or ($source.Length -gt 255) -or
+        ($source -notmatch '^[A-Za-z0-9._:-]+$')) {
+        Write-Output 'unknown'
+        exit 0
+    }
+
+    $stripOutput = @(& w32tm.exe /stripchart "/computer:$source" /period:1 /samples:3 /rdtsc 2>$null)
+    if ($LASTEXITCODE -ne 0) {
+        Write-Output 'unavailable'
+        exit 0
+    }
+
+    $samples = [Collections.Generic.List[double]]::new()
+    foreach ($line in $stripOutput) {
+        $parts = ([string]$line).Split(',')
+        if (($parts.Count -ne 5) -or
+            ($parts[0].Trim() -notmatch '^\d+$') -or
+            ($parts[1].Trim() -notmatch '^\d+$') -or
+            ($parts[2].Trim() -notmatch '^\d+$')) {
+            continue
+        }
+        try {
+            $offset = [double]::Parse(
+                $parts[4].Trim(),
+                [Globalization.NumberStyles]::Float,
+                [Globalization.CultureInfo]::CurrentCulture)
+        } catch {
+            Write-Output 'unknown'
+            exit 0
+        }
+        if ([double]::IsNaN($offset) -or [double]::IsInfinity($offset)) {
+            Write-Output 'unknown'
+            exit 0
+        }
+        $samples.Add($offset)
+    }
+
+    if ($samples.Count -ne 3) {
+        Write-Output 'unknown'
+        exit 0
+    }
+    foreach ($offset in $samples) {
+        if ([Math]::Abs($offset) -gt 2.0) {
+            Write-Output 'unsynchronized'
+            exit 0
+        }
+    }
+    Write-Output 'synchronized'
+} catch {
+    Write-Output 'unavailable'
+}
+"#;
+
+fn parse_windows_clock_probe_result(output: &[u8]) -> ClockSyncStatus {
+    match output {
+        b"synchronized\n" | b"synchronized\r\n" => ClockSyncStatus::Synchronized,
+        b"unsynchronized\n" | b"unsynchronized\r\n" => ClockSyncStatus::Unsynchronized,
+        b"unavailable\n" | b"unavailable\r\n" => ClockSyncStatus::Unavailable,
+        b"unknown\n" | b"unknown\r\n" => ClockSyncStatus::Unknown,
+        _ => ClockSyncStatus::Unknown,
+    }
+}
+
 fn probe_windows_clock_sync() -> ClockSyncStatus {
-    let mut command = hidden_command("w32tm.exe");
-    command.args(["/query", "/status"]);
-    // A successful w32tm query means only that status was returned. Its text is
-    // localized and can describe an unsynchronized clock, so do not infer green.
-    let _ = run_bounded_command(command, Duration::from_secs(5), 64 * 1024);
-    ClockSyncStatus::Unknown
+    let mut command = hidden_command("powershell.exe");
+    command.args([
+        "-NoProfile",
+        "-NonInteractive",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-Command",
+        WINDOWS_CLOCK_PROBE_SCRIPT,
+    ]);
+    match run_bounded_command(command, Duration::from_secs(8), 64 * 1024) {
+        Ok(output) if output.success => parse_windows_clock_probe_result(&output.stdout),
+        Ok(_) | Err(_) => ClockSyncStatus::Unavailable,
+    }
 }
 
 fn hidden_command(program: impl AsRef<std::ffi::OsStr>) -> Command {
@@ -6209,6 +6289,46 @@ mod tests {
             .unwrap();
         let csrf_value = csrf.split_once('=').unwrap().1.to_owned();
         (format!("{session}; {csrf}"), csrf_value)
+    }
+
+    #[test]
+    fn windows_clock_probe_result_accepts_only_one_exact_ascii_status() {
+        assert_eq!(
+            parse_windows_clock_probe_result(b"synchronized\r\n"),
+            ClockSyncStatus::Synchronized
+        );
+        assert_eq!(
+            parse_windows_clock_probe_result(b"unsynchronized\n"),
+            ClockSyncStatus::Unsynchronized
+        );
+        assert_eq!(
+            parse_windows_clock_probe_result(b"unavailable\n"),
+            ClockSyncStatus::Unavailable
+        );
+        assert_eq!(
+            parse_windows_clock_probe_result(b"unknown\n"),
+            ClockSyncStatus::Unknown
+        );
+        assert_eq!(
+            parse_windows_clock_probe_result(b"synchronized\nextra\n"),
+            ClockSyncStatus::Unknown
+        );
+        assert_eq!(
+            parse_windows_clock_probe_result(b"Synchronized\n"),
+            ClockSyncStatus::Unknown
+        );
+    }
+
+    #[test]
+    fn windows_clock_probe_contract_measures_the_configured_source_fail_closed() {
+        assert!(WINDOWS_CLOCK_PROBE_SCRIPT.contains("w32tm.exe /query /source"));
+        assert!(WINDOWS_CLOCK_PROBE_SCRIPT.contains(".Split(',')[0].Trim()"));
+        assert!(WINDOWS_CLOCK_PROBE_SCRIPT.contains("/samples:3"));
+        assert!(WINDOWS_CLOCK_PROBE_SCRIPT.contains("/rdtsc"));
+        assert!(WINDOWS_CLOCK_PROBE_SCRIPT.contains("$samples.Count -ne 3"));
+        assert!(WINDOWS_CLOCK_PROBE_SCRIPT.contains("[Math]::Abs($offset) -gt 2.0"));
+        assert!(WINDOWS_CLOCK_PROBE_SCRIPT.contains("CurrentCulture"));
+        assert!(!WINDOWS_CLOCK_PROBE_SCRIPT.contains("Invoke-Expression"));
     }
 
     #[test]

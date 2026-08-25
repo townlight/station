@@ -28,8 +28,12 @@ resource sample, backup write probe, receipt hashing, or GStreamer subprocess wo
 Installed-engine inspection runs only the private `gst-inspect-1.0.exe`, with private plugin paths,
 a five-second deadline, discarded stderr, and a concurrently enforced byte limit. It accepts only
 the known required factory and encoder names. The current network probe proves local route selection,
-not outbound delivery, so it remains unknown. A successful localized `w32tm` status query is not
-treated as synchronization proof, so clock synchronization remains unknown. Application and
+not outbound delivery, so it remains unknown. Clock evidence queries the current Windows Time source,
+removes only its comma-delimited peer flags, and obtains exactly three one-second
+`w32tm /stripchart /rdtsc` offset samples. The fixed hidden PowerShell boundary parses each numeric
+offset with the current culture and emits one exact ASCII status. Every finite sample must be within
+two seconds for synchronized readiness; command failure, an unsafe source, malformed or missing
+samples, and excessive offsets remain unavailable, unknown, or unsynchronized rather than green. Application and
 active-slot receipts must agree, and every application file is rehashed. The approved media-runtime
 package identity is bound to a full installed-file manifest whose exact bytes are SHA-256-bound into
 the installation receipt. Every runtime file is re-enumerated and rehashed; missing, extra,
@@ -55,6 +59,6 @@ readiness facts.
 
 StationBox status is now one typed authority that S2 headend checks and S3 commissioning can extend
 without inventing new readiness vocabularies. The current machine will correctly remain yellow or
-red for unverified clock, outbound delivery, interlaced output, SDI, and
+red for unavailable or excessive-offset clock evidence, outbound delivery, interlaced output, SDI, and
 NDI. That is an implementation result, not field evidence: clean-machine, headend, one-station-week,
 and three-station-week gates remain external and false until their evidence is captured.
