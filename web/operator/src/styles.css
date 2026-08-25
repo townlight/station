@@ -175,3 +175,14 @@ form { display:grid; gap:16px; margin-top:20px; }label { display:grid; gap:7px; 
 .fallback-slate-authority>div { display:grid; grid-template-columns:7.5rem minmax(0,1fr); gap:.75rem; }
 .fallback-slate-authority dt { color:var(--muted); }
 .fallback-slate-authority dd { margin:0; overflow-wrap:anywhere; }
+.caption-policy-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(min(100%,28rem),1fr)); gap:1rem; margin-bottom:1rem; }
+.caption-policy-panel { display:grid; gap:.85rem; }
+.caption-mode { flex:none; padding:7px 10px; border-radius:999px; background:#f5edd8; color:#7e5b1e; font-size:10px; font-weight:800; text-transform:capitalize; }
+.caption-mode-cea708 { background:#e2f2e7; color:#246b4c; }
+.caption-mode-disabled { background:#eef0ed; color:#59645f; }
+.caption-policy-fields { display:grid; grid-template-columns:minmax(0,1fr) minmax(8rem,.45fr) minmax(8rem,.6fr); gap:.75rem; }
+.caption-policy-authority { display:grid; gap:.45rem; margin:0; }
+.caption-policy-authority>div { display:grid; grid-template-columns:7.5rem minmax(0,1fr); gap:.75rem; }
+.caption-policy-authority dt { color:var(--muted); }
+.caption-policy-authority dd { margin:0; overflow-wrap:anywhere; }
+@media (max-width:760px) { .caption-policy-fields { grid-template-columns:1fr; } }
