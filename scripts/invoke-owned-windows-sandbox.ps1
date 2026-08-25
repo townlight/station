@@ -28,14 +28,93 @@ function Get-CurrentWindowsSandboxProcesses {
 
     try {
         return @($processes | Sort-Object Id | ForEach-Object {
+            $executablePath = [IO.Path]::GetFullPath($_.Path)
             [pscustomobject]@{
                 process_id = [int]$_.Id
                 process_name = "$($_.ProcessName).exe"
                 creation_time = $_.StartTime.ToUniversalTime().ToString('o')
+                executable_path = $executablePath
             }
         })
     } catch {
         throw "Windows Sandbox ownership is unknown because a detected process identity could not be read: $($_.Exception.Message)"
+    }
+}
+
+function Resolve-WindowsSandboxOwnership {
+    param(
+        [Parameter(Mandatory)][AllowEmptyCollection()][array]$Processes,
+        [Parameter(Mandatory)][string]$OwnershipRoot
+    )
+
+    if ($Processes.Count -eq 0) {
+        return [pscustomobject]@{
+            ownership = 'none_observed'
+            owner_namespace = $null
+            run_id = $null
+            ownership_record = $null
+        }
+    }
+
+    if (-not (Test-Path -LiteralPath $OwnershipRoot -PathType Container)) {
+        return [pscustomobject]@{
+            ownership = 'external_or_unclaimed'
+            owner_namespace = $null
+            run_id = $null
+            ownership_record = $null
+        }
+    }
+
+    try {
+        $records = @(Get-ChildItem -LiteralPath $OwnershipRoot -Filter '*.launched.json' -File |
+            ForEach-Object {
+                $record = Get-Content -LiteralPath $_.FullName -Raw | ConvertFrom-Json
+                [pscustomobject]@{ path = $_.FullName; record = $record }
+            })
+    } catch {
+        throw "Windows Sandbox ownership is unknown because ownership records could not be inspected: $($_.Exception.Message)"
+    }
+
+    $matches = @()
+    foreach ($process in $Processes) {
+        $processMatches = @($records | Where-Object {
+            $_.record.schema_version -eq 1 -and
+            $_.record.record_type -eq 'launched_process' -and
+            $_.record.owner_namespace -eq 'townlight-station-codex' -and
+            [int]$_.record.process_id -eq $process.process_id -and
+            $_.record.process_name -eq $process.process_name -and
+            $_.record.process_creation_time -eq $process.creation_time -and
+            ([IO.Path]::GetFullPath([string]$_.record.executable_path)).Equals(
+                $process.executable_path,
+                [StringComparison]::OrdinalIgnoreCase
+            )
+        })
+        if ($processMatches.Count -ne 1) {
+            return [pscustomobject]@{
+                ownership = 'external_or_unclaimed'
+                owner_namespace = $null
+                run_id = $null
+                ownership_record = $null
+            }
+        }
+        $matches += $processMatches[0]
+    }
+
+    $runIds = @($matches | ForEach-Object { [string]$_.record.run_id } | Sort-Object -Unique)
+    if ($runIds.Count -ne 1) {
+        return [pscustomobject]@{
+            ownership = 'external_or_unclaimed'
+            owner_namespace = $null
+            run_id = $null
+            ownership_record = $null
+        }
+    }
+
+    return [pscustomobject]@{
+        ownership = 'townlight_harness'
+        owner_namespace = 'townlight-station-codex'
+        run_id = $runIds[0]
+        ownership_record = $matches[0].path
     }
 }
 
@@ -100,22 +179,54 @@ try {
         throw 'Windows Sandbox ownership is unknown because another launch decision is in progress.'
     }
 
+    $ownershipRoot = Join-Path $env:ProgramData 'Scott Shared Harness\WindowsSandbox\ownership-v1'
     $activeProcesses = @(Get-CurrentWindowsSandboxProcesses)
+    $observedOwnership = Resolve-WindowsSandboxOwnership `
+        -Processes $activeProcesses `
+        -OwnershipRoot $ownershipRoot
     if ($activeProcesses.Count -gt 0) {
         $identities = ($activeProcesses | ForEach-Object {
             "$($_.process_name) PID $($_.process_id)"
         }) -join ', '
-        throw "Windows Sandbox is occupied by an unclaimed owner ($identities). No launch or cleanup was attempted."
+        if ($CheckOnly) {
+            [pscustomobject]@{
+                schema_version = 1
+                status = 'occupied'
+                ownership = $observedOwnership.ownership
+                owner_namespace = $observedOwnership.owner_namespace
+                run_id = $observedOwnership.run_id
+                ownership_record = $observedOwnership.ownership_record
+                launch_allowed = $false
+                sandbox_process_count = $activeProcesses.Count
+                processes = $activeProcesses
+                checked_at_utc = [datetime]::UtcNow.ToString('o')
+                shared_mutex = $sharedMutexName
+                guard_reason = 'An active Sandbox process is a no-touch boundary unless exact harness ownership is proved.'
+            }
+            return
+        }
+        $ownerDescription = if ($observedOwnership.ownership -eq 'townlight_harness') {
+            "the TownLight harness run $($observedOwnership.run_id)"
+        } else {
+            'an external or unclaimed owner'
+        }
+        throw "Windows Sandbox is occupied by $ownerDescription ($identities). No launch or cleanup was attempted."
     }
 
     if ($CheckOnly) {
         [pscustomobject]@{
             schema_version = 1
-            status = 'available'
+            status = 'no_active_sandbox_detected'
+            ownership = 'none_observed'
+            owner_namespace = $null
+            run_id = $null
+            ownership_record = $null
             launch_allowed = $true
             sandbox_process_count = 0
+            processes = @()
             checked_at_utc = [datetime]::UtcNow.ToString('o')
             shared_mutex = $sharedMutexName
+            guard_reason = 'This is an instantaneous guarded observation, not an assumption that the shared Sandbox remains free.'
         }
         return
     }
@@ -147,7 +258,6 @@ try {
         throw 'The Windows Sandbox host executable does not have a valid Microsoft signature.'
     }
 
-    $ownershipRoot = Join-Path $env:ProgramData 'Scott Shared Harness\WindowsSandbox\ownership-v1'
     [void][IO.Directory]::CreateDirectory($ownershipRoot)
     $runId = [guid]::NewGuid().ToString('D')
     $requestRecordPath = Join-Path $ownershipRoot "$runId.request.json"

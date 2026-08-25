@@ -143,18 +143,20 @@ clean-machine acceptance, and field gates are not done.
 ### Shared Windows Sandbox ownership
 
 Windows Sandbox is a shared host resource because independent TownLight and Claude work may use it.
-No harness may infer ownership from an idle-looking desktop, Hyper-V service state, a process name,
-or an old file. Before any TownLight sandbox launch, run
+No harness may assume that it is free or infer ownership from an idle-looking desktop, Hyper-V
+service state, a process name, or an old file. Before any TownLight sandbox launch, run
 `scripts\invoke-owned-windows-sandbox.ps1 -CheckOnly`, then launch only through the same script with
 a committed TownLight-owned `.wsb` configuration beneath `harness\windows-sandbox\configs`.
 
 The launcher serializes the check-and-launch boundary with the machine-global
-`Global\Scott.SharedWindowsSandbox.Launch.v1` mutex, rejects every detected sandbox host/client
-process as unclaimed occupancy, and creates new immutable request/process identity records beneath
-`%ProgramData%\Scott Shared Harness\WindowsSandbox\ownership-v1`. It never stops a process, removes
-an ownership record, or overwrites evidence. A future cleanup tool may act only when its own record
-matches the exact PID, process creation identity, executable, and run ID. Claude-owned processes and
-files are a permanent no-touch fence, regardless of apparent age or state. See
+`Global\Scott.SharedWindowsSandbox.Launch.v1` mutex. Check-only mode reports
+`no_active_sandbox_detected`, `townlight_harness`, or `external_or_unclaimed`; it never reports the
+resource as free. Every detected process blocks launch. TownLight attribution requires an exact
+PID, creation identity, executable, owner namespace, and run-ID match against immutable records
+beneath `%ProgramData%\Scott Shared Harness\WindowsSandbox\ownership-v1`. It never stops a process,
+removes an ownership record, or overwrites evidence. A future cleanup tool may act only when its own
+record matches that same exact identity. Claude-owned processes and files are a permanent no-touch
+fence, regardless of apparent age or state. See
 [ADR 0045](docs/adr/0045-shared-windows-sandbox-ownership.md).
 
 Run formatting, linting, and tests before committing:

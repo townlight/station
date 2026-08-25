@@ -22,7 +22,15 @@ user-token `Get-Process` snapshot. It does not depend on elevated `Win32_Process
 inspect, inability to read the exact identity of a detected process, an abandoned or unavailable
 mutex, or any matching process makes ownership unknown or occupied and blocks launch. The global
 mutex is agent-neutral so the Claude harness can use the same check-and-launch serialization
-boundary.
+boundary. A check that observes no process reports `no_active_sandbox_detected` and
+`none_observed`, never "free" or "available"; that result is an instantaneous guarded observation.
+
+When a Sandbox process is present, check-only mode returns its PID, process name, creation time, and
+executable path without changing it. The process is attributed to TownLight only when every observed
+identity has exactly one matching immutable TownLight launch record and all matches share one run
+ID. Anything else is `external_or_unclaimed` and therefore inside the no-touch fence. Launch mode
+fails closed for both classifications. It never adopts, reuses, or cleans an already-running
+Sandbox, including one launched by Claude.
 
 Launch accepts only an existing `.wsb` file beneath the committed TownLight-owned
 `harness\windows-sandbox\configs` directory and only the Microsoft-signed

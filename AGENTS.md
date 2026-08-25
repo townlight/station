@@ -10,12 +10,14 @@
 - Do not claim a capability from source presence. Require the same-candidate installed-machine evidence.
 - Never commit secrets, signing material, customer data, generated databases, or local environment files.
 - Keep commits atomic and update contracts and documentation with behavior.
-- Treat Windows Sandbox as a shared machine resource. Before every launch, use
+- Treat Windows Sandbox as a shared machine resource. Never assume it is free. Before every launch, use
   `scripts/invoke-owned-windows-sandbox.ps1`; unknown ownership, an active sandbox process, or a
   concurrent launch decision fails closed. Never terminate a sandbox process by name or broad
   search. Cleanup is permitted only for an exact PID, creation identity, and executable recorded by
-  the harness that launched it. Claude-owned processes and files are always outside TownLight's
-  ownership boundary and must not be changed, moved, deleted, or used as cleanup targets.
+  the harness that launched it. All Claude-owned or Claude-created local processes and files are
+  inside a no-touch fence, always outside TownLight's ownership boundary, and must not be inspected
+  beyond the minimum identity needed to detect occupancy, changed, moved, deleted, or used as
+  cleanup targets.
 - Run Cargo commands from the workspace root. On Windows, invoke Cargo only through
   `scripts/invoke-cargo.ps1`; it binds Cargo and every descendant process to the explicit GStreamer
   runtime. The checked-in target runner is a second boundary. Never bypass either boundary or launch

@@ -40,7 +40,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - A shared-machine Windows Sandbox ownership guard now serializes pre-launch checks, rejects any
   active or unknown sandbox owner, records only exact harness-launched process identity in immutable
   evidence, and contains no broad cleanup or process-termination path. Its exact-name process
-  snapshot works under the ordinary user token instead of requiring elevated CIM access.
+  snapshot works under the ordinary user token instead of requiring elevated CIM access. Read-only
+  checks now report `none_observed`, exact TownLight ownership, or `external_or_unclaimed` instead
+  of calling an idle instant "available"; every observed process remains a no-touch launch blocker.
 
 - Windows development Cargo execution now starts through a checked-in GStreamer environment wrapper,
   with the target runner retained as a second fail-closed boundary, preventing test binaries and their

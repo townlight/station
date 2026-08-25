@@ -48,9 +48,14 @@ Assert-True ($source -notmatch '(?i)\bRemove-Item\b|\bMove-Item\b|\bRename-Item\
     'the launcher must not mutate or clean up another harness owner file'
 
 $check = & $launcherPath -CheckOnly
-Assert-True ($check.status -eq 'available') 'the current machine must report available when no sandbox is active'
+Assert-True ($check.status -eq 'no_active_sandbox_detected') `
+    'the guard must report only what it observed instead of assuming the shared sandbox is free'
+Assert-True ($check.ownership -eq 'none_observed') `
+    'the guard must distinguish no observed owner from proved availability'
 Assert-True ($check.launch_allowed) 'the current machine check must explicitly allow launch'
 Assert-True ($check.sandbox_process_count -eq 0) 'the available result must contain no sandbox processes'
+Assert-True ($check.guard_reason -match 'instantaneous') `
+    'the no-process result must state that the observation is instantaneous'
 
 $temporaryRoot = Join-Path ([IO.Path]::GetTempPath()) "townlight-sandbox-guard-$([guid]::NewGuid().ToString('N'))"
 $fakeSandboxPath = Join-Path $temporaryRoot 'WindowsSandbox.exe'
@@ -59,14 +64,26 @@ Copy-Item -LiteralPath (Join-Path $env:WINDIR 'System32\ping.exe') -Destination 
 $fakeSandbox = Start-Process -FilePath $fakeSandboxPath `
     -ArgumentList @('127.0.0.1', '-n', '4') -WindowStyle Hidden -PassThru
 try {
-    $occupiedCaught = $false
-    try {
-        & $launcherPath -CheckOnly | Out-Null
-    } catch {
-        $occupiedCaught = $_.Exception.Message -match 'occupied by an unclaimed owner'
-    }
-    Assert-True $occupiedCaught `
+    $occupied = & $launcherPath -CheckOnly
+    Assert-True ($occupied.status -eq 'occupied') `
+        'an observed WindowsSandbox.exe process must be reported as occupied'
+    Assert-True ($occupied.ownership -eq 'external_or_unclaimed') `
+        'an observed process without exact harness evidence must never be claimed by TownLight'
+    Assert-True (-not $occupied.launch_allowed) `
         'an unclaimed WindowsSandbox.exe process must make the pre-launch guard fail closed'
+    Assert-True ($occupied.processes.Count -eq 1) `
+        'the ownership check must return the exact observed process identity'
+    Assert-True ($occupied.processes[0].process_id -eq $fakeSandbox.Id) `
+        'the ownership check must identify the exact occupied process'
+
+    $occupiedLaunchCaught = $false
+    try {
+        & $launcherPath -ConfigurationPath $launcherPath | Out-Null
+    } catch {
+        $occupiedLaunchCaught = $_.Exception.Message -match 'occupied by an external or unclaimed owner'
+    }
+    Assert-True $occupiedLaunchCaught `
+        'the launch path must reject occupied state before inspecting or starting a configuration'
 } finally {
     if (-not $fakeSandbox.WaitForExit(10000)) {
         throw 'The verifier-owned sandbox-name simulation did not exit on its own.'
