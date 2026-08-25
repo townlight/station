@@ -23,6 +23,7 @@ members = [
     "crates/station-media-protocol",
     "crates/station-maintenance",
     "crates/station-orchestration",
+    "crates/station-ott-contract",
     "crates/station-underwriting",
     "crates/station-automation-policy",
     "crates/station-recording",

@@ -1931,6 +1931,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "station-ott-contract"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "station-publishing"
 version = "0.1.0"
 dependencies = [
