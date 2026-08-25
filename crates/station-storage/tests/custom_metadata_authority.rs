@@ -6,7 +6,7 @@ use station_metadata::{
     AssetMetadataRecord, AssetMetadataValue, MetadataFieldDefinition, MetadataFieldType,
     MetadataFieldValue, MetadataSchema,
 };
-use station_storage::StationStore;
+use station_storage::{AssetMetadataWriteError, StationStore};
 
 const SCHEMA_ID: &str = "11111111-2222-4333-8444-555555555555";
 const FIELD_ID: &str = "22222222-2222-4333-8444-555555555555";
@@ -164,6 +164,53 @@ fn metadata_authority_rejects_stale_rebinding_and_unknown_schema_revisions() {
             .list_asset_metadata_record_history(RECORD_ID, 129)
             .is_err()
     );
+    drop(store);
+    for candidate in [
+        database.clone(),
+        PathBuf::from(format!("{}-wal", database.display())),
+        PathBuf::from(format!("{}-shm", database.display())),
+    ] {
+        let _ = std::fs::remove_file(candidate);
+    }
+}
+
+#[test]
+fn record_cas_rechecks_current_schema_and_rejects_duplicate_binding() {
+    let database = temporary_database("custom-metadata-schema-race");
+    let store = StationStore::open(&database).unwrap();
+    store
+        .write_custom_metadata_schema(&schema(1), None, "setup-admin", 10)
+        .unwrap();
+
+    // This is the API-resolved candidate. Advancing the schema before the
+    // record write deterministically models the resolution/write interleaving.
+    let stale_candidate = record(1, 1);
+    let mut revised_schema = schema(2);
+    revised_schema.fields[0].label = "Current program title".into();
+    store
+        .write_custom_metadata_schema(&revised_schema, Some(1), "setup-admin", 20)
+        .unwrap();
+    assert_eq!(
+        store.write_asset_metadata_record(&stale_candidate, None, "meeting-operator", 30),
+        Err(AssetMetadataWriteError::StaleSchema {
+            requested_revision: 1,
+            current_revision: 2,
+        })
+    );
+
+    let current = record(1, 2);
+    store
+        .write_asset_metadata_record(&current, None, "meeting-operator", 40)
+        .unwrap();
+    let duplicate = AssetMetadataRecord {
+        metadata_id: "44444444-2222-4333-8444-555555555555".into(),
+        ..current
+    };
+    assert_eq!(
+        store.write_asset_metadata_record(&duplicate, None, "meeting-operator", 50),
+        Err(AssetMetadataWriteError::DuplicateBinding)
+    );
+
     drop(store);
     for candidate in [
         database.clone(),

@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use station_schedule::{AssetReadiness, DispatchStatus, MediaAsset, ScheduleItem, ScheduleState};
-use station_storage::{CommitWriteError, StationStore};
+use station_storage::{CommitWriteError, ScheduleItemWrite, StationStore};
 
 const CHANNEL: &str = "8b626c01-bdf8-419a-8a2e-b0a7caa1ff7e";
 const ITEM: &str = "256d5a07-92d3-4718-aec9-05cad42fae7d";
@@ -10,6 +10,25 @@ const ITEM_TWO: &str = "356d5a07-92d3-4718-aec9-05cad42fae7d";
 const ITEM_THREE: &str = "456d5a07-92d3-4718-aec9-05cad42fae7d";
 const CONFLICT: &str = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
 const ASSET: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+trait ScheduleStoreTestExt {
+    fn put_schedule_item(&self, item: &ScheduleItem) -> Result<(), String>;
+}
+
+impl ScheduleStoreTestExt for StationStore {
+    fn put_schedule_item(&self, item: &ScheduleItem) -> Result<(), String> {
+        if item.state != ScheduleState::Draft {
+            return Err(
+                "test schedule fixtures must seed drafts through the public write path".into(),
+            );
+        }
+        self.write_schedule_item(&ScheduleItemWrite {
+            item: item.clone(),
+            changed_by: "test-harness".into(),
+            occurred_at_unix_ms: 1,
+        })
+    }
+}
 
 #[test]
 fn reruns_the_gate_under_a_write_lock_and_persists_approval_before_dispatch() {
@@ -28,7 +47,7 @@ fn reruns_the_gate_under_a_write_lock_and_persists_approval_before_dispatch() {
     assert!(preview.dry_run_passed);
 
     store
-        .put_schedule_item(&schedule_item(CONFLICT, 110_000, ScheduleState::Committed))
+        .put_schedule_item(&schedule_item(CONFLICT, 110_000, ScheduleState::Draft))
         .unwrap();
     let rejected = store.commit_schedule(
         "report-1",
@@ -48,7 +67,7 @@ fn reruns_the_gate_under_a_write_lock_and_persists_approval_before_dispatch() {
         ScheduleState::Draft
     );
 
-    let mut resolved_conflict = schedule_item(CONFLICT, 110_000, ScheduleState::Cancelled);
+    let mut resolved_conflict = schedule_item(CONFLICT, 200_000, ScheduleState::Draft);
     resolved_conflict.revision = 2;
     store.put_schedule_item(&resolved_conflict).unwrap();
     let report = store

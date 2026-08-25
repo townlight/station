@@ -10,7 +10,7 @@ use station_schedule::{
     AssetReadiness, ChannelConfiguration, MediaAsset, OutputProfileId, OutputSinkConfiguration,
     ScheduleItem, ScheduleState,
 };
-use station_storage::{ChannelCaptionMode, StationStore};
+use station_storage::{ChannelCaptionMode, ScheduleItemWrite, StationStore};
 
 const CHANNEL_ID: &str = "169206ab-0e2d-4907-a3c7-a8ddc052f664";
 const SINK_ID: &str = "23658df8-5401-473d-80b7-95bc84b44103";
@@ -18,6 +18,25 @@ const ASSET_ID: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 const TRACK_ID: &str = "65a26343-0339-4654-a92c-4bf9384f18df";
 const ITEM_ID: &str = "256d5a07-92d3-4718-aec9-05cad42fae7d";
 const REPORT_ID: &str = "44444444-5555-4666-8777-888888888888";
+
+trait ScheduleStoreTestExt {
+    fn put_schedule_item(&self, item: &ScheduleItem) -> Result<(), String>;
+}
+
+impl ScheduleStoreTestExt for StationStore {
+    fn put_schedule_item(&self, item: &ScheduleItem) -> Result<(), String> {
+        if item.state != ScheduleState::Draft {
+            return Err(
+                "test schedule fixtures must seed drafts through the public write path".into(),
+            );
+        }
+        self.write_schedule_item(&ScheduleItemWrite {
+            item: item.clone(),
+            changed_by: "test-harness".into(),
+            occurred_at_unix_ms: 1,
+        })
+    }
+}
 
 fn root(label: &str) -> PathBuf {
     let nonce = SystemTime::now()

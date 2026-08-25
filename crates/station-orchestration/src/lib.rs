@@ -3960,7 +3960,8 @@ mod tests {
         ScheduleItem, ScheduleState,
     };
     use station_storage::{
-        ChannelCaptionMode, OutputLoudnessProofJob, OutputLoudnessProofJobState, StationStore,
+        ChannelCaptionMode, OutputLoudnessProofJob, OutputLoudnessProofJobState, ScheduleItemWrite,
+        StationStore,
     };
     use std::collections::{BTreeMap, HashSet};
     use std::path::PathBuf;
@@ -3969,6 +3970,25 @@ mod tests {
         atomic::{AtomicBool, AtomicUsize, Ordering},
     };
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    trait ScheduleStoreTestExt {
+        fn put_schedule_item(&self, item: &ScheduleItem) -> Result<(), String>;
+    }
+
+    impl ScheduleStoreTestExt for StationStore {
+        fn put_schedule_item(&self, item: &ScheduleItem) -> Result<(), String> {
+            if item.state != ScheduleState::Draft {
+                return Err(
+                    "test schedule fixtures must seed drafts through the public write path".into(),
+                );
+            }
+            self.write_schedule_item(&ScheduleItemWrite {
+                item: item.clone(),
+                changed_by: "test-harness".into(),
+                occurred_at_unix_ms: 1,
+            })
+        }
+    }
 
     const CHANNEL_ID: &str = "5d85189a-cd1f-43dc-a619-66a2aeb09ac4";
     const OTHER_CHANNEL_ID: &str = "9d85189a-cd1f-43dc-a619-66a2aeb09ac4";

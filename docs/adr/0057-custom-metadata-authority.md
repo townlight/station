@@ -14,9 +14,9 @@ Schemas are written with explicit compare-and-set intent: creation is revision o
 with no expected revision, and replacement advances exactly one revision from the
 current expected revision. An existing field identity cannot be rebound to another
 key or type, and an existing controlled-choice identity cannot be rebound to
-another key. This narrow initial contract also refuses field/choice removal; later
-durable schema history may add explicit retirement semantics rather than silently
-changing the interpretation of existing values.
+another key. This narrow initial contract also refuses field/choice removal; a later
+explicit retirement authority may preserve historical interpretation without
+silently deleting fields or choices.
 
 `station-storage` is the sole SQLite writer for this authority. It persists each
 current schema and value record alongside separately indexed identity/revision
@@ -39,9 +39,32 @@ than a mutable label.
 
 ## Boundaries and non-claims
 
-This is not an API, authentication or authorization, asset catalog integration,
-text indexing service, public renderer, or operator UI. It does not assert that an
-asset exists, that supplied values are truthful, that a projected facet has been
-indexed, or that a public flag has been published. Later slices must derive
-actor/time authority server-side, integrate with asset lifecycle/search/public
-surfaces, and obtain installed-machine and field evidence.
+`station-api` exposes authenticated, bounded management reads for current schemas,
+per-asset records, and both immutable histories. Setup Admin alone can use schema
+CAS writes; an enabled Setup Admin or Meeting Operator can use asset-value CAS
+writes. The API derives schema and record revisions, schema-revision binding,
+actor, and server time itself. Schema and record identity arrive only from a
+canonical route path, and request contracts cannot carry audit identity, actor,
+server time, or a claimed schema revision. Typed storage errors preserve the
+boundary between invalid requests and capacity limits (`422`), stale or conflicting
+authority (`409`), missing authority (`404`), and storage corruption or failures
+(`500`).
+
+Asset-value writes verify the media asset and current schema exist before
+preserving the immutable binding. Storage re-resolves that exact current schema
+revision after `BEGIN IMMEDIATE`, in the same transaction as record CAS, so an
+API-resolved schema that changes before persistence fails with a revision conflict
+and rolls back. An existing metadata record cannot be rebound to another asset or
+schema, and a second record cannot claim the same asset/schema binding.
+
+The operator console provides Setup Admin schema creation and revision management,
+plus per-asset value editing for enabled Setup Admin and Meeting Operator accounts.
+It locks stale writes instead of silently overwriting another operator's revision:
+record conflicts reload current asset-record authority automatically, while schema
+conflicts require the operator to use **Read current** before retrying. Actor, time,
+record revision, and schema-revision binding remain server-owned throughout.
+
+This does not yet integrate metadata with the full asset lifecycle, text/search
+indexing, or public projection/rendering. It does not assert that supplied values
+are truthful, that a projected facet has been indexed, or that a public flag has
+been published. It has not obtained installed-machine or field evidence.

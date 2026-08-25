@@ -18,6 +18,7 @@ station-captions.workspace = true
 station-domain.workspace = true
 station-media-lifecycle.workspace = true
 station-maintenance.workspace = true
+station-metadata.workspace = true
 station-readiness.workspace = true
 station-recording.workspace = true
 station-schedule.workspace = true

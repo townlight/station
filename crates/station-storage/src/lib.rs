@@ -197,6 +197,29 @@ pub enum ProfileWriteError {
     Storage(String),
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AssetMetadataWriteError {
+    Invalid(String),
+    SchemaNotFound,
+    StaleSchema {
+        requested_revision: u64,
+        current_revision: u64,
+    },
+    Conflict(String),
+    Rebound,
+    DuplicateBinding,
+    Storage(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CustomMetadataSchemaWriteError {
+    Invalid(String),
+    Conflict(String),
+    Rebound,
+    Capacity,
+    Storage(String),
+}
+
 /// A compare-and-swap rejection for the persisted Reference Station target.
 /// `None` means the singleton was absent at the time the write was attempted.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -727,6 +750,20 @@ pub struct ScheduledRecordingHistoryEntry {
     pub occurred_at_unix_ms: i64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScheduleItemWrite {
+    pub item: ScheduleItem,
+    pub changed_by: String,
+    pub occurred_at_unix_ms: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScheduleItemHistoryEntry {
+    pub item: ScheduleItem,
+    pub changed_by: String,
+    pub occurred_at_unix_ms: i64,
+}
+
 struct CachedCgImageVerification {
     byte_len: u64,
     modified: Option<SystemTime>,
@@ -1101,6 +1138,7 @@ impl StationStore {
         store.migrate_ingest_transcode_status()?;
         store.migrate_commit_report_statuses()?;
         store.migrate_schedule_item_revision()?;
+        store.initialize_schedule_item_history_schema()?;
         store.initialize_commissioning_support_bundle_schema()?;
         store.migrate_channel_runtime_live_state()?;
         store.migrate_alert_delivery_realerts()?;
@@ -8171,54 +8209,94 @@ impl StationStore {
         expected_revision: Option<u64>,
         changed_by: &str,
         occurred_at_unix_ms: i64,
-    ) -> Result<(), String> {
-        schema.validate()?;
+    ) -> Result<(), CustomMetadataSchemaWriteError> {
+        schema
+            .validate()
+            .map_err(CustomMetadataSchemaWriteError::Invalid)?;
         if occurred_at_unix_ms < 0 || !secret_field(changed_by, 200) {
-            return Err("custom metadata schema change attribution is invalid".into());
+            return Err(CustomMetadataSchemaWriteError::Invalid(
+                "custom metadata schema change attribution is invalid".into(),
+            ));
         }
-        self.execute("BEGIN IMMEDIATE")?;
+        self.execute("BEGIN IMMEDIATE")
+            .map_err(CustomMetadataSchemaWriteError::Storage)?;
         let outcome = (|| {
-            let current = self.read_custom_metadata_schema(&schema.schema_id)?;
+            let current = self
+                .read_custom_metadata_schema(&schema.schema_id)
+                .map_err(CustomMetadataSchemaWriteError::Storage)?;
             if current.is_none()
-                && self.list_custom_metadata_schemas()?.len() >= MAX_CUSTOM_METADATA_SCHEMAS
+                && self
+                    .list_custom_metadata_schemas()
+                    .map_err(CustomMetadataSchemaWriteError::Storage)?
+                    .len()
+                    >= MAX_CUSTOM_METADATA_SCHEMAS
             {
-                return Err("custom metadata authority cannot exceed 64 schemas".into());
+                return Err(CustomMetadataSchemaWriteError::Capacity);
             }
-            validate_schema_write(current.as_ref(), expected_revision, schema)?;
-            let record_json = serde_json::to_string(schema)
-                .map_err(|error| format!("serialize custom metadata schema: {error}"))?;
-            let schema_id = c_string(&schema.schema_id, "custom metadata schema identity")?;
-            let record_json = c_string(&record_json, "custom metadata schema record")?;
+            validate_schema_write(current.as_ref(), expected_revision, schema).map_err(
+                |message| {
+                    if message.contains("creation requires")
+                        || message.contains("compare-and-set revision")
+                    {
+                        CustomMetadataSchemaWriteError::Conflict(message)
+                    } else if message.contains("rebound") {
+                        CustomMetadataSchemaWriteError::Rebound
+                    } else {
+                        CustomMetadataSchemaWriteError::Invalid(message)
+                    }
+                },
+            )?;
+            let record_json = serde_json::to_string(schema).map_err(|error| {
+                CustomMetadataSchemaWriteError::Storage(format!(
+                    "serialize custom metadata schema: {error}"
+                ))
+            })?;
+            let schema_id = c_string(&schema.schema_id, "custom metadata schema identity")
+                .map_err(CustomMetadataSchemaWriteError::Invalid)?;
+            let record_json = c_string(&record_json, "custom metadata schema record")
+                .map_err(CustomMetadataSchemaWriteError::Storage)?;
             let statement = self.prepare(
                 "INSERT INTO custom_metadata_schemas(schema_id, revision, record_json) VALUES(?1, ?2, ?3) \
                  ON CONFLICT(schema_id) DO UPDATE SET revision=excluded.revision, record_json=excluded.record_json",
-            )?;
-            bind_text(self.database, statement.raw, 1, &schema_id)?;
+            ).map_err(CustomMetadataSchemaWriteError::Storage)?;
+            bind_text(self.database, statement.raw, 1, &schema_id)
+                .map_err(CustomMetadataSchemaWriteError::Storage)?;
             bind_i64(
                 self.database,
                 statement.raw,
                 2,
-                checked_i64(schema.revision, "custom metadata schema revision")?,
-            )?;
-            bind_text(self.database, statement.raw, 3, &record_json)?;
-            expect_done(self.database, statement.raw)?;
+                checked_i64(schema.revision, "custom metadata schema revision")
+                    .map_err(CustomMetadataSchemaWriteError::Invalid)?,
+            )
+            .map_err(CustomMetadataSchemaWriteError::Storage)?;
+            bind_text(self.database, statement.raw, 3, &record_json)
+                .map_err(CustomMetadataSchemaWriteError::Storage)?;
+            expect_done(self.database, statement.raw)
+                .map_err(CustomMetadataSchemaWriteError::Storage)?;
             let history = self.prepare(
                 "INSERT INTO custom_metadata_schema_history(schema_id, revision, record_json, changed_by, occurred_at_unix_ms) VALUES(?1, ?2, ?3, ?4, ?5)",
-            )?;
-            let changed_by = c_string(changed_by, "custom metadata schema change actor")?;
-            bind_text(self.database, history.raw, 1, &schema_id)?;
+            ).map_err(CustomMetadataSchemaWriteError::Storage)?;
+            let changed_by = c_string(changed_by, "custom metadata schema change actor")
+                .map_err(CustomMetadataSchemaWriteError::Invalid)?;
+            bind_text(self.database, history.raw, 1, &schema_id)
+                .map_err(CustomMetadataSchemaWriteError::Storage)?;
             bind_i64(
                 self.database,
                 history.raw,
                 2,
-                checked_i64(schema.revision, "custom metadata schema revision")?,
-            )?;
-            bind_text(self.database, history.raw, 3, &record_json)?;
-            bind_text(self.database, history.raw, 4, &changed_by)?;
-            bind_i64(self.database, history.raw, 5, occurred_at_unix_ms)?;
-            expect_done(self.database, history.raw)
+                checked_i64(schema.revision, "custom metadata schema revision")
+                    .map_err(CustomMetadataSchemaWriteError::Invalid)?,
+            )
+            .map_err(CustomMetadataSchemaWriteError::Storage)?;
+            bind_text(self.database, history.raw, 3, &record_json)
+                .map_err(CustomMetadataSchemaWriteError::Storage)?;
+            bind_text(self.database, history.raw, 4, &changed_by)
+                .map_err(CustomMetadataSchemaWriteError::Storage)?;
+            bind_i64(self.database, history.raw, 5, occurred_at_unix_ms)
+                .map_err(CustomMetadataSchemaWriteError::Storage)?;
+            expect_done(self.database, history.raw).map_err(CustomMetadataSchemaWriteError::Storage)
         })();
-        self.finish_transaction(outcome)
+        self.finish_custom_metadata_schema_transaction(outcome)
     }
 
     pub fn list_custom_metadata_schema_history(
@@ -8317,80 +8395,140 @@ impl StationStore {
         expected_revision: Option<u64>,
         changed_by: &str,
         occurred_at_unix_ms: i64,
-    ) -> Result<(), String> {
-        record.validate_shape()?;
+    ) -> Result<(), AssetMetadataWriteError> {
+        record
+            .validate_shape()
+            .map_err(AssetMetadataWriteError::Invalid)?;
         if occurred_at_unix_ms < 0 || !secret_field(changed_by, 200) {
-            return Err("asset metadata change attribution is invalid".into());
+            return Err(AssetMetadataWriteError::Invalid(
+                "asset metadata change attribution is invalid".into(),
+            ));
         }
-        self.execute("BEGIN IMMEDIATE")?;
+        self.execute("BEGIN IMMEDIATE")
+            .map_err(AssetMetadataWriteError::Storage)?;
         let outcome = (|| {
+            // This read deliberately occurs after BEGIN IMMEDIATE. The API may
+            // have resolved a schema before entering storage; only this exact
+            // in-transaction revision is authoritative for the record CAS.
             let schema = self
-                .read_custom_metadata_schema_revision(&record.schema_id, record.schema_revision)?
-                .ok_or_else(|| {
-                    "asset metadata record references an unknown schema revision".to_string()
-                })?;
-            let current = self.read_asset_metadata_record(&record.metadata_id)?;
-            if current.is_none()
-                && self.list_asset_metadata_records(&record.asset_id)?.len()
-                    >= MAX_CUSTOM_METADATA_RECORDS_PER_ASSET
-            {
-                return Err(
-                    "asset metadata authority cannot exceed 128 records for one asset".into(),
-                );
+                .read_custom_metadata_schema(&record.schema_id)
+                .map_err(AssetMetadataWriteError::Storage)?
+                .ok_or(AssetMetadataWriteError::SchemaNotFound)?;
+            if schema.revision != record.schema_revision {
+                return Err(AssetMetadataWriteError::StaleSchema {
+                    requested_revision: record.schema_revision,
+                    current_revision: schema.revision,
+                });
             }
-            validate_asset_metadata_write(current.as_ref(), expected_revision, record, &schema)?;
-            let record_json = serde_json::to_string(record)
-                .map_err(|error| format!("serialize asset metadata record: {error}"))?;
-            let metadata_id = c_string(&record.metadata_id, "asset metadata identity")?;
-            let asset_id = c_string(&record.asset_id, "asset metadata asset identity")?;
-            let schema_id = c_string(&record.schema_id, "custom metadata schema identity")?;
-            let record_json = c_string(&record_json, "asset metadata record")?;
+            let current = self
+                .read_asset_metadata_record(&record.metadata_id)
+                .map_err(AssetMetadataWriteError::Storage)?;
+            if current.as_ref().is_some_and(|current| {
+                current.asset_id != record.asset_id || current.schema_id != record.schema_id
+            }) {
+                return Err(AssetMetadataWriteError::Rebound);
+            }
+            let asset_records = self
+                .list_asset_metadata_records(&record.asset_id)
+                .map_err(AssetMetadataWriteError::Storage)?;
+            if asset_records.iter().any(|existing| {
+                existing.schema_id == record.schema_id && existing.metadata_id != record.metadata_id
+            }) {
+                return Err(AssetMetadataWriteError::DuplicateBinding);
+            }
+            if current.is_none() && asset_records.len() >= MAX_CUSTOM_METADATA_RECORDS_PER_ASSET {
+                return Err(AssetMetadataWriteError::Conflict(
+                    "asset metadata authority cannot exceed 128 records for one asset".into(),
+                ));
+            }
+            validate_asset_metadata_write(current.as_ref(), expected_revision, record, &schema)
+                .map_err(|message| {
+                    if message.contains("compare-and-set revision") {
+                        AssetMetadataWriteError::Conflict(message)
+                    } else if message.contains("rebound") {
+                        AssetMetadataWriteError::Rebound
+                    } else {
+                        AssetMetadataWriteError::Invalid(message)
+                    }
+                })?;
+            let record_json = serde_json::to_string(record).map_err(|error| {
+                AssetMetadataWriteError::Storage(format!(
+                    "serialize asset metadata record: {error}"
+                ))
+            })?;
+            let metadata_id = c_string(&record.metadata_id, "asset metadata identity")
+                .map_err(AssetMetadataWriteError::Invalid)?;
+            let asset_id = c_string(&record.asset_id, "asset metadata asset identity")
+                .map_err(AssetMetadataWriteError::Invalid)?;
+            let schema_id = c_string(&record.schema_id, "custom metadata schema identity")
+                .map_err(AssetMetadataWriteError::Invalid)?;
+            let record_json = c_string(&record_json, "asset metadata record")
+                .map_err(AssetMetadataWriteError::Storage)?;
             let statement = self.prepare(
                 "INSERT INTO asset_metadata_records(metadata_id, asset_id, schema_id, schema_revision, revision, record_json) VALUES(?1, ?2, ?3, ?4, ?5, ?6) \
                  ON CONFLICT(metadata_id) DO UPDATE SET asset_id=excluded.asset_id, schema_id=excluded.schema_id, schema_revision=excluded.schema_revision, revision=excluded.revision, record_json=excluded.record_json",
-            )?;
-            bind_text(self.database, statement.raw, 1, &metadata_id)?;
-            bind_text(self.database, statement.raw, 2, &asset_id)?;
-            bind_text(self.database, statement.raw, 3, &schema_id)?;
+            ).map_err(AssetMetadataWriteError::Storage)?;
+            bind_text(self.database, statement.raw, 1, &metadata_id)
+                .map_err(AssetMetadataWriteError::Storage)?;
+            bind_text(self.database, statement.raw, 2, &asset_id)
+                .map_err(AssetMetadataWriteError::Storage)?;
+            bind_text(self.database, statement.raw, 3, &schema_id)
+                .map_err(AssetMetadataWriteError::Storage)?;
             bind_i64(
                 self.database,
                 statement.raw,
                 4,
-                checked_i64(record.schema_revision, "asset metadata schema revision")?,
-            )?;
+                checked_i64(record.schema_revision, "asset metadata schema revision")
+                    .map_err(AssetMetadataWriteError::Invalid)?,
+            )
+            .map_err(AssetMetadataWriteError::Storage)?;
             bind_i64(
                 self.database,
                 statement.raw,
                 5,
-                checked_i64(record.revision, "asset metadata revision")?,
-            )?;
-            bind_text(self.database, statement.raw, 6, &record_json)?;
-            expect_done(self.database, statement.raw)?;
+                checked_i64(record.revision, "asset metadata revision")
+                    .map_err(AssetMetadataWriteError::Invalid)?,
+            )
+            .map_err(AssetMetadataWriteError::Storage)?;
+            bind_text(self.database, statement.raw, 6, &record_json)
+                .map_err(AssetMetadataWriteError::Storage)?;
+            expect_done(self.database, statement.raw).map_err(AssetMetadataWriteError::Storage)?;
             let history = self.prepare(
                 "INSERT INTO asset_metadata_record_history(metadata_id, asset_id, schema_id, schema_revision, revision, record_json, changed_by, occurred_at_unix_ms) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-            )?;
-            let changed_by = c_string(changed_by, "asset metadata change actor")?;
-            bind_text(self.database, history.raw, 1, &metadata_id)?;
-            bind_text(self.database, history.raw, 2, &asset_id)?;
-            bind_text(self.database, history.raw, 3, &schema_id)?;
+            ).map_err(AssetMetadataWriteError::Storage)?;
+            let changed_by = c_string(changed_by, "asset metadata change actor")
+                .map_err(AssetMetadataWriteError::Invalid)?;
+            bind_text(self.database, history.raw, 1, &metadata_id)
+                .map_err(AssetMetadataWriteError::Storage)?;
+            bind_text(self.database, history.raw, 2, &asset_id)
+                .map_err(AssetMetadataWriteError::Storage)?;
+            bind_text(self.database, history.raw, 3, &schema_id)
+                .map_err(AssetMetadataWriteError::Storage)?;
             bind_i64(
                 self.database,
                 history.raw,
                 4,
-                checked_i64(record.schema_revision, "asset metadata schema revision")?,
-            )?;
+                checked_i64(record.schema_revision, "asset metadata schema revision")
+                    .map_err(AssetMetadataWriteError::Invalid)?,
+            )
+            .map_err(AssetMetadataWriteError::Storage)?;
             bind_i64(
                 self.database,
                 history.raw,
                 5,
-                checked_i64(record.revision, "asset metadata revision")?,
-            )?;
-            bind_text(self.database, history.raw, 6, &record_json)?;
-            bind_text(self.database, history.raw, 7, &changed_by)?;
-            bind_i64(self.database, history.raw, 8, occurred_at_unix_ms)?;
-            expect_done(self.database, history.raw)
+                checked_i64(record.revision, "asset metadata revision")
+                    .map_err(AssetMetadataWriteError::Invalid)?,
+            )
+            .map_err(AssetMetadataWriteError::Storage)?;
+            bind_text(self.database, history.raw, 6, &record_json)
+                .map_err(AssetMetadataWriteError::Storage)?;
+            bind_text(self.database, history.raw, 7, &changed_by)
+                .map_err(AssetMetadataWriteError::Storage)?;
+            bind_i64(self.database, history.raw, 8, occurred_at_unix_ms)
+                .map_err(AssetMetadataWriteError::Storage)?;
+            expect_done(self.database, history.raw).map_err(AssetMetadataWriteError::Storage)
         })();
-        self.finish_transaction(outcome)
+        self.finish_asset_metadata_transaction(outcome)
     }
 
     pub fn list_asset_metadata_record_history(
@@ -8546,6 +8684,9 @@ impl StationStore {
                     "scheduled recording transition revision or definition authority conflicts"
                         .into(),
                 );
+            }
+            if receipt.kind != RecordingTransitionKind::Cancel {
+                self.recheck_scheduled_recording_schedule_binding(recording)?;
             }
             let record_json = serde_json::to_string(recording)
                 .map_err(|error| format!("serialize scheduled recording: {error}"))?;
@@ -11379,20 +11520,38 @@ impl StationStore {
         }
     }
 
-    pub fn put_schedule_item(&self, item: &ScheduleItem) -> Result<(), String> {
-        item.validate().map_err(|error| format!("{error:?}"))?;
+    pub fn write_schedule_item(&self, write: &ScheduleItemWrite) -> Result<(), String> {
+        write
+            .item
+            .validate()
+            .map_err(|error| format!("{error:?}"))?;
+        if !secret_field(&write.changed_by, 200)
+            || write.occurred_at_unix_ms <= 0
+            || write.changed_by == "legacy-migration"
+        {
+            return Err("schedule item change attribution is invalid or unbounded".into());
+        }
+        if write.item.state != ScheduleState::Draft {
+            return Err(
+                "public schedule item writes require draft state; use the audited commit gate"
+                    .into(),
+            );
+        }
         self.execute("BEGIN IMMEDIATE")?;
-        let outcome = (|| {
-            let current = self.read_schedule_item(&item.item_id)?;
-            match current {
-                None if item.revision == 1 => self.insert_schedule_item(item),
-                Some(current) if current.revision.checked_add(1) == Some(item.revision) => {
-                    self.update_schedule_item(item, current.revision)
-                }
-                _ => Err("schedule item compare-and-set revision conflicts".into()),
-            }
-        })();
+        let outcome = self.write_schedule_item_in_transaction(write);
         self.finish_transaction(outcome)
+    }
+
+    fn write_schedule_item_in_transaction(&self, write: &ScheduleItemWrite) -> Result<(), String> {
+        let current = self.read_schedule_item(&write.item.item_id)?;
+        match current {
+            None if write.item.revision == 1 => self.insert_schedule_item(&write.item)?,
+            Some(current) if current.revision.checked_add(1) == Some(write.item.revision) => {
+                self.update_schedule_item(&write.item, current.revision)?;
+            }
+            _ => return Err("schedule item compare-and-set revision conflicts".into()),
+        }
+        self.append_schedule_item_history(&write.item, &write.changed_by, write.occurred_at_unix_ms)
     }
 
     fn insert_schedule_item(&self, item: &ScheduleItem) -> Result<(), String> {
@@ -11476,6 +11635,34 @@ impl StationStore {
         }
     }
 
+    fn append_schedule_item_history(
+        &self,
+        item: &ScheduleItem,
+        changed_by: &str,
+        occurred_at_unix_ms: i64,
+    ) -> Result<(), String> {
+        let record_json = serde_json::to_string(item)
+            .map_err(|error| format!("serialize schedule item history: {error}"))?;
+        let statement = self.prepare(
+            "INSERT INTO schedule_item_history(item_id, revision, record_json, changed_by, occurred_at_unix_ms) \
+             VALUES(?1, ?2, ?3, ?4, ?5)",
+        )?;
+        let item_id = c_string(&item.item_id, "schedule item history identity")?;
+        let record_json = c_string(&record_json, "schedule item history record")?;
+        let changed_by = c_string(changed_by, "schedule item history actor")?;
+        bind_text(self.database, statement.raw, 1, &item_id)?;
+        bind_i64(
+            self.database,
+            statement.raw,
+            2,
+            checked_i64(item.revision, "schedule item history revision")?,
+        )?;
+        bind_text(self.database, statement.raw, 3, &record_json)?;
+        bind_text(self.database, statement.raw, 4, &changed_by)?;
+        bind_i64(self.database, statement.raw, 5, occurred_at_unix_ms)?;
+        expect_done(self.database, statement.raw)
+    }
+
     pub fn read_schedule_item(&self, item_id: &str) -> Result<Option<ScheduleItem>, String> {
         let statement = self.prepare(
             "SELECT item_id, revision, channel_id, asset_id, title, starts_at_unix_ms, duration_ms, state \
@@ -11483,10 +11670,79 @@ impl StationStore {
         )?;
         let item_id = c_string(item_id, "schedule item identity")?;
         bind_text(self.database, statement.raw, 1, &item_id)?;
+        let item = match unsafe { sqlite3_step(statement.raw) } {
+            SQLITE_ROW => Some(read_schedule_item_row(statement.raw)?),
+            SQLITE_DONE => None,
+            _ => return Err(sqlite_error(self.database)),
+        };
+        drop(statement);
+        let Some(item) = item else {
+            return Ok(None);
+        };
+        self.validate_schedule_item_current_history(&item)?;
+        Ok(Some(item))
+    }
+
+    fn validate_schedule_item_current_history(&self, item: &ScheduleItem) -> Result<(), String> {
+        if let Some(history) = self.read_latest_schedule_item_history(&item.item_id)?
+            && history.item != *item
+        {
+            return Err("schedule item current row and latest history disagree".into());
+        }
+        Ok(())
+    }
+
+    fn validate_schedule_item_list_current_history(
+        &self,
+        items: Vec<ScheduleItem>,
+    ) -> Result<Vec<ScheduleItem>, String> {
+        for item in &items {
+            self.validate_schedule_item_current_history(item)?;
+        }
+        Ok(items)
+    }
+
+    fn read_latest_schedule_item_history(
+        &self,
+        item_id: &str,
+    ) -> Result<Option<ScheduleItemHistoryEntry>, String> {
+        let statement = self.prepare(
+            "SELECT item_id, revision, record_json, changed_by, occurred_at_unix_ms \
+             FROM schedule_item_history WHERE item_id=?1 ORDER BY revision DESC LIMIT 1",
+        )?;
+        let item_id_value = c_string(item_id, "schedule item history identity")?;
+        bind_text(self.database, statement.raw, 1, &item_id_value)?;
         match unsafe { sqlite3_step(statement.raw) } {
-            SQLITE_ROW => Ok(Some(read_schedule_item_row(statement.raw)?)),
+            SQLITE_ROW => Ok(Some(read_schedule_item_history_row(statement.raw)?)),
             SQLITE_DONE => Ok(None),
             _ => Err(sqlite_error(self.database)),
+        }
+    }
+
+    pub fn list_schedule_item_history(
+        &self,
+        item_id: &str,
+        limit: usize,
+    ) -> Result<Vec<ScheduleItemHistoryEntry>, String> {
+        if !is_canonical_uuid(item_id) || !(1..=128).contains(&limit) {
+            return Err("schedule item history query is invalid or unbounded".into());
+        }
+        let statement = self.prepare(
+            "SELECT item_id, revision, record_json, changed_by, occurred_at_unix_ms \
+             FROM schedule_item_history WHERE item_id=?1 ORDER BY revision LIMIT ?2",
+        )?;
+        let item_id_value = c_string(item_id, "schedule item history identity")?;
+        bind_text(self.database, statement.raw, 1, &item_id_value)?;
+        bind_i64(self.database, statement.raw, 2, limit as i64)?;
+        let mut history = Vec::new();
+        loop {
+            match unsafe { sqlite3_step(statement.raw) } {
+                SQLITE_ROW => {
+                    history.push(read_schedule_item_history_row(statement.raw)?);
+                }
+                SQLITE_DONE => return Ok(history),
+                _ => return Err(sqlite_error(self.database)),
+            }
         }
     }
 
@@ -11501,10 +11757,12 @@ impl StationStore {
         loop {
             match unsafe { sqlite3_step(statement.raw) } {
                 SQLITE_ROW => items.push(read_schedule_item_row(statement.raw)?),
-                SQLITE_DONE => return Ok(items),
+                SQLITE_DONE => break,
                 _ => return Err(sqlite_error(self.database)),
             }
         }
+        drop(statement);
+        self.validate_schedule_item_list_current_history(items)
     }
 
     pub fn list_schedule_window(
@@ -11526,10 +11784,55 @@ impl StationStore {
         loop {
             match unsafe { sqlite3_step(statement.raw) } {
                 SQLITE_ROW => items.push(read_schedule_item_row(statement.raw)?),
-                SQLITE_DONE => return Ok(items),
+                SQLITE_DONE => break,
                 _ => return Err(sqlite_error(self.database)),
             }
         }
+        drop(statement);
+        self.validate_schedule_item_list_current_history(items)
+    }
+
+    /// Returns a bounded, current-authority subset of committed schedule items
+    /// whose starts are strictly after the supplied station time. Callers must
+    /// supply a bounded time window; this method never enumerates the station's
+    /// full schedule history.
+    pub fn list_recording_schedule_candidates(
+        &self,
+        channel_id: &str,
+        starts_at_or_after_unix_ms: i64,
+        ends_before_unix_ms: i64,
+        limit: usize,
+    ) -> Result<Vec<ScheduleItem>, String> {
+        const MAX_WINDOW_MS: i64 = 31 * 24 * 60 * 60 * 1_000;
+        if !is_canonical_uuid(channel_id)
+            || !(1..=128).contains(&limit)
+            || starts_at_or_after_unix_ms < 0
+            || ends_before_unix_ms <= starts_at_or_after_unix_ms
+            || ends_before_unix_ms - starts_at_or_after_unix_ms > MAX_WINDOW_MS
+        {
+            return Err("recording schedule candidate query is invalid or unbounded".into());
+        }
+        let statement = self.prepare(
+            "SELECT item_id, revision, channel_id, asset_id, title, starts_at_unix_ms, duration_ms, state \
+             FROM schedule_items WHERE channel_id=?1 AND state='committed' \
+             AND starts_at_unix_ms>?2 AND starts_at_unix_ms<?3 \
+             ORDER BY starts_at_unix_ms, item_id LIMIT ?4",
+        )?;
+        let channel_id = c_string(channel_id, "recording schedule candidate channel identity")?;
+        bind_text(self.database, statement.raw, 1, &channel_id)?;
+        bind_i64(self.database, statement.raw, 2, starts_at_or_after_unix_ms)?;
+        bind_i64(self.database, statement.raw, 3, ends_before_unix_ms)?;
+        bind_i64(self.database, statement.raw, 4, limit as i64)?;
+        let mut items = Vec::new();
+        loop {
+            match unsafe { sqlite3_step(statement.raw) } {
+                SQLITE_ROW => items.push(read_schedule_item_row(statement.raw)?),
+                SQLITE_DONE => break,
+                _ => return Err(sqlite_error(self.database)),
+            }
+        }
+        drop(statement);
+        self.validate_schedule_item_list_current_history(items)
     }
 
     pub fn prepare_schedule_commit(
@@ -11602,8 +11905,20 @@ impl StationStore {
             };
             self.insert_commit_report(&report)
                 .map_err(CommitWriteError::Storage)?;
-            self.set_schedule_state(item_id, ScheduleState::Committed)
-                .map_err(CommitWriteError::Storage)?;
+            let schedule_revision = item.revision.checked_add(1).ok_or_else(|| {
+                CommitWriteError::Storage("schedule item revision overflow".into())
+            })?;
+            let committed_item = ScheduleItem {
+                revision: schedule_revision,
+                state: ScheduleState::Committed,
+                ..item
+            };
+            self.write_schedule_item_in_transaction(&ScheduleItemWrite {
+                item: committed_item,
+                changed_by: approved_by.to_string(),
+                occurred_at_unix_ms: approved_at_unix_ms,
+            })
+            .map_err(CommitWriteError::Storage)?;
             Ok(report)
         })();
         match outcome {
@@ -12011,23 +12326,6 @@ impl StationStore {
         bind_text(self.database, statement.raw, 8, &values[6])?;
         bind_text(self.database, statement.raw, 9, &values[7])?;
         expect_done(self.database, statement.raw)
-    }
-
-    fn set_schedule_state(&self, item_id: &str, state: ScheduleState) -> Result<(), String> {
-        let statement = self.prepare(
-            "UPDATE schedule_items SET state=?1, revision=revision+1 WHERE item_id=?2 AND revision<?3",
-        )?;
-        let state = c_string(schedule_state_name(state), "schedule state")?;
-        let item_id = c_string(item_id, "schedule item identity")?;
-        bind_text(self.database, statement.raw, 1, &state)?;
-        bind_text(self.database, statement.raw, 2, &item_id)?;
-        bind_i64(self.database, statement.raw, 3, i64::MAX)?;
-        expect_done(self.database, statement.raw)?;
-        if self.changes() == 1 {
-            Ok(())
-        } else {
-            Err("schedule item state transition is missing or revision overflowed".into())
-        }
     }
 
     fn execute(&self, sql: &str) -> Result<(), String> {
@@ -12584,6 +12882,63 @@ impl StationStore {
             )?;
         }
         Ok(())
+    }
+
+    fn initialize_schedule_item_history_schema(&self) -> Result<(), String> {
+        self.execute(
+            "CREATE TABLE IF NOT EXISTS schedule_item_history (\
+               item_id TEXT NOT NULL,\
+               revision INTEGER NOT NULL CHECK (revision >= 1),\
+               record_json TEXT NOT NULL,\
+               changed_by TEXT NOT NULL CHECK (length(changed_by) BETWEEN 1 AND 200),\
+               occurred_at_unix_ms INTEGER NOT NULL CHECK (occurred_at_unix_ms >= 0),\
+               PRIMARY KEY(item_id, revision),\
+               FOREIGN KEY(item_id) REFERENCES schedule_items(item_id) ON DELETE RESTRICT\
+             );\
+             CREATE INDEX IF NOT EXISTS schedule_item_history_item_revision \
+               ON schedule_item_history(item_id, revision);\
+             CREATE TRIGGER IF NOT EXISTS schedule_item_history_no_update \
+               BEFORE UPDATE ON schedule_item_history BEGIN SELECT RAISE(ABORT, 'schedule item history is append-only'); END;\
+             CREATE TRIGGER IF NOT EXISTS schedule_item_history_no_delete \
+               BEFORE DELETE ON schedule_item_history BEGIN SELECT RAISE(ABORT, 'schedule item history is append-only'); END;",
+        )?;
+        self.execute("BEGIN IMMEDIATE")?;
+        let outcome = (|| {
+            let statement = self.prepare(
+                "SELECT item_id, revision, channel_id, asset_id, title, starts_at_unix_ms, duration_ms, state \
+                 FROM schedule_items ORDER BY item_id",
+            )?;
+            let mut items = Vec::new();
+            loop {
+                match unsafe { sqlite3_step(statement.raw) } {
+                    SQLITE_ROW => items.push(read_schedule_item_row(statement.raw)?),
+                    SQLITE_DONE => break,
+                    _ => return Err(sqlite_error(self.database)),
+                }
+            }
+            drop(statement);
+            for item in items {
+                let record_json = serde_json::to_string(&item)
+                    .map_err(|error| format!("serialize legacy schedule history: {error}"))?;
+                let statement = self.prepare(
+                    "INSERT OR IGNORE INTO schedule_item_history(item_id, revision, record_json, changed_by, occurred_at_unix_ms) \
+                     VALUES(?1, ?2, ?3, 'legacy-migration', 0)",
+                )?;
+                let item_id = c_string(&item.item_id, "legacy schedule item identity")?;
+                let record_json = c_string(&record_json, "legacy schedule item record")?;
+                bind_text(self.database, statement.raw, 1, &item_id)?;
+                bind_i64(
+                    self.database,
+                    statement.raw,
+                    2,
+                    checked_i64(item.revision, "legacy schedule item revision")?,
+                )?;
+                bind_text(self.database, statement.raw, 3, &record_json)?;
+                expect_done(self.database, statement.raw)?;
+            }
+            Ok(())
+        })();
+        self.finish_transaction(outcome)
     }
 
     fn migrate_channel_runtime_live_state(&self) -> Result<(), String> {
@@ -13203,6 +13558,44 @@ impl StationStore {
                 Err(error) => {
                     let _ = self.execute("ROLLBACK");
                     Err(error)
+                }
+            },
+            Err(error) => {
+                let _ = self.execute("ROLLBACK");
+                Err(error)
+            }
+        }
+    }
+
+    fn finish_asset_metadata_transaction(
+        &self,
+        outcome: Result<(), AssetMetadataWriteError>,
+    ) -> Result<(), AssetMetadataWriteError> {
+        match outcome {
+            Ok(()) => match self.execute("COMMIT") {
+                Ok(()) => Ok(()),
+                Err(error) => {
+                    let _ = self.execute("ROLLBACK");
+                    Err(AssetMetadataWriteError::Storage(error))
+                }
+            },
+            Err(error) => {
+                let _ = self.execute("ROLLBACK");
+                Err(error)
+            }
+        }
+    }
+
+    fn finish_custom_metadata_schema_transaction(
+        &self,
+        outcome: Result<(), CustomMetadataSchemaWriteError>,
+    ) -> Result<(), CustomMetadataSchemaWriteError> {
+        match outcome {
+            Ok(()) => match self.execute("COMMIT") {
+                Ok(()) => Ok(()),
+                Err(error) => {
+                    let _ = self.execute("ROLLBACK");
+                    Err(CustomMetadataSchemaWriteError::Storage(error))
                 }
             },
             Err(error) => {
@@ -14337,6 +14730,35 @@ fn read_schedule_item_row(statement: *mut SqliteStatement) -> Result<ScheduleIte
     };
     item.validate().map_err(|error| format!("{error:?}"))?;
     Ok(item)
+}
+
+fn read_schedule_item_history_row(
+    statement: *mut SqliteStatement,
+) -> Result<ScheduleItemHistoryEntry, String> {
+    let item: ScheduleItem =
+        serde_json::from_str(&column_text(statement, 2)?).map_err(|error| {
+            format!("database returned invalid schedule item history JSON: {error}")
+        })?;
+    item.validate()
+        .map_err(|error| format!("database returned invalid schedule item history: {error:?}"))?;
+    if item.item_id != column_text(statement, 0)?
+        || item.revision != column_u64(statement, 1, "schedule item history revision")?
+    {
+        return Err("schedule item history row and record disagree".into());
+    }
+    let changed_by = column_text(statement, 3)?;
+    let occurred_at_unix_ms = unsafe { sqlite3_column_int64(statement, 4) };
+    if !secret_field(&changed_by, 200)
+        || occurred_at_unix_ms < 0
+        || (occurred_at_unix_ms == 0 && changed_by != "legacy-migration")
+    {
+        return Err("schedule item history attribution is invalid".into());
+    }
+    Ok(ScheduleItemHistoryEntry {
+        item,
+        changed_by,
+        occurred_at_unix_ms,
+    })
 }
 
 fn read_live_source_row(statement: *mut SqliteStatement) -> Result<LiveSource, String> {
@@ -15995,6 +16417,25 @@ mod tests {
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
 
+    trait ScheduleStoreTestExt {
+        fn put_schedule_item(&self, item: &ScheduleItem) -> Result<(), String>;
+    }
+
+    impl ScheduleStoreTestExt for StationStore {
+        fn put_schedule_item(&self, item: &ScheduleItem) -> Result<(), String> {
+            if item.state != ScheduleState::Draft {
+                return Err(
+                    "test schedule fixtures must seed drafts through the public write path".into(),
+                );
+            }
+            self.write_schedule_item(&ScheduleItemWrite {
+                item: item.clone(),
+                changed_by: "test-harness".into(),
+                occurred_at_unix_ms: 1,
+            })
+        }
+    }
+
     fn row_count(store: &StationStore, sql: &str) -> i64 {
         let statement = store.prepare(sql).unwrap();
         assert_eq!(unsafe { sqlite3_step(statement.raw) }, SQLITE_ROW);
@@ -16194,7 +16635,14 @@ mod tests {
         let mut updated = item.clone();
         updated.revision = 2;
         updated.title = "Legacy schedule revision two".into();
-        store.put_schedule_item(&updated).unwrap();
+        store.execute("BEGIN IMMEDIATE").unwrap();
+        let update_result = store.write_schedule_item_in_transaction(&ScheduleItemWrite {
+            item: updated.clone(),
+            changed_by: "test-harness".into(),
+            occurred_at_unix_ms: 1,
+        });
+        assert!(update_result.is_ok());
+        store.execute("COMMIT").unwrap();
         assert_eq!(
             store
                 .read_schedule_item("11111111-2222-4333-8444-555555555555")
@@ -16202,7 +16650,24 @@ mod tests {
                 .unwrap(),
             updated
         );
+        let history = store
+            .list_schedule_item_history("11111111-2222-4333-8444-555555555555", 8)
+            .unwrap();
+        assert_eq!(history.len(), 2);
+        assert_eq!(history[0].item.revision, 1);
+        assert_eq!(history[0].changed_by, "legacy-migration");
+        assert_eq!(history[0].occurred_at_unix_ms, 0);
+        assert_eq!(history[1].item.revision, 2);
         drop(store);
+        let reopened = StationStore::open(&database).unwrap();
+        assert_eq!(
+            reopened
+                .list_schedule_item_history("11111111-2222-4333-8444-555555555555", 8)
+                .unwrap()
+                .len(),
+            2
+        );
+        drop(reopened);
         let _ = std::fs::remove_file(database);
     }
 
@@ -16214,6 +16679,8 @@ mod tests {
             .as_nanos();
         let database =
             std::env::temp_dir().join(format!("townlight-recording-authority-{nonce}.db"));
+        let media_path = database.with_extension("ts");
+        std::fs::write(&media_path, b"scheduled recording authority media").unwrap();
         let store = StationStore::open(&database).unwrap();
         let operator = RecordingActor {
             actor_id: "11111111-2222-4333-8444-555555555555".into(),
@@ -16227,14 +16694,90 @@ mod tests {
             title: "Scheduled recording source".into(),
             starts_at_unix_ms: 10_000,
             duration_ms: 60_000,
-            state: ScheduleState::Committed,
+            state: ScheduleState::Draft,
         };
         store.put_schedule_item(&schedule_item).unwrap();
+        store
+            .put_media_asset(&MediaAsset {
+                asset_id: schedule_item.asset_id.clone(),
+                media_path: media_path.to_string_lossy().into_owned(),
+                duration_ms: schedule_item.duration_ms,
+                readiness: AssetReadiness::Ready,
+            })
+            .unwrap();
+        store
+            .commit_schedule(
+                "recording-source-report",
+                "recording-source-plan",
+                &schedule_item.item_id,
+                "test-harness",
+                1,
+                "scheduled recording fixture",
+            )
+            .unwrap();
+        let schedule_item = store
+            .read_schedule_item(&schedule_item.item_id)
+            .unwrap()
+            .unwrap();
+        let schedule_history = store
+            .list_schedule_item_history(&schedule_item.item_id, 8)
+            .unwrap();
+        assert_eq!(schedule_history.len(), 2);
+        assert_eq!(schedule_history[1].item, schedule_item);
+        assert_eq!(schedule_history[1].changed_by, "test-harness");
+        assert_eq!(
+            store
+                .list_recording_schedule_candidates(&schedule_item.channel_id, 1, 100_000, 1)
+                .unwrap(),
+            vec![schedule_item.clone()]
+        );
+        assert!(
+            store
+                .list_recording_schedule_candidates(
+                    &schedule_item.channel_id,
+                    schedule_item.starts_at_unix_ms,
+                    100_000,
+                    1,
+                )
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            store
+                .list_recording_schedule_candidates(&schedule_item.channel_id, 1, 100_000, 0)
+                .is_err()
+        );
+        let maximum_candidate_window_ms = 31 * 24 * 60 * 60 * 1_000;
+        assert!(
+            store
+                .list_recording_schedule_candidates(
+                    &schedule_item.channel_id,
+                    1,
+                    1 + maximum_candidate_window_ms,
+                    128,
+                )
+                .is_ok()
+        );
+        assert!(
+            store
+                .list_recording_schedule_candidates(
+                    &schedule_item.channel_id,
+                    1,
+                    2 + maximum_candidate_window_ms,
+                    1,
+                )
+                .is_err()
+        );
+        assert!(
+            store
+                .list_recording_schedule_candidates(&schedule_item.channel_id, 1, 100_000, 129)
+                .is_err()
+        );
         let draft = ScheduledRecording::new(station_recording::RecordingDefinition {
             recording_id: "33333333-4444-4555-8666-777777777777".into(),
             channel_id: "44444444-5555-4666-8777-888888888888".into(),
             schedule_item_id: "55555555-6666-4777-8888-999999999999".into(),
-            schedule_revision: 1,
+            schedule_revision: 2,
             scheduled_start_unix_ms: 10_000,
             scheduled_end_unix_ms: 70_000,
             requested_by: operator.clone(),
@@ -16260,20 +16803,6 @@ mod tests {
         assert_eq!(created.len(), 1);
         assert_eq!(created[0].receipt, None);
         assert_eq!(created[0].actor, operator);
-
-        let mut changed_schedule_item = schedule_item.clone();
-        changed_schedule_item.revision = 2;
-        changed_schedule_item.title = "Changed after recording request".into();
-        store.put_schedule_item(&changed_schedule_item).unwrap();
-        let mut stale_schedule_recording = draft.clone();
-        stale_schedule_recording.definition.recording_id =
-            "77777777-8888-4999-8aaa-bbbbbbbbbbbb".into();
-        assert!(
-            store
-                .create_scheduled_recording(&stale_schedule_recording)
-                .unwrap_err()
-                .contains("schedule binding is stale or changed")
-        );
 
         let armed = draft
             .transition(station_recording::RecordingTransitionRequest {
@@ -16306,11 +16835,65 @@ mod tests {
         assert_eq!(history[1].receipt, Some(armed.receipt.clone()));
         assert_eq!(history[1].actor, armed.receipt.actor);
 
+        let mut changed_schedule_item = schedule_item.clone();
+        changed_schedule_item.revision = 3;
+        changed_schedule_item.state = ScheduleState::Draft;
+        changed_schedule_item.title = "Changed after recording request".into();
+        store.put_schedule_item(&changed_schedule_item).unwrap();
+        assert_eq!(
+            store
+                .list_schedule_item_history(&changed_schedule_item.item_id, 8)
+                .unwrap()
+                .len(),
+            3
+        );
+        let start_capture = armed
+            .recording
+            .transition(station_recording::RecordingTransitionRequest {
+                expected_revision: 2,
+                actor: RecordingActor {
+                    actor_id: "00000000-0000-4000-8000-000000000021".into(),
+                    role: RecordingActorRole::RecordingWorker,
+                },
+                occurred_at_unix_ms: 10_000,
+                execution: scheduled_recording_execution(&armed.recording).cloned(),
+                event: station_recording::RecordingEvent::StartCapture,
+            })
+            .unwrap();
+        assert!(
+            store
+                .write_scheduled_recording_transition(
+                    &start_capture.recording,
+                    &start_capture.receipt,
+                )
+                .unwrap_err()
+                .contains("schedule item is not committed")
+        );
+        let mut stale_schedule_recording = draft.clone();
+        stale_schedule_recording.definition.recording_id =
+            "77777777-8888-4999-8aaa-bbbbbbbbbbbb".into();
+        assert!(
+            store
+                .create_scheduled_recording(&stale_schedule_recording)
+                .unwrap_err()
+                .contains("schedule item is not committed")
+        );
+
         assert!(
             store
                 .write_scheduled_recording_transition(&armed.recording, &armed.receipt)
                 .is_err()
         );
+        store
+            .commit_schedule(
+                "recording-source-report-two",
+                "recording-source-plan-two",
+                &schedule_item.item_id,
+                "test-harness",
+                4,
+                "recommitted fixture",
+            )
+            .unwrap();
         let statement = store
             .prepare(
                 "UPDATE scheduled_recording_history SET actor_id='tampered' WHERE recording_id=?1",
@@ -16320,6 +16903,26 @@ mod tests {
             c_string(&draft.definition.recording_id, "test recording identity").unwrap();
         bind_text(store.database, statement.raw, 1, &recording_id).unwrap();
         assert!(expect_done(store.database, statement.raw).is_err());
+
+        let statement = store
+            .prepare("UPDATE schedule_items SET title='tampered' WHERE item_id=?1")
+            .unwrap();
+        let schedule_item_id =
+            c_string(&schedule_item.item_id, "test schedule item identity").unwrap();
+        bind_text(store.database, statement.raw, 1, &schedule_item_id).unwrap();
+        expect_done(store.database, statement.raw).unwrap();
+        assert!(store.read_schedule_item(&schedule_item.item_id).is_err());
+        assert!(
+            store
+                .list_channel_schedule(&schedule_item.channel_id)
+                .is_err()
+        );
+        assert!(store.list_schedule_window(1, 100_000).is_err());
+        assert!(
+            store
+                .list_recording_schedule_candidates(&schedule_item.channel_id, 1, 100_000, 1)
+                .is_err()
+        );
 
         let mut mismatched = armed.recording.clone();
         mismatched.revision = 3;
@@ -16341,6 +16944,7 @@ mod tests {
         );
         drop(store);
         let _ = std::fs::remove_file(database);
+        let _ = std::fs::remove_file(media_path);
     }
 
     #[test]

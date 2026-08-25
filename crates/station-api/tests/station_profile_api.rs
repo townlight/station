@@ -24,10 +24,29 @@ use station_media_lifecycle::{
     WatchFolderConfig,
 };
 use station_schedule::{
-    AssetReadiness, ChannelConfiguration, CommitPlan, CommitReport, DispatchStatus, MediaAsset,
-    OutputProfileId, OutputSinkConfiguration, ScheduleItem, ScheduleState,
+    AssetReadiness, ChannelConfiguration, DispatchStatus, MediaAsset, OutputProfileId,
+    OutputSinkConfiguration, ScheduleItem, ScheduleState,
 };
-use station_storage::StationStore;
+use station_storage::{ScheduleItemWrite, StationStore};
+
+trait ScheduleStoreTestExt {
+    fn put_schedule_item(&self, item: &station_schedule::ScheduleItem) -> Result<(), String>;
+}
+
+impl ScheduleStoreTestExt for StationStore {
+    fn put_schedule_item(&self, item: &station_schedule::ScheduleItem) -> Result<(), String> {
+        if item.state != ScheduleState::Draft {
+            return Err(
+                "test schedule fixtures must seed drafts through the public write path".into(),
+            );
+        }
+        self.write_schedule_item(&ScheduleItemWrite {
+            item: item.clone(),
+            changed_by: "test-harness".into(),
+            occurred_at_unix_ms: 1,
+        })
+    }
+}
 
 fn temporary_database(name: &str) -> PathBuf {
     let nonce = SystemTime::now()
@@ -41,7 +60,7 @@ fn remove_directory(path: &Path) {
     // Windows media/GStreamer teardown can release the final mapped file after
     // the pipeline has reached NULL. Keep cleanup bounded, but allow that
     // asynchronous handle release instead of turning it into a product failure.
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let deadline = Instant::now() + Duration::from_secs(30);
     loop {
         match std::fs::remove_dir_all(path) {
             Ok(()) => return,
@@ -1840,7 +1859,11 @@ fn admits_real_media_into_the_managed_library_and_refuses_declared_readiness() {
         .unwrap()
         .as_millis() as i64;
     let store = StationStore::open(&database).unwrap();
-    store.put_media_asset(&forged).unwrap();
+    let scheduled_media = root.join("scheduled-missing.ts");
+    std::fs::write(&scheduled_media, b"temporarily admitted media").unwrap();
+    let mut scheduled_missing = forged.clone();
+    scheduled_missing.media_path = scheduled_media.to_string_lossy().into_owned();
+    store.put_media_asset(&scheduled_missing).unwrap();
     store
         .put_schedule_item(&ScheduleItem {
             item_id: "185dc897-a14c-45f0-bd6a-899fd90cd196".into(),
@@ -1850,9 +1873,20 @@ fn admits_real_media_into_the_managed_library_and_refuses_declared_readiness() {
             title: "Missing council recording".into(),
             starts_at_unix_ms: now + 60_000,
             duration_ms: 30_000,
-            state: ScheduleState::Committed,
+            state: ScheduleState::Draft,
         })
         .unwrap();
+    store
+        .commit_schedule(
+            "missing-scheduled-report",
+            "missing-scheduled-plan",
+            "185dc897-a14c-45f0-bd6a-899fd90cd196",
+            "test-harness",
+            now,
+            "missing scheduled fixture",
+        )
+        .unwrap();
+    std::fs::remove_file(&scheduled_media).unwrap();
     drop(store);
     let dashboard = api.handle_in_process("GET", "/api/v1/assets/readiness-dashboard", None);
     assert_eq!(dashboard.status, 200);
@@ -2010,77 +2044,27 @@ fn generate_media_fixture(path: &Path) {
 }
 
 #[test]
-fn prepares_commits_and_persists_an_operator_approval_through_the_api() {
+fn schedule_item_mutation_requires_authenticated_authority_at_the_public_boundary() {
     let database = temporary_database("schedule-commit");
     let api = Api::open(&database).unwrap();
-    let scheduled_media = database.with_extension("scheduled.ts");
-    std::fs::write(&scheduled_media, b"admitted bytes").unwrap();
-    let asset = MediaAsset {
-        asset_id: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
-        media_path: scheduled_media.to_string_lossy().into_owned(),
-        duration_ms: 60_000,
-        readiness: AssetReadiness::Ready,
-    };
-    StationStore::open(&database)
-        .unwrap()
-        .put_media_asset(&asset)
-        .unwrap();
     let item = ScheduleItem {
         item_id: "256d5a07-92d3-4718-aec9-05cad42fae7d".into(),
         revision: 1,
         channel_id: "8b626c01-bdf8-419a-8a2e-b0a7caa1ff7e".into(),
-        asset_id: asset.asset_id.clone(),
+        asset_id: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
         title: "City Council".into(),
         starts_at_unix_ms: 100_000,
         duration_ms: 60_000,
         state: ScheduleState::Draft,
     };
+    let item_json = serde_json::to_vec(&item).unwrap();
     assert_eq!(
-        api.handle_in_process(
-            "PUT",
-            "/api/v1/schedule/items",
-            Some(&serde_json::to_vec(&item).unwrap())
-        )
-        .status,
-        200
+        api.handle_in_process("PUT", "/api/v1/schedule/items", Some(&item_json))
+            .status,
+        403
     );
-    let prepare = api.handle_in_process(
-        "POST",
-        "/api/v1/schedule/prepare",
-        Some(br#"{"plan_id":"plan-1","schedule_item_id":"256d5a07-92d3-4718-aec9-05cad42fae7d"}"#),
-    );
-    assert_eq!(prepare.status, 200);
-    assert!(
-        serde_json::from_slice::<CommitPlan>(&prepare.body)
-            .unwrap()
-            .dry_run_passed
-    );
-
-    let commit = api.handle_in_process(
-        "POST",
-        "/api/v1/schedule/commit",
-        Some(br#"{"report_id":"report-1","plan_id":"plan-1","schedule_item_id":"256d5a07-92d3-4718-aec9-05cad42fae7d","approved_by":"operator-scott","operator_notes":"Reviewed."}"#),
-    );
-    assert_eq!(commit.status, 201);
-    let report: CommitReport = serde_json::from_slice(&commit.body).unwrap();
-    assert_eq!(report.dispatch_status, DispatchStatus::Pending);
-    let fetched = api.handle_in_process("GET", "/api/v1/schedule/commits/report-1", None);
-    assert_eq!(fetched.status, 200);
-    assert_eq!(
-        serde_json::from_slice::<CommitReport>(&fetched.body).unwrap(),
-        report
-    );
-    let listed = api.handle_in_process(
-        "GET",
-        "/api/v1/schedule/items?channel_id=8b626c01-bdf8-419a-8a2e-b0a7caa1ff7e",
-        None,
-    );
-    let items: Vec<ScheduleItem> = serde_json::from_slice(&listed.body).unwrap();
-    assert_eq!(items.len(), 1);
-    assert_eq!(items[0].state, ScheduleState::Committed);
-
+    drop(api);
     let _ = std::fs::remove_file(database);
-    std::fs::remove_file(scheduled_media).unwrap();
 }
 
 #[test]

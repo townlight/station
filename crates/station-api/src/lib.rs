@@ -49,6 +49,9 @@ use station_media_lifecycle::{
     LoudnessGateStatus, MediaIngestJob, MissingMediaAlert, ReadinessDashboard, ReadinessState,
     TranscodeJobStatus, WatchFolderConfig,
 };
+use station_metadata::{
+    AssetMetadataRecord, AssetMetadataValue, MetadataFieldDefinition, MetadataSchema,
+};
 use station_readiness::{
     BackupProbeInput, CandidateIdentity, CapabilitySupport, ChannelOutputRuntimeProbe,
     ClockProbeInput, ClockSyncStatus, EffectiveLoudnessStatus, EngineProbeInput,
@@ -68,14 +71,15 @@ use station_schedule::{
     ScheduleWindow,
 };
 use station_storage::{
-    AlertChannelSecret, CaptionPolicyWriteError, CgSnapshotReadError, CgWriteError,
-    ChannelCaptionMode, ChannelCaptionPolicy, ChannelCaptionPolicyAuditEvent, ChannelFallbackSlate,
-    ChannelFallbackSlateAuditEvent, ChannelWriteError, CommissioningSupportBundleReceipt,
-    CommitWriteError, ExternalReceiverAcceptanceReceipt, FallbackSlateWriteError,
-    HeadendProfileWriteError, OutputLoudnessProofJob, OutputLoudnessProofJobRecord,
-    OutputLoudnessProofJobState, ProfileWriteError, ReceiverAcceptanceOutcome,
-    ReceiverEvidenceMethod, ReferenceStationTierWrite, ReferenceStationTierWriteError,
-    StationStore, StoredSinkLoudnessProof,
+    AlertChannelSecret, AssetMetadataWriteError, CaptionPolicyWriteError, CgSnapshotReadError,
+    CgWriteError, ChannelCaptionMode, ChannelCaptionPolicy, ChannelCaptionPolicyAuditEvent,
+    ChannelFallbackSlate, ChannelFallbackSlateAuditEvent, ChannelWriteError,
+    CommissioningSupportBundleReceipt, CommitWriteError, CustomMetadataSchemaWriteError,
+    ExternalReceiverAcceptanceReceipt, FallbackSlateWriteError, HeadendProfileWriteError,
+    OutputLoudnessProofJob, OutputLoudnessProofJobRecord, OutputLoudnessProofJobState,
+    ProfileWriteError, ReceiverAcceptanceOutcome, ReceiverEvidenceMethod,
+    ReferenceStationTierWrite, ReferenceStationTierWriteError, ScheduleItemWrite, StationStore,
+    StoredSinkLoudnessProof,
 };
 use station_update::UpdateCheckTrigger;
 use station_update_coordinator::CoordinatorError;
@@ -97,6 +101,7 @@ const CAPTION_PROOF_RUNTIME_MAX_AGE_MS: i64 = 15_000;
 const CAPTION_PROOF_EXECUTION_LEAD_MS: u64 = 1_000;
 const AUTOMATION_CONNECTION_TEST_TTL_MS: i64 = 24 * 60 * 60 * 1_000;
 const RECORDING_WORKER_ACTOR_ID: &str = "00000000-0000-4000-8000-000000000021";
+const RECORDING_CANDIDATE_FUTURE_WINDOW_MS: i64 = 31 * 24 * 60 * 60 * 1_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -646,6 +651,41 @@ struct PutAutomationFeaturePolicyRequest {
     expected_revision: Option<u64>,
 }
 
+/// The browser proposes only mutable field definitions. Schema identity,
+/// revision, attribution, and time are derived by the server.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PutCustomMetadataSchemaRequest {
+    fields: Vec<MetadataFieldDefinition>,
+    expected_revision: Option<u64>,
+}
+
+/// The browser proposes values and the requested asset/schema identities only.
+/// The server resolves the current schema revision, record revision, actor, and
+/// occurrence time; callers cannot submit those authority facts.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PutAssetMetadataRecordRequest {
+    asset_id: String,
+    schema_id: String,
+    values: Vec<AssetMetadataValue>,
+    expected_revision: Option<u64>,
+}
+
+#[derive(Debug, Serialize)]
+struct CustomMetadataSchemaHistoryResponse {
+    schema: MetadataSchema,
+    changed_by: String,
+    occurred_at_unix_ms: i64,
+}
+
+#[derive(Debug, Serialize)]
+struct AssetMetadataRecordHistoryResponse {
+    record: AssetMetadataRecord,
+    changed_by: String,
+    occurred_at_unix_ms: i64,
+}
+
 #[derive(Debug, Serialize)]
 struct AutomationFeaturePolicyStatusResponse {
     policy: AutomationFeaturePolicy,
@@ -895,11 +935,11 @@ struct PrepareScheduleCommit {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct CommitSchedule {
     report_id: String,
     plan_id: String,
     schedule_item_id: String,
-    approved_by: String,
     #[serde(default)]
     operator_notes: String,
 }
@@ -1349,8 +1389,33 @@ impl Api {
             ("PUT", path) if automation_policy_path(path).is_some() => {
                 self.put_automation_policy(path, body, actor)
             }
+            ("GET", "/api/v1/custom-metadata/schemas") => self.list_custom_metadata_schemas(actor),
+            ("GET", path) if custom_metadata_schema_history_path(path).is_some() => {
+                self.list_custom_metadata_schema_history(path, actor)
+            }
+            ("GET", path) if custom_metadata_schema_path(path).is_some() => {
+                self.read_custom_metadata_schema(path, actor)
+            }
+            ("PUT", path) if custom_metadata_schema_path(path).is_some() => {
+                self.put_custom_metadata_schema(path, body, actor)
+            }
+            ("GET", path) if asset_metadata_record_history_path(path).is_some() => {
+                self.list_asset_metadata_record_history(path, actor)
+            }
+            ("GET", path) if asset_metadata_record_path(path).is_some() => {
+                self.read_asset_metadata_record(path, actor)
+            }
+            ("PUT", path) if asset_metadata_record_path(path).is_some() => {
+                self.put_asset_metadata_record(path, body, actor)
+            }
+            ("GET", path) if asset_metadata_records_path(path).is_some() => {
+                self.list_asset_metadata_records(path, actor)
+            }
             ("POST", "/api/v1/scheduled-recordings") => {
                 self.create_scheduled_recording(body, actor)
+            }
+            ("GET", path) if path.starts_with("/api/v1/scheduled-recordings/candidates") => {
+                self.list_scheduled_recording_candidates(path, actor)
             }
             ("GET", path) if scheduled_recording_history_path(path).is_some() => {
                 self.list_scheduled_recording_history(path, actor)
@@ -1603,7 +1668,7 @@ impl Api {
             ("PUT", "/api/v1/cg/bulletins") => self.write_cg_bulletin(body, actor),
             ("POST", "/api/v1/cg/bulletins/expire") => self.expire_cg_bulletins(body, actor),
             ("GET", path) if path.starts_with("/api/v1/cg/audit?") => self.list_cg_audit(path),
-            ("PUT", "/api/v1/schedule/items") => self.put_schedule_item(body),
+            ("PUT", "/api/v1/schedule/items") => self.put_schedule_item(body, actor),
             ("POST", "/api/v1/schedule/prepare") => self.prepare_schedule_commit(body),
             ("POST", "/api/v1/schedule/commit") => self.commit_schedule(body, actor),
             ("GET", path) if path.starts_with("/api/v1/schedule/items?") => {
@@ -2078,6 +2143,427 @@ impl Api {
         Ok(candidate)
     }
 
+    fn list_custom_metadata_schemas(&self, actor: Option<&OperatorAccount>) -> ApiResponse {
+        if !is_metadata_reader(actor) {
+            return error_response(
+                403,
+                "metadata_operator_required",
+                "Reading custom metadata requires an enabled Setup Admin or Meeting Operator account.",
+            );
+        }
+        match self.storage.list_custom_metadata_schemas() {
+            Ok(schemas) => json_response(
+                200,
+                serde_json::to_vec(&schemas)
+                    .expect("serializing custom metadata schemas cannot fail"),
+            ),
+            Err(message) => error_response(500, "storage_error", &message),
+        }
+    }
+
+    fn read_custom_metadata_schema(
+        &self,
+        path: &str,
+        actor: Option<&OperatorAccount>,
+    ) -> ApiResponse {
+        if !is_metadata_reader(actor) {
+            return error_response(
+                403,
+                "metadata_operator_required",
+                "Reading custom metadata requires an enabled Setup Admin or Meeting Operator account.",
+            );
+        }
+        let Some(schema_id) = custom_metadata_schema_path(path) else {
+            return error_response(
+                400,
+                "invalid_path",
+                "The metadata schema identity is invalid.",
+            );
+        };
+        match self.storage.read_custom_metadata_schema(schema_id) {
+            Ok(Some(schema)) => json_response(
+                200,
+                serde_json::to_vec(&schema).expect("serializing a metadata schema cannot fail"),
+            ),
+            Ok(None) => error_response(
+                404,
+                "metadata_schema_not_found",
+                "The custom metadata schema does not exist.",
+            ),
+            Err(message) => error_response(500, "storage_error", &message),
+        }
+    }
+
+    fn list_custom_metadata_schema_history(
+        &self,
+        path: &str,
+        actor: Option<&OperatorAccount>,
+    ) -> ApiResponse {
+        if !is_metadata_reader(actor) {
+            return error_response(
+                403,
+                "metadata_operator_required",
+                "Reading custom metadata requires an enabled Setup Admin or Meeting Operator account.",
+            );
+        }
+        let Some((schema_id, limit)) = custom_metadata_schema_history_path(path) else {
+            return error_response(
+                400,
+                "invalid_path",
+                "The metadata schema history path is invalid.",
+            );
+        };
+        match self.storage.read_custom_metadata_schema(schema_id) {
+            Ok(Some(_)) => {}
+            Ok(None) => {
+                return error_response(
+                    404,
+                    "metadata_schema_not_found",
+                    "The custom metadata schema does not exist.",
+                );
+            }
+            Err(message) => return error_response(500, "storage_error", &message),
+        }
+        match self
+            .storage
+            .list_custom_metadata_schema_history(schema_id, limit)
+        {
+            Ok(history) => {
+                let response = history
+                    .into_iter()
+                    .map(|entry| CustomMetadataSchemaHistoryResponse {
+                        schema: entry.schema,
+                        changed_by: entry.changed_by,
+                        occurred_at_unix_ms: entry.occurred_at_unix_ms,
+                    })
+                    .collect::<Vec<_>>();
+                json_response(
+                    200,
+                    serde_json::to_vec(&response)
+                        .expect("serializing custom metadata schema history cannot fail"),
+                )
+            }
+            Err(message) if message.contains("invalid") || message.contains("unbounded") => {
+                error_response(422, "validation_failed", &message)
+            }
+            Err(message) => error_response(500, "storage_error", &message),
+        }
+    }
+
+    fn put_custom_metadata_schema(
+        &self,
+        path: &str,
+        body: Option<&[u8]>,
+        actor: Option<&OperatorAccount>,
+    ) -> ApiResponse {
+        let Some(schema_id) = custom_metadata_schema_path(path) else {
+            return error_response(
+                400,
+                "invalid_path",
+                "The metadata schema identity is invalid.",
+            );
+        };
+        let Some(actor) = metadata_writer(actor, false) else {
+            return error_response(
+                403,
+                "setup_admin_required",
+                "Changing custom metadata schemas requires the Setup Admin role.",
+            );
+        };
+        let Some(request) = parse_body::<PutCustomMetadataSchemaRequest>(body) else {
+            return error_response(
+                400,
+                "invalid_json",
+                "A custom metadata schema body is required.",
+            );
+        };
+        let revision = match metadata_next_revision(request.expected_revision) {
+            Ok(revision) => revision,
+            Err(message) => return error_response(422, "validation_failed", &message),
+        };
+        let schema = MetadataSchema {
+            schema_id: schema_id.into(),
+            revision,
+            fields: request.fields,
+        };
+        if let Err(message) = schema.validate() {
+            return error_response(422, "validation_failed", &message);
+        }
+        let occurred_at_unix_ms = match system_time_millis() {
+            Ok(now) => now,
+            Err(message) => return error_response(500, "clock_error", &message),
+        };
+        match self.storage.write_custom_metadata_schema(
+            &schema,
+            request.expected_revision,
+            actor.account_id().as_str(),
+            occurred_at_unix_ms,
+        ) {
+            Ok(()) => json_response(
+                if revision == 1 { 201 } else { 200 },
+                serde_json::to_vec(&schema).expect("serializing a metadata schema cannot fail"),
+            ),
+            Err(CustomMetadataSchemaWriteError::Invalid(message)) => {
+                error_response(422, "validation_failed", &message)
+            }
+            Err(CustomMetadataSchemaWriteError::Conflict(message)) => {
+                error_response(409, "revision_conflict", &message)
+            }
+            Err(CustomMetadataSchemaWriteError::Rebound) => error_response(
+                409,
+                "metadata_identity_rebound",
+                "An existing metadata schema identity cannot be rebound.",
+            ),
+            Err(CustomMetadataSchemaWriteError::Capacity) => error_response(
+                422,
+                "metadata_schema_capacity_exceeded",
+                "Custom metadata cannot exceed 64 schemas.",
+            ),
+            Err(CustomMetadataSchemaWriteError::Storage(message)) => {
+                error_response(500, "storage_error", &message)
+            }
+        }
+    }
+
+    fn list_asset_metadata_records(
+        &self,
+        path: &str,
+        actor: Option<&OperatorAccount>,
+    ) -> ApiResponse {
+        if !is_metadata_reader(actor) {
+            return error_response(
+                403,
+                "metadata_operator_required",
+                "Reading custom metadata requires an enabled Setup Admin or Meeting Operator account.",
+            );
+        }
+        let Some(asset_id) = asset_metadata_records_path(path) else {
+            return error_response(400, "invalid_path", "The media asset identity is invalid.");
+        };
+        match self.storage.read_media_asset(asset_id) {
+            Ok(Some(_)) => {}
+            Ok(None) => {
+                return error_response(404, "asset_not_found", "The media asset does not exist.");
+            }
+            Err(message) => return error_response(500, "storage_error", &message),
+        }
+        match self.storage.list_asset_metadata_records(asset_id) {
+            Ok(records) => json_response(
+                200,
+                serde_json::to_vec(&records)
+                    .expect("serializing asset metadata records cannot fail"),
+            ),
+            Err(message) => error_response(500, "storage_error", &message),
+        }
+    }
+
+    fn read_asset_metadata_record(
+        &self,
+        path: &str,
+        actor: Option<&OperatorAccount>,
+    ) -> ApiResponse {
+        if !is_metadata_reader(actor) {
+            return error_response(
+                403,
+                "metadata_operator_required",
+                "Reading custom metadata requires an enabled Setup Admin or Meeting Operator account.",
+            );
+        }
+        let Some(metadata_id) = asset_metadata_record_path(path) else {
+            return error_response(
+                400,
+                "invalid_path",
+                "The metadata record identity is invalid.",
+            );
+        };
+        match self.storage.read_asset_metadata_record(metadata_id) {
+            Ok(Some(record)) => json_response(
+                200,
+                serde_json::to_vec(&record)
+                    .expect("serializing an asset metadata record cannot fail"),
+            ),
+            Ok(None) => error_response(
+                404,
+                "metadata_record_not_found",
+                "The asset metadata record does not exist.",
+            ),
+            Err(message) => error_response(500, "storage_error", &message),
+        }
+    }
+
+    fn list_asset_metadata_record_history(
+        &self,
+        path: &str,
+        actor: Option<&OperatorAccount>,
+    ) -> ApiResponse {
+        if !is_metadata_reader(actor) {
+            return error_response(
+                403,
+                "metadata_operator_required",
+                "Reading custom metadata requires an enabled Setup Admin or Meeting Operator account.",
+            );
+        }
+        let Some((metadata_id, limit)) = asset_metadata_record_history_path(path) else {
+            return error_response(
+                400,
+                "invalid_path",
+                "The asset metadata history path is invalid.",
+            );
+        };
+        match self.storage.read_asset_metadata_record(metadata_id) {
+            Ok(Some(_)) => {}
+            Ok(None) => {
+                return error_response(
+                    404,
+                    "metadata_record_not_found",
+                    "The asset metadata record does not exist.",
+                );
+            }
+            Err(message) => return error_response(500, "storage_error", &message),
+        }
+        match self
+            .storage
+            .list_asset_metadata_record_history(metadata_id, limit)
+        {
+            Ok(history) => {
+                let response = history
+                    .into_iter()
+                    .map(|entry| AssetMetadataRecordHistoryResponse {
+                        record: entry.record,
+                        changed_by: entry.changed_by,
+                        occurred_at_unix_ms: entry.occurred_at_unix_ms,
+                    })
+                    .collect::<Vec<_>>();
+                json_response(
+                    200,
+                    serde_json::to_vec(&response)
+                        .expect("serializing asset metadata history cannot fail"),
+                )
+            }
+            Err(message) if message.contains("invalid") || message.contains("unbounded") => {
+                error_response(422, "validation_failed", &message)
+            }
+            Err(message) => error_response(500, "storage_error", &message),
+        }
+    }
+
+    fn put_asset_metadata_record(
+        &self,
+        path: &str,
+        body: Option<&[u8]>,
+        actor: Option<&OperatorAccount>,
+    ) -> ApiResponse {
+        let Some(metadata_id) = asset_metadata_record_path(path) else {
+            return error_response(
+                400,
+                "invalid_path",
+                "The metadata record identity is invalid.",
+            );
+        };
+        let Some(actor) = metadata_writer(actor, true) else {
+            return error_response(
+                403,
+                "metadata_operator_required",
+                "Changing asset metadata requires an enabled Setup Admin or Meeting Operator account.",
+            );
+        };
+        let Some(request) = parse_body::<PutAssetMetadataRecordRequest>(body) else {
+            return error_response(
+                400,
+                "invalid_json",
+                "An asset metadata record body is required.",
+            );
+        };
+        if !is_lowercase_sha256(&request.asset_id) {
+            return error_response(
+                422,
+                "validation_failed",
+                "The asset identity must be a lowercase SHA-256 digest.",
+            );
+        }
+        if !is_canonical_api_uuid(&request.schema_id) {
+            return error_response(
+                422,
+                "validation_failed",
+                "The metadata schema identity must be a lowercase canonical UUID.",
+            );
+        }
+        match self.storage.read_media_asset(&request.asset_id) {
+            Ok(Some(_)) => {}
+            Ok(None) => {
+                return error_response(404, "asset_not_found", "The media asset does not exist.");
+            }
+            Err(message) => return error_response(500, "storage_error", &message),
+        }
+        let schema = match self.storage.read_custom_metadata_schema(&request.schema_id) {
+            Ok(Some(schema)) => schema,
+            Ok(None) => {
+                return error_response(
+                    404,
+                    "metadata_schema_not_found",
+                    "The custom metadata schema does not exist.",
+                );
+            }
+            Err(message) => return error_response(500, "storage_error", &message),
+        };
+        self.write_resolved_asset_metadata_record(metadata_id, request, actor, schema)
+    }
+
+    /// Completes an asset-metadata write after API schema resolution. Keeping
+    /// this boundary explicit lets the deterministic regression advance the
+    /// schema between resolution and persistence; storage must reject that
+    /// stale revision inside its own BEGIN IMMEDIATE transaction.
+    fn write_resolved_asset_metadata_record(
+        &self,
+        metadata_id: &str,
+        request: PutAssetMetadataRecordRequest,
+        actor: &OperatorAccount,
+        schema: MetadataSchema,
+    ) -> ApiResponse {
+        let current = match self.storage.read_asset_metadata_record(metadata_id) {
+            Ok(current) => current,
+            Err(message) => return error_response(500, "storage_error", &message),
+        };
+        if let Some(current) = &current
+            && (current.asset_id != request.asset_id || current.schema_id != request.schema_id)
+        {
+            return error_response(
+                409,
+                "metadata_identity_rebound",
+                "An existing metadata record cannot be rebound to another asset or schema.",
+            );
+        }
+        let revision = match metadata_next_revision(request.expected_revision) {
+            Ok(revision) => revision,
+            Err(message) => return error_response(422, "validation_failed", &message),
+        };
+        let record = AssetMetadataRecord {
+            metadata_id: metadata_id.into(),
+            asset_id: request.asset_id,
+            schema_id: request.schema_id,
+            schema_revision: schema.revision,
+            revision,
+            values: request.values,
+        };
+        let occurred_at_unix_ms = match system_time_millis() {
+            Ok(now) => now,
+            Err(message) => return error_response(500, "clock_error", &message),
+        };
+        match self.storage.write_asset_metadata_record(
+            &record,
+            request.expected_revision,
+            actor.account_id().as_str(),
+            occurred_at_unix_ms,
+        ) {
+            Ok(()) => json_response(
+                if revision == 1 { 201 } else { 200 },
+                serde_json::to_vec(&record)
+                    .expect("serializing an asset metadata record cannot fail"),
+            ),
+            Err(error) => asset_metadata_write_error_response(error),
+        }
+    }
+
     fn create_scheduled_recording(
         &self,
         body: Option<&[u8]>,
@@ -2204,6 +2690,57 @@ impl Api {
                 200,
                 serde_json::to_vec(&recordings)
                     .expect("serializing scheduled recordings cannot fail"),
+            ),
+            Err(message) if message.contains("invalid") || message.contains("unbounded") => {
+                error_response(422, "validation_failed", &message)
+            }
+            Err(message) => error_response(500, "storage_error", &message),
+        }
+    }
+
+    fn list_scheduled_recording_candidates(
+        &self,
+        path: &str,
+        actor: Option<&OperatorAccount>,
+    ) -> ApiResponse {
+        if recording_operator(actor).is_none() {
+            return error_response(
+                403,
+                "recording_operator_required",
+                "Reading recording candidates requires an enabled Setup Admin or Meeting Operator account.",
+            );
+        }
+        let Some((channel_id, limit)) = scheduled_recording_candidates_path(path) else {
+            return error_response(
+                400,
+                "invalid_path",
+                "The scheduled recording candidate path is invalid.",
+            );
+        };
+        let now = match system_time_millis() {
+            Ok(now) => now,
+            Err(message) => return error_response(500, "clock_error", &message),
+        };
+        let ends_before_unix_ms = match now.checked_add(RECORDING_CANDIDATE_FUTURE_WINDOW_MS) {
+            Some(end) => end,
+            None => {
+                return error_response(
+                    500,
+                    "clock_error",
+                    "The recording candidate window overflows the station clock.",
+                );
+            }
+        };
+        match self.storage.list_recording_schedule_candidates(
+            channel_id,
+            now,
+            ends_before_unix_ms,
+            limit,
+        ) {
+            Ok(items) => json_response(
+                200,
+                serde_json::to_vec(&items)
+                    .expect("serializing recording schedule candidates cannot fail"),
             ),
             Err(message) if message.contains("invalid") || message.contains("unbounded") => {
                 error_response(422, "validation_failed", &message)
@@ -2487,6 +3024,12 @@ impl Api {
             ),
             Err(message) if message.contains("conflict") || message.contains("race") => {
                 error_response(409, "revision_conflict", &message)
+            }
+            Err(message)
+                if message.contains("scheduled recording schedule item")
+                    || message.contains("schedule binding") =>
+            {
+                recording_schedule_error_response(message)
             }
             Err(message) => error_response(500, "storage_error", &message),
         }
@@ -6214,14 +6757,40 @@ impl Api {
         }
     }
 
-    fn put_schedule_item(&self, body: Option<&[u8]>) -> ApiResponse {
+    fn put_schedule_item(
+        &self,
+        body: Option<&[u8]>,
+        actor: Option<&OperatorAccount>,
+    ) -> ApiResponse {
+        let Some(actor) = recording_operator(actor) else {
+            return error_response(
+                403,
+                "schedule_operator_required",
+                "Changing schedule items requires an enabled Setup Admin or Meeting Operator account.",
+            );
+        };
         let Some(item) = parse_body::<ScheduleItem>(body) else {
             return error_response(400, "invalid_json", "A schedule item body is required.");
         };
         if let Err(error) = item.validate() {
             return error_response(422, "validation_failed", &format!("{error:?}"));
         }
-        match self.storage.put_schedule_item(&item) {
+        if item.state != ScheduleState::Draft {
+            return error_response(
+                409,
+                "schedule_commit_route_required",
+                "Create or edit schedule items as drafts, then use the audited schedule commit route.",
+            );
+        }
+        let occurred_at_unix_ms = match system_time_millis() {
+            Ok(value) => value,
+            Err(message) => return error_response(500, "clock_error", &message),
+        };
+        match self.storage.write_schedule_item(&ScheduleItemWrite {
+            item: item.clone(),
+            changed_by: actor.actor_id,
+            occurred_at_unix_ms,
+        }) {
             Ok(()) => json_response(
                 200,
                 serde_json::to_vec(&item).expect("serializing a schedule item cannot fail"),
@@ -6265,9 +6834,14 @@ impl Api {
     }
 
     fn commit_schedule(&self, body: Option<&[u8]>, actor: Option<&OperatorAccount>) -> ApiResponse {
-        let Some(command) =
-            parse_authenticated_body::<CommitSchedule>(body, actor, &[&["approved_by"]])
-        else {
+        let Some(actor) = recording_operator(actor) else {
+            return error_response(
+                403,
+                "schedule_operator_required",
+                "Committing schedule items requires an enabled Setup Admin or Meeting Operator account.",
+            );
+        };
+        let Some(command) = parse_body::<CommitSchedule>(body) else {
             return error_response(400, "invalid_json", "A schedule commit body is required.");
         };
         let approved_at = match system_time_millis() {
@@ -6278,7 +6852,7 @@ impl Api {
             &command.report_id,
             &command.plan_id,
             &command.schedule_item_id,
-            &mutation_actor(actor, &command.approved_by),
+            &actor.actor_id,
             approved_at,
             &command.operator_notes,
         ) {
@@ -6991,6 +7565,80 @@ fn is_automation_reader(actor: Option<&OperatorAccount>) -> bool {
     })
 }
 
+fn is_metadata_reader(actor: Option<&OperatorAccount>) -> bool {
+    actor.is_some_and(|account| {
+        account.enabled()
+            && (account
+                .roles()
+                .contains(&station_auth::OperatorRole::SetupAdmin)
+                || account
+                    .roles()
+                    .contains(&station_auth::OperatorRole::MeetingOperator))
+    })
+}
+
+fn metadata_writer(
+    actor: Option<&OperatorAccount>,
+    permit_meeting_operator: bool,
+) -> Option<&OperatorAccount> {
+    actor.filter(|account| {
+        account.enabled()
+            && (account
+                .roles()
+                .contains(&station_auth::OperatorRole::SetupAdmin)
+                || (permit_meeting_operator
+                    && account
+                        .roles()
+                        .contains(&station_auth::OperatorRole::MeetingOperator)))
+    })
+}
+
+fn metadata_next_revision(expected_revision: Option<u64>) -> Result<u64, String> {
+    match expected_revision {
+        Some(revision) => revision
+            .checked_add(1)
+            .ok_or_else(|| "The expected revision is invalid.".to_string()),
+        None => Ok(1),
+    }
+}
+
+fn asset_metadata_write_error_response(error: AssetMetadataWriteError) -> ApiResponse {
+    match error {
+        AssetMetadataWriteError::Invalid(message) => {
+            error_response(422, "validation_failed", &message)
+        }
+        AssetMetadataWriteError::SchemaNotFound => error_response(
+            404,
+            "metadata_schema_not_found",
+            "The custom metadata schema does not exist.",
+        ),
+        AssetMetadataWriteError::StaleSchema {
+            requested_revision,
+            current_revision,
+        } => error_response(
+            409,
+            "schema_revision_conflict",
+            &format!(
+                "Metadata schema revision {requested_revision} is stale; the current revision is {current_revision}."
+            ),
+        ),
+        AssetMetadataWriteError::Conflict(message) => {
+            error_response(409, "revision_conflict", &message)
+        }
+        AssetMetadataWriteError::Rebound => error_response(
+            409,
+            "metadata_identity_rebound",
+            "An existing metadata record cannot be rebound to another asset or schema.",
+        ),
+        AssetMetadataWriteError::DuplicateBinding => error_response(
+            409,
+            "metadata_binding_conflict",
+            "This asset and schema already have a metadata record.",
+        ),
+        AssetMetadataWriteError::Storage(message) => error_response(500, "storage_error", &message),
+    }
+}
+
 fn recording_operator(actor: Option<&OperatorAccount>) -> Option<RecordingActor> {
     let account = actor.filter(|account| account.enabled())?;
     let role = if account
@@ -7093,6 +7741,41 @@ fn automation_policy_history_path(path: &str) -> Option<(&str, usize)> {
     (1..=128).contains(&limit).then_some((policy_id, limit))
 }
 
+fn custom_metadata_schema_path(path: &str) -> Option<&str> {
+    path_identity(path, "/api/v1/custom-metadata/schemas/", "")
+        .filter(|identity| is_canonical_api_uuid(identity))
+}
+
+fn custom_metadata_schema_history_path(path: &str) -> Option<(&str, usize)> {
+    let remainder = path.strip_prefix("/api/v1/custom-metadata/schemas/")?;
+    let (schema_id, query) = remainder.split_once("/history?")?;
+    if !is_canonical_api_uuid(schema_id) || query.contains('&') {
+        return None;
+    }
+    let limit = query.strip_prefix("limit=")?.parse::<usize>().ok()?;
+    (1..=128).contains(&limit).then_some((schema_id, limit))
+}
+
+fn asset_metadata_record_path(path: &str) -> Option<&str> {
+    path_identity(path, "/api/v1/custom-metadata/records/", "")
+        .filter(|identity| is_canonical_api_uuid(identity))
+}
+
+fn asset_metadata_record_history_path(path: &str) -> Option<(&str, usize)> {
+    let remainder = path.strip_prefix("/api/v1/custom-metadata/records/")?;
+    let (metadata_id, query) = remainder.split_once("/history?")?;
+    if !is_canonical_api_uuid(metadata_id) || query.contains('&') {
+        return None;
+    }
+    let limit = query.strip_prefix("limit=")?.parse::<usize>().ok()?;
+    (1..=128).contains(&limit).then_some((metadata_id, limit))
+}
+
+fn asset_metadata_records_path(path: &str) -> Option<&str> {
+    path_identity(path, "/api/v1/custom-metadata/assets/", "/records")
+        .filter(|identity| is_lowercase_sha256(identity))
+}
+
 fn scheduled_recording_path(path: &str) -> Option<&str> {
     path_identity(path, "/api/v1/scheduled-recordings/", "")
         .filter(|identity| is_canonical_api_uuid(identity))
@@ -7116,6 +7799,17 @@ fn scheduled_recording_history_path(path: &str) -> Option<(&str, usize)> {
 
 fn scheduled_recording_list_path(path: &str) -> Option<(&str, usize)> {
     let query = path.strip_prefix("/api/v1/scheduled-recordings?")?;
+    let (channel, limit) = query.split_once("&limit=")?;
+    let channel_id = channel.strip_prefix("channel_id=")?;
+    if !is_canonical_api_uuid(channel_id) || limit.contains('&') {
+        return None;
+    }
+    let limit = limit.parse::<usize>().ok()?;
+    (1..=128).contains(&limit).then_some((channel_id, limit))
+}
+
+fn scheduled_recording_candidates_path(path: &str) -> Option<(&str, usize)> {
+    let query = path.strip_prefix("/api/v1/scheduled-recordings/candidates?")?;
     let (channel, limit) = query.split_once("&limit=")?;
     let channel_id = channel.strip_prefix("channel_id=")?;
     if !is_canonical_api_uuid(channel_id) || limit.contains('&') {
@@ -9249,6 +9943,25 @@ mod tests {
     use std::net::TcpListener;
     use std::thread;
 
+    trait ScheduleStoreTestExt {
+        fn put_schedule_item(&self, item: &ScheduleItem) -> Result<(), String>;
+    }
+
+    impl ScheduleStoreTestExt for StationStore {
+        fn put_schedule_item(&self, item: &ScheduleItem) -> Result<(), String> {
+            if item.state != ScheduleState::Draft {
+                return Err(
+                    "test schedule fixtures must seed drafts through the public write path".into(),
+                );
+            }
+            self.write_schedule_item(&ScheduleItemWrite {
+                item: item.clone(),
+                changed_by: "test-harness".into(),
+                occurred_at_unix_ms: 1,
+            })
+        }
+    }
+
     const PNG_1X1: &[u8] = &[
         137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 1, 0, 0, 0, 1, 8, 6,
         0, 0, 0, 31, 21, 196, 137, 0, 0, 0, 13, 73, 68, 65, 84, 120, 156, 99, 248, 207, 192, 240,
@@ -9270,6 +9983,113 @@ mod tests {
             1,
         )
         .unwrap()
+    }
+
+    #[test]
+    fn schedule_mutations_bind_authorized_actors_and_reject_forged_approval() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let database = std::env::temp_dir().join(format!("townlight-schedule-api-{nonce}.db"));
+        let scheduled_media = database.with_extension("scheduled.ts");
+        std::fs::write(&scheduled_media, b"admitted bytes").unwrap();
+        let api = Api::open(&database).unwrap();
+        let operator = test_actor(station_auth::OperatorRole::MeetingOperator);
+        let asset = MediaAsset {
+            asset_id: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+            media_path: scheduled_media.to_string_lossy().into_owned(),
+            duration_ms: 60_000,
+            readiness: AssetReadiness::Ready,
+        };
+        api.storage.put_media_asset(&asset).unwrap();
+        let item = ScheduleItem {
+            item_id: "256d5a07-92d3-4718-aec9-05cad42fae7d".into(),
+            revision: 1,
+            channel_id: "8b626c01-bdf8-419a-8a2e-b0a7caa1ff7e".into(),
+            asset_id: asset.asset_id.clone(),
+            title: "City Council".into(),
+            starts_at_unix_ms: 100_000,
+            duration_ms: 60_000,
+            state: ScheduleState::Draft,
+        };
+        let item_json = serde_json::to_vec(&item).unwrap();
+        assert_eq!(
+            api.handle_in_process("PUT", "/api/v1/schedule/items", Some(&item_json))
+                .status,
+            403
+        );
+        for role in [
+            station_auth::OperatorRole::RecordsClerk,
+            station_auth::OperatorRole::PublishOperator,
+            station_auth::OperatorRole::SupportAdmin,
+        ] {
+            let rejected = test_actor(role);
+            assert_eq!(
+                api.handle_authenticated(
+                    "PUT",
+                    "/api/v1/schedule/items",
+                    Some(&item_json),
+                    &rejected,
+                )
+                .status,
+                403
+            );
+            assert_eq!(
+                api.handle_authenticated(
+                    "POST",
+                    "/api/v1/schedule/commit",
+                    Some(br#"{"report_id":"role-rejected","plan_id":"plan-1","schedule_item_id":"256d5a07-92d3-4718-aec9-05cad42fae7d"}"#),
+                    &rejected,
+                )
+                .status,
+                403
+            );
+        }
+        assert_eq!(
+            api.handle_authenticated("PUT", "/api/v1/schedule/items", Some(&item_json), &operator)
+                .status,
+            200
+        );
+        let prepare = api.handle_in_process(
+            "POST",
+            "/api/v1/schedule/prepare",
+            Some(br#"{"plan_id":"plan-1","schedule_item_id":"256d5a07-92d3-4718-aec9-05cad42fae7d"}"#),
+        );
+        assert_eq!(prepare.status, 200);
+        assert!(
+            serde_json::from_slice::<station_schedule::CommitPlan>(&prepare.body)
+                .unwrap()
+                .dry_run_passed
+        );
+        assert_eq!(
+            api.handle_authenticated(
+                "POST",
+                "/api/v1/schedule/commit",
+                Some(br#"{"report_id":"forged-report","plan_id":"plan-1","schedule_item_id":"256d5a07-92d3-4718-aec9-05cad42fae7d","approved_by":"forged"}"#),
+                &operator,
+            )
+            .status,
+            400
+        );
+        let commit = api.handle_authenticated(
+            "POST",
+            "/api/v1/schedule/commit",
+            Some(br#"{"report_id":"report-1","plan_id":"plan-1","schedule_item_id":"256d5a07-92d3-4718-aec9-05cad42fae7d","operator_notes":"Reviewed."}"#),
+            &operator,
+        );
+        assert_eq!(commit.status, 201);
+        let report: CommitReport = serde_json::from_slice(&commit.body).unwrap();
+        assert_eq!(report.dispatch_status, DispatchStatus::Pending);
+        assert_eq!(report.approved_by, operator.account_id().as_str());
+        assert_eq!(
+            api.handle_in_process("GET", "/api/v1/schedule/commits/report-1", None)
+                .status,
+            200
+        );
+        drop(api);
+        let _ = std::fs::remove_file(database);
+        let _ = std::fs::remove_file(scheduled_media);
     }
 
     #[test]
@@ -12538,6 +13358,439 @@ mod tests {
     }
 
     #[test]
+    fn custom_metadata_api_derives_authority_and_rejects_rebinding() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let database = std::env::temp_dir().join(format!("townlight-metadata-api-{nonce}.db"));
+        let application = database.with_extension("application");
+        std::fs::create_dir_all(&application).unwrap();
+        let api =
+            Api::open_with_station_box_probe(&database, &application, station_box_probe()).unwrap();
+        let admin = test_actor(station_auth::OperatorRole::SetupAdmin);
+        let operator = test_actor(station_auth::OperatorRole::MeetingOperator);
+        let asset_id = "a".repeat(64);
+        let replacement_asset_id = "b".repeat(64);
+        for asset_id in [&asset_id, &replacement_asset_id] {
+            api.storage
+                .put_media_asset(&MediaAsset {
+                    asset_id: asset_id.clone(),
+                    media_path: r"C:\TownLight\media\metadata.ts".into(),
+                    duration_ms: 10_000,
+                    readiness: AssetReadiness::Ready,
+                })
+                .unwrap();
+        }
+        let schema_id = "11111111-2222-4333-8444-555555555555";
+        let field_id = "22222222-3333-4444-8555-666666666666";
+        let record_id = "33333333-4444-4555-8666-777777777777";
+        let schema_path = format!("/api/v1/custom-metadata/schemas/{schema_id}");
+        let schema_request = serde_json::json!({
+            "fields": [{
+                "field_id": field_id,
+                "key": "title",
+                "label": "Title",
+                "description": null,
+                "required": true,
+                "public": true,
+                "faceted": true,
+                "field_type": {"kind": "text", "constraints": {"min_chars": 1, "max_chars": 80}}
+            }],
+            "expected_revision": null
+        });
+        let mut forged_schema = schema_request.clone();
+        forged_schema["actor"] = serde_json::Value::String("forged-admin".into());
+        assert_eq!(
+            api.handle_authenticated(
+                "PUT",
+                &schema_path,
+                Some(&serde_json::to_vec(&forged_schema).unwrap()),
+                &admin,
+            )
+            .status,
+            400
+        );
+        assert_eq!(
+            api.handle_authenticated(
+                "PUT",
+                &schema_path,
+                Some(&serde_json::to_vec(&schema_request).unwrap()),
+                &operator,
+            )
+            .status,
+            403
+        );
+        let mut invalid_schema = schema_request.clone();
+        invalid_schema["fields"][0]["key"] = serde_json::Value::String("Invalid-Key".into());
+        assert_eq!(
+            api.handle_authenticated(
+                "PUT",
+                &schema_path,
+                Some(&serde_json::to_vec(&invalid_schema).unwrap()),
+                &admin,
+            )
+            .status,
+            422
+        );
+        let before_write = system_time_millis().unwrap();
+        let written_schema = api.handle_authenticated(
+            "PUT",
+            &schema_path,
+            Some(&serde_json::to_vec(&schema_request).unwrap()),
+            &admin,
+        );
+        assert_eq!(written_schema.status, 201);
+        let written_schema: serde_json::Value =
+            serde_json::from_slice(&written_schema.body).unwrap();
+        assert_eq!(written_schema["schema_id"], schema_id);
+        assert_eq!(written_schema["revision"], 1);
+        let schema_history = api.handle_authenticated(
+            "GET",
+            &format!("{schema_path}/history?limit=1"),
+            None,
+            &operator,
+        );
+        assert_eq!(schema_history.status, 200);
+        let schema_history: serde_json::Value =
+            serde_json::from_slice(&schema_history.body).unwrap();
+        assert_eq!(schema_history[0]["changed_by"], admin.account_id().as_str());
+        assert!(schema_history[0]["occurred_at_unix_ms"].as_i64().unwrap() >= before_write);
+        let stale_schema = serde_json::json!({
+            "fields": schema_request["fields"].clone(),
+            "expected_revision": 0
+        });
+        assert_eq!(
+            api.handle_authenticated(
+                "PUT",
+                &schema_path,
+                Some(&serde_json::to_vec(&stale_schema).unwrap()),
+                &admin,
+            )
+            .status,
+            409
+        );
+
+        let record_path = format!("/api/v1/custom-metadata/records/{record_id}");
+        let record_request = serde_json::json!({
+            "asset_id": asset_id,
+            "schema_id": schema_id,
+            "values": [{
+                "field_id": field_id,
+                "value": {"kind": "text", "value": "Council Meeting"}
+            }],
+            "expected_revision": null
+        });
+        let mut forged_record = record_request.clone();
+        forged_record["schema_revision"] = serde_json::Value::from(999_u64);
+        assert_eq!(
+            api.handle_authenticated(
+                "PUT",
+                &record_path,
+                Some(&serde_json::to_vec(&forged_record).unwrap()),
+                &operator,
+            )
+            .status,
+            400
+        );
+        let mut forged_attribution = record_request.clone();
+        forged_attribution["actor"] = serde_json::Value::String("browser-forgery".into());
+        forged_attribution["occurred_at_unix_ms"] = serde_json::Value::from(1_i64);
+        assert_eq!(
+            api.handle_authenticated(
+                "PUT",
+                &record_path,
+                Some(&serde_json::to_vec(&forged_attribution).unwrap()),
+                &operator,
+            )
+            .status,
+            400
+        );
+        let mut invalid_schema_id = record_request.clone();
+        invalid_schema_id["schema_id"] = serde_json::Value::String("not-a-schema-id".into());
+        assert_eq!(
+            api.handle_authenticated(
+                "PUT",
+                &record_path,
+                Some(&serde_json::to_vec(&invalid_schema_id).unwrap()),
+                &operator,
+            )
+            .status,
+            422
+        );
+        let mut unknown_field = record_request.clone();
+        unknown_field["values"][0]["field_id"] =
+            serde_json::Value::String("99999999-8888-4777-8666-555555555555".into());
+        assert_eq!(
+            api.handle_authenticated(
+                "PUT",
+                &record_path,
+                Some(&serde_json::to_vec(&unknown_field).unwrap()),
+                &operator,
+            )
+            .status,
+            422
+        );
+
+        let api_resolved_schema = api
+            .storage
+            .read_custom_metadata_schema(schema_id)
+            .unwrap()
+            .unwrap();
+        let advance_schema = serde_json::json!({
+            "fields": schema_request["fields"].clone(),
+            "expected_revision": 1
+        });
+        assert_eq!(
+            api.handle_authenticated(
+                "PUT",
+                &schema_path,
+                Some(&serde_json::to_vec(&advance_schema).unwrap()),
+                &admin,
+            )
+            .status,
+            200
+        );
+        let stale_interleaved_request: PutAssetMetadataRecordRequest =
+            serde_json::from_value(record_request.clone()).unwrap();
+        let stale_interleaved = api.write_resolved_asset_metadata_record(
+            record_id,
+            stale_interleaved_request,
+            &operator,
+            api_resolved_schema,
+        );
+        assert_eq!(stale_interleaved.status, 409);
+        let stale_interleaved: serde_json::Value =
+            serde_json::from_slice(&stale_interleaved.body).unwrap();
+        assert_eq!(
+            stale_interleaved["error"]["code"],
+            "schema_revision_conflict"
+        );
+
+        let before_record_write = system_time_millis().unwrap();
+        let created = api.handle_authenticated(
+            "PUT",
+            &record_path,
+            Some(&serde_json::to_vec(&record_request).unwrap()),
+            &operator,
+        );
+        let after_record_write = system_time_millis().unwrap();
+        assert_eq!(
+            created.status,
+            201,
+            "{}",
+            String::from_utf8_lossy(&created.body)
+        );
+        let created: serde_json::Value = serde_json::from_slice(&created.body).unwrap();
+        assert_eq!(created["metadata_id"], record_id);
+        assert_eq!(created["schema_revision"], 2);
+        assert_eq!(created["revision"], 1);
+        let duplicate = api.handle_authenticated(
+            "PUT",
+            "/api/v1/custom-metadata/records/77777777-8888-4999-8aaa-bbbbbbbbbbbb",
+            Some(&serde_json::to_vec(&record_request).unwrap()),
+            &admin,
+        );
+        assert_eq!(duplicate.status, 409);
+        let duplicate: serde_json::Value = serde_json::from_slice(&duplicate.body).unwrap();
+        assert_eq!(duplicate["error"]["code"], "metadata_binding_conflict");
+        assert_eq!(api.handle_in_process("GET", &record_path, None).status, 403);
+        assert_eq!(
+            api.handle_authenticated(
+                "GET",
+                &format!("/api/v1/custom-metadata/assets/{asset_id}/records"),
+                None,
+                &operator,
+            )
+            .status,
+            200
+        );
+        let record_history = api.handle_authenticated(
+            "GET",
+            &format!("{record_path}/history?limit=1"),
+            None,
+            &admin,
+        );
+        assert_eq!(record_history.status, 200);
+        let record_history: serde_json::Value =
+            serde_json::from_slice(&record_history.body).unwrap();
+        assert_eq!(
+            record_history[0]["changed_by"],
+            operator.account_id().as_str()
+        );
+        let record_occurred_at = record_history[0]["occurred_at_unix_ms"].as_i64().unwrap();
+        assert!(record_occurred_at >= before_record_write);
+        assert!(record_occurred_at <= after_record_write);
+        let stale_record = serde_json::json!({
+            "asset_id": asset_id,
+            "schema_id": schema_id,
+            "values": record_request["values"].clone(),
+            "expected_revision": 0
+        });
+        assert_eq!(
+            api.handle_authenticated(
+                "PUT",
+                &record_path,
+                Some(&serde_json::to_vec(&stale_record).unwrap()),
+                &admin,
+            )
+            .status,
+            409
+        );
+        let rebound = serde_json::json!({
+            "asset_id": replacement_asset_id,
+            "schema_id": schema_id,
+            "values": record_request["values"].clone(),
+            "expected_revision": 1
+        });
+        assert_eq!(
+            api.handle_authenticated(
+                "PUT",
+                &record_path,
+                Some(&serde_json::to_vec(&rebound).unwrap()),
+                &admin,
+            )
+            .status,
+            409
+        );
+        let missing_asset = serde_json::json!({
+            "asset_id": "c".repeat(64),
+            "schema_id": schema_id,
+            "values": record_request["values"].clone(),
+            "expected_revision": null
+        });
+        assert_eq!(
+            api.handle_authenticated(
+                "PUT",
+                "/api/v1/custom-metadata/records/44444444-5555-4666-8777-888888888888",
+                Some(&serde_json::to_vec(&missing_asset).unwrap()),
+                &admin,
+            )
+            .status,
+            404
+        );
+        assert_eq!(
+            api.handle_authenticated(
+                "GET",
+                "/api/v1/custom-metadata/schemas/55555555-6666-4777-8888-999999999999/history?limit=1",
+                None,
+                &admin,
+            )
+            .status,
+            404
+        );
+
+        drop(api);
+        let _ = std::fs::remove_file(database);
+        let _ = std::fs::remove_dir_all(application);
+    }
+
+    #[test]
+    fn custom_metadata_schema_creation_conflict_and_capacity_are_exact_client_errors() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let database =
+            std::env::temp_dir().join(format!("townlight-metadata-schema-errors-{nonce}.db"));
+        let application = database.with_extension("application");
+        std::fs::create_dir_all(&application).unwrap();
+        let api =
+            Api::open_with_station_box_probe(&database, &application, station_box_probe()).unwrap();
+        let admin = test_actor(station_auth::OperatorRole::SetupAdmin);
+        let field_id = "22222222-3333-4444-8555-666666666666";
+        let fields = serde_json::json!([{
+            "field_id": field_id,
+            "key": "title",
+            "label": "Title",
+            "description": null,
+            "required": true,
+            "public": true,
+            "faceted": true,
+            "field_type": {"kind": "text", "constraints": {"min_chars": 1, "max_chars": 80}}
+        }]);
+
+        let conflict_id = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+        let conflict = api.handle_authenticated(
+            "PUT",
+            &format!("/api/v1/custom-metadata/schemas/{conflict_id}"),
+            Some(
+                &serde_json::to_vec(&serde_json::json!({
+                    "fields": fields.clone(),
+                    "expected_revision": 0
+                }))
+                .unwrap(),
+            ),
+            &admin,
+        );
+        assert_eq!(conflict.status, 409);
+        let conflict: serde_json::Value = serde_json::from_slice(&conflict.body).unwrap();
+        assert_eq!(conflict["error"]["code"], "revision_conflict");
+        assert!(
+            api.storage
+                .read_custom_metadata_schema(conflict_id)
+                .unwrap()
+                .is_none()
+        );
+
+        let fields: Vec<MetadataFieldDefinition> = serde_json::from_value(fields).unwrap();
+        for index in 1_u64..=64 {
+            let schema_id = format!("{index:08x}-aaaa-4bbb-8ccc-{index:012x}");
+            api.storage
+                .write_custom_metadata_schema(
+                    &MetadataSchema {
+                        schema_id,
+                        revision: 1,
+                        fields: fields.clone(),
+                    },
+                    None,
+                    admin.account_id().as_str(),
+                    i64::try_from(index).unwrap(),
+                )
+                .unwrap();
+        }
+        let capacity_id = "00000041-aaaa-4bbb-8ccc-000000000041";
+        let capacity = api.handle_authenticated(
+            "PUT",
+            &format!("/api/v1/custom-metadata/schemas/{capacity_id}"),
+            Some(
+                &serde_json::to_vec(&serde_json::json!({
+                    "fields": fields,
+                    "expected_revision": null
+                }))
+                .unwrap(),
+            ),
+            &admin,
+        );
+        assert_eq!(capacity.status, 422);
+        let capacity: serde_json::Value = serde_json::from_slice(&capacity.body).unwrap();
+        assert_eq!(
+            capacity["error"]["code"],
+            "metadata_schema_capacity_exceeded"
+        );
+        assert!(
+            api.storage
+                .read_custom_metadata_schema(capacity_id)
+                .unwrap()
+                .is_none()
+        );
+
+        drop(api);
+        let _ = std::fs::remove_file(database);
+        let _ = std::fs::remove_dir_all(application);
+    }
+
+    #[test]
+    fn asset_metadata_storage_corruption_remains_a_server_error() {
+        let response = asset_metadata_write_error_response(AssetMetadataWriteError::Storage(
+            "database returned invalid asset metadata binding: row and record disagree".into(),
+        ));
+        assert_eq!(response.status, 500);
+        let body: serde_json::Value = serde_json::from_slice(&response.body).unwrap();
+        assert_eq!(body["error"]["code"], "storage_error");
+    }
+
+    #[test]
     fn scheduled_recording_api_uses_authenticated_operator_and_server_authority() {
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -12568,6 +13821,18 @@ mod tests {
         let recording_id = "33333333-4444-4555-8666-777777777777";
         let schedule_item_id = "44444444-5555-4666-8777-888888888888";
         let schedule_start = now + 60_000;
+        let media_path = database.with_extension("recording.ts");
+        std::fs::write(&media_path, b"scheduled recording API media").unwrap();
+        for asset_id in ["a".repeat(64), "b".repeat(64), "d".repeat(64)] {
+            api.storage
+                .put_media_asset(&MediaAsset {
+                    asset_id,
+                    media_path: media_path.to_string_lossy().into_owned(),
+                    duration_ms: 30_000,
+                    readiness: AssetReadiness::Ready,
+                })
+                .unwrap();
+        }
         api.storage
             .put_schedule_item(&ScheduleItem {
                 item_id: schedule_item_id.into(),
@@ -12577,9 +13842,99 @@ mod tests {
                 title: "Committed recording item".into(),
                 starts_at_unix_ms: schedule_start,
                 duration_ms: 30_000,
-                state: ScheduleState::Committed,
+                state: ScheduleState::Draft,
             })
             .unwrap();
+        api.storage
+            .commit_schedule(
+                "recording-api-report-one",
+                "recording-api-plan-one",
+                schedule_item_id,
+                "test-harness",
+                now,
+                "scheduled recording fixture",
+            )
+            .unwrap();
+        let candidates_path =
+            format!("/api/v1/scheduled-recordings/candidates?channel_id={channel_id}&limit=1");
+        assert_eq!(
+            api.handle_in_process("GET", &candidates_path, None).status,
+            403
+        );
+        let records_clerk = test_actor(station_auth::OperatorRole::RecordsClerk);
+        assert_eq!(
+            api.handle_authenticated("GET", &candidates_path, None, &records_clerk)
+                .status,
+            403
+        );
+        assert_eq!(
+            api.handle_authenticated(
+                "GET",
+                &format!("/api/v1/scheduled-recordings/candidates?channel_id={channel_id}&limit=0"),
+                None,
+                &admin,
+            )
+            .status,
+            400
+        );
+        assert_eq!(
+            api.handle_authenticated(
+                "GET",
+                &format!("/api/v1/scheduled-recordings/candidates?limit=1&channel_id={channel_id}"),
+                None,
+                &admin,
+            )
+            .status,
+            400
+        );
+        assert_eq!(
+            api.handle_authenticated(
+                "GET",
+                &format!(
+                    "/api/v1/scheduled-recordings/candidates?channel_id={channel_id}&limit=1&extra=value"
+                ),
+                None,
+                &admin,
+            )
+            .status,
+            400
+        );
+        assert_eq!(
+            api.handle_authenticated(
+                "GET",
+                "/api/v1/scheduled-recordings/candidates?channel_id=AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA&limit=1",
+                None,
+                &admin,
+            )
+            .status,
+            400
+        );
+        assert_eq!(
+            api.handle_authenticated(
+                "GET",
+                &format!(
+                    "/api/v1/scheduled-recordings/candidates?channel_id={channel_id}&limit=129"
+                ),
+                None,
+                &admin,
+            )
+            .status,
+            400
+        );
+        let candidates = api.handle_authenticated("GET", &candidates_path, None, &admin);
+        assert_eq!(candidates.status, 200);
+        let candidates: Vec<ScheduleItem> = serde_json::from_slice(&candidates.body).unwrap();
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].item_id, schedule_item_id);
+        assert_eq!(candidates[0].revision, 2);
+        assert_eq!(candidates[0].state, ScheduleState::Committed);
+        assert!(candidates[0].starts_at_unix_ms > now);
+        let meeting_candidate_reader = test_actor(station_auth::OperatorRole::MeetingOperator);
+        assert_eq!(
+            api.handle_authenticated("GET", &candidates_path, None, &meeting_candidate_reader,)
+                .status,
+            200
+        );
         let create = serde_json::to_vec(&serde_json::json!({
             "recording_id": recording_id,
             "schedule_item_id": schedule_item_id
@@ -12622,7 +13977,7 @@ mod tests {
         );
         assert!(created.definition.requested_at_unix_ms >= now);
         assert_eq!(created.definition.channel_id, channel_id);
-        assert_eq!(created.definition.schedule_revision, 1);
+        assert_eq!(created.definition.schedule_revision, 2);
         assert_eq!(created.definition.scheduled_start_unix_ms, schedule_start);
         assert_eq!(
             api.handle_in_process("POST", "/api/v1/scheduled-recordings", Some(&create),)
@@ -12709,10 +14064,20 @@ mod tests {
                 channel_id: channel_id.into(),
                 asset_id: "b".repeat(64),
                 title: "Meeting operator recording item".into(),
-                starts_at_unix_ms: schedule_start,
+                starts_at_unix_ms: schedule_start + 120_000,
                 duration_ms: 30_000,
-                state: ScheduleState::Committed,
+                state: ScheduleState::Draft,
             })
+            .unwrap();
+        api.storage
+            .commit_schedule(
+                "recording-api-report-two",
+                "recording-api-plan-two",
+                second_schedule_item_id,
+                "test-harness",
+                now + 1,
+                "scheduled recording fixture",
+            )
             .unwrap();
         let meeting_create = serde_json::to_vec(&serde_json::json!({
             "recording_id": second_recording_id,
@@ -12777,11 +14142,21 @@ mod tests {
             channel_id: channel_id.into(),
             asset_id: "d".repeat(64),
             title: "Stale binding item".into(),
-            starts_at_unix_ms: schedule_start,
+            starts_at_unix_ms: schedule_start + 240_000,
             duration_ms: 30_000,
-            state: ScheduleState::Committed,
+            state: ScheduleState::Draft,
         };
         api.storage.put_schedule_item(&stale_schedule).unwrap();
+        api.storage
+            .commit_schedule(
+                "recording-api-report-three",
+                "recording-api-plan-three",
+                stale_schedule_item_id,
+                "test-harness",
+                now + 2,
+                "scheduled recording fixture",
+            )
+            .unwrap();
         let stale_create = format!(
             r#"{{"recording_id":"{stale_recording_id}","schedule_item_id":"{stale_schedule_item_id}"}}"#
         );
@@ -12795,9 +14170,14 @@ mod tests {
             .status,
             201
         );
-        let mut changed_schedule = stale_schedule;
-        changed_schedule.revision = 2;
+        let mut changed_schedule = api
+            .storage
+            .read_schedule_item(stale_schedule_item_id)
+            .unwrap()
+            .unwrap();
+        changed_schedule.revision = 3;
         changed_schedule.title = "Changed schedule item".into();
+        changed_schedule.state = ScheduleState::Draft;
         api.storage.put_schedule_item(&changed_schedule).unwrap();
         assert_eq!(
             api.handle_authenticated(
@@ -12808,6 +14188,19 @@ mod tests {
             )
             .status,
             409
+        );
+        assert!(
+            api.record_trusted_scheduled_recording_worker_observation(
+                TrustedScheduledRecordingWorkerObservation {
+                    recording_id: stale_recording_id.into(),
+                    expected_revision: 1,
+                    event: TrustedScheduledRecordingWorkerEvent::Fail {
+                        reason: "stale schedule binding".into(),
+                    },
+                },
+            )
+            .unwrap_err()
+            .contains("schedule item is not committed")
         );
         assert_eq!(
             api.handle_authenticated(
@@ -12827,6 +14220,7 @@ mod tests {
         ] {
             let _ = std::fs::remove_file(candidate);
         }
+        let _ = std::fs::remove_file(media_path);
         let _ = std::fs::remove_dir_all(application);
     }
 }

@@ -5,7 +5,7 @@ use station_schedule::{
     AssetReadiness, ChannelConfiguration, DispatchStatus, MediaAsset, OutputProfileId,
     OutputSinkConfiguration, ScheduleItem, ScheduleState,
 };
-use station_storage::{CommissioningSupportBundleReceipt, StationStore};
+use station_storage::{CommissioningSupportBundleReceipt, ScheduleItemWrite, StationStore};
 
 const CHANNEL_ID: &str = "11111111-2222-4333-8444-555555555555";
 const ASSET_ID: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -13,6 +13,25 @@ const ITEM_ID: &str = "22222222-3333-4444-8555-666666666666";
 const REPORT_ID: &str = "report-guided";
 const BUNDLE_ID: &str = "support-bundle-1234";
 const BUNDLE_SHA256: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
+trait ScheduleStoreTestExt {
+    fn put_schedule_item(&self, item: &ScheduleItem) -> Result<(), String>;
+}
+
+impl ScheduleStoreTestExt for StationStore {
+    fn put_schedule_item(&self, item: &ScheduleItem) -> Result<(), String> {
+        if item.state != ScheduleState::Draft {
+            return Err(
+                "test schedule fixtures must seed drafts through the public write path".into(),
+            );
+        }
+        self.write_schedule_item(&ScheduleItemWrite {
+            item: item.clone(),
+            changed_by: "test-harness".into(),
+            occurred_at_unix_ms: 1,
+        })
+    }
+}
 
 fn temporary_root(name: &str) -> PathBuf {
     let nonce = SystemTime::now()
