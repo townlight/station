@@ -1,12 +1,17 @@
 use station_schedule_automation::{
-    ArbitrationOutcome, AssetCandidate, AssetPickStrategy, AssetResolution, DaypartBlock,
-    DstApplication, LocalDate, MaterializationOutcome, MaterializationPlan, MaterializationWindow,
+    ArbitrationOutcome, AssetCandidate, AssetPickStrategy, AssetResolution,
+    AuthenticatedCandidateProjection, AuthenticatedMaterializationInputs,
+    AuthenticatedPriorAirings, DaypartBlock, DstApplication, LocalDate, MaterializationAdmission,
+    MaterializationAuthorities, MaterializationOutcome, MaterializationPlan, MaterializationWindow,
     MetadataFilter, MetadataValue, PriorAiring, RecurrenceTimeZone, RecurringRule,
     RuleSlotCandidate, SavedSearch, SavedSearchOrder, SavedSearchQuery, SlotMaterializationOutcome,
+    SourceEvidenceKind, SourceEvidenceReceipt, SourceEvidenceVerifier, admit_materialization,
     arbitrate_rule_slots, canonical_intent_bytes, canonical_source_bytes,
-    derive_materialization_intent, resolve_asset,
+    derive_materialization_intent, materialization_evidence_scope_sha256, resolve_asset,
 };
 use std::collections::BTreeMap;
+
+const OBSERVED_AT_UTC_MS: i64 = 1_767_225_600_000;
 
 fn id(suffix: &str) -> String {
     format!("00000000-0000-4000-8000-0000000000{suffix}")
@@ -103,6 +108,76 @@ fn plan(outcome: MaterializationOutcome) -> MaterializationPlan {
     }
 }
 
+struct TestEvidenceVerifier;
+
+impl SourceEvidenceVerifier for TestEvidenceVerifier {
+    fn verify(
+        &self,
+        _kind: SourceEvidenceKind,
+        receipt: &SourceEvidenceReceipt,
+        scope_sha256: &str,
+        _payload_sha256: &str,
+        observed_at_utc_ms: i64,
+    ) -> Result<(), String> {
+        if receipt.attestation_sha256 != sha('f')
+            || receipt.scope_sha256 != scope_sha256
+            || observed_at_utc_ms != OBSERVED_AT_UTC_MS
+        {
+            return Err("test receipt was not authenticated for its scope".into());
+        }
+        Ok(())
+    }
+}
+
+fn inputs(
+    search: &SavedSearch,
+    block: &DaypartBlock,
+    rule: &RecurringRule,
+    window: &MaterializationWindow,
+    candidates: Vec<AssetCandidate>,
+    airings: Vec<PriorAiring>,
+) -> AuthenticatedMaterializationInputs {
+    let receipt = |kind, suffix| SourceEvidenceReceipt {
+        issuer_id: id("06"),
+        receipt_id: id(suffix),
+        issued_at_utc_ms: OBSERVED_AT_UTC_MS - 1_000,
+        expires_at_utc_ms: OBSERVED_AT_UTC_MS + 60_000,
+        scope_sha256: materialization_evidence_scope_sha256(search, block, rule, window, kind)
+            .unwrap(),
+        attestation_sha256: sha('f'),
+    };
+    AuthenticatedMaterializationInputs {
+        candidate_projection: AuthenticatedCandidateProjection {
+            receipt: receipt(SourceEvidenceKind::CandidateProjection, "07"),
+            candidates,
+        },
+        prior_airings: AuthenticatedPriorAirings {
+            receipt: receipt(SourceEvidenceKind::PriorAirings, "08"),
+            airings,
+        },
+    }
+}
+
+fn derive(
+    search: &SavedSearch,
+    block: &DaypartBlock,
+    rule: &RecurringRule,
+    window: MaterializationWindow,
+    candidates: Vec<AssetCandidate>,
+    airings: Vec<PriorAiring>,
+) -> Result<MaterializationOutcome, String> {
+    let inputs = inputs(search, block, rule, &window, candidates, airings);
+    derive_materialization_intent(
+        search,
+        block,
+        rule,
+        window,
+        OBSERVED_AT_UTC_MS,
+        &inputs,
+        &TestEvidenceVerifier,
+    )
+}
+
 #[test]
 fn resolver_filters_typed_metadata_and_rejects_invalid_candidate_input() {
     let valid = candidate('a', "Alpha council", 1_700_000_000_000);
@@ -183,28 +258,31 @@ fn picks_and_avoid_repeat_are_deterministic() {
 
 #[test]
 fn per_slot_resolution_emits_stable_draft_occurrences() {
+    let current_search = search();
+    let current_block = block();
+    let current_rule = rule();
     let first = plan(
-        derive_materialization_intent(
-            &search(),
-            &block(),
-            &rule(),
+        derive(
+            &current_search,
+            &current_block,
+            &current_rule,
             window(),
-            &[candidate('a', "Alpha council", 1_700_000_000_000)],
-            &[],
+            vec![candidate('a', "Alpha council", 1_700_000_000_000)],
+            vec![],
         )
         .unwrap(),
     );
     let shifted = plan(
-        derive_materialization_intent(
-            &search(),
-            &block(),
-            &rule(),
+        derive(
+            &current_search,
+            &current_block,
+            &current_rule,
             MaterializationWindow {
                 starts_at_utc_ms: 1_767_300_000_000,
                 ends_at_utc_ms: 1_768_435_200_000,
             },
-            &[candidate('a', "Alpha council", 1_700_000_000_000)],
-            &[],
+            vec![candidate('a', "Alpha council", 1_700_000_000_000)],
+            vec![],
         )
         .unwrap(),
     );
@@ -230,20 +308,23 @@ fn per_slot_resolution_emits_stable_draft_occurrences() {
 
 #[test]
 fn no_match_disabled_and_seasonal_blocks_are_explicit() {
+    let current_search = search();
+    let current_block = block();
+    let current_rule = rule();
     assert!(matches!(
-        derive_materialization_intent(&search(), &block(), &rule(), window(), &[], &[]).unwrap(),
+        derive(&current_search, &current_block, &current_rule, window(), vec![], vec![]).unwrap(),
         MaterializationOutcome::Plan(plan) if plan.outcomes.iter().all(|outcome| matches!(outcome, SlotMaterializationOutcome::NoMatch { .. }))
     ));
     let mut disabled = rule();
     disabled.enabled = false;
     assert!(matches!(
-        derive_materialization_intent(
-            &search(),
-            &block(),
+        derive(
+            &current_search,
+            &current_block,
             &disabled,
             window(),
-            &[candidate('a', "Alpha council", 1_700_000_000_000)],
-            &[]
+            vec![candidate('a', "Alpha council", 1_700_000_000_000)],
+            vec![]
         )
         .unwrap(),
         MaterializationOutcome::Plan(plan) if plan.outcomes.iter().all(|outcome| matches!(outcome, SlotMaterializationOutcome::Blocked { .. }))
@@ -260,13 +341,13 @@ fn no_match_disabled_and_seasonal_blocks_are_explicit() {
         day: 28,
     });
     assert!(matches!(
-        derive_materialization_intent(
-            &search(),
+        derive(
+            &current_search,
             &seasonal,
-            &rule(),
+            &current_rule,
             window(),
-            &[candidate('a', "Alpha council", 1_700_000_000_000)],
-            &[]
+            vec![candidate('a', "Alpha council", 1_700_000_000_000)],
+            vec![]
         )
         .unwrap(),
         MaterializationOutcome::Plan(plan) if plan.outcomes.iter().all(|outcome| matches!(outcome, SlotMaterializationOutcome::Blocked { .. }))
@@ -275,6 +356,8 @@ fn no_match_disabled_and_seasonal_blocks_are_explicit() {
 
 #[test]
 fn mixed_season_window_keeps_proposed_and_blocked_slots() {
+    let current_search = search();
+    let current_rule = rule();
     let mut seasonal = block();
     seasonal.season_starts_on = Some(LocalDate {
         year: 2026,
@@ -287,13 +370,13 @@ fn mixed_season_window_keeps_proposed_and_blocked_slots() {
         day: 31,
     });
     let plan = plan(
-        derive_materialization_intent(
-            &search(),
+        derive(
+            &current_search,
             &seasonal,
-            &rule(),
+            &current_rule,
             window(),
-            &[candidate('a', "Alpha council", 1_700_000_000_000)],
-            &[],
+            vec![candidate('a', "Alpha council", 1_700_000_000_000)],
+            vec![],
         )
         .unwrap(),
     );
@@ -311,16 +394,19 @@ fn mixed_season_window_keeps_proposed_and_blocked_slots() {
 }
 
 #[test]
-fn v2_domains_are_explicit() {
+fn v2_source_and_v3_intent_domains_are_explicit() {
     let source = canonical_source_bytes(&search(), &block(), &rule()).unwrap();
+    let current_search = search();
+    let current_block = block();
+    let current_rule = rule();
     let plan = plan(
-        derive_materialization_intent(
-            &search(),
-            &block(),
-            &rule(),
+        derive(
+            &current_search,
+            &current_block,
+            &current_rule,
             window(),
-            &[candidate('a', "Alpha council", 1_700_000_000_000)],
-            &[],
+            vec![candidate('a', "Alpha council", 1_700_000_000_000)],
+            vec![],
         )
         .unwrap(),
     );
@@ -329,10 +415,6 @@ fn v2_domains_are_explicit() {
         hex(&source),
         "1c00000000000000746f776e6c696768742e7363686564756c652d736f757263652e76320200240000000000000030303030303030302d303030302d343030302d383030302d303030303030303030303031240000000000000030303030303030302d303030302d343030302d383030302d303030303030303030303032240000000000000030303030303030302d303030302d343030302d383030302d3030303030303030303030330100000000000000000800010000000500000000000000746f706963040700000000000000636f756e63696c00000000240000000000000030303030303030302d303030302d343030302d383030302d303030303030303030303034240000000000000030303030303030302d303030302d343030302d383030302d3030303030303030303030320f000000000000005765656b6e69676874206369766963380428057f00000000000100000000000000240000000000000030303030303030302d303030302d343030302d383030302d303030303030303030303035240000000000000030303030303030302d303030302d343030302d383030302d303030303030303030303032240000000000000030303030303030302d303030302d343030302d383030302d303030303030303030303031240000000000000030303030303030302d303030302d343030302d383030302d30303030303030303030303401000000000000000100000000000000000e000100000801ea07010105000000000000006e616d65640e00000000000000416d65726963612f44656e76657207000000000000006561726c69657274043c000100000000000000"
     );
-    assert_eq!(
-        hex(&canonical_intent_bytes(&intent)),
-        "2300000000000000746f776e6c696768742e6d6174657269616c697a6174696f6e2d696e74656e742e76320200240000000000000030303030303030302d303030302d343030302d383030302d303030303030303030303035240000000000000030303030303030302d303030302d343030302d383030302d303030303030303030303032240000000000000030303030303030302d303030302d343030302d383030302d3030303030303030303030340100000000000000010000000000000000a8da769b01000000b0f3be9b010000400000000000000063303564643065323230333431643866613463353839373766306134376162313136616438396462313161623432666232613435303337343561616534353339020000004000000000000000396265636439623131613536333465346261386339333863353830383031303139663266613839326266643830633966653565363565356632646265643534304000000000000000616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161610d00000000000000416c70686120636f756e63696cea07010174040e00000000000000416d65726963612f44656e766572909dffff00e16e7c9b01000080cfa57c9b010000004000000000000000303630666165393635303061376363363130313038303333316563393065376138373134323461383030303665623933373539383739656235346465663664624000000000000000616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161610d00000000000000416c70686120636f756e63696cea07010874040e00000000000000416d65726963612f44656e766572909dffff00657ba09b0100008053b2a09b01000000"
-    );
     assert!(
         source
             .windows(b"townlight.schedule-source.v2".len())
@@ -340,14 +422,342 @@ fn v2_domains_are_explicit() {
     );
     assert!(
         canonical_intent_bytes(&intent)
-            .windows(b"townlight.materialization-intent.v2".len())
-            .any(|part| part == b"townlight.materialization-intent.v2")
+            .windows(b"townlight.materialization-intent.v3".len())
+            .any(|part| part == b"townlight.materialization-intent.v3")
+    );
+    assert!(intent.source_input_binding.combined_sha256.len() == 64);
+}
+
+#[test]
+fn materialization_requires_two_authenticated_scoped_projections_even_when_empty() {
+    struct RejectingVerifier;
+    impl SourceEvidenceVerifier for RejectingVerifier {
+        fn verify(
+            &self,
+            _kind: SourceEvidenceKind,
+            _receipt: &SourceEvidenceReceipt,
+            _scope_sha256: &str,
+            _payload_sha256: &str,
+            _observed_at_utc_ms: i64,
+        ) -> Result<(), String> {
+            Err("missing authoritative projection receipt".into())
+        }
+    }
+
+    let current_search = search();
+    let current_block = block();
+    let current_rule = rule();
+    let current_window = window();
+    let empty = inputs(
+        &current_search,
+        &current_block,
+        &current_rule,
+        &current_window,
+        vec![],
+        vec![],
+    );
+    assert!(
+        derive_materialization_intent(
+            &current_search,
+            &current_block,
+            &current_rule,
+            current_window,
+            OBSERVED_AT_UTC_MS,
+            &empty,
+            &RejectingVerifier,
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn source_receipts_must_be_current_and_short_lived() {
+    let current_search = search();
+    let current_block = block();
+    let current_rule = rule();
+    let current_window = window();
+    let baseline = inputs(
+        &current_search,
+        &current_block,
+        &current_rule,
+        &current_window,
+        vec![],
+        vec![],
+    );
+    for changed in [
+        {
+            let mut changed = baseline.clone();
+            changed.candidate_projection.receipt.expires_at_utc_ms = OBSERVED_AT_UTC_MS;
+            changed
+        },
+        {
+            let mut changed = baseline.clone();
+            changed.candidate_projection.receipt.issued_at_utc_ms = OBSERVED_AT_UTC_MS + 1;
+            changed.candidate_projection.receipt.expires_at_utc_ms = OBSERVED_AT_UTC_MS + 60_000;
+            changed
+        },
+        {
+            let mut changed = baseline.clone();
+            changed.candidate_projection.receipt.issued_at_utc_ms = OBSERVED_AT_UTC_MS - 1;
+            changed.candidate_projection.receipt.expires_at_utc_ms = OBSERVED_AT_UTC_MS + 300_000;
+            changed
+        },
+    ] {
+        assert!(
+            derive_materialization_intent(
+                &current_search,
+                &current_block,
+                &current_rule,
+                current_window.clone(),
+                OBSERVED_AT_UTC_MS,
+                &changed,
+                &TestEvidenceVerifier,
+            )
+            .is_err()
+        );
+    }
+}
+
+#[test]
+fn source_evidence_is_bound_to_exact_payload_receipt_and_materialization_scope() {
+    struct ExactPayloadVerifier {
+        candidate_projection_sha256: String,
+        prior_airings_sha256: String,
+    }
+    impl SourceEvidenceVerifier for ExactPayloadVerifier {
+        fn verify(
+            &self,
+            kind: SourceEvidenceKind,
+            receipt: &SourceEvidenceReceipt,
+            scope_sha256: &str,
+            payload_sha256: &str,
+            observed_at_utc_ms: i64,
+        ) -> Result<(), String> {
+            let expected = match kind {
+                SourceEvidenceKind::CandidateProjection => &self.candidate_projection_sha256,
+                SourceEvidenceKind::PriorAirings => &self.prior_airings_sha256,
+            };
+            if receipt.attestation_sha256 == sha('f')
+                && receipt.scope_sha256 == scope_sha256
+                && payload_sha256 == expected
+                && observed_at_utc_ms == OBSERVED_AT_UTC_MS
+            {
+                Ok(())
+            } else {
+                Err("receipt payload binding was not authenticated".into())
+            }
+        }
+    }
+
+    let current_search = search();
+    let current_block = block();
+    let current_rule = rule();
+    let current_window = window();
+    let valid = inputs(
+        &current_search,
+        &current_block,
+        &current_rule,
+        &current_window,
+        vec![candidate('a', "Alpha council", 1_700_000_000_000)],
+        vec![],
+    );
+    let first = plan(
+        derive_materialization_intent(
+            &current_search,
+            &current_block,
+            &current_rule,
+            current_window.clone(),
+            OBSERVED_AT_UTC_MS,
+            &valid,
+            &TestEvidenceVerifier,
+        )
+        .unwrap(),
+    );
+    let exact_verifier = ExactPayloadVerifier {
+        candidate_projection_sha256: first
+            .source_input_binding
+            .candidate_projection_sha256
+            .clone(),
+        prior_airings_sha256: first.source_input_binding.prior_airings_sha256.clone(),
+    };
+    assert!(
+        derive_materialization_intent(
+            &current_search,
+            &current_block,
+            &current_rule,
+            current_window.clone(),
+            OBSERVED_AT_UTC_MS,
+            &valid,
+            &exact_verifier,
+        )
+        .is_ok()
+    );
+    let mut changed = valid.clone();
+    changed.candidate_projection.candidates[0].title = "Changed council".into();
+    assert!(
+        derive_materialization_intent(
+            &current_search,
+            &current_block,
+            &current_rule,
+            current_window.clone(),
+            OBSERVED_AT_UTC_MS,
+            &changed,
+            &exact_verifier,
+        )
+        .is_err()
+    );
+    let changed_plan = plan(
+        derive_materialization_intent(
+            &current_search,
+            &current_block,
+            &current_rule,
+            current_window.clone(),
+            OBSERVED_AT_UTC_MS,
+            &changed,
+            &TestEvidenceVerifier,
+        )
+        .unwrap(),
+    );
+    assert_ne!(
+        first.source_input_binding.candidate_projection_sha256,
+        changed_plan
+            .source_input_binding
+            .candidate_projection_sha256
+    );
+    let first_occurrence = first.draft_intent.unwrap().occurrence_ids();
+    let changed_occurrence = changed_plan.draft_intent.unwrap().occurrence_ids();
+    assert_eq!(first_occurrence, changed_occurrence);
+
+    let mut rebound = valid;
+    rebound.candidate_projection.receipt.scope_sha256 = sha('0');
+    assert!(
+        derive_materialization_intent(
+            &current_search,
+            &current_block,
+            &current_rule,
+            current_window,
+            OBSERVED_AT_UTC_MS,
+            &rebound,
+            &TestEvidenceVerifier,
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn materialization_admission_reauthenticates_the_exact_source_inputs() {
+    let current_search = search();
+    let current_block = block();
+    let current_rule = rule();
+    let current_window = window();
+    let valid = inputs(
+        &current_search,
+        &current_block,
+        &current_rule,
+        &current_window,
+        vec![candidate('a', "Alpha council", 1_700_000_000_000)],
+        vec![],
+    );
+    let intent = plan(
+        derive_materialization_intent(
+            &current_search,
+            &current_block,
+            &current_rule,
+            current_window,
+            OBSERVED_AT_UTC_MS,
+            &valid,
+            &TestEvidenceVerifier,
+        )
+        .unwrap(),
+    )
+    .draft_intent
+    .unwrap();
+    assert!(matches!(
+        admit_materialization(
+            &[],
+            (*intent).clone(),
+            MaterializationAuthorities {
+                search: &current_search,
+                block: &current_block,
+                rule: &current_rule,
+            },
+            &valid,
+            OBSERVED_AT_UTC_MS,
+            &TestEvidenceVerifier,
+        )
+        .unwrap(),
+        MaterializationAdmission::Create(_)
+    ));
+    let mut substituted = valid;
+    substituted.candidate_projection.candidates[0].title = "Substituted council".into();
+    assert!(
+        admit_materialization(
+            &[],
+            (*intent).clone(),
+            MaterializationAuthorities {
+                search: &current_search,
+                block: &current_block,
+                rule: &current_rule,
+            },
+            &substituted,
+            OBSERVED_AT_UTC_MS,
+            &TestEvidenceVerifier,
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn source_projection_order_and_receipt_independence_fail_closed() {
+    let current_search = search();
+    let current_block = block();
+    let current_rule = rule();
+    let current_window = window();
+    let mut unordered = inputs(
+        &current_search,
+        &current_block,
+        &current_rule,
+        &current_window,
+        vec![
+            candidate('b', "Beta council", 1_700_000_000_000),
+            candidate('a', "Alpha council", 1_700_000_000_000),
+        ],
+        vec![],
+    );
+    assert!(
+        derive_materialization_intent(
+            &current_search,
+            &current_block,
+            &current_rule,
+            current_window.clone(),
+            OBSERVED_AT_UTC_MS,
+            &unordered,
+            &TestEvidenceVerifier,
+        )
+        .is_err()
+    );
+    unordered.candidate_projection.candidates.reverse();
+    unordered.prior_airings.receipt.receipt_id =
+        unordered.candidate_projection.receipt.receipt_id.clone();
+    assert!(
+        derive_materialization_intent(
+            &current_search,
+            &current_block,
+            &current_rule,
+            current_window,
+            OBSERVED_AT_UTC_MS,
+            &unordered,
+            &TestEvidenceVerifier,
+        )
+        .is_err()
     );
 }
 
 #[test]
 fn horizon_and_block_allow_list_fail_closed_at_boundaries() {
     let candidate = candidate('a', "Alpha council", 1_700_000_000_000);
+    let current_search = search();
+    let current_block = block();
     let mut fourteen = rule();
     fourteen.rolling_window_days = 14;
     let within = MaterializationWindow {
@@ -355,13 +765,13 @@ fn horizon_and_block_allow_list_fail_closed_at_boundaries() {
         ends_at_utc_ms: 1_768_435_200_000,
     };
     assert!(
-        derive_materialization_intent(
-            &search(),
-            &block(),
+        derive(
+            &current_search,
+            &current_block,
             &fourteen,
             within,
-            std::slice::from_ref(&candidate),
-            &[],
+            vec![candidate.clone()],
+            vec![],
         )
         .is_ok()
     );
@@ -370,13 +780,13 @@ fn horizon_and_block_allow_list_fail_closed_at_boundaries() {
         ends_at_utc_ms: 1_768_435_200_001,
     };
     assert!(
-        derive_materialization_intent(
-            &search(),
-            &block(),
+        derive(
+            &current_search,
+            &current_block,
             &fourteen,
             past,
-            std::slice::from_ref(&candidate),
-            &[],
+            vec![candidate.clone()],
+            vec![],
         )
         .is_err()
     );
@@ -387,21 +797,27 @@ fn horizon_and_block_allow_list_fail_closed_at_boundaries() {
         ends_at_utc_ms: 1_772_409_600_000,
     };
     assert!(
-        derive_materialization_intent(
-            &search(),
-            &block(),
+        derive(
+            &current_search,
+            &current_block,
             &sixty,
             sixty_window,
-            std::slice::from_ref(&candidate),
-            &[],
+            vec![candidate.clone()],
+            vec![],
         )
         .is_ok()
     );
     let mut denied = block();
     denied.allow_rule_ids = vec![id("06")];
     assert!(
-        derive_materialization_intent(&search(), &denied, &rule(), window(), &[candidate], &[])
-            .is_err()
+        materialization_evidence_scope_sha256(
+            &current_search,
+            &denied,
+            &rule(),
+            &window(),
+            SourceEvidenceKind::CandidateProjection,
+        )
+        .is_err()
     );
 }
 

@@ -38,6 +38,7 @@ SQL mutation through the normal database contract; they are not a signature-back
 defense against an attacker who can replace the database or deliberately drop its
 triggers and coherently rewrite every copy of a record.
 
-Before materialization can be claimed, a later authority must bind each plan to the
-exact candidate-projection digest and authenticated prior-airing digest used for
-selection. Empty or browser-supplied candidate/as-run inputs are not evidence.
+The pure v3 materialization contract now binds each plan to exact candidate and
+prior-airing payload/receipt digests. A later authority must produce, authenticate,
+and persist those projections and receipts before runtime materialization can be
+claimed. Empty or browser-supplied candidate/as-run inputs are not evidence.

@@ -9,10 +9,15 @@ const MAX_QUERY_FILTERS: usize = 8;
 const MAX_QUERY_LIMIT: usize = 128;
 const MAX_WINDOW_MS: i64 = 60 * 86_400_000;
 const MAX_SLOTS: usize = 64;
-/// Version two intentionally changes the canonical rule and intent domains.
-/// Version one admitted mutable, UUID-shaped media references; it must not be
-/// silently reinterpreted as a content-addressed rule.
-const HASH_SCHEMA_VERSION: u16 = 2;
+const MAX_EVIDENCE_RECEIPT_LIFETIME_MS: i64 = 300_000;
+/// Version three binds each materialization to authenticated catalog and
+/// as-run projections. Version two intents did not contain that evidence and
+/// must not be silently reinterpreted as proved materializations.
+const HASH_SCHEMA_VERSION: u16 = 3;
+/// The rule/search/block authority contract itself remains the established v2
+/// encoding. Keeping it stable also keeps occurrence identities stable.
+const SOURCE_AUTHORITY_SCHEMA_VERSION: u16 = 2;
+const OCCURRENCE_SCHEMA_VERSION: u16 = 2;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SavedSearch {
@@ -67,6 +72,85 @@ pub struct AssetCandidate {
 pub struct PriorAiring {
     pub asset_sha256: String,
     pub aired_at_utc_ms: i64,
+}
+
+/// The two projection kinds which must be independently authenticated before
+/// a materialization may regard an empty result as authoritative.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SourceEvidenceKind {
+    CandidateProjection,
+    PriorAirings,
+}
+
+/// A receipt produced by the authenticated catalog/as-run boundary.
+///
+/// This crate deliberately does not implement key management or signature
+/// verification. The caller supplies a verifier for the receipt, while this
+/// typed contract binds that verified receipt to one exact materialization
+/// scope and one exact canonical payload digest. Receipts are reusable immutable
+/// snapshot attestations only for that scope during their bounded five-minute
+/// validity period; they are not one-shot bearer tokens.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceEvidenceReceipt {
+    pub issuer_id: String,
+    pub receipt_id: String,
+    pub issued_at_utc_ms: i64,
+    pub expires_at_utc_ms: i64,
+    pub scope_sha256: String,
+    pub attestation_sha256: String,
+}
+
+/// The trust boundary for catalog and as-run evidence. Implementations must
+/// authenticate `receipt.attestation_sha256` and bind it to every supplied
+/// argument; an accept-all implementation is not a production verifier.
+pub trait SourceEvidenceVerifier {
+    fn verify(
+        &self,
+        kind: SourceEvidenceKind,
+        receipt: &SourceEvidenceReceipt,
+        scope_sha256: &str,
+        payload_sha256: &str,
+        observed_at_utc_ms: i64,
+    ) -> Result<(), String>;
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuthenticatedCandidateProjection {
+    pub receipt: SourceEvidenceReceipt,
+    pub candidates: Vec<AssetCandidate>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuthenticatedPriorAirings {
+    pub receipt: SourceEvidenceReceipt,
+    pub airings: Vec<PriorAiring>,
+}
+
+/// Raw slices are intentionally not accepted by materialization. Even an
+/// empty projection is evidence only after both its canonical digest and its
+/// receipt have been verified.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuthenticatedMaterializationInputs {
+    pub candidate_projection: AuthenticatedCandidateProjection,
+    pub prior_airings: AuthenticatedPriorAirings,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct MaterializationAuthorities<'a> {
+    pub search: &'a SavedSearch,
+    pub block: &'a DaypartBlock,
+    pub rule: &'a RecurringRule,
+}
+
+/// Exact, immutable source evidence carried in a plan and draft intent.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MaterializationInputBinding {
+    pub candidate_projection_sha256: String,
+    pub candidate_receipt_sha256: String,
+    pub prior_airings_sha256: String,
+    pub prior_airings_receipt_sha256: String,
+    pub scope_sha256: String,
+    pub combined_sha256: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -182,6 +266,7 @@ pub struct MaterializationIntent {
     pub window: MaterializationWindow,
     pub slots: Vec<ResolvedSlot>,
     pub source_authority_sha256: String,
+    pub source_input_binding: MaterializationInputBinding,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -207,6 +292,7 @@ pub enum MaterializationOutcome {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MaterializationPlan {
     pub source_authority_sha256: String,
+    pub source_input_binding: MaterializationInputBinding,
     /// Draft-only: this pure layer never commits the derived schedule items.
     pub draft_intent: Option<Box<MaterializationIntent>>,
     pub outcomes: Vec<SlotMaterializationOutcome>,
@@ -560,13 +646,141 @@ impl RecurringRule {
     }
 }
 
+impl AuthenticatedMaterializationInputs {
+    fn verify_and_bind(
+        &self,
+        source_authority_sha256: &str,
+        window: &MaterializationWindow,
+        observed_at_utc_ms: i64,
+        verifier: &impl SourceEvidenceVerifier,
+    ) -> Result<MaterializationInputBinding, String> {
+        if self.candidate_projection.receipt.issuer_id == self.prior_airings.receipt.issuer_id
+            && self.candidate_projection.receipt.receipt_id == self.prior_airings.receipt.receipt_id
+        {
+            return Err("candidate and prior-airings evidence must have distinct receipts".into());
+        }
+        let candidate_projection_sha256 = projection_hash(
+            SourceEvidenceKind::CandidateProjection,
+            &canonical_candidate_projection_bytes(&self.candidate_projection.candidates)?,
+        );
+        let prior_airings_sha256 = projection_hash(
+            SourceEvidenceKind::PriorAirings,
+            &canonical_prior_airings_bytes(&self.prior_airings.airings)?,
+        );
+        let candidate_scope = evidence_scope_hash(
+            SourceEvidenceKind::CandidateProjection,
+            source_authority_sha256,
+            window,
+        );
+        let airing_scope = evidence_scope_hash(
+            SourceEvidenceKind::PriorAirings,
+            source_authority_sha256,
+            window,
+        );
+        self.candidate_projection
+            .receipt
+            .validate_for(&candidate_scope, observed_at_utc_ms)?;
+        self.prior_airings
+            .receipt
+            .validate_for(&airing_scope, observed_at_utc_ms)?;
+        verifier.verify(
+            SourceEvidenceKind::CandidateProjection,
+            &self.candidate_projection.receipt,
+            &candidate_scope,
+            &candidate_projection_sha256,
+            observed_at_utc_ms,
+        )?;
+        verifier.verify(
+            SourceEvidenceKind::PriorAirings,
+            &self.prior_airings.receipt,
+            &airing_scope,
+            &prior_airings_sha256,
+            observed_at_utc_ms,
+        )?;
+        let binding = MaterializationInputBinding {
+            candidate_projection_sha256,
+            candidate_receipt_sha256: receipt_hash(&self.candidate_projection.receipt),
+            prior_airings_sha256,
+            prior_airings_receipt_sha256: receipt_hash(&self.prior_airings.receipt),
+            scope_sha256: combined_scope_hash(&candidate_scope, &airing_scope),
+            combined_sha256: String::new(),
+        };
+        let mut binding = binding;
+        binding.combined_sha256 = input_binding_hash(&binding);
+        binding.validate_for(source_authority_sha256, window)?;
+        Ok(binding)
+    }
+}
+
+impl SourceEvidenceReceipt {
+    fn validate_for(
+        &self,
+        expected_scope_sha256: &str,
+        observed_at_utc_ms: i64,
+    ) -> Result<(), String> {
+        ids(&[&self.issuer_id, &self.receipt_id])?;
+        if observed_at_utc_ms < 0
+            || self.issued_at_utc_ms < 0
+            || self.issued_at_utc_ms > observed_at_utc_ms
+            || self.expires_at_utc_ms <= observed_at_utc_ms
+            || self.expires_at_utc_ms <= self.issued_at_utc_ms
+            || self.expires_at_utc_ms - self.issued_at_utc_ms > MAX_EVIDENCE_RECEIPT_LIFETIME_MS
+            || !lowercase_sha256(&self.scope_sha256)
+            || !lowercase_sha256(&self.attestation_sha256)
+            || self.scope_sha256 != expected_scope_sha256
+        {
+            return Err("source evidence receipt is malformed, expired, or scope-rebound".into());
+        }
+        Ok(())
+    }
+}
+
+impl MaterializationInputBinding {
+    fn validate_for(
+        &self,
+        source_authority_sha256: &str,
+        window: &MaterializationWindow,
+    ) -> Result<(), String> {
+        if !lowercase_sha256(source_authority_sha256)
+            || [
+                &self.candidate_projection_sha256,
+                &self.candidate_receipt_sha256,
+                &self.prior_airings_sha256,
+                &self.prior_airings_receipt_sha256,
+                &self.scope_sha256,
+                &self.combined_sha256,
+            ]
+            .iter()
+            .any(|value| !lowercase_sha256(value))
+            || self.scope_sha256
+                != combined_scope_hash(
+                    &evidence_scope_hash(
+                        SourceEvidenceKind::CandidateProjection,
+                        source_authority_sha256,
+                        window,
+                    ),
+                    &evidence_scope_hash(
+                        SourceEvidenceKind::PriorAirings,
+                        source_authority_sha256,
+                        window,
+                    ),
+                )
+            || self.combined_sha256 != input_binding_hash(self)
+        {
+            return Err("materialization input evidence is forged, incomplete, or rebound".into());
+        }
+        Ok(())
+    }
+}
+
 pub fn derive_materialization_intent(
     search: &SavedSearch,
     block: &DaypartBlock,
     rule: &RecurringRule,
     window: MaterializationWindow,
-    candidates: &[AssetCandidate],
-    prior_airings: &[PriorAiring],
+    observed_at_utc_ms: i64,
+    inputs: &AuthenticatedMaterializationInputs,
+    verifier: &impl SourceEvidenceVerifier,
 ) -> Result<MaterializationOutcome, String> {
     rule.validate_against(search, block)?;
     window.validate()?;
@@ -575,8 +789,15 @@ pub fn derive_materialization_intent(
     {
         return Err("materialization window exceeds the rule rolling horizon".into());
     }
+    let source_authority_sha256 = authority_hash(search, block, rule);
+    let source_input_binding = inputs.verify_and_bind(
+        &source_authority_sha256,
+        &window,
+        observed_at_utc_ms,
+        verifier,
+    )?;
     let mut slots = resolve_slots(rule, &window)?;
-    let mut selected_airings = prior_airings.to_vec();
+    let mut selected_airings = inputs.prior_airings.airings.clone();
     let mut outcomes = Vec::with_capacity(slots.len());
     for slot in &mut slots {
         if !rule.enabled || !block_applies_on(block, &slot.local_date) {
@@ -588,7 +809,7 @@ pub fn derive_materialization_intent(
         let resolution = resolve_asset(
             search,
             rule,
-            candidates,
+            &inputs.candidate_projection.candidates,
             slot.starts_at_utc_ms,
             &selected_airings,
         )?;
@@ -616,7 +837,6 @@ pub fn derive_materialization_intent(
             },
         ));
     }
-    let source_authority_sha256 = authority_hash(search, block, rule);
     let proposed_slots = slots
         .into_iter()
         .filter(|slot| !slot.occurrence_id.is_empty())
@@ -635,13 +855,15 @@ pub fn derive_materialization_intent(
             window,
             slots: proposed_slots,
             source_authority_sha256: source_authority_sha256.clone(),
+            source_input_binding: source_input_binding.clone(),
         };
         intent.materialization_id = intent_hash(&intent);
-        intent.validate_against(search, block, rule)?;
+        intent.validate_integrity_against(search, block, rule)?;
         Some(Box::new(intent))
     };
     Ok(MaterializationOutcome::Plan(MaterializationPlan {
         source_authority_sha256,
+        source_input_binding,
         draft_intent,
         outcomes,
     }))
@@ -704,10 +926,16 @@ pub fn arbitrate_rule_slots(
 pub fn admit_materialization(
     existing: &[MaterializationIntent],
     mut candidate: MaterializationIntent,
-    search: &SavedSearch,
-    block: &DaypartBlock,
-    rule: &RecurringRule,
+    authorities: MaterializationAuthorities<'_>,
+    inputs: &AuthenticatedMaterializationInputs,
+    observed_at_utc_ms: i64,
+    verifier: &impl SourceEvidenceVerifier,
 ) -> Result<MaterializationAdmission, String> {
+    let MaterializationAuthorities {
+        search,
+        block,
+        rule,
+    } = authorities;
     if existing.len() > MAX_SLOTS {
         return Err("materialization ledger is unbounded".into());
     }
@@ -722,7 +950,14 @@ pub fn admit_materialization(
             return Err("duplicate materialization identity is not appendable".into());
         }
     }
-    candidate.validate_against(search, block, rule)?;
+    candidate.validate_authenticated_against(
+        search,
+        block,
+        rule,
+        inputs,
+        observed_at_utc_ms,
+        verifier,
+    )?;
     candidate.slots.retain(|slot| {
         !existing.iter().any(|prior| {
             prior
@@ -735,7 +970,14 @@ pub fn admit_materialization(
         return Ok(MaterializationAdmission::AlreadyPresent);
     }
     candidate.materialization_id = intent_hash(&candidate);
-    candidate.validate_against(search, block, rule)?;
+    candidate.validate_authenticated_against(
+        search,
+        block,
+        rule,
+        inputs,
+        observed_at_utc_ms,
+        verifier,
+    )?;
     if let Some(prior) = existing
         .iter()
         .find(|prior| prior.materialization_id == candidate.materialization_id)
@@ -796,7 +1038,7 @@ impl MaterializationIntent {
             })
             .collect()
     }
-    pub fn validate_against(
+    fn validate_integrity_against(
         &self,
         search: &SavedSearch,
         block: &DaypartBlock,
@@ -813,7 +1055,30 @@ impl MaterializationIntent {
         {
             return Err("materialization source authority is stale or rebound".into());
         }
+        self.source_input_binding
+            .validate_for(&self.source_authority_sha256, &self.window)?;
         validate_slots(rule, &self.window, &self.slots)
+    }
+    pub fn validate_authenticated_against(
+        &self,
+        search: &SavedSearch,
+        block: &DaypartBlock,
+        rule: &RecurringRule,
+        inputs: &AuthenticatedMaterializationInputs,
+        observed_at_utc_ms: i64,
+        verifier: &impl SourceEvidenceVerifier,
+    ) -> Result<(), String> {
+        self.validate_integrity_against(search, block, rule)?;
+        let expected = inputs.verify_and_bind(
+            &self.source_authority_sha256,
+            &self.window,
+            observed_at_utc_ms,
+            verifier,
+        )?;
+        if self.source_input_binding != expected {
+            return Err("materialization input evidence was not authenticated".into());
+        }
+        Ok(())
     }
     fn validate(&self) -> Result<(), String> {
         ids(&[&self.rule_id, &self.channel_id, &self.block_id])?;
@@ -824,6 +1089,10 @@ impl MaterializationIntent {
             || self.hash_schema_version != HASH_SCHEMA_VERSION
             || self.slots.len() > MAX_SLOTS
             || !sha(&self.source_authority_sha256)
+            || self
+                .source_input_binding
+                .validate_for(&self.source_authority_sha256, &self.window)
+                .is_err()
             || self.materialization_id != intent_hash(self)
         {
             return Err("materialization authority is forged or unbounded".into());
@@ -1145,10 +1414,53 @@ fn authority_hash(search: &SavedSearch, block: &DaypartBlock, rule: &RecurringRu
     encode_source(&mut digest, search, block, rule);
     format!("{:x}", digest.finalize())
 }
+fn evidence_scope_hash(
+    kind: SourceEvidenceKind,
+    source_authority_sha256: &str,
+    window: &MaterializationWindow,
+) -> String {
+    let mut digest = Sha256::new();
+    put(&mut digest, "townlight.materialization-evidence-scope.v1");
+    put(&mut digest, source_evidence_kind_name(kind));
+    put(&mut digest, source_authority_sha256);
+    digest.write(window.starts_at_utc_ms.to_le_bytes());
+    digest.write(window.ends_at_utc_ms.to_le_bytes());
+    format!("{:x}", digest.finalize())
+}
+fn combined_scope_hash(candidate_scope_sha256: &str, prior_airings_scope_sha256: &str) -> String {
+    let mut digest = Sha256::new();
+    put(&mut digest, "townlight.materialization-evidence-scopes.v1");
+    put(&mut digest, candidate_scope_sha256);
+    put(&mut digest, prior_airings_scope_sha256);
+    format!("{:x}", digest.finalize())
+}
+fn projection_hash(kind: SourceEvidenceKind, canonical_bytes: &[u8]) -> String {
+    let mut digest = Sha256::new();
+    put(&mut digest, "townlight.materialization-projection.v1");
+    put(&mut digest, source_evidence_kind_name(kind));
+    digest.write(canonical_bytes);
+    format!("{:x}", digest.finalize())
+}
+fn receipt_hash(receipt: &SourceEvidenceReceipt) -> String {
+    let mut digest = Sha256::new();
+    encode_receipt(&mut digest, receipt);
+    format!("{:x}", digest.finalize())
+}
+fn input_binding_hash(binding: &MaterializationInputBinding) -> String {
+    let mut digest = Sha256::new();
+    encode_input_binding(&mut digest, binding, false);
+    format!("{:x}", digest.finalize())
+}
+fn source_evidence_kind_name(kind: SourceEvidenceKind) -> &'static str {
+    match kind {
+        SourceEvidenceKind::CandidateProjection => "candidate-projection",
+        SourceEvidenceKind::PriorAirings => "prior-airings",
+    }
+}
 fn occurrence_hash(rule_id: &str, channel_id: &str, starts_at_utc_ms: i64) -> String {
     let mut digest = Sha256::new();
     put(&mut digest, "townlight.schedule-occurrence.v2");
-    digest.write(HASH_SCHEMA_VERSION.to_le_bytes());
+    digest.write(OCCURRENCE_SCHEMA_VERSION.to_le_bytes());
     put(&mut digest, rule_id);
     put(&mut digest, channel_id);
     digest.write(starts_at_utc_ms.to_le_bytes());
@@ -1178,6 +1490,23 @@ pub fn canonical_source_bytes(
     encode_source(&mut bytes, search, block, rule);
     Ok(bytes)
 }
+/// Returns the scope that an external catalog or as-run authority must bind in
+/// its receipt before this crate will consume that projection.
+pub fn materialization_evidence_scope_sha256(
+    search: &SavedSearch,
+    block: &DaypartBlock,
+    rule: &RecurringRule,
+    window: &MaterializationWindow,
+    kind: SourceEvidenceKind,
+) -> Result<String, String> {
+    rule.validate_against(search, block)?;
+    window.validate()?;
+    Ok(evidence_scope_hash(
+        kind,
+        &authority_hash(search, block, rule),
+        window,
+    ))
+}
 fn encode_source(
     digest: &mut impl CanonicalSink,
     search: &SavedSearch,
@@ -1185,7 +1514,7 @@ fn encode_source(
     rule: &RecurringRule,
 ) {
     put(digest, "townlight.schedule-source.v2");
-    digest.write(HASH_SCHEMA_VERSION.to_le_bytes());
+    digest.write(SOURCE_AUTHORITY_SCHEMA_VERSION.to_le_bytes());
     for value in [
         &search.search_id,
         &search.channel_id,
@@ -1267,7 +1596,7 @@ pub fn canonical_intent_bytes(intent: &MaterializationIntent) -> Vec<u8> {
     bytes
 }
 fn encode_intent(digest: &mut impl CanonicalSink, intent: &MaterializationIntent) {
-    put(digest, "townlight.materialization-intent.v2");
+    put(digest, "townlight.materialization-intent.v3");
     digest.write(intent.hash_schema_version.to_le_bytes());
     for value in [&intent.rule_id, &intent.channel_id, &intent.block_id] {
         put(digest, value);
@@ -1277,6 +1606,7 @@ fn encode_intent(digest: &mut impl CanonicalSink, intent: &MaterializationIntent
     digest.write(intent.window.starts_at_utc_ms.to_le_bytes());
     digest.write(intent.window.ends_at_utc_ms.to_le_bytes());
     put(digest, &intent.source_authority_sha256);
+    encode_input_binding(digest, &intent.source_input_binding, true);
     digest.write((intent.slots.len() as u32).to_le_bytes());
     for slot in &intent.slots {
         put(digest, &slot.occurrence_id);
@@ -1295,6 +1625,133 @@ fn encode_intent(digest: &mut impl CanonicalSink, intent: &MaterializationIntent
             LocalResolution::LaterFold => 2,
             LocalResolution::Gap => 3,
         }]);
+    }
+}
+/// Canonical, ordered candidate bytes. The authenticated source boundary must
+/// sign the digest of precisely these bytes, including an empty projection.
+pub fn canonical_candidate_projection_bytes(
+    candidates: &[AssetCandidate],
+) -> Result<Vec<u8>, String> {
+    validate_candidate_projection(candidates)?;
+    let mut bytes = Vec::new();
+    put(&mut bytes, "townlight.candidate-projection.v1");
+    bytes.write((candidates.len() as u32).to_le_bytes());
+    for candidate in candidates {
+        put(&mut bytes, &candidate.asset_sha256);
+        put(&mut bytes, &candidate.title);
+        bytes.write(candidate.duration_ms.to_le_bytes());
+        bytes.write([u8::from(candidate.ready), u8::from(candidate.published)]);
+        bytes.write(candidate.published_at_utc_ms.to_le_bytes());
+        bytes.write((candidate.indexed_custom_metadata.len() as u32).to_le_bytes());
+        for (field, value) in &candidate.indexed_custom_metadata {
+            put(&mut bytes, field);
+            encode_metadata_value(&mut bytes, value);
+        }
+    }
+    Ok(bytes)
+}
+
+/// Canonical, ordered as-run bytes. An empty sequence is not a no-airings
+/// claim unless a verifier accepts the receipt for its exact digest.
+pub fn canonical_prior_airings_bytes(airings: &[PriorAiring]) -> Result<Vec<u8>, String> {
+    validate_prior_airings_projection(airings)?;
+    let mut bytes = Vec::new();
+    put(&mut bytes, "townlight.prior-airings-projection.v1");
+    bytes.write((airings.len() as u32).to_le_bytes());
+    for airing in airings {
+        put(&mut bytes, &airing.asset_sha256);
+        bytes.write(airing.aired_at_utc_ms.to_le_bytes());
+    }
+    Ok(bytes)
+}
+
+pub fn canonical_unverified_input_binding_bytes(
+    binding: &MaterializationInputBinding,
+) -> Result<Vec<u8>, String> {
+    if [
+        &binding.candidate_projection_sha256,
+        &binding.candidate_receipt_sha256,
+        &binding.prior_airings_sha256,
+        &binding.prior_airings_receipt_sha256,
+        &binding.scope_sha256,
+        &binding.combined_sha256,
+    ]
+    .iter()
+    .any(|value| !lowercase_sha256(value))
+        || binding.combined_sha256 != input_binding_hash(binding)
+    {
+        return Err("materialization input binding is malformed".into());
+    }
+    let mut bytes = Vec::new();
+    encode_input_binding(&mut bytes, binding, true);
+    Ok(bytes)
+}
+
+fn validate_candidate_projection(candidates: &[AssetCandidate]) -> Result<(), String> {
+    if candidates.len() > MAX_QUERY_LIMIT {
+        return Err("candidate projection is unbounded".into());
+    }
+    for candidate in candidates {
+        candidate.validate()?;
+    }
+    if candidates
+        .windows(2)
+        .any(|pair| pair[0].asset_sha256 >= pair[1].asset_sha256)
+    {
+        return Err("candidate projection is unordered or duplicate".into());
+    }
+    Ok(())
+}
+
+fn validate_prior_airings_projection(airings: &[PriorAiring]) -> Result<(), String> {
+    if airings.len() > MAX_QUERY_LIMIT {
+        return Err("prior-airings projection is unbounded".into());
+    }
+    for airing in airings {
+        if !lowercase_sha256(&airing.asset_sha256) || airing.aired_at_utc_ms < 0 {
+            return Err("prior-airings projection is malformed".into());
+        }
+    }
+    if airings.windows(2).any(|pair| {
+        (&pair[0].asset_sha256, pair[0].aired_at_utc_ms)
+            >= (&pair[1].asset_sha256, pair[1].aired_at_utc_ms)
+    }) {
+        return Err("prior-airings projection is unordered or duplicate".into());
+    }
+    Ok(())
+}
+
+fn encode_receipt(digest: &mut impl CanonicalSink, receipt: &SourceEvidenceReceipt) {
+    put(digest, "townlight.materialization-evidence-receipt.v1");
+    for value in [
+        &receipt.issuer_id,
+        &receipt.receipt_id,
+        &receipt.scope_sha256,
+        &receipt.attestation_sha256,
+    ] {
+        put(digest, value);
+    }
+    digest.write(receipt.issued_at_utc_ms.to_le_bytes());
+    digest.write(receipt.expires_at_utc_ms.to_le_bytes());
+}
+
+fn encode_input_binding(
+    digest: &mut impl CanonicalSink,
+    binding: &MaterializationInputBinding,
+    include_combined_sha256: bool,
+) {
+    put(digest, "townlight.materialization-input-binding.v1");
+    for value in [
+        &binding.candidate_projection_sha256,
+        &binding.candidate_receipt_sha256,
+        &binding.prior_airings_sha256,
+        &binding.prior_airings_receipt_sha256,
+        &binding.scope_sha256,
+    ] {
+        put(digest, value);
+    }
+    if include_combined_sha256 {
+        put(digest, &binding.combined_sha256);
     }
 }
 fn encode_query(digest: &mut impl CanonicalSink, query: &SavedSearchQuery) {
