@@ -358,6 +358,94 @@ fn collect_guided_air_evidence(storage: &StationStore) -> Result<GuidedAirEviden
     })
 }
 
+fn current_cea708_caption_proof(
+    storage: &StationStore,
+    channels: &[ChannelConfiguration],
+    candidate_version: &str,
+    source_commit: &str,
+) -> Result<Option<CaptionEgressProof>, String> {
+    for channel in channels.iter().filter(|channel| channel.enabled) {
+        let Some(policy) = storage.read_channel_caption_policy(&channel.channel_id)? else {
+            continue;
+        };
+        if policy.mode != ChannelCaptionMode::Cea708 {
+            continue;
+        }
+        let configuration_hash =
+            storage.current_channel_output_configuration_hash(&channel.channel_id)?;
+        for proof in storage.list_caption_egress_proofs(&channel.channel_id, None, 1_000)? {
+            if proof.outcome != station_captions::CaptionProofOutcome::Verified
+                || proof.candidate_version != candidate_version
+                || proof.source_commit != source_commit
+                || proof.configuration_hash != configuration_hash
+                || proof.caption_policy_revision != policy.revision
+                || proof.language != policy.language
+                || proof.service_number != policy.service_number
+            {
+                continue;
+            }
+            if !channel.output_sinks.iter().any(|sink| {
+                sink.sink_id == proof.sink_id
+                    && sink.enabled
+                    && matches!(
+                        sink.kind,
+                        station_schedule::OutputSinkKind::UdpTs
+                            | station_schedule::OutputSinkKind::Srt
+                    )
+            }) {
+                continue;
+            }
+            let Some(report) = storage.read_commit_report(&proof.report_id)? else {
+                continue;
+            };
+            if report.channel_id != proof.channel_id
+                || report.asset_id != proof.asset_id
+                || !matches!(
+                    report.dispatch_status,
+                    DispatchStatus::Acknowledged | DispatchStatus::Completed
+                )
+                || proof.captured_at_unix_ms < report.approved_at_unix_ms
+            {
+                continue;
+            }
+            let Some(asset) = storage.read_media_asset(&proof.asset_id)? else {
+                continue;
+            };
+            if asset.readiness != AssetReadiness::Ready || !Path::new(&asset.media_path).is_file() {
+                continue;
+            }
+            let Some(track) = storage.read_asset_caption_track(&proof.track_id)? else {
+                continue;
+            };
+            if track.asset_id != proof.asset_id
+                || track.revision != proof.track_revision
+                || track.cues_sha256 != proof.cues_sha256
+                || track.language != proof.language
+                || track.service_number != proof.service_number
+            {
+                continue;
+            }
+            let Ok(expected) = expected_caption_evidence_for_window(
+                &track,
+                asset.duration_ms,
+                proof.capture_started_asset_offset_ms,
+                proof.capture_duration_ms,
+            ) else {
+                continue;
+            };
+            if expected.cue_count != proof.expected_cue_count
+                || expected.text_sha256 != proof.expected_text_sha256
+                || proof.decoded_cue_count != proof.expected_cue_count
+                || proof.decoded_text_sha256 != proof.expected_text_sha256
+            {
+                continue;
+            }
+            return Ok(Some(proof));
+        }
+    }
+    Ok(None)
+}
+
 fn verified_commissioning_bundle_receipt(
     storage: &StationStore,
     database_path: &Path,
@@ -4157,15 +4245,62 @@ impl Api {
             },
             CommissioningBoundary::LocalAuthority,
         ));
+        let current_caption_proof = match station_box
+            .source_commit
+            .as_deref()
+            .filter(|_| station_box.release.candidate_verified)
+        {
+            Some(source_commit) => match current_cea708_caption_proof(
+                &self.storage,
+                &channels,
+                &station_box.product_version,
+                source_commit,
+            ) {
+                Ok(proof) => proof,
+                Err(message) => return error_response(500, "storage_error", &message),
+            },
+            None => None,
+        };
         checks.push(commissioning_check(
             "cea708_captions",
             "CEA-708 caption path",
             CommissioningPhase::SourcesOutputs,
-            CommissioningCheckStatus::Blocked,
+            if current_caption_proof.is_some() {
+                CommissioningCheckStatus::Pass
+            } else {
+                CommissioningCheckStatus::Blocked
+            },
             true,
             Some("channels"),
-            "No typed CEA-708 ingest, preservation, playout, or output-proof authority exists yet.",
-            "CEA-708 is absent from current media, schedule, worker, and output contracts",
+            current_caption_proof.as_ref().map_or_else(
+                || {
+                    "No verified CEA-708 egress proof matches an enabled channel's current policy, track, acknowledged dispatch, transport configuration, and installed candidate.".into()
+                },
+                |proof| {
+                    format!(
+                        "Verified proof {} establishes the current CEA-708 policy, caption track, acknowledged dispatch, and decoded output path for enabled channel {} sink {}.",
+                        proof.proof_id, proof.channel_id, proof.sink_id
+                    )
+                },
+            ),
+            current_caption_proof.as_ref().map_or_else(
+                || {
+                    "requires one verified CEA-708 proof with exact current candidate, output configuration, policy, track, dispatch, and decode-back evidence".into()
+                },
+                |proof| {
+                    format!(
+                        "proof {} binds candidate {}@{}, configuration {}, policy revision {}, track {} revision {}, report {}, and verified independent CEA-708 decode-back",
+                        proof.proof_id,
+                        proof.candidate_version,
+                        proof.source_commit,
+                        proof.configuration_hash,
+                        proof.caption_policy_revision,
+                        proof.track_id,
+                        proof.track_revision,
+                        proof.report_id,
+                    )
+                },
+            ),
             CommissioningBoundary::LocalAuthority,
         ));
 
@@ -10892,6 +11027,89 @@ mod tests {
         let history: serde_json::Value = serde_json::from_slice(&history.body).unwrap();
         assert_eq!(history["channel_id"], channel_id);
         assert_eq!(history["proofs"], serde_json::json!([]));
+
+        let configuration_hash = api
+            .storage
+            .current_channel_output_configuration_hash(channel_id)
+            .unwrap();
+        let track = api
+            .storage
+            .read_asset_caption_track(track_id)
+            .unwrap()
+            .unwrap();
+        let expected = expected_caption_evidence_for_window(&track, 20_000, 2_000, 3_000).unwrap();
+        let proof = CaptionEgressProof {
+            proof_id: "88888888-9999-4aaa-8bbb-cccccccccccc".into(),
+            channel_id: channel_id.into(),
+            sink_id: sink_id.into(),
+            report_id: report_id.into(),
+            asset_id: asset_id.clone(),
+            track_id: track_id.into(),
+            track_revision: 1,
+            cues_sha256: track.cues_sha256,
+            caption_policy_revision: 1,
+            language: "en-US".into(),
+            service_number: 1,
+            candidate_version: "0.1.0".into(),
+            source_commit: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+            configuration_hash,
+            capture_started_asset_offset_ms: 2_000,
+            capture_duration_ms: 3_000,
+            capture_bytes: 1_000,
+            capture_sha256: "d".repeat(64),
+            artifact_relative_path: "caption-proofs/88888888-9999-4aaa-8bbb-cccccccccccc.ts".into(),
+            expected_cue_count: expected.cue_count,
+            decoded_cue_count: expected.cue_count,
+            expected_text_sha256: expected.text_sha256.clone(),
+            decoded_text_sha256: expected.text_sha256,
+            decoder_engine: "GStreamer 1.28.6".into(),
+            decoder_method: "independent MPEG-TS CEA-708 decode-back".into(),
+            outcome: station_captions::CaptionProofOutcome::Verified,
+            captured_at_unix_ms: now,
+        };
+        api.storage.append_caption_egress_proof(&proof).unwrap();
+
+        let commissioning = api.handle_in_process("GET", "/api/v1/commissioning/report", None);
+        assert_eq!(commissioning.status, 200);
+        let commissioning: serde_json::Value = serde_json::from_slice(&commissioning.body).unwrap();
+        let caption_check = commissioning["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|check| check["id"] == "cea708_captions")
+            .unwrap();
+        assert_eq!(caption_check["status"], "pass");
+
+        let mut stale_candidate = station_box_probe();
+        stale_candidate.source_commit = Some("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into());
+        api.station_box_probe_override = Some(stale_candidate);
+        *api.station_box_cache.lock().unwrap() = None;
+        let stale_candidate = api.handle_in_process("GET", "/api/v1/commissioning/report", None);
+        let stale_candidate: serde_json::Value =
+            serde_json::from_slice(&stale_candidate.body).unwrap();
+        let caption_check = stale_candidate["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|check| check["id"] == "cea708_captions")
+            .unwrap();
+        assert_eq!(caption_check["status"], "blocked");
+
+        api.station_box_probe_override = Some(station_box_probe());
+        *api.station_box_cache.lock().unwrap() = None;
+        channel.output_sinks[0].destination = "127.0.0.1:5501".into();
+        api.storage.put_channel(&channel).unwrap();
+        let stale_configuration =
+            api.handle_in_process("GET", "/api/v1/commissioning/report", None);
+        let stale_configuration: serde_json::Value =
+            serde_json::from_slice(&stale_configuration.body).unwrap();
+        let caption_check = stale_configuration["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|check| check["id"] == "cea708_captions")
+            .unwrap();
+        assert_eq!(caption_check["status"], "blocked");
 
         drop(api);
         std::fs::remove_dir_all(root).unwrap();

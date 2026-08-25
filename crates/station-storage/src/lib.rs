@@ -1064,6 +1064,7 @@ impl StationStore {
         store.initialize_asset_caption_track_schema()?;
         store.initialize_caption_egress_proof_schema()?;
         store.initialize_caption_egress_job_schema()?;
+        store.migrate_caption_egress_history_sink_foreign_keys()?;
         store.migrate_cg_feed_cache_schema()?;
         store.initialize_operator_auth_schema()?;
         store.execute(
@@ -10883,8 +10884,7 @@ impl StationStore {
                configuration_hash TEXT NOT NULL CHECK (length(configuration_hash) = 64),\
                outcome TEXT NOT NULL CHECK (outcome IN ('verified','mismatch')),\
                captured_at_unix_ms INTEGER NOT NULL CHECK (captured_at_unix_ms >= 0),\
-               record_json TEXT NOT NULL,\
-               FOREIGN KEY(channel_id, sink_id) REFERENCES channel_output_sinks(channel_id, sink_id)\
+               record_json TEXT NOT NULL\
              );\
              CREATE INDEX IF NOT EXISTS caption_egress_proofs_channel_time \
                ON caption_egress_proofs(channel_id, captured_at_unix_ms DESC, proof_id DESC);\
@@ -10911,14 +10911,106 @@ impl StationStore {
                capture_json TEXT NOT NULL DEFAULT '',\
                completed_at_unix_ms INTEGER NOT NULL DEFAULT -1 CHECK (completed_at_unix_ms >= -1),\
                failed_at_unix_ms INTEGER NOT NULL DEFAULT -1 CHECK (failed_at_unix_ms >= -1),\
-               failure_detail TEXT NOT NULL DEFAULT '',\
-               FOREIGN KEY(channel_id, sink_id) REFERENCES channel_output_sinks(channel_id, sink_id)\
+               failure_detail TEXT NOT NULL DEFAULT ''\
              );\
              CREATE UNIQUE INDEX IF NOT EXISTS caption_egress_jobs_active_sink \
                ON caption_egress_jobs(channel_id, sink_id) WHERE state NOT IN ('completed','failed');\
              CREATE INDEX IF NOT EXISTS caption_egress_jobs_state_time \
                ON caption_egress_jobs(state, created_at_unix_ms, job_id);",
         )
+    }
+
+    fn migrate_caption_egress_history_sink_foreign_keys(&self) -> Result<(), String> {
+        let proof_has_mutable_sink_fk =
+            self.caption_egress_history_has_mutable_sink_fk("caption_egress_proofs")?;
+        let job_has_mutable_sink_fk =
+            self.caption_egress_history_has_mutable_sink_fk("caption_egress_jobs")?;
+        if !proof_has_mutable_sink_fk && !job_has_mutable_sink_fk {
+            return Ok(());
+        }
+        self.execute("BEGIN IMMEDIATE")?;
+        let outcome = (|| {
+            if proof_has_mutable_sink_fk {
+                self.execute(
+                    "CREATE TABLE caption_egress_proofs_replacement (\
+                       proof_id TEXT PRIMARY KEY,\
+                       channel_id TEXT NOT NULL,\
+                       sink_id TEXT NOT NULL,\
+                       report_id TEXT NOT NULL,\
+                       asset_id TEXT NOT NULL,\
+                       track_id TEXT NOT NULL,\
+                       track_revision INTEGER NOT NULL CHECK (track_revision >= 1),\
+                       caption_policy_revision INTEGER NOT NULL CHECK (caption_policy_revision >= 1),\
+                       cues_sha256 TEXT NOT NULL CHECK (length(cues_sha256) = 64),\
+                       candidate_version TEXT NOT NULL,\
+                       source_commit TEXT NOT NULL CHECK (length(source_commit) = 40),\
+                       configuration_hash TEXT NOT NULL CHECK (length(configuration_hash) = 64),\
+                       outcome TEXT NOT NULL CHECK (outcome IN ('verified','mismatch')),\
+                       captured_at_unix_ms INTEGER NOT NULL CHECK (captured_at_unix_ms >= 0),\
+                       record_json TEXT NOT NULL\
+                     );\
+                     INSERT INTO caption_egress_proofs_replacement \
+                     SELECT * FROM caption_egress_proofs;",
+                )
+                .map_err(|message| format!("replace legacy caption proof history: {message}"))?;
+                self.execute(
+                    "DROP TRIGGER IF EXISTS caption_egress_proofs_no_update;\
+                     DROP TRIGGER IF EXISTS caption_egress_proofs_no_delete;\
+                     DROP INDEX IF EXISTS caption_egress_proofs_channel_time;\
+                     DROP TABLE caption_egress_proofs;\
+                     ALTER TABLE caption_egress_proofs_replacement RENAME TO caption_egress_proofs;",
+                )
+                .map_err(|message| format!("install migrated caption proof history: {message}"))?;
+                self.initialize_caption_egress_proof_schema()
+                    .map_err(|message| {
+                        format!("restore migrated caption proof history indexes: {message}")
+                    })?;
+            }
+            if job_has_mutable_sink_fk {
+                self.execute(
+                    "CREATE TABLE caption_egress_jobs_replacement (\
+                       job_id TEXT PRIMARY KEY,\
+                       channel_id TEXT NOT NULL,\
+                       sink_id TEXT NOT NULL,\
+                       state TEXT NOT NULL CHECK (state IN ('pending','claimed','capture_pending','analyzing','completed','failed')),\
+                       created_at_unix_ms INTEGER NOT NULL CHECK (created_at_unix_ms >= 0),\
+                       updated_at_unix_ms INTEGER NOT NULL CHECK (updated_at_unix_ms >= created_at_unix_ms),\
+                       lease_expires_at_unix_ms INTEGER NOT NULL DEFAULT -1 CHECK (lease_expires_at_unix_ms >= -1),\
+                       job_json TEXT NOT NULL,\
+                       capture_json TEXT NOT NULL DEFAULT '',\
+                       completed_at_unix_ms INTEGER NOT NULL DEFAULT -1 CHECK (completed_at_unix_ms >= -1),\
+                       failed_at_unix_ms INTEGER NOT NULL DEFAULT -1 CHECK (failed_at_unix_ms >= -1),\
+                       failure_detail TEXT NOT NULL DEFAULT ''\
+                     );\
+                     INSERT INTO caption_egress_jobs_replacement \
+                     SELECT * FROM caption_egress_jobs;\
+                     DROP INDEX IF EXISTS caption_egress_jobs_active_sink;\
+                     DROP INDEX IF EXISTS caption_egress_jobs_state_time;\
+                     DROP TABLE caption_egress_jobs;\
+                     ALTER TABLE caption_egress_jobs_replacement RENAME TO caption_egress_jobs;",
+                )
+                .map_err(|message| format!("replace legacy caption proof job history: {message}"))?;
+                self.initialize_caption_egress_job_schema()
+                    .map_err(|message| {
+                        format!("restore migrated caption proof job indexes: {message}")
+                    })?;
+            }
+            Ok(())
+        })();
+        self.finish_transaction(outcome)
+    }
+
+    fn caption_egress_history_has_mutable_sink_fk(&self, table: &str) -> Result<bool, String> {
+        let statement =
+            self.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name=?1")?;
+        let table = c_string(table, "caption egress history table")?;
+        bind_text(self.database, statement.raw, 1, &table)?;
+        match unsafe { sqlite3_step(statement.raw) } {
+            SQLITE_ROW => Ok(column_text(statement.raw, 0)?
+                .contains("REFERENCES channel_output_sinks(channel_id, sink_id)")),
+            SQLITE_DONE => Err("caption egress history schema is missing".into()),
+            _ => Err(sqlite_error(self.database)),
+        }
     }
 
     fn migrate_cg_feed_cache_schema(&self) -> Result<(), String> {
@@ -14013,6 +14105,468 @@ mod tests {
         let statement = store.prepare(sql).unwrap();
         assert_eq!(unsafe { sqlite3_step(statement.raw) }, SQLITE_ROW);
         unsafe { sqlite3_column_int64(statement.raw, 0) }
+    }
+
+    #[test]
+    fn completed_caption_history_survives_output_sink_reconfiguration_and_removal() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let database = std::env::temp_dir().join(format!(
+            "townlight-caption-history-sink-reconfiguration-{nonce}.db"
+        ));
+        let media_path = database.with_extension("ts");
+        std::fs::write(&media_path, b"caption history media").unwrap();
+        let store = StationStore::open(&database).unwrap();
+        let channel_id = "11111111-2222-4333-8444-555555555555";
+        let proof_sink_id = "22222222-3333-4444-8555-666666666666";
+        let retained_sink_id = "33333333-4444-4555-8666-777777777777";
+        let asset_id = "a".repeat(64);
+        let track_id = "44444444-5555-4666-8777-888888888888";
+        let job_id = "55555555-6666-4777-8888-999999999999";
+        let proof_id = job_id;
+        let report_id = "caption-history-report";
+        let item_id = "77777777-8888-4999-8aaa-bbbbbbbbbbbb";
+        let now = 10_000;
+        let mut channel = ChannelConfiguration {
+            channel_id: channel_id.into(),
+            display_name: "Caption history".into(),
+            output_profile: OutputProfileId::Proof360p30,
+            output_sinks: vec![
+                OutputSinkConfiguration::required_udp(
+                    proof_sink_id,
+                    "Proof sink",
+                    "127.0.0.1:5500",
+                    -16.0,
+                ),
+                OutputSinkConfiguration::required_udp(
+                    retained_sink_id,
+                    "Retained sink",
+                    "127.0.0.1:5501",
+                    -16.0,
+                ),
+            ],
+            enabled: false,
+        };
+        store.put_channel(&channel).unwrap();
+        store
+            .put_media_asset(&MediaAsset {
+                asset_id: asset_id.clone(),
+                media_path: media_path.to_string_lossy().into_owned(),
+                duration_ms: 10_000,
+                readiness: AssetReadiness::Ready,
+            })
+            .unwrap();
+        let track = store
+            .write_asset_caption_track(&AssetCaptionTrackWrite {
+                track_id: track_id.into(),
+                asset_id: asset_id.clone(),
+                language: "en-US".into(),
+                service_number: 1,
+                source_kind: CaptionTrackSourceKind::External,
+                label: "Reviewed English".into(),
+                cues: vec![AssetCaptionCue {
+                    cue_id: "88888888-9999-4aaa-8bbb-cccccccccccc".into(),
+                    start_ms: 1_000,
+                    duration_ms: 3_000,
+                    text: "Council meeting".into(),
+                }],
+                expected_revision: 0,
+                actor: "setup-admin".into(),
+                occurred_at_unix_ms: now - 4_000,
+                audit_id: "99999999-aaaa-4bbb-8ccc-dddddddddddd".into(),
+            })
+            .unwrap();
+        let policy = store
+            .write_channel_caption_policy(
+                channel_id,
+                ChannelCaptionMode::Cea708,
+                1,
+                "en-US",
+                0,
+                "setup-admin",
+                now - 4_000,
+                "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+            )
+            .unwrap();
+        store
+            .put_schedule_item(&ScheduleItem {
+                item_id: item_id.into(),
+                channel_id: channel_id.into(),
+                asset_id: asset_id.clone(),
+                title: "Caption history program".into(),
+                starts_at_unix_ms: now - 3_000,
+                duration_ms: 10_000,
+                state: ScheduleState::Draft,
+            })
+            .unwrap();
+        store
+            .commit_schedule(
+                report_id,
+                "caption-history-plan",
+                item_id,
+                "meeting-operator",
+                now - 3_000,
+                "caption history fixture",
+            )
+            .unwrap();
+        assert!(
+            store
+                .advance_dispatch_status(report_id, DispatchStatus::Pending, DispatchStatus::Queued)
+                .unwrap()
+        );
+        assert!(
+            store
+                .advance_dispatch_status(
+                    report_id,
+                    DispatchStatus::Queued,
+                    DispatchStatus::Acknowledged,
+                )
+                .unwrap()
+        );
+        channel.enabled = true;
+        store.put_channel(&channel).unwrap();
+        let configuration_hash = store
+            .current_channel_output_configuration_hash(channel_id)
+            .unwrap();
+        let expected = expected_caption_evidence_for_window(&track, 10_000, 1_000, 3_000).unwrap();
+        let job = CaptionEgressProofJob {
+            job_id: job_id.into(),
+            channel_id: channel_id.into(),
+            sink_id: proof_sink_id.into(),
+            report_id: report_id.into(),
+            asset_id: asset_id.clone(),
+            track_id: track_id.into(),
+            track_revision: track.revision,
+            cues_sha256: track.cues_sha256.clone(),
+            caption_policy_revision: policy.revision,
+            language: policy.language.clone(),
+            service_number: policy.service_number,
+            candidate_version: "0.1.0".into(),
+            source_commit: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+            configuration_hash: configuration_hash.clone(),
+            capture_started_asset_offset_ms: 1_000,
+            capture_duration_ms: 3_000,
+            max_capture_bytes: 1_000_000,
+            expected_cue_count: expected.cue_count,
+            expected_text_sha256: expected.text_sha256.clone(),
+            created_at_unix_ms: now - 2_000,
+        };
+        assert!(store.create_caption_egress_job(&job).unwrap());
+        store
+            .claim_next_caption_egress_job(channel_id, now - 1_900, 10_000)
+            .unwrap()
+            .unwrap();
+        store
+            .advance_caption_egress_job(
+                job_id,
+                CaptionEgressProofJobState::Claimed,
+                CaptionEgressProofJobState::CapturePending,
+                now - 1_800,
+                10_000,
+                None,
+            )
+            .unwrap();
+        let capture = CaptionProofCaptureFacts {
+            artifact_relative_path: format!("caption-proofs/{job_id}.ts"),
+            capture_bytes: 1_000,
+            capture_duration_ms: 3_000,
+            capture_sha256: "b".repeat(64),
+        };
+        store
+            .advance_caption_egress_job(
+                job_id,
+                CaptionEgressProofJobState::CapturePending,
+                CaptionEgressProofJobState::Analyzing,
+                now - 1_700,
+                10_000,
+                Some(&capture),
+            )
+            .unwrap();
+        let proof = CaptionEgressProof {
+            proof_id: proof_id.into(),
+            channel_id: channel_id.into(),
+            sink_id: proof_sink_id.into(),
+            report_id: report_id.into(),
+            asset_id: asset_id.clone(),
+            track_id: track_id.into(),
+            track_revision: track.revision,
+            cues_sha256: track.cues_sha256,
+            caption_policy_revision: policy.revision,
+            language: policy.language,
+            service_number: policy.service_number,
+            candidate_version: "0.1.0".into(),
+            source_commit: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+            configuration_hash,
+            capture_started_asset_offset_ms: 1_000,
+            capture_duration_ms: capture.capture_duration_ms,
+            capture_bytes: capture.capture_bytes,
+            capture_sha256: capture.capture_sha256,
+            artifact_relative_path: capture.artifact_relative_path,
+            expected_cue_count: expected.cue_count,
+            decoded_cue_count: expected.cue_count,
+            expected_text_sha256: expected.text_sha256.clone(),
+            decoded_text_sha256: expected.text_sha256,
+            decoder_engine: "GStreamer 1.28.6".into(),
+            decoder_method: "independent MPEG-TS CEA-708 decode-back".into(),
+            outcome: CaptionProofOutcome::Verified,
+            captured_at_unix_ms: now - 1_600,
+        };
+        let completed = store
+            .complete_caption_egress_job_with_proof(job_id, now - 1_500, &proof)
+            .unwrap();
+        assert_eq!(completed.state, CaptionEgressProofJobState::Completed);
+
+        channel.output_sinks = vec![OutputSinkConfiguration::required_udp(
+            retained_sink_id,
+            "Reconfigured retained sink",
+            "127.0.0.1:5502",
+            -16.0,
+        )];
+        store.put_channel(&channel).unwrap();
+        assert_eq!(
+            store
+                .read_caption_egress_job(job_id)
+                .unwrap()
+                .unwrap()
+                .state,
+            CaptionEgressProofJobState::Completed
+        );
+        assert_eq!(
+            store
+                .list_caption_egress_proofs(channel_id, None, 10)
+                .unwrap(),
+            vec![proof]
+        );
+        assert!(store
+            .execute(&format!(
+                "UPDATE caption_egress_proofs SET outcome='mismatch' WHERE proof_id='{proof_id}'"
+            ))
+            .is_err());
+        assert!(
+            store
+                .execute(&format!(
+                    "DELETE FROM caption_egress_proofs WHERE proof_id='{proof_id}'"
+                ))
+                .is_err()
+        );
+
+        drop(store);
+        for candidate in [
+            database.clone(),
+            media_path,
+            PathBuf::from(format!("{}-wal", database.display())),
+            PathBuf::from(format!("{}-shm", database.display())),
+        ] {
+            let _ = std::fs::remove_file(candidate);
+        }
+    }
+
+    #[test]
+    fn legacy_caption_sink_foreign_keys_migrate_without_losing_history_or_triggers() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let database = std::env::temp_dir().join(format!(
+            "townlight-caption-history-legacy-sink-foreign-key-{nonce}.db"
+        ));
+        let channel_id = "11111111-2222-4333-8444-555555555555";
+        let proof_sink_id = "22222222-3333-4444-8555-666666666666";
+        let retained_sink_id = "33333333-4444-4555-8666-777777777777";
+        let job_id = "44444444-5555-4666-8777-888888888888";
+        let proof_id = "55555555-6666-4777-8888-999999999999";
+        let mut channel = ChannelConfiguration {
+            channel_id: channel_id.into(),
+            display_name: "Legacy caption history".into(),
+            output_profile: OutputProfileId::Proof360p30,
+            output_sinks: vec![
+                OutputSinkConfiguration::required_udp(
+                    proof_sink_id,
+                    "Legacy proof sink",
+                    "127.0.0.1:5500",
+                    -16.0,
+                ),
+                OutputSinkConfiguration::required_udp(
+                    retained_sink_id,
+                    "Legacy retained sink",
+                    "127.0.0.1:5501",
+                    -16.0,
+                ),
+            ],
+            enabled: true,
+        };
+        let proof = CaptionEgressProof {
+            proof_id: proof_id.into(),
+            channel_id: channel_id.into(),
+            sink_id: proof_sink_id.into(),
+            report_id: "legacy-caption-report".into(),
+            asset_id: "a".repeat(64),
+            track_id: "66666666-7777-4888-8999-aaaaaaaaaaaa".into(),
+            track_revision: 1,
+            cues_sha256: "b".repeat(64),
+            caption_policy_revision: 1,
+            language: "en-US".into(),
+            service_number: 1,
+            candidate_version: "0.1.0".into(),
+            source_commit: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+            configuration_hash: "c".repeat(64),
+            capture_started_asset_offset_ms: 1_000,
+            capture_duration_ms: 3_000,
+            capture_bytes: 1_000,
+            capture_sha256: "d".repeat(64),
+            artifact_relative_path: format!("caption-proofs/{proof_id}.ts"),
+            expected_cue_count: 1,
+            decoded_cue_count: 1,
+            expected_text_sha256: "e".repeat(64),
+            decoded_text_sha256: "e".repeat(64),
+            decoder_engine: "GStreamer 1.28.6".into(),
+            decoder_method: "independent MPEG-TS CEA-708 decode-back".into(),
+            outcome: CaptionProofOutcome::Verified,
+            captured_at_unix_ms: 3_000,
+        };
+        let job = CaptionEgressProofJob {
+            job_id: job_id.into(),
+            channel_id: channel_id.into(),
+            sink_id: proof_sink_id.into(),
+            report_id: proof.report_id.clone(),
+            asset_id: proof.asset_id.clone(),
+            track_id: proof.track_id.clone(),
+            track_revision: proof.track_revision,
+            cues_sha256: proof.cues_sha256.clone(),
+            caption_policy_revision: proof.caption_policy_revision,
+            language: proof.language.clone(),
+            service_number: proof.service_number,
+            candidate_version: proof.candidate_version.clone(),
+            source_commit: proof.source_commit.clone(),
+            configuration_hash: proof.configuration_hash.clone(),
+            capture_started_asset_offset_ms: proof.capture_started_asset_offset_ms,
+            capture_duration_ms: proof.capture_duration_ms,
+            max_capture_bytes: 1_000_000,
+            expected_cue_count: proof.expected_cue_count,
+            expected_text_sha256: proof.expected_text_sha256.clone(),
+            created_at_unix_ms: 1_000,
+        };
+        let store = StationStore::open(&database).unwrap();
+        store.put_channel(&channel).unwrap();
+        let proof_json = serde_json::to_string(&proof).unwrap();
+        let job_json = serde_json::to_string(&job).unwrap();
+        store
+            .execute(&format!(
+                "DROP TRIGGER caption_egress_proofs_no_update;\
+                 DROP TRIGGER caption_egress_proofs_no_delete;\
+                 DROP INDEX caption_egress_proofs_channel_time;\
+                 DROP INDEX caption_egress_jobs_active_sink;\
+                 DROP INDEX caption_egress_jobs_state_time;\
+                 DROP TABLE caption_egress_proofs;\
+                 DROP TABLE caption_egress_jobs;\
+                 CREATE TABLE caption_egress_proofs(\
+                   proof_id TEXT PRIMARY KEY, channel_id TEXT NOT NULL, sink_id TEXT NOT NULL,\
+                   report_id TEXT NOT NULL, asset_id TEXT NOT NULL, track_id TEXT NOT NULL,\
+                   track_revision INTEGER NOT NULL, caption_policy_revision INTEGER NOT NULL,\
+                   cues_sha256 TEXT NOT NULL, candidate_version TEXT NOT NULL, source_commit TEXT NOT NULL,\
+                   configuration_hash TEXT NOT NULL, outcome TEXT NOT NULL, captured_at_unix_ms INTEGER NOT NULL,\
+                   record_json TEXT NOT NULL,\
+                   FOREIGN KEY(channel_id, sink_id) REFERENCES channel_output_sinks(channel_id, sink_id)\
+                 );\
+                 CREATE TABLE caption_egress_jobs(\
+                   job_id TEXT PRIMARY KEY, channel_id TEXT NOT NULL, sink_id TEXT NOT NULL, state TEXT NOT NULL,\
+                   created_at_unix_ms INTEGER NOT NULL, updated_at_unix_ms INTEGER NOT NULL,\
+                   lease_expires_at_unix_ms INTEGER NOT NULL, job_json TEXT NOT NULL, capture_json TEXT NOT NULL,\
+                   completed_at_unix_ms INTEGER NOT NULL, failed_at_unix_ms INTEGER NOT NULL, failure_detail TEXT NOT NULL,\
+                   FOREIGN KEY(channel_id, sink_id) REFERENCES channel_output_sinks(channel_id, sink_id)\
+                 );\
+                 INSERT INTO caption_egress_proofs VALUES(\
+                   '{proof_id}','{channel_id}','{proof_sink_id}','{}','{}','{}',1,1,'{}','{}','{}','{}','verified',3000,'{}'\
+                 );\
+                 INSERT INTO caption_egress_jobs VALUES(\
+                   '{job_id}','{channel_id}','{proof_sink_id}','completed',1000,3000,-1,'{}','',3000,-1,''\
+                 );",
+                proof.report_id,
+                proof.asset_id,
+                proof.track_id,
+                proof.cues_sha256,
+                proof.candidate_version,
+                proof.source_commit,
+                proof.configuration_hash,
+                proof_json,
+                job_json,
+            ))
+            .unwrap();
+        drop(store);
+
+        let migrated = StationStore::open(&database).unwrap();
+        assert_eq!(
+            migrated
+                .read_caption_egress_job(job_id)
+                .unwrap()
+                .unwrap()
+                .state,
+            CaptionEgressProofJobState::Completed
+        );
+        assert_eq!(
+            migrated
+                .list_caption_egress_proofs(channel_id, None, 10)
+                .unwrap(),
+            vec![proof]
+        );
+        assert_eq!(
+            row_count(
+                &migrated,
+                "SELECT COUNT(*) FROM sqlite_master \
+                 WHERE type='table' AND name IN ('caption_egress_proofs','caption_egress_jobs') \
+                 AND sql LIKE '%REFERENCES channel_output_sinks%'"
+            ),
+            0
+        );
+        assert_eq!(
+            row_count(
+                &migrated,
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='trigger' AND name IN (\
+                   'caption_egress_proofs_no_update','caption_egress_proofs_no_delete'\
+                 )"
+            ),
+            2
+        );
+        assert_eq!(
+            row_count(
+                &migrated,
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name IN (\
+                   'caption_egress_proofs_channel_time','caption_egress_jobs_active_sink',\
+                   'caption_egress_jobs_state_time'\
+                 )"
+            ),
+            3
+        );
+        channel.output_sinks = vec![OutputSinkConfiguration::required_udp(
+            retained_sink_id,
+            "Migrated retained sink",
+            "127.0.0.1:5502",
+            -16.0,
+        )];
+        migrated.put_channel(&channel).unwrap();
+        assert!(migrated
+            .execute(&format!(
+                "UPDATE caption_egress_proofs SET outcome='mismatch' WHERE proof_id='{proof_id}'"
+            ))
+            .is_err());
+        assert!(
+            migrated
+                .execute(&format!(
+                    "DELETE FROM caption_egress_proofs WHERE proof_id='{proof_id}'"
+                ))
+                .is_err()
+        );
+
+        drop(migrated);
+        for candidate in [
+            database.clone(),
+            PathBuf::from(format!("{}-wal", database.display())),
+            PathBuf::from(format!("{}-shm", database.display())),
+        ] {
+            let _ = std::fs::remove_file(candidate);
+        }
     }
 
     #[test]
