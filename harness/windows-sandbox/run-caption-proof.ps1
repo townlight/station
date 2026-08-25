@@ -81,6 +81,19 @@ function New-RandomProofCredential {
     }
 }
 
+function Get-ExactResponseCookie {
+    param($Response, [string]$Name)
+    $headers = @($Response.Headers['Set-Cookie']) -join "`n"
+    $matches = [regex]::Matches(
+        $headers,
+        ('(?i)(?:^|[,\r\n]\s*)' + [regex]::Escape($Name) + '=([A-Za-z0-9_-]{43})(?:;|$)')
+    )
+    if ($matches.Count -ne 1) {
+        throw "Bootstrap response did not contain exactly one bounded $Name cookie."
+    }
+    $matches[0].Groups[1].Value
+}
+
 try {
     foreach ($required in @($manifestPath, $installerPath, $verifierPath, $inputPath)) {
         if (-not (Test-Path -LiteralPath $required -PathType Leaf)) {
@@ -126,6 +139,7 @@ try {
     $capability = $rawCapability.Substring(0, 43)
     $proofCredential = New-RandomProofCredential
     $bootstrapSession = [Microsoft.PowerShell.Commands.WebRequestSession]::new()
+    $bootstrapResponse = $null
     try {
         $bootstrapBody = [ordered]@{
             capability = $capability
@@ -133,12 +147,17 @@ try {
             display_name = 'Sandbox Setup Admin'
             password = $proofCredential.PlainText
         } | ConvertTo-Json -Compress
-        Invoke-WebRequest -Method Post -Uri "$origin/api/v1/auth/bootstrap" `
+        $bootstrapResponse = Invoke-WebRequest -Method Post -Uri "$origin/api/v1/auth/bootstrap" `
             -WebSession $bootstrapSession -Headers @{
                 Origin = $origin
                 'Sec-Fetch-Site' = 'same-origin'
             } -ContentType 'application/json' -Body $bootstrapBody -TimeoutSec 20 `
-            -MaximumRedirection 0 -UseBasicParsing | Out-Null
+            -MaximumRedirection 0 -UseBasicParsing
+        $bootstrapDocument = $bootstrapResponse.Content | ConvertFrom-Json
+        if ($bootstrapDocument.session.username -ne $proofCredential.Credential.UserName -or
+            @($bootstrapDocument.session.roles | Where-Object { $_ -eq 'setup_admin' }).Count -ne 1) {
+            throw 'Bootstrap response did not establish the exact Setup Admin identity.'
+        }
         Remove-Item -LiteralPath $handoffPath -Force
     }
     finally {
@@ -146,7 +165,32 @@ try {
         $capability = $null
         $rawCapability = $null
     }
-    $apiSession = New-TownLightProofSession -BaseUri $baseUri -Credential $proofCredential.Credential
+    # Windows PowerShell 5 can retain only one of multiple Set-Cookie response headers.
+    # Reconstruct the in-memory jar from the exact bounded response headers; never persist tokens.
+    $sessionToken = Get-ExactResponseCookie -Response $bootstrapResponse -Name 'townlight_session_v1'
+    $csrfToken = Get-ExactResponseCookie -Response $bootstrapResponse -Name 'townlight_csrf_v1'
+    $apiWebSession = [Microsoft.PowerShell.Commands.WebRequestSession]::new()
+    $apiWebSession.Cookies.SetCookies(
+        [uri]"$origin/api/v1/",
+        "townlight_session_v1=$sessionToken; Path=/api/v1/"
+    )
+    $apiWebSession.Cookies.SetCookies(
+        [uri]"$origin/",
+        "townlight_csrf_v1=$csrfToken; Path=/"
+    )
+    $apiSession = [pscustomobject]@{
+        Origin = $origin
+        ApiRoot = "$origin/api/v1"
+        WebSession = $apiWebSession
+        Identity = $bootstrapDocument.session
+    }
+    $apiSession.PSObject.TypeNames.Insert(0, 'TownLight.InstalledProofSession')
+    $confirmed = Invoke-TownLightProofApi -Session $apiSession -Method Get -Path '/auth/session'
+    if ($confirmed.session.username -ne $proofCredential.Credential.UserName) {
+        throw 'Bootstrap-established session could not be confirmed through the public API.'
+    }
+    $sessionToken = $null
+    $csrfToken = $null
     $proofCredential.PlainText = $null
 
     Invoke-Api 'Put' '/station' ([ordered]@{

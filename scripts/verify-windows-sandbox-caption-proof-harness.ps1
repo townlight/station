@@ -31,6 +31,7 @@ $requirements = [ordered]@{
     'guest verifies installed candidate' = 'verify-installed.ps1'
     'guest authenticates through public API' = 'installed-proof-api.ps1'
     'guest uses the canonical protected handoff' = 'operator-bootstrap.capability'
+    'guest retains the bootstrap session in memory' = 'Get-ExactResponseCookie'
     'guest creates caption authority' = '/caption-tracks/'
     'guest requests final-sink proof' = '/caption-proof'
     'guest requires verified decode-back' = "outcome -ne 'verified'"
