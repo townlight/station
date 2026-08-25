@@ -237,11 +237,13 @@ impl RecurringRule {
         &self,
         current: &Self,
         expected: u64,
-        search: &SavedSearch,
-        block: &DaypartBlock,
+        current_search: &SavedSearch,
+        current_block: &DaypartBlock,
+        next_search: &SavedSearch,
+        next_block: &DaypartBlock,
     ) -> Result<(), String> {
-        self.validate_against(search, block)?;
-        current.validate()?;
+        current.validate_against(current_search, current_block)?;
+        self.validate_against(next_search, next_block)?;
         if expected != current.revision
             || self.revision
                 != current
@@ -251,6 +253,8 @@ impl RecurringRule {
             || self.rule_id != current.rule_id
             || self.channel_id != current.channel_id
             || self.asset_id != current.asset_id
+            || self.saved_search_id != current.saved_search_id
+            || self.block_id != current.block_id
         {
             return Err("recurring rule CAS or channel/asset rebinding failed".into());
         }
@@ -317,6 +321,9 @@ pub fn admit_materialization(
         } else {
             Err("materialization identity collision is forged".into())
         };
+    }
+    if existing.len() == MAX_SLOTS {
+        return Err("materialization ledger is at append capacity".into());
     }
     Ok(MaterializationAdmission::Create(Box::new(candidate)))
 }

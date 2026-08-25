@@ -136,7 +136,7 @@ fn dayparts_are_same_day_only_and_rule_successor_requires_exact_dependencies() {
     next.revision = 2;
     next.saved_search_revision = 2;
     assert!(
-        next.validate_successor_of(&current, 1, &search(), &block())
+        next.validate_successor_of(&current, 1, &search(), &block(), &search(), &block(),)
             .is_err()
     );
 }
@@ -189,17 +189,38 @@ fn claimed_rule_and_search_bounds_fail_closed() {
 
 #[test]
 fn materialization_ledger_bound_fails_closed() {
-    let intent = derive_materialization_intent(&search(), &block(), &rule(), window()).unwrap();
-    assert!(
-        admit_materialization(
-            &vec![intent.clone(); 65],
-            intent,
-            &search(),
-            &block(),
-            &rule()
-        )
-        .is_err()
+    let existing = (0..64)
+        .map(|week| {
+            let starts_at_utc_ms = 1_767_225_600_000 + i64::from(week) * 7 * 86_400_000;
+            derive_materialization_intent(
+                &search(),
+                &block(),
+                &rule(),
+                MaterializationWindow {
+                    starts_at_utc_ms,
+                    ends_at_utc_ms: starts_at_utc_ms + 4 * 86_400_000,
+                },
+            )
+            .unwrap()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        admit_materialization(&existing, existing[0].clone(), &search(), &block(), &rule(),)
+            .unwrap(),
+        MaterializationAdmission::AlreadyPresent
     );
+    let starts_at_utc_ms = 1_767_225_600_000 + 64_i64 * 7 * 86_400_000;
+    let new_intent = derive_materialization_intent(
+        &search(),
+        &block(),
+        &rule(),
+        MaterializationWindow {
+            starts_at_utc_ms,
+            ends_at_utc_ms: starts_at_utc_ms + 4 * 86_400_000,
+        },
+    )
+    .unwrap();
+    assert!(admit_materialization(&existing, new_intent, &search(), &block(), &rule()).is_err());
 }
 
 #[test]
@@ -219,6 +240,8 @@ fn recurring_rule_successor_rejects_stale_cas_asset_channel_and_dependency_rebin
             next.validate_successor_of(
                 &current,
                 if mutation == 0 { 0 } else { 1 },
+                &search(),
+                &block(),
                 &next_search,
                 &block()
             )
@@ -316,7 +339,28 @@ fn positive_revision_two_successor_requires_exact_new_dependencies() {
     next.revision = 2;
     next.saved_search_revision = 2;
     assert!(
-        next.validate_successor_of(&current, 1, &next_search, &block())
+        next.validate_successor_of(&current, 1, &search(), &block(), &next_search, &block(),)
             .is_ok()
     );
+}
+
+#[test]
+fn interval_two_mixed_weekdays_honor_half_open_window_boundaries() {
+    let mut mixed = rule();
+    mixed.interval_weeks = 2;
+    mixed.weekday_mask = (1 << 3) | (1 << 4);
+    let boundary_window = MaterializationWindow {
+        starts_at_utc_ms: 1_767_319_200_000,
+        ends_at_utc_ms: 1_767_405_600_000,
+    };
+    let intent =
+        derive_materialization_intent(&search(), &block(), &mixed, boundary_window).unwrap();
+    assert_eq!(intent.resolved_slots().len(), 1);
+    assert_eq!(intent.resolved_slots()[0].0, 1_767_319_200_000);
+
+    let skipped_week = MaterializationWindow {
+        starts_at_utc_ms: 1_767_924_000_000,
+        ends_at_utc_ms: 1_768_010_400_000,
+    };
+    assert!(derive_materialization_intent(&search(), &block(), &mixed, skipped_week).is_err());
 }
