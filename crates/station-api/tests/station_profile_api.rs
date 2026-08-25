@@ -38,7 +38,10 @@ fn temporary_database(name: &str) -> PathBuf {
 }
 
 fn remove_directory(path: &Path) {
-    let deadline = Instant::now() + Duration::from_secs(2);
+    // Windows media/GStreamer teardown can release the final mapped file after
+    // the pipeline has reached NULL. Keep cleanup bounded, but allow that
+    // asynchronous handle release instead of turning it into a product failure.
+    let deadline = Instant::now() + Duration::from_secs(10);
     loop {
         match std::fs::remove_dir_all(path) {
             Ok(()) => return,
