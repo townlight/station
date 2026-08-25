@@ -30,6 +30,7 @@ members = [
     "crates/station-publishing",
     "crates/station-runtime",
     "crates/station-readiness",
+    "crates/station-reporting",
     "crates/station-schedule",
     "crates/station-subscriptions",
     "crates/station-live",
