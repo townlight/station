@@ -36,8 +36,25 @@ package targets and features.
 
 A direct read-only Windows probe identified `time.windows.com` as this machine's configured source
 and returned three finite `/rdtsc` offset samples. That source observation validates the command
-shape but is not installed-product evidence; the exact committed candidate must still be built,
-installed, and queried through its authenticated StationBox authority.
+shape but is not authenticated StationBox evidence.
+
+## Installed candidate
+
+Clean source commit `333c88a23d5e735f6b8a9a19cc4a3163b2541dbb` produced installer SHA-256
+`aaeabbd0575cc98b2212b961bee82abc0d4a9e9813c10f1325f78d50db22f76d`. The prior application and
+services were uninstalled while ProgramData remained present, and the exact candidate then passed
+the installer's health-gated clean installation.
+
+`installer/verify-installed.ps1` passed with both services running automatically as LocalSystem,
+health ready, all three native binary hashes matching their receipts, the private-runtime manifest
+matching, and required media factories ready. The installed receipt reports the exact source commit
+above.
+
+The final authenticated route observation is not claimed. `GET /api/v1/auth/status` reports
+`bootstrap_required`: this preserved station has no operator account, and the freshly opened console
+has no valid bootstrap capability. Creating owner credentials is intentionally outside this
+proof-only slice. Consequently, installed candidate identity and runtime health are proved, while an
+authenticated observation of `clock_sync.state = pass` remains not run.
 
 ## Sources
 
