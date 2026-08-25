@@ -1733,6 +1733,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "station-automation-policy"
+version = "0.1.0"
+dependencies = [
+ "serde",
+]
+
+[[package]]
 name = "station-captions"
 version = "0.1.0"
 dependencies = [
