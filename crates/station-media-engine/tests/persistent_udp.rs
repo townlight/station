@@ -16,10 +16,11 @@ use image::{ImageBuffer, ImageFormat, Rgba};
 use sha2::{Digest, Sha256};
 use station_media_assets::ingest_media;
 use station_media_engine::{
-    ConfiguredTransportOutput, EngineError, PersistentPlayout, SourceRole, TransportOutput,
+    ConfiguredTransportOutput, EngineError, OutputCaptureRequest, OutputCaptureStatus,
+    PersistentPlayout, SourceRole, TransportOutput,
 };
 use station_media_protocol::{
-    CgImageFormat, CgOverlay, CgOverlayContent, CgRect, CgSnapshot, LoudnessTarget,
+    CaptionCue, CgImageFormat, CgOverlay, CgOverlayContent, CgRect, CgSnapshot, LoudnessTarget,
     WorkerFallbackSlate,
 };
 use station_schedule::OutputProfileId;
@@ -72,6 +73,102 @@ fn fans_one_persistent_transport_out_to_two_independent_udp_sinks() {
         assert!(truth.audio_pts_samples >= 3);
     }
     playout.stop().unwrap();
+}
+
+#[test]
+fn accepts_a_typed_caption_cue_without_interrupting_transport() {
+    let _guard = persistent_graph_test_guard();
+    let receiver = UdpSocket::bind("127.0.0.1:0").unwrap();
+    receiver
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    let root = test_root("cea708-output-proof");
+    fs::create_dir_all(&root).unwrap();
+    let proof_root = root.join("output-proofs");
+    let sink_id = "7ef1430d-a35c-49f7-91f0-d03cc96bf4af";
+    let mut playout = PersistentPlayout::start_configured_outputs_with_profile_and_roots(
+        &[ConfiguredTransportOutput::udp_identified(
+            sink_id,
+            receiver.local_addr().unwrap(),
+            LoudnessTarget::CABLE,
+        )],
+        OutputProfileId::Proof360p30,
+        None,
+        Some(&proof_root),
+    )
+    .expect("caption-capable output graph starts");
+    let before = playout.output_bytes_sent().unwrap()[0];
+    let proof_id = "a1f80660-c73a-4ac3-b815-ed9e863c14e6";
+    playout
+        .start_output_capture(OutputCaptureRequest {
+            proof_id: proof_id.into(),
+            output_index: 0,
+            sink_id: sink_id.into(),
+            loudness_target: LoudnessTarget::CABLE,
+            duration_ms: 4_000,
+            max_bytes: 8 * 1024 * 1024,
+        })
+        .expect("exact post-mux caption capture starts");
+    playout
+        .push_caption_cue(&CaptionCue {
+            cue_id: "4fefcd4e-cfa1-4f62-a810-3d4fa53d2cb6".into(),
+            start_after_ms: 250,
+            duration_ms: 1_500,
+            text: "TownLight CEA-708 proof".into(),
+        })
+        .expect("the bounded caption cue enters the persistent graph");
+    let deadline = Instant::now() + Duration::from_secs(12);
+    let ready = loop {
+        assert!(Instant::now() < deadline, "caption capture did not finish");
+        match playout.poll_output_capture(proof_id).unwrap() {
+            OutputCaptureStatus::Pending { .. } => {
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            OutputCaptureStatus::Ready(ready) => break ready,
+            OutputCaptureStatus::Failed { code, message, .. } => {
+                panic!("caption capture failed: {code}: {message}")
+            }
+        }
+    };
+    let after = playout.output_bytes_sent().unwrap()[0];
+    assert!(after > before, "caption injection must not stall transport");
+    playout.stop().unwrap();
+    let artifact = proof_root.join(&ready.artifact_relative_path);
+    assert!(artifact.is_file(), "caption proof artifact must exist");
+    let movie = format!(
+        "movie=output-proofs/{}[out0+subcc]",
+        ready.artifact_relative_path
+    );
+    let decoded = Command::new("ffmpeg.exe")
+        .current_dir(&root)
+        .args([
+            "-nostdin",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            &movie,
+            "-map",
+            "0:1",
+            "-f",
+            "srt",
+            "pipe:1",
+        ])
+        .output()
+        .expect("FFmpeg caption decode-back tool starts");
+    assert!(
+        decoded.status.success(),
+        "caption decode-back failed: {}",
+        String::from_utf8_lossy(&decoded.stderr)
+    );
+    let text = String::from_utf8_lossy(&decoded.stdout);
+    assert!(
+        text.contains("TownLight CEA-708 proof"),
+        "emitted transport did not decode the expected caption: {text}"
+    );
+    fs::remove_dir_all(root).unwrap();
 }
 
 #[test]

@@ -597,6 +597,22 @@ fn decide_event(
             media.clear_cg_snapshot();
             (WorkerEvent::CgCleared, false)
         }
+        ChannelCommand::PushCaptionCue { cue } => match media.push_caption_cue(cue) {
+            Ok(()) => (
+                WorkerEvent::CaptionCueAccepted {
+                    cue_id: cue.cue_id.clone(),
+                },
+                false,
+            ),
+            Err(error) => (
+                rejection(
+                    command,
+                    "caption_cue_rejected",
+                    &format!("The CEA-708 cue could not be scheduled: {error:?}"),
+                ),
+                false,
+            ),
+        },
         ChannelCommand::LoadAsset {
             asset_id,
             media_path,

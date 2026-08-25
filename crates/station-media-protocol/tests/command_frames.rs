@@ -1,9 +1,10 @@
 use station_media_protocol::{
-    CgImageFormat, ChannelCommand, CommandEnvelope, LiveArmToken, LiveInputConfiguration,
-    LiveReturnTarget, LoudnessTarget, OutputTransportObservation, PROTOCOL_VERSION, ProtocolError,
-    ProtocolVersion, SrtPassphrase, WorkerBootstrapEnvelope, WorkerEvent, WorkerEventEnvelope,
-    WorkerFallbackSlate, WorkerOutputConfiguration, decode_bootstrap_frame, decode_command_frame,
-    decode_event_frame, encode_bootstrap_frame, encode_command_frame, encode_event_frame,
+    CaptionCue, CgImageFormat, ChannelCommand, CommandEnvelope, LiveArmToken,
+    LiveInputConfiguration, LiveReturnTarget, LoudnessTarget, OutputTransportObservation,
+    PROTOCOL_VERSION, ProtocolError, ProtocolVersion, SrtPassphrase, WorkerBootstrapEnvelope,
+    WorkerEvent, WorkerEventEnvelope, WorkerFallbackSlate, WorkerOutputConfiguration,
+    decode_bootstrap_frame, decode_command_frame, decode_event_frame, encode_bootstrap_frame,
+    encode_command_frame, encode_event_frame,
 };
 use std::num::NonZeroU16;
 
@@ -284,6 +285,68 @@ fn round_trips_asset_load_and_take_commands() {
 }
 
 #[test]
+fn round_trips_a_bounded_typed_cea708_caption_cue() {
+    let envelope = CommandEnvelope {
+        version: PROTOCOL_VERSION,
+        channel_id: "62a47b7e-2a03-48d6-8703-a6e5ce986527".into(),
+        command_id: "caption-command".into(),
+        expected_sequence: 7,
+        command: ChannelCommand::PushCaptionCue {
+            cue: CaptionCue {
+                cue_id: "4fefcd4e-cfa1-4f62-a810-3d4fa53d2cb6".into(),
+                start_after_ms: 500,
+                duration_ms: 2_000,
+                text: "TownLight CEA-708 proof".into(),
+            },
+        },
+    };
+    let frame = encode_command_frame(&envelope).expect("caption cue encodes");
+    assert_eq!(decode_command_frame(&frame).unwrap(), envelope);
+}
+
+#[test]
+fn rejects_invalid_caption_cue_identity_timing_and_text() {
+    for cue in [
+        CaptionCue {
+            cue_id: "not-a-uuid".into(),
+            start_after_ms: 500,
+            duration_ms: 2_000,
+            text: "caption".into(),
+        },
+        CaptionCue {
+            cue_id: "4fefcd4e-cfa1-4f62-a810-3d4fa53d2cb6".into(),
+            start_after_ms: 60_001,
+            duration_ms: 2_000,
+            text: "caption".into(),
+        },
+        CaptionCue {
+            cue_id: "4fefcd4e-cfa1-4f62-a810-3d4fa53d2cb6".into(),
+            start_after_ms: 500,
+            duration_ms: 0,
+            text: "caption".into(),
+        },
+        CaptionCue {
+            cue_id: "4fefcd4e-cfa1-4f62-a810-3d4fa53d2cb6".into(),
+            start_after_ms: 500,
+            duration_ms: 2_000,
+            text: "\n".into(),
+        },
+    ] {
+        let envelope = CommandEnvelope {
+            version: PROTOCOL_VERSION,
+            channel_id: "channel-1".into(),
+            command_id: "caption-command".into(),
+            expected_sequence: 1,
+            command: ChannelCommand::PushCaptionCue { cue },
+        };
+        assert!(matches!(
+            encode_command_frame(&envelope),
+            Err(ProtocolError::InvalidCaptionCue(_))
+        ));
+    }
+}
+
+#[test]
 fn rejects_a_command_from_an_incompatible_future_major_version() {
     let mut command = take_live_command();
     let future_major = PROTOCOL_VERSION.major + 1;
@@ -352,6 +415,18 @@ fn round_trips_worker_events_and_rejects_an_incompatible_major() {
     let frame = encode_event_frame(&heartbeat).expect("heartbeat encodes");
     assert_eq!(decode_event_frame(&frame).unwrap(), heartbeat);
 
+    let caption = WorkerEventEnvelope {
+        version: PROTOCOL_VERSION,
+        worker_id: "ae819b97-2920-434b-9d96-0b51a8ea9abb".into(),
+        channel_id: "62a47b7e-2a03-48d6-8703-a6e5ce986527".into(),
+        sequence: 45,
+        event: WorkerEvent::CaptionCueAccepted {
+            cue_id: "4fefcd4e-cfa1-4f62-a810-3d4fa53d2cb6".into(),
+        },
+    };
+    let frame = encode_event_frame(&caption).expect("caption event encodes");
+    assert_eq!(decode_event_frame(&frame).unwrap(), caption);
+
     let mut incompatible = event;
     incompatible.version = ProtocolVersion { major: 9, minor: 0 };
     let frame = encode_event_frame(&incompatible).expect("event encodes");
@@ -398,5 +473,22 @@ fn rejects_invalid_live_events_on_encode_and_decode() {
     assert!(matches!(
         decode_event_frame(&frame),
         Err(ProtocolError::InvalidLiveEvent(_))
+    ));
+}
+
+#[test]
+fn rejects_an_invalid_caption_acknowledgment_identity() {
+    let invalid = WorkerEventEnvelope {
+        version: PROTOCOL_VERSION,
+        worker_id: "worker".into(),
+        channel_id: "channel".into(),
+        sequence: 1,
+        event: WorkerEvent::CaptionCueAccepted {
+            cue_id: "not-a-uuid".into(),
+        },
+    };
+    assert!(matches!(
+        encode_event_frame(&invalid),
+        Err(ProtocolError::InvalidCaptionCue(_))
     ));
 }

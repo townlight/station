@@ -16,9 +16,10 @@ use gstreamer as gst;
 use image::{ImageReader, Limits};
 use sha2::{Digest, Sha256};
 use station_media_protocol::{
-    CgImageFormat, CgOverlayContent, CgSnapshot, LoudnessTarget, MAX_CG_SLOTS, MAX_CG_TEXT_BYTES,
-    MAX_OUTPUT_PROOF_BYTES, MAX_OUTPUT_PROOF_DURATION_MS, MIN_OUTPUT_PROOF_DURATION_MS,
-    WorkerFallbackSlate,
+    CaptionCue, CgImageFormat, CgOverlayContent, CgSnapshot, LoudnessTarget,
+    MAX_CAPTION_DURATION_MS, MAX_CAPTION_START_AFTER_MS, MAX_CAPTION_TEXT_BYTES, MAX_CG_SLOTS,
+    MAX_CG_TEXT_BYTES, MAX_OUTPUT_PROOF_BYTES, MAX_OUTPUT_PROOF_DURATION_MS,
+    MIN_OUTPUT_PROOF_DURATION_MS, WorkerFallbackSlate,
 };
 use station_schedule::{OutputProfile, OutputProfileId};
 
@@ -276,6 +277,8 @@ pub enum EngineError {
         reason: &'static str,
     },
     OutputCapture(String),
+    CaptionInvalid(String),
+    CaptionPush(String),
 }
 
 pub struct PersistentPlayout {
@@ -299,6 +302,7 @@ pub struct PersistentPlayout {
     output_capture_bindings: Vec<OutputCaptureBinding>,
     output_capture_ingresses: Vec<Arc<CaptureIngress>>,
     proof_artifact_root: Option<PathBuf>,
+    caption_source: gst::Element,
     stopped: bool,
 }
 
@@ -632,6 +636,68 @@ impl PersistentPlayout {
             .property("config-interval", 1_i32)
             .build()
             .map_err(|error| build_error("h264parse", error))?;
+        let caption_source = gst::ElementFactory::make("appsrc")
+            .name("cea708-caption-source")
+            .property(
+                "caps",
+                gst::Caps::builder("text/x-raw")
+                    .field("format", "utf8")
+                    .build(),
+            )
+            .property("is-live", true)
+            .property("format", gst::Format::Time)
+            .property("block", false)
+            .build()
+            .map_err(|error| build_error("appsrc", error))?;
+        let caption_encoder = gst::ElementFactory::make("tttocea708")
+            .name("cea708-caption-encoder")
+            .property_from_str("mode", "pop-on")
+            .property("service-number", 1_u32)
+            .property("cea608-channel", 1_u32)
+            .build()
+            .map_err(|error| build_error("tttocea708", error))?;
+        let caption_caps = gst::ElementFactory::make("capsfilter")
+            .name("cea708-caption-caps")
+            .property(
+                "caps",
+                gst::Caps::builder("closedcaption/x-cea-708")
+                    .field("format", "cc_data")
+                    .field(
+                        "framerate",
+                        gst::Fraction::new(
+                            i32::try_from(profile.frame_rate_numerator).map_err(|_| {
+                                EngineError::CaptionInvalid(
+                                    "caption frame-rate numerator exceeds range".into(),
+                                )
+                            })?,
+                            i32::try_from(profile.frame_rate_denominator).map_err(|_| {
+                                EngineError::CaptionInvalid(
+                                    "caption frame-rate denominator exceeds range".into(),
+                                )
+                            })?,
+                        ),
+                    )
+                    .build(),
+            )
+            .build()
+            .map_err(|error| build_error("capsfilter", error))?;
+        let caption_queue = bounded_queue("cea708-caption-queue")?;
+        let caption_combiner = gst::ElementFactory::make("cccombiner")
+            .name("cea708-caption-combiner")
+            .property("schedule", true)
+            .property("output-padding", true)
+            .build()
+            .map_err(|error| build_error("cccombiner", error))?;
+        let caption_inserter = gst::ElementFactory::make("h264ccinserter")
+            .name("cea708-h264-inserter")
+            .property("remove-caption-meta", true)
+            .build()
+            .map_err(|error| build_error("h264ccinserter", error))?;
+        let post_caption_parser = gst::ElementFactory::make("h264parse")
+            .name("post-caption-video-parser")
+            .property("config-interval", 1_i32)
+            .build()
+            .map_err(|error| build_error("h264parse", error))?;
         let cg_input_convert = element("videoconvert", "cg-input-convert")?;
         let cg_input_caps = gst::ElementFactory::make("capsfilter")
             .name("cg-input-caps")
@@ -763,6 +829,13 @@ impl PersistentPlayout {
                 &caps_filter,
                 &encoder,
                 &parser,
+                &caption_source,
+                &caption_encoder,
+                &caption_caps,
+                &caption_queue,
+                &caption_combiner,
+                &caption_inserter,
+                &post_caption_parser,
                 &fallback_audio,
                 &fallback_audio_convert,
                 &fallback_audio_resample,
@@ -855,12 +928,42 @@ impl PersistentPlayout {
             &caps_filter,
             &encoder,
             &parser,
+            &caption_combiner,
+            &caption_inserter,
+            &post_caption_parser,
             &video_variant_fanout,
         ])
         .map_err(|_| EngineError::Link {
             from: "cg-compositor",
             to: "video-variant-fanout",
         })?;
+        gst::Element::link_many([
+            &caption_source,
+            &caption_encoder,
+            &caption_caps,
+            &caption_queue,
+        ])
+        .map_err(|_| EngineError::Link {
+            from: "appsrc",
+            to: "tttocea708",
+        })?;
+        let caption_source_pad =
+            caption_queue
+                .static_pad("src")
+                .ok_or(EngineError::MissingPad {
+                    element: "queue",
+                    pad: "src",
+                })?;
+        let caption_sink_pad =
+            caption_combiner
+                .request_pad_simple("caption")
+                .ok_or(EngineError::MissingPad {
+                    element: "cccombiner",
+                    pad: "caption",
+                })?;
+        caption_source_pad
+            .link(&caption_sink_pad)
+            .map_err(|error| EngineError::PadLink(format!("{error:?}")))?;
         for variant in &loudness_variants {
             gst::Element::link_many([&video_variant_fanout, &variant.video_queue, &variant.mux])
                 .map_err(|_| EngineError::Link {
@@ -1001,6 +1104,7 @@ impl PersistentPlayout {
             output_capture_bindings,
             output_capture_ingresses,
             proof_artifact_root,
+            caption_source,
             stopped: false,
         };
         playout.cg_canvas_pad.set_property("alpha", 0.0_f64);
@@ -1030,6 +1134,39 @@ impl PersistentPlayout {
 
     pub fn output_variant_count(&self) -> usize {
         self.output_variant_count
+    }
+
+    /// Schedules one bounded UTF-8 cue against the worker's running graph clock.
+    /// The server supplies only a relative delay; browser and wall-clock values
+    /// never become direct media timestamps.
+    pub fn push_caption_cue(&mut self, cue: &CaptionCue) -> Result<(), EngineError> {
+        if self.stopped {
+            return Err(EngineError::CaptionPush(
+                "caption cue requires a running graph".into(),
+            ));
+        }
+        validate_caption_cue(cue)?;
+        let running_time = self
+            .pipeline
+            .current_running_time()
+            .ok_or_else(|| EngineError::CaptionPush("caption graph has no running time".into()))?;
+        let pts = running_time
+            .checked_add(gst::ClockTime::from_mseconds(cue.start_after_ms))
+            .ok_or_else(|| EngineError::CaptionPush("caption timestamp overflowed".into()))?;
+        let mut buffer = gst::Buffer::from_mut_slice(cue.text.as_bytes().to_vec());
+        {
+            let writable = buffer
+                .get_mut()
+                .ok_or_else(|| EngineError::CaptionPush("caption buffer is not writable".into()))?;
+            writable.set_pts(pts);
+            writable.set_duration(gst::ClockTime::from_mseconds(cue.duration_ms));
+        }
+        let flow = self
+            .caption_source
+            .emit_by_name::<gst::FlowReturn>("push-buffer", &[&buffer]);
+        flow.into_result().map(|_| ()).map_err(|error| {
+            EngineError::CaptionPush(format!("caption source rejected cue: {error:?}"))
+        })
     }
 
     pub fn output_bytes_sent(&self) -> Result<Vec<u64>, EngineError> {
@@ -3049,6 +3186,36 @@ fn is_canonical_uuid(value: &str) -> bool {
             .iter()
             .enumerate()
             .all(|(index, byte)| matches!(index, 8 | 13 | 18 | 23) || byte.is_ascii_hexdigit())
+}
+
+fn validate_caption_cue(cue: &CaptionCue) -> Result<(), EngineError> {
+    if !is_canonical_uuid(&cue.cue_id) || cue.cue_id != cue.cue_id.to_ascii_lowercase() {
+        return Err(EngineError::CaptionInvalid(
+            "caption cue identity must be a lowercase canonical UUID".into(),
+        ));
+    }
+    if cue.start_after_ms > MAX_CAPTION_START_AFTER_MS {
+        return Err(EngineError::CaptionInvalid(
+            "caption cue start delay exceeds the bounded range".into(),
+        ));
+    }
+    if cue.duration_ms == 0 || cue.duration_ms > MAX_CAPTION_DURATION_MS {
+        return Err(EngineError::CaptionInvalid(
+            "caption cue duration is outside the bounded range".into(),
+        ));
+    }
+    if cue.text.trim().is_empty()
+        || cue.text.len() > MAX_CAPTION_TEXT_BYTES
+        || cue
+            .text
+            .chars()
+            .any(|character| character.is_control() && character != '\n')
+    {
+        return Err(EngineError::CaptionInvalid(
+            "caption cue text is empty, oversized, or contains control characters".into(),
+        ));
+    }
+    Ok(())
 }
 
 pub type SyntheticPlayout = PersistentPlayout;

@@ -74,7 +74,7 @@ impl<'de> Deserialize<'de> for LoudnessTarget {
 }
 
 pub const MAX_FRAME_BYTES: usize = 65_536;
-pub const PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion { major: 5, minor: 0 };
+pub const PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion { major: 6, minor: 0 };
 
 pub const MAX_OUTPUT_PROOF_INDEX: u16 = 255;
 // Operator-requested analyzable program is capped at ten minutes. The worker
@@ -100,6 +100,21 @@ const MAX_LIVE_ID_BYTES: usize = 128;
 
 pub const MAX_CG_SLOTS: usize = 8;
 pub const MAX_CG_TEXT_BYTES: usize = 2048;
+pub const MAX_CAPTION_TEXT_BYTES: usize = 2048;
+pub const MAX_CAPTION_START_AFTER_MS: u64 = 60_000;
+pub const MAX_CAPTION_DURATION_MS: u64 = 60_000;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CaptionCue {
+    pub cue_id: String,
+    /// Worker-relative scheduling delay. The worker derives the actual
+    /// presentation timestamp from its running graph clock and never trusts a
+    /// browser- or wall-clock-supplied on-air timestamp.
+    pub start_after_ms: u64,
+    pub duration_ms: u64,
+    pub text: String,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CgRect {
@@ -392,6 +407,9 @@ pub enum ChannelCommand {
         snapshot: CgSnapshot,
     },
     ClearCgSnapshot,
+    PushCaptionCue {
+        cue: CaptionCue,
+    },
     LoadAsset {
         asset_id: String,
         media_path: String,
@@ -496,6 +514,9 @@ pub enum WorkerEvent {
         board_revision: u64,
     },
     CgCleared,
+    CaptionCueAccepted {
+        cue_id: String,
+    },
     CommandRejected {
         command_id: String,
         code: String,
@@ -591,6 +612,7 @@ pub enum ProtocolError {
     InvalidManagedCgImageRoot(String),
     InvalidManagedProofRoot(String),
     InvalidFallbackSlate(String),
+    InvalidCaptionCue(String),
     InvalidLiveCommand(String),
     InvalidLiveEvent(String),
     InvalidOutputProof(String),
@@ -598,6 +620,7 @@ pub enum ProtocolError {
 }
 
 pub fn encode_command_frame(command: &CommandEnvelope) -> Result<Vec<u8>, ProtocolError> {
+    validate_caption_command(&command.command).map_err(ProtocolError::InvalidCaptionCue)?;
     validate_live_command(&command.command).map_err(ProtocolError::InvalidLiveCommand)?;
     validate_output_proof_command(&command.command).map_err(ProtocolError::InvalidOutputProof)?;
     encode_frame(command)
@@ -993,9 +1016,33 @@ pub fn decode_command_frame(frame: &[u8]) -> Result<CommandEnvelope, ProtocolErr
     if command.version.major != PROTOCOL_VERSION.major {
         return Err(ProtocolError::UnsupportedMajor(command.version.major));
     }
+    validate_caption_command(&command.command).map_err(ProtocolError::InvalidCaptionCue)?;
     validate_live_command(&command.command).map_err(ProtocolError::InvalidLiveCommand)?;
     validate_output_proof_command(&command.command).map_err(ProtocolError::InvalidOutputProof)?;
     Ok(command)
+}
+
+fn validate_caption_command(command: &ChannelCommand) -> Result<(), String> {
+    let ChannelCommand::PushCaptionCue { cue } = command else {
+        return Ok(());
+    };
+    validate_canonical_uuid(&cue.cue_id, "caption cue_id")?;
+    if cue.start_after_ms > MAX_CAPTION_START_AFTER_MS {
+        return Err("caption cue start delay exceeds the bounded range".into());
+    }
+    if cue.duration_ms == 0 || cue.duration_ms > MAX_CAPTION_DURATION_MS {
+        return Err("caption cue duration is outside the bounded range".into());
+    }
+    if cue.text.trim().is_empty()
+        || cue.text.len() > MAX_CAPTION_TEXT_BYTES
+        || cue
+            .text
+            .chars()
+            .any(|character| character.is_control() && character != '\n')
+    {
+        return Err("caption cue text is empty, oversized, or contains control characters".into());
+    }
+    Ok(())
 }
 
 fn validate_live_command(command: &ChannelCommand) -> Result<(), String> {
@@ -1011,6 +1058,7 @@ fn validate_live_command(command: &ChannelCommand) -> Result<(), String> {
 }
 
 pub fn encode_event_frame(event: &WorkerEventEnvelope) -> Result<Vec<u8>, ProtocolError> {
+    validate_caption_event(&event.event).map_err(ProtocolError::InvalidCaptionCue)?;
     validate_live_event(&event.event).map_err(ProtocolError::InvalidLiveEvent)?;
     validate_output_proof_event(&event.event).map_err(ProtocolError::InvalidOutputProof)?;
     encode_frame(event)
@@ -1021,9 +1069,19 @@ pub fn decode_event_frame(frame: &[u8]) -> Result<WorkerEventEnvelope, ProtocolE
     if event.version.major != PROTOCOL_VERSION.major {
         return Err(ProtocolError::UnsupportedMajor(event.version.major));
     }
+    validate_caption_event(&event.event).map_err(ProtocolError::InvalidCaptionCue)?;
     validate_live_event(&event.event).map_err(ProtocolError::InvalidLiveEvent)?;
     validate_output_proof_event(&event.event).map_err(ProtocolError::InvalidOutputProof)?;
     Ok(event)
+}
+
+fn validate_caption_event(event: &WorkerEvent) -> Result<(), String> {
+    match event {
+        WorkerEvent::CaptionCueAccepted { cue_id } => {
+            validate_canonical_uuid(cue_id, "caption cue_id")
+        }
+        _ => Ok(()),
+    }
 }
 
 fn validate_live_event(event: &WorkerEvent) -> Result<(), String> {

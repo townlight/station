@@ -14,6 +14,13 @@ only the content digest and format to the worker, which rehashes and decodes the
 reporting Ready. Commissioning consumes the same authority plus green current runtime; EAS forced
 slate and tones remain separate unfinished S11 work.
 
+The persistent worker is now caption-transport capable. Protocol v6 carries one bounded typed cue;
+the graph converts it to CEA-708 service 1 with CEA-608 compatibility, schedules it against video,
+and inserts H.264 SEI before the shared encoded video fans out to each MPEG-TS variant. A source
+proof captures the exact post-mux branch and decodes the expected text back. Durable caption tracks,
+live ASR, operator configuration, current proof receipts, and installed/field evidence remain
+separate work, so commissioning still reports the caption authority as blocked.
+
 ## Architecture
 
 - Rust owns the station control plane and isolated media workers.
