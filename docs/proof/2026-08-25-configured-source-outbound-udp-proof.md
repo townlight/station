@@ -45,12 +45,22 @@ The complete `station-api` package passed 80 tests with the Windows inventory an
 machine lanes explicitly ignored during the deterministic suite. Warning-denied Clippy passed for
 all package targets and features.
 
-## Remaining installed boundary
+## Installed candidate
 
-The exact committed candidate must still be built and installed. Authenticated observation through
-`GET /api/v1/station-box-profile` also requires the station owner to create the first operator
-account; the current installed station reports `bootstrap_required`, so that route result is not yet
-claimed.
+Clean source commit `c8c9885668e9752b203dd20b1f25d02f486b83e6` produced installer SHA-256
+`a89c9478e6958d261798fd498ffa2e1d7f38c819b95ba884243bffd31c7afb87`. The previous application,
+private runtime, and services were uninstalled while the station database remained present, and the
+exact candidate then completed its health-gated clean installation.
+
+`installer/verify-installed.ps1` exited zero with both services running automatically as
+LocalSystem, health ready, all three installed binary hashes matching the candidate manifest,
+installed and active-slot receipts matching the source commit, the private-runtime manifest
+matching, and all required media factories ready.
+
+The elevated configured-source machine lane is the direct proof at the installed service's Windows
+privilege boundary. An authenticated observation through `GET /api/v1/station-box-profile` is still
+not claimed. `GET /api/v1/auth/status` reports `bootstrap_required`; creating the first operator
+account requires owner-selected credentials and is outside this proof slice.
 
 ## Sources
 
