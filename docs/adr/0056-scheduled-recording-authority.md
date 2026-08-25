@@ -45,6 +45,29 @@ history records creation or the exact receipt plus the resulting recording snaps
 its update/delete triggers reject mutation. JSON/index/receipt/lifecycle/execution
 disagreement fails closed rather than being repaired or guessed.
 
+`station-api` now supplies the authenticated server boundary for this authority.
+Enabled Setup Admins map to recording supervisors and enabled Meeting Operators
+map to recording operators; the browser supplies only a recording identity and a
+schedule-item identity for creation, optimistic revisions, and a cancellation
+reason. The server reads the current committed schedule item and derives its
+channel, wall-clock window, and durable CAS revision; it never accepts browser
+schedule channel/window/revision facts. The server rechecks that exact committed
+schedule identity/revision/channel/window before arm or a trusted worker
+transition, failing closed after a schedule edit, cancellation, or deletion. It
+also derives the actor and event time, and derives candidate/channel configuration
+authority for an operator arm from the currently verified installed candidate and
+current channel configuration. Browser routes do not accept lifecycle receipts,
+worker actor identity, candidate, configuration hash, timestamp, or
+capture/finalization facts.
+
+Non-operator lifecycle steps are available only through an in-process trusted
+observation type. That type has no candidate, configuration, timestamp, receipt,
+or actor fields; the server supplies the fixed recording-worker identity, current
+time, and current verified candidate/configuration before delegating to the domain
+contract. It is deliberately not a browser route. The API exposes bounded
+authenticated current-recording, channel-list, and append-only-history reads, but
+does not materialize schedules, run capture, or expose an operator UI.
+
 Recovery deliberately cannot resume an interrupted capture. A recording worker can
 mark an in-progress capture for recovery only after its scheduled end and only into
 `Finalizing`, retaining the fact that the completion followed an interruption. A
@@ -54,8 +77,8 @@ claiming a continuous recovered capture that has not been proven.
 
 ## Boundaries and non-claims
 
-This slice has a database and append-only audit boundary, but is not a capture engine,
-scheduler, media asset store, recovery probe, API, authorization provider, or operator
+This slice has a database, append-only audit, and authenticated API boundary, but is
+not a capture engine, scheduler, media asset store, recovery probe, or operator
 interface. It makes no device call, starts no source, writes no media bytes, observes
 no actual duration, hashes no recording, and cannot establish that the supplied
 finalization facts are true. The actor role is an authority contract supplied by a
@@ -63,6 +86,6 @@ future authenticated server boundary, not authentication itself.
 
 Later slices must materialize recordings from authoritative schedule changes, supervise native
 capture per channel, create and verify managed media assets, reconcile worker crash
-evidence, expose authenticated operator workflow, and collect exact-candidate
+evidence, expose an operator workflow, and collect exact-candidate
 installed-machine and field evidence. No lifecycle state or passing unit test is a
 claim that scheduled recording works on a station.

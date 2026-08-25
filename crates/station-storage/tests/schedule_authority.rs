@@ -48,9 +48,9 @@ fn reruns_the_gate_under_a_write_lock_and_persists_approval_before_dispatch() {
         ScheduleState::Draft
     );
 
-    store
-        .put_schedule_item(&schedule_item(CONFLICT, 110_000, ScheduleState::Cancelled))
-        .unwrap();
+    let mut resolved_conflict = schedule_item(CONFLICT, 110_000, ScheduleState::Cancelled);
+    resolved_conflict.revision = 2;
+    store.put_schedule_item(&resolved_conflict).unwrap();
     let report = store
         .commit_schedule(
             "report-2",
@@ -296,6 +296,7 @@ fn ready_asset() -> MediaAsset {
 fn schedule_item(id: &str, starts_at_unix_ms: i64, state: ScheduleState) -> ScheduleItem {
     ScheduleItem {
         item_id: id.into(),
+        revision: 1,
         channel_id: CHANNEL.into(),
         asset_id: ASSET.into(),
         title: "City Council".into(),
@@ -303,6 +304,22 @@ fn schedule_item(id: &str, starts_at_unix_ms: i64, state: ScheduleState) -> Sche
         duration_ms: 60_000,
         state,
     }
+}
+
+#[test]
+fn schedule_items_require_nonzero_compare_and_set_revisions() {
+    let database = database_path("schedule-cas-revision");
+    let store = StationStore::open(&database).unwrap();
+    let item = schedule_item(ITEM, 100_000, ScheduleState::Draft);
+    store.put_schedule_item(&item).unwrap();
+    let mut replacement = item.clone();
+    replacement.revision = 2;
+    replacement.title = "Revised City Council".into();
+    store.put_schedule_item(&replacement).unwrap();
+    assert_eq!(store.read_schedule_item(ITEM).unwrap(), Some(replacement));
+    assert!(store.put_schedule_item(&item).is_err());
+    drop(store);
+    remove_database(&database);
 }
 
 fn database_path(label: &str) -> PathBuf {

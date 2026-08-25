@@ -79,6 +79,7 @@ fn asset(readiness: AssetReadiness) -> MediaAsset {
 fn item(id: &str, starts_at_unix_ms: i64, duration_ms: u64) -> ScheduleItem {
     ScheduleItem {
         item_id: id.into(),
+        revision: 1,
         channel_id: CHANNEL.into(),
         asset_id: ASSET.into(),
         title: "City Council".into(),

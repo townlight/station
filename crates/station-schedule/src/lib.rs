@@ -611,6 +611,7 @@ pub enum AssetReadiness {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ScheduleItem {
     pub item_id: String,
+    pub revision: u64,
     pub channel_id: String,
     pub asset_id: String,
     pub title: String,
@@ -727,6 +728,11 @@ impl ScheduleItem {
         if !is_uuid(&self.item_id) || !is_uuid(&self.channel_id) {
             return Err(ScheduleError::Invalid(
                 "item_id and channel_id must be canonical UUIDs",
+            ));
+        }
+        if self.revision == 0 {
+            return Err(ScheduleError::Invalid(
+                "schedule item revision must be nonzero",
             ));
         }
         if !is_asset_id(&self.asset_id) {

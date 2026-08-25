@@ -58,6 +58,10 @@ use station_readiness::{
     ReleaseProbeInput, StationBoxProbeInput, StationBoxProfile, derive_headend_readiness,
     derive_station_box_profile,
 };
+use station_recording::{
+    RecordingActor, RecordingActorRole, RecordingCandidateIdentity, RecordingEvent,
+    RecordingExecutionAuthority, RecordingTransitionRequest, ScheduledRecording,
+};
 use station_schedule::{
     AssetReadiness, ChannelConfiguration, CommitReport, DispatchStatus, HEADEND_PROFILES,
     HeadendProfileApplyRequest, MediaAsset, OUTPUT_PROFILES, ScheduleItem, ScheduleState,
@@ -92,6 +96,7 @@ const CAPTION_PROOF_MIN_DURATION_MS: u64 = 3_000;
 const CAPTION_PROOF_RUNTIME_MAX_AGE_MS: i64 = 15_000;
 const CAPTION_PROOF_EXECUTION_LEAD_MS: u64 = 1_000;
 const AUTOMATION_CONNECTION_TEST_TTL_MS: i64 = 24 * 60 * 60 * 1_000;
+const RECORDING_WORKER_ACTOR_ID: &str = "00000000-0000-4000-8000-000000000021";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -901,6 +906,57 @@ struct CommitSchedule {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct CreateScheduledRecordingRequest {
+    recording_id: String,
+    schedule_item_id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RecordingExpectedRevisionRequest {
+    expected_revision: u64,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CancelScheduledRecordingRequest {
+    expected_revision: u64,
+    reason: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TrustedScheduledRecordingWorkerEvent {
+    StartCapture,
+    BeginFinalization,
+    RecoverForFinalization {
+        reason: String,
+    },
+    FinalizeSuccess {
+        captured_asset_hash: String,
+        captured_duration_ms: i64,
+    },
+    Fail {
+        reason: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TrustedScheduledRecordingWorkerObservation {
+    pub recording_id: String,
+    pub expected_revision: u64,
+    pub event: TrustedScheduledRecordingWorkerEvent,
+}
+
+#[derive(Serialize)]
+struct ScheduledRecordingHistoryResponse {
+    recording: ScheduledRecording,
+    receipt: Option<station_recording::RecordingTransitionReceipt>,
+    actor: RecordingActor,
+    occurred_at_unix_ms: i64,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct IngestMedia {
     job_id: String,
     source_path: PathBuf,
@@ -1292,6 +1348,24 @@ impl Api {
             }
             ("PUT", path) if automation_policy_path(path).is_some() => {
                 self.put_automation_policy(path, body, actor)
+            }
+            ("POST", "/api/v1/scheduled-recordings") => {
+                self.create_scheduled_recording(body, actor)
+            }
+            ("GET", path) if scheduled_recording_history_path(path).is_some() => {
+                self.list_scheduled_recording_history(path, actor)
+            }
+            ("GET", path) if scheduled_recording_list_path(path).is_some() => {
+                self.list_scheduled_recordings(path, actor)
+            }
+            ("GET", path) if scheduled_recording_path(path).is_some() => {
+                self.read_scheduled_recording(path, actor)
+            }
+            ("POST", path) if scheduled_recording_action_path(path, "arm").is_some() => {
+                self.arm_scheduled_recording(path, body, actor)
+            }
+            ("POST", path) if scheduled_recording_action_path(path, "cancel").is_some() => {
+                self.cancel_scheduled_recording(path, body, actor)
             }
             ("PUT", "/api/v1/reference-station-tier") => {
                 self.put_reference_station_tier(body, actor)
@@ -2002,6 +2076,420 @@ impl Api {
         };
         candidate.validate()?;
         Ok(candidate)
+    }
+
+    fn create_scheduled_recording(
+        &self,
+        body: Option<&[u8]>,
+        actor: Option<&OperatorAccount>,
+    ) -> ApiResponse {
+        let Some(requested_by) = recording_operator(actor) else {
+            return error_response(
+                403,
+                "recording_operator_required",
+                "Creating a scheduled recording requires an enabled Setup Admin or Meeting Operator account.",
+            );
+        };
+        let Some(request) = parse_body::<CreateScheduledRecordingRequest>(body) else {
+            return error_response(
+                400,
+                "invalid_json",
+                "A complete scheduled recording body is required.",
+            );
+        };
+        let schedule_item =
+            match self.read_committed_recording_schedule_item(&request.schedule_item_id) {
+                Ok(item) => item,
+                Err(message) => return recording_schedule_error_response(message),
+            };
+        let scheduled_end_unix_ms = match schedule_item.ends_at_unix_ms() {
+            Ok(end) => end,
+            Err(error) => {
+                return error_response(409, "schedule_binding_changed", &format!("{error:?}"));
+            }
+        };
+        let requested_at_unix_ms = match system_time_millis() {
+            Ok(now) => now,
+            Err(message) => return error_response(500, "clock_error", &message),
+        };
+        let recording = match ScheduledRecording::new(station_recording::RecordingDefinition {
+            recording_id: request.recording_id,
+            channel_id: schedule_item.channel_id,
+            schedule_item_id: request.schedule_item_id,
+            schedule_revision: schedule_item.revision,
+            scheduled_start_unix_ms: schedule_item.starts_at_unix_ms,
+            scheduled_end_unix_ms,
+            requested_by,
+            requested_at_unix_ms,
+        }) {
+            Ok(recording) => recording,
+            Err(message) => return error_response(422, "validation_failed", &message),
+        };
+        match self.storage.create_scheduled_recording(&recording) {
+            Ok(()) => json_response(
+                201,
+                serde_json::to_vec(&recording)
+                    .expect("serializing scheduled recording cannot fail"),
+            ),
+            Err(message) if message.contains("already exists") => {
+                error_response(409, "recording_conflict", &message)
+            }
+            Err(message)
+                if message.contains("scheduled recording schedule item")
+                    || message.contains("schedule binding") =>
+            {
+                recording_schedule_error_response(message)
+            }
+            Err(message) if message.contains("invalid") || message.contains("revision") => {
+                error_response(422, "validation_failed", &message)
+            }
+            Err(message) => error_response(500, "storage_error", &message),
+        }
+    }
+
+    fn read_scheduled_recording(&self, path: &str, actor: Option<&OperatorAccount>) -> ApiResponse {
+        if recording_operator(actor).is_none() {
+            return error_response(
+                403,
+                "recording_operator_required",
+                "Reading scheduled recordings requires an enabled operator account.",
+            );
+        }
+        let Some(recording_id) = scheduled_recording_path(path) else {
+            return error_response(
+                400,
+                "invalid_path",
+                "The scheduled recording identity is invalid.",
+            );
+        };
+        match self.storage.read_scheduled_recording(recording_id) {
+            Ok(Some(recording)) => json_response(
+                200,
+                serde_json::to_vec(&recording)
+                    .expect("serializing scheduled recording cannot fail"),
+            ),
+            Ok(None) => error_response(
+                404,
+                "recording_not_found",
+                "The scheduled recording does not exist.",
+            ),
+            Err(message) => error_response(500, "storage_error", &message),
+        }
+    }
+
+    fn list_scheduled_recordings(
+        &self,
+        path: &str,
+        actor: Option<&OperatorAccount>,
+    ) -> ApiResponse {
+        if recording_operator(actor).is_none() {
+            return error_response(
+                403,
+                "recording_operator_required",
+                "Reading scheduled recordings requires an enabled operator account.",
+            );
+        }
+        let Some((channel_id, limit)) = scheduled_recording_list_path(path) else {
+            return error_response(
+                400,
+                "invalid_path",
+                "The scheduled recording list path is invalid.",
+            );
+        };
+        match self
+            .storage
+            .list_scheduled_recordings_for_channel(channel_id, limit)
+        {
+            Ok(recordings) => json_response(
+                200,
+                serde_json::to_vec(&recordings)
+                    .expect("serializing scheduled recordings cannot fail"),
+            ),
+            Err(message) if message.contains("invalid") || message.contains("unbounded") => {
+                error_response(422, "validation_failed", &message)
+            }
+            Err(message) => error_response(500, "storage_error", &message),
+        }
+    }
+
+    fn list_scheduled_recording_history(
+        &self,
+        path: &str,
+        actor: Option<&OperatorAccount>,
+    ) -> ApiResponse {
+        if recording_operator(actor).is_none() {
+            return error_response(
+                403,
+                "recording_operator_required",
+                "Reading scheduled recording history requires an enabled operator account.",
+            );
+        }
+        let Some((recording_id, limit)) = scheduled_recording_history_path(path) else {
+            return error_response(
+                400,
+                "invalid_path",
+                "The scheduled recording history path is invalid.",
+            );
+        };
+        match self
+            .storage
+            .list_scheduled_recording_history(recording_id, limit)
+        {
+            Ok(history) => {
+                let response = history
+                    .into_iter()
+                    .map(|entry| ScheduledRecordingHistoryResponse {
+                        recording: entry.recording,
+                        receipt: entry.receipt,
+                        actor: entry.actor,
+                        occurred_at_unix_ms: entry.occurred_at_unix_ms,
+                    })
+                    .collect::<Vec<_>>();
+                json_response(
+                    200,
+                    serde_json::to_vec(&response)
+                        .expect("serializing scheduled recording history cannot fail"),
+                )
+            }
+            Err(message) if message.contains("invalid") || message.contains("unbounded") => {
+                error_response(422, "validation_failed", &message)
+            }
+            Err(message) => error_response(500, "storage_error", &message),
+        }
+    }
+
+    fn arm_scheduled_recording(
+        &self,
+        path: &str,
+        body: Option<&[u8]>,
+        actor: Option<&OperatorAccount>,
+    ) -> ApiResponse {
+        let Some(actor) = recording_operator(actor) else {
+            return error_response(
+                403,
+                "recording_operator_required",
+                "Arming a scheduled recording requires an enabled Setup Admin or Meeting Operator account.",
+            );
+        };
+        let Some(recording_id) = scheduled_recording_action_path(path, "arm") else {
+            return error_response(
+                400,
+                "invalid_path",
+                "The scheduled recording identity is invalid.",
+            );
+        };
+        let Some(request) = parse_body::<RecordingExpectedRevisionRequest>(body) else {
+            return error_response(
+                400,
+                "invalid_json",
+                "An expected recording revision is required.",
+            );
+        };
+        let recording = match self.storage.read_scheduled_recording(recording_id) {
+            Ok(Some(recording)) => recording,
+            Ok(None) => {
+                return error_response(
+                    404,
+                    "recording_not_found",
+                    "The scheduled recording does not exist.",
+                );
+            }
+            Err(message) => return error_response(500, "storage_error", &message),
+        };
+        if let Err(message) = self.recheck_scheduled_recording_binding(&recording) {
+            return recording_schedule_error_response(message);
+        }
+        let execution =
+            match self.current_recording_execution_authority(&recording.definition.channel_id) {
+                Ok(execution) => execution,
+                Err(message) => {
+                    return error_response(409, "execution_authority_unavailable", &message);
+                }
+            };
+        self.transition_scheduled_recording(
+            recording,
+            RecordingTransitionRequest {
+                expected_revision: request.expected_revision,
+                actor,
+                occurred_at_unix_ms: match system_time_millis() {
+                    Ok(now) => now,
+                    Err(message) => return error_response(500, "clock_error", &message),
+                },
+                execution: Some(execution),
+                event: RecordingEvent::Arm,
+            },
+        )
+    }
+
+    fn cancel_scheduled_recording(
+        &self,
+        path: &str,
+        body: Option<&[u8]>,
+        actor: Option<&OperatorAccount>,
+    ) -> ApiResponse {
+        let Some(actor) = recording_operator(actor) else {
+            return error_response(
+                403,
+                "recording_operator_required",
+                "Cancelling a scheduled recording requires an enabled Setup Admin or Meeting Operator account.",
+            );
+        };
+        let Some(recording_id) = scheduled_recording_action_path(path, "cancel") else {
+            return error_response(
+                400,
+                "invalid_path",
+                "The scheduled recording identity is invalid.",
+            );
+        };
+        let Some(request) = parse_body::<CancelScheduledRecordingRequest>(body) else {
+            return error_response(
+                400,
+                "invalid_json",
+                "An expected recording revision and cancellation reason are required.",
+            );
+        };
+        let recording = match self.storage.read_scheduled_recording(recording_id) {
+            Ok(Some(recording)) => recording,
+            Ok(None) => {
+                return error_response(
+                    404,
+                    "recording_not_found",
+                    "The scheduled recording does not exist.",
+                );
+            }
+            Err(message) => return error_response(500, "storage_error", &message),
+        };
+        self.transition_scheduled_recording(
+            recording.clone(),
+            RecordingTransitionRequest {
+                expected_revision: request.expected_revision,
+                actor,
+                occurred_at_unix_ms: match system_time_millis() {
+                    Ok(now) => now,
+                    Err(message) => return error_response(500, "clock_error", &message),
+                },
+                execution: recording_execution_authority(&recording),
+                event: RecordingEvent::Cancel {
+                    reason: request.reason,
+                },
+            },
+        )
+    }
+
+    pub fn record_trusted_scheduled_recording_worker_observation(
+        &self,
+        observation: TrustedScheduledRecordingWorkerObservation,
+    ) -> Result<(), String> {
+        let recording = self
+            .storage
+            .read_scheduled_recording(&observation.recording_id)?
+            .ok_or_else(|| "scheduled recording does not exist".to_string())?;
+        self.recheck_scheduled_recording_binding(&recording)?;
+        let execution =
+            self.current_recording_execution_authority(&recording.definition.channel_id)?;
+        let now = system_time_millis()?;
+        let outcome = recording.transition(RecordingTransitionRequest {
+            expected_revision: observation.expected_revision,
+            actor: RecordingActor {
+                actor_id: RECORDING_WORKER_ACTOR_ID.into(),
+                role: RecordingActorRole::RecordingWorker,
+            },
+            occurred_at_unix_ms: now,
+            execution: Some(execution),
+            event: trusted_recording_worker_event(observation.event),
+        })?;
+        self.storage
+            .write_scheduled_recording_transition(&outcome.recording, &outcome.receipt)
+    }
+
+    fn current_recording_execution_authority(
+        &self,
+        channel_id: &str,
+    ) -> Result<RecordingExecutionAuthority, String> {
+        let station_box = self.station_box_profile_uncached()?;
+        let source_commit = station_box
+            .source_commit
+            .filter(|_| station_box.release.candidate_verified)
+            .ok_or_else(|| {
+                "A verified installed candidate is required for recording execution authority."
+                    .to_string()
+            })?;
+        let candidate = RecordingCandidateIdentity {
+            version: station_box.product_version,
+            source_commit,
+        };
+        candidate.validate()?;
+        let channel_configuration_hash = self
+            .storage
+            .current_channel_output_configuration_hash(channel_id)?;
+        let execution = RecordingExecutionAuthority {
+            candidate,
+            channel_configuration_hash,
+        };
+        execution.validate()?;
+        Ok(execution)
+    }
+
+    fn read_committed_recording_schedule_item(
+        &self,
+        schedule_item_id: &str,
+    ) -> Result<ScheduleItem, String> {
+        let item = self
+            .storage
+            .read_schedule_item(schedule_item_id)?
+            .ok_or_else(|| "scheduled recording schedule item does not exist".to_string())?;
+        if item.state != ScheduleState::Committed {
+            return Err("scheduled recording schedule item is not committed".into());
+        }
+        item.validate().map_err(|error| format!("{error:?}"))?;
+        Ok(item)
+    }
+
+    fn recheck_scheduled_recording_binding(
+        &self,
+        recording: &ScheduledRecording,
+    ) -> Result<(), String> {
+        let item =
+            self.read_committed_recording_schedule_item(&recording.definition.schedule_item_id)?;
+        if item.revision != recording.definition.schedule_revision
+            || item.channel_id != recording.definition.channel_id
+            || item.starts_at_unix_ms != recording.definition.scheduled_start_unix_ms
+            || item
+                .ends_at_unix_ms()
+                .map_err(|error| format!("{error:?}"))?
+                != recording.definition.scheduled_end_unix_ms
+        {
+            return Err("scheduled recording schedule binding is stale or changed".into());
+        }
+        Ok(())
+    }
+
+    fn transition_scheduled_recording(
+        &self,
+        recording: ScheduledRecording,
+        request: RecordingTransitionRequest,
+    ) -> ApiResponse {
+        let outcome = match recording.transition(request) {
+            Ok(outcome) => outcome,
+            Err(message) if message.contains("revision") => {
+                return error_response(409, "revision_conflict", &message);
+            }
+            Err(message) => return error_response(422, "transition_rejected", &message),
+        };
+        match self
+            .storage
+            .write_scheduled_recording_transition(&outcome.recording, &outcome.receipt)
+        {
+            Ok(()) => json_response(
+                200,
+                serde_json::to_vec(&outcome.recording)
+                    .expect("serializing scheduled recording cannot fail"),
+            ),
+            Err(message) if message.contains("conflict") || message.contains("race") => {
+                error_response(409, "revision_conflict", &message)
+            }
+            Err(message) => error_response(500, "storage_error", &message),
+        }
     }
 
     fn ingest_media(&self, body: Option<&[u8]>) -> ApiResponse {
@@ -5738,6 +6226,9 @@ impl Api {
                 200,
                 serde_json::to_vec(&item).expect("serializing a schedule item cannot fail"),
             ),
+            Err(message) if message.contains("compare-and-set revision") => {
+                error_response(409, "revision_conflict", &message)
+            }
             Err(message) => error_response(500, "storage_error", &message),
         }
     }
@@ -6500,6 +6991,82 @@ fn is_automation_reader(actor: Option<&OperatorAccount>) -> bool {
     })
 }
 
+fn recording_operator(actor: Option<&OperatorAccount>) -> Option<RecordingActor> {
+    let account = actor.filter(|account| account.enabled())?;
+    let role = if account
+        .roles()
+        .contains(&station_auth::OperatorRole::SetupAdmin)
+    {
+        RecordingActorRole::Supervisor
+    } else if account
+        .roles()
+        .contains(&station_auth::OperatorRole::MeetingOperator)
+    {
+        RecordingActorRole::Operator
+    } else {
+        return None;
+    };
+    Some(RecordingActor {
+        actor_id: account.account_id().as_str().into(),
+        role,
+    })
+}
+
+fn trusted_recording_worker_event(event: TrustedScheduledRecordingWorkerEvent) -> RecordingEvent {
+    match event {
+        TrustedScheduledRecordingWorkerEvent::StartCapture => RecordingEvent::StartCapture,
+        TrustedScheduledRecordingWorkerEvent::BeginFinalization => {
+            RecordingEvent::BeginFinalization
+        }
+        TrustedScheduledRecordingWorkerEvent::RecoverForFinalization { reason } => {
+            RecordingEvent::RecoverForFinalization { reason }
+        }
+        TrustedScheduledRecordingWorkerEvent::FinalizeSuccess {
+            captured_asset_hash,
+            captured_duration_ms,
+        } => RecordingEvent::FinalizeSuccess {
+            captured_asset_hash,
+            captured_duration_ms,
+        },
+        TrustedScheduledRecordingWorkerEvent::Fail { reason } => RecordingEvent::Fail { reason },
+    }
+}
+
+fn recording_execution_authority(
+    recording: &ScheduledRecording,
+) -> Option<RecordingExecutionAuthority> {
+    match &recording.lifecycle {
+        station_recording::RecordingLifecycle::Draft
+        | station_recording::RecordingLifecycle::CancelledBeforeArm { .. } => None,
+        station_recording::RecordingLifecycle::Armed { execution, .. }
+        | station_recording::RecordingLifecycle::Capturing { execution, .. }
+        | station_recording::RecordingLifecycle::Finalizing { execution, .. }
+        | station_recording::RecordingLifecycle::Completed { execution, .. }
+        | station_recording::RecordingLifecycle::Failed { execution, .. }
+        | station_recording::RecordingLifecycle::CancelledAfterArm { execution, .. } => {
+            Some(execution.clone())
+        }
+    }
+}
+
+fn recording_schedule_error_response(message: String) -> ApiResponse {
+    if message.contains("does not exist") {
+        error_response(
+            404,
+            "schedule_item_not_found",
+            "The scheduled recording's schedule item does not exist.",
+        )
+    } else if message.contains("not committed") {
+        error_response(
+            409,
+            "schedule_not_committed",
+            "The scheduled recording's schedule item is not committed.",
+        )
+    } else {
+        error_response(409, "schedule_binding_changed", &message)
+    }
+}
+
 fn path_identity<'a>(path: &'a str, prefix: &str, suffix: &str) -> Option<&'a str> {
     let identity = path.strip_prefix(prefix)?.strip_suffix(suffix)?;
     (!identity.is_empty() && !identity.contains('/') && !identity.contains(['?', '%', '\\']))
@@ -6524,6 +7091,38 @@ fn automation_policy_history_path(path: &str) -> Option<(&str, usize)> {
     }
     let limit = query.strip_prefix("limit=")?.parse::<usize>().ok()?;
     (1..=128).contains(&limit).then_some((policy_id, limit))
+}
+
+fn scheduled_recording_path(path: &str) -> Option<&str> {
+    path_identity(path, "/api/v1/scheduled-recordings/", "")
+        .filter(|identity| is_canonical_api_uuid(identity))
+}
+
+fn scheduled_recording_action_path<'a>(path: &'a str, action: &str) -> Option<&'a str> {
+    let remainder = path.strip_prefix("/api/v1/scheduled-recordings/")?;
+    let (recording_id, requested_action) = remainder.rsplit_once('/')?;
+    (requested_action == action && is_canonical_api_uuid(recording_id)).then_some(recording_id)
+}
+
+fn scheduled_recording_history_path(path: &str) -> Option<(&str, usize)> {
+    let remainder = path.strip_prefix("/api/v1/scheduled-recordings/")?;
+    let (recording_id, query) = remainder.split_once("/history?")?;
+    if !is_canonical_api_uuid(recording_id) || query.contains('&') {
+        return None;
+    }
+    let limit = query.strip_prefix("limit=")?.parse::<usize>().ok()?;
+    (1..=128).contains(&limit).then_some((recording_id, limit))
+}
+
+fn scheduled_recording_list_path(path: &str) -> Option<(&str, usize)> {
+    let query = path.strip_prefix("/api/v1/scheduled-recordings?")?;
+    let (channel, limit) = query.split_once("&limit=")?;
+    let channel_id = channel.strip_prefix("channel_id=")?;
+    if !is_canonical_api_uuid(channel_id) || limit.contains('&') {
+        return None;
+    }
+    let limit = limit.parse::<usize>().ok()?;
+    (1..=128).contains(&limit).then_some((channel_id, limit))
 }
 
 fn asset_caption_track_path(path: &str) -> Option<(&str, &str)> {
@@ -11253,6 +11852,7 @@ mod tests {
         api.storage
             .put_schedule_item(&ScheduleItem {
                 item_id: item_id.into(),
+                revision: 1,
                 channel_id: channel_id.into(),
                 asset_id: asset_id.clone(),
                 title: "Caption proof program".into(),
@@ -11934,6 +12534,299 @@ mod tests {
 
         drop(api);
         let _ = std::fs::remove_file(database);
+        let _ = std::fs::remove_dir_all(application);
+    }
+
+    #[test]
+    fn scheduled_recording_api_uses_authenticated_operator_and_server_authority() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let database = std::env::temp_dir().join(format!("townlight-recording-api-{nonce}.db"));
+        let application = database.with_extension("application");
+        std::fs::create_dir_all(&application).unwrap();
+        let api =
+            Api::open_with_station_box_probe(&database, &application, station_box_probe()).unwrap();
+        let now = system_time_millis().unwrap();
+        let channel_id = "11111111-2222-4333-8444-555555555555";
+        api.storage
+            .put_channel(&ChannelConfiguration {
+                channel_id: channel_id.into(),
+                display_name: "Recording authority".into(),
+                output_profile: station_schedule::OutputProfileId::Proof360p30,
+                output_sinks: vec![station_schedule::OutputSinkConfiguration::required_udp(
+                    "22222222-3333-4444-8555-666666666666",
+                    "Recording output",
+                    "127.0.0.1:5500",
+                    -16.0,
+                )],
+                enabled: false,
+            })
+            .unwrap();
+        let admin = test_actor(station_auth::OperatorRole::SetupAdmin);
+        let recording_id = "33333333-4444-4555-8666-777777777777";
+        let schedule_item_id = "44444444-5555-4666-8777-888888888888";
+        let schedule_start = now + 60_000;
+        api.storage
+            .put_schedule_item(&ScheduleItem {
+                item_id: schedule_item_id.into(),
+                revision: 1,
+                channel_id: channel_id.into(),
+                asset_id: "a".repeat(64),
+                title: "Committed recording item".into(),
+                starts_at_unix_ms: schedule_start,
+                duration_ms: 30_000,
+                state: ScheduleState::Committed,
+            })
+            .unwrap();
+        let create = serde_json::to_vec(&serde_json::json!({
+            "recording_id": recording_id,
+            "schedule_item_id": schedule_item_id
+        }))
+        .unwrap();
+        let forged = serde_json::to_vec(&serde_json::json!({
+            "recording_id": recording_id,
+            "channel_id": channel_id,
+            "schedule_item_id": schedule_item_id,
+            "schedule_revision": 7,
+            "scheduled_start_unix_ms": now + 60_000
+        }))
+        .unwrap();
+        assert_eq!(
+            api.handle_authenticated(
+                "POST",
+                "/api/v1/scheduled-recordings",
+                Some(&forged),
+                &admin,
+            )
+            .status,
+            400
+        );
+        let created = api.handle_authenticated(
+            "POST",
+            "/api/v1/scheduled-recordings",
+            Some(&create),
+            &admin,
+        );
+        assert_eq!(created.status, 201);
+        let created: station_recording::ScheduledRecording =
+            serde_json::from_slice(&created.body).unwrap();
+        assert_eq!(
+            created.definition.requested_by.actor_id,
+            admin.account_id().as_str()
+        );
+        assert_eq!(
+            created.definition.requested_by.role,
+            station_recording::RecordingActorRole::Supervisor
+        );
+        assert!(created.definition.requested_at_unix_ms >= now);
+        assert_eq!(created.definition.channel_id, channel_id);
+        assert_eq!(created.definition.schedule_revision, 1);
+        assert_eq!(created.definition.scheduled_start_unix_ms, schedule_start);
+        assert_eq!(
+            api.handle_in_process("POST", "/api/v1/scheduled-recordings", Some(&create),)
+                .status,
+            403
+        );
+        assert_eq!(
+            api.handle_authenticated(
+                "GET",
+                &format!("/api/v1/scheduled-recordings/{recording_id}"),
+                None,
+                &admin,
+            )
+            .status,
+            200
+        );
+        assert_eq!(
+            api.handle_authenticated(
+                "GET",
+                &format!("/api/v1/scheduled-recordings?channel_id={channel_id}&limit=1"),
+                None,
+                &admin,
+            )
+            .status,
+            200
+        );
+        assert_eq!(
+            api.handle_authenticated(
+                "GET",
+                &format!("/api/v1/scheduled-recordings/{recording_id}/history?limit=1"),
+                None,
+                &admin,
+            )
+            .status,
+            200
+        );
+        let armed = api.handle_authenticated(
+            "POST",
+            &format!("/api/v1/scheduled-recordings/{recording_id}/arm"),
+            Some(br#"{"expected_revision":1}"#),
+            &admin,
+        );
+        assert_eq!(armed.status, 200);
+        let armed: station_recording::ScheduledRecording =
+            serde_json::from_slice(&armed.body).unwrap();
+        assert!(matches!(
+            &armed.lifecycle,
+            station_recording::RecordingLifecycle::Armed { .. }
+        ));
+        assert_eq!(
+            api.handle_in_process(
+                "POST",
+                &format!("/api/v1/scheduled-recordings/{recording_id}/worker-transition"),
+                Some(br#"{"candidate":{"source_commit":"forged"},"occurred_at_unix_ms":0}"#),
+            )
+            .status,
+            404
+        );
+        api.record_trusted_scheduled_recording_worker_observation(
+            TrustedScheduledRecordingWorkerObservation {
+                recording_id: recording_id.into(),
+                expected_revision: armed.revision,
+                event: TrustedScheduledRecordingWorkerEvent::Fail {
+                    reason: "trusted capture fault".into(),
+                },
+            },
+        )
+        .unwrap();
+        assert!(matches!(
+            api.storage
+                .read_scheduled_recording(recording_id)
+                .unwrap()
+                .unwrap()
+                .lifecycle,
+            station_recording::RecordingLifecycle::Failed { .. }
+        ));
+        let meeting_operator = test_actor(station_auth::OperatorRole::MeetingOperator);
+        let second_recording_id = "55555555-6666-4777-8888-999999999999";
+        let second_schedule_item_id = "66666666-7777-4888-8999-aaaaaaaaaaaa";
+        api.storage
+            .put_schedule_item(&ScheduleItem {
+                item_id: second_schedule_item_id.into(),
+                revision: 1,
+                channel_id: channel_id.into(),
+                asset_id: "b".repeat(64),
+                title: "Meeting operator recording item".into(),
+                starts_at_unix_ms: schedule_start,
+                duration_ms: 30_000,
+                state: ScheduleState::Committed,
+            })
+            .unwrap();
+        let meeting_create = serde_json::to_vec(&serde_json::json!({
+            "recording_id": second_recording_id,
+            "schedule_item_id": second_schedule_item_id
+        }))
+        .unwrap();
+        assert_eq!(
+            api.handle_authenticated(
+                "POST",
+                "/api/v1/scheduled-recordings",
+                Some(&meeting_create),
+                &meeting_operator,
+            )
+            .status,
+            201
+        );
+        let cancelled = api.handle_authenticated(
+            "POST",
+            &format!("/api/v1/scheduled-recordings/{second_recording_id}/cancel"),
+            Some(br#"{"expected_revision":1,"reason":"meeting moved"}"#),
+            &meeting_operator,
+        );
+        assert_eq!(cancelled.status, 200);
+        let missing = api.handle_authenticated(
+            "POST",
+            "/api/v1/scheduled-recordings",
+            Some(br#"{"recording_id":"77777777-8888-4999-8aaa-bbbbbbbbbbbb","schedule_item_id":"88888888-9999-4aaa-8bbb-cccccccccccc"}"#),
+            &admin,
+        );
+        assert_eq!(missing.status, 404);
+        let draft_schedule_item_id = "99999999-aaaa-4bbb-8ccc-dddddddddddd";
+        api.storage
+            .put_schedule_item(&ScheduleItem {
+                item_id: draft_schedule_item_id.into(),
+                revision: 1,
+                channel_id: channel_id.into(),
+                asset_id: "c".repeat(64),
+                title: "Draft recording item".into(),
+                starts_at_unix_ms: schedule_start,
+                duration_ms: 30_000,
+                state: ScheduleState::Draft,
+            })
+            .unwrap();
+        let draft_body = format!(
+            r#"{{"recording_id":"aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee","schedule_item_id":"{draft_schedule_item_id}"}}"#
+        );
+        assert_eq!(
+            api.handle_authenticated(
+                "POST",
+                "/api/v1/scheduled-recordings",
+                Some(draft_body.as_bytes()),
+                &admin,
+            )
+            .status,
+            409
+        );
+        let stale_recording_id = "bbbbbbbb-cccc-4ddd-8eee-ffffffffffff";
+        let stale_schedule_item_id = "cccccccc-dddd-4eee-8fff-000000000000";
+        let stale_schedule = ScheduleItem {
+            item_id: stale_schedule_item_id.into(),
+            revision: 1,
+            channel_id: channel_id.into(),
+            asset_id: "d".repeat(64),
+            title: "Stale binding item".into(),
+            starts_at_unix_ms: schedule_start,
+            duration_ms: 30_000,
+            state: ScheduleState::Committed,
+        };
+        api.storage.put_schedule_item(&stale_schedule).unwrap();
+        let stale_create = format!(
+            r#"{{"recording_id":"{stale_recording_id}","schedule_item_id":"{stale_schedule_item_id}"}}"#
+        );
+        assert_eq!(
+            api.handle_authenticated(
+                "POST",
+                "/api/v1/scheduled-recordings",
+                Some(stale_create.as_bytes()),
+                &admin,
+            )
+            .status,
+            201
+        );
+        let mut changed_schedule = stale_schedule;
+        changed_schedule.revision = 2;
+        changed_schedule.title = "Changed schedule item".into();
+        api.storage.put_schedule_item(&changed_schedule).unwrap();
+        assert_eq!(
+            api.handle_authenticated(
+                "POST",
+                &format!("/api/v1/scheduled-recordings/{stale_recording_id}/arm"),
+                Some(br#"{"expected_revision":1}"#),
+                &admin,
+            )
+            .status,
+            409
+        );
+        assert_eq!(
+            api.handle_authenticated(
+                "POST",
+                &format!("/api/v1/scheduled-recordings/{recording_id}/arm"),
+                Some(br#"{"expected_revision":3}"#),
+                &meeting_operator,
+            )
+            .status,
+            422
+        );
+        drop(api);
+        for candidate in [
+            database.clone(),
+            PathBuf::from(format!("{}-wal", database.display())),
+            PathBuf::from(format!("{}-shm", database.display())),
+        ] {
+            let _ = std::fs::remove_file(candidate);
+        }
         let _ = std::fs::remove_dir_all(application);
     }
 }

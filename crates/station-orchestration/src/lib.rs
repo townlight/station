@@ -4331,6 +4331,7 @@ mod tests {
         store
             .put_schedule_item(&ScheduleItem {
                 item_id: item_id.into(),
+                revision: 1,
                 channel_id: CHANNEL_ID.into(),
                 asset_id: asset_id.clone(),
                 title: "Caption proof fixture".into(),

@@ -391,6 +391,7 @@ fn commissioning_report_separates_schedule_authority_from_dispatch_execution() {
     store
         .put_schedule_item(&ScheduleItem {
             item_id: item_id.into(),
+            revision: 1,
             channel_id: channel_id.into(),
             asset_id: asset_id.into(),
             title: "City Council".into(),
@@ -540,6 +541,7 @@ fn commissioning_guided_air_proof_requires_one_persisted_causal_chain() {
     store
         .put_schedule_item(&ScheduleItem {
             item_id: "256d5a07-92d3-4718-aec9-05cad42fae7d".into(),
+            revision: 1,
             channel_id: channel_id.into(),
             asset_id: guided_asset_id.into(),
             title: "Unrelated historical item".into(),
@@ -655,6 +657,7 @@ fn commissioning_guided_air_proof_requires_one_persisted_causal_chain() {
     store
         .put_schedule_item(&ScheduleItem {
             item_id: "7e6e36ae-c6ea-4986-99d7-e848f4248815".into(),
+            revision: 1,
             channel_id: channel_id.into(),
             asset_id: guided_asset_id.into(),
             title: "Guided first broadcast".into(),
@@ -1841,6 +1844,7 @@ fn admits_real_media_into_the_managed_library_and_refuses_declared_readiness() {
     store
         .put_schedule_item(&ScheduleItem {
             item_id: "185dc897-a14c-45f0-bd6a-899fd90cd196".into(),
+            revision: 1,
             channel_id: "8b626c01-bdf8-419a-8a2e-b0a7caa1ff7e".into(),
             asset_id: forged.asset_id.clone(),
             title: "Missing council recording".into(),
@@ -2023,6 +2027,7 @@ fn prepares_commits_and_persists_an_operator_approval_through_the_api() {
         .unwrap();
     let item = ScheduleItem {
         item_id: "256d5a07-92d3-4718-aec9-05cad42fae7d".into(),
+        revision: 1,
         channel_id: "8b626c01-bdf8-419a-8a2e-b0a7caa1ff7e".into(),
         asset_id: asset.asset_id.clone(),
         title: "City Council".into(),

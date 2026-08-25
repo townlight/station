@@ -58,6 +58,7 @@ fn setup(path: &Path) -> (StationStore, CaptionEgressProof) {
     store
         .put_schedule_item(&ScheduleItem {
             item_id: ITEM_ID.into(),
+            revision: 1,
             channel_id: CHANNEL_ID.into(),
             asset_id: ASSET_ID.into(),
             title: "City Council".into(),

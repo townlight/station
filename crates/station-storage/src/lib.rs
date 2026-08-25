@@ -1024,6 +1024,7 @@ impl StationStore {
                ON alert_deliveries(state, next_attempt_at_unix_ms, created_at_unix_ms);\
              CREATE TABLE IF NOT EXISTS schedule_items (\
                item_id TEXT PRIMARY KEY,\
+               revision INTEGER NOT NULL CHECK (revision >= 1),\
                channel_id TEXT NOT NULL,\
                asset_id TEXT NOT NULL,\
                title TEXT NOT NULL,\
@@ -1099,6 +1100,7 @@ impl StationStore {
         store.migrate_ingest_retry_schedule()?;
         store.migrate_ingest_transcode_status()?;
         store.migrate_commit_report_statuses()?;
+        store.migrate_schedule_item_revision()?;
         store.initialize_commissioning_support_bundle_schema()?;
         store.migrate_channel_runtime_live_state()?;
         store.migrate_alert_delivery_realerts()?;
@@ -8481,6 +8483,7 @@ impl StationStore {
         }
         self.execute("BEGIN IMMEDIATE")?;
         let outcome = (|| {
+            self.recheck_scheduled_recording_schedule_binding(recording)?;
             if self
                 .read_scheduled_recording(&recording.definition.recording_id)?
                 .is_some()
@@ -8497,6 +8500,29 @@ impl StationStore {
             )
         })();
         self.finish_transaction(outcome)
+    }
+
+    fn recheck_scheduled_recording_schedule_binding(
+        &self,
+        recording: &ScheduledRecording,
+    ) -> Result<(), String> {
+        let item = self
+            .read_schedule_item(&recording.definition.schedule_item_id)?
+            .ok_or_else(|| "scheduled recording schedule item does not exist".to_string())?;
+        if item.state != ScheduleState::Committed {
+            return Err("scheduled recording schedule item is not committed".into());
+        }
+        let scheduled_end_unix_ms = item.ends_at_unix_ms().map_err(|error| {
+            format!("scheduled recording schedule binding is invalid: {error:?}")
+        })?;
+        if item.revision != recording.definition.schedule_revision
+            || item.channel_id != recording.definition.channel_id
+            || item.starts_at_unix_ms != recording.definition.scheduled_start_unix_ms
+            || scheduled_end_unix_ms != recording.definition.scheduled_end_unix_ms
+        {
+            return Err("scheduled recording schedule binding is stale or changed".into());
+        }
+        Ok(())
     }
 
     pub fn write_scheduled_recording_transition(
@@ -11355,11 +11381,24 @@ impl StationStore {
 
     pub fn put_schedule_item(&self, item: &ScheduleItem) -> Result<(), String> {
         item.validate().map_err(|error| format!("{error:?}"))?;
+        self.execute("BEGIN IMMEDIATE")?;
+        let outcome = (|| {
+            let current = self.read_schedule_item(&item.item_id)?;
+            match current {
+                None if item.revision == 1 => self.insert_schedule_item(item),
+                Some(current) if current.revision.checked_add(1) == Some(item.revision) => {
+                    self.update_schedule_item(item, current.revision)
+                }
+                _ => Err("schedule item compare-and-set revision conflicts".into()),
+            }
+        })();
+        self.finish_transaction(outcome)
+    }
+
+    fn insert_schedule_item(&self, item: &ScheduleItem) -> Result<(), String> {
         let statement = self.prepare(
-            "INSERT INTO schedule_items(item_id, channel_id, asset_id, title, starts_at_unix_ms, duration_ms, state) \
-             VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7) \
-             ON CONFLICT(item_id) DO UPDATE SET channel_id=excluded.channel_id, asset_id=excluded.asset_id, title=excluded.title, \
-             starts_at_unix_ms=excluded.starts_at_unix_ms, duration_ms=excluded.duration_ms, state=excluded.state",
+            "INSERT INTO schedule_items(item_id, revision, channel_id, asset_id, title, starts_at_unix_ms, duration_ms, state) \
+             VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
         )?;
         let values = [
             c_string(&item.item_id, "schedule item identity")?,
@@ -11368,9 +11407,52 @@ impl StationStore {
             c_string(&item.title, "schedule title")?,
             c_string(schedule_state_name(item.state), "schedule state")?,
         ];
-        for (index, value) in values[..4].iter().enumerate() {
-            bind_text(self.database, statement.raw, (index + 1) as c_int, value)?;
+        bind_text(self.database, statement.raw, 1, &values[0])?;
+        bind_i64(
+            self.database,
+            statement.raw,
+            2,
+            checked_i64(item.revision, "schedule item revision")?,
+        )?;
+        for (index, value) in values[1..4].iter().enumerate() {
+            bind_text(self.database, statement.raw, (index + 3) as c_int, value)?;
         }
+        bind_i64(self.database, statement.raw, 6, item.starts_at_unix_ms)?;
+        bind_i64(
+            self.database,
+            statement.raw,
+            7,
+            checked_i64(item.duration_ms, "schedule duration")?,
+        )?;
+        bind_text(self.database, statement.raw, 8, &values[4])?;
+        expect_done(self.database, statement.raw)
+    }
+
+    fn update_schedule_item(
+        &self,
+        item: &ScheduleItem,
+        expected_revision: u64,
+    ) -> Result<(), String> {
+        let statement = self.prepare(
+            "UPDATE schedule_items SET revision=?1, channel_id=?2, asset_id=?3, title=?4, starts_at_unix_ms=?5, duration_ms=?6, state=?7 \
+             WHERE item_id=?8 AND revision=?9",
+        )?;
+        let values = [
+            c_string(&item.channel_id, "channel identity")?,
+            c_string(&item.asset_id, "asset identity")?,
+            c_string(&item.title, "schedule title")?,
+            c_string(schedule_state_name(item.state), "schedule state")?,
+            c_string(&item.item_id, "schedule item identity")?,
+        ];
+        bind_i64(
+            self.database,
+            statement.raw,
+            1,
+            checked_i64(item.revision, "schedule item revision")?,
+        )?;
+        bind_text(self.database, statement.raw, 2, &values[0])?;
+        bind_text(self.database, statement.raw, 3, &values[1])?;
+        bind_text(self.database, statement.raw, 4, &values[2])?;
         bind_i64(self.database, statement.raw, 5, item.starts_at_unix_ms)?;
         bind_i64(
             self.database,
@@ -11378,13 +11460,25 @@ impl StationStore {
             6,
             checked_i64(item.duration_ms, "schedule duration")?,
         )?;
-        bind_text(self.database, statement.raw, 7, &values[4])?;
-        expect_done(self.database, statement.raw)
+        bind_text(self.database, statement.raw, 7, &values[3])?;
+        bind_text(self.database, statement.raw, 8, &values[4])?;
+        bind_i64(
+            self.database,
+            statement.raw,
+            9,
+            checked_i64(expected_revision, "schedule item expected revision")?,
+        )?;
+        expect_done(self.database, statement.raw)?;
+        if self.changes() == 1 {
+            Ok(())
+        } else {
+            Err("schedule item compare-and-set revision conflicts".into())
+        }
     }
 
     pub fn read_schedule_item(&self, item_id: &str) -> Result<Option<ScheduleItem>, String> {
         let statement = self.prepare(
-            "SELECT item_id, channel_id, asset_id, title, starts_at_unix_ms, duration_ms, state \
+            "SELECT item_id, revision, channel_id, asset_id, title, starts_at_unix_ms, duration_ms, state \
              FROM schedule_items WHERE item_id=?1",
         )?;
         let item_id = c_string(item_id, "schedule item identity")?;
@@ -11398,7 +11492,7 @@ impl StationStore {
 
     pub fn list_channel_schedule(&self, channel_id: &str) -> Result<Vec<ScheduleItem>, String> {
         let statement = self.prepare(
-            "SELECT item_id, channel_id, asset_id, title, starts_at_unix_ms, duration_ms, state \
+            "SELECT item_id, revision, channel_id, asset_id, title, starts_at_unix_ms, duration_ms, state \
              FROM schedule_items WHERE channel_id=?1 ORDER BY starts_at_unix_ms, item_id",
         )?;
         let channel_id = c_string(channel_id, "channel identity")?;
@@ -11422,7 +11516,7 @@ impl StationStore {
             return Err("schedule window is invalid".into());
         }
         let statement = self.prepare(
-            "SELECT item_id, channel_id, asset_id, title, starts_at_unix_ms, duration_ms, state \
+            "SELECT item_id, revision, channel_id, asset_id, title, starts_at_unix_ms, duration_ms, state \
              FROM schedule_items WHERE state='committed' AND starts_at_unix_ms>=?1 \
              AND starts_at_unix_ms<?2 ORDER BY starts_at_unix_ms, item_id",
         )?;
@@ -11833,7 +11927,7 @@ impl StationStore {
         let statement = self.prepare(
             "SELECT r.report_id, r.plan_id, r.channel_id, r.schedule_item_id, r.asset_id, r.approved_by, \
              r.approved_at_unix_ms, r.dispatch_status, r.operator_notes, \
-             s.item_id, s.channel_id, s.asset_id, s.title, s.starts_at_unix_ms, s.duration_ms, s.state, \
+             s.item_id, s.revision, s.channel_id, s.asset_id, s.title, s.starts_at_unix_ms, s.duration_ms, s.state, \
              a.asset_id, a.media_path, a.duration_ms, a.readiness \
              FROM commit_reports r JOIN schedule_items s ON s.item_id=r.schedule_item_id \
              JOIN media_assets a ON a.asset_id=r.asset_id WHERE r.channel_id=?1 \
@@ -11849,18 +11943,19 @@ impl StationStore {
                     report: read_commit_report_row(statement.raw)?,
                     item: ScheduleItem {
                         item_id: column_text(statement.raw, 9)?,
-                        channel_id: column_text(statement.raw, 10)?,
-                        asset_id: column_text(statement.raw, 11)?,
-                        title: column_text(statement.raw, 12)?,
-                        starts_at_unix_ms: unsafe { sqlite3_column_int64(statement.raw, 13) },
-                        duration_ms: column_u64(statement.raw, 14, "schedule duration")?,
-                        state: parse_schedule_state(&column_text(statement.raw, 15)?)?,
+                        revision: column_u64(statement.raw, 10, "schedule item revision")?,
+                        channel_id: column_text(statement.raw, 11)?,
+                        asset_id: column_text(statement.raw, 12)?,
+                        title: column_text(statement.raw, 13)?,
+                        starts_at_unix_ms: unsafe { sqlite3_column_int64(statement.raw, 14) },
+                        duration_ms: column_u64(statement.raw, 15, "schedule duration")?,
+                        state: parse_schedule_state(&column_text(statement.raw, 16)?)?,
                     },
                     asset: MediaAsset {
-                        asset_id: column_text(statement.raw, 16)?,
-                        media_path: column_text(statement.raw, 17)?,
-                        duration_ms: column_u64(statement.raw, 18, "asset duration")?,
-                        readiness: parse_readiness(&column_text(statement.raw, 19)?)?,
+                        asset_id: column_text(statement.raw, 17)?,
+                        media_path: column_text(statement.raw, 18)?,
+                        duration_ms: column_u64(statement.raw, 19, "asset duration")?,
+                        readiness: parse_readiness(&column_text(statement.raw, 20)?)?,
                     },
                 }),
                 SQLITE_DONE => return Ok(jobs),
@@ -11919,12 +12014,20 @@ impl StationStore {
     }
 
     fn set_schedule_state(&self, item_id: &str, state: ScheduleState) -> Result<(), String> {
-        let statement = self.prepare("UPDATE schedule_items SET state=?1 WHERE item_id=?2")?;
+        let statement = self.prepare(
+            "UPDATE schedule_items SET state=?1, revision=revision+1 WHERE item_id=?2 AND revision<?3",
+        )?;
         let state = c_string(schedule_state_name(state), "schedule state")?;
         let item_id = c_string(item_id, "schedule item identity")?;
         bind_text(self.database, statement.raw, 1, &state)?;
         bind_text(self.database, statement.raw, 2, &item_id)?;
-        expect_done(self.database, statement.raw)
+        bind_i64(self.database, statement.raw, 3, i64::MAX)?;
+        expect_done(self.database, statement.raw)?;
+        if self.changes() == 1 {
+            Ok(())
+        } else {
+            Err("schedule item state transition is missing or revision overflowed".into())
+        }
     }
 
     fn execute(&self, sql: &str) -> Result<(), String> {
@@ -12464,6 +12567,23 @@ impl StationStore {
         .inspect_err(|_| {
             let _ = self.execute("ROLLBACK");
         })
+    }
+
+    fn migrate_schedule_item_revision(&self) -> Result<(), String> {
+        let statement = self.prepare(
+            "SELECT COUNT(*) FROM pragma_table_info('schedule_items') WHERE name='revision'",
+        )?;
+        let has_revision = match unsafe { sqlite3_step(statement.raw) } {
+            SQLITE_ROW => (unsafe { sqlite3_column_int64(statement.raw, 0) }) == 1,
+            _ => return Err(sqlite_error(self.database)),
+        };
+        drop(statement);
+        if !has_revision {
+            self.execute(
+                "ALTER TABLE schedule_items ADD COLUMN revision INTEGER NOT NULL DEFAULT 1 CHECK (revision >= 1)",
+            )?;
+        }
+        Ok(())
     }
 
     fn migrate_channel_runtime_live_state(&self) -> Result<(), String> {
@@ -14205,15 +14325,18 @@ fn read_watch_file_observation_row(
 }
 
 fn read_schedule_item_row(statement: *mut SqliteStatement) -> Result<ScheduleItem, String> {
-    Ok(ScheduleItem {
+    let item = ScheduleItem {
         item_id: column_text(statement, 0)?,
-        channel_id: column_text(statement, 1)?,
-        asset_id: column_text(statement, 2)?,
-        title: column_text(statement, 3)?,
-        starts_at_unix_ms: unsafe { sqlite3_column_int64(statement, 4) },
-        duration_ms: column_u64(statement, 5, "schedule duration")?,
-        state: parse_schedule_state(&column_text(statement, 6)?)?,
-    })
+        revision: column_u64(statement, 1, "schedule item revision")?,
+        channel_id: column_text(statement, 2)?,
+        asset_id: column_text(statement, 3)?,
+        title: column_text(statement, 4)?,
+        starts_at_unix_ms: unsafe { sqlite3_column_int64(statement, 5) },
+        duration_ms: column_u64(statement, 6, "schedule duration")?,
+        state: parse_schedule_state(&column_text(statement, 7)?)?,
+    };
+    item.validate().map_err(|error| format!("{error:?}"))?;
+    Ok(item)
 }
 
 fn read_live_source_row(statement: *mut SqliteStatement) -> Result<LiveSource, String> {
@@ -15878,6 +16001,59 @@ mod tests {
         unsafe { sqlite3_column_int64(statement.raw, 0) }
     }
 
+    fn create_legacy_schedule_items_database(database: &Path) {
+        let filename = c_string(
+            &database.to_string_lossy(),
+            "legacy schedule test database path",
+        )
+        .unwrap();
+        let mut handle = ptr::null_mut();
+        assert_eq!(
+            unsafe {
+                sqlite3_open_v2(
+                    filename.as_ptr(),
+                    &mut handle,
+                    SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX,
+                    ptr::null(),
+                )
+            },
+            SQLITE_OK
+        );
+        let sql = c_string(
+            &format!(
+                "CREATE TABLE schedule_items(\
+                   item_id TEXT PRIMARY KEY,\
+                   channel_id TEXT NOT NULL,\
+                   asset_id TEXT NOT NULL,\
+                   title TEXT NOT NULL,\
+                   starts_at_unix_ms INTEGER NOT NULL,\
+                   duration_ms INTEGER NOT NULL,\
+                   state TEXT NOT NULL\
+                 );\
+                 INSERT INTO schedule_items(item_id, channel_id, asset_id, title, starts_at_unix_ms, duration_ms, state)\
+                 VALUES('11111111-2222-4333-8444-555555555555',\
+                        '22222222-3333-4444-8555-666666666666',\
+                        '{}', 'Legacy schedule item', 1000, 60000, 'committed');",
+                "a".repeat(64)
+            ),
+            "legacy schedule test schema",
+        )
+        .unwrap();
+        assert_eq!(
+            unsafe {
+                sqlite3_exec(
+                    handle,
+                    sql.as_ptr(),
+                    ptr::null_mut(),
+                    ptr::null_mut(),
+                    ptr::null_mut(),
+                )
+            },
+            SQLITE_OK
+        );
+        assert_eq!(unsafe { sqlite3_close(handle) }, SQLITE_OK);
+    }
+
     #[test]
     fn automation_json_mismatch_is_fail_closed_on_every_authority_read() {
         let nonce = SystemTime::now()
@@ -16002,6 +16178,35 @@ mod tests {
     }
 
     #[test]
+    fn legacy_schedule_items_are_backfilled_to_revision_one() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let database = std::env::temp_dir().join(format!("townlight-legacy-schedule-{nonce}.db"));
+        create_legacy_schedule_items_database(&database);
+        let store = StationStore::open(&database).unwrap();
+        let item = store
+            .read_schedule_item("11111111-2222-4333-8444-555555555555")
+            .unwrap()
+            .unwrap();
+        assert_eq!(item.revision, 1);
+        let mut updated = item.clone();
+        updated.revision = 2;
+        updated.title = "Legacy schedule revision two".into();
+        store.put_schedule_item(&updated).unwrap();
+        assert_eq!(
+            store
+                .read_schedule_item("11111111-2222-4333-8444-555555555555")
+                .unwrap()
+                .unwrap(),
+            updated
+        );
+        drop(store);
+        let _ = std::fs::remove_file(database);
+    }
+
+    #[test]
     fn scheduled_recording_storage_is_cas_bound_append_only_and_fails_closed_on_tampering() {
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -16014,11 +16219,22 @@ mod tests {
             actor_id: "11111111-2222-4333-8444-555555555555".into(),
             role: RecordingActorRole::Operator,
         };
+        let schedule_item = ScheduleItem {
+            item_id: "55555555-6666-4777-8888-999999999999".into(),
+            revision: 1,
+            channel_id: "44444444-5555-4666-8777-888888888888".into(),
+            asset_id: "a".repeat(64),
+            title: "Scheduled recording source".into(),
+            starts_at_unix_ms: 10_000,
+            duration_ms: 60_000,
+            state: ScheduleState::Committed,
+        };
+        store.put_schedule_item(&schedule_item).unwrap();
         let draft = ScheduledRecording::new(station_recording::RecordingDefinition {
             recording_id: "33333333-4444-4555-8666-777777777777".into(),
             channel_id: "44444444-5555-4666-8777-888888888888".into(),
             schedule_item_id: "55555555-6666-4777-8888-999999999999".into(),
-            schedule_revision: 7,
+            schedule_revision: 1,
             scheduled_start_unix_ms: 10_000,
             scheduled_end_unix_ms: 70_000,
             requested_by: operator.clone(),
@@ -16044,6 +16260,20 @@ mod tests {
         assert_eq!(created.len(), 1);
         assert_eq!(created[0].receipt, None);
         assert_eq!(created[0].actor, operator);
+
+        let mut changed_schedule_item = schedule_item.clone();
+        changed_schedule_item.revision = 2;
+        changed_schedule_item.title = "Changed after recording request".into();
+        store.put_schedule_item(&changed_schedule_item).unwrap();
+        let mut stale_schedule_recording = draft.clone();
+        stale_schedule_recording.definition.recording_id =
+            "77777777-8888-4999-8aaa-bbbbbbbbbbbb".into();
+        assert!(
+            store
+                .create_scheduled_recording(&stale_schedule_recording)
+                .unwrap_err()
+                .contains("schedule binding is stale or changed")
+        );
 
         let armed = draft
             .transition(station_recording::RecordingTransitionRequest {
@@ -16199,6 +16429,7 @@ mod tests {
         store
             .put_schedule_item(&ScheduleItem {
                 item_id: item_id.into(),
+                revision: 1,
                 channel_id: channel_id.into(),
                 asset_id: asset_id.clone(),
                 title: "Caption history program".into(),
