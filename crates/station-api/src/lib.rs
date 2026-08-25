@@ -20,6 +20,11 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use station_alerting::probe_system_resources;
 use station_auth::{OperatorAccount, SecretToken, digest_secret};
+use station_automation_policy::{
+    AdaptiveDefaultHint, AutomationCandidateIdentity, AutomationConnectionTestEvidence,
+    AutomationFeature, AutomationFeaturePolicy, ConnectionTestOutcome, FeatureAutomationStatus,
+    derive_feature_automation_status,
+};
 use station_captions::{
     AssetCaptionCue, AssetCaptionTrack, AssetCaptionTrackAuditEvent, AssetCaptionTrackWrite,
     CaptionEgressProof, CaptionEgressProofJob, CaptionEgressProofJobRecord,
@@ -86,6 +91,7 @@ const LOUDNESS_PROOF_MAX_CAPTURE_BYTES: u64 = 1024 * 1024 * 1024;
 const CAPTION_PROOF_MIN_DURATION_MS: u64 = 3_000;
 const CAPTION_PROOF_RUNTIME_MAX_AGE_MS: i64 = 15_000;
 const CAPTION_PROOF_EXECUTION_LEAD_MS: u64 = 1_000;
+const AUTOMATION_CONNECTION_TEST_TTL_MS: i64 = 24 * 60 * 60 * 1_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -623,6 +629,44 @@ struct CreateReceiverReceiptRequest {
     evidence_reference: String,
     detail: String,
     observed_at_unix_ms: i64,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PutAutomationFeaturePolicyRequest {
+    feature: AutomationFeature,
+    operator_selected_adapter_id: Option<String>,
+    adaptive_default: Option<AdaptiveDefaultHint>,
+    configuration_hash: String,
+    expected_revision: Option<u64>,
+}
+
+#[derive(Debug, Serialize)]
+struct AutomationFeaturePolicyStatusResponse {
+    policy: AutomationFeaturePolicy,
+    status: FeatureAutomationStatus,
+    evidence: Option<AutomationConnectionTestEvidence>,
+}
+
+#[derive(Debug, Serialize)]
+struct AutomationFeaturePolicyHistoryResponse {
+    policy: AutomationFeaturePolicy,
+    changed_by: String,
+    occurred_at_unix_ms: i64,
+}
+
+/// Trusted adapter-to-server observation. Candidate identity and all timestamps are
+/// deliberately absent so this type cannot self-assert server authority facts.
+#[derive(Debug, Clone)]
+pub struct TrustedAutomationConnectionTestObservation {
+    pub evidence_id: String,
+    pub policy_id: String,
+    pub adapter_id: String,
+    pub policy_revision: u64,
+    pub adapter_revision: u64,
+    pub configuration_hash: String,
+    pub outcome: ConnectionTestOutcome,
+    pub detail: String,
 }
 
 #[derive(Deserialize)]
@@ -1235,6 +1279,20 @@ impl Api {
             }
             ("GET", "/api/v1/station-box-profile") => self.station_box_profile(false),
             ("GET", "/api/v1/station-box-profile/readiness") => self.station_box_profile(true),
+            ("GET", "/api/v1/automation/adapters") => self.list_automation_adapters(actor),
+            ("GET", "/api/v1/automation/policies") => self.list_automation_policies(actor),
+            ("GET", path) if automation_policy_status_path(path).is_some() => {
+                self.read_automation_policy_status(path, actor)
+            }
+            ("GET", path) if automation_policy_history_path(path).is_some() => {
+                self.list_automation_policy_history(path, actor)
+            }
+            ("GET", path) if automation_policy_path(path).is_some() => {
+                self.read_automation_policy(path, actor)
+            }
+            ("PUT", path) if automation_policy_path(path).is_some() => {
+                self.put_automation_policy(path, body, actor)
+            }
             ("PUT", "/api/v1/reference-station-tier") => {
                 self.put_reference_station_tier(body, actor)
             }
@@ -1631,6 +1689,319 @@ impl Api {
                 error_response(500, "storage_error", &message)
             }
         }
+    }
+
+    fn list_automation_adapters(&self, actor: Option<&OperatorAccount>) -> ApiResponse {
+        if !is_automation_reader(actor) {
+            return error_response(
+                403,
+                "operator_required",
+                "Reading automation authority requires an enabled operator account.",
+            );
+        }
+        match self.storage.list_automation_adapter_descriptors() {
+            Ok(adapters) => json_response(
+                200,
+                serde_json::to_vec(&adapters).expect("serializing automation adapters cannot fail"),
+            ),
+            Err(message) => error_response(500, "storage_error", &message),
+        }
+    }
+
+    fn list_automation_policies(&self, actor: Option<&OperatorAccount>) -> ApiResponse {
+        if !is_automation_reader(actor) {
+            return error_response(
+                403,
+                "operator_required",
+                "Reading automation authority requires an enabled operator account.",
+            );
+        }
+        match self.storage.list_automation_feature_policies() {
+            Ok(policies) => json_response(
+                200,
+                serde_json::to_vec(&policies).expect("serializing automation policies cannot fail"),
+            ),
+            Err(message) => error_response(500, "storage_error", &message),
+        }
+    }
+
+    fn read_automation_policy(&self, path: &str, actor: Option<&OperatorAccount>) -> ApiResponse {
+        if !is_automation_reader(actor) {
+            return error_response(
+                403,
+                "operator_required",
+                "Reading automation authority requires an enabled operator account.",
+            );
+        }
+        let Some(policy_id) = automation_policy_path(path) else {
+            return error_response(
+                400,
+                "invalid_path",
+                "The automation policy identity is invalid.",
+            );
+        };
+        match self.storage.read_automation_feature_policy(policy_id) {
+            Ok(Some(policy)) => json_response(
+                200,
+                serde_json::to_vec(&policy).expect("serializing automation policy cannot fail"),
+            ),
+            Ok(None) => error_response(
+                404,
+                "automation_policy_not_found",
+                "The automation policy does not exist.",
+            ),
+            Err(message) => error_response(500, "storage_error", &message),
+        }
+    }
+
+    fn list_automation_policy_history(
+        &self,
+        path: &str,
+        actor: Option<&OperatorAccount>,
+    ) -> ApiResponse {
+        if !is_automation_reader(actor) {
+            return error_response(
+                403,
+                "operator_required",
+                "Reading automation authority requires an enabled operator account.",
+            );
+        }
+        let Some((policy_id, limit)) = automation_policy_history_path(path) else {
+            return error_response(
+                400,
+                "invalid_path",
+                "The automation policy history path is invalid.",
+            );
+        };
+        match self
+            .storage
+            .list_automation_feature_policy_history(policy_id, limit)
+        {
+            Ok(history) => {
+                let response = history
+                    .into_iter()
+                    .map(|entry| AutomationFeaturePolicyHistoryResponse {
+                        policy: entry.policy,
+                        changed_by: entry.changed_by,
+                        occurred_at_unix_ms: entry.occurred_at_unix_ms,
+                    })
+                    .collect::<Vec<_>>();
+                json_response(
+                    200,
+                    serde_json::to_vec(&response)
+                        .expect("serializing automation policy history cannot fail"),
+                )
+            }
+            Err(message) if message.contains("unbounded") || message.contains("invalid") => {
+                error_response(422, "validation_failed", &message)
+            }
+            Err(message) => error_response(500, "storage_error", &message),
+        }
+    }
+
+    fn read_automation_policy_status(
+        &self,
+        path: &str,
+        actor: Option<&OperatorAccount>,
+    ) -> ApiResponse {
+        if !is_automation_reader(actor) {
+            return error_response(
+                403,
+                "operator_required",
+                "Reading automation authority requires an enabled operator account.",
+            );
+        }
+        let Some(policy_id) = automation_policy_status_path(path) else {
+            return error_response(
+                400,
+                "invalid_path",
+                "The automation policy identity is invalid.",
+            );
+        };
+        let policy = match self.storage.read_automation_feature_policy(policy_id) {
+            Ok(Some(policy)) => policy,
+            Ok(None) => {
+                return error_response(
+                    404,
+                    "automation_policy_not_found",
+                    "The automation policy does not exist.",
+                );
+            }
+            Err(message) => return error_response(500, "storage_error", &message),
+        };
+        let candidate = match self.current_automation_candidate() {
+            Ok(candidate) => candidate,
+            Err(message) => return error_response(409, "candidate_not_verified", &message),
+        };
+        let adapters = match self.storage.list_automation_adapter_descriptors() {
+            Ok(adapters) => adapters,
+            Err(message) => return error_response(500, "storage_error", &message),
+        };
+        let evidence = match self
+            .storage
+            .list_automation_connection_test_evidence(policy_id, 128)
+        {
+            Ok(evidence) => evidence.into_iter().next(),
+            Err(message) => return error_response(500, "storage_error", &message),
+        };
+        let now = match system_time_millis() {
+            Ok(now) => now,
+            Err(message) => return error_response(500, "clock_error", &message),
+        };
+        let status = derive_feature_automation_status(
+            &policy,
+            &adapters,
+            evidence.as_ref(),
+            &candidate,
+            now,
+        );
+        json_response(
+            200,
+            serde_json::to_vec(&AutomationFeaturePolicyStatusResponse {
+                policy,
+                status,
+                evidence,
+            })
+            .expect("serializing automation policy status cannot fail"),
+        )
+    }
+
+    fn put_automation_policy(
+        &self,
+        path: &str,
+        body: Option<&[u8]>,
+        actor: Option<&OperatorAccount>,
+    ) -> ApiResponse {
+        let Some(policy_id) = automation_policy_path(path) else {
+            return error_response(
+                400,
+                "invalid_path",
+                "The automation policy identity is invalid.",
+            );
+        };
+        let Some(actor) = actor.filter(|account| {
+            account.enabled()
+                && account
+                    .roles()
+                    .contains(&station_auth::OperatorRole::SetupAdmin)
+        }) else {
+            return error_response(
+                403,
+                "setup_admin_required",
+                "Changing automation policy requires the Setup Admin role.",
+            );
+        };
+        let Some(request) = parse_body::<PutAutomationFeaturePolicyRequest>(body) else {
+            return error_response(
+                400,
+                "invalid_json",
+                "A complete automation policy body is required.",
+            );
+        };
+        let revision = match request.expected_revision {
+            Some(revision) => match revision.checked_add(1) {
+                Some(next) => next,
+                None => {
+                    return error_response(
+                        422,
+                        "validation_failed",
+                        "The expected revision is invalid.",
+                    );
+                }
+            },
+            None => 1,
+        };
+        match self.storage.list_automation_feature_policies() {
+            Ok(policies)
+                if policies.iter().any(|policy| {
+                    policy.feature == request.feature && policy.policy_id != policy_id
+                }) =>
+            {
+                return error_response(
+                    409,
+                    "feature_conflict",
+                    "Another policy already owns this automation feature.",
+                );
+            }
+            Ok(_) => {}
+            Err(message) => return error_response(500, "storage_error", &message),
+        }
+        let now = match system_time_millis() {
+            Ok(now) => now,
+            Err(message) => return error_response(500, "clock_error", &message),
+        };
+        let policy = AutomationFeaturePolicy {
+            policy_id: policy_id.into(),
+            feature: request.feature,
+            operator_selected_adapter_id: request.operator_selected_adapter_id,
+            adaptive_default: request.adaptive_default,
+            configuration_hash: request.configuration_hash,
+            revision,
+        };
+        match self.storage.write_automation_feature_policy(
+            &policy,
+            request.expected_revision,
+            actor.account_id().as_str(),
+            now,
+        ) {
+            Ok(()) => json_response(
+                if revision == 1 { 201 } else { 200 },
+                serde_json::to_vec(&policy).expect("serializing automation policy cannot fail"),
+            ),
+            Err(message) if message.contains("revision conflict") => {
+                error_response(409, "revision_conflict", &message)
+            }
+            Err(message)
+                if message.contains("missing")
+                    || message.contains("unsupported")
+                    || message.contains("invalid") =>
+            {
+                error_response(422, "validation_failed", &message)
+            }
+            Err(message) => error_response(500, "storage_error", &message),
+        }
+    }
+
+    pub fn record_trusted_automation_connection_test_evidence(
+        &self,
+        observation: TrustedAutomationConnectionTestObservation,
+    ) -> Result<(), String> {
+        let candidate = self.current_automation_candidate()?;
+        let now = system_time_millis()?;
+        let expires_at_unix_ms = now
+            .checked_add(AUTOMATION_CONNECTION_TEST_TTL_MS)
+            .ok_or_else(|| "automation connection evidence expiry overflowed".to_string())?;
+        let evidence = AutomationConnectionTestEvidence {
+            evidence_id: observation.evidence_id,
+            policy_id: observation.policy_id,
+            adapter_id: observation.adapter_id,
+            policy_revision: observation.policy_revision,
+            adapter_revision: observation.adapter_revision,
+            configuration_hash: observation.configuration_hash,
+            candidate,
+            outcome: observation.outcome,
+            tested_at_unix_ms: now,
+            expires_at_unix_ms,
+            detail: observation.detail,
+        };
+        self.storage
+            .append_automation_connection_test_evidence(&evidence, &evidence.candidate, now)
+    }
+
+    fn current_automation_candidate(&self) -> Result<AutomationCandidateIdentity, String> {
+        let station_box = self.station_box_profile_uncached()?;
+        let source_commit = station_box
+            .source_commit
+            .filter(|_| station_box.release.candidate_verified)
+            .ok_or_else(|| {
+                "A verified installed candidate is required for automation evidence.".to_string()
+            })?;
+        let candidate = AutomationCandidateIdentity {
+            version: station_box.product_version,
+            source_commit,
+        };
+        candidate.validate()?;
+        Ok(candidate)
     }
 
     fn ingest_media(&self, body: Option<&[u8]>) -> ApiResponse {
@@ -6117,10 +6488,42 @@ fn parse_authenticated_body<T: serde::de::DeserializeOwned>(
     serde_json::from_value(value).ok()
 }
 
+fn is_automation_reader(actor: Option<&OperatorAccount>) -> bool {
+    actor.is_some_and(|account| {
+        account.enabled()
+            && (account
+                .roles()
+                .contains(&station_auth::OperatorRole::SetupAdmin)
+                || account
+                    .roles()
+                    .contains(&station_auth::OperatorRole::MeetingOperator))
+    })
+}
+
 fn path_identity<'a>(path: &'a str, prefix: &str, suffix: &str) -> Option<&'a str> {
     let identity = path.strip_prefix(prefix)?.strip_suffix(suffix)?;
     (!identity.is_empty() && !identity.contains('/') && !identity.contains(['?', '%', '\\']))
         .then_some(identity)
+}
+
+fn automation_policy_path(path: &str) -> Option<&str> {
+    path_identity(path, "/api/v1/automation/policies/", "")
+        .filter(|identity| is_canonical_api_uuid(identity))
+}
+
+fn automation_policy_status_path(path: &str) -> Option<&str> {
+    path_identity(path, "/api/v1/automation/policies/", "/status")
+        .filter(|identity| is_canonical_api_uuid(identity))
+}
+
+fn automation_policy_history_path(path: &str) -> Option<(&str, usize)> {
+    let remainder = path.strip_prefix("/api/v1/automation/policies/")?;
+    let (policy_id, query) = remainder.split_once("/history?")?;
+    if !is_canonical_api_uuid(policy_id) || query.contains('&') {
+        return None;
+    }
+    let limit = query.strip_prefix("limit=")?.parse::<usize>().ok()?;
+    (1..=128).contains(&limit).then_some((policy_id, limit))
 }
 
 fn asset_caption_track_path(path: &str) -> Option<(&str, &str)> {
@@ -11407,5 +11810,130 @@ mod tests {
             assert!(!body.contains(secret));
             assert!(!body.contains("station.db"));
         }
+    }
+
+    #[test]
+    fn automation_policy_api_uses_setup_admin_cas_and_server_derived_evidence_binding() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let database =
+            std::env::temp_dir().join(format!("townlight-automation-policy-api-{nonce}.db"));
+        let application = database.with_extension("application");
+        std::fs::create_dir_all(&application).unwrap();
+        let api =
+            Api::open_with_station_box_probe(&database, &application, station_box_probe()).unwrap();
+        let adapter = station_automation_policy::AutomationAdapterDescriptor {
+            adapter_id: "11111111-2222-4333-8444-555555555555".into(),
+            location: station_automation_policy::AdapterLocation::Local,
+            model_key: "gemma4-12b-ollama".into(),
+            model_identifier: "gemma4:12b".into(),
+            supported_features: vec![AutomationFeature::Summaries],
+            credential_availability: station_automation_policy::CredentialAvailability::NotRequired,
+            revision: 1,
+        };
+        api.storage
+            .write_automation_adapter_descriptor(&adapter, None, "seed-authority", 1)
+            .unwrap();
+        let setup_admin = test_actor(station_auth::OperatorRole::SetupAdmin);
+        let policy_id = "22222222-2222-4333-8444-555555555555";
+        let request = serde_json::to_vec(&serde_json::json!({
+            "feature": "summaries",
+            "operator_selected_adapter_id": adapter.adapter_id,
+            "adaptive_default": null,
+            "configuration_hash": "b".repeat(64),
+            "expected_revision": null
+        }))
+        .unwrap();
+        let created = api.handle_authenticated(
+            "PUT",
+            &format!("/api/v1/automation/policies/{policy_id}"),
+            Some(&request),
+            &setup_admin,
+        );
+        assert_eq!(created.status, 201);
+        assert_eq!(
+            api.handle_in_process("GET", "/api/v1/automation/policies", None)
+                .status,
+            403
+        );
+        let status = api.handle_authenticated(
+            "GET",
+            &format!("/api/v1/automation/policies/{policy_id}/status"),
+            None,
+            &setup_admin,
+        );
+        let status: serde_json::Value = serde_json::from_slice(&status.body).unwrap();
+        assert_eq!(status["status"], "not_tested");
+
+        let observation = TrustedAutomationConnectionTestObservation {
+            evidence_id: "33333333-2222-4333-8444-555555555555".into(),
+            policy_id: policy_id.into(),
+            adapter_id: adapter.adapter_id.clone(),
+            policy_revision: 1,
+            adapter_revision: 1,
+            configuration_hash: "b".repeat(64),
+            outcome: station_automation_policy::ConnectionTestOutcome::Passed,
+            detail: "trusted test passed".into(),
+        };
+        let before_recorded = system_time_millis().unwrap();
+        api.record_trusted_automation_connection_test_evidence(observation)
+            .unwrap();
+        let persisted = api
+            .storage
+            .list_automation_connection_test_evidence(policy_id, 1)
+            .unwrap()
+            .pop()
+            .unwrap();
+        assert_eq!(
+            persisted.candidate.source_commit,
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        );
+        assert!(persisted.tested_at_unix_ms >= before_recorded);
+        assert_eq!(
+            persisted.expires_at_unix_ms - persisted.tested_at_unix_ms,
+            AUTOMATION_CONNECTION_TEST_TTL_MS
+        );
+        assert_eq!(
+            api.handle_in_process(
+                "POST",
+                &format!("/api/v1/automation/policies/{policy_id}/evidence"),
+                Some(br#"{"candidate":{"source_commit":"forged"},"tested_at_unix_ms":0}"#),
+            )
+            .status,
+            404
+        );
+        let status = api.handle_authenticated(
+            "GET",
+            &format!("/api/v1/automation/policies/{policy_id}/status"),
+            None,
+            &setup_admin,
+        );
+        let status: serde_json::Value = serde_json::from_slice(&status.body).unwrap();
+        assert_eq!(status["status"], "passed");
+
+        let history = api.handle_authenticated(
+            "GET",
+            &format!("/api/v1/automation/policies/{policy_id}/history?limit=1"),
+            None,
+            &setup_admin,
+        );
+        assert_eq!(history.status, 200);
+        let non_admin = test_actor(station_auth::OperatorRole::MeetingOperator);
+        assert_eq!(
+            api.handle_authenticated(
+                "PUT",
+                &format!("/api/v1/automation/policies/{policy_id}"),
+                Some(&request),
+                &non_admin,
+            )
+            .status,
+            403
+        );
+
+        drop(api);
+        let _ = std::fs::remove_file(database);
+        let _ = std::fs::remove_dir_all(application);
     }
 }

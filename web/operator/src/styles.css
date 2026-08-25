@@ -210,3 +210,44 @@ form { display:grid; gap:16px; margin-top:20px; }label { display:grid; gap:7px; 
 .caption-track-authority { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:0 16px; margin:0; padding:12px; border:1px solid #dce5de; border-radius:11px; background:#f7faf7; }.caption-track-authority>div { display:grid; gap:3px; min-width:0; padding:8px 0; border-bottom:1px solid #e5ebe6; }.caption-track-authority dt { color:var(--muted); font-size:8px; font-weight:800; text-transform:uppercase; letter-spacing:.4px; }.caption-track-authority dd { margin:0; color:var(--ink); font-size:9px; overflow-wrap:anywhere; }.caption-track-authority code { font-size:8px; }
 @media (max-width:980px) { .caption-track-layout { grid-template-columns:1fr; }.caption-track-list { grid-template-columns:repeat(auto-fit,minmax(190px,1fr)); }.caption-track-list-head,.caption-track-loading,.caption-track-empty { grid-column:1/-1; }.caption-track-fields { grid-template-columns:repeat(2,minmax(0,1fr)); } }
 @media (max-width:620px) { .caption-track-fields,.caption-track-authority { grid-template-columns:1fr; }.caption-track-source { min-height:230px; } }
+.automation-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+  gap: 1rem;
+}
+
+.automation-card {
+  align-content: start;
+}
+
+.automation-card label {
+  display: grid;
+  gap: 0.45rem;
+  margin-top: 0.9rem;
+}
+
+.automation-authority {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.65rem;
+  margin: 1rem 0;
+}
+
+.automation-authority div {
+  min-width: 0;
+  padding: 0.7rem;
+  border: 1px solid var(--line);
+  border-radius: 0.7rem;
+}
+
+.automation-authority dt {
+  color: var(--muted);
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.automation-authority dd {
+  margin: 0.25rem 0 0;
+  overflow-wrap: anywhere;
+}
