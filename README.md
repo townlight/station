@@ -20,9 +20,12 @@ Admins configure CEA-708/disabled mode, service number, and language through an 
 operator workflow. The graph applies the configured service, rejects cues when captions are disabled
 or unconfigured, schedules enabled cues against video, and inserts CEA-708/608-compatibility H.264
 SEI before the shared encoded video fans out to each MPEG-TS variant. A source proof captures the
-exact post-mux branch and decodes the expected text back. Durable asset-bound caption tracks, live
-ASR, current proof receipts, and installed/field evidence remain separate work, so commissioning
-still reports the caption authority as blocked.
+exact post-mux branch and decodes the expected text back. The server-side track foundation now binds
+each reviewed cue set to the exact content-addressed media identity, language, and CEA service with
+CAS revisions, complete append-only snapshots, and on-air mutation refusal. It is not yet exposed
+through the API or dispatched to the worker; live caption scheduling, live ASR, current proof
+receipts, and installed/field evidence remain separate work, so commissioning still reports the
+caption authority as blocked.
 
 ## Architecture
 

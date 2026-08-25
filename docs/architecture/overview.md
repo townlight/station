@@ -24,6 +24,7 @@ The initial control-plane dependency direction is enforced by the Cargo workspac
 
 ```text
 station-domain <- station-storage <- station-api <- stationd
+station-captions <- station-storage <- station-api <- stationd
 station-media-lifecycle <- station-storage <- station-ingest <- stationd
 station-update <- station-storage <- station-update-coordinator <- station-api <- stationd
 ```
@@ -49,6 +50,15 @@ Operator alert destinations attach to that incident boundary without entering ch
 The same lifecycle boundary owns unattended watch-folder intent and scan health. A five-second monitor reads enabled local, USB, or SMB/NAS folders without treating temporary unavailability as a daemon failure. SQLite observations require nonzero files with identical size and modification time across at least two polls and the configured settle duration. A deterministic UUID derived from folder, path, size, and modification time makes queueing idempotent across crashes. A changed file version resets the observation and becomes new work. Transient source I/O failures return to `pending` with durable bounded backoff; unsupported media fails visibly. See [ADR 0011](../adr/0011-resilient-watch-folder-ingest.md).
 
 Canonical transcode runs a bounded EBU R128 analysis against the derivative bytes. The result is stored in integer milli-LUFS with a -24 LUFS ±2 LU target, so database authority is deterministic and transport JSON can still expose human-scale LUFS. A derivative can become `ready` only with passing post-transcode loudness. An analyzer or normalization failure remains visible job failure, never invented success. See [ADR 0012](../adr/0012-ingest-time-loudness-gate.md) and [ADR 0013](../adr/0013-durable-canonical-transcode.md).
+
+`station-captions` owns transport-independent caption-track identity, bounded asset-relative cue
+validation, source provenance, and deterministic cue-set hashing. `station-storage` is the sole
+writer: one authoritative track occupies each exact media-hash/language/CEA-service slot, and every
+accepted compare-and-swap change stores both the current cues and a complete append-only revision
+snapshot. A track identity cannot move to different media or a different language/service slot;
+non-ready assets and assets currently on air reject mutation. This is caption source authority, not
+proof of emission. API review/import, schedule-relative dispatch, decode-back receipts, and live ASR
+remain separate boundaries. See [ADR 0050](../adr/0050-asset-bound-caption-track-authority.md).
 
 The operator console is a production React/TypeScript bundle embedded into `stationd` and served from the same loopback origin as the API. It commissions station identity and provides responsive views for readiness, media/job state, channels, schedule commit, dispatch, and guided commissioning. Commissioning report schema v2 owns the ordered current step, required progress, and `core_complete` on the server. Its full local checklist covers identity/auth, StationBox/storage/time/backup, watch-folder and channel/output policy, named headend and cable analysis, a causally linked real ingest → commit → worker-air chain, ten-minute selected-sink proof, support evidence, and first-broadcast completion. Missing authorities remain blocked; receiver, clean-machine, and one-/three-station field proof remain explicitly external. Browser state remembers navigation only and has no completion-write contract. It carries no runtime dependency on an Internet service, CDN, or separate web server. See [ADR 0031](../adr/0031-authoritative-commissioning-report.md).
 

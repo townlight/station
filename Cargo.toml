@@ -8,6 +8,7 @@ members = [
     "crates/station-alerting",
     "crates/station-auth",
     "crates/station-cg",
+    "crates/station-captions",
     "crates/station-domain",
     "crates/station-media-journal",
     "crates/station-media-lifecycle",
@@ -59,6 +60,7 @@ station-api = { path = "crates/station-api" }
 station-alerting = { path = "crates/station-alerting" }
 station-auth = { path = "crates/station-auth" }
 station-cg = { path = "crates/station-cg" }
+station-captions = { path = "crates/station-captions" }
 station-domain = { path = "crates/station-domain" }
 station-media-journal = { path = "crates/station-media-journal" }
 station-media-lifecycle = { path = "crates/station-media-lifecycle" }

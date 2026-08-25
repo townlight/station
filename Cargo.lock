@@ -1732,6 +1732,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "station-captions"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "sha2",
+]
+
+[[package]]
 name = "station-cg"
 version = "0.1.0"
 dependencies = [
@@ -1902,6 +1910,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "station-auth",
+ "station-captions",
  "station-cg",
  "station-domain",
  "station-live",

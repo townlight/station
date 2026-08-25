@@ -24,10 +24,12 @@ caption-incapable substitute.
 ## Boundaries
 
 This decision establishes a real caption-capable worker, durable audited transport policy, operator
-configuration, and emitted-stream proof seam. It does not create durable caption-source authority,
-asset-bound tracks, live ASR, or a current commissioning proof. The `cea708_captions` commissioning
-check remains blocked until those remaining server-owned authorities exist and a current
-candidate/configuration/policy-bound exact-output decode-back passes.
+configuration, and emitted-stream proof seam. It does not itself create caption-source authority,
+live ASR, schedule-relative dispatch, or a current commissioning proof. Asset-bound track authority
+now exists separately under [ADR 0050](0050-asset-bound-caption-track-authority.md), but is not yet
+dispatched. The `cea708_captions` commissioning check remains blocked until the remaining
+server-owned dispatch/proof authorities exist and a current candidate/configuration/policy/track-
+bound exact-output decode-back passes.
 
 TownLight may claim only that a tested cue was embedded in emitted H.264/MPEG-TS and decoded back at
 the declared local boundary. It does not claim FCC Part 79 compliance or cable-headend acceptance.

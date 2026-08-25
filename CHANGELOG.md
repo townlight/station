@@ -8,6 +8,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- Asset caption authority now stores bounded, ordered, non-overlapping cue sets against the exact
+  content-addressed media identity, language, and CEA service. Writes require ready media, reject
+  on-air mutation and identity rebinding, use compare-and-swap revisions, and append a complete
+  immutable cue snapshot for every accepted change.
+
 - Setup Admins can now persist a stopped-channel CEA-708/disabled policy with bounded service and
   language metadata through the operator console and an audited revision-guarded API. Worker
   protocol v7 carries the exact durable authority before Ready; the media graph applies the selected

@@ -18,6 +18,10 @@ use station_auth::{
     AccountId, BootstrapCredential, CredentialVersion, OperatorAccount, OperatorDisplayName,
     OperatorRole, OperatorSession, OperatorUsername, PasswordPhc, RecoveryCredential, SecretDigest,
 };
+use station_captions::{
+    AssetCaptionCue, AssetCaptionTrack, AssetCaptionTrackAuditEvent, AssetCaptionTrackWrite,
+    CaptionTrackSourceKind, CaptionTrackWriteError,
+};
 use station_cg::{
     CgAuditEvent, CgAuditEventKind, CgBoard, CgBulletin, CgBulletinContent, CgBulletinState,
     CgContentSource, CgFeedCacheEntry, CgFeedItem, CgFeedItemApproval, CgFeedKind, CgFeedSource,
@@ -1055,6 +1059,7 @@ impl StationStore {
         store.initialize_cg_schema()?;
         store.initialize_fallback_slate_schema()?;
         store.initialize_caption_policy_schema()?;
+        store.initialize_asset_caption_track_schema()?;
         store.migrate_cg_feed_cache_schema()?;
         store.initialize_operator_auth_schema()?;
         store.execute(
@@ -7438,6 +7443,489 @@ impl StationStore {
         }
     }
 
+    pub fn read_asset_caption_track(
+        &self,
+        track_id: &str,
+    ) -> Result<Option<AssetCaptionTrack>, String> {
+        if !is_canonical_uuid(track_id) {
+            return Err("caption track identity is invalid".into());
+        }
+        let statement = self.prepare(
+            "SELECT t.track_id, t.asset_id, t.language, t.service_number, t.source_kind, \
+                    t.label, t.revision, t.cue_count, t.cues_sha256, t.created_at_unix_ms, \
+                    t.updated_at_unix_ms, t.updated_by, a.duration_ms \
+             FROM asset_caption_tracks t JOIN media_assets a ON a.asset_id=t.asset_id \
+             WHERE t.track_id=?1",
+        )?;
+        let identity = c_string(track_id, "caption track identity")?;
+        bind_text(self.database, statement.raw, 1, &identity)?;
+        match unsafe { sqlite3_step(statement.raw) } {
+            SQLITE_DONE => Ok(None),
+            SQLITE_ROW => {
+                let cue_count =
+                    usize::try_from(column_u64(statement.raw, 7, "caption track cue count")?)
+                        .map_err(|_| {
+                            "database returned an invalid caption cue count".to_string()
+                        })?;
+                let asset_duration_ms =
+                    column_u64(statement.raw, 12, "caption track asset duration")?;
+                let mut track = AssetCaptionTrack {
+                    track_id: column_text(statement.raw, 0)?,
+                    asset_id: column_text(statement.raw, 1)?,
+                    language: column_text(statement.raw, 2)?,
+                    service_number: u8::try_from(column_u64(
+                        statement.raw,
+                        3,
+                        "caption track service number",
+                    )?)
+                    .map_err(|_| {
+                        "database returned an invalid caption service number".to_string()
+                    })?,
+                    source_kind: CaptionTrackSourceKind::from_storage(&column_text(
+                        statement.raw,
+                        4,
+                    )?)?,
+                    label: column_text(statement.raw, 5)?,
+                    cues: Vec::with_capacity(cue_count),
+                    revision: column_u64(statement.raw, 6, "caption track revision")?,
+                    cues_sha256: column_text(statement.raw, 8)?,
+                    created_at_unix_ms: unsafe { sqlite3_column_int64(statement.raw, 9) },
+                    updated_at_unix_ms: unsafe { sqlite3_column_int64(statement.raw, 10) },
+                    updated_by: column_text(statement.raw, 11)?,
+                };
+                let cues = self.prepare(
+                    "SELECT cue_ordinal, cue_id, start_ms, duration_ms, cue_text \
+                     FROM asset_caption_cues WHERE track_id=?1 ORDER BY cue_ordinal",
+                )?;
+                bind_text(self.database, cues.raw, 1, &identity)?;
+                loop {
+                    match unsafe { sqlite3_step(cues.raw) } {
+                        SQLITE_ROW => {
+                            let ordinal =
+                                usize::try_from(column_u64(cues.raw, 0, "caption cue ordinal")?)
+                                    .map_err(|_| {
+                                        "database returned an invalid caption cue ordinal"
+                                            .to_string()
+                                    })?;
+                            if ordinal != track.cues.len() {
+                                return Err(
+                                    "database returned a noncontiguous caption cue sequence".into(),
+                                );
+                            }
+                            track.cues.push(AssetCaptionCue {
+                                cue_id: column_text(cues.raw, 1)?,
+                                start_ms: column_u64(cues.raw, 2, "caption cue start")?,
+                                duration_ms: column_u64(cues.raw, 3, "caption cue duration")?,
+                                text: column_text(cues.raw, 4)?,
+                            });
+                        }
+                        SQLITE_DONE => break,
+                        _ => return Err(sqlite_error(self.database)),
+                    }
+                }
+                if track.cues.len() != cue_count {
+                    return Err("database caption cue count does not match the track".into());
+                }
+                track.validate(asset_duration_ms)?;
+                Ok(Some(track))
+            }
+            _ => Err(sqlite_error(self.database)),
+        }
+    }
+
+    pub fn list_asset_caption_tracks(
+        &self,
+        asset_id: &str,
+    ) -> Result<Vec<AssetCaptionTrack>, String> {
+        if !is_sha256_identity(asset_id) {
+            return Err("caption asset identity is invalid".into());
+        }
+        let statement = self.prepare(
+            "SELECT track_id FROM asset_caption_tracks WHERE asset_id=?1 \
+             ORDER BY service_number, language, track_id",
+        )?;
+        let identity = c_string(asset_id, "caption asset identity")?;
+        bind_text(self.database, statement.raw, 1, &identity)?;
+        let mut track_ids = Vec::new();
+        loop {
+            match unsafe { sqlite3_step(statement.raw) } {
+                SQLITE_ROW => track_ids.push(column_text(statement.raw, 0)?),
+                SQLITE_DONE => break,
+                _ => return Err(sqlite_error(self.database)),
+            }
+        }
+        drop(statement);
+        track_ids
+            .into_iter()
+            .map(|track_id| {
+                self.read_asset_caption_track(&track_id)?
+                    .ok_or_else(|| "caption track disappeared while listing asset authority".into())
+            })
+            .collect()
+    }
+
+    pub fn write_asset_caption_track(
+        &self,
+        write: &AssetCaptionTrackWrite,
+    ) -> Result<AssetCaptionTrack, CaptionTrackWriteError> {
+        write
+            .validate(u64::MAX)
+            .map_err(CaptionTrackWriteError::Invalid)?;
+        self.execute("BEGIN IMMEDIATE")
+            .map_err(CaptionTrackWriteError::Storage)?;
+        let outcome = (|| {
+            let asset = self
+                .read_media_asset(&write.asset_id)
+                .map_err(CaptionTrackWriteError::Storage)?
+                .ok_or(CaptionTrackWriteError::AssetNotFound)?;
+            if asset.readiness != AssetReadiness::Ready {
+                return Err(CaptionTrackWriteError::AssetNotReady);
+            }
+            write
+                .validate(asset.duration_ms)
+                .map_err(CaptionTrackWriteError::Invalid)?;
+
+            let on_air = self
+                .prepare(
+                    "SELECT 1 FROM channel_runtime \
+                     WHERE on_air_asset_id=?1 AND state IN ('on_air','live') LIMIT 1",
+                )
+                .map_err(CaptionTrackWriteError::Storage)?;
+            let asset_identity = c_string(&write.asset_id, "caption asset identity")
+                .map_err(CaptionTrackWriteError::Storage)?;
+            bind_text(self.database, on_air.raw, 1, &asset_identity)
+                .map_err(CaptionTrackWriteError::Storage)?;
+            match unsafe { sqlite3_step(on_air.raw) } {
+                SQLITE_ROW => return Err(CaptionTrackWriteError::AssetOnAir),
+                SQLITE_DONE => {}
+                _ => return Err(CaptionTrackWriteError::Storage(sqlite_error(self.database))),
+            }
+
+            let current = self
+                .read_asset_caption_track(&write.track_id)
+                .map_err(CaptionTrackWriteError::Storage)?;
+            if let Some(current) = &current {
+                if current.asset_id != write.asset_id
+                    || current.language != write.language
+                    || current.service_number != write.service_number
+                {
+                    return Err(CaptionTrackWriteError::Invalid(
+                        "an existing caption track identity cannot be rebound to another asset, language, or service"
+                            .into(),
+                    ));
+                }
+                if current.revision != write.expected_revision {
+                    return Err(CaptionTrackWriteError::Conflict(current.revision));
+                }
+                if write.occurred_at_unix_ms < current.updated_at_unix_ms {
+                    return Err(CaptionTrackWriteError::Invalid(
+                        "caption track write time precedes current authority".into(),
+                    ));
+                }
+            } else if write.expected_revision != 0 {
+                return Err(CaptionTrackWriteError::NotFound);
+            }
+
+            let language = c_string(&write.language, "caption language")
+                .map_err(CaptionTrackWriteError::Storage)?;
+            let slot = self
+                .prepare(
+                    "SELECT track_id, revision FROM asset_caption_tracks \
+                     WHERE asset_id=?1 AND language=?2 AND service_number=?3",
+                )
+                .map_err(CaptionTrackWriteError::Storage)?;
+            bind_text(self.database, slot.raw, 1, &asset_identity)
+                .map_err(CaptionTrackWriteError::Storage)?;
+            bind_text(self.database, slot.raw, 2, &language)
+                .map_err(CaptionTrackWriteError::Storage)?;
+            bind_i64(self.database, slot.raw, 3, i64::from(write.service_number))
+                .map_err(CaptionTrackWriteError::Storage)?;
+            match unsafe { sqlite3_step(slot.raw) } {
+                SQLITE_ROW => {
+                    let occupied_track =
+                        column_text(slot.raw, 0).map_err(CaptionTrackWriteError::Storage)?;
+                    if occupied_track != write.track_id {
+                        return Err(CaptionTrackWriteError::SlotOccupied {
+                            track_id: occupied_track,
+                            revision: column_u64(slot.raw, 1, "caption slot revision")
+                                .map_err(CaptionTrackWriteError::Storage)?,
+                        });
+                    }
+                }
+                SQLITE_DONE => {}
+                _ => return Err(CaptionTrackWriteError::Storage(sqlite_error(self.database))),
+            }
+
+            let revision = write.expected_revision.checked_add(1).ok_or_else(|| {
+                CaptionTrackWriteError::Invalid("caption track revision overflow".into())
+            })?;
+            let created_at_unix_ms = current
+                .as_ref()
+                .map_or(write.occurred_at_unix_ms, |track| track.created_at_unix_ms);
+            let cue_hash = write.cues_sha256();
+            let track_identity = c_string(&write.track_id, "caption track identity")
+                .map_err(CaptionTrackWriteError::Storage)?;
+            let source_kind = c_string(write.source_kind.storage_name(), "caption source kind")
+                .map_err(CaptionTrackWriteError::Storage)?;
+            let label = c_string(&write.label, "caption track label")
+                .map_err(CaptionTrackWriteError::Storage)?;
+            let cue_hash_value = c_string(&cue_hash, "caption cue digest")
+                .map_err(CaptionTrackWriteError::Storage)?;
+            let actor = c_string(&write.actor, "caption track actor")
+                .map_err(CaptionTrackWriteError::Storage)?;
+            let upsert = self
+                .prepare(
+                    "INSERT INTO asset_caption_tracks(\
+                       track_id, asset_id, language, service_number, source_kind, label, revision, \
+                       cue_count, cues_sha256, created_at_unix_ms, updated_at_unix_ms, updated_by\
+                     ) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12) \
+                     ON CONFLICT(track_id) DO UPDATE SET \
+                       source_kind=excluded.source_kind, label=excluded.label, revision=excluded.revision, \
+                       cue_count=excluded.cue_count, cues_sha256=excluded.cues_sha256, \
+                       updated_at_unix_ms=excluded.updated_at_unix_ms, updated_by=excluded.updated_by",
+                )
+                .map_err(CaptionTrackWriteError::Storage)?;
+            bind_text(self.database, upsert.raw, 1, &track_identity)
+                .map_err(CaptionTrackWriteError::Storage)?;
+            bind_text(self.database, upsert.raw, 2, &asset_identity)
+                .map_err(CaptionTrackWriteError::Storage)?;
+            bind_text(self.database, upsert.raw, 3, &language)
+                .map_err(CaptionTrackWriteError::Storage)?;
+            bind_i64(
+                self.database,
+                upsert.raw,
+                4,
+                i64::from(write.service_number),
+            )
+            .map_err(CaptionTrackWriteError::Storage)?;
+            bind_text(self.database, upsert.raw, 5, &source_kind)
+                .map_err(CaptionTrackWriteError::Storage)?;
+            bind_text(self.database, upsert.raw, 6, &label)
+                .map_err(CaptionTrackWriteError::Storage)?;
+            bind_i64(
+                self.database,
+                upsert.raw,
+                7,
+                checked_i64(revision, "caption track revision")
+                    .map_err(CaptionTrackWriteError::Storage)?,
+            )
+            .map_err(CaptionTrackWriteError::Storage)?;
+            bind_i64(
+                self.database,
+                upsert.raw,
+                8,
+                checked_i64(write.cues.len() as u64, "caption cue count")
+                    .map_err(CaptionTrackWriteError::Storage)?,
+            )
+            .map_err(CaptionTrackWriteError::Storage)?;
+            bind_text(self.database, upsert.raw, 9, &cue_hash_value)
+                .map_err(CaptionTrackWriteError::Storage)?;
+            bind_i64(self.database, upsert.raw, 10, created_at_unix_ms)
+                .map_err(CaptionTrackWriteError::Storage)?;
+            bind_i64(self.database, upsert.raw, 11, write.occurred_at_unix_ms)
+                .map_err(CaptionTrackWriteError::Storage)?;
+            bind_text(self.database, upsert.raw, 12, &actor)
+                .map_err(CaptionTrackWriteError::Storage)?;
+            expect_done(self.database, upsert.raw).map_err(CaptionTrackWriteError::Storage)?;
+
+            let clear = self
+                .prepare("DELETE FROM asset_caption_cues WHERE track_id=?1")
+                .map_err(CaptionTrackWriteError::Storage)?;
+            bind_text(self.database, clear.raw, 1, &track_identity)
+                .map_err(CaptionTrackWriteError::Storage)?;
+            expect_done(self.database, clear.raw).map_err(CaptionTrackWriteError::Storage)?;
+            for (ordinal, cue) in write.cues.iter().enumerate() {
+                insert_caption_cue(self, "asset_caption_cues", &track_identity, ordinal, cue)
+                    .map_err(CaptionTrackWriteError::Storage)?;
+            }
+
+            let audit_identity = c_string(&write.audit_id, "caption track audit identity")
+                .map_err(CaptionTrackWriteError::Storage)?;
+            let audit = self
+                .prepare(
+                    "INSERT INTO asset_caption_track_revisions(\
+                       audit_id, track_id, asset_id, language, service_number, source_kind, label, \
+                       revision, cue_count, cues_sha256, actor, occurred_at_unix_ms\
+                     ) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
+                )
+                .map_err(CaptionTrackWriteError::Storage)?;
+            for (parameter, value) in [
+                (1, &audit_identity),
+                (2, &track_identity),
+                (3, &asset_identity),
+                (4, &language),
+                (6, &source_kind),
+                (7, &label),
+                (10, &cue_hash_value),
+                (11, &actor),
+            ] {
+                bind_text(self.database, audit.raw, parameter, value)
+                    .map_err(CaptionTrackWriteError::Storage)?;
+            }
+            bind_i64(self.database, audit.raw, 5, i64::from(write.service_number))
+                .map_err(CaptionTrackWriteError::Storage)?;
+            bind_i64(
+                self.database,
+                audit.raw,
+                8,
+                checked_i64(revision, "caption audit revision")
+                    .map_err(CaptionTrackWriteError::Storage)?,
+            )
+            .map_err(CaptionTrackWriteError::Storage)?;
+            bind_i64(
+                self.database,
+                audit.raw,
+                9,
+                checked_i64(write.cues.len() as u64, "caption audit cue count")
+                    .map_err(CaptionTrackWriteError::Storage)?,
+            )
+            .map_err(CaptionTrackWriteError::Storage)?;
+            bind_i64(self.database, audit.raw, 12, write.occurred_at_unix_ms)
+                .map_err(CaptionTrackWriteError::Storage)?;
+            expect_done(self.database, audit.raw).map_err(CaptionTrackWriteError::Storage)?;
+            for (ordinal, cue) in write.cues.iter().enumerate() {
+                insert_caption_cue(
+                    self,
+                    "asset_caption_track_revision_cues",
+                    &audit_identity,
+                    ordinal,
+                    cue,
+                )
+                .map_err(CaptionTrackWriteError::Storage)?;
+            }
+            self.read_asset_caption_track(&write.track_id)
+                .map_err(CaptionTrackWriteError::Storage)?
+                .ok_or_else(|| {
+                    CaptionTrackWriteError::Storage(
+                        "caption track disappeared during its write transaction".into(),
+                    )
+                })
+        })();
+        match outcome {
+            Ok(track) => match self.execute("COMMIT") {
+                Ok(()) => Ok(track),
+                Err(error) => {
+                    let _ = self.execute("ROLLBACK");
+                    Err(CaptionTrackWriteError::Storage(error))
+                }
+            },
+            Err(error) => {
+                let _ = self.execute("ROLLBACK");
+                Err(error)
+            }
+        }
+    }
+
+    pub fn list_asset_caption_track_audit(
+        &self,
+        track_id: &str,
+    ) -> Result<Vec<AssetCaptionTrackAuditEvent>, String> {
+        if !is_canonical_uuid(track_id) {
+            return Err("caption track identity is invalid".into());
+        }
+        let statement = self.prepare(
+            "SELECT r.audit_id, r.track_id, r.asset_id, r.language, r.service_number, \
+                    r.source_kind, r.label, r.revision, r.cue_count, r.cues_sha256, \
+                    r.actor, r.occurred_at_unix_ms, a.duration_ms \
+             FROM asset_caption_track_revisions r JOIN media_assets a ON a.asset_id=r.asset_id \
+             WHERE r.track_id=?1 ORDER BY r.revision, r.audit_id",
+        )?;
+        let identity = c_string(track_id, "caption track identity")?;
+        bind_text(self.database, statement.raw, 1, &identity)?;
+        let mut events = Vec::new();
+        loop {
+            match unsafe { sqlite3_step(statement.raw) } {
+                SQLITE_ROW => {
+                    let audit_id = column_text(statement.raw, 0)?;
+                    let cue_count =
+                        usize::try_from(column_u64(statement.raw, 8, "caption audit cue count")?)
+                            .map_err(|_| {
+                            "database returned an invalid caption audit cue count".to_string()
+                        })?;
+                    let asset_duration_ms =
+                        column_u64(statement.raw, 12, "caption audit asset duration")?;
+                    let mut event = AssetCaptionTrackAuditEvent {
+                        audit_id: audit_id.clone(),
+                        track_id: column_text(statement.raw, 1)?,
+                        asset_id: column_text(statement.raw, 2)?,
+                        language: column_text(statement.raw, 3)?,
+                        service_number: u8::try_from(column_u64(
+                            statement.raw,
+                            4,
+                            "caption audit service number",
+                        )?)
+                        .map_err(|_| {
+                            "database returned an invalid caption audit service number".to_string()
+                        })?,
+                        source_kind: CaptionTrackSourceKind::from_storage(&column_text(
+                            statement.raw,
+                            5,
+                        )?)?,
+                        label: column_text(statement.raw, 6)?,
+                        cues: Vec::with_capacity(cue_count),
+                        revision: column_u64(statement.raw, 7, "caption audit revision")?,
+                        cues_sha256: column_text(statement.raw, 9)?,
+                        actor: column_text(statement.raw, 10)?,
+                        occurred_at_unix_ms: unsafe { sqlite3_column_int64(statement.raw, 11) },
+                    };
+                    let cue_statement = self.prepare(
+                        "SELECT cue_ordinal, cue_id, start_ms, duration_ms, cue_text \
+                         FROM asset_caption_track_revision_cues \
+                         WHERE audit_id=?1 ORDER BY cue_ordinal",
+                    )?;
+                    let audit_identity = c_string(&audit_id, "caption track audit identity")?;
+                    bind_text(self.database, cue_statement.raw, 1, &audit_identity)?;
+                    loop {
+                        match unsafe { sqlite3_step(cue_statement.raw) } {
+                            SQLITE_ROW => {
+                                let ordinal = usize::try_from(column_u64(
+                                    cue_statement.raw,
+                                    0,
+                                    "caption audit cue ordinal",
+                                )?)
+                                .map_err(|_| {
+                                    "database returned an invalid caption audit cue ordinal"
+                                        .to_string()
+                                })?;
+                                if ordinal != event.cues.len() {
+                                    return Err(
+                                        "database returned a noncontiguous caption audit cue sequence"
+                                            .into(),
+                                    );
+                                }
+                                event.cues.push(AssetCaptionCue {
+                                    cue_id: column_text(cue_statement.raw, 1)?,
+                                    start_ms: column_u64(
+                                        cue_statement.raw,
+                                        2,
+                                        "caption audit cue start",
+                                    )?,
+                                    duration_ms: column_u64(
+                                        cue_statement.raw,
+                                        3,
+                                        "caption audit cue duration",
+                                    )?,
+                                    text: column_text(cue_statement.raw, 4)?,
+                                });
+                            }
+                            SQLITE_DONE => break,
+                            _ => return Err(sqlite_error(self.database)),
+                        }
+                    }
+                    if event.cues.len() != cue_count {
+                        return Err(
+                            "database caption audit cue count does not match the revision".into(),
+                        );
+                    }
+                    event.validate(asset_duration_ms)?;
+                    events.push(event);
+                }
+                SQLITE_DONE => return Ok(events),
+                _ => return Err(sqlite_error(self.database)),
+            }
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn write_channel_caption_policy(
         &self,
@@ -9605,6 +10093,85 @@ impl StationStore {
         )
     }
 
+    fn initialize_asset_caption_track_schema(&self) -> Result<(), String> {
+        self.execute(
+            "CREATE TABLE IF NOT EXISTS asset_caption_tracks (\
+               track_id TEXT PRIMARY KEY,\
+               asset_id TEXT NOT NULL,\
+               language TEXT NOT NULL CHECK (length(language) BETWEEN 2 AND 35),\
+               service_number INTEGER NOT NULL CHECK (service_number BETWEEN 1 AND 63),\
+               source_kind TEXT NOT NULL CHECK (source_kind IN ('embedded','sidecar','generated','external')),\
+               label TEXT NOT NULL CHECK (length(label) BETWEEN 1 AND 120),\
+               revision INTEGER NOT NULL CHECK (revision >= 1),\
+               cue_count INTEGER NOT NULL CHECK (cue_count >= 1),\
+               cues_sha256 TEXT NOT NULL CHECK (length(cues_sha256) = 64),\
+               created_at_unix_ms INTEGER NOT NULL CHECK (created_at_unix_ms >= 0),\
+               updated_at_unix_ms INTEGER NOT NULL CHECK (updated_at_unix_ms >= created_at_unix_ms),\
+               updated_by TEXT NOT NULL CHECK (length(updated_by) BETWEEN 1 AND 200),\
+               CHECK (label = trim(label)),\
+               CHECK (updated_by = trim(updated_by)),\
+               UNIQUE(asset_id, language, service_number),\
+               FOREIGN KEY(asset_id) REFERENCES media_assets(asset_id)\
+             );\
+             CREATE TABLE IF NOT EXISTS asset_caption_cues (\
+               track_id TEXT NOT NULL,\
+               cue_ordinal INTEGER NOT NULL CHECK (cue_ordinal >= 0),\
+               cue_id TEXT NOT NULL,\
+               start_ms INTEGER NOT NULL CHECK (start_ms >= 0),\
+               duration_ms INTEGER NOT NULL CHECK (duration_ms > 0),\
+               cue_text TEXT NOT NULL CHECK (length(cue_text) BETWEEN 1 AND 2048),\
+               PRIMARY KEY(track_id, cue_ordinal),\
+               UNIQUE(track_id, cue_id),\
+               FOREIGN KEY(track_id) REFERENCES asset_caption_tracks(track_id) ON DELETE CASCADE\
+             );\
+             CREATE TABLE IF NOT EXISTS asset_caption_track_revisions (\
+               audit_id TEXT PRIMARY KEY,\
+               track_id TEXT NOT NULL,\
+               asset_id TEXT NOT NULL,\
+               language TEXT NOT NULL CHECK (length(language) BETWEEN 2 AND 35),\
+               service_number INTEGER NOT NULL CHECK (service_number BETWEEN 1 AND 63),\
+               source_kind TEXT NOT NULL CHECK (source_kind IN ('embedded','sidecar','generated','external')),\
+               label TEXT NOT NULL CHECK (length(label) BETWEEN 1 AND 120),\
+               revision INTEGER NOT NULL CHECK (revision >= 1),\
+               cue_count INTEGER NOT NULL CHECK (cue_count >= 1),\
+               cues_sha256 TEXT NOT NULL CHECK (length(cues_sha256) = 64),\
+               actor TEXT NOT NULL CHECK (length(actor) BETWEEN 1 AND 200),\
+               occurred_at_unix_ms INTEGER NOT NULL CHECK (occurred_at_unix_ms >= 0),\
+               CHECK (label = trim(label)),\
+               CHECK (actor = trim(actor)),\
+               UNIQUE(track_id, revision),\
+               FOREIGN KEY(asset_id) REFERENCES media_assets(asset_id)\
+             );\
+             CREATE TABLE IF NOT EXISTS asset_caption_track_revision_cues (\
+               audit_id TEXT NOT NULL,\
+               cue_ordinal INTEGER NOT NULL CHECK (cue_ordinal >= 0),\
+               cue_id TEXT NOT NULL,\
+               start_ms INTEGER NOT NULL CHECK (start_ms >= 0),\
+               duration_ms INTEGER NOT NULL CHECK (duration_ms > 0),\
+               cue_text TEXT NOT NULL CHECK (length(cue_text) BETWEEN 1 AND 2048),\
+               PRIMARY KEY(audit_id, cue_ordinal),\
+               UNIQUE(audit_id, cue_id),\
+               FOREIGN KEY(audit_id) REFERENCES asset_caption_track_revisions(audit_id)\
+             );\
+             CREATE INDEX IF NOT EXISTS asset_caption_tracks_asset \
+               ON asset_caption_tracks(asset_id, service_number, language);\
+             CREATE INDEX IF NOT EXISTS asset_caption_track_revisions_time \
+               ON asset_caption_track_revisions(track_id, revision, audit_id);\
+             CREATE TRIGGER IF NOT EXISTS asset_caption_track_revisions_no_update \
+               BEFORE UPDATE ON asset_caption_track_revisions \
+               BEGIN SELECT RAISE(ABORT, 'asset caption track revisions are append-only'); END;\
+             CREATE TRIGGER IF NOT EXISTS asset_caption_track_revisions_no_delete \
+               BEFORE DELETE ON asset_caption_track_revisions \
+               BEGIN SELECT RAISE(ABORT, 'asset caption track revisions are append-only'); END;\
+             CREATE TRIGGER IF NOT EXISTS asset_caption_track_revision_cues_no_update \
+               BEFORE UPDATE ON asset_caption_track_revision_cues \
+               BEGIN SELECT RAISE(ABORT, 'asset caption revision cues are append-only'); END;\
+             CREATE TRIGGER IF NOT EXISTS asset_caption_track_revision_cues_no_delete \
+               BEFORE DELETE ON asset_caption_track_revision_cues \
+               BEGIN SELECT RAISE(ABORT, 'asset caption revision cues are append-only'); END;",
+        )
+    }
+
     fn migrate_cg_feed_cache_schema(&self) -> Result<(), String> {
         let statement = self.prepare("PRAGMA table_info(cg_feed_sources)")?;
         let mut has_tags = false;
@@ -10524,6 +11091,53 @@ fn read_media_asset_row(statement: *mut SqliteStatement) -> Result<MediaAsset, S
         duration_ms: column_u64(statement, 2, "asset duration")?,
         readiness: parse_readiness(&column_text(statement, 3)?)?,
     })
+}
+
+fn insert_caption_cue(
+    store: &StationStore,
+    table: &str,
+    parent_identity: &CString,
+    ordinal: usize,
+    cue: &AssetCaptionCue,
+) -> Result<(), String> {
+    let sql = match table {
+        "asset_caption_cues" => {
+            "INSERT INTO asset_caption_cues(\
+               track_id, cue_ordinal, cue_id, start_ms, duration_ms, cue_text\
+             ) VALUES(?1,?2,?3,?4,?5,?6)"
+        }
+        "asset_caption_track_revision_cues" => {
+            "INSERT INTO asset_caption_track_revision_cues(\
+               audit_id, cue_ordinal, cue_id, start_ms, duration_ms, cue_text\
+             ) VALUES(?1,?2,?3,?4,?5,?6)"
+        }
+        _ => return Err("caption cue storage target is invalid".into()),
+    };
+    let statement = store.prepare(sql)?;
+    let cue_identity = c_string(&cue.cue_id, "caption cue identity")?;
+    let cue_text = c_string(&cue.text, "caption cue text")?;
+    bind_text(store.database, statement.raw, 1, parent_identity)?;
+    bind_i64(
+        store.database,
+        statement.raw,
+        2,
+        checked_i64(ordinal as u64, "caption cue ordinal")?,
+    )?;
+    bind_text(store.database, statement.raw, 3, &cue_identity)?;
+    bind_i64(
+        store.database,
+        statement.raw,
+        4,
+        checked_i64(cue.start_ms, "caption cue start")?,
+    )?;
+    bind_i64(
+        store.database,
+        statement.raw,
+        5,
+        checked_i64(cue.duration_ms, "caption cue duration")?,
+    )?;
+    bind_text(store.database, statement.raw, 6, &cue_text)?;
+    expect_done(store.database, statement.raw)
 }
 
 fn read_cg_image_asset_row(statement: *mut SqliteStatement) -> Result<CgImageAsset, String> {
@@ -12567,6 +13181,188 @@ mod tests {
         let statement = store.prepare(sql).unwrap();
         assert_eq!(unsafe { sqlite3_step(statement.raw) }, SQLITE_ROW);
         unsafe { sqlite3_column_int64(statement.raw, 0) }
+    }
+
+    #[test]
+    fn opening_store_creates_asset_caption_authority_schema() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let database = std::env::temp_dir().join(format!(
+            "townlight-asset-caption-authority-schema-{nonce}.db"
+        ));
+        let store = StationStore::open(&database).unwrap();
+
+        assert_eq!(
+            row_count(
+                &store,
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name IN (\
+                   'asset_caption_tracks',\
+                   'asset_caption_cues',\
+                   'asset_caption_track_revisions',\
+                   'asset_caption_track_revision_cues'\
+                 )",
+            ),
+            4,
+            "opening the authoritative store must create the complete caption-track schema"
+        );
+
+        drop(store);
+        for candidate in [
+            database.clone(),
+            PathBuf::from(format!("{}-wal", database.display())),
+            PathBuf::from(format!("{}-shm", database.display())),
+        ] {
+            let _ = std::fs::remove_file(candidate);
+        }
+    }
+
+    #[test]
+    fn reads_an_exact_asset_caption_track_and_its_cues() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let database =
+            std::env::temp_dir().join(format!("townlight-asset-caption-read-{nonce}.db"));
+        let store = StationStore::open(&database).unwrap();
+        let asset_id = "a".repeat(64);
+        let track_id = "65a26343-0339-4654-a92c-4bf9384f18df";
+        let cue = station_captions::AssetCaptionCue {
+            cue_id: "bf0aa2ca-1488-42d2-8c1b-5d9179ee5d30".into(),
+            start_ms: 1_000,
+            duration_ms: 2_000,
+            text: "Town Council".into(),
+        };
+        let cue_hash = station_captions::cues_sha256(std::slice::from_ref(&cue));
+        store
+            .execute(&format!(
+                "INSERT INTO media_assets VALUES('{asset_id}','C:\\\\media.ts',10000,'ready');\
+                 INSERT INTO asset_caption_tracks VALUES(\
+                   '{track_id}','{asset_id}','en-US',1,'external','Reviewed English',1,1,\
+                   '{cue_hash}',1000,1000,'setup-admin'\
+                 );\
+                 INSERT INTO asset_caption_cues VALUES(\
+                   '{track_id}',0,'{}',1000,2000,'Town Council'\
+                 );",
+                cue.cue_id
+            ))
+            .unwrap();
+
+        assert_eq!(
+            store.read_asset_caption_track(track_id).unwrap(),
+            Some(AssetCaptionTrack {
+                track_id: track_id.into(),
+                asset_id,
+                language: "en-US".into(),
+                service_number: 1,
+                source_kind: CaptionTrackSourceKind::External,
+                label: "Reviewed English".into(),
+                cues: vec![cue],
+                revision: 1,
+                cues_sha256: cue_hash,
+                created_at_unix_ms: 1_000,
+                updated_at_unix_ms: 1_000,
+                updated_by: "setup-admin".into(),
+            })
+        );
+
+        drop(store);
+        for candidate in [
+            database.clone(),
+            PathBuf::from(format!("{}-wal", database.display())),
+            PathBuf::from(format!("{}-shm", database.display())),
+        ] {
+            let _ = std::fs::remove_file(candidate);
+        }
+    }
+
+    #[test]
+    fn asset_caption_revision_headers_and_cues_reject_tampering() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let database =
+            std::env::temp_dir().join(format!("townlight-asset-caption-tamper-{nonce}.db"));
+        let store = StationStore::open(&database).unwrap();
+        let asset_id = "a".repeat(64);
+        store
+            .put_media_asset(&MediaAsset {
+                asset_id: asset_id.clone(),
+                media_path: r"C:\TownLight\media\tamper.ts".into(),
+                duration_ms: 10_000,
+                readiness: AssetReadiness::Ready,
+            })
+            .unwrap();
+        let track_id = "65a26343-0339-4654-a92c-4bf9384f18df";
+        let audit_id = "54691f24-e034-45bd-9ed5-31d9227a78aa";
+        store
+            .write_asset_caption_track(&AssetCaptionTrackWrite {
+                track_id: track_id.into(),
+                asset_id,
+                language: "en-US".into(),
+                service_number: 1,
+                source_kind: CaptionTrackSourceKind::External,
+                label: "Reviewed English".into(),
+                cues: vec![AssetCaptionCue {
+                    cue_id: "bf0aa2ca-1488-42d2-8c1b-5d9179ee5d30".into(),
+                    start_ms: 1_000,
+                    duration_ms: 2_000,
+                    text: "Town Council".into(),
+                }],
+                expected_revision: 0,
+                actor: "setup-admin".into(),
+                occurred_at_unix_ms: 1_000,
+                audit_id: audit_id.into(),
+            })
+            .unwrap();
+
+        assert!(
+            store
+                .execute(&format!(
+                    "UPDATE asset_caption_track_revisions SET actor='tampered' WHERE audit_id='{audit_id}'"
+                ))
+                .is_err()
+        );
+        assert!(
+            store
+                .execute(&format!(
+                    "DELETE FROM asset_caption_track_revisions WHERE audit_id='{audit_id}'"
+                ))
+                .is_err()
+        );
+        assert!(
+            store
+                .execute(&format!(
+                    "UPDATE asset_caption_track_revision_cues SET cue_text='tampered' WHERE audit_id='{audit_id}'"
+                ))
+                .is_err()
+        );
+        assert!(
+            store
+                .execute(&format!(
+                    "DELETE FROM asset_caption_track_revision_cues WHERE audit_id='{audit_id}'"
+                ))
+                .is_err()
+        );
+        assert_eq!(
+            store
+                .list_asset_caption_track_audit(track_id)
+                .unwrap()
+                .len(),
+            1
+        );
+
+        drop(store);
+        for candidate in [
+            database.clone(),
+            PathBuf::from(format!("{}-wal", database.display())),
+            PathBuf::from(format!("{}-shm", database.display())),
+        ] {
+            let _ = std::fs::remove_file(candidate);
+        }
     }
 
     #[test]
