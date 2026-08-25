@@ -19,6 +19,11 @@ expected/decoded canonical text digests. A mismatch may be recorded only when th
 differ. Worker acceptance, configured output, packet transmission, and an empty decoder result can
 never be converted into verified caption evidence.
 
+Expected evidence is derived from the validated current track with a half-open asset-time capture
+window. Cues already active at capture start and cues beginning before capture end are included in
+track order; expired cues and cues beginning exactly at capture end are excluded. A window extending
+beyond the bound media asset or containing no expected cues cannot become a proof request.
+
 ## Boundaries
 
 The independent decoder accepts only an absolute executable path, hashes the exact executable into

@@ -47,6 +47,12 @@ pub struct CaptionEgressProof {
     pub captured_at_unix_ms: i64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExpectedCaptionEvidence {
+    pub cue_count: u32,
+    pub text_sha256: String,
+}
+
 impl CaptionEgressProof {
     pub fn validate(&self) -> Result<(), String> {
         for (value, field) in [
@@ -336,6 +342,40 @@ pub fn canonical_caption_text_sha256(texts: &[String]) -> Result<String, String>
         update_length_prefixed(&mut digest, canonical.as_bytes());
     }
     Ok(format!("{:x}", digest.finalize()))
+}
+
+pub fn expected_caption_evidence_for_window(
+    track: &AssetCaptionTrack,
+    asset_duration_ms: u64,
+    capture_started_asset_offset_ms: u64,
+    capture_duration_ms: u64,
+) -> Result<ExpectedCaptionEvidence, String> {
+    track.validate(asset_duration_ms)?;
+    if !(1..=MAX_CAPTION_PROOF_CAPTURE_DURATION_MS).contains(&capture_duration_ms) {
+        return Err("caption proof window duration is invalid or unbounded".into());
+    }
+    let capture_end = capture_started_asset_offset_ms
+        .checked_add(capture_duration_ms)
+        .ok_or_else(|| "caption proof window overflowed".to_string())?;
+    if capture_end > asset_duration_ms {
+        return Err("caption proof window extends beyond the bound media asset".into());
+    }
+    let texts = track
+        .cues
+        .iter()
+        .filter(|cue| {
+            cue.start_ms + cue.duration_ms > capture_started_asset_offset_ms
+                && cue.start_ms < capture_end
+        })
+        .map(|cue| cue.text.clone())
+        .collect::<Vec<_>>();
+    let cue_count = u32::try_from(texts.len())
+        .map_err(|_| "caption proof expected cue count overflowed".to_string())?;
+    let text_sha256 = canonical_caption_text_sha256(&texts)?;
+    Ok(ExpectedCaptionEvidence {
+        cue_count,
+        text_sha256,
+    })
 }
 
 fn update_length_prefixed(digest: &mut Sha256, value: &[u8]) {
@@ -717,5 +757,60 @@ mod tests {
             canonical_caption_text_sha256(&reversed).unwrap()
         );
         assert!(canonical_caption_text_sha256(&[]).is_err());
+    }
+
+    #[test]
+    fn expected_proof_window_includes_active_and_future_but_not_boundary_cues() {
+        let cues = vec![
+            AssetCaptionCue {
+                cue_id: "11111111-2222-4333-8444-555555555555".into(),
+                start_ms: 1_000,
+                duration_ms: 1_500,
+                text: "expired before capture".into(),
+            },
+            AssetCaptionCue {
+                cue_id: "22222222-3333-4444-8555-666666666666".into(),
+                start_ms: 2_500,
+                duration_ms: 2_000,
+                text: "active at capture".into(),
+            },
+            AssetCaptionCue {
+                cue_id: "33333333-4444-4555-8666-777777777777".into(),
+                start_ms: 5_000,
+                duration_ms: 1_000,
+                text: "future inside capture".into(),
+            },
+            AssetCaptionCue {
+                cue_id: "44444444-5555-4666-8777-888888888888".into(),
+                start_ms: 7_000,
+                duration_ms: 1_000,
+                text: "starts exactly after capture".into(),
+            },
+        ];
+        let track = AssetCaptionTrack {
+            track_id: "55555555-6666-4777-8888-999999999999".into(),
+            asset_id: "a".repeat(64),
+            language: "en-US".into(),
+            service_number: 1,
+            source_kind: CaptionTrackSourceKind::External,
+            label: "Reviewed English".into(),
+            cues_sha256: cues_sha256(&cues),
+            cues,
+            revision: 1,
+            created_at_unix_ms: 1,
+            updated_at_unix_ms: 1,
+            updated_by: "setup-admin".into(),
+        };
+        let evidence = expected_caption_evidence_for_window(&track, 8_000, 3_000, 4_000).unwrap();
+        assert_eq!(evidence.cue_count, 2);
+        assert_eq!(
+            evidence.text_sha256,
+            canonical_caption_text_sha256(&[
+                "active at capture".into(),
+                "future inside capture".into()
+            ])
+            .unwrap()
+        );
+        assert!(expected_caption_evidence_for_window(&track, 8_000, 7_001, 1_000).is_err());
     }
 }
