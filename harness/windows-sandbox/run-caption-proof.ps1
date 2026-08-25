@@ -118,7 +118,7 @@ try {
     if ($authStatus.state -ne 'bootstrap_required') {
         throw 'Fresh caption-proof guest did not require first-account bootstrap.'
     }
-    $handoffPath = 'C:\ProgramData\TownLight Station\bootstrap.capability'
+    $handoffPath = 'C:\ProgramData\TownLight Station\operator-bootstrap.capability'
     $rawCapability = [IO.File]::ReadAllText($handoffPath, [Text.UTF8Encoding]::new($false))
     if ($rawCapability -notmatch '\A[A-Za-z0-9_-]{43}\n\z') {
         throw 'Silent installer did not preserve one exact protected bootstrap capability.'
