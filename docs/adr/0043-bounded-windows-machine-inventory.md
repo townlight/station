@@ -27,9 +27,18 @@ inventory to unavailable before profile derivation.
 Windows observations have deliberately narrow meaning:
 
 - media-volume total capacity may satisfy the 2 TB nominal development predicate;
+- for any supported local or mounted-folder media path, the same snapshot resolves the actual
+  volume with `Get-Volume -FilePath`, then binds it through `Get-Partition -Volume` → `Get-Disk`;
+  the collector re-queries the volume identity, size, and partition disk-number set before
+  marking the typed relation verified; only a non-empty verified binding whose every disk reports
+  `BusType = NVMe` may satisfy the media-medium predicate, and backing-disk size must cover the
+  volume total;
 - DeckLink-named PnP observations remain unknown until stable hardware identity and function are authenticated;
 - GPU identity/memory remains insufficient for class or throughput;
 - visible mirror-like storage remains insufficient for media-volume RAID linkage or recovery;
+- an absent binding, mixed/unknown bus type, aggregate NVMe observation without the verified
+  binding, or a relation whose backing size does not cover the volume remains unknown/unavailable;
+  this slice does not infer redundancy, GPU, UPS, or device function from the relation;
 - UPS detection remains insufficient for health, runtime, or power-failure protection;
 - Blackmagic driver detection remains insufficient for Desktop Video SDK/runtime compatibility;
 - no observation proves SDI function, cabling, signal lock, or external headend acceptance.

@@ -4,6 +4,7 @@ import test from "node:test";
 
 import {
   LatestStationBoxLoad,
+  mediaVolumeBackingDiskLabel,
   observedMachineEvidenceLabel,
   referenceQualificationLabel,
   referenceTierSelectionIsCurrent,
@@ -15,7 +16,7 @@ import type { StationBoxProfile } from "./station-box-contract.ts";
 
 function profile(matchingTiers: string[]): StationBoxProfile {
   return {
-    schema_version: 4,
+    schema_version: 6,
     reference_station_tier_selection: null,
     hardware: {
       logical_cpus: 32,
@@ -28,6 +29,8 @@ function profile(matchingTiers: string[]): StationBoxProfile {
         storage_collection: "collected",
         device_collection: "collected",
         media_volume_total_gb: 2_000,
+        media_volume_backing_disks: [{ name: "Media NVMe", size_gb: 2_000, media_type: "SSD", bus_type: "NVMe", health_status: "Healthy" }],
+        media_volume_backing_disks_verified: true,
         gpu_adapters: [],
         physical_disks: [],
         virtual_disks: [],
@@ -121,4 +124,18 @@ test("machine inventory labels detection without claiming qualification", () => 
   assert.equal(/qualif/i.test(detected), false);
   assert.equal(observedMachineEvidenceLabel("collected", []), "Not detected");
   assert.equal(observedMachineEvidenceLabel("unavailable", []), "Inventory unavailable");
+});
+
+test("machine inventory renders the authenticated media-volume backing relation", () => {
+  const stationBox = profile([]);
+  assert.equal(
+    mediaVolumeBackingDiskLabel(
+      stationBox.hardware.machine_inventory.storage_collection,
+      stationBox.hardware.machine_inventory.media_volume_backing_disks,
+      stationBox.hardware.machine_inventory.media_volume_backing_disks_verified,
+    ),
+    "Linked: Media NVMe (2000.0 GiB, NVMe)",
+  );
+  assert.equal(mediaVolumeBackingDiskLabel("collected", [], false), "Not linked");
+  assert.equal(mediaVolumeBackingDiskLabel("unavailable", [], false), "Inventory unavailable");
 });

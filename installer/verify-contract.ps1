@@ -22,9 +22,8 @@ $requirements = [ordered]@{
     'checks the static image overlay plugin' = 'gstgdkpixbuf.dll'
     'checks the PNG image decoder plugin' = 'gstpng.dll'
     'checks the JPEG image decoder plugin' = 'gstjpeg.dll'
-    'never blesses a merely presence-complete prior runtime' = 'if DirExists(RuntimeRoot) then'
-    'removes the previous private runtime before replacement' = "if FileExists(RuntimeRoot + '\unins000.exe') then"
-    'rejects an incompletely removed prior runtime tree' = 'The previous private media runtime root still exists after removal.'
+    'rejects any pre-existing private runtime during clean installation' = 'if DirExists(RuntimeRoot) or FileExists(RuntimeRoot) then'
+    'does not remove a pre-existing private runtime during clean installation' = 'The private media runtime root already exists before clean installation.'
     'creates an exact installed-runtime manifest before service start' = 'release write-runtime-manifest --runtime-root "'
     'binds the installed-runtime manifest digest into the receipt' = 'runtime_manifest_sha256'
     'registers the native station service' = 'create TownLightStation'
@@ -57,6 +56,24 @@ $requirements = [ordered]@{
     'tracks whether this setup owns rollback cleanup' = 'BootstrapHandoffOwned: Boolean;'
     'claims cleanup responsibility before launching stationd' = 'BootstrapHandoffOwned := True;'
     'releases cleanup responsibility after exact deletion' = 'BootstrapHandoffOwned := False;'
+    'rejects an in-place product installation before activation' = 'function ExistingProductInstallationDetected: Boolean;'
+    'rejects an existing application directory' = 'DirExists(ApplicationDirectory)'
+    'rejects an existing station service' = 'ServiceExists(StationServiceName)'
+    'rejects an existing updater service' = 'ServiceExists(UpdaterServiceName)'
+    'rejects the same AppId uninstall registration' = 'RegKeyExists(HKLM64, UninstallRegistrySubkey)'
+    'runs the clean-install-only preflight hook' = 'function PrepareToInstall(var NeedsRestart: Boolean): String;'
+    'directs installed stations to the signed maintenance updater' = 'TownLight Station Maintenance updater for a signed in-place upgrade'
+    'tracks station service ownership before candidate configuration' = 'StationServiceCreatedByCandidate := True;'
+    'tracks updater service ownership before candidate configuration' = 'UpdaterServiceCreatedByCandidate := True;'
+    'rolls back only candidate-owned services' = 'if StationServiceCreatedByCandidate then'
+    'claims an empty candidate application directory atomically' = 'procedure ClaimCandidateApplicationDirectory;'
+    'uses CreateDir to claim the candidate application directory' = 'CreateDir(AppDirectory)'
+    'tracks candidate application directory ownership' = 'CandidateApplicationDirectoryClaimed: Boolean;'
+    'removes the application directory only when candidate-owned' = 'procedure RemoveCandidateApplicationDirectory;'
+    'fails if staged binary files already exist' = "AppDirectory + '\stationd.exe', True"
+    'recognizes SCM already-exists errors during station registration' = 'ResultCode = 1073'
+    'recognizes uncertain station service creation' = 'StationServiceExistedBeforeCreate'
+    'recognizes uncertain updater service creation' = 'UpdaterServiceExistedBeforeCreate'
     'auth-state-gates installation activation' = 'PrepareOperatorAuthentication'
     'rolls back a failed service activation' = 'RollbackService'
     'removes the station service on uninstall' = 'StopAndDeleteServiceIfPresent(StationServiceName)'
@@ -103,6 +120,140 @@ if ($healthGate -lt 0 -or $authGate -le $healthGate) {
 $activation = $source.LastIndexOf('CandidateActivated := True;')
 if ($activation -le $authGate) {
     throw 'Installer marks activation successful before authentication state is resolved.'
+}
+
+$preflightStart = $source.IndexOf('function ExistingProductInstallationDetected: Boolean;')
+$preflightEnd = $source.IndexOf('procedure DeinitializeSetup;', $preflightStart)
+if ($preflightStart -lt 0 -or $preflightEnd -le $preflightStart) {
+    throw 'Installer clean-install preflight boundary could not be isolated.'
+}
+$preflightBoundary = $source.Substring($preflightStart, $preflightEnd - $preflightStart)
+if (-not $preflightBoundary.Contains('if ExistingProductInstallationDetected then')) {
+    throw 'Installer preflight can continue into ssInstall despite an existing product installation.'
+}
+
+$detectorEnd = $source.IndexOf('function PrepareToInstall(var NeedsRestart: Boolean): String;', $preflightStart)
+if ($detectorEnd -le $preflightStart) {
+    throw 'Installer product-presence detector boundary could not be isolated.'
+}
+$detector = $source.Substring($preflightStart, $detectorEnd - $preflightStart)
+foreach ($requiredPresenceSignal in @(
+    'DirExists(ApplicationDirectory)',
+    'ServiceExists(StationServiceName)',
+    'ServiceExists(UpdaterServiceName)',
+    'RegKeyExists(HKLM64, UninstallRegistrySubkey)'
+)) {
+    if (-not $detector.Contains($requiredPresenceSignal)) {
+        throw "Installer product-presence detector omits: $requiredPresenceSignal"
+    }
+}
+
+$claimStart = $source.IndexOf('procedure ClaimCandidateApplicationDirectory;')
+$claimEnd = $source.IndexOf('procedure RemoveCandidateApplicationDirectory;', $claimStart)
+if ($claimStart -lt 0 -or $claimEnd -le $claimStart) {
+    throw 'Installer candidate application-directory claim boundary could not be isolated.'
+}
+$claimBoundary = $source.Substring($claimStart, $claimEnd - $claimStart)
+foreach ($claimRequirement in @(
+    'if DirExists(AppDirectory) or FileExists(AppDirectory) then',
+    'if not CreateDir(AppDirectory) then',
+    'CandidateApplicationDirectoryClaimed := True;'
+)) {
+    if (-not $claimBoundary.Contains($claimRequirement)) {
+        throw "Installer candidate application-directory claim omits: $claimRequirement"
+    }
+}
+
+$removeCandidateEnd = $source.IndexOf('procedure RemovePrivateRuntime;', $claimEnd)
+if ($removeCandidateEnd -le $claimEnd) {
+    throw 'Installer candidate application-directory rollback boundary could not be isolated.'
+}
+$removeCandidate = $source.Substring($claimEnd, $removeCandidateEnd - $claimEnd)
+if (-not $removeCandidate.Contains('if not CandidateApplicationDirectoryClaimed then')) {
+    throw 'Installer rollback can remove an application directory it did not claim.'
+}
+
+$installStart = $source.IndexOf('procedure CurStepChanged(CurStep: TSetupStep);')
+$installEnd = $source.IndexOf('function ExistingProductInstallationDetected: Boolean;', $installStart)
+if ($installStart -lt 0 -or $installEnd -le $installStart) {
+    throw 'Installer ssInstall activation boundary could not be isolated.'
+}
+$installBoundary = $source.Substring($installStart, $installEnd - $installStart)
+if ($installBoundary.Contains('StopAndDeleteServiceIfPresent')) {
+    throw 'Installer ssInstall can stop/delete a pre-existing service after a raced or bypassed preflight.'
+}
+if ($installBoundary.IndexOf('ClaimCandidateApplicationDirectory;') -lt 0 -or
+    $installBoundary.IndexOf('ClaimCandidateApplicationDirectory;') -gt
+    $installBoundary.IndexOf('StageStationBinaries;')) {
+    throw 'Installer can stage candidate files before atomically claiming the application directory.'
+}
+
+$stationCreateStart = $source.IndexOf('procedure CreateAndStartService;')
+$stationCreateEnd = $source.IndexOf('procedure CreateAndStartUpdaterService;', $stationCreateStart)
+$updaterCreateEnd = $source.IndexOf('function WaitForHealthyStation:', $stationCreateEnd)
+if ($stationCreateStart -lt 0 -or $stationCreateEnd -le $stationCreateStart -or
+    $updaterCreateEnd -le $stationCreateEnd) {
+    throw 'Installer candidate service ownership boundaries could not be isolated.'
+}
+$stationCreate = $source.Substring($stationCreateStart, $stationCreateEnd - $stationCreateStart)
+$updaterCreate = $source.Substring($stationCreateEnd, $updaterCreateEnd - $stationCreateEnd)
+if ($stationCreate.IndexOf('StationServiceCreatedByCandidate := True;') -lt 0 -or
+    $stationCreate.IndexOf('StationServiceCreatedByCandidate := True;') -gt
+    $stationCreate.IndexOf('ConfigureServiceEnvironment;')) {
+    throw 'Installer can mutate a station service before taking candidate ownership.'
+}
+if ($updaterCreate.IndexOf('UpdaterServiceCreatedByCandidate := True;') -lt 0 -or
+    $updaterCreate.IndexOf('UpdaterServiceCreatedByCandidate := True;') -gt
+    $updaterCreate.IndexOf('config '' + UpdaterServiceName')) {
+    throw 'Installer can mutate an updater service before taking candidate ownership.'
+}
+foreach ($uncertainCreateRequirement in @(
+    'ResultCode = 1073',
+    'ServiceExists(StationServiceName)',
+    'ServiceExists(UpdaterServiceName)'
+)) {
+    if (($stationCreate + $updaterCreate).IndexOf($uncertainCreateRequirement) -lt 0) {
+        throw "Installer SCM create handling omits: $uncertainCreateRequirement"
+    }
+}
+if ($preflightBoundary.Contains('StationDataDirectory') -or
+    $preflightBoundary.Contains('install-receipt.json') -or
+    $preflightBoundary.Contains('active-slot.json')) {
+    throw 'Installer preflight treats deliberately preserved ProgramData as an installed application.'
+}
+
+foreach ($forbiddenUpgradeMechanism in @(
+    'procedure BeginInstallerTransaction;',
+    'procedure SnapshotPriorServices;',
+    'function QueryServiceState',
+    'procedure RestorePriorServices;',
+    'reg.exe restore'
+)) {
+    if ($source.Contains($forbiddenUpgradeMechanism)) {
+        throw "Installer attempts an unsupported in-place service restoration path: $forbiddenUpgradeMechanism"
+    }
+}
+
+$runtimeInstallStart = $source.IndexOf('procedure InstallPrivateRuntime;')
+$runtimeInstallEnd = $source.IndexOf('procedure WriteRuntimeManifest;', $runtimeInstallStart)
+if ($runtimeInstallStart -lt 0 -or $runtimeInstallEnd -le $runtimeInstallStart) {
+    throw 'Installer private-runtime installation boundary could not be isolated.'
+}
+$runtimeInstall = $source.Substring($runtimeInstallStart, $runtimeInstallEnd - $runtimeInstallStart)
+if ($runtimeInstall.Contains('DelTree(RuntimeRoot') -or $runtimeInstall.Contains('unins000.exe')) {
+    throw 'Installer can remove a pre-existing private runtime instead of rejecting the clean install.'
+}
+
+$runtimeInvocationStart = $source.IndexOf('function RunStationdWithPrivateRuntime')
+$runtimeInvocationEnd = $source.IndexOf('procedure WriteRuntimeManifest;', $runtimeInvocationStart)
+if ($runtimeInvocationStart -lt 0 -or $runtimeInvocationEnd -le $runtimeInvocationStart) {
+    throw 'Installer private-runtime invocation boundary could not be isolated.'
+}
+$runtimeInvocation = $source.Substring($runtimeInvocationStart, $runtimeInvocationEnd - $runtimeInvocationStart)
+foreach ($runtimeVariable in @('PATH', 'GST_PLUGIN_PATH_1_0', 'GST_PLUGIN_SYSTEM_PATH_1_0')) {
+    if (-not $runtimeInvocation.Contains("NativeSetEnvironmentVariable('$runtimeVariable'")) {
+        throw "Installer can execute stationd without explicitly setting $runtimeVariable to the private runtime."
+    }
 }
 
 $deleteHandoff = $source.LastIndexOf('if not DeleteFile(HandoffPath) then')

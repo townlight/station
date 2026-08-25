@@ -10,3 +10,7 @@
 - Do not claim a capability from source presence. Require the same-candidate installed-machine evidence.
 - Never commit secrets, signing material, customer data, generated databases, or local environment files.
 - Keep commits atomic and update contracts and documentation with behavior.
+- Run Cargo commands from the workspace root. On Windows, invoke Cargo only through
+  `scripts/invoke-cargo.ps1`; it binds Cargo and every descendant process to the explicit GStreamer
+  runtime. The checked-in target runner is a second boundary. Never bypass either boundary or launch
+  `target` artifacts directly.

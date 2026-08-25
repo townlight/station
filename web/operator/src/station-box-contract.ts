@@ -15,6 +15,8 @@ export interface MachineInventoryEvidence {
   storage_collection: MachineEvidenceCollectionState;
   device_collection: MachineEvidenceCollectionState;
   media_volume_total_gb: number | null;
+  media_volume_backing_disks: Array<{ name: string; size_gb: number; media_type: string | null; bus_type: string | null; health_status: string | null }>;
+  media_volume_backing_disks_verified: boolean;
   gpu_adapters: Array<{ name: string; adapter_memory_gb: number | null; driver_version: string | null }>;
   physical_disks: Array<{ name: string; size_gb: number; media_type: string | null; bus_type: string | null; health_status: string | null }>;
   virtual_disks: Array<{ name: string; size_gb: number; resiliency: string | null; health_status: string | null }>;
@@ -147,4 +149,15 @@ export function observedMachineEvidenceLabel(
 ): string {
   if (collection === "unavailable") return "Inventory unavailable";
   return names.length === 0 ? "Not detected" : `Detected: ${names.join(", ")}`;
+}
+
+export function mediaVolumeBackingDiskLabel(
+  collection: MachineEvidenceCollectionState,
+  disks: MachineInventoryEvidence["media_volume_backing_disks"],
+  verified: boolean,
+): string {
+  if (collection === "unavailable") return "Inventory unavailable";
+  if (disks.length === 0) return "Not linked";
+  if (!verified) return "Observed, not verified";
+  return `Linked: ${disks.map((disk) => `${disk.name} (${disk.size_gb.toFixed(1)} GiB${disk.bus_type ? `, ${disk.bus_type}` : ""})`).join(", ")}`;
 }

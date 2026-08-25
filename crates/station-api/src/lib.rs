@@ -7308,7 +7308,7 @@ mod tests {
         let full = api.handle_in_process("GET", "/api/v1/station-box-profile", None);
         assert_eq!(full.status, 200);
         let full: serde_json::Value = serde_json::from_slice(&full.body).unwrap();
-        assert_eq!(full["schema_version"], 4);
+        assert_eq!(full["schema_version"], 6);
         assert_eq!(
             full["peg_readiness"]["color"], "yellow",
             "an unselected deployment tier is unknown and remains fail-closed"

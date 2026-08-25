@@ -2,10 +2,10 @@ use station_readiness::{
     BackupProbeInput, BlackmagicDriverEvidence, CapabilitySupport, ClockProbeInput,
     ClockSyncStatus, DeckLinkDeviceEvidence, EngineProbeInput, EngineTierVerdict,
     GpuAdapterEvidence, HardwareProbeInput, MachineInventoryCollectionState,
-    MachineInventoryEvidence, NetworkProbeInput, PegReadinessColor, PhysicalDiskEvidence,
-    ReadinessDimensionName, ReadinessState, ReferenceStationRequirementName, ReferenceStationTier,
-    ReleaseProbeInput, StationBoxProbeInput, UpsDeviceEvidence, VirtualDiskEvidence,
-    derive_station_box_profile,
+    MachineInventoryEvidence, MediaVolumeBackingDiskEvidence, NetworkProbeInput, PegReadinessColor,
+    PhysicalDiskEvidence, ReadinessDimensionName, ReadinessState, ReferenceStationRequirementName,
+    ReferenceStationTier, ReleaseProbeInput, StationBoxProbeInput, UpsDeviceEvidence,
+    VirtualDiskEvidence, derive_station_box_profile,
 };
 
 fn unavailable_inventory() -> MachineInventoryEvidence {
@@ -16,6 +16,8 @@ fn unavailable_inventory() -> MachineInventoryEvidence {
         storage_collection: MachineInventoryCollectionState::Unavailable,
         device_collection: MachineInventoryCollectionState::Unavailable,
         media_volume_total_gb: None,
+        media_volume_backing_disks: Vec::new(),
+        media_volume_backing_disks_verified: false,
         gpu_adapters: Vec::new(),
         physical_disks: Vec::new(),
         virtual_disks: Vec::new(),
@@ -96,7 +98,7 @@ fn ready_probe() -> StationBoxProbeInput {
 fn complete_legacy_facts_stay_yellow_without_reference_station_evidence() {
     let profile = derive_station_box_profile(ready_probe()).unwrap();
 
-    assert_eq!(profile.schema_version, 4);
+    assert_eq!(profile.schema_version, 6);
     assert_eq!(
         profile.engine_tier_verdict,
         EngineTierVerdict::FullBroadcast
@@ -350,6 +352,8 @@ fn media_storage_capacity_uses_observed_total_capacity_not_free_space() {
         storage_collection: MachineInventoryCollectionState::Collected,
         device_collection: MachineInventoryCollectionState::Unavailable,
         media_volume_total_gb: Some(2_000.0),
+        media_volume_backing_disks: Vec::new(),
+        media_volume_backing_disks_verified: false,
         gpu_adapters: Vec::new(),
         physical_disks: vec![PhysicalDiskEvidence {
             name: "NVMe 2TB".into(),
@@ -395,6 +399,176 @@ fn media_storage_capacity_uses_observed_total_capacity_not_free_space() {
 }
 
 #[test]
+fn linked_nvme_media_volume_qualifies_medium_without_inferencing_redundancy() {
+    let profile = linked_media_probe(
+        vec![MediaVolumeBackingDiskEvidence {
+            name: "Media NVMe".into(),
+            size_gb: 2_000.0,
+            media_type: Some("SSD".into()),
+            bus_type: Some("NVMe".into()),
+            health_status: Some("Healthy".into()),
+        }],
+        true,
+    )
+    .unwrap();
+    let development = profile
+        .reference_station_catalog
+        .assessments
+        .iter()
+        .find(|assessment| assessment.tier == ReferenceStationTier::DevelopmentValidation)
+        .unwrap();
+    assert_eq!(
+        development
+            .requirements
+            .iter()
+            .find(|requirement| requirement.name
+                == ReferenceStationRequirementName::MediaStorageMedium)
+            .unwrap()
+            .state,
+        ReadinessState::Pass
+    );
+    let cable = profile
+        .reference_station_catalog
+        .assessments
+        .iter()
+        .find(|assessment| assessment.tier == ReferenceStationTier::CableSdi)
+        .unwrap();
+    assert_eq!(
+        cable
+            .requirements
+            .iter()
+            .find(|requirement| requirement.name
+                == ReferenceStationRequirementName::RedundantMediaStorage)
+            .unwrap()
+            .state,
+        ReadinessState::Unknown
+    );
+}
+
+fn linked_media_probe(
+    backing_disks: Vec<MediaVolumeBackingDiskEvidence>,
+    verified: bool,
+) -> Result<station_readiness::StationBoxProfile, station_readiness::ValidationError> {
+    let mut probe = ready_probe();
+    probe.hardware.machine_inventory = MachineInventoryEvidence {
+        collected_at_unix_ms: probe.probe_collected_at_unix_ms,
+        source: station_readiness::MachineEvidenceSource::WindowsCim,
+        gpu_collection: MachineInventoryCollectionState::Unavailable,
+        storage_collection: MachineInventoryCollectionState::Collected,
+        device_collection: MachineInventoryCollectionState::Unavailable,
+        media_volume_total_gb: Some(2_000.0),
+        media_volume_backing_disks: backing_disks,
+        media_volume_backing_disks_verified: verified,
+        gpu_adapters: Vec::new(),
+        physical_disks: vec![PhysicalDiskEvidence {
+            name: "Media NVMe".into(),
+            size_gb: 2_000.0,
+            media_type: Some("SSD".into()),
+            bus_type: Some("NVMe".into()),
+            health_status: Some("Healthy".into()),
+        }],
+        virtual_disks: Vec::new(),
+        ups_devices: Vec::new(),
+        decklink_devices: Vec::new(),
+        blackmagic_drivers: Vec::new(),
+    };
+    derive_station_box_profile(probe)
+}
+
+#[test]
+fn media_volume_link_validation_rejects_size_mismatch_and_duplicates() {
+    let undersized = linked_media_probe(
+        vec![MediaVolumeBackingDiskEvidence {
+            name: "Media NVMe".into(),
+            size_gb: 1_999.0,
+            media_type: Some("SSD".into()),
+            bus_type: Some("NVMe".into()),
+            health_status: Some("Healthy".into()),
+        }],
+        true,
+    );
+    assert!(undersized.is_err());
+
+    let disk = MediaVolumeBackingDiskEvidence {
+        name: "Media NVMe".into(),
+        size_gb: 2_000.0,
+        media_type: Some("SSD".into()),
+        bus_type: Some("NVMe".into()),
+        health_status: Some("Healthy".into()),
+    };
+    let duplicate = linked_media_probe(vec![disk.clone(), disk], true);
+    assert!(duplicate.is_err());
+}
+
+#[test]
+fn mixed_or_unknown_backing_bus_does_not_qualify_media_medium() {
+    let mixed = linked_media_probe(
+        vec![
+            MediaVolumeBackingDiskEvidence {
+                name: "Media NVMe".into(),
+                size_gb: 1_000.0,
+                media_type: Some("SSD".into()),
+                bus_type: Some("NVMe".into()),
+                health_status: Some("Healthy".into()),
+            },
+            MediaVolumeBackingDiskEvidence {
+                name: "Media SATA".into(),
+                size_gb: 1_000.0,
+                media_type: Some("SSD".into()),
+                bus_type: Some("SATA".into()),
+                health_status: Some("Healthy".into()),
+            },
+        ],
+        true,
+    )
+    .unwrap();
+    let development = mixed
+        .reference_station_catalog
+        .assessments
+        .iter()
+        .find(|assessment| assessment.tier == ReferenceStationTier::DevelopmentValidation)
+        .unwrap();
+    assert_eq!(
+        development
+            .requirements
+            .iter()
+            .find(|requirement| requirement.name
+                == ReferenceStationRequirementName::MediaStorageMedium)
+            .unwrap()
+            .state,
+        ReadinessState::Unknown
+    );
+
+    let unknown = linked_media_probe(
+        vec![MediaVolumeBackingDiskEvidence {
+            name: "Media unknown bus".into(),
+            size_gb: 2_000.0,
+            media_type: Some("SSD".into()),
+            bus_type: None,
+            health_status: Some("Healthy".into()),
+        }],
+        true,
+    )
+    .unwrap();
+    let development = unknown
+        .reference_station_catalog
+        .assessments
+        .iter()
+        .find(|assessment| assessment.tier == ReferenceStationTier::DevelopmentValidation)
+        .unwrap();
+    assert_eq!(
+        development
+            .requirements
+            .iter()
+            .find(|requirement| requirement.name
+                == ReferenceStationRequirementName::MediaStorageMedium)
+            .unwrap()
+            .state,
+        ReadinessState::Unknown
+    );
+}
+
+#[test]
 fn rich_machine_inventory_does_not_infer_gpu_redundancy_ups_or_blackmagic_qualification() {
     let mut probe = ready_probe();
     probe.hardware.machine_inventory = MachineInventoryEvidence {
@@ -404,6 +578,8 @@ fn rich_machine_inventory_does_not_infer_gpu_redundancy_ups_or_blackmagic_qualif
         storage_collection: MachineInventoryCollectionState::Collected,
         device_collection: MachineInventoryCollectionState::Collected,
         media_volume_total_gb: Some(8_000.0),
+        media_volume_backing_disks: Vec::new(),
+        media_volume_backing_disks_verified: false,
         gpu_adapters: vec![GpuAdapterEvidence {
             name: "NVIDIA RTX observed adapter".into(),
             adapter_memory_gb: Some(16.0),

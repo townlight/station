@@ -8,6 +8,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- Windows development Cargo execution now starts through a checked-in GStreamer environment wrapper,
+  with the target runner retained as a second fail-closed boundary, preventing test binaries and their
+  child processes from opening modal missing-runtime dialogs.
+
+- Installer preflight now rejects an existing TownLight application tree, service, or matching AppId uninstall registration before `ssInstall` can replace binaries, remove the private runtime, or stop a working service. It atomically claims an empty candidate directory, uses no-overwrite file staging, rejects an existing runtime root, and rolls back only candidate-owned application/services. The full setup executable is clean-install/reinstall-only; signed maintenance updates remain the in-place path, while ProgramData preserved by uninstall still permits reinstall.
+
 - Fresh TownLight Station repository and native Rust control-plane foundation.
 - Versioned station-profile read/write API with typed JSON errors.
 - SQLite WAL persistence using the database runtime included with Windows.

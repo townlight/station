@@ -10,8 +10,8 @@ use std::time::Duration;
 use serde::Deserialize;
 use station_readiness::{
     BlackmagicDriverEvidence, DeckLinkDeviceEvidence, GpuAdapterEvidence, MachineEvidenceSource,
-    MachineInventoryCollectionState, MachineInventoryEvidence, PhysicalDiskEvidence,
-    UpsDeviceEvidence, VirtualDiskEvidence,
+    MachineInventoryCollectionState, MachineInventoryEvidence, MediaVolumeBackingDiskEvidence,
+    PhysicalDiskEvidence, UpsDeviceEvidence, VirtualDiskEvidence,
 };
 
 use super::{hidden_command, run_bounded_command};
@@ -45,14 +45,36 @@ try {
 }
 
 $storage = @{ state = 'unavailable'; media_total_bytes = $null;
+              media_volume_backing_disks = @(); media_volume_backing_disks_verified = $false;
               physical_disks = @(); virtual_disks = @() }
 try {
     if ([string]::IsNullOrWhiteSpace($mediaPath)) { throw 'media path is missing' }
-    $volumeRoot = [System.IO.Path]::GetPathRoot($mediaPath).TrimEnd('\')
-    $volume = Get-CimInstance Win32_LogicalDisk -ErrorAction Stop |
-        Where-Object { (Text $_.Caption) -eq $volumeRoot } |
-        Select-Object -First 1
-    if ($null -eq $volume) { throw 'media volume is unavailable' }
+    $volumeCandidates = @(Get-Volume -FilePath $mediaPath -ErrorAction Stop)
+    if ($volumeCandidates.Count -ne 1) { throw 'media volume is ambiguous or unavailable' }
+    $volume = $volumeCandidates[0]
+    $volumeIdentity = Text $volume.UniqueId
+    if ($null -eq $volumeIdentity) { throw 'media volume identity is unavailable' }
+    $volumeSizeBytes = [int64]$volume.Size
+    if ($volumeSizeBytes -le 0) { throw 'media volume size is unavailable' }
+    $partitions = @(Get-Partition -Volume $volume -ErrorAction Stop)
+    if ($partitions.Count -eq 0) { throw 'media volume partition is unavailable' }
+    $diskNumbers = @($partitions | Select-Object -ExpandProperty DiskNumber -Unique | Sort-Object { [int]$_ })
+    if ($diskNumbers.Count -eq 0) { throw 'media volume backing disk is unavailable' }
+    if ($diskNumbers.Count -gt 256) { throw 'media volume backing disk set is too large' }
+    $backingDiskObjects = @($diskNumbers | ForEach-Object { Get-Disk -Number $_ -ErrorAction Stop })
+    if ($backingDiskObjects.Count -ne $diskNumbers.Count) { throw 'media volume backing disk set is incomplete' }
+    [decimal]$backingSizeBytes = 0
+    foreach ($disk in $backingDiskObjects) {
+        $diskSizeBytes = [int64]$disk.Size
+        if ($diskSizeBytes -le 0) { throw 'media volume backing disk size is unavailable' }
+        $backingSizeBytes += [decimal]$diskSizeBytes
+    }
+    if ($backingSizeBytes -lt [decimal]$volumeSizeBytes) { throw 'media volume backing disks do not cover volume size' }
+    $backing = @($backingDiskObjects | ForEach-Object {
+        @{ name = Text $_.FriendlyName; media_type = Text $_.MediaType;
+           bus_type = Text $_.BusType; size_bytes = [int64]$_.Size;
+           health_status = Text $_.HealthStatus }
+    })
     $physical = @(Get-PhysicalDisk | ForEach-Object {
         @{ name = Text $_.FriendlyName; media_type = Text $_.MediaType;
            bus_type = Text $_.BusType; size_bytes = [int64]$_.Size;
@@ -62,7 +84,20 @@ try {
         @{ name = Text $_.FriendlyName; resiliency = Text $_.ResiliencySettingName;
            size_bytes = [int64]$_.Size; health_status = Text $_.HealthStatus }
     })
-    $storage = @{ state = 'collected'; media_total_bytes = [int64]$volume.Size;
+    $volumeAfterCandidates = @(Get-Volume -FilePath $mediaPath -ErrorAction Stop)
+    if ($volumeAfterCandidates.Count -ne 1) { throw 'media volume changed during collection' }
+    $volumeAfter = $volumeAfterCandidates[0]
+    $volumeAfterIdentity = Text $volumeAfter.UniqueId
+    $volumeAfterSizeBytes = [int64]$volumeAfter.Size
+    $partitionsAfter = @(Get-Partition -Volume $volumeAfter -ErrorAction Stop)
+    $diskNumbersAfter = @($partitionsAfter | Select-Object -ExpandProperty DiskNumber -Unique | Sort-Object { [int]$_ })
+    if ($volumeAfterIdentity -ne $volumeIdentity -or
+        $volumeAfterSizeBytes -ne $volumeSizeBytes -or
+        ($diskNumbersAfter -join ',') -ne ($diskNumbers -join ',')) {
+        throw 'media volume changed during collection'
+    }
+    $storage = @{ state = 'collected'; media_total_bytes = $volumeSizeBytes;
+                  media_volume_backing_disks = $backing; media_volume_backing_disks_verified = $true;
                   physical_disks = $physical; virtual_disks = $virtual }
 } catch {
 }
@@ -111,6 +146,10 @@ struct RawGpuGroup {
 struct RawStorageGroup {
     state: String,
     media_total_bytes: Option<u64>,
+    #[serde(default)]
+    media_volume_backing_disks: Vec<RawDisk>,
+    #[serde(default)]
+    media_volume_backing_disks_verified: bool,
     #[serde(default)]
     physical_disks: Vec<RawDisk>,
     #[serde(default)]
@@ -179,6 +218,8 @@ pub(crate) fn unavailable_evidence(collected_at_unix_ms: i64) -> MachineInventor
         storage_collection: MachineInventoryCollectionState::Unavailable,
         device_collection: MachineInventoryCollectionState::Unavailable,
         media_volume_total_gb: None,
+        media_volume_backing_disks: Vec::new(),
+        media_volume_backing_disks_verified: false,
         gpu_adapters: Vec::new(),
         physical_disks: Vec::new(),
         virtual_disks: Vec::new(),
@@ -248,6 +289,8 @@ fn parse_json(bytes: &[u8]) -> Result<MachineInventoryEvidence, String> {
     if (raw.gpu.state.trim() == "unavailable" && !raw.gpu.facts.is_empty())
         || (raw.storage.state.trim() == "unavailable"
             && (raw.storage.media_total_bytes.is_some()
+                || !raw.storage.media_volume_backing_disks.is_empty()
+                || raw.storage.media_volume_backing_disks_verified
                 || !raw.storage.physical_disks.is_empty()
                 || !raw.storage.virtual_disks.is_empty()))
         || (raw.devices.state.trim() == "unavailable"
@@ -264,6 +307,13 @@ fn parse_json(bytes: &[u8]) -> Result<MachineInventoryEvidence, String> {
         storage_collection: parse_state(&raw.storage.state)?,
         device_collection: parse_state(&raw.devices.state)?,
         media_volume_total_gb: bytes_to_gb(raw.storage.media_total_bytes, "media volume")?,
+        media_volume_backing_disks: raw
+            .storage
+            .media_volume_backing_disks
+            .into_iter()
+            .map(normalize_media_volume_backing_disk)
+            .collect::<Result<_, _>>()?,
+        media_volume_backing_disks_verified: raw.storage.media_volume_backing_disks_verified,
         gpu_adapters: raw
             .gpu
             .facts
@@ -371,6 +421,19 @@ fn normalize_physical_disk(raw: RawDisk) -> Result<PhysicalDiskEvidence, String>
     })
 }
 
+fn normalize_media_volume_backing_disk(
+    raw: RawDisk,
+) -> Result<MediaVolumeBackingDiskEvidence, String> {
+    Ok(MediaVolumeBackingDiskEvidence {
+        name: text(raw.name, "media-volume backing disk name")?,
+        size_gb: signed_bytes_to_gb(raw.size_bytes, "media-volume backing disk")?
+            .ok_or_else(|| "media-volume backing disk size is missing".to_string())?,
+        media_type: optional_text(raw.media_type, "media-volume backing disk media type")?,
+        bus_type: optional_text(raw.bus_type, "media-volume backing disk bus type")?,
+        health_status: optional_text(raw.health_status, "media-volume backing disk health status")?,
+    })
+}
+
 fn normalize_virtual_disk(raw: RawVirtualDisk) -> Result<VirtualDiskEvidence, String> {
     Ok(VirtualDiskEvidence {
         name: text(raw.name, "virtual disk name")?,
@@ -409,7 +472,7 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn complete_json() -> Vec<u8> {
-        br#"{"collected_at":123,"gpu":{"state":"collected","facts":[{"name":" RTX 4060 ","driver_version":" 1.2 ","vram_bytes":2147483648}]},"storage":{"state":"collected","media_total_bytes":107374182400,"physical_disks":[{"name":" NVMe ","media_type":" SSD ","bus_type":" NVMe ","size_bytes":214748364800,"health_status":" Healthy "}],"virtual_disks":[{"name":" Mirror ","resiliency":" Mirror ","size_bytes":429496729600,"health_status":" Healthy "}]},"devices":{"state":"collected","ups":[{"name":" UPS ","manufacturer":" APC "}],"decklink":[{"name":" DeckLink ","manufacturer":" Blackmagic "}],"blackmagic_drivers":[{"name":" Desktop Video ","manufacturer":" Blackmagic ","version":" 14.0 "}]}}"#.to_vec()
+        br#"{"collected_at":123,"gpu":{"state":"collected","facts":[{"name":" RTX 4060 ","driver_version":" 1.2 ","vram_bytes":2147483648}]},"storage":{"state":"collected","media_total_bytes":107374182400,"media_volume_backing_disks":[{"name":" Media NVMe ","media_type":" SSD ","bus_type":" NVMe ","size_bytes":214748364800,"health_status":" Healthy "}],"media_volume_backing_disks_verified":true,"physical_disks":[{"name":" NVMe ","media_type":" SSD ","bus_type":" NVMe ","size_bytes":214748364800,"health_status":" Healthy "}],"virtual_disks":[{"name":" Mirror ","resiliency":" Mirror ","size_bytes":429496729600,"health_status":" Healthy "}]},"devices":{"state":"collected","ups":[{"name":" UPS ","manufacturer":" APC "}],"decklink":[{"name":" DeckLink ","manufacturer":" Blackmagic "}],"blackmagic_drivers":[{"name":" Desktop Video ","manufacturer":" Blackmagic ","version":" 14.0 "}]}}"#.to_vec()
     }
 
     #[test]
@@ -419,6 +482,8 @@ mod tests {
         assert_eq!(evidence.gpu_adapters[0].name, "RTX 4060");
         assert_eq!(evidence.gpu_adapters[0].adapter_memory_gb, Some(2.0));
         assert_eq!(evidence.media_volume_total_gb, Some(100.0));
+        assert_eq!(evidence.media_volume_backing_disks[0].name, "Media NVMe");
+        assert!(evidence.media_volume_backing_disks_verified);
         assert_eq!(evidence.physical_disks[0].name, "NVMe");
         assert_eq!(evidence.ups_devices[0].manufacturer.as_deref(), Some("APC"));
     }
@@ -451,6 +516,25 @@ mod tests {
             .replacen("\"state\":\"collected\"", "\"state\":\"unavailable\"", 1)
             .into_bytes();
         assert!(parse_json(&unavailable_with_facts).is_err());
+        let invalid_backing_disk = String::from_utf8(complete_json())
+            .unwrap()
+            .replacen("\"size_bytes\":214748364800", "\"size_bytes\":-1", 1)
+            .into_bytes();
+        assert!(parse_json(&invalid_backing_disk).is_err());
+        let unverified_relation = String::from_utf8(complete_json())
+            .unwrap()
+            .replace(
+                "\"media_volume_backing_disks_verified\":true",
+                "\"media_volume_backing_disks_verified\":false",
+            )
+            .into_bytes();
+        assert!(parse_json(&unverified_relation).is_ok());
+        let missing_verified_relation = parse_json(&unverified_relation).unwrap();
+        assert!(
+            missing_verified_relation
+                .validate_for_probe(50.0, 123, 123)
+                .is_err()
+        );
     }
 
     #[test]
@@ -485,6 +569,16 @@ mod tests {
     #[test]
     fn static_command_contract_cannot_be_http_controlled_or_leak_raw_identifiers() {
         assert!(WINDOWS_MACHINE_INVENTORY_SCRIPT.contains("TOWNLIGHT_STATION_MEDIA_PROBE_PATH"));
+        assert!(WINDOWS_MACHINE_INVENTORY_SCRIPT.contains("Get-Volume -FilePath $mediaPath"));
+        assert!(WINDOWS_MACHINE_INVENTORY_SCRIPT.contains("Get-Partition -Volume $volume"));
+        assert!(WINDOWS_MACHINE_INVENTORY_SCRIPT.contains("Get-Disk -Number"));
+        assert!(WINDOWS_MACHINE_INVENTORY_SCRIPT.contains("volumeAfter"));
+        assert!(WINDOWS_MACHINE_INVENTORY_SCRIPT.contains("diskNumbersAfter"));
+        assert!(WINDOWS_MACHINE_INVENTORY_SCRIPT.contains("backingSizeBytes"));
+        assert!(WINDOWS_MACHINE_INVENTORY_SCRIPT.contains("media_volume_backing_disks"));
+        assert!(!WINDOWS_MACHINE_INVENTORY_SCRIPT.contains("GetPathRoot"));
+        assert!(!WINDOWS_MACHINE_INVENTORY_SCRIPT.contains("Win32_LogicalDisk"));
+        assert!(!WINDOWS_MACHINE_INVENTORY_SCRIPT.contains("-DriveLetter"));
         assert!(!WINDOWS_MACHINE_INVENTORY_SCRIPT.contains("$args"));
         assert!(!WINDOWS_MACHINE_INVENTORY_SCRIPT.contains("DeviceID"));
         assert!(!WINDOWS_MACHINE_INVENTORY_SCRIPT.contains("SerialNumber"));

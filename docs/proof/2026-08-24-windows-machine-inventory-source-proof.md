@@ -20,6 +20,19 @@ Observed facts on this machine:
 - visible storage: one 2 TB-class NVMe SSD and one external 8 TB-class USB HDD, both reported healthy;
 - no virtual disk, UPS, DeckLink, or Blackmagic signed-driver match was observed.
 
-The proof does not claim GPU class/throughput, storage redundancy or media-volume linkage, UPS
-protection, DeckLink/SDI function, Desktop Video SDK compatibility, cabling, signal lock, receiver
-acceptance, or any installed-service/field gate.
+The executed collector proof does not claim GPU class/throughput, storage redundancy or
+media-volume linkage, UPS protection, DeckLink/SDI function, Desktop Video SDK compatibility,
+cabling, signal lock, receiver acceptance, or any installed-service/field gate. That run predates
+the typed media-volume binding below and remains intentionally non-authoritative for the new
+predicate.
+
+## Contract-level linkage proof
+
+The current source contract adds `media_volume_backing_disks` and its typed verification flag to
+the version-6 StationBox profile. The fixed PowerShell boundary resolves mounted-folder paths
+with `Get-Volume -FilePath`, binds with `Get-Partition -Volume` and `Get-Disk`, and rechecks
+volume identity, size, and disk-number set; it supplies no serial, PNP, or operator-controlled
+identifiers. The API fixture trims and converts the relation, rejects missing/negative sizes, and
+the pure readiness fixture proves that a same-snapshot all-NVMe relation passes only
+`MediaStorageMedium` while `RedundantMediaStorage` remains unknown. No native GStreamer-linked
+test or live Windows collector was run for this contract-only proof.

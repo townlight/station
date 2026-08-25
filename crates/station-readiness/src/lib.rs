@@ -10,7 +10,7 @@ mod headend;
 
 pub use headend::*;
 
-const SCHEMA_VERSION: u32 = 4;
+const SCHEMA_VERSION: u32 = 6;
 const MAX_TEXT: usize = 200;
 const MAX_FACTORY_NAME: usize = 120;
 const MAX_LIST_ITEMS: usize = 256;
@@ -75,12 +75,28 @@ pub struct MachineInventoryEvidence {
     pub storage_collection: MachineInventoryCollectionState,
     pub device_collection: MachineInventoryCollectionState,
     pub media_volume_total_gb: Option<f64>,
+    pub media_volume_backing_disks: Vec<MediaVolumeBackingDiskEvidence>,
+    pub media_volume_backing_disks_verified: bool,
     pub gpu_adapters: Vec<GpuAdapterEvidence>,
     pub physical_disks: Vec<PhysicalDiskEvidence>,
     pub virtual_disks: Vec<VirtualDiskEvidence>,
     pub ups_devices: Vec<UpsDeviceEvidence>,
     pub decklink_devices: Vec<DeckLinkDeviceEvidence>,
     pub blackmagic_drivers: Vec<BlackmagicDriverEvidence>,
+}
+
+/// A same-snapshot binding from the configured media volume to the disks
+/// reported by Windows for that volume. This is intentionally separate from
+/// the aggregate disk inventory: aggregate NVMe or mirror-like observations
+/// cannot qualify the media volume without this relation.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MediaVolumeBackingDiskEvidence {
+    pub name: String,
+    pub size_gb: f64,
+    pub media_type: Option<String>,
+    pub bus_type: Option<String>,
+    pub health_status: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -919,22 +935,48 @@ fn derive_reference_station_catalog(
         ),
     };
     let media_storage_medium = || {
-        let detail = if hardware.machine_inventory.storage_collection
+        let backing_disks = &hardware.machine_inventory.media_volume_backing_disks;
+        let linked_nvme = hardware.machine_inventory.storage_collection
             == MachineInventoryCollectionState::Collected
+            && hardware.machine_inventory.media_volume_total_gb.is_some()
             && hardware
                 .machine_inventory
-                .physical_disks
-                .iter()
-                .any(|disk| {
-                    disk.bus_type
-                        .as_deref()
-                        .is_some_and(|value| value.eq_ignore_ascii_case("nvme"))
-                }) {
-            "NVMe physical storage was observed, but its linkage to the media volume is not authenticated."
+                .media_volume_backing_disks_verified
+            && !backing_disks.is_empty()
+            && backing_disks.iter().all(|disk| {
+                disk.bus_type
+                    .as_deref()
+                    .is_some_and(|value| value.eq_ignore_ascii_case("nvme"))
+            });
+        if linked_nvme {
+            passing_reference_requirement(
+                ReferenceStationRequirementName::MediaStorageMedium,
+                format!(
+                    "The configured media volume is linked to {} NVMe backing disk(s) in the current Windows storage snapshot.",
+                    backing_disks.len()
+                ),
+            )
         } else {
-            "The required NVMe medium for the media volume is not authenticated."
-        };
-        unknown_reference_requirement(ReferenceStationRequirementName::MediaStorageMedium, detail)
+            let detail = if hardware.machine_inventory.storage_collection
+                == MachineInventoryCollectionState::Collected
+                && hardware
+                    .machine_inventory
+                    .physical_disks
+                    .iter()
+                    .any(|disk| {
+                        disk.bus_type
+                            .as_deref()
+                            .is_some_and(|value| value.eq_ignore_ascii_case("nvme"))
+                    }) {
+                "NVMe physical storage was observed, but its linkage to the media volume is not authenticated."
+            } else {
+                "The required NVMe medium for the media volume is not authenticated."
+            };
+            unknown_reference_requirement(
+                ReferenceStationRequirementName::MediaStorageMedium,
+                detail,
+            )
+        }
     };
     let gpu = || {
         let detail = if hardware.machine_inventory.gpu_collection
@@ -1340,6 +1382,17 @@ fn unknown_reference_requirement(
     }
 }
 
+fn passing_reference_requirement(
+    name: ReferenceStationRequirementName,
+    detail: String,
+) -> ReferenceStationRequirementAssessment {
+    ReferenceStationRequirementAssessment {
+        name,
+        state: ReadinessState::Pass,
+        detail,
+    }
+}
+
 fn optional_reference_requirement(
     name: ReferenceStationRequirementName,
     detail: &str,
@@ -1535,6 +1588,7 @@ fn validate_machine_inventory(
     validate_inventory_group(
         &input.storage_collection,
         input.media_volume_total_gb.is_none()
+            && input.media_volume_backing_disks.is_empty()
             && input.physical_disks.is_empty()
             && input.virtual_disks.is_empty(),
         "storage",
@@ -1553,6 +1607,13 @@ fn validate_machine_inventory(
         return invalid("machine inventory media volume total is impossible");
     }
     validate_inventory_list(&input.gpu_adapters, "GPU adapters")?;
+    validate_inventory_list(
+        &input.media_volume_backing_disks,
+        "media-volume backing disks",
+    )?;
+    if input.media_volume_backing_disks_verified != !input.media_volume_backing_disks.is_empty() {
+        return invalid("media-volume backing-disk verification does not match its facts");
+    }
     validate_inventory_list(&input.physical_disks, "physical disks")?;
     validate_inventory_list(&input.virtual_disks, "virtual disks")?;
     validate_inventory_list(&input.ups_devices, "UPS devices")?;
@@ -1580,6 +1641,29 @@ fn validate_machine_inventory(
             &disk.health_status,
             "physical disk",
         )?;
+    }
+    for disk in &input.media_volume_backing_disks {
+        validate_disk_text(
+            &disk.name,
+            disk.size_gb,
+            &disk.media_type,
+            &disk.bus_type,
+            &disk.health_status,
+            "media-volume backing disk",
+        )?;
+    }
+    if input.media_volume_backing_disks_verified {
+        let Some(total_gb) = input.media_volume_total_gb else {
+            return invalid("verified media-volume backing disks require total capacity");
+        };
+        let backing_total_gb = input
+            .media_volume_backing_disks
+            .iter()
+            .map(|disk| disk.size_gb)
+            .sum::<f64>();
+        if !backing_total_gb.is_finite() || backing_total_gb < total_gb {
+            return invalid("media-volume backing disks do not cover total capacity");
+        }
     }
     for disk in &input.virtual_disks {
         visible(&disk.name, "virtual disk name", MAX_TEXT)?;
@@ -1961,6 +2045,8 @@ mod tests {
                     storage_collection: MachineInventoryCollectionState::Unavailable,
                     device_collection: MachineInventoryCollectionState::Unavailable,
                     media_volume_total_gb: None,
+                    media_volume_backing_disks: Vec::new(),
+                    media_volume_backing_disks_verified: false,
                     gpu_adapters: Vec::new(),
                     physical_disks: Vec::new(),
                     virtual_disks: Vec::new(),

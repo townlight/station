@@ -27,13 +27,21 @@ honest implementation/proof status of every required section.
 
 Install GStreamer from the [official Windows download](https://gstreamer.freedesktop.org/download/#windows) and put its `bin` directory first in `PATH` before building. The runtime currently uses the SQLite library included with Windows and does not require a separately installed database server. The product installer will carry the selected GStreamer runtime rather than asking station operators to configure a development SDK.
 
+Run Cargo from the workspace root through `scripts\invoke-cargo.ps1`. The wrapper binds Cargo and all
+of its descendant processes to the explicit runtime before Windows loads any test executable. The
+Windows MSVC Cargo runner provides a second execution boundary and resolves the development runtime at
+`%LOCALAPPDATA%\Programs\gstreamer\1.0\msvc_x86_64` by default, binds its exact loader and plugin
+directories before launching any built executable, and fails in the terminal before launch if that
+runtime is absent. Set `TOWNLIGHT_GSTREAMER_ROOT` to an explicit alternate pinned runtime root when
+needed; the runner never accepts a DLL found only through ambient `PATH`.
+
 ## Quick start
 
 1. Install Rust and the official GStreamer 1.28.6 MSVC x64 development runtime.
 2. Clone this repository.
 3. Run `npm ci --prefix web/operator` and `npm run build --prefix web/operator`.
-4. Run `cargo test --offline --workspace`.
-5. Run `cargo run -p stationd -- station.db 127.0.0.1:4070`.
+4. Run `scripts\invoke-cargo.ps1 test --offline --workspace`.
+5. Run `scripts\invoke-cargo.ps1 run -p stationd -- station.db 127.0.0.1:4070`.
 6. Open `http://127.0.0.1:4070/` to commission and operate the station. `GET /health` remains the machine health endpoint.
 
 `stationd service --database <absolute-path> --address 127.0.0.1:<port>` is the Service Control Manager entry point used by installation infrastructure. Service mode refuses relative database paths and non-loopback listeners, reports startup and shutdown state to Windows, and handles both requested stops and operating-system shutdown cooperatively. It is not intended to be launched directly from an operator terminal.
@@ -43,6 +51,8 @@ Install GStreamer from the [official Windows download](https://gstreamer.freedes
 `installer\build-installer.ps1` reproducibly restores and builds the operator console, then builds one elevated x64 setup executable in `dist`. It accepts only the pinned official GStreamer 1.28.6 runtime hash, embeds `stationd` (including the console), `channel-worker`, the private media runtime, notices, and an immutable source commit, and refuses a dirty release worktree. `-AllowDirty` exists only for local packaging tests.
 
 Installation is health-gated before Inno Setup commits the product registration: the installer stages immutable binaries, installs the private runtime, registers an immediate automatic LocalSystem service with restart recovery, starts it, receives the local readiness response, and writes a candidate receipt. Immediate startup is deliberate: a station must begin channel recovery during boot rather than wait for Windows' delayed-start window. Any failure before formal installation removes the staged service, runtime, and binaries and returns nonzero. Uninstall removes application/runtime files and the service but deliberately preserves station data beneath `%ProgramData%\TownLight Station`.
+
+The full setup executable is deliberately **clean-install/reinstall only**. Before `ssInstall`, it refuses to run when the TownLight application directory, either TownLight service, or this AppId's 64-bit uninstall registration exists, so it cannot overwrite a working installation and later attempt a speculative rollback. It then atomically claims an empty application directory, stages files with no-overwrite copies, and refuses a pre-existing private runtime. Use the installed signed maintenance updater for in-place `.tlu` upgrades. A reinstall after proper uninstall remains supported: Inno removes its uninstall registration while preserved ProgramData, the database, receipts, and manifests alone do not trigger the rejection.
 
 Run `installer\verify-installed.ps1` after installation to compare installed hashes and receipts with the candidate manifest and to prove the service, health endpoint, and required media factories. Development candidates are not code-signed; a trusted Windows signing identity and timestamp are mandatory release gates before external distribution.
 
@@ -114,11 +124,11 @@ Run formatting, linting, and tests before committing:
 ```powershell
 npm ci --prefix web/operator --ignore-scripts --no-audit
 npm run build --prefix web/operator
-cargo fmt --check
-cargo clippy --offline --all-targets --all-features -- -D warnings
-cargo test --offline --workspace
+scripts\invoke-cargo.ps1 fmt --all -- --check
+scripts\invoke-cargo.ps1 clippy --offline --all-targets --all-features -- -D warnings
+scripts\invoke-cargo.ps1 test --offline --workspace
 ```
 
-The external MPEG-TS live-input regressions also require `ffmpeg.exe` on `PATH`. The worker-level gate that reproduces an already-running feed can be run directly with `cargo test -p channel-worker --test process_contract spawned_worker_live_takeover_preserves_audible_audio -- --exact --test-threads=1`.
+The external MPEG-TS live-input regressions also require `ffmpeg.exe` on `PATH`. The worker-level gate that reproduces an already-running feed can be run with `scripts\invoke-cargo.ps1 test -p channel-worker --test process_contract spawned_worker_live_takeover_preserves_audible_audio -- --exact --test-threads=1`.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the proof-first workflow and [LICENSE](LICENSE) for terms.

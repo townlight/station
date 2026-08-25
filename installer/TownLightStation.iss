@@ -106,6 +106,8 @@ const
   AuthStateBootstrapRequired = 1;
   AuthStateLoginRequired = 2;
   AuthStateAuthenticated = 3;
+  UninstallRegistrySubkey =
+    'Software\Microsoft\Windows\CurrentVersion\Uninstall\{D70BC1A2-A047-4F3A-87D9-811385248D2C}_is1';
   OperatorRootUrl = 'http://127.0.0.1:4070/';
   AuthStatusUrl = 'http://127.0.0.1:4070/api/v1/auth/status';
 
@@ -114,6 +116,9 @@ var
   CandidateActivated: Boolean;
   SetupCompleted: Boolean;
   BootstrapHandoffOwned: Boolean;
+  CandidateApplicationDirectoryClaimed: Boolean;
+  StationServiceCreatedByCandidate: Boolean;
+  UpdaterServiceCreatedByCandidate: Boolean;
   RuntimeManifestSha256: String;
 
 function NativeShellExecute(hWnd: Integer; lpOperation, lpFile,
@@ -126,6 +131,38 @@ function StationDatabasePath: String;
 begin
   Result := ExpandConstant(
     '{commonappdata}\TownLight Station\station.db');
+end;
+
+function ApplicationDirectory: String;
+begin
+  Result := ExpandConstant('{app}');
+end;
+
+procedure ClaimCandidateApplicationDirectory;
+var
+  AppDirectory: String;
+begin
+  AppDirectory := ApplicationDirectory;
+  if DirExists(AppDirectory) or FileExists(AppDirectory) then
+    RaiseException('The TownLight Station application directory appeared before clean installation could begin.');
+  if not CreateDir(AppDirectory) then
+    RaiseException('The TownLight Station application directory could not be claimed for clean installation.');
+  CandidateApplicationDirectoryClaimed := True;
+end;
+
+procedure RemoveCandidateApplicationDirectory;
+var
+  AppDirectory: String;
+begin
+  if not CandidateApplicationDirectoryClaimed then
+    Exit;
+  AppDirectory := ApplicationDirectory;
+  if DirExists(AppDirectory) and
+    (not DelTree(AppDirectory, True, True, True)) then
+    RaiseException('The candidate application directory could not be removed during rollback.');
+  if DirExists(AppDirectory) then
+    RaiseException('The candidate application directory remains after rollback.');
+  CandidateApplicationDirectoryClaimed := False;
 end;
 
 function BootstrapHandoffPath: String;
@@ -180,9 +217,23 @@ end;
 
 procedure RollbackService;
 begin
+  if UpdaterServiceCreatedByCandidate then
+  begin
+    StopAndDeleteServiceIfPresent(UpdaterServiceName);
+    UpdaterServiceCreatedByCandidate := False;
+  end;
+  if StationServiceCreatedByCandidate then
+  begin
+    StopAndDeleteServiceIfPresent(StationServiceName);
+    StationServiceCreatedByCandidate := False;
+  end;
+  CandidateActivated := False;
+end;
+
+procedure RemoveInstalledServices;
+begin
   StopAndDeleteServiceIfPresent(UpdaterServiceName);
   StopAndDeleteServiceIfPresent(StationServiceName);
-  CandidateActivated := False;
 end;
 
 procedure RemovePrivateRuntime;
@@ -220,6 +271,7 @@ begin
     '{commonappdata}\TownLight Station\active-slot.json'));
   DeleteFile(ExpandConstant(
     '{commonappdata}\TownLight Station\runtime-manifest.json'));
+  RemoveCandidateApplicationDirectory;
 end;
 
 function QueryAuthState: Integer;
@@ -277,36 +329,68 @@ begin
     'Run setup again; if setup still reports pending initialization, wait 15 minutes and retry.');
 end;
 
+function RunStationdWithPrivateRuntime(const Parameters: String;
+  var ResultCode: Integer): Boolean;
+var
+  OldPath: String;
+  OldPluginPath: String;
+  OldSystemPluginPath: String;
+  RuntimeBin: String;
+  RuntimePlugins: String;
+  PathWasSet: Boolean;
+  PluginPathWasSet: Boolean;
+  SystemPluginPathWasSet: Boolean;
+begin
+  Result := False;
+  PathWasSet := False;
+  PluginPathWasSet := False;
+  SystemPluginPathWasSet := False;
+  RuntimeBin := ExpandConstant('{app}\runtime\gstreamer\bin');
+  RuntimePlugins := ExpandConstant('{app}\runtime\gstreamer\lib\gstreamer-1.0');
+  OldPath := GetEnv('PATH');
+  OldPluginPath := GetEnv('GST_PLUGIN_PATH_1_0');
+  OldSystemPluginPath := GetEnv('GST_PLUGIN_SYSTEM_PATH_1_0');
+  try
+    if not NativeSetEnvironmentVariable('PATH', RuntimeBin + ';' + OldPath) then
+      RaiseException('The setup process could not prepare the private runtime PATH.');
+    PathWasSet := True;
+    if not NativeSetEnvironmentVariable('GST_PLUGIN_PATH_1_0', RuntimePlugins) then
+      RaiseException('The setup process could not prepare the private runtime plugin path.');
+    PluginPathWasSet := True;
+    if not NativeSetEnvironmentVariable('GST_PLUGIN_SYSTEM_PATH_1_0', RuntimePlugins) then
+      RaiseException('The setup process could not prepare the private runtime system plugin path.');
+    SystemPluginPathWasSet := True;
+    Result := Exec(ExpandConstant('{app}\stationd.exe'), Parameters, '', SW_HIDE,
+      ewWaitUntilTerminated, ResultCode);
+  finally
+    if SystemPluginPathWasSet and
+      (not NativeSetEnvironmentVariable('GST_PLUGIN_SYSTEM_PATH_1_0', OldSystemPluginPath)) then
+      Log('The setup process could not restore its private runtime system plugin path.');
+    if PluginPathWasSet and
+      (not NativeSetEnvironmentVariable('GST_PLUGIN_PATH_1_0', OldPluginPath)) then
+      Log('The setup process could not restore its private runtime plugin path.');
+    if PathWasSet and (not NativeSetEnvironmentVariable('PATH', OldPath)) then
+      Log('The setup process could not restore its private runtime PATH.');
+  end;
+end;
+
 procedure IssueBootstrapHandoff;
 var
   DatabasePath: String;
   HandoffPath: String;
-  OldPath: String;
   Parameters: String;
   ResultCode: Integer;
-  RuntimeBin: String;
-  StationdPath: String;
 begin
   DatabasePath := StationDatabasePath;
   HandoffPath := BootstrapHandoffPath;
-  StationdPath := ExpandConstant('{app}\stationd.exe');
-  RuntimeBin := ExpandConstant('{app}\runtime\gstreamer\bin');
   Parameters := 'auth issue-bootstrap-handoff --database "' +
     DatabasePath + '" --handoff "' + HandoffPath + '"';
-  OldPath := GetEnv('PATH');
-  if not NativeSetEnvironmentVariable('PATH', RuntimeBin + ';' + OldPath) then
-    RaiseException('The setup process could not prepare the private runtime environment.');
   BootstrapHandoffOwned := True;
-  try
-    if (not Exec(StationdPath, Parameters, '', SW_HIDE,
-      ewWaitUntilTerminated, ResultCode)) or (ResultCode <> 0) then
-      RaiseException(
-        'The one-time operator setup could not be initialized. ' +
-        'If another setup attempt just ended, wait 15 minutes and retry.');
-  finally
-    if not NativeSetEnvironmentVariable('PATH', OldPath) then
-      Log('The setup process could not restore its private runtime environment.');
-  end;
+  if (not RunStationdWithPrivateRuntime(Parameters, ResultCode)) or
+    (ResultCode <> 0) then
+    RaiseException(
+      'The one-time operator setup could not be initialized. ' +
+      'If another setup attempt just ended, wait 15 minutes and retry.');
 end;
 
 function IsBase64UrlCharacter(Value: Char): Boolean;
@@ -408,20 +492,8 @@ var
   Parameters: String;
 begin
   RuntimeRoot := ExpandConstant('{app}\runtime\gstreamer');
-  if DirExists(RuntimeRoot) then
-  begin
-    if FileExists(RuntimeRoot + '\unins000.exe') then
-    begin
-      if (not Exec(RuntimeRoot + '\unins000.exe', '/VERYSILENT /NORESTART', '',
-        SW_HIDE, ewWaitUntilTerminated, ResultCode)) or (ResultCode <> 0) then
-        RaiseException('The previous private media runtime could not be removed safely.');
-    end;
-    if DirExists(RuntimeRoot) and
-      (not DelTree(RuntimeRoot, True, True, True)) then
-      RaiseException('The previous private media runtime left files that could not be removed.');
-    if DirExists(RuntimeRoot) then
-      RaiseException('The previous private media runtime root still exists after removal.');
-  end;
+  if DirExists(RuntimeRoot) or FileExists(RuntimeRoot) then
+    RaiseException('The private media runtime root already exists before clean installation.');
 
   ExtractTemporaryFile('{#GStreamerFile}');
   RuntimeInstaller := ExpandConstant('{tmp}\{#GStreamerFile}');
@@ -443,18 +515,16 @@ var
   Parameters: String;
   ResultCode: Integer;
   RuntimeRoot: String;
-  StationdPath: String;
 begin
   RuntimeRoot := ExpandConstant('{app}\runtime\gstreamer');
   ManifestPath := ExpandConstant(
     '{commonappdata}\TownLight Station\runtime-manifest.json');
-  StationdPath := ExpandConstant('{app}\stationd.exe');
   Parameters := 'release write-runtime-manifest --runtime-root "' +
     RuntimeRoot + '" --output "' + ManifestPath +
     '" --version "' + CandidateVersion + '" --source-commit "' +
     CandidateCommit + '" --runtime-package-sha256 "' + RuntimeSha256 + '"';
-  if (not Exec(StationdPath, Parameters, '', SW_HIDE,
-    ewWaitUntilTerminated, ResultCode)) or (ResultCode <> 0) then
+  if (not RunStationdWithPrivateRuntime(Parameters, ResultCode)) or
+    (ResultCode <> 0) then
     RaiseException('The installed media runtime manifest could not be created.');
   if not FileExists(ManifestPath) then
     RaiseException('The installed media runtime manifest is missing after creation.');
@@ -471,16 +541,16 @@ begin
   ExtractTemporaryFile('channel-worker.exe');
   ExtractTemporaryFile('station-updater.exe');
   AppDirectory := ExpandConstant('{app}');
-  if not ForceDirectories(AppDirectory) then
-    RaiseException('The TownLight Station application directory could not be created.');
+  if (not CandidateApplicationDirectoryClaimed) or (not DirExists(AppDirectory)) then
+    RaiseException('The TownLight Station application directory was not claimed for this candidate.');
   if not CopyFile(ExpandConstant('{tmp}\stationd.exe'),
-    AppDirectory + '\stationd.exe', False) then
+    AppDirectory + '\stationd.exe', True) then
     RaiseException('The station service binary could not be staged.');
   if not CopyFile(ExpandConstant('{tmp}\channel-worker.exe'),
-    AppDirectory + '\channel-worker.exe', False) then
+    AppDirectory + '\channel-worker.exe', True) then
     RaiseException('The channel worker binary could not be staged.');
   if not CopyFile(ExpandConstant('{tmp}\station-updater.exe'),
-    AppDirectory + '\station-updater.exe', False) then
+    AppDirectory + '\station-updater.exe', True) then
     RaiseException('The maintenance updater binary could not be staged.');
   if not ForceDirectories(ExpandConstant('{commonappdata}\TownLight Station')) then
     RaiseException('The station data directory could not be created.');
@@ -507,9 +577,11 @@ var
   ResultCode: Integer;
   BinaryPath: String;
   Arguments: String;
+  StationServiceExistedBeforeCreate: Boolean;
 begin
-  StopAndDeleteServiceIfPresent(UpdaterServiceName);
-  StopAndDeleteServiceIfPresent(StationServiceName);
+  StationServiceExistedBeforeCreate := ServiceExists(StationServiceName);
+  if ServiceExists(UpdaterServiceName) or StationServiceExistedBeforeCreate then
+    RaiseException('Candidate service registration began before the prior services were removed.');
 
   BinaryPath := '\"' + ExpandConstant('{app}\stationd.exe') +
     '\" service --database \"' +
@@ -517,9 +589,17 @@ begin
     '\" --address 127.0.0.1:4070';
   Arguments := 'create TownLightStation binPath= "' + BinaryPath +
     '" start= auto obj= LocalSystem DisplayName= "TownLight Station"';
+  ResultCode := -1;
   if (not RunSc(Arguments, ResultCode)) or (ResultCode <> 0) then
+  begin
+    if ResultCode = 1073 then
+      RaiseException('The TownLight Station service appeared during candidate registration.');
+    if (not StationServiceExistedBeforeCreate) and ServiceExists(StationServiceName) then
+      StationServiceCreatedByCandidate := True;
     RaiseException('The TownLight Station service could not be registered (exit ' +
       IntToStr(ResultCode) + ').');
+  end;
+  StationServiceCreatedByCandidate := True;
   ConfigureServiceEnvironment;
   if (not RunSc('config TownLightStation start= auto', ResultCode)) or
     (ResultCode <> 0) then
@@ -545,16 +625,28 @@ var
   ResultCode: Integer;
   BinaryPath: String;
   Arguments: String;
+  UpdaterServiceExistedBeforeCreate: Boolean;
 begin
+  UpdaterServiceExistedBeforeCreate := ServiceExists(UpdaterServiceName);
+  if UpdaterServiceExistedBeforeCreate then
+    RaiseException('Candidate updater service registration found an existing service.');
   BinaryPath := '\"' + ExpandConstant('{app}\station-updater.exe') +
     '\" service --database \"' +
     ExpandConstant('{commonappdata}\TownLight Station\station.db') +
     '\" --application-root \"' + ExpandConstant('{app}') + '\"';
   Arguments := 'create ' + UpdaterServiceName + ' binPath= "' + BinaryPath +
     '" start= auto obj= LocalSystem DisplayName= "TownLight Station Maintenance"';
+  ResultCode := -1;
   if (not RunSc(Arguments, ResultCode)) or (ResultCode <> 0) then
+  begin
+    if ResultCode = 1073 then
+      RaiseException('The maintenance updater service appeared during candidate registration.');
+    if (not UpdaterServiceExistedBeforeCreate) and ServiceExists(UpdaterServiceName) then
+      UpdaterServiceCreatedByCandidate := True;
     RaiseException('The maintenance updater service could not be registered (exit ' +
       IntToStr(ResultCode) + ').');
+  end;
+  UpdaterServiceCreatedByCandidate := True;
   if (not RunSc('config ' + UpdaterServiceName + ' start= auto', ResultCode)) or
     (ResultCode <> 0) then
     RaiseException('Maintenance updater automatic start could not be configured.');
@@ -659,10 +751,7 @@ end;
 
 procedure RemoveStagedBinaries;
 begin
-  DeleteFile(ExpandConstant('{app}\station-updater.exe'));
-  DeleteFile(ExpandConstant('{app}\channel-worker.exe'));
-  DeleteFile(ExpandConstant('{app}\stationd.exe'));
-  RemoveDir(ExpandConstant('{app}'));
+  RemoveCandidateApplicationDirectory;
 end;
 
 procedure CurStepChanged(CurStep: TSetupStep);
@@ -670,8 +759,7 @@ begin
   if CurStep = ssInstall then
   begin
     try
-      StopAndDeleteServiceIfPresent(UpdaterServiceName);
-      StopAndDeleteServiceIfPresent(StationServiceName);
+      ClaimCandidateApplicationDirectory;
       StageStationBinaries;
       InstallPrivateRuntime;
       WriteRuntimeManifest;
@@ -693,6 +781,28 @@ begin
     SetupCompleted := True;
 end;
 
+function ExistingProductInstallationDetected: Boolean;
+begin
+  Result := DirExists(ApplicationDirectory) or
+    ServiceExists(StationServiceName) or
+    ServiceExists(UpdaterServiceName) or
+    RegKeyExists(HKLM64, UninstallRegistrySubkey);
+end;
+
+function PrepareToInstall(var NeedsRestart: Boolean): String;
+begin
+  NeedsRestart := False;
+  if ExistingProductInstallationDetected then
+  begin
+    Result := 'An existing TownLight Station application or service was found. ' +
+      'This setup executable is clean-install and reinstall only; use the installed ' +
+      'TownLight Station Maintenance updater for a signed in-place upgrade, or uninstall ' +
+      'the existing application before reinstalling.';
+    Exit;
+  end;
+  Result := '';
+end;
+
 procedure DeinitializeSetup;
 begin
   if CandidateActivated and (not SetupCompleted) then
@@ -706,7 +816,7 @@ procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
 begin
   if CurUninstallStep = usUninstall then
   begin
-    RollbackService;
+    RemoveInstalledServices;
     RemovePrivateRuntime;
     { Station data is deliberately preserved across uninstall. }
   end;

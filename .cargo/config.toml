@@ -1,0 +1,2 @@
+[target.x86_64-pc-windows-msvc]
+runner = ["powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", "../../.cargo/run-with-gstreamer.ps1"]

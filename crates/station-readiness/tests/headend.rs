@@ -34,6 +34,8 @@ fn station_box() -> station_readiness::StationBoxProfile {
                 storage_collection: MachineInventoryCollectionState::Unavailable,
                 device_collection: MachineInventoryCollectionState::Unavailable,
                 media_volume_total_gb: None,
+                media_volume_backing_disks: Vec::new(),
+                media_volume_backing_disks_verified: false,
                 gpu_adapters: Vec::new(),
                 physical_disks: Vec::new(),
                 virtual_disks: Vec::new(),

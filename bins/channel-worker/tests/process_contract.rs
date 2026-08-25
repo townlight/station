@@ -22,6 +22,36 @@ const CHANNEL_ID: &str = "62a47b7e-2a03-48d6-8703-a6e5ce986527";
 const WORKER_EXIT_TIMEOUT: Duration = Duration::from_secs(8);
 static PROCESS_CONTRACT_TEST_LOCK: Mutex<()> = Mutex::new(());
 
+fn live_audio_is_sustained(half_second_means: &[f64]) -> bool {
+    const MINIMUM_DECODED_CHUNKS: usize = 12;
+    const AUDIBLE_MEAN_ABS: f64 = 100.0;
+
+    half_second_means.len() >= MINIMUM_DECODED_CHUNKS
+        && half_second_means
+            .iter()
+            .skip(1)
+            .all(|mean| mean.is_finite() && *mean > AUDIBLE_MEAN_ABS)
+}
+
+#[test]
+fn live_audio_gate_rejects_a_long_silent_transition_followed_by_tone() {
+    let silent_then_tone = [
+        0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 150.0, 150.0, 150.0, 150.0, 150.0, 150.0,
+    ];
+
+    assert!(!live_audio_is_sustained(&silent_then_tone));
+}
+
+#[test]
+fn live_audio_gate_allows_only_one_partial_discovery_chunk() {
+    let mut boundary_partial_then_tone = vec![0.0];
+    boundary_partial_then_tone.extend([150.0; 11]);
+    assert!(live_audio_is_sustained(&boundary_partial_then_tone));
+
+    boundary_partial_then_tone[6] = 0.0;
+    assert!(!live_audio_is_sustained(&boundary_partial_then_tone));
+}
+
 fn process_contract_test_guard() -> MutexGuard<'static, ()> {
     PROCESS_CONTRACT_TEST_LOCK
         .lock()
@@ -937,10 +967,9 @@ fn spawned_worker_live_takeover_preserves_audible_audio() {
 
     clear_udp_backlog(&output);
     std::thread::sleep(Duration::from_millis(750));
-    // A transport capture beginning at an arbitrary mux boundary can lose
-    // leading audio during FFmpeg discovery. Eight seconds leaves a stable
-    // six-half-second decoded window without weakening the sustained-audio
-    // requirement below.
+    // A transport capture beginning at an arbitrary mux boundary may decode
+    // one partial leading chunk. Eight seconds must still yield at least six
+    // seconds of decoded audio with no later silent half-second gap.
     let transport_capture = capture_transport_for(&output, &mut worker, Duration::from_secs(8));
     assert!(
         transport_capture.len() > 100_000,
@@ -1061,12 +1090,9 @@ fn spawned_worker_live_takeover_preserves_audible_audio() {
             sum as f64 / count.max(1) as f64
         })
         .collect::<Vec<_>>();
-    let sustained_tail = chunk_means.len() >= 6
-        && chunk_means[chunk_means.len() - 6..]
-            .iter()
-            .all(|mean| *mean > 100.0);
+    let sustained_audio = live_audio_is_sustained(&chunk_means);
     assert!(
-        count > 300_000 && mean_abs > 100.0 && sustained_tail,
+        count > 300_000 && mean_abs > 100.0 && sustained_audio,
         "FFmpeg live audio was not sustained: {count} decoded samples, mean abs {mean_abs:.2}, half-second chunks {chunk_means:?}"
     );
 }
