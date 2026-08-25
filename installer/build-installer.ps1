@@ -14,8 +14,9 @@ $stationUpdater = Join-Path $repository 'target\release\station-updater.exe'
 $contract = Join-Path $PSScriptRoot 'verify-contract.ps1'
 $innoScript = Join-Path $PSScriptRoot 'TownLightStation.iss'
 $operatorRoot = Join-Path $repository 'web\operator'
+$cargoWrapper = Join-Path $repository 'scripts\invoke-cargo.ps1'
 
-foreach ($requiredFile in @($GStreamerInstaller, $InnoCompiler, $contract, $innoScript)) {
+foreach ($requiredFile in @($GStreamerInstaller, $InnoCompiler, $contract, $innoScript, $cargoWrapper)) {
     if (-not (Test-Path -LiteralPath $requiredFile -PathType Leaf)) {
         throw "Required installer input is missing: $requiredFile"
     }
@@ -56,9 +57,7 @@ try {
     }
 
     $env:CARGO_HTTP_CHECK_REVOKE = 'false'
-    $gstreamerBin = Join-Path $env:LOCALAPPDATA 'Programs\gstreamer\1.0\msvc_x86_64\bin'
-    $env:PATH = $gstreamerBin + ';' + $env:PATH
-    cargo build --release --offline -p stationd -p channel-worker -p station-updater
+    & $cargoWrapper build --release --offline -p stationd -p channel-worker -p station-updater
     if ($LASTEXITCODE -ne 0) {
         throw 'Release binary build failed.'
     }
