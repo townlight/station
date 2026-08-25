@@ -51,7 +51,8 @@ use station_schedule::{
     HeadendProfileApplyRequest, MediaAsset, OUTPUT_PROFILES, ScheduleItem, ScheduleState,
 };
 use station_storage::{
-    AlertChannelSecret, CgSnapshotReadError, CgWriteError, ChannelFallbackSlate,
+    AlertChannelSecret, CaptionPolicyWriteError, CgSnapshotReadError, CgWriteError,
+    ChannelCaptionMode, ChannelCaptionPolicy, ChannelCaptionPolicyAuditEvent, ChannelFallbackSlate,
     ChannelFallbackSlateAuditEvent, ChannelWriteError, CommissioningSupportBundleReceipt,
     CommitWriteError, ExternalReceiverAcceptanceReceipt, FallbackSlateWriteError,
     HeadendProfileWriteError, OutputLoudnessProofJob, OutputLoudnessProofJobRecord,
@@ -502,6 +503,53 @@ struct FallbackSlateAuthorityResponse {
     channel_id: String,
     selection: Option<FallbackSlateSelectionResponse>,
     audit: Vec<FallbackSlateAuditResponse>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum CaptionModeRequest {
+    Disabled,
+    Cea708,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PutCaptionPolicyRequest {
+    mode: CaptionModeRequest,
+    service_number: u8,
+    language: String,
+    expected_revision: u64,
+}
+
+#[derive(Debug, Serialize)]
+struct CaptionPolicyResponse {
+    channel_id: String,
+    mode: &'static str,
+    service_number: u8,
+    language: String,
+    revision: u64,
+    created_at_unix_ms: i64,
+    updated_at_unix_ms: i64,
+    updated_by: String,
+}
+
+#[derive(Debug, Serialize)]
+struct CaptionPolicyAuditResponse {
+    audit_id: String,
+    channel_id: String,
+    mode: &'static str,
+    service_number: u8,
+    language: String,
+    revision: u64,
+    actor: String,
+    occurred_at_unix_ms: i64,
+}
+
+#[derive(Debug, Serialize)]
+struct CaptionPolicyAuthorityResponse {
+    channel_id: String,
+    policy: Option<CaptionPolicyResponse>,
+    audit: Vec<CaptionPolicyAuditResponse>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1028,6 +1076,16 @@ impl Api {
                 if path.starts_with("/api/v1/channels/") && path.ends_with("/fallback-slate") =>
             {
                 self.put_fallback_slate(path, body, actor)
+            }
+            ("GET", path)
+                if path.starts_with("/api/v1/channels/") && path.ends_with("/caption-policy") =>
+            {
+                self.read_caption_policy(path)
+            }
+            ("PUT", path)
+                if path.starts_with("/api/v1/channels/") && path.ends_with("/caption-policy") =>
+            {
+                self.put_caption_policy(path, body, actor)
             }
             ("POST", path)
                 if path.starts_with("/api/v1/channels/")
@@ -2369,6 +2427,124 @@ impl Api {
                 error_response(422, "validation_failed", &message)
             }
             Err(FallbackSlateWriteError::Storage(message)) => {
+                error_response(500, "storage_error", &message)
+            }
+        }
+    }
+
+    fn read_caption_policy(&self, path: &str) -> ApiResponse {
+        let Some(channel_id) = path_identity(path, "/api/v1/channels/", "/caption-policy") else {
+            return error_response(400, "invalid_path", "The channel identity is invalid.");
+        };
+        if !is_api_uuid(channel_id) {
+            return error_response(400, "invalid_path", "The channel identity is invalid.");
+        }
+        let channel_exists = match self.storage.list_channels() {
+            Ok(channels) => channels
+                .iter()
+                .any(|channel| channel.channel_id == channel_id),
+            Err(message) => return error_response(500, "storage_error", &message),
+        };
+        if !channel_exists {
+            return error_response(404, "channel_not_found", "The channel does not exist.");
+        }
+        let policy = match self.storage.read_channel_caption_policy(channel_id) {
+            Ok(policy) => policy.map(caption_policy_response),
+            Err(message) => return error_response(500, "storage_error", &message),
+        };
+        let audit = match self.storage.list_channel_caption_policy_audit(channel_id) {
+            Ok(events) => events
+                .into_iter()
+                .map(caption_policy_audit_response)
+                .collect(),
+            Err(message) => return error_response(500, "storage_error", &message),
+        };
+        json_response(
+            200,
+            serde_json::to_vec(&CaptionPolicyAuthorityResponse {
+                channel_id: channel_id.into(),
+                policy,
+                audit,
+            })
+            .expect("serializing caption policy authority cannot fail"),
+        )
+    }
+
+    fn put_caption_policy(
+        &self,
+        path: &str,
+        body: Option<&[u8]>,
+        actor: Option<&OperatorAccount>,
+    ) -> ApiResponse {
+        let Some(channel_id) = path_identity(path, "/api/v1/channels/", "/caption-policy") else {
+            return error_response(400, "invalid_path", "The channel identity is invalid.");
+        };
+        if !is_api_uuid(channel_id) {
+            return error_response(400, "invalid_path", "The channel identity is invalid.");
+        }
+        let Some(actor) = actor.filter(|account| {
+            account.enabled()
+                && account
+                    .roles()
+                    .contains(&station_auth::OperatorRole::SetupAdmin)
+        }) else {
+            return error_response(
+                403,
+                "setup_admin_required",
+                "Changing caption policy requires the Setup Admin role.",
+            );
+        };
+        let Some(request) = parse_body::<PutCaptionPolicyRequest>(body) else {
+            return error_response(
+                400,
+                "invalid_json",
+                "A complete caption policy body is required.",
+            );
+        };
+        let mode = match request.mode {
+            CaptionModeRequest::Disabled => ChannelCaptionMode::Disabled,
+            CaptionModeRequest::Cea708 => ChannelCaptionMode::Cea708,
+        };
+        let occurred_at_unix_ms = match system_time_millis() {
+            Ok(value) => value,
+            Err(message) => return error_response(500, "clock_error", &message),
+        };
+        let audit_id = match secure_canonical_uuid() {
+            Ok(value) => value,
+            Err(message) => return error_response(500, "entropy_unavailable", &message),
+        };
+        match self.storage.write_channel_caption_policy(
+            channel_id,
+            mode,
+            request.service_number,
+            &request.language,
+            request.expected_revision,
+            actor.account_id().as_str(),
+            occurred_at_unix_ms,
+            &audit_id,
+        ) {
+            Ok(policy) => json_response(
+                200,
+                serde_json::to_vec(&caption_policy_response(policy))
+                    .expect("serializing caption policy cannot fail"),
+            ),
+            Err(CaptionPolicyWriteError::NotFound) => {
+                error_response(404, "channel_not_found", "The channel does not exist.")
+            }
+            Err(CaptionPolicyWriteError::MustBeStopped) => error_response(
+                409,
+                "channel_must_be_stopped",
+                "Stop this output before changing its caption policy.",
+            ),
+            Err(CaptionPolicyWriteError::Conflict(current_revision)) => error_response(
+                409,
+                "revision_conflict",
+                &format!("The current caption policy revision is {current_revision}."),
+            ),
+            Err(CaptionPolicyWriteError::Invalid(message)) => {
+                error_response(422, "validation_failed", &message)
+            }
+            Err(CaptionPolicyWriteError::Storage(message)) => {
                 error_response(500, "storage_error", &message)
             }
         }
@@ -5462,6 +5638,41 @@ fn fallback_slate_audit_response(
     }
 }
 
+fn caption_mode_name(mode: ChannelCaptionMode) -> &'static str {
+    match mode {
+        ChannelCaptionMode::Disabled => "disabled",
+        ChannelCaptionMode::Cea708 => "cea708",
+    }
+}
+
+fn caption_policy_response(policy: ChannelCaptionPolicy) -> CaptionPolicyResponse {
+    CaptionPolicyResponse {
+        channel_id: policy.channel_id,
+        mode: caption_mode_name(policy.mode),
+        service_number: policy.service_number,
+        language: policy.language,
+        revision: policy.revision,
+        created_at_unix_ms: policy.created_at_unix_ms,
+        updated_at_unix_ms: policy.updated_at_unix_ms,
+        updated_by: policy.updated_by,
+    }
+}
+
+fn caption_policy_audit_response(
+    event: ChannelCaptionPolicyAuditEvent,
+) -> CaptionPolicyAuditResponse {
+    CaptionPolicyAuditResponse {
+        audit_id: event.audit_id,
+        channel_id: event.channel_id,
+        mode: caption_mode_name(event.mode),
+        service_number: event.service_number,
+        language: event.language,
+        revision: event.revision,
+        actor: event.actor,
+        occurred_at_unix_ms: event.occurred_at_unix_ms,
+    }
+}
+
 fn loudness_job_response(record: OutputLoudnessProofJobRecord) -> LoudnessProofJobResponse {
     LoudnessProofJobResponse {
         job_id: record.job_id,
@@ -7229,6 +7440,80 @@ mod tests {
                 .unwrap()
                 .contains("revision 1")
         );
+
+        drop(api);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn setup_admin_controls_audited_channel_caption_policy() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "townlight-caption-policy-api-{}-{nonce}",
+            std::process::id()
+        ));
+        let application = root.join("application");
+        std::fs::create_dir_all(&application).unwrap();
+        let database = root.join("station.db");
+        let api =
+            Api::open_with_station_box_probe(&database, &application, station_box_probe()).unwrap();
+        let channel_id = "11111111-2222-4333-8444-555555555555";
+        let mut channel = ChannelConfiguration {
+            channel_id: channel_id.into(),
+            display_name: "Caption proof".into(),
+            output_profile: station_schedule::OutputProfileId::Proof360p30,
+            output_sinks: vec![station_schedule::OutputSinkConfiguration::required_udp(
+                "22222222-3333-4444-8555-666666666666",
+                "Proof output",
+                "127.0.0.1:5500",
+                -16.0,
+            )],
+            enabled: false,
+        };
+        api.storage.put_channel(&channel).unwrap();
+        let admin = test_actor(station_auth::OperatorRole::SetupAdmin);
+        let operator = test_actor(station_auth::OperatorRole::MeetingOperator);
+        let path = format!("/api/v1/channels/{channel_id}/caption-policy");
+        let body =
+            br#"{"mode":"cea708","service_number":1,"language":"en-US","expected_revision":0}"#;
+
+        assert_eq!(api.route("PUT", &path, Some(body), None).status, 403);
+        assert_eq!(
+            api.route("PUT", &path, Some(body), Some(&operator)).status,
+            403
+        );
+        let written = api.route("PUT", &path, Some(body), Some(&admin));
+        assert_eq!(
+            written.status,
+            200,
+            "{}",
+            String::from_utf8_lossy(&written.body)
+        );
+        let written: serde_json::Value = serde_json::from_slice(&written.body).unwrap();
+        assert_eq!(written["mode"], "cea708");
+        assert_eq!(written["service_number"], 1);
+        assert_eq!(written["language"], "en-US");
+        assert_eq!(written["revision"], 1);
+        assert_eq!(written["updated_by"], admin.account_id().as_str());
+
+        let authority = api.handle_in_process("GET", &path, None);
+        assert_eq!(authority.status, 200);
+        let authority: serde_json::Value = serde_json::from_slice(&authority.body).unwrap();
+        assert_eq!(authority["policy"]["revision"], 1);
+        assert_eq!(authority["audit"].as_array().unwrap().len(), 1);
+
+        let stale = api.route("PUT", &path, Some(body), Some(&admin));
+        assert_eq!(stale.status, 409);
+
+        channel.enabled = true;
+        api.storage.put_channel(&channel).unwrap();
+        let running_update =
+            br#"{"mode":"disabled","service_number":1,"language":"en-US","expected_revision":1}"#;
+        let running = api.route("PUT", &path, Some(running_update), Some(&admin));
+        assert_eq!(running.status, 409);
 
         drop(api);
         let _ = std::fs::remove_dir_all(root);
