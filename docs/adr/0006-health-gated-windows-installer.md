@@ -14,11 +14,12 @@ TownLight Station builds one elevated x64 setup executable with Inno Setup.
 
 - The candidate embeds optimized `stationd` and `channel-worker` binaries, notices, the full official GStreamer 1.28.6 MSVC x64 runtime installer, and its pinned SHA-256 digest.
 - Before Inno Setup commits product registration, code extracts the candidate binaries, installs GStreamer to a private application prefix, registers `TownLightStation` as an immediate automatic LocalSystem service, sets bounded restart recovery, and starts it. Channel recovery therefore begins during boot rather than after Windows' delayed-start window.
-- The activation transaction allows 75 seconds and succeeds only after `GET /health` returns HTTP 200 with database readiness and current-boot orchestration readiness. It then writes `%ProgramData%\TownLight Station\install-receipt.json` containing product version, immutable source commit, media-runtime digest, time, and health URI. Post-install verification parses those fields structurally and does not depend on JSON property order.
+- The pinned private media runtime is removed and freshly installed on every installer activation. Before either service starts, the candidate `stationd` enumerates and hashes the exact bounded runtime file tree into `%ProgramData%\TownLight Station\runtime-manifest.json`; the manifest carries candidate and runtime-package identity, and its SHA-256 is bound into the installation receipt. A merely presence-complete prior tree is never blessed as current.
+- The activation transaction allows 75 seconds and succeeds only after `GET /health` returns HTTP 200 with database readiness and current-boot orchestration readiness. It then writes `%ProgramData%\TownLight Station\install-receipt.json` containing product version, immutable source commit, media-runtime package digest, installed-runtime manifest digest, time, and health URI. Post-install verification parses those fields structurally and does not depend on JSON property order.
 - Failure during staging, runtime installation, service registration, startup, health, or receipt writing removes the staged service, private runtime, and binaries and returns a nonzero setup result.
 - The service receives explicit private GStreamer `PATH` and plugin paths rather than relying on machine-wide developer configuration.
 - Uninstall stops and deletes the service and removes application/runtime files. It deliberately does not delete the station database or receipts in ProgramData.
-- Release packaging refuses a dirty worktree. The installer and binary hashes are emitted to `candidate-manifest.json` and can be checked by `verify-installed.ps1`.
+- Release packaging refuses a dirty worktree. The installer and binary hashes are emitted to `candidate-manifest.json`. `verify-installed.ps1` also verifies the receipt-bound runtime-manifest digest, exact file set, sizes, hashes, and absence of reparse points before probing factories.
 
 ## Evidence
 

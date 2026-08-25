@@ -776,7 +776,7 @@ pub fn derive_station_box_profile(
                 .detail
                 .clone()
                 .unwrap_or_else(|| "Installed release identity has no current evidence.".into()),
-            "installed and active-slot receipts",
+            "installed, active-slot, and runtime-manifest evidence",
             (release.state != ReadinessState::Pass)
                 .then(|| "Install a manifest-verified release candidate.".into()),
         ),

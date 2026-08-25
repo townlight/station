@@ -5,6 +5,7 @@ use station_update::{
     PreparedSlotRecord, UpdatePackageManifest, prepared_slot_path, read_prepared_slot_manifest,
     verify_prepared_slot,
 };
+use std::collections::BTreeSet;
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -17,6 +18,8 @@ pub const ACTIVE_SLOT_SCHEMA_VERSION: u32 = 1;
 pub const MAINTENANCE_SCHEMA_VERSION: u32 = 1;
 pub const ACTIVE_SLOT_RECEIPT_NAME: &str = "active-slot.json";
 pub const INSTALL_RECEIPT_NAME: &str = "install-receipt.json";
+pub const INSTALLED_RUNTIME_MANIFEST_NAME: &str = "runtime-manifest.json";
+pub const INSTALLED_RUNTIME_MANIFEST_SCHEMA_VERSION: u32 = 1;
 pub const TRANSACTION_DIRECTORY_NAME: &str = "maintenance-transactions";
 pub const REQUEST_DIRECTORY_NAME: &str = "maintenance-requests";
 pub const COMPLETED_REQUEST_DIRECTORY_NAME: &str = "maintenance-requests-completed";
@@ -25,6 +28,10 @@ const JOURNAL_SNAPSHOT_DIRECTORY_SUFFIX: &str = ".journal-snapshot";
 const JOURNAL_SNAPSHOT_MANIFEST_NAME: &str = "manifest.json";
 const JOURNAL_RESTORE_STAGE_NAME: &str = "restore-stage";
 const JOURNAL_RESTORE_QUARANTINE_NAME: &str = "restore-quarantine";
+const MAX_RUNTIME_MANIFEST_BYTES: u64 = 512 * 1024;
+const MAX_RUNTIME_MANIFEST_ENTRIES: usize = 4_096;
+const MAX_RUNTIME_FILE_BYTES: u64 = 512 * 1024 * 1024;
+const MAX_RUNTIME_TOTAL_BYTES: u64 = 1024 * 1024 * 1024;
 const MAX_JOURNAL_SNAPSHOT_ENTRIES: usize = 10_000;
 const MAX_JOURNAL_SNAPSHOT_PATH_BYTES: usize = 512;
 const MAX_JOURNAL_SNAPSHOT_PATH_DEPTH: usize = 32;
@@ -73,6 +80,60 @@ pub struct ActiveSlotReceipt {
     pub transaction_id: String,
     pub active: ActiveApplication,
     pub previous: Option<ActiveApplication>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InstalledRuntimeManifest {
+    pub schema_version: u32,
+    pub product: String,
+    pub version: String,
+    pub source_commit: String,
+    pub runtime_package_sha256: String,
+    pub files: Vec<InstalledRuntimeFile>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InstalledRuntimeFile {
+    pub path: String,
+    pub size_bytes: u64,
+    pub sha256: String,
+}
+
+impl InstalledRuntimeManifest {
+    pub fn validate(&self) -> Result<(), String> {
+        if self.schema_version != INSTALLED_RUNTIME_MANIFEST_SCHEMA_VERSION
+            || self.product != "TownLight Station"
+            || Version::parse(&self.version).is_err()
+            || !is_commit_hash_lowercase(&self.source_commit)
+            || !is_sha256_lowercase(&self.runtime_package_sha256)
+            || self.files.is_empty()
+            || self.files.len() > MAX_RUNTIME_MANIFEST_ENTRIES
+        {
+            return Err("installed runtime manifest identity or bounds are invalid".into());
+        }
+        let mut paths = BTreeSet::new();
+        let mut folded_paths = BTreeSet::new();
+        let mut total = 0_u64;
+        for file in &self.files {
+            validate_runtime_relative_path(&file.path)?;
+            if !paths.insert(file.path.clone())
+                || !folded_paths.insert(file.path.to_lowercase())
+                || file.size_bytes > MAX_RUNTIME_FILE_BYTES
+                || !is_sha256_lowercase(&file.sha256)
+            {
+                return Err("installed runtime manifest file entry is invalid".into());
+            }
+            total = total
+                .checked_add(file.size_bytes)
+                .ok_or_else(|| "installed runtime manifest total size overflowed".to_string())?;
+        }
+        if total > MAX_RUNTIME_TOTAL_BYTES {
+            return Err("installed runtime manifest total size exceeds its bound".into());
+        }
+        Ok(())
+    }
 }
 
 impl ActiveSlotReceipt {
@@ -1371,6 +1432,7 @@ pub struct VerifiedCandidateIdentity {
     pub version: String,
     pub source_commit: String,
     pub media_runtime_sha256: String,
+    pub runtime_manifest_sha256: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1379,6 +1441,7 @@ struct InstallReceiptIdentity {
     version: String,
     source_commit: String,
     media_runtime_sha256: String,
+    runtime_manifest_sha256: String,
     #[serde(default)]
     installed_at_unix_ms: Option<i64>,
     #[serde(default)]
@@ -1406,6 +1469,9 @@ pub fn read_verified_candidate_identity(
     if !is_sha256(&install.media_runtime_sha256) {
         return Err("installation receipt runtime SHA-256 is invalid".into());
     }
+    if !is_sha256_lowercase(&install.runtime_manifest_sha256) {
+        return Err("installation receipt runtime manifest SHA-256 is invalid".into());
+    }
 
     let active = read_active_slot_receipt(&data_directory.join(ACTIVE_SLOT_RECEIPT_NAME))?;
     let manifest = &active.active.package_manifest;
@@ -1417,12 +1483,236 @@ pub fn read_verified_candidate_identity(
     }
     verify_active_application(application_root, &active.active)
         .map_err(|error| format!("active application verification failed: {error}"))?;
+    let runtime_manifest_path = data_directory.join(INSTALLED_RUNTIME_MANIFEST_NAME);
+    let runtime_manifest_bytes = read_bounded_file(
+        &runtime_manifest_path,
+        MAX_RUNTIME_MANIFEST_BYTES,
+        "installed runtime manifest",
+    )?;
+    let actual_manifest_sha256 = sha256_lowercase(&runtime_manifest_bytes);
+    if actual_manifest_sha256 != install.runtime_manifest_sha256 {
+        return Err(
+            "installation receipt runtime manifest SHA-256 does not match the manifest".into(),
+        );
+    }
+    let runtime_manifest: InstalledRuntimeManifest =
+        serde_json::from_slice(&runtime_manifest_bytes)
+            .map_err(|error| format!("installed runtime manifest is invalid: {error}"))?;
+    runtime_manifest.validate()?;
+    if runtime_manifest.product != install.product
+        || runtime_manifest.runtime_package_sha256
+            != install.media_runtime_sha256.to_ascii_lowercase()
+    {
+        return Err("installation and runtime manifest identities do not agree".into());
+    }
+    verify_installed_runtime(
+        &application_root.join("runtime").join("gstreamer"),
+        &runtime_manifest,
+    )?;
     Ok(VerifiedCandidateIdentity {
         product: install.product,
         version: install.version,
         source_commit: install.source_commit,
         media_runtime_sha256: install.media_runtime_sha256.to_ascii_lowercase(),
+        runtime_manifest_sha256: install.runtime_manifest_sha256,
     })
+}
+
+pub fn write_installed_runtime_manifest(
+    runtime_root: &Path,
+    output_path: &Path,
+    version: &str,
+    source_commit: &str,
+    runtime_package_sha256: &str,
+) -> Result<String, String> {
+    if Version::parse(version).is_err()
+        || !is_commit_hash_lowercase(source_commit)
+        || !is_sha256_lowercase(runtime_package_sha256)
+    {
+        return Err("installed runtime manifest identity is invalid".into());
+    }
+    let files = enumerate_runtime_files(runtime_root)?;
+    let mut manifest_files = Vec::with_capacity(files.len());
+    for (path, full_path, size_bytes) in files {
+        let sha256 = hash_runtime_file(&full_path)?;
+        manifest_files.push(InstalledRuntimeFile {
+            path,
+            size_bytes,
+            sha256,
+        });
+    }
+    let manifest = InstalledRuntimeManifest {
+        schema_version: INSTALLED_RUNTIME_MANIFEST_SCHEMA_VERSION,
+        product: "TownLight Station".into(),
+        version: version.into(),
+        source_commit: source_commit.into(),
+        runtime_package_sha256: runtime_package_sha256.into(),
+        files: manifest_files,
+    };
+    manifest.validate()?;
+    let bytes = serde_json::to_vec(&manifest)
+        .map_err(|error| format!("could not encode installed runtime manifest: {error}"))?;
+    if bytes.len() as u64 > MAX_RUNTIME_MANIFEST_BYTES {
+        return Err("installed runtime manifest exceeds its size bound".into());
+    }
+    let digest = sha256_lowercase(&bytes);
+    write_bytes_atomic(output_path, &bytes, "installed runtime manifest")?;
+    Ok(digest)
+}
+
+fn verify_installed_runtime(
+    runtime_root: &Path,
+    manifest: &InstalledRuntimeManifest,
+) -> Result<(), String> {
+    let actual_files = enumerate_runtime_files(runtime_root)?;
+    let expected_paths = manifest
+        .files
+        .iter()
+        .map(|file| file.path.clone())
+        .collect::<BTreeSet<_>>();
+    let actual_paths = actual_files
+        .iter()
+        .map(|(path, _, _)| path.clone())
+        .collect::<BTreeSet<_>>();
+    if actual_paths != expected_paths {
+        return Err("installed runtime file set does not match its manifest".into());
+    }
+    let expected = manifest
+        .files
+        .iter()
+        .map(|file| (file.path.as_str(), file))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    for (path, full_path, size_bytes) in actual_files {
+        let file = expected
+            .get(path.as_str())
+            .ok_or_else(|| "installed runtime contains an unexpected file".to_string())?;
+        if size_bytes != file.size_bytes || hash_runtime_file(&full_path)? != file.sha256 {
+            return Err(format!(
+                "installed runtime file does not match its manifest: {path}"
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn enumerate_runtime_files(runtime_root: &Path) -> Result<Vec<(String, PathBuf, u64)>, String> {
+    let metadata = std::fs::symlink_metadata(runtime_root)
+        .map_err(|error| format!("could not inspect installed runtime root: {error}"))?;
+    if !metadata.is_dir() || metadata.file_type().is_symlink() || is_reparse_point(&metadata) {
+        return Err("installed runtime root is not a real directory".into());
+    }
+    let mut stack = vec![(runtime_root.to_path_buf(), String::new())];
+    let mut files = Vec::new();
+    let mut total = 0_u64;
+    let mut entry_count = 0_usize;
+    while let Some((directory, relative_directory)) = stack.pop() {
+        let entries = std::fs::read_dir(&directory)
+            .map_err(|error| format!("could not enumerate installed runtime: {error}"))?;
+        for entry in entries {
+            let entry =
+                entry.map_err(|error| format!("could not enumerate installed runtime: {error}"))?;
+            entry_count = entry_count.saturating_add(1);
+            if entry_count > MAX_RUNTIME_MANIFEST_ENTRIES {
+                return Err("installed runtime contains too many entries".into());
+            }
+            let entry_path = entry.path();
+            let metadata = std::fs::symlink_metadata(&entry_path)
+                .map_err(|error| format!("could not inspect installed runtime entry: {error}"))?;
+            if metadata.file_type().is_symlink() || is_reparse_point(&metadata) {
+                return Err("installed runtime contains a symlink or reparse point".into());
+            }
+            let name = entry
+                .file_name()
+                .into_string()
+                .map_err(|_| "installed runtime contains a non-Unicode entry name".to_string())?;
+            let relative_path = if relative_directory.is_empty() {
+                name
+            } else {
+                format!("{relative_directory}/{name}")
+            };
+            if metadata.is_dir() {
+                stack.push((entry_path, relative_path));
+                continue;
+            }
+            if !metadata.is_file() {
+                return Err("installed runtime contains a non-file entry".into());
+            }
+            validate_runtime_relative_path(&relative_path)?;
+            if metadata.len() > MAX_RUNTIME_FILE_BYTES {
+                return Err("installed runtime file size is outside its bounds".into());
+            }
+            total = total
+                .checked_add(metadata.len())
+                .ok_or_else(|| "installed runtime total size overflowed".to_string())?;
+            if total > MAX_RUNTIME_TOTAL_BYTES {
+                return Err("installed runtime total size exceeds its bound".into());
+            }
+            files.push((relative_path, entry_path, metadata.len()));
+            if files.len() > MAX_RUNTIME_MANIFEST_ENTRIES {
+                return Err("installed runtime contains too many files".into());
+            }
+        }
+    }
+    files.sort_by(|left, right| left.0.cmp(&right.0));
+    Ok(files)
+}
+
+fn validate_runtime_relative_path(path: &str) -> Result<(), String> {
+    if path.is_empty()
+        || path.starts_with('/')
+        || path.contains('\\')
+        || path.contains("//")
+        || path.ends_with('/')
+        || Path::new(path).is_absolute()
+        || path
+            .split('/')
+            .any(|part| part.is_empty() || part == "." || part == ".." || part.contains(':'))
+    {
+        return Err(format!(
+            "installed runtime manifest path is not canonical: {path}"
+        ));
+    }
+    Ok(())
+}
+
+fn hash_runtime_file(path: &Path) -> Result<String, String> {
+    let mut input = File::open(path)
+        .map_err(|error| format!("could not open installed runtime file: {error}"))?;
+    let mut digest = Sha256::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let count = input
+            .read(&mut buffer)
+            .map_err(|error| format!("could not read installed runtime file: {error}"))?;
+        if count == 0 {
+            break;
+        }
+        digest.update(&buffer[..count]);
+    }
+    Ok(format!("{:x}", digest.finalize()))
+}
+
+fn sha256_lowercase(bytes: &[u8]) -> String {
+    format!("{:x}", Sha256::digest(bytes))
+}
+
+fn is_sha256_lowercase(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte: u8| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+#[cfg(windows)]
+fn is_reparse_point(metadata: &std::fs::Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt;
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+    metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+}
+
+#[cfg(not(windows))]
+fn is_reparse_point(_metadata: &std::fs::Metadata) -> bool {
+    false
 }
 
 pub fn verify_active_application(
@@ -1454,6 +1744,8 @@ fn write_install_identity(
     struct PreviousInstallIdentity {
         #[serde(default)]
         media_runtime_sha256: Option<String>,
+        #[serde(default)]
+        runtime_manifest_sha256: Option<String>,
     }
     #[derive(Serialize)]
     struct InstallIdentity<'a> {
@@ -1463,6 +1755,8 @@ fn write_install_identity(
         installed_at_unix_ms: i64,
         #[serde(skip_serializing_if = "Option::is_none")]
         media_runtime_sha256: Option<&'a str>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        runtime_manifest_sha256: Option<&'a str>,
         health_uri: &'static str,
     }
     let previous_path = data_directory.join(INSTALL_RECEIPT_NAME);
@@ -1472,6 +1766,12 @@ fn write_install_identity(
         .and_then(|identity| identity.media_runtime_sha256)
         .filter(|hash| is_sha256(hash))
         .map(|hash| hash.to_ascii_lowercase());
+    let previous_manifest = read_bounded_file(&previous_path, 64 * 1024, "installation receipt")
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<PreviousInstallIdentity>(&bytes).ok())
+        .and_then(|identity| identity.runtime_manifest_sha256)
+        .filter(|hash| is_sha256_lowercase(hash))
+        .map(|hash| hash.to_ascii_lowercase());
     write_json_atomic(
         &previous_path,
         &InstallIdentity {
@@ -1480,6 +1780,7 @@ fn write_install_identity(
             source_commit: &application.package_manifest.source_commit,
             installed_at_unix_ms: now_unix_ms,
             media_runtime_sha256: previous.as_deref(),
+            runtime_manifest_sha256: previous_manifest.as_deref(),
             health_uri: "http://127.0.0.1:4070/health",
         },
         "installation receipt",
@@ -1530,6 +1831,38 @@ fn write_json_atomic(path: &Path, value: &impl Serialize, label: &str) -> Result
             .map_err(|error| format!("could not create temporary {label}: {error}"))?;
         output
             .write_all(&bytes)
+            .and_then(|()| output.sync_all())
+            .map_err(|error| format!("could not synchronize {label}: {error}"))?;
+        drop(output);
+        replace_file(&temporary, path)
+            .map_err(|error| format!("could not publish {label}: {error}"))
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temporary);
+    }
+    result
+}
+
+fn write_bytes_atomic(path: &Path, bytes: &[u8], label: &str) -> Result<(), String> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| format!("{label} has no parent directory"))?;
+    ensure_real_directory(parent)?;
+    let temporary = parent.join(format!(
+        ".{}.{}.tmp",
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("runtime-manifest"),
+        std::process::id()
+    ));
+    let result = (|| {
+        let mut output = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)
+            .map_err(|error| format!("could not create temporary {label}: {error}"))?;
+        output
+            .write_all(bytes)
             .and_then(|()| output.sync_all())
             .map_err(|error| format!("could not synchronize {label}: {error}"))?;
         drop(output);

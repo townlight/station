@@ -114,6 +114,7 @@ var
   CandidateActivated: Boolean;
   SetupCompleted: Boolean;
   BootstrapHandoffOwned: Boolean;
+  RuntimeManifestSha256: String;
 
 function NativeShellExecute(hWnd: Integer; lpOperation, lpFile,
   lpParameters, lpDirectory: String; nShowCmd: Integer): Integer;
@@ -217,6 +218,8 @@ begin
     '{commonappdata}\TownLight Station\install-receipt.json'));
   DeleteFile(ExpandConstant(
     '{commonappdata}\TownLight Station\active-slot.json'));
+  DeleteFile(ExpandConstant(
+    '{commonappdata}\TownLight Station\runtime-manifest.json'));
 end;
 
 function QueryAuthState: Integer;
@@ -405,16 +408,20 @@ var
   Parameters: String;
 begin
   RuntimeRoot := ExpandConstant('{app}\runtime\gstreamer');
-  if PrivateRuntimeIsComplete(RuntimeRoot) then
+  if DirExists(RuntimeRoot) then
   begin
-    Log('Reusing the complete private media runtime already installed at ' +
-      RuntimeRoot);
-    RuntimeWasInstalled := False;
-    Exit;
+    if FileExists(RuntimeRoot + '\unins000.exe') then
+    begin
+      if (not Exec(RuntimeRoot + '\unins000.exe', '/VERYSILENT /NORESTART', '',
+        SW_HIDE, ewWaitUntilTerminated, ResultCode)) or (ResultCode <> 0) then
+        RaiseException('The previous private media runtime could not be removed safely.');
+    end;
+    if DirExists(RuntimeRoot) and
+      (not DelTree(RuntimeRoot, True, True, True)) then
+      RaiseException('The previous private media runtime left files that could not be removed.');
+    if DirExists(RuntimeRoot) then
+      RaiseException('The previous private media runtime root still exists after removal.');
   end;
-
-  if FileExists(RuntimeRoot + '\unins000.exe') then
-    RemovePrivateRuntime;
 
   ExtractTemporaryFile('{#GStreamerFile}');
   RuntimeInstaller := ExpandConstant('{tmp}\{#GStreamerFile}');
@@ -428,6 +435,32 @@ begin
 
   if not PrivateRuntimeIsComplete(RuntimeRoot) then
     RaiseException('The bundled media runtime did not produce every required library and plugin.');
+end;
+
+procedure WriteRuntimeManifest;
+var
+  ManifestPath: String;
+  Parameters: String;
+  ResultCode: Integer;
+  RuntimeRoot: String;
+  StationdPath: String;
+begin
+  RuntimeRoot := ExpandConstant('{app}\runtime\gstreamer');
+  ManifestPath := ExpandConstant(
+    '{commonappdata}\TownLight Station\runtime-manifest.json');
+  StationdPath := ExpandConstant('{app}\stationd.exe');
+  Parameters := 'release write-runtime-manifest --runtime-root "' +
+    RuntimeRoot + '" --output "' + ManifestPath +
+    '" --version "' + CandidateVersion + '" --source-commit "' +
+    CandidateCommit + '" --runtime-package-sha256 "' + RuntimeSha256 + '"';
+  if (not Exec(StationdPath, Parameters, '', SW_HIDE,
+    ewWaitUntilTerminated, ResultCode)) or (ResultCode <> 0) then
+    RaiseException('The installed media runtime manifest could not be created.');
+  if not FileExists(ManifestPath) then
+    RaiseException('The installed media runtime manifest is missing after creation.');
+  RuntimeManifestSha256 := Lowercase(GetSHA256OfFile(ManifestPath));
+  if Length(RuntimeManifestSha256) <> 64 then
+    RaiseException('The installed media runtime manifest digest is invalid.');
 end;
 
 procedure StageStationBinaries;
@@ -582,6 +615,7 @@ begin
     '"version":"' + CandidateVersion + '",' +
     '"source_commit":"' + CandidateCommit + '",' +
     '"media_runtime_sha256":"' + RuntimeSha256 + '",' +
+    '"runtime_manifest_sha256":"' + RuntimeManifestSha256 + '",' +
     '"installed_local_time":"' +
       GetDateTimeString('yyyy-mm-dd hh:nn:ss', '-', ':') + '",' +
     '"health_uri":"http://127.0.0.1:4070/health"' +
@@ -640,6 +674,7 @@ begin
       StopAndDeleteServiceIfPresent(StationServiceName);
       StageStationBinaries;
       InstallPrivateRuntime;
+      WriteRuntimeManifest;
       CreateAndStartService;
       if not WaitForHealthyStation then
         RaiseException('TownLight Station did not become healthy within 75 seconds.');

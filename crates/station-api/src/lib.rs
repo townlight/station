@@ -4844,7 +4844,7 @@ fn collect_station_box_probe(
                 Some(identity.version),
                 Some(identity.source_commit),
                 true,
-                "The active application manifest files and recorded approved media-runtime SHA-256 identity are verified; live engine and factory readiness remains a separate probe.".into(),
+                "The active application and every file in the receipt-bound installed media-runtime manifest are rehashed and verified; live engine and factory readiness remains a separate probe.".into(),
             ),
             Err(detail) => (None, None, false, detail),
         };

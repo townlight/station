@@ -61,6 +61,20 @@ fn main() {
         LaunchMode::AuthIssueBootstrapHandoff { handoff } => {
             auth_handoff::issue_bootstrap_handoff(&config.database, &handoff)
         }
+        LaunchMode::ReleaseWriteRuntimeManifest {
+            runtime_root,
+            output,
+            version,
+            source_commit,
+            runtime_package_sha256,
+        } => station_maintenance::write_installed_runtime_manifest(
+            &runtime_root,
+            &output,
+            &version,
+            &source_commit,
+            &runtime_package_sha256,
+        )
+        .map(|_| ()),
     };
     if let Err(message) = result {
         fatal(&message);

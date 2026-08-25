@@ -29,10 +29,11 @@ Installed-engine inspection runs only the private `gst-inspect-1.0.exe`, with pr
 a five-second deadline, discarded stderr, and a concurrently enforced byte limit. It accepts only
 the known required factory and encoder names. The current network probe proves local route selection,
 not outbound delivery, so it remains unknown. A successful localized `w32tm` status query is not
-treated as synchronization proof, so clock synchronization remains unknown. Application receipts
-and active binary hashes can agree, but the current media-runtime receipt identifies the bundled
-runtime installer rather than installed runtime bytes; release integrity therefore remains unknown
-until an authenticated installed-file manifest exists.
+treated as synchronization proof, so clock synchronization remains unknown. Application and
+active-slot receipts must agree, and every application file is rehashed. The approved media-runtime
+package identity is bound to a full installed-file manifest whose exact bytes are SHA-256-bound into
+the installation receipt. Every runtime file is re-enumerated and rehashed; missing, extra,
+modified, unsafe, unbounded, or identity-mismatched evidence keeps release integrity from passing.
 
 The Windows boundary also runs one fixed, hidden PowerShell inventory program with no profile,
 no interactive input, a fifteen-second deadline, and a one-MiB stdout cap. The media path crosses only
@@ -54,6 +55,6 @@ readiness facts.
 
 StationBox status is now one typed authority that S2 headend checks and S3 commissioning can extend
 without inventing new readiness vocabularies. The current machine will correctly remain yellow or
-red for unverified clock, outbound delivery, release runtime integrity, interlaced output, SDI, and
+red for unverified clock, outbound delivery, interlaced output, SDI, and
 NDI. That is an implementation result, not field evidence: clean-machine, headend, one-station-week,
 and three-station-week gates remain external and false until their evidence is captured.

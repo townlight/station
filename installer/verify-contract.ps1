@@ -22,8 +22,11 @@ $requirements = [ordered]@{
     'checks the static image overlay plugin' = 'gstgdkpixbuf.dll'
     'checks the PNG image decoder plugin' = 'gstpng.dll'
     'checks the JPEG image decoder plugin' = 'gstjpeg.dll'
-    'reuses an already-complete private runtime during upgrade' = 'if PrivateRuntimeIsComplete(RuntimeRoot) then'
-    'removes an incomplete private runtime before replacement' = "if FileExists(RuntimeRoot + '\unins000.exe') then"
+    'never blesses a merely presence-complete prior runtime' = 'if DirExists(RuntimeRoot) then'
+    'removes the previous private runtime before replacement' = "if FileExists(RuntimeRoot + '\unins000.exe') then"
+    'rejects an incompletely removed prior runtime tree' = 'The previous private media runtime root still exists after removal.'
+    'creates an exact installed-runtime manifest before service start' = 'release write-runtime-manifest --runtime-root "'
+    'binds the installed-runtime manifest digest into the receipt' = 'runtime_manifest_sha256'
     'registers the native station service' = 'create TownLightStation'
     'sets immediate automatic service start' = 'config TownLightStation start= auto'
     'configures service recovery' = 'failure TownLightStation'

@@ -1,10 +1,11 @@
 use sha2::{Digest, Sha256};
 use station_maintenance::{
     ACTIVE_SLOT_RECEIPT_NAME, ACTIVE_SLOT_SCHEMA_VERSION, ActiveApplication, ActiveSlotReceipt,
-    INSTALL_RECEIPT_NAME, MAINTENANCE_SCHEMA_VERSION, MaintenanceHost, MaintenancePhase,
-    MaintenanceRequest, TRANSACTION_DIRECTORY_NAME, activate_prepared_slot,
-    latest_maintenance_transaction, read_active_slot_receipt, read_verified_candidate_identity,
-    recover_incomplete_transaction,
+    INSTALL_RECEIPT_NAME, INSTALLED_RUNTIME_MANIFEST_NAME, MAINTENANCE_SCHEMA_VERSION,
+    MaintenanceHost, MaintenancePhase, MaintenanceRequest, TRANSACTION_DIRECTORY_NAME,
+    activate_prepared_slot, latest_maintenance_transaction, read_active_slot_receipt,
+    read_verified_candidate_identity, recover_incomplete_transaction,
+    write_installed_runtime_manifest,
 };
 use station_update::{
     PreparedSlotRecord, ReleaseManifest, UPDATE_PACKAGE_SCHEMA_VERSION, UpdatePackageFile,
@@ -132,6 +133,15 @@ fn commits_only_after_candidate_proof_and_records_the_previous_application() {
             .unwrap();
     assert_eq!(install["version"], "0.2.0");
     assert_eq!(install["media_runtime_sha256"], "c".repeat(64));
+    assert_eq!(
+        install["runtime_manifest_sha256"],
+        format!(
+            "{:x}",
+            Sha256::digest(
+                std::fs::read(fixture.data.join(INSTALLED_RUNTIME_MANIFEST_NAME)).unwrap()
+            )
+        )
+    );
     let verified = read_verified_candidate_identity(&fixture.data, &fixture.application).unwrap();
     assert_eq!(verified.version, "0.2.0");
     assert_eq!(verified.media_runtime_sha256, "c".repeat(64));
@@ -569,6 +579,9 @@ fn fixture() -> Fixture {
     let data = root.join("data");
     std::fs::create_dir_all(&application).unwrap();
     std::fs::create_dir_all(&data).unwrap();
+    let runtime = application.join("runtime").join("gstreamer");
+    std::fs::create_dir_all(runtime.join("bin")).unwrap();
+    std::fs::write(runtime.join("bin").join("gstreamer.dll"), b"runtime").unwrap();
     std::fs::create_dir_all(data.join("channel-journals").join("empty")).unwrap();
     std::fs::write(
         data.join("channel-journals").join("channel-a.tlj"),
@@ -595,10 +608,18 @@ fn fixture() -> Fixture {
         serde_json::to_vec(&active).unwrap(),
     )
     .unwrap();
+    let runtime_manifest_sha256 = write_installed_runtime_manifest(
+        &runtime,
+        &data.join(INSTALLED_RUNTIME_MANIFEST_NAME),
+        "0.1.0",
+        CURRENT_COMMIT,
+        &"c".repeat(64),
+    )
+    .unwrap();
     std::fs::write(
         data.join(INSTALL_RECEIPT_NAME),
         format!(
-            "{{\"product\":\"TownLight Station\",\"version\":\"0.1.0\",\"source_commit\":\"{CURRENT_COMMIT}\",\"media_runtime_sha256\":\"{}\"}}",
+            "{{\"product\":\"TownLight Station\",\"version\":\"0.1.0\",\"source_commit\":\"{CURRENT_COMMIT}\",\"media_runtime_sha256\":\"{}\",\"runtime_manifest_sha256\":\"{runtime_manifest_sha256}\"}}",
             "C".repeat(64)
         ),
     )

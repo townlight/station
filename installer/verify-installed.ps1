@@ -9,6 +9,8 @@ $runtime = Join-Path $application 'runtime\gstreamer'
 $manifestDocument = Get-Content -LiteralPath $Manifest -Raw | ConvertFrom-Json
 $receipt = Get-Content -LiteralPath (Join-Path $data 'install-receipt.json') -Raw | ConvertFrom-Json
 $activeReceipt = Get-Content -LiteralPath (Join-Path $data 'active-slot.json') -Raw | ConvertFrom-Json
+$runtimeManifestPath = Join-Path $data 'runtime-manifest.json'
+$runtimeManifest = Get-Content -LiteralPath $runtimeManifestPath -Raw | ConvertFrom-Json
 
 $service = Get-CimInstance Win32_Service -Filter "Name='TownLightStation'"
 if (-not $service -or $service.State -ne 'Running' -or $service.StartMode -ne 'Auto') {
@@ -64,6 +66,55 @@ if ($updaterHash -ne $manifestDocument.station_updater_sha256) {
 if ($receipt.source_commit -ne $manifestDocument.source_commit -or
     $receipt.media_runtime_sha256 -ne $manifestDocument.media_runtime_sha256) {
     throw 'The installation receipt does not match the candidate manifest.'
+}
+$runtimeManifestHash = (Get-FileHash -LiteralPath $runtimeManifestPath -Algorithm SHA256).Hash.ToLowerInvariant()
+if ($receipt.runtime_manifest_sha256 -ne $runtimeManifestHash) {
+    throw 'The installed runtime manifest does not match the installation receipt.'
+}
+if ($runtimeManifest.schema_version -ne 1 -or
+    $runtimeManifest.product -ne 'TownLight Station' -or
+    $runtimeManifest.version -ne $manifestDocument.version -or
+    $runtimeManifest.source_commit -ne $manifestDocument.source_commit -or
+    $runtimeManifest.runtime_package_sha256 -ne $manifestDocument.media_runtime_sha256) {
+    throw 'The installed runtime manifest identity does not match the candidate.'
+}
+
+$reparseEntries = @(Get-ChildItem -LiteralPath $runtime -Force -Recurse | Where-Object {
+    ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0
+})
+if ($reparseEntries.Count -ne 0) {
+    throw 'The installed runtime contains a reparse-point entry.'
+}
+$expectedRuntimeFiles = [Collections.Generic.Dictionary[string,object]]::new(
+    [StringComparer]::OrdinalIgnoreCase)
+foreach ($file in @($runtimeManifest.files)) {
+    $relative = [string]$file.path
+    if ([string]::IsNullOrWhiteSpace($relative) -or
+        $relative.Contains('\') -or
+        $relative.StartsWith('/') -or
+        $relative.Split('/') -contains '..' -or
+        $expectedRuntimeFiles.ContainsKey($relative)) {
+        throw 'The installed runtime manifest contains an unsafe or duplicate path.'
+    }
+    $expectedRuntimeFiles.Add($relative, $file)
+}
+$runtimePrefix = $runtime.TrimEnd('\') + '\'
+$actualRuntimeFiles = @(Get-ChildItem -LiteralPath $runtime -File -Force -Recurse)
+if ($actualRuntimeFiles.Count -ne $expectedRuntimeFiles.Count) {
+    throw 'The installed runtime file set does not match its manifest.'
+}
+foreach ($actual in $actualRuntimeFiles) {
+    if (-not $actual.FullName.StartsWith($runtimePrefix, [StringComparison]::OrdinalIgnoreCase)) {
+        throw 'The installed runtime file escaped its managed root.'
+    }
+    $relative = $actual.FullName.Substring($runtimePrefix.Length).Replace('\', '/')
+    $specification = $null
+    if (-not $expectedRuntimeFiles.TryGetValue($relative, [ref]$specification) -or
+        $actual.Length -ne [int64]$specification.size_bytes -or
+        (Get-FileHash -LiteralPath $actual.FullName -Algorithm SHA256).Hash.ToLowerInvariant() -ne
+            ([string]$specification.sha256).ToLowerInvariant()) {
+        throw "Installed runtime file does not match its manifest: $relative"
+    }
 }
 if ($activeReceipt.active.relative_directory -ne '.' -or
     $activeReceipt.active.package_manifest.source_commit -ne $manifestDocument.source_commit -or
@@ -123,6 +174,7 @@ foreach ($factory in @(
     stationd_sha256 = $stationdHash
     channel_worker_sha256 = $workerHash
     station_updater_sha256 = $updaterHash
+    runtime_manifest_sha256 = $runtimeManifestHash
     media_factories = 'ready'
     data_path = $data
 } | ConvertTo-Json

@@ -6,7 +6,16 @@ use std::path::PathBuf;
 pub enum LaunchMode {
     Console,
     Service,
-    AuthIssueBootstrapHandoff { handoff: PathBuf },
+    AuthIssueBootstrapHandoff {
+        handoff: PathBuf,
+    },
+    ReleaseWriteRuntimeManifest {
+        runtime_root: PathBuf,
+        output: PathBuf,
+        version: String,
+        source_commit: String,
+        runtime_package_sha256: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -21,6 +30,10 @@ pub fn parse(arguments: impl IntoIterator<Item = OsString>) -> Result<DaemonConf
     if arguments.peek().and_then(|value| value.to_str()) == Some("auth") {
         arguments.next();
         return parse_auth(arguments);
+    }
+    if arguments.peek().and_then(|value| value.to_str()) == Some("release") {
+        arguments.next();
+        return parse_release(arguments);
     }
     let mode = match arguments.peek().and_then(|value| value.to_str()) {
         Some("service") => {
@@ -99,6 +112,80 @@ pub fn parse(arguments: impl IntoIterator<Item = OsString>) -> Result<DaemonConf
         mode,
         database,
         address,
+    })
+}
+
+fn parse_release(mut arguments: impl Iterator<Item = OsString>) -> Result<DaemonConfig, String> {
+    if arguments
+        .next()
+        .and_then(|value| value.into_string().ok())
+        .as_deref()
+        != Some("write-runtime-manifest")
+    {
+        return Err("release requires the write-runtime-manifest command".into());
+    }
+
+    let mut runtime_root = None;
+    let mut output = None;
+    let mut version = None;
+    let mut source_commit = None;
+    let mut runtime_package_sha256 = None;
+    while let Some(argument) = arguments.next() {
+        let (slot, label) = match argument.to_str() {
+            Some("--runtime-root") => (&mut runtime_root, "--runtime-root"),
+            Some("--output") => (&mut output, "--output"),
+            Some("--version") => (&mut version, "--version"),
+            Some("--source-commit") => (&mut source_commit, "--source-commit"),
+            Some("--runtime-package-sha256") => {
+                (&mut runtime_package_sha256, "--runtime-package-sha256")
+            }
+            _ => {
+                return Err("runtime manifest mode accepts only its five named options".into());
+            }
+        };
+        if slot.is_some() {
+            return Err(format!(
+                "runtime manifest {label} may be specified only once"
+            ));
+        }
+        *slot = Some(
+            arguments
+                .next()
+                .ok_or_else(|| format!("runtime manifest {label} requires a value"))?,
+        );
+    }
+
+    let runtime_root =
+        PathBuf::from(runtime_root.ok_or("runtime manifest requires --runtime-root")?);
+    let output = PathBuf::from(output.ok_or("runtime manifest requires --output")?);
+    if !runtime_root.is_absolute() || !output.is_absolute() {
+        return Err("runtime manifest requires absolute --runtime-root and --output paths".into());
+    }
+    let utf8 = |value: OsString, label: &str| {
+        value
+            .into_string()
+            .map_err(|_| format!("runtime manifest {label} must be UTF-8"))
+    };
+    Ok(DaemonConfig {
+        mode: LaunchMode::ReleaseWriteRuntimeManifest {
+            runtime_root,
+            output,
+            version: utf8(
+                version.ok_or("runtime manifest requires --version")?,
+                "--version",
+            )?,
+            source_commit: utf8(
+                source_commit.ok_or("runtime manifest requires --source-commit")?,
+                "--source-commit",
+            )?,
+            runtime_package_sha256: utf8(
+                runtime_package_sha256
+                    .ok_or("runtime manifest requires --runtime-package-sha256")?,
+                "--runtime-package-sha256",
+            )?,
+        },
+        database: PathBuf::from("station.db"),
+        address: "127.0.0.1:4070".parse().expect("default address is valid"),
     })
 }
 
@@ -331,5 +418,108 @@ mod tests {
         .unwrap_err();
 
         assert!(!error.contains(secret), "argv secret was echoed: {error}");
+    }
+
+    #[test]
+    fn parses_only_the_absolute_bounded_runtime_manifest_command() {
+        let config = parse(
+            [
+                "release",
+                "write-runtime-manifest",
+                "--runtime-root",
+                r"C:\Program Files\TownLight Station\runtime\gstreamer",
+                "--output",
+                r"C:\ProgramData\TownLight Station\runtime-manifest.json",
+                "--version",
+                "0.1.0",
+                "--source-commit",
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "--runtime-package-sha256",
+                "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            ]
+            .map(OsString::from),
+        )
+        .unwrap();
+
+        assert!(matches!(
+            config.mode,
+            LaunchMode::ReleaseWriteRuntimeManifest {
+                runtime_root,
+                output,
+                version,
+                source_commit,
+                runtime_package_sha256,
+            } if runtime_root == std::path::Path::new(r"C:\Program Files\TownLight Station\runtime\gstreamer")
+                && output == std::path::Path::new(r"C:\ProgramData\TownLight Station\runtime-manifest.json")
+                && version == "0.1.0"
+                && source_commit == "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                && runtime_package_sha256 == "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        ));
+    }
+
+    #[test]
+    fn runtime_manifest_command_rejects_relative_missing_duplicate_or_extra_options() {
+        for arguments in [
+            vec![
+                "release",
+                "write-runtime-manifest",
+                "--runtime-root",
+                "runtime",
+                "--output",
+                r"C:\manifest.json",
+                "--version",
+                "0.1.0",
+                "--source-commit",
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "--runtime-package-sha256",
+                "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            ],
+            vec![
+                "release",
+                "write-runtime-manifest",
+                "--runtime-root",
+                r"C:\runtime",
+                "--output",
+                r"C:\manifest.json",
+                "--version",
+                "0.1.0",
+                "--source-commit",
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            ],
+            vec![
+                "release",
+                "write-runtime-manifest",
+                "--runtime-root",
+                r"C:\runtime",
+                "--runtime-root",
+                r"C:\other",
+                "--output",
+                r"C:\manifest.json",
+                "--version",
+                "0.1.0",
+                "--source-commit",
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "--runtime-package-sha256",
+                "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            ],
+            vec![
+                "release",
+                "write-runtime-manifest",
+                "--runtime-root",
+                r"C:\runtime",
+                "--output",
+                r"C:\manifest.json",
+                "--version",
+                "0.1.0",
+                "--source-commit",
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "--runtime-package-sha256",
+                "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "--unexpected",
+                "value",
+            ],
+        ] {
+            assert!(parse(arguments.into_iter().map(OsString::from)).is_err());
+        }
     }
 }
