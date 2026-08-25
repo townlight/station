@@ -21,6 +21,7 @@ fn bootstrap(
         cg_image_root: r"C:\ProgramData\TownLight Station\cg-images".into(),
         proof_artifact_root: r"C:\ProgramData\TownLight Station\output-proofs".into(),
         fallback_slate: None,
+        caption_policy: None,
         outputs: vec![WorkerOutputConfiguration::UdpTs {
             sink_id: SINK_ID.into(),
             destination: "192.0.2.40:5500".into(),

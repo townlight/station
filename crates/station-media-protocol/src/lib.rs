@@ -74,7 +74,7 @@ impl<'de> Deserialize<'de> for LoudnessTarget {
 }
 
 pub const MAX_FRAME_BYTES: usize = 65_536;
-pub const PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion { major: 6, minor: 0 };
+pub const PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion { major: 7, minor: 0 };
 
 pub const MAX_OUTPUT_PROOF_INDEX: u16 = 255;
 // Operator-requested analyzable program is capped at ten minutes. The worker
@@ -151,6 +151,22 @@ pub enum CgImageFormat {
 pub struct WorkerFallbackSlate {
     pub asset_id: String,
     pub format: CgImageFormat,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkerCaptionMode {
+    Disabled,
+    Cea708,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkerCaptionPolicy {
+    pub mode: WorkerCaptionMode,
+    pub service_number: u8,
+    pub language: String,
+    pub revision: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -343,6 +359,9 @@ pub struct WorkerBootstrapEnvelope {
     /// Optional, server-authoritative image loaded into the worker's fallback-only branch.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fallback_slate: Option<WorkerFallbackSlate>,
+    /// Optional durable caption authority loaded before the worker reports Ready.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub caption_policy: Option<WorkerCaptionPolicy>,
     pub outputs: Vec<WorkerOutputConfiguration>,
 }
 
@@ -612,6 +631,7 @@ pub enum ProtocolError {
     InvalidManagedCgImageRoot(String),
     InvalidManagedProofRoot(String),
     InvalidFallbackSlate(String),
+    InvalidCaptionPolicy(String),
     InvalidCaptionCue(String),
     InvalidLiveCommand(String),
     InvalidLiveEvent(String),
@@ -635,6 +655,8 @@ pub fn encode_bootstrap_frame(
         .map_err(ProtocolError::InvalidManagedProofRoot)?;
     validate_fallback_slate(bootstrap.fallback_slate.as_ref())
         .map_err(ProtocolError::InvalidFallbackSlate)?;
+    validate_caption_policy(bootstrap.caption_policy.as_ref())
+        .map_err(ProtocolError::InvalidCaptionPolicy)?;
     validate_bootstrap_outputs(bootstrap).map_err(ProtocolError::InvalidOutputConfiguration)?;
     encode_frame(bootstrap)
 }
@@ -650,6 +672,8 @@ pub fn decode_bootstrap_frame(frame: &[u8]) -> Result<WorkerBootstrapEnvelope, P
         .map_err(ProtocolError::InvalidManagedProofRoot)?;
     validate_fallback_slate(bootstrap.fallback_slate.as_ref())
         .map_err(ProtocolError::InvalidFallbackSlate)?;
+    validate_caption_policy(bootstrap.caption_policy.as_ref())
+        .map_err(ProtocolError::InvalidCaptionPolicy)?;
     validate_bootstrap_outputs(&bootstrap).map_err(ProtocolError::InvalidOutputConfiguration)?;
     Ok(bootstrap)
 }
@@ -691,6 +715,27 @@ fn validate_fallback_slate(slate: Option<&WorkerFallbackSlate>) -> Result<(), St
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
     {
         return Err("fallback slate identity must be a lowercase SHA-256 digest".into());
+    }
+    Ok(())
+}
+
+fn validate_caption_policy(policy: Option<&WorkerCaptionPolicy>) -> Result<(), String> {
+    let Some(policy) = policy else {
+        return Ok(());
+    };
+    if !(1..=63).contains(&policy.service_number) || policy.revision == 0 {
+        return Err("caption policy service number or revision is invalid".into());
+    }
+    let bytes = policy.language.as_bytes();
+    if !(2..=35).contains(&bytes.len())
+        || !bytes.first().is_some_and(u8::is_ascii_alphabetic)
+        || !bytes.last().is_some_and(u8::is_ascii_alphanumeric)
+        || !bytes
+            .iter()
+            .all(|byte| byte.is_ascii_alphanumeric() || *byte == b'-')
+        || policy.language.contains("--")
+    {
+        return Err("caption policy language is invalid or unbounded".into());
     }
     Ok(())
 }

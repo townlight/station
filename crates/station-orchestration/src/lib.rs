@@ -24,8 +24,9 @@ use station_media_protocol::{
     CgImageFormat, CgOverlay, CgOverlayContent, CgRect, CgSnapshot, ChannelCommand, LiveArmToken,
     LiveInputConfiguration, LiveReturnTarget, LoudnessTarget, MAX_CG_SLOTS, MAX_CG_TEXT_BYTES,
     MAX_OUTPUT_PROOF_DURATION_MS, MAX_OUTPUT_PROOF_SAMPLE_DURATION_MS,
-    OUTPUT_PROOF_CAPTURE_HEADROOM_MS, SrtPassphrase, WorkerEvent, WorkerFallbackSlate,
-    WorkerHeadendProfileId, WorkerHeadendTransportContract, WorkerOutputConfiguration,
+    OUTPUT_PROOF_CAPTURE_HEADROOM_MS, SrtPassphrase, WorkerCaptionMode, WorkerCaptionPolicy,
+    WorkerEvent, WorkerFallbackSlate, WorkerHeadendProfileId, WorkerHeadendTransportContract,
+    WorkerOutputConfiguration,
 };
 use station_readiness::derive_loudness_outcome;
 use station_readiness::{
@@ -37,8 +38,8 @@ use station_schedule::{
     OutputProfileId, OutputSinkKind, ScheduleWindow,
 };
 use station_storage::{
-    CgSnapshotReadError, CgWriteError, OutputLoudnessCaptureFacts, OutputLoudnessProofJobRecord,
-    OutputLoudnessProofJobState, StationStore,
+    CgSnapshotReadError, CgWriteError, ChannelCaptionMode, OutputLoudnessCaptureFacts,
+    OutputLoudnessProofJobRecord, OutputLoudnessProofJobState, StationStore,
 };
 
 static ALERT_SEQUENCE: AtomicU64 = AtomicU64::new(1);
@@ -706,6 +707,18 @@ impl ChannelController {
                     _ => unreachable!("storage validates managed fallback slate image MIME"),
                 },
             });
+        let caption_policy = store
+            .read_channel_caption_policy(&channel.channel_id)
+            .map_err(OrchestrationError::Storage)?
+            .map(|policy| WorkerCaptionPolicy {
+                mode: match policy.mode {
+                    ChannelCaptionMode::Disabled => WorkerCaptionMode::Disabled,
+                    ChannelCaptionMode::Cea708 => WorkerCaptionMode::Cea708,
+                },
+                service_number: policy.service_number,
+                language: policy.language,
+                revision: policy.revision,
+            });
         let output_expectations = channel
             .output_sinks
             .iter()
@@ -730,7 +743,7 @@ impl ChannelController {
             })
             .collect();
         let worker_id = format!("station-worker-{}", channel.channel_id);
-        let supervisor = WorkerSupervisor::launch_with_outputs_roots_and_fallback_slate(
+        let supervisor = WorkerSupervisor::launch_with_outputs_roots_and_authorities(
             worker_executable,
             &worker_id,
             &channel.channel_id,
@@ -739,6 +752,7 @@ impl ChannelController {
             &managed_cg_image_root(database_path),
             &managed_output_proof_root(database_path),
             fallback_slate,
+            caption_policy,
             channel.output_profile,
             timeout.max(MINIMUM_WORKER_BOOTSTRAP_TIMEOUT),
         )

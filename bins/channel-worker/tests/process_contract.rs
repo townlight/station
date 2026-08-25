@@ -113,6 +113,7 @@ fn worker_loads_the_exact_managed_fallback_slate_before_ready() {
             asset_id: image.asset_id,
             format: CgImageFormat::Png,
         }),
+        caption_policy: None,
         outputs: vec![WorkerOutputConfiguration::UdpTs {
             sink_id: "22222222-3333-4444-8555-666666666666".into(),
             destination: output.local_addr().unwrap().to_string(),
@@ -196,6 +197,7 @@ fn worker_refuses_ready_when_the_selected_fallback_slate_is_missing() {
             asset_id: "a".repeat(64),
             format: CgImageFormat::Png,
         }),
+        caption_policy: None,
         outputs: vec![WorkerOutputConfiguration::UdpTs {
             sink_id: "22222222-3333-4444-8555-666666666666".into(),
             destination: output.local_addr().unwrap().to_string(),
@@ -293,6 +295,7 @@ fn run_worker(
             .to_string_lossy()
             .into_owned(),
         fallback_slate: None,
+        caption_policy: None,
         outputs: vec![WorkerOutputConfiguration::UdpTs {
             sink_id: "22222222-3333-4444-8555-666666666666".into(),
             destination: udp.local_addr().unwrap().to_string(),
@@ -353,6 +356,7 @@ fn worker_rejects_a_staged_profile_before_starting_the_media_graph() {
             .to_string_lossy()
             .into_owned(),
         fallback_slate: None,
+        caption_policy: None,
         outputs: vec![WorkerOutputConfiguration::UdpTs {
             sink_id: "22222222-3333-4444-8555-666666666666".into(),
             destination: udp.local_addr().unwrap().to_string(),
@@ -453,6 +457,7 @@ fn spawned_worker_enforces_a_runnable_headend_transport_contract() {
             .to_string_lossy()
             .into_owned(),
         fallback_slate: None,
+        caption_policy: None,
         outputs: vec![WorkerOutputConfiguration::UdpTs {
             sink_id: "22222222-3333-4444-8555-666666666666".into(),
             destination: receiver.local_addr().unwrap().to_string(),
@@ -736,6 +741,7 @@ fn spawned_worker_output_proof_reaches_ready_with_artifact_hash_and_health() {
         cg_image_root: root.join("cg-images").to_string_lossy().into_owned(),
         proof_artifact_root: proof_root.to_string_lossy().into_owned(),
         fallback_slate: None,
+        caption_policy: None,
         outputs: vec![WorkerOutputConfiguration::UdpTs {
             sink_id: sink_id.into(),
             destination: output.local_addr().unwrap().to_string(),
@@ -1044,6 +1050,7 @@ fn spawned_worker_live_takeover_preserves_audible_audio() {
             .to_string_lossy()
             .into_owned(),
         fallback_slate: None,
+        caption_policy: None,
         outputs: vec![WorkerOutputConfiguration::UdpTs {
             sink_id: "22222222-3333-4444-8555-666666666666".into(),
             destination: output.local_addr().unwrap().to_string(),

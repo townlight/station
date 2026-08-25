@@ -2,9 +2,9 @@ use station_media_protocol::{
     CaptionCue, CgImageFormat, ChannelCommand, CommandEnvelope, LiveArmToken,
     LiveInputConfiguration, LiveReturnTarget, LoudnessTarget, OutputTransportObservation,
     PROTOCOL_VERSION, ProtocolError, ProtocolVersion, SrtPassphrase, WorkerBootstrapEnvelope,
-    WorkerEvent, WorkerEventEnvelope, WorkerFallbackSlate, WorkerOutputConfiguration,
-    decode_bootstrap_frame, decode_command_frame, decode_event_frame, encode_bootstrap_frame,
-    encode_command_frame, encode_event_frame,
+    WorkerCaptionMode, WorkerCaptionPolicy, WorkerEvent, WorkerEventEnvelope, WorkerFallbackSlate,
+    WorkerOutputConfiguration, decode_bootstrap_frame, decode_command_frame, decode_event_frame,
+    encode_bootstrap_frame, encode_command_frame, encode_event_frame,
 };
 use std::num::NonZeroU16;
 
@@ -150,6 +150,12 @@ fn round_trips_private_worker_bootstrap_without_process_arguments() {
             asset_id: "a".repeat(64),
             format: CgImageFormat::Png,
         }),
+        caption_policy: Some(WorkerCaptionPolicy {
+            mode: WorkerCaptionMode::Cea708,
+            service_number: 2,
+            language: "es-US".into(),
+            revision: 4,
+        }),
         outputs: vec![
             WorkerOutputConfiguration::UdpTs {
                 sink_id: "11111111-2222-4333-8444-555555555555".into(),
@@ -176,6 +182,36 @@ fn round_trips_private_worker_bootstrap_without_process_arguments() {
     let diagnostic = format!("{bootstrap:?}");
     assert!(diagnostic.contains("[REDACTED]"));
     assert!(!diagnostic.contains("private-srt-proof"));
+}
+
+#[test]
+fn bootstrap_rejects_invalid_caption_policy() {
+    let mut bootstrap = WorkerBootstrapEnvelope {
+        version: PROTOCOL_VERSION,
+        worker_id: "worker".into(),
+        channel_id: "channel".into(),
+        output_profile: "proof-360p30".into(),
+        cg_image_root: r"C:\ProgramData\TownLight Station\cg-images".into(),
+        proof_artifact_root: r"C:\ProgramData\TownLight Station\output-proofs".into(),
+        fallback_slate: None,
+        caption_policy: Some(WorkerCaptionPolicy {
+            mode: WorkerCaptionMode::Cea708,
+            service_number: 64,
+            language: "en-US".into(),
+            revision: 1,
+        }),
+        outputs: Vec::new(),
+    };
+    assert!(matches!(
+        encode_bootstrap_frame(&bootstrap),
+        Err(ProtocolError::InvalidCaptionPolicy(_))
+    ));
+    bootstrap.caption_policy.as_mut().unwrap().service_number = 1;
+    bootstrap.caption_policy.as_mut().unwrap().language = "not a language".into();
+    assert!(matches!(
+        encode_bootstrap_frame(&bootstrap),
+        Err(ProtocolError::InvalidCaptionPolicy(_))
+    ));
 }
 
 #[test]
@@ -228,6 +264,7 @@ fn bootstrap_rejects_a_noncanonical_fallback_slate_identity() {
             asset_id: "A".repeat(64),
             format: CgImageFormat::Png,
         }),
+        caption_policy: None,
         outputs: Vec::new(),
     };
     assert!(matches!(
@@ -251,6 +288,7 @@ fn bootstrap_rejects_relative_traversing_or_wrong_managed_image_roots() {
             cg_image_root: root.into(),
             proof_artifact_root: r"C:\ProgramData\TownLight Station\output-proofs".into(),
             fallback_slate: None,
+            caption_policy: None,
             outputs: Vec::new(),
         };
         assert!(matches!(

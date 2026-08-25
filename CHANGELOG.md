@@ -8,6 +8,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- Setup Admins can now persist a stopped-channel CEA-708/disabled policy with bounded service and
+  language metadata through the operator console and an audited revision-guarded API. Worker
+  protocol v7 carries the exact durable authority before Ready; the media graph applies the selected
+  service and rejects caption cues when the policy is disabled or absent.
+
 - Setup Admins can now append accepted or rejected external receiver evidence for an exact enabled
   output. The server binds each immutable receipt to the authenticated actor, verified installed
   candidate, and canonical output configuration; stale receipts remain historical and cannot turn

@@ -19,7 +19,7 @@ use station_media_protocol::{
     CaptionCue, CgImageFormat, CgOverlayContent, CgSnapshot, LoudnessTarget,
     MAX_CAPTION_DURATION_MS, MAX_CAPTION_START_AFTER_MS, MAX_CAPTION_TEXT_BYTES, MAX_CG_SLOTS,
     MAX_CG_TEXT_BYTES, MAX_OUTPUT_PROOF_BYTES, MAX_OUTPUT_PROOF_DURATION_MS,
-    MIN_OUTPUT_PROOF_DURATION_MS, WorkerFallbackSlate,
+    MIN_OUTPUT_PROOF_DURATION_MS, WorkerCaptionMode, WorkerCaptionPolicy, WorkerFallbackSlate,
 };
 use station_schedule::{OutputProfile, OutputProfileId};
 
@@ -277,6 +277,7 @@ pub enum EngineError {
         reason: &'static str,
     },
     OutputCapture(String),
+    CaptionDisabled,
     CaptionInvalid(String),
     CaptionPush(String),
 }
@@ -303,7 +304,21 @@ pub struct PersistentPlayout {
     output_capture_ingresses: Vec<Arc<CaptureIngress>>,
     proof_artifact_root: Option<PathBuf>,
     caption_source: gst::Element,
+    caption_enabled: bool,
     stopped: bool,
+}
+
+#[derive(Clone, Copy)]
+struct CaptionGraphPolicy {
+    enabled: bool,
+    service_number: u8,
+}
+
+impl CaptionGraphPolicy {
+    const DISABLED: Self = Self {
+        enabled: false,
+        service_number: 1,
+    };
 }
 
 #[derive(Clone)]
@@ -424,6 +439,7 @@ impl PersistentPlayout {
             cg_image_root,
             None,
             None,
+            CaptionGraphPolicy::DISABLED,
         )
     }
 
@@ -449,6 +465,7 @@ impl PersistentPlayout {
             None,
             None,
             None,
+            CaptionGraphPolicy::DISABLED,
         )
     }
 
@@ -469,7 +486,15 @@ impl PersistentPlayout {
                 "at least one transport output is required".into(),
             ));
         }
-        Self::start_outputs_with_program(outputs, None, output_profile, cg_image_root, None, None)
+        Self::start_outputs_with_program(
+            outputs,
+            None,
+            output_profile,
+            cg_image_root,
+            None,
+            None,
+            CaptionGraphPolicy::DISABLED,
+        )
     }
 
     pub fn start_configured_outputs_with_profile_and_roots(
@@ -490,6 +515,7 @@ impl PersistentPlayout {
             cg_image_root,
             proof_artifact_root,
             None,
+            CaptionGraphPolicy::DISABLED,
         )
     }
 
@@ -512,6 +538,31 @@ impl PersistentPlayout {
             cg_image_root,
             proof_artifact_root,
             fallback_slate,
+            CaptionGraphPolicy::DISABLED,
+        )
+    }
+
+    pub fn start_configured_outputs_with_profile_roots_and_authorities(
+        outputs: &[ConfiguredTransportOutput],
+        output_profile: OutputProfileId,
+        cg_image_root: Option<&Path>,
+        proof_artifact_root: Option<&Path>,
+        fallback_slate: Option<&WorkerFallbackSlate>,
+        caption_policy: Option<&WorkerCaptionPolicy>,
+    ) -> Result<Self, EngineError> {
+        if outputs.is_empty() {
+            return Err(EngineError::Pipeline(
+                "at least one transport output is required".into(),
+            ));
+        }
+        Self::start_outputs_with_program(
+            outputs,
+            None,
+            output_profile,
+            cg_image_root,
+            proof_artifact_root,
+            fallback_slate,
+            caption_graph_policy(caption_policy)?,
         )
     }
 
@@ -522,6 +573,7 @@ impl PersistentPlayout {
         cg_image_root: Option<&Path>,
         proof_artifact_root: Option<&Path>,
         fallback_slate: Option<&WorkerFallbackSlate>,
+        caption_policy: CaptionGraphPolicy,
     ) -> Result<Self, EngineError> {
         if !output_profile.is_runnable() {
             return Err(EngineError::ProfileNotRunnable {
@@ -652,7 +704,7 @@ impl PersistentPlayout {
         let caption_encoder = gst::ElementFactory::make("tttocea708")
             .name("cea708-caption-encoder")
             .property_from_str("mode", "pop-on")
-            .property("service-number", 1_u32)
+            .property("service-number", u32::from(caption_policy.service_number))
             .property("cea608-channel", 1_u32)
             .build()
             .map_err(|error| build_error("tttocea708", error))?;
@@ -1105,6 +1157,7 @@ impl PersistentPlayout {
             output_capture_ingresses,
             proof_artifact_root,
             caption_source,
+            caption_enabled: caption_policy.enabled,
             stopped: false,
         };
         playout.cg_canvas_pad.set_property("alpha", 0.0_f64);
@@ -1144,6 +1197,9 @@ impl PersistentPlayout {
             return Err(EngineError::CaptionPush(
                 "caption cue requires a running graph".into(),
             ));
+        }
+        if !self.caption_enabled {
+            return Err(EngineError::CaptionDisabled);
         }
         validate_caption_cue(cue)?;
         let running_time = self
@@ -3186,6 +3242,36 @@ fn is_canonical_uuid(value: &str) -> bool {
             .iter()
             .enumerate()
             .all(|(index, byte)| matches!(index, 8 | 13 | 18 | 23) || byte.is_ascii_hexdigit())
+}
+
+fn caption_graph_policy(
+    policy: Option<&WorkerCaptionPolicy>,
+) -> Result<CaptionGraphPolicy, EngineError> {
+    let Some(policy) = policy else {
+        return Ok(CaptionGraphPolicy {
+            enabled: false,
+            service_number: 1,
+        });
+    };
+    let bytes = policy.language.as_bytes();
+    if !(1..=63).contains(&policy.service_number)
+        || policy.revision == 0
+        || !(2..=35).contains(&bytes.len())
+        || !bytes.first().is_some_and(u8::is_ascii_alphabetic)
+        || !bytes.last().is_some_and(u8::is_ascii_alphanumeric)
+        || !bytes
+            .iter()
+            .all(|byte| byte.is_ascii_alphanumeric() || *byte == b'-')
+        || policy.language.contains("--")
+    {
+        return Err(EngineError::CaptionInvalid(
+            "caption policy is invalid or unbounded".into(),
+        ));
+    }
+    Ok(CaptionGraphPolicy {
+        enabled: matches!(policy.mode, WorkerCaptionMode::Cea708),
+        service_number: policy.service_number,
+    })
 }
 
 fn validate_caption_cue(cue: &CaptionCue) -> Result<(), EngineError> {

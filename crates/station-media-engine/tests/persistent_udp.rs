@@ -21,7 +21,7 @@ use station_media_engine::{
 };
 use station_media_protocol::{
     CaptionCue, CgImageFormat, CgOverlay, CgOverlayContent, CgRect, CgSnapshot, LoudnessTarget,
-    WorkerFallbackSlate,
+    WorkerCaptionMode, WorkerCaptionPolicy, WorkerFallbackSlate,
 };
 use station_schedule::OutputProfileId;
 
@@ -86,17 +86,25 @@ fn accepts_a_typed_caption_cue_without_interrupting_transport() {
     fs::create_dir_all(&root).unwrap();
     let proof_root = root.join("output-proofs");
     let sink_id = "7ef1430d-a35c-49f7-91f0-d03cc96bf4af";
-    let mut playout = PersistentPlayout::start_configured_outputs_with_profile_and_roots(
-        &[ConfiguredTransportOutput::udp_identified(
-            sink_id,
-            receiver.local_addr().unwrap(),
-            LoudnessTarget::CABLE,
-        )],
-        OutputProfileId::Proof360p30,
-        None,
-        Some(&proof_root),
-    )
-    .expect("caption-capable output graph starts");
+    let mut playout =
+        PersistentPlayout::start_configured_outputs_with_profile_roots_and_authorities(
+            &[ConfiguredTransportOutput::udp_identified(
+                sink_id,
+                receiver.local_addr().unwrap(),
+                LoudnessTarget::CABLE,
+            )],
+            OutputProfileId::Proof360p30,
+            None,
+            Some(&proof_root),
+            None,
+            Some(&WorkerCaptionPolicy {
+                mode: WorkerCaptionMode::Cea708,
+                service_number: 1,
+                language: "en-US".into(),
+                revision: 1,
+            }),
+        )
+        .expect("caption-capable output graph starts");
     let before = playout.output_bytes_sent().unwrap()[0];
     let proof_id = "a1f80660-c73a-4ac3-b815-ed9e863c14e6";
     playout
@@ -169,6 +177,41 @@ fn accepts_a_typed_caption_cue_without_interrupting_transport() {
         "emitted transport did not decode the expected caption: {text}"
     );
     fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn disabled_bootstrap_caption_policy_rejects_cues() {
+    let _guard = persistent_graph_test_guard();
+    let receiver = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let mut playout =
+        PersistentPlayout::start_configured_outputs_with_profile_roots_and_authorities(
+            &[ConfiguredTransportOutput::udp_identified(
+                "7ef1430d-a35c-49f7-91f0-d03cc96bf4af",
+                receiver.local_addr().unwrap(),
+                LoudnessTarget::CABLE,
+            )],
+            OutputProfileId::Proof360p30,
+            None,
+            None,
+            None,
+            Some(&WorkerCaptionPolicy {
+                mode: WorkerCaptionMode::Disabled,
+                service_number: 1,
+                language: "en-US".into(),
+                revision: 1,
+            }),
+        )
+        .expect("disabled caption policy still permits ordinary output");
+    assert!(matches!(
+        playout.push_caption_cue(&CaptionCue {
+            cue_id: "4fefcd4e-cfa1-4f62-a810-3d4fa53d2cb6".into(),
+            start_after_ms: 0,
+            duration_ms: 1_000,
+            text: "must not enter disabled transport".into(),
+        }),
+        Err(EngineError::CaptionDisabled)
+    ));
+    playout.stop().unwrap();
 }
 
 #[test]

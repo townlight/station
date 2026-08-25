@@ -7,8 +7,9 @@ use std::time::{Duration, Instant};
 
 use station_media_protocol::{
     ChannelCommand, CommandEnvelope, LoudnessTarget, MAX_FRAME_BYTES, PROTOCOL_VERSION,
-    ProtocolError, WorkerBootstrapEnvelope, WorkerEvent, WorkerEventEnvelope, WorkerFallbackSlate,
-    WorkerOutputConfiguration, decode_event_frame, encode_bootstrap_frame, encode_command_frame,
+    ProtocolError, WorkerBootstrapEnvelope, WorkerCaptionPolicy, WorkerEvent, WorkerEventEnvelope,
+    WorkerFallbackSlate, WorkerOutputConfiguration, decode_event_frame, encode_bootstrap_frame,
+    encode_command_frame,
 };
 use station_schedule::OutputProfileId;
 use station_windows_ipc::{IpcError, PipeServer, PipeStream};
@@ -201,6 +202,35 @@ impl WorkerSupervisor {
         output_profile: OutputProfileId,
         timeout: Duration,
     ) -> Result<Self, SupervisorError> {
+        Self::launch_with_outputs_roots_and_authorities(
+            executable,
+            worker_id,
+            channel_id,
+            journal_path,
+            outputs,
+            cg_image_root,
+            proof_artifact_root,
+            fallback_slate,
+            None,
+            output_profile,
+            timeout,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn launch_with_outputs_roots_and_authorities(
+        executable: &Path,
+        worker_id: &str,
+        channel_id: &str,
+        journal_path: &Path,
+        outputs: &[WorkerOutputConfiguration],
+        cg_image_root: &Path,
+        proof_artifact_root: &Path,
+        fallback_slate: Option<WorkerFallbackSlate>,
+        caption_policy: Option<WorkerCaptionPolicy>,
+        output_profile: OutputProfileId,
+        timeout: Duration,
+    ) -> Result<Self, SupervisorError> {
         let cg_image_root = if cg_image_root.is_absolute() {
             cg_image_root.to_path_buf()
         } else {
@@ -223,6 +253,7 @@ impl WorkerSupervisor {
             cg_image_root: cg_image_root.to_string_lossy().into_owned(),
             proof_artifact_root: proof_artifact_root.to_string_lossy().into_owned(),
             fallback_slate,
+            caption_policy,
             outputs: outputs.to_vec(),
         };
         let bootstrap_frame =
