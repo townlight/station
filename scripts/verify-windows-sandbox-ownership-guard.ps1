@@ -26,11 +26,13 @@ Assert-True ($source -match 'Global\\Scott\.SharedWindowsSandbox\.Launch\.v1') `
     'the launcher must serialize the shared pre-launch decision with a global mutex'
 Assert-True ($source -match '\.WaitOne\(0\)') `
     'the launcher must fail immediately when another launch decision is in progress'
-Assert-True ($source -match '\bGet-CimInstance\s+Win32_Process\b') `
-    'the launcher must inspect current host process ownership before launch'
-foreach ($processName in @('WindowsSandbox.exe', 'WindowsSandboxClient.exe', 'WindowsSandboxRemoteSession.exe')) {
+Assert-True ($source -match '\bGet-Process\b') `
+    'the launcher must inspect current host process ownership without requiring elevated CIM access'
+Assert-True ($source -notmatch '\bGet-CimInstance\s+Win32_Process\b') `
+    'the launcher must not make ordinary pre-launch checks depend on elevated CIM access'
+foreach ($processName in @('WindowsSandbox', 'WindowsSandboxClient', 'WindowsSandboxRemoteSession', 'WindowsSandboxServer')) {
     Assert-True ($source -match [regex]::Escape($processName)) `
-        "the launcher must treat $processName as occupied Windows Sandbox state"
+        "the launcher must treat $processName.exe as occupied Windows Sandbox state"
 }
 Assert-True ($source -match '\bStart-Process\b' -and $source -match '\bPassThru\b') `
     'the launcher must retain the exact process object it launched'

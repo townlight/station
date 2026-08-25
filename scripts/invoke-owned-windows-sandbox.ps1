@@ -10,29 +10,58 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $sharedMutexName = 'Global\Scott.SharedWindowsSandbox.Launch.v1'
-$sandboxProcessNames = @(
-    'WindowsSandbox.exe',
-    'WindowsSandboxClient.exe',
-    'WindowsSandboxRemoteSession.exe',
-    'WindowsSandboxServer.exe'
+$sandboxProcessBaseNames = @(
+    'WindowsSandbox',
+    'WindowsSandboxClient',
+    'WindowsSandboxRemoteSession',
+    'WindowsSandboxServer'
 )
 
 function Get-CurrentWindowsSandboxProcesses {
     try {
-        $processes = @(Get-CimInstance Win32_Process -ErrorAction Stop | Where-Object {
-            $_.Name -in $sandboxProcessNames
+        $processes = @(Get-Process -ErrorAction Stop | Where-Object {
+            $_.ProcessName -in $sandboxProcessBaseNames
         })
     } catch {
         throw "Windows Sandbox ownership is unknown because host processes could not be inspected: $($_.Exception.Message)"
     }
 
-    return @($processes | Sort-Object ProcessId | ForEach-Object {
-        [pscustomobject]@{
-            process_id = [int]$_.ProcessId
-            process_name = [string]$_.Name
-            creation_time = if ($null -eq $_.CreationDate) { $null } else { [string]$_.CreationDate }
+    try {
+        return @($processes | Sort-Object Id | ForEach-Object {
+            [pscustomobject]@{
+                process_id = [int]$_.Id
+                process_name = "$($_.ProcessName).exe"
+                creation_time = $_.StartTime.ToUniversalTime().ToString('o')
+            }
+        })
+    } catch {
+        throw "Windows Sandbox ownership is unknown because a detected process identity could not be read: $($_.Exception.Message)"
+    }
+}
+
+function Get-ExactLaunchedWindowsSandboxProcess {
+    param(
+        [Parameter(Mandatory)][int]$ProcessId,
+        [Parameter(Mandatory)][string]$ExpectedExecutable
+    )
+
+    try {
+        $process = Get-Process -Id $ProcessId -ErrorAction Stop
+        $observedPath = [IO.Path]::GetFullPath($process.Path)
+        $expectedPath = [IO.Path]::GetFullPath($ExpectedExecutable)
+        if ($process.ProcessName -ne 'WindowsSandbox' -or
+            -not $observedPath.Equals($expectedPath, [StringComparison]::OrdinalIgnoreCase)) {
+            throw 'the observed process name or executable path did not match the requested Windows Sandbox host'
         }
-    })
+        return [pscustomobject]@{
+            process_id = [int]$process.Id
+            process_name = "$($process.ProcessName).exe"
+            creation_time = $process.StartTime.ToUniversalTime().ToString('o')
+            executable_path = $observedPath
+        }
+    } catch {
+        throw "The launched Windows Sandbox process identity could not be proved; it was left untouched. $($_.Exception.Message)"
+    }
 }
 
 function Write-NewOwnershipRecord {
@@ -138,11 +167,9 @@ try {
     $launchedProcess = Start-Process -FilePath $sandboxExecutable `
         -ArgumentList @($resolvedConfiguration) -PassThru -WindowStyle Normal
     $launchedProcess.Refresh()
-    $launchedAtUtc = $launchedProcess.StartTime.ToUniversalTime()
-    $observed = Get-CimInstance Win32_Process -Filter "ProcessId = $($launchedProcess.Id)" -ErrorAction Stop
-    if ($null -eq $observed -or $observed.Name -ne 'WindowsSandbox.exe') {
-        throw 'The launched Windows Sandbox process identity could not be proved; it was left untouched.'
-    }
+    $observed = Get-ExactLaunchedWindowsSandboxProcess `
+        -ProcessId $launchedProcess.Id `
+        -ExpectedExecutable $sandboxExecutable
 
     $launchRecordPath = Join-Path $ownershipRoot "$runId.launched.json"
     Write-NewOwnershipRecord -Path $launchRecordPath -Record ([ordered]@{
@@ -151,10 +178,11 @@ try {
         owner_namespace = 'townlight-station-codex'
         run_id = $runId
         requested_at_utc = $requestedAtUtc.ToString('o')
-        launched_at_utc = $launchedAtUtc.ToString('o')
-        process_id = [int]$launchedProcess.Id
-        process_name = [string]$observed.Name
-        process_creation_time = [string]$observed.CreationDate
+        launched_at_utc = $observed.creation_time
+        process_id = $observed.process_id
+        process_name = $observed.process_name
+        process_creation_time = $observed.creation_time
+        executable_path = $observed.executable_path
         executable_sha256 = (Get-FileHash -LiteralPath $sandboxExecutable -Algorithm SHA256).Hash.ToLowerInvariant()
         configuration_file = [IO.Path]::GetFileName($resolvedConfiguration)
         configuration_sha256 = $configurationHash
@@ -166,8 +194,8 @@ try {
         status = 'launched'
         owner_namespace = 'townlight-station-codex'
         run_id = $runId
-        process_id = [int]$launchedProcess.Id
-        process_creation_time = [string]$observed.CreationDate
+        process_id = $observed.process_id
+        process_creation_time = $observed.creation_time
         ownership_record = $launchRecordPath
         automatic_cleanup = $false
     }

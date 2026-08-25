@@ -17,10 +17,12 @@ configuration or lease file can erase the only ownership evidence.
 Every TownLight Windows Sandbox launch must use `scripts/invoke-owned-windows-sandbox.ps1`.
 
 The launcher takes the machine-global `Global\Scott.SharedWindowsSandbox.Launch.v1` mutex without
-waiting, then enumerates the exact Windows Sandbox host/client process names through
-`Win32_Process`. Failure to inspect, an abandoned or unavailable mutex, or any matching process makes
-ownership unknown or occupied and blocks launch. The global mutex is agent-neutral so the Claude
-harness can use the same check-and-launch serialization boundary.
+waiting, then enumerates the exact Windows Sandbox host/client process names through the ordinary
+user-token `Get-Process` snapshot. It does not depend on elevated `Win32_Process` access. Failure to
+inspect, inability to read the exact identity of a detected process, an abandoned or unavailable
+mutex, or any matching process makes ownership unknown or occupied and blocks launch. The global
+mutex is agent-neutral so the Claude harness can use the same check-and-launch serialization
+boundary.
 
 Launch accepts only an existing `.wsb` file beneath the committed TownLight-owned
 `harness\windows-sandbox\configs` directory and only the Microsoft-signed
