@@ -1,0 +1,44 @@
+<Configuration>
+  <VGpu>Disable</VGpu>
+  <Networking>Disable</Networking>
+  <AudioInput>Disable</AudioInput>
+  <VideoInput>Disable</VideoInput>
+  <PrinterRedirection>Disable</PrinterRedirection>
+  <ClipboardRedirection>Disable</ClipboardRedirection>
+  <MemoryInMB>8192</MemoryInMB>
+  <MappedFolders>
+    <MappedFolder>
+      <HostFolder>C:\Users\scott\Desktop\Code\townlight-station\dist</HostFolder>
+      <SandboxFolder>C:\TownLightCandidate</SandboxFolder>
+      <ReadOnly>true</ReadOnly>
+    </MappedFolder>
+    <MappedFolder>
+      <HostFolder>C:\Users\scott\Desktop\Code\townlight-station\installer</HostFolder>
+      <SandboxFolder>C:\TownLightVerifier</SandboxFolder>
+      <ReadOnly>true</ReadOnly>
+    </MappedFolder>
+    <MappedFolder>
+      <HostFolder>C:\Users\scott\Desktop\Code\townlight-station\scripts</HostFolder>
+      <SandboxFolder>C:\TownLightScripts</SandboxFolder>
+      <ReadOnly>true</ReadOnly>
+    </MappedFolder>
+    <MappedFolder>
+      <HostFolder>C:\ProgramData\TownLight Station\SandboxInputs</HostFolder>
+      <SandboxFolder>C:\TownLightInputs</SandboxFolder>
+      <ReadOnly>true</ReadOnly>
+    </MappedFolder>
+    <MappedFolder>
+      <HostFolder>C:\Users\scott\Desktop\Code\townlight-station\harness\windows-sandbox</HostFolder>
+      <SandboxFolder>C:\TownLightHarness</SandboxFolder>
+      <ReadOnly>true</ReadOnly>
+    </MappedFolder>
+    <MappedFolder>
+      <HostFolder>C:\ProgramData\TownLight Station\SandboxEvidence</HostFolder>
+      <SandboxFolder>C:\TownLightEvidence</SandboxFolder>
+      <ReadOnly>false</ReadOnly>
+    </MappedFolder>
+  </MappedFolders>
+  <LogonCommand>
+    <Command>powershell.exe -NoProfile -ExecutionPolicy Bypass -File "C:\TownLightHarness\run-caption-proof.ps1"</Command>
+  </LogonCommand>
+</Configuration>
