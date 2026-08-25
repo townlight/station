@@ -50,15 +50,19 @@ Status vocabulary:
 
 ## Evidence state
 
-The current exact installed candidate proves substantial portions of S3-S9, S15, and S23 on one
-Windows machine. It does not prove a clean-machine install, external headend acceptance, the
-one-station week, or the three-station week. Those gates remain false until their external evidence
-exists. Detailed same-candidate records live in `docs/proof/`.
+The current exact installed candidates prove substantial portions of S3-S9, S15, and S23 on one
+Windows machine. Exact candidate `b6ae66e71e57cb2d48e7d5de917bc78349bb8d60` also passed a fresh,
+network-isolated Windows Sandbox installation with candidate hashes, both LocalSystem services,
+health, private runtime, media factories, and caption decoder independently verified. Physical
+double-click operator usability, external headend acceptance, the one-station week, and the
+three-station week remain false until their external evidence exists. Detailed candidate-bound
+records live in `docs/proof/`.
 
 ## Dependency order
 
 The S1 → S2 → S3 authority spine now includes machine/readiness evidence, headend/output checks,
-receiver receipts, exact-sink loudness, support-bundle receipts, and fallback slate. The next
-required commissioning blocker is the CEA-708 caption path, followed by publish-target and
-automation/model authority. Build those operational slices in dependency order while keeping the
-installed, clean-machine, headend, and field gates external and honest.
+receiver receipts, exact-sink loudness, support-bundle receipts, fallback slate, and server-derived
+caption-proof execution. The next caption gates are installed exact-candidate execution evidence
+and already-queued cue clearing at unscheduled source transitions, followed by publish-target and
+automation/model authority. Build those operational slices in dependency order while keeping
+physical operator, headend, and field gates external and honest.
