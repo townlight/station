@@ -5,13 +5,16 @@
 `station-storage` is the single SQLite writer for the current and historical
 authority of S19 saved searches, daypart blocks, and recurring rules. Each write
 runs under `BEGIN IMMEDIATE`, requires compare-and-set revision authority, accepts
-only the next successor revision, writes the current row and append-only historical snapshot
-atomically, and records a separately supplied actor and event time. Identity and
-channel bindings cannot be changed. A recurring rule also permanently binds its
+only the next successor revision, writes the current row and append-only historical
+snapshot atomically, and records a separately supplied actor and event time. Search
+identity, owner, and creation time cannot be changed; its name and query can. Daypart
+and recurring-rule channel bindings cannot be changed. A recurring rule also permanently binds its
 saved-search and block identities, and every write must name their exact current
 revisions.
 
-Current tables retain indexed authority fields beside canonical JSON. Reads reject
+Saved searches are listed station-wide rather than by channel. Their current and
+historical rows index identity, name, owner, creation time, and revision beside
+canonical JSON. Reads reject
 indexed/JSON disagreement, malformed records, missing exact rule dependencies, and
 any current row that is not equal to the actual latest valid historical snapshot.
 Historical reads validate exact revision snapshots. History tables reject updates

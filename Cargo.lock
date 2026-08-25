@@ -1731,6 +1731,7 @@ dependencies = [
  "station-readiness",
  "station-recording",
  "station-schedule",
+ "station-schedule-automation",
  "station-storage",
  "station-support",
  "station-update",
@@ -1763,6 +1764,14 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "sha2",
+]
+
+[[package]]
+name = "station-catalog"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -2005,6 +2014,7 @@ dependencies = [
  "station-auth",
  "station-automation-policy",
  "station-captions",
+ "station-catalog",
  "station-cg",
  "station-domain",
  "station-live",

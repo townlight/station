@@ -80,6 +80,8 @@ pub use schedule_automation_authority::{
     DaypartBlockHistoryEntry, RecurringRuleHistoryEntry, SavedSearchHistoryEntry,
     ScheduleAutomationWriteError,
 };
+mod catalog_authority;
+pub use catalog_authority::{CatalogAssetHistoryEntry, CatalogAssetPage, CatalogAssetWriteError};
 
 const SQLITE_OK: c_int = 0;
 const SQLITE_ROW: c_int = 100;
@@ -1166,6 +1168,7 @@ impl StationStore {
         store.initialize_automation_policy_schema()?;
         store.initialize_custom_metadata_schema()?;
         store.initialize_schedule_automation_schema()?;
+        store.initialize_catalog_authority_schema()?;
         store.initialize_scheduled_recording_schema()?;
         store.migrate_caption_egress_history_sink_foreign_keys()?;
         store.migrate_cg_feed_cache_schema()?;

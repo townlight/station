@@ -1,10 +1,12 @@
 use jiff::{civil::DateTime, tz::TimeZone};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 const MAX_TERM_LEN: usize = 64;
 const MAX_LABEL_LEN: usize = 80;
+const MAX_SAVED_SEARCH_NAME_LEN: usize = 120;
+const MAX_METADATA_TEXT_CHARS: usize = 2_048;
 const MAX_QUERY_FILTERS: usize = 8;
 const MAX_QUERY_LIMIT: usize = 128;
 const MAX_WINDOW_MS: i64 = 60 * 86_400_000;
@@ -14,27 +16,61 @@ const MAX_EVIDENCE_RECEIPT_LIFETIME_MS: i64 = 300_000;
 /// as-run projections. Version two intents did not contain that evidence and
 /// must not be silently reinterpreted as proved materializations.
 const HASH_SCHEMA_VERSION: u16 = 3;
-/// The rule/search/block authority contract itself remains the established v2
-/// encoding. Keeping it stable also keeps occurrence identities stable.
-const SOURCE_AUTHORITY_SCHEMA_VERSION: u16 = 2;
+/// Version three removes an accidental channel binding from reusable saved
+/// searches and adds the full typed predicate language. Occurrence identity
+/// deliberately remains v2: it is only rule + channel + start time.
+const SOURCE_AUTHORITY_SCHEMA_VERSION: u16 = 3;
 const OCCURRENCE_SCHEMA_VERSION: u16 = 2;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SavedSearch {
     pub search_id: String,
-    pub channel_id: String,
+    pub name: String,
     pub owner_operator_id: String,
+    pub created_at_utc_ms: i64,
     pub query: SavedSearchQuery,
     pub revision: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct MetadataFilter {
-    pub field: String,
-    pub value: MetadataValue,
+#[serde(deny_unknown_fields)]
+pub enum AssetPredicate {
+    TitleContains(String),
+    MeetingBodyEquals(String),
+    DurationMs {
+        min_inclusive: Option<u64>,
+        max_inclusive: Option<u64>,
+    },
+    PublishedAtUtcMs {
+        starts_at_inclusive: Option<i64>,
+        ends_before_exclusive: Option<i64>,
+    },
+    Custom {
+        field: String,
+        predicate: CustomMetadataPredicate,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub enum CustomMetadataPredicate {
+    Equals(MetadataValue),
+    /// Unicode default-case conversion only; no locale-specific casing is used.
+    Contains(String),
+    NumberRange {
+        min_inclusive: Option<i64>,
+        max_inclusive: Option<i64>,
+    },
+    DateTimeRange {
+        min_inclusive: Option<i64>,
+        max_inclusive: Option<i64>,
+    },
+    BooleanEquals(bool),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub enum MetadataValue {
     Text(String),
     Number(i64),
@@ -44,15 +80,17 @@ pub enum MetadataValue {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub enum SavedSearchOrder {
     TitleAscending,
     PublishedNewest,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SavedSearchQuery {
-    pub all_of: Vec<MetadataFilter>,
-    pub any_of: Vec<MetadataFilter>,
+    pub all_of: Vec<AssetPredicate>,
+    pub any_of: Vec<AssetPredicate>,
     pub order_by: SavedSearchOrder,
     pub limit: u16,
 }
@@ -61,10 +99,14 @@ pub struct SavedSearchQuery {
 pub struct AssetCandidate {
     pub asset_sha256: String,
     pub title: String,
+    pub meeting_body: Option<String>,
     pub duration_ms: u64,
     pub ready: bool,
     pub published: bool,
     pub published_at_utc_ms: i64,
+    /// Digest over the exact ordered S22 schema/record revisions and projected
+    /// facets used to construct `indexed_custom_metadata`.
+    pub custom_metadata_authority_sha256: String,
     pub indexed_custom_metadata: BTreeMap<String, MetadataValue>,
 }
 
@@ -142,6 +184,32 @@ pub struct MaterializationAuthorities<'a> {
     pub rule: &'a RecurringRule,
 }
 
+/// One authenticated rule input to bounded batch compilation. Callers provide
+/// source authorities and evidence, never arbitration candidates: candidates
+/// are derived only from authenticated per-rule materialization plans.
+#[derive(Clone, Copy)]
+pub struct BatchMaterializationRequest<'a> {
+    pub authorities: MaterializationAuthorities<'a>,
+    pub inputs: &'a AuthenticatedMaterializationInputs,
+}
+
+/// Opaque output of authenticated batch compilation and precedence resolution.
+///
+/// A future station-storage writer must accept this result only after it has
+/// performed its own one-transaction reread, batch compilation, occurrence
+/// admission, and Draft schedule writes. It must not bypass this boundary with
+/// independently admitted per-rule plans.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArbitratedMaterializationBatch {
+    plans: Vec<MaterializationPlan>,
+}
+
+impl ArbitratedMaterializationBatch {
+    pub fn plans(&self) -> &[MaterializationPlan] {
+        &self.plans
+    }
+}
+
 /// Exact, immutable source evidence carried in a plan and draft intent.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MaterializationInputBinding {
@@ -149,6 +217,11 @@ pub struct MaterializationInputBinding {
     pub candidate_receipt_sha256: String,
     pub prior_airings_sha256: String,
     pub prior_airings_receipt_sha256: String,
+    /// Exact inclusive/exclusive UTC range the authenticated as-run authority
+    /// attested as complete for this materialization. This starts at the
+    /// window start minus the rule's avoid-repeat horizon and ends at the
+    /// materialization window end.
+    pub prior_airings_coverage: MaterializationWindow,
     pub scope_sha256: String,
     pub combined_sha256: String,
 }
@@ -160,6 +233,7 @@ pub enum AssetResolution {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DaypartBlock {
     pub block_id: String,
     pub channel_id: String,
@@ -174,6 +248,7 @@ pub struct DaypartBlock {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub enum DstApplication {
     Standard,
     EarlierFold,
@@ -181,6 +256,7 @@ pub enum DstApplication {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub enum LocalResolution {
     Normal,
     EarlierFold,
@@ -189,6 +265,7 @@ pub enum LocalResolution {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub enum AssetPickStrategy {
     Top,
     Random,
@@ -197,6 +274,7 @@ pub enum AssetPickStrategy {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub enum RecurrenceTimeZone {
     Utc,
     Named {
@@ -206,6 +284,7 @@ pub enum RecurrenceTimeZone {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct LocalDate {
     pub year: u16,
     pub month: u8,
@@ -213,6 +292,7 @@ pub struct LocalDate {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RecurringRule {
     pub rule_id: String,
     pub channel_id: String,
@@ -279,12 +359,6 @@ pub struct MaterializedOccurrence {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum MaterializationAdmission {
-    Create(Box<MaterializationIntent>),
-    AlreadyPresent,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MaterializationOutcome {
     Plan(MaterializationPlan),
 }
@@ -307,38 +381,74 @@ pub enum SlotMaterializationOutcome {
     Blocked {
         starts_at_utc_ms: i64,
     },
-    SuppressedByHigherPriority {
+    SuppressedByPrecedence {
         rule_id: String,
         starts_at_utc_ms: i64,
         winner_rule_id: String,
+        candidate_priority: i16,
+        winner_priority: i16,
+        reason: ArbitrationPrecedence,
     },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuleSlotCandidate {
     pub rule_id: String,
+    pub channel_id: String,
     pub priority: i16,
     pub starts_at_utc_ms: i64,
     pub ends_at_utc_ms: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct RuleSlotKey {
+    rule_id: String,
+    channel_id: String,
+    starts_at_utc_ms: i64,
+}
+
+impl RuleSlotKey {
+    fn from_candidate(candidate: &RuleSlotCandidate) -> Self {
+        Self {
+            rule_id: candidate.rule_id.clone(),
+            channel_id: candidate.channel_id.clone(),
+            starts_at_utc_ms: candidate.starts_at_utc_ms,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ArbitrationOutcome {
     Winner {
         rule_id: String,
+        channel_id: String,
         starts_at_utc_ms: i64,
     },
-    SuppressedByHigherPriority {
+    SuppressedByPrecedence {
         rule_id: String,
+        channel_id: String,
         starts_at_utc_ms: i64,
         winner_rule_id: String,
+        candidate_priority: i16,
+        winner_priority: i16,
+        reason: ArbitrationPrecedence,
     },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArbitrationPrecedence {
+    HigherPriority,
+    RuleIdTieBreak,
 }
 
 impl SavedSearch {
     pub fn validate(&self) -> Result<(), String> {
-        ids(&[&self.search_id, &self.channel_id, &self.owner_operator_id])?;
-        if self.revision == 0 || self.query.validate().is_err() {
+        ids(&[&self.search_id, &self.owner_operator_id])?;
+        if self.revision == 0
+            || self.created_at_utc_ms < 0
+            || !safe_saved_search_name(&self.name)
+            || self.query.validate().is_err()
+        {
             return Err("saved search authority is unbounded, unordered, or malformed".into());
         }
         Ok(())
@@ -353,8 +463,8 @@ impl SavedSearch {
                     .checked_add(1)
                     .ok_or("search revision overflow")?
             || self.search_id != current.search_id
-            || self.channel_id != current.channel_id
             || self.owner_operator_id != current.owner_operator_id
+            || self.created_at_utc_ms != current.created_at_utc_ms
         {
             return Err("saved search CAS or identity rebinding failed".into());
         }
@@ -369,9 +479,14 @@ impl SavedSearchQuery {
             || self.all_of.is_empty() && self.any_of.is_empty()
             || self.limit == 0
             || usize::from(self.limit) > MAX_QUERY_LIMIT
-            || self.all_of.iter().chain(&self.any_of).any(|filter| {
-                !safe_metadata_field(&filter.field) || !valid_metadata_value(&filter.value)
-            })
+            || self
+                .all_of
+                .iter()
+                .chain(&self.any_of)
+                .any(|predicate| predicate.validate().is_err())
+            || predicates_have_duplicates(&self.all_of)
+            || predicates_have_duplicates(&self.any_of)
+            || predicates_overlap(&self.all_of, &self.any_of)
         {
             return Err("saved-search query is unbounded or malformed".into());
         }
@@ -383,8 +498,13 @@ impl AssetCandidate {
     pub fn validate(&self) -> Result<(), String> {
         if !lowercase_sha256(&self.asset_sha256)
             || !safe_schedule_title(&self.title)
+            || self
+                .meeting_body
+                .as_ref()
+                .is_some_and(|meeting_body| !safe_schedule_title(meeting_body))
             || self.duration_ms == 0
             || self.published_at_utc_ms < 0
+            || !lowercase_sha256(&self.custom_metadata_authority_sha256)
             || self.indexed_custom_metadata.len() > MAX_QUERY_LIMIT
             || self
                 .indexed_custom_metadata
@@ -406,20 +526,31 @@ pub fn resolve_asset(
 ) -> Result<AssetResolution, String> {
     search.validate()?;
     rule.validate()?;
-    if candidates.len() > MAX_QUERY_LIMIT || prior_airings.len() > MAX_QUERY_LIMIT {
+    if occurrence_starts_at_utc_ms < 0
+        || candidates.len() > MAX_QUERY_LIMIT
+        || prior_airings.len() > MAX_QUERY_LIMIT
+    {
         return Err("asset resolution input is unbounded".into());
     }
     for candidate in candidates {
         candidate.validate()?;
     }
     for airing in prior_airings {
-        if !lowercase_sha256(&airing.asset_sha256) || airing.aired_at_utc_ms < 0 {
+        if !lowercase_sha256(&airing.asset_sha256)
+            || airing.aired_at_utc_ms < 0
+            || airing.aired_at_utc_ms > occurrence_starts_at_utc_ms
+        {
             return Err("prior airing projection is malformed".into());
         }
     }
-    let repeat_cutoff = rule
-        .avoid_repeat_within_days
-        .map(|days| occurrence_starts_at_utc_ms - i64::from(days) * 86_400_000);
+    let repeat_cutoff = match rule.avoid_repeat_within_days {
+        Some(days) => Some(
+            occurrence_starts_at_utc_ms
+                .checked_sub(i64::from(days) * 86_400_000)
+                .ok_or("asset resolution repeat cutoff underflow")?,
+        ),
+        None => None,
+    };
     let mut matches = candidates
         .iter()
         .filter(|candidate| candidate.ready && candidate.published)
@@ -469,12 +600,7 @@ pub fn resolve_asset(
 }
 
 fn query_matches(query: &SavedSearchQuery, candidate: &AssetCandidate) -> bool {
-    let matches = |filter: &MetadataFilter| {
-        candidate
-            .indexed_custom_metadata
-            .get(&filter.field)
-            .is_some_and(|value| value == &filter.value)
-    };
+    let matches = |predicate: &AssetPredicate| predicate.matches(candidate);
     query.all_of.iter().all(matches)
         && (query.any_of.is_empty() || query.any_of.iter().any(matches))
 }
@@ -489,10 +615,207 @@ fn last_aired(prior_airings: &[PriorAiring], asset_sha256: &str) -> Option<i64> 
 
 fn valid_metadata_value(value: &MetadataValue) -> bool {
     match value {
-        MetadataValue::Text(value) | MetadataValue::Choice(value) => safe_schedule_title(value),
+        MetadataValue::Text(value) => safe_metadata_text(value),
+        MetadataValue::Choice(value) => safe_metadata_field(value),
         MetadataValue::Number(_) | MetadataValue::Boolean(_) => true,
-        MetadataValue::DateTimeUnixMs(value) => *value >= 0,
+        MetadataValue::DateTimeUnixMs(_) => true,
     }
+}
+
+impl AssetPredicate {
+    fn validate(&self) -> Result<(), String> {
+        match self {
+            Self::TitleContains(value) | Self::MeetingBodyEquals(value) => {
+                if safe_query_text(value) {
+                    Ok(())
+                } else {
+                    Err("fixed predicate text is malformed".into())
+                }
+            }
+            Self::DurationMs {
+                min_inclusive,
+                max_inclusive,
+            } => validate_inclusive_range(*min_inclusive, *max_inclusive, "duration"),
+            Self::PublishedAtUtcMs {
+                starts_at_inclusive,
+                ends_before_exclusive,
+            } => validate_nonnegative_half_open_range(
+                *starts_at_inclusive,
+                *ends_before_exclusive,
+                "published time",
+            ),
+            Self::Custom { field, predicate } => {
+                if !safe_metadata_field(field) {
+                    return Err("custom predicate field is malformed".into());
+                }
+                predicate.validate()
+            }
+        }
+    }
+
+    fn matches(&self, candidate: &AssetCandidate) -> bool {
+        match self {
+            Self::TitleContains(needle) => {
+                unicode_case_insensitive_contains(&candidate.title, needle)
+            }
+            Self::MeetingBodyEquals(expected) => candidate
+                .meeting_body
+                .as_ref()
+                .is_some_and(|value| value == expected),
+            Self::DurationMs {
+                min_inclusive,
+                max_inclusive,
+            } => inclusive_range_matches(candidate.duration_ms, *min_inclusive, *max_inclusive),
+            Self::PublishedAtUtcMs {
+                starts_at_inclusive,
+                ends_before_exclusive,
+            } => half_open_range_matches(
+                candidate.published_at_utc_ms,
+                *starts_at_inclusive,
+                *ends_before_exclusive,
+            ),
+            Self::Custom { field, predicate } => candidate
+                .indexed_custom_metadata
+                .get(field)
+                .is_some_and(|value| predicate.matches(value)),
+        }
+    }
+}
+
+impl CustomMetadataPredicate {
+    fn validate(&self) -> Result<(), String> {
+        match self {
+            Self::Equals(value) => {
+                if matches!(value, MetadataValue::Boolean(_)) {
+                    Err("boolean equality must use the explicit boolean predicate".into())
+                } else if valid_metadata_value(value) {
+                    Ok(())
+                } else {
+                    Err("custom equality value is malformed".into())
+                }
+            }
+            Self::Contains(value) => {
+                if safe_query_text(value) {
+                    Ok(())
+                } else {
+                    Err("custom text needle is malformed".into())
+                }
+            }
+            Self::NumberRange {
+                min_inclusive,
+                max_inclusive,
+            } => validate_inclusive_range(*min_inclusive, *max_inclusive, "number"),
+            Self::DateTimeRange {
+                min_inclusive,
+                max_inclusive,
+            } => validate_inclusive_range(*min_inclusive, *max_inclusive, "date-time"),
+            Self::BooleanEquals(_) => Ok(()),
+        }
+    }
+
+    fn matches(&self, value: &MetadataValue) -> bool {
+        match self {
+            Self::Equals(expected) => value == expected,
+            Self::Contains(needle) => {
+                matches!(value, MetadataValue::Text(text) if unicode_case_insensitive_contains(text, needle))
+            }
+            Self::NumberRange {
+                min_inclusive,
+                max_inclusive,
+            } => {
+                matches!(value, MetadataValue::Number(number) if inclusive_range_matches(*number, *min_inclusive, *max_inclusive))
+            }
+            Self::DateTimeRange {
+                min_inclusive,
+                max_inclusive,
+            } => {
+                matches!(value, MetadataValue::DateTimeUnixMs(timestamp) if inclusive_range_matches(*timestamp, *min_inclusive, *max_inclusive))
+            }
+            Self::BooleanEquals(expected) => {
+                matches!(value, MetadataValue::Boolean(actual) if actual == expected)
+            }
+        }
+    }
+}
+
+fn validate_inclusive_range<T: Ord>(
+    min: Option<T>,
+    max: Option<T>,
+    name: &str,
+) -> Result<(), String> {
+    if min.is_none() && max.is_none()
+        || min
+            .as_ref()
+            .zip(max.as_ref())
+            .is_some_and(|(min, max)| min > max)
+    {
+        return Err(format!("{name} range is unbounded or inverted"));
+    }
+    Ok(())
+}
+
+fn validate_half_open_range<T: Ord>(
+    start: Option<T>,
+    end: Option<T>,
+    name: &str,
+) -> Result<(), String> {
+    if start.is_none() && end.is_none()
+        || start
+            .as_ref()
+            .zip(end.as_ref())
+            .is_some_and(|(start, end)| start >= end)
+    {
+        return Err(format!("{name} range is unbounded or inverted"));
+    }
+    Ok(())
+}
+
+fn validate_nonnegative_half_open_range(
+    start: Option<i64>,
+    end: Option<i64>,
+    name: &str,
+) -> Result<(), String> {
+    if start.is_some_and(|value| value < 0) || end.is_some_and(|value| value < 0) {
+        return Err(format!("{name} range contains a negative timestamp"));
+    }
+    validate_half_open_range(start, end, name)
+}
+
+fn inclusive_range_matches<T: Ord + Copy>(value: T, min: Option<T>, max: Option<T>) -> bool {
+    min.is_none_or(|minimum| value >= minimum) && max.is_none_or(|maximum| value <= maximum)
+}
+
+fn half_open_range_matches<T: Ord + Copy>(value: T, start: Option<T>, end: Option<T>) -> bool {
+    start.is_none_or(|minimum| value >= minimum)
+        && end.is_none_or(|exclusive_end| value < exclusive_end)
+}
+
+fn unicode_case_insensitive_contains(haystack: &str, needle: &str) -> bool {
+    haystack.to_lowercase().contains(&needle.to_lowercase())
+}
+
+fn predicates_have_duplicates(predicates: &[AssetPredicate]) -> bool {
+    let mut encodings = predicates
+        .iter()
+        .map(canonical_predicate_bytes)
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap_or_default();
+    encodings.sort();
+    encodings.windows(2).any(|pair| pair[0] == pair[1])
+}
+
+fn predicates_overlap(left: &[AssetPredicate], right: &[AssetPredicate]) -> bool {
+    let left = left
+        .iter()
+        .map(canonical_predicate_bytes)
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap_or_default();
+    let right = right
+        .iter()
+        .map(canonical_predicate_bytes)
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap_or_default();
+    left.iter().any(|predicate| right.contains(predicate))
 }
 
 fn order_candidates(candidates: &mut [AssetCandidate], order: SavedSearchOrder) {
@@ -569,8 +892,7 @@ impl RecurringRule {
         self.validate()?;
         search.validate()?;
         block.validate()?;
-        if self.channel_id != search.channel_id
-            || self.channel_id != block.channel_id
+        if self.channel_id != block.channel_id
             || self.saved_search_id != search.search_id
             || self.saved_search_revision != search.revision
             || self.block_id != block.block_id
@@ -650,6 +972,7 @@ impl AuthenticatedMaterializationInputs {
     fn verify_and_bind(
         &self,
         source_authority_sha256: &str,
+        rule: &RecurringRule,
         window: &MaterializationWindow,
         observed_at_utc_ms: i64,
         verifier: &impl SourceEvidenceVerifier,
@@ -667,6 +990,7 @@ impl AuthenticatedMaterializationInputs {
             SourceEvidenceKind::PriorAirings,
             &canonical_prior_airings_bytes(&self.prior_airings.airings)?,
         );
+        let prior_airings_coverage = prior_airings_coverage_window(rule, window)?;
         let candidate_scope = evidence_scope_hash(
             SourceEvidenceKind::CandidateProjection,
             source_authority_sha256,
@@ -675,7 +999,7 @@ impl AuthenticatedMaterializationInputs {
         let airing_scope = evidence_scope_hash(
             SourceEvidenceKind::PriorAirings,
             source_authority_sha256,
-            window,
+            &prior_airings_coverage,
         );
         self.candidate_projection
             .receipt
@@ -702,12 +1026,13 @@ impl AuthenticatedMaterializationInputs {
             candidate_receipt_sha256: receipt_hash(&self.candidate_projection.receipt),
             prior_airings_sha256,
             prior_airings_receipt_sha256: receipt_hash(&self.prior_airings.receipt),
+            prior_airings_coverage,
             scope_sha256: combined_scope_hash(&candidate_scope, &airing_scope),
             combined_sha256: String::new(),
         };
         let mut binding = binding;
         binding.combined_sha256 = input_binding_hash(&binding);
-        binding.validate_for(source_authority_sha256, window)?;
+        binding.validate_for(source_authority_sha256, rule, window)?;
         Ok(binding)
     }
 }
@@ -739,9 +1064,51 @@ impl MaterializationInputBinding {
     fn validate_for(
         &self,
         source_authority_sha256: &str,
+        rule: &RecurringRule,
         window: &MaterializationWindow,
     ) -> Result<(), String> {
+        let expected_prior_airings_coverage = prior_airings_coverage_window(rule, window)?;
         if !lowercase_sha256(source_authority_sha256)
+            || [
+                &self.candidate_projection_sha256,
+                &self.candidate_receipt_sha256,
+                &self.prior_airings_sha256,
+                &self.prior_airings_receipt_sha256,
+                &self.scope_sha256,
+                &self.combined_sha256,
+            ]
+            .iter()
+            .any(|value| !lowercase_sha256(value))
+            || self.prior_airings_coverage != expected_prior_airings_coverage
+            || self.scope_sha256
+                != combined_scope_hash(
+                    &evidence_scope_hash(
+                        SourceEvidenceKind::CandidateProjection,
+                        source_authority_sha256,
+                        window,
+                    ),
+                    &evidence_scope_hash(
+                        SourceEvidenceKind::PriorAirings,
+                        source_authority_sha256,
+                        &expected_prior_airings_coverage,
+                    ),
+                )
+            || self.combined_sha256 != input_binding_hash(self)
+        {
+            return Err("materialization input evidence is forged, incomplete, or rebound".into());
+        }
+        Ok(())
+    }
+
+    fn validate_unbound_for(
+        &self,
+        source_authority_sha256: &str,
+        window: &MaterializationWindow,
+    ) -> Result<(), String> {
+        self.prior_airings_coverage.validate()?;
+        if self.prior_airings_coverage.ends_at_utc_ms != window.ends_at_utc_ms
+            || self.prior_airings_coverage.starts_at_utc_ms > window.starts_at_utc_ms
+            || !lowercase_sha256(source_authority_sha256)
             || [
                 &self.candidate_projection_sha256,
                 &self.candidate_receipt_sha256,
@@ -762,7 +1129,7 @@ impl MaterializationInputBinding {
                     &evidence_scope_hash(
                         SourceEvidenceKind::PriorAirings,
                         source_authority_sha256,
-                        window,
+                        &self.prior_airings_coverage,
                     ),
                 )
             || self.combined_sha256 != input_binding_hash(self)
@@ -792,6 +1159,7 @@ pub fn derive_materialization_intent(
     let source_authority_sha256 = authority_hash(search, block, rule);
     let source_input_binding = inputs.verify_and_bind(
         &source_authority_sha256,
+        rule,
         &window,
         observed_at_utc_ms,
         verifier,
@@ -869,6 +1237,169 @@ pub fn derive_materialization_intent(
     }))
 }
 
+/// Derives a bounded set of authenticated per-rule plans, then resolves
+/// overlapping same-channel slots exactly once by priority and rule-id.
+///
+/// This is the required pure boundary for future station-storage batch
+/// compilation. The storage writer must rerun it from transaction-reread
+/// authority and evidence before occurrence admission and Draft-only writes.
+pub fn derive_arbitrated_materialization_batch(
+    requests: &[BatchMaterializationRequest<'_>],
+    window: MaterializationWindow,
+    observed_at_utc_ms: i64,
+    verifier: &impl SourceEvidenceVerifier,
+) -> Result<ArbitratedMaterializationBatch, String> {
+    if requests.is_empty() || requests.len() > MAX_SLOTS {
+        return Err("materialization batch is empty or unbounded".into());
+    }
+    let mut authority_keys = BTreeSet::new();
+    let mut plans = Vec::with_capacity(requests.len());
+    let mut candidates = Vec::new();
+    let mut slot_keys = BTreeSet::new();
+
+    for request in requests {
+        let MaterializationAuthorities {
+            search,
+            block,
+            rule,
+        } = request.authorities;
+        if !authority_keys.insert(rule.rule_id.clone()) {
+            return Err("duplicate recurring-rule authority in materialization batch".into());
+        }
+        let MaterializationOutcome::Plan(plan) = derive_materialization_intent(
+            search,
+            block,
+            rule,
+            window.clone(),
+            observed_at_utc_ms,
+            request.inputs,
+            verifier,
+        )?;
+        if let Some(intent) = plan.draft_intent.as_deref() {
+            intent.validate_authenticated_against(
+                search,
+                block,
+                rule,
+                request.inputs,
+                observed_at_utc_ms,
+                verifier,
+            )?;
+            for slot in &intent.slots {
+                let candidate = RuleSlotCandidate {
+                    rule_id: rule.rule_id.clone(),
+                    channel_id: rule.channel_id.clone(),
+                    priority: rule.priority,
+                    starts_at_utc_ms: slot.starts_at_utc_ms,
+                    ends_at_utc_ms: slot.ends_at_utc_ms,
+                };
+                if !slot_keys.insert(RuleSlotKey::from_candidate(&candidate)) {
+                    return Err("duplicate recurring-rule slot in materialization batch".into());
+                }
+                candidates.push(candidate);
+            }
+        }
+        plans.push(plan);
+    }
+
+    let outcomes = arbitrate_rule_slots(&candidates)?;
+    let mut suppressions = BTreeMap::new();
+    for outcome in outcomes {
+        if let ArbitrationOutcome::SuppressedByPrecedence {
+            rule_id,
+            channel_id,
+            starts_at_utc_ms,
+            winner_rule_id,
+            candidate_priority,
+            winner_priority,
+            reason,
+        } = outcome
+        {
+            let key = RuleSlotKey {
+                rule_id,
+                channel_id,
+                starts_at_utc_ms,
+            };
+            if suppressions
+                .insert(
+                    key,
+                    (winner_rule_id, candidate_priority, winner_priority, reason),
+                )
+                .is_some()
+            {
+                return Err("duplicate precedence decision in materialization batch".into());
+            }
+        }
+    }
+
+    for (plan, request) in plans.iter_mut().zip(requests) {
+        let MaterializationAuthorities {
+            search,
+            block,
+            rule,
+        } = request.authorities;
+        let mut retained_draft = true;
+        if let Some(intent) = plan.draft_intent.as_mut() {
+            let mut suppressed_slots = BTreeSet::new();
+            for outcome in &mut plan.outcomes {
+                let SlotMaterializationOutcome::Proposed(occurrence) = outcome else {
+                    continue;
+                };
+                let starts_at_utc_ms = occurrence.starts_at_utc_ms;
+                let key = RuleSlotKey {
+                    rule_id: rule.rule_id.clone(),
+                    channel_id: rule.channel_id.clone(),
+                    starts_at_utc_ms,
+                };
+                if let Some((winner_rule_id, candidate_priority, winner_priority, reason)) =
+                    suppressions.get(&key)
+                {
+                    suppressed_slots.insert(key);
+                    *outcome = SlotMaterializationOutcome::SuppressedByPrecedence {
+                        rule_id: rule.rule_id.clone(),
+                        starts_at_utc_ms,
+                        winner_rule_id: winner_rule_id.clone(),
+                        candidate_priority: *candidate_priority,
+                        winner_priority: *winner_priority,
+                        reason: *reason,
+                    };
+                }
+            }
+            intent.slots.retain(|slot| {
+                !suppressed_slots.contains(&RuleSlotKey {
+                    rule_id: rule.rule_id.clone(),
+                    channel_id: rule.channel_id.clone(),
+                    starts_at_utc_ms: slot.starts_at_utc_ms,
+                })
+            });
+            retained_draft = !intent.slots.is_empty();
+            if retained_draft {
+                intent.materialization_id = intent_hash(intent);
+                intent.validate_authenticated_against(
+                    search,
+                    block,
+                    rule,
+                    request.inputs,
+                    observed_at_utc_ms,
+                    verifier,
+                )?;
+            }
+        }
+        if !retained_draft {
+            plan.draft_intent = None;
+        }
+    }
+
+    let mut keyed_plans = plans
+        .into_iter()
+        .zip(requests)
+        .map(|(plan, request)| (request.authorities.rule.rule_id.clone(), plan))
+        .collect::<Vec<_>>();
+    keyed_plans.sort_by(|left, right| left.0.cmp(&right.0));
+    Ok(ArbitratedMaterializationBatch {
+        plans: keyed_plans.into_iter().map(|(_, plan)| plan).collect(),
+    })
+}
+
 fn block_applies_on(block: &DaypartBlock, date: &LocalDate) -> bool {
     block.weekday_mask & (1 << date.weekday()) != 0
         && block
@@ -886,6 +1417,7 @@ pub fn arbitrate_rule_slots(
     }
     for candidate in candidates {
         if !uuid(&candidate.rule_id)
+            || !uuid(&candidate.channel_id)
             || candidate.starts_at_utc_ms < 0
             || candidate.ends_at_utc_ms <= candidate.starts_at_utc_ms
         {
@@ -894,9 +1426,9 @@ pub fn arbitrate_rule_slots(
     }
     let mut ranked = candidates.to_vec();
     ranked.sort_by(|left, right| {
-        right
-            .priority
-            .cmp(&left.priority)
+        left.channel_id
+            .cmp(&right.channel_id)
+            .then_with(|| right.priority.cmp(&left.priority))
             .then_with(|| left.rule_id.cmp(&right.rule_id))
             .then_with(|| left.starts_at_utc_ms.cmp(&right.starts_at_utc_ms))
     });
@@ -904,94 +1436,33 @@ pub fn arbitrate_rule_slots(
     let mut outcomes = Vec::with_capacity(ranked.len());
     for candidate in ranked {
         if let Some(winner) = winners.iter().find(|winner| {
-            candidate.starts_at_utc_ms < winner.ends_at_utc_ms
+            candidate.channel_id == winner.channel_id
+                && candidate.starts_at_utc_ms < winner.ends_at_utc_ms
                 && winner.starts_at_utc_ms < candidate.ends_at_utc_ms
         }) {
-            outcomes.push(ArbitrationOutcome::SuppressedByHigherPriority {
+            outcomes.push(ArbitrationOutcome::SuppressedByPrecedence {
                 rule_id: candidate.rule_id.clone(),
+                channel_id: candidate.channel_id.clone(),
                 starts_at_utc_ms: candidate.starts_at_utc_ms,
                 winner_rule_id: winner.rule_id.clone(),
+                candidate_priority: candidate.priority,
+                winner_priority: winner.priority,
+                reason: if winner.priority > candidate.priority {
+                    ArbitrationPrecedence::HigherPriority
+                } else {
+                    ArbitrationPrecedence::RuleIdTieBreak
+                },
             });
         } else {
             outcomes.push(ArbitrationOutcome::Winner {
                 rule_id: candidate.rule_id.clone(),
+                channel_id: candidate.channel_id.clone(),
                 starts_at_utc_ms: candidate.starts_at_utc_ms,
             });
             winners.push(candidate);
         }
     }
     Ok(outcomes)
-}
-
-pub fn admit_materialization(
-    existing: &[MaterializationIntent],
-    mut candidate: MaterializationIntent,
-    authorities: MaterializationAuthorities<'_>,
-    inputs: &AuthenticatedMaterializationInputs,
-    observed_at_utc_ms: i64,
-    verifier: &impl SourceEvidenceVerifier,
-) -> Result<MaterializationAdmission, String> {
-    let MaterializationAuthorities {
-        search,
-        block,
-        rule,
-    } = authorities;
-    if existing.len() > MAX_SLOTS {
-        return Err("materialization ledger is unbounded".into());
-    }
-    for (index, prior) in existing.iter().enumerate() {
-        // Historical intents are immutable audit records. Current rule/search/block
-        // authority may legitimately have advanced after they were appended.
-        prior.validate()?;
-        if existing[..index]
-            .iter()
-            .any(|older| older.materialization_id == prior.materialization_id)
-        {
-            return Err("duplicate materialization identity is not appendable".into());
-        }
-    }
-    candidate.validate_authenticated_against(
-        search,
-        block,
-        rule,
-        inputs,
-        observed_at_utc_ms,
-        verifier,
-    )?;
-    candidate.slots.retain(|slot| {
-        !existing.iter().any(|prior| {
-            prior
-                .slots
-                .iter()
-                .any(|prior_slot| prior_slot.occurrence_id == slot.occurrence_id)
-        })
-    });
-    if candidate.slots.is_empty() {
-        return Ok(MaterializationAdmission::AlreadyPresent);
-    }
-    candidate.materialization_id = intent_hash(&candidate);
-    candidate.validate_authenticated_against(
-        search,
-        block,
-        rule,
-        inputs,
-        observed_at_utc_ms,
-        verifier,
-    )?;
-    if let Some(prior) = existing
-        .iter()
-        .find(|prior| prior.materialization_id == candidate.materialization_id)
-    {
-        return if prior == &candidate {
-            Ok(MaterializationAdmission::AlreadyPresent)
-        } else {
-            Err("materialization identity collision is forged".into())
-        };
-    }
-    if existing.len() == MAX_SLOTS {
-        return Err("materialization ledger is at append capacity".into());
-    }
-    Ok(MaterializationAdmission::Create(Box::new(candidate)))
 }
 
 impl MaterializationWindow {
@@ -1055,8 +1526,11 @@ impl MaterializationIntent {
         {
             return Err("materialization source authority is stale or rebound".into());
         }
-        self.source_input_binding
-            .validate_for(&self.source_authority_sha256, &self.window)?;
+        self.source_input_binding.validate_for(
+            &self.source_authority_sha256,
+            rule,
+            &self.window,
+        )?;
         validate_slots(rule, &self.window, &self.slots)
     }
     pub fn validate_authenticated_against(
@@ -1071,6 +1545,7 @@ impl MaterializationIntent {
         self.validate_integrity_against(search, block, rule)?;
         let expected = inputs.verify_and_bind(
             &self.source_authority_sha256,
+            rule,
             &self.window,
             observed_at_utc_ms,
             verifier,
@@ -1091,7 +1566,7 @@ impl MaterializationIntent {
             || !sha(&self.source_authority_sha256)
             || self
                 .source_input_binding
-                .validate_for(&self.source_authority_sha256, &self.window)
+                .validate_unbound_for(&self.source_authority_sha256, &self.window)
                 .is_err()
             || self.materialization_id != intent_hash(self)
         {
@@ -1191,6 +1666,9 @@ fn resolve_slots(
                 }
             };
             let starts_at_utc_ms = zoned.timestamp().as_millisecond();
+            let ends_at_utc_ms = starts_at_utc_ms
+                .checked_add(i64::from(rule.duration_minutes) * 60_000)
+                .ok_or("recurrence slot UTC end overflow")?;
             if starts_at_utc_ms >= window.ends_at_utc_ms
                 && date.days_since_epoch() > rule.anchor_date.days_since_epoch()
             {
@@ -1198,6 +1676,7 @@ fn resolve_slots(
             }
             if starts_at_utc_ms >= window.starts_at_utc_ms
                 && starts_at_utc_ms < window.ends_at_utc_ms
+                && ends_at_utc_ms <= window.ends_at_utc_ms
             {
                 slots.push(ResolvedSlot {
                     occurrence_id: String::new(),
@@ -1208,7 +1687,7 @@ fn resolve_slots(
                     iana_zone: zone_name.to_owned(),
                     utc_offset_seconds: zoned.offset().seconds(),
                     starts_at_utc_ms,
-                    ends_at_utc_ms: starts_at_utc_ms + i64::from(rule.duration_minutes) * 60_000,
+                    ends_at_utc_ms,
                     resolution,
                 });
                 if slots.len() > MAX_SLOTS {
@@ -1350,6 +1829,24 @@ fn safe_label(value: &str) -> bool {
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b' ' | b'-'))
 }
+fn safe_saved_search_name(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= MAX_SAVED_SEARCH_NAME_LEN
+        && value == value.trim()
+        && value.chars().all(|character| !character.is_control())
+}
+fn safe_query_text(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= MAX_TERM_LEN
+        && value == value.trim()
+        && value.chars().all(|character| !character.is_control())
+}
+fn safe_metadata_text(value: &str) -> bool {
+    !value.is_empty()
+        && value.chars().count() <= MAX_METADATA_TEXT_CHARS
+        && value == value.trim()
+        && value.chars().all(|character| !character.is_control())
+}
 fn safe_schedule_title(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 240
@@ -1420,12 +1917,39 @@ fn evidence_scope_hash(
     window: &MaterializationWindow,
 ) -> String {
     let mut digest = Sha256::new();
-    put(&mut digest, "townlight.materialization-evidence-scope.v1");
+    put(&mut digest, "townlight.materialization-evidence-scope.v2");
     put(&mut digest, source_evidence_kind_name(kind));
     put(&mut digest, source_authority_sha256);
     digest.write(window.starts_at_utc_ms.to_le_bytes());
     digest.write(window.ends_at_utc_ms.to_le_bytes());
     format!("{:x}", digest.finalize())
+}
+/// Returns the exact historical as-run UTC range an authority must attest as
+/// complete for the rule and materialization window. The end remains exclusive.
+pub fn materialization_prior_airings_coverage_window(
+    rule: &RecurringRule,
+    window: &MaterializationWindow,
+) -> Result<MaterializationWindow, String> {
+    rule.validate()?;
+    window.validate()?;
+    prior_airings_coverage_window(rule, window)
+}
+
+fn prior_airings_coverage_window(
+    rule: &RecurringRule,
+    window: &MaterializationWindow,
+) -> Result<MaterializationWindow, String> {
+    let lookback_ms = i64::from(rule.avoid_repeat_within_days.unwrap_or(0)) * 86_400_000;
+    let starts_at_utc_ms = window
+        .starts_at_utc_ms
+        .checked_sub(lookback_ms)
+        .ok_or("prior-airings evidence coverage underflows UTC epoch")?;
+    let coverage = MaterializationWindow {
+        starts_at_utc_ms,
+        ends_at_utc_ms: window.ends_at_utc_ms,
+    };
+    coverage.validate()?;
+    Ok(coverage)
 }
 fn combined_scope_hash(candidate_scope_sha256: &str, prior_airings_scope_sha256: &str) -> String {
     let mut digest = Sha256::new();
@@ -1491,7 +2015,9 @@ pub fn canonical_source_bytes(
     Ok(bytes)
 }
 /// Returns the scope that an external catalog or as-run authority must bind in
-/// its receipt before this crate will consume that projection.
+/// its receipt before this crate will consume that projection. Prior-airings
+/// scopes cover the full `materialization_prior_airings_coverage_window`, not
+/// merely the requested future materialization window.
 pub fn materialization_evidence_scope_sha256(
     search: &SavedSearch,
     block: &DaypartBlock,
@@ -1501,10 +2027,14 @@ pub fn materialization_evidence_scope_sha256(
 ) -> Result<String, String> {
     rule.validate_against(search, block)?;
     window.validate()?;
+    let evidence_window = match kind {
+        SourceEvidenceKind::CandidateProjection => window.clone(),
+        SourceEvidenceKind::PriorAirings => prior_airings_coverage_window(rule, window)?,
+    };
     Ok(evidence_scope_hash(
         kind,
         &authority_hash(search, block, rule),
-        window,
+        &evidence_window,
     ))
 }
 fn encode_source(
@@ -1513,15 +2043,12 @@ fn encode_source(
     block: &DaypartBlock,
     rule: &RecurringRule,
 ) {
-    put(digest, "townlight.schedule-source.v2");
+    put(digest, "townlight.schedule-source.v3");
     digest.write(SOURCE_AUTHORITY_SCHEMA_VERSION.to_le_bytes());
-    for value in [
-        &search.search_id,
-        &search.channel_id,
-        &search.owner_operator_id,
-    ] {
+    for value in [&search.search_id, &search.name, &search.owner_operator_id] {
         put(digest, value);
     }
+    digest.write(search.created_at_utc_ms.to_le_bytes());
     digest.write(search.revision.to_le_bytes());
     encode_query(digest, &search.query);
     for value in [&block.block_id, &block.channel_id, &block.label] {
@@ -1634,14 +2161,22 @@ pub fn canonical_candidate_projection_bytes(
 ) -> Result<Vec<u8>, String> {
     validate_candidate_projection(candidates)?;
     let mut bytes = Vec::new();
-    put(&mut bytes, "townlight.candidate-projection.v1");
+    put(&mut bytes, "townlight.candidate-projection.v3");
     bytes.write((candidates.len() as u32).to_le_bytes());
     for candidate in candidates {
         put(&mut bytes, &candidate.asset_sha256);
         put(&mut bytes, &candidate.title);
+        match &candidate.meeting_body {
+            Some(meeting_body) => {
+                bytes.write([1]);
+                put(&mut bytes, meeting_body);
+            }
+            None => bytes.write([0]),
+        }
         bytes.write(candidate.duration_ms.to_le_bytes());
         bytes.write([u8::from(candidate.ready), u8::from(candidate.published)]);
         bytes.write(candidate.published_at_utc_ms.to_le_bytes());
+        put(&mut bytes, &candidate.custom_metadata_authority_sha256);
         bytes.write((candidate.indexed_custom_metadata.len() as u32).to_le_bytes());
         for (field, value) in &candidate.indexed_custom_metadata {
             put(&mut bytes, field);
@@ -1678,6 +2213,7 @@ pub fn canonical_unverified_input_binding_bytes(
     ]
     .iter()
     .any(|value| !lowercase_sha256(value))
+        || binding.prior_airings_coverage.validate().is_err()
         || binding.combined_sha256 != input_binding_hash(binding)
     {
         return Err("materialization input binding is malformed".into());
@@ -1750,6 +2286,13 @@ fn encode_input_binding(
     ] {
         put(digest, value);
     }
+    digest.write(
+        binding
+            .prior_airings_coverage
+            .starts_at_utc_ms
+            .to_le_bytes(),
+    );
+    digest.write(binding.prior_airings_coverage.ends_at_utc_ms.to_le_bytes());
     if include_combined_sha256 {
         put(digest, &binding.combined_sha256);
     }
@@ -1761,11 +2304,106 @@ fn encode_query(digest: &mut impl CanonicalSink, query: &SavedSearchQuery) {
     }]);
     digest.write(query.limit.to_le_bytes());
     for filters in [&query.all_of, &query.any_of] {
-        digest.write((filters.len() as u32).to_le_bytes());
-        for filter in filters {
-            put(digest, &filter.field);
-            encode_metadata_value(digest, &filter.value);
+        let mut encoded = filters
+            .iter()
+            .map(canonical_predicate_bytes)
+            .collect::<Result<Vec<_>, _>>()
+            .expect("validated query has canonical predicates");
+        encoded.sort();
+        digest.write((encoded.len() as u32).to_le_bytes());
+        for predicate in encoded {
+            digest.write((predicate.len() as u64).to_le_bytes());
+            digest.write(predicate);
         }
+    }
+}
+fn canonical_predicate_bytes(predicate: &AssetPredicate) -> Result<Vec<u8>, String> {
+    predicate.validate()?;
+    let mut bytes = Vec::new();
+    encode_asset_predicate(&mut bytes, predicate);
+    Ok(bytes)
+}
+fn encode_asset_predicate(digest: &mut impl CanonicalSink, predicate: &AssetPredicate) {
+    match predicate {
+        AssetPredicate::TitleContains(value) => {
+            digest.write([0]);
+            put(digest, value);
+        }
+        AssetPredicate::MeetingBodyEquals(value) => {
+            digest.write([1]);
+            put(digest, value);
+        }
+        AssetPredicate::DurationMs {
+            min_inclusive,
+            max_inclusive,
+        } => {
+            digest.write([2]);
+            encode_optional_u64(digest, *min_inclusive);
+            encode_optional_u64(digest, *max_inclusive);
+        }
+        AssetPredicate::PublishedAtUtcMs {
+            starts_at_inclusive,
+            ends_before_exclusive,
+        } => {
+            digest.write([3]);
+            encode_optional_i64(digest, *starts_at_inclusive);
+            encode_optional_i64(digest, *ends_before_exclusive);
+        }
+        AssetPredicate::Custom { field, predicate } => {
+            digest.write([4]);
+            put(digest, field);
+            encode_custom_metadata_predicate(digest, predicate);
+        }
+    }
+}
+fn encode_custom_metadata_predicate(
+    digest: &mut impl CanonicalSink,
+    predicate: &CustomMetadataPredicate,
+) {
+    match predicate {
+        CustomMetadataPredicate::Equals(value) => {
+            digest.write([0]);
+            encode_metadata_value(digest, value);
+        }
+        CustomMetadataPredicate::Contains(value) => {
+            digest.write([1]);
+            put(digest, value);
+        }
+        CustomMetadataPredicate::NumberRange {
+            min_inclusive,
+            max_inclusive,
+        } => {
+            digest.write([2]);
+            encode_optional_i64(digest, *min_inclusive);
+            encode_optional_i64(digest, *max_inclusive);
+        }
+        CustomMetadataPredicate::DateTimeRange {
+            min_inclusive,
+            max_inclusive,
+        } => {
+            digest.write([3]);
+            encode_optional_i64(digest, *min_inclusive);
+            encode_optional_i64(digest, *max_inclusive);
+        }
+        CustomMetadataPredicate::BooleanEquals(value) => digest.write([4, u8::from(*value)]),
+    }
+}
+fn encode_optional_u64(digest: &mut impl CanonicalSink, value: Option<u64>) {
+    match value {
+        Some(value) => {
+            digest.write([1]);
+            digest.write(value.to_le_bytes());
+        }
+        None => digest.write([0]),
+    }
+}
+fn encode_optional_i64(digest: &mut impl CanonicalSink, value: Option<i64>) {
+    match value {
+        Some(value) => {
+            digest.write([1]);
+            digest.write(value.to_le_bytes());
+        }
+        None => digest.write([0]),
     }
 }
 fn encode_date(digest: &mut impl CanonicalSink, value: &LocalDate) {

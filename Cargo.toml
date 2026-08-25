@@ -11,6 +11,7 @@ members = [
     "crates/station-auth",
     "crates/station-cg",
     "crates/station-captions",
+    "crates/station-catalog",
     "crates/station-contribution",
     "crates/station-control-room",
     "crates/station-domain",
@@ -76,6 +77,7 @@ station-agenda = { path = "crates/station-agenda" }
 station-auth = { path = "crates/station-auth" }
 station-cg = { path = "crates/station-cg" }
 station-captions = { path = "crates/station-captions" }
+station-catalog = { path = "crates/station-catalog" }
 station-contribution = { path = "crates/station-contribution" }
 station-domain = { path = "crates/station-domain" }
 station-media-journal = { path = "crates/station-media-journal" }

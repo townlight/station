@@ -70,6 +70,10 @@ use station_schedule::{
     HeadendProfileApplyRequest, MediaAsset, OUTPUT_PROFILES, ScheduleItem, ScheduleState,
     ScheduleWindow,
 };
+use station_schedule_automation::{
+    AssetPickStrategy, DaypartBlock, LocalDate, RecurrenceTimeZone, RecurringRule, SavedSearch,
+    SavedSearchQuery,
+};
 use station_storage::{
     AlertChannelSecret, AssetMetadataWriteError, CaptionPolicyWriteError, CgSnapshotReadError,
     CgWriteError, ChannelCaptionMode, ChannelCaptionPolicy, ChannelCaptionPolicyAuditEvent,
@@ -78,8 +82,8 @@ use station_storage::{
     ExternalReceiverAcceptanceReceipt, FallbackSlateWriteError, HeadendProfileWriteError,
     OutputLoudnessProofJob, OutputLoudnessProofJobRecord, OutputLoudnessProofJobState,
     ProfileWriteError, ReceiverAcceptanceOutcome, ReceiverEvidenceMethod,
-    ReferenceStationTierWrite, ReferenceStationTierWriteError, ScheduleItemWrite, StationStore,
-    StoredSinkLoudnessProof,
+    ReferenceStationTierWrite, ReferenceStationTierWriteError, ScheduleAutomationWriteError,
+    ScheduleItemWrite, StationStore, StoredSinkLoudnessProof,
 };
 use station_update::UpdateCheckTrigger;
 use station_update_coordinator::CoordinatorError;
@@ -696,6 +700,79 @@ struct AutomationFeaturePolicyStatusResponse {
 #[derive(Debug, Serialize)]
 struct AutomationFeaturePolicyHistoryResponse {
     policy: AutomationFeaturePolicy,
+    changed_by: String,
+    occurred_at_unix_ms: i64,
+}
+
+/// The browser proposes only the station-wide name and query. Identity,
+/// revision, ownership, creation time, attribution, and change time are
+/// server-derived authority facts.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PutSavedSearchRequest {
+    name: String,
+    query: SavedSearchQuery,
+    expected_revision: Option<u64>,
+}
+
+/// The browser proposes mutable daypart fields. Identity, revision,
+/// attribution, and time are server-derived authority facts.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PutDaypartBlockRequest {
+    channel_id: String,
+    label: String,
+    starts_local_minute: u16,
+    ends_local_minute: u16,
+    weekday_mask: u8,
+    season_starts_on: Option<LocalDate>,
+    season_ends_on: Option<LocalDate>,
+    allow_rule_ids: Vec<String>,
+    expected_revision: Option<u64>,
+}
+
+/// Dependency revisions are explicit operator intent and storage verifies they
+/// are still current. Rule identity, revision, attribution, and time are
+/// server-derived authority facts.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PutRecurringRuleRequest {
+    channel_id: String,
+    saved_search_id: String,
+    saved_search_revision: u64,
+    pick_strategy: AssetPickStrategy,
+    rolling_window_days: u8,
+    avoid_repeat_within_days: Option<u8>,
+    enabled: bool,
+    priority: i16,
+    block_id: String,
+    block_revision: u64,
+    weekday_mask: u8,
+    interval_weeks: u8,
+    anchor_date: LocalDate,
+    timezone: RecurrenceTimeZone,
+    local_start_minute: u16,
+    duration_minutes: u16,
+    expected_revision: Option<u64>,
+}
+
+#[derive(Debug, Serialize)]
+struct SavedSearchHistoryResponse {
+    search: SavedSearch,
+    changed_by: String,
+    occurred_at_unix_ms: i64,
+}
+
+#[derive(Debug, Serialize)]
+struct DaypartBlockHistoryResponse {
+    block: DaypartBlock,
+    changed_by: String,
+    occurred_at_unix_ms: i64,
+}
+
+#[derive(Debug, Serialize)]
+struct RecurringRuleHistoryResponse {
+    rule: RecurringRule,
     changed_by: String,
     occurred_at_unix_ms: i64,
 }
@@ -1389,6 +1466,52 @@ impl Api {
             ("PUT", path) if automation_policy_path(path).is_some() => {
                 self.put_automation_policy(path, body, actor)
             }
+            ("GET", path) if saved_search_history_path(path).is_some() => {
+                self.list_saved_search_history(path, actor)
+            }
+            ("GET", path) if saved_search_path(path).is_some() => {
+                self.read_saved_search(path, actor)
+            }
+            ("PUT", path) if saved_search_path(path).is_some() => {
+                self.put_saved_search(path, body, actor)
+            }
+            ("GET", path) if saved_search_list_path(path).is_some() => {
+                self.list_saved_searches(path, actor)
+            }
+            ("GET", path) if daypart_block_history_path(path).is_some() => {
+                self.list_daypart_block_history(path, actor)
+            }
+            ("GET", path) if daypart_block_path(path).is_some() => {
+                self.read_daypart_block(path, actor)
+            }
+            ("PUT", path) if daypart_block_path(path).is_some() => {
+                self.put_daypart_block(path, body, actor)
+            }
+            ("GET", path) if daypart_block_list_path(path).is_some() => {
+                self.list_daypart_blocks(path, actor)
+            }
+            ("GET", path) if recurring_rule_history_path(path).is_some() => {
+                self.list_recurring_rule_history(path, actor)
+            }
+            ("GET", path) if recurring_rule_path(path).is_some() => {
+                self.read_recurring_rule(path, actor)
+            }
+            ("PUT", path) if recurring_rule_path(path).is_some() => {
+                self.put_recurring_rule(path, body, actor)
+            }
+            ("GET", path) if recurring_rule_list_path(path).is_some() => {
+                self.list_recurring_rules(path, actor)
+            }
+            ("GET" | "PUT", path) if path.starts_with("/api/v1/scheduling/") => error_response(
+                400,
+                "invalid_path",
+                "The scheduling automation path or bounded query is invalid.",
+            ),
+            (_, path) if path.starts_with("/api/v1/scheduling/") => error_response(
+                405,
+                "method_not_allowed",
+                "Scheduling automation supports only its documented GET and PUT operations.",
+            ),
             ("GET", "/api/v1/custom-metadata/schemas") => self.list_custom_metadata_schemas(actor),
             ("GET", path) if custom_metadata_schema_history_path(path).is_some() => {
                 self.list_custom_metadata_schema_history(path, actor)
@@ -2141,6 +2264,434 @@ impl Api {
         };
         candidate.validate()?;
         Ok(candidate)
+    }
+
+    fn list_saved_searches(&self, path: &str, actor: Option<&OperatorAccount>) -> ApiResponse {
+        if !is_scheduling_reader(actor) {
+            return scheduling_reader_required();
+        }
+        let Some(limit) = saved_search_list_path(path) else {
+            return scheduling_invalid_path();
+        };
+        match self.storage.list_saved_searches(limit) {
+            Ok(searches) => json_response(
+                200,
+                serde_json::to_vec(&searches).expect("serializing saved searches cannot fail"),
+            ),
+            Err(message) => error_response(500, "storage_error", &message),
+        }
+    }
+
+    fn read_saved_search(&self, path: &str, actor: Option<&OperatorAccount>) -> ApiResponse {
+        if !is_scheduling_reader(actor) {
+            return scheduling_reader_required();
+        }
+        let Some(search_id) = saved_search_path(path) else {
+            return scheduling_invalid_path();
+        };
+        match self.storage.read_saved_search(search_id) {
+            Ok(Some(search)) => json_response(
+                200,
+                serde_json::to_vec(&search).expect("serializing a saved search cannot fail"),
+            ),
+            Ok(None) => scheduling_not_found("saved_search"),
+            Err(message) => error_response(500, "storage_error", &message),
+        }
+    }
+
+    fn list_saved_search_history(
+        &self,
+        path: &str,
+        actor: Option<&OperatorAccount>,
+    ) -> ApiResponse {
+        if !is_scheduling_reader(actor) {
+            return scheduling_reader_required();
+        }
+        let Some((search_id, limit)) = saved_search_history_path(path) else {
+            return scheduling_invalid_path();
+        };
+        match self.storage.read_saved_search(search_id) {
+            Ok(Some(_)) => {}
+            Ok(None) => return scheduling_not_found("saved_search"),
+            Err(message) => return error_response(500, "storage_error", &message),
+        }
+        match self.storage.list_saved_search_history(search_id, limit) {
+            Ok(history) => json_response(
+                200,
+                serde_json::to_vec(
+                    &history
+                        .into_iter()
+                        .map(|entry| SavedSearchHistoryResponse {
+                            search: entry.search,
+                            changed_by: entry.changed_by,
+                            occurred_at_unix_ms: entry.occurred_at_unix_ms,
+                        })
+                        .collect::<Vec<_>>(),
+                )
+                .expect("serializing saved search history cannot fail"),
+            ),
+            Err(message) => error_response(500, "storage_error", &message),
+        }
+    }
+
+    fn put_saved_search(
+        &self,
+        path: &str,
+        body: Option<&[u8]>,
+        actor: Option<&OperatorAccount>,
+    ) -> ApiResponse {
+        let Some(search_id) = saved_search_path(path) else {
+            return scheduling_invalid_path();
+        };
+        let Some(actor) = scheduling_writer(actor) else {
+            return scheduling_writer_required();
+        };
+        let Some(request) = parse_body::<PutSavedSearchRequest>(body) else {
+            return error_response(
+                400,
+                "invalid_json",
+                "A complete saved-search body is required.",
+            );
+        };
+        let revision = match scheduling_next_revision(request.expected_revision) {
+            Ok(revision) => revision,
+            Err(message) => return error_response(422, "validation_failed", &message),
+        };
+        let now = match system_time_millis() {
+            Ok(now) => now,
+            Err(message) => return error_response(500, "clock_error", &message),
+        };
+        let current = match self.storage.read_saved_search(search_id) {
+            Ok(current) => current,
+            Err(message) => return error_response(500, "storage_error", &message),
+        };
+        if current.as_ref().is_some_and(|search| {
+            !is_setup_admin(actor) && search.owner_operator_id != actor.account_id().as_str()
+        }) {
+            return error_response(
+                403,
+                "saved_search_owner_required",
+                "A Meeting Operator may change only a saved search they own.",
+            );
+        }
+        let search = SavedSearch {
+            search_id: search_id.into(),
+            name: request.name,
+            owner_operator_id: current.as_ref().map_or_else(
+                || actor.account_id().as_str().into(),
+                |value| value.owner_operator_id.clone(),
+            ),
+            created_at_utc_ms: current
+                .as_ref()
+                .map_or(now, |value| value.created_at_utc_ms),
+            query: request.query,
+            revision,
+        };
+        if let Err(message) = search.validate() {
+            return error_response(422, "validation_failed", &message);
+        }
+        match self.storage.write_saved_search(
+            &search,
+            request.expected_revision,
+            actor.account_id().as_str(),
+            now,
+        ) {
+            Ok(()) => json_response(
+                if revision == 1 { 201 } else { 200 },
+                serde_json::to_vec(&search).expect("serializing a saved search cannot fail"),
+            ),
+            Err(error) => scheduling_write_error_response(error, "saved_search"),
+        }
+    }
+
+    fn list_daypart_blocks(&self, path: &str, actor: Option<&OperatorAccount>) -> ApiResponse {
+        if !is_scheduling_reader(actor) {
+            return scheduling_reader_required();
+        }
+        let Some((channel_id, limit)) = daypart_block_list_path(path) else {
+            return scheduling_invalid_path();
+        };
+        match self.scheduling_channel_exists(channel_id) {
+            Ok(true) => {}
+            Ok(false) => return scheduling_not_found("channel"),
+            Err(message) => return error_response(500, "storage_error", &message),
+        }
+        match self.storage.list_daypart_blocks(channel_id, limit) {
+            Ok(blocks) => json_response(
+                200,
+                serde_json::to_vec(&blocks).expect("serializing daypart blocks cannot fail"),
+            ),
+            Err(message) => error_response(500, "storage_error", &message),
+        }
+    }
+
+    fn read_daypart_block(&self, path: &str, actor: Option<&OperatorAccount>) -> ApiResponse {
+        if !is_scheduling_reader(actor) {
+            return scheduling_reader_required();
+        }
+        let Some(block_id) = daypart_block_path(path) else {
+            return scheduling_invalid_path();
+        };
+        match self.storage.read_daypart_block(block_id) {
+            Ok(Some(block)) => json_response(
+                200,
+                serde_json::to_vec(&block).expect("serializing a daypart block cannot fail"),
+            ),
+            Ok(None) => scheduling_not_found("daypart_block"),
+            Err(message) => error_response(500, "storage_error", &message),
+        }
+    }
+
+    fn list_daypart_block_history(
+        &self,
+        path: &str,
+        actor: Option<&OperatorAccount>,
+    ) -> ApiResponse {
+        if !is_scheduling_reader(actor) {
+            return scheduling_reader_required();
+        }
+        let Some((block_id, limit)) = daypart_block_history_path(path) else {
+            return scheduling_invalid_path();
+        };
+        match self.storage.read_daypart_block(block_id) {
+            Ok(Some(_)) => {}
+            Ok(None) => return scheduling_not_found("daypart_block"),
+            Err(message) => return error_response(500, "storage_error", &message),
+        }
+        match self.storage.list_daypart_block_history(block_id, limit) {
+            Ok(history) => json_response(
+                200,
+                serde_json::to_vec(
+                    &history
+                        .into_iter()
+                        .map(|entry| DaypartBlockHistoryResponse {
+                            block: entry.block,
+                            changed_by: entry.changed_by,
+                            occurred_at_unix_ms: entry.occurred_at_unix_ms,
+                        })
+                        .collect::<Vec<_>>(),
+                )
+                .expect("serializing daypart block history cannot fail"),
+            ),
+            Err(message) => error_response(500, "storage_error", &message),
+        }
+    }
+
+    fn put_daypart_block(
+        &self,
+        path: &str,
+        body: Option<&[u8]>,
+        actor: Option<&OperatorAccount>,
+    ) -> ApiResponse {
+        let Some(block_id) = daypart_block_path(path) else {
+            return scheduling_invalid_path();
+        };
+        let Some(actor) = scheduling_writer(actor) else {
+            return scheduling_writer_required();
+        };
+        let Some(request) = parse_body::<PutDaypartBlockRequest>(body) else {
+            return error_response(
+                400,
+                "invalid_json",
+                "A complete daypart-block body is required.",
+            );
+        };
+        if !is_canonical_api_uuid(&request.channel_id) {
+            return error_response(422, "validation_failed", "The channel identity is invalid.");
+        }
+        match self.scheduling_channel_exists(&request.channel_id) {
+            Ok(true) => {}
+            Ok(false) => return scheduling_not_found("channel"),
+            Err(message) => return error_response(500, "storage_error", &message),
+        }
+        let revision = match scheduling_next_revision(request.expected_revision) {
+            Ok(revision) => revision,
+            Err(message) => return error_response(422, "validation_failed", &message),
+        };
+        let block = DaypartBlock {
+            block_id: block_id.into(),
+            channel_id: request.channel_id,
+            label: request.label,
+            starts_local_minute: request.starts_local_minute,
+            ends_local_minute: request.ends_local_minute,
+            weekday_mask: request.weekday_mask,
+            season_starts_on: request.season_starts_on,
+            season_ends_on: request.season_ends_on,
+            allow_rule_ids: request.allow_rule_ids,
+            revision,
+        };
+        if let Err(message) = block.validate() {
+            return error_response(422, "validation_failed", &message);
+        }
+        let now = match system_time_millis() {
+            Ok(now) => now,
+            Err(message) => return error_response(500, "clock_error", &message),
+        };
+        match self.storage.write_daypart_block(
+            &block,
+            request.expected_revision,
+            actor.account_id().as_str(),
+            now,
+        ) {
+            Ok(()) => json_response(
+                if revision == 1 { 201 } else { 200 },
+                serde_json::to_vec(&block).expect("serializing a daypart block cannot fail"),
+            ),
+            Err(error) => scheduling_write_error_response(error, "daypart_block"),
+        }
+    }
+
+    fn list_recurring_rules(&self, path: &str, actor: Option<&OperatorAccount>) -> ApiResponse {
+        if !is_scheduling_reader(actor) {
+            return scheduling_reader_required();
+        }
+        let Some((channel_id, limit)) = recurring_rule_list_path(path) else {
+            return scheduling_invalid_path();
+        };
+        match self.scheduling_channel_exists(channel_id) {
+            Ok(true) => {}
+            Ok(false) => return scheduling_not_found("channel"),
+            Err(message) => return error_response(500, "storage_error", &message),
+        }
+        match self.storage.list_recurring_rules(channel_id, limit) {
+            Ok(rules) => json_response(
+                200,
+                serde_json::to_vec(&rules).expect("serializing recurring rules cannot fail"),
+            ),
+            Err(message) => error_response(500, "storage_error", &message),
+        }
+    }
+
+    fn read_recurring_rule(&self, path: &str, actor: Option<&OperatorAccount>) -> ApiResponse {
+        if !is_scheduling_reader(actor) {
+            return scheduling_reader_required();
+        }
+        let Some(rule_id) = recurring_rule_path(path) else {
+            return scheduling_invalid_path();
+        };
+        match self.storage.read_recurring_rule(rule_id) {
+            Ok(Some(rule)) => json_response(
+                200,
+                serde_json::to_vec(&rule).expect("serializing a recurring rule cannot fail"),
+            ),
+            Ok(None) => scheduling_not_found("recurring_rule"),
+            Err(message) => error_response(500, "storage_error", &message),
+        }
+    }
+
+    fn list_recurring_rule_history(
+        &self,
+        path: &str,
+        actor: Option<&OperatorAccount>,
+    ) -> ApiResponse {
+        if !is_scheduling_reader(actor) {
+            return scheduling_reader_required();
+        }
+        let Some((rule_id, limit)) = recurring_rule_history_path(path) else {
+            return scheduling_invalid_path();
+        };
+        match self.storage.read_recurring_rule(rule_id) {
+            Ok(Some(_)) => {}
+            Ok(None) => return scheduling_not_found("recurring_rule"),
+            Err(message) => return error_response(500, "storage_error", &message),
+        }
+        match self.storage.list_recurring_rule_history(rule_id, limit) {
+            Ok(history) => json_response(
+                200,
+                serde_json::to_vec(
+                    &history
+                        .into_iter()
+                        .map(|entry| RecurringRuleHistoryResponse {
+                            rule: entry.rule,
+                            changed_by: entry.changed_by,
+                            occurred_at_unix_ms: entry.occurred_at_unix_ms,
+                        })
+                        .collect::<Vec<_>>(),
+                )
+                .expect("serializing recurring rule history cannot fail"),
+            ),
+            Err(message) => error_response(500, "storage_error", &message),
+        }
+    }
+
+    fn put_recurring_rule(
+        &self,
+        path: &str,
+        body: Option<&[u8]>,
+        actor: Option<&OperatorAccount>,
+    ) -> ApiResponse {
+        let Some(rule_id) = recurring_rule_path(path) else {
+            return scheduling_invalid_path();
+        };
+        let Some(actor) = scheduling_writer(actor) else {
+            return scheduling_writer_required();
+        };
+        let Some(request) = parse_body::<PutRecurringRuleRequest>(body) else {
+            return error_response(
+                400,
+                "invalid_json",
+                "A complete recurring-rule body is required.",
+            );
+        };
+        if !is_canonical_api_uuid(&request.channel_id) {
+            return error_response(422, "validation_failed", "The channel identity is invalid.");
+        }
+        match self.scheduling_channel_exists(&request.channel_id) {
+            Ok(true) => {}
+            Ok(false) => return scheduling_not_found("channel"),
+            Err(message) => return error_response(500, "storage_error", &message),
+        }
+        let revision = match scheduling_next_revision(request.expected_revision) {
+            Ok(revision) => revision,
+            Err(message) => return error_response(422, "validation_failed", &message),
+        };
+        let rule = RecurringRule {
+            rule_id: rule_id.into(),
+            channel_id: request.channel_id,
+            saved_search_id: request.saved_search_id,
+            saved_search_revision: request.saved_search_revision,
+            pick_strategy: request.pick_strategy,
+            rolling_window_days: request.rolling_window_days,
+            avoid_repeat_within_days: request.avoid_repeat_within_days,
+            enabled: request.enabled,
+            priority: request.priority,
+            block_id: request.block_id,
+            block_revision: request.block_revision,
+            weekday_mask: request.weekday_mask,
+            interval_weeks: request.interval_weeks,
+            anchor_date: request.anchor_date,
+            timezone: request.timezone,
+            local_start_minute: request.local_start_minute,
+            duration_minutes: request.duration_minutes,
+            revision,
+        };
+        if let Err(message) = rule.validate() {
+            return error_response(422, "validation_failed", &message);
+        }
+        let now = match system_time_millis() {
+            Ok(now) => now,
+            Err(message) => return error_response(500, "clock_error", &message),
+        };
+        match self.storage.write_recurring_rule(
+            &rule,
+            request.expected_revision,
+            actor.account_id().as_str(),
+            now,
+        ) {
+            Ok(()) => json_response(
+                if revision == 1 { 201 } else { 200 },
+                serde_json::to_vec(&rule).expect("serializing a recurring rule cannot fail"),
+            ),
+            Err(error) => scheduling_write_error_response(error, "recurring_rule"),
+        }
+    }
+
+    fn scheduling_channel_exists(&self, channel_id: &str) -> Result<bool, String> {
+        Ok(self
+            .storage
+            .list_channels()?
+            .iter()
+            .any(|channel| channel.channel_id == channel_id))
     }
 
     fn list_custom_metadata_schemas(&self, actor: Option<&OperatorAccount>) -> ApiResponse {
@@ -7565,6 +8116,132 @@ fn is_automation_reader(actor: Option<&OperatorAccount>) -> bool {
     })
 }
 
+fn is_scheduling_reader(actor: Option<&OperatorAccount>) -> bool {
+    actor.is_some_and(|account| {
+        account.enabled()
+            && (account
+                .roles()
+                .contains(&station_auth::OperatorRole::SetupAdmin)
+                || account
+                    .roles()
+                    .contains(&station_auth::OperatorRole::MeetingOperator)
+                || account
+                    .roles()
+                    .contains(&station_auth::OperatorRole::SupportAdmin))
+    })
+}
+
+fn scheduling_writer(actor: Option<&OperatorAccount>) -> Option<&OperatorAccount> {
+    actor.filter(|account| {
+        account.enabled()
+            && (account
+                .roles()
+                .contains(&station_auth::OperatorRole::SetupAdmin)
+                || account
+                    .roles()
+                    .contains(&station_auth::OperatorRole::MeetingOperator))
+    })
+}
+
+fn is_setup_admin(actor: &OperatorAccount) -> bool {
+    actor
+        .roles()
+        .contains(&station_auth::OperatorRole::SetupAdmin)
+}
+
+fn scheduling_reader_required() -> ApiResponse {
+    error_response(
+        403,
+        "scheduling_operator_required",
+        "Reading scheduling automation requires an enabled Setup Admin, Meeting Operator, or Support Admin account.",
+    )
+}
+
+fn scheduling_writer_required() -> ApiResponse {
+    error_response(
+        403,
+        "scheduling_writer_required",
+        "Changing scheduling automation requires the Setup Admin or Meeting Operator role.",
+    )
+}
+
+fn scheduling_invalid_path() -> ApiResponse {
+    error_response(
+        400,
+        "invalid_path",
+        "The scheduling automation path or bounded query is invalid.",
+    )
+}
+
+fn scheduling_next_revision(expected_revision: Option<u64>) -> Result<u64, String> {
+    expected_revision.map_or(Ok(1), |revision| {
+        revision
+            .checked_add(1)
+            .ok_or_else(|| "The expected revision is invalid.".to_string())
+    })
+}
+
+fn scheduling_not_found(authority: &str) -> ApiResponse {
+    let (code, message) = match authority {
+        "saved_search" => ("saved_search_not_found", "The saved search does not exist."),
+        "daypart_block" => (
+            "daypart_block_not_found",
+            "The daypart block does not exist.",
+        ),
+        "recurring_rule" => (
+            "recurring_rule_not_found",
+            "The recurring rule does not exist.",
+        ),
+        "channel" => ("channel_not_found", "The channel does not exist."),
+        _ => (
+            "scheduling_authority_not_found",
+            "The required scheduling authority does not exist.",
+        ),
+    };
+    error_response(404, code, message)
+}
+
+fn scheduling_write_error_response(
+    error: ScheduleAutomationWriteError,
+    resource: &str,
+) -> ApiResponse {
+    match error {
+        ScheduleAutomationWriteError::Invalid(message) => {
+            error_response(422, "validation_failed", &message)
+        }
+        ScheduleAutomationWriteError::Conflict { current_revision } => error_response(
+            409,
+            "revision_conflict",
+            &format!("The scheduling authority changed; current revision is {current_revision:?}."),
+        ),
+        ScheduleAutomationWriteError::DependencyConflict {
+            authority,
+            requested_revision,
+            current_revision,
+        } => error_response(
+            409,
+            "authority_revision_conflict",
+            &format!(
+                "The {authority} dependency changed; requested revision {requested_revision}, current revision {current_revision:?}."
+            ),
+        ),
+        ScheduleAutomationWriteError::NotFound { authority } => scheduling_not_found(authority),
+        ScheduleAutomationWriteError::Rebound => error_response(
+            409,
+            "scheduling_authority_rebound",
+            "An existing scheduling authority identity cannot be rebound.",
+        ),
+        ScheduleAutomationWriteError::Capacity => error_response(
+            422,
+            &format!("{resource}_capacity_exceeded"),
+            "Scheduling automation has reached its bounded authority capacity.",
+        ),
+        ScheduleAutomationWriteError::Storage(message) => {
+            error_response(500, "storage_error", &message)
+        }
+    }
+}
+
 fn is_metadata_reader(actor: Option<&OperatorAccount>) -> bool {
     actor.is_some_and(|account| {
         account.enabled()
@@ -7739,6 +8416,71 @@ fn automation_policy_history_path(path: &str) -> Option<(&str, usize)> {
     }
     let limit = query.strip_prefix("limit=")?.parse::<usize>().ok()?;
     (1..=128).contains(&limit).then_some((policy_id, limit))
+}
+
+fn saved_search_path(path: &str) -> Option<&str> {
+    path_identity(path, "/api/v1/scheduling/saved-searches/", "")
+        .filter(|identity| is_canonical_api_uuid(identity))
+}
+
+fn saved_search_history_path(path: &str) -> Option<(&str, usize)> {
+    scheduling_history_path(path, "/api/v1/scheduling/saved-searches/")
+}
+
+fn saved_search_list_path(path: &str) -> Option<usize> {
+    let query = path.strip_prefix("/api/v1/scheduling/saved-searches?")?;
+    if query.contains('&') {
+        return None;
+    }
+    let limit = query.strip_prefix("limit=")?.parse::<usize>().ok()?;
+    (1..=128).contains(&limit).then_some(limit)
+}
+
+fn daypart_block_path(path: &str) -> Option<&str> {
+    path_identity(path, "/api/v1/scheduling/daypart-blocks/", "")
+        .filter(|identity| is_canonical_api_uuid(identity))
+}
+
+fn daypart_block_history_path(path: &str) -> Option<(&str, usize)> {
+    scheduling_history_path(path, "/api/v1/scheduling/daypart-blocks/")
+}
+
+fn daypart_block_list_path(path: &str) -> Option<(&str, usize)> {
+    scheduling_channel_list_path(path, "/api/v1/scheduling/daypart-blocks?")
+}
+
+fn recurring_rule_path(path: &str) -> Option<&str> {
+    path_identity(path, "/api/v1/scheduling/recurring-rules/", "")
+        .filter(|identity| is_canonical_api_uuid(identity))
+}
+
+fn recurring_rule_history_path(path: &str) -> Option<(&str, usize)> {
+    scheduling_history_path(path, "/api/v1/scheduling/recurring-rules/")
+}
+
+fn recurring_rule_list_path(path: &str) -> Option<(&str, usize)> {
+    scheduling_channel_list_path(path, "/api/v1/scheduling/recurring-rules?")
+}
+
+fn scheduling_history_path<'a>(path: &'a str, prefix: &str) -> Option<(&'a str, usize)> {
+    let remainder = path.strip_prefix(prefix)?;
+    let (identity, query) = remainder.split_once("/history?")?;
+    if !is_canonical_api_uuid(identity) || query.contains('&') {
+        return None;
+    }
+    let limit = query.strip_prefix("limit=")?.parse::<usize>().ok()?;
+    (1..=128).contains(&limit).then_some((identity, limit))
+}
+
+fn scheduling_channel_list_path<'a>(path: &'a str, prefix: &str) -> Option<(&'a str, usize)> {
+    let query = path.strip_prefix(prefix)?;
+    let (channel, limit) = query.split_once("&limit=")?;
+    let channel_id = channel.strip_prefix("channel_id=")?;
+    if !is_canonical_api_uuid(channel_id) || limit.contains('&') {
+        return None;
+    }
+    let limit = limit.parse::<usize>().ok()?;
+    (1..=128).contains(&limit).then_some((channel_id, limit))
 }
 
 fn custom_metadata_schema_path(path: &str) -> Option<&str> {
@@ -9970,10 +10712,14 @@ mod tests {
 
     const TEST_PASSWORD_PHC: &str = "$argon2id$v=19$m=65536,t=3,p=1$c2FsdHNhbHRzYWx0c2FsdA$QUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUE";
 
-    fn test_actor(role: station_auth::OperatorRole) -> OperatorAccount {
+    fn test_actor_with_account(
+        account_id: &str,
+        username: &str,
+        role: station_auth::OperatorRole,
+    ) -> OperatorAccount {
         OperatorAccount::new(
-            station_auth::AccountId::try_from("dc3c0d56-44c8-4c4f-bd32-b501c56d34f6").unwrap(),
-            station_auth::OperatorUsername::try_from("setup.admin").unwrap(),
+            station_auth::AccountId::try_from(account_id).unwrap(),
+            station_auth::OperatorUsername::try_from(username).unwrap(),
             station_auth::OperatorDisplayName::try_from("Setup Administrator").unwrap(),
             station_auth::PasswordPhc::try_from(TEST_PASSWORD_PHC).unwrap(),
             BTreeSet::from([role]),
@@ -9983,6 +10729,10 @@ mod tests {
             1,
         )
         .unwrap()
+    }
+
+    fn test_actor(role: station_auth::OperatorRole) -> OperatorAccount {
+        test_actor_with_account("dc3c0d56-44c8-4c4f-bd32-b501c56d34f6", "setup.admin", role)
     }
 
     #[test]
@@ -13778,6 +14528,581 @@ mod tests {
         drop(api);
         let _ = std::fs::remove_file(database);
         let _ = std::fs::remove_dir_all(application);
+    }
+
+    #[test]
+    fn scheduling_automation_api_derives_authority_and_exposes_current_and_history() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let database = std::env::temp_dir().join(format!("townlight-scheduling-api-{nonce}.db"));
+        let api = Api::open(&database).unwrap();
+        let operator = test_actor(station_auth::OperatorRole::MeetingOperator);
+        let admin = test_actor(station_auth::OperatorRole::SetupAdmin);
+        let support = test_actor_with_account(
+            "cccccccc-dddd-4eee-8fff-000000000000",
+            "schedule.support",
+            station_auth::OperatorRole::SupportAdmin,
+        );
+        let channel_id = "11111111-2222-4333-8444-555555555555";
+        api.storage
+            .put_channel(&ChannelConfiguration {
+                channel_id: channel_id.into(),
+                display_name: "Government".into(),
+                output_profile: station_schedule::OutputProfileId::Proof360p30,
+                output_sinks: vec![station_schedule::OutputSinkConfiguration::required_udp(
+                    "22222222-3333-4444-8555-666666666666",
+                    "Proof output",
+                    "127.0.0.1:5500",
+                    -16.0,
+                )],
+                enabled: false,
+            })
+            .unwrap();
+
+        let search_id = "33333333-4444-4555-8666-777777777777";
+        let block_id = "44444444-5555-4666-8777-888888888888";
+        let rule_id = "55555555-6666-4777-8888-999999999999";
+        let search_path = format!("/api/v1/scheduling/saved-searches/{search_id}");
+        let block_path = format!("/api/v1/scheduling/daypart-blocks/{block_id}");
+        let rule_path = format!("/api/v1/scheduling/recurring-rules/{rule_id}");
+        let query = station_schedule_automation::SavedSearchQuery {
+            all_of: vec![
+                station_schedule_automation::AssetPredicate::MeetingBodyEquals(
+                    "City Council".into(),
+                ),
+                station_schedule_automation::AssetPredicate::DurationMs {
+                    min_inclusive: Some(60_000),
+                    max_inclusive: Some(7_200_000),
+                },
+                station_schedule_automation::AssetPredicate::PublishedAtUtcMs {
+                    starts_at_inclusive: Some(1),
+                    ends_before_exclusive: Some(2_000_000_000_000),
+                },
+                station_schedule_automation::AssetPredicate::Custom {
+                    field: "program_type".into(),
+                    predicate: station_schedule_automation::CustomMetadataPredicate::Equals(
+                        station_schedule_automation::MetadataValue::Choice("meeting".into()),
+                    ),
+                },
+            ],
+            any_of: Vec::new(),
+            order_by: station_schedule_automation::SavedSearchOrder::PublishedNewest,
+            limit: 20,
+        };
+        let search_request = serde_json::json!({
+            "name": "Council meetings",
+            "query": query,
+            "expected_revision": null
+        });
+        let before_write = system_time_millis().unwrap();
+        let created_search = api.handle_authenticated(
+            "PUT",
+            &search_path,
+            Some(&serde_json::to_vec(&search_request).unwrap()),
+            &operator,
+        );
+        assert_eq!(
+            created_search.status,
+            201,
+            "{}",
+            String::from_utf8_lossy(&created_search.body)
+        );
+        let created_search: serde_json::Value =
+            serde_json::from_slice(&created_search.body).unwrap();
+        assert_eq!(
+            created_search["owner_operator_id"],
+            operator.account_id().as_str()
+        );
+        assert_eq!(created_search["revision"], 1);
+        assert_eq!(created_search["name"], "Council meetings");
+        assert!(created_search["created_at_utc_ms"].as_i64().unwrap() >= before_write);
+
+        let block_request = serde_json::json!({
+            "channel_id": channel_id,
+            "label": "Evening",
+            "starts_local_minute": 1080,
+            "ends_local_minute": 1320,
+            "weekday_mask": 127,
+            "season_starts_on": null,
+            "season_ends_on": null,
+            "allow_rule_ids": [rule_id],
+            "expected_revision": null
+        });
+        assert_eq!(
+            api.handle_authenticated(
+                "PUT",
+                &block_path,
+                Some(&serde_json::to_vec(&block_request).unwrap()),
+                &operator,
+            )
+            .status,
+            201
+        );
+        let rule_request = serde_json::json!({
+            "channel_id": channel_id,
+            "saved_search_id": search_id,
+            "saved_search_revision": 1,
+            "pick_strategy": station_schedule_automation::AssetPickStrategy::Newest,
+            "rolling_window_days": 14,
+            "avoid_repeat_within_days": 7,
+            "enabled": true,
+            "priority": 10,
+            "block_id": block_id,
+            "block_revision": 1,
+            "weekday_mask": 127,
+            "interval_weeks": 1,
+            "anchor_date": {"year": 2026, "month": 8, "day": 24},
+            "timezone": station_schedule_automation::RecurrenceTimeZone::Utc,
+            "local_start_minute": 1140,
+            "duration_minutes": 60,
+            "expected_revision": null
+        });
+        assert_eq!(
+            api.handle_authenticated(
+                "PUT",
+                &rule_path,
+                Some(&serde_json::to_vec(&rule_request).unwrap()),
+                &admin,
+            )
+            .status,
+            201
+        );
+
+        let second_channel_id = "66666666-7777-4888-8999-aaaaaaaaaaaa";
+        let second_block_id = "77777777-8888-4999-8aaa-bbbbbbbbbbbb";
+        let second_rule_id = "88888888-9999-4aaa-8bbb-cccccccccccc";
+        api.storage
+            .put_channel(&ChannelConfiguration {
+                channel_id: second_channel_id.into(),
+                display_name: "Education".into(),
+                output_profile: station_schedule::OutputProfileId::Proof360p30,
+                output_sinks: vec![station_schedule::OutputSinkConfiguration::required_udp(
+                    "99999999-aaaa-4bbb-8ccc-dddddddddddd",
+                    "Education proof output",
+                    "127.0.0.1:5501",
+                    -16.0,
+                )],
+                enabled: false,
+            })
+            .unwrap();
+        let mut second_block_request = block_request.clone();
+        second_block_request["channel_id"] = serde_json::Value::String(second_channel_id.into());
+        second_block_request["allow_rule_ids"] = serde_json::json!([second_rule_id]);
+        assert_eq!(
+            api.handle_authenticated(
+                "PUT",
+                &format!("/api/v1/scheduling/daypart-blocks/{second_block_id}"),
+                Some(&serde_json::to_vec(&second_block_request).unwrap()),
+                &operator,
+            )
+            .status,
+            201
+        );
+        let mut second_rule_request = rule_request.clone();
+        second_rule_request["channel_id"] = serde_json::Value::String(second_channel_id.into());
+        second_rule_request["block_id"] = serde_json::Value::String(second_block_id.into());
+        assert_eq!(
+            api.handle_authenticated(
+                "PUT",
+                &format!("/api/v1/scheduling/recurring-rules/{second_rule_id}"),
+                Some(&serde_json::to_vec(&second_rule_request).unwrap()),
+                &operator,
+            )
+            .status,
+            201,
+            "a station-wide saved search must be reusable by another channel"
+        );
+        let mut stale_dependency_request = rule_request.clone();
+        stale_dependency_request["saved_search_revision"] = serde_json::Value::from(999_u64);
+        let stale_dependency = api.handle_authenticated(
+            "PUT",
+            "/api/v1/scheduling/recurring-rules/99999999-aaaa-4bbb-8ccc-dddddddddddd",
+            Some(&serde_json::to_vec(&stale_dependency_request).unwrap()),
+            &operator,
+        );
+        assert_eq!(stale_dependency.status, 409);
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&stale_dependency.body).unwrap()["error"]["code"],
+            "authority_revision_conflict"
+        );
+        let mut missing_dependency_request = rule_request.clone();
+        missing_dependency_request["saved_search_id"] =
+            serde_json::Value::String("aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee".into());
+        let missing_dependency = api.handle_authenticated(
+            "PUT",
+            "/api/v1/scheduling/recurring-rules/aaaaaaaa-cccc-4ddd-8eee-ffffffffffff",
+            Some(&serde_json::to_vec(&missing_dependency_request).unwrap()),
+            &operator,
+        );
+        assert_eq!(missing_dependency.status, 404);
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&missing_dependency.body).unwrap()["error"]
+                ["code"],
+            "saved_search_not_found"
+        );
+
+        for (path, identity_field, identity) in [
+            (&search_path, "search_id", search_id),
+            (&block_path, "block_id", block_id),
+            (&rule_path, "rule_id", rule_id),
+        ] {
+            let current = api.handle_authenticated("GET", path, None, &operator);
+            assert_eq!(current.status, 200);
+            let current: serde_json::Value = serde_json::from_slice(&current.body).unwrap();
+            assert_eq!(current[identity_field], identity);
+            let history = api.handle_authenticated(
+                "GET",
+                &format!("{path}/history?limit=1"),
+                None,
+                &operator,
+            );
+            assert_eq!(history.status, 200);
+            let history: serde_json::Value = serde_json::from_slice(&history.body).unwrap();
+            assert!(history[0]["occurred_at_unix_ms"].as_i64().unwrap() >= before_write);
+        }
+        let searches = api.handle_authenticated(
+            "GET",
+            "/api/v1/scheduling/saved-searches?limit=8",
+            None,
+            &support,
+        );
+        assert_eq!(searches.status, 200);
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&searches.body)
+                .unwrap()
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        for collection in ["daypart-blocks", "recurring-rules"] {
+            let listed = api.handle_authenticated(
+                "GET",
+                &format!("/api/v1/scheduling/{collection}?channel_id={channel_id}&limit=8"),
+                None,
+                &operator,
+            );
+            assert_eq!(listed.status, 200);
+            assert_eq!(
+                serde_json::from_slice::<serde_json::Value>(&listed.body)
+                    .unwrap()
+                    .as_array()
+                    .unwrap()
+                    .len(),
+                1
+            );
+        }
+        assert_eq!(api.handle_in_process("GET", &search_path, None).status, 403);
+        assert_eq!(
+            api.handle_authenticated("GET", &search_path, None, &support)
+                .status,
+            200
+        );
+        assert_eq!(
+            api.handle_authenticated(
+                "GET",
+                &format!("{search_path}/history?limit=1"),
+                None,
+                &support,
+            )
+            .status,
+            200
+        );
+        assert_eq!(
+            api.handle_authenticated(
+                "PUT",
+                &search_path,
+                Some(
+                    &serde_json::to_vec(&serde_json::json!({
+                        "name": "Support edit",
+                        "query": search_request["query"].clone(),
+                        "expected_revision": 1
+                    }))
+                    .unwrap()
+                ),
+                &support,
+            )
+            .status,
+            403
+        );
+        assert_eq!(
+            api.handle_authenticated("DELETE", &rule_path, None, &admin)
+                .status,
+            405
+        );
+
+        drop(api);
+        let _ = std::fs::remove_file(database);
+    }
+
+    #[test]
+    fn scheduling_automation_api_enforces_owner_roles_cas_and_dependencies() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let database =
+            std::env::temp_dir().join(format!("townlight-scheduling-api-errors-{nonce}.db"));
+        let api = Api::open(&database).unwrap();
+        let owner = test_actor_with_account(
+            "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+            "schedule.owner",
+            station_auth::OperatorRole::MeetingOperator,
+        );
+        let other = test_actor_with_account(
+            "bbbbbbbb-cccc-4ddd-8eee-ffffffffffff",
+            "schedule.other",
+            station_auth::OperatorRole::MeetingOperator,
+        );
+        let records = test_actor(station_auth::OperatorRole::RecordsClerk);
+        let admin = test_actor_with_account(
+            "cccccccc-dddd-4eee-8fff-000000000000",
+            "schedule.admin",
+            station_auth::OperatorRole::SetupAdmin,
+        );
+        let channel_id = "11111111-2222-4333-8444-555555555555";
+        api.storage
+            .put_channel(&ChannelConfiguration {
+                channel_id: channel_id.into(),
+                display_name: "Government".into(),
+                output_profile: station_schedule::OutputProfileId::Proof360p30,
+                output_sinks: vec![station_schedule::OutputSinkConfiguration::required_udp(
+                    "22222222-3333-4444-8555-666666666666",
+                    "Proof output",
+                    "127.0.0.1:5500",
+                    -16.0,
+                )],
+                enabled: false,
+            })
+            .unwrap();
+        let search_id = "33333333-4444-4555-8666-777777777777";
+        let search_path = format!("/api/v1/scheduling/saved-searches/{search_id}");
+        let query = station_schedule_automation::SavedSearchQuery {
+            all_of: vec![station_schedule_automation::AssetPredicate::Custom {
+                field: "program_type".into(),
+                predicate: station_schedule_automation::CustomMetadataPredicate::Equals(
+                    station_schedule_automation::MetadataValue::Choice("meeting".into()),
+                ),
+            }],
+            any_of: Vec::new(),
+            order_by: station_schedule_automation::SavedSearchOrder::TitleAscending,
+            limit: 20,
+        };
+        let create = serde_json::json!({
+            "name": "Meeting search",
+            "query": query,
+            "expected_revision": null
+        });
+        assert_eq!(
+            api.handle_authenticated(
+                "PUT",
+                &search_path,
+                Some(&serde_json::to_vec(&create).unwrap()),
+                &records,
+            )
+            .status,
+            403
+        );
+        assert_eq!(
+            api.handle_authenticated(
+                "PUT",
+                &search_path,
+                Some(&serde_json::to_vec(&create).unwrap()),
+                &owner,
+            )
+            .status,
+            201
+        );
+        let mut forged = create.clone();
+        forged["owner_operator_id"] = serde_json::Value::String(other.account_id().as_str().into());
+        forged["created_at_utc_ms"] = serde_json::Value::from(1_i64);
+        forged["expected_revision"] = serde_json::Value::from(1_u64);
+        assert_eq!(
+            api.handle_authenticated(
+                "PUT",
+                &search_path,
+                Some(&serde_json::to_vec(&forged).unwrap()),
+                &owner,
+            )
+            .status,
+            400
+        );
+        let update = serde_json::json!({
+            "name": "Meeting search update",
+            "query": create["query"].clone(),
+            "expected_revision": 1
+        });
+        let forbidden = api.handle_authenticated(
+            "PUT",
+            &search_path,
+            Some(&serde_json::to_vec(&update).unwrap()),
+            &other,
+        );
+        assert_eq!(forbidden.status, 403);
+        let forbidden: serde_json::Value = serde_json::from_slice(&forbidden.body).unwrap();
+        assert_eq!(forbidden["error"]["code"], "saved_search_owner_required");
+        let stale = serde_json::json!({
+            "name": "Meeting search update",
+            "query": create["query"].clone(),
+            "expected_revision": 0
+        });
+        let stale = api.handle_authenticated(
+            "PUT",
+            &search_path,
+            Some(&serde_json::to_vec(&stale).unwrap()),
+            &owner,
+        );
+        assert_eq!(stale.status, 409);
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&stale.body).unwrap()["error"]["code"],
+            "revision_conflict"
+        );
+        let admin_update = api.handle_authenticated(
+            "PUT",
+            &search_path,
+            Some(&serde_json::to_vec(&update).unwrap()),
+            &admin,
+        );
+        assert_eq!(admin_update.status, 200);
+        let admin_update: serde_json::Value = serde_json::from_slice(&admin_update.body).unwrap();
+        assert_eq!(
+            admin_update["owner_operator_id"],
+            owner.account_id().as_str()
+        );
+        assert_eq!(admin_update["revision"], 2);
+        assert_eq!(
+            api.handle_authenticated(
+                "GET",
+                "/api/v1/scheduling/saved-searches?channel_id=bad&limit=999",
+                None,
+                &owner,
+            )
+            .status,
+            400
+        );
+        assert_eq!(
+            api.handle_authenticated(
+                "GET",
+                "/api/v1/scheduling/saved-searches/99999999-8888-4777-8666-555555555555/history?limit=1",
+                None,
+                &owner,
+            )
+            .status,
+            404
+        );
+
+        drop(api);
+        let _ = std::fs::remove_file(database);
+    }
+
+    #[test]
+    fn scheduling_automation_api_rejects_unknown_and_malformed_nested_query_members() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let database =
+            std::env::temp_dir().join(format!("townlight-scheduling-api-nested-{nonce}.db"));
+        let api = Api::open(&database).unwrap();
+        let owner = test_actor_with_account(
+            "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+            "schedule.nested",
+            station_auth::OperatorRole::MeetingOperator,
+        );
+        let search_path = "/api/v1/scheduling/saved-searches/33333333-4444-4555-8666-777777777777";
+        let base = serde_json::json!({
+            "name": "Meeting search",
+            "query": {
+                "all_of": [{
+                    "Custom": {
+                        "field": "program_type",
+                        "predicate": {"Equals": {"Choice": "Meeting"}}
+                    }
+                }],
+                "any_of": [],
+                "order_by": "TitleAscending",
+                "limit": 20
+            },
+            "expected_revision": null
+        });
+
+        let mut unknown_query_field = base.clone();
+        unknown_query_field["query"]["unexpected"] = serde_json::Value::Bool(true);
+        assert_eq!(
+            api.handle_authenticated(
+                "PUT",
+                search_path,
+                Some(&serde_json::to_vec(&unknown_query_field).unwrap()),
+                &owner,
+            )
+            .status,
+            400
+        );
+
+        let mut unknown_predicate_field = base.clone();
+        unknown_predicate_field["query"]["all_of"][0]["Custom"]["unexpected"] =
+            serde_json::Value::Bool(true);
+        assert_eq!(
+            api.handle_authenticated(
+                "PUT",
+                search_path,
+                Some(&serde_json::to_vec(&unknown_predicate_field).unwrap()),
+                &owner,
+            )
+            .status,
+            400
+        );
+
+        let mut malformed_nested_member = base;
+        malformed_nested_member["query"]["all_of"][0]["Custom"]["predicate"] =
+            serde_json::json!({"NumberRange": {"min_inclusive": null, "max_inclusive": null}});
+        assert_eq!(
+            api.handle_authenticated(
+                "PUT",
+                search_path,
+                Some(&serde_json::to_vec(&malformed_nested_member).unwrap()),
+                &owner,
+            )
+            .status,
+            422
+        );
+
+        drop(api);
+        let _ = std::fs::remove_file(database);
+    }
+
+    #[test]
+    fn scheduling_automation_write_errors_are_exact_client_responses() {
+        for (error, status, code) in [
+            (
+                ScheduleAutomationWriteError::DependencyConflict {
+                    authority: "saved_search",
+                    requested_revision: 1,
+                    current_revision: Some(2),
+                },
+                409,
+                "authority_revision_conflict",
+            ),
+            (
+                ScheduleAutomationWriteError::Rebound,
+                409,
+                "scheduling_authority_rebound",
+            ),
+            (
+                ScheduleAutomationWriteError::Capacity,
+                422,
+                "recurring_rule_capacity_exceeded",
+            ),
+        ] {
+            let response = scheduling_write_error_response(error, "recurring_rule");
+            assert_eq!(response.status, status);
+            assert_eq!(
+                serde_json::from_slice::<serde_json::Value>(&response.body).unwrap()["error"]["code"],
+                code
+            );
+        }
     }
 
     #[test]

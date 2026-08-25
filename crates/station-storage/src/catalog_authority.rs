@@ -1,0 +1,589 @@
+use super::*;
+use station_catalog::{CatalogAssetRecord, CatalogAuthorityError, CatalogEditorialState};
+
+const MAX_CATALOG_ASSETS: usize = 100_000;
+const MAX_CATALOG_QUERY: usize = 1_000;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CatalogAssetWriteError {
+    Invalid(String),
+    Conflict { current_revision: Option<u64> },
+    Rebound,
+    Capacity,
+    Storage(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CatalogAssetHistoryEntry {
+    pub record: CatalogAssetRecord,
+    pub changed_by: String,
+    pub occurred_at_utc_ms: i64,
+}
+
+/// One bounded, keyset-paginated current catalog result.
+///
+/// `next_after_asset_sha256`, when present, is the exclusive cursor for the
+/// next page. The cursor is always the final record returned in this page, so
+/// callers can traverse the canonical asset-identity order without gaps or
+/// duplicates.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CatalogAssetPage {
+    pub records: Vec<CatalogAssetRecord>,
+    pub next_after_asset_sha256: Option<String>,
+}
+
+impl StationStore {
+    pub(super) fn initialize_catalog_authority_schema(&self) -> Result<(), String> {
+        self.execute(
+            "CREATE TABLE IF NOT EXISTS catalog_assets (\
+               asset_sha256 TEXT PRIMARY KEY,\
+               title TEXT NOT NULL,\
+               meeting_body TEXT NOT NULL,\
+               editorial_state TEXT NOT NULL CHECK (editorial_state IN ('draft','published','withdrawn')),\
+               published_at_utc_ms INTEGER NOT NULL CHECK (published_at_utc_ms >= -1),\
+               revision INTEGER NOT NULL CHECK (revision >= 1),\
+               record_json TEXT NOT NULL,\
+               CHECK ((editorial_state='draft' AND published_at_utc_ms=-1) OR \
+                       (editorial_state IN ('published','withdrawn') AND published_at_utc_ms>=0))\
+             );\
+             CREATE INDEX IF NOT EXISTS catalog_assets_editorial_order \
+               ON catalog_assets(editorial_state, published_at_utc_ms DESC, asset_sha256);\
+             CREATE TABLE IF NOT EXISTS catalog_asset_history (\
+               asset_sha256 TEXT NOT NULL,\
+               title TEXT NOT NULL,\
+               meeting_body TEXT NOT NULL,\
+               editorial_state TEXT NOT NULL CHECK (editorial_state IN ('draft','published','withdrawn')),\
+               published_at_utc_ms INTEGER NOT NULL CHECK (published_at_utc_ms >= -1),\
+               revision INTEGER NOT NULL CHECK (revision >= 1),\
+               record_json TEXT NOT NULL,\
+               changed_by TEXT NOT NULL CHECK (length(changed_by) BETWEEN 1 AND 200 AND changed_by=trim(changed_by)),\
+               occurred_at_utc_ms INTEGER NOT NULL CHECK (occurred_at_utc_ms >= 0),\
+               PRIMARY KEY(asset_sha256, revision),\
+               CHECK ((editorial_state='draft' AND published_at_utc_ms=-1) OR \
+                       (editorial_state IN ('published','withdrawn') AND published_at_utc_ms>=0))\
+             );\
+             CREATE INDEX IF NOT EXISTS catalog_asset_history_asset_revision \
+               ON catalog_asset_history(asset_sha256, revision);\
+             CREATE TRIGGER IF NOT EXISTS catalog_assets_no_delete \
+               BEFORE DELETE ON catalog_assets BEGIN \
+                 SELECT RAISE(ABORT, 'catalog assets cannot be deleted'); \
+               END;\
+             CREATE TRIGGER IF NOT EXISTS catalog_asset_history_no_update \
+               BEFORE UPDATE ON catalog_asset_history BEGIN \
+                 SELECT RAISE(ABORT, 'catalog asset history is append-only'); \
+               END;\
+             CREATE TRIGGER IF NOT EXISTS catalog_asset_history_no_delete \
+               BEFORE DELETE ON catalog_asset_history BEGIN \
+                 SELECT RAISE(ABORT, 'catalog asset history is append-only'); \
+               END;",
+        )
+    }
+
+    pub fn read_catalog_asset(
+        &self,
+        asset_sha256: &str,
+    ) -> Result<Option<CatalogAssetRecord>, String> {
+        validate_asset_identity(asset_sha256)?;
+        let statement = self.prepare(
+            "SELECT asset_sha256,title,meeting_body,editorial_state,published_at_utc_ms,revision,record_json \
+             FROM catalog_assets WHERE asset_sha256=?1",
+        )?;
+        bind_asset_identity(self, statement.raw, 1, asset_sha256)?;
+        match unsafe { sqlite3_step(statement.raw) } {
+            SQLITE_ROW => {
+                let record = read_catalog_asset_row(statement.raw)?;
+                self.validate_current_catalog_snapshot(&record)?;
+                Ok(Some(record))
+            }
+            SQLITE_DONE => Ok(None),
+            _ => Err(sqlite_error(self.database)),
+        }
+    }
+
+    pub fn read_catalog_asset_revision(
+        &self,
+        asset_sha256: &str,
+        revision: u64,
+    ) -> Result<Option<CatalogAssetRecord>, String> {
+        validate_catalog_revision_query(asset_sha256, revision)?;
+        let statement = self.prepare(
+            "SELECT asset_sha256,title,meeting_body,editorial_state,published_at_utc_ms,revision,record_json \
+             FROM catalog_asset_history WHERE asset_sha256=?1 AND revision=?2",
+        )?;
+        bind_asset_identity(self, statement.raw, 1, asset_sha256)?;
+        bind_catalog_revision(self, statement.raw, 2, revision)?;
+        match unsafe { sqlite3_step(statement.raw) } {
+            SQLITE_ROW => Ok(Some(read_catalog_asset_row(statement.raw)?)),
+            SQLITE_DONE => Ok(None),
+            _ => Err(sqlite_error(self.database)),
+        }
+    }
+
+    pub fn list_catalog_assets(&self, limit: usize) -> Result<Vec<CatalogAssetRecord>, String> {
+        Ok(self.list_catalog_asset_page(None, limit)?.records)
+    }
+
+    /// Lists current catalog authority in canonical ascending asset-SHA order.
+    ///
+    /// The optional cursor is exclusive and must be a canonical lowercase
+    /// SHA-256 identity. This deliberately fetches one additional row so the
+    /// page can carry a lossless next cursor without exposing unbounded reads.
+    pub fn list_catalog_asset_page(
+        &self,
+        after_asset_sha256: Option<&str>,
+        limit: usize,
+    ) -> Result<CatalogAssetPage, String> {
+        validate_catalog_limit(limit, "catalog asset")?;
+        if let Some(after_asset_sha256) = after_asset_sha256 {
+            validate_asset_identity(after_asset_sha256)?;
+        }
+        let statement = self.prepare(
+            "SELECT asset_sha256,title,meeting_body,editorial_state,published_at_utc_ms,revision,record_json \
+             FROM catalog_assets WHERE asset_sha256>?1 ORDER BY asset_sha256 LIMIT ?2",
+        )?;
+        // Every valid identity is a 64-byte lowercase hexadecimal string, so
+        // the empty first-page sentinel sorts before every possible asset.
+        let after = c_string(
+            after_asset_sha256.unwrap_or_default(),
+            "catalog asset page cursor",
+        )?;
+        bind_text(self.database, statement.raw, 1, &after)?;
+        bind_i64(self.database, statement.raw, 2, (limit + 1) as i64)?;
+        let mut records = Vec::new();
+        loop {
+            match unsafe { sqlite3_step(statement.raw) } {
+                SQLITE_ROW => records.push(read_catalog_asset_row(statement.raw)?),
+                SQLITE_DONE => break,
+                _ => return Err(sqlite_error(self.database)),
+            }
+        }
+        let has_more = records.len() > limit;
+        if has_more {
+            records.pop();
+        }
+        for record in &records {
+            self.validate_current_catalog_snapshot(record)?;
+        }
+        Ok(CatalogAssetPage {
+            next_after_asset_sha256: has_more.then(|| {
+                records
+                    .last()
+                    .expect("nonempty paginated page")
+                    .asset_sha256
+                    .clone()
+            }),
+            records,
+        })
+    }
+
+    pub fn list_catalog_asset_history(
+        &self,
+        asset_sha256: &str,
+        limit: usize,
+    ) -> Result<Vec<CatalogAssetHistoryEntry>, String> {
+        validate_asset_identity(asset_sha256)?;
+        validate_catalog_limit(limit, "catalog asset history")?;
+        let statement = self.prepare(
+            "SELECT asset_sha256,title,meeting_body,editorial_state,published_at_utc_ms,revision,record_json,changed_by,occurred_at_utc_ms \
+             FROM catalog_asset_history WHERE asset_sha256=?1 ORDER BY revision DESC LIMIT ?2",
+        )?;
+        bind_asset_identity(self, statement.raw, 1, asset_sha256)?;
+        bind_i64(self.database, statement.raw, 2, limit as i64)?;
+        let mut entries = Vec::new();
+        loop {
+            match unsafe { sqlite3_step(statement.raw) } {
+                SQLITE_ROW => entries.push(read_catalog_history_entry(statement.raw)?),
+                SQLITE_DONE => return Ok(entries),
+                _ => return Err(sqlite_error(self.database)),
+            }
+        }
+    }
+
+    pub fn write_catalog_asset(
+        &self,
+        asset_sha256: &str,
+        value: &CatalogAssetRecord,
+        expected_revision: Option<u64>,
+        changed_by: &str,
+        occurred_at_utc_ms: i64,
+    ) -> Result<(), CatalogAssetWriteError> {
+        validate_write_identity(asset_sha256, value)?;
+        validate_catalog_attribution(changed_by, occurred_at_utc_ms)?;
+        value.validate().map_err(map_catalog_authority_error)?;
+        self.execute("BEGIN IMMEDIATE")
+            .map_err(CatalogAssetWriteError::Storage)?;
+        let outcome = (|| {
+            let current = self
+                .read_catalog_asset(asset_sha256)
+                .map_err(CatalogAssetWriteError::Storage)?;
+            validate_catalog_cas(
+                current.as_ref().map(|record| record.revision),
+                expected_revision,
+                value.revision,
+            )?;
+            if let Some(current) = &current {
+                let latest_history = self
+                    .read_latest_catalog_history_entry(asset_sha256)
+                    .map_err(CatalogAssetWriteError::Storage)?
+                    .ok_or_else(|| {
+                        CatalogAssetWriteError::Storage(
+                            "current catalog asset has no exact historical snapshot".into(),
+                        )
+                    })?;
+                if occurred_at_utc_ms < latest_history.occurred_at_utc_ms {
+                    return Err(CatalogAssetWriteError::Invalid(
+                        "catalog change occurrence time precedes latest history".into(),
+                    ));
+                }
+                value
+                    .validate_successor_of(
+                        current,
+                        expected_revision.expect("existing authority has an expected revision"),
+                        occurred_at_utc_ms,
+                    )
+                    .map_err(map_catalog_authority_error)?;
+            } else {
+                value
+                    .validate_creation()
+                    .map_err(map_catalog_authority_error)?;
+                ensure_catalog_capacity(self)?;
+            }
+            write_catalog_rows(
+                self,
+                value,
+                current.as_ref().map(|record| record.revision),
+                changed_by,
+                occurred_at_utc_ms,
+            )
+        })();
+        finish_catalog_write(self, outcome)
+    }
+
+    fn validate_current_catalog_snapshot(
+        &self,
+        current: &CatalogAssetRecord,
+    ) -> Result<(), String> {
+        let historical = self
+            .read_latest_catalog_history_entry(&current.asset_sha256)?
+            .ok_or_else(|| "current catalog asset has no exact historical snapshot".to_string())?;
+        if historical.record == *current {
+            Ok(())
+        } else {
+            Err("current catalog asset disagrees with its latest historical snapshot".into())
+        }
+    }
+
+    fn read_latest_catalog_history_entry(
+        &self,
+        asset_sha256: &str,
+    ) -> Result<Option<CatalogAssetHistoryEntry>, String> {
+        let statement = self.prepare(
+            "SELECT asset_sha256,title,meeting_body,editorial_state,published_at_utc_ms,revision,record_json,changed_by,occurred_at_utc_ms \
+             FROM catalog_asset_history WHERE asset_sha256=?1 ORDER BY revision DESC LIMIT 1",
+        )?;
+        bind_asset_identity(self, statement.raw, 1, asset_sha256)?;
+        match unsafe { sqlite3_step(statement.raw) } {
+            SQLITE_ROW => Ok(Some(read_catalog_history_entry(statement.raw)?)),
+            SQLITE_DONE => Ok(None),
+            _ => Err(sqlite_error(self.database)),
+        }
+    }
+}
+
+fn validate_asset_identity(asset_sha256: &str) -> Result<(), String> {
+    if asset_sha256.len() == 64
+        && asset_sha256
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        Ok(())
+    } else {
+        Err("catalog asset identity is invalid".into())
+    }
+}
+
+fn validate_catalog_revision_query(asset_sha256: &str, revision: u64) -> Result<(), String> {
+    validate_asset_identity(asset_sha256)?;
+    if revision == 0 || revision > i64::MAX as u64 {
+        Err("catalog asset revision is invalid".into())
+    } else {
+        Ok(())
+    }
+}
+
+fn validate_catalog_limit(limit: usize, kind: &str) -> Result<(), String> {
+    if (1..=MAX_CATALOG_QUERY).contains(&limit) {
+        Ok(())
+    } else {
+        Err(format!("{kind} query is invalid or unbounded"))
+    }
+}
+
+fn validate_write_identity(
+    asset_sha256: &str,
+    value: &CatalogAssetRecord,
+) -> Result<(), CatalogAssetWriteError> {
+    validate_asset_identity(asset_sha256).map_err(CatalogAssetWriteError::Invalid)?;
+    if value.asset_sha256 == asset_sha256 {
+        Ok(())
+    } else {
+        Err(CatalogAssetWriteError::Rebound)
+    }
+}
+
+fn validate_catalog_attribution(
+    changed_by: &str,
+    occurred_at_utc_ms: i64,
+) -> Result<(), CatalogAssetWriteError> {
+    if occurred_at_utc_ms >= 0 && secret_field(changed_by, 200) {
+        Ok(())
+    } else {
+        Err(CatalogAssetWriteError::Invalid(
+            "catalog change attribution is invalid".into(),
+        ))
+    }
+}
+
+fn validate_catalog_cas(
+    current_revision: Option<u64>,
+    expected_revision: Option<u64>,
+    incoming_revision: u64,
+) -> Result<(), CatalogAssetWriteError> {
+    let next_revision = current_revision.and_then(|revision| revision.checked_add(1));
+    if current_revision != expected_revision
+        || incoming_revision != next_revision.unwrap_or(1)
+        || next_revision.is_none() && current_revision.is_some()
+    {
+        Err(CatalogAssetWriteError::Conflict { current_revision })
+    } else {
+        Ok(())
+    }
+}
+
+fn map_catalog_authority_error(error: CatalogAuthorityError) -> CatalogAssetWriteError {
+    match error {
+        CatalogAuthorityError::IdentityRebound => CatalogAssetWriteError::Rebound,
+        CatalogAuthorityError::RevisionConflict {
+            current_revision, ..
+        } => CatalogAssetWriteError::Conflict {
+            current_revision: Some(current_revision),
+        },
+        other => {
+            CatalogAssetWriteError::Invalid(format!("catalog authority is invalid: {other:?}"))
+        }
+    }
+}
+
+fn finish_catalog_write(
+    store: &StationStore,
+    outcome: Result<(), CatalogAssetWriteError>,
+) -> Result<(), CatalogAssetWriteError> {
+    match outcome {
+        Ok(()) => store
+            .execute("COMMIT")
+            .map_err(CatalogAssetWriteError::Storage)
+            .inspect_err(|_| {
+                let _ = store.execute("ROLLBACK");
+            }),
+        Err(error) => {
+            let _ = store.execute("ROLLBACK");
+            Err(error)
+        }
+    }
+}
+
+fn ensure_catalog_capacity(store: &StationStore) -> Result<(), CatalogAssetWriteError> {
+    let statement = store
+        .prepare(&format!(
+            "SELECT 1 FROM catalog_assets LIMIT {}",
+            MAX_CATALOG_ASSETS + 1
+        ))
+        .map_err(CatalogAssetWriteError::Storage)?;
+    let mut count = 0usize;
+    loop {
+        match unsafe { sqlite3_step(statement.raw) } {
+            SQLITE_ROW => count += 1,
+            SQLITE_DONE if count < MAX_CATALOG_ASSETS => return Ok(()),
+            SQLITE_DONE => return Err(CatalogAssetWriteError::Capacity),
+            _ => {
+                return Err(CatalogAssetWriteError::Storage(sqlite_error(
+                    store.database,
+                )));
+            }
+        }
+    }
+}
+
+fn bind_asset_identity(
+    store: &StationStore,
+    statement: *mut SqliteStatement,
+    index: c_int,
+    value: &str,
+) -> Result<(), String> {
+    let value = c_string(value, "catalog asset identity")?;
+    bind_text(store.database, statement, index, &value)
+}
+
+fn bind_catalog_revision(
+    store: &StationStore,
+    statement: *mut SqliteStatement,
+    index: c_int,
+    revision: u64,
+) -> Result<(), String> {
+    bind_i64(
+        store.database,
+        statement,
+        index,
+        checked_i64(revision, "catalog asset revision")?,
+    )
+}
+
+fn read_catalog_history_entry(
+    statement: *mut SqliteStatement,
+) -> Result<CatalogAssetHistoryEntry, String> {
+    let record = read_catalog_asset_row(statement)?;
+    let changed_by = column_text(statement, 7)?;
+    let occurred_at_utc_ms = unsafe { sqlite3_column_int64(statement, 8) };
+    if !secret_field(&changed_by, 200) || occurred_at_utc_ms < 0 {
+        return Err("database returned invalid catalog history attribution".into());
+    }
+    Ok(CatalogAssetHistoryEntry {
+        record,
+        changed_by,
+        occurred_at_utc_ms,
+    })
+}
+
+fn read_catalog_asset_row(statement: *mut SqliteStatement) -> Result<CatalogAssetRecord, String> {
+    let record: CatalogAssetRecord = serde_json::from_str(&column_text(statement, 6)?)
+        .map_err(|error| format!("decode catalog asset authority: {error}"))?;
+    record
+        .validate()
+        .map_err(|error| format!("database returned invalid catalog asset authority: {error:?}"))?;
+
+    let meeting_body = column_text(statement, 2)?;
+    let meeting_body = if meeting_body.is_empty() {
+        None
+    } else {
+        Some(meeting_body)
+    };
+    let published_at_utc_ms = match unsafe { sqlite3_column_int64(statement, 4) } {
+        -1 => None,
+        value @ 0.. => Some(value),
+        _ => return Err("database returned invalid catalog publication time".into()),
+    };
+    if record.asset_sha256 != column_text(statement, 0)?
+        || record.title != column_text(statement, 1)?
+        || record.meeting_body != meeting_body
+        || record.editorial_state != parse_editorial_state(&column_text(statement, 3)?)?
+        || record.published_at_utc_ms != published_at_utc_ms
+        || record.revision
+            != u64::try_from(unsafe { sqlite3_column_int64(statement, 5) })
+                .map_err(|_| "database returned invalid catalog asset revision".to_string())?
+    {
+        return Err("catalog asset indexed authority and JSON disagree".into());
+    }
+    Ok(record)
+}
+
+fn editorial_state_name(state: CatalogEditorialState) -> &'static str {
+    match state {
+        CatalogEditorialState::Draft => "draft",
+        CatalogEditorialState::Published => "published",
+        CatalogEditorialState::Withdrawn => "withdrawn",
+    }
+}
+
+fn parse_editorial_state(value: &str) -> Result<CatalogEditorialState, String> {
+    match value {
+        "draft" => Ok(CatalogEditorialState::Draft),
+        "published" => Ok(CatalogEditorialState::Published),
+        "withdrawn" => Ok(CatalogEditorialState::Withdrawn),
+        _ => Err("database returned invalid catalog editorial state".into()),
+    }
+}
+
+fn write_catalog_rows(
+    store: &StationStore,
+    value: &CatalogAssetRecord,
+    prior_revision: Option<u64>,
+    changed_by: &str,
+    occurred_at_utc_ms: i64,
+) -> Result<(), CatalogAssetWriteError> {
+    let json = serde_json::to_string(value).map_err(|error| {
+        CatalogAssetWriteError::Storage(format!("serialize catalog asset authority: {error}"))
+    })?;
+    let statement = if prior_revision.is_some() {
+        store.prepare(
+            "UPDATE catalog_assets SET title=?2,meeting_body=?3,editorial_state=?4,published_at_utc_ms=?5,revision=?6,record_json=?7 \
+             WHERE asset_sha256=?1 AND revision=?8",
+        )
+    } else {
+        store.prepare(
+            "INSERT INTO catalog_assets(asset_sha256,title,meeting_body,editorial_state,published_at_utc_ms,revision,record_json) \
+             VALUES(?1,?2,?3,?4,?5,?6,?7)",
+        )
+    }
+    .map_err(CatalogAssetWriteError::Storage)?;
+    bind_catalog_record(store, statement.raw, value, &json)?;
+    if let Some(prior_revision) = prior_revision {
+        bind_catalog_revision(store, statement.raw, 8, prior_revision)
+            .map_err(CatalogAssetWriteError::Storage)?;
+    }
+    expect_done(store.database, statement.raw).map_err(CatalogAssetWriteError::Storage)?;
+    if store.changes() != 1 {
+        return Err(CatalogAssetWriteError::Conflict {
+            current_revision: prior_revision,
+        });
+    }
+
+    let history = store
+        .prepare(
+            "INSERT INTO catalog_asset_history(asset_sha256,title,meeting_body,editorial_state,published_at_utc_ms,revision,record_json,changed_by,occurred_at_utc_ms) \
+             VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)",
+        )
+        .map_err(CatalogAssetWriteError::Storage)?;
+    bind_catalog_record(store, history.raw, value, &json)?;
+    let actor =
+        c_string(changed_by, "catalog history actor").map_err(CatalogAssetWriteError::Invalid)?;
+    bind_text(store.database, history.raw, 8, &actor).map_err(CatalogAssetWriteError::Storage)?;
+    bind_i64(store.database, history.raw, 9, occurred_at_utc_ms)
+        .map_err(CatalogAssetWriteError::Storage)?;
+    expect_done(store.database, history.raw).map_err(CatalogAssetWriteError::Storage)
+}
+
+fn bind_catalog_record(
+    store: &StationStore,
+    statement: *mut SqliteStatement,
+    value: &CatalogAssetRecord,
+    json: &str,
+) -> Result<(), CatalogAssetWriteError> {
+    bind_asset_identity(store, statement, 1, &value.asset_sha256)
+        .map_err(CatalogAssetWriteError::Storage)?;
+    let title = c_string(&value.title, "catalog title").map_err(CatalogAssetWriteError::Storage)?;
+    bind_text(store.database, statement, 2, &title).map_err(CatalogAssetWriteError::Storage)?;
+    let meeting_body = c_string(
+        value.meeting_body.as_deref().unwrap_or_default(),
+        "catalog meeting body",
+    )
+    .map_err(CatalogAssetWriteError::Storage)?;
+    bind_text(store.database, statement, 3, &meeting_body)
+        .map_err(CatalogAssetWriteError::Storage)?;
+    let state = c_string(
+        editorial_state_name(value.editorial_state),
+        "catalog editorial state",
+    )
+    .map_err(CatalogAssetWriteError::Storage)?;
+    bind_text(store.database, statement, 4, &state).map_err(CatalogAssetWriteError::Storage)?;
+    bind_i64(
+        store.database,
+        statement,
+        5,
+        value.published_at_utc_ms.unwrap_or(-1),
+    )
+    .map_err(CatalogAssetWriteError::Storage)?;
+    bind_catalog_revision(store, statement, 6, value.revision)
+        .map_err(CatalogAssetWriteError::Storage)?;
+    let json = c_string(json, "catalog authority JSON").map_err(CatalogAssetWriteError::Storage)?;
+    bind_text(store.database, statement, 7, &json).map_err(CatalogAssetWriteError::Storage)
+}

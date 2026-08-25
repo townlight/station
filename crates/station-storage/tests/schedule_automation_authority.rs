@@ -5,16 +5,20 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use station_schedule_automation::{
-    AssetPickStrategy, DaypartBlock, LocalDate, MetadataFilter, MetadataValue, RecurrenceTimeZone,
-    RecurringRule, SavedSearch, SavedSearchOrder, SavedSearchQuery,
+    AssetPickStrategy, AssetPredicate, CustomMetadataPredicate, DaypartBlock, LocalDate,
+    MetadataValue, RecurrenceTimeZone, RecurringRule, SavedSearch, SavedSearchOrder,
+    SavedSearchQuery,
 };
 use station_storage::{ScheduleAutomationWriteError, StationStore};
 
 const CHANNEL: &str = "11111111-1111-4111-8111-111111111111";
+const SECOND_CHANNEL: &str = "66666666-6666-4666-8666-666666666666";
 const OWNER: &str = "22222222-2222-4222-8222-222222222222";
 const SEARCH: &str = "33333333-3333-4333-8333-333333333333";
 const BLOCK: &str = "44444444-4444-4444-8444-444444444444";
 const RULE: &str = "55555555-5555-4555-8555-555555555555";
+const SECOND_BLOCK: &str = "77777777-7777-4777-8777-777777777777";
+const SECOND_RULE: &str = "88888888-8888-4888-8888-888888888888";
 static SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 const SQLITE_OK: c_int = 0;
@@ -80,12 +84,13 @@ fn temporary_database(name: &str) -> PathBuf {
 fn search(revision: u64) -> SavedSearch {
     SavedSearch {
         search_id: SEARCH.into(),
-        channel_id: CHANNEL.into(),
+        name: "Meeting programs".into(),
         owner_operator_id: OWNER.into(),
+        created_at_utc_ms: 1_725_000_000_000,
         query: SavedSearchQuery {
-            all_of: vec![MetadataFilter {
+            all_of: vec![AssetPredicate::Custom {
                 field: "program_type".into(),
-                value: MetadataValue::Choice("meeting".into()),
+                predicate: CustomMetadataPredicate::Equals(MetadataValue::Choice("meeting".into())),
             }],
             any_of: vec![],
             order_by: SavedSearchOrder::PublishedNewest,
@@ -135,6 +140,22 @@ fn rule(revision: u64, search_revision: u64, block_revision: u64) -> RecurringRu
         duration_minutes: 60,
         revision,
     }
+}
+
+fn second_block(revision: u64) -> DaypartBlock {
+    let mut value = block(revision);
+    value.block_id = SECOND_BLOCK.into();
+    value.channel_id = SECOND_CHANNEL.into();
+    value.allow_rule_ids = vec![SECOND_RULE.into()];
+    value
+}
+
+fn second_rule(revision: u64, search_revision: u64, block_revision: u64) -> RecurringRule {
+    let mut value = rule(revision, search_revision, block_revision);
+    value.rule_id = SECOND_RULE.into();
+    value.channel_id = SECOND_CHANNEL.into();
+    value.block_id = SECOND_BLOCK.into();
+    value
 }
 
 fn seed(store: &StationStore) {
@@ -187,11 +208,62 @@ fn current_and_exact_historical_authority_round_trip() {
     );
     assert_eq!(store.list_daypart_block_history(BLOCK, 8).unwrap().len(), 2);
     assert_eq!(store.list_recurring_rule_history(RULE, 8).unwrap().len(), 2);
-    assert_eq!(store.list_saved_searches(CHANNEL, 8).unwrap().len(), 1);
+    assert_eq!(store.list_saved_searches(8).unwrap().len(), 1);
     assert_eq!(store.list_daypart_blocks(CHANNEL, 8).unwrap().len(), 1);
     assert_eq!(
         store.list_recurring_rules(CHANNEL, 8).unwrap(),
         vec![next_rule]
+    );
+}
+
+#[test]
+fn saved_searches_are_station_global_and_keep_creation_identity() {
+    let store = StationStore::open(temporary_database("station-global-search")).unwrap();
+    store
+        .write_saved_search(&search(1), None, "operator", 10)
+        .unwrap();
+    store
+        .write_daypart_block(&block(1), None, "operator", 11)
+        .unwrap();
+    store
+        .write_daypart_block(&second_block(1), None, "operator", 12)
+        .unwrap();
+    store
+        .write_recurring_rule(&rule(1, 1, 1), None, "operator", 13)
+        .unwrap();
+    store
+        .write_recurring_rule(&second_rule(1, 1, 1), None, "operator", 14)
+        .unwrap();
+    assert_eq!(store.list_saved_searches(8).unwrap(), vec![search(1)]);
+    assert_eq!(store.list_recurring_rules(CHANNEL, 8).unwrap().len(), 1);
+    assert_eq!(
+        store.list_recurring_rules(SECOND_CHANNEL, 8).unwrap().len(),
+        1
+    );
+
+    let mut renamed = search(2);
+    renamed.name = "Public meetings".into();
+    store
+        .write_saved_search(&renamed, Some(1), "operator", 20)
+        .unwrap();
+    assert_eq!(
+        store.read_saved_search(SEARCH).unwrap(),
+        Some(renamed.clone())
+    );
+
+    let mut rebound_owner = renamed.clone();
+    rebound_owner.revision = 3;
+    rebound_owner.owner_operator_id = SECOND_CHANNEL.into();
+    assert_eq!(
+        store.write_saved_search(&rebound_owner, Some(2), "operator", 21),
+        Err(ScheduleAutomationWriteError::Rebound)
+    );
+    let mut rebound_created = renamed;
+    rebound_created.revision = 3;
+    rebound_created.created_at_utc_ms += 1;
+    assert_eq!(
+        store.write_saved_search(&rebound_created, Some(2), "operator", 22),
+        Err(ScheduleAutomationWriteError::Rebound)
     );
 }
 
@@ -204,7 +276,7 @@ fn stale_cas_rebinding_stale_dependencies_and_unbounded_queries_fail_closed() {
         Err(ScheduleAutomationWriteError::Conflict { .. })
     ));
     let mut rebound = search(2);
-    rebound.channel_id = "66666666-6666-4666-8666-666666666666".into();
+    rebound.owner_operator_id = SECOND_CHANNEL.into();
     assert_eq!(
         store.write_saved_search(&rebound, Some(1), "operator", 20),
         Err(ScheduleAutomationWriteError::Rebound)
@@ -214,7 +286,7 @@ fn stale_cas_rebinding_stale_dependencies_and_unbounded_queries_fail_closed() {
         store.write_recurring_rule(&stale_rule, Some(1), "operator", 20),
         Err(ScheduleAutomationWriteError::DependencyConflict { .. })
     ));
-    assert!(store.list_saved_searches(CHANNEL, 0).is_err());
+    assert!(store.list_saved_searches(0).is_err());
     assert!(store.list_daypart_block_history(BLOCK, 129).is_err());
     assert!(matches!(
         store.write_daypart_block(&block(2), Some(1), " bad ", 20),
@@ -270,30 +342,51 @@ fn duplicate_creation_and_capacity_are_typed() {
 
 #[test]
 fn indexed_current_tampering_fails_closed_for_every_authority() {
-    let database = temporary_database("current-tamper");
+    for (field, value, read_id) in [
+        ("search_id", SECOND_CHANNEL, SECOND_CHANNEL),
+        ("name", "tampered name", SEARCH),
+        ("owner_operator_id", SECOND_CHANNEL, SEARCH),
+        ("created_at_unix_ms", "1725000000001", SEARCH),
+        ("revision", "2", SEARCH),
+    ] {
+        let database = temporary_database("saved-search-current-tamper");
+        {
+            let store = StationStore::open(&database).unwrap();
+            seed(&store);
+        }
+        assert_eq!(
+            raw_sql_status(
+                &database,
+                &format!("UPDATE schedule_automation_saved_searches SET {field}='{value}'"),
+            ),
+            SQLITE_OK
+        );
+        let store = StationStore::open(&database).unwrap();
+        assert!(
+            store
+                .read_saved_search(read_id)
+                .unwrap_err()
+                .contains("disagree"),
+            "tampering {field} must be detected"
+        );
+    }
+
+    let database = temporary_database("other-current-tamper");
     {
         let store = StationStore::open(&database).unwrap();
         seed(&store);
     }
-    let other_channel = "66666666-6666-4666-8666-666666666666";
     assert_eq!(
         raw_sql_status(
             &database,
             &format!(
-                "UPDATE schedule_automation_saved_searches SET channel_id='{other_channel}';\
-                 UPDATE schedule_automation_daypart_blocks SET channel_id='{other_channel}';\
-                 UPDATE schedule_automation_recurring_rules SET channel_id='{other_channel}';"
+                "UPDATE schedule_automation_daypart_blocks SET channel_id='{SECOND_CHANNEL}';\
+                 UPDATE schedule_automation_recurring_rules SET channel_id='{SECOND_CHANNEL}';"
             ),
         ),
         SQLITE_OK
     );
     let store = StationStore::open(&database).unwrap();
-    assert!(
-        store
-            .read_saved_search(SEARCH)
-            .unwrap_err()
-            .contains("disagree")
-    );
     assert!(
         store
             .read_daypart_block(BLOCK)
@@ -333,7 +426,7 @@ fn all_history_is_append_only_and_snapshot_tampering_fails_closed() {
         );
     }
 
-    let other_channel = "66666666-6666-4666-8666-666666666666";
+    let other_channel = SECOND_CHANNEL;
     assert_eq!(
         raw_sql_status(
             &database,
@@ -341,7 +434,7 @@ fn all_history_is_append_only_and_snapshot_tampering_fails_closed() {
                 "DROP TRIGGER schedule_automation_saved_search_history_no_update;\
                  DROP TRIGGER schedule_automation_daypart_block_history_no_update;\
                  DROP TRIGGER schedule_automation_recurring_rule_history_no_update;\
-                 UPDATE schedule_automation_saved_search_history SET channel_id='{other_channel}';\
+                 UPDATE schedule_automation_saved_search_history SET name='tampered name';\
                  UPDATE schedule_automation_daypart_block_history SET channel_id='{other_channel}';\
                  UPDATE schedule_automation_recurring_rule_history SET channel_id='{other_channel}';"
             ),
@@ -367,6 +460,41 @@ fn all_history_is_append_only_and_snapshot_tampering_fails_closed() {
             .unwrap_err()
             .contains("disagree")
     );
+}
+
+#[test]
+fn saved_search_history_tampering_of_each_indexed_scalar_fails_closed() {
+    for (field, value, read_id, read_revision) in [
+        ("search_id", SECOND_CHANNEL, SECOND_CHANNEL, 1),
+        ("name", "tampered name", SEARCH, 1),
+        ("owner_operator_id", SECOND_CHANNEL, SEARCH, 1),
+        ("created_at_unix_ms", "1725000000001", SEARCH, 1),
+        ("revision", "2", SEARCH, 2),
+    ] {
+        let database = temporary_database("saved-search-history-tamper");
+        {
+            let store = StationStore::open(&database).unwrap();
+            seed(&store);
+        }
+        assert_eq!(
+            raw_sql_status(
+                &database,
+                &format!(
+                    "DROP TRIGGER schedule_automation_saved_search_history_no_update;\
+                     UPDATE schedule_automation_saved_search_history SET {field}='{value}'"
+                ),
+            ),
+            SQLITE_OK
+        );
+        let store = StationStore::open(&database).unwrap();
+        assert!(
+            store
+                .read_saved_search_revision(read_id, read_revision)
+                .unwrap_err()
+                .contains("disagree"),
+            "tampering history {field} must be detected"
+        );
+    }
 }
 
 #[test]
@@ -413,7 +541,7 @@ fn current_authority_must_equal_its_latest_valid_history_snapshot() {
             .unwrap_err()
             .contains("historical snapshot")
     );
-    assert!(store.list_saved_searches(CHANNEL, 8).is_err());
+    assert!(store.list_saved_searches(8).is_err());
     assert!(store.list_daypart_blocks(CHANNEL, 8).is_err());
     assert!(store.list_recurring_rules(CHANNEL, 8).is_err());
 }
