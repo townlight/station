@@ -8,6 +8,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- A shared-machine Windows Sandbox ownership guard now serializes pre-launch checks, rejects any
+  active or unknown sandbox owner, records only exact harness-launched process identity in immutable
+  evidence, and contains no broad cleanup or process-termination path.
+
 - Windows development Cargo execution now starts through a checked-in GStreamer environment wrapper,
   with the target runner retained as a second fail-closed boundary, preventing test binaries and their
   child processes from opening modal missing-runtime dialogs.

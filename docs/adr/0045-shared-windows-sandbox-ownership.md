@@ -1,0 +1,48 @@
+# ADR 0045: Shared Windows Sandbox ownership
+
+## Status
+
+Accepted — 2026-08-24
+
+## Context
+
+TownLight and an independent Claude workflow run on the same Windows host. Either may need Windows
+Sandbox for clean-machine evidence. A visible absence of a sandbox window, a running Hyper-V compute
+service, an old timestamp, or an unfamiliar process is not proof that TownLight owns the resource.
+Process-name cleanup can destroy another workflow's active test, while modifying another workflow's
+configuration or lease file can erase the only ownership evidence.
+
+## Decision
+
+Every TownLight Windows Sandbox launch must use `scripts/invoke-owned-windows-sandbox.ps1`.
+
+The launcher takes the machine-global `Global\Scott.SharedWindowsSandbox.Launch.v1` mutex without
+waiting, then enumerates the exact Windows Sandbox host/client process names through
+`Win32_Process`. Failure to inspect, an abandoned or unavailable mutex, or any matching process makes
+ownership unknown or occupied and blocks launch. The global mutex is agent-neutral so the Claude
+harness can use the same check-and-launch serialization boundary.
+
+Launch accepts only an existing `.wsb` file beneath the committed TownLight-owned
+`harness\windows-sandbox\configs` directory and only the Microsoft-signed
+`%WINDIR%\System32\WindowsSandbox.exe`. Before launch it creates a new immutable request record;
+after `Start-Process -PassThru` returns, it verifies and records the exact PID, creation identity,
+configuration hash, executable hash, run ID, and TownLight owner namespace. Records are created with
+`FileMode.CreateNew` beneath
+`%ProgramData%\Scott Shared Harness\WindowsSandbox\ownership-v1`; they are never overwritten or
+removed by the launcher.
+
+The launcher has no termination path. Any later cleanup implementation must require an exact
+harness-owned record and revalidate PID, creation identity, executable identity, and run ID before
+acting. It must never target processes by name, age, port, VM state, or broad enumeration. Claude
+processes, configurations, worktrees, logs, leases, and evidence are always outside TownLight's
+ownership boundary.
+
+## Consequences
+
+- Concurrent cooperative launches cannot race through the preflight boundary.
+- A sandbox started outside the shared mutex can still appear between inspection and launch; both
+  workflows therefore must use this same boundary. Detected occupancy always fails closed.
+- Stale or foreign evidence is retained. It cannot become a cleanup target merely because its
+  process is absent.
+- The current launcher favors leaving an uncertain process running over damaging another workflow.
+  Manual adjudication remains necessary when ownership cannot be proved.
