@@ -228,6 +228,63 @@ pub struct CommissioningSupportBundleReceipt {
     pub created_by: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReceiverAcceptanceOutcome {
+    Accepted,
+    Rejected,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReceiverEvidenceMethod {
+    HeadendOperatorConfirmation,
+    ReceiverTelemetry,
+    ReturnPathObservation,
+    VisualAudioObservation,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExternalReceiverAcceptanceReceipt {
+    pub receipt_id: String,
+    pub channel_id: String,
+    pub sink_id: String,
+    pub outcome: ReceiverAcceptanceOutcome,
+    pub method: ReceiverEvidenceMethod,
+    pub receiver_label: String,
+    pub evidence_reference: String,
+    pub detail: String,
+    pub observed_at_unix_ms: i64,
+    pub recorded_at_unix_ms: i64,
+    pub recorded_by: String,
+    pub candidate_version: String,
+    pub source_commit: String,
+    pub configuration_hash: String,
+}
+
+impl ExternalReceiverAcceptanceReceipt {
+    fn validate(&self) -> Result<(), String> {
+        const MAX_OBSERVATION_DELAY_MS: i64 = 7 * 24 * 60 * 60 * 1_000;
+        if !is_canonical_uuid(&self.receipt_id)
+            || !is_canonical_uuid(&self.channel_id)
+            || !is_canonical_uuid(&self.sink_id)
+            || !secret_field(&self.receiver_label, 200)
+            || !secret_field(&self.evidence_reference, 500)
+            || !secret_field(&self.detail, 2_000)
+            || self.observed_at_unix_ms < 0
+            || self.recorded_at_unix_ms < self.observed_at_unix_ms
+            || self.recorded_at_unix_ms - self.observed_at_unix_ms > MAX_OBSERVATION_DELAY_MS
+            || !secret_field(&self.recorded_by, 200)
+            || !secret_field(&self.candidate_version, 200)
+            || !is_source_commit_identity(&self.source_commit)
+            || !is_sha256_identity(&self.configuration_hash)
+        {
+            return Err(
+                "external receiver receipt facts are invalid, missing, or unbounded".into(),
+            );
+        }
+        Ok(())
+    }
+}
+
 impl CommissioningSupportBundleReceipt {
     fn validate(&self) -> Result<(), String> {
         let valid_bundle_id = self.bundle_id.starts_with("support-bundle-")
@@ -905,6 +962,7 @@ impl StationStore {
         store.migrate_headend_sink_contract()?;
         store.migrate_channel_output_sink_order()?;
         store.migrate_channel_output_sinks()?;
+        store.initialize_external_receiver_acceptance_schema()?;
         store.migrate_sink_loudness_proofs()?;
         store.migrate_output_loudness_jobs()?;
         store.initialize_reference_station_tier_schema()?;
@@ -944,6 +1002,38 @@ impl StationStore {
              CREATE TRIGGER IF NOT EXISTS commissioning_support_bundle_receipts_no_delete \
                BEFORE DELETE ON commissioning_support_bundle_receipts \
                BEGIN SELECT RAISE(ABORT, 'commissioning support bundle receipts are append-only'); END;",
+        )
+    }
+
+    fn initialize_external_receiver_acceptance_schema(&self) -> Result<(), String> {
+        self.execute(
+            "CREATE TABLE IF NOT EXISTS external_receiver_acceptance_receipts (\
+               receipt_id TEXT PRIMARY KEY,\
+               channel_id TEXT NOT NULL,\
+               sink_id TEXT NOT NULL,\
+               outcome TEXT NOT NULL CHECK (outcome IN ('accepted','rejected')),\
+               method TEXT NOT NULL CHECK (method IN ('headend_operator_confirmation','receiver_telemetry','return_path_observation','visual_audio_observation')),\
+               receiver_label TEXT NOT NULL CHECK (length(receiver_label) BETWEEN 1 AND 200),\
+               evidence_reference TEXT NOT NULL CHECK (length(evidence_reference) BETWEEN 1 AND 500),\
+               detail TEXT NOT NULL CHECK (length(detail) BETWEEN 1 AND 2000),\
+               observed_at_unix_ms INTEGER NOT NULL CHECK (observed_at_unix_ms >= 0),\
+               recorded_at_unix_ms INTEGER NOT NULL CHECK (recorded_at_unix_ms >= observed_at_unix_ms),\
+               recorded_by TEXT NOT NULL CHECK (length(recorded_by) BETWEEN 1 AND 200),\
+               candidate_version TEXT NOT NULL CHECK (length(candidate_version) BETWEEN 1 AND 200),\
+               source_commit TEXT NOT NULL CHECK (length(source_commit) = 40),\
+               configuration_hash TEXT NOT NULL CHECK (length(configuration_hash) = 64),\
+               CHECK (recorded_at_unix_ms - observed_at_unix_ms <= 604800000)\
+             );\
+             CREATE INDEX IF NOT EXISTS external_receiver_acceptance_current \
+               ON external_receiver_acceptance_receipts(channel_id, sink_id, candidate_version, source_commit, configuration_hash, recorded_at_unix_ms DESC, receipt_id DESC);\
+             CREATE INDEX IF NOT EXISTS external_receiver_acceptance_history \
+               ON external_receiver_acceptance_receipts(channel_id, recorded_at_unix_ms DESC, receipt_id DESC);\
+             CREATE TRIGGER IF NOT EXISTS external_receiver_acceptance_no_update \
+               BEFORE UPDATE ON external_receiver_acceptance_receipts \
+               BEGIN SELECT RAISE(ABORT, 'external receiver receipts are append-only'); END;\
+             CREATE TRIGGER IF NOT EXISTS external_receiver_acceptance_no_delete \
+               BEFORE DELETE ON external_receiver_acceptance_receipts \
+               BEGIN SELECT RAISE(ABORT, 'external receiver receipts are append-only'); END;",
         )
     }
 
@@ -8413,6 +8503,194 @@ impl StationStore {
         }
     }
 
+    pub fn append_external_receiver_acceptance_receipt(
+        &self,
+        receipt: &ExternalReceiverAcceptanceReceipt,
+    ) -> Result<(), String> {
+        receipt.validate()?;
+        self.execute("BEGIN IMMEDIATE")?;
+        let outcome = (|| {
+            let channel = self
+                .list_channels()?
+                .into_iter()
+                .find(|channel| channel.channel_id == receipt.channel_id)
+                .ok_or_else(|| "external receiver receipt channel is not configured".to_string())?;
+            if !channel
+                .output_sinks
+                .iter()
+                .any(|sink| sink.sink_id == receipt.sink_id && sink.enabled)
+            {
+                return Err(
+                    "external receiver receipt requires a currently configured enabled sink".into(),
+                );
+            }
+            let current_hash =
+                self.current_channel_output_configuration_hash(&receipt.channel_id)?;
+            if receipt.configuration_hash != current_hash {
+                return Err(
+                    "external receiver receipt configuration does not match the current channel output"
+                        .into(),
+                );
+            }
+
+            let statement = self.prepare(
+                "INSERT INTO external_receiver_acceptance_receipts(\
+               receipt_id, channel_id, sink_id, outcome, method, receiver_label, evidence_reference, detail, \
+               observed_at_unix_ms, recorded_at_unix_ms, recorded_by, candidate_version, source_commit, configuration_hash\
+             ) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)",
+            )?;
+            let text_values = [
+                (&receipt.receipt_id, "external receiver receipt identity"),
+                (&receipt.channel_id, "external receiver receipt channel"),
+                (&receipt.sink_id, "external receiver receipt sink"),
+            ]
+            .into_iter()
+            .map(|(value, field)| c_string(value, field))
+            .collect::<Result<Vec<_>, _>>()?;
+            let outcome = c_string(
+                receiver_acceptance_outcome_name(receipt.outcome),
+                "receiver outcome",
+            )?;
+            let method = c_string(
+                receiver_evidence_method_name(receipt.method),
+                "receiver method",
+            )?;
+            let receiver_label = c_string(&receipt.receiver_label, "receiver label")?;
+            let evidence_reference =
+                c_string(&receipt.evidence_reference, "receiver evidence reference")?;
+            let detail = c_string(&receipt.detail, "receiver evidence detail")?;
+            let recorded_by = c_string(&receipt.recorded_by, "receiver receipt actor")?;
+            let candidate_version =
+                c_string(&receipt.candidate_version, "receiver candidate version")?;
+            let source_commit = c_string(&receipt.source_commit, "receiver source commit")?;
+            let configuration_hash =
+                c_string(&receipt.configuration_hash, "receiver configuration hash")?;
+            bind_text(self.database, statement.raw, 1, &text_values[0])?;
+            bind_text(self.database, statement.raw, 2, &text_values[1])?;
+            bind_text(self.database, statement.raw, 3, &text_values[2])?;
+            bind_text(self.database, statement.raw, 4, &outcome)?;
+            bind_text(self.database, statement.raw, 5, &method)?;
+            bind_text(self.database, statement.raw, 6, &receiver_label)?;
+            bind_text(self.database, statement.raw, 7, &evidence_reference)?;
+            bind_text(self.database, statement.raw, 8, &detail)?;
+            bind_i64(self.database, statement.raw, 9, receipt.observed_at_unix_ms)?;
+            bind_i64(
+                self.database,
+                statement.raw,
+                10,
+                receipt.recorded_at_unix_ms,
+            )?;
+            bind_text(self.database, statement.raw, 11, &recorded_by)?;
+            bind_text(self.database, statement.raw, 12, &candidate_version)?;
+            bind_text(self.database, statement.raw, 13, &source_commit)?;
+            bind_text(self.database, statement.raw, 14, &configuration_hash)?;
+            match unsafe { sqlite3_step(statement.raw) } {
+                SQLITE_DONE => Ok(()),
+                _ => Err(sqlite_error(self.database)),
+            }
+        })();
+        self.finish_transaction(outcome)
+    }
+
+    pub fn read_current_external_receiver_acceptance_receipt(
+        &self,
+        channel_id: &str,
+        sink_id: &str,
+        candidate_version: &str,
+        source_commit: &str,
+    ) -> Result<Option<ExternalReceiverAcceptanceReceipt>, String> {
+        if !is_canonical_uuid(channel_id)
+            || !is_canonical_uuid(sink_id)
+            || !secret_field(candidate_version, 200)
+            || !is_source_commit_identity(source_commit)
+        {
+            return Err("current external receiver receipt lookup is invalid".into());
+        }
+        let channel = self
+            .list_channels()?
+            .into_iter()
+            .find(|channel| channel.channel_id == channel_id);
+        let Some(channel) = channel else {
+            return Ok(None);
+        };
+        if !channel
+            .output_sinks
+            .iter()
+            .any(|sink| sink.sink_id == sink_id && sink.enabled)
+        {
+            return Ok(None);
+        }
+        let configuration_hash = self.current_channel_output_configuration_hash(channel_id)?;
+        let statement = self.prepare(
+            "SELECT receipt_id, channel_id, sink_id, outcome, method, receiver_label, evidence_reference, detail, \
+                    observed_at_unix_ms, recorded_at_unix_ms, recorded_by, candidate_version, source_commit, configuration_hash \
+             FROM external_receiver_acceptance_receipts \
+             WHERE channel_id=?1 AND sink_id=?2 AND candidate_version=?3 AND source_commit=?4 AND configuration_hash=?5 \
+             ORDER BY recorded_at_unix_ms DESC, rowid DESC LIMIT 1",
+        )?;
+        let channel_id = c_string(channel_id, "external receiver channel identity")?;
+        let sink_id = c_string(sink_id, "external receiver sink identity")?;
+        let candidate_version = c_string(candidate_version, "external receiver candidate version")?;
+        let source_commit = c_string(source_commit, "external receiver source commit")?;
+        let configuration_hash =
+            c_string(&configuration_hash, "external receiver configuration hash")?;
+        bind_text(self.database, statement.raw, 1, &channel_id)?;
+        bind_text(self.database, statement.raw, 2, &sink_id)?;
+        bind_text(self.database, statement.raw, 3, &candidate_version)?;
+        bind_text(self.database, statement.raw, 4, &source_commit)?;
+        bind_text(self.database, statement.raw, 5, &configuration_hash)?;
+        match unsafe { sqlite3_step(statement.raw) } {
+            SQLITE_ROW => Ok(Some(read_external_receiver_acceptance_row(statement.raw)?)),
+            SQLITE_DONE => Ok(None),
+            _ => Err(sqlite_error(self.database)),
+        }
+    }
+
+    pub fn list_external_receiver_acceptance_receipts(
+        &self,
+        channel_id: &str,
+        sink_id: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<ExternalReceiverAcceptanceReceipt>, String> {
+        if !is_canonical_uuid(channel_id)
+            || sink_id.is_some_and(|value| !is_canonical_uuid(value))
+            || !(1..=1_000).contains(&limit)
+        {
+            return Err("external receiver receipt query is invalid or unbounded".into());
+        }
+        let sql = if sink_id.is_some() {
+            "SELECT receipt_id, channel_id, sink_id, outcome, method, receiver_label, evidence_reference, detail, \
+                    observed_at_unix_ms, recorded_at_unix_ms, recorded_by, candidate_version, source_commit, configuration_hash \
+             FROM external_receiver_acceptance_receipts WHERE channel_id=?1 AND sink_id=?2 \
+             ORDER BY recorded_at_unix_ms DESC, rowid DESC LIMIT ?3"
+        } else {
+            "SELECT receipt_id, channel_id, sink_id, outcome, method, receiver_label, evidence_reference, detail, \
+                    observed_at_unix_ms, recorded_at_unix_ms, recorded_by, candidate_version, source_commit, configuration_hash \
+             FROM external_receiver_acceptance_receipts WHERE channel_id=?1 \
+             ORDER BY recorded_at_unix_ms DESC, rowid DESC LIMIT ?2"
+        };
+        let statement = self.prepare(sql)?;
+        let channel_id = c_string(channel_id, "external receiver channel identity")?;
+        let sink_id = sink_id
+            .map(|value| c_string(value, "external receiver sink identity"))
+            .transpose()?;
+        bind_text(self.database, statement.raw, 1, &channel_id)?;
+        if let Some(sink_id) = &sink_id {
+            bind_text(self.database, statement.raw, 2, sink_id)?;
+            bind_i64(self.database, statement.raw, 3, limit as i64)?;
+        } else {
+            bind_i64(self.database, statement.raw, 2, limit as i64)?;
+        }
+        let mut receipts = Vec::new();
+        loop {
+            match unsafe { sqlite3_step(statement.raw) } {
+                SQLITE_ROW => receipts.push(read_external_receiver_acceptance_row(statement.raw)?),
+                SQLITE_DONE => return Ok(receipts),
+                _ => return Err(sqlite_error(self.database)),
+            }
+        }
+    }
+
     pub fn append_commissioning_support_bundle_receipt(
         &self,
         receipt: &CommissioningSupportBundleReceipt,
@@ -10488,6 +10766,29 @@ fn optional_i64(statement: *mut SqliteStatement, column: c_int) -> Option<i64> {
     (value >= 0).then_some(value)
 }
 
+fn read_external_receiver_acceptance_row(
+    statement: *mut SqliteStatement,
+) -> Result<ExternalReceiverAcceptanceReceipt, String> {
+    let receipt = ExternalReceiverAcceptanceReceipt {
+        receipt_id: column_text(statement, 0)?,
+        channel_id: column_text(statement, 1)?,
+        sink_id: column_text(statement, 2)?,
+        outcome: parse_receiver_acceptance_outcome(&column_text(statement, 3)?)?,
+        method: parse_receiver_evidence_method(&column_text(statement, 4)?)?,
+        receiver_label: column_text(statement, 5)?,
+        evidence_reference: column_text(statement, 6)?,
+        detail: column_text(statement, 7)?,
+        observed_at_unix_ms: unsafe { sqlite3_column_int64(statement, 8) },
+        recorded_at_unix_ms: unsafe { sqlite3_column_int64(statement, 9) },
+        recorded_by: column_text(statement, 10)?,
+        candidate_version: column_text(statement, 11)?,
+        source_commit: column_text(statement, 12)?,
+        configuration_hash: column_text(statement, 13)?,
+    };
+    receipt.validate()?;
+    Ok(receipt)
+}
+
 fn read_commit_report_row(statement: *mut SqliteStatement) -> Result<CommitReport, String> {
     Ok(CommitReport {
         report_id: column_text(statement, 0)?,
@@ -11077,6 +11378,40 @@ fn parse_loudness_proof_outcome(value: &str) -> Result<LoudnessProofOutcome, Str
         _ => Err(format!(
             "database returned invalid loudness proof outcome {value}"
         )),
+    }
+}
+
+fn receiver_acceptance_outcome_name(value: ReceiverAcceptanceOutcome) -> &'static str {
+    match value {
+        ReceiverAcceptanceOutcome::Accepted => "accepted",
+        ReceiverAcceptanceOutcome::Rejected => "rejected",
+    }
+}
+
+fn parse_receiver_acceptance_outcome(value: &str) -> Result<ReceiverAcceptanceOutcome, String> {
+    match value {
+        "accepted" => Ok(ReceiverAcceptanceOutcome::Accepted),
+        "rejected" => Ok(ReceiverAcceptanceOutcome::Rejected),
+        _ => Err("external receiver receipt outcome is invalid".into()),
+    }
+}
+
+fn receiver_evidence_method_name(value: ReceiverEvidenceMethod) -> &'static str {
+    match value {
+        ReceiverEvidenceMethod::HeadendOperatorConfirmation => "headend_operator_confirmation",
+        ReceiverEvidenceMethod::ReceiverTelemetry => "receiver_telemetry",
+        ReceiverEvidenceMethod::ReturnPathObservation => "return_path_observation",
+        ReceiverEvidenceMethod::VisualAudioObservation => "visual_audio_observation",
+    }
+}
+
+fn parse_receiver_evidence_method(value: &str) -> Result<ReceiverEvidenceMethod, String> {
+    match value {
+        "headend_operator_confirmation" => Ok(ReceiverEvidenceMethod::HeadendOperatorConfirmation),
+        "receiver_telemetry" => Ok(ReceiverEvidenceMethod::ReceiverTelemetry),
+        "return_path_observation" => Ok(ReceiverEvidenceMethod::ReturnPathObservation),
+        "visual_audio_observation" => Ok(ReceiverEvidenceMethod::VisualAudioObservation),
+        _ => Err("external receiver receipt evidence method is invalid".into()),
     }
 }
 

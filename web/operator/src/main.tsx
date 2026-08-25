@@ -3,6 +3,7 @@ import { createRoot } from "react-dom/client";
 import "./styles.css";
 import { CgOperator, CG_ROUTES, CgRoute } from "./cg";
 import { LoudnessProofPanel } from "./loudness-proof";
+import { ReceiverReceipts } from "./receiver-receipts";
 import {
   HeadendProfile,
   HeadendReadiness,
@@ -635,9 +636,10 @@ function HeadendWorkflow({ channels, profiles, loadingCatalog, catalogError, onR
       </form>
       <aside className="headend-readiness" aria-live="polite">
         <div className="panel-head"><div><p className="eyebrow">Current evidence</p><h2>{selectedChannel?.display_name ?? "Channel readiness"}</h2></div>{selectedReadiness && <StatusPill status={selectedReadiness.state} />}</div>
-        {loadingReadiness ? <p className="muted">Reading current output evidence…</p> : readinessError ? <div className="headend-empty"><div className="error-box" role="alert">{readinessError}</div><button className="secondary" type="button" onClick={() => void loadReadiness()}>Retry readiness</button></div> : !selectedReadiness ? <div className="headend-empty"><strong>No readiness record</strong><p>Refresh after the channel has been saved.</p><button className="secondary" type="button" onClick={() => void loadReadiness()}>Retry</button></div> : <><p className="headend-readiness-detail">{selectedReadiness.detail}</p><div className="headend-evidence-list">{selectedReadiness.sinks.map((sink) => <article key={sink.sink_id}><div className="headend-evidence-head"><div><strong>{sink.label}</strong><small>{sink.kind.replaceAll("_", " ")} · {sink.required ? "required" : "optional"}</small></div><StatusPill status={sink.state} /></div><div className="headend-proof-split"><div><span>Local transport</span><strong>{readinessLabel(sink.local_transport)}</strong><small>{sink.evidence}</small></div><div><span>Receiver acceptance</span><strong>{receiverAcceptanceLabel(sink.external_receiver)}</strong><small>{sink.external_receiver === "verified" ? "An external receiver receipt supports this state." : "No external receiver receipt is recorded; local output is not proof of reception."}</small></div></div><p>{sink.detail}</p></article>)}</div><button className="text-button" type="button" onClick={() => void loadReadiness()}>Refresh evidence →</button></>}
+        {loadingReadiness ? <p className="muted">Reading current output evidence…</p> : readinessError ? <div className="headend-empty"><div className="error-box" role="alert">{readinessError}</div><button className="secondary" type="button" onClick={() => void loadReadiness()}>Retry readiness</button></div> : !selectedReadiness ? <div className="headend-empty"><strong>No readiness record</strong><p>Refresh after the channel has been saved.</p><button className="secondary" type="button" onClick={() => void loadReadiness()}>Retry</button></div> : <><p className="headend-readiness-detail">{selectedReadiness.detail}</p><div className="headend-evidence-list">{selectedReadiness.sinks.map((sink) => <article key={sink.sink_id}><div className="headend-evidence-head"><div><strong>{sink.label}</strong><small>{sink.kind.replaceAll("_", " ")} · {sink.required ? "required" : "optional"}</small></div><StatusPill status={sink.state} /></div><div className="headend-proof-split"><div><span>Local transport</span><strong>{readinessLabel(sink.local_transport)}</strong><small>{sink.evidence}</small></div><div><span>Receiver acceptance</span><strong>{receiverAcceptanceLabel(sink.external_receiver)}</strong><small>{sink.external_receiver_evidence ?? "No current external receiver receipt is recorded; local output is not proof of reception."}</small></div></div><p>{sink.detail}</p></article>)}</div><button className="text-button" type="button" onClick={() => void loadReadiness()}>Refresh evidence →</button></>}
       </aside>
     </div>}
+    {selectedChannel && <ReceiverReceipts channelId={selectedChannel.channel_id} sinks={selectedChannel.output_sinks} onRecorded={loadReadiness} />}
   </section>;
 }
 

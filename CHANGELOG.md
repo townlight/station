@@ -8,6 +8,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- Setup Admins can now append accepted or rejected external receiver evidence for an exact enabled
+  output. The server binds each immutable receipt to the authenticated actor, verified installed
+  candidate, and canonical output configuration; stale receipts remain historical and cannot turn
+  headend readiness or commissioning green. Local transport and external evidence remain separate in
+  both the API and operator console.
+
 - Output proof now captures the exact selected UDP/SRT branch rather than a shared loudness/mux
   variant. The bounded request supports the required ten-minute commissioning sample, migrates
   existing proof/job tables without losing history, and advances commissioning only for a current

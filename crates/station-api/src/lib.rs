@@ -52,10 +52,11 @@ use station_schedule::{
 };
 use station_storage::{
     AlertChannelSecret, CgSnapshotReadError, CgWriteError, ChannelWriteError,
-    CommissioningSupportBundleReceipt, CommitWriteError, HeadendProfileWriteError,
-    OutputLoudnessProofJob, OutputLoudnessProofJobRecord, OutputLoudnessProofJobState,
-    ProfileWriteError, ReferenceStationTierWrite, ReferenceStationTierWriteError, StationStore,
-    StoredSinkLoudnessProof,
+    CommissioningSupportBundleReceipt, CommitWriteError, ExternalReceiverAcceptanceReceipt,
+    HeadendProfileWriteError, OutputLoudnessProofJob, OutputLoudnessProofJobRecord,
+    OutputLoudnessProofJobState, ProfileWriteError, ReceiverAcceptanceOutcome,
+    ReceiverEvidenceMethod, ReferenceStationTierWrite, ReferenceStationTierWriteError,
+    StationStore, StoredSinkLoudnessProof,
 };
 use station_update::UpdateCheckTrigger;
 use station_update_coordinator::CoordinatorError;
@@ -438,6 +439,59 @@ struct LoudnessProofJobCaptureResponse {
     capture_bytes: u64,
     sample_duration_ms: u64,
     capture_sha256: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum ReceiverReceiptOutcomeRequest {
+    Accepted,
+    Rejected,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum ReceiverEvidenceMethodRequest {
+    HeadendOperatorConfirmation,
+    ReceiverTelemetry,
+    ReturnPathObservation,
+    VisualAudioObservation,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CreateReceiverReceiptRequest {
+    sink_id: String,
+    outcome: ReceiverReceiptOutcomeRequest,
+    method: ReceiverEvidenceMethodRequest,
+    receiver_label: String,
+    evidence_reference: String,
+    detail: String,
+    observed_at_unix_ms: i64,
+}
+
+#[derive(Debug, Serialize)]
+struct ReceiverReceiptResponse {
+    receipt_id: String,
+    channel_id: String,
+    sink_id: String,
+    outcome: &'static str,
+    method: &'static str,
+    receiver_label: String,
+    evidence_reference: String,
+    detail: String,
+    observed_at_unix_ms: i64,
+    recorded_at_unix_ms: i64,
+    recorded_by: String,
+    candidate_version: String,
+    source_commit: String,
+    configuration_hash: String,
+    current: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct ReceiverReceiptHistoryResponse {
+    channel_id: String,
+    receipts: Vec<ReceiverReceiptResponse>,
 }
 
 #[derive(Deserialize)]
@@ -923,6 +977,18 @@ impl Api {
                     && path.ends_with("/headend-readiness") =>
             {
                 self.channel_headend_readiness(path)
+            }
+            ("GET", path)
+                if path.starts_with("/api/v1/channels/")
+                    && path.ends_with("/receiver-receipts") =>
+            {
+                self.list_receiver_receipts(path)
+            }
+            ("POST", path)
+                if path.starts_with("/api/v1/channels/")
+                    && path.ends_with("/receiver-receipts") =>
+            {
+                self.create_receiver_receipt(path, body, actor)
             }
             ("GET", path)
                 if path.starts_with("/api/v1/channels/") && path.ends_with("/loudness-proof") =>
@@ -2146,6 +2212,225 @@ impl Api {
         self.headend_readiness(Some(channel_id))
     }
 
+    fn create_receiver_receipt(
+        &self,
+        path: &str,
+        body: Option<&[u8]>,
+        actor: Option<&OperatorAccount>,
+    ) -> ApiResponse {
+        let Some(channel_id) = path_identity(path, "/api/v1/channels/", "/receiver-receipts")
+        else {
+            return error_response(400, "invalid_path", "The channel identity is invalid.");
+        };
+        if !is_api_uuid(channel_id) {
+            return error_response(400, "invalid_path", "The channel identity is invalid.");
+        }
+        let Some(actor) = actor.filter(|account| {
+            account.enabled()
+                && account
+                    .roles()
+                    .contains(&station_auth::OperatorRole::SetupAdmin)
+        }) else {
+            return error_response(
+                403,
+                "setup_admin_required",
+                "Recording external receiver evidence requires the Setup Admin role.",
+            );
+        };
+        let Some(request) = parse_body::<CreateReceiverReceiptRequest>(body) else {
+            return error_response(
+                400,
+                "invalid_json",
+                "An external receiver receipt body is required.",
+            );
+        };
+        if !is_canonical_api_uuid(&request.sink_id) {
+            return error_response(422, "validation_failed", "The sink identity is invalid.");
+        }
+        let station_box = match self.station_box_profile_uncached() {
+            Ok(profile) => profile,
+            Err(message) => return error_response(500, "readiness_probe_failed", &message),
+        };
+        let Some(source_commit) = station_box
+            .source_commit
+            .clone()
+            .filter(|_| station_box.release.candidate_verified)
+        else {
+            return error_response(
+                409,
+                "candidate_not_verified",
+                "External receiver evidence requires a verified installed candidate.",
+            );
+        };
+        let snapshot = match self
+            .storage
+            .read_channel_loudness_proof_snapshot(channel_id)
+        {
+            Ok(Some(snapshot)) => snapshot,
+            Ok(None) => {
+                return error_response(404, "channel_not_found", "The channel does not exist.");
+            }
+            Err(message) => return error_response(500, "storage_error", &message),
+        };
+        if !snapshot
+            .output_sinks
+            .iter()
+            .any(|sink| sink.sink_id == request.sink_id && sink.enabled)
+        {
+            return error_response(
+                409,
+                "sink_not_enabled",
+                "External receiver evidence requires a currently configured enabled sink.",
+            );
+        }
+        let recorded_at_unix_ms = match system_time_millis() {
+            Ok(value) => value,
+            Err(message) => return error_response(500, "clock_error", &message),
+        };
+        if request.observed_at_unix_ms > recorded_at_unix_ms {
+            return error_response(
+                422,
+                "validation_failed",
+                "External receiver evidence cannot be observed in the future.",
+            );
+        }
+        let receipt_id = match secure_canonical_uuid() {
+            Ok(value) => value,
+            Err(message) => return error_response(500, "entropy_unavailable", &message),
+        };
+        let receipt = ExternalReceiverAcceptanceReceipt {
+            receipt_id,
+            channel_id: channel_id.into(),
+            sink_id: request.sink_id,
+            outcome: match request.outcome {
+                ReceiverReceiptOutcomeRequest::Accepted => ReceiverAcceptanceOutcome::Accepted,
+                ReceiverReceiptOutcomeRequest::Rejected => ReceiverAcceptanceOutcome::Rejected,
+            },
+            method: match request.method {
+                ReceiverEvidenceMethodRequest::HeadendOperatorConfirmation => {
+                    ReceiverEvidenceMethod::HeadendOperatorConfirmation
+                }
+                ReceiverEvidenceMethodRequest::ReceiverTelemetry => {
+                    ReceiverEvidenceMethod::ReceiverTelemetry
+                }
+                ReceiverEvidenceMethodRequest::ReturnPathObservation => {
+                    ReceiverEvidenceMethod::ReturnPathObservation
+                }
+                ReceiverEvidenceMethodRequest::VisualAudioObservation => {
+                    ReceiverEvidenceMethod::VisualAudioObservation
+                }
+            },
+            receiver_label: request.receiver_label,
+            evidence_reference: request.evidence_reference,
+            detail: request.detail,
+            observed_at_unix_ms: request.observed_at_unix_ms,
+            recorded_at_unix_ms,
+            recorded_by: actor.account_id().as_str().into(),
+            candidate_version: station_box.product_version,
+            source_commit,
+            configuration_hash: snapshot.configuration_hash,
+        };
+        match self
+            .storage
+            .append_external_receiver_acceptance_receipt(&receipt)
+        {
+            Ok(()) => json_response(
+                201,
+                serde_json::to_vec(&receiver_receipt_response(receipt, true))
+                    .expect("serializing an external receiver receipt cannot fail"),
+            ),
+            Err(message)
+                if message.contains("configuration") || message.contains("enabled sink") =>
+            {
+                error_response(409, "receiver_evidence_stale", &message)
+            }
+            Err(message)
+                if message.contains("invalid")
+                    || message.contains("missing")
+                    || message.contains("unbounded") =>
+            {
+                error_response(422, "validation_failed", &message)
+            }
+            Err(message) => error_response(500, "storage_error", &message),
+        }
+    }
+
+    fn list_receiver_receipts(&self, path: &str) -> ApiResponse {
+        let Some(channel_id) = path_identity(path, "/api/v1/channels/", "/receiver-receipts")
+        else {
+            return error_response(400, "invalid_path", "The channel identity is invalid.");
+        };
+        if !is_api_uuid(channel_id) {
+            return error_response(400, "invalid_path", "The channel identity is invalid.");
+        }
+        let snapshot = match self
+            .storage
+            .read_channel_loudness_proof_snapshot(channel_id)
+        {
+            Ok(Some(snapshot)) => snapshot,
+            Ok(None) => {
+                return error_response(404, "channel_not_found", "The channel does not exist.");
+            }
+            Err(message) => return error_response(500, "storage_error", &message),
+        };
+        let station_box = match self.station_box_profile_uncached() {
+            Ok(profile) => profile,
+            Err(message) => return error_response(500, "readiness_probe_failed", &message),
+        };
+        let current_candidate = station_box
+            .source_commit
+            .as_deref()
+            .filter(|_| station_box.release.candidate_verified)
+            .map(|source_commit| (station_box.product_version.as_str(), source_commit));
+        let enabled_sinks = snapshot
+            .output_sinks
+            .iter()
+            .filter(|sink| sink.enabled)
+            .map(|sink| sink.sink_id.as_str())
+            .collect::<BTreeSet<_>>();
+        let mut current_receipt_ids = BTreeSet::new();
+        if let Some((candidate_version, source_commit)) = current_candidate {
+            for sink_id in &enabled_sinks {
+                match self
+                    .storage
+                    .read_current_external_receiver_acceptance_receipt(
+                        channel_id,
+                        sink_id,
+                        candidate_version,
+                        source_commit,
+                    ) {
+                    Ok(Some(receipt)) => {
+                        current_receipt_ids.insert(receipt.receipt_id);
+                    }
+                    Ok(None) => {}
+                    Err(message) => return error_response(500, "storage_error", &message),
+                }
+            }
+        }
+        let receipts = match self
+            .storage
+            .list_external_receiver_acceptance_receipts(channel_id, None, 1_000)
+        {
+            Ok(receipts) => receipts,
+            Err(message) => return error_response(500, "storage_error", &message),
+        };
+        let receipts = receipts
+            .into_iter()
+            .map(|receipt| {
+                let current = current_receipt_ids.contains(receipt.receipt_id.as_str());
+                receiver_receipt_response(receipt, current)
+            })
+            .collect();
+        json_response(
+            200,
+            serde_json::to_vec(&ReceiverReceiptHistoryResponse {
+                channel_id: channel_id.into(),
+                receipts,
+            })
+            .expect("serializing external receiver receipt history cannot fail"),
+        )
+    }
+
     fn channel_loudness_proof(&self, path: &str) -> ApiResponse {
         let Some(channel_id) = path_identity(path, "/api/v1/channels/", "/loudness-proof") else {
             return error_response(400, "invalid_path", "The channel identity is invalid.");
@@ -2167,36 +2452,53 @@ impl Api {
         for stored in snapshot.latest_proofs {
             latest_by_sink.insert(stored.proof.sink_id.clone(), stored);
         }
-        let candidate = if latest_by_sink.is_empty() {
-            None
-        } else {
-            match self.station_box_profile_uncached() {
-                Ok(profile) if profile.release.candidate_verified => Some(CandidateIdentity {
-                    version: profile.product_version,
-                    source_commit: profile.source_commit,
-                }),
-                Ok(_) => None,
-                Err(message) => return error_response(500, "readiness_probe_failed", &message),
-            }
+        let candidate = match self.station_box_profile_uncached() {
+            Ok(profile) if profile.release.candidate_verified => Some(CandidateIdentity {
+                version: profile.product_version,
+                source_commit: profile.source_commit,
+            }),
+            Ok(_) => None,
+            Err(message) => return error_response(500, "readiness_probe_failed", &message),
         };
         let now = match system_time_millis() {
             Ok(value) => value,
             Err(message) => return error_response(500, "clock_error", &message),
         };
-        let sinks = snapshot
-            .output_sinks
-            .into_iter()
-            .map(|sink| {
-                let stored = latest_by_sink.remove(&sink.sink_id);
-                loudness_proof_response(
-                    sink,
-                    stored,
-                    candidate.as_ref(),
-                    &snapshot.configuration_hash,
-                    now,
-                )
-            })
-            .collect();
+        let mut sinks = Vec::with_capacity(snapshot.output_sinks.len());
+        for sink in snapshot.output_sinks {
+            let stored = latest_by_sink.remove(&sink.sink_id);
+            let receiver_acceptance = match candidate.as_ref().and_then(|identity| {
+                identity
+                    .source_commit
+                    .as_deref()
+                    .map(|commit| (identity, commit))
+            }) {
+                Some((identity, source_commit)) => match self
+                    .storage
+                    .read_current_external_receiver_acceptance_receipt(
+                        channel_id,
+                        &sink.sink_id,
+                        &identity.version,
+                        source_commit,
+                    ) {
+                    Ok(Some(receipt)) => match receipt.outcome {
+                        ReceiverAcceptanceOutcome::Accepted => ReceiverAcceptance::Verified,
+                        ReceiverAcceptanceOutcome::Rejected => ReceiverAcceptance::Rejected,
+                    },
+                    Ok(None) => ReceiverAcceptance::Unknown,
+                    Err(message) => return error_response(500, "storage_error", &message),
+                },
+                None => ReceiverAcceptance::Unknown,
+            };
+            sinks.push(loudness_proof_response(
+                sink,
+                stored,
+                receiver_acceptance,
+                candidate.as_ref(),
+                &snapshot.configuration_hash,
+                now,
+            ));
+        }
         json_response(
             200,
             serde_json::to_vec(&ChannelLoudnessProofResponse {
@@ -2427,18 +2729,44 @@ impl Api {
             Ok(value) => value.max(station_box.generated_at_unix_ms),
             Err(message) => return error_response(500, "clock_error", &message),
         };
-        let probe = match collect_headend_probe(&self.storage, generated_at_unix_ms, channel_id) {
-            Ok(Some(probe)) => probe,
+        let current_candidate = station_box
+            .source_commit
+            .as_deref()
+            .filter(|_| station_box.release.candidate_verified)
+            .map(|source_commit| (station_box.product_version.as_str(), source_commit));
+        let collected = match collect_headend_probe(
+            &self.storage,
+            generated_at_unix_ms,
+            channel_id,
+            current_candidate,
+        ) {
+            Ok(Some(collected)) => collected,
             Ok(None) => {
                 return error_response(404, "channel_not_found", "The channel does not exist.");
             }
             Err(message) => return error_response(500, "storage_error", &message),
         };
+        let CollectedHeadendProbe {
+            probe,
+            receiver_evidence,
+        } = collected;
         match derive_headend_readiness(&station_box, probe) {
-            Ok(readiness) => json_response(
-                200,
-                serde_json::to_vec(&readiness).expect("serializing headend readiness cannot fail"),
-            ),
+            Ok(mut readiness) => {
+                for channel in &mut readiness.channels {
+                    for sink in &mut channel.sinks {
+                        if let Some(evidence) = receiver_evidence
+                            .get(&receiver_evidence_key(&channel.channel_id, &sink.sink_id))
+                        {
+                            sink.external_receiver_evidence = Some(evidence.clone());
+                        }
+                    }
+                }
+                json_response(
+                    200,
+                    serde_json::to_vec(&readiness)
+                        .expect("serializing headend readiness cannot fail"),
+                )
+            }
             Err(error) => error_response(500, "headend_readiness_invalid", &error.to_string()),
         }
     }
@@ -2788,8 +3116,18 @@ impl Api {
             CommissioningBoundary::LocalAuthority,
         ));
 
-        let headend_probe = match collect_headend_probe(&self.storage, generated_at_unix_ms, None) {
-            Ok(Some(probe)) => probe,
+        let receiver_candidate = station_box
+            .source_commit
+            .as_deref()
+            .filter(|_| station_box.release.candidate_verified)
+            .map(|source_commit| (station_box.product_version.as_str(), source_commit));
+        let headend_probe = match collect_headend_probe(
+            &self.storage,
+            generated_at_unix_ms,
+            None,
+            receiver_candidate,
+        ) {
+            Ok(Some(collected)) => collected.probe,
             Ok(None) => unreachable!("the aggregate headend probe is always present"),
             Err(message) => return error_response(500, "storage_error", &message),
         };
@@ -4766,9 +5104,45 @@ const REQUIRED_MEDIA_FACTORIES: [&str; 22] = [
     "jpegdec",
 ];
 
+fn receiver_receipt_response(
+    receipt: ExternalReceiverAcceptanceReceipt,
+    current: bool,
+) -> ReceiverReceiptResponse {
+    ReceiverReceiptResponse {
+        receipt_id: receipt.receipt_id,
+        channel_id: receipt.channel_id,
+        sink_id: receipt.sink_id,
+        outcome: match receipt.outcome {
+            ReceiverAcceptanceOutcome::Accepted => "accepted",
+            ReceiverAcceptanceOutcome::Rejected => "rejected",
+        },
+        method: receiver_evidence_method_api_name(receipt.method),
+        receiver_label: receipt.receiver_label,
+        evidence_reference: receipt.evidence_reference,
+        detail: receipt.detail,
+        observed_at_unix_ms: receipt.observed_at_unix_ms,
+        recorded_at_unix_ms: receipt.recorded_at_unix_ms,
+        recorded_by: receipt.recorded_by,
+        candidate_version: receipt.candidate_version,
+        source_commit: receipt.source_commit,
+        configuration_hash: receipt.configuration_hash,
+        current,
+    }
+}
+
+fn receiver_evidence_method_api_name(method: ReceiverEvidenceMethod) -> &'static str {
+    match method {
+        ReceiverEvidenceMethod::HeadendOperatorConfirmation => "headend_operator_confirmation",
+        ReceiverEvidenceMethod::ReceiverTelemetry => "receiver_telemetry",
+        ReceiverEvidenceMethod::ReturnPathObservation => "return_path_observation",
+        ReceiverEvidenceMethod::VisualAudioObservation => "visual_audio_observation",
+    }
+}
+
 fn loudness_proof_response(
     sink: station_schedule::OutputSinkConfiguration,
     stored: Option<StoredSinkLoudnessProof>,
+    receiver_acceptance: ReceiverAcceptance,
     candidate: Option<&CandidateIdentity>,
     current_configuration_hash: &str,
     now_unix_ms: i64,
@@ -4782,7 +5156,7 @@ fn loudness_proof_response(
             configured_target_lufs,
             measured_lufs: None,
             measurement_status: EffectiveLoudnessStatus::NotRun,
-            receiver_acceptance: ReceiverAcceptance::Unknown,
+            receiver_acceptance,
             proof_id: None,
             captured_at_unix_ms: None,
             sample_duration_ms: None,
@@ -4815,7 +5189,7 @@ fn loudness_proof_response(
             .measured_lufs_milli
             .map(|value| f64::from(value) / 1_000.0),
         measurement_status,
-        receiver_acceptance: proof.receiver_acceptance,
+        receiver_acceptance,
         proof_id: Some(proof.proof_id),
         captured_at_unix_ms: Some(proof.captured_at_unix_ms),
         sample_duration_ms: Some(proof.sample_duration_ms),
@@ -4900,11 +5274,17 @@ fn loudness_job_storage_error(message: &str) -> ApiResponse {
     error_response(500, "storage_error", message)
 }
 
+struct CollectedHeadendProbe {
+    probe: HeadendProbeInput,
+    receiver_evidence: HashMap<String, String>,
+}
+
 fn collect_headend_probe(
     storage: &StationStore,
     generated_at_unix_ms: i64,
     channel_id: Option<&str>,
-) -> Result<Option<HeadendProbeInput>, String> {
+    current_candidate: Option<(&str, &str)>,
+) -> Result<Option<CollectedHeadendProbe>, String> {
     let mut channels = storage.list_channels()?;
     if let Some(channel_id) = channel_id {
         channels.retain(|channel| channel.channel_id == channel_id);
@@ -4913,6 +5293,7 @@ fn collect_headend_probe(
         }
     }
     let mut probes = Vec::with_capacity(channels.len());
+    let mut receiver_evidence = HashMap::new();
     for channel in channels {
         let profile = channel.output_profile.profile();
         let runtime = storage.read_channel_runtime(&channel.channel_id)?;
@@ -4947,6 +5328,55 @@ fn collect_headend_probe(
                 evidence: "no authoritative worker runtime observation exists".into(),
             },
         };
+        let mut sinks = Vec::with_capacity(channel.output_sinks.len());
+        for sink in channel.output_sinks {
+            let (external_receiver, evidence) = if let Some((candidate_version, source_commit)) =
+                current_candidate
+            {
+                match storage.read_current_external_receiver_acceptance_receipt(
+                    &channel.channel_id,
+                    &sink.sink_id,
+                    candidate_version,
+                    source_commit,
+                )? {
+                    Some(receipt) => {
+                        let state = match receipt.outcome {
+                            ReceiverAcceptanceOutcome::Accepted => ExternalReceiverState::Verified,
+                            ReceiverAcceptanceOutcome::Rejected => {
+                                ExternalReceiverState::NotVerified
+                            }
+                        };
+                        let evidence = format!(
+                            "external receiver receipt {} via {} with reference {}",
+                            receipt.receipt_id,
+                            receiver_evidence_method_api_name(receipt.method),
+                            receipt.evidence_reference
+                        );
+                        (state, Some(evidence))
+                    }
+                    None => (ExternalReceiverState::Unknown, None),
+                }
+            } else {
+                (ExternalReceiverState::Unknown, None)
+            };
+            if let Some(evidence) = evidence {
+                receiver_evidence.insert(
+                    receiver_evidence_key(&channel.channel_id, &sink.sink_id),
+                    evidence,
+                );
+            }
+            sinks.push(HeadendSinkProbeInput {
+                sink_id: sink.sink_id,
+                label: sink.label,
+                kind: match sink.kind {
+                    station_schedule::OutputSinkKind::UdpTs => HeadendSinkKind::UdpTs,
+                    station_schedule::OutputSinkKind::Srt => HeadendSinkKind::Srt,
+                },
+                required: sink.required,
+                enabled: sink.enabled,
+                external_receiver,
+            });
+        }
         probes.push(HeadendChannelProbeInput {
             channel_id: channel.channel_id,
             display_name: channel.display_name,
@@ -4964,31 +5394,21 @@ fn collect_headend_probe(
                 audio_sample_rate_hz: profile.audio_sample_rate_hz,
                 loudness_target_lufs: profile.loudness_target_lufs,
             },
-            sinks: channel
-                .output_sinks
-                .into_iter()
-                .map(|sink| HeadendSinkProbeInput {
-                    sink_id: sink.sink_id,
-                    label: sink.label,
-                    kind: match sink.kind {
-                        station_schedule::OutputSinkKind::UdpTs => HeadendSinkKind::UdpTs,
-                        station_schedule::OutputSinkKind::Srt => HeadendSinkKind::Srt,
-                    },
-                    required: sink.required,
-                    enabled: sink.enabled,
-                    // Local worker progress is not cable-operator decode or
-                    // receiver acceptance. Only an external evidence receipt
-                    // may change this in a later proof slice.
-                    external_receiver: ExternalReceiverState::Unknown,
-                })
-                .collect(),
+            sinks,
             runtime,
         });
     }
-    Ok(Some(HeadendProbeInput {
-        generated_at_unix_ms,
-        channels: probes,
+    Ok(Some(CollectedHeadendProbe {
+        probe: HeadendProbeInput {
+            generated_at_unix_ms,
+            channels: probes,
+        },
+        receiver_evidence,
     }))
+}
+
+fn receiver_evidence_key(channel_id: &str, sink_id: &str) -> String {
+    format!("{channel_id}/{sink_id}")
 }
 
 fn collect_station_box_probe(
@@ -7667,6 +8087,7 @@ mod tests {
                 capability: CapabilitySupport::Supported,
                 local_transport: StationReadinessState::Pass,
                 external_receiver: ExternalReceiverState::Verified,
+                external_receiver_evidence: Some("external receiver fixture".into()),
                 state: StationReadinessState::Pass,
                 detail: "test fixture".into(),
                 evidence: "test fixture".into(),
@@ -8126,6 +8547,262 @@ mod tests {
         let stopped = api.handle_in_process("GET", "/api/v1/headend-readiness", None);
         let stopped: serde_json::Value = serde_json::from_slice(&stopped.body).unwrap();
         assert_eq!(stopped["rollup"]["color"], "red");
+
+        std::fs::remove_dir_all(application).unwrap();
+        let _ = std::fs::remove_file(database);
+    }
+
+    #[test]
+    fn setup_admin_receiver_receipt_is_server_bound_and_drives_headend_readiness() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let database = std::env::temp_dir().join(format!(
+            "townlight-receiver-receipt-api-{}-{nonce}.db",
+            std::process::id()
+        ));
+        let application = database.with_extension("application");
+        std::fs::create_dir_all(&application).unwrap();
+        let api =
+            Api::open_with_station_box_probe(&database, &application, station_box_probe()).unwrap();
+        let channel_id = "8b626c01-bdf8-419a-8a2e-b0a7caa1ff7e";
+        let sink_id = "22222222-3333-4444-8555-666666666666";
+        api.storage
+            .put_channel(&ChannelConfiguration {
+                channel_id: channel_id.into(),
+                display_name: "Government".into(),
+                output_profile: station_schedule::OutputProfileId::Atsc720p5994,
+                output_sinks: vec![station_schedule::OutputSinkConfiguration::required_udp(
+                    sink_id,
+                    "Cable primary",
+                    "127.0.0.1:5500",
+                    -24.0,
+                )],
+                enabled: true,
+            })
+            .unwrap();
+        let now = system_time_millis().unwrap();
+        api.storage
+            .put_channel_runtime(&station_domain::ChannelRuntimeObservation {
+                channel_id: channel_id.into(),
+                state: ChannelRuntimeState::HealthyFallback,
+                on_air_asset_id: None,
+                state_started_at_unix_ms: now,
+                heartbeat_at_unix_ms: now,
+                detail: Some("all required branches advancing".into()),
+            })
+            .unwrap();
+        let setup_admin = test_actor(station_auth::OperatorRole::SetupAdmin);
+        let body = serde_json::to_vec(&serde_json::json!({
+            "sink_id": sink_id,
+            "outcome": "accepted",
+            "method": "headend_operator_confirmation",
+            "receiver_label": "Cable operator master control",
+            "evidence_reference": "headend-ticket-1042",
+            "detail": "Cable operator confirmed stable decoded video and audible program audio.",
+            "observed_at_unix_ms": now - 1_000
+        }))
+        .unwrap();
+
+        let created = api.route(
+            "POST",
+            &format!("/api/v1/channels/{channel_id}/receiver-receipts"),
+            Some(&body),
+            Some(&setup_admin),
+        );
+        assert_eq!(
+            created.status,
+            201,
+            "{}",
+            String::from_utf8_lossy(&created.body)
+        );
+        let created: serde_json::Value = serde_json::from_slice(&created.body).unwrap();
+        assert_eq!(created["channel_id"], channel_id);
+        assert_eq!(created["sink_id"], sink_id);
+        assert_eq!(created["candidate_version"], "0.1.0");
+        assert_eq!(
+            created["source_commit"],
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        );
+        assert_eq!(created["recorded_by"], setup_admin.account_id().as_str());
+        assert_eq!(created["current"], true);
+
+        let listed = api.route(
+            "GET",
+            &format!("/api/v1/channels/{channel_id}/receiver-receipts"),
+            None,
+            Some(&setup_admin),
+        );
+        assert_eq!(listed.status, 200);
+        let listed: serde_json::Value = serde_json::from_slice(&listed.body).unwrap();
+        assert_eq!(listed["receipts"].as_array().unwrap().len(), 1);
+
+        let readiness = api.handle_in_process("GET", "/api/v1/headend-readiness", None);
+        assert_eq!(readiness.status, 200);
+        let readiness: serde_json::Value = serde_json::from_slice(&readiness.body).unwrap();
+        assert_eq!(readiness["rollup"]["color"], "green");
+        assert_eq!(
+            readiness["channels"][0]["sinks"][0]["external_receiver"],
+            "verified"
+        );
+        assert!(
+            readiness["channels"][0]["sinks"][0]["external_receiver_evidence"]
+                .as_str()
+                .unwrap()
+                .contains("headend-ticket-1042")
+        );
+        assert!(
+            !readiness["channels"][0]["sinks"][0]["evidence"]
+                .as_str()
+                .unwrap()
+                .contains("headend-ticket-1042")
+        );
+
+        let loudness = api.handle_in_process(
+            "GET",
+            &format!("/api/v1/channels/{channel_id}/loudness-proof"),
+            None,
+        );
+        assert_eq!(loudness.status, 200);
+        let loudness: serde_json::Value = serde_json::from_slice(&loudness.body).unwrap();
+        assert_eq!(loudness["sinks"][0]["receiver_acceptance"], "verified");
+        assert_eq!(loudness["sinks"][0]["measurement_status"], "not_run");
+
+        let commissioning = api.handle_in_process("GET", "/api/v1/commissioning/report", None);
+        assert_eq!(commissioning.status, 200);
+        let commissioning: serde_json::Value = serde_json::from_slice(&commissioning.body).unwrap();
+        let receiver_check = commissioning["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|check| check["id"] == "external_receiver_proof")
+            .unwrap();
+        assert_eq!(receiver_check["status"], "pass");
+
+        let rejected_body = serde_json::to_vec(&serde_json::json!({
+            "sink_id": sink_id,
+            "outcome": "rejected",
+            "method": "receiver_telemetry",
+            "receiver_label": "Cable receiver telemetry",
+            "evidence_reference": "headend-ticket-1043",
+            "detail": "Receiver reported loss of program decode after the earlier acceptance.",
+            "observed_at_unix_ms": now - 500
+        }))
+        .unwrap();
+        let rejected = api.route(
+            "POST",
+            &format!("/api/v1/channels/{channel_id}/receiver-receipts"),
+            Some(&rejected_body),
+            Some(&setup_admin),
+        );
+        assert_eq!(rejected.status, 201);
+        let listed = api.route(
+            "GET",
+            &format!("/api/v1/channels/{channel_id}/receiver-receipts"),
+            None,
+            Some(&setup_admin),
+        );
+        let listed: serde_json::Value = serde_json::from_slice(&listed.body).unwrap();
+        let current = listed["receipts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|receipt| receipt["current"] == true)
+            .collect::<Vec<_>>();
+        assert_eq!(current.len(), 1);
+        assert_eq!(current[0]["outcome"], "rejected");
+        let readiness = api.handle_in_process("GET", "/api/v1/headend-readiness", None);
+        let readiness: serde_json::Value = serde_json::from_slice(&readiness.body).unwrap();
+        assert_eq!(
+            readiness["channels"][0]["sinks"][0]["external_receiver"],
+            "not_verified"
+        );
+
+        std::fs::remove_dir_all(application).unwrap();
+        let _ = std::fs::remove_file(database);
+    }
+
+    #[test]
+    fn receiver_receipt_rejects_non_admin_forgery_and_unverified_candidate() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let database = std::env::temp_dir().join(format!(
+            "townlight-receiver-receipt-auth-{}-{nonce}.db",
+            std::process::id()
+        ));
+        let application = database.with_extension("application");
+        std::fs::create_dir_all(&application).unwrap();
+        let mut probe = station_box_probe();
+        probe.release.candidate_verified = false;
+        probe.release.state = StationReadinessState::Blocked;
+        let api = Api::open_with_station_box_probe(&database, &application, probe).unwrap();
+        let channel_id = "8b626c01-bdf8-419a-8a2e-b0a7caa1ff7e";
+        let sink_id = "22222222-3333-4444-8555-666666666666";
+        api.storage
+            .put_channel(&ChannelConfiguration {
+                channel_id: channel_id.into(),
+                display_name: "Government".into(),
+                output_profile: station_schedule::OutputProfileId::Atsc720p5994,
+                output_sinks: vec![station_schedule::OutputSinkConfiguration::required_udp(
+                    sink_id,
+                    "Cable primary",
+                    "127.0.0.1:5500",
+                    -24.0,
+                )],
+                enabled: true,
+            })
+            .unwrap();
+        let body = serde_json::to_vec(&serde_json::json!({
+            "sink_id": sink_id,
+            "outcome": "accepted",
+            "method": "receiver_telemetry",
+            "receiver_label": "IRD telemetry",
+            "evidence_reference": "telemetry-record-7",
+            "detail": "Receiver reported decoded program.",
+            "observed_at_unix_ms": system_time_millis().unwrap(),
+            "candidate_version": "forged",
+            "source_commit": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        }))
+        .unwrap();
+        let setup_admin = test_actor(station_auth::OperatorRole::SetupAdmin);
+        let forged = api.route(
+            "POST",
+            &format!("/api/v1/channels/{channel_id}/receiver-receipts"),
+            Some(&body),
+            Some(&setup_admin),
+        );
+        assert_eq!(forged.status, 400);
+
+        let clean_body = serde_json::to_vec(&serde_json::json!({
+            "sink_id": sink_id,
+            "outcome": "accepted",
+            "method": "receiver_telemetry",
+            "receiver_label": "IRD telemetry",
+            "evidence_reference": "telemetry-record-7",
+            "detail": "Receiver reported decoded program.",
+            "observed_at_unix_ms": system_time_millis().unwrap()
+        }))
+        .unwrap();
+        let meeting_operator = test_actor(station_auth::OperatorRole::MeetingOperator);
+        let forbidden = api.route(
+            "POST",
+            &format!("/api/v1/channels/{channel_id}/receiver-receipts"),
+            Some(&clean_body),
+            Some(&meeting_operator),
+        );
+        assert_eq!(forbidden.status, 403);
+        let unverified = api.route(
+            "POST",
+            &format!("/api/v1/channels/{channel_id}/receiver-receipts"),
+            Some(&clean_body),
+            Some(&setup_admin),
+        );
+        assert_eq!(unverified.status, 409);
+        let unverified: serde_json::Value = serde_json::from_slice(&unverified.body).unwrap();
+        assert_eq!(unverified["error"]["code"], "candidate_not_verified");
 
         std::fs::remove_dir_all(application).unwrap();
         let _ = std::fs::remove_file(database);

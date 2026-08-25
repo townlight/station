@@ -27,6 +27,7 @@ export interface SinkHeadendReadiness {
   capability: "supported" | "unsupported" | "unimplemented" | "unknown";
   local_transport: ReadinessState;
   external_receiver: ExternalReceiverState;
+  external_receiver_evidence: string | null;
   state: ReadinessState;
   detail: string;
   evidence: string;

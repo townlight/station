@@ -5,11 +5,13 @@ use station_maintenance::{
 };
 use station_update::{UpdatePackageFile, UpdatePackageManifest};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 const VERSION: &str = "0.2.0";
 const COMMIT: &str = "0123456789abcdef0123456789abcdef01234567";
 const RUNTIME_SHA256: &str = "abcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcd";
 const RUNTIME_PACKAGE_SHA256: &str = RUNTIME_SHA256;
+static FIXTURE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 struct Fixture {
     root: PathBuf,
@@ -26,12 +28,13 @@ impl Drop for Fixture {
 
 fn fixture() -> Fixture {
     let root = std::env::temp_dir().join(format!(
-        "townlight-candidate-identity-{}-{}",
+        "townlight-candidate-identity-{}-{}-{}",
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
-            .as_nanos()
+            .as_nanos(),
+        FIXTURE_SEQUENCE.fetch_add(1, Ordering::Relaxed),
     ));
     let data = root.join("data");
     let application = root.join("application");
