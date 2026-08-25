@@ -47,3 +47,7 @@ created modal Windows loader errors for hashed `target\debug\deps` test executab
 - The same replay also exposed a transient Windows file-sharing lock during generated-media cleanup.
   API integration cleanup now uses the repository's bounded two-second retry contract. The complete
   `station-api` package then passed with the installed services active.
+- After those harness corrections, the complete `station-api` package and every remaining workspace
+  package passed under the wrapper. Together with the guarded complete `channel-worker` replay, this
+  covers the full workspace. Desktop inventories remained free of loader dialogs throughout and at
+  completion.
