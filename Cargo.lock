@@ -1676,6 +1676,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a2eb9349b6444b326872e140eb1cf5e7c522154d69e7a0ffb0fb81c06b37543f"
 
 [[package]]
+name = "station-agenda"
+version = "0.1.0"
+dependencies = [
+ "serde",
+]
+
+[[package]]
 name = "station-alerting"
 version = "0.1.0"
 dependencies = [
@@ -1691,6 +1698,14 @@ dependencies = [
  "station-storage",
  "ureq",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "station-analytics"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "sha2",
 ]
 
 [[package]]
@@ -1713,6 +1728,7 @@ dependencies = [
  "station-maintenance",
  "station-media-lifecycle",
  "station-readiness",
+ "station-recording",
  "station-schedule",
  "station-storage",
  "station-support",
@@ -1755,6 +1771,21 @@ dependencies = [
  "image",
  "serde",
  "sha2",
+]
+
+[[package]]
+name = "station-contribution"
+version = "0.1.0"
+dependencies = [
+ "serde",
+]
+
+[[package]]
+name = "station-control-room"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -1959,6 +1990,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "station-subscriptions"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "station-support"
 version = "0.1.0"
 dependencies = [
@@ -1971,6 +2010,14 @@ dependencies = [
  "station-storage",
  "station-update",
  "zip",
+]
+
+[[package]]
+name = "station-underwriting"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

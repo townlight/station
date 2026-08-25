@@ -6,9 +6,13 @@ members = [
     "bins/stationd",
     "crates/station-api",
     "crates/station-alerting",
+    "crates/station-analytics",
+    "crates/station-agenda",
     "crates/station-auth",
     "crates/station-cg",
     "crates/station-captions",
+    "crates/station-contribution",
+    "crates/station-control-room",
     "crates/station-domain",
     "crates/station-media-journal",
     "crates/station-media-lifecycle",
@@ -19,12 +23,14 @@ members = [
     "crates/station-media-protocol",
     "crates/station-maintenance",
     "crates/station-orchestration",
+    "crates/station-underwriting",
     "crates/station-automation-policy",
     "crates/station-recording",
     "crates/station-publishing",
     "crates/station-runtime",
     "crates/station-readiness",
     "crates/station-schedule",
+    "crates/station-subscriptions",
     "crates/station-live",
     "crates/station-feed-normalization",
     "crates/station-feed-fetch",
@@ -62,9 +68,12 @@ httpdate = "=1.0.3"
 image = { version = "=0.25.8", default-features = false, features = ["png", "jpeg"] }
 station-api = { path = "crates/station-api" }
 station-alerting = { path = "crates/station-alerting" }
+station-analytics = { path = "crates/station-analytics" }
+station-agenda = { path = "crates/station-agenda" }
 station-auth = { path = "crates/station-auth" }
 station-cg = { path = "crates/station-cg" }
 station-captions = { path = "crates/station-captions" }
+station-contribution = { path = "crates/station-contribution" }
 station-domain = { path = "crates/station-domain" }
 station-media-journal = { path = "crates/station-media-journal" }
 station-media-lifecycle = { path = "crates/station-media-lifecycle" }
