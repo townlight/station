@@ -43,8 +43,20 @@ proof history is bounded to the newest 100 immutable records.
 The independent decoder accepts only an absolute executable path, hashes the exact executable into
 the evidence, enforces capture/output/deadline bounds, parses SRT, removes only known FFmpeg-generated
 CEA-708 presentation wrappers, and hashes canonical semantic text. Its real graph test generates,
-captures, independently decodes, and matches an MPEG-TS cue. The orchestration job that requests the
-selected-sink capture, invokes this decoder, and rechecks the installed candidate at the final write
-boundary remains unfinished. The API request, status, and immutable-history boundary is implemented.
+captures, independently decodes, and matches an MPEG-TS cue. The installer extracts only the pinned
+executable and license from a hash-verified BtbN LGPL archive into a private application runtime;
+stationd never resolves the decoder from ambient `PATH`.
+
+Orchestration claims the job, serializes it against loudness capture on the same worker tap, renews
+the bounded lease, and waits for the exact selected asset-relative start. It fails a missed start,
+wrong on-air asset, stale report/policy/track/sink/configuration/candidate, missing exact decoder, or
+ambiguous worker response. A valid worker result is independently rehashed, atomically moved from the
+worker capture root to `caption-proofs/<job>.ts`, rehashed again, decoded off the control loop, and
+written only after a final candidate/configuration recheck. Disabled or controllerless channels fail
+unfinished jobs and remove only deterministic job-owned artifacts. Semantic inequality is recorded
+as `mismatch`; decoder/runtime failure is not evidence and terminates the job as failed.
+
+The API request, status, immutable-history, and orchestration execution boundaries are implemented.
+Installed exact-candidate execution proof remains pending.
 Headend carriage and viewer rendering remain external acceptance evidence, not local decode-back
 proof.

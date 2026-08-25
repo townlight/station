@@ -62,7 +62,12 @@ contract can record only candidate/configuration/policy/track-bound transport ca
 independent decode-back facts. Authenticated API requests provide only bounded proof intent; the
 server requires a fresh exact on-air schedule/runtime binding, selects a future cue-bearing window,
 derives every evidence identity, and exposes channel-confined leased status and immutable history.
-Job execution and live ASR remain separate boundaries. See
+Orchestration serializes caption work against loudness use of the worker's one final-sink proof tap,
+renews the lease while waiting/capturing/analyzing, starts only inside the bounded asset-relative
+window, verifies and atomically promotes the exact managed transport, and invokes the private
+absolute decoder off the control loop. It rechecks candidate and configuration authority before the
+atomic terminal proof write. Operational failures remain durable failed jobs; semantic inequality is
+an immutable mismatch proof. Installed evidence and live ASR remain separate boundaries. See
 [ADR 0050](../adr/0050-asset-bound-caption-track-authority.md),
 [ADR 0051](../adr/0051-schedule-authoritative-caption-dispatch.md), and
 [ADR 0052](../adr/0052-caption-egress-proof-authority.md).

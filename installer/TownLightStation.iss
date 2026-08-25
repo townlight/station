@@ -31,6 +31,27 @@
 #ifndef GStreamerInstaller
   #error GStreamerInstaller must be supplied by build-installer.ps1
 #endif
+#ifndef CaptionDecoderPath
+  #error CaptionDecoderPath must be supplied by build-installer.ps1
+#endif
+#ifndef CaptionDecoderLicensePath
+  #error CaptionDecoderLicensePath must be supplied by build-installer.ps1
+#endif
+#ifndef CaptionDecoderArchiveSha256
+  #error CaptionDecoderArchiveSha256 must be supplied by build-installer.ps1
+#endif
+#ifndef CaptionDecoderSha256
+  #error CaptionDecoderSha256 must be supplied by build-installer.ps1
+#endif
+#ifndef CaptionDecoderSize
+  #error CaptionDecoderSize must be supplied by build-installer.ps1
+#endif
+#ifndef CaptionDecoderLicenseSha256
+  #error CaptionDecoderLicenseSha256 must be supplied by build-installer.ps1
+#endif
+#ifndef CaptionDecoderLicenseSize
+  #error CaptionDecoderLicenseSize must be supplied by build-installer.ps1
+#endif
 #ifndef OutputDirectory
   #error OutputDirectory must be supplied by build-installer.ps1
 #endif
@@ -80,6 +101,8 @@ Source: "{#GStreamerInstaller}"; DestName: "{#GStreamerFile}"; Flags: dontcopy n
 Source: "{#StationdPath}"; DestName: "stationd.exe"; Flags: dontcopy noencryption
 Source: "{#ChannelWorkerPath}"; DestName: "channel-worker.exe"; Flags: dontcopy noencryption
 Source: "{#StationUpdaterPath}"; DestName: "station-updater.exe"; Flags: dontcopy noencryption
+Source: "{#CaptionDecoderPath}"; DestName: "caption-decoder-ffmpeg.exe"; Flags: dontcopy noencryption
+Source: "{#CaptionDecoderLicensePath}"; DestName: "caption-decoder-LICENSE.txt"; Flags: dontcopy noencryption
 Source: "..\THIRD-PARTY-NOTICES.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\LICENSE"; DestDir: "{app}"; Flags: ignoreversion
 
@@ -103,6 +126,11 @@ const
   StationdSize = '{#StationdSize}';
   ChannelWorkerSize = '{#ChannelWorkerSize}';
   StationUpdaterSize = '{#StationUpdaterSize}';
+  CaptionDecoderArchiveSha256 = '{#CaptionDecoderArchiveSha256}';
+  CaptionDecoderSha256 = '{#CaptionDecoderSha256}';
+  CaptionDecoderSize = '{#CaptionDecoderSize}';
+  CaptionDecoderLicenseSha256 = '{#CaptionDecoderLicenseSha256}';
+  CaptionDecoderLicenseSize = '{#CaptionDecoderLicenseSize}';
   AuthStateBootstrapRequired = 1;
   AuthStateLoginRequired = 2;
   AuthStateAuthenticated = 3;
@@ -536,10 +564,13 @@ end;
 procedure StageStationBinaries;
 var
   AppDirectory: String;
+  DecoderDirectory: String;
 begin
   ExtractTemporaryFile('stationd.exe');
   ExtractTemporaryFile('channel-worker.exe');
   ExtractTemporaryFile('station-updater.exe');
+  ExtractTemporaryFile('caption-decoder-ffmpeg.exe');
+  ExtractTemporaryFile('caption-decoder-LICENSE.txt');
   AppDirectory := ExpandConstant('{app}');
   if (not CandidateApplicationDirectoryClaimed) or (not DirExists(AppDirectory)) then
     RaiseException('The TownLight Station application directory was not claimed for this candidate.');
@@ -552,6 +583,20 @@ begin
   if not CopyFile(ExpandConstant('{tmp}\station-updater.exe'),
     AppDirectory + '\station-updater.exe', True) then
     RaiseException('The maintenance updater binary could not be staged.');
+  DecoderDirectory := AppDirectory + '\runtime\caption-decoder';
+  if not ForceDirectories(DecoderDirectory) then
+    RaiseException('The private caption decoder directory could not be staged.');
+  if not CopyFile(ExpandConstant('{tmp}\caption-decoder-ffmpeg.exe'),
+    DecoderDirectory + '\ffmpeg.exe', True) then
+    RaiseException('The private caption decoder executable could not be staged.');
+  if not CopyFile(ExpandConstant('{tmp}\caption-decoder-LICENSE.txt'),
+    DecoderDirectory + '\LICENSE.txt', True) then
+    RaiseException('The private caption decoder license could not be staged.');
+  if (Lowercase(GetSHA256OfFile(DecoderDirectory + '\ffmpeg.exe')) <>
+      CaptionDecoderSha256) or
+    (Lowercase(GetSHA256OfFile(DecoderDirectory + '\LICENSE.txt')) <>
+      CaptionDecoderLicenseSha256) then
+    RaiseException('The staged private caption decoder does not match its pinned payload.');
   if not ForceDirectories(ExpandConstant('{commonappdata}\TownLight Station')) then
     RaiseException('The station data directory could not be created.');
 end;
@@ -708,6 +753,11 @@ begin
     '"source_commit":"' + CandidateCommit + '",' +
     '"media_runtime_sha256":"' + RuntimeSha256 + '",' +
     '"runtime_manifest_sha256":"' + RuntimeManifestSha256 + '",' +
+    '"caption_decoder_archive_sha256":"' + CaptionDecoderArchiveSha256 + '",' +
+    '"caption_decoder_sha256":"' + CaptionDecoderSha256 + '",' +
+    '"caption_decoder_size_bytes":' + CaptionDecoderSize + ',' +
+    '"caption_decoder_license_sha256":"' + CaptionDecoderLicenseSha256 + '",' +
+    '"caption_decoder_license_size_bytes":' + CaptionDecoderLicenseSize + ',' +
     '"installed_local_time":"' +
       GetDateTimeString('yyyy-mm-dd hh:nn:ss', '-', ':') + '",' +
     '"health_uri":"http://127.0.0.1:4070/health"' +

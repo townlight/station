@@ -87,6 +87,7 @@ fn run_console(config: DaemonConfig) -> Result<(), String> {
     let worker_executable = worker_executable()?;
     let update_application = application_directory()?;
     let api_application = update_application.clone();
+    let caption_decoder = caption_decoder_executable(&update_application);
     let proof_candidate_authority =
         installed_candidate_authority(&config.database, update_application.clone())?;
     let stop = Arc::new(AtomicBool::new(false));
@@ -98,11 +99,12 @@ fn run_console(config: DaemonConfig) -> Result<(), String> {
         None,
         move |orchestration_stop, health| {
             let reconciled_health = Arc::clone(&health);
-            station_orchestration::run_until_with_candidate_authority_and_liveness(
+            station_orchestration::run_until_with_proof_authorities_and_liveness(
                 &orchestration_database,
                 &worker_executable,
                 orchestration_stop,
                 Some(proof_candidate_authority),
+                Some(caption_decoder),
                 move || health.mark_alive(),
                 move || reconciled_health.mark_progress(),
             )
@@ -251,6 +253,7 @@ fn run_service(config: DaemonConfig) -> Result<(), String> {
     let worker_executable = worker_executable()?;
     let update_application = application_directory()?;
     let api_application = update_application.clone();
+    let caption_decoder = caption_decoder_executable(&update_application);
     let proof_candidate_authority =
         installed_candidate_authority(&config.database, update_application.clone())?;
     let orchestration_database = config.database.clone();
@@ -261,11 +264,12 @@ fn run_service(config: DaemonConfig) -> Result<(), String> {
         Some(orchestration_receipt),
         move |orchestration_stop, health| {
             let reconciled_health = Arc::clone(&health);
-            station_orchestration::run_until_with_candidate_authority_and_liveness(
+            station_orchestration::run_until_with_proof_authorities_and_liveness(
                 &orchestration_database,
                 &worker_executable,
                 orchestration_stop,
                 Some(proof_candidate_authority),
+                Some(caption_decoder),
                 move || health.mark_alive(),
                 move || reconciled_health.mark_progress(),
             )
@@ -438,6 +442,13 @@ fn application_directory() -> Result<std::path::PathBuf, String> {
     let executable = std::env::current_exe()
         .map_err(|error| format!("could not locate station application: {error}"))?;
     application_root_for_executable(&executable)
+}
+
+fn caption_decoder_executable(application_root: &Path) -> PathBuf {
+    application_root
+        .join("runtime")
+        .join("caption-decoder")
+        .join("ffmpeg.exe")
 }
 
 fn installed_candidate_authority(
@@ -782,5 +793,18 @@ mod startup_tests {
             root
         );
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn caption_decoder_is_bound_to_the_private_application_runtime() {
+        let application = PathBuf::from(r"C:\Program Files\TownLight Station");
+
+        assert_eq!(
+            caption_decoder_executable(&application),
+            application
+                .join("runtime")
+                .join("caption-decoder")
+                .join("ffmpeg.exe")
+        );
     }
 }

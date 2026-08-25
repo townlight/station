@@ -6,6 +6,8 @@ $ErrorActionPreference = 'Stop'
 $application = Join-Path $env:ProgramFiles 'TownLight Station'
 $data = Join-Path $env:ProgramData 'TownLight Station'
 $runtime = Join-Path $application 'runtime\gstreamer'
+$captionDecoder = Join-Path $application 'runtime\caption-decoder\ffmpeg.exe'
+$captionDecoderLicense = Join-Path $application 'runtime\caption-decoder\LICENSE.txt'
 $manifestDocument = Get-Content -LiteralPath $Manifest -Raw | ConvertFrom-Json
 $receipt = Get-Content -LiteralPath (Join-Path $data 'install-receipt.json') -Raw | ConvertFrom-Json
 $activeReceipt = Get-Content -LiteralPath (Join-Path $data 'active-slot.json') -Raw | ConvertFrom-Json
@@ -54,6 +56,8 @@ if ($health.database -ne 'ready' -or
 $stationdHash = (Get-FileHash -LiteralPath (Join-Path $application 'stationd.exe') -Algorithm SHA256).Hash
 $workerHash = (Get-FileHash -LiteralPath (Join-Path $application 'channel-worker.exe') -Algorithm SHA256).Hash
 $updaterHash = (Get-FileHash -LiteralPath (Join-Path $application 'station-updater.exe') -Algorithm SHA256).Hash
+$captionDecoderHash = (Get-FileHash -LiteralPath $captionDecoder -Algorithm SHA256).Hash.ToLowerInvariant()
+$captionDecoderLicenseHash = (Get-FileHash -LiteralPath $captionDecoderLicense -Algorithm SHA256).Hash.ToLowerInvariant()
 if ($stationdHash -ne $manifestDocument.stationd_sha256) {
     throw 'Installed stationd does not match the candidate manifest.'
 }
@@ -63,8 +67,25 @@ if ($workerHash -ne $manifestDocument.channel_worker_sha256) {
 if ($updaterHash -ne $manifestDocument.station_updater_sha256) {
     throw 'Installed station-updater does not match the candidate manifest.'
 }
+if ($captionDecoderHash -ne $manifestDocument.caption_decoder_sha256 -or
+    (Get-Item -LiteralPath $captionDecoder).Length -ne [int64]$manifestDocument.caption_decoder_size_bytes -or
+    $captionDecoderLicenseHash -ne $manifestDocument.caption_decoder_license_sha256 -or
+    (Get-Item -LiteralPath $captionDecoderLicense).Length -ne [int64]$manifestDocument.caption_decoder_license_size_bytes) {
+    throw 'Installed caption decoder payload does not match the candidate manifest.'
+}
+$captionDecoderEntries = @(
+    Get-Item -LiteralPath (Split-Path $captionDecoder -Parent), $captionDecoder, $captionDecoderLicense -Force
+)
+if (@($captionDecoderEntries | Where-Object {
+    ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0
+}).Count -ne 0) {
+    throw 'Installed caption decoder payload contains a reparse-point entry.'
+}
 if ($receipt.source_commit -ne $manifestDocument.source_commit -or
-    $receipt.media_runtime_sha256 -ne $manifestDocument.media_runtime_sha256) {
+    $receipt.media_runtime_sha256 -ne $manifestDocument.media_runtime_sha256 -or
+    $receipt.caption_decoder_archive_sha256 -ne $manifestDocument.caption_decoder_archive_sha256 -or
+    $receipt.caption_decoder_sha256 -ne $manifestDocument.caption_decoder_sha256 -or
+    $receipt.caption_decoder_license_sha256 -ne $manifestDocument.caption_decoder_license_sha256) {
     throw 'The installation receipt does not match the candidate manifest.'
 }
 $runtimeManifestHash = (Get-FileHash -LiteralPath $runtimeManifestPath -Algorithm SHA256).Hash.ToLowerInvariant()
@@ -163,6 +184,10 @@ foreach ($factory in @(
         throw "Installed media factory is unavailable: $factory"
     }
 }
+& $captionDecoder -nostdin -hide_banner -version *> $null
+if ($LASTEXITCODE -ne 0) {
+    throw 'Installed caption decoder executable did not start successfully.'
+}
 
 [ordered]@{
     service = $service.State
@@ -174,6 +199,8 @@ foreach ($factory in @(
     stationd_sha256 = $stationdHash
     channel_worker_sha256 = $workerHash
     station_updater_sha256 = $updaterHash
+    caption_decoder_sha256 = $captionDecoderHash
+    caption_decoder_license_sha256 = $captionDecoderLicenseHash
     runtime_manifest_sha256 = $runtimeManifestHash
     media_factories = 'ready'
     data_path = $data

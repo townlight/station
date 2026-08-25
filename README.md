@@ -36,8 +36,13 @@ mismatched or absent decoded evidence verified. Authenticated caption-proof rout
 report, enabled sink, duration, and byte-limit intent; the server derives a fresh exact on-air
 schedule/runtime binding, selects a bounded future cue-bearing window, binds the verified installed
 candidate and current output configuration, creates one leased job per channel/sink, and exposes
-channel-scoped job status plus bounded immutable proof history. Proof-job execution,
-already-queued cue clearing at unscheduled source transitions, live ASR, and installed/field evidence remain separate work, so
+channel-scoped job status plus bounded immutable proof history. The channel controller now leases
+those jobs, reserves the worker's final-sink capture tap against
+loudness work, waits for the server-selected asset-relative start with a bounded late tolerance,
+revalidates on-air/schedule/candidate/configuration authority, atomically promotes the exact capture,
+and independently decodes it off the control loop. The installer carries a pinned hash-verified LGPL
+FFmpeg executable at a private absolute path; each proof records that executable's measured digest.
+Already-queued cue clearing at unscheduled source transitions, live ASR, and installed/field evidence remain separate work, so
 commissioning still reports the caption authority as blocked.
 
 ## Architecture
@@ -82,7 +87,7 @@ needed; the runner never accepts a DLL found only through ambient `PATH`.
 
 ## Installer
 
-`installer\build-installer.ps1` reproducibly restores and builds the operator console, then builds one elevated x64 setup executable in `dist`. It accepts only the pinned official GStreamer 1.28.6 runtime hash, embeds `stationd` (including the console), `channel-worker`, the private media runtime, notices, and an immutable source commit, and refuses a dirty release worktree. `-AllowDirty` exists only for local packaging tests.
+`installer\build-installer.ps1` reproducibly restores and builds the operator console, then builds one elevated x64 setup executable in `dist`. It accepts only the pinned official GStreamer 1.28.6 runtime hash and the pinned BtbN LGPL FFmpeg archive/executable/license hashes, embeds `stationd` (including the console), `channel-worker`, both private runtimes, notices, and an immutable source commit, and refuses a dirty release worktree. `-AllowDirty` exists only for local packaging tests.
 
 Installation is health-gated before Inno Setup commits the product registration: the installer stages immutable binaries, installs the private runtime, registers an immediate automatic LocalSystem service with restart recovery, starts it, receives the local readiness response, and writes a candidate receipt. Immediate startup is deliberate: a station must begin channel recovery during boot rather than wait for Windows' delayed-start window. Any failure before formal installation removes the staged service, runtime, and binaries and returns nonzero. Uninstall removes application/runtime files and the service but deliberately preserves station data beneath `%ProgramData%\TownLight Station`.
 

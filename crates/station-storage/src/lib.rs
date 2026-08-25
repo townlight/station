@@ -8950,6 +8950,28 @@ impl StationStore {
         }
     }
 
+    pub fn list_unfinished_caption_egress_jobs_for_channel(
+        &self,
+        channel_id: &str,
+    ) -> Result<Vec<CaptionEgressProofJobRecord>, String> {
+        if !is_canonical_uuid(channel_id) {
+            return Err("caption proof channel identity must be a canonical UUID".into());
+        }
+        let statement = self.prepare(
+            "SELECT job_json, state, updated_at_unix_ms, lease_expires_at_unix_ms, capture_json, completed_at_unix_ms, failed_at_unix_ms, failure_detail FROM caption_egress_jobs WHERE channel_id=?1 AND state IN ('pending','claimed','capture_pending','analyzing') ORDER BY created_at_unix_ms, job_id",
+        )?;
+        let channel_id = c_string(channel_id, "caption proof channel identity")?;
+        bind_text(self.database, statement.raw, 1, &channel_id)?;
+        let mut jobs = Vec::new();
+        loop {
+            match unsafe { sqlite3_step(statement.raw) } {
+                SQLITE_ROW => jobs.push(read_caption_egress_job_row(statement.raw)?),
+                SQLITE_DONE => return Ok(jobs),
+                _ => return Err(sqlite_error(self.database)),
+            }
+        }
+    }
+
     pub fn claim_next_caption_egress_job(
         &self,
         channel_id: &str,
@@ -9070,6 +9092,64 @@ impl StationStore {
             .ok_or_else(|| "caption proof job disappeared after transition".into())
     }
 
+    pub fn renew_caption_egress_job_lease(
+        &self,
+        job_id: &str,
+        expected_state: CaptionEgressProofJobState,
+        now_unix_ms: i64,
+        lease_duration_ms: u64,
+    ) -> Result<CaptionEgressProofJobRecord, String> {
+        let lease_duration_ms = checked_i64(lease_duration_ms, "caption proof job lease duration")?;
+        validate_output_loudness_lease(now_unix_ms, lease_duration_ms)?;
+        if !matches!(
+            expected_state,
+            CaptionEgressProofJobState::Claimed
+                | CaptionEgressProofJobState::CapturePending
+                | CaptionEgressProofJobState::Analyzing
+        ) {
+            return Err("only an active caption proof job lease can be renewed".into());
+        }
+        let lease_expires_at_unix_ms = now_unix_ms
+            .checked_add(lease_duration_ms)
+            .ok_or_else(|| "caption proof job lease time overflowed".to_string())?;
+        let job_id = c_string(job_id, "caption proof job identity")?;
+        let expected_state = c_string(
+            caption_egress_job_state_name(expected_state),
+            "caption proof expected state",
+        )?;
+        self.execute("BEGIN IMMEDIATE")?;
+        let outcome = (|| {
+            let statement = self.prepare(
+                "UPDATE caption_egress_jobs SET updated_at_unix_ms=?1, lease_expires_at_unix_ms=?2 WHERE job_id=?3 AND state=?4 AND state NOT IN ('completed','failed') AND lease_expires_at_unix_ms>?1",
+            )?;
+            bind_i64(self.database, statement.raw, 1, now_unix_ms)?;
+            bind_i64(self.database, statement.raw, 2, lease_expires_at_unix_ms)?;
+            bind_text(self.database, statement.raw, 3, &job_id)?;
+            bind_text(self.database, statement.raw, 4, &expected_state)?;
+            expect_done(self.database, statement.raw)?;
+            if self.changes() != 1 {
+                return Err(
+                    "caption proof lease renewal compare-and-set failed or lease expired".into(),
+                );
+            }
+            self.read_caption_egress_job(&job_id.to_string_lossy())?
+                .ok_or_else(|| "renewed caption proof job disappeared".into())
+        })();
+        match outcome {
+            Ok(job) => match self.execute("COMMIT") {
+                Ok(()) => Ok(job),
+                Err(error) => {
+                    let _ = self.execute("ROLLBACK");
+                    Err(error)
+                }
+            },
+            Err(error) => {
+                let _ = self.execute("ROLLBACK");
+                Err(error)
+            }
+        }
+    }
+
     pub fn fail_caption_egress_job(
         &self,
         job_id: &str,
@@ -9087,7 +9167,7 @@ impl StationStore {
             return Err("terminal caption proof job cannot be failed".into());
         }
         let statement = self.prepare(
-            "UPDATE caption_egress_jobs SET state='failed', updated_at_unix_ms=?1, lease_expires_at_unix_ms=-1, failed_at_unix_ms=?1, failure_detail=?2 WHERE job_id=?3 AND state=?4",
+            "UPDATE caption_egress_jobs SET state='failed', updated_at_unix_ms=?1, lease_expires_at_unix_ms=-1, failed_at_unix_ms=?1, failure_detail=?2 WHERE job_id=?3 AND state=?4 AND lease_expires_at_unix_ms>?1",
         )?;
         let values = [
             c_string(detail, "caption proof job failure detail")?,
@@ -9103,10 +9183,52 @@ impl StationStore {
         bind_text(self.database, statement.raw, 4, &values[2])?;
         expect_done(self.database, statement.raw)?;
         if self.changes() != 1 {
-            return Err("caption proof job failure compare-and-set failed".into());
+            return Err("caption proof job failure compare-and-set failed or lease expired".into());
         }
         self.read_caption_egress_job(job_id)?
             .ok_or_else(|| "caption proof job disappeared after failure".into())
+    }
+
+    pub fn fail_abandoned_caption_egress_job(
+        &self,
+        job_id: &str,
+        expected_state: CaptionEgressProofJobState,
+        now_unix_ms: i64,
+        detail: &str,
+    ) -> Result<CaptionEgressProofJobRecord, String> {
+        if now_unix_ms < 0 || !secret_field(detail, 4_000) {
+            return Err("caption proof job abandonment facts are invalid".into());
+        }
+        if !matches!(
+            expected_state,
+            CaptionEgressProofJobState::Pending
+                | CaptionEgressProofJobState::Claimed
+                | CaptionEgressProofJobState::CapturePending
+                | CaptionEgressProofJobState::Analyzing
+        ) {
+            return Err("only an unfinished caption proof job can be abandoned".into());
+        }
+        let statement = self.prepare(
+            "UPDATE caption_egress_jobs SET state='failed', updated_at_unix_ms=?1, lease_expires_at_unix_ms=-1, failed_at_unix_ms=?1, failure_detail=?2 WHERE job_id=?3 AND state=?4",
+        )?;
+        let values = [
+            c_string(detail, "caption proof job abandonment detail")?,
+            c_string(job_id, "caption proof job identity")?,
+            c_string(
+                caption_egress_job_state_name(expected_state),
+                "caption proof expected state",
+            )?,
+        ];
+        bind_i64(self.database, statement.raw, 1, now_unix_ms)?;
+        bind_text(self.database, statement.raw, 2, &values[0])?;
+        bind_text(self.database, statement.raw, 3, &values[1])?;
+        bind_text(self.database, statement.raw, 4, &values[2])?;
+        expect_done(self.database, statement.raw)?;
+        if self.changes() != 1 {
+            return Err("caption proof job abandonment compare-and-set failed".into());
+        }
+        self.read_caption_egress_job(job_id)?
+            .ok_or_else(|| "abandoned caption proof job disappeared".into())
     }
 
     pub fn recover_expired_caption_egress_jobs(&self, now_unix_ms: i64) -> Result<u64, String> {

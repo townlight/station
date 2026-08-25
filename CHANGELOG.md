@@ -21,8 +21,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   proof with terminal completion. Authenticated per-channel APIs now create those jobs from bounded
   operator intent only: the server requires the exact acknowledged asset on a fresh on-air runtime,
   selects a future cue-bearing window, derives policy/track/candidate/configuration facts, rejects
-  forged authority fields, and exposes channel-scoped job status plus bounded proof history.
-  Orchestration execution remains unfinished.
+  forged authority fields, and exposes channel-scoped job status plus bounded proof history. The
+  channel controller now serializes caption and loudness use of the exact final-sink capture tap,
+  renews leases while waiting/capturing/analyzing, starts only inside the bounded scheduled on-air
+  window, verifies every worker identity and artifact digest, atomically promotes the proof-owned
+  transport, independently decodes it off-loop, rechecks candidate/configuration authority at the
+  final write boundary, and atomically records either verified or honest mismatch evidence. Disabled
+  or controllerless channels and every operational failure become durable failed truth while cleanup
+  removes only deterministic TownLight-owned artifacts. The service uses only a private absolute
+  decoder path, and the installer now stages a pinned hash-verified BtbN LGPL FFmpeg executable and
+  its license with decoder hashes in the candidate and installation receipts.
 
 - Asset caption authority now stores bounded, ordered, non-overlapping cue sets against the exact
   content-addressed media identity, language, and CEA service. Writes require ready media, reject

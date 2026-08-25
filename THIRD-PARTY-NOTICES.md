@@ -2,6 +2,8 @@
 
 TownLight Station's media engine dynamically uses GStreamer and its selected plugins. GStreamer is licensed under LGPL-2.1-or-later; source and license information are available from <https://gstreamer.freedesktop.org/>.
 
+TownLight Station includes the unmodified `ffmpeg.exe` from BtbN's pinned `ffmpeg-n9.0.1-6-g9d4ca21220-win64-lgpl-9.0` build solely as an out-of-process caption decode-back tool. That build is LGPL, does not enable GPL-only FFmpeg components, and is installed with its `LICENSE.txt`. The exact build recipe is available from <https://github.com/BtbN/FFmpeg-Builds/tree/autobuild-2026-08-20-13-45>; corresponding FFmpeg source is available from <https://github.com/FFmpeg/FFmpeg/tree/9d4ca21220>. The distributed archive SHA-256 is `ccaa910db95451121482a5ebcb8c682123cb4f8a5bd5170fde4a814d7b437772`, and the installed executable SHA-256 is `b6b61f0d99c55e422bbd59fad6880a8d4f96d99a6c865f3bb58c8f1ce3ff7b31`.
+
 The Rust GStreamer bindings are available under MIT OR Apache-2.0 from <https://gitlab.freedesktop.org/gstreamer/gstreamer-rs>.
 
 The RustCrypto SHA-2 implementation is available under MIT OR Apache-2.0 from <https://github.com/RustCrypto/hashes>.

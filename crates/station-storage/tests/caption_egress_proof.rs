@@ -273,12 +273,41 @@ fn caption_proof_job_is_leased_cas_recoverable_and_terminal_failure_is_durable()
         )
         .unwrap();
     assert_eq!(analyzing.capture, Some(capture));
+    let renewed = store
+        .renew_caption_egress_job_lease(
+            &job.job_id,
+            CaptionEgressProofJobState::Analyzing,
+            105_000,
+            10_000,
+        )
+        .unwrap();
+    assert_eq!(renewed.lease_expires_at_unix_ms, Some(115_000));
+    assert!(
+        store
+            .renew_caption_egress_job_lease(
+                &job.job_id,
+                CaptionEgressProofJobState::CapturePending,
+                106_000,
+                10_000,
+            )
+            .is_err()
+    );
     assert_eq!(
         store.recover_expired_caption_egress_jobs(111_999).unwrap(),
         0
     );
+    assert!(
+        store
+            .fail_caption_egress_job(
+                &job.job_id,
+                CaptionEgressProofJobState::Analyzing,
+                115_000,
+                "stale worker must not own this transition",
+            )
+            .is_err()
+    );
     assert_eq!(
-        store.recover_expired_caption_egress_jobs(112_000).unwrap(),
+        store.recover_expired_caption_egress_jobs(115_000).unwrap(),
         1
     );
     assert_eq!(

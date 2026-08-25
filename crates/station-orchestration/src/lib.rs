@@ -13,14 +13,19 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use sha2::{Digest, Sha256};
-use station_captions::AssetCaptionTrack;
+use station_captions::{
+    AssetCaptionTrack, CaptionEgressProof, CaptionEgressProofJobRecord, CaptionEgressProofJobState,
+    CaptionProofCaptureFacts, CaptionProofOutcome,
+};
 use station_cg::{CgBulletinContent, CgResolvedContent, CgResolvedSnapshot};
 use station_domain::{
     AlertConditionKind, AlertEvent, AlertEventState, AlertSeverity, ChannelRuntimeObservation,
     ChannelRuntimeState,
 };
 use station_live::{LiveEndpoint, TakeoverSession, TakeoverState};
-use station_media_assets::measure_output_loudness;
+use station_media_assets::{
+    DecodedCaptionEvidence, decode_output_captions, measure_output_loudness,
+};
 use station_media_protocol::{
     CaptionCue as WorkerCaptionCue, CgImageFormat, CgOverlay, CgOverlayContent, CgRect, CgSnapshot,
     ChannelCommand, LiveArmToken, LiveInputConfiguration, LiveReturnTarget, LoudnessTarget,
@@ -109,6 +114,19 @@ pub fn managed_output_proof_root(database_path: &Path) -> PathBuf {
         std::env::current_dir().map_or(parent.clone(), |current| current.join(parent))
     };
     parent.join("output-proofs")
+}
+
+pub fn managed_caption_proof_root(database_path: &Path) -> PathBuf {
+    let parent = database_path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .to_path_buf();
+    let parent = if parent.is_absolute() {
+        parent
+    } else {
+        std::env::current_dir().map_or(parent.clone(), |current| current.join(parent))
+    };
+    parent.join("caption-proofs")
 }
 
 fn expire_due_bulletins(
@@ -391,6 +409,38 @@ const OUTPUT_PROOF_LEASE_MS: i64 = 300_000;
 const OUTPUT_PROOF_POLL_INTERVAL_MS: i64 = 250;
 const OUTPUT_PROOF_LEASE_RENEW_MARGIN_MS: i64 = 30_000;
 const OUTPUT_PROOF_TOLERANCE_MILLI: i32 = 2_000;
+const CAPTION_PROOF_START_LATE_TOLERANCE_MS: i64 = 500;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CaptionCaptureTiming {
+    Waiting,
+    Due,
+    Missed,
+}
+
+fn caption_capture_timing(
+    schedule_starts_at_unix_ms: i64,
+    capture_asset_offset_ms: u64,
+    now_unix_ms: i64,
+) -> CaptionCaptureTiming {
+    let Ok(capture_asset_offset_ms) = i64::try_from(capture_asset_offset_ms) else {
+        return CaptionCaptureTiming::Missed;
+    };
+    let Some(capture_starts_at_unix_ms) =
+        schedule_starts_at_unix_ms.checked_add(capture_asset_offset_ms)
+    else {
+        return CaptionCaptureTiming::Missed;
+    };
+    if now_unix_ms < capture_starts_at_unix_ms {
+        CaptionCaptureTiming::Waiting
+    } else if now_unix_ms
+        <= capture_starts_at_unix_ms.saturating_add(CAPTION_PROOF_START_LATE_TOLERANCE_MS)
+    {
+        CaptionCaptureTiming::Due
+    } else {
+        CaptionCaptureTiming::Missed
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ProofOutputBinding {
@@ -428,6 +478,41 @@ enum OutputProofState {
         next_poll_at_unix_ms: i64,
     },
     Analyzing(OutputProofAnalyzing),
+}
+
+#[derive(Debug)]
+struct CaptionProofWaiting {
+    job: CaptionEgressProofJobRecord,
+    schedule_starts_at_unix_ms: i64,
+}
+
+#[derive(Debug)]
+struct CaptionProofAnalyzing {
+    job: CaptionEgressProofJobRecord,
+    artifact_relative_path: String,
+    worker_instance_id: String,
+    graph_revision: u64,
+    worker_capture_duration_ms: u64,
+    captured_at_unix_ms: i64,
+    analysis: Receiver<Result<DecodedCaptionEvidence, String>>,
+}
+
+#[derive(Debug, Default)]
+enum CaptionProofState {
+    #[default]
+    Idle,
+    Waiting(CaptionProofWaiting),
+    Capturing {
+        job: CaptionEgressProofJobRecord,
+        output_index: u16,
+        target: LoudnessTarget,
+        artifact_relative_path: String,
+        worker_instance_id: String,
+        graph_revision: u64,
+        captured_at_unix_ms: i64,
+        next_poll_at_unix_ms: i64,
+    },
+    Analyzing(CaptionProofAnalyzing),
 }
 
 fn proof_artifact_path(root: &Path, relative: &str) -> Result<PathBuf, String> {
@@ -536,6 +621,50 @@ fn cleanup_orphan_output_proof_artifacts(root: &Path, job_id: &str) -> Result<()
     Ok(())
 }
 
+fn cleanup_orphan_caption_proof_artifacts(
+    database_path: &Path,
+    job_id: &str,
+) -> Result<(), String> {
+    cleanup_orphan_output_proof_artifacts(&managed_output_proof_root(database_path), job_id)?;
+    cleanup_orphan_output_proof_artifacts(&managed_caption_proof_root(database_path), job_id)
+}
+
+fn promote_caption_proof_artifact(
+    database_path: &Path,
+    job_id: &str,
+    worker_relative_path: &str,
+) -> Result<(PathBuf, String), String> {
+    if worker_relative_path != format!("{job_id}.ts") {
+        return Err("caption proof worker artifact path did not match the durable job".into());
+    }
+    let worker_root = managed_output_proof_root(database_path);
+    let source = proof_artifact_path(&worker_root, worker_relative_path)?;
+    let caption_root = managed_caption_proof_root(database_path);
+    match fs::create_dir(&caption_root) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            let metadata = fs::symlink_metadata(&caption_root)
+                .map_err(|inspect| format!("inspect managed caption proof root: {inspect}"))?;
+            if !metadata.file_type().is_dir() {
+                return Err("managed caption proof root is not a directory".into());
+            }
+        }
+        Err(error) => return Err(format!("create managed caption proof root: {error}")),
+    }
+    let destination = proof_artifact_path(&caption_root, worker_relative_path)?;
+    match fs::symlink_metadata(&destination) {
+        Ok(_) => return Err("caption proof destination artifact already exists".into()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(format!("inspect caption proof destination: {error}")),
+    }
+    fs::rename(&source, &destination)
+        .map_err(|error| format!("atomically promote caption proof artifact: {error}"))?;
+    Ok((
+        destination,
+        format!("caption-proofs/{worker_relative_path}"),
+    ))
+}
+
 fn fail_output_proofs_without_controller(
     store: &StationStore,
     database_path: &Path,
@@ -555,6 +684,34 @@ fn fail_output_proofs_without_controller(
         store
             .fail_abandoned_output_loudness_job(
                 &job.job_id,
+                job.state,
+                now_unix_ms,
+                &failure_detail,
+            )
+            .map_err(OrchestrationError::Storage)?;
+    }
+    Ok(())
+}
+
+fn fail_caption_proofs_without_controller(
+    store: &StationStore,
+    database_path: &Path,
+    channel_id: &str,
+    now_unix_ms: i64,
+    detail: &str,
+) -> Result<(), OrchestrationError> {
+    let jobs = store
+        .list_unfinished_caption_egress_jobs_for_channel(channel_id)
+        .map_err(OrchestrationError::Storage)?;
+    for job in jobs {
+        let failure_detail =
+            match cleanup_orphan_caption_proof_artifacts(database_path, &job.job.job_id) {
+                Ok(()) => detail.to_string(),
+                Err(error) => format!("{detail}; managed artifact cleanup also failed: {error}"),
+            };
+        store
+            .fail_abandoned_caption_egress_job(
+                &job.job.job_id,
                 job.state,
                 now_unix_ms,
                 &failure_detail,
@@ -720,7 +877,9 @@ pub struct ChannelController {
     output_expectations: Vec<OutputExpectation>,
     proof_output_bindings: Vec<ProofOutputBinding>,
     output_proof: OutputProofState,
+    caption_proof: CaptionProofState,
     candidate_authority: Option<Arc<dyn CandidateAuthority>>,
+    caption_decoder_executable: Option<PathBuf>,
     last_output_bytes: Option<Vec<u64>>,
     last_output_audio_buffers: Option<Vec<u64>>,
     cg_state: CgSnapshotState,
@@ -817,7 +976,9 @@ impl ChannelController {
             output_expectations,
             proof_output_bindings,
             output_proof: OutputProofState::Idle,
+            caption_proof: CaptionProofState::Idle,
             candidate_authority: None,
+            caption_decoder_executable: None,
             last_output_bytes: None,
             last_output_audio_buffers: None,
             cg_state: CgSnapshotState::default(),
@@ -857,6 +1018,10 @@ impl ChannelController {
 
     pub fn set_candidate_authority(&mut self, authority: Arc<dyn CandidateAuthority>) {
         self.candidate_authority = Some(authority);
+    }
+
+    pub fn set_caption_decoder_executable(&mut self, executable: PathBuf) {
+        self.caption_decoder_executable = Some(executable);
     }
 
     fn fail_output_proof_job(
@@ -1493,6 +1658,716 @@ impl ChannelController {
             }
             OutputProofState::Analyzing(analyzing) => {
                 self.finish_output_proof(store, analyzing, now_unix_ms)?
+            }
+        };
+        Ok(())
+    }
+
+    fn fail_caption_proof_job_after_cleanup(
+        &self,
+        store: &StationStore,
+        job: &CaptionEgressProofJobRecord,
+        now_unix_ms: i64,
+        detail: impl Into<String>,
+    ) -> Result<(), OrchestrationError> {
+        let detail = detail.into();
+        let detail =
+            match cleanup_orphan_caption_proof_artifacts(&self.database_path, &job.job.job_id) {
+                Ok(()) => detail,
+                Err(cleanup_error) => {
+                    format!("{detail}; managed artifact cleanup also failed: {cleanup_error}")
+                }
+            };
+        store
+            .fail_caption_egress_job(&job.job.job_id, job.state, now_unix_ms, &detail)
+            .map(|_| ())
+            .map_err(OrchestrationError::Storage)
+    }
+
+    fn verify_current_caption_candidate(
+        &self,
+        job: &CaptionEgressProofJobRecord,
+    ) -> Result<(), String> {
+        let authority = self
+            .candidate_authority
+            .as_ref()
+            .ok_or_else(|| "caption proof candidate authority is not connected".to_string())?;
+        let current = authority.current_candidate()?;
+        if current.version != job.job.candidate_version
+            || current.source_commit.as_deref() != Some(job.job.source_commit.as_str())
+        {
+            return Err("caption proof candidate identity is stale".into());
+        }
+        Ok(())
+    }
+
+    fn caption_proof_binding(
+        &self,
+        store: &StationStore,
+        job: &CaptionEgressProofJobRecord,
+    ) -> Result<(u16, LoudnessTarget, i64), String> {
+        let report = store
+            .read_commit_report(&job.job.report_id)?
+            .ok_or_else(|| "caption proof schedule report no longer exists".to_string())?;
+        if report.channel_id != self.channel_id
+            || report.asset_id != job.job.asset_id
+            || report.dispatch_status != DispatchStatus::Acknowledged
+        {
+            return Err(
+                "caption proof schedule report is not the acknowledged on-air authority".into(),
+            );
+        }
+        let item = store
+            .read_schedule_item(&report.schedule_item_id)?
+            .ok_or_else(|| "caption proof schedule item no longer exists".to_string())?;
+        if item.channel_id != self.channel_id || item.asset_id != job.job.asset_id {
+            return Err("caption proof schedule item binding is stale".into());
+        }
+        let snapshot = store
+            .read_channel_loudness_proof_snapshot(&self.channel_id)?
+            .ok_or_else(|| "caption proof channel no longer exists".to_string())?;
+        if snapshot.configuration_hash != job.job.configuration_hash {
+            return Err("caption proof configuration hash is stale".into());
+        }
+        let snapshot_bindings = snapshot
+            .output_sinks
+            .iter()
+            .map(|sink| ProofOutputBinding {
+                sink_id: sink.sink_id.clone(),
+                target_lufs_milli: (f64::from(sink.loudness_target_lufs) * 1_000.0).round() as i32,
+            })
+            .collect::<Vec<_>>();
+        if !proof_bindings_match(&self.proof_output_bindings, &snapshot_bindings) {
+            return Err("caption proof sink ordering or target changed".into());
+        }
+        let (index, sink) = snapshot
+            .output_sinks
+            .iter()
+            .enumerate()
+            .find(|(_, sink)| sink.sink_id == job.job.sink_id)
+            .ok_or_else(|| "caption proof sink is no longer configured".to_string())?;
+        let binding = self
+            .proof_output_bindings
+            .get(index)
+            .ok_or_else(|| "caption proof sink is absent from the worker bootstrap".to_string())?;
+        if binding.sink_id != sink.sink_id {
+            return Err("caption proof worker binding is stale".into());
+        }
+        let target =
+            LoudnessTarget::from_milli_lufs(binding.target_lufs_milli).map_err(str::to_string)?;
+        Ok((
+            u16::try_from(index).map_err(|_| "caption proof index exceeds protocol range")?,
+            target,
+            item.starts_at_unix_ms,
+        ))
+    }
+
+    fn begin_caption_proof(
+        &mut self,
+        store: &StationStore,
+        waiting: CaptionProofWaiting,
+        now_unix_ms: i64,
+    ) -> Result<CaptionProofState, OrchestrationError> {
+        let mut job = waiting.job;
+        if lease_renewal_due(now_unix_ms, job.lease_expires_at_unix_ms) {
+            job = store
+                .renew_caption_egress_job_lease(
+                    &job.job.job_id,
+                    CaptionEgressProofJobState::Claimed,
+                    now_unix_ms,
+                    OUTPUT_PROOF_LEASE_MS as u64,
+                )
+                .map_err(OrchestrationError::Storage)?;
+        }
+        match caption_capture_timing(
+            waiting.schedule_starts_at_unix_ms,
+            job.job.capture_started_asset_offset_ms,
+            now_unix_ms,
+        ) {
+            CaptionCaptureTiming::Waiting => {
+                return Ok(CaptionProofState::Waiting(CaptionProofWaiting {
+                    job,
+                    schedule_starts_at_unix_ms: waiting.schedule_starts_at_unix_ms,
+                }));
+            }
+            CaptionCaptureTiming::Missed => {
+                self.fail_caption_proof_job_after_cleanup(
+                    store,
+                    &job,
+                    now_unix_ms,
+                    "caption proof capture start missed its bounded on-air window",
+                )?;
+                return Ok(CaptionProofState::Idle);
+            }
+            CaptionCaptureTiming::Due => {}
+        }
+        if self.runtime_state != ChannelRuntimeState::OnAir
+            || self.on_air_asset_id.as_deref() != Some(job.job.asset_id.as_str())
+        {
+            self.fail_caption_proof_job_after_cleanup(
+                store,
+                &job,
+                now_unix_ms,
+                "caption proof capture did not find the exact scheduled asset on air",
+            )?;
+            return Ok(CaptionProofState::Idle);
+        }
+        let (output_index, target, schedule_starts_at_unix_ms) =
+            match self.caption_proof_binding(store, &job) {
+                Ok(binding) => binding,
+                Err(detail) => {
+                    self.fail_caption_proof_job_after_cleanup(store, &job, now_unix_ms, detail)?;
+                    return Ok(CaptionProofState::Idle);
+                }
+            };
+        if schedule_starts_at_unix_ms != waiting.schedule_starts_at_unix_ms {
+            self.fail_caption_proof_job_after_cleanup(
+                store,
+                &job,
+                now_unix_ms,
+                "caption proof scheduled start changed while awaiting capture",
+            )?;
+            return Ok(CaptionProofState::Idle);
+        }
+        if let Err(detail) = self.verify_current_caption_candidate(&job) {
+            self.fail_caption_proof_job_after_cleanup(store, &job, now_unix_ms, detail)?;
+            return Ok(CaptionProofState::Idle);
+        }
+        let Some(decoder) = self.caption_decoder_executable.as_ref() else {
+            self.fail_caption_proof_job_after_cleanup(
+                store,
+                &job,
+                now_unix_ms,
+                "caption proof decoder authority is not connected",
+            )?;
+            return Ok(CaptionProofState::Idle);
+        };
+        if !decoder.is_absolute() || !decoder.is_file() {
+            self.fail_caption_proof_job_after_cleanup(
+                store,
+                &job,
+                now_unix_ms,
+                "caption proof decoder executable is missing from its exact installed path",
+            )?;
+            return Ok(CaptionProofState::Idle);
+        }
+        if let Err(detail) =
+            cleanup_orphan_caption_proof_artifacts(&self.database_path, &job.job.job_id)
+        {
+            self.fail_caption_proof_job_after_cleanup(store, &job, now_unix_ms, detail)?;
+            return Ok(CaptionProofState::Idle);
+        }
+        let response = match self.supervisor.command(
+            &format!("caption-proof-start-{}", job.job.job_id),
+            ChannelCommand::StartOutputProof {
+                proof_id: job.job.job_id.clone(),
+                output_index,
+                sink_id: job.job.sink_id.clone(),
+                loudness_target_lufs: target,
+                duration_ms: job.job.capture_duration_ms,
+                max_bytes: job.job.max_capture_bytes,
+            },
+            self.command_timeout,
+        ) {
+            Ok(response) => response,
+            Err(error) => {
+                self.supervisor.force_terminate();
+                self.fail_caption_proof_job_after_cleanup(
+                    store,
+                    &job,
+                    now_unix_ms,
+                    format!(
+                        "worker caption proof start was ambiguous; worker terminated: {error:?}"
+                    ),
+                )?;
+                return Ok(CaptionProofState::Idle);
+            }
+        };
+        let WorkerEvent::OutputProofStarted {
+            proof_id,
+            output_index: event_index,
+            sink_id,
+            loudness_target_lufs,
+            duration_ms,
+            max_bytes,
+            artifact_relative_path,
+            worker_instance_id,
+            graph_revision,
+        } = response.event
+        else {
+            self.supervisor.force_terminate();
+            self.fail_caption_proof_job_after_cleanup(
+                store,
+                &job,
+                now_unix_ms,
+                "worker returned an invalid caption proof start response and was terminated",
+            )?;
+            return Ok(CaptionProofState::Idle);
+        };
+        if proof_id != job.job.job_id
+            || event_index != output_index
+            || sink_id != job.job.sink_id
+            || loudness_target_lufs != target
+            || duration_ms != job.job.capture_duration_ms
+            || max_bytes != job.job.max_capture_bytes
+            || artifact_relative_path != format!("{}.ts", job.job.job_id)
+            || worker_instance_id.is_empty()
+        {
+            let abort_detail = self.abort_or_terminate_output_proof(&job.job.job_id);
+            let detail = abort_detail.map_or_else(
+                || "worker caption proof start identity or bounds did not match the durable job".to_string(),
+                |abort| format!("worker caption proof start identity or bounds did not match the durable job; {abort}"),
+            );
+            self.fail_caption_proof_job_after_cleanup(store, &job, now_unix_ms, detail)?;
+            return Ok(CaptionProofState::Idle);
+        }
+        if let Err(error) = proof_artifact_path(
+            &managed_output_proof_root(&self.database_path),
+            &artifact_relative_path,
+        ) {
+            let abort_detail = self.abort_or_terminate_output_proof(&job.job.job_id);
+            let detail = abort_detail.map_or(error.clone(), |abort| format!("{error}; {abort}"));
+            self.fail_caption_proof_job_after_cleanup(store, &job, now_unix_ms, detail)?;
+            return Ok(CaptionProofState::Idle);
+        }
+        let capture_accepted_at_unix_ms = system_time_millis()?;
+        if caption_capture_timing(
+            schedule_starts_at_unix_ms,
+            job.job.capture_started_asset_offset_ms,
+            capture_accepted_at_unix_ms,
+        ) != CaptionCaptureTiming::Due
+        {
+            let abort_detail = self.abort_or_terminate_output_proof(&job.job.job_id);
+            let detail = abort_detail.map_or_else(
+                || "worker acknowledged caption capture after the bounded start window".to_string(),
+                |abort| {
+                    format!(
+                        "worker acknowledged caption capture after the bounded start window; {abort}"
+                    )
+                },
+            );
+            self.fail_caption_proof_job_after_cleanup(
+                store,
+                &job,
+                capture_accepted_at_unix_ms,
+                detail,
+            )?;
+            return Ok(CaptionProofState::Idle);
+        }
+        let capture_pending_job = store
+            .advance_caption_egress_job(
+                &job.job.job_id,
+                CaptionEgressProofJobState::Claimed,
+                CaptionEgressProofJobState::CapturePending,
+                capture_accepted_at_unix_ms,
+                OUTPUT_PROOF_LEASE_MS as u64,
+                None,
+            )
+            .map_err(OrchestrationError::Storage)?;
+        Ok(CaptionProofState::Capturing {
+            job: capture_pending_job,
+            output_index,
+            target,
+            artifact_relative_path,
+            worker_instance_id,
+            graph_revision,
+            captured_at_unix_ms: capture_accepted_at_unix_ms,
+            next_poll_at_unix_ms: capture_accepted_at_unix_ms,
+        })
+    }
+
+    fn poll_caption_proof(
+        &mut self,
+        store: &StationStore,
+        mut capture: CaptionProofState,
+        now_unix_ms: i64,
+    ) -> Result<CaptionProofState, OrchestrationError> {
+        let CaptionProofState::Capturing {
+            job,
+            output_index,
+            target,
+            artifact_relative_path,
+            worker_instance_id,
+            graph_revision,
+            captured_at_unix_ms,
+            next_poll_at_unix_ms,
+        } = &mut capture
+        else {
+            return Ok(capture);
+        };
+        if lease_renewal_due(now_unix_ms, job.lease_expires_at_unix_ms) {
+            *job = store
+                .renew_caption_egress_job_lease(
+                    &job.job.job_id,
+                    CaptionEgressProofJobState::CapturePending,
+                    now_unix_ms,
+                    OUTPUT_PROOF_LEASE_MS as u64,
+                )
+                .map_err(OrchestrationError::Storage)?;
+        }
+        if now_unix_ms < *next_poll_at_unix_ms {
+            return Ok(capture);
+        }
+        let response = match self.supervisor.command(
+            &format!("caption-proof-poll-{}-{now_unix_ms}", job.job.job_id),
+            ChannelCommand::PollOutputProof {
+                proof_id: job.job.job_id.clone(),
+            },
+            self.command_timeout,
+        ) {
+            Ok(response) => response,
+            Err(error) => {
+                let abort_detail = self.abort_or_terminate_output_proof(&job.job.job_id);
+                let detail = abort_detail.map_or_else(
+                    || format!("worker could not poll caption proof: {error:?}"),
+                    |abort| format!("worker could not poll caption proof: {error:?}; {abort}"),
+                );
+                self.fail_caption_proof_job_after_cleanup(store, job, now_unix_ms, detail)?;
+                return Ok(CaptionProofState::Idle);
+            }
+        };
+        match response.event {
+            WorkerEvent::OutputProofPending {
+                proof_id,
+                artifact_relative_path: event_path,
+                worker_instance_id: event_worker,
+                graph_revision: event_graph,
+            } if proof_id == job.job.job_id
+                && event_path == *artifact_relative_path
+                && event_worker == *worker_instance_id
+                && event_graph == *graph_revision =>
+            {
+                *next_poll_at_unix_ms = now_unix_ms.saturating_add(OUTPUT_PROOF_POLL_INTERVAL_MS);
+                Ok(capture)
+            }
+            WorkerEvent::OutputProofReady {
+                proof_id,
+                output_index: event_index,
+                sink_id,
+                loudness_target_lufs,
+                artifact_relative_path: event_path,
+                worker_instance_id: event_worker,
+                graph_revision: event_graph,
+                size_bytes,
+                capture_sha256,
+                duration_ms,
+            } if proof_id == job.job.job_id
+                && event_index == *output_index
+                && sink_id == job.job.sink_id
+                && loudness_target_lufs == *target
+                && event_path == *artifact_relative_path
+                && event_worker == *worker_instance_id
+                && event_graph == *graph_revision
+                && ready_duration_is_bounded(duration_ms, job.job.capture_duration_ms) =>
+            {
+                let worker_path = match proof_artifact_path(
+                    &managed_output_proof_root(&self.database_path),
+                    artifact_relative_path,
+                ) {
+                    Ok(path) => path,
+                    Err(error) => {
+                        self.fail_caption_proof_job_after_cleanup(store, job, now_unix_ms, error)?;
+                        return Ok(CaptionProofState::Idle);
+                    }
+                };
+                let (actual_bytes, actual_hash) =
+                    match hash_capture(&worker_path, job.job.max_capture_bytes) {
+                        Ok(facts) => facts,
+                        Err(error) => {
+                            self.fail_caption_proof_job_after_cleanup(
+                                store,
+                                job,
+                                now_unix_ms,
+                                error,
+                            )?;
+                            return Ok(CaptionProofState::Idle);
+                        }
+                    };
+                if actual_bytes != size_bytes || actual_hash != capture_sha256 {
+                    self.fail_caption_proof_job_after_cleanup(
+                        store,
+                        job,
+                        now_unix_ms,
+                        "caption proof artifact identity did not match the worker report",
+                    )?;
+                    return Ok(CaptionProofState::Idle);
+                }
+                let (path, durable_relative_path) = match promote_caption_proof_artifact(
+                    &self.database_path,
+                    &job.job.job_id,
+                    artifact_relative_path,
+                ) {
+                    Ok(result) => result,
+                    Err(error) => {
+                        self.fail_caption_proof_job_after_cleanup(store, job, now_unix_ms, error)?;
+                        return Ok(CaptionProofState::Idle);
+                    }
+                };
+                let (promoted_bytes, promoted_hash) =
+                    hash_capture(&path, job.job.max_capture_bytes)
+                        .map_err(OrchestrationError::Storage)?;
+                if promoted_bytes != actual_bytes || promoted_hash != actual_hash {
+                    self.fail_caption_proof_job_after_cleanup(
+                        store,
+                        job,
+                        now_unix_ms,
+                        "caption proof artifact identity changed during atomic promotion",
+                    )?;
+                    return Ok(CaptionProofState::Idle);
+                }
+                let facts = CaptionProofCaptureFacts {
+                    artifact_relative_path: durable_relative_path.clone(),
+                    capture_bytes: promoted_bytes,
+                    capture_duration_ms: job.job.capture_duration_ms,
+                    capture_sha256: promoted_hash,
+                };
+                let analyzing_job = store
+                    .advance_caption_egress_job(
+                        &job.job.job_id,
+                        CaptionEgressProofJobState::CapturePending,
+                        CaptionEgressProofJobState::Analyzing,
+                        now_unix_ms,
+                        OUTPUT_PROOF_LEASE_MS as u64,
+                        Some(&facts),
+                    )
+                    .map_err(OrchestrationError::Storage)?;
+                let decoder = self.caption_decoder_executable.clone().ok_or_else(|| {
+                    OrchestrationError::Storage(
+                        "caption proof decoder authority disconnected".into(),
+                    )
+                })?;
+                let (sender, receiver) = mpsc::channel();
+                let path_for_analysis = path.clone();
+                thread::spawn(move || {
+                    let result =
+                        decode_output_captions(&path_for_analysis, &decoder).map_err(|error| {
+                            format!("independent caption decode-back failed: {error:?}")
+                        });
+                    let _ = sender.send(result);
+                });
+                Ok(CaptionProofState::Analyzing(CaptionProofAnalyzing {
+                    job: analyzing_job,
+                    artifact_relative_path: durable_relative_path,
+                    worker_instance_id: worker_instance_id.clone(),
+                    graph_revision: *graph_revision,
+                    worker_capture_duration_ms: duration_ms,
+                    captured_at_unix_ms: *captured_at_unix_ms,
+                    analysis: receiver,
+                }))
+            }
+            WorkerEvent::OutputProofReady { proof_id, .. } if proof_id == job.job.job_id => {
+                self.fail_caption_proof_job_after_cleanup(
+                    store,
+                    job,
+                    now_unix_ms,
+                    "worker caption proof ready identity, bounds, or duration was invalid",
+                )?;
+                Ok(CaptionProofState::Idle)
+            }
+            WorkerEvent::OutputProofFailed {
+                proof_id,
+                worker_instance_id: event_worker,
+                graph_revision: event_graph,
+                code,
+                message,
+                ..
+            } if proof_id == job.job.job_id
+                && event_worker == *worker_instance_id
+                && event_graph == *graph_revision =>
+            {
+                self.fail_caption_proof_job_after_cleanup(
+                    store,
+                    job,
+                    now_unix_ms,
+                    format!("worker caption proof failed ({code}): {message}"),
+                )?;
+                Ok(CaptionProofState::Idle)
+            }
+            _ => {
+                let abort_detail = self.abort_or_terminate_output_proof(&job.job.job_id);
+                let detail = abort_detail.map_or_else(
+                    || "worker caption proof poll identity or state was invalid".to_string(),
+                    |abort| {
+                        format!("worker caption proof poll identity or state was invalid; {abort}")
+                    },
+                );
+                self.fail_caption_proof_job_after_cleanup(store, job, now_unix_ms, detail)?;
+                Ok(CaptionProofState::Idle)
+            }
+        }
+    }
+
+    fn finish_caption_proof(
+        &self,
+        store: &StationStore,
+        mut analyzing: CaptionProofAnalyzing,
+        now_unix_ms: i64,
+    ) -> Result<CaptionProofState, OrchestrationError> {
+        if lease_renewal_due(now_unix_ms, analyzing.job.lease_expires_at_unix_ms) {
+            analyzing.job = store
+                .renew_caption_egress_job_lease(
+                    &analyzing.job.job.job_id,
+                    CaptionEgressProofJobState::Analyzing,
+                    now_unix_ms,
+                    OUTPUT_PROOF_LEASE_MS as u64,
+                )
+                .map_err(OrchestrationError::Storage)?;
+        }
+        let decoded = match analyzing.analysis.try_recv() {
+            Ok(Ok(decoded)) => decoded,
+            Ok(Err(error)) => {
+                self.fail_caption_proof_job_after_cleanup(
+                    store,
+                    &analyzing.job,
+                    now_unix_ms,
+                    error,
+                )?;
+                return Ok(CaptionProofState::Idle);
+            }
+            Err(mpsc::TryRecvError::Empty) => {
+                return Ok(CaptionProofState::Analyzing(analyzing));
+            }
+            Err(mpsc::TryRecvError::Disconnected) => {
+                self.fail_caption_proof_job_after_cleanup(
+                    store,
+                    &analyzing.job,
+                    now_unix_ms,
+                    "caption proof analysis worker disconnected without a result",
+                )?;
+                return Ok(CaptionProofState::Idle);
+            }
+        };
+        if decoded.cue_count == 0 {
+            self.fail_caption_proof_job_after_cleanup(
+                store,
+                &analyzing.job,
+                now_unix_ms,
+                "independent caption decode-back produced no caption cues",
+            )?;
+            return Ok(CaptionProofState::Idle);
+        }
+        if let Err(detail) = self.verify_current_caption_candidate(&analyzing.job) {
+            self.fail_caption_proof_job_after_cleanup(store, &analyzing.job, now_unix_ms, detail)?;
+            return Ok(CaptionProofState::Idle);
+        }
+        let current_hash = store
+            .current_channel_output_configuration_hash(&self.channel_id)
+            .map_err(OrchestrationError::Storage)?;
+        if current_hash != analyzing.job.job.configuration_hash {
+            self.fail_caption_proof_job_after_cleanup(
+                store,
+                &analyzing.job,
+                now_unix_ms,
+                "caption proof configuration changed during analysis",
+            )?;
+            return Ok(CaptionProofState::Idle);
+        }
+        let capture = analyzing.job.capture.as_ref().ok_or_else(|| {
+            OrchestrationError::Storage("analyzing caption proof has no capture facts".into())
+        })?;
+        let outcome = if decoded.cue_count == analyzing.job.job.expected_cue_count
+            && decoded.text_sha256 == analyzing.job.job.expected_text_sha256
+        {
+            CaptionProofOutcome::Verified
+        } else {
+            CaptionProofOutcome::Mismatch
+        };
+        let proof = CaptionEgressProof {
+            proof_id: analyzing.job.job.job_id.clone(),
+            channel_id: analyzing.job.job.channel_id.clone(),
+            sink_id: analyzing.job.job.sink_id.clone(),
+            report_id: analyzing.job.job.report_id.clone(),
+            asset_id: analyzing.job.job.asset_id.clone(),
+            track_id: analyzing.job.job.track_id.clone(),
+            track_revision: analyzing.job.job.track_revision,
+            cues_sha256: analyzing.job.job.cues_sha256.clone(),
+            caption_policy_revision: analyzing.job.job.caption_policy_revision,
+            language: analyzing.job.job.language.clone(),
+            service_number: analyzing.job.job.service_number,
+            candidate_version: analyzing.job.job.candidate_version.clone(),
+            source_commit: analyzing.job.job.source_commit.clone(),
+            configuration_hash: analyzing.job.job.configuration_hash.clone(),
+            capture_started_asset_offset_ms: analyzing.job.job.capture_started_asset_offset_ms,
+            capture_duration_ms: capture.capture_duration_ms,
+            capture_bytes: capture.capture_bytes,
+            capture_sha256: capture.capture_sha256.clone(),
+            artifact_relative_path: analyzing.artifact_relative_path.clone(),
+            expected_cue_count: analyzing.job.job.expected_cue_count,
+            decoded_cue_count: decoded.cue_count,
+            expected_text_sha256: analyzing.job.job.expected_text_sha256.clone(),
+            decoded_text_sha256: decoded.text_sha256,
+            decoder_engine: decoded.decoder_engine,
+            decoder_method: decoded.decoder_method,
+            outcome,
+            captured_at_unix_ms: analyzing.captured_at_unix_ms,
+        };
+        if let Err(detail) = self.verify_current_caption_candidate(&analyzing.job) {
+            self.fail_caption_proof_job_after_cleanup(store, &analyzing.job, now_unix_ms, detail)?;
+            return Ok(CaptionProofState::Idle);
+        }
+        store
+            .complete_caption_egress_job_with_proof(&analyzing.job.job.job_id, now_unix_ms, &proof)
+            .map_err(|error| {
+                OrchestrationError::Storage(format!("complete caption proof: {error}"))
+            })?;
+        let _ = (
+            analyzing.worker_instance_id,
+            analyzing.graph_revision,
+            analyzing.worker_capture_duration_ms,
+        );
+        Ok(CaptionProofState::Idle)
+    }
+
+    fn caption_proof_tick(
+        &mut self,
+        store: &StationStore,
+        now_unix_ms: i64,
+    ) -> Result<(), OrchestrationError> {
+        let state = std::mem::take(&mut self.caption_proof);
+        self.caption_proof = match state {
+            CaptionProofState::Idle => {
+                let job = store
+                    .claim_next_caption_egress_job(
+                        &self.channel_id,
+                        now_unix_ms,
+                        OUTPUT_PROOF_LEASE_MS as u64,
+                    )
+                    .map_err(OrchestrationError::Storage)?;
+                match job {
+                    Some(job) => {
+                        let (_, _, schedule_starts_at_unix_ms) =
+                            match self.caption_proof_binding(store, &job) {
+                                Ok(binding) => binding,
+                                Err(detail) => {
+                                    self.fail_caption_proof_job_after_cleanup(
+                                        store,
+                                        &job,
+                                        now_unix_ms,
+                                        detail,
+                                    )?;
+                                    return Ok(());
+                                }
+                            };
+                        self.begin_caption_proof(
+                            store,
+                            CaptionProofWaiting {
+                                job,
+                                schedule_starts_at_unix_ms,
+                            },
+                            now_unix_ms,
+                        )?
+                    }
+                    None => CaptionProofState::Idle,
+                }
+            }
+            CaptionProofState::Waiting(waiting) => {
+                self.begin_caption_proof(store, waiting, now_unix_ms)?
+            }
+            state @ CaptionProofState::Capturing { .. } => {
+                self.poll_caption_proof(store, state, now_unix_ms)?
+            }
+            CaptionProofState::Analyzing(analyzing) => {
+                self.finish_caption_proof(store, analyzing, now_unix_ms)?
             }
         };
         Ok(())
@@ -2209,7 +3084,12 @@ impl ChannelController {
             .ensure_running()
             .map_err(OrchestrationError::Worker)?;
         let store = StationStore::open(&self.database_path).map_err(OrchestrationError::Storage)?;
-        self.output_proof_tick(&store, now_unix_ms)?;
+        if matches!(self.output_proof, OutputProofState::Idle) {
+            self.caption_proof_tick(&store, now_unix_ms)?;
+        }
+        if matches!(self.caption_proof, CaptionProofState::Idle) {
+            self.output_proof_tick(&store, now_unix_ms)?;
+        }
         if now_unix_ms >= self.next_cg_sync_at_unix_ms {
             self.next_cg_sync_at_unix_ms = now_unix_ms.saturating_add(CG_SYNC_INTERVAL_MS);
             expire_due_bulletins(&store, &self.channel_id, now_unix_ms)?;
@@ -2559,6 +3439,30 @@ pub fn run_until_with_candidate_authority_and_liveness<A, R>(
     worker_executable: &Path,
     stop: Arc<AtomicBool>,
     candidate_authority: Option<Arc<dyn CandidateAuthority>>,
+    on_alive: A,
+    on_reconciled: R,
+) -> Result<(), OrchestrationError>
+where
+    A: FnMut(),
+    R: FnMut(),
+{
+    run_until_with_proof_authorities_and_liveness(
+        database_path,
+        worker_executable,
+        stop,
+        candidate_authority,
+        None,
+        on_alive,
+        on_reconciled,
+    )
+}
+
+pub fn run_until_with_proof_authorities_and_liveness<A, R>(
+    database_path: &Path,
+    worker_executable: &Path,
+    stop: Arc<AtomicBool>,
+    candidate_authority: Option<Arc<dyn CandidateAuthority>>,
+    caption_decoder_executable: Option<PathBuf>,
     mut on_alive: A,
     mut on_reconciled: R,
 ) -> Result<(), OrchestrationError>
@@ -2657,6 +3561,9 @@ where
                 if let Some(authority) = candidate_authority.as_ref() {
                     controller.set_candidate_authority(Arc::clone(authority));
                 }
+                if let Some(executable) = caption_decoder_executable.as_ref() {
+                    controller.set_caption_decoder_executable(executable.clone());
+                }
                 if let Some(state) = cg_states.remove(&channel.channel_id) {
                     controller.seed_cg_state(state);
                 }
@@ -2710,7 +3617,7 @@ where
         }
         for channel in &channels {
             if !channel.enabled || !controllers.contains_key(&channel.channel_id) {
-                let detail = if channel.enabled {
+                let output_detail = if channel.enabled {
                     "Output loudness proof failed because the channel has no active controller; restore channel output and submit a new proof job."
                 } else {
                     "Output loudness proof failed because the channel was disabled; enable channel output and submit a new proof job."
@@ -2720,7 +3627,19 @@ where
                     database_path,
                     &channel.channel_id,
                     dispatch_now,
-                    detail,
+                    output_detail,
+                )?;
+                let caption_detail = if channel.enabled {
+                    "Caption proof failed because the channel has no active controller; restore channel output and submit a new proof job."
+                } else {
+                    "Caption proof failed because the channel was disabled; enable channel output and submit a new proof job."
+                };
+                fail_caption_proofs_without_controller(
+                    &store,
+                    database_path,
+                    &channel.channel_id,
+                    dispatch_now,
+                    caption_detail,
                 )?;
             }
         }
@@ -2929,13 +3848,17 @@ fn system_time_millis() -> Result<i64, OrchestrationError> {
 #[cfg(test)]
 mod tests {
     use super::{
-        CgSnapshotState, OrchestrationError, OutputExpectation, capture_duration_for_sample,
-        cleanup_orphan_output_proof_artifacts, due_caption_cues, expire_due_bulletins,
-        generate_live_arm_token, hash_capture, is_abort_confirmation, lease_renewal_due,
-        managed_cg_image_root, proof_artifact_path, proof_bindings_match,
+        CaptionCaptureTiming, CgSnapshotState, OrchestrationError, OutputExpectation,
+        caption_capture_timing, capture_duration_for_sample, cleanup_orphan_output_proof_artifacts,
+        due_caption_cues, expire_due_bulletins, generate_live_arm_token, hash_capture,
+        is_abort_confirmation, lease_renewal_due, managed_cg_image_root,
+        promote_caption_proof_artifact, proof_artifact_path, proof_bindings_match,
         ready_duration_is_bounded, resolved_snapshot_to_protocol, stalled_required_output,
     };
-    use station_captions::{AssetCaptionCue, AssetCaptionTrack, CaptionTrackSourceKind};
+    use station_captions::{
+        AssetCaptionCue, AssetCaptionTrack, AssetCaptionTrackWrite, CaptionEgressProofJob,
+        CaptionEgressProofJobState, CaptionTrackSourceKind, canonical_caption_text_sha256,
+    };
     use station_cg::{
         CgAuditEvent, CgAuditEventKind, CgBoard, CgBulletin, CgBulletinContent, CgBulletinState,
         CgZoneConfig,
@@ -2945,8 +3868,13 @@ mod tests {
         CgTemplateKind, CgZoneKind,
     };
     use station_media_protocol::WorkerEvent;
-    use station_schedule::{ChannelConfiguration, OutputProfileId, OutputSinkConfiguration};
-    use station_storage::{OutputLoudnessProofJob, OutputLoudnessProofJobState, StationStore};
+    use station_schedule::{
+        AssetReadiness, ChannelConfiguration, MediaAsset, OutputProfileId, OutputSinkConfiguration,
+        ScheduleItem, ScheduleState,
+    };
+    use station_storage::{
+        ChannelCaptionMode, OutputLoudnessProofJob, OutputLoudnessProofJobState, StationStore,
+    };
     use std::collections::{BTreeMap, HashSet};
     use std::path::PathBuf;
     use std::sync::{
@@ -2962,6 +3890,7 @@ mod tests {
     const BULLETIN_ID: &str = "597f52ae-f16c-4ff8-ab32-60379cd950c4";
     const OTHER_BULLETIN_ID: &str = "697f52ae-f16c-48f8-ab32-60379cd950c4";
     const OUTPUT_PROOF_JOB_ID: &str = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+    const CAPTION_PROOF_JOB_ID: &str = "caaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
     const OUTPUT_SINK_ID: &str = "bbbbbbbb-cccc-4ddd-8eee-ffffffffffff";
     const SOURCE_COMMIT: &str = "0123456789abcdef0123456789abcdef01234567";
 
@@ -2980,6 +3909,63 @@ mod tests {
             managed_cg_image_root(&database),
             PathBuf::from(r"C:\ProgramData\TownLight Station\cg-images")
         );
+    }
+
+    #[test]
+    fn caption_capture_timing_waits_starts_once_and_fails_when_late() {
+        assert_eq!(
+            caption_capture_timing(100_000, 10_000, 109_999),
+            CaptionCaptureTiming::Waiting
+        );
+        assert_eq!(
+            caption_capture_timing(100_000, 10_000, 110_000),
+            CaptionCaptureTiming::Due
+        );
+        assert_eq!(
+            caption_capture_timing(100_000, 10_000, 110_500),
+            CaptionCaptureTiming::Due
+        );
+        assert_eq!(
+            caption_capture_timing(100_000, 10_000, 110_501),
+            CaptionCaptureTiming::Missed
+        );
+        assert_eq!(
+            caption_capture_timing(i64::MAX, 1, i64::MAX),
+            CaptionCaptureTiming::Missed
+        );
+    }
+
+    #[test]
+    fn caption_artifact_promotion_moves_only_the_exact_owned_capture() {
+        let root = database_path("caption-promote").with_extension("root");
+        let database = root.join("station.db");
+        let worker_root = root.join("output-proofs");
+        std::fs::create_dir_all(&worker_root).unwrap();
+        std::fs::write(
+            worker_root.join(format!("{CAPTION_PROOF_JOB_ID}.ts")),
+            b"bounded caption transport",
+        )
+        .unwrap();
+        std::fs::write(worker_root.join("claude-proof.ts"), b"foreign artifact").unwrap();
+
+        let (path, relative) = promote_caption_proof_artifact(
+            &database,
+            CAPTION_PROOF_JOB_ID,
+            &format!("{CAPTION_PROOF_JOB_ID}.ts"),
+        )
+        .unwrap();
+
+        assert_eq!(
+            relative,
+            format!("caption-proofs/{CAPTION_PROOF_JOB_ID}.ts")
+        );
+        assert_eq!(std::fs::read(path).unwrap(), b"bounded caption transport");
+        assert!(worker_root.join("claude-proof.ts").exists());
+        assert!(
+            promote_caption_proof_artifact(&database, CAPTION_PROOF_JOB_ID, "claude-proof.ts")
+                .is_err()
+        );
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -3110,6 +4096,47 @@ mod tests {
     }
 
     #[test]
+    fn disabled_channel_reconcile_fails_caption_proof_without_touching_foreign_artifacts() {
+        let root = database_path("disabled-caption-proof").with_extension("root");
+        std::fs::create_dir_all(&root).unwrap();
+        let database = root.join("station.db");
+        let store = StationStore::open(&database).unwrap();
+        store.put_channel(&output_proof_channel(false)).unwrap();
+        create_caption_proof_job(&store, &root);
+        let caption_root = root.join("caption-proofs");
+        std::fs::create_dir_all(&caption_root).unwrap();
+        std::fs::write(
+            caption_root.join(format!("{CAPTION_PROOF_JOB_ID}.ts")),
+            b"owned caption artifact",
+        )
+        .unwrap();
+        std::fs::write(caption_root.join("claude-proof.ts"), b"foreign artifact").unwrap();
+        drop(store);
+
+        reconcile_once(&database);
+
+        let store = StationStore::open(&database).unwrap();
+        let job = store
+            .read_caption_egress_job(CAPTION_PROOF_JOB_ID)
+            .unwrap()
+            .unwrap();
+        assert_eq!(job.state, CaptionEgressProofJobState::Failed);
+        assert!(
+            job.failure_detail
+                .as_deref()
+                .is_some_and(|detail| detail.contains("disabled"))
+        );
+        assert!(
+            !caption_root
+                .join(format!("{CAPTION_PROOF_JOB_ID}.ts"))
+                .exists()
+        );
+        assert!(caption_root.join("claude-proof.ts").exists());
+        drop(store);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn enabled_channel_without_a_controller_fails_its_active_output_proof() {
         let root = database_path("controllerless-output-proof").with_extension("root");
         std::fs::create_dir_all(&root).unwrap();
@@ -3197,6 +4224,105 @@ mod tests {
         assert_eq!(
             super::managed_output_proof_root(database),
             database.parent().unwrap().join("output-proofs")
+        );
+    }
+
+    fn create_caption_proof_job(store: &StationStore, root: &std::path::Path) {
+        let asset_id = "d".repeat(64);
+        let media = root.join("caption-asset.ts");
+        std::fs::write(&media, b"caption asset fixture").unwrap();
+        store
+            .put_media_asset(&MediaAsset {
+                asset_id: asset_id.clone(),
+                media_path: media.to_string_lossy().into_owned(),
+                duration_ms: 60_000,
+                readiness: AssetReadiness::Ready,
+            })
+            .unwrap();
+        let item_id = "daaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+        let report_id = "caption-orchestration-report";
+        store
+            .put_schedule_item(&ScheduleItem {
+                item_id: item_id.into(),
+                channel_id: CHANNEL_ID.into(),
+                asset_id: asset_id.clone(),
+                title: "Caption proof fixture".into(),
+                starts_at_unix_ms: 100_000,
+                duration_ms: 60_000,
+                state: ScheduleState::Draft,
+            })
+            .unwrap();
+        store
+            .commit_schedule(
+                report_id,
+                "caption-orchestration-plan",
+                item_id,
+                "setup-admin",
+                90_000,
+                "Caption proof fixture",
+            )
+            .unwrap();
+        let policy = store
+            .write_channel_caption_policy(
+                CHANNEL_ID,
+                ChannelCaptionMode::Cea708,
+                1,
+                "en-US",
+                0,
+                "setup-admin",
+                90_001,
+                "eaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+            )
+            .unwrap();
+        let track = store
+            .write_asset_caption_track(&AssetCaptionTrackWrite {
+                track_id: "faaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee".into(),
+                asset_id: asset_id.clone(),
+                language: "en-US".into(),
+                service_number: 1,
+                source_kind: CaptionTrackSourceKind::External,
+                label: "Reviewed English".into(),
+                cues: vec![AssetCaptionCue {
+                    cue_id: "abaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee".into(),
+                    start_ms: 1_000,
+                    duration_ms: 2_000,
+                    text: "Town Council".into(),
+                }],
+                expected_revision: 0,
+                actor: "setup-admin".into(),
+                occurred_at_unix_ms: 90_002,
+                audit_id: "acaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee".into(),
+            })
+            .unwrap();
+        let expected_text_sha256 = canonical_caption_text_sha256(&["Town Council".into()]).unwrap();
+        let configuration_hash = store
+            .current_channel_output_configuration_hash(CHANNEL_ID)
+            .unwrap();
+        assert!(
+            store
+                .create_caption_egress_job(&CaptionEgressProofJob {
+                    job_id: CAPTION_PROOF_JOB_ID.into(),
+                    channel_id: CHANNEL_ID.into(),
+                    sink_id: OUTPUT_SINK_ID.into(),
+                    report_id: report_id.into(),
+                    asset_id,
+                    track_id: track.track_id,
+                    track_revision: track.revision,
+                    cues_sha256: track.cues_sha256,
+                    caption_policy_revision: policy.revision,
+                    language: policy.language,
+                    service_number: policy.service_number,
+                    candidate_version: "0.1.0".into(),
+                    source_commit: SOURCE_COMMIT.into(),
+                    configuration_hash,
+                    capture_started_asset_offset_ms: 0,
+                    capture_duration_ms: 3_000,
+                    max_capture_bytes: 8 * 1024 * 1024,
+                    expected_cue_count: 1,
+                    expected_text_sha256,
+                    created_at_unix_ms: 95_000,
+                })
+                .unwrap()
         );
     }
 
