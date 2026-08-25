@@ -53,6 +53,136 @@ pub struct ExpectedCaptionEvidence {
     pub text_sha256: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CaptionEgressProofJobState {
+    Pending,
+    Claimed,
+    CapturePending,
+    Analyzing,
+    Completed,
+    Failed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CaptionProofCaptureFacts {
+    pub artifact_relative_path: String,
+    pub capture_bytes: u64,
+    pub capture_duration_ms: u64,
+    pub capture_sha256: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CaptionEgressProofJob {
+    pub job_id: String,
+    pub channel_id: String,
+    pub sink_id: String,
+    pub report_id: String,
+    pub asset_id: String,
+    pub track_id: String,
+    pub track_revision: u64,
+    pub cues_sha256: String,
+    pub caption_policy_revision: u64,
+    pub language: String,
+    pub service_number: u8,
+    pub candidate_version: String,
+    pub source_commit: String,
+    pub configuration_hash: String,
+    pub capture_started_asset_offset_ms: u64,
+    pub capture_duration_ms: u64,
+    pub max_capture_bytes: u64,
+    pub expected_cue_count: u32,
+    pub expected_text_sha256: String,
+    pub created_at_unix_ms: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CaptionEgressProofJobRecord {
+    pub job: CaptionEgressProofJob,
+    pub state: CaptionEgressProofJobState,
+    pub updated_at_unix_ms: i64,
+    pub lease_expires_at_unix_ms: Option<i64>,
+    pub capture: Option<CaptionProofCaptureFacts>,
+    pub completed_at_unix_ms: Option<i64>,
+    pub failed_at_unix_ms: Option<i64>,
+    pub failure_detail: Option<String>,
+}
+
+impl CaptionEgressProofJob {
+    pub fn validate(&self) -> Result<(), String> {
+        for (value, field) in [
+            (&self.job_id, "caption proof job identity"),
+            (&self.channel_id, "caption proof job channel identity"),
+            (&self.sink_id, "caption proof job sink identity"),
+            (&self.track_id, "caption proof job track identity"),
+        ] {
+            if !is_canonical_uuid(value) {
+                return Err(format!("{field} must be a lowercase canonical UUID"));
+            }
+        }
+        validate_visible(&self.report_id, 200, "caption proof job report identity")?;
+        for (value, field) in [
+            (&self.asset_id, "caption proof job asset identity"),
+            (&self.cues_sha256, "caption proof job cue digest"),
+            (
+                &self.configuration_hash,
+                "caption proof job configuration hash",
+            ),
+            (
+                &self.expected_text_sha256,
+                "caption proof job expected text hash",
+            ),
+        ] {
+            if !is_sha256_identity(value) {
+                return Err(format!("{field} must be a lowercase SHA-256 digest"));
+            }
+        }
+        if self.source_commit.len() != 40
+            || !self
+                .source_commit
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return Err("caption proof job source commit is invalid".into());
+        }
+        validate_visible(
+            &self.candidate_version,
+            200,
+            "caption proof job candidate version",
+        )?;
+        if self.track_revision == 0
+            || self.caption_policy_revision == 0
+            || !is_language_tag(&self.language)
+            || !(1..=63).contains(&self.service_number)
+            || !(1..=MAX_CAPTION_PROOF_CAPTURE_DURATION_MS).contains(&self.capture_duration_ms)
+            || !(1..=MAX_CAPTION_PROOF_CAPTURE_BYTES).contains(&self.max_capture_bytes)
+            || !(1..=MAX_CAPTION_CUES_PER_TRACK as u32).contains(&self.expected_cue_count)
+            || self
+                .capture_started_asset_offset_ms
+                .checked_add(self.capture_duration_ms)
+                .is_none()
+            || self.created_at_unix_ms < 0
+        {
+            return Err("caption proof job authority or bounds are invalid".into());
+        }
+        Ok(())
+    }
+}
+
+impl CaptionProofCaptureFacts {
+    pub fn validate(&self, job: &CaptionEgressProofJob) -> Result<(), String> {
+        if self.artifact_relative_path != format!("caption-proofs/{}.ts", job.job_id)
+            || !(1..=job.max_capture_bytes).contains(&self.capture_bytes)
+            || self.capture_duration_ms == 0
+            || self.capture_duration_ms > job.capture_duration_ms
+            || !is_sha256_identity(&self.capture_sha256)
+        {
+            return Err("caption proof capture facts do not match the bounded job".into());
+        }
+        Ok(())
+    }
+}
+
 impl CaptionEgressProof {
     pub fn validate(&self) -> Result<(), String> {
         for (value, field) in [
@@ -543,6 +673,57 @@ mod tests {
             outcome: CaptionProofOutcome::Verified,
             captured_at_unix_ms: 10_000,
         }
+    }
+
+    fn proof_job() -> CaptionEgressProofJob {
+        let proof = egress_proof();
+        CaptionEgressProofJob {
+            job_id: proof.proof_id,
+            channel_id: proof.channel_id,
+            sink_id: proof.sink_id,
+            report_id: proof.report_id,
+            asset_id: proof.asset_id,
+            track_id: proof.track_id,
+            track_revision: proof.track_revision,
+            cues_sha256: proof.cues_sha256,
+            caption_policy_revision: proof.caption_policy_revision,
+            language: proof.language,
+            service_number: proof.service_number,
+            candidate_version: proof.candidate_version,
+            source_commit: proof.source_commit,
+            configuration_hash: proof.configuration_hash,
+            capture_started_asset_offset_ms: proof.capture_started_asset_offset_ms,
+            capture_duration_ms: proof.capture_duration_ms,
+            max_capture_bytes: 8 * 1024 * 1024,
+            expected_cue_count: proof.expected_cue_count,
+            expected_text_sha256: proof.expected_text_sha256,
+            created_at_unix_ms: 9_000,
+        }
+    }
+
+    #[test]
+    fn proof_job_and_capture_are_bounded_to_exact_authority() {
+        let job = proof_job();
+        assert_eq!(job.validate(), Ok(()));
+        let capture = CaptionProofCaptureFacts {
+            artifact_relative_path: "caption-proofs/11111111-2222-4333-8444-555555555555.ts".into(),
+            capture_bytes: 1_000_000,
+            capture_duration_ms: 20_000,
+            capture_sha256: "d".repeat(64),
+        };
+        assert_eq!(capture.validate(&job), Ok(()));
+
+        let mut stale = job.clone();
+        stale.expected_text_sha256 = "E".repeat(64);
+        assert!(stale.validate().is_err());
+
+        let mut oversized = capture.clone();
+        oversized.capture_bytes = job.max_capture_bytes + 1;
+        assert!(oversized.validate(&job).is_err());
+
+        let mut wrong_path = capture;
+        wrong_path.artifact_relative_path = "caption-proofs/other.ts".into();
+        assert!(wrong_path.validate(&job).is_err());
     }
 
     #[test]

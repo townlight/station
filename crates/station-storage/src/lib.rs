@@ -20,7 +20,9 @@ use station_auth::{
 };
 use station_captions::{
     AssetCaptionCue, AssetCaptionTrack, AssetCaptionTrackAuditEvent, AssetCaptionTrackWrite,
-    CaptionEgressProof, CaptionProofOutcome, CaptionTrackSourceKind, CaptionTrackWriteError,
+    CaptionEgressProof, CaptionEgressProofJob, CaptionEgressProofJobRecord,
+    CaptionEgressProofJobState, CaptionProofCaptureFacts, CaptionProofOutcome,
+    CaptionTrackSourceKind, CaptionTrackWriteError, expected_caption_evidence_for_window,
 };
 use station_cg::{
     CgAuditEvent, CgAuditEventKind, CgBoard, CgBulletin, CgBulletinContent, CgBulletinState,
@@ -1061,6 +1063,7 @@ impl StationStore {
         store.initialize_caption_policy_schema()?;
         store.initialize_asset_caption_track_schema()?;
         store.initialize_caption_egress_proof_schema()?;
+        store.initialize_caption_egress_job_schema()?;
         store.migrate_cg_feed_cache_schema()?;
         store.initialize_operator_auth_schema()?;
         store.execute(
@@ -8819,127 +8822,106 @@ impl StationStore {
         }
     }
 
-    pub fn append_caption_egress_proof(&self, proof: &CaptionEgressProof) -> Result<(), String> {
-        proof.validate()?;
+    fn validate_caption_egress_job_current(
+        &self,
+        job: &CaptionEgressProofJob,
+    ) -> Result<(), String> {
+        let report = self
+            .read_commit_report(&job.report_id)?
+            .ok_or_else(|| "caption proof job schedule report does not exist".to_string())?;
+        if report.channel_id != job.channel_id || report.asset_id != job.asset_id {
+            return Err("caption proof job schedule report binding is stale".into());
+        }
+        let asset = self
+            .read_media_asset(&job.asset_id)?
+            .ok_or_else(|| "caption proof job media asset does not exist".to_string())?;
+        if asset.readiness != AssetReadiness::Ready {
+            return Err("caption proof job asset is not ready".into());
+        }
+        let policy = self
+            .read_channel_caption_policy(&job.channel_id)?
+            .ok_or_else(|| "caption proof job channel has no caption policy".to_string())?;
+        if policy.mode != ChannelCaptionMode::Cea708
+            || policy.revision != job.caption_policy_revision
+            || policy.language != job.language
+            || policy.service_number != job.service_number
+        {
+            return Err("caption proof job channel policy binding is stale".into());
+        }
+        let track = self
+            .read_asset_caption_track(&job.track_id)?
+            .ok_or_else(|| "caption proof job asset track does not exist".to_string())?;
+        if track.asset_id != job.asset_id
+            || track.revision != job.track_revision
+            || track.cues_sha256 != job.cues_sha256
+            || track.language != job.language
+            || track.service_number != job.service_number
+        {
+            return Err("caption proof job asset track binding is stale".into());
+        }
+        let expected = expected_caption_evidence_for_window(
+            &track,
+            asset.duration_ms,
+            job.capture_started_asset_offset_ms,
+            job.capture_duration_ms,
+        )?;
+        if expected.cue_count != job.expected_cue_count
+            || expected.text_sha256 != job.expected_text_sha256
+        {
+            return Err("caption proof job expected evidence binding is stale".into());
+        }
+        let current_hash = self.current_channel_output_configuration_hash(&job.channel_id)?;
+        if current_hash != job.configuration_hash {
+            return Err("caption proof job output configuration binding is stale".into());
+        }
+        let sink = self.prepare(
+            "SELECT kind, enabled FROM channel_output_sinks WHERE channel_id=?1 AND sink_id=?2",
+        )?;
+        let channel_id = c_string(&job.channel_id, "caption proof job channel identity")?;
+        let sink_id = c_string(&job.sink_id, "caption proof job sink identity")?;
+        bind_text(self.database, sink.raw, 1, &channel_id)?;
+        bind_text(self.database, sink.raw, 2, &sink_id)?;
+        match unsafe { sqlite3_step(sink.raw) } {
+            SQLITE_ROW => {
+                let kind = column_text(sink.raw, 0)?;
+                let enabled = unsafe { sqlite3_column_int64(sink.raw, 1) } == 1;
+                if !enabled || !matches!(kind.as_str(), "udp-ts" | "srt") {
+                    return Err("caption proof job sink is not an enabled transport output".into());
+                }
+            }
+            SQLITE_DONE => return Err("caption proof job sink is not configured".into()),
+            _ => return Err(sqlite_error(self.database)),
+        }
+        Ok(())
+    }
+
+    pub fn create_caption_egress_job(&self, job: &CaptionEgressProofJob) -> Result<bool, String> {
+        job.validate()?;
         self.execute("BEGIN IMMEDIATE")?;
         let outcome = (|| {
-            let report = self
-                .read_commit_report(&proof.report_id)?
-                .ok_or_else(|| "caption proof schedule report does not exist".to_string())?;
-            if report.channel_id != proof.channel_id || report.asset_id != proof.asset_id {
-                return Err("caption proof schedule report binding is stale".into());
-            }
-            let asset = self
-                .read_media_asset(&proof.asset_id)?
-                .ok_or_else(|| "caption proof media asset does not exist".to_string())?;
-            let capture_end = proof
-                .capture_started_asset_offset_ms
-                .checked_add(proof.capture_duration_ms)
-                .ok_or_else(|| "caption proof capture window overflowed".to_string())?;
-            if asset.readiness != AssetReadiness::Ready || capture_end > asset.duration_ms {
-                return Err(
-                    "caption proof capture window is outside the ready scheduled asset".into(),
-                );
-            }
-            let policy = self
-                .read_channel_caption_policy(&proof.channel_id)?
-                .ok_or_else(|| "caption proof channel has no caption policy".to_string())?;
-            if policy.mode != ChannelCaptionMode::Cea708
-                || policy.revision != proof.caption_policy_revision
-                || policy.language != proof.language
-                || policy.service_number != proof.service_number
-            {
-                return Err("caption proof channel policy binding is stale".into());
-            }
-            let track = self
-                .read_asset_caption_track(&proof.track_id)?
-                .ok_or_else(|| "caption proof asset track does not exist".to_string())?;
-            if track.asset_id != proof.asset_id
-                || track.revision != proof.track_revision
-                || track.cues_sha256 != proof.cues_sha256
-                || track.language != proof.language
-                || track.service_number != proof.service_number
-            {
-                return Err("caption proof asset track binding is stale".into());
-            }
-            let current_hash = self.current_channel_output_configuration_hash(&proof.channel_id)?;
-            if current_hash != proof.configuration_hash {
-                return Err("caption proof output configuration binding is stale".into());
-            }
-            let sink = self.prepare(
-                "SELECT kind, enabled FROM channel_output_sinks WHERE channel_id=?1 AND sink_id=?2",
-            )?;
-            let channel_id = c_string(&proof.channel_id, "caption proof channel identity")?;
-            let sink_id = c_string(&proof.sink_id, "caption proof sink identity")?;
-            bind_text(self.database, sink.raw, 1, &channel_id)?;
-            bind_text(self.database, sink.raw, 2, &sink_id)?;
-            match unsafe { sqlite3_step(sink.raw) } {
-                SQLITE_ROW => {
-                    let kind = column_text(sink.raw, 0)?;
-                    let enabled = unsafe { sqlite3_column_int64(sink.raw, 1) } == 1;
-                    if !enabled || !matches!(kind.as_str(), "udp-ts" | "srt") {
-                        return Err("caption proof sink is not an enabled transport output".into());
-                    }
-                }
-                SQLITE_DONE => return Err("caption proof sink is not currently configured".into()),
-                _ => return Err(sqlite_error(self.database)),
-            }
-            let record_json = serde_json::to_string(proof)
-                .map_err(|error| format!("serialize caption egress proof: {error}"))?;
+            self.validate_caption_egress_job_current(job)?;
+            let job_json = serde_json::to_string(job)
+                .map_err(|error| format!("serialize caption proof job: {error}"))?;
             let statement = self.prepare(
-                "INSERT INTO caption_egress_proofs(proof_id, channel_id, sink_id, report_id, asset_id, track_id, track_revision, caption_policy_revision, cues_sha256, candidate_version, source_commit, configuration_hash, outcome, captured_at_unix_ms, record_json) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+                "INSERT OR IGNORE INTO caption_egress_jobs(job_id, channel_id, sink_id, state, created_at_unix_ms, updated_at_unix_ms, lease_expires_at_unix_ms, job_json, capture_json, completed_at_unix_ms, failed_at_unix_ms, failure_detail) VALUES(?1, ?2, ?3, 'pending', ?4, ?4, -1, ?5, '', -1, -1, '')",
             )?;
             let values = [
-                c_string(&proof.proof_id, "caption proof identity")?,
-                c_string(&proof.channel_id, "caption proof channel identity")?,
-                c_string(&proof.sink_id, "caption proof sink identity")?,
-                c_string(&proof.report_id, "caption proof report identity")?,
-                c_string(&proof.asset_id, "caption proof asset identity")?,
-                c_string(&proof.track_id, "caption proof track identity")?,
-                c_string(&proof.cues_sha256, "caption proof cue digest")?,
-                c_string(&proof.candidate_version, "caption proof candidate version")?,
-                c_string(&proof.source_commit, "caption proof source commit")?,
-                c_string(
-                    &proof.configuration_hash,
-                    "caption proof configuration hash",
-                )?,
-                c_string(
-                    match proof.outcome {
-                        CaptionProofOutcome::Verified => "verified",
-                        CaptionProofOutcome::Mismatch => "mismatch",
-                    },
-                    "caption proof outcome",
-                )?,
-                c_string(&record_json, "caption proof record")?,
+                c_string(&job.job_id, "caption proof job identity")?,
+                c_string(&job.channel_id, "caption proof job channel identity")?,
+                c_string(&job.sink_id, "caption proof job sink identity")?,
+                c_string(&job_json, "caption proof job record")?,
             ];
-            for (index, value) in values[..6].iter().enumerate() {
-                bind_text(self.database, statement.raw, (index + 1) as c_int, value)?;
-            }
-            bind_i64(
-                self.database,
-                statement.raw,
-                7,
-                checked_i64(proof.track_revision, "caption proof track revision")?,
-            )?;
-            bind_i64(
-                self.database,
-                statement.raw,
-                8,
-                checked_i64(
-                    proof.caption_policy_revision,
-                    "caption proof policy revision",
-                )?,
-            )?;
-            for (index, value) in values[6..11].iter().enumerate() {
-                bind_text(self.database, statement.raw, (index + 9) as c_int, value)?;
-            }
-            bind_i64(self.database, statement.raw, 14, proof.captured_at_unix_ms)?;
-            bind_text(self.database, statement.raw, 15, &values[11])?;
-            expect_done(self.database, statement.raw)
+            bind_text(self.database, statement.raw, 1, &values[0])?;
+            bind_text(self.database, statement.raw, 2, &values[1])?;
+            bind_text(self.database, statement.raw, 3, &values[2])?;
+            bind_i64(self.database, statement.raw, 4, job.created_at_unix_ms)?;
+            bind_text(self.database, statement.raw, 5, &values[3])?;
+            expect_done(self.database, statement.raw)?;
+            Ok(self.changes() == 1)
         })();
         match outcome {
-            Ok(()) => match self.execute("COMMIT") {
-                Ok(()) => Ok(()),
+            Ok(created) => match self.execute("COMMIT") {
+                Ok(()) => Ok(created),
                 Err(error) => {
                     let _ = self.execute("ROLLBACK");
                     Err(error)
@@ -8950,6 +8932,417 @@ impl StationStore {
                 Err(error)
             }
         }
+    }
+
+    pub fn read_caption_egress_job(
+        &self,
+        job_id: &str,
+    ) -> Result<Option<CaptionEgressProofJobRecord>, String> {
+        let statement = self.prepare(
+            "SELECT job_json, state, updated_at_unix_ms, lease_expires_at_unix_ms, capture_json, completed_at_unix_ms, failed_at_unix_ms, failure_detail FROM caption_egress_jobs WHERE job_id=?1",
+        )?;
+        let job_id = c_string(job_id, "caption proof job identity")?;
+        bind_text(self.database, statement.raw, 1, &job_id)?;
+        match unsafe { sqlite3_step(statement.raw) } {
+            SQLITE_ROW => read_caption_egress_job_row(statement.raw).map(Some),
+            SQLITE_DONE => Ok(None),
+            _ => Err(sqlite_error(self.database)),
+        }
+    }
+
+    pub fn claim_next_caption_egress_job(
+        &self,
+        channel_id: &str,
+        now_unix_ms: i64,
+        lease_duration_ms: u64,
+    ) -> Result<Option<CaptionEgressProofJobRecord>, String> {
+        let lease_duration_ms = checked_i64(lease_duration_ms, "caption proof job lease duration")?;
+        validate_output_loudness_lease(now_unix_ms, lease_duration_ms)?;
+        let lease_expires = now_unix_ms
+            .checked_add(lease_duration_ms)
+            .ok_or_else(|| "caption proof job lease overflowed".to_string())?;
+        self.execute("BEGIN IMMEDIATE")?;
+        let outcome = (|| {
+            recover_expired_caption_egress_jobs_in_transaction(self, now_unix_ms)?;
+            let selection = self.prepare(
+                "SELECT job_id FROM caption_egress_jobs WHERE channel_id=?1 AND state='pending' ORDER BY created_at_unix_ms, job_id LIMIT 1",
+            )?;
+            let channel_id_value = c_string(channel_id, "caption proof job channel identity")?;
+            bind_text(self.database, selection.raw, 1, &channel_id_value)?;
+            let job_id = match unsafe { sqlite3_step(selection.raw) } {
+                SQLITE_ROW => column_text(selection.raw, 0)?,
+                SQLITE_DONE => return Ok(None),
+                _ => return Err(sqlite_error(self.database)),
+            };
+            drop(selection);
+            let statement = self.prepare(
+                "UPDATE caption_egress_jobs SET state='claimed', updated_at_unix_ms=?1, lease_expires_at_unix_ms=?2 WHERE job_id=?3 AND state='pending'",
+            )?;
+            let job_id_value = c_string(&job_id, "caption proof job identity")?;
+            bind_i64(self.database, statement.raw, 1, now_unix_ms)?;
+            bind_i64(self.database, statement.raw, 2, lease_expires)?;
+            bind_text(self.database, statement.raw, 3, &job_id_value)?;
+            expect_done(self.database, statement.raw)?;
+            if self.changes() != 1 {
+                return Err("caption proof job claim compare-and-set failed".into());
+            }
+            self.read_caption_egress_job(&job_id)
+        })();
+        match outcome {
+            Ok(job) => match self.execute("COMMIT") {
+                Ok(()) => Ok(job),
+                Err(error) => {
+                    let _ = self.execute("ROLLBACK");
+                    Err(error)
+                }
+            },
+            Err(error) => {
+                let _ = self.execute("ROLLBACK");
+                Err(error)
+            }
+        }
+    }
+
+    pub fn advance_caption_egress_job(
+        &self,
+        job_id: &str,
+        expected_state: CaptionEgressProofJobState,
+        next_state: CaptionEgressProofJobState,
+        now_unix_ms: i64,
+        lease_duration_ms: u64,
+        capture: Option<&CaptionProofCaptureFacts>,
+    ) -> Result<CaptionEgressProofJobRecord, String> {
+        let lease_duration_ms = checked_i64(lease_duration_ms, "caption proof job lease duration")?;
+        validate_output_loudness_lease(now_unix_ms, lease_duration_ms)?;
+        if !matches!(
+            (expected_state, next_state),
+            (
+                CaptionEgressProofJobState::Claimed,
+                CaptionEgressProofJobState::CapturePending
+            ) | (
+                CaptionEgressProofJobState::CapturePending,
+                CaptionEgressProofJobState::Analyzing
+            )
+        ) || (next_state == CaptionEgressProofJobState::Analyzing) != capture.is_some()
+        {
+            return Err("caption proof job transition is invalid".into());
+        }
+        let current = self
+            .read_caption_egress_job(job_id)?
+            .ok_or_else(|| "caption proof job does not exist".to_string())?;
+        if let Some(capture) = capture {
+            capture.validate(&current.job)?;
+        }
+        let lease_expires = now_unix_ms
+            .checked_add(lease_duration_ms)
+            .ok_or_else(|| "caption proof job lease overflowed".to_string())?;
+        let capture_json = capture
+            .map(serde_json::to_string)
+            .transpose()
+            .map_err(|error| format!("serialize caption proof capture: {error}"))?
+            .unwrap_or_default();
+        let statement = self.prepare(
+            "UPDATE caption_egress_jobs SET state=?1, updated_at_unix_ms=?2, lease_expires_at_unix_ms=?3, capture_json=CASE WHEN ?4='' THEN capture_json ELSE ?4 END WHERE job_id=?5 AND state=?6 AND lease_expires_at_unix_ms>?2",
+        )?;
+        let values = [
+            c_string(
+                caption_egress_job_state_name(next_state),
+                "caption proof next state",
+            )?,
+            c_string(&capture_json, "caption proof capture record")?,
+            c_string(job_id, "caption proof job identity")?,
+            c_string(
+                caption_egress_job_state_name(expected_state),
+                "caption proof expected state",
+            )?,
+        ];
+        bind_text(self.database, statement.raw, 1, &values[0])?;
+        bind_i64(self.database, statement.raw, 2, now_unix_ms)?;
+        bind_i64(self.database, statement.raw, 3, lease_expires)?;
+        bind_text(self.database, statement.raw, 4, &values[1])?;
+        bind_text(self.database, statement.raw, 5, &values[2])?;
+        bind_text(self.database, statement.raw, 6, &values[3])?;
+        expect_done(self.database, statement.raw)?;
+        if self.changes() != 1 {
+            return Err("caption proof job transition compare-and-set failed".into());
+        }
+        self.read_caption_egress_job(job_id)?
+            .ok_or_else(|| "caption proof job disappeared after transition".into())
+    }
+
+    pub fn fail_caption_egress_job(
+        &self,
+        job_id: &str,
+        expected_state: CaptionEgressProofJobState,
+        now_unix_ms: i64,
+        detail: &str,
+    ) -> Result<CaptionEgressProofJobRecord, String> {
+        if now_unix_ms < 0 || !secret_field(detail, 4_000) {
+            return Err("caption proof job failure facts are invalid".into());
+        }
+        if matches!(
+            expected_state,
+            CaptionEgressProofJobState::Completed | CaptionEgressProofJobState::Failed
+        ) {
+            return Err("terminal caption proof job cannot be failed".into());
+        }
+        let statement = self.prepare(
+            "UPDATE caption_egress_jobs SET state='failed', updated_at_unix_ms=?1, lease_expires_at_unix_ms=-1, failed_at_unix_ms=?1, failure_detail=?2 WHERE job_id=?3 AND state=?4",
+        )?;
+        let values = [
+            c_string(detail, "caption proof job failure detail")?,
+            c_string(job_id, "caption proof job identity")?,
+            c_string(
+                caption_egress_job_state_name(expected_state),
+                "caption proof expected state",
+            )?,
+        ];
+        bind_i64(self.database, statement.raw, 1, now_unix_ms)?;
+        bind_text(self.database, statement.raw, 2, &values[0])?;
+        bind_text(self.database, statement.raw, 3, &values[1])?;
+        bind_text(self.database, statement.raw, 4, &values[2])?;
+        expect_done(self.database, statement.raw)?;
+        if self.changes() != 1 {
+            return Err("caption proof job failure compare-and-set failed".into());
+        }
+        self.read_caption_egress_job(job_id)?
+            .ok_or_else(|| "caption proof job disappeared after failure".into())
+    }
+
+    pub fn recover_expired_caption_egress_jobs(&self, now_unix_ms: i64) -> Result<u64, String> {
+        if now_unix_ms < 0 {
+            return Err("caption proof recovery time is invalid".into());
+        }
+        self.execute("BEGIN IMMEDIATE")?;
+        let outcome = recover_expired_caption_egress_jobs_in_transaction(self, now_unix_ms);
+        match outcome {
+            Ok(count) => match self.execute("COMMIT") {
+                Ok(()) => Ok(count),
+                Err(error) => {
+                    let _ = self.execute("ROLLBACK");
+                    Err(error)
+                }
+            },
+            Err(error) => {
+                let _ = self.execute("ROLLBACK");
+                Err(error)
+            }
+        }
+    }
+
+    pub fn complete_caption_egress_job_with_proof(
+        &self,
+        job_id: &str,
+        now_unix_ms: i64,
+        proof: &CaptionEgressProof,
+    ) -> Result<CaptionEgressProofJobRecord, String> {
+        if now_unix_ms < 0 {
+            return Err("caption proof completion time is invalid".into());
+        }
+        proof.validate()?;
+        self.execute("BEGIN IMMEDIATE")?;
+        let outcome = (|| {
+            let current = self
+                .read_caption_egress_job(job_id)?
+                .ok_or_else(|| "caption proof job does not exist".to_string())?;
+            if current.state != CaptionEgressProofJobState::Analyzing
+                || current
+                    .lease_expires_at_unix_ms
+                    .is_none_or(|expires| expires <= now_unix_ms)
+            {
+                return Err("caption proof job is not analyzing under a current lease".into());
+            }
+            let capture = current
+                .capture
+                .as_ref()
+                .ok_or_else(|| "caption proof job has no captured evidence".to_string())?;
+            let job = &current.job;
+            if proof.proof_id != job.job_id
+                || proof.channel_id != job.channel_id
+                || proof.sink_id != job.sink_id
+                || proof.report_id != job.report_id
+                || proof.asset_id != job.asset_id
+                || proof.track_id != job.track_id
+                || proof.track_revision != job.track_revision
+                || proof.cues_sha256 != job.cues_sha256
+                || proof.caption_policy_revision != job.caption_policy_revision
+                || proof.language != job.language
+                || proof.service_number != job.service_number
+                || proof.candidate_version != job.candidate_version
+                || proof.source_commit != job.source_commit
+                || proof.configuration_hash != job.configuration_hash
+                || proof.capture_started_asset_offset_ms != job.capture_started_asset_offset_ms
+                || proof.capture_duration_ms != capture.capture_duration_ms
+                || proof.capture_bytes != capture.capture_bytes
+                || proof.capture_sha256 != capture.capture_sha256
+                || proof.artifact_relative_path != capture.artifact_relative_path
+                || proof.expected_cue_count != job.expected_cue_count
+                || proof.expected_text_sha256 != job.expected_text_sha256
+            {
+                return Err("caption proof does not match its durable job facts".into());
+            }
+            self.append_caption_egress_proof_in_transaction(proof)?;
+            let statement = self.prepare(
+                "UPDATE caption_egress_jobs SET state='completed', updated_at_unix_ms=?1, lease_expires_at_unix_ms=-1, completed_at_unix_ms=?1 WHERE job_id=?2 AND state='analyzing' AND lease_expires_at_unix_ms>?1",
+            )?;
+            let job_id = c_string(job_id, "caption proof job identity")?;
+            bind_i64(self.database, statement.raw, 1, now_unix_ms)?;
+            bind_text(self.database, statement.raw, 2, &job_id)?;
+            expect_done(self.database, statement.raw)?;
+            if self.changes() != 1 {
+                return Err("caption proof completion compare-and-set failed".into());
+            }
+            self.read_caption_egress_job(&current.job.job_id)?
+                .ok_or_else(|| "completed caption proof job disappeared".into())
+        })();
+        match outcome {
+            Ok(record) => match self.execute("COMMIT") {
+                Ok(()) => Ok(record),
+                Err(error) => {
+                    let _ = self.execute("ROLLBACK");
+                    Err(error)
+                }
+            },
+            Err(error) => {
+                let _ = self.execute("ROLLBACK");
+                Err(error)
+            }
+        }
+    }
+
+    pub fn append_caption_egress_proof(&self, proof: &CaptionEgressProof) -> Result<(), String> {
+        self.execute("BEGIN IMMEDIATE")?;
+        let outcome = self.append_caption_egress_proof_in_transaction(proof);
+        self.finish_transaction(outcome)
+    }
+
+    fn append_caption_egress_proof_in_transaction(
+        &self,
+        proof: &CaptionEgressProof,
+    ) -> Result<(), String> {
+        proof.validate()?;
+        let report = self
+            .read_commit_report(&proof.report_id)?
+            .ok_or_else(|| "caption proof schedule report does not exist".to_string())?;
+        if report.channel_id != proof.channel_id || report.asset_id != proof.asset_id {
+            return Err("caption proof schedule report binding is stale".into());
+        }
+        let asset = self
+            .read_media_asset(&proof.asset_id)?
+            .ok_or_else(|| "caption proof media asset does not exist".to_string())?;
+        let capture_end = proof
+            .capture_started_asset_offset_ms
+            .checked_add(proof.capture_duration_ms)
+            .ok_or_else(|| "caption proof capture window overflowed".to_string())?;
+        if asset.readiness != AssetReadiness::Ready || capture_end > asset.duration_ms {
+            return Err("caption proof capture window is outside the ready scheduled asset".into());
+        }
+        let policy = self
+            .read_channel_caption_policy(&proof.channel_id)?
+            .ok_or_else(|| "caption proof channel has no caption policy".to_string())?;
+        if policy.mode != ChannelCaptionMode::Cea708
+            || policy.revision != proof.caption_policy_revision
+            || policy.language != proof.language
+            || policy.service_number != proof.service_number
+        {
+            return Err("caption proof channel policy binding is stale".into());
+        }
+        let track = self
+            .read_asset_caption_track(&proof.track_id)?
+            .ok_or_else(|| "caption proof asset track does not exist".to_string())?;
+        if track.asset_id != proof.asset_id
+            || track.revision != proof.track_revision
+            || track.cues_sha256 != proof.cues_sha256
+            || track.language != proof.language
+            || track.service_number != proof.service_number
+        {
+            return Err("caption proof asset track binding is stale".into());
+        }
+        let expected = expected_caption_evidence_for_window(
+            &track,
+            asset.duration_ms,
+            proof.capture_started_asset_offset_ms,
+            proof.capture_duration_ms,
+        )?;
+        if expected.cue_count != proof.expected_cue_count
+            || expected.text_sha256 != proof.expected_text_sha256
+        {
+            return Err("caption proof expected evidence binding is stale".into());
+        }
+        let current_hash = self.current_channel_output_configuration_hash(&proof.channel_id)?;
+        if current_hash != proof.configuration_hash {
+            return Err("caption proof output configuration binding is stale".into());
+        }
+        let sink = self.prepare(
+            "SELECT kind, enabled FROM channel_output_sinks WHERE channel_id=?1 AND sink_id=?2",
+        )?;
+        let channel_id = c_string(&proof.channel_id, "caption proof channel identity")?;
+        let sink_id = c_string(&proof.sink_id, "caption proof sink identity")?;
+        bind_text(self.database, sink.raw, 1, &channel_id)?;
+        bind_text(self.database, sink.raw, 2, &sink_id)?;
+        match unsafe { sqlite3_step(sink.raw) } {
+            SQLITE_ROW => {
+                let kind = column_text(sink.raw, 0)?;
+                let enabled = unsafe { sqlite3_column_int64(sink.raw, 1) } == 1;
+                if !enabled || !matches!(kind.as_str(), "udp-ts" | "srt") {
+                    return Err("caption proof sink is not an enabled transport output".into());
+                }
+            }
+            SQLITE_DONE => return Err("caption proof sink is not currently configured".into()),
+            _ => return Err(sqlite_error(self.database)),
+        }
+        let record_json = serde_json::to_string(proof)
+            .map_err(|error| format!("serialize caption egress proof: {error}"))?;
+        let statement = self.prepare(
+                "INSERT INTO caption_egress_proofs(proof_id, channel_id, sink_id, report_id, asset_id, track_id, track_revision, caption_policy_revision, cues_sha256, candidate_version, source_commit, configuration_hash, outcome, captured_at_unix_ms, record_json) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+            )?;
+        let values = [
+            c_string(&proof.proof_id, "caption proof identity")?,
+            c_string(&proof.channel_id, "caption proof channel identity")?,
+            c_string(&proof.sink_id, "caption proof sink identity")?,
+            c_string(&proof.report_id, "caption proof report identity")?,
+            c_string(&proof.asset_id, "caption proof asset identity")?,
+            c_string(&proof.track_id, "caption proof track identity")?,
+            c_string(&proof.cues_sha256, "caption proof cue digest")?,
+            c_string(&proof.candidate_version, "caption proof candidate version")?,
+            c_string(&proof.source_commit, "caption proof source commit")?,
+            c_string(
+                &proof.configuration_hash,
+                "caption proof configuration hash",
+            )?,
+            c_string(
+                match proof.outcome {
+                    CaptionProofOutcome::Verified => "verified",
+                    CaptionProofOutcome::Mismatch => "mismatch",
+                },
+                "caption proof outcome",
+            )?,
+            c_string(&record_json, "caption proof record")?,
+        ];
+        for (index, value) in values[..6].iter().enumerate() {
+            bind_text(self.database, statement.raw, (index + 1) as c_int, value)?;
+        }
+        bind_i64(
+            self.database,
+            statement.raw,
+            7,
+            checked_i64(proof.track_revision, "caption proof track revision")?,
+        )?;
+        bind_i64(
+            self.database,
+            statement.raw,
+            8,
+            checked_i64(
+                proof.caption_policy_revision,
+                "caption proof policy revision",
+            )?,
+        )?;
+        for (index, value) in values[6..11].iter().enumerate() {
+            bind_text(self.database, statement.raw, (index + 9) as c_int, value)?;
+        }
+        bind_i64(self.database, statement.raw, 14, proof.captured_at_unix_ms)?;
+        bind_text(self.database, statement.raw, 15, &values[11])?;
+        expect_done(self.database, statement.raw)
     }
 
     pub fn list_caption_egress_proofs(
@@ -10379,6 +10772,30 @@ impl StationStore {
              CREATE TRIGGER IF NOT EXISTS caption_egress_proofs_no_delete \
                BEFORE DELETE ON caption_egress_proofs \
                BEGIN SELECT RAISE(ABORT, 'caption egress proofs are append-only'); END;",
+        )
+    }
+
+    fn initialize_caption_egress_job_schema(&self) -> Result<(), String> {
+        self.execute(
+            "CREATE TABLE IF NOT EXISTS caption_egress_jobs (\
+               job_id TEXT PRIMARY KEY,\
+               channel_id TEXT NOT NULL,\
+               sink_id TEXT NOT NULL,\
+               state TEXT NOT NULL CHECK (state IN ('pending','claimed','capture_pending','analyzing','completed','failed')),\
+               created_at_unix_ms INTEGER NOT NULL CHECK (created_at_unix_ms >= 0),\
+               updated_at_unix_ms INTEGER NOT NULL CHECK (updated_at_unix_ms >= created_at_unix_ms),\
+               lease_expires_at_unix_ms INTEGER NOT NULL DEFAULT -1 CHECK (lease_expires_at_unix_ms >= -1),\
+               job_json TEXT NOT NULL,\
+               capture_json TEXT NOT NULL DEFAULT '',\
+               completed_at_unix_ms INTEGER NOT NULL DEFAULT -1 CHECK (completed_at_unix_ms >= -1),\
+               failed_at_unix_ms INTEGER NOT NULL DEFAULT -1 CHECK (failed_at_unix_ms >= -1),\
+               failure_detail TEXT NOT NULL DEFAULT '',\
+               FOREIGN KEY(channel_id, sink_id) REFERENCES channel_output_sinks(channel_id, sink_id)\
+             );\
+             CREATE UNIQUE INDEX IF NOT EXISTS caption_egress_jobs_active_sink \
+               ON caption_egress_jobs(channel_id, sink_id) WHERE state NOT IN ('completed','failed');\
+             CREATE INDEX IF NOT EXISTS caption_egress_jobs_state_time \
+               ON caption_egress_jobs(state, created_at_unix_ms, job_id);",
         )
     }
 
@@ -13006,6 +13423,75 @@ fn recover_expired_output_loudness_jobs_in_transaction(
     bind_i64(store.database, statement.raw, 1, now_unix_ms)?;
     expect_done(store.database, statement.raw)?;
     Ok(store.changes() as u64)
+}
+
+fn recover_expired_caption_egress_jobs_in_transaction(
+    store: &StationStore,
+    now_unix_ms: i64,
+) -> Result<u64, String> {
+    let statement = store.prepare(
+        "UPDATE caption_egress_jobs SET state='pending', updated_at_unix_ms=?1, lease_expires_at_unix_ms=-1, capture_json='' WHERE state IN ('claimed','capture_pending','analyzing') AND lease_expires_at_unix_ms<=?1",
+    )?;
+    bind_i64(store.database, statement.raw, 1, now_unix_ms)?;
+    expect_done(store.database, statement.raw)?;
+    Ok(store.changes() as u64)
+}
+
+fn caption_egress_job_state_name(state: CaptionEgressProofJobState) -> &'static str {
+    match state {
+        CaptionEgressProofJobState::Pending => "pending",
+        CaptionEgressProofJobState::Claimed => "claimed",
+        CaptionEgressProofJobState::CapturePending => "capture_pending",
+        CaptionEgressProofJobState::Analyzing => "analyzing",
+        CaptionEgressProofJobState::Completed => "completed",
+        CaptionEgressProofJobState::Failed => "failed",
+    }
+}
+
+fn caption_egress_job_state(value: &str) -> Result<CaptionEgressProofJobState, String> {
+    match value {
+        "pending" => Ok(CaptionEgressProofJobState::Pending),
+        "claimed" => Ok(CaptionEgressProofJobState::Claimed),
+        "capture_pending" => Ok(CaptionEgressProofJobState::CapturePending),
+        "analyzing" => Ok(CaptionEgressProofJobState::Analyzing),
+        "completed" => Ok(CaptionEgressProofJobState::Completed),
+        "failed" => Ok(CaptionEgressProofJobState::Failed),
+        _ => Err("database returned an invalid caption proof job state".into()),
+    }
+}
+
+fn read_caption_egress_job_row(
+    statement: *mut SqliteStatement,
+) -> Result<CaptionEgressProofJobRecord, String> {
+    let job_json = column_text(statement, 0)?;
+    let job: CaptionEgressProofJob = serde_json::from_str(&job_json)
+        .map_err(|error| format!("decode caption proof job: {error}"))?;
+    job.validate()?;
+    let state = caption_egress_job_state(&column_text(statement, 1)?)?;
+    let updated_at_unix_ms = unsafe { sqlite3_column_int64(statement, 2) };
+    let lease = unsafe { sqlite3_column_int64(statement, 3) };
+    let capture_json = column_text(statement, 4)?;
+    let capture = if capture_json.is_empty() {
+        None
+    } else {
+        let capture: CaptionProofCaptureFacts = serde_json::from_str(&capture_json)
+            .map_err(|error| format!("decode caption proof capture: {error}"))?;
+        capture.validate(&job)?;
+        Some(capture)
+    };
+    let completed = unsafe { sqlite3_column_int64(statement, 5) };
+    let failed = unsafe { sqlite3_column_int64(statement, 6) };
+    let failure_detail = column_text(statement, 7)?;
+    Ok(CaptionEgressProofJobRecord {
+        job,
+        state,
+        updated_at_unix_ms,
+        lease_expires_at_unix_ms: (lease >= 0).then_some(lease),
+        capture,
+        completed_at_unix_ms: (completed >= 0).then_some(completed),
+        failed_at_unix_ms: (failed >= 0).then_some(failed),
+        failure_detail: (!failure_detail.is_empty()).then_some(failure_detail),
+    })
 }
 
 fn ingest_source_kind_name(value: IngestSourceKind) -> &'static str {

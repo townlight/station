@@ -24,13 +24,19 @@ window. Cues already active at capture start and cues beginning before capture e
 track order; expired cues and cues beginning exactly at capture end are excluded. A window extending
 beyond the bound media asset or containing no expected cues cannot become a proof request.
 
+The durable execution request stores that expected count/digest with every authority binding before
+work begins. One unfinished job may occupy a channel/sink at a time. Claims and state changes use
+bounded leases and compare-and-set transitions; expired claimed/capturing/analyzing work returns to
+pending with partial capture facts cleared. Completion appends the immutable proof and changes the
+job to terminal `completed` in one transaction. A mismatch between proof, capture, or original job
+facts rolls back both changes. Terminal failure remains durable and bounded.
+
 ## Boundaries
 
 The independent decoder accepts only an absolute executable path, hashes the exact executable into
 the evidence, enforces capture/output/deadline bounds, parses SRT, removes only known FFmpeg-generated
 CEA-708 presentation wrappers, and hashes canonical semantic text. Its real graph test generates,
 captures, independently decodes, and matches an MPEG-TS cue. The orchestration job that requests the
-selected-sink capture, derives the exact expected cue window, invokes this decoder, rechecks the
-installed candidate at the final write boundary, and exposes current status through the API remains
-unfinished. Headend carriage and viewer rendering remain external acceptance evidence, not local
-decode-back proof.
+selected-sink capture, invokes this decoder, rechecks the installed candidate at the final write
+boundary, and exposes current status through the API remains unfinished. Headend carriage and viewer
+rendering remain external acceptance evidence, not local decode-back proof.
