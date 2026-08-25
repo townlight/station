@@ -21,6 +21,7 @@ fn station_box() -> station_readiness::StationBoxProfile {
         station_id: Some(STATION_ID.into()),
         station_name: Some("KTLT Community Television".into()),
         timezone: Some("America/Denver".into()),
+        reference_station_tier_selection: None,
         hardware: HardwareProbeInput {
             logical_cpus: 16,
             ram_total_gb: 32.0,

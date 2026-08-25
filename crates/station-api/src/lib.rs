@@ -40,8 +40,9 @@ use station_readiness::{
     ClockProbeInput, ClockSyncStatus, EffectiveLoudnessStatus, EngineProbeInput,
     ExternalReceiverState, HardwareProbeInput, HeadendChannelProbeInput, HeadendProbeInput,
     HeadendProfileProbeInput, HeadendSinkKind, HeadendSinkProbeInput, NetworkProbeInput,
-    ReadinessState as StationReadinessState, ReceiverAcceptance, ReleaseProbeInput,
-    StationBoxProbeInput, StationBoxProfile, derive_headend_readiness, derive_station_box_profile,
+    ReadinessState as StationReadinessState, ReceiverAcceptance, ReferenceStationTier,
+    ReleaseProbeInput, StationBoxProbeInput, StationBoxProfile, derive_headend_readiness,
+    derive_station_box_profile,
 };
 use station_schedule::{
     AssetReadiness, ChannelConfiguration, DispatchStatus, HEADEND_PROFILES,
@@ -50,7 +51,8 @@ use station_schedule::{
 use station_storage::{
     AlertChannelSecret, CgSnapshotReadError, CgWriteError, ChannelWriteError, CommitWriteError,
     HeadendProfileWriteError, OutputLoudnessProofJob, OutputLoudnessProofJobRecord,
-    OutputLoudnessProofJobState, ProfileWriteError, StationStore, StoredSinkLoudnessProof,
+    OutputLoudnessProofJobState, ProfileWriteError, ReferenceStationTierWrite,
+    ReferenceStationTierWriteError, StationStore, StoredSinkLoudnessProof,
 };
 use station_update::UpdateCheckTrigger;
 use station_update_coordinator::CoordinatorError;
@@ -341,6 +343,14 @@ struct PutStationProfile {
     profile: StationProfile,
     #[serde(default)]
     expected_revision: u64,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PutReferenceStationTier {
+    expected_revision: Option<u64>,
+    catalog_version: u32,
+    tier: ReferenceStationTier,
 }
 
 #[derive(Deserialize)]
@@ -783,6 +793,9 @@ impl Api {
             }
             ("GET", "/api/v1/station-box-profile") => self.station_box_profile(false),
             ("GET", "/api/v1/station-box-profile/readiness") => self.station_box_profile(true),
+            ("PUT", "/api/v1/reference-station-tier") => {
+                self.put_reference_station_tier(body, actor)
+            }
             ("GET", "/api/v1/headend-readiness") => self.headend_readiness(None),
             ("GET", "/api/v1/headend-profiles") => json_response(
                 200,
@@ -1037,6 +1050,81 @@ impl Api {
                 ),
             ),
             Err(ProfileWriteError::Storage(message)) => {
+                error_response(500, "storage_error", &message)
+            }
+        }
+    }
+
+    fn put_reference_station_tier(
+        &self,
+        body: Option<&[u8]>,
+        actor: Option<&OperatorAccount>,
+    ) -> ApiResponse {
+        let Some(actor) = actor.filter(|account| {
+            account.enabled()
+                && account
+                    .roles()
+                    .contains(&station_auth::OperatorRole::SetupAdmin)
+        }) else {
+            return error_response(
+                403,
+                "setup_admin_required",
+                "Selecting the reference station tier requires the Setup Admin role.",
+            );
+        };
+        let Some(command) = parse_body::<PutReferenceStationTier>(body) else {
+            return error_response(
+                400,
+                "invalid_json",
+                "A reference station tier selection body is required.",
+            );
+        };
+        let now = match system_time_millis() {
+            Ok(now) => now,
+            Err(message) => return error_response(500, "clock_error", &message),
+        };
+        let request = ReferenceStationTierWrite {
+            expected_revision: command.expected_revision,
+            catalog_version: command.catalog_version,
+            tier: command.tier,
+            actor: actor.account_id().as_str().into(),
+            occurred_at_unix_ms: now,
+        };
+        match self
+            .storage
+            .write_reference_station_tier_selection(&request)
+        {
+            Ok(selection) => {
+                if let Ok(mut cache) = self.station_box_cache.lock() {
+                    *cache = None;
+                }
+                json_response(
+                    if selection.revision == 1 { 201 } else { 200 },
+                    serde_json::to_vec(&selection)
+                        .expect("serializing a reference station selection cannot fail"),
+                )
+            }
+            Err(ReferenceStationTierWriteError::Conflict { current_revision }) => error_response(
+                409,
+                "revision_conflict",
+                &format!(
+                    "The selected reference station tier changed; expected revision {:?}, current revision {:?}.",
+                    command.expected_revision, current_revision
+                ),
+            ),
+            Err(ReferenceStationTierWriteError::CatalogVersionMismatch { expected, actual }) => {
+                error_response(
+                    409,
+                    "catalog_version_conflict",
+                    &format!(
+                        "The reference station catalog changed; submitted version {actual}, current version {expected}."
+                    ),
+                )
+            }
+            Err(ReferenceStationTierWriteError::Invalid(message)) => {
+                error_response(422, "validation_failed", &message)
+            }
+            Err(ReferenceStationTierWriteError::Storage(message)) => {
                 error_response(500, "storage_error", &message)
             }
         }
@@ -2274,7 +2362,22 @@ impl Api {
             Err(message) => return Err(format!("station clock is unavailable: {message}")),
         };
         let probe = match &self.station_box_probe_override {
-            Some(probe) => probe.clone(),
+            Some(probe) => {
+                let mut probe = probe.clone();
+                // Test-injected hardware facts remain deterministic, but the
+                // assembled profile is generated now. This preserves the same
+                // temporal contract as the production collector when current
+                // persisted authority (such as a tier selection) is attached.
+                probe.generated_at_unix_ms = generated_at_unix_ms;
+                probe.probe_collected_at_unix_ms = generated_at_unix_ms;
+                probe.reference_station_tier_selection = self
+                    .storage
+                    .read_reference_station_tier_selection()
+                    .map_err(|message| {
+                        format!("read selected reference station tier: {message}")
+                    })?;
+                probe
+            }
             None => collect_station_box_probe(
                 &self.storage,
                 &self.database_path,
@@ -4722,6 +4825,7 @@ fn collect_station_box_probe(
 ) -> Result<StationBoxProbeInput, String> {
     let resources = probe_system_resources(database_path, generated_at_unix_ms)?;
     let station = storage.read_profile()?;
+    let reference_station_tier_selection = storage.read_reference_station_tier_selection()?;
     let engine = probe_installed_engine(application_directory);
     let network_up = UdpSocket::bind("0.0.0.0:0")
         .and_then(|socket| {
@@ -4757,6 +4861,7 @@ fn collect_station_box_probe(
             .as_ref()
             .map(|value| value.profile.display_name.clone()),
         timezone: station.as_ref().map(|value| value.profile.timezone.clone()),
+        reference_station_tier_selection,
         hardware: HardwareProbeInput {
             logical_cpus: std::thread::available_parallelism()
                 .map(|value| value.get() as u32)
@@ -6020,6 +6125,7 @@ fn error_response(status: u16, code: &str, message: &str) -> ApiResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeSet;
     use std::net::TcpListener;
     use std::thread;
 
@@ -6028,6 +6134,23 @@ mod tests {
         0, 0, 0, 31, 21, 196, 137, 0, 0, 0, 13, 73, 68, 65, 84, 120, 156, 99, 248, 207, 192, 240,
         31, 0, 5, 0, 1, 255, 137, 153, 61, 29, 0, 0, 0, 0, 73, 69, 78, 68, 174, 66, 96, 130,
     ];
+
+    const TEST_PASSWORD_PHC: &str = "$argon2id$v=19$m=65536,t=3,p=1$c2FsdHNhbHRzYWx0c2FsdA$QUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUE";
+
+    fn test_actor(role: station_auth::OperatorRole) -> OperatorAccount {
+        OperatorAccount::new(
+            station_auth::AccountId::try_from("dc3c0d56-44c8-4c4f-bd32-b501c56d34f6").unwrap(),
+            station_auth::OperatorUsername::try_from("setup.admin").unwrap(),
+            station_auth::OperatorDisplayName::try_from("Setup Administrator").unwrap(),
+            station_auth::PasswordPhc::try_from(TEST_PASSWORD_PHC).unwrap(),
+            BTreeSet::from([role]),
+            station_auth::CredentialVersion::new(1).unwrap(),
+            true,
+            1,
+            1,
+        )
+        .unwrap()
+    }
 
     fn raw_request(method: &str, path: &str, headers: &[(&str, &str)], body: &[u8]) -> Vec<u8> {
         let mut request = format!(
@@ -7035,6 +7158,7 @@ mod tests {
             station_id: Some("3f5f721f-96c7-48b1-b061-1bf1ad1e62c2".into()),
             station_name: Some("KTLT".into()),
             timezone: Some("America/Denver".into()),
+            reference_station_tier_selection: None,
             hardware: HardwareProbeInput {
                 logical_cpus: 8,
                 ram_total_gb: 16.0,
@@ -7166,8 +7290,19 @@ mod tests {
         let full = api.handle_in_process("GET", "/api/v1/station-box-profile", None);
         assert_eq!(full.status, 200);
         let full: serde_json::Value = serde_json::from_slice(&full.body).unwrap();
-        assert_eq!(full["schema_version"], 2);
-        assert_eq!(full["peg_readiness"]["color"], "red");
+        assert_eq!(full["schema_version"], 3);
+        assert_eq!(
+            full["peg_readiness"]["color"], "yellow",
+            "an unselected deployment tier is unknown and remains fail-closed"
+        );
+        assert!(
+            full["peg_readiness"]["dimensions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|dimension| dimension["name"] == "reference_station"
+                    && dimension["state"] == "unknown")
+        );
         assert_eq!(full["engine"]["sdi"], "unimplemented");
         assert_eq!(full["reference_station_catalog"]["version"], 1);
         assert_eq!(
@@ -7193,6 +7328,143 @@ mod tests {
             200
         );
         assert!(api.station_box_cache.lock().unwrap().is_none());
+
+        std::fs::remove_dir_all(application).unwrap();
+        let _ = std::fs::remove_file(database);
+    }
+
+    #[test]
+    fn setup_admin_selects_audited_reference_tier_with_server_actor_and_cas() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let database = std::env::temp_dir().join(format!(
+            "townlight-reference-tier-api-{}-{nonce}.db",
+            std::process::id()
+        ));
+        let application = database.with_extension("application");
+        std::fs::create_dir_all(&application).unwrap();
+        let api =
+            Api::open_with_station_box_probe(&database, &application, station_box_probe()).unwrap();
+        let setup_admin = test_actor(station_auth::OperatorRole::SetupAdmin);
+        let before = api.handle_in_process("GET", "/api/v1/station-box-profile", None);
+        assert_eq!(before.status, 200);
+        let before: serde_json::Value = serde_json::from_slice(&before.body).unwrap();
+        assert!(before["reference_station_tier_selection"].is_null());
+        assert!(api.station_box_cache.lock().unwrap().is_some());
+        let request = serde_json::to_vec(&serde_json::json!({
+            "expected_revision": null,
+            "catalog_version": station_readiness::REFERENCE_STATION_CATALOG_VERSION,
+            "tier": "tier0_batch_stream"
+        }))
+        .unwrap();
+
+        let created = api.handle_authenticated(
+            "PUT",
+            "/api/v1/reference-station-tier",
+            Some(&request),
+            &setup_admin,
+        );
+        assert_eq!(created.status, 201);
+        let created: station_readiness::ReferenceStationTierSelection =
+            serde_json::from_slice(&created.body).unwrap();
+        assert_eq!(created.revision, 1);
+        assert!(
+            api.station_box_cache.lock().unwrap().is_none(),
+            "a successful mutation must invalidate the primed StationBox cache"
+        );
+        assert_eq!(
+            created.updated_by,
+            setup_admin.account_id().as_str(),
+            "the server-authenticated account must own the audit identity"
+        );
+        assert_eq!(
+            api.storage
+                .list_reference_station_tier_audit()
+                .unwrap()
+                .len(),
+            1
+        );
+
+        let stale = api.handle_authenticated(
+            "PUT",
+            "/api/v1/reference-station-tier",
+            Some(&request),
+            &setup_admin,
+        );
+        assert_eq!(stale.status, 409);
+        assert_eq!(
+            api.storage
+                .list_reference_station_tier_audit()
+                .unwrap()
+                .len(),
+            1
+        );
+
+        let forged_authority = serde_json::to_vec(&serde_json::json!({
+            "expected_revision": 1,
+            "catalog_version": station_readiness::REFERENCE_STATION_CATALOG_VERSION,
+            "tier": "tier1_streaming",
+            "actor": "browser-supplied-identity",
+            "occurred_at_unix_ms": 1
+        }))
+        .unwrap();
+        let forged = api.handle_authenticated(
+            "PUT",
+            "/api/v1/reference-station-tier",
+            Some(&forged_authority),
+            &setup_admin,
+        );
+        assert_eq!(forged.status, 400);
+        assert_eq!(
+            api.storage
+                .list_reference_station_tier_audit()
+                .unwrap()
+                .len(),
+            1,
+            "browser-supplied audit identity and time must be rejected without an event"
+        );
+
+        let non_admin = test_actor(station_auth::OperatorRole::MeetingOperator);
+        let forbidden = api.handle_authenticated(
+            "PUT",
+            "/api/v1/reference-station-tier",
+            Some(&request),
+            &non_admin,
+        );
+        assert_eq!(forbidden.status, 403);
+
+        let profile = api.handle_in_process("GET", "/api/v1/station-box-profile", None);
+        assert_eq!(
+            profile.status,
+            200,
+            "{}",
+            String::from_utf8_lossy(&profile.body)
+        );
+        let profile: serde_json::Value = serde_json::from_slice(&profile.body).unwrap();
+        assert_eq!(
+            profile["reference_station_tier_selection"]["tier"],
+            "tier0_batch_stream"
+        );
+        let selected_state = profile["reference_station_catalog"]["assessments"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|assessment| assessment["tier"] == "tier0_batch_stream")
+            .unwrap()["state"]
+            .clone();
+        let dimension_state = profile["peg_readiness"]["dimensions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|dimension| dimension["name"] == "reference_station")
+            .unwrap()["state"]
+            .clone();
+        assert_eq!(
+            dimension_state, selected_state,
+            "the readiness dimension must mirror the exact selected catalog assessment"
+        );
 
         std::fs::remove_dir_all(application).unwrap();
         let _ = std::fs::remove_file(database);

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   commissioningAction,
   commissioningGroups,
@@ -16,7 +16,10 @@ import type {
 } from "./commissioning-contract";
 import { apiRequest } from "./api-client";
 import {
+  LatestStationBoxLoad,
   referenceQualificationLabel,
+  referenceTierSelectionIsCurrent,
+  referenceTierSelectionPayload,
   stationBoxLabel,
   stationBoxStatus,
 } from "./station-box-contract";
@@ -46,32 +49,51 @@ function Status({ status }: { status: CommissioningStatus | "fail" }) {
 }
 
 export function AuthoritativeCommissioning({ onNavigate }: CommissioningProps) {
+  const stationBoxLoad = useRef(new LatestStationBoxLoad());
   const [report, setReport] = useState<AuthoritativeCommissioningReport | null>(null);
   const [stationBox, setStationBox] = useState<StationBoxProfile | null>(null);
+  const [canSelectReferenceTier, setCanSelectReferenceTier] = useState(false);
+  const [referenceTierDraft, setReferenceTierDraft] = useState("");
+  const [referenceTierSaving, setReferenceTierSaving] = useState(false);
+  const [referenceTierError, setReferenceTierError] = useState<string | null>(null);
   const [selectedCheckId, setSelectedCheckId] = useState<string | null>(null);
   const [readError, setReadError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
 
   const load = useCallback(async () => {
+    const request = stationBoxLoad.current.begin();
     try {
-      const [nextReport, nextStationBox] = await Promise.all([
+      const [nextReport, nextStationBox, authSession] = await Promise.all([
         apiRequest<AuthoritativeCommissioningReport>("/api/v1/commissioning/report"),
         apiRequest<StationBoxProfile>("/api/v1/station-box-profile").catch(() => null),
+        apiRequest<{ session: { roles: string[] } }>("/api/v1/auth/session"),
       ]);
+      if (!stationBoxLoad.current.accepts(request)) return;
       setReport(nextReport);
       setStationBox(nextStationBox);
+      setCanSelectReferenceTier(authSession.session.roles.includes("setup_admin"));
+      if (nextStationBox) {
+        setReferenceTierDraft((current) => current
+          || nextStationBox.reference_station_tier_selection?.tier
+          || nextStationBox.reference_station_catalog.assessments[0]?.tier
+          || "");
+      }
       setReadError(null);
     } catch (problem) {
+      if (!stationBoxLoad.current.accepts(request)) return;
       setReadError(problem instanceof Error ? problem.message : "Authoritative commissioning state could not be read.");
     } finally {
-      setLoading(false);
+      if (stationBoxLoad.current.accepts(request)) setLoading(false);
     }
   }, []);
 
   useEffect(() => {
     void load();
     const timer = window.setInterval(() => void load(), 5_000);
-    return () => window.clearInterval(timer);
+    return () => {
+      window.clearInterval(timer);
+      stationBoxLoad.current.invalidate();
+    };
   }, [load]);
 
   const recommended = report ? currentCommissioningCheck(report) : null;
@@ -85,6 +107,24 @@ export function AuthoritativeCommissioning({ onNavigate }: CommissioningProps) {
     setSelectedCheckId(check.id);
     const view = actionView(commissioningAction(check));
     if (view) onNavigate(view);
+  }
+
+  async function saveReferenceTier() {
+    if (!stationBox || !referenceTierDraft) return;
+    setReferenceTierSaving(true);
+    setReferenceTierError(null);
+    try {
+      await apiRequest("/api/v1/reference-station-tier", {
+        method: "PUT",
+        body: JSON.stringify(referenceTierSelectionPayload(stationBox, referenceTierDraft)),
+      });
+      await load();
+    } catch (problem) {
+      setReferenceTierError(problem instanceof Error ? problem.message : "The deployment tier could not be selected.");
+      await load();
+    } finally {
+      setReferenceTierSaving(false);
+    }
   }
 
   if (loading && !report) return <>
@@ -126,7 +166,7 @@ export function AuthoritativeCommissioning({ onNavigate }: CommissioningProps) {
         <section className="panel commission-focus"><p className="eyebrow">Current server step</p>{focused ? <><h2>{focused.label}</h2><Status status={focused.status} /><p>{focused.detail}</p><dl><div><dt>Boundary</dt><dd>{isExternalCommissioningCheck(focused) ? "External evidence" : "Local station authority"}</dd></div><div><dt>Required for core</dt><dd>{focused.required === false ? "No" : "Yes"}</dd></div><div><dt>Evidence source</dt><dd>{focused.evidence || "Not reported"}</dd></div></dl>{focusedView && focusedAction && <button className="primary wide" onClick={() => openAction(focused)}>Continue to {actionLabel(focusedAction)}</button>}</> : <><h2>No current step</h2><p>The server did not name a next required check.</p></>}</section>
         <section className="panel stationbox-evidence"><div className="panel-head"><div><p className="eyebrow">Separate live authority</p><h2>StationBox profile</h2></div>{stationBox && <span className={`headend-rollup headend-${stationBox.peg_readiness.color}`}>Overall: {stationBox.peg_readiness.color}</span>}</div>{stationBox ? <>
           <div className="stationbox-machine-facts" aria-label="Measured machine facts"><div><span>Logical processors</span><strong>{stationBox.hardware.logical_cpus}</strong></div><div><span>Installed RAM</span><strong>{stationBox.hardware.ram_total_gb.toFixed(1)} GB</strong></div><div><span>Media space free</span><strong>{stationBox.hardware.media_disk_free_gb.toFixed(1)} GB</strong></div><div><span>Engine capability</span><strong>{stationBoxLabel(stationBox.engine_tier_verdict)}</strong></div></div>
-          <section className="stationbox-reference" aria-label="Reference station qualification"><div><p className="eyebrow">Reference catalog v{stationBox.reference_station_catalog.version}</p><h3>{referenceQualificationLabel(stationBox)}</h3><p>Unknown physical requirements never count as qualified.</p></div><div className="stationbox-tier-list">{stationBox.reference_station_catalog.assessments.map((assessment) => <details key={assessment.tier}><summary><span>{stationBoxLabel(assessment.tier)}</span><Status status={stationBoxStatus(assessment.state)} /></summary><p>{assessment.detail}</p><ul>{assessment.requirements.map((requirement) => <li key={requirement.name}><span><strong>{stationBoxLabel(requirement.name)}</strong><small>{requirement.detail}</small></span><Status status={stationBoxStatus(requirement.state)} /></li>)}</ul>{assessment.next_step && <b>{assessment.next_step}</b>}</details>)}</div></section>
+          <section className="stationbox-reference" aria-label="Reference station qualification"><div><p className="eyebrow">Reference catalog v{stationBox.reference_station_catalog.version}</p><h3>{referenceQualificationLabel(stationBox)}</h3><p>Selected deployment target: <strong>{stationBox.reference_station_tier_selection ? stationBoxLabel(stationBox.reference_station_tier_selection.tier) : "Not selected"}</strong>. Unknown physical requirements never count as qualified.</p>{canSelectReferenceTier && <div className="stationbox-tier-selector"><label>Deployment target<select value={referenceTierDraft} onChange={(event) => setReferenceTierDraft(event.target.value)}>{stationBox.reference_station_catalog.assessments.map((assessment) => <option key={assessment.tier} value={assessment.tier}>{stationBoxLabel(assessment.tier)}</option>)}</select></label><button className="secondary" disabled={referenceTierSaving || !referenceTierDraft || referenceTierSelectionIsCurrent(stationBox, referenceTierDraft)} onClick={() => void saveReferenceTier()}>{referenceTierSaving ? "Saving…" : stationBox.reference_station_tier_selection ? "Change target" : "Select target"}</button></div>}{referenceTierError && <div className="error-box" role="alert">{referenceTierError}</div>}</div><div className="stationbox-tier-list">{stationBox.reference_station_catalog.assessments.map((assessment) => <details key={assessment.tier}><summary><span>{stationBoxLabel(assessment.tier)}</span><Status status={stationBoxStatus(assessment.state)} /></summary><p>{assessment.detail}</p><ul>{assessment.requirements.map((requirement) => <li key={requirement.name}><span><strong>{stationBoxLabel(requirement.name)}</strong><small>{requirement.detail}</small></span><Status status={stationBoxStatus(requirement.state)} /></li>)}</ul>{assessment.next_step && <b>{assessment.next_step}</b>}</details>)}</div></section>
           <div className="stationbox-dimensions">{stationBox.peg_readiness.dimensions.map((dimension) => <article key={dimension.name}><div><strong>{stationBoxLabel(dimension.name)}</strong><Status status={stationBoxStatus(dimension.state)} /></div><p>{dimension.detail}</p><small>{dimension.evidence}</small>{dimension.next_step && <b>{dimension.next_step}</b>}</article>)}</div>
         </> : <div className="commissioning-empty"><strong>StationBox evidence unavailable</strong><p>The commissioning report remains authoritative; this supporting profile could not be loaded.</p></div>}</section>
       </aside>

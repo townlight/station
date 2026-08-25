@@ -15,6 +15,7 @@ fn ready_probe() -> StationBoxProbeInput {
         station_id: Some("3f5f721f-96c7-48b1-b061-1bf1ad1e62c2".into()),
         station_name: Some("KTLT Community Television".into()),
         timezone: Some("America/Denver".into()),
+        reference_station_tier_selection: None,
         hardware: HardwareProbeInput {
             logical_cpus: 16,
             ram_total_gb: 32.0,
@@ -74,7 +75,7 @@ fn ready_probe() -> StationBoxProbeInput {
 fn complete_legacy_facts_stay_yellow_without_reference_station_evidence() {
     let profile = derive_station_box_profile(ready_probe()).unwrap();
 
-    assert_eq!(profile.schema_version, 2);
+    assert_eq!(profile.schema_version, 3);
     assert_eq!(
         profile.engine_tier_verdict,
         EngineTierVerdict::FullBroadcast
@@ -265,7 +266,7 @@ fn low_resources_unknown_clock_and_unverified_release_do_not_go_green() {
 
     let profile = derive_station_box_profile(probe).unwrap();
 
-    assert_eq!(profile.peg_readiness.color, PegReadinessColor::Red);
+    assert_eq!(profile.peg_readiness.color, PegReadinessColor::Yellow);
     assert_eq!(profile.hardware.state, ReadinessState::Recoverable);
     let base = profile
         .reference_station_catalog

@@ -10,7 +10,7 @@ mod headend;
 
 pub use headend::*;
 
-const SCHEMA_VERSION: u32 = 2;
+const SCHEMA_VERSION: u32 = 3;
 const MAX_TEXT: usize = 200;
 const MAX_FACTORY_NAME: usize = 120;
 const MAX_LIST_ITEMS: usize = 256;
@@ -32,6 +32,8 @@ pub struct StationBoxProbeInput {
     pub station_name: Option<String>,
     #[serde(default)]
     pub timezone: Option<String>,
+    #[serde(default)]
+    pub reference_station_tier_selection: Option<ReferenceStationTierSelection>,
     pub hardware: HardwareProbeInput,
     pub engine: EngineProbeInput,
     pub clock: ClockProbeInput,
@@ -112,6 +114,8 @@ pub struct StationBoxProfile {
     pub station_id: Option<String>,
     pub station_name: Option<String>,
     pub timezone: Option<String>,
+    #[serde(default)]
+    pub reference_station_tier_selection: Option<ReferenceStationTierSelection>,
     pub hardware: HardwareReadiness,
     pub engine: EngineReadiness,
     pub clock: ClockReadiness,
@@ -553,7 +557,16 @@ pub fn derive_station_box_profile(
     }
     let reference_station_catalog =
         derive_reference_station_catalog(&input.hardware, &input.engine);
-    let reference_station_state = reference_station_readiness_state(&reference_station_catalog);
+    let reference_station_selection = input.reference_station_tier_selection.as_ref();
+    let reference_station_state =
+        reference_station_readiness_state(&reference_station_catalog, reference_station_selection);
+    let reference_station_detail =
+        reference_station_dimension_detail(&reference_station_catalog, reference_station_selection);
+    let reference_station_next_step = reference_station_dimension_next_step(
+        &reference_station_catalog,
+        reference_station_selection,
+        &reference_station_state,
+    );
     let dimensions = vec![
         dimension(
             ReadinessDimensionName::StationIdentity,
@@ -584,25 +597,9 @@ pub fn derive_station_box_profile(
             ReadinessDimensionName::ReferenceStation,
             &reference_station_state,
             true,
-            if !reference_station_catalog.matching_tiers.is_empty() {
-                format!(
-                    "This machine matches reference builds {}, but no operator-selected deployment tier is commissioned.",
-                    reference_station_catalog
-                        .matching_tiers
-                        .iter()
-                        .map(reference_tier_label)
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                )
-            } else {
-                "No complete reference-build match or selected deployment tier exists; missing physical evidence remains fail-closed."
-                    .into()
-            },
+            reference_station_detail,
             "versioned reference-build matrix and current StationBox facts",
-            (reference_station_state != ReadinessState::Pass).then(|| {
-                "Select a deployment tier, resolve its blocked requirements, and collect authenticated evidence for every unknown required item."
-                    .into()
-            }),
+            reference_station_next_step,
         ),
         dimension(
             ReadinessDimensionName::Engine,
@@ -744,6 +741,7 @@ pub fn derive_station_box_profile(
         station_id: input.station_id,
         station_name: input.station_name,
         timezone: input.timezone,
+        reference_station_tier_selection: input.reference_station_tier_selection,
         hardware,
         engine,
         clock: ClockReadiness {
@@ -944,18 +942,114 @@ fn derive_reference_station_catalog(
     }
 }
 
-fn reference_station_readiness_state(catalog: &ReferenceStationCatalog) -> ReadinessState {
-    if catalog
+fn reference_station_readiness_state(
+    catalog: &ReferenceStationCatalog,
+    selection: Option<&ReferenceStationTierSelection>,
+) -> ReadinessState {
+    let Some(selection) = selection else {
+        return ReadinessState::Unknown;
+    };
+    if !selection.uses_current_catalog() || catalog.version != selection.catalog_version {
+        return ReadinessState::Unknown;
+    }
+    catalog
         .assessments
         .iter()
-        .all(|assessment| assessment.state == ReadinessState::Blocked)
-    {
-        ReadinessState::Blocked
-    } else {
-        // A generic build-row match cannot satisfy deployment readiness. This
-        // becomes Pass only when a later slice binds the evidence to a
-        // persisted, operator-selected tier revision.
-        ReadinessState::Unknown
+        .find(|assessment| assessment.tier == selection.tier)
+        .map(|assessment| match assessment.state {
+            ReadinessState::Pass => ReadinessState::Pass,
+            ReadinessState::Blocked => ReadinessState::Blocked,
+            ReadinessState::Unknown => ReadinessState::Unknown,
+            _ => ReadinessState::Unknown,
+        })
+        .unwrap_or(ReadinessState::Unknown)
+}
+
+fn reference_station_dimension_detail(
+    catalog: &ReferenceStationCatalog,
+    selection: Option<&ReferenceStationTierSelection>,
+) -> String {
+    let Some(selection) = selection else {
+        return if !catalog.matching_tiers.is_empty() {
+            format!(
+                "This machine matches reference builds {}, but no operator-selected deployment tier is commissioned.",
+                catalog
+                    .matching_tiers
+                    .iter()
+                    .map(reference_tier_label)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        } else {
+            "No complete reference-build match or selected deployment tier exists; missing physical evidence remains fail-closed."
+                .into()
+        };
+    };
+    if !selection.uses_current_catalog() || catalog.version != selection.catalog_version {
+        return format!(
+            "Selected {} uses reference catalog version {}, while the installed catalog is version {}; readiness is unknown until reselected.",
+            reference_tier_label(&selection.tier),
+            selection.catalog_version,
+            catalog.version,
+        );
+    }
+    catalog
+        .assessments
+        .iter()
+        .find(|assessment| assessment.tier == selection.tier)
+        .map(|assessment| {
+            format!(
+                "Selected {} (revision {}) is assessed as {}: {}",
+                reference_tier_label(&selection.tier),
+                selection.revision,
+                readiness_state_label(&assessment.state),
+                assessment.detail
+            )
+        })
+        .unwrap_or_else(|| {
+            format!(
+                "Selected {} is not present in the installed reference catalog; readiness is unknown.",
+                reference_tier_label(&selection.tier)
+            )
+        })
+}
+
+fn reference_station_dimension_next_step(
+    catalog: &ReferenceStationCatalog,
+    selection: Option<&ReferenceStationTierSelection>,
+    state: &ReadinessState,
+) -> Option<String> {
+    if *state == ReadinessState::Pass {
+        return None;
+    }
+    match selection {
+        Some(selection)
+            if selection.uses_current_catalog()
+                && selection.catalog_version == catalog.version
+                && catalog
+                    .assessments
+                    .iter()
+                    .any(|assessment| assessment.tier == selection.tier) =>
+        {
+            Some(
+                "Resolve the selected tier's blocked requirements and collect authenticated evidence for every unknown required item."
+                    .into(),
+            )
+        }
+        _ => Some(
+            "Select a deployment tier from the current reference catalog before collecting its missing evidence."
+                .into(),
+        ),
+    }
+}
+
+fn readiness_state_label(state: &ReadinessState) -> &'static str {
+    match state {
+        ReadinessState::Pass => "pass",
+        ReadinessState::Blocked => "blocked",
+        ReadinessState::Recoverable => "recoverable",
+        ReadinessState::Optional => "optional",
+        ReadinessState::Unknown => "unknown",
     }
 }
 
@@ -1188,6 +1282,16 @@ impl StationBoxProbeInput {
         validate_network(&self.network)?;
         validate_backup(&self.backup)?;
         validate_release(&self.release)?;
+        if let Some(selection) = &self.reference_station_tier_selection {
+            selection
+                .validate()
+                .map_err(ValidationError::InvalidInput)?;
+            if selection.updated_at_unix_ms > self.generated_at_unix_ms {
+                return invalid(
+                    "reference station tier selection cannot be updated after profile generation",
+                );
+            }
+        }
         if self.release.candidate_verified && self.source_commit.is_none() {
             return invalid("a verified release requires a source commit identity");
         }
@@ -1415,7 +1519,7 @@ mod tests {
         };
 
         assert_eq!(
-            reference_station_readiness_state(&catalog),
+            reference_station_readiness_state(&catalog, None),
             ReadinessState::Unknown
         );
     }
@@ -1449,5 +1553,173 @@ mod tests {
         };
         selection.validate().unwrap();
         assert!(!selection.uses_current_catalog());
+    }
+
+    #[test]
+    fn selected_blocked_tier_binds_blocked_readiness_instead_of_generic_unknown() {
+        let input = StationBoxProbeInput {
+            generated_at_unix_ms: 1_777_000_000_000,
+            probe_collected_at_unix_ms: 1_777_000_000_000,
+            max_probe_age_ms: 300_000,
+            product_version: "0.1.0".into(),
+            source_commit: Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into()),
+            station_id: Some("3f5f721f-96c7-48b1-b061-1bf1ad1e62c2".into()),
+            station_name: Some("KTLT Community Television".into()),
+            timezone: Some("America/Denver".into()),
+            reference_station_tier_selection: Some(ReferenceStationTierSelection {
+                catalog_version: REFERENCE_STATION_CATALOG_VERSION,
+                tier: ReferenceStationTier::CableSdi,
+                revision: 1,
+                created_at_unix_ms: 1_777_000_000_000,
+                updated_at_unix_ms: 1_777_000_000_000,
+                updated_by: "operator-1".into(),
+            }),
+            hardware: HardwareProbeInput {
+                logical_cpus: 16,
+                ram_total_gb: 32.0,
+                media_disk_free_gb: 500.0,
+            },
+            engine: EngineProbeInput {
+                gstreamer_version: Some("1.28.6".into()),
+                required_factories: vec!["udpsink".into()],
+                available_factories: vec!["udpsink".into()],
+                available_encoders: vec!["openh264enc".into()],
+                playout: ReadinessState::Pass,
+                runtime: ReadinessState::Pass,
+                output: ReadinessState::Pass,
+                udp: CapabilitySupport::Supported,
+                srt: CapabilitySupport::Supported,
+                sdi: CapabilitySupport::Unimplemented,
+                ndi: CapabilitySupport::Supported,
+                interlaced: CapabilitySupport::Supported,
+            },
+            clock: ClockProbeInput {
+                configured_timezone: Some("America/Denver".into()),
+                utc_offset_seconds: Some(-21_600),
+                sync_status: ClockSyncStatus::Synchronized,
+            },
+            network: NetworkProbeInput {
+                state: ReadinessState::Pass,
+                hostname: Some("station-one".into()),
+                interface_up: true,
+                dns_working: Some(true),
+                outbound_udp: CapabilitySupport::Supported,
+                outbound_srt: CapabilitySupport::Supported,
+            },
+            backup: BackupProbeInput {
+                state: ReadinessState::Pass,
+                destination_configured: true,
+                writable: Some(true),
+                detail: Some("backup probe passed".into()),
+            },
+            release: ReleaseProbeInput {
+                state: ReadinessState::Pass,
+                candidate_verified: true,
+                update_available: false,
+                detail: Some("candidate verified".into()),
+            },
+        };
+
+        let profile = derive_station_box_profile(input.clone()).unwrap();
+        assert_eq!(
+            profile
+                .reference_station_tier_selection
+                .as_ref()
+                .unwrap()
+                .tier,
+            ReferenceStationTier::CableSdi
+        );
+        assert_eq!(
+            profile
+                .peg_readiness
+                .dimensions
+                .iter()
+                .find(|dimension| dimension.name == ReadinessDimensionName::ReferenceStation)
+                .unwrap()
+                .state,
+            ReadinessState::Blocked
+        );
+
+        let mut future_selection = input.reference_station_tier_selection.clone().unwrap();
+        future_selection.updated_at_unix_ms += 1;
+        let mut future_input = input;
+        future_input.reference_station_tier_selection = Some(future_selection);
+        assert!(matches!(
+            derive_station_box_profile(future_input),
+            Err(ValidationError::InvalidInput(message))
+                if message.contains("after profile generation")
+        ));
+    }
+
+    #[test]
+    fn selected_reference_state_mirrors_only_the_selected_current_assessment() {
+        let catalog = ReferenceStationCatalog {
+            version: REFERENCE_STATION_CATALOG_VERSION,
+            matching_tiers: vec![ReferenceStationTier::Tier1Streaming],
+            assessments: vec![
+                ReferenceStationTierAssessment {
+                    tier: ReferenceStationTier::Tier0BatchStream,
+                    state: ReadinessState::Blocked,
+                    requirements: Vec::new(),
+                    detail: "blocked".into(),
+                    next_step: None,
+                },
+                ReferenceStationTierAssessment {
+                    tier: ReferenceStationTier::Tier1Streaming,
+                    state: ReadinessState::Pass,
+                    requirements: Vec::new(),
+                    detail: "pass".into(),
+                    next_step: None,
+                },
+                ReferenceStationTierAssessment {
+                    tier: ReferenceStationTier::DevelopmentValidation,
+                    state: ReadinessState::Unknown,
+                    requirements: Vec::new(),
+                    detail: "unknown".into(),
+                    next_step: None,
+                },
+            ],
+        };
+        let selection = |tier| ReferenceStationTierSelection {
+            catalog_version: REFERENCE_STATION_CATALOG_VERSION,
+            tier,
+            revision: 1,
+            created_at_unix_ms: 100,
+            updated_at_unix_ms: 100,
+            updated_by: "operator-1".into(),
+        };
+
+        assert_eq!(
+            reference_station_readiness_state(
+                &catalog,
+                Some(&selection(ReferenceStationTier::Tier1Streaming))
+            ),
+            ReadinessState::Pass
+        );
+        assert_eq!(
+            reference_station_readiness_state(
+                &catalog,
+                Some(&selection(ReferenceStationTier::Tier0BatchStream))
+            ),
+            ReadinessState::Blocked
+        );
+        assert_eq!(
+            reference_station_readiness_state(
+                &catalog,
+                Some(&selection(ReferenceStationTier::DevelopmentValidation))
+            ),
+            ReadinessState::Unknown
+        );
+        assert_eq!(
+            reference_station_readiness_state(&catalog, None),
+            ReadinessState::Unknown
+        );
+
+        let mut old = selection(ReferenceStationTier::Tier1Streaming);
+        old.catalog_version -= 1;
+        assert_eq!(
+            reference_station_readiness_state(&catalog, Some(&old)),
+            ReadinessState::Unknown
+        );
     }
 }

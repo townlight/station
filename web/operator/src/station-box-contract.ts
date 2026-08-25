@@ -27,6 +27,14 @@ export interface ReferenceStationTierAssessment {
 
 export interface StationBoxProfile {
   schema_version: number;
+  reference_station_tier_selection: {
+    catalog_version: number;
+    tier: string;
+    revision: number;
+    created_at_unix_ms: number;
+    updated_at_unix_ms: number;
+    updated_by: string;
+  } | null;
   hardware: {
     logical_cpus: number;
     ram_total_gb: number;
@@ -43,6 +51,29 @@ export interface StationBoxProfile {
     color: "green" | "yellow" | "red";
     dimensions: StationBoxDimension[];
   };
+}
+
+export interface ReferenceTierSelectionPayload {
+  expected_revision: number | null;
+  catalog_version: number;
+  tier: string;
+}
+
+export class LatestStationBoxLoad {
+  private latestRequest = 0;
+
+  begin(): number {
+    this.latestRequest += 1;
+    return this.latestRequest;
+  }
+
+  accepts(request: number): boolean {
+    return request === this.latestRequest;
+  }
+
+  invalidate(): void {
+    this.latestRequest += 1;
+  }
 }
 
 export function stationBoxStatus(state: StationBoxReadinessState): CommissioningStatus {
@@ -66,4 +97,24 @@ export function referenceQualificationLabel(profile: StationBoxProfile): string 
   return tiers.length > 0
     ? `Build matches: ${tiers.map(stationBoxLabel).join(", ")}`
     : "No complete build match";
+}
+
+export function referenceTierSelectionPayload(
+  profile: StationBoxProfile,
+  tier: string,
+): ReferenceTierSelectionPayload {
+  return {
+    expected_revision: profile.reference_station_tier_selection?.revision ?? null,
+    catalog_version: profile.reference_station_catalog.version,
+    tier,
+  };
+}
+
+export function referenceTierSelectionIsCurrent(
+  profile: StationBoxProfile,
+  tier: string,
+): boolean {
+  const selection = profile.reference_station_tier_selection;
+  return selection?.tier === tier
+    && selection.catalog_version === profile.reference_station_catalog.version;
 }
