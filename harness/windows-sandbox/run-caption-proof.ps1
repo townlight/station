@@ -56,26 +56,55 @@ function Invoke-Api {
         $headers['Sec-Fetch-Site'] = 'same-origin'
         $headers['X-TownLight-CSRF'] = $script:apiCsrfToken
     }
-    $parameters = @{
-        Method = $Method
-        Uri = "$($script:origin)/api/v1$Path"
-        Headers = $headers
-        TimeoutSec = $TimeoutSec
-        MaximumRedirection = 0
-        UseBasicParsing = $true
-        ErrorAction = 'Stop'
-    }
+    $request = [Net.HttpWebRequest]::Create("$($script:origin)/api/v1$Path")
+    $request.Method = $Method.ToUpperInvariant()
+    $request.Timeout = $TimeoutSec * 1000
+    $request.ReadWriteTimeout = $TimeoutSec * 1000
+    $request.AllowAutoRedirect = $false
+    $request.Accept = 'application/json'
+    foreach ($name in $headers.Keys) { $request.Headers[$name] = $headers[$name] }
+    $requestBody = $null
     if ($null -ne $Body) {
-        $parameters.ContentType = 'application/json'
-        $parameters.Body = $Body | ConvertTo-Json -Depth 32 -Compress
+        $request.ContentType = 'application/json'
+        $requestBody = [Text.UTF8Encoding]::new($false).GetBytes(
+            ($Body | ConvertTo-Json -Depth 32 -Compress)
+        )
+        $request.ContentLength = $requestBody.Length
+        $requestStream = $request.GetRequestStream()
+        try { $requestStream.Write($requestBody, 0, $requestBody.Length) }
+        finally { $requestStream.Dispose() }
     }
+    $response = $null
+    $reader = $null
     try {
-        $response = Invoke-WebRequest @parameters
-        if ([string]::IsNullOrWhiteSpace([string]$response.Content)) { return $null }
-        $response.Content | ConvertFrom-Json -ErrorAction Stop
+        $response = [Net.HttpWebResponse]$request.GetResponse()
+        $reader = [IO.StreamReader]::new(
+            $response.GetResponseStream(),
+            [Text.UTF8Encoding]::new($false),
+            $true,
+            4096,
+            $false
+        )
+        $content = $reader.ReadToEnd()
+        if ($content.Length -gt 16777216) {
+            throw 'Caption proof API response exceeded 16 MiB.'
+        }
+        if ([string]::IsNullOrWhiteSpace($content)) { return $null }
+        $content | ConvertFrom-Json -ErrorAction Stop
+    }
+    catch [Net.WebException] {
+        $status = if ($_.Exception.Response) {
+            [int]([Net.HttpWebResponse]$_.Exception.Response).StatusCode
+        } else { 0 }
+        throw "Caption proof API $Method $Path failed with HTTP status $status; response content was not recorded."
     }
     catch {
         throw "Caption proof API $Method $Path failed; response content was not recorded."
+    }
+    finally {
+        $requestBody = $null
+        if ($reader) { $reader.Dispose() }
+        if ($response) { $response.Dispose() }
     }
 }
 
