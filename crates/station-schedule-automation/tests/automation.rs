@@ -1,31 +1,39 @@
 use station_schedule_automation::{
-    DaypartBlock, DstApplication, LocalDate, MaterializationAdmission, MaterializationWindow,
-    RecurrenceTimeZone, RecurringRule, SavedSearch, admit_materialization, canonical_intent_bytes,
-    canonical_source_bytes, derive_materialization_intent,
+    ArbitrationOutcome, AssetCandidate, AssetPickStrategy, AssetResolution, DaypartBlock,
+    DstApplication, LocalDate, MaterializationOutcome, MaterializationPlan, MaterializationWindow,
+    MetadataFilter, MetadataValue, PriorAiring, RecurrenceTimeZone, RecurringRule,
+    RuleSlotCandidate, SavedSearch, SavedSearchOrder, SavedSearchQuery, SlotMaterializationOutcome,
+    arbitrate_rule_slots, canonical_intent_bytes, canonical_source_bytes,
+    derive_materialization_intent, resolve_asset,
 };
+use std::collections::BTreeMap;
 
 fn id(suffix: &str) -> String {
     format!("00000000-0000-4000-8000-0000000000{suffix}")
 }
-
-fn hex(bytes: &[u8]) -> String {
-    bytes
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect::<Vec<_>>()
-        .join("")
+fn sha(character: char) -> String {
+    character.to_string().repeat(64)
 }
-
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
 fn search() -> SavedSearch {
     SavedSearch {
         search_id: id("01"),
         channel_id: id("02"),
         owner_operator_id: id("03"),
-        terms: vec!["council".into(), "meeting".into()],
         revision: 1,
+        query: SavedSearchQuery {
+            all_of: vec![MetadataFilter {
+                field: "topic".into(),
+                value: MetadataValue::Choice("council".into()),
+            }],
+            any_of: vec![],
+            order_by: SavedSearchOrder::TitleAscending,
+            limit: 8,
+        },
     }
 }
-
 fn block() -> DaypartBlock {
     DaypartBlock {
         block_id: id("04"),
@@ -33,18 +41,24 @@ fn block() -> DaypartBlock {
         label: "Weeknight civic".into(),
         starts_local_minute: 1_080,
         ends_local_minute: 1_320,
+        weekday_mask: 0b0111_1111,
+        season_starts_on: None,
+        season_ends_on: None,
+        allow_rule_ids: vec![],
         revision: 1,
     }
 }
-
 fn rule() -> RecurringRule {
     RecurringRule {
         rule_id: id("05"),
         channel_id: id("02"),
         saved_search_id: id("01"),
         saved_search_revision: 1,
-        asset_id: id("06"),
-        asset_revision: 7,
+        pick_strategy: AssetPickStrategy::Top,
+        rolling_window_days: 14,
+        avoid_repeat_within_days: None,
+        enabled: true,
+        priority: 0,
         block_id: id("04"),
         block_revision: 1,
         weekday_mask: 0b0000_1000,
@@ -63,304 +77,368 @@ fn rule() -> RecurringRule {
         revision: 1,
     }
 }
-
 fn window() -> MaterializationWindow {
     MaterializationWindow {
         starts_at_utc_ms: 1_767_225_600_000,
         ends_at_utc_ms: 1_768_435_200_000,
     }
 }
-
-#[test]
-fn deterministic_materialization_is_idempotent_without_dispatch() {
-    let intent = derive_materialization_intent(&search(), &block(), &rule(), window()).unwrap();
-    assert_eq!(intent.asset_revision, 7);
-    assert_eq!(
-        admit_materialization(&[], intent.clone(), &search(), &block(), &rule()).unwrap(),
-        MaterializationAdmission::Create(Box::new(intent.clone()))
-    );
-    assert_eq!(
-        admit_materialization(
-            std::slice::from_ref(&intent),
-            intent.clone(),
-            &search(),
-            &block(),
-            &rule(),
-        )
-        .unwrap(),
-        MaterializationAdmission::AlreadyPresent
-    );
+fn candidate(letter: char, title: &str, published_at_utc_ms: i64) -> AssetCandidate {
+    AssetCandidate {
+        asset_sha256: sha(letter),
+        title: title.into(),
+        duration_ms: 3_600_000,
+        ready: true,
+        published: true,
+        published_at_utc_ms,
+        indexed_custom_metadata: BTreeMap::from([(
+            "topic".into(),
+            MetadataValue::Choice("council".into()),
+        )]),
+    }
+}
+fn plan(outcome: MaterializationOutcome) -> MaterializationPlan {
+    match outcome {
+        MaterializationOutcome::Plan(plan) => plan,
+    }
 }
 
 #[test]
-fn timezone_dst_policy_and_window_bounds_are_explicit_and_fail_closed() {
-    let mut ambiguous = rule();
-    ambiguous.timezone = RecurrenceTimeZone::Named {
-        iana_name: "America/Denver".into(),
-        dst: DstApplication::Standard,
-    };
-    assert!(derive_materialization_intent(&search(), &block(), &ambiguous, window()).is_err());
-    let mut too_wide = window();
-    too_wide.ends_at_utc_ms += 14 * 86_400_000;
-    assert!(derive_materialization_intent(&search(), &block(), &rule(), too_wide).is_err());
-}
-
-#[test]
-fn stale_revisions_rebinding_and_duplicate_append_fail_closed() {
-    let mut stale = rule();
-    stale.saved_search_revision = 2;
-    assert!(derive_materialization_intent(&search(), &block(), &stale, window()).is_err());
-    let intent = derive_materialization_intent(&search(), &block(), &rule(), window()).unwrap();
-    let mut forged = intent.clone();
-    forged.asset_id = id("07");
-    assert!(admit_materialization(&[], forged, &search(), &block(), &rule()).is_err());
+fn resolver_filters_typed_metadata_and_rejects_invalid_candidate_input() {
+    let valid = candidate('a', "Alpha council", 1_700_000_000_000);
+    let mut invalid = candidate('b', "Broken", 1_700_000_000_000);
+    invalid.asset_sha256 = sha('g');
     assert!(
-        admit_materialization(
-            &[intent.clone(), intent.clone()],
-            intent,
+        resolve_asset(
             &search(),
-            &block(),
-            &rule()
+            &rule(),
+            &[valid, invalid],
+            1_767_319_200_000,
+            &[]
         )
         .is_err()
     );
-}
-
-#[test]
-fn dayparts_are_same_day_only_and_rule_successor_requires_exact_dependencies() {
-    let mut overnight = block();
-    overnight.ends_local_minute = 60;
-    assert!(overnight.validate().is_err());
-    let current = rule();
-    let mut next = current.clone();
-    next.revision = 2;
-    next.saved_search_revision = 2;
-    assert!(
-        next.validate_successor_of(&current, 1, &search(), &block(), &search(), &block(),)
-            .is_err()
+    let mut off_query = candidate('c', "Not council", 1_700_000_000_000);
+    off_query.indexed_custom_metadata.clear();
+    assert_eq!(
+        resolve_asset(&search(), &rule(), &[off_query], 1_767_319_200_000, &[]).unwrap(),
+        AssetResolution::NoMatch
     );
 }
 
 #[test]
-fn canonical_hashes_match_version_one_golden_vectors() {
-    let bytes = canonical_source_bytes(&search(), &block(), &rule()).unwrap();
-    let mut expected_prefix = 28_u64.to_le_bytes().to_vec();
-    expected_prefix.extend_from_slice(b"townlight.schedule-source.v1");
-    expected_prefix.extend_from_slice(&1_u16.to_le_bytes());
-    assert_eq!(&bytes[..expected_prefix.len()], expected_prefix.as_slice());
-    let intent = derive_materialization_intent(&search(), &block(), &rule(), window()).unwrap();
-    let intent_bytes = canonical_intent_bytes(&intent);
+fn picks_and_avoid_repeat_are_deterministic() {
+    let alpha = candidate('a', "Alpha council", 1_700_000_000_000);
+    let beta = candidate('b', "Beta council", 1_760_000_000_000);
+    let candidates = vec![beta.clone(), alpha.clone()];
     assert_eq!(
-        (
-            hex(&bytes),
-            hex(&intent_bytes),
-            intent.source_authority_sha256,
-            intent.materialization_id,
-        ),
-        (
-            "1c00000000000000746f776e6c696768742e7363686564756c652d736f757263652e76310100240000000000000030303030303030302d303030302d343030302d383030302d303030303030303030303031240000000000000030303030303030302d303030302d343030302d383030302d303030303030303030303032240000000000000030303030303030302d303030302d343030302d383030302d3030303030303030303030330100000000000000020000000700000000000000636f756e63696c07000000000000006d656574696e67240000000000000030303030303030302d303030302d343030302d383030302d303030303030303030303034240000000000000030303030303030302d303030302d343030302d383030302d3030303030303030303030320f000000000000005765656b6e69676874206369766963380428050100000000000000240000000000000030303030303030302d303030302d343030302d383030302d303030303030303030303035240000000000000030303030303030302d303030302d343030302d383030302d303030303030303030303032240000000000000030303030303030302d303030302d343030302d383030302d303030303030303030303031240000000000000030303030303030302d303030302d343030302d383030302d303030303030303030303036240000000000000030303030303030302d303030302d343030302d383030302d3030303030303030303030340100000000000000070000000000000001000000000000000801ea07010105000000000000006e616d65640e00000000000000416d65726963612f44656e76657207000000000000006561726c69657274043c000100000000000000".to_owned(),
-            "2300000000000000746f776e6c696768742e6d6174657269616c697a6174696f6e2d696e74656e742e76310100240000000000000030303030303030302d303030302d343030302d383030302d303030303030303030303035240000000000000030303030303030302d303030302d343030302d383030302d303030303030303030303032240000000000000030303030303030302d303030302d343030302d383030302d303030303030303030303036240000000000000030303030303030302d303030302d343030302d383030302d30303030303030303030303401000000000000000700000000000000010000000000000000a8da769b01000000b0f3be9b01000040000000000000006433616531356339643133303738373064313465366232326666373464643239356232386165386237306332626336656638346232653664376635363733373602000000ea07010174040e00000000000000416d65726963612f44656e766572909dffff00e16e7c9b01000080cfa57c9b01000000ea07010874040e00000000000000416d65726963612f44656e766572909dffff00657ba09b0100008053b2a09b01000000".to_owned(),
-            "d3ae15c9d1307870d14e6b22ff74dd295b28ae8b70c2bc6ef84b2e6d7f567376".to_owned(),
-            "3eb2fafd14cadfde766741c913c46df185eebe63cc392f3a85afe8cfe057ad52".to_owned(),
-        )
+        resolve_asset(&search(), &rule(), &candidates, 1_767_319_200_000, &[]).unwrap(),
+        AssetResolution::Selected(alpha.clone())
     );
-}
-
-#[test]
-fn claimed_rule_and_search_bounds_fail_closed() {
-    for mutation in 0..5 {
-        let mut invalid = rule();
-        match mutation {
-            0 => invalid.weekday_mask = 0,
-            1 => invalid.interval_weeks = 5,
-            2 => invalid.duration_minutes = 0,
-            3 => invalid.local_start_minute = 1_440,
-            _ => invalid.anchor_date.year = 2101,
-        }
-        assert!(derive_materialization_intent(&search(), &block(), &invalid, window()).is_err());
-    }
-    let mut duplicate_terms = search();
-    duplicate_terms.terms = vec!["council".into(), "council".into()];
-    assert!(duplicate_terms.validate().is_err());
-    let mut unbounded_terms = search();
-    unbounded_terms.terms = (0..9).map(|index| format!("term{index}")).collect();
-    assert!(unbounded_terms.validate().is_err());
-}
-
-#[test]
-fn materialization_ledger_bound_fails_closed() {
-    let existing = (0..64)
-        .map(|week| {
-            let starts_at_utc_ms = 1_767_225_600_000 + i64::from(week) * 7 * 86_400_000;
-            derive_materialization_intent(
-                &search(),
-                &block(),
-                &rule(),
-                MaterializationWindow {
-                    starts_at_utc_ms,
-                    ends_at_utc_ms: starts_at_utc_ms + 4 * 86_400_000,
-                },
-            )
-            .unwrap()
-        })
-        .collect::<Vec<_>>();
+    let mut newest = rule();
+    newest.pick_strategy = AssetPickStrategy::Newest;
     assert_eq!(
-        admit_materialization(&existing, existing[0].clone(), &search(), &block(), &rule(),)
-            .unwrap(),
-        MaterializationAdmission::AlreadyPresent
+        resolve_asset(&search(), &newest, &candidates, 1_767_319_200_000, &[]).unwrap(),
+        AssetResolution::Selected(beta.clone())
     );
-    let starts_at_utc_ms = 1_767_225_600_000 + 64_i64 * 7 * 86_400_000;
-    let new_intent = derive_materialization_intent(
-        &search(),
-        &block(),
-        &rule(),
-        MaterializationWindow {
-            starts_at_utc_ms,
-            ends_at_utc_ms: starts_at_utc_ms + 4 * 86_400_000,
-        },
-    )
-    .unwrap();
-    assert!(admit_materialization(&existing, new_intent, &search(), &block(), &rule()).is_err());
-}
-
-#[test]
-fn recurring_rule_successor_rejects_stale_cas_asset_channel_and_dependency_rebinding() {
-    let current = rule();
-    for mutation in 0..4 {
-        let mut next = current.clone();
-        next.revision = 2;
-        let next_search = search();
-        match mutation {
-            0 => next.asset_id = id("08"),
-            1 => next.channel_id = id("08"),
-            2 => next.saved_search_id = id("08"),
-            _ => next.block_id = id("08"),
-        }
-        assert!(
-            next.validate_successor_of(
-                &current,
-                if mutation == 0 { 0 } else { 1 },
-                &search(),
-                &block(),
-                &next_search,
-                &block()
-            )
-            .is_err()
-        );
-    }
-}
-
-#[test]
-fn jiff_resolves_denver_normal_and_both_fall_back_instants() {
-    let normal_window = MaterializationWindow {
-        starts_at_utc_ms: 1_767_225_600_000,
-        ends_at_utc_ms: 1_767_571_200_000,
-    };
-    let normal =
-        derive_materialization_intent(&search(), &block(), &rule(), normal_window).unwrap();
+    let mut least = rule();
+    least.pick_strategy = AssetPickStrategy::LeastRecentlyAired;
     assert_eq!(
-        normal.resolved_slots(),
-        vec![(
+        resolve_asset(
+            &search(),
+            &least,
+            &candidates,
             1_767_319_200_000,
-            -25_200,
-            station_schedule_automation::LocalResolution::Normal
-        )]
+            &[PriorAiring {
+                asset_sha256: sha('a'),
+                aired_at_utc_ms: 1_760_000_000_000
+            }]
+        )
+        .unwrap(),
+        AssetResolution::Selected(beta.clone())
     );
-
-    for (policy, expected_ms, expected_offset, expected_resolution) in [
-        (
-            DstApplication::EarlierFold,
-            1_793_518_200_000,
-            -21_600,
-            station_schedule_automation::LocalResolution::EarlierFold,
-        ),
-        (
-            DstApplication::LaterFold,
-            1_793_521_800_000,
-            -25_200,
-            station_schedule_automation::LocalResolution::LaterFold,
-        ),
-    ] {
-        let mut fold_rule = rule();
-        fold_rule.anchor_date = LocalDate {
-            year: 2026,
-            month: 11,
-            day: 1,
-        };
-        fold_rule.weekday_mask = 1 << 6;
-        fold_rule.local_start_minute = 90;
-        fold_rule.duration_minutes = 60;
-        fold_rule.timezone = RecurrenceTimeZone::Named {
-            iana_name: "America/Denver".into(),
-            dst: policy,
-        };
-        let mut fold_block = block();
-        fold_block.starts_local_minute = 0;
-        fold_block.ends_local_minute = 180;
-        let fold_window = MaterializationWindow {
-            starts_at_utc_ms: 1_793_491_200_000,
-            ends_at_utc_ms: 1_793_491_200_000 + 3 * 86_400_000,
-        };
-        let intent =
-            derive_materialization_intent(&search(), &fold_block, &fold_rule, fold_window).unwrap();
-        assert_eq!(
-            intent.resolved_slots(),
-            vec![(expected_ms, expected_offset, expected_resolution)]
-        );
-    }
+    let mut random = rule();
+    random.pick_strategy = AssetPickStrategy::Random;
+    assert_eq!(
+        resolve_asset(&search(), &random, &candidates, 1_767_319_200_000, &[]).unwrap(),
+        resolve_asset(&search(), &random, &candidates, 1_767_319_200_000, &[]).unwrap()
+    );
+    let mut avoiding = rule();
+    avoiding.avoid_repeat_within_days = Some(14);
+    assert_eq!(
+        resolve_asset(
+            &search(),
+            &avoiding,
+            &candidates,
+            1_767_319_200_000,
+            &[PriorAiring {
+                asset_sha256: sha('a'),
+                aired_at_utc_ms: 1_767_000_000_000
+            }]
+        )
+        .unwrap(),
+        AssetResolution::Selected(beta)
+    );
 }
 
 #[test]
-fn jiff_rejects_denver_spring_gap() {
-    let mut gap_rule = rule();
-    gap_rule.anchor_date = LocalDate {
+fn per_slot_resolution_emits_stable_draft_occurrences() {
+    let first = plan(
+        derive_materialization_intent(
+            &search(),
+            &block(),
+            &rule(),
+            window(),
+            &[candidate('a', "Alpha council", 1_700_000_000_000)],
+            &[],
+        )
+        .unwrap(),
+    );
+    let shifted = plan(
+        derive_materialization_intent(
+            &search(),
+            &block(),
+            &rule(),
+            MaterializationWindow {
+                starts_at_utc_ms: 1_767_300_000_000,
+                ends_at_utc_ms: 1_768_435_200_000,
+            },
+            &[candidate('a', "Alpha council", 1_700_000_000_000)],
+            &[],
+        )
+        .unwrap(),
+    );
+    let first_proposed = first
+        .outcomes
+        .iter()
+        .find_map(|outcome| match outcome {
+            SlotMaterializationOutcome::Proposed(occurrence) => Some(occurrence),
+            _ => None,
+        })
+        .unwrap();
+    let shifted_proposed = shifted
+        .outcomes
+        .iter()
+        .find_map(|outcome| match outcome {
+            SlotMaterializationOutcome::Proposed(occurrence) => Some(occurrence),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(first_proposed.occurrence_id, shifted_proposed.occurrence_id);
+    assert_eq!(first_proposed.asset_sha256, sha('a'));
+}
+
+#[test]
+fn no_match_disabled_and_seasonal_blocks_are_explicit() {
+    assert!(matches!(
+        derive_materialization_intent(&search(), &block(), &rule(), window(), &[], &[]).unwrap(),
+        MaterializationOutcome::Plan(plan) if plan.outcomes.iter().all(|outcome| matches!(outcome, SlotMaterializationOutcome::NoMatch { .. }))
+    ));
+    let mut disabled = rule();
+    disabled.enabled = false;
+    assert!(matches!(
+        derive_materialization_intent(
+            &search(),
+            &block(),
+            &disabled,
+            window(),
+            &[candidate('a', "Alpha council", 1_700_000_000_000)],
+            &[]
+        )
+        .unwrap(),
+        MaterializationOutcome::Plan(plan) if plan.outcomes.iter().all(|outcome| matches!(outcome, SlotMaterializationOutcome::Blocked { .. }))
+    ));
+    let mut seasonal = block();
+    seasonal.season_starts_on = Some(LocalDate {
         year: 2026,
-        month: 3,
-        day: 8,
-    };
-    gap_rule.weekday_mask = 1 << 6;
-    gap_rule.local_start_minute = 150;
-    let mut gap_block = block();
-    gap_block.starts_local_minute = 0;
-    gap_block.ends_local_minute = 240;
-    let gap_window = MaterializationWindow {
-        starts_at_utc_ms: 1_772_928_000_000,
-        ends_at_utc_ms: 1_774_137_600_000,
-    };
-    assert!(derive_materialization_intent(&search(), &gap_block, &gap_rule, gap_window).is_err());
+        month: 2,
+        day: 1,
+    });
+    seasonal.season_ends_on = Some(LocalDate {
+        year: 2026,
+        month: 2,
+        day: 28,
+    });
+    assert!(matches!(
+        derive_materialization_intent(
+            &search(),
+            &seasonal,
+            &rule(),
+            window(),
+            &[candidate('a', "Alpha council", 1_700_000_000_000)],
+            &[]
+        )
+        .unwrap(),
+        MaterializationOutcome::Plan(plan) if plan.outcomes.iter().all(|outcome| matches!(outcome, SlotMaterializationOutcome::Blocked { .. }))
+    ));
 }
 
 #[test]
-fn positive_revision_two_successor_requires_exact_new_dependencies() {
-    let current = rule();
-    let mut next_search = search();
-    next_search.revision = 2;
-    let mut next = current.clone();
-    next.revision = 2;
-    next.saved_search_revision = 2;
+fn mixed_season_window_keeps_proposed_and_blocked_slots() {
+    let mut seasonal = block();
+    seasonal.season_starts_on = Some(LocalDate {
+        year: 2026,
+        month: 1,
+        day: 8,
+    });
+    seasonal.season_ends_on = Some(LocalDate {
+        year: 2026,
+        month: 1,
+        day: 31,
+    });
+    let plan = plan(
+        derive_materialization_intent(
+            &search(),
+            &seasonal,
+            &rule(),
+            window(),
+            &[candidate('a', "Alpha council", 1_700_000_000_000)],
+            &[],
+        )
+        .unwrap(),
+    );
     assert!(
-        next.validate_successor_of(&current, 1, &search(), &block(), &next_search, &block(),)
-            .is_ok()
+        plan.outcomes
+            .iter()
+            .any(|outcome| matches!(outcome, SlotMaterializationOutcome::Blocked { .. }))
+    );
+    assert!(
+        plan.outcomes
+            .iter()
+            .any(|outcome| matches!(outcome, SlotMaterializationOutcome::Proposed(_)))
+    );
+    assert!(plan.draft_intent.is_some());
+}
+
+#[test]
+fn v2_domains_are_explicit() {
+    let source = canonical_source_bytes(&search(), &block(), &rule()).unwrap();
+    let plan = plan(
+        derive_materialization_intent(
+            &search(),
+            &block(),
+            &rule(),
+            window(),
+            &[candidate('a', "Alpha council", 1_700_000_000_000)],
+            &[],
+        )
+        .unwrap(),
+    );
+    let intent = plan.draft_intent.unwrap();
+    assert_eq!(
+        hex(&source),
+        "1c00000000000000746f776e6c696768742e7363686564756c652d736f757263652e76320200240000000000000030303030303030302d303030302d343030302d383030302d303030303030303030303031240000000000000030303030303030302d303030302d343030302d383030302d303030303030303030303032240000000000000030303030303030302d303030302d343030302d383030302d3030303030303030303030330100000000000000000800010000000500000000000000746f706963040700000000000000636f756e63696c00000000240000000000000030303030303030302d303030302d343030302d383030302d303030303030303030303034240000000000000030303030303030302d303030302d343030302d383030302d3030303030303030303030320f000000000000005765656b6e69676874206369766963380428057f00000000000100000000000000240000000000000030303030303030302d303030302d343030302d383030302d303030303030303030303035240000000000000030303030303030302d303030302d343030302d383030302d303030303030303030303032240000000000000030303030303030302d303030302d343030302d383030302d303030303030303030303031240000000000000030303030303030302d303030302d343030302d383030302d30303030303030303030303401000000000000000100000000000000000e000100000801ea07010105000000000000006e616d65640e00000000000000416d65726963612f44656e76657207000000000000006561726c69657274043c000100000000000000"
+    );
+    assert_eq!(
+        hex(&canonical_intent_bytes(&intent)),
+        "2300000000000000746f776e6c696768742e6d6174657269616c697a6174696f6e2d696e74656e742e76320200240000000000000030303030303030302d303030302d343030302d383030302d303030303030303030303035240000000000000030303030303030302d303030302d343030302d383030302d303030303030303030303032240000000000000030303030303030302d303030302d343030302d383030302d3030303030303030303030340100000000000000010000000000000000a8da769b01000000b0f3be9b010000400000000000000063303564643065323230333431643866613463353839373766306134376162313136616438396462313161623432666232613435303337343561616534353339020000004000000000000000396265636439623131613536333465346261386339333863353830383031303139663266613839326266643830633966653565363565356632646265643534304000000000000000616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161610d00000000000000416c70686120636f756e63696cea07010174040e00000000000000416d65726963612f44656e766572909dffff00e16e7c9b01000080cfa57c9b010000004000000000000000303630666165393635303061376363363130313038303333316563393065376138373134323461383030303665623933373539383739656235346465663664624000000000000000616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161610d00000000000000416c70686120636f756e63696cea07010874040e00000000000000416d65726963612f44656e766572909dffff00657ba09b0100008053b2a09b01000000"
+    );
+    assert!(
+        source
+            .windows(b"townlight.schedule-source.v2".len())
+            .any(|part| part == b"townlight.schedule-source.v2")
+    );
+    assert!(
+        canonical_intent_bytes(&intent)
+            .windows(b"townlight.materialization-intent.v2".len())
+            .any(|part| part == b"townlight.materialization-intent.v2")
     );
 }
 
 #[test]
-fn interval_two_mixed_weekdays_honor_half_open_window_boundaries() {
-    let mut mixed = rule();
-    mixed.interval_weeks = 2;
-    mixed.weekday_mask = (1 << 3) | (1 << 4);
-    let boundary_window = MaterializationWindow {
-        starts_at_utc_ms: 1_767_319_200_000,
-        ends_at_utc_ms: 1_767_405_600_000,
+fn horizon_and_block_allow_list_fail_closed_at_boundaries() {
+    let candidate = candidate('a', "Alpha council", 1_700_000_000_000);
+    let mut fourteen = rule();
+    fourteen.rolling_window_days = 14;
+    let within = MaterializationWindow {
+        starts_at_utc_ms: 1_767_225_600_000,
+        ends_at_utc_ms: 1_768_435_200_000,
     };
-    let intent =
-        derive_materialization_intent(&search(), &block(), &mixed, boundary_window).unwrap();
-    assert_eq!(intent.resolved_slots().len(), 1);
-    assert_eq!(intent.resolved_slots()[0].0, 1_767_319_200_000);
+    assert!(
+        derive_materialization_intent(
+            &search(),
+            &block(),
+            &fourteen,
+            within,
+            std::slice::from_ref(&candidate),
+            &[],
+        )
+        .is_ok()
+    );
+    let past = MaterializationWindow {
+        starts_at_utc_ms: 1_767_225_600_000,
+        ends_at_utc_ms: 1_768_435_200_001,
+    };
+    assert!(
+        derive_materialization_intent(
+            &search(),
+            &block(),
+            &fourteen,
+            past,
+            std::slice::from_ref(&candidate),
+            &[],
+        )
+        .is_err()
+    );
+    let mut sixty = rule();
+    sixty.rolling_window_days = 60;
+    let sixty_window = MaterializationWindow {
+        starts_at_utc_ms: 1_767_225_600_000,
+        ends_at_utc_ms: 1_772_409_600_000,
+    };
+    assert!(
+        derive_materialization_intent(
+            &search(),
+            &block(),
+            &sixty,
+            sixty_window,
+            std::slice::from_ref(&candidate),
+            &[],
+        )
+        .is_ok()
+    );
+    let mut denied = block();
+    denied.allow_rule_ids = vec![id("06")];
+    assert!(
+        derive_materialization_intent(&search(), &denied, &rule(), window(), &[candidate], &[])
+            .is_err()
+    );
+}
 
-    let skipped_week = MaterializationWindow {
-        starts_at_utc_ms: 1_767_924_000_000,
-        ends_at_utc_ms: 1_768_010_400_000,
+#[test]
+fn overlap_arbitration_uses_priority_then_rule_id() {
+    let first = RuleSlotCandidate {
+        rule_id: id("05"),
+        priority: 3,
+        starts_at_utc_ms: 100,
+        ends_at_utc_ms: 200,
     };
-    assert!(derive_materialization_intent(&search(), &block(), &mixed, skipped_week).is_err());
+    let higher = RuleSlotCandidate {
+        rule_id: id("06"),
+        priority: 4,
+        starts_at_utc_ms: 150,
+        ends_at_utc_ms: 250,
+    };
+    let outcome = arbitrate_rule_slots(&[first.clone(), higher.clone()]).unwrap();
+    assert!(
+        matches!(&outcome[0], ArbitrationOutcome::Winner { rule_id, .. } if rule_id == &higher.rule_id)
+    );
+    assert!(matches!(
+        &outcome[1],
+        ArbitrationOutcome::SuppressedByHigherPriority {
+            rule_id,
+            winner_rule_id,
+            ..
+        } if rule_id == &first.rule_id && winner_rule_id == &higher.rule_id
+    ));
+    let later_id = RuleSlotCandidate {
+        rule_id: id("07"),
+        priority: 3,
+        starts_at_utc_ms: 150,
+        ends_at_utc_ms: 250,
+    };
+    let tie = arbitrate_rule_slots(&[later_id, first.clone()]).unwrap();
+    assert!(
+        matches!(&tie[0], ArbitrationOutcome::Winner { rule_id, .. } if rule_id == &first.rule_id)
+    );
 }
