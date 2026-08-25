@@ -75,6 +75,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   snapshot works under the ordinary user token instead of requiring elevated CIM access. Read-only
   checks now report `none_observed`, exact TownLight ownership, or `external_or_unclaimed` instead
   of calling an idle instant "available"; every observed process remains a no-touch launch blocker.
+  The clean-install harness uses that guard as its only launch path, mounts only the exact candidate,
+  installer verifier, and guest harness as separate read-only inputs, writes only to a dedicated
+  TownLight ProgramData evidence boundary, authenticates the exact clean commit and installer on
+  both sides, and waits for guest-authored evidence without terminating the shared Sandbox host.
 
 - Windows development Cargo execution now starts through a checked-in GStreamer environment wrapper,
   with the target runner retained as a second fail-closed boundary, preventing test binaries and their

@@ -185,6 +185,13 @@ record matches that same exact identity. Claude-owned processes and files are a 
 fence, regardless of apparent age or state. See
 [ADR 0045](docs/adr/0045-shared-windows-sandbox-ownership.md).
 
+The clean-machine installer gate is `scripts/prove-clean-install-in-owned-sandbox.ps1`. It requires
+one clean source commit and an exact matching candidate manifest, then performs the atomic ownership
+check and launch through the guard. The guest receives only read-only candidate, verifier, and
+harness mappings; its sole host-writable boundary is
+`%ProgramData%\TownLight Station\SandboxEvidence`. The guest shuts itself down after atomically
+publishing evidence. A host timeout never terminates or adopts the shared Sandbox.
+
 Run formatting, linting, and tests before committing:
 
 ```powershell
