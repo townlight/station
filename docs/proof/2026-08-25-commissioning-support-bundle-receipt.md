@@ -43,9 +43,19 @@ The completed end-to-end test now proves all three states:
 - TypeScript and Vite production build passed.
 - Warning-denied Clippy passed for all `station-storage` and `station-api` targets and features.
 
-## Remaining installed boundary
+## Installed candidate
 
-The exact committed candidate still requires release packaging and installed-machine verification.
-The preserved installed station currently has no operator account, so an authenticated live
-commissioning-chain exercise requires owner-selected credentials and is not claimed by this source
-proof.
+Clean source commit `3b3bd7f0235377a9d1f7aa6882f2bab544a67ab3` produced installer SHA-256
+`fe04c75ff66e51f32ff68255d685ec3f36bc069f233f27a1c7c2c11759c14664`. The previous application,
+private runtime, and services were uninstalled while the 1,220,608-byte station database remained
+present. The exact candidate then completed its health-gated clean installation.
+
+`installer/verify-installed.ps1` exited zero with both services running automatically as
+LocalSystem, health ready, all three installed binary hashes matching the candidate manifest,
+installed and active-slot receipts matching the source commit, the private-runtime manifest
+matching, and all required media factories ready. Opening the preserved database under the new
+service also proves the feature schema initialized after the legacy commit-report migrations.
+
+An authenticated live commissioning-chain exercise remains unclaimed. `GET /api/v1/auth/status`
+reports `bootstrap_required`; creating the first operator account requires owner-selected
+credentials and is outside this proof slice.
