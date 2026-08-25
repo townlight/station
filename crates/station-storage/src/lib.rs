@@ -11702,8 +11702,15 @@ fn bind_text(
     index: c_int,
     value: &CString,
 ) -> Result<(), String> {
-    let status =
-        unsafe { sqlite3_bind_text(statement, index, value.as_ptr(), -1, ptr::null_mut()) };
+    let status = unsafe {
+        sqlite3_bind_text(
+            statement,
+            index,
+            value.as_ptr(),
+            -1,
+            sqlite_transient_destructor(),
+        )
+    };
     if status == SQLITE_OK {
         Ok(())
     } else {
@@ -11739,7 +11746,7 @@ fn bind_blob(
             index,
             value.as_ptr().cast(),
             byte_count,
-            ptr::null_mut(),
+            sqlite_transient_destructor(),
         )
     };
     if status == SQLITE_OK {
@@ -11747,6 +11754,13 @@ fn bind_blob(
     } else {
         Err(sqlite_error(database))
     }
+}
+
+fn sqlite_transient_destructor() -> *mut c_void {
+    // SQLite defines the all-bits-one destructor sentinel as SQLITE_TRANSIENT: it copies the
+    // bound bytes before returning. Generic bind helpers cannot require every caller's buffer to
+    // outlive a later sqlite3_step, and digest accessors commonly return references to temporaries.
+    ptr::without_provenance_mut(usize::MAX)
 }
 
 fn expect_done(database: *mut Sqlite3, statement: *mut SqliteStatement) -> Result<(), String> {

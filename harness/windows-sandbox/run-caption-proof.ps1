@@ -29,9 +29,26 @@ $result = [ordered]@{
     installer_sha256 = $null
     fixture_sha256 = $null
     verifier = $null
+    auth_diagnostics = [ordered]@{
+        before_bootstrap = $null
+        after_bootstrap = $null
+        after_failure = $null
+    }
     caption_job = $null
     caption_proof = $null
     error = $null
+}
+
+function Get-StationServiceIdentity {
+    $service = Get-CimInstance -ClassName Win32_Service -Filter "Name='TownLightStation'"
+    if ($null -eq $service -or $service.State -ne 'Running' -or [uint32]$service.ProcessId -eq 0) {
+        throw 'TownLight station service identity is unavailable during authentication proof.'
+    }
+    $process = Get-Process -Id ([uint32]$service.ProcessId) -ErrorAction Stop
+    [ordered]@{
+        process_id = [uint32]$service.ProcessId
+        process_start_utc = $process.StartTime.ToUniversalTime().ToString('o')
+    }
 }
 
 function Invoke-Api {
@@ -264,6 +281,7 @@ try {
     $capability = $rawCapability.Substring(0, 43)
     $proofCredential = New-RandomProofCredential
     $bootstrapResponse = $null
+    $result.auth_diagnostics.before_bootstrap = Get-StationServiceIdentity
     try {
         $bootstrapBody = [ordered]@{
             capability = $capability
@@ -274,6 +292,13 @@ try {
         $bootstrapResponse = Invoke-Api -Method Post -Path '/auth/bootstrap' `
             -Body $bootstrapBody -TimeoutSec 20 -Unauthenticated -IncludeResponseHeaders
         $bootstrapDocument = $bootstrapResponse.Document
+        $result.auth_diagnostics.after_bootstrap = Get-StationServiceIdentity
+        if ($result.auth_diagnostics.after_bootstrap.process_id -ne
+            $result.auth_diagnostics.before_bootstrap.process_id -or
+            $result.auth_diagnostics.after_bootstrap.process_start_utc -ne
+            $result.auth_diagnostics.before_bootstrap.process_start_utc) {
+            throw 'TownLight station service restarted while issuing bootstrap authority.'
+        }
         if ($bootstrapDocument.session.username -ne $proofCredential.Credential.UserName -or
             @($bootstrapDocument.session.roles | Where-Object { $_ -eq 'setup_admin' }).Count -ne 1) {
             throw 'Bootstrap response did not establish the exact Setup Admin identity.'
@@ -472,6 +497,8 @@ try {
 }
 catch {
     $result.error = $_.Exception.Message
+    try { $result.auth_diagnostics.after_failure = Get-StationServiceIdentity }
+    catch { $result.auth_diagnostics.after_failure = [ordered]@{ unavailable = $true } }
 }
 finally {
     $apiCookieHeader = $null
