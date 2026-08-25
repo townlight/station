@@ -1727,6 +1727,7 @@ dependencies = [
  "station-live",
  "station-maintenance",
  "station-media-lifecycle",
+ "station-metadata",
  "station-readiness",
  "station-recording",
  "station-schedule",
@@ -1982,6 +1983,15 @@ name = "station-schedule"
 version = "0.1.0"
 dependencies = [
  "serde",
+]
+
+[[package]]
+name = "station-schedule-automation"
+version = "0.1.0"
+dependencies = [
+ "jiff",
+ "serde",
+ "sha2",
 ]
 
 [[package]]

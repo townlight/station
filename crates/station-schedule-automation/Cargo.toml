@@ -1,0 +1,10 @@
+[package]
+name = "station-schedule-automation"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+jiff.workspace = true
+serde.workspace = true
+sha2.workspace = true

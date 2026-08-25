@@ -32,6 +32,7 @@ members = [
     "crates/station-readiness",
     "crates/station-reporting",
     "crates/station-schedule",
+    "crates/station-schedule-automation",
     "crates/station-subscriptions",
     "crates/station-live",
     "crates/station-feed-normalization",
@@ -93,6 +94,7 @@ station-publishing = { path = "crates/station-publishing" }
 station-runtime = { path = "crates/station-runtime" }
 station-readiness = { path = "crates/station-readiness" }
 station-schedule = { path = "crates/station-schedule" }
+station-schedule-automation = { path = "crates/station-schedule-automation" }
 station-feed-normalization = { path = "crates/station-feed-normalization" }
 station-feed-fetch = { path = "crates/station-feed-fetch" }
 station-support = { path = "crates/station-support" }
