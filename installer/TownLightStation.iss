@@ -473,6 +473,24 @@ begin
   end;
 end;
 
+procedure PrepareSilentOperatorAuthentication;
+var
+  AuthState: Integer;
+begin
+  AuthState := QueryAuthState;
+  if (AuthState = AuthStateLoginRequired) or
+    (AuthState = AuthStateAuthenticated) then
+  begin
+    DeleteBootstrapHandoff;
+    BootstrapHandoffOwned := False;
+    Exit;
+  end;
+  if AuthState <> AuthStateBootstrapRequired then
+    RaiseException('TownLight Station returned an unsupported authentication state.');
+  RejectCrashRemnantHandoff;
+  IssueBootstrapHandoff;
+end;
+
 procedure PrepareOperatorAuthentication;
 var
   AuthState: Integer;
@@ -819,7 +837,10 @@ begin
       WriteInstallReceipt;
       WriteActiveSlotReceipt;
       CreateAndStartUpdaterService;
-      PrepareOperatorAuthentication;
+      if WizardSilent then
+        PrepareSilentOperatorAuthentication
+      else
+        PrepareOperatorAuthentication;
       CandidateActivated := True;
     except
       RollbackInstallation;

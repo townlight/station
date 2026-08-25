@@ -79,6 +79,8 @@ $requirements = [ordered]@{
     'recognizes uncertain station service creation' = 'StationServiceExistedBeforeCreate'
     'recognizes uncertain updater service creation' = 'UpdaterServiceExistedBeforeCreate'
     'auth-state-gates installation activation' = 'PrepareOperatorAuthentication'
+    'unattended setup has a noninteractive authentication boundary' = 'procedure PrepareSilentOperatorAuthentication;'
+    'unattended setup selects that boundary explicitly' = 'if WizardSilent then'
     'rolls back a failed service activation' = 'RollbackService'
     'removes the station service on uninstall' = 'StopAndDeleteServiceIfPresent(StationServiceName)'
     'removes the updater service on uninstall' = 'StopAndDeleteServiceIfPresent(UpdaterServiceName)'
@@ -124,6 +126,20 @@ if ($healthGate -lt 0 -or $authGate -le $healthGate) {
 $activation = $source.LastIndexOf('CandidateActivated := True;')
 if ($activation -le $authGate) {
     throw 'Installer marks activation successful before authentication state is resolved.'
+}
+
+$silentAuthStart = $source.IndexOf('procedure PrepareSilentOperatorAuthentication;')
+$interactiveAuthStart = $source.IndexOf('procedure PrepareOperatorAuthentication;')
+if ($silentAuthStart -lt 0 -or $interactiveAuthStart -le $silentAuthStart) {
+    throw 'Installer unattended authentication boundary could not be isolated.'
+}
+$silentAuth = $source.Substring($silentAuthStart, $interactiveAuthStart - $silentAuthStart)
+if (-not $silentAuth.Contains('IssueBootstrapHandoff;')) {
+    throw 'Installer unattended first-run path does not provision protected bootstrap authority.'
+}
+if ($silentAuth.Contains('LaunchOperatorUrl') -or
+    $silentAuth.Contains('ReadDeleteAndLaunchBootstrap')) {
+    throw 'Installer unattended authentication boundary can launch an interactive operator console.'
 }
 
 $preflightStart = $source.IndexOf('function ExistingProductInstallationDetected: Boolean;')

@@ -121,3 +121,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Self-contained elevated Windows installer with a hash-pinned private GStreamer runtime, delayed-auto service recovery, activation health gate, immutable candidate receipt, failed-install rollback, uninstall, and station-data-preserving reinstall proof.
 - HTTP `Expect: 100-continue` support so standard Windows clients can submit API bodies without a request-body deadlock.
 - Blocking per-client sockets behind the cooperative nonblocking listener, eliminating a Windows race that aborted clients which did not send request bytes immediately after connecting.
+
+### Fixed
+
+- Unattended clean installation no longer rolls back a healthy, exact candidate merely because the
+  host cannot launch an interactive browser. Silent setup still queries the service-owned auth
+  state and provisions the same protected one-time bootstrap authority, but leaves that authority
+  in its ACL-protected handoff instead of exposing it or making console launch an activation gate.
