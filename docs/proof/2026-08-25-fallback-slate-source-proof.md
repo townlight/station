@@ -1,7 +1,7 @@
 # Fallback slate source proof — 2026-08-25
 
-This source slice proves the fallback-slate authority and worker boundary; it is not installed or
-field evidence.
+This source slice proves the fallback-slate authority and worker boundary. The exact binaries from
+this source were subsequently installed and verified; field evidence remains separate.
 
 - Storage tests prove stopped-channel enforcement, current file verification, compare-and-swap
   conflict behavior, revision persistence across reopen, and one append-only audit event per
@@ -18,5 +18,8 @@ field evidence.
 - Operator tests and the production Vite build cover stopped-channel selection, upload, CAS save,
   current readiness, actor/time, and audit-count presentation.
 
-An exact installer build, installed-service verification, decoded-pixel capture, and clean-machine
-exercise remain pending and must not be inferred from this source proof.
+The exact installer and installed-service results are recorded in
+[the installed fallback-slate candidate proof](2026-08-25-installed-fallback-slate.md). The decoded
+pixel capture above is a source-built native worker proof, not an authenticated installed-operator
+selection. Clean-machine and field exercises remain pending and must not be inferred from either
+record.
