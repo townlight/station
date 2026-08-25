@@ -152,6 +152,105 @@ fn accepts_a_typed_caption_cue_without_interrupting_transport() {
     fs::remove_dir_all(root).unwrap();
 }
 
+#[test]
+fn clears_a_prequeued_caption_across_a_program_to_fallback_transition_without_stalling_transport() {
+    let _guard = persistent_graph_test_guard();
+    let root = test_root("caption-transition-clear");
+    let source = root.join("incoming.ts");
+    let library = root.join("library");
+    let proof_root = root.join("output-proofs");
+    fs::create_dir_all(&root).unwrap();
+    generate_fixture(&source, "smpte");
+    let asset = ingest_media(&source, &library).expect("the real A/V file must ingest");
+
+    let receiver = UdpSocket::bind("127.0.0.1:0").unwrap();
+    receiver
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    let sink_id = "7ef1430d-a35c-49f7-91f0-d03cc96bf4af";
+    let mut playout =
+        PersistentPlayout::start_configured_outputs_with_profile_roots_and_authorities(
+            &[ConfiguredTransportOutput::udp_identified(
+                sink_id,
+                receiver.local_addr().unwrap(),
+                LoudnessTarget::CABLE,
+            )],
+            OutputProfileId::Proof360p30,
+            None,
+            Some(&proof_root),
+            None,
+            Some(&WorkerCaptionPolicy {
+                mode: WorkerCaptionMode::Cea708,
+                service_number: 1,
+                language: "en-US".into(),
+                revision: 1,
+            }),
+        )
+        .expect("caption-capable output graph starts");
+    prepare_while_draining_output(&receiver, &mut playout, |playout| {
+        playout.load_asset(&asset.asset_id, &asset.stored_path)
+    })
+    .expect("the validated stored asset must load");
+    playout.take_program_at(0).unwrap();
+
+    let proof_id = "a1f80660-c73a-4ac3-b815-ed9e863c14e7";
+    playout
+        .start_output_capture(OutputCaptureRequest {
+            proof_id: proof_id.into(),
+            output_index: 0,
+            sink_id: sink_id.into(),
+            loudness_target: LoudnessTarget::CABLE,
+            duration_ms: 4_000,
+            max_bytes: 8 * 1024 * 1024,
+        })
+        .expect("post-mux capture starts before the source transition");
+    playout
+        .push_caption_cue(&CaptionCue {
+            cue_id: "4fefcd4e-cfa1-4f62-a810-3d4fa53d2cb7".into(),
+            start_after_ms: 1_200,
+            duration_ms: 1_000,
+            text: "stale program caption".into(),
+        })
+        .expect("the future program caption queues");
+    let bytes_before_switch = playout.output_bytes_sent().unwrap()[0];
+    playout
+        .clear_caption_cues()
+        .expect("caption-only reset is accepted before the source transition");
+    playout.select(SourceRole::Fallback).unwrap();
+    playout
+        .push_caption_cue(&CaptionCue {
+            cue_id: "4fefcd4e-cfa1-4f62-a810-3d4fa53d2cb8".into(),
+            start_after_ms: 250,
+            duration_ms: 1_000,
+            text: "post-switch caption".into(),
+        })
+        .expect("the caption branch accepts a cue after its clear");
+
+    let deadline = Instant::now() + Duration::from_secs(12);
+    let ready = loop {
+        assert!(Instant::now() < deadline, "caption capture did not finish");
+        match playout.poll_output_capture(proof_id).unwrap() {
+            OutputCaptureStatus::Pending { .. } => std::thread::sleep(Duration::from_millis(50)),
+            OutputCaptureStatus::Ready(ready) => break ready,
+            OutputCaptureStatus::Failed { code, message, .. } => {
+                panic!("caption capture failed: {code}: {message}")
+            }
+        }
+    };
+    assert!(
+        playout.output_bytes_sent().unwrap()[0] > bytes_before_switch,
+        "caption clear must not stall post-switch transport"
+    );
+    playout.stop().unwrap();
+    let artifact = proof_root.join(&ready.artifact_relative_path);
+    let decoded = decode_output_captions(&artifact, ffmpeg_executable())
+        .expect("independent caption decode-back succeeds");
+    let expected = canonical_caption_text_sha256(&["post-switch caption".into()]).unwrap();
+    assert_eq!(decoded.cue_count, 1, "a pre-switch cue must not leak");
+    assert_eq!(decoded.text_sha256, expected);
+    fs::remove_dir_all(root).unwrap();
+}
+
 fn ffmpeg_executable() -> PathBuf {
     if let Some(path) = std::env::var_os("TOWNLIGHT_FFMPEG") {
         return PathBuf::from(path);

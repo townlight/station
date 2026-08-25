@@ -10,6 +10,14 @@ bootstrap: disabled/CEA-708 mode, service number, language, and policy revision 
 boundary before the worker reports Ready. The worker derives the actual presentation timestamp from
 its running graph clock; callers cannot inject a wall-clock or arbitrary media timestamp.
 
+Protocol version 8 adds mandatory `ClearCaptionCues` / `CaptionCuesCleared` before every source-role
+transition. Orchestration prequeues active and bounded-future cues. The acknowledged clear
+synchronously removes them before the transition and then invalidates acknowledged cue state.
+Orchestration surfaces any cue that expires before worker admission as transient runtime detail.
+That detail is not durable incident/readiness authority. This is deliberately
+a major-version change: a pre-v8 worker cannot safely participate in
+source transitions because it cannot clear the CEA-708 display state.
+
 The graph converts timed text directly to the configured CEA-708 service, includes CEA-608 compatibility bytes,
 schedules caption metadata against video frames, inserts that metadata as H.264 SEI, reparses the
 stream, and only then fans the same encoded video into the per-loudness MPEG-TS variants. Caption

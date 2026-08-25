@@ -8,8 +8,8 @@ committed schedule window. It reads the channel's durable CEA-708 language/servi
 one current asset track occupying that exact language/service slot. Disabled policy or no matching
 track means no cue is expected; it never fabricates caption presence.
 
-Each controller tick skips expired cues, resumes a cue already active at the current media offset
-with zero delay and only its remaining duration, and sends future cues only within the worker
+Each controller tick surfaces expired cues as transient runtime detail, resumes a cue already active at the current media offset
+with zero delay and only its remaining duration, and prequeues future cues within the worker
 protocol's bounded sixty-second relative-delay window. A tick sends at most 64 cues. The worker
 derives presentation timestamps from its running graph clock, acknowledges every canonical cue
 identity, and a missing or mismatched acknowledgment fails the channel visibly. In-memory accepted
@@ -25,7 +25,8 @@ cue authority underneath the cursor.
 
 A `CaptionCueAccepted` event proves only that the isolated worker accepted the server-derived cue.
 It does not prove MPEG-TS insertion, decode-back, headend carriage, viewer display, or FCC compliance.
-Those require current candidate/configuration/policy/track-bound output evidence. An asset without a
+Those require current candidate/configuration/policy/track-bound output evidence. Expired-cue runtime
+detail is not yet a durable incident or safe-to-air readiness authority. An asset without a
 matching reviewed track stays explicitly uncaptioned rather than causing unrelated program playout
 to fail.
 
@@ -35,5 +36,5 @@ to fail.
 - Catch-up after delayed take or worker replacement is deterministic from the committed schedule.
 - Live takeover suspends schedule dispatch; handback re-derives due cues from the current media
   offset.
-- Immediate downstream cancellation of an already accepted long-duration cue at an unscheduled
-  source transition remains part of the exact-output clearing/proof lane.
+- Every source-role transition synchronously clears already accepted future cues before the new
+  source is selected.

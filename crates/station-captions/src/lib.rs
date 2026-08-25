@@ -4,6 +4,10 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 pub const MAX_CAPTION_CUES_PER_TRACK: usize = 100_000;
+/// A caption cue has a finite, positive duration. Runtime scheduling surfaces
+/// cues that expire before admission only as transient runtime detail; it is
+/// not durable incident/readiness authority.
+pub const MIN_CAPTION_CUE_DURATION_MS: u64 = 1;
 pub const MAX_CAPTION_CUE_DURATION_MS: u64 = 60_000;
 pub const MAX_CAPTION_CUE_TEXT_BYTES: usize = 2_048;
 pub const MAX_CAPTION_PROOF_CAPTURE_DURATION_MS: u64 = 120_000;
@@ -545,8 +549,10 @@ fn validate_cues(cues: &[AssetCaptionCue], asset_duration_ms: u64) -> Result<(),
         if !is_canonical_uuid(&cue.cue_id) || !cue_ids.insert(cue.cue_id.as_str()) {
             return Err("caption cue identities must be unique lowercase canonical UUIDs".into());
         }
-        if !(1..=MAX_CAPTION_CUE_DURATION_MS).contains(&cue.duration_ms) {
-            return Err("caption cue duration is outside the bounded range".into());
+        if !(MIN_CAPTION_CUE_DURATION_MS..=MAX_CAPTION_CUE_DURATION_MS).contains(&cue.duration_ms) {
+            return Err(format!(
+                "caption cue duration must be between {MIN_CAPTION_CUE_DURATION_MS} and {MAX_CAPTION_CUE_DURATION_MS} ms"
+            ));
         }
         if cue.text.is_empty()
             || cue.text.trim() != cue.text
@@ -853,6 +859,10 @@ mod tests {
         let mut zero_duration = write(vec![cue()]);
         zero_duration.cues[0].duration_ms = 0;
         assert!(zero_duration.validate(10_000).is_err());
+
+        let mut one_millisecond_duration = write(vec![cue()]);
+        one_millisecond_duration.cues[0].duration_ms = 1;
+        assert!(one_millisecond_duration.validate(10_000).is_ok());
 
         let mut unbounded_duration = write(vec![cue()]);
         unbounded_duration.cues[0].duration_ms = 60_001;

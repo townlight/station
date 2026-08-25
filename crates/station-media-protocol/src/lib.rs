@@ -74,7 +74,9 @@ impl<'de> Deserialize<'de> for LoudnessTarget {
 }
 
 pub const MAX_FRAME_BYTES: usize = 65_536;
-pub const PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion { major: 7, minor: 0 };
+// Caption clear is mandatory before every source-role transition. It is a
+// breaking worker capability, so mixed pre-v8 workers fail closed.
+pub const PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion { major: 8, minor: 0 };
 
 pub const MAX_OUTPUT_PROOF_INDEX: u16 = 255;
 // Operator-requested analyzable program is capped at ten minutes. The worker
@@ -102,6 +104,10 @@ pub const MAX_CG_SLOTS: usize = 8;
 pub const MAX_CG_TEXT_BYTES: usize = 2048;
 pub const MAX_CAPTION_TEXT_BYTES: usize = 2048;
 pub const MAX_CAPTION_START_AFTER_MS: u64 = 60_000;
+/// Mirrors the persisted finite positive-duration bound. The controller still
+/// surfaces cues that expire before worker admission as transient runtime
+/// detail; this is not durable incident/readiness authority.
+pub const MIN_CAPTION_DURATION_MS: u64 = 1;
 pub const MAX_CAPTION_DURATION_MS: u64 = 60_000;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -429,6 +435,7 @@ pub enum ChannelCommand {
     PushCaptionCue {
         cue: CaptionCue,
     },
+    ClearCaptionCues,
     LoadAsset {
         asset_id: String,
         media_path: String,
@@ -536,6 +543,7 @@ pub enum WorkerEvent {
     CaptionCueAccepted {
         cue_id: String,
     },
+    CaptionCuesCleared,
     CommandRejected {
         command_id: String,
         code: String,
@@ -618,6 +626,48 @@ mod tests {
         };
         let decoded = decode_command_frame(&encode_command_frame(&command).unwrap()).unwrap();
         assert_eq!(decoded, command);
+    }
+
+    #[test]
+    fn round_trips_caption_clear_command_and_acknowledgement() {
+        let command = CommandEnvelope {
+            version: PROTOCOL_VERSION,
+            channel_id: "channel-1".into(),
+            command_id: "caption-clear-1".into(),
+            expected_sequence: 4,
+            command: ChannelCommand::ClearCaptionCues,
+        };
+        let decoded = decode_command_frame(&encode_command_frame(&command).unwrap()).unwrap();
+        assert_eq!(decoded, command);
+
+        let event = WorkerEventEnvelope {
+            version: PROTOCOL_VERSION,
+            worker_id: "worker-1".into(),
+            channel_id: "channel-1".into(),
+            sequence: 5,
+            event: WorkerEvent::CaptionCuesCleared,
+        };
+        let decoded = decode_event_frame(&encode_event_frame(&event).unwrap()).unwrap();
+        assert_eq!(decoded, event);
+    }
+
+    #[test]
+    fn accepts_one_millisecond_caption_cues() {
+        let command = CommandEnvelope {
+            version: PROTOCOL_VERSION,
+            channel_id: "channel-1".into(),
+            command_id: "caption-cue-1".into(),
+            expected_sequence: 4,
+            command: ChannelCommand::PushCaptionCue {
+                cue: CaptionCue {
+                    cue_id: "11111111-1111-4111-8111-111111111111".into(),
+                    start_after_ms: 0,
+                    duration_ms: MIN_CAPTION_DURATION_MS,
+                    text: "short but valid".into(),
+                },
+            },
+        };
+        assert!(encode_command_frame(&command).is_ok());
     }
 }
 
@@ -1075,8 +1125,10 @@ fn validate_caption_command(command: &ChannelCommand) -> Result<(), String> {
     if cue.start_after_ms > MAX_CAPTION_START_AFTER_MS {
         return Err("caption cue start delay exceeds the bounded range".into());
     }
-    if cue.duration_ms == 0 || cue.duration_ms > MAX_CAPTION_DURATION_MS {
-        return Err("caption cue duration is outside the bounded range".into());
+    if !(MIN_CAPTION_DURATION_MS..=MAX_CAPTION_DURATION_MS).contains(&cue.duration_ms) {
+        return Err(format!(
+            "caption cue duration must be between {MIN_CAPTION_DURATION_MS} and {MAX_CAPTION_DURATION_MS} ms"
+        ));
     }
     if cue.text.trim().is_empty()
         || cue.text.len() > MAX_CAPTION_TEXT_BYTES

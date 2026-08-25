@@ -15,7 +15,9 @@ reporting Ready. Commissioning consumes the same authority plus green current ru
 slate and tones remain separate unfinished S11 work.
 
 The persistent worker is now caption-transport capable. Protocol v6 introduced one bounded typed
-cue; protocol v7 adds the durable stopped-channel caption policy to bootstrap before Ready. Setup
+cue; protocol v7 adds the durable stopped-channel caption policy to bootstrap before Ready; and
+protocol v8 requires an explicit CEA-708 caption clear before every source-role transition, so an
+older worker fails closed rather than leaving stale scheduled captions on air. Setup
 Admins configure CEA-708/disabled mode, service number, and language through an audited CAS API and
 operator workflow. The graph applies the configured service, rejects cues when captions are disabled
 or unconfigured, schedules enabled cues against video, and inserts CEA-708/608-compatibility H.264
@@ -42,7 +44,10 @@ loudness work, waits for the server-selected asset-relative start with a bounded
 revalidates on-air/schedule/candidate/configuration authority, atomically promotes the exact capture,
 and independently decodes it off the control loop. The installer carries a pinned hash-verified LGPL
 FFmpeg executable at a private absolute path; each proof records that executable's measured digest.
-Already-queued cue clearing at unscheduled source transitions, live ASR, and installed/field evidence remain separate work, so
+The controller prequeues active and bounded-future cues, and requires an acknowledged caption clear
+before every source-role transition to synchronously remove them. A cue that expires before worker
+admission is surfaced only as transient runtime detail; it is not yet a durable incident or safe-to-air readiness authority. Live ASR,
+that durable missed-cue authority, and installed/field evidence remain separate work, so
 commissioning still reports the caption authority as blocked.
 
 ## Architecture

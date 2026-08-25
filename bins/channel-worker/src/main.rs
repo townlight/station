@@ -614,6 +614,17 @@ fn decide_event(
                 false,
             ),
         },
+        ChannelCommand::ClearCaptionCues => match media.clear_caption_cues() {
+            Ok(()) => (WorkerEvent::CaptionCuesCleared, false),
+            Err(error) => (
+                rejection(
+                    command,
+                    "caption_clear_failed",
+                    &format!("The CEA-708 caption state could not be cleared: {error:?}"),
+                ),
+                false,
+            ),
+        },
         ChannelCommand::LoadAsset {
             asset_id,
             media_path,

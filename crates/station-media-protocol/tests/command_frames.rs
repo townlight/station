@@ -400,6 +400,17 @@ fn rejects_a_command_from_an_incompatible_future_major_version() {
 }
 
 #[test]
+fn rejects_a_pre_caption_clear_major_version() {
+    let mut command = take_live_command();
+    command.version = ProtocolVersion { major: 7, minor: 0 };
+    let frame = encode_command_frame(&command).expect("command encodes");
+    assert_eq!(
+        decode_command_frame(&frame),
+        Err(ProtocolError::UnsupportedMajor(7))
+    );
+}
+
+#[test]
 fn rejects_a_truncated_frame_before_deserialization() {
     let command = take_live_command();
     let mut frame = encode_command_frame(&command).expect("command encodes");

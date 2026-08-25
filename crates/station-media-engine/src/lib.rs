@@ -304,6 +304,8 @@ pub struct PersistentPlayout {
     output_capture_ingresses: Vec<Arc<CaptureIngress>>,
     proof_artifact_root: Option<PathBuf>,
     caption_source: gst::Element,
+    caption_encoder: gst::Element,
+    caption_queue: gst::Element,
     caption_enabled: bool,
     stopped: bool,
 }
@@ -1157,6 +1159,8 @@ impl PersistentPlayout {
             output_capture_ingresses,
             proof_artifact_root,
             caption_source,
+            caption_encoder,
+            caption_queue,
             caption_enabled: caption_policy.enabled,
             stopped: false,
         };
@@ -1223,6 +1227,161 @@ impl PersistentPlayout {
         flow.into_result().map(|_| ()).map_err(|error| {
             EngineError::CaptionPush(format!("caption source rejected cue: {error:?}"))
         })
+    }
+
+    /// Forces the CEA-708 encoder to emit a clear at the current graph time
+    /// without flushing the shared combiner, video, audio, or transport
+    /// branches.
+    pub fn clear_caption_cues(&mut self) -> Result<(), EngineError> {
+        if self.stopped {
+            return Err(EngineError::CaptionPush(
+                "caption clear requires a running graph".into(),
+            ));
+        }
+        if !self.caption_enabled {
+            return Ok(());
+        }
+        self.flush_caption_combiner_schedule()?;
+        // `tttocea708` turns a mode property update into a clear on its next
+        // input buffer. Reapplying pop-on preserves the configured rendering
+        // mode while requesting the explicit CEA-708 ClearWindows code that
+        // an empty timed-text buffer alone does not produce. The one blank
+        // cell makes pop-on commit an empty display window after that clear.
+        self.caption_encoder.set_property_from_str("mode", "pop-on");
+        let pts = self
+            .pipeline
+            .current_running_time()
+            .ok_or_else(|| EngineError::CaptionPush("caption graph has no running time".into()))?;
+        let mut buffer = gst::Buffer::from_mut_slice(b" ".to_vec());
+        {
+            let writable = buffer
+                .get_mut()
+                .ok_or_else(|| EngineError::CaptionPush("caption buffer is not writable".into()))?;
+            writable.set_pts(pts);
+            writable.set_duration(gst::ClockTime::from_mseconds(1));
+        }
+        self.caption_source
+            .emit_by_name::<gst::FlowReturn>("push-buffer", &[&buffer])
+            .into_result()
+            .map(|_| ())
+            .map_err(|error| {
+                EngineError::CaptionPush(format!("caption source rejected clear: {error:?}"))
+            })
+    }
+
+    fn flush_caption_combiner_schedule(&self) -> Result<(), EngineError> {
+        let source_pad = self
+            .caption_source
+            .static_pad("src")
+            .ok_or(EngineError::MissingPad {
+                element: "cea708-caption-source",
+                pad: "src",
+            })?;
+        let reset_segment = source_pad
+            .sticky_event::<gst::event::Segment>(0)
+            .map(gst::Event::from)
+            .unwrap_or_else(|| {
+                let canonical_time_segment = gst::FormattedSegment::<gst::ClockTime>::new();
+                gst::event::Segment::new(&canonical_time_segment)
+            });
+        // A cue may still be pending in appsrc or tttocea708 when a transition
+        // arrives. Reset from appsrc rather than the downstream queue so the
+        // complete caption-only chain discards that pending data. A first-cue
+        // race has no sticky segment yet, so send an explicit canonical TIME
+        // segment after FlushStop to resume the appsrc branch in either case.
+        let Some(drop_caption_data) = source_pad.add_probe(
+            gst::PadProbeType::BUFFER | gst::PadProbeType::BUFFER_LIST,
+            |_, _| gst::PadProbeReturn::Drop,
+        ) else {
+            return Err(EngineError::State(
+                "could not install the caption data reset guard".into(),
+            ));
+        };
+        // cccombiner clears its element-owned scheduled caption queues on a
+        // flush. Suppress only that pair at its src pad: caption state resets,
+        // but video/audio/mux/transport never receive a flush event.
+        let caption_queue_src =
+            self.caption_queue
+                .static_pad("src")
+                .ok_or(EngineError::MissingPad {
+                    element: "cea708-caption-queue",
+                    pad: "src",
+                });
+        let caption_queue_src = match caption_queue_src {
+            Ok(caption_queue_src) => caption_queue_src,
+            Err(error) => {
+                source_pad.remove_probe(drop_caption_data);
+                return Err(error);
+            }
+        };
+        let downstream = caption_queue_src.peer().ok_or_else(|| {
+            EngineError::PadLink("caption queue is not linked to cccombiner".into())
+        });
+        let downstream = match downstream {
+            Ok(downstream) => downstream,
+            Err(error) => {
+                source_pad.remove_probe(drop_caption_data);
+                return Err(error);
+            }
+        };
+        let combiner_src = downstream
+            .parent_element()
+            .and_then(|element| element.static_pad("src"))
+            .ok_or(EngineError::MissingPad {
+                element: "cccombiner",
+                pad: "src",
+            });
+        let combiner_src = match combiner_src {
+            Ok(combiner_src) => combiner_src,
+            Err(error) => {
+                source_pad.remove_probe(drop_caption_data);
+                return Err(error);
+            }
+        };
+        let Some(drop_flush_probe) = combiner_src.add_probe(
+            gst::PadProbeType::EVENT_DOWNSTREAM | gst::PadProbeType::EVENT_FLUSH,
+            |_, info| match info.data.as_ref() {
+                Some(gst::PadProbeData::Event(event))
+                    if matches!(
+                        event.view(),
+                        gst::EventView::FlushStart(_) | gst::EventView::FlushStop(_)
+                    ) =>
+                {
+                    gst::PadProbeReturn::Drop
+                }
+                _ => gst::PadProbeReturn::Ok,
+            },
+        ) else {
+            source_pad.remove_probe(drop_caption_data);
+            return Err(EngineError::State(
+                "could not install the caption-only flush guard".into(),
+            ));
+        };
+        let result = (|| {
+            // appsrc owns a serialized-event queue. Element-level send_event
+            // reaches its flush implementation and clears queued buffers;
+            // pushing directly on src_pad would bypass that queue.
+            if !self
+                .caption_source
+                .send_event(gst::event::FlushStart::new())
+                || !self
+                    .caption_source
+                    .send_event(gst::event::FlushStop::new(false))
+            {
+                return Err(EngineError::State(
+                    "caption source rejected the caption-only flush".into(),
+                ));
+            }
+            if !self.caption_source.send_event(reset_segment) {
+                return Err(EngineError::State(
+                    "caption source rejected the caption time segment after reset".into(),
+                ));
+            }
+            Ok(())
+        })();
+        source_pad.remove_probe(drop_caption_data);
+        combiner_src.remove_probe(drop_flush_probe);
+        result
     }
 
     pub fn output_bytes_sent(&self) -> Result<Vec<u64>, EngineError> {

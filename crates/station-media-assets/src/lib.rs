@@ -409,14 +409,20 @@ fn parse_srt_caption_texts(srt: &str) -> Result<Vec<String>, AssetError> {
             .ok_or_else(|| {
                 AssetError::Discovery("caption decoder returned malformed SRT".into())
             })?;
-        let text = lines[timestamp_index + 1..]
+        let raw_text = lines[timestamp_index + 1..]
             .iter()
             .map(|line| line.trim())
             .filter(|line| !line.is_empty())
             .collect::<Vec<_>>()
             .join("\n");
-        let text = normalize_ffmpeg_srt_presentation(&text);
+        let text = normalize_ffmpeg_srt_presentation(&raw_text);
         if text.is_empty() {
+            if is_ffmpeg_cea708_clear_window_record(&raw_text) {
+                // tttocea708 ClearWindows becomes this exact FFmpeg SRT
+                // presentation-only record. It is a valid state transition,
+                // not caption text, so omit it from canonical evidence.
+                continue;
+            }
             return Err(AssetError::Discovery(
                 "caption decoder returned an SRT cue without text".into(),
             ));
@@ -437,6 +443,10 @@ fn normalize_ffmpeg_srt_presentation(text: &str) -> String {
         .unwrap_or(text);
     let text = text.strip_suffix("</font>").unwrap_or(text);
     text.strip_prefix("{\\an7}").unwrap_or(text).to_string()
+}
+
+fn is_ffmpeg_cea708_clear_window_record(text: &str) -> bool {
+    text.trim() == "<font face=\"Monospace\">{\\an7}</font>"
 }
 
 struct TemporaryDecodeOutput(PathBuf);
@@ -976,9 +986,34 @@ mod tests {
     }
 
     #[test]
+    fn ignores_a_cea708_clear_window_record_before_textual_caption_evidence() {
+        let texts = parse_srt_caption_texts(
+            "1\n00:00:00,100 --> 00:00:00,101\n<font face=\"Monospace\">{\\an7}</font>\n\n2\n00:00:00,350 --> 00:00:01,350\n<font face=\"Monospace\">{\\an7}post-switch caption</font>\n",
+        )
+        .unwrap();
+        assert_eq!(texts, vec!["post-switch caption"]);
+    }
+
+    #[test]
+    fn rejects_an_srt_stream_containing_only_cea708_clear_window_records() {
+        let error = parse_srt_caption_texts(
+            "1\n00:00:00,100 --> 00:00:00,101\n<font face=\"Monospace\">{\\an7}</font>\n",
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            AssetError::Discovery(ref detail) if detail == "caption decoder returned no caption cues"
+        ));
+    }
+
+    #[test]
     fn rejects_empty_or_malformed_decoder_output() {
         assert!(parse_srt_caption_texts("").is_err());
         assert!(parse_srt_caption_texts("1\nno timestamp\ntext\n").is_err());
         assert!(parse_srt_caption_texts("1\n00:00:00,100 --> 00:00:01,000\n\n").is_err());
+        assert!(parse_srt_caption_texts(
+            "1\n00:00:00,100 --> 00:00:00,101\n\n2\n00:00:00,350 --> 00:00:01,350\ntext after malformed block\n"
+        )
+        .is_err());
     }
 }
