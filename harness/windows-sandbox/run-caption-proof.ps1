@@ -50,61 +50,114 @@ function Invoke-Api {
         $Path.Contains('..')) {
         throw 'Caption proof API path is invalid or unbounded.'
     }
-    $headers = @{ Cookie = $script:apiCookieHeader }
+    $headers = [ordered]@{ Cookie = $script:apiCookieHeader }
     if ($Method -ne 'Get') {
         $headers.Origin = $script:origin
         $headers['Sec-Fetch-Site'] = 'same-origin'
         $headers['X-TownLight-CSRF'] = $script:apiCsrfToken
     }
-    $request = [Net.HttpWebRequest]::Create("$($script:origin)/api/v1$Path")
-    $request.Method = $Method.ToUpperInvariant()
-    $request.Timeout = $TimeoutSec * 1000
-    $request.ReadWriteTimeout = $TimeoutSec * 1000
-    $request.AllowAutoRedirect = $false
-    $request.Accept = 'application/json'
-    foreach ($name in $headers.Keys) { $request.Headers[$name] = $headers[$name] }
     $requestBody = $null
     if ($null -ne $Body) {
-        $request.ContentType = 'application/json'
         $requestBody = [Text.UTF8Encoding]::new($false).GetBytes(
             ($Body | ConvertTo-Json -Depth 32 -Compress)
         )
-        $request.ContentLength = $requestBody.Length
-        $requestStream = $request.GetRequestStream()
-        try { $requestStream.Write($requestBody, 0, $requestBody.Length) }
-        finally { $requestStream.Dispose() }
+    } else {
+        $requestBody = [byte[]]::new(0)
     }
-    $response = $null
-    $reader = $null
+    $headerLines = [Collections.Generic.List[string]]::new()
+    $headerLines.Add("$($Method.ToUpperInvariant()) /api/v1$Path HTTP/1.1")
+    $headerLines.Add('Host: 127.0.0.1:4070')
+    $headerLines.Add('Accept: application/json')
+    $headerLines.Add('Connection: close')
+    foreach ($name in $headers.Keys) { $headerLines.Add("$name`: $($headers[$name])") }
+    if ($requestBody.Length -gt 0) { $headerLines.Add('Content-Type: application/json') }
+    $headerLines.Add("Content-Length: $($requestBody.Length)")
+    $requestHead = [Text.Encoding]::ASCII.GetBytes(($headerLines -join "`r`n") + "`r`n`r`n")
+    $requestBytes = [byte[]]::new($requestHead.Length + $requestBody.Length)
+    [Array]::Copy($requestHead, 0, $requestBytes, 0, $requestHead.Length)
+    if ($requestBody.Length -gt 0) {
+        [Array]::Copy($requestBody, 0, $requestBytes, $requestHead.Length, $requestBody.Length)
+    }
+    $client = [Net.Sockets.TcpClient]::new()
+    $stream = $null
+    $responseBuffer = $null
+    $responseBytes = $null
+    $connect = $null
     try {
-        $response = [Net.HttpWebResponse]$request.GetResponse()
-        $reader = [IO.StreamReader]::new(
-            $response.GetResponseStream(),
-            [Text.UTF8Encoding]::new($false),
-            $true,
-            4096,
-            $false
-        )
-        $content = $reader.ReadToEnd()
-        if ($content.Length -gt 16777216) {
-            throw 'Caption proof API response exceeded 16 MiB.'
+        $connect = $client.BeginConnect([Net.IPAddress]::Loopback, 4070, $null, $null)
+        if (-not $connect.AsyncWaitHandle.WaitOne($TimeoutSec * 1000)) {
+            throw 'Caption proof API loopback connection timed out.'
         }
-        if ([string]::IsNullOrWhiteSpace($content)) { return $null }
+        $client.EndConnect($connect)
+        $client.SendTimeout = $TimeoutSec * 1000
+        $client.ReceiveTimeout = $TimeoutSec * 1000
+        $stream = $client.GetStream()
+        $stream.Write($requestBytes, 0, $requestBytes.Length)
+        $stream.Flush()
+        $responseBuffer = [byte[]]::new(8192)
+        $responseMemory = [IO.MemoryStream]::new()
+        try {
+            while (($read = $stream.Read($responseBuffer, 0, $responseBuffer.Length)) -gt 0) {
+                if ($responseMemory.Length + $read -gt 16842752) {
+                    throw 'Caption proof API response exceeded its bounded size.'
+                }
+                $responseMemory.Write($responseBuffer, 0, $read)
+            }
+            $responseBytes = $responseMemory.ToArray()
+        }
+        finally { $responseMemory.Dispose() }
+        $headerEnd = -1
+        for ($index = 0; $index -le $responseBytes.Length - 4; $index++) {
+            if ($responseBytes[$index] -eq 13 -and $responseBytes[$index + 1] -eq 10 -and
+                $responseBytes[$index + 2] -eq 13 -and $responseBytes[$index + 3] -eq 10) {
+                $headerEnd = $index
+                break
+            }
+        }
+        if ($headerEnd -lt 0 -or $headerEnd -gt 65536) {
+            throw 'Caption proof API returned invalid or oversized HTTP headers.'
+        }
+        $responseHead = [Text.Encoding]::ASCII.GetString($responseBytes, 0, $headerEnd)
+        $responseLines = $responseHead -split "`r`n"
+        if ($responseLines[0] -notmatch '^HTTP/1\.1 ([0-9]{3}) ') {
+            throw 'Caption proof API returned an invalid HTTP status line.'
+        }
+        $status = [int]$Matches[1]
+        $lengthHeaders = @($responseLines | Where-Object { $_ -match '(?i)^Content-Length:\s*([0-9]+)\s*$' })
+        if ($lengthHeaders.Count -ne 1 -or $lengthHeaders[0] -notmatch '(?i)^Content-Length:\s*([0-9]+)\s*$') {
+            throw 'Caption proof API returned invalid response framing.'
+        }
+        $contentLength = [int64]$Matches[1]
+        $bodyOffset = $headerEnd + 4
+        if ($contentLength -gt 16777216 -or $contentLength -ne ($responseBytes.Length - $bodyOffset)) {
+            throw 'Caption proof API returned a mismatched or oversized response body.'
+        }
+        if ($status -lt 200 -or $status -ge 300) {
+            throw "Caption proof API $Method $Path failed with HTTP status $status; response content was not recorded."
+        }
+        if ($contentLength -eq 0) { return $null }
+        $content = [Text.UTF8Encoding]::new($false, $true).GetString(
+            $responseBytes,
+            $bodyOffset,
+            [int]$contentLength
+        )
         $content | ConvertFrom-Json -ErrorAction Stop
     }
-    catch [Net.WebException] {
-        $status = if ($_.Exception.Response) {
-            [int]([Net.HttpWebResponse]$_.Exception.Response).StatusCode
-        } else { 0 }
-        throw "Caption proof API $Method $Path failed with HTTP status $status; response content was not recorded."
-    }
     catch {
+        if ($_.Exception.Message -match '^Caption proof API .+ failed with HTTP status [0-9]+;') {
+            throw
+        }
         throw "Caption proof API $Method $Path failed; response content was not recorded."
     }
     finally {
         $requestBody = $null
-        if ($reader) { $reader.Dispose() }
-        if ($response) { $response.Dispose() }
+        $requestHead = $null
+        $requestBytes = $null
+        $responseBuffer = $null
+        $responseBytes = $null
+        if ($connect -and $connect.AsyncWaitHandle) { $connect.AsyncWaitHandle.Dispose() }
+        if ($stream) { $stream.Dispose() }
+        $client.Dispose()
     }
 }
 

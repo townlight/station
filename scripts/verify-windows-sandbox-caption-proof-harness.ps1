@@ -32,7 +32,7 @@ $requirements = [ordered]@{
     'guest uses the canonical protected handoff' = 'operator-bootstrap.capability'
     'guest retains exact cookies only in memory' = 'Get-ExactResponseCookie'
     'guest sends an explicit bounded cookie header' = 'Cookie = $script:apiCookieHeader'
-    'guest uses direct in-process HTTP for authenticated calls' = '[Net.HttpWebRequest]::Create'
+    'guest uses byte-exact loopback HTTP for authenticated calls' = '[Net.Sockets.TcpClient]::new()'
     'guest creates caption authority' = '/caption-tracks/'
     'guest requests final-sink proof' = '/caption-proof'
     'guest requires verified decode-back' = "outcome -ne 'verified'"
