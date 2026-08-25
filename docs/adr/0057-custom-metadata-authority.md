@@ -2,8 +2,8 @@
 
 ## Decision
 
-`station-metadata` owns a pure, fail-closed contract for one revisioned custom
-metadata schema and its per-asset value records. A schema has a stable canonical
+`station-metadata` owns a pure, fail-closed contract for revisioned custom
+metadata schemas and their per-asset value records. A schema has a stable canonical
 identity and revision, with at most 128 uniquely identified, lowercase-keyed
 fields. Each field declares whether its value may appear publicly and whether it
 may participate in a search facet. The initial field kinds are bounded text,
@@ -18,6 +18,16 @@ another key. This narrow initial contract also refuses field/choice removal; lat
 durable schema history may add explicit retirement semantics rather than silently
 changing the interpretation of existing values.
 
+`station-storage` is the sole SQLite writer for this authority. It persists each
+current schema and value record alongside separately indexed identity/revision
+columns, then atomically appends an immutable, attributed snapshot for every
+accepted revision. Schema and value history reads are explicitly limited to 1–128
+records; current schema and per-asset value lists fetch one extra row and reject
+authority that exceeds their respective 64-schema and 128-value limits. Every
+read validates the deserialized record and requires every indexed identity,
+schema-revision, and record revision column to agree with it. Malformed JSON or
+row/JSON disagreement is corruption and fails closed.
+
 An asset value record has its own stable identity and CAS revision, binds one exact
 asset SHA-256 and one exact schema identity/revision, and stores at most one value
 per schema field. Validation requires the supplied exact schema revision, rejects
@@ -29,11 +39,9 @@ than a mutable label.
 
 ## Boundaries and non-claims
 
-This is not SQLite persistence, append-only history, an API, authentication or
-authorization, asset catalog integration, text indexing service, public renderer,
-or operator UI. It does not assert that an asset exists, that supplied values are
-truthful, that a projected facet has been indexed, or that a public flag has been
-published. Later slices must persist schema/value revisions through the single
-SQLite writer, derive actor/time authority server-side, preserve enough historical
-schema data to read old records, integrate with asset lifecycle/search/public
+This is not an API, authentication or authorization, asset catalog integration,
+text indexing service, public renderer, or operator UI. It does not assert that an
+asset exists, that supplied values are truthful, that a projected facet has been
+indexed, or that a public flag has been published. Later slices must derive
+actor/time authority server-side, integrate with asset lifecycle/search/public
 surfaces, and obtain installed-machine and field evidence.

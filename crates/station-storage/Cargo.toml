@@ -14,10 +14,13 @@ station-cg.workspace = true
 station-captions.workspace = true
 station-domain.workspace = true
 station-media-lifecycle.workspace = true
+station-metadata.workspace = true
 station-live.workspace = true
 station-readiness.workspace = true
+station-recording.workspace = true
 station-schedule.workspace = true
 station-update.workspace = true
 
 [dev-dependencies]
 image.workspace = true
+station-metadata.workspace = true

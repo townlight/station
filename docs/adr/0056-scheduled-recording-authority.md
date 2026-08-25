@@ -35,6 +35,16 @@ later append-only persistence boundary. Invalid UUIDs, hashes, revisions, time
 windows, actors, reasons, transitions, duplicate/replayed revision attempts, armed
 authority mismatch, and terminal-state reanimation fail closed.
 
+`station-storage` persists the current recording authority through the one SQLite
+writer. Draft creation is revision one; every later write must carry a receipt whose
+prior/resulting revisions are exactly the persisted/current revisions. The current
+row indexes the recording, channel, schedule item/revision, window, lifecycle,
+execution authority, and revision alongside its full JSON record. Every read
+cross-checks those indexed values against validated JSON. A bounded append-only
+history records creation or the exact receipt plus the resulting recording snapshot;
+its update/delete triggers reject mutation. JSON/index/receipt/lifecycle/execution
+disagreement fails closed rather than being repaired or guessed.
+
 Recovery deliberately cannot resume an interrupted capture. A recording worker can
 mark an in-progress capture for recovery only after its scheduled end and only into
 `Finalizing`, retaining the fact that the completion followed an interruption. A
@@ -44,15 +54,14 @@ claiming a continuous recovered capture that has not been proven.
 
 ## Boundaries and non-claims
 
-This is not a capture engine, scheduler, database, audit log, media asset store,
-recovery probe, API, authorization provider, or operator interface. It makes no
-device call, starts no source, writes no bytes, observes no actual duration, hashes
-no recording, and cannot establish that the supplied finalization facts are true.
-The actor role is an authority contract supplied by a future authenticated server
-boundary, not authentication itself.
+This slice has a database and append-only audit boundary, but is not a capture engine,
+scheduler, media asset store, recovery probe, API, authorization provider, or operator
+interface. It makes no device call, starts no source, writes no media bytes, observes
+no actual duration, hashes no recording, and cannot establish that the supplied
+finalization facts are true. The actor role is an authority contract supplied by a
+future authenticated server boundary, not authentication itself.
 
-Later slices must durably persist definitions and receipts through the single SQLite
-writer, materialize recordings from authoritative schedule changes, supervise native
+Later slices must materialize recordings from authoritative schedule changes, supervise native
 capture per channel, create and verify managed media assets, reconcile worker crash
 evidence, expose authenticated operator workflow, and collect exact-candidate
 installed-machine and field evidence. No lifecycle state or passing unit test is a

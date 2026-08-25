@@ -74,6 +74,7 @@ station-media-assets = { path = "crates/station-media-assets" }
 station-live = { path = "crates/station-live" }
 station-media-protocol = { path = "crates/station-media-protocol" }
 station-maintenance = { path = "crates/station-maintenance" }
+station-metadata = { path = "crates/station-metadata" }
 station-orchestration = { path = "crates/station-orchestration" }
 station-automation-policy = { path = "crates/station-automation-policy" }
 station-recording = { path = "crates/station-recording" }
