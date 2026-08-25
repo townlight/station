@@ -11,7 +11,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Asset caption authority now stores bounded, ordered, non-overlapping cue sets against the exact
   content-addressed media identity, language, and CEA service. Writes require ready media, reject
   on-air mutation and identity rebinding, use compare-and-swap revisions, and append a complete
-  immutable cue snapshot for every accepted change.
+  immutable cue snapshot for every accepted change. Authenticated asset routes expose compact track
+  lists and full current/audit reads; only Setup Admins may replace cue authority, and caller-forged
+  actor, audit, path identity, stale revision, oversized body, or occupied service slots fail closed.
 
 - Setup Admins can now persist a stopped-channel CEA-708/disabled policy with bounded service and
   language metadata through the operator console and an audited revision-guarded API. Worker

@@ -1704,6 +1704,7 @@ dependencies = [
  "sha2",
  "station-alerting",
  "station-auth",
+ "station-captions",
  "station-cg",
  "station-domain",
  "station-ingest",

@@ -20,6 +20,10 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use station_alerting::probe_system_resources;
 use station_auth::{OperatorAccount, SecretToken, digest_secret};
+use station_captions::{
+    AssetCaptionCue, AssetCaptionTrack, AssetCaptionTrackAuditEvent, AssetCaptionTrackWrite,
+    CaptionTrackSourceKind, CaptionTrackWriteError,
+};
 use station_cg::{
     CgAuditEvent, CgBoard, CgBulletin, CgBulletinState, CgFeedItem, CgFeedItemApproval,
     CgFeedSource, CgImageAsset, CgImageReadiness, CgZoneConfig, built_in_templates,
@@ -69,6 +73,7 @@ const OPERATOR_STYLES: &[u8] = include_bytes!("../../../web/operator/dist/operat
 const MAX_CONCURRENT_REQUESTS: usize = 16;
 const MAX_SMALL_REQUEST_BODY: usize = 65_536;
 const MAX_CG_IMAGE_BODY: usize = 8 * 1024 * 1024;
+const MAX_CAPTION_TRACK_BODY: usize = 8 * 1024 * 1024;
 const STATION_BOX_CACHE_TTL: Duration = Duration::from_secs(60);
 const LOUDNESS_PROOF_MAX_AGE_MS: i64 = 24 * 60 * 60 * 1_000;
 const LOUDNESS_PROOF_MIN_DURATION_MS: u64 = 3_000;
@@ -550,6 +555,54 @@ struct CaptionPolicyAuthorityResponse {
     channel_id: String,
     policy: Option<CaptionPolicyResponse>,
     audit: Vec<CaptionPolicyAuditResponse>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CaptionCueRequest {
+    cue_id: String,
+    start_ms: u64,
+    duration_ms: u64,
+    text: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PutAssetCaptionTrackRequest {
+    language: String,
+    service_number: u8,
+    source_kind: CaptionTrackSourceKind,
+    label: String,
+    cues: Vec<CaptionCueRequest>,
+    expected_revision: u64,
+}
+
+#[derive(Debug, Serialize)]
+struct AssetCaptionTrackAuthorityResponse {
+    track: AssetCaptionTrack,
+    audit: Vec<AssetCaptionTrackAuditEvent>,
+}
+
+#[derive(Debug, Serialize)]
+struct AssetCaptionTrackSummaryResponse {
+    track_id: String,
+    asset_id: String,
+    language: String,
+    service_number: u8,
+    source_kind: CaptionTrackSourceKind,
+    label: String,
+    cue_count: usize,
+    cues_sha256: String,
+    revision: u64,
+    created_at_unix_ms: i64,
+    updated_at_unix_ms: i64,
+    updated_by: String,
+}
+
+#[derive(Debug, Serialize)]
+struct AssetCaptionTrackListResponse {
+    asset_id: String,
+    tracks: Vec<AssetCaptionTrackSummaryResponse>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1086,6 +1139,19 @@ impl Api {
                 if path.starts_with("/api/v1/channels/") && path.ends_with("/caption-policy") =>
             {
                 self.put_caption_policy(path, body, actor)
+            }
+            ("GET", path) if asset_caption_tracks_path(path).is_some() => {
+                self.list_asset_caption_tracks(path)
+            }
+            ("GET", path)
+                if path.starts_with("/api/v1/assets/") && path.contains("/caption-tracks/") =>
+            {
+                self.read_asset_caption_track(path)
+            }
+            ("PUT", path)
+                if path.starts_with("/api/v1/assets/") && path.contains("/caption-tracks/") =>
+            {
+                self.put_asset_caption_track(path, body, actor)
             }
             ("POST", path)
                 if path.starts_with("/api/v1/channels/")
@@ -2545,6 +2611,184 @@ impl Api {
                 error_response(422, "validation_failed", &message)
             }
             Err(CaptionPolicyWriteError::Storage(message)) => {
+                error_response(500, "storage_error", &message)
+            }
+        }
+    }
+
+    fn read_asset_caption_track(&self, path: &str) -> ApiResponse {
+        let Some((asset_id, track_id)) = asset_caption_track_path(path) else {
+            return error_response(
+                400,
+                "invalid_path",
+                "The asset or caption track identity is invalid.",
+            );
+        };
+        let track = match self.storage.read_asset_caption_track(track_id) {
+            Ok(Some(track)) if track.asset_id == asset_id => track,
+            Ok(Some(_)) | Ok(None) => {
+                return error_response(
+                    404,
+                    "caption_track_not_found",
+                    "The caption track does not exist for this media asset.",
+                );
+            }
+            Err(message) => return error_response(500, "storage_error", &message),
+        };
+        let audit = match self.storage.list_asset_caption_track_audit(track_id) {
+            Ok(audit) => audit,
+            Err(message) => return error_response(500, "storage_error", &message),
+        };
+        json_response(
+            200,
+            serde_json::to_vec(&AssetCaptionTrackAuthorityResponse { track, audit })
+                .expect("serializing asset caption authority cannot fail"),
+        )
+    }
+
+    fn list_asset_caption_tracks(&self, path: &str) -> ApiResponse {
+        let Some(asset_id) = asset_caption_tracks_path(path) else {
+            return error_response(400, "invalid_path", "The asset identity is invalid.");
+        };
+        match self.storage.read_media_asset(asset_id) {
+            Ok(Some(_)) => {}
+            Ok(None) => {
+                return error_response(404, "asset_not_found", "The media asset does not exist.");
+            }
+            Err(message) => return error_response(500, "storage_error", &message),
+        }
+        let tracks = match self.storage.list_asset_caption_tracks(asset_id) {
+            Ok(tracks) => tracks,
+            Err(message) => return error_response(500, "storage_error", &message),
+        };
+        let tracks = tracks
+            .into_iter()
+            .map(|track| AssetCaptionTrackSummaryResponse {
+                track_id: track.track_id,
+                asset_id: track.asset_id,
+                language: track.language,
+                service_number: track.service_number,
+                source_kind: track.source_kind,
+                label: track.label,
+                cue_count: track.cues.len(),
+                cues_sha256: track.cues_sha256,
+                revision: track.revision,
+                created_at_unix_ms: track.created_at_unix_ms,
+                updated_at_unix_ms: track.updated_at_unix_ms,
+                updated_by: track.updated_by,
+            })
+            .collect();
+        json_response(
+            200,
+            serde_json::to_vec(&AssetCaptionTrackListResponse {
+                asset_id: asset_id.into(),
+                tracks,
+            })
+            .expect("serializing asset caption track list cannot fail"),
+        )
+    }
+
+    fn put_asset_caption_track(
+        &self,
+        path: &str,
+        body: Option<&[u8]>,
+        actor: Option<&OperatorAccount>,
+    ) -> ApiResponse {
+        let Some((asset_id, track_id)) = asset_caption_track_path(path) else {
+            return error_response(
+                400,
+                "invalid_path",
+                "The asset or caption track identity is invalid.",
+            );
+        };
+        let Some(actor) = actor.filter(|account| {
+            account.enabled()
+                && account
+                    .roles()
+                    .contains(&station_auth::OperatorRole::SetupAdmin)
+        }) else {
+            return error_response(
+                403,
+                "setup_admin_required",
+                "Changing an asset caption track requires the Setup Admin role.",
+            );
+        };
+        let Some(request) = parse_body::<PutAssetCaptionTrackRequest>(body) else {
+            return error_response(
+                400,
+                "invalid_json",
+                "A complete asset caption track body is required.",
+            );
+        };
+        let occurred_at_unix_ms = match system_time_millis() {
+            Ok(value) => value,
+            Err(message) => return error_response(500, "clock_error", &message),
+        };
+        let audit_id = match secure_canonical_uuid() {
+            Ok(value) => value,
+            Err(message) => return error_response(500, "entropy_unavailable", &message),
+        };
+        let write = AssetCaptionTrackWrite {
+            track_id: track_id.into(),
+            asset_id: asset_id.into(),
+            language: request.language,
+            service_number: request.service_number,
+            source_kind: request.source_kind,
+            label: request.label,
+            cues: request
+                .cues
+                .into_iter()
+                .map(|cue| AssetCaptionCue {
+                    cue_id: cue.cue_id,
+                    start_ms: cue.start_ms,
+                    duration_ms: cue.duration_ms,
+                    text: cue.text,
+                })
+                .collect(),
+            expected_revision: request.expected_revision,
+            actor: actor.account_id().as_str().into(),
+            occurred_at_unix_ms,
+            audit_id,
+        };
+        match self.storage.write_asset_caption_track(&write) {
+            Ok(track) => json_response(
+                200,
+                serde_json::to_vec(&track).expect("serializing asset caption track cannot fail"),
+            ),
+            Err(CaptionTrackWriteError::AssetNotFound) => {
+                error_response(404, "asset_not_found", "The media asset does not exist.")
+            }
+            Err(CaptionTrackWriteError::AssetNotReady) => error_response(
+                409,
+                "asset_not_ready",
+                "Caption authority requires a currently ready media asset.",
+            ),
+            Err(CaptionTrackWriteError::AssetOnAir) => error_response(
+                409,
+                "asset_on_air",
+                "Wait until this media asset is off air before changing its captions.",
+            ),
+            Err(CaptionTrackWriteError::NotFound) => error_response(
+                404,
+                "caption_track_not_found",
+                "The caption track revision target does not exist.",
+            ),
+            Err(CaptionTrackWriteError::Conflict(current_revision)) => error_response(
+                409,
+                "revision_conflict",
+                &format!("The current caption track revision is {current_revision}."),
+            ),
+            Err(CaptionTrackWriteError::SlotOccupied { track_id, revision }) => error_response(
+                409,
+                "caption_slot_occupied",
+                &format!(
+                    "Caption track {track_id} already owns this asset, language, and service at revision {revision}."
+                ),
+            ),
+            Err(CaptionTrackWriteError::Invalid(message)) => {
+                error_response(422, "validation_failed", &message)
+            }
+            Err(CaptionTrackWriteError::Storage(message)) => {
                 error_response(500, "storage_error", &message)
             }
         }
@@ -5296,6 +5540,29 @@ fn path_identity<'a>(path: &'a str, prefix: &str, suffix: &str) -> Option<&'a st
         .then_some(identity)
 }
 
+fn asset_caption_track_path(path: &str) -> Option<(&str, &str)> {
+    let remainder = path.strip_prefix("/api/v1/assets/")?;
+    let (asset_id, track_id) = remainder.split_once("/caption-tracks/")?;
+    (is_lowercase_sha256(asset_id)
+        && is_canonical_api_uuid(track_id)
+        && !track_id.contains(['/', '?', '%', '\\']))
+    .then_some((asset_id, track_id))
+}
+
+fn asset_caption_tracks_path(path: &str) -> Option<&str> {
+    let asset_id = path
+        .strip_prefix("/api/v1/assets/")?
+        .strip_suffix("/caption-tracks")?;
+    is_lowercase_sha256(asset_id).then_some(asset_id)
+}
+
+fn is_lowercase_sha256(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
 fn is_api_uuid(value: &str) -> bool {
     let bytes = value.as_bytes();
     bytes.len() == 36
@@ -7198,16 +7465,20 @@ fn security_headers(response: ApiResponse) -> ApiResponse {
 fn request_body_limit(method: &str, path: &str) -> usize {
     if method == "POST" && path == "/api/v1/cg/images" {
         MAX_CG_IMAGE_BODY
+    } else if method == "PUT" && asset_caption_track_path(path).is_some() {
+        MAX_CAPTION_TRACK_BODY
     } else {
         MAX_SMALL_REQUEST_BODY
     }
 }
 
 fn request_too_large_message(method: &str, path: &str) -> &'static str {
-    if request_body_limit(method, path) == MAX_CG_IMAGE_BODY {
-        "CG image uploads may not exceed 8 MiB."
-    } else {
-        "Requests may not exceed 64 KiB."
+    match request_body_limit(method, path) {
+        MAX_CG_IMAGE_BODY if method == "POST" && path == "/api/v1/cg/images" => {
+            "CG image uploads may not exceed 8 MiB."
+        }
+        MAX_CAPTION_TRACK_BODY => "Caption track requests may not exceed 8 MiB.",
+        _ => "Requests may not exceed 64 KiB.",
     }
 }
 
@@ -7514,6 +7785,165 @@ mod tests {
             br#"{"mode":"disabled","service_number":1,"language":"en-US","expected_revision":1}"#;
         let running = api.route("PUT", &path, Some(running_update), Some(&admin));
         assert_eq!(running.status, 409);
+
+        drop(api);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn setup_admin_controls_asset_caption_tracks_with_server_owned_audit() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "townlight-caption-track-api-{}-{nonce}",
+            std::process::id()
+        ));
+        let application = root.join("application");
+        std::fs::create_dir_all(&application).unwrap();
+        let database = root.join("station.db");
+        let api =
+            Api::open_with_station_box_probe(&database, &application, station_box_probe()).unwrap();
+        let asset_id = "a".repeat(64);
+        let track_id = "65a26343-0339-4654-a92c-4bf9384f18df";
+        api.storage
+            .put_media_asset(&MediaAsset {
+                asset_id: asset_id.clone(),
+                media_path: r"C:\TownLight\media\captioned.ts".into(),
+                duration_ms: 10_000,
+                readiness: AssetReadiness::Ready,
+            })
+            .unwrap();
+        let admin = test_actor(station_auth::OperatorRole::SetupAdmin);
+        let operator = test_actor(station_auth::OperatorRole::MeetingOperator);
+        let path = format!("/api/v1/assets/{asset_id}/caption-tracks/{track_id}");
+        let body = br#"{
+          "language":"en-US",
+          "service_number":1,
+          "source_kind":"external",
+          "label":"Reviewed English",
+          "cues":[
+            {
+              "cue_id":"bf0aa2ca-1488-42d2-8c1b-5d9179ee5d30",
+              "start_ms":1000,
+              "duration_ms":2000,
+              "text":"Town Council"
+            }
+          ],
+          "expected_revision":0
+        }"#;
+
+        assert_eq!(api.route("PUT", &path, Some(body), None).status, 403);
+        assert_eq!(
+            api.route("PUT", &path, Some(body), Some(&operator)).status,
+            403
+        );
+        let mut forged_body: serde_json::Value = serde_json::from_slice(body).unwrap();
+        forged_body["actor"] = serde_json::Value::String("forged-operator".into());
+        forged_body["audit_id"] =
+            serde_json::Value::String("e28331a8-a133-4756-b90c-91885fef40ee".into());
+        let forged_body = serde_json::to_vec(&forged_body).unwrap();
+        assert_eq!(
+            api.route("PUT", &path, Some(&forged_body), Some(&admin))
+                .status,
+            400
+        );
+        let written = api.route("PUT", &path, Some(body), Some(&admin));
+        assert_eq!(
+            written.status,
+            200,
+            "{}",
+            String::from_utf8_lossy(&written.body)
+        );
+        let written: serde_json::Value = serde_json::from_slice(&written.body).unwrap();
+        assert_eq!(written["track_id"], track_id);
+        assert_eq!(written["asset_id"], asset_id);
+        assert_eq!(written["revision"], 1);
+        assert_eq!(written["updated_by"], admin.account_id().as_str());
+        assert_eq!(written["cues"].as_array().unwrap().len(), 1);
+
+        let listed = api.route(
+            "GET",
+            &format!("/api/v1/assets/{asset_id}/caption-tracks"),
+            None,
+            Some(&operator),
+        );
+        assert_eq!(listed.status, 200);
+        let listed: serde_json::Value = serde_json::from_slice(&listed.body).unwrap();
+        assert_eq!(listed["asset_id"], asset_id);
+        assert_eq!(listed["tracks"].as_array().unwrap().len(), 1);
+        assert_eq!(listed["tracks"][0]["track_id"], track_id);
+        assert_eq!(listed["tracks"][0]["cue_count"], 1);
+        assert!(listed["tracks"][0].get("cues").is_none());
+
+        let unknown_asset = api.route(
+            "GET",
+            &format!("/api/v1/assets/{}/caption-tracks", "b".repeat(64)),
+            None,
+            Some(&operator),
+        );
+        assert_eq!(unknown_asset.status, 404);
+
+        let not_ready_asset_id = "c".repeat(64);
+        api.storage
+            .put_media_asset(&MediaAsset {
+                asset_id: not_ready_asset_id.clone(),
+                media_path: r"C:\TownLight\media\pending.ts".into(),
+                duration_ms: 10_000,
+                readiness: AssetReadiness::Missing,
+            })
+            .unwrap();
+        let not_ready = api.route(
+            "PUT",
+            &format!(
+                "/api/v1/assets/{not_ready_asset_id}/caption-tracks/6f8787a6-a829-4e85-a01e-650984c913ce"
+            ),
+            Some(body),
+            Some(&admin),
+        );
+        assert_eq!(not_ready.status, 409);
+
+        let occupied_slot = api.route(
+            "PUT",
+            &format!(
+                "/api/v1/assets/{asset_id}/caption-tracks/6f8787a6-a829-4e85-a01e-650984c913ce"
+            ),
+            Some(body),
+            Some(&admin),
+        );
+        assert_eq!(occupied_slot.status, 409);
+
+        let uppercase_asset_path = format!(
+            "/api/v1/assets/{}/caption-tracks/{track_id}",
+            asset_id.to_uppercase()
+        );
+        assert_eq!(
+            api.route("GET", &uppercase_asset_path, None, Some(&operator))
+                .status,
+            400
+        );
+
+        let wrong_asset_path = format!(
+            "/api/v1/assets/{}/caption-tracks/{track_id}",
+            "d".repeat(64)
+        );
+        assert_eq!(
+            api.route("GET", &wrong_asset_path, None, Some(&operator))
+                .status,
+            404
+        );
+
+        let authority = api.route("GET", &path, None, Some(&operator));
+        assert_eq!(authority.status, 200);
+        let authority: serde_json::Value = serde_json::from_slice(&authority.body).unwrap();
+        assert_eq!(authority["track"]["cues_sha256"], written["cues_sha256"]);
+        assert_eq!(authority["audit"].as_array().unwrap().len(), 1);
+        assert_eq!(authority["audit"][0]["actor"], admin.account_id().as_str());
+        assert_eq!(authority["audit"][0]["cues"], written["cues"]);
+
+        let stale = api.route("PUT", &path, Some(body), Some(&admin));
+        assert_eq!(stale.status, 409);
 
         drop(api);
         let _ = std::fs::remove_dir_all(root);
@@ -9832,7 +10262,7 @@ mod tests {
     }
 
     #[test]
-    fn http_parser_allows_large_body_only_for_the_image_upload_route() {
+    fn http_parser_allows_large_bodies_only_for_exact_image_and_caption_routes() {
         let mut image = PNG_1X1.to_vec();
         image.resize(MAX_SMALL_REQUEST_BODY + 1, 0);
         let request = format!(
@@ -9851,6 +10281,45 @@ mod tests {
         let runtime = auth::AuthRuntime::new("127.0.0.1:4070".parse().unwrap()).unwrap();
         let image_response = dispatch_http(&api, &runtime, &parsed);
         assert_ne!(image_response.status, 413);
+
+        let caption_path = format!(
+            "/api/v1/assets/{}/caption-tracks/65a26343-0339-4654-a92c-4bf9384f18df",
+            "a".repeat(64)
+        );
+        let mut caption_request = format!(
+            "PUT {caption_path} HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\n\r\n",
+            image.len()
+        )
+        .into_bytes();
+        caption_request.extend_from_slice(&image);
+        let parsed_caption =
+            read_request_over_tcp(caption_request).expect("caption request should parse");
+        assert!(parsed_caption.len() > MAX_SMALL_REQUEST_BODY);
+
+        let mut oversized_caption = format!(
+            "PUT {caption_path} HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\n\r\n",
+            MAX_CAPTION_TRACK_BODY + 1
+        )
+        .into_bytes();
+        oversized_caption.resize(oversized_caption.len() + MAX_CAPTION_TRACK_BODY + 1, 0);
+        let rejection = read_request_over_tcp(oversized_caption).unwrap_err();
+        assert_eq!(rejection.status, 413);
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&rejection.body).unwrap()["error"]["message"],
+            "Caption track requests may not exceed 8 MiB."
+        );
+
+        let malformed_caption_path = format!("{caption_path}/extra");
+        let mut malformed_caption = format!(
+            "PUT {malformed_caption_path} HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\n\r\n",
+            image.len()
+        )
+        .into_bytes();
+        malformed_caption.extend_from_slice(&image);
+        assert_eq!(
+            read_request_over_tcp(malformed_caption).unwrap_err().status,
+            413
+        );
 
         let mut unrelated = format!(
             "POST /api/v1/station HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\n\r\n",

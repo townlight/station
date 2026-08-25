@@ -13,6 +13,7 @@ station-live.workspace = true
 station-alerting.workspace = true
 station-auth.workspace = true
 station-cg.workspace = true
+station-captions.workspace = true
 station-domain.workspace = true
 station-media-lifecycle.workspace = true
 station-maintenance.workspace = true

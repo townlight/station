@@ -22,10 +22,12 @@ or unconfigured, schedules enabled cues against video, and inserts CEA-708/608-c
 SEI before the shared encoded video fans out to each MPEG-TS variant. A source proof captures the
 exact post-mux branch and decodes the expected text back. The server-side track foundation now binds
 each reviewed cue set to the exact content-addressed media identity, language, and CEA service with
-CAS revisions, complete append-only snapshots, and on-air mutation refusal. It is not yet exposed
-through the API or dispatched to the worker; live caption scheduling, live ASR, current proof
-receipts, and installed/field evidence remain separate work, so commissioning still reports the
-caption authority as blocked.
+CAS revisions, complete append-only snapshots, and on-air mutation refusal. Authenticated asset
+routes list compact track summaries and let Setup Admins read or replace exact cue authority while
+the server owns actor, time, path identity, and audit identity. It is not yet exposed in the operator
+console or dispatched to the worker; live caption scheduling, live ASR, current proof receipts, and
+installed/field evidence remain separate work, so commissioning still reports the caption authority
+as blocked.
 
 ## Architecture
 

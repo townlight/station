@@ -18,8 +18,11 @@ domain-separated SHA-256 digest of cue order, identities, timing, and text. Data
 updates or deletion of revision headers and revision cues.
 
 Source provenance is explicit as `embedded`, `sidecar`, `generated`, or `external`; provenance does
-not itself mean a cue was reviewed, aired, or decoded. The future authenticated API owns the
-operator/review decision that promotes content into this authority.
+not itself mean a cue was reviewed, aired, or decoded. The authenticated API owns the
+operator/review decision that promotes content into this authority. Any signed-in operator may list
+compact per-asset summaries and read one current track plus its complete audit snapshots; only a
+Setup Admin may write. The route owns the asset and track identities, authenticated actor, clock,
+and audit identity, rejects unknown JSON fields, and caps exact caption-track PUT bodies at 8 MiB.
 
 ## Boundaries
 
@@ -39,4 +42,5 @@ ingress evidence, not decode-back proof.
 - Stale editors and duplicate audit identities cannot partially replace current authority.
 - Historical revisions remain reconstructable rather than retaining only a lossy change summary.
 - Editing captions during active playout requires stopping or completing that asset first.
-- API, review/import, dispatch cursor, live ASR, and exact-output proof remain explicit later work.
+- Operator review/import UI, dispatch cursor, live ASR, and exact-output proof remain explicit later
+  work.
