@@ -20,7 +20,7 @@ use station_auth::{
 };
 use station_captions::{
     AssetCaptionCue, AssetCaptionTrack, AssetCaptionTrackAuditEvent, AssetCaptionTrackWrite,
-    CaptionTrackSourceKind, CaptionTrackWriteError,
+    CaptionEgressProof, CaptionProofOutcome, CaptionTrackSourceKind, CaptionTrackWriteError,
 };
 use station_cg::{
     CgAuditEvent, CgAuditEventKind, CgBoard, CgBulletin, CgBulletinContent, CgBulletinState,
@@ -1060,6 +1060,7 @@ impl StationStore {
         store.initialize_fallback_slate_schema()?;
         store.initialize_caption_policy_schema()?;
         store.initialize_asset_caption_track_schema()?;
+        store.initialize_caption_egress_proof_schema()?;
         store.migrate_cg_feed_cache_schema()?;
         store.initialize_operator_auth_schema()?;
         store.execute(
@@ -8818,6 +8819,184 @@ impl StationStore {
         }
     }
 
+    pub fn append_caption_egress_proof(&self, proof: &CaptionEgressProof) -> Result<(), String> {
+        proof.validate()?;
+        self.execute("BEGIN IMMEDIATE")?;
+        let outcome = (|| {
+            let report = self
+                .read_commit_report(&proof.report_id)?
+                .ok_or_else(|| "caption proof schedule report does not exist".to_string())?;
+            if report.channel_id != proof.channel_id || report.asset_id != proof.asset_id {
+                return Err("caption proof schedule report binding is stale".into());
+            }
+            let asset = self
+                .read_media_asset(&proof.asset_id)?
+                .ok_or_else(|| "caption proof media asset does not exist".to_string())?;
+            let capture_end = proof
+                .capture_started_asset_offset_ms
+                .checked_add(proof.capture_duration_ms)
+                .ok_or_else(|| "caption proof capture window overflowed".to_string())?;
+            if asset.readiness != AssetReadiness::Ready || capture_end > asset.duration_ms {
+                return Err(
+                    "caption proof capture window is outside the ready scheduled asset".into(),
+                );
+            }
+            let policy = self
+                .read_channel_caption_policy(&proof.channel_id)?
+                .ok_or_else(|| "caption proof channel has no caption policy".to_string())?;
+            if policy.mode != ChannelCaptionMode::Cea708
+                || policy.revision != proof.caption_policy_revision
+                || policy.language != proof.language
+                || policy.service_number != proof.service_number
+            {
+                return Err("caption proof channel policy binding is stale".into());
+            }
+            let track = self
+                .read_asset_caption_track(&proof.track_id)?
+                .ok_or_else(|| "caption proof asset track does not exist".to_string())?;
+            if track.asset_id != proof.asset_id
+                || track.revision != proof.track_revision
+                || track.cues_sha256 != proof.cues_sha256
+                || track.language != proof.language
+                || track.service_number != proof.service_number
+            {
+                return Err("caption proof asset track binding is stale".into());
+            }
+            let current_hash = self.current_channel_output_configuration_hash(&proof.channel_id)?;
+            if current_hash != proof.configuration_hash {
+                return Err("caption proof output configuration binding is stale".into());
+            }
+            let sink = self.prepare(
+                "SELECT kind, enabled FROM channel_output_sinks WHERE channel_id=?1 AND sink_id=?2",
+            )?;
+            let channel_id = c_string(&proof.channel_id, "caption proof channel identity")?;
+            let sink_id = c_string(&proof.sink_id, "caption proof sink identity")?;
+            bind_text(self.database, sink.raw, 1, &channel_id)?;
+            bind_text(self.database, sink.raw, 2, &sink_id)?;
+            match unsafe { sqlite3_step(sink.raw) } {
+                SQLITE_ROW => {
+                    let kind = column_text(sink.raw, 0)?;
+                    let enabled = unsafe { sqlite3_column_int64(sink.raw, 1) } == 1;
+                    if !enabled || !matches!(kind.as_str(), "udp-ts" | "srt") {
+                        return Err("caption proof sink is not an enabled transport output".into());
+                    }
+                }
+                SQLITE_DONE => return Err("caption proof sink is not currently configured".into()),
+                _ => return Err(sqlite_error(self.database)),
+            }
+            let record_json = serde_json::to_string(proof)
+                .map_err(|error| format!("serialize caption egress proof: {error}"))?;
+            let statement = self.prepare(
+                "INSERT INTO caption_egress_proofs(proof_id, channel_id, sink_id, report_id, asset_id, track_id, track_revision, caption_policy_revision, cues_sha256, candidate_version, source_commit, configuration_hash, outcome, captured_at_unix_ms, record_json) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+            )?;
+            let values = [
+                c_string(&proof.proof_id, "caption proof identity")?,
+                c_string(&proof.channel_id, "caption proof channel identity")?,
+                c_string(&proof.sink_id, "caption proof sink identity")?,
+                c_string(&proof.report_id, "caption proof report identity")?,
+                c_string(&proof.asset_id, "caption proof asset identity")?,
+                c_string(&proof.track_id, "caption proof track identity")?,
+                c_string(&proof.cues_sha256, "caption proof cue digest")?,
+                c_string(&proof.candidate_version, "caption proof candidate version")?,
+                c_string(&proof.source_commit, "caption proof source commit")?,
+                c_string(
+                    &proof.configuration_hash,
+                    "caption proof configuration hash",
+                )?,
+                c_string(
+                    match proof.outcome {
+                        CaptionProofOutcome::Verified => "verified",
+                        CaptionProofOutcome::Mismatch => "mismatch",
+                    },
+                    "caption proof outcome",
+                )?,
+                c_string(&record_json, "caption proof record")?,
+            ];
+            for (index, value) in values[..6].iter().enumerate() {
+                bind_text(self.database, statement.raw, (index + 1) as c_int, value)?;
+            }
+            bind_i64(
+                self.database,
+                statement.raw,
+                7,
+                checked_i64(proof.track_revision, "caption proof track revision")?,
+            )?;
+            bind_i64(
+                self.database,
+                statement.raw,
+                8,
+                checked_i64(
+                    proof.caption_policy_revision,
+                    "caption proof policy revision",
+                )?,
+            )?;
+            for (index, value) in values[6..11].iter().enumerate() {
+                bind_text(self.database, statement.raw, (index + 9) as c_int, value)?;
+            }
+            bind_i64(self.database, statement.raw, 14, proof.captured_at_unix_ms)?;
+            bind_text(self.database, statement.raw, 15, &values[11])?;
+            expect_done(self.database, statement.raw)
+        })();
+        match outcome {
+            Ok(()) => match self.execute("COMMIT") {
+                Ok(()) => Ok(()),
+                Err(error) => {
+                    let _ = self.execute("ROLLBACK");
+                    Err(error)
+                }
+            },
+            Err(error) => {
+                let _ = self.execute("ROLLBACK");
+                Err(error)
+            }
+        }
+    }
+
+    pub fn list_caption_egress_proofs(
+        &self,
+        channel_id: &str,
+        sink_id: Option<&str>,
+        limit: u32,
+    ) -> Result<Vec<CaptionEgressProof>, String> {
+        if !(1..=1_000).contains(&limit) {
+            return Err("caption proof listing limit must be between 1 and 1000".into());
+        }
+        let statement = if sink_id.is_some() {
+            self.prepare(
+                "SELECT record_json FROM caption_egress_proofs WHERE channel_id=?1 AND sink_id=?2 ORDER BY captured_at_unix_ms DESC, proof_id DESC LIMIT ?3",
+            )?
+        } else {
+            self.prepare(
+                "SELECT record_json FROM caption_egress_proofs WHERE channel_id=?1 ORDER BY captured_at_unix_ms DESC, proof_id DESC LIMIT ?2",
+            )?
+        };
+        let channel_id = c_string(channel_id, "caption proof channel identity")?;
+        let sink_id = sink_id
+            .map(|value| c_string(value, "caption proof sink identity"))
+            .transpose()?;
+        bind_text(self.database, statement.raw, 1, &channel_id)?;
+        if let Some(sink_id) = &sink_id {
+            bind_text(self.database, statement.raw, 2, sink_id)?;
+            bind_i64(self.database, statement.raw, 3, i64::from(limit))?;
+        } else {
+            bind_i64(self.database, statement.raw, 2, i64::from(limit))?;
+        }
+        let mut proofs = Vec::new();
+        loop {
+            match unsafe { sqlite3_step(statement.raw) } {
+                SQLITE_ROW => {
+                    let json = column_text(statement.raw, 0)?;
+                    let proof: CaptionEgressProof = serde_json::from_str(&json)
+                        .map_err(|error| format!("decode caption egress proof: {error}"))?;
+                    proof.validate()?;
+                    proofs.push(proof);
+                }
+                SQLITE_DONE => return Ok(proofs),
+                _ => return Err(sqlite_error(self.database)),
+            }
+        }
+    }
+
     pub fn append_sink_loudness_proof(
         &self,
         proof: &SinkLoudnessProof,
@@ -10169,6 +10348,37 @@ impl StationStore {
              CREATE TRIGGER IF NOT EXISTS asset_caption_track_revision_cues_no_delete \
                BEFORE DELETE ON asset_caption_track_revision_cues \
                BEGIN SELECT RAISE(ABORT, 'asset caption revision cues are append-only'); END;",
+        )
+    }
+
+    fn initialize_caption_egress_proof_schema(&self) -> Result<(), String> {
+        self.execute(
+            "CREATE TABLE IF NOT EXISTS caption_egress_proofs (\
+               proof_id TEXT PRIMARY KEY,\
+               channel_id TEXT NOT NULL,\
+               sink_id TEXT NOT NULL,\
+               report_id TEXT NOT NULL,\
+               asset_id TEXT NOT NULL,\
+               track_id TEXT NOT NULL,\
+               track_revision INTEGER NOT NULL CHECK (track_revision >= 1),\
+               caption_policy_revision INTEGER NOT NULL CHECK (caption_policy_revision >= 1),\
+               cues_sha256 TEXT NOT NULL CHECK (length(cues_sha256) = 64),\
+               candidate_version TEXT NOT NULL,\
+               source_commit TEXT NOT NULL CHECK (length(source_commit) = 40),\
+               configuration_hash TEXT NOT NULL CHECK (length(configuration_hash) = 64),\
+               outcome TEXT NOT NULL CHECK (outcome IN ('verified','mismatch')),\
+               captured_at_unix_ms INTEGER NOT NULL CHECK (captured_at_unix_ms >= 0),\
+               record_json TEXT NOT NULL,\
+               FOREIGN KEY(channel_id, sink_id) REFERENCES channel_output_sinks(channel_id, sink_id)\
+             );\
+             CREATE INDEX IF NOT EXISTS caption_egress_proofs_channel_time \
+               ON caption_egress_proofs(channel_id, captured_at_unix_ms DESC, proof_id DESC);\
+             CREATE TRIGGER IF NOT EXISTS caption_egress_proofs_no_update \
+               BEFORE UPDATE ON caption_egress_proofs \
+               BEGIN SELECT RAISE(ABORT, 'caption egress proofs are append-only'); END;\
+             CREATE TRIGGER IF NOT EXISTS caption_egress_proofs_no_delete \
+               BEFORE DELETE ON caption_egress_proofs \
+               BEGIN SELECT RAISE(ABORT, 'caption egress proofs are append-only'); END;",
         )
     }
 

@@ -6,6 +6,131 @@ use sha2::{Digest, Sha256};
 pub const MAX_CAPTION_CUES_PER_TRACK: usize = 100_000;
 pub const MAX_CAPTION_CUE_DURATION_MS: u64 = 60_000;
 pub const MAX_CAPTION_CUE_TEXT_BYTES: usize = 2_048;
+pub const MAX_CAPTION_PROOF_CAPTURE_DURATION_MS: u64 = 120_000;
+pub const MAX_CAPTION_PROOF_CAPTURE_BYTES: u64 = 1024 * 1024 * 1024;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CaptionProofOutcome {
+    Verified,
+    Mismatch,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CaptionEgressProof {
+    pub proof_id: String,
+    pub channel_id: String,
+    pub sink_id: String,
+    pub report_id: String,
+    pub asset_id: String,
+    pub track_id: String,
+    pub track_revision: u64,
+    pub cues_sha256: String,
+    pub caption_policy_revision: u64,
+    pub language: String,
+    pub service_number: u8,
+    pub candidate_version: String,
+    pub source_commit: String,
+    pub configuration_hash: String,
+    pub capture_started_asset_offset_ms: u64,
+    pub capture_duration_ms: u64,
+    pub capture_bytes: u64,
+    pub capture_sha256: String,
+    pub artifact_relative_path: String,
+    pub expected_cue_count: u32,
+    pub decoded_cue_count: u32,
+    pub expected_text_sha256: String,
+    pub decoded_text_sha256: String,
+    pub decoder_engine: String,
+    pub decoder_method: String,
+    pub outcome: CaptionProofOutcome,
+    pub captured_at_unix_ms: i64,
+}
+
+impl CaptionEgressProof {
+    pub fn validate(&self) -> Result<(), String> {
+        for (value, field) in [
+            (&self.proof_id, "caption proof identity"),
+            (&self.channel_id, "caption proof channel identity"),
+            (&self.sink_id, "caption proof sink identity"),
+            (&self.track_id, "caption proof track identity"),
+        ] {
+            if !is_canonical_uuid(value) {
+                return Err(format!("{field} must be a lowercase canonical UUID"));
+            }
+        }
+        validate_visible(
+            &self.report_id,
+            200,
+            "caption proof schedule report identity",
+        )?;
+        for (value, field) in [
+            (&self.asset_id, "caption proof asset identity"),
+            (&self.cues_sha256, "caption proof cue digest"),
+            (&self.configuration_hash, "caption proof configuration hash"),
+            (&self.capture_sha256, "caption proof capture hash"),
+            (
+                &self.expected_text_sha256,
+                "caption proof expected text hash",
+            ),
+            (&self.decoded_text_sha256, "caption proof decoded text hash"),
+        ] {
+            if !is_sha256_identity(value) {
+                return Err(format!("{field} must be a lowercase SHA-256 digest"));
+            }
+        }
+        if self.source_commit.len() != 40
+            || !self
+                .source_commit
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return Err(
+                "caption proof source commit must be an exact lowercase commit hash".into(),
+            );
+        }
+        if self.track_revision == 0 || self.caption_policy_revision == 0 {
+            return Err("caption proof authority revisions must be nonzero".into());
+        }
+        if !is_language_tag(&self.language) || !(1..=63).contains(&self.service_number) {
+            return Err("caption proof language or CEA-708 service is invalid".into());
+        }
+        validate_visible(
+            &self.candidate_version,
+            200,
+            "caption proof candidate version",
+        )?;
+        validate_visible(&self.decoder_engine, 200, "caption proof decoder engine")?;
+        validate_visible(&self.decoder_method, 500, "caption proof decoder method")?;
+        if self
+            .capture_started_asset_offset_ms
+            .checked_add(self.capture_duration_ms)
+            .is_none()
+            || !(1..=MAX_CAPTION_PROOF_CAPTURE_DURATION_MS).contains(&self.capture_duration_ms)
+            || !(1..=MAX_CAPTION_PROOF_CAPTURE_BYTES).contains(&self.capture_bytes)
+            || !(1..=MAX_CAPTION_CUES_PER_TRACK as u32).contains(&self.expected_cue_count)
+            || !(1..=MAX_CAPTION_CUES_PER_TRACK as u32).contains(&self.decoded_cue_count)
+            || self.captured_at_unix_ms < 0
+        {
+            return Err("caption proof capture facts are invalid or unbounded".into());
+        }
+        let expected_artifact = format!("caption-proofs/{}.ts", self.proof_id);
+        if self.artifact_relative_path != expected_artifact {
+            return Err("caption proof artifact path is not the proof-owned managed path".into());
+        }
+        let evidence_matches = self.expected_cue_count == self.decoded_cue_count
+            && self.expected_text_sha256 == self.decoded_text_sha256;
+        match self.outcome {
+            CaptionProofOutcome::Verified if !evidence_matches => {
+                Err("verified caption proof does not match independently decoded evidence".into())
+            }
+            CaptionProofOutcome::Mismatch if evidence_matches => {
+                Err("caption proof mismatch outcome contradicts matching evidence".into())
+            }
+            _ => Ok(()),
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -321,6 +446,89 @@ mod tests {
             duration_ms: 2_000,
             text: "Council meeting".into(),
         }
+    }
+
+    fn egress_proof() -> CaptionEgressProof {
+        CaptionEgressProof {
+            proof_id: "11111111-2222-4333-8444-555555555555".into(),
+            channel_id: "22222222-3333-4444-8555-666666666666".into(),
+            sink_id: "33333333-4444-4555-8666-777777777777".into(),
+            report_id: "44444444-5555-4666-8777-888888888888".into(),
+            asset_id: "a".repeat(64),
+            track_id: "55555555-6666-4777-8888-999999999999".into(),
+            track_revision: 3,
+            cues_sha256: "b".repeat(64),
+            caption_policy_revision: 4,
+            language: "en-US".into(),
+            service_number: 1,
+            candidate_version: "0.3.0".into(),
+            source_commit: "0123456789abcdef0123456789abcdef01234567".into(),
+            configuration_hash: "c".repeat(64),
+            capture_started_asset_offset_ms: 1_000,
+            capture_duration_ms: 20_000,
+            capture_bytes: 1_000_000,
+            capture_sha256: "d".repeat(64),
+            artifact_relative_path: "caption-proofs/11111111-2222-4333-8444-555555555555.ts".into(),
+            expected_cue_count: 2,
+            decoded_cue_count: 2,
+            expected_text_sha256: "e".repeat(64),
+            decoded_text_sha256: "e".repeat(64),
+            decoder_engine: "GStreamer 1.28.6".into(),
+            decoder_method: "independent MPEG-TS CEA-708 decode-back".into(),
+            outcome: CaptionProofOutcome::Verified,
+            captured_at_unix_ms: 10_000,
+        }
+    }
+
+    #[test]
+    fn verified_egress_proof_requires_exact_bound_evidence() {
+        assert_eq!(egress_proof().validate(), Ok(()));
+    }
+
+    #[test]
+    fn verified_egress_proof_rejects_stale_or_unbound_authority() {
+        let mut invalid = egress_proof();
+        invalid.source_commit.clear();
+        assert!(invalid.validate().is_err());
+
+        let mut invalid = egress_proof();
+        invalid.configuration_hash = "C".repeat(64);
+        assert!(invalid.validate().is_err());
+
+        let mut invalid = egress_proof();
+        invalid.track_revision = 0;
+        assert!(invalid.validate().is_err());
+
+        let mut invalid = egress_proof();
+        invalid.caption_policy_revision = 0;
+        assert!(invalid.validate().is_err());
+
+        let mut invalid = egress_proof();
+        invalid.artifact_relative_path = "caption-proofs/other.ts".into();
+        assert!(invalid.validate().is_err());
+    }
+
+    #[test]
+    fn verified_egress_proof_rejects_missing_or_mismatched_decode_back() {
+        let mut missing = egress_proof();
+        missing.decoded_cue_count = 0;
+        assert!(missing.validate().is_err());
+
+        let mut unbounded = egress_proof();
+        unbounded.capture_bytes = MAX_CAPTION_PROOF_CAPTURE_BYTES + 1;
+        assert!(unbounded.validate().is_err());
+
+        let mut mismatch_claimed_verified = egress_proof();
+        mismatch_claimed_verified.decoded_text_sha256 = "f".repeat(64);
+        assert!(mismatch_claimed_verified.validate().is_err());
+
+        let mut honest_mismatch = mismatch_claimed_verified;
+        honest_mismatch.outcome = CaptionProofOutcome::Mismatch;
+        assert_eq!(honest_mismatch.validate(), Ok(()));
+
+        let mut false_mismatch = egress_proof();
+        false_mismatch.outcome = CaptionProofOutcome::Mismatch;
+        assert!(false_mismatch.validate().is_err());
     }
 
     #[test]

@@ -8,6 +8,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- Caption egress evidence now has an append-only SQLite authority bound to the exact installed
+  candidate/source commit, channel output configuration and sink, committed schedule report and
+  asset, caption policy revision, caption track revision/digest, proof-owned MPEG-TS artifact hash,
+  and independent decoded-text digest. Verified outcomes require nonempty decoded cues and exact
+  expected/decoded count and digest equality; stale policy, track, schedule, or output bindings fail
+  closed. Worker capture/decode job execution remains a separate unfinished boundary.
+
 - Asset caption authority now stores bounded, ordered, non-overlapping cue sets against the exact
   content-addressed media identity, language, and CEA service. Writes require ready media, reject
   on-air mutation and identity rebinding, use compare-and-swap revisions, and append a complete

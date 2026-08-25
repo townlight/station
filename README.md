@@ -28,10 +28,13 @@ the server owns actor, time, path identity, and audit identity. The Media consol
 validates reviewed WebVTT/SRT, edits canonical WebVTT timing, displays immutable revisions, and saves
 through that exact contract. After an acknowledged scheduled take, the channel controller selects
 the exact policy-matching asset track, derives timing from the committed media offset, catches up an
-active cue, and sends bounded relative-delay cues only with worker acknowledgments. Live ASR,
-already-queued cue clearing at unscheduled source transitions, current decode-back proof receipts,
-and installed/field evidence remain separate work, so commissioning still reports the caption
-authority as blocked.
+active cue, and sends bounded relative-delay cues only with worker acknowledgments. A separate
+append-only caption egress ledger rejects receipts not bound to the exact schedule report/asset,
+enabled sink configuration, current policy revision, current track revision/digest, installed
+source commit, managed transport capture, and independent decode-back result. It cannot mark
+mismatched or absent decoded evidence verified. Proof-job execution, already-queued cue clearing at
+unscheduled source transitions, live ASR, and installed/field evidence remain separate work, so
+commissioning still reports the caption authority as blocked.
 
 ## Architecture
 

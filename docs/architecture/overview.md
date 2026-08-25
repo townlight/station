@@ -57,8 +57,12 @@ writer: one authoritative track occupies each exact media-hash/language/CEA-serv
 accepted compare-and-swap change stores both the current cues and a complete append-only revision
 snapshot. A track identity cannot move to different media or a different language/service slot;
 non-ready assets and assets currently on air reject mutation. This is caption source authority, not
-proof of emission. API review/import, schedule-relative dispatch, decode-back receipts, and live ASR
-remain separate boundaries. See [ADR 0050](../adr/0050-asset-bound-caption-track-authority.md).
+proof of emission. Schedule-relative dispatch is server-owned, and a separate immutable egress-proof
+contract can record only candidate/configuration/policy/track-bound transport capture plus
+independent decode-back facts; job execution and live ASR remain separate boundaries. See
+[ADR 0050](../adr/0050-asset-bound-caption-track-authority.md),
+[ADR 0051](../adr/0051-schedule-authoritative-caption-dispatch.md), and
+[ADR 0052](../adr/0052-caption-egress-proof-authority.md).
 
 The operator console is a production React/TypeScript bundle embedded into `stationd` and served from the same loopback origin as the API. It commissions station identity and provides responsive views for readiness, media/job state, channels, schedule commit, dispatch, and guided commissioning. Commissioning report schema v2 owns the ordered current step, required progress, and `core_complete` on the server. Its full local checklist covers identity/auth, StationBox/storage/time/backup, watch-folder and channel/output policy, named headend and cable analysis, a causally linked real ingest → commit → worker-air chain, ten-minute selected-sink proof, support evidence, and first-broadcast completion. Missing authorities remain blocked; receiver, clean-machine, and one-/three-station field proof remain explicitly external. Browser state remembers navigation only and has no completion-write contract. It carries no runtime dependency on an Internet service, CDN, or separate web server. See [ADR 0031](../adr/0031-authoritative-commissioning-report.md).
 
