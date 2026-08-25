@@ -88,6 +88,17 @@ fn http_request(database: &Path, request: &[u8]) -> Vec<u8> {
     response
 }
 
+fn http_request_to(address: std::net::SocketAddr, request: &[u8]) -> Vec<u8> {
+    let mut client = TcpStream::connect(address).unwrap();
+    client
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    client.write_all(request).unwrap();
+    let mut response = Vec::new();
+    client.read_to_end(&mut response).unwrap();
+    response
+}
+
 #[test]
 fn persists_a_valid_station_profile_and_reads_it_back() {
     let database = temporary_database("persist");
@@ -2080,6 +2091,85 @@ fn production_http_boundary_requires_auth_for_station_profile_mutation() {
     let response_body = response.split("\r\n\r\n").nth(1).unwrap();
     let error: serde_json::Value = serde_json::from_str(response_body).unwrap();
     assert_eq!(error["error"]["code"], "operator_bootstrap_required");
+    let _ = std::fs::remove_file(database);
+}
+
+#[test]
+fn bootstrap_session_survives_across_real_tcp_connections() {
+    let database = temporary_database("tcp-bootstrap-session");
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+    let capability = station_auth::generate_secret_token().unwrap();
+    let bootstrap = station_auth::BootstrapCredential::new(
+        station_auth::digest_secret(&capability),
+        now.saturating_sub(1_000),
+        now.saturating_add(5 * 60 * 1_000),
+        None,
+    )
+    .unwrap();
+    assert!(
+        StationStore::open(&database)
+            .unwrap()
+            .provision_operator_bootstrap(&bootstrap)
+            .unwrap()
+    );
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let stop = Arc::new(AtomicBool::new(false));
+    let server_stop = Arc::clone(&stop);
+    let server_database = database.clone();
+    let (finished_tx, finished_rx) = mpsc::channel();
+    thread::spawn(move || {
+        let _ = finished_tx.send(serve_until(listener, server_database, server_stop));
+    });
+
+    let body = serde_json::to_vec(&serde_json::json!({
+        "capability": capability.expose_secret(),
+        "username": "setup.admin",
+        "display_name": "Setup Administrator",
+        "password": "A-strong-bootstrap-password-47!"
+    }))
+    .unwrap();
+    let mut request = format!(
+        "POST /api/v1/auth/bootstrap HTTP/1.1\r\nHost: {address}\r\nOrigin: http://{address}\r\nSec-Fetch-Site: same-origin\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        body.len()
+    )
+    .into_bytes();
+    request.extend_from_slice(&body);
+    let issued = String::from_utf8(http_request_to(address, &request)).unwrap();
+    assert!(issued.starts_with("HTTP/1.1 201 Created\r\n"), "{issued}");
+    let cookies = issued
+        .split("\r\n\r\n")
+        .next()
+        .unwrap()
+        .lines()
+        .filter_map(|line| line.strip_prefix("Set-Cookie: "))
+        .filter_map(|line| line.split(';').next())
+        .collect::<Vec<_>>();
+    let session = cookies
+        .iter()
+        .find(|cookie| cookie.starts_with("townlight_session_v1="))
+        .unwrap();
+    let csrf = cookies
+        .iter()
+        .find(|cookie| cookie.starts_with("townlight_csrf_v1="))
+        .unwrap();
+    let request = format!(
+        "GET /api/v1/auth/session HTTP/1.1\r\nHost: {address}\r\nCookie: {session}; {csrf}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+    );
+    let confirmed = String::from_utf8(http_request_to(address, request.as_bytes())).unwrap();
+    assert!(confirmed.starts_with("HTTP/1.1 200 OK\r\n"), "{confirmed}");
+
+    stop.store(true, Ordering::Release);
+    assert!(
+        finished_rx
+            .recv_timeout(Duration::from_secs(3))
+            .unwrap()
+            .is_ok()
+    );
     let _ = std::fs::remove_file(database);
 }
 

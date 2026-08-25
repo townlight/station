@@ -39,10 +39,13 @@ function Invoke-Api {
         [ValidateSet('Get', 'Post', 'Put')][string]$Method,
         [string]$Path,
         $Body = $null,
-        [int]$TimeoutSec = 30
+        [int]$TimeoutSec = 30,
+        [switch]$Unauthenticated,
+        [switch]$IncludeResponseHeaders
     )
-    if ([string]::IsNullOrWhiteSpace($script:apiCookieHeader) -or
-        [string]::IsNullOrWhiteSpace($script:apiCsrfToken)) {
+    if (-not $Unauthenticated -and
+        ([string]::IsNullOrWhiteSpace($script:apiCookieHeader) -or
+        [string]::IsNullOrWhiteSpace($script:apiCsrfToken))) {
         throw 'Caption proof API session authority is unavailable.'
     }
     if ([string]::IsNullOrWhiteSpace($Path) -or -not $Path.StartsWith('/') -or
@@ -50,11 +53,14 @@ function Invoke-Api {
         $Path.Contains('..')) {
         throw 'Caption proof API path is invalid or unbounded.'
     }
-    $headers = [ordered]@{ Cookie = $script:apiCookieHeader }
+    $headers = [ordered]@{}
+    if (-not $Unauthenticated) { $headers.Cookie = $script:apiCookieHeader }
     if ($Method -ne 'Get') {
         $headers.Origin = $script:origin
         $headers['Sec-Fetch-Site'] = 'same-origin'
-        $headers['X-TownLight-CSRF'] = $script:apiCsrfToken
+        if (-not $Unauthenticated) {
+            $headers['X-TownLight-CSRF'] = $script:apiCsrfToken
+        }
     }
     $requestBody = $null
     if ($null -ne $Body) {
@@ -135,13 +141,22 @@ function Invoke-Api {
         if ($status -lt 200 -or $status -ge 300) {
             throw "Caption proof API $Method $Path failed with HTTP status $status; response content was not recorded."
         }
-        if ($contentLength -eq 0) { return $null }
-        $content = [Text.UTF8Encoding]::new($false, $true).GetString(
-            $responseBytes,
-            $bodyOffset,
-            [int]$contentLength
-        )
-        $content | ConvertFrom-Json -ErrorAction Stop
+        $document = $null
+        if ($contentLength -gt 0) {
+            $content = [Text.UTF8Encoding]::new($false, $true).GetString(
+                $responseBytes,
+                $bodyOffset,
+                [int]$contentLength
+            )
+            $document = $content | ConvertFrom-Json -ErrorAction Stop
+        }
+        if ($IncludeResponseHeaders) {
+            return [pscustomobject]@{
+                Document = $document
+                ResponseHeaders = @($responseLines | Select-Object -Skip 1)
+            }
+        }
+        $document
     }
     catch {
         if ($_.Exception.Message -match '^Caption proof API .+ failed with HTTP status [0-9]+;') {
@@ -192,16 +207,16 @@ function New-RandomProofCredential {
 }
 
 function Get-ExactResponseCookie {
-    param($Response, [string]$Name)
-    $headers = @($Response.Headers['Set-Cookie']) -join "`n"
-    $matches = [regex]::Matches(
-        $headers,
-        ('(?i)(?:^|[,\r\n]\s*)' + [regex]::Escape($Name) + '=([A-Za-z0-9_-]{43})(?:;|$)')
-    )
+    param([string[]]$ResponseHeaders, [string]$Name)
+    $matches = @($ResponseHeaders | ForEach-Object {
+        if ($_ -match ('(?i)^Set-Cookie:\s*' + [regex]::Escape($Name) + '=([A-Za-z0-9_-]{43});')) {
+            $Matches[1]
+        }
+    })
     if ($matches.Count -ne 1) {
         throw "Bootstrap response did not contain exactly one bounded $Name cookie."
     }
-    $matches[0].Groups[1].Value
+    $matches[0]
 }
 
 try {
@@ -255,14 +270,10 @@ try {
             username = $proofCredential.Credential.UserName
             display_name = 'Sandbox Setup Admin'
             password = $proofCredential.PlainText
-        } | ConvertTo-Json -Compress
-        $bootstrapResponse = Invoke-WebRequest -Method Post -Uri "$origin/api/v1/auth/bootstrap" `
-            -Headers @{
-                Origin = $origin
-                'Sec-Fetch-Site' = 'same-origin'
-            } -ContentType 'application/json' -Body $bootstrapBody -TimeoutSec 20 `
-            -MaximumRedirection 0 -UseBasicParsing
-        $bootstrapDocument = $bootstrapResponse.Content | ConvertFrom-Json
+        }
+        $bootstrapResponse = Invoke-Api -Method Post -Path '/auth/bootstrap' `
+            -Body $bootstrapBody -TimeoutSec 20 -Unauthenticated -IncludeResponseHeaders
+        $bootstrapDocument = $bootstrapResponse.Document
         if ($bootstrapDocument.session.username -ne $proofCredential.Credential.UserName -or
             @($bootstrapDocument.session.roles | Where-Object { $_ -eq 'setup_admin' }).Count -ne 1) {
             throw 'Bootstrap response did not establish the exact Setup Admin identity.'
@@ -274,10 +285,13 @@ try {
         $capability = $null
         $rawCapability = $null
     }
-    # Windows PowerShell 5 does not reliably replay this server's multiple Set-Cookie headers.
-    # Retain both exact bounded tokens only in process memory and emit one explicit Cookie header.
-    $sessionToken = Get-ExactResponseCookie -Response $bootstrapResponse -Name 'townlight_session_v1'
-    $csrfToken = Get-ExactResponseCookie -Response $bootstrapResponse -Name 'townlight_csrf_v1'
+    # Parse both exact Set-Cookie lines from the raw HTTP bytes and retain the bounded tokens only
+    # in process memory. Windows PowerShell 5 may alter repeated response headers.
+    $sessionToken = Get-ExactResponseCookie -ResponseHeaders $bootstrapResponse.ResponseHeaders `
+        -Name 'townlight_session_v1'
+    $csrfToken = Get-ExactResponseCookie -ResponseHeaders $bootstrapResponse.ResponseHeaders `
+        -Name 'townlight_csrf_v1'
+    $bootstrapResponse = $null
     $apiCookieHeader = "townlight_session_v1=$sessionToken; townlight_csrf_v1=$csrfToken"
     $apiCsrfToken = $csrfToken
     $confirmed = Invoke-Api 'Get' '/auth/session'

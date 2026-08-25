@@ -31,6 +31,7 @@ $requirements = [ordered]@{
     'guest authenticates through public API' = '/auth/bootstrap'
     'guest uses the canonical protected handoff' = 'operator-bootstrap.capability'
     'guest retains exact cookies only in memory' = 'Get-ExactResponseCookie'
+    'guest bootstraps through byte-exact HTTP' = '-Unauthenticated -IncludeResponseHeaders'
     'guest sends an explicit bounded cookie header' = 'Cookie = $script:apiCookieHeader'
     'guest uses byte-exact loopback HTTP for authenticated calls' = '[Net.Sockets.TcpClient]::new()'
     'guest creates caption authority' = '/caption-tracks/'
