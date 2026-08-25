@@ -2158,7 +2158,7 @@ impl ChannelController {
                     .command(
                         &format!("complete-{report_id}"),
                         ChannelCommand::ReturnToSchedule,
-                        self.command_timeout,
+                        self.command_timeout.max(MEDIA_TEARDOWN_TIMEOUT),
                     )
                     .map_err(OrchestrationError::Worker)?;
                 if !matches!(event.event, WorkerEvent::OnAirChanged { ref source_kind, .. }

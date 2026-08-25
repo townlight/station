@@ -305,8 +305,11 @@ fn measure_loudness_with_minimum(
         .set_state(gst::State::Playing)
         .map_err(|error| AssetError::Discovery(error.to_string()))?;
     let result = collect_loudness(&pipeline, &level, &audio_linked, minimum_duration_ms);
-    let _ = pipeline.set_state(gst::State::Null);
-    result
+    let stopped = stop_pipeline(&pipeline);
+    match (result, stopped) {
+        (Err(error), _) | (Ok(_), Err(error)) => Err(error),
+        (Ok(measurement), Ok(())) => Ok(measurement),
+    }
 }
 
 pub fn transcode_playout_asset(
@@ -483,14 +486,52 @@ pub fn transcode_playout_asset(
         .set_state(gst::State::Playing)
         .map_err(|error| AssetError::Discovery(error.to_string()))?;
     let transcode = wait_for_transcode(&pipeline, &video_linked, &audio_linked);
-    let _ = pipeline.set_state(gst::State::Null);
+    let stopped = stop_pipeline(&pipeline);
     if let Err(error) = transcode {
         let _ = fs::remove_file(&temporary);
         return Err(error);
     }
+    if let Err(error) = stopped {
+        let _ = fs::remove_file(&temporary);
+        return Err(error);
+    }
     let output = ingest_media(&temporary, &library);
-    let _ = fs::remove_file(&temporary);
+    remove_file_bounded(&temporary, Duration::from_secs(5))?;
     output
+}
+
+fn remove_file_bounded(path: &Path, timeout: Duration) -> Result<(), AssetError> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        match fs::remove_file(path) {
+            Ok(()) => return Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(_error) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(25));
+            }
+            Err(error) => {
+                return Err(AssetError::Io(format!(
+                    "the temporary media file was not released within {} ms: {error}",
+                    timeout.as_millis()
+                )));
+            }
+        }
+    }
+}
+
+fn stop_pipeline(pipeline: &gst::Pipeline) -> Result<(), AssetError> {
+    pipeline
+        .set_state(gst::State::Null)
+        .map_err(|error| AssetError::Discovery(format!("media pipeline stop failed: {error:?}")))?;
+    pipeline
+        .state(gst::ClockTime::from_seconds(5))
+        .0
+        .map(|_| ())
+        .map_err(|error| {
+            AssetError::Discovery(format!(
+                "media pipeline did not reach the stopped state: {error:?}"
+            ))
+        })
 }
 
 fn wait_for_transcode(

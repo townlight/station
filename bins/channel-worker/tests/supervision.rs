@@ -131,7 +131,7 @@ fn launches_handshakes_commands_and_cleanly_stops_the_real_worker() {
                 asset_id: asset.asset_id.clone(),
                 media_offset_ms: 0,
             },
-            Duration::from_secs(2),
+            Duration::from_secs(7),
         )
         .unwrap();
     assert_eq!(on_air.sequence, 5);
@@ -147,7 +147,7 @@ fn launches_handshakes_commands_and_cleanly_stops_the_real_worker() {
         .command(
             "return-1",
             ChannelCommand::ReturnToSchedule,
-            Duration::from_secs(2),
+            Duration::from_secs(30),
         )
         .unwrap();
     assert_eq!(returned.sequence, 6);
@@ -178,7 +178,7 @@ fn launches_handshakes_commands_and_cleanly_stops_the_real_worker() {
                 asset_id: second_asset.asset_id.clone(),
                 media_offset_ms: 0,
             },
-            Duration::from_secs(2),
+            Duration::from_secs(7),
         )
         .unwrap();
     assert_eq!(second_on_air.sequence, 8);
@@ -191,13 +191,13 @@ fn launches_handshakes_commands_and_cleanly_stops_the_real_worker() {
         .command(
             "return-2",
             ChannelCommand::ReturnToSchedule,
-            Duration::from_secs(2),
+            Duration::from_secs(30),
         )
         .unwrap();
     assert_eq!(second_returned.sequence, 9);
 
     let stopped = supervisor
-        .shutdown("shutdown-1", Duration::from_secs(1))
+        .shutdown("shutdown-1", Duration::from_secs(3))
         .unwrap();
     assert_eq!(stopped.sequence, 10);
     assert!(matches!(stopped.event, WorkerEvent::ShutdownComplete));
@@ -214,7 +214,7 @@ fn launches_handshakes_commands_and_cleanly_stops_the_real_worker() {
     let restart_ready = restarted.ready().clone();
     assert_eq!(restart_ready.sequence, 11);
     let restart_stopped = restarted
-        .shutdown("shutdown-2", Duration::from_secs(1))
+        .shutdown("shutdown-2", Duration::from_secs(3))
         .unwrap();
     assert_eq!(restart_stopped.sequence, 12);
 

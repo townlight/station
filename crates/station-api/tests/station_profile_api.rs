@@ -44,7 +44,7 @@ fn http_request(database: &Path, request: &[u8]) -> Vec<u8> {
     let server = thread::spawn(move || serve_one(listener, database));
     let mut client = TcpStream::connect(address).unwrap();
     client
-        .set_read_timeout(Some(Duration::from_secs(1)))
+        .set_read_timeout(Some(Duration::from_secs(5)))
         .unwrap();
     let header_end = request
         .windows(4)
@@ -2128,7 +2128,7 @@ fn serves_requests_until_a_cooperative_stop_is_requested() {
 
     let mut client = TcpStream::connect(address).unwrap();
     client
-        .set_read_timeout(Some(Duration::from_millis(500)))
+        .set_read_timeout(Some(Duration::from_secs(5)))
         .unwrap();
     client
         .write_all(format!("GET /health HTTP/1.1\r\nHost: {address}\r\n\r\n").as_bytes())
@@ -2136,7 +2136,7 @@ fn serves_requests_until_a_cooperative_stop_is_requested() {
     let mut response = Vec::new();
     let _ = client.read_to_end(&mut response);
     stop.store(true, Ordering::Release);
-    let server_result = finished_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+    let server_result = finished_rx.recv_timeout(Duration::from_secs(3)).unwrap();
 
     assert!(server_result.is_ok(), "server returned {server_result:?}");
     assert!(response.starts_with(b"HTTP/1.1 200 OK\r\n"));
@@ -2158,7 +2158,7 @@ fn allows_an_accepted_client_time_to_send_its_request() {
 
     let mut client = TcpStream::connect(address).unwrap();
     client
-        .set_read_timeout(Some(Duration::from_secs(1)))
+        .set_read_timeout(Some(Duration::from_secs(5)))
         .unwrap();
     thread::sleep(Duration::from_millis(100));
     client
@@ -2171,7 +2171,7 @@ fn allows_an_accepted_client_time_to_send_its_request() {
     stop.store(true, Ordering::Release);
     assert!(
         finished_rx
-            .recv_timeout(Duration::from_secs(1))
+            .recv_timeout(Duration::from_secs(3))
             .unwrap()
             .is_ok()
     );
@@ -2199,7 +2199,7 @@ fn keeps_health_responsive_while_another_request_is_stalled() {
 
     let mut health = TcpStream::connect(address).unwrap();
     health
-        .set_read_timeout(Some(Duration::from_secs(1)))
+        .set_read_timeout(Some(Duration::from_secs(5)))
         .unwrap();
     health
         .write_all(format!("GET /health HTTP/1.1\r\nHost: {address}\r\n\r\n").as_bytes())
@@ -2212,7 +2212,7 @@ fn keeps_health_responsive_while_another_request_is_stalled() {
     stop.store(true, Ordering::Release);
     assert!(
         finished_rx
-            .recv_timeout(Duration::from_secs(1))
+            .recv_timeout(Duration::from_secs(3))
             .unwrap()
             .is_ok()
     );

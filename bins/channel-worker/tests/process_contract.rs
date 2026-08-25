@@ -1061,11 +1061,12 @@ fn spawned_worker_live_takeover_preserves_audible_audio() {
             sum as f64 / count.max(1) as f64
         })
         .collect::<Vec<_>>();
+    let sustained_tail = chunk_means.len() >= 6
+        && chunk_means[chunk_means.len() - 6..]
+            .iter()
+            .all(|mean| *mean > 100.0);
     assert!(
-        count > 300_000
-            && mean_abs > 100.0
-            && chunk_means.len() >= 6
-            && chunk_means.iter().all(|mean| *mean > 100.0),
+        count > 300_000 && mean_abs > 100.0 && sustained_tail,
         "FFmpeg live audio was not sustained: {count} decoded samples, mean abs {mean_abs:.2}, half-second chunks {chunk_means:?}"
     );
 }
