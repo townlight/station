@@ -12,6 +12,7 @@ members = [
     "crates/station-domain",
     "crates/station-media-journal",
     "crates/station-media-lifecycle",
+    "crates/station-metadata",
     "crates/station-media-engine",
     "crates/station-ingest",
     "crates/station-media-assets",
@@ -19,6 +20,7 @@ members = [
     "crates/station-maintenance",
     "crates/station-orchestration",
     "crates/station-automation-policy",
+    "crates/station-recording",
     "crates/station-publishing",
     "crates/station-runtime",
     "crates/station-readiness",
@@ -74,6 +76,7 @@ station-media-protocol = { path = "crates/station-media-protocol" }
 station-maintenance = { path = "crates/station-maintenance" }
 station-orchestration = { path = "crates/station-orchestration" }
 station-automation-policy = { path = "crates/station-automation-policy" }
+station-recording = { path = "crates/station-recording" }
 station-publishing = { path = "crates/station-publishing" }
 station-runtime = { path = "crates/station-runtime" }
 station-readiness = { path = "crates/station-readiness" }

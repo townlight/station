@@ -1872,6 +1872,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "station-metadata"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "station-orchestration"
 version = "0.1.0"
 dependencies = [
@@ -1899,6 +1907,13 @@ dependencies = [
 
 [[package]]
 name = "station-readiness"
+version = "0.1.0"
+dependencies = [
+ "serde",
+]
+
+[[package]]
+name = "station-recording"
 version = "0.1.0"
 dependencies = [
  "serde",
