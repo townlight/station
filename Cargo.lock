@@ -1701,6 +1701,7 @@ dependencies = [
  "gstreamer",
  "serde",
  "serde_json",
+ "sha2",
  "station-alerting",
  "station-auth",
  "station-cg",

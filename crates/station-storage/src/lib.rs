@@ -219,6 +219,43 @@ pub enum CommitWriteError {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommissioningSupportBundleReceipt {
+    pub bundle_id: String,
+    pub report_id: String,
+    pub archive_sha256: String,
+    pub archive_size_bytes: u64,
+    pub created_at_unix_ms: i64,
+    pub created_by: String,
+}
+
+impl CommissioningSupportBundleReceipt {
+    fn validate(&self) -> Result<(), String> {
+        let valid_bundle_id = self.bundle_id.starts_with("support-bundle-")
+            && (18..=120).contains(&self.bundle_id.len())
+            && self
+                .bundle_id
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-');
+        if !valid_bundle_id
+            || self.report_id.is_empty()
+            || self.report_id.len() > 200
+            || self.report_id.trim() != self.report_id
+            || self.report_id.chars().any(char::is_control)
+            || !is_sha256_identity(&self.archive_sha256)
+            || self.archive_size_bytes == 0
+            || self.archive_size_bytes > 16 * 1024 * 1024
+            || self.created_at_unix_ms < 0
+            || !secret_field(&self.created_by, 200)
+        {
+            return Err(
+                "commissioning support-bundle receipt facts are invalid or unbounded".into(),
+            );
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CgWriteError {
     NotFound,
     Conflict(u64),
@@ -860,6 +897,7 @@ impl StationStore {
         store.migrate_ingest_retry_schedule()?;
         store.migrate_ingest_transcode_status()?;
         store.migrate_commit_report_statuses()?;
+        store.initialize_commissioning_support_bundle_schema()?;
         store.migrate_channel_runtime_live_state()?;
         store.migrate_alert_delivery_realerts()?;
         store.migrate_channel_output_profile()?;
@@ -885,6 +923,28 @@ impl StationStore {
         store.seed_default_alert_rules()?;
         store.seed_default_self_test_schedules()?;
         Ok(store)
+    }
+
+    fn initialize_commissioning_support_bundle_schema(&self) -> Result<(), String> {
+        self.execute(
+            "CREATE TABLE IF NOT EXISTS commissioning_support_bundle_receipts (\
+               bundle_id TEXT PRIMARY KEY,\
+               report_id TEXT NOT NULL,\
+               archive_sha256 TEXT NOT NULL CHECK (length(archive_sha256) = 64),\
+               archive_size_bytes INTEGER NOT NULL CHECK (archive_size_bytes BETWEEN 1 AND 16777216),\
+               created_at_unix_ms INTEGER NOT NULL CHECK (created_at_unix_ms >= 0),\
+               created_by TEXT NOT NULL,\
+               FOREIGN KEY(report_id) REFERENCES commit_reports(report_id)\
+             );\
+             CREATE INDEX IF NOT EXISTS commissioning_support_bundle_receipts_time \
+               ON commissioning_support_bundle_receipts(created_at_unix_ms DESC, bundle_id DESC);\
+             CREATE TRIGGER IF NOT EXISTS commissioning_support_bundle_receipts_no_update \
+               BEFORE UPDATE ON commissioning_support_bundle_receipts \
+               BEGIN SELECT RAISE(ABORT, 'commissioning support bundle receipts are append-only'); END;\
+             CREATE TRIGGER IF NOT EXISTS commissioning_support_bundle_receipts_no_delete \
+               BEFORE DELETE ON commissioning_support_bundle_receipts \
+               BEGIN SELECT RAISE(ABORT, 'commissioning support bundle receipts are append-only'); END;",
+        )
     }
 
     fn initialize_operator_auth_schema(&self) -> Result<(), String> {
@@ -8353,6 +8413,88 @@ impl StationStore {
         }
     }
 
+    pub fn append_commissioning_support_bundle_receipt(
+        &self,
+        receipt: &CommissioningSupportBundleReceipt,
+    ) -> Result<(), String> {
+        receipt.validate()?;
+        let report = self
+            .read_commit_report(&receipt.report_id)?
+            .ok_or_else(|| {
+                "commissioning support bundle requires an existing commit report".to_string()
+            })?;
+        if report.dispatch_status != DispatchStatus::Completed {
+            return Err("commissioning support bundle requires a completed commit report".into());
+        }
+
+        let statement = self.prepare(
+            "INSERT INTO commissioning_support_bundle_receipts(\
+               bundle_id, report_id, archive_sha256, archive_size_bytes, created_at_unix_ms, created_by\
+             ) VALUES(?1, ?2, ?3, ?4, ?5, ?6)",
+        )?;
+        let bundle_id = c_string(&receipt.bundle_id, "support bundle identity")?;
+        let report_id = c_string(&receipt.report_id, "commit report identity")?;
+        let archive_sha256 = c_string(&receipt.archive_sha256, "support bundle hash")?;
+        let created_by = c_string(&receipt.created_by, "support bundle actor")?;
+        bind_text(self.database, statement.raw, 1, &bundle_id)?;
+        bind_text(self.database, statement.raw, 2, &report_id)?;
+        bind_text(self.database, statement.raw, 3, &archive_sha256)?;
+        bind_i64(
+            self.database,
+            statement.raw,
+            4,
+            i64::try_from(receipt.archive_size_bytes)
+                .map_err(|_| "support bundle size is invalid".to_string())?,
+        )?;
+        bind_i64(self.database, statement.raw, 5, receipt.created_at_unix_ms)?;
+        bind_text(self.database, statement.raw, 6, &created_by)?;
+        match unsafe { sqlite3_step(statement.raw) } {
+            SQLITE_DONE => Ok(()),
+            _ => Err(sqlite_error(self.database)),
+        }
+    }
+
+    pub fn list_commissioning_support_bundle_receipts(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<CommissioningSupportBundleReceipt>, String> {
+        if !(1..=100).contains(&limit) {
+            return Err(
+                "commissioning support bundle receipt limit must be between 1 and 100".into(),
+            );
+        }
+        let statement = self.prepare(
+            "SELECT bundle_id, report_id, archive_sha256, archive_size_bytes, created_at_unix_ms, created_by \
+             FROM commissioning_support_bundle_receipts \
+             ORDER BY created_at_unix_ms DESC, bundle_id DESC LIMIT ?1",
+        )?;
+        bind_i64(
+            self.database,
+            statement.raw,
+            1,
+            i64::try_from(limit).map_err(|_| "receipt limit is invalid".to_string())?,
+        )?;
+        let mut receipts = Vec::new();
+        loop {
+            match unsafe { sqlite3_step(statement.raw) } {
+                SQLITE_ROW => {
+                    let receipt = CommissioningSupportBundleReceipt {
+                        bundle_id: column_text(statement.raw, 0)?,
+                        report_id: column_text(statement.raw, 1)?,
+                        archive_sha256: column_text(statement.raw, 2)?,
+                        archive_size_bytes: column_u64(statement.raw, 3, "support bundle size")?,
+                        created_at_unix_ms: unsafe { sqlite3_column_int64(statement.raw, 4) },
+                        created_by: column_text(statement.raw, 5)?,
+                    };
+                    receipt.validate()?;
+                    receipts.push(receipt);
+                }
+                SQLITE_DONE => return Ok(receipts),
+                _ => return Err(sqlite_error(self.database)),
+            }
+        }
+    }
+
     pub fn list_dispatch_jobs(&self, channel_id: &str) -> Result<Vec<DispatchJob>, String> {
         let statement = self.prepare(
             "SELECT r.report_id, r.plan_id, r.channel_id, r.schedule_item_id, r.asset_id, r.approved_by, \
@@ -12223,7 +12365,8 @@ mod tests {
         let store = StationStore::open(&database).unwrap();
         store
             .execute(
-                "DROP TABLE commit_reports;\
+                "DROP TABLE commissioning_support_bundle_receipts;\
+                 DROP TABLE commit_reports;\
                  CREATE TABLE commit_reports (\
                    report_id TEXT PRIMARY KEY, plan_id TEXT NOT NULL, channel_id TEXT NOT NULL,\
                    schedule_item_id TEXT NOT NULL, asset_id TEXT NOT NULL, approved_by TEXT NOT NULL,\
@@ -12255,6 +12398,24 @@ mod tests {
                 .dispatch_status,
             DispatchStatus::Completed
         );
+        migrated
+            .append_commissioning_support_bundle_receipt(&CommissioningSupportBundleReceipt {
+                bundle_id: "support-bundle-after-migration".into(),
+                report_id: "legacy".into(),
+                archive_sha256: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+                    .into(),
+                archive_size_bytes: 4_096,
+                created_at_unix_ms: 2,
+                created_by: "setup-admin".into(),
+            })
+            .unwrap();
+        assert_eq!(
+            migrated
+                .list_commissioning_support_bundle_receipts(10)
+                .unwrap()
+                .len(),
+            1
+        );
         drop(migrated);
         for candidate in [
             database.clone(),
@@ -12275,7 +12436,8 @@ mod tests {
         let store = StationStore::open(&database).unwrap();
         store
             .execute(
-                "DROP TABLE commit_reports;\
+                "DROP TABLE commissioning_support_bundle_receipts;\
+                 DROP TABLE commit_reports;\
                  CREATE TABLE commit_reports (\
                    report_id TEXT PRIMARY KEY, plan_id TEXT NOT NULL, channel_id TEXT NOT NULL,\
                    schedule_item_id TEXT NOT NULL, asset_id TEXT NOT NULL, approved_by TEXT NOT NULL,\
@@ -12471,6 +12633,48 @@ mod tests {
                 "SELECT COUNT(*) FROM operator_auth_audit WHERE event_kind='password_changed'",
             ),
             1
+        );
+        drop(store);
+        for candidate in [
+            database.clone(),
+            PathBuf::from(format!("{}-wal", database.display())),
+            PathBuf::from(format!("{}-shm", database.display())),
+        ] {
+            let _ = std::fs::remove_file(candidate);
+        }
+    }
+
+    #[test]
+    fn commissioning_support_bundle_receipts_reject_update_and_delete_tampering() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let database =
+            std::env::temp_dir().join(format!("townlight-support-receipt-trigger-{nonce}.db"));
+        let store = StationStore::open(&database).unwrap();
+        store
+            .execute(
+                "INSERT INTO commit_reports VALUES(\
+                   'report-guided','plan-guided','channel-guided','item-guided','asset-guided',\
+                   'operator',1,'completed','');\
+                 INSERT INTO commissioning_support_bundle_receipts VALUES(\
+                   'support-bundle-1','report-guided',\
+                   'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',\
+                   4096,2,'setup-admin');",
+            )
+            .unwrap();
+        assert!(
+            store
+                .execute("UPDATE commissioning_support_bundle_receipts SET created_by='attacker'")
+                .unwrap_err()
+                .contains("append-only")
+        );
+        assert!(
+            store
+                .execute("DELETE FROM commissioning_support_bundle_receipts")
+                .unwrap_err()
+                .contains("append-only")
         );
         drop(store);
         for candidate in [

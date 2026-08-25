@@ -698,6 +698,7 @@ fn commissioning_guided_air_proof_requires_one_persisted_causal_chain() {
     );
     drop(store);
     assert_eq!(read_status("first_broadcast_report"), "pass");
+    assert_eq!(read_status("support_bundle"), "blocked");
     let api = Api::open(&database).unwrap();
     let response = api.handle_in_process("GET", "/api/v1/commissioning/report", None);
     let report: serde_json::Value = serde_json::from_slice(&response.body).unwrap();
@@ -720,6 +721,26 @@ fn commissioning_guided_air_proof_requires_one_persisted_causal_chain() {
             .contains(guided_asset_id)
     );
     drop(api);
+
+    let api = Api::open(&database).unwrap();
+    let created = api.handle_in_process("POST", "/api/v1/support-bundles", None);
+    assert_eq!(
+        created.status,
+        201,
+        "{}",
+        String::from_utf8_lossy(&created.body)
+    );
+    let bundle: serde_json::Value = serde_json::from_slice(&created.body).unwrap();
+    assert_eq!(bundle["commissioning_report_id"], "report-guided");
+    let bundle_path = bundle["path"].as_str().unwrap().to_owned();
+    drop(api);
+    assert_eq!(read_status("support_bundle"), "pass");
+
+    let mut corrupted = std::fs::read(&bundle_path).unwrap();
+    corrupted[0] ^= 0xff;
+    std::fs::write(&bundle_path, corrupted).unwrap();
+    assert_eq!(read_status("support_bundle"), "blocked");
+    std::fs::remove_file(&bundle_path).unwrap();
 
     let _ = std::fs::remove_file(database);
     let _ = std::fs::remove_file(historical_media);

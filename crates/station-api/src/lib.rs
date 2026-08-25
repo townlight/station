@@ -17,6 +17,7 @@ use std::time::{Duration, Instant};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use station_alerting::probe_system_resources;
 use station_auth::{OperatorAccount, SecretToken, digest_secret};
 use station_cg::{
@@ -46,14 +47,15 @@ use station_readiness::{
     derive_station_box_profile,
 };
 use station_schedule::{
-    AssetReadiness, ChannelConfiguration, DispatchStatus, HEADEND_PROFILES,
+    AssetReadiness, ChannelConfiguration, CommitReport, DispatchStatus, HEADEND_PROFILES,
     HeadendProfileApplyRequest, MediaAsset, OUTPUT_PROFILES, ScheduleItem, ScheduleState,
 };
 use station_storage::{
-    AlertChannelSecret, CgSnapshotReadError, CgWriteError, ChannelWriteError, CommitWriteError,
-    HeadendProfileWriteError, OutputLoudnessProofJob, OutputLoudnessProofJobRecord,
-    OutputLoudnessProofJobState, ProfileWriteError, ReferenceStationTierWrite,
-    ReferenceStationTierWriteError, StationStore, StoredSinkLoudnessProof,
+    AlertChannelSecret, CgSnapshotReadError, CgWriteError, ChannelWriteError,
+    CommissioningSupportBundleReceipt, CommitWriteError, HeadendProfileWriteError,
+    OutputLoudnessProofJob, OutputLoudnessProofJobRecord, OutputLoudnessProofJobState,
+    ProfileWriteError, ReferenceStationTierWrite, ReferenceStationTierWriteError, StationStore,
+    StoredSinkLoudnessProof,
 };
 use station_update::UpdateCheckTrigger;
 use station_update_coordinator::CoordinatorError;
@@ -223,6 +225,13 @@ struct CommissioningReport {
     checks: Vec<CommissioningCheck>,
 }
 
+#[derive(Debug, Serialize)]
+struct SupportBundleCreationResponse {
+    #[serde(flatten)]
+    bundle: station_support::SupportBundleRecord,
+    commissioning_report_id: Option<String>,
+}
+
 // Keeping every serialized policy field visible at each ordered call site makes
 // this safety checklist auditable; hiding them in positional defaults would be
 // more error-prone than this deliberately explicit constructor.
@@ -269,6 +278,99 @@ fn headend_receiver_verified(headend: &station_readiness::HeadendReadiness) -> b
                         .filter(|sink| sink.enabled && sink.required)
                         .all(|sink| sink.external_receiver == ExternalReceiverState::Verified)
             })
+}
+
+struct GuidedAirEvidence {
+    ready_ingested_asset_ids: BTreeSet<String>,
+    linked_reports: Vec<CommitReport>,
+}
+
+fn collect_guided_air_evidence(storage: &StationStore) -> Result<GuidedAirEvidence, String> {
+    let ready_asset_ids = storage
+        .list_media_assets()?
+        .into_iter()
+        .filter(|asset| {
+            asset.readiness == AssetReadiness::Ready && Path::new(&asset.media_path).is_file()
+        })
+        .map(|asset| asset.asset_id)
+        .collect::<BTreeSet<_>>();
+    let guided_asset_completion = storage
+        .list_ingest_jobs()?
+        .into_iter()
+        .filter(|job| job.status == IngestJobStatus::Completed)
+        .filter_map(|job| Some((job.asset_id?, job.completed_at_unix_ms?)))
+        .filter(|(asset_id, _)| ready_asset_ids.contains(asset_id))
+        .fold(
+            HashMap::<String, i64>::new(),
+            |mut completed, (asset_id, at)| {
+                completed
+                    .entry(asset_id)
+                    .and_modify(|existing| *existing = (*existing).min(at))
+                    .or_insert(at);
+                completed
+            },
+        );
+    let ready_ingested_asset_ids = guided_asset_completion
+        .keys()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+
+    let mut schedule_items = Vec::new();
+    let mut reports = Vec::new();
+    for channel in storage.list_channels()? {
+        schedule_items.extend(storage.list_channel_schedule(&channel.channel_id)?);
+        reports.extend(storage.list_commit_reports(&channel.channel_id)?);
+    }
+    let linked_reports = reports
+        .into_iter()
+        .filter(|report| {
+            guided_asset_completion
+                .get(&report.asset_id)
+                .is_some_and(|completed_at| *completed_at <= report.approved_at_unix_ms)
+        })
+        .filter(|report| {
+            schedule_items.iter().any(|item| {
+                item.state == ScheduleState::Committed
+                    && item.item_id == report.schedule_item_id
+                    && item.channel_id == report.channel_id
+                    && item.asset_id == report.asset_id
+            })
+        })
+        .collect();
+    Ok(GuidedAirEvidence {
+        ready_ingested_asset_ids,
+        linked_reports,
+    })
+}
+
+fn verified_commissioning_bundle_receipt(
+    storage: &StationStore,
+    database_path: &Path,
+    linked_reports: &[CommitReport],
+) -> Result<Option<CommissioningSupportBundleReceipt>, String> {
+    for receipt in storage.list_commissioning_support_bundle_receipts(1)? {
+        let report_is_linked = linked_reports.iter().any(|report| {
+            report.report_id == receipt.report_id
+                && report.dispatch_status == DispatchStatus::Completed
+                && receipt.created_at_unix_ms >= report.approved_at_unix_ms
+        });
+        if !report_is_linked {
+            continue;
+        }
+        let Ok(bytes) = station_support::read_support_bundle(database_path, &receipt.bundle_id)
+        else {
+            continue;
+        };
+        if bytes.len() as u64 != receipt.archive_size_bytes {
+            continue;
+        }
+        let actual_hash = format!("{:x}", Sha256::digest(&bytes));
+        if actual_hash != receipt.archive_sha256 {
+            continue;
+        }
+        return Ok(Some(receipt));
+    }
+    Ok(None)
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -896,7 +998,7 @@ impl Api {
             ("PUT", path) if path.starts_with("/api/v1/self-test-schedules/") => {
                 self.put_self_test_schedule(path, body, actor)
             }
-            ("POST", "/api/v1/support-bundles") => self.create_support_bundle(),
+            ("POST", "/api/v1/support-bundles") => self.create_support_bundle(actor),
             ("GET", path)
                 if path.starts_with("/api/v1/support-bundles/") && path.ends_with("/download") =>
             {
@@ -2750,40 +2852,11 @@ impl Api {
             CommissioningBoundary::LocalAuthority,
         ));
 
-        let assets = match self.storage.list_media_assets() {
-            Ok(assets) => assets,
+        let guided_air_evidence = match collect_guided_air_evidence(&self.storage) {
+            Ok(evidence) => evidence,
             Err(message) => return error_response(500, "storage_error", &message),
         };
-        let ready_asset_ids = assets
-            .iter()
-            .filter(|asset| {
-                asset.readiness == AssetReadiness::Ready && Path::new(&asset.media_path).is_file()
-            })
-            .map(|asset| asset.asset_id.clone())
-            .collect::<BTreeSet<_>>();
-        let ingest_jobs = match self.storage.list_ingest_jobs() {
-            Ok(jobs) => jobs,
-            Err(message) => return error_response(500, "storage_error", &message),
-        };
-        let guided_asset_completion = ingest_jobs
-            .iter()
-            .filter(|job| job.status == IngestJobStatus::Completed)
-            .filter_map(|job| Some((job.asset_id.as_ref()?, job.completed_at_unix_ms?)))
-            .filter(|(asset_id, _)| ready_asset_ids.contains(*asset_id))
-            .fold(
-                HashMap::<String, i64>::new(),
-                |mut completed, (asset_id, at)| {
-                    completed
-                        .entry(asset_id.clone())
-                        .and_modify(|existing| *existing = (*existing).min(at))
-                        .or_insert(at);
-                    completed
-                },
-            );
-        let guided_asset_ids = guided_asset_completion
-            .keys()
-            .cloned()
-            .collect::<BTreeSet<_>>();
+        let guided_asset_ids = &guided_air_evidence.ready_ingested_asset_ids;
         checks.push(commissioning_check(
             "guided_ingest",
             "Guided real media ingest",
@@ -2804,36 +2877,7 @@ impl Api {
             CommissioningBoundary::LocalAuthority,
         ));
 
-        let mut schedule_items = Vec::new();
-        let mut reports = Vec::new();
-        for channel in &channels {
-            let schedule = match self.storage.list_channel_schedule(&channel.channel_id) {
-                Ok(schedule) => schedule,
-                Err(message) => return error_response(500, "storage_error", &message),
-            };
-            schedule_items.extend(schedule);
-            let channel_reports = match self.storage.list_commit_reports(&channel.channel_id) {
-                Ok(reports) => reports,
-                Err(message) => return error_response(500, "storage_error", &message),
-            };
-            reports.extend(channel_reports);
-        }
-        let linked_reports = reports
-            .iter()
-            .filter(|report| {
-                guided_asset_completion
-                    .get(&report.asset_id)
-                    .is_some_and(|completed_at| *completed_at <= report.approved_at_unix_ms)
-            })
-            .filter(|report| {
-                schedule_items.iter().any(|item| {
-                    item.state == ScheduleState::Committed
-                        && item.item_id == report.schedule_item_id
-                        && item.channel_id == report.channel_id
-                        && item.asset_id == report.asset_id
-                })
-            })
-            .collect::<Vec<_>>();
+        let linked_reports = &guided_air_evidence.linked_reports;
         checks.push(commissioning_check(
             "guided_schedule",
             "Guided schedule approval",
@@ -2916,15 +2960,44 @@ impl Api {
             "no durable ten-minute selected-sink output proof authority exists",
             CommissioningBoundary::LocalAuthority,
         ));
+        let commissioning_bundle = match verified_commissioning_bundle_receipt(
+            &self.storage,
+            &self.database_path,
+            linked_reports,
+        ) {
+            Ok(receipt) => receipt,
+            Err(message) => return error_response(500, "storage_error", &message),
+        };
         checks.push(commissioning_check(
             "support_bundle",
             "Durable commissioning support bundle",
             CommissioningPhase::GuidedAirProof,
-            CommissioningCheckStatus::Blocked,
+            if commissioning_bundle.is_some() {
+                CommissioningCheckStatus::Pass
+            } else {
+                CommissioningCheckStatus::Blocked
+            },
             true,
             Some("health"),
-            "Support bundles can be generated, but no durable commissioning-linked bundle receipt is stored yet.",
-            "the current support-bundle response is not commissioning persistence authority",
+            commissioning_bundle.as_ref().map_or_else(
+                || "No durable support-bundle receipt is linked to the completed guided broadcast with matching current archive bytes.".into(),
+                |receipt| format!(
+                    "Support bundle {} is durably linked to completed report {} and its current bytes match SHA-256 {}.",
+                    receipt.bundle_id, receipt.report_id, receipt.archive_sha256
+                ),
+            ),
+            commissioning_bundle.as_ref().map_or_else(
+                || "no completed guided report has a current readable hash-matching support-bundle receipt".into(),
+                |receipt| format!(
+                    "append-only receipt by {} at {} binds report {}, bundle {}, {} bytes, and SHA-256 {}",
+                    receipt.created_by,
+                    receipt.created_at_unix_ms,
+                    receipt.report_id,
+                    receipt.bundle_id,
+                    receipt.archive_size_bytes,
+                    receipt.archive_sha256
+                ),
+            ),
             CommissioningBoundary::LocalAuthority,
         ));
         let completed = linked_reports
@@ -3186,7 +3259,7 @@ impl Api {
         }
     }
 
-    fn create_support_bundle(&self) -> ApiResponse {
+    fn create_support_bundle(&self, actor: Option<&OperatorAccount>) -> ApiResponse {
         let now = match system_time_millis() {
             Ok(value) => value,
             Err(message) => return error_response(500, "clock_error", &message),
@@ -3196,10 +3269,46 @@ impl Api {
             &self.application_directory,
             now,
         ) {
-            Ok(record) => json_response(
-                201,
-                serde_json::to_vec(&record).expect("serializing a support bundle cannot fail"),
-            ),
+            Ok(record) => {
+                let evidence = match collect_guided_air_evidence(&self.storage) {
+                    Ok(evidence) => evidence,
+                    Err(message) => return error_response(500, "storage_error", &message),
+                };
+                let completed_report = evidence
+                    .linked_reports
+                    .iter()
+                    .filter(|report| report.dispatch_status == DispatchStatus::Completed)
+                    .max_by_key(|report| (report.approved_at_unix_ms, report.report_id.as_str()));
+                let commissioning_report_id = if let Some(report) = completed_report {
+                    let receipt = CommissioningSupportBundleReceipt {
+                        bundle_id: record.bundle_id.clone(),
+                        report_id: report.report_id.clone(),
+                        archive_sha256: record.sha256.to_ascii_lowercase(),
+                        archive_size_bytes: record.size_bytes,
+                        created_at_unix_ms: record.created_at_unix_ms,
+                        created_by: actor
+                            .map(|account| account.account_id().as_str().to_owned())
+                            .unwrap_or_else(|| "trusted-in-process".into()),
+                    };
+                    if let Err(message) = self
+                        .storage
+                        .append_commissioning_support_bundle_receipt(&receipt)
+                    {
+                        return error_response(500, "support_bundle_receipt_failed", &message);
+                    }
+                    Some(report.report_id.clone())
+                } else {
+                    None
+                };
+                json_response(
+                    201,
+                    serde_json::to_vec(&SupportBundleCreationResponse {
+                        bundle: record,
+                        commissioning_report_id,
+                    })
+                    .expect("serializing a support bundle cannot fail"),
+                )
+            }
             Err(message) => error_response(500, "support_bundle_failed", &message),
         }
     }

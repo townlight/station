@@ -8,6 +8,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- Commissioning support bundles now receive an append-only operator-attributed receipt only when the
+  server can bind them to a completed guided broadcast. The commissioning report reopens the
+  managed ZIP and verifies its current size and SHA-256; missing or changed bytes fail closed.
+
 - StationBox network readiness now uses the configured Windows Time source for a bounded
   three-sample UDP request/reply proof. A hostname-backed completed exchange proves name resolution;
   SRT, arbitrary destinations, headend delivery, and receiver acceptance remain explicitly unknown.
