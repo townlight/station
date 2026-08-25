@@ -42,5 +42,6 @@ ingress evidence, not decode-back proof.
 - Stale editors and duplicate audit identities cannot partially replace current authority.
 - Historical revisions remain reconstructable rather than retaining only a lossy change summary.
 - Editing captions during active playout requires stopping or completing that asset first.
-- Operator review/import UI, dispatch cursor, live ASR, and exact-output proof remain explicit later
-  work.
+- The operator review/import UI parses bounded WebVTT/SRT locally for immediate feedback, assigns new
+  canonical cue identities instead of trusting file identifiers, and submits only the typed API
+  contract. Dispatch cursor, live ASR, and exact-output proof remain explicit later work.

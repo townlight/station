@@ -24,10 +24,11 @@ exact post-mux branch and decodes the expected text back. The server-side track 
 each reviewed cue set to the exact content-addressed media identity, language, and CEA service with
 CAS revisions, complete append-only snapshots, and on-air mutation refusal. Authenticated asset
 routes list compact track summaries and let Setup Admins read or replace exact cue authority while
-the server owns actor, time, path identity, and audit identity. It is not yet exposed in the operator
-console or dispatched to the worker; live caption scheduling, live ASR, current proof receipts, and
-installed/field evidence remain separate work, so commissioning still reports the caption authority
-as blocked.
+the server owns actor, time, path identity, and audit identity. The Media console imports and
+validates reviewed WebVTT/SRT, edits canonical WebVTT timing, displays immutable revisions, and saves
+through that exact contract. Tracks are not yet dispatched to the worker; live caption scheduling,
+live ASR, current proof receipts, and installed/field evidence remain separate work, so commissioning
+still reports the caption authority as blocked.
 
 ## Architecture
 

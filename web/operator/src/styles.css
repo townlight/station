@@ -186,3 +186,27 @@ form { display:grid; gap:16px; margin-top:20px; }label { display:grid; gap:7px; 
 .caption-policy-authority dt { color:var(--muted); }
 .caption-policy-authority dd { margin:0; overflow-wrap:anywhere; }
 @media (max-width:760px) { .caption-policy-fields { grid-template-columns:1fr; } }
+
+/* Reviewed cue content is asset-bound authority; playout and decode-back remain separate proof. */
+.visually-hidden { position:absolute!important; width:1px!important; height:1px!important; padding:0!important; margin:-1px!important; overflow:hidden!important; clip:rect(0,0,0,0)!important; white-space:nowrap!important; border:0!important; }
+.asset-card.selected { border-color:#6ca181; box-shadow:0 0 0 3px #6ca18122; }
+.asset-caption-button { min-height:36px; margin-top:8px; padding:0 10px; font-size:10px; }
+.caption-track-editor { scroll-margin-top:72px; }
+.caption-track-layout { display:grid; grid-template-columns:minmax(230px,.32fr) minmax(0,1fr); gap:18px; align-items:start; }
+.caption-track-list { display:grid; align-content:start; gap:8px; padding:12px; border:1px solid var(--line); border-radius:14px; background:#f7faf7; }
+.caption-track-list-head { display:flex; justify-content:space-between; align-items:center; gap:10px; margin-bottom:3px; }
+.caption-track-list-head>strong { color:var(--ink); font-size:12px; }
+.caption-track-list-head .secondary { min-height:32px; padding:0 10px; font-size:9px; }
+.caption-track-list>button { display:grid; grid-template-columns:minmax(0,1fr) auto; align-items:center; gap:9px; width:100%; padding:11px; border:1px solid #dce5de; border-radius:10px; background:white; color:var(--ink); text-align:left; }
+.caption-track-list>button:hover,.caption-track-list>button.selected { border-color:#77a98a; background:#f2f8f3; box-shadow:inset 3px 0 #77a98a; }
+.caption-track-list>button>span { display:grid; min-width:0; gap:3px; }.caption-track-list>button strong { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:10px; }.caption-track-list>button small { color:var(--muted); font-size:8px; line-height:1.4; }.caption-track-list>button b { color:var(--green); font-size:9px; }
+.caption-track-loading,.caption-track-empty { padding:18px 8px; color:var(--muted); font-size:10px; line-height:1.5; }.caption-track-empty strong { color:var(--ink); }.caption-track-empty p { margin:4px 0 0; }
+.caption-track-workspace { display:grid; gap:13px; min-width:0; }
+.caption-track-fields { display:grid; grid-template-columns:minmax(0,1fr) minmax(105px,.35fr) minmax(105px,.3fr) minmax(140px,.45fr); gap:10px; }
+.caption-track-fields input,.caption-track-fields select { min-height:40px; }
+.caption-track-import { display:flex; justify-content:space-between; align-items:center; gap:12px; flex-wrap:wrap; }.caption-track-import>.secondary { display:inline-flex; align-items:center; width:auto; min-height:38px; padding:0 12px; cursor:pointer; }.caption-track-import>span { color:var(--muted); font-size:9px; }
+.caption-track-source { width:100%; min-height:280px; resize:vertical; border:1px solid #ccd8d1; border-radius:11px; padding:12px 13px; color:var(--ink); background:#fbfcfa; outline:none; font:11px/1.55 ui-monospace,SFMono-Regular,Consolas,monospace; tab-size:2; }.caption-track-source:focus { border-color:var(--green); box-shadow:0 0 0 3px #1e6f5c17; }.caption-track-source:disabled { opacity:.6; }
+.caption-track-help { margin-top:-8px; color:var(--muted); font-size:9px; line-height:1.5; }
+.caption-track-authority { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:0 16px; margin:0; padding:12px; border:1px solid #dce5de; border-radius:11px; background:#f7faf7; }.caption-track-authority>div { display:grid; gap:3px; min-width:0; padding:8px 0; border-bottom:1px solid #e5ebe6; }.caption-track-authority dt { color:var(--muted); font-size:8px; font-weight:800; text-transform:uppercase; letter-spacing:.4px; }.caption-track-authority dd { margin:0; color:var(--ink); font-size:9px; overflow-wrap:anywhere; }.caption-track-authority code { font-size:8px; }
+@media (max-width:980px) { .caption-track-layout { grid-template-columns:1fr; }.caption-track-list { grid-template-columns:repeat(auto-fit,minmax(190px,1fr)); }.caption-track-list-head,.caption-track-loading,.caption-track-empty { grid-column:1/-1; }.caption-track-fields { grid-template-columns:repeat(2,minmax(0,1fr)); } }
+@media (max-width:620px) { .caption-track-fields,.caption-track-authority { grid-template-columns:1fr; }.caption-track-source { min-height:230px; } }

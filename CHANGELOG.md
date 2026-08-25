@@ -14,6 +14,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   immutable cue snapshot for every accepted change. Authenticated asset routes expose compact track
   lists and full current/audit reads; only Setup Admins may replace cue authority, and caller-forged
   actor, audit, path identity, stale revision, oversized body, or occupied service slots fail closed.
+  The Media console now provides a responsive per-asset editor with bounded WebVTT/SRT import,
+  timing/text validation, source provenance, current cue digest, and immutable revision visibility.
 
 - Setup Admins can now persist a stopped-channel CEA-708/disabled policy with bounded service and
   language metadata through the operator console and an audited revision-guarded API. Worker
