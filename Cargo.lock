@@ -1884,6 +1884,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "station-publishing"
+version = "0.1.0"
+dependencies = [
+ "serde",
+]
+
+[[package]]
 name = "station-readiness"
 version = "0.1.0"
 dependencies = [

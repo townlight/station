@@ -18,6 +18,7 @@ members = [
     "crates/station-media-protocol",
     "crates/station-maintenance",
     "crates/station-orchestration",
+    "crates/station-publishing",
     "crates/station-runtime",
     "crates/station-readiness",
     "crates/station-schedule",
@@ -71,6 +72,7 @@ station-live = { path = "crates/station-live" }
 station-media-protocol = { path = "crates/station-media-protocol" }
 station-maintenance = { path = "crates/station-maintenance" }
 station-orchestration = { path = "crates/station-orchestration" }
+station-publishing = { path = "crates/station-publishing" }
 station-runtime = { path = "crates/station-runtime" }
 station-readiness = { path = "crates/station-readiness" }
 station-schedule = { path = "crates/station-schedule" }
