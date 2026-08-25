@@ -19,6 +19,7 @@ station-live.workspace = true
 station-readiness.workspace = true
 station-recording.workspace = true
 station-schedule.workspace = true
+station-schedule-automation.workspace = true
 station-update.workspace = true
 
 [dev-dependencies]

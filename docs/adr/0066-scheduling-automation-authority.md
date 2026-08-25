@@ -36,13 +36,15 @@ domains and occurrence identity.
 
 ## Boundaries and non-claims
 
-This slice has no persistence/query adapter, as-run adapter, filler alert, S4
-writer, schedule write, materialization job, dispatch, worker, API, UI, or
-installed-machine evidence. It does not establish that a saved search finds media,
+The pure crate has no query adapter, as-run adapter, filler alert, S4 writer,
+schedule write, materialization job, dispatch, worker, API, UI, or installed-machine
+evidence. ADR 0068 adds durable current/history storage for saved searches, blocks,
+and rules, but no catalog/as-run or materialization persistence. This contract does
+not establish that a saved search finds media,
 that candidate projections came from the catalog, that `PriorAiring` inputs are
 authentic, that an intent was stored, that a schedule item was created, that a
 worker received a dispatch, or that any item aired. Future work must derive actors
-server-side, persist authority through the single SQLite writer, connect trusted
-catalog and as-run adapters, materialize/commit through schedule authority, add
-filler-alert behavior and the S4 writer, and acquire installed-machine and field
-evidence.
+server-side, connect trusted catalog and as-run adapters, persist later
+materialization authority through the single SQLite writer, materialize/commit
+through schedule authority, add filler-alert behavior and the S4 writer, and acquire
+installed-machine and field evidence.

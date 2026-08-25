@@ -505,7 +505,7 @@ impl RecurringRule {
         }
         Ok(())
     }
-    fn validate(&self) -> Result<(), String> {
+    pub fn validate(&self) -> Result<(), String> {
         ids(&[
             &self.rule_id,
             &self.channel_id,

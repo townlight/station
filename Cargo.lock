@@ -2013,6 +2013,7 @@ dependencies = [
  "station-readiness",
  "station-recording",
  "station-schedule",
+ "station-schedule-automation",
  "station-update",
 ]
 

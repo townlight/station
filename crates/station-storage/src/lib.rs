@@ -75,6 +75,12 @@ use station_update::{
     UpdateCheckTrigger,
 };
 
+mod schedule_automation_authority;
+pub use schedule_automation_authority::{
+    DaypartBlockHistoryEntry, RecurringRuleHistoryEntry, SavedSearchHistoryEntry,
+    ScheduleAutomationWriteError,
+};
+
 const SQLITE_OK: c_int = 0;
 const SQLITE_ROW: c_int = 100;
 const SQLITE_DONE: c_int = 101;
@@ -1159,6 +1165,7 @@ impl StationStore {
         store.initialize_caption_egress_job_schema()?;
         store.initialize_automation_policy_schema()?;
         store.initialize_custom_metadata_schema()?;
+        store.initialize_schedule_automation_schema()?;
         store.initialize_scheduled_recording_schema()?;
         store.migrate_caption_egress_history_sink_foreign_keys()?;
         store.migrate_cg_feed_cache_schema()?;
