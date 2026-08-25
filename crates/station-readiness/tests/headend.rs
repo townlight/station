@@ -2,8 +2,9 @@ use station_readiness::{
     BackupProbeInput, CapabilitySupport, ChannelOutputRuntimeProbe, ClockProbeInput,
     ClockSyncStatus, EngineProbeInput, ExternalReceiverState, HardwareProbeInput,
     HeadendChannelProbeInput, HeadendProbeInput, HeadendProfileProbeInput, HeadendSinkKind,
-    HeadendSinkProbeInput, PegReadinessColor, ReadinessState, ReleaseProbeInput,
-    StationBoxProbeInput, derive_headend_readiness, derive_station_box_profile,
+    HeadendSinkProbeInput, MachineInventoryCollectionState, MachineInventoryEvidence,
+    PegReadinessColor, ReadinessState, ReleaseProbeInput, StationBoxProbeInput,
+    derive_headend_readiness, derive_station_box_profile,
 };
 
 const STATION_ID: &str = "3f5f721f-96c7-48b1-b061-1bf1ad1e62c2";
@@ -26,6 +27,20 @@ fn station_box() -> station_readiness::StationBoxProfile {
             logical_cpus: 16,
             ram_total_gb: 32.0,
             media_disk_free_gb: 500.0,
+            machine_inventory: MachineInventoryEvidence {
+                collected_at_unix_ms: NOW,
+                source: station_readiness::MachineEvidenceSource::WindowsCim,
+                gpu_collection: MachineInventoryCollectionState::Unavailable,
+                storage_collection: MachineInventoryCollectionState::Unavailable,
+                device_collection: MachineInventoryCollectionState::Unavailable,
+                media_volume_total_gb: None,
+                gpu_adapters: Vec::new(),
+                physical_disks: Vec::new(),
+                virtual_disks: Vec::new(),
+                ups_devices: Vec::new(),
+                decklink_devices: Vec::new(),
+                blackmagic_drivers: Vec::new(),
+            },
         },
         engine: EngineProbeInput {
             gstreamer_version: Some("1.28.6".into()),

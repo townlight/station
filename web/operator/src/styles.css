@@ -156,6 +156,9 @@ form { display:grid; gap:16px; margin-top:20px; }label { display:grid; gap:7px; 
 .stationbox-machine-facts { grid-template-columns:repeat(2,minmax(0,1fr)); }
 @media (max-width:760px) { .stationbox-machine-facts { grid-template-columns:1fr; } }
 
+.stationbox-inventory { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:7px; margin:-5px 0 14px; }.stationbox-inventory>div { display:grid; gap:3px; padding:8px; border:1px solid #dfe6e1; border-radius:9px; background:#f8faf8; }.stationbox-inventory span { color:var(--muted); font-size:7px; font-weight:800; text-transform:uppercase; letter-spacing:.35px; }.stationbox-inventory strong { color:var(--ink); font-size:9px; line-height:1.35; overflow-wrap:anywhere; }.stationbox-inventory>p { grid-column:1/-1; margin:0; color:var(--muted); font-size:8px; line-height:1.45; }
+@media (max-width:760px) { .stationbox-inventory { grid-template-columns:1fr; }.stationbox-inventory>p { grid-column:auto; } }
+
 .stationbox-tier-selector { display:grid; grid-template-columns:minmax(0,1fr) auto; gap:8px; align-items:end; margin-top:10px; }.stationbox-tier-selector label { display:grid; gap:4px; color:var(--muted); font-size:8px; font-weight:800; text-transform:uppercase; letter-spacing:.35px; }.stationbox-tier-selector select { min-height:34px; }.stationbox-tier-selector .secondary { min-height:34px; padding:0 10px; white-space:nowrap; }
 @media (max-width:760px) { .stationbox-tier-selector { grid-template-columns:1fr; } }
 

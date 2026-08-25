@@ -10,12 +10,14 @@ mod headend;
 
 pub use headend::*;
 
-const SCHEMA_VERSION: u32 = 3;
+const SCHEMA_VERSION: u32 = 4;
 const MAX_TEXT: usize = 200;
 const MAX_FACTORY_NAME: usize = 120;
 const MAX_LIST_ITEMS: usize = 256;
+const MAX_MACHINE_INVENTORY_ITEMS: usize = 64;
+const MAX_MACHINE_GIB: f64 = 1_048_576.0;
 const DEFAULT_MAX_PROBE_AGE_MS: i64 = 300_000;
-pub const REFERENCE_STATION_CATALOG_VERSION: u32 = 1;
+pub const REFERENCE_STATION_CATALOG_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -48,6 +50,86 @@ pub struct HardwareProbeInput {
     pub logical_cpus: u32,
     pub ram_total_gb: f64,
     pub media_disk_free_gb: f64,
+    pub machine_inventory: MachineInventoryEvidence,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MachineInventoryCollectionState {
+    Collected,
+    Unavailable,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MachineEvidenceSource {
+    WindowsCim,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MachineInventoryEvidence {
+    pub collected_at_unix_ms: i64,
+    pub source: MachineEvidenceSource,
+    pub gpu_collection: MachineInventoryCollectionState,
+    pub storage_collection: MachineInventoryCollectionState,
+    pub device_collection: MachineInventoryCollectionState,
+    pub media_volume_total_gb: Option<f64>,
+    pub gpu_adapters: Vec<GpuAdapterEvidence>,
+    pub physical_disks: Vec<PhysicalDiskEvidence>,
+    pub virtual_disks: Vec<VirtualDiskEvidence>,
+    pub ups_devices: Vec<UpsDeviceEvidence>,
+    pub decklink_devices: Vec<DeckLinkDeviceEvidence>,
+    pub blackmagic_drivers: Vec<BlackmagicDriverEvidence>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GpuAdapterEvidence {
+    pub name: String,
+    pub adapter_memory_gb: Option<f64>,
+    pub driver_version: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PhysicalDiskEvidence {
+    pub name: String,
+    pub size_gb: f64,
+    pub media_type: Option<String>,
+    pub bus_type: Option<String>,
+    pub health_status: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct VirtualDiskEvidence {
+    pub name: String,
+    pub size_gb: f64,
+    pub resiliency: Option<String>,
+    pub health_status: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UpsDeviceEvidence {
+    pub name: String,
+    pub manufacturer: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DeckLinkDeviceEvidence {
+    pub name: String,
+    pub manufacturer: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BlackmagicDriverEvidence {
+    pub device_name: String,
+    pub manufacturer: Option<String>,
+    pub driver_version: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -133,6 +215,7 @@ pub struct HardwareReadiness {
     pub logical_cpus: u32,
     pub ram_total_gb: f64,
     pub media_disk_free_gb: f64,
+    pub machine_inventory: MachineInventoryEvidence,
     pub state: ReadinessState,
 }
 
@@ -331,6 +414,7 @@ pub enum ReferenceStationRequirementName {
     LogicalCpuCapacity,
     MemoryCapacity,
     MediaStorageCapacity,
+    MediaStorageMedium,
     RedundantMediaStorage,
     MultiDiskZfsStorage,
     NetworkAttachedStorage,
@@ -484,6 +568,7 @@ pub fn derive_station_box_profile(
         logical_cpus: input.hardware.logical_cpus,
         ram_total_gb: input.hardware.ram_total_gb,
         media_disk_free_gb: input.hardware.media_disk_free_gb,
+        machine_inventory: input.hardware.machine_inventory.clone(),
         state: hardware_state.clone(),
     };
     let engine = EngineReadiness {
@@ -802,8 +887,137 @@ fn derive_reference_station_catalog(
     let raid1 = || {
         unknown_reference_requirement(
             ReferenceStationRequirementName::RedundantMediaStorage,
-            "Total capacity and 2x4TB NVMe RAID1 redundancy are not collected.",
+            if hardware.machine_inventory.storage_collection
+                == MachineInventoryCollectionState::Collected
+                && hardware.machine_inventory.virtual_disks.iter().any(|disk| {
+                    disk.resiliency
+                        .as_deref()
+                        .is_some_and(|value| value.eq_ignore_ascii_case("mirror"))
+                })
+            {
+                "Mirror-like virtual-disk topology was observed, but its linkage to the media volume and fault tolerance are unproven."
+            } else {
+                "Total capacity and 2x4TB NVMe RAID1 redundancy are not collected."
+            },
         )
+    };
+    let media_storage_capacity = || match hardware.machine_inventory.media_volume_total_gb {
+        Some(total)
+            if hardware.machine_inventory.storage_collection
+                == MachineInventoryCollectionState::Collected =>
+        {
+            numeric_requirement(
+                ReferenceStationRequirementName::MediaStorageCapacity,
+                total,
+                1_800.0,
+                "GiB total media storage (2 TB nominal class)",
+            )
+        }
+        _ => unknown_reference_requirement(
+            ReferenceStationRequirementName::MediaStorageCapacity,
+            "The 2TB NVMe reference-dev capacity is not collected; free space is not total capacity.",
+        ),
+    };
+    let media_storage_medium = || {
+        let detail = if hardware.machine_inventory.storage_collection
+            == MachineInventoryCollectionState::Collected
+            && hardware
+                .machine_inventory
+                .physical_disks
+                .iter()
+                .any(|disk| {
+                    disk.bus_type
+                        .as_deref()
+                        .is_some_and(|value| value.eq_ignore_ascii_case("nvme"))
+                }) {
+            "NVMe physical storage was observed, but its linkage to the media volume is not authenticated."
+        } else {
+            "The required NVMe medium for the media volume is not authenticated."
+        };
+        unknown_reference_requirement(ReferenceStationRequirementName::MediaStorageMedium, detail)
+    };
+    let gpu = || {
+        let detail = if hardware.machine_inventory.gpu_collection
+            == MachineInventoryCollectionState::Collected
+            && !hardware.machine_inventory.gpu_adapters.is_empty()
+        {
+            format!(
+                "Observed GPU adapters: {}; GPU class and throughput are not inferred.",
+                hardware
+                    .machine_inventory
+                    .gpu_adapters
+                    .iter()
+                    .map(|adapter| adapter.name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        } else {
+            "GPU identity and video memory are not collected.".into()
+        };
+        unknown_reference_requirement(ReferenceStationRequirementName::Gpu, &detail)
+    };
+    let decklink = || {
+        let detail = if hardware.machine_inventory.device_collection
+            == MachineInventoryCollectionState::Collected
+            && !hardware.machine_inventory.decklink_devices.is_empty()
+        {
+            format!(
+                "DeckLink-named PnP devices observed: {}; stable hardware identity and function are not authenticated.",
+                hardware
+                    .machine_inventory
+                    .decklink_devices
+                    .iter()
+                    .map(|device| device.name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        } else {
+            "DeckLink hardware identity and function are not authenticated.".into()
+        };
+        unknown_reference_requirement(ReferenceStationRequirementName::DeckLinkHardware, &detail)
+    };
+    let blackmagic_driver = || {
+        let detail = if hardware.machine_inventory.device_collection
+            == MachineInventoryCollectionState::Collected
+            && !hardware.machine_inventory.blackmagic_drivers.is_empty()
+        {
+            format!(
+                "Blackmagic drivers observed: {}; SDK/runtime compatibility is not inferred.",
+                hardware
+                    .machine_inventory
+                    .blackmagic_drivers
+                    .iter()
+                    .map(|driver| driver.device_name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        } else {
+            "Blackmagic Desktop Video driver and SDK identity are not collected.".into()
+        };
+        unknown_reference_requirement(
+            ReferenceStationRequirementName::BlackmagicDesktopVideo,
+            &detail,
+        )
+    };
+    let ups = || {
+        let detail = if hardware.machine_inventory.device_collection
+            == MachineInventoryCollectionState::Collected
+            && !hardware.machine_inventory.ups_devices.is_empty()
+        {
+            format!(
+                "UPS devices observed: {}; UPS health and power protection are not inferred.",
+                hardware
+                    .machine_inventory
+                    .ups_devices
+                    .iter()
+                    .map(|device| device.name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        } else {
+            "UPS presence and health are not collected.".into()
+        };
+        unknown_reference_requirement(ReferenceStationRequirementName::Ups, &detail)
     };
     let assessments = vec![
         reference_tier_assessment(
@@ -830,14 +1044,9 @@ fn derive_reference_station_catalog(
             vec![
                 cpu(16.0),
                 ram(32.0),
-                unknown_reference_requirement(
-                    ReferenceStationRequirementName::MediaStorageCapacity,
-                    "The 2TB NVMe reference-dev capacity is not collected; free space is not total capacity.",
-                ),
-                unknown_reference_requirement(
-                    ReferenceStationRequirementName::Gpu,
-                    "RTX 5070 Ti-class GPU identity and video memory are not collected.",
-                ),
+                media_storage_capacity(),
+                media_storage_medium(),
+                gpu(),
                 ip(),
                 srt(),
             ],
@@ -852,10 +1061,7 @@ fn derive_reference_station_catalog(
                     ReferenceStationRequirementName::NetworkAttachedStorage,
                     "The required NAS target is not collected.",
                 ),
-                unknown_reference_requirement(
-                    ReferenceStationRequirementName::Gpu,
-                    "RTX 4060-4070-class GPU identity and video memory are not collected.",
-                ),
+                gpu(),
                 unknown_reference_requirement(
                     ReferenceStationRequirementName::OpenGl45,
                     "OpenGL 4.5 support is not collected.",
@@ -864,22 +1070,13 @@ fn derive_reference_station_catalog(
                     ReferenceStationRequirementName::HardwareEncoder,
                     "A hardware encoder cannot be inferred from the generic encoder-factory list.",
                 ),
-                unknown_reference_requirement(
-                    ReferenceStationRequirementName::DeckLinkHardware,
-                    "DeckLink hardware presence is not collected.",
-                ),
-                unknown_reference_requirement(
-                    ReferenceStationRequirementName::BlackmagicDesktopVideo,
-                    "Blackmagic Desktop Video driver and SDK identity are not collected.",
-                ),
+                decklink(),
+                blackmagic_driver(),
                 unknown_reference_requirement(
                     ReferenceStationRequirementName::NativeOperatingSystem,
                     "Native-host PCIe suitability is not collected.",
                 ),
-                unknown_reference_requirement(
-                    ReferenceStationRequirementName::Ups,
-                    "UPS presence and health are not collected.",
-                ),
+                ups(),
                 unknown_reference_requirement(
                     ReferenceStationRequirementName::HeadendInterface,
                     "The cable operator's required headend interface is not configured or probed.",
@@ -907,10 +1104,7 @@ fn derive_reference_station_catalog(
                     ReferenceStationRequirementName::MultiDiskZfsStorage,
                     "The 8x4TB NVMe ZFS storage topology is not collected.",
                 ),
-                unknown_reference_requirement(
-                    ReferenceStationRequirementName::Gpu,
-                    "RTX 4070 Ti Super-class GPU identity and video memory are not collected.",
-                ),
+                gpu(),
                 unknown_reference_requirement(
                     ReferenceStationRequirementName::HardwareEncoder,
                     "Multi-stream hardware-encoder capacity is not collected.",
@@ -1198,6 +1392,7 @@ fn reference_requirement_label(requirement: &ReferenceStationRequirementName) ->
         ReferenceStationRequirementName::LogicalCpuCapacity => "CPU capacity",
         ReferenceStationRequirementName::MemoryCapacity => "memory capacity",
         ReferenceStationRequirementName::MediaStorageCapacity => "media storage capacity",
+        ReferenceStationRequirementName::MediaStorageMedium => "media storage medium",
         ReferenceStationRequirementName::RedundantMediaStorage => "redundant media storage",
         ReferenceStationRequirementName::MultiDiskZfsStorage => "multi-disk ZFS storage",
         ReferenceStationRequirementName::NetworkAttachedStorage => "network-attached storage",
@@ -1276,7 +1471,11 @@ impl StationBoxProbeInput {
         {
             return invalid("timezone must be an IANA timezone name");
         }
-        validate_hardware(&self.hardware)?;
+        validate_hardware(
+            &self.hardware,
+            self.probe_collected_at_unix_ms,
+            self.generated_at_unix_ms,
+        )?;
         validate_engine(&self.engine)?;
         validate_clock(&self.clock)?;
         validate_network(&self.network)?;
@@ -1299,7 +1498,11 @@ impl StationBoxProbeInput {
     }
 }
 
-fn validate_hardware(input: &HardwareProbeInput) -> Result<(), ValidationError> {
+fn validate_hardware(
+    input: &HardwareProbeInput,
+    probe_collected_at_unix_ms: i64,
+    generated_at_unix_ms: i64,
+) -> Result<(), ValidationError> {
     if input.logical_cpus == 0
         || !input.ram_total_gb.is_finite()
         || input.ram_total_gb <= 0.0
@@ -1308,7 +1511,180 @@ fn validate_hardware(input: &HardwareProbeInput) -> Result<(), ValidationError> 
     {
         return invalid("hardware measurements are impossible or nonfinite");
     }
+    validate_machine_inventory(
+        &input.machine_inventory,
+        input.media_disk_free_gb,
+        probe_collected_at_unix_ms,
+        generated_at_unix_ms,
+    )?;
     Ok(())
+}
+
+fn validate_machine_inventory(
+    input: &MachineInventoryEvidence,
+    media_disk_free_gb: f64,
+    probe_collected_at_unix_ms: i64,
+    generated_at_unix_ms: i64,
+) -> Result<(), ValidationError> {
+    if input.collected_at_unix_ms < probe_collected_at_unix_ms
+        || input.collected_at_unix_ms > generated_at_unix_ms
+    {
+        return invalid("machine inventory timestamp is stale or outside probe generation");
+    }
+    validate_inventory_group(&input.gpu_collection, input.gpu_adapters.is_empty(), "GPU")?;
+    validate_inventory_group(
+        &input.storage_collection,
+        input.media_volume_total_gb.is_none()
+            && input.physical_disks.is_empty()
+            && input.virtual_disks.is_empty(),
+        "storage",
+    )?;
+    validate_inventory_group(
+        &input.device_collection,
+        input.ups_devices.is_empty()
+            && input.decklink_devices.is_empty()
+            && input.blackmagic_drivers.is_empty(),
+        "device",
+    )?;
+    if input
+        .media_volume_total_gb
+        .is_some_and(|value| !plausible_gib(value) || value < media_disk_free_gb)
+    {
+        return invalid("machine inventory media volume total is impossible");
+    }
+    validate_inventory_list(&input.gpu_adapters, "GPU adapters")?;
+    validate_inventory_list(&input.physical_disks, "physical disks")?;
+    validate_inventory_list(&input.virtual_disks, "virtual disks")?;
+    validate_inventory_list(&input.ups_devices, "UPS devices")?;
+    validate_inventory_list(&input.decklink_devices, "DeckLink devices")?;
+    validate_inventory_list(&input.blackmagic_drivers, "Blackmagic drivers")?;
+    for adapter in &input.gpu_adapters {
+        visible(&adapter.name, "GPU adapter name", MAX_TEXT)?;
+        optional_visible(
+            adapter.driver_version.as_deref(),
+            "GPU adapter driver version",
+        )?;
+        if adapter
+            .adapter_memory_gb
+            .is_some_and(|value| !plausible_gib(value))
+        {
+            return invalid("GPU adapter memory is impossible");
+        }
+    }
+    for disk in &input.physical_disks {
+        validate_disk_text(
+            &disk.name,
+            disk.size_gb,
+            &disk.media_type,
+            &disk.bus_type,
+            &disk.health_status,
+            "physical disk",
+        )?;
+    }
+    for disk in &input.virtual_disks {
+        visible(&disk.name, "virtual disk name", MAX_TEXT)?;
+        if !plausible_gib(disk.size_gb) {
+            return invalid("virtual disk size is impossible");
+        }
+        optional_visible(disk.resiliency.as_deref(), "virtual disk resiliency")?;
+        optional_visible(disk.health_status.as_deref(), "virtual disk health status")?;
+    }
+    for device in &input.ups_devices {
+        visible(&device.name, "UPS device name", MAX_TEXT)?;
+        optional_visible(device.manufacturer.as_deref(), "UPS device manufacturer")?;
+    }
+    for device in &input.decklink_devices {
+        visible(&device.name, "DeckLink device name", MAX_TEXT)?;
+        optional_visible(
+            device.manufacturer.as_deref(),
+            "DeckLink device manufacturer",
+        )?;
+    }
+    for driver in &input.blackmagic_drivers {
+        visible(
+            &driver.device_name,
+            "Blackmagic driver device name",
+            MAX_TEXT,
+        )?;
+        optional_visible(
+            driver.manufacturer.as_deref(),
+            "Blackmagic driver manufacturer",
+        )?;
+        optional_visible(
+            driver.driver_version.as_deref(),
+            "Blackmagic driver version",
+        )?;
+    }
+    Ok(())
+}
+
+impl MachineInventoryEvidence {
+    pub fn validate_for_probe(
+        &self,
+        media_disk_free_gb: f64,
+        probe_collected_at_unix_ms: i64,
+        generated_at_unix_ms: i64,
+    ) -> Result<(), ValidationError> {
+        validate_machine_inventory(
+            self,
+            media_disk_free_gb,
+            probe_collected_at_unix_ms,
+            generated_at_unix_ms,
+        )
+    }
+}
+
+fn validate_inventory_group(
+    state: &MachineInventoryCollectionState,
+    has_no_facts: bool,
+    name: &str,
+) -> Result<(), ValidationError> {
+    if *state == MachineInventoryCollectionState::Unavailable && !has_no_facts {
+        return invalid(format!("unavailable {name} inventory cannot carry facts"));
+    }
+    Ok(())
+}
+
+fn validate_inventory_list<T: PartialEq>(values: &[T], name: &str) -> Result<(), ValidationError> {
+    if values.len() > MAX_MACHINE_INVENTORY_ITEMS || has_exact_duplicates(values) {
+        return invalid(format!("{name} contains too many or duplicate facts"));
+    }
+    Ok(())
+}
+
+fn has_exact_duplicates<T: PartialEq>(values: &[T]) -> bool {
+    values
+        .iter()
+        .enumerate()
+        .any(|(index, value)| values[..index].iter().any(|prior| prior == value))
+}
+
+fn plausible_gib(value: f64) -> bool {
+    value.is_finite() && value > 0.0 && value <= MAX_MACHINE_GIB
+}
+
+fn optional_visible(value: Option<&str>, field: &str) -> Result<(), ValidationError> {
+    if value.is_some_and(|value| visible(value, field, MAX_TEXT).is_err()) {
+        return invalid(format!("{field} is malformed"));
+    }
+    Ok(())
+}
+
+fn validate_disk_text(
+    name: &str,
+    size_gb: f64,
+    media_type: &Option<String>,
+    bus_type: &Option<String>,
+    health_status: &Option<String>,
+    kind: &str,
+) -> Result<(), ValidationError> {
+    visible(name, &format!("{kind} name"), MAX_TEXT)?;
+    if !plausible_gib(size_gb) || size_gb == 0.0 {
+        return invalid(format!("{kind} size is impossible"));
+    }
+    optional_visible(media_type.as_deref(), &format!("{kind} media type"))?;
+    optional_visible(bus_type.as_deref(), &format!("{kind} bus type"))?;
+    optional_visible(health_status.as_deref(), &format!("{kind} health status"))
 }
 
 fn validate_engine(input: &EngineProbeInput) -> Result<(), ValidationError> {
@@ -1578,6 +1954,20 @@ mod tests {
                 logical_cpus: 16,
                 ram_total_gb: 32.0,
                 media_disk_free_gb: 500.0,
+                machine_inventory: MachineInventoryEvidence {
+                    collected_at_unix_ms: 1_777_000_000_000,
+                    source: MachineEvidenceSource::WindowsCim,
+                    gpu_collection: MachineInventoryCollectionState::Unavailable,
+                    storage_collection: MachineInventoryCollectionState::Unavailable,
+                    device_collection: MachineInventoryCollectionState::Unavailable,
+                    media_volume_total_gb: None,
+                    gpu_adapters: Vec::new(),
+                    physical_disks: Vec::new(),
+                    virtual_disks: Vec::new(),
+                    ups_devices: Vec::new(),
+                    decklink_devices: Vec::new(),
+                    blackmagic_drivers: Vec::new(),
+                },
             },
             engine: EngineProbeInput {
                 gstreamer_version: Some("1.28.6".into()),

@@ -34,6 +34,19 @@ and active binary hashes can agree, but the current media-runtime receipt identi
 runtime installer rather than installed runtime bytes; release integrity therefore remains unknown
 until an authenticated installed-file manifest exists.
 
+The Windows boundary also runs one fixed, hidden PowerShell inventory program with no profile,
+no interactive input, a fifteen-second deadline, and a one-MiB stdout cap. The media path crosses only
+through a process-owned environment variable; HTTP cannot supply script text, commands, paths, or
+facts. Independently guarded CIM/storage queries report adapter identity, driver-reported memory,
+media-volume total capacity, visible physical/virtual disk topology, UPS/DeckLink PnP matches, and
+Blackmagic signed-driver metadata. Serial and PnP identifiers are discarded. A failed or malformed
+group becomes unavailable, never green. Total media capacity may satisfy only its explicit nominal
+capacity predicate. Friendly names, mirror-like topology, GPU identity, UPS presence, or driver
+presence do not prove stable device identity, RAID linkage, GPU class/throughput, UPS protection,
+SDK compatibility, SDI function, cabling, signal lock, or
+headend acceptance. This semantic change is reference catalog version 2; old selected-tier intent
+remains visible but stale until a Setup Admin reselects against the current catalog.
+
 The test-only probe constructor is compiled only for unit tests. Production callers cannot inject
 readiness facts.
 

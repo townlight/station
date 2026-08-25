@@ -1,4 +1,5 @@
 pub mod auth;
+mod machine_inventory;
 
 use std::collections::{BTreeSet, HashMap};
 use std::io::{Read, Write};
@@ -2370,6 +2371,7 @@ impl Api {
                 // persisted authority (such as a tier selection) is attached.
                 probe.generated_at_unix_ms = generated_at_unix_ms;
                 probe.probe_collected_at_unix_ms = generated_at_unix_ms;
+                probe.hardware.machine_inventory.collected_at_unix_ms = generated_at_unix_ms;
                 probe.reference_station_tier_selection = self
                     .storage
                     .read_reference_station_tier_selection()
@@ -4848,8 +4850,24 @@ fn collect_station_box_probe(
         };
     let backup_writable = resources.backup_volume_writable;
     let clock_sync = probe_windows_clock_sync();
-    Ok(StationBoxProbeInput {
+    let media_disk_free_gb = resources
+        .media_volume_free_gb
+        .ok_or_else(|| "live media free space is unavailable".to_string())?;
+    let collected_machine_inventory =
+        machine_inventory::collect(&data_directory.join("media"), generated_at_unix_ms);
+    let profile_generated_at_unix_ms = system_time_millis()
+        .map_err(|message| {
+            format!("station clock is unavailable after machine inventory: {message}")
+        })?
+        .max(generated_at_unix_ms);
+    let machine_inventory_evidence = machine_inventory::validate_or_unavailable(
+        collected_machine_inventory,
+        media_disk_free_gb,
         generated_at_unix_ms,
+        profile_generated_at_unix_ms,
+    );
+    Ok(StationBoxProbeInput {
+        generated_at_unix_ms: profile_generated_at_unix_ms,
         probe_collected_at_unix_ms: generated_at_unix_ms,
         max_probe_age_ms: 300_000,
         product_version: receipt_version.unwrap_or_else(|| env!("CARGO_PKG_VERSION").into()),
@@ -4869,9 +4887,8 @@ fn collect_station_box_probe(
             ram_total_gb: resources
                 .ram_total_gb
                 .ok_or_else(|| "live RAM total is unavailable".to_string())?,
-            media_disk_free_gb: resources
-                .media_volume_free_gb
-                .ok_or_else(|| "live media free space is unavailable".to_string())?,
+            media_disk_free_gb,
+            machine_inventory: machine_inventory_evidence,
         },
         clock: ClockProbeInput {
             configured_timezone: station.as_ref().map(|value| value.profile.timezone.clone()),
@@ -7163,6 +7180,7 @@ mod tests {
                 logical_cpus: 8,
                 ram_total_gb: 16.0,
                 media_disk_free_gb: 200.0,
+                machine_inventory: machine_inventory::unavailable_evidence(1_777_000_000_000),
             },
             engine: EngineProbeInput {
                 gstreamer_version: Some("1.28.6".into()),
@@ -7290,7 +7308,7 @@ mod tests {
         let full = api.handle_in_process("GET", "/api/v1/station-box-profile", None);
         assert_eq!(full.status, 200);
         let full: serde_json::Value = serde_json::from_slice(&full.body).unwrap();
-        assert_eq!(full["schema_version"], 3);
+        assert_eq!(full["schema_version"], 4);
         assert_eq!(
             full["peg_readiness"]["color"], "yellow",
             "an unselected deployment tier is unknown and remains fail-closed"
@@ -7304,7 +7322,10 @@ mod tests {
                     && dimension["state"] == "unknown")
         );
         assert_eq!(full["engine"]["sdi"], "unimplemented");
-        assert_eq!(full["reference_station_catalog"]["version"], 1);
+        assert_eq!(
+            full["reference_station_catalog"]["version"],
+            station_readiness::REFERENCE_STATION_CATALOG_VERSION
+        );
         assert_eq!(
             full["reference_station_catalog"]["matching_tiers"],
             serde_json::json!([]),

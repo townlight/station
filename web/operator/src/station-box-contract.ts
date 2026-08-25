@@ -1,6 +1,27 @@
 import type { CommissioningStatus } from "./commissioning-contract";
 
 export type StationBoxReadinessState = "pass" | "blocked" | "recoverable" | "optional" | "unknown";
+export type MachineEvidenceCollectionState = "collected" | "unavailable";
+
+export interface ObservedMachineDevice {
+  name: string;
+  manufacturer: string | null;
+}
+
+export interface MachineInventoryEvidence {
+  collected_at_unix_ms: number;
+  source: "windows_cim";
+  gpu_collection: MachineEvidenceCollectionState;
+  storage_collection: MachineEvidenceCollectionState;
+  device_collection: MachineEvidenceCollectionState;
+  media_volume_total_gb: number | null;
+  gpu_adapters: Array<{ name: string; adapter_memory_gb: number | null; driver_version: string | null }>;
+  physical_disks: Array<{ name: string; size_gb: number; media_type: string | null; bus_type: string | null; health_status: string | null }>;
+  virtual_disks: Array<{ name: string; size_gb: number; resiliency: string | null; health_status: string | null }>;
+  ups_devices: ObservedMachineDevice[];
+  decklink_devices: ObservedMachineDevice[];
+  blackmagic_drivers: Array<{ device_name: string; manufacturer: string | null; driver_version: string | null }>;
+}
 
 export interface StationBoxDimension {
   name: string;
@@ -39,6 +60,7 @@ export interface StationBoxProfile {
     logical_cpus: number;
     ram_total_gb: number;
     media_disk_free_gb: number;
+    machine_inventory: MachineInventoryEvidence;
     state: StationBoxReadinessState;
   };
   engine_tier_verdict: string;
@@ -117,4 +139,12 @@ export function referenceTierSelectionIsCurrent(
   const selection = profile.reference_station_tier_selection;
   return selection?.tier === tier
     && selection.catalog_version === profile.reference_station_catalog.version;
+}
+
+export function observedMachineEvidenceLabel(
+  collection: MachineEvidenceCollectionState,
+  names: string[],
+): string {
+  if (collection === "unavailable") return "Inventory unavailable";
+  return names.length === 0 ? "Not detected" : `Detected: ${names.join(", ")}`;
 }

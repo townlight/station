@@ -4,6 +4,7 @@ import test from "node:test";
 
 import {
   LatestStationBoxLoad,
+  observedMachineEvidenceLabel,
   referenceQualificationLabel,
   referenceTierSelectionIsCurrent,
   referenceTierSelectionPayload,
@@ -14,17 +15,31 @@ import type { StationBoxProfile } from "./station-box-contract.ts";
 
 function profile(matchingTiers: string[]): StationBoxProfile {
   return {
-    schema_version: 3,
+    schema_version: 4,
     reference_station_tier_selection: null,
     hardware: {
       logical_cpus: 32,
       ram_total_gb: 64,
       media_disk_free_gb: 1_000,
+      machine_inventory: {
+        collected_at_unix_ms: 1,
+        source: "windows_cim",
+        gpu_collection: "collected",
+        storage_collection: "collected",
+        device_collection: "collected",
+        media_volume_total_gb: 2_000,
+        gpu_adapters: [],
+        physical_disks: [],
+        virtual_disks: [],
+        ups_devices: [],
+        decklink_devices: [],
+        blackmagic_drivers: [],
+      },
       state: "pass",
     },
     engine_tier_verdict: "full_broadcast",
     reference_station_catalog: {
-      version: 1,
+      version: 2,
       matching_tiers: matchingTiers,
       assessments: [],
     },
@@ -50,14 +65,14 @@ test("tier selection payload carries only CAS intent and catalog identity", () =
   const first = referenceTierSelectionPayload(stationBox, "tier1_streaming");
   assert.deepEqual(first, {
     expected_revision: null,
-    catalog_version: 1,
+    catalog_version: 2,
     tier: "tier1_streaming",
   });
   assert.equal("actor" in first, false);
   assert.equal("occurred_at_unix_ms" in first, false);
 
   stationBox.reference_station_tier_selection = {
-    catalog_version: 1,
+    catalog_version: 2,
     tier: "tier0_batch_stream",
     revision: 7,
     created_at_unix_ms: 1,
@@ -69,7 +84,7 @@ test("tier selection payload carries only CAS intent and catalog identity", () =
     7,
   );
   assert.equal(referenceTierSelectionIsCurrent(stationBox, "tier0_batch_stream"), true);
-  stationBox.reference_station_tier_selection.catalog_version = 0;
+  stationBox.reference_station_tier_selection.catalog_version = 1;
   assert.equal(
     referenceTierSelectionIsCurrent(stationBox, "tier0_batch_stream"),
     false,
@@ -98,4 +113,12 @@ test("only the newest overlapping StationBox load may update operator state", as
   await olderLoad;
 
   assert.deepEqual(accepted, ["revision-2"]);
+});
+
+test("machine inventory labels detection without claiming qualification", () => {
+  const detected = observedMachineEvidenceLabel("collected", ["DeckLink Duo 2"]);
+  assert.equal(detected, "Detected: DeckLink Duo 2");
+  assert.equal(/qualif/i.test(detected), false);
+  assert.equal(observedMachineEvidenceLabel("collected", []), "Not detected");
+  assert.equal(observedMachineEvidenceLabel("unavailable", []), "Inventory unavailable");
 });

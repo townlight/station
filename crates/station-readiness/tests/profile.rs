@@ -1,9 +1,29 @@
 use station_readiness::{
-    BackupProbeInput, CapabilitySupport, ClockProbeInput, ClockSyncStatus, EngineProbeInput,
-    EngineTierVerdict, HardwareProbeInput, NetworkProbeInput, PegReadinessColor,
+    BackupProbeInput, BlackmagicDriverEvidence, CapabilitySupport, ClockProbeInput,
+    ClockSyncStatus, DeckLinkDeviceEvidence, EngineProbeInput, EngineTierVerdict,
+    GpuAdapterEvidence, HardwareProbeInput, MachineInventoryCollectionState,
+    MachineInventoryEvidence, NetworkProbeInput, PegReadinessColor, PhysicalDiskEvidence,
     ReadinessDimensionName, ReadinessState, ReferenceStationRequirementName, ReferenceStationTier,
-    ReleaseProbeInput, StationBoxProbeInput, derive_station_box_profile,
+    ReleaseProbeInput, StationBoxProbeInput, UpsDeviceEvidence, VirtualDiskEvidence,
+    derive_station_box_profile,
 };
+
+fn unavailable_inventory() -> MachineInventoryEvidence {
+    MachineInventoryEvidence {
+        collected_at_unix_ms: 1_777_000_000_000,
+        source: station_readiness::MachineEvidenceSource::WindowsCim,
+        gpu_collection: MachineInventoryCollectionState::Unavailable,
+        storage_collection: MachineInventoryCollectionState::Unavailable,
+        device_collection: MachineInventoryCollectionState::Unavailable,
+        media_volume_total_gb: None,
+        gpu_adapters: Vec::new(),
+        physical_disks: Vec::new(),
+        virtual_disks: Vec::new(),
+        ups_devices: Vec::new(),
+        decklink_devices: Vec::new(),
+        blackmagic_drivers: Vec::new(),
+    }
+}
 
 fn ready_probe() -> StationBoxProbeInput {
     StationBoxProbeInput {
@@ -20,6 +40,7 @@ fn ready_probe() -> StationBoxProbeInput {
             logical_cpus: 16,
             ram_total_gb: 32.0,
             media_disk_free_gb: 500.0,
+            machine_inventory: unavailable_inventory(),
         },
         engine: EngineProbeInput {
             gstreamer_version: Some("1.28.6".into()),
@@ -75,7 +96,7 @@ fn ready_probe() -> StationBoxProbeInput {
 fn complete_legacy_facts_stay_yellow_without_reference_station_evidence() {
     let profile = derive_station_box_profile(ready_probe()).unwrap();
 
-    assert_eq!(profile.schema_version, 3);
+    assert_eq!(profile.schema_version, 4);
     assert_eq!(
         profile.engine_tier_verdict,
         EngineTierVerdict::FullBroadcast
@@ -101,7 +122,7 @@ fn complete_legacy_facts_stay_yellow_without_reference_station_evidence() {
 fn reference_station_catalog_is_versioned_and_never_conflates_engine_capability() {
     let profile = derive_station_box_profile(ready_probe()).unwrap();
 
-    assert_eq!(profile.reference_station_catalog.version, 1);
+    assert_eq!(profile.reference_station_catalog.version, 2);
     assert_eq!(
         profile.engine_tier_verdict,
         EngineTierVerdict::FullBroadcast,
@@ -317,6 +338,270 @@ fn impossible_stale_or_ambiguous_probe_facts_fail_closed() {
     let mut probe = ready_probe();
     probe.release.candidate_verified = false;
     assert!(derive_station_box_profile(probe).is_err());
+}
+
+#[test]
+fn media_storage_capacity_uses_observed_total_capacity_not_free_space() {
+    let mut probe = ready_probe();
+    probe.hardware.machine_inventory = MachineInventoryEvidence {
+        collected_at_unix_ms: probe.probe_collected_at_unix_ms,
+        source: station_readiness::MachineEvidenceSource::WindowsCim,
+        gpu_collection: MachineInventoryCollectionState::Unavailable,
+        storage_collection: MachineInventoryCollectionState::Collected,
+        device_collection: MachineInventoryCollectionState::Unavailable,
+        media_volume_total_gb: Some(2_000.0),
+        gpu_adapters: Vec::new(),
+        physical_disks: vec![PhysicalDiskEvidence {
+            name: "NVMe 2TB".into(),
+            size_gb: 2_000.0,
+            media_type: Some("SSD".into()),
+            bus_type: Some("NVMe".into()),
+            health_status: Some("Healthy".into()),
+        }],
+        virtual_disks: Vec::new(),
+        ups_devices: Vec::new(),
+        decklink_devices: Vec::new(),
+        blackmagic_drivers: Vec::new(),
+    };
+
+    let profile = derive_station_box_profile(probe).unwrap();
+    let development = profile
+        .reference_station_catalog
+        .assessments
+        .iter()
+        .find(|assessment| assessment.tier == ReferenceStationTier::DevelopmentValidation)
+        .unwrap();
+    assert_eq!(
+        development
+            .requirements
+            .iter()
+            .find(|requirement| requirement.name
+                == ReferenceStationRequirementName::MediaStorageCapacity)
+            .unwrap()
+            .state,
+        ReadinessState::Pass
+    );
+    assert_eq!(
+        development
+            .requirements
+            .iter()
+            .find(|requirement| requirement.name
+                == ReferenceStationRequirementName::MediaStorageMedium)
+            .unwrap()
+            .state,
+        ReadinessState::Unknown,
+        "visible NVMe hardware cannot be linked to the media volume by this inventory"
+    );
+}
+
+#[test]
+fn rich_machine_inventory_does_not_infer_gpu_redundancy_ups_or_blackmagic_qualification() {
+    let mut probe = ready_probe();
+    probe.hardware.machine_inventory = MachineInventoryEvidence {
+        collected_at_unix_ms: probe.probe_collected_at_unix_ms,
+        source: station_readiness::MachineEvidenceSource::WindowsCim,
+        gpu_collection: MachineInventoryCollectionState::Collected,
+        storage_collection: MachineInventoryCollectionState::Collected,
+        device_collection: MachineInventoryCollectionState::Collected,
+        media_volume_total_gb: Some(8_000.0),
+        gpu_adapters: vec![GpuAdapterEvidence {
+            name: "NVIDIA RTX observed adapter".into(),
+            adapter_memory_gb: Some(16.0),
+            driver_version: Some("1.2.3.4".into()),
+        }],
+        physical_disks: vec![
+            PhysicalDiskEvidence {
+                name: "NVMe A".into(),
+                size_gb: 4_000.0,
+                media_type: Some("SSD".into()),
+                bus_type: Some("NVMe".into()),
+                health_status: Some("Healthy".into()),
+            },
+            PhysicalDiskEvidence {
+                name: "NVMe B".into(),
+                size_gb: 4_000.0,
+                media_type: Some("SSD".into()),
+                bus_type: Some("NVMe".into()),
+                health_status: Some("Healthy".into()),
+            },
+        ],
+        virtual_disks: vec![VirtualDiskEvidence {
+            name: "Mirror observed".into(),
+            size_gb: 4_000.0,
+            resiliency: Some("Mirror".into()),
+            health_status: Some("Healthy".into()),
+        }],
+        ups_devices: vec![UpsDeviceEvidence {
+            name: "UPS observed".into(),
+            manufacturer: Some("Vendor".into()),
+        }],
+        decklink_devices: vec![DeckLinkDeviceEvidence {
+            name: "DeckLink observed".into(),
+            manufacturer: Some("Blackmagic Design".into()),
+        }],
+        blackmagic_drivers: vec![BlackmagicDriverEvidence {
+            device_name: "Desktop Video observed".into(),
+            manufacturer: Some("Blackmagic Design".into()),
+            driver_version: Some("14.0".into()),
+        }],
+    };
+
+    let profile = derive_station_box_profile(probe).unwrap();
+    let cable = profile
+        .reference_station_catalog
+        .assessments
+        .iter()
+        .find(|assessment| assessment.tier == ReferenceStationTier::CableSdi)
+        .unwrap();
+    for name in [
+        ReferenceStationRequirementName::Gpu,
+        ReferenceStationRequirementName::RedundantMediaStorage,
+        ReferenceStationRequirementName::Ups,
+        ReferenceStationRequirementName::BlackmagicDesktopVideo,
+    ] {
+        assert_eq!(
+            cable
+                .requirements
+                .iter()
+                .find(|requirement| requirement.name == name)
+                .unwrap()
+                .state,
+            ReadinessState::Unknown
+        );
+    }
+    assert!(cable.requirements.iter().any(|requirement| {
+        requirement.name == ReferenceStationRequirementName::Gpu
+            && requirement.detail.contains("NVIDIA RTX observed adapter")
+    }));
+}
+
+#[test]
+fn decklink_friendly_name_detection_never_qualifies_hardware_identity_or_function() {
+    let mut detected = ready_probe();
+    detected.hardware.machine_inventory = unavailable_inventory();
+    detected.hardware.machine_inventory.device_collection =
+        MachineInventoryCollectionState::Collected;
+    detected
+        .hardware
+        .machine_inventory
+        .decklink_devices
+        .push(DeckLinkDeviceEvidence {
+            name: "DeckLink 8K Pro".into(),
+            manufacturer: Some("Blackmagic Design".into()),
+        });
+    let profile = derive_station_box_profile(detected).unwrap();
+    let cable = profile
+        .reference_station_catalog
+        .assessments
+        .iter()
+        .find(|assessment| assessment.tier == ReferenceStationTier::CableSdi)
+        .unwrap();
+    assert_eq!(
+        cable
+            .requirements
+            .iter()
+            .find(
+                |requirement| requirement.name == ReferenceStationRequirementName::DeckLinkHardware
+            )
+            .unwrap()
+            .state,
+        ReadinessState::Unknown
+    );
+
+    let mut absent = ready_probe();
+    absent.hardware.machine_inventory = unavailable_inventory();
+    absent.hardware.machine_inventory.device_collection =
+        MachineInventoryCollectionState::Collected;
+    let profile = derive_station_box_profile(absent).unwrap();
+    let cable = profile
+        .reference_station_catalog
+        .assessments
+        .iter()
+        .find(|assessment| assessment.tier == ReferenceStationTier::CableSdi)
+        .unwrap();
+    assert_eq!(
+        cable
+            .requirements
+            .iter()
+            .find(
+                |requirement| requirement.name == ReferenceStationRequirementName::DeckLinkHardware
+            )
+            .unwrap()
+            .state,
+        ReadinessState::Unknown
+    );
+}
+
+#[test]
+fn unavailable_or_stale_impossible_or_duplicate_machine_inventory_is_rejected() {
+    let mut unavailable_with_facts = ready_probe();
+    unavailable_with_facts
+        .hardware
+        .machine_inventory
+        .gpu_adapters
+        .push(GpuAdapterEvidence {
+            name: "unexpected".into(),
+            adapter_memory_gb: Some(1.0),
+            driver_version: Some("1.0".into()),
+        });
+    assert!(derive_station_box_profile(unavailable_with_facts).is_err());
+
+    let mut stale = ready_probe();
+    stale.hardware.machine_inventory.collected_at_unix_ms -= 1;
+    assert!(derive_station_box_profile(stale).is_err());
+
+    let mut impossible = ready_probe();
+    impossible.hardware.machine_inventory.storage_collection =
+        MachineInventoryCollectionState::Collected;
+    impossible.hardware.machine_inventory.media_volume_total_gb = Some(499.0);
+    assert!(derive_station_box_profile(impossible).is_err());
+
+    let mut zero_vram = ready_probe();
+    zero_vram.hardware.machine_inventory.gpu_collection =
+        MachineInventoryCollectionState::Collected;
+    zero_vram.hardware.machine_inventory.gpu_adapters = vec![GpuAdapterEvidence {
+        name: "zero-memory adapter".into(),
+        adapter_memory_gb: Some(0.0),
+        driver_version: None,
+    }];
+    assert!(derive_station_box_profile(zero_vram).is_err());
+
+    let mut duplicates = ready_probe();
+    duplicates.hardware.machine_inventory.gpu_collection =
+        MachineInventoryCollectionState::Collected;
+    let adapter = GpuAdapterEvidence {
+        name: "same adapter".into(),
+        adapter_memory_gb: Some(1.0),
+        driver_version: Some("1.0".into()),
+    };
+    duplicates.hardware.machine_inventory.gpu_adapters = vec![adapter.clone(), adapter];
+    assert!(derive_station_box_profile(duplicates).is_err());
+}
+
+#[test]
+fn version_one_selection_is_stale_under_the_machine_inventory_catalog() {
+    let mut probe = ready_probe();
+    probe.reference_station_tier_selection =
+        Some(station_readiness::ReferenceStationTierSelection {
+            catalog_version: 1,
+            tier: ReferenceStationTier::Tier0BatchStream,
+            revision: 1,
+            created_at_unix_ms: probe.generated_at_unix_ms,
+            updated_at_unix_ms: probe.generated_at_unix_ms,
+            updated_by: "operator-1".into(),
+        });
+    let profile = derive_station_box_profile(probe).unwrap();
+    assert_eq!(profile.reference_station_catalog.version, 2);
+    assert_eq!(
+        profile
+            .peg_readiness
+            .dimensions
+            .iter()
+            .find(|dimension| dimension.name == ReadinessDimensionName::ReferenceStation)
+            .unwrap()
+            .state,
+        ReadinessState::Unknown
+    );
 }
 
 trait MissingFactoryForTest {
