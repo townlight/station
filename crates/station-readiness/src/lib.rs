@@ -10,11 +10,12 @@ mod headend;
 
 pub use headend::*;
 
-const SCHEMA_VERSION: u32 = 1;
+const SCHEMA_VERSION: u32 = 2;
 const MAX_TEXT: usize = 200;
 const MAX_FACTORY_NAME: usize = 120;
 const MAX_LIST_ITEMS: usize = 256;
 const DEFAULT_MAX_PROBE_AGE_MS: i64 = 300_000;
+pub const REFERENCE_STATION_CATALOG_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -118,6 +119,7 @@ pub struct StationBoxProfile {
     pub backup: BackupReadiness,
     pub release: ReleaseReadiness,
     pub engine_tier_verdict: EngineTierVerdict,
+    pub reference_station_catalog: ReferenceStationCatalog,
     pub peg_readiness: PegReadinessRollup,
 }
 
@@ -226,9 +228,71 @@ pub enum EngineTierVerdict {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+pub enum ReferenceStationTier {
+    Tier0BatchStream,
+    Tier1Streaming,
+    DevelopmentValidation,
+    CableSdi,
+    Tier2MultiStream,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReferenceStationRequirementName {
+    LogicalCpuCapacity,
+    MemoryCapacity,
+    MediaStorageCapacity,
+    RedundantMediaStorage,
+    MultiDiskZfsStorage,
+    NetworkAttachedStorage,
+    Gpu,
+    OpenGl45,
+    HardwareEncoder,
+    Ups,
+    IpOutput,
+    SrtOutput,
+    HlsOutput,
+    SdiOutput,
+    InterlacedOutput,
+    DeckLinkHardware,
+    BlackmagicDesktopVideo,
+    NativeOperatingSystem,
+    HeadendInterface,
+    MultiChannelOutput,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReferenceStationRequirementAssessment {
+    pub name: ReferenceStationRequirementName,
+    pub state: ReadinessState,
+    pub detail: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReferenceStationTierAssessment {
+    pub tier: ReferenceStationTier,
+    pub state: ReadinessState,
+    pub requirements: Vec<ReferenceStationRequirementAssessment>,
+    pub detail: String,
+    pub next_step: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReferenceStationCatalog {
+    pub version: u32,
+    pub matching_tiers: Vec<ReferenceStationTier>,
+    pub assessments: Vec<ReferenceStationTierAssessment>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ReadinessDimensionName {
     StationIdentity,
     Hardware,
+    ReferenceStation,
     Engine,
     OutputCapabilities,
     Clock,
@@ -402,6 +466,9 @@ pub fn derive_station_box_profile(
     if input.engine.ndi != CapabilitySupport::Supported {
         missing_outputs.push("NDI");
     }
+    let reference_station_catalog =
+        derive_reference_station_catalog(&input.hardware, &input.engine);
+    let reference_station_state = reference_station_readiness_state(&reference_station_catalog);
     let dimensions = vec![
         dimension(
             ReadinessDimensionName::StationIdentity,
@@ -427,6 +494,30 @@ pub fn derive_station_box_profile(
             "current Windows memory and volume probe",
             (hardware.state != ReadinessState::Pass)
                 .then(|| "Provide at least 8 GB RAM and 100 GB free media storage.".into()),
+        ),
+        dimension(
+            ReadinessDimensionName::ReferenceStation,
+            &reference_station_state,
+            true,
+            if !reference_station_catalog.matching_tiers.is_empty() {
+                format!(
+                    "This machine matches reference builds {}, but no operator-selected deployment tier is commissioned.",
+                    reference_station_catalog
+                        .matching_tiers
+                        .iter()
+                        .map(reference_tier_label)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            } else {
+                "No complete reference-build match or selected deployment tier exists; missing physical evidence remains fail-closed."
+                    .into()
+            },
+            "versioned reference-build matrix and current StationBox facts",
+            (reference_station_state != ReadinessState::Pass).then(|| {
+                "Select a deployment tier, resolve its blocked requirements, and collect authenticated evidence for every unknown required item."
+                    .into()
+            }),
         ),
         dimension(
             ReadinessDimensionName::Engine,
@@ -580,8 +671,381 @@ pub fn derive_station_box_profile(
         backup,
         release,
         engine_tier_verdict,
+        reference_station_catalog,
         peg_readiness,
     })
+}
+
+fn derive_reference_station_catalog(
+    hardware: &HardwareProbeInput,
+    engine: &EngineProbeInput,
+) -> ReferenceStationCatalog {
+    let cpu = |minimum| {
+        numeric_requirement(
+            ReferenceStationRequirementName::LogicalCpuCapacity,
+            hardware.logical_cpus as f64,
+            minimum,
+            "logical processors",
+        )
+    };
+    let ram = |minimum| {
+        numeric_requirement(
+            ReferenceStationRequirementName::MemoryCapacity,
+            hardware.ram_total_gb,
+            minimum,
+            "GB RAM",
+        )
+    };
+    let ip = || {
+        capability_requirement(
+            ReferenceStationRequirementName::IpOutput,
+            &engine.udp,
+            "UDP MPEG-TS output capability",
+        )
+    };
+    let srt = || {
+        capability_requirement(
+            ReferenceStationRequirementName::SrtOutput,
+            &engine.srt,
+            "SRT output capability",
+        )
+    };
+    let hls = || {
+        unknown_reference_requirement(
+            ReferenceStationRequirementName::HlsOutput,
+            "HLS output capability is not collected by the current engine probe.",
+        )
+    };
+    let raid1 = || {
+        unknown_reference_requirement(
+            ReferenceStationRequirementName::RedundantMediaStorage,
+            "Total capacity and 2x4TB NVMe RAID1 redundancy are not collected.",
+        )
+    };
+    let assessments = vec![
+        reference_tier_assessment(
+            ReferenceStationTier::Tier0BatchStream,
+            vec![cpu(16.0), ram(32.0), raid1(), ip(), srt(), hls()],
+        ),
+        reference_tier_assessment(
+            ReferenceStationTier::Tier1Streaming,
+            vec![
+                cpu(16.0),
+                ram(32.0),
+                raid1(),
+                optional_reference_requirement(
+                    ReferenceStationRequirementName::Gpu,
+                    "The reference build lists an RTX 4060, but the base streaming engine permits CPU playout.",
+                ),
+                ip(),
+                srt(),
+                hls(),
+            ],
+        ),
+        reference_tier_assessment(
+            ReferenceStationTier::DevelopmentValidation,
+            vec![
+                cpu(16.0),
+                ram(32.0),
+                unknown_reference_requirement(
+                    ReferenceStationRequirementName::MediaStorageCapacity,
+                    "The 2TB NVMe reference-dev capacity is not collected; free space is not total capacity.",
+                ),
+                unknown_reference_requirement(
+                    ReferenceStationRequirementName::Gpu,
+                    "RTX 5070 Ti-class GPU identity and video memory are not collected.",
+                ),
+                ip(),
+                srt(),
+            ],
+        ),
+        reference_tier_assessment(
+            ReferenceStationTier::CableSdi,
+            vec![
+                cpu(16.0),
+                ram(32.0),
+                raid1(),
+                unknown_reference_requirement(
+                    ReferenceStationRequirementName::NetworkAttachedStorage,
+                    "The required NAS target is not collected.",
+                ),
+                unknown_reference_requirement(
+                    ReferenceStationRequirementName::Gpu,
+                    "RTX 4060-4070-class GPU identity and video memory are not collected.",
+                ),
+                unknown_reference_requirement(
+                    ReferenceStationRequirementName::OpenGl45,
+                    "OpenGL 4.5 support is not collected.",
+                ),
+                unknown_reference_requirement(
+                    ReferenceStationRequirementName::HardwareEncoder,
+                    "A hardware encoder cannot be inferred from the generic encoder-factory list.",
+                ),
+                unknown_reference_requirement(
+                    ReferenceStationRequirementName::DeckLinkHardware,
+                    "DeckLink hardware presence is not collected.",
+                ),
+                unknown_reference_requirement(
+                    ReferenceStationRequirementName::BlackmagicDesktopVideo,
+                    "Blackmagic Desktop Video driver and SDK identity are not collected.",
+                ),
+                unknown_reference_requirement(
+                    ReferenceStationRequirementName::NativeOperatingSystem,
+                    "Native-host PCIe suitability is not collected.",
+                ),
+                unknown_reference_requirement(
+                    ReferenceStationRequirementName::Ups,
+                    "UPS presence and health are not collected.",
+                ),
+                unknown_reference_requirement(
+                    ReferenceStationRequirementName::HeadendInterface,
+                    "The cable operator's required headend interface is not configured or probed.",
+                ),
+                ip(),
+                srt(),
+                capability_requirement(
+                    ReferenceStationRequirementName::SdiOutput,
+                    &engine.sdi,
+                    "SDI output capability",
+                ),
+                capability_requirement(
+                    ReferenceStationRequirementName::InterlacedOutput,
+                    &engine.interlaced,
+                    "interlaced cable output capability",
+                ),
+            ],
+        ),
+        reference_tier_assessment(
+            ReferenceStationTier::Tier2MultiStream,
+            vec![
+                cpu(32.0),
+                ram(128.0),
+                unknown_reference_requirement(
+                    ReferenceStationRequirementName::MultiDiskZfsStorage,
+                    "The 8x4TB NVMe ZFS storage topology is not collected.",
+                ),
+                unknown_reference_requirement(
+                    ReferenceStationRequirementName::Gpu,
+                    "RTX 4070 Ti Super-class GPU identity and video memory are not collected.",
+                ),
+                unknown_reference_requirement(
+                    ReferenceStationRequirementName::HardwareEncoder,
+                    "Multi-stream hardware-encoder capacity is not collected.",
+                ),
+                unknown_reference_requirement(
+                    ReferenceStationRequirementName::MultiChannelOutput,
+                    "Concurrent multi-channel output capacity has not been machine-proved.",
+                ),
+                ip(),
+                srt(),
+                hls(),
+                optional_capability_requirement(
+                    ReferenceStationRequirementName::SdiOutput,
+                    &engine.sdi,
+                    "SDI output is optional per Tier 2 channel",
+                ),
+            ],
+        ),
+    ];
+    let matching_tiers = assessments
+        .iter()
+        .filter(|assessment| assessment.state == ReadinessState::Pass)
+        .map(|assessment| assessment.tier.clone())
+        .collect();
+    ReferenceStationCatalog {
+        version: REFERENCE_STATION_CATALOG_VERSION,
+        matching_tiers,
+        assessments,
+    }
+}
+
+fn reference_station_readiness_state(catalog: &ReferenceStationCatalog) -> ReadinessState {
+    if catalog
+        .assessments
+        .iter()
+        .all(|assessment| assessment.state == ReadinessState::Blocked)
+    {
+        ReadinessState::Blocked
+    } else {
+        // A generic build-row match cannot satisfy deployment readiness. This
+        // becomes Pass only when a later slice binds the evidence to a
+        // persisted, operator-selected tier revision.
+        ReadinessState::Unknown
+    }
+}
+
+fn reference_tier_assessment(
+    tier: ReferenceStationTier,
+    requirements: Vec<ReferenceStationRequirementAssessment>,
+) -> ReferenceStationTierAssessment {
+    let state = if requirements
+        .iter()
+        .any(|requirement| requirement.state == ReadinessState::Blocked)
+    {
+        ReadinessState::Blocked
+    } else if requirements
+        .iter()
+        .any(|requirement| requirement.state == ReadinessState::Unknown)
+    {
+        ReadinessState::Unknown
+    } else {
+        ReadinessState::Pass
+    };
+    let detail = match &state {
+        ReadinessState::Pass => "All measured and recorded reference requirements passed.".into(),
+        ReadinessState::Blocked => {
+            "One or more measured reference requirements are below the tier minimum.".into()
+        }
+        _ => "Physical requirements without machine evidence remain unqualified.".into(),
+    };
+    let blocked = requirement_names(&requirements, ReadinessState::Blocked);
+    let unknown = requirement_names(&requirements, ReadinessState::Unknown);
+    let mut actions = Vec::new();
+    if !blocked.is_empty() {
+        actions.push(format!(
+            "Resolve blocked requirements: {}.",
+            blocked.join(", ")
+        ));
+    }
+    if !unknown.is_empty() {
+        actions.push(format!("Collect evidence for: {}.", unknown.join(", ")));
+    }
+    ReferenceStationTierAssessment {
+        tier,
+        state,
+        requirements,
+        detail,
+        next_step: (!actions.is_empty()).then(|| actions.join(" ")),
+    }
+}
+
+fn numeric_requirement(
+    name: ReferenceStationRequirementName,
+    observed: f64,
+    minimum: f64,
+    unit: &str,
+) -> ReferenceStationRequirementAssessment {
+    let state = if observed >= minimum {
+        ReadinessState::Pass
+    } else {
+        ReadinessState::Blocked
+    };
+    ReferenceStationRequirementAssessment {
+        name,
+        state,
+        detail: format!("{observed:.1} {unit} observed; minimum is {minimum:.1}."),
+    }
+}
+
+fn capability_requirement(
+    name: ReferenceStationRequirementName,
+    support: &CapabilitySupport,
+    label: &str,
+) -> ReferenceStationRequirementAssessment {
+    let state = match support {
+        CapabilitySupport::Supported => ReadinessState::Pass,
+        CapabilitySupport::Unsupported | CapabilitySupport::Unimplemented => {
+            ReadinessState::Blocked
+        }
+        CapabilitySupport::Unknown => ReadinessState::Unknown,
+    };
+    ReferenceStationRequirementAssessment {
+        name,
+        state,
+        detail: format!("{label} is {}.", capability_label(support)),
+    }
+}
+
+fn unknown_reference_requirement(
+    name: ReferenceStationRequirementName,
+    detail: &str,
+) -> ReferenceStationRequirementAssessment {
+    ReferenceStationRequirementAssessment {
+        name,
+        state: ReadinessState::Unknown,
+        detail: detail.into(),
+    }
+}
+
+fn optional_reference_requirement(
+    name: ReferenceStationRequirementName,
+    detail: &str,
+) -> ReferenceStationRequirementAssessment {
+    ReferenceStationRequirementAssessment {
+        name,
+        state: ReadinessState::Optional,
+        detail: detail.into(),
+    }
+}
+
+fn optional_capability_requirement(
+    name: ReferenceStationRequirementName,
+    support: &CapabilitySupport,
+    label: &str,
+) -> ReferenceStationRequirementAssessment {
+    ReferenceStationRequirementAssessment {
+        name,
+        state: ReadinessState::Optional,
+        detail: format!(
+            "{label}; current capability is {}.",
+            capability_label(support)
+        ),
+    }
+}
+
+fn requirement_names(
+    requirements: &[ReferenceStationRequirementAssessment],
+    state: ReadinessState,
+) -> Vec<&'static str> {
+    requirements
+        .iter()
+        .filter(|requirement| requirement.state == state)
+        .map(|requirement| reference_requirement_label(&requirement.name))
+        .collect()
+}
+
+fn reference_tier_label(tier: &ReferenceStationTier) -> &'static str {
+    match tier {
+        ReferenceStationTier::Tier0BatchStream => "Tier 0 batch/stream",
+        ReferenceStationTier::Tier1Streaming => "Tier 1 streaming",
+        ReferenceStationTier::DevelopmentValidation => "reference development/validation",
+        ReferenceStationTier::CableSdi => "Cable/SDI",
+        ReferenceStationTier::Tier2MultiStream => "Tier 2 multi-stream",
+    }
+}
+
+fn reference_requirement_label(requirement: &ReferenceStationRequirementName) -> &'static str {
+    match requirement {
+        ReferenceStationRequirementName::LogicalCpuCapacity => "CPU capacity",
+        ReferenceStationRequirementName::MemoryCapacity => "memory capacity",
+        ReferenceStationRequirementName::MediaStorageCapacity => "media storage capacity",
+        ReferenceStationRequirementName::RedundantMediaStorage => "redundant media storage",
+        ReferenceStationRequirementName::MultiDiskZfsStorage => "multi-disk ZFS storage",
+        ReferenceStationRequirementName::NetworkAttachedStorage => "network-attached storage",
+        ReferenceStationRequirementName::Gpu => "GPU",
+        ReferenceStationRequirementName::OpenGl45 => "OpenGL 4.5",
+        ReferenceStationRequirementName::HardwareEncoder => "hardware encoder",
+        ReferenceStationRequirementName::Ups => "UPS",
+        ReferenceStationRequirementName::IpOutput => "IP output",
+        ReferenceStationRequirementName::SrtOutput => "SRT output",
+        ReferenceStationRequirementName::HlsOutput => "HLS output",
+        ReferenceStationRequirementName::SdiOutput => "SDI output",
+        ReferenceStationRequirementName::InterlacedOutput => "interlaced output",
+        ReferenceStationRequirementName::DeckLinkHardware => "DeckLink hardware",
+        ReferenceStationRequirementName::BlackmagicDesktopVideo => "Blackmagic Desktop Video",
+        ReferenceStationRequirementName::NativeOperatingSystem => "native operating system",
+        ReferenceStationRequirementName::HeadendInterface => "headend interface",
+        ReferenceStationRequirementName::MultiChannelOutput => "multi-channel output",
+    }
+}
+
+fn capability_label(support: &CapabilitySupport) -> &'static str {
+    match support {
+        CapabilitySupport::Supported => "supported",
+        CapabilitySupport::Unsupported => "unsupported",
+        CapabilitySupport::Unimplemented => "unimplemented",
+        CapabilitySupport::Unknown => "unknown",
+    }
 }
 
 impl StationBoxProbeInput {
@@ -838,4 +1302,29 @@ fn invalid(message: impl Into<String>) -> Result<(), ValidationError> {
 
 fn default_max_probe_age_ms() -> i64 {
     DEFAULT_MAX_PROBE_AGE_MS
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn generic_tier_match_cannot_replace_selected_deployment_intent() {
+        let catalog = ReferenceStationCatalog {
+            version: REFERENCE_STATION_CATALOG_VERSION,
+            matching_tiers: vec![ReferenceStationTier::Tier0BatchStream],
+            assessments: vec![ReferenceStationTierAssessment {
+                tier: ReferenceStationTier::Tier0BatchStream,
+                state: ReadinessState::Pass,
+                requirements: Vec::new(),
+                detail: "generic match".into(),
+                next_step: None,
+            }],
+        };
+
+        assert_eq!(
+            reference_station_readiness_state(&catalog),
+            ReadinessState::Unknown
+        );
+    }
 }

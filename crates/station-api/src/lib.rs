@@ -7166,9 +7166,19 @@ mod tests {
         let full = api.handle_in_process("GET", "/api/v1/station-box-profile", None);
         assert_eq!(full.status, 200);
         let full: serde_json::Value = serde_json::from_slice(&full.body).unwrap();
-        assert_eq!(full["schema_version"], 1);
-        assert_eq!(full["peg_readiness"]["color"], "yellow");
+        assert_eq!(full["schema_version"], 2);
+        assert_eq!(full["peg_readiness"]["color"], "red");
         assert_eq!(full["engine"]["sdi"], "unimplemented");
+        assert_eq!(full["reference_station_catalog"]["version"], 1);
+        assert_eq!(
+            full["reference_station_catalog"]["matching_tiers"],
+            serde_json::json!([]),
+            "unmeasured physical requirements must not produce a complete build match"
+        );
+        assert_eq!(
+            full["reference_station_catalog"]["assessments"][0]["tier"],
+            "tier0_batch_stream"
+        );
         assert!(api.station_box_cache.lock().unwrap().is_some());
 
         let rollup = api.handle_in_process("GET", "/api/v1/station-box-profile/readiness", None);

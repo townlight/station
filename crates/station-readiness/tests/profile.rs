@@ -1,8 +1,8 @@
 use station_readiness::{
     BackupProbeInput, CapabilitySupport, ClockProbeInput, ClockSyncStatus, EngineProbeInput,
     EngineTierVerdict, HardwareProbeInput, NetworkProbeInput, PegReadinessColor,
-    ReadinessDimensionName, ReadinessState, ReleaseProbeInput, StationBoxProbeInput,
-    derive_station_box_profile,
+    ReadinessDimensionName, ReadinessState, ReferenceStationRequirementName, ReferenceStationTier,
+    ReleaseProbeInput, StationBoxProbeInput, derive_station_box_profile,
 };
 
 fn ready_probe() -> StationBoxProbeInput {
@@ -71,20 +71,140 @@ fn ready_probe() -> StationBoxProbeInput {
 }
 
 #[test]
-fn only_complete_live_facts_are_green() {
+fn complete_legacy_facts_stay_yellow_without_reference_station_evidence() {
     let profile = derive_station_box_profile(ready_probe()).unwrap();
 
-    assert_eq!(profile.schema_version, 1);
+    assert_eq!(profile.schema_version, 2);
     assert_eq!(
         profile.engine_tier_verdict,
         EngineTierVerdict::FullBroadcast
     );
-    assert_eq!(profile.peg_readiness.color, PegReadinessColor::Green);
-    assert!(profile.peg_readiness.dimensions.iter().all(|dimension| {
-        dimension.state == ReadinessState::Pass
-            && !dimension.detail.is_empty()
-            && !dimension.evidence.is_empty()
-    }));
+    assert_eq!(profile.peg_readiness.color, PegReadinessColor::Yellow);
+    let reference = profile
+        .peg_readiness
+        .dimensions
+        .iter()
+        .find(|dimension| dimension.name == ReadinessDimensionName::ReferenceStation)
+        .unwrap();
+    assert_eq!(reference.state, ReadinessState::Unknown);
+    assert!(
+        profile
+            .peg_readiness
+            .dimensions
+            .iter()
+            .all(|dimension| { !dimension.detail.is_empty() && !dimension.evidence.is_empty() })
+    );
+}
+
+#[test]
+fn reference_station_catalog_is_versioned_and_never_conflates_engine_capability() {
+    let profile = derive_station_box_profile(ready_probe()).unwrap();
+
+    assert_eq!(profile.reference_station_catalog.version, 1);
+    assert_eq!(
+        profile.engine_tier_verdict,
+        EngineTierVerdict::FullBroadcast,
+        "installed output capabilities are a different verdict from box qualification"
+    );
+    assert!(
+        profile.reference_station_catalog.matching_tiers.is_empty(),
+        "unmeasured physical requirements must prevent a hardware-tier green claim"
+    );
+    let base = profile
+        .reference_station_catalog
+        .assessments
+        .iter()
+        .find(|assessment| assessment.tier == ReferenceStationTier::Tier0BatchStream)
+        .unwrap();
+    assert_eq!(base.state, ReadinessState::Unknown);
+    assert_eq!(
+        base.requirements
+            .iter()
+            .find(|requirement| {
+                requirement.name == ReferenceStationRequirementName::RedundantMediaStorage
+            })
+            .unwrap()
+            .state,
+        ReadinessState::Unknown
+    );
+}
+
+#[test]
+fn unmeasured_reference_station_requirements_are_never_inferred_from_large_numbers() {
+    let mut probe = ready_probe();
+    probe.hardware.logical_cpus = 64;
+    probe.hardware.ram_total_gb = 256.0;
+    probe.hardware.media_disk_free_gb = 10_000.0;
+
+    let profile = derive_station_box_profile(probe).unwrap();
+
+    assert!(profile.reference_station_catalog.matching_tiers.is_empty());
+    for tier in &profile.reference_station_catalog.assessments {
+        assert_ne!(tier.state, ReadinessState::Pass);
+    }
+    let cable = profile
+        .reference_station_catalog
+        .assessments
+        .iter()
+        .find(|assessment| assessment.tier == ReferenceStationTier::CableSdi)
+        .unwrap();
+    for name in [
+        ReferenceStationRequirementName::Gpu,
+        ReferenceStationRequirementName::RedundantMediaStorage,
+        ReferenceStationRequirementName::Ups,
+        ReferenceStationRequirementName::DeckLinkHardware,
+        ReferenceStationRequirementName::HeadendInterface,
+    ] {
+        assert_eq!(
+            cable
+                .requirements
+                .iter()
+                .find(|requirement| requirement.name == name)
+                .unwrap()
+                .state,
+            ReadinessState::Unknown
+        );
+    }
+}
+
+#[test]
+fn catalog_carries_every_reference_row_and_cable_prerequisite() {
+    let profile = derive_station_box_profile(ready_probe()).unwrap();
+    assert_eq!(
+        profile
+            .reference_station_catalog
+            .assessments
+            .iter()
+            .map(|assessment| assessment.tier.clone())
+            .collect::<Vec<_>>(),
+        vec![
+            ReferenceStationTier::Tier0BatchStream,
+            ReferenceStationTier::Tier1Streaming,
+            ReferenceStationTier::DevelopmentValidation,
+            ReferenceStationTier::CableSdi,
+            ReferenceStationTier::Tier2MultiStream,
+        ]
+    );
+    let cable = &profile.reference_station_catalog.assessments[3];
+    for name in [
+        ReferenceStationRequirementName::NetworkAttachedStorage,
+        ReferenceStationRequirementName::OpenGl45,
+        ReferenceStationRequirementName::HardwareEncoder,
+        ReferenceStationRequirementName::DeckLinkHardware,
+        ReferenceStationRequirementName::BlackmagicDesktopVideo,
+        ReferenceStationRequirementName::NativeOperatingSystem,
+        ReferenceStationRequirementName::HeadendInterface,
+        ReferenceStationRequirementName::SdiOutput,
+        ReferenceStationRequirementName::InterlacedOutput,
+    ] {
+        assert!(
+            cable
+                .requirements
+                .iter()
+                .any(|requirement| requirement.name == name),
+            "Cable/SDI prerequisite missing: {name:?}"
+        );
+    }
 }
 
 #[test]
@@ -145,8 +265,22 @@ fn low_resources_unknown_clock_and_unverified_release_do_not_go_green() {
 
     let profile = derive_station_box_profile(probe).unwrap();
 
-    assert_eq!(profile.peg_readiness.color, PegReadinessColor::Yellow);
+    assert_eq!(profile.peg_readiness.color, PegReadinessColor::Red);
     assert_eq!(profile.hardware.state, ReadinessState::Recoverable);
+    let base = profile
+        .reference_station_catalog
+        .assessments
+        .iter()
+        .find(|assessment| assessment.tier == ReferenceStationTier::Tier0BatchStream)
+        .unwrap();
+    assert_eq!(base.state, ReadinessState::Blocked);
+    assert!(base.requirements.iter().any(|requirement| {
+        requirement.name == ReferenceStationRequirementName::MemoryCapacity
+            && requirement.state == ReadinessState::Blocked
+    }));
+    let next_step = base.next_step.as_deref().unwrap();
+    assert!(next_step.contains("memory capacity"));
+    assert!(next_step.contains("redundant media storage"));
 }
 
 #[test]
