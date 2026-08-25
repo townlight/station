@@ -74,19 +74,17 @@ fn post_mux_capture_is_bounded_decodable_and_does_not_interrupt_playout() {
         })
         .expect("capture must arm without rebuilding the graph");
     assert_eq!(started.artifact_relative_path, format!("{PROOF_ID}.ts"));
-    assert!(
-        playout
-            .start_output_capture(OutputCaptureRequest {
-                proof_id: "44444444-5555-4666-8777-888888888888".into(),
-                output_index: 1,
-                sink_id: SECOND_SINK_ID.into(),
-                loudness_target: LoudnessTarget::STREAMING,
-                duration_ms: 12_000,
-                max_bytes: 16 * 1024 * 1024,
-            })
-            .is_err(),
-        "same-target sinks must share one active target-group capture"
-    );
+    let second_proof_id = "55555555-6666-4777-8888-999999999999";
+    playout
+        .start_output_capture(OutputCaptureRequest {
+            proof_id: second_proof_id.into(),
+            output_index: 1,
+            sink_id: SECOND_SINK_ID.into(),
+            loudness_target: LoudnessTarget::STREAMING,
+            duration_ms: 12_000,
+            max_bytes: 16 * 1024 * 1024,
+        })
+        .expect("same-contract sinks must own independent exact-branch captures");
 
     let deadline = Instant::now() + Duration::from_secs(25);
     let ready = loop {
@@ -108,6 +106,25 @@ fn post_mux_capture_is_bounded_decodable_and_does_not_interrupt_playout() {
     assert!(ready.capture_bytes <= 16 * 1024 * 1024);
     assert_eq!(ready.capture_sha256.len(), 64);
     assert_eq!(ready.capture_duration_ms, 12_000);
+
+    let second_ready = loop {
+        assert!(
+            Instant::now() < deadline,
+            "second exact-branch capture did not finish"
+        );
+        match playout.poll_output_capture(second_proof_id).unwrap() {
+            OutputCaptureStatus::Pending { .. } => {
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            OutputCaptureStatus::Ready(ready) => break ready,
+            OutputCaptureStatus::Failed { code, message, .. } => {
+                panic!("second capture failed: {code}: {message}")
+            }
+        }
+    };
+    assert_eq!(second_ready.output_index, 1);
+    assert_eq!(second_ready.sink_id, SECOND_SINK_ID);
+    assert!(second_ready.capture_bytes > 0);
 
     let observations = playout.output_health_observations().unwrap();
     let during = observations[0];
@@ -133,10 +150,10 @@ fn post_mux_capture_is_bounded_decodable_and_does_not_interrupt_playout() {
             output_index: 0,
             sink_id: SINK_ID.into(),
             loudness_target: LoudnessTarget::STREAMING,
-            duration_ms: 304_000,
+            duration_ms: 604_000,
             max_bytes: 16 * 1024 * 1024,
         })
-        .expect("the 300-second sample plus decode headroom must be accepted");
+        .expect("the ten-minute sample plus decode headroom must be accepted");
     playout
         .abort_output_capture(MAX_DURATION_PROOF_ID)
         .expect("the maximum-duration validation capture must abort cleanly");

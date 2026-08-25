@@ -1,6 +1,7 @@
 # ADR 0040: Operator-requested output-proof execution
 
-Status: Accepted
+Status: Accepted. Exact branch placement and ten-minute bounds are superseded by
+[ADR 0046](0046-exact-sink-ten-minute-output-proof.md).
 
 Date: 2026-08-22
 

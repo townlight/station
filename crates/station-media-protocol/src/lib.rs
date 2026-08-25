@@ -77,17 +77,20 @@ pub const MAX_FRAME_BYTES: usize = 65_536;
 pub const PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion { major: 4, minor: 0 };
 
 pub const MAX_OUTPUT_PROOF_INDEX: u16 = 255;
-// Operator-requested analyzable program is capped at 300 seconds. The worker
+// Operator-requested analyzable program is capped at ten minutes. The worker
 // protocol permits four additional seconds: a late 720p59.94 capture can wait
 // one 120-frame GOP (2.002 seconds) for random access, after which the
 // one-second analyzer reporting interval must complete. The remaining margin
 // avoids making success depend on frame phase at that boundary.
-pub const MAX_OUTPUT_PROOF_SAMPLE_DURATION_MS: u64 = 300_000;
+pub const MAX_OUTPUT_PROOF_SAMPLE_DURATION_MS: u64 = 600_000;
 pub const OUTPUT_PROOF_CAPTURE_HEADROOM_MS: u64 = 4_000;
 pub const MAX_OUTPUT_PROOF_DURATION_MS: u64 =
     MAX_OUTPUT_PROOF_SAMPLE_DURATION_MS + OUTPUT_PROOF_CAPTURE_HEADROOM_MS;
 pub const MIN_OUTPUT_PROOF_DURATION_MS: u64 = 3_000;
-pub const MAX_OUTPUT_PROOF_BYTES: u64 = 256 * 1024 * 1024;
+// An 8 Mb/s commissioning transport produces about 576 MiB over the full
+// sample plus headroom. Keep the operator boundary finite while leaving
+// enough margin for the exact configured mux stream.
+pub const MAX_OUTPUT_PROOF_BYTES: u64 = 1024 * 1024 * 1024;
 const MAX_OUTPUT_PROOF_ARTIFACT_PATH_BYTES: usize = 2_048;
 const MAX_OUTPUT_PROOF_TEXT_BYTES: usize = 512;
 

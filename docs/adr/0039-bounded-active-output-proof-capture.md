@@ -2,7 +2,8 @@
 
 ## Status
 
-Accepted.
+Accepted. Exact branch placement and ten-minute bounds are superseded by
+[ADR 0046](0046-exact-sink-ten-minute-output-proof.md).
 
 ## Context
 

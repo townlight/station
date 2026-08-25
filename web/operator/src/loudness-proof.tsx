@@ -9,8 +9,8 @@ import {
 } from "./loudness-proof-contract";
 import { ApiError, apiRequest } from "./api-client";
 
-const DEFAULT_SAMPLE_DURATION_MS = 30_000;
-const DEFAULT_CAPTURE_BYTES = 64 * 1024 * 1024;
+const DEFAULT_SAMPLE_DURATION_MS = 600_000;
+const DEFAULT_CAPTURE_BYTES = 768 * 1024 * 1024;
 
 export interface LoudnessProofSink {
   sink_id: string;
@@ -215,7 +215,7 @@ export function LoudnessProofPanel({ channelId, sinks }: { channelId: string; si
         <p className="eyebrow">Request a fresh local proof</p>
         <h3>{selectedSink?.label}</h3>
         <p className="proof-target-note">{targetGroup(selectedSink?.loudness_target_lufs ?? 0)}</p>
-        <label>Sample duration (milliseconds)<input type="number" min={MIN_SAMPLE_DURATION_MS} max={MAX_SAMPLE_DURATION_MS} step="1" value={sampleDurationMs} onChange={(event) => setSampleDurationMs(event.target.value)} /><small>Allowed range: {MIN_SAMPLE_DURATION_MS.toLocaleString()}–{MAX_SAMPLE_DURATION_MS.toLocaleString()} ms. Default: 30,000 ms. Capture adds 2 seconds of bounded transport context for independent decode.</small></label>
+        <label>Sample duration (milliseconds)<input type="number" min={MIN_SAMPLE_DURATION_MS} max={MAX_SAMPLE_DURATION_MS} step="1" value={sampleDurationMs} onChange={(event) => setSampleDurationMs(event.target.value)} /><small>Allowed range: {MIN_SAMPLE_DURATION_MS.toLocaleString()}–{MAX_SAMPLE_DURATION_MS.toLocaleString()} ms. Default: 600,000 ms for commissioning. Capture adds 4 seconds of bounded transport context for independent decode.</small></label>
         <label>Maximum capture size (bytes)<input type="number" min="1" max={MAX_CAPTURE_BYTES} step="1" value={maxCaptureBytes} onChange={(event) => setMaxCaptureBytes(event.target.value)} /><small>Allowed range: 1–{MAX_CAPTURE_BYTES.toLocaleString()} bytes. Default: {formatBytes(DEFAULT_CAPTURE_BYTES)}.</small></label>
         {error && <div className="error-box" role="alert">{error}</div>}
         <button className="primary wide" disabled={busy || !selectedSink}>{busy ? "Requesting…" : "Request output proof"}</button>

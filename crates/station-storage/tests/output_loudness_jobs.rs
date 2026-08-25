@@ -642,11 +642,11 @@ fn job_and_capture_validation_rejects_unbounded_or_untrusted_facts() {
     assert!(invalid.validate().is_err());
 
     let mut invalid = job(JOB_ID);
-    invalid.sample_duration_ms = 300_001;
+    invalid.sample_duration_ms = 600_001;
     assert!(invalid.validate().is_err());
 
     let mut invalid = job(JOB_ID);
-    invalid.max_capture_bytes = 256 * 1024 * 1024 + 1;
+    invalid.max_capture_bytes = 1024 * 1024 * 1024 + 1;
     assert!(invalid.validate().is_err());
 
     let mut invalid_capture = capture();

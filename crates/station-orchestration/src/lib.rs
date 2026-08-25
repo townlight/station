@@ -3119,13 +3119,13 @@ mod tests {
     fn capture_duration_adds_bounded_decode_headroom() {
         assert_eq!(capture_duration_for_sample(2_999), None);
         assert_eq!(capture_duration_for_sample(3_000), Some(7_000));
-        assert_eq!(capture_duration_for_sample(300_000), Some(304_000));
-        assert_eq!(capture_duration_for_sample(300_001), None);
+        assert_eq!(capture_duration_for_sample(600_000), Some(604_000));
+        assert_eq!(capture_duration_for_sample(600_001), None);
 
         assert!(!ready_duration_is_bounded(6_999, 7_000));
         assert!(ready_duration_is_bounded(7_000, 7_000));
         assert!(ready_duration_is_bounded(7_250, 7_000));
-        assert!(!ready_duration_is_bounded(304_001, 7_000));
+        assert!(!ready_duration_is_bounded(604_001, 7_000));
     }
 
     #[test]

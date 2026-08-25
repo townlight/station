@@ -304,7 +304,7 @@ pub struct PersistentPlayout {
 #[derive(Clone)]
 struct OutputCaptureBinding {
     sink_id: Option<String>,
-    variant_index: usize,
+    capture_index: usize,
     loudness_target: LoudnessTarget,
 }
 
@@ -340,6 +340,7 @@ struct OutputBranch {
     queue: gst::Element,
     sink: gst::Element,
     variant_index: usize,
+    capture_ingress: Arc<CaptureIngress>,
 }
 
 struct LoudnessVariant {
@@ -357,7 +358,6 @@ struct LoudnessVariant {
     audio_buffers: Arc<AtomicU64>,
     mux: gst::Element,
     transport_fanout: gst::Element,
-    capture_ingress: Arc<CaptureIngress>,
 }
 
 impl PersistentPlayout {
@@ -615,6 +615,7 @@ impl PersistentPlayout {
         let mut srt_sinks = Vec::new();
         for (index, output) in outputs.iter().enumerate() {
             let queue = element("queue", format!("transport-output-queue-{index}"))?;
+            let capture_ingress = install_output_capture_ingress(&queue)?;
             let sink = match &output.transport {
                 TransportOutput::Udp(destination) => gst::ElementFactory::make("udpsink")
                     .name(format!("udp-output-{index}"))
@@ -663,6 +664,7 @@ impl PersistentPlayout {
                 queue,
                 sink,
                 variant_index,
+                capture_ingress,
             });
         }
 
@@ -875,16 +877,16 @@ impl PersistentPlayout {
 
         let output_capture_bindings = outputs
             .iter()
-            .zip(&output_branches)
-            .map(|(output, branch)| OutputCaptureBinding {
+            .enumerate()
+            .map(|(capture_index, output)| OutputCaptureBinding {
                 sink_id: output.sink_id.clone(),
-                variant_index: branch.variant_index,
+                capture_index,
                 loudness_target: output.loudness_target,
             })
             .collect();
-        let output_capture_ingresses = loudness_variants
+        let output_capture_ingresses = output_branches
             .iter()
-            .map(|variant| Arc::clone(&variant.capture_ingress))
+            .map(|branch| Arc::clone(&branch.capture_ingress))
             .collect();
         let output_variant_count = loudness_variants.len();
         let playout = Self {
@@ -1029,7 +1031,7 @@ impl PersistentPlayout {
         let root = self.proof_artifact_root.as_ref().ok_or_else(|| {
             EngineError::OutputCapture("managed output proof root is unavailable".into())
         })?;
-        self.output_capture_ingresses[binding.variant_index].begin(request, root)
+        self.output_capture_ingresses[binding.capture_index].begin(request, root)
     }
 
     pub fn poll_output_capture(
@@ -2473,7 +2475,7 @@ impl CaptureIngress {
         self.reap_writer()?;
         if self.active.load(Ordering::Acquire) {
             return Err(EngineError::OutputCapture(
-                "a proof capture is already active for this target group".into(),
+                "a proof capture is already active for this selected sink branch".into(),
             ));
         }
         if self
@@ -2483,7 +2485,7 @@ impl CaptureIngress {
             .is_some()
         {
             return Err(EngineError::OutputCapture(
-                "the previous target-group capture is still finalizing".into(),
+                "the previous selected-sink capture is still finalizing".into(),
             ));
         }
 
@@ -3162,6 +3164,38 @@ fn loudness_input_caps(name: impl Into<gst::glib::GString>) -> Result<gst::Eleme
         .map_err(|error| build_error("capsfilter", error))
 }
 
+fn install_output_capture_ingress(
+    output_queue: &gst::Element,
+) -> Result<Arc<CaptureIngress>, EngineError> {
+    let capture_ingress = Arc::new(CaptureIngress::new());
+    let capture_pad = output_queue
+        .static_pad("src")
+        .ok_or(EngineError::MissingPad {
+            element: "transport-output-queue",
+            pad: "src",
+        })?;
+    let ingress = Arc::clone(&capture_ingress);
+    capture_pad.add_probe(
+        gst::PadProbeType::BUFFER | gst::PadProbeType::BUFFER_LIST,
+        move |_, info| {
+            if !ingress.active.load(Ordering::Acquire) {
+                return gst::PadProbeReturn::Ok;
+            }
+            if let Some(buffer) = info.buffer() {
+                ingress.offer(buffer.as_ref());
+            } else if let Some(list) = info.buffer_list() {
+                for buffer in list.iter() {
+                    ingress.offer(buffer);
+                }
+            } else {
+                ingress.callback_failed.store(true, Ordering::Release);
+            }
+            gst::PadProbeReturn::Ok
+        },
+    );
+    Ok(capture_ingress)
+}
+
 fn build_loudness_variant(
     contract: OutputVariantContract,
     profile: &OutputProfile,
@@ -3209,32 +3243,6 @@ fn build_loudness_variant(
         gst::PadProbeReturn::Ok
     });
     let transport_fanout = element("tee", format!("{prefix}-transport-fanout"))?;
-    let capture_ingress = Arc::new(CaptureIngress::new());
-    let capture_pad = transport_fanout
-        .static_pad("sink")
-        .ok_or(EngineError::MissingPad {
-            element: "transport-fanout",
-            pad: "sink",
-        })?;
-    let ingress = Arc::clone(&capture_ingress);
-    capture_pad.add_probe(
-        gst::PadProbeType::BUFFER | gst::PadProbeType::BUFFER_LIST,
-        move |_, info| {
-            if !ingress.active.load(Ordering::Acquire) {
-                return gst::PadProbeReturn::Ok;
-            }
-            if let Some(buffer) = info.buffer() {
-                ingress.offer(buffer.as_ref());
-            } else if let Some(list) = info.buffer_list() {
-                for buffer in list.iter() {
-                    ingress.offer(buffer);
-                }
-            } else {
-                ingress.callback_failed.store(true, Ordering::Release);
-            }
-            gst::PadProbeReturn::Ok
-        },
-    );
     Ok(LoudnessVariant {
         video_queue: bounded_queue(format!("{prefix}-video-queue"))?,
         audio_queue: bounded_queue(format!("{prefix}-audio-queue"))?,
@@ -3255,7 +3263,6 @@ fn build_loudness_variant(
         audio_buffers,
         mux,
         transport_fanout,
-        capture_ingress,
     })
 }
 

@@ -1,6 +1,6 @@
 export const MIN_SAMPLE_DURATION_MS = 3_000;
-export const MAX_SAMPLE_DURATION_MS = 300_000;
-export const MAX_CAPTURE_BYTES = 256 * 1024 * 1024;
+export const MAX_SAMPLE_DURATION_MS = 600_000;
+export const MAX_CAPTURE_BYTES = 1024 * 1024 * 1024;
 
 export type LoudnessProofJobState = "pending" | "claimed" | "capture_pending" | "analyzing" | "completed" | "failed";
 

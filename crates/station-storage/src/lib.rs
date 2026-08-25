@@ -63,9 +63,9 @@ const SQLITE_OPEN_CREATE: c_int = 0x0000_0004;
 const SQLITE_OPEN_FULLMUTEX: c_int = 0x0001_0000;
 const CG_IMAGE_VERIFICATION_CACHE_LIMIT: usize = 256;
 const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
-const OUTPUT_LOUDNESS_MAX_CAPTURE_BYTES: u64 = 256 * 1024 * 1024;
+const OUTPUT_LOUDNESS_MAX_CAPTURE_BYTES: u64 = 1024 * 1024 * 1024;
 const OUTPUT_LOUDNESS_MIN_DURATION_MS: u64 = 3_000;
-const OUTPUT_LOUDNESS_MAX_DURATION_MS: u64 = 300_000;
+const OUTPUT_LOUDNESS_MAX_DURATION_MS: u64 = 600_000;
 const OUTPUT_LOUDNESS_MAX_TARGET_GROUP_TEXT: usize = 64;
 const OUTPUT_LOUDNESS_MAX_CANDIDATE_TEXT: usize = 200;
 static CG_IMAGE_TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(1);
@@ -9099,8 +9099,8 @@ impl StationStore {
                outcome TEXT NOT NULL CHECK (outcome IN ('pass','fail','not_run','invalid')),\
                receiver_acceptance TEXT NOT NULL CHECK (receiver_acceptance IN ('not_attempted','unknown','verified','rejected')),\
                captured_at_unix_ms INTEGER NOT NULL CHECK (captured_at_unix_ms >= 0),\
-               sample_duration_ms INTEGER NOT NULL CHECK (sample_duration_ms BETWEEN 1 AND 300000),\
-               capture_bytes INTEGER NOT NULL CHECK (capture_bytes BETWEEN 1 AND 268435456),\
+               sample_duration_ms INTEGER NOT NULL CHECK (sample_duration_ms BETWEEN 1 AND 600000),\
+               capture_bytes INTEGER NOT NULL CHECK (capture_bytes BETWEEN 1 AND 1073741824),\
                capture_sha256 TEXT NOT NULL,\
                candidate_version TEXT NOT NULL,\
                source_commit TEXT NOT NULL DEFAULT '',\
@@ -9111,6 +9111,51 @@ impl StationStore {
                artifact_relative_path TEXT NOT NULL DEFAULT ''\
              );",
         )?;
+        let statement = self.prepare(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='channel_output_loudness_proofs'",
+        )?;
+        let definition = match unsafe { sqlite3_step(statement.raw) } {
+            SQLITE_ROW => column_text(statement.raw, 0)?,
+            SQLITE_DONE => return Err("channel_output_loudness_proofs schema is missing".into()),
+            _ => return Err(sqlite_error(self.database)),
+        };
+        drop(statement);
+        if !definition.contains("600000") || !definition.contains("1073741824") {
+            self.execute(
+                "BEGIN IMMEDIATE;\
+                 DROP TRIGGER IF EXISTS channel_output_loudness_proofs_no_update;\
+                 DROP TRIGGER IF EXISTS channel_output_loudness_proofs_no_delete;\
+                 DROP INDEX IF EXISTS channel_output_loudness_proofs_sink_time;\
+                 ALTER TABLE channel_output_loudness_proofs RENAME TO channel_output_loudness_proofs_legacy;\
+                 CREATE TABLE channel_output_loudness_proofs (\
+                   proof_id TEXT PRIMARY KEY,\
+                   channel_id TEXT NOT NULL,\
+                   sink_id TEXT NOT NULL,\
+                   target_lufs_milli INTEGER NOT NULL CHECK (target_lufs_milli IN (-24000,-16000)),\
+                   measured_lufs_milli INTEGER NOT NULL DEFAULT -2147483648,\
+                   tolerance_lufs_milli INTEGER NOT NULL CHECK (tolerance_lufs_milli = 2000),\
+                   outcome TEXT NOT NULL CHECK (outcome IN ('pass','fail','not_run','invalid')),\
+                   receiver_acceptance TEXT NOT NULL CHECK (receiver_acceptance IN ('not_attempted','unknown','verified','rejected')),\
+                   captured_at_unix_ms INTEGER NOT NULL CHECK (captured_at_unix_ms >= 0),\
+                   sample_duration_ms INTEGER NOT NULL CHECK (sample_duration_ms BETWEEN 1 AND 600000),\
+                   capture_bytes INTEGER NOT NULL CHECK (capture_bytes BETWEEN 1 AND 1073741824),\
+                   capture_sha256 TEXT NOT NULL,\
+                   candidate_version TEXT NOT NULL,\
+                   source_commit TEXT NOT NULL DEFAULT '',\
+                   configuration_hash TEXT NOT NULL,\
+                   measurement_engine TEXT NOT NULL,\
+                   measurement_method TEXT NOT NULL,\
+                   detail TEXT NOT NULL,\
+                   artifact_relative_path TEXT NOT NULL DEFAULT ''\
+                 );\
+                 INSERT INTO channel_output_loudness_proofs SELECT * FROM channel_output_loudness_proofs_legacy;\
+                 DROP TABLE channel_output_loudness_proofs_legacy;\
+                 COMMIT;",
+            )
+            .inspect_err(|_| {
+                let _ = self.execute("ROLLBACK");
+            })?;
+        }
         self.execute(
             "CREATE INDEX IF NOT EXISTS channel_output_loudness_proofs_sink_time ON channel_output_loudness_proofs(channel_id, sink_id, captured_at_unix_ms, proof_id)",
         )
@@ -9136,8 +9181,8 @@ impl StationStore {
                candidate_version TEXT NOT NULL,\
                source_commit TEXT NOT NULL DEFAULT '',\
                configuration_hash TEXT NOT NULL,\
-               sample_duration_ms INTEGER NOT NULL CHECK (sample_duration_ms BETWEEN 3000 AND 300000),\
-               max_capture_bytes INTEGER NOT NULL CHECK (max_capture_bytes BETWEEN 1 AND 268435456),\
+               sample_duration_ms INTEGER NOT NULL CHECK (sample_duration_ms BETWEEN 3000 AND 600000),\
+               max_capture_bytes INTEGER NOT NULL CHECK (max_capture_bytes BETWEEN 1 AND 1073741824),\
                state TEXT NOT NULL CHECK (state IN ('pending','claimed','capture_pending','analyzing','completed','failed')),\
                created_at_unix_ms INTEGER NOT NULL CHECK (created_at_unix_ms >= 0),\
                updated_at_unix_ms INTEGER NOT NULL CHECK (updated_at_unix_ms >= created_at_unix_ms),\
@@ -9151,6 +9196,52 @@ impl StationStore {
                failure_detail TEXT NOT NULL DEFAULT ''\
              );",
         )?;
+        let statement = self.prepare(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='output_loudness_jobs'",
+        )?;
+        let definition = match unsafe { sqlite3_step(statement.raw) } {
+            SQLITE_ROW => column_text(statement.raw, 0)?,
+            SQLITE_DONE => return Err("output_loudness_jobs schema is missing".into()),
+            _ => return Err(sqlite_error(self.database)),
+        };
+        drop(statement);
+        if !definition.contains("600000") || !definition.contains("1073741824") {
+            self.execute(
+                "BEGIN IMMEDIATE;\
+                 DROP INDEX IF EXISTS output_loudness_jobs_active_group;\
+                 DROP INDEX IF EXISTS output_loudness_jobs_state_time;\
+                 ALTER TABLE output_loudness_jobs RENAME TO output_loudness_jobs_legacy;\
+                 CREATE TABLE output_loudness_jobs (\
+                   job_id TEXT PRIMARY KEY,\
+                   channel_id TEXT NOT NULL,\
+                   target_group TEXT NOT NULL,\
+                   sink_id TEXT NOT NULL,\
+                   target_lufs_milli INTEGER NOT NULL CHECK (target_lufs_milli IN (-24000,-16000)),\
+                   candidate_version TEXT NOT NULL,\
+                   source_commit TEXT NOT NULL DEFAULT '',\
+                   configuration_hash TEXT NOT NULL,\
+                   sample_duration_ms INTEGER NOT NULL CHECK (sample_duration_ms BETWEEN 3000 AND 600000),\
+                   max_capture_bytes INTEGER NOT NULL CHECK (max_capture_bytes BETWEEN 1 AND 1073741824),\
+                   state TEXT NOT NULL CHECK (state IN ('pending','claimed','capture_pending','analyzing','completed','failed')),\
+                   created_at_unix_ms INTEGER NOT NULL CHECK (created_at_unix_ms >= 0),\
+                   updated_at_unix_ms INTEGER NOT NULL CHECK (updated_at_unix_ms >= created_at_unix_ms),\
+                   lease_expires_at_unix_ms INTEGER NOT NULL DEFAULT -1 CHECK (lease_expires_at_unix_ms >= -1),\
+                   capture_relative_path TEXT NOT NULL DEFAULT '',\
+                   capture_bytes INTEGER NOT NULL DEFAULT -1 CHECK (capture_bytes >= -1),\
+                   capture_sample_duration_ms INTEGER NOT NULL DEFAULT -1 CHECK (capture_sample_duration_ms >= -1),\
+                   capture_sha256 TEXT NOT NULL DEFAULT '',\
+                   completed_at_unix_ms INTEGER NOT NULL DEFAULT -1 CHECK (completed_at_unix_ms >= -1),\
+                   failed_at_unix_ms INTEGER NOT NULL DEFAULT -1 CHECK (failed_at_unix_ms >= -1),\
+                   failure_detail TEXT NOT NULL DEFAULT ''\
+                 );\
+                 INSERT INTO output_loudness_jobs SELECT * FROM output_loudness_jobs_legacy;\
+                 DROP TABLE output_loudness_jobs_legacy;\
+                 COMMIT;",
+            )
+            .inspect_err(|_| {
+                let _ = self.execute("ROLLBACK");
+            })?;
+        }
         self.execute(
             "CREATE UNIQUE INDEX IF NOT EXISTS output_loudness_jobs_active_group ON output_loudness_jobs(channel_id, target_group) WHERE state NOT IN ('completed','failed')",
         )?;

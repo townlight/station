@@ -8,6 +8,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- Output proof now captures the exact selected UDP/SRT branch rather than a shared loudness/mux
+  variant. The bounded request supports the required ten-minute commissioning sample, migrates
+  existing proof/job tables without losing history, and advances commissioning only for a current
+  candidate/configuration-bound passing 600-second proof.
+
 - Commissioning support bundles now receive an append-only operator-attributed receipt only when the
   server can bind them to a completed guided broadcast. The commissioning report reopens the
   managed ZIP and verifies its current size and SHA-256; missing or changed bytes fail closed.

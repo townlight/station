@@ -69,8 +69,8 @@ const MAX_CG_IMAGE_BODY: usize = 8 * 1024 * 1024;
 const STATION_BOX_CACHE_TTL: Duration = Duration::from_secs(60);
 const LOUDNESS_PROOF_MAX_AGE_MS: i64 = 24 * 60 * 60 * 1_000;
 const LOUDNESS_PROOF_MIN_DURATION_MS: u64 = 3_000;
-const LOUDNESS_PROOF_MAX_DURATION_MS: u64 = 300_000;
-const LOUDNESS_PROOF_MAX_CAPTURE_BYTES: u64 = 256 * 1024 * 1024;
+const LOUDNESS_PROOF_MAX_DURATION_MS: u64 = 600_000;
+const LOUDNESS_PROOF_MAX_CAPTURE_BYTES: u64 = 1024 * 1024 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -2949,15 +2949,78 @@ impl Api {
             acknowledged_evidence,
             CommissioningBoundary::LocalAuthority,
         ));
+        let current_candidate = if station_box.release.candidate_verified {
+            station_box
+                .source_commit
+                .clone()
+                .map(|source_commit| CandidateIdentity {
+                    version: station_box.product_version.clone(),
+                    source_commit: Some(source_commit),
+                })
+        } else {
+            None
+        };
+        let mut ten_minute_sink_proof: Option<StoredSinkLoudnessProof> = None;
+        if let Some(candidate) = current_candidate.as_ref() {
+            for channel in &enabled {
+                let snapshot = match self
+                    .storage
+                    .read_channel_loudness_proof_snapshot(&channel.channel_id)
+                {
+                    Ok(Some(snapshot)) => snapshot,
+                    Ok(None) => continue,
+                    Err(message) => return error_response(500, "storage_error", &message),
+                };
+                for stored in snapshot.latest_proofs {
+                    if stored.proof.sample_duration_ms >= 600_000
+                        && stored.proof.effective_status(
+                            candidate,
+                            &snapshot.configuration_hash,
+                            generated_at_unix_ms,
+                            LOUDNESS_PROOF_MAX_AGE_MS,
+                        ) == EffectiveLoudnessStatus::Pass
+                        && ten_minute_sink_proof.as_ref().is_none_or(|current| {
+                            stored.proof.captured_at_unix_ms > current.proof.captured_at_unix_ms
+                        })
+                    {
+                        ten_minute_sink_proof = Some(stored);
+                    }
+                }
+            }
+        }
         checks.push(commissioning_check(
             "selected_sink_ten_minute_proof",
             "Ten-minute selected-sink output proof",
             CommissioningPhase::GuidedAirProof,
-            CommissioningCheckStatus::Blocked,
+            if ten_minute_sink_proof.is_some() {
+                CommissioningCheckStatus::Pass
+            } else {
+                CommissioningCheckStatus::Blocked
+            },
             true,
             Some("health"),
-            "Current output proof is bounded below ten minutes and cannot satisfy the required selected-sink report.",
-            "no durable ten-minute selected-sink output proof authority exists",
+            ten_minute_sink_proof.as_ref().map_or_else(
+                || "No current passing ten-minute proof exists for an enabled selected output sink on the verified installed candidate and exact output configuration.".into(),
+                |stored| format!(
+                    "Selected sink {} on channel {} passed a {} ms exact-branch output proof with {} captured bytes.",
+                    stored.proof.sink_id,
+                    stored.proof.channel_id,
+                    stored.proof.sample_duration_ms,
+                    stored.proof.capture_bytes
+                ),
+            ),
+            ten_minute_sink_proof.as_ref().map_or_else(
+                || "no current candidate/configuration-bound passing selected-sink proof covers at least 600000 ms".into(),
+                |stored| format!(
+                    "append-only proof {} binds selected sink {}, candidate {}, configuration {}, {} ms, and SHA-256 {}",
+                    stored.proof.proof_id,
+                    stored.proof.sink_id,
+                    stored.proof.candidate_version,
+                    stored.proof.configuration_hash,
+                    stored.proof.sample_duration_ms,
+                    stored.proof.capture_sha256
+                ),
+            ),
             CommissioningBoundary::LocalAuthority,
         ));
         let commissioning_bundle = match verified_commissioning_bundle_receipt(
@@ -7873,6 +7936,106 @@ mod tests {
     }
 
     #[test]
+    fn commissioning_requires_a_current_passing_ten_minute_selected_sink_proof() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let database = std::env::temp_dir().join(format!(
+            "townlight-commissioning-ten-minute-proof-{}-{nonce}.db",
+            std::process::id()
+        ));
+        let application = database.with_extension("application");
+        std::fs::create_dir_all(&application).unwrap();
+        let probe = station_box_probe();
+        let candidate_version = probe.product_version.clone();
+        let source_commit = probe.source_commit.clone();
+        let api = Api::open_with_station_box_probe(&database, &application, probe).unwrap();
+        let channel_id = "11111111-2222-4333-8444-555555555555";
+        let sink_id = "22222222-3333-4444-8555-666666666666";
+        api.storage
+            .put_channel(&ChannelConfiguration {
+                channel_id: channel_id.into(),
+                display_name: "Commissioning output".into(),
+                output_profile: station_schedule::OutputProfileId::Atsc720p5994,
+                output_sinks: vec![station_schedule::OutputSinkConfiguration::required_udp(
+                    sink_id,
+                    "Selected cable sink",
+                    "127.0.0.1:5500",
+                    -24.0,
+                )],
+                enabled: true,
+            })
+            .unwrap();
+        let configuration_hash = api
+            .storage
+            .current_channel_output_configuration_hash(channel_id)
+            .unwrap();
+        let now = system_time_millis().unwrap();
+        let proof = |proof_id: &str, sample_duration_ms: u64, captured_at_unix_ms: i64| {
+            station_readiness::SinkLoudnessProof {
+                proof_id: proof_id.into(),
+                channel_id: channel_id.into(),
+                sink_id: sink_id.into(),
+                target_lufs_milli: -24_000,
+                measured_lufs_milli: Some(-23_800),
+                tolerance_lufs_milli: 2_000,
+                outcome: station_readiness::LoudnessProofOutcome::Pass,
+                receiver_acceptance: ReceiverAcceptance::NotAttempted,
+                captured_at_unix_ms,
+                sample_duration_ms,
+                capture_bytes: 1_000_000,
+                capture_sha256: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+                    .into(),
+                candidate_version: candidate_version.clone(),
+                source_commit: source_commit.clone(),
+                configuration_hash: configuration_hash.clone(),
+                measurement_engine: "gstreamer-ebur128".into(),
+                measurement_method: "station-media-assets::measure_output_loudness".into(),
+                detail: "exact selected-sink output branch".into(),
+            }
+        };
+        api.storage
+            .append_sink_loudness_proof(
+                &proof("33333333-4444-4555-8666-777777777777", 300_000, now),
+                None,
+            )
+            .unwrap();
+
+        let short = api.handle_in_process("GET", "/api/v1/commissioning/report", None);
+        let short: serde_json::Value = serde_json::from_slice(&short.body).unwrap();
+        let find = |report: &serde_json::Value| {
+            report["checks"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|check| check["id"] == "selected_sink_ten_minute_proof")
+                .unwrap()
+                .clone()
+        };
+        assert_eq!(find(&short)["status"], "blocked");
+
+        api.storage
+            .append_sink_loudness_proof(
+                &proof("44444444-5555-4666-8777-888888888888", 600_000, now + 1),
+                None,
+            )
+            .unwrap();
+        let passing = api.handle_in_process("GET", "/api/v1/commissioning/report", None);
+        let passing: serde_json::Value = serde_json::from_slice(&passing.body).unwrap();
+        assert_eq!(find(&passing)["status"], "pass");
+        assert!(
+            find(&passing)["evidence"]
+                .as_str()
+                .unwrap()
+                .contains("44444444-5555-4666-8777-888888888888")
+        );
+
+        std::fs::remove_dir_all(application).unwrap();
+        let _ = std::fs::remove_file(database);
+    }
+
+    #[test]
     fn readiness_subprocess_output_is_rejected_at_the_configured_byte_limit() {
         let mut command = hidden_command("cmd.exe");
         command.args(["/D", "/S", "/C", "echo 0123456789"]);
@@ -8339,7 +8502,7 @@ mod tests {
             &format!("/api/v1/channels/{channel_id}/loudness-proof"),
             Some(
                 format!(
-                    r#"{{"sink_id":"{sink_id}","sample_duration_ms":300001,"max_capture_bytes":1000000}}"#
+                    r#"{{"sink_id":"{sink_id}","sample_duration_ms":600001,"max_capture_bytes":1000000}}"#
                 )
                 .as_bytes(),
             ),
@@ -8350,7 +8513,7 @@ mod tests {
             &format!("/api/v1/channels/{channel_id}/loudness-proof"),
             Some(
                 format!(
-                    r#"{{"sink_id":"{sink_id}","sample_duration_ms":3000,"max_capture_bytes":268435457}}"#
+                    r#"{{"sink_id":"{sink_id}","sample_duration_ms":3000,"max_capture_bytes":1073741825}}"#
                 )
                 .as_bytes(),
             ),
