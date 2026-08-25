@@ -74,7 +74,7 @@ impl<'de> Deserialize<'de> for LoudnessTarget {
 }
 
 pub const MAX_FRAME_BYTES: usize = 65_536;
-pub const PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion { major: 4, minor: 0 };
+pub const PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion { major: 5, minor: 0 };
 
 pub const MAX_OUTPUT_PROOF_INDEX: u16 = 255;
 // Operator-requested analyzable program is capped at ten minutes. The worker
@@ -129,6 +129,13 @@ pub enum CgOverlayContent {
 pub enum CgImageFormat {
     Png,
     Jpeg,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkerFallbackSlate {
+    pub asset_id: String,
+    pub format: CgImageFormat,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -318,6 +325,9 @@ pub struct WorkerBootstrapEnvelope {
     pub cg_image_root: String,
     /// Station-managed root under which the worker writes output-proof artifacts.
     pub proof_artifact_root: String,
+    /// Optional, server-authoritative image loaded into the worker's fallback-only branch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fallback_slate: Option<WorkerFallbackSlate>,
     pub outputs: Vec<WorkerOutputConfiguration>,
 }
 
@@ -580,6 +590,7 @@ pub enum ProtocolError {
     UnsupportedMajor(u16),
     InvalidManagedCgImageRoot(String),
     InvalidManagedProofRoot(String),
+    InvalidFallbackSlate(String),
     InvalidLiveCommand(String),
     InvalidLiveEvent(String),
     InvalidOutputProof(String),
@@ -599,6 +610,8 @@ pub fn encode_bootstrap_frame(
         .map_err(ProtocolError::InvalidManagedCgImageRoot)?;
     validate_proof_artifact_root(&bootstrap.proof_artifact_root)
         .map_err(ProtocolError::InvalidManagedProofRoot)?;
+    validate_fallback_slate(bootstrap.fallback_slate.as_ref())
+        .map_err(ProtocolError::InvalidFallbackSlate)?;
     validate_bootstrap_outputs(bootstrap).map_err(ProtocolError::InvalidOutputConfiguration)?;
     encode_frame(bootstrap)
 }
@@ -612,6 +625,8 @@ pub fn decode_bootstrap_frame(frame: &[u8]) -> Result<WorkerBootstrapEnvelope, P
         .map_err(ProtocolError::InvalidManagedCgImageRoot)?;
     validate_proof_artifact_root(&bootstrap.proof_artifact_root)
         .map_err(ProtocolError::InvalidManagedProofRoot)?;
+    validate_fallback_slate(bootstrap.fallback_slate.as_ref())
+        .map_err(ProtocolError::InvalidFallbackSlate)?;
     validate_bootstrap_outputs(&bootstrap).map_err(ProtocolError::InvalidOutputConfiguration)?;
     Ok(bootstrap)
 }
@@ -638,6 +653,21 @@ fn validate_proof_artifact_root(root: &str) -> Result<(), String> {
         || root.split(['\\', '/']).any(|component| component == "..")
     {
         return Err("proof artifact root must be a safe managed output-proofs directory".into());
+    }
+    Ok(())
+}
+
+fn validate_fallback_slate(slate: Option<&WorkerFallbackSlate>) -> Result<(), String> {
+    let Some(slate) = slate else {
+        return Ok(());
+    };
+    if slate.asset_id.len() != 64
+        || !slate
+            .asset_id
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err("fallback slate identity must be a lowercase SHA-256 digest".into());
     }
     Ok(())
 }

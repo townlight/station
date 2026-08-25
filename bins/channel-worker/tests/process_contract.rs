@@ -9,18 +9,24 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use station_media_journal::{JournalWriter, read_events};
 use station_media_protocol::{
-    CgOverlay, CgOverlayContent, CgRect, CgSnapshot, ChannelCommand, CommandEnvelope, LiveArmToken,
-    LiveInputConfiguration, LiveReturnTarget, LoudnessTarget, PROTOCOL_VERSION,
-    WorkerBootstrapEnvelope, WorkerEvent, WorkerEventEnvelope, WorkerHeadendProfileId,
-    WorkerHeadendTransportContract, WorkerOutputConfiguration, decode_event_frame,
-    encode_bootstrap_frame, encode_command_frame,
+    CgImageFormat, CgOverlay, CgOverlayContent, CgRect, CgSnapshot, ChannelCommand,
+    CommandEnvelope, LiveArmToken, LiveInputConfiguration, LiveReturnTarget, LoudnessTarget,
+    PROTOCOL_VERSION, WorkerBootstrapEnvelope, WorkerEvent, WorkerEventEnvelope,
+    WorkerFallbackSlate, WorkerHeadendProfileId, WorkerHeadendTransportContract,
+    WorkerOutputConfiguration, decode_event_frame, encode_bootstrap_frame, encode_command_frame,
 };
+use station_storage::StationStore;
 use station_windows_ipc::PipeServer;
 
 const WORKER_ID: &str = "ae819b97-2920-434b-9d96-0b51a8ea9abb";
 const CHANNEL_ID: &str = "62a47b7e-2a03-48d6-8703-a6e5ce986527";
 const WORKER_EXIT_TIMEOUT: Duration = Duration::from_secs(8);
 static PROCESS_CONTRACT_TEST_LOCK: Mutex<()> = Mutex::new(());
+const FALLBACK_PNG_1X1: &[u8] = &[
+    137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 1, 0, 0, 0, 1, 8, 6, 0,
+    0, 0, 31, 21, 196, 137, 0, 0, 0, 13, 73, 68, 65, 84, 120, 156, 99, 248, 207, 192, 240, 31, 0,
+    5, 0, 1, 255, 137, 153, 61, 29, 0, 0, 0, 0, 73, 69, 78, 68, 174, 66, 96, 130,
+];
 
 fn live_audio_is_sustained(half_second_means: &[f64]) -> bool {
     const MINIMUM_DECODED_CHUNKS: usize = 12;
@@ -56,6 +62,156 @@ fn process_contract_test_guard() -> MutexGuard<'static, ()> {
     PROCESS_CONTRACT_TEST_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+#[test]
+fn worker_loads_the_exact_managed_fallback_slate_before_ready() {
+    let _guard = process_contract_test_guard();
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock is before Unix epoch")
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!(
+        "townlight-worker-fallback-slate-{}-{nonce}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&root).unwrap();
+    let _temp_dir = TempDirectory(root.clone());
+    let image = StationStore::open(root.join("station.db"))
+        .unwrap()
+        .admit_cg_image_asset(FALLBACK_PNG_1X1)
+        .unwrap();
+    let journal = root.join("worker.tlj");
+    let server = PipeServer::bind(
+        &journal
+            .file_stem()
+            .unwrap()
+            .to_string_lossy()
+            .replace('.', "-"),
+    )
+    .unwrap();
+    let output = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let child = Command::new(env!("CARGO_BIN_EXE_channel-worker"))
+        .args([WORKER_ID, CHANNEL_ID])
+        .arg(&journal)
+        .arg(server.name())
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut worker = ChildGuard::new(child);
+    let mut stream = server.accept_timeout(Duration::from_secs(10)).unwrap();
+    let bootstrap = WorkerBootstrapEnvelope {
+        version: PROTOCOL_VERSION,
+        worker_id: WORKER_ID.into(),
+        channel_id: CHANNEL_ID.into(),
+        output_profile: "proof-360p30".into(),
+        cg_image_root: root.join("cg-images").to_string_lossy().into_owned(),
+        proof_artifact_root: root.join("output-proofs").to_string_lossy().into_owned(),
+        fallback_slate: Some(WorkerFallbackSlate {
+            asset_id: image.asset_id,
+            format: CgImageFormat::Png,
+        }),
+        outputs: vec![WorkerOutputConfiguration::UdpTs {
+            sink_id: "22222222-3333-4444-8555-666666666666".into(),
+            destination: output.local_addr().unwrap().to_string(),
+            loudness_target_lufs: LoudnessTarget::STREAMING,
+            headend: None,
+        }],
+    };
+    stream
+        .write_all(&encode_bootstrap_frame(&bootstrap).unwrap())
+        .unwrap();
+    assert!(matches!(
+        read_event(&mut stream).event,
+        WorkerEvent::Ready { graph_revision: 1 }
+    ));
+    output
+        .set_read_timeout(Some(Duration::from_secs(8)))
+        .unwrap();
+    let mut datagram = [0_u8; 65_536];
+    assert!(output.recv(&mut datagram).unwrap() > 0);
+    stream
+        .write_all(
+            &encode_command_frame(&command("shutdown-fallback", 2, ChannelCommand::Shutdown))
+                .unwrap(),
+        )
+        .unwrap();
+    assert!(matches!(
+        read_command_event(&mut stream).event,
+        WorkerEvent::ShutdownComplete
+    ));
+    assert_clean_worker_exit(&mut worker, WORKER_EXIT_TIMEOUT);
+}
+
+#[test]
+fn worker_refuses_ready_when_the_selected_fallback_slate_is_missing() {
+    let _guard = process_contract_test_guard();
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock is before Unix epoch")
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!(
+        "townlight-worker-missing-fallback-slate-{}-{nonce}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&root).unwrap();
+    let _temp_dir = TempDirectory(root.clone());
+    let journal = root.join("worker.tlj");
+    let server = PipeServer::bind(
+        &journal
+            .file_stem()
+            .unwrap()
+            .to_string_lossy()
+            .replace('.', "-"),
+    )
+    .unwrap();
+    let output = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let child = Command::new(env!("CARGO_BIN_EXE_channel-worker"))
+        .args([WORKER_ID, CHANNEL_ID])
+        .arg(&journal)
+        .arg(server.name())
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stream = server.accept_timeout(Duration::from_secs(10)).unwrap();
+    let managed_root = journal.parent().unwrap();
+    let bootstrap = WorkerBootstrapEnvelope {
+        version: PROTOCOL_VERSION,
+        worker_id: WORKER_ID.into(),
+        channel_id: CHANNEL_ID.into(),
+        output_profile: "proof-360p30".into(),
+        cg_image_root: managed_root
+            .join("cg-images")
+            .to_string_lossy()
+            .into_owned(),
+        proof_artifact_root: managed_root
+            .join("output-proofs")
+            .to_string_lossy()
+            .into_owned(),
+        fallback_slate: Some(WorkerFallbackSlate {
+            asset_id: "a".repeat(64),
+            format: CgImageFormat::Png,
+        }),
+        outputs: vec![WorkerOutputConfiguration::UdpTs {
+            sink_id: "22222222-3333-4444-8555-666666666666".into(),
+            destination: output.local_addr().unwrap().to_string(),
+            loudness_target_lufs: LoudnessTarget::STREAMING,
+            headend: None,
+        }],
+    };
+    stream
+        .write_all(&encode_bootstrap_frame(&bootstrap).unwrap())
+        .unwrap();
+    drop(stream);
+    let result = wait_for_worker_output(child, WORKER_EXIT_TIMEOUT);
+    assert_eq!(result.status.code(), Some(8));
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    assert!(stderr.contains("start its fallback graph"), "{stderr}");
+    assert!(stderr.contains("managed image is unreadable"), "{stderr}");
 }
 
 fn journal_path(name: &str) -> PathBuf {
@@ -136,6 +292,7 @@ fn run_worker(
             .join("output-proofs")
             .to_string_lossy()
             .into_owned(),
+        fallback_slate: None,
         outputs: vec![WorkerOutputConfiguration::UdpTs {
             sink_id: "22222222-3333-4444-8555-666666666666".into(),
             destination: udp.local_addr().unwrap().to_string(),
@@ -195,6 +352,7 @@ fn worker_rejects_a_staged_profile_before_starting_the_media_graph() {
             .join("output-proofs")
             .to_string_lossy()
             .into_owned(),
+        fallback_slate: None,
         outputs: vec![WorkerOutputConfiguration::UdpTs {
             sink_id: "22222222-3333-4444-8555-666666666666".into(),
             destination: udp.local_addr().unwrap().to_string(),
@@ -294,6 +452,7 @@ fn spawned_worker_enforces_a_runnable_headend_transport_contract() {
             .join("output-proofs")
             .to_string_lossy()
             .into_owned(),
+        fallback_slate: None,
         outputs: vec![WorkerOutputConfiguration::UdpTs {
             sink_id: "22222222-3333-4444-8555-666666666666".into(),
             destination: receiver.local_addr().unwrap().to_string(),
@@ -576,6 +735,7 @@ fn spawned_worker_output_proof_reaches_ready_with_artifact_hash_and_health() {
         output_profile: "proof-360p30".into(),
         cg_image_root: root.join("cg-images").to_string_lossy().into_owned(),
         proof_artifact_root: proof_root.to_string_lossy().into_owned(),
+        fallback_slate: None,
         outputs: vec![WorkerOutputConfiguration::UdpTs {
             sink_id: sink_id.into(),
             destination: output.local_addr().unwrap().to_string(),
@@ -883,6 +1043,7 @@ fn spawned_worker_live_takeover_preserves_audible_audio() {
             .join("output-proofs")
             .to_string_lossy()
             .into_owned(),
+        fallback_slate: None,
         outputs: vec![WorkerOutputConfiguration::UdpTs {
             sink_id: "22222222-3333-4444-8555-666666666666".into(),
             destination: output.local_addr().unwrap().to_string(),

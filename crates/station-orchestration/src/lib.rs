@@ -24,8 +24,8 @@ use station_media_protocol::{
     CgImageFormat, CgOverlay, CgOverlayContent, CgRect, CgSnapshot, ChannelCommand, LiveArmToken,
     LiveInputConfiguration, LiveReturnTarget, LoudnessTarget, MAX_CG_SLOTS, MAX_CG_TEXT_BYTES,
     MAX_OUTPUT_PROOF_DURATION_MS, MAX_OUTPUT_PROOF_SAMPLE_DURATION_MS,
-    OUTPUT_PROOF_CAPTURE_HEADROOM_MS, SrtPassphrase, WorkerEvent, WorkerHeadendProfileId,
-    WorkerHeadendTransportContract, WorkerOutputConfiguration,
+    OUTPUT_PROOF_CAPTURE_HEADROOM_MS, SrtPassphrase, WorkerEvent, WorkerFallbackSlate,
+    WorkerHeadendProfileId, WorkerHeadendTransportContract, WorkerOutputConfiguration,
 };
 use station_readiness::derive_loudness_outcome;
 use station_readiness::{
@@ -695,6 +695,17 @@ impl ChannelController {
             .map_err(|error| OrchestrationError::InvalidDestination(format!("{error:?}")))?;
         let store = StationStore::open(database_path).map_err(OrchestrationError::Storage)?;
         let outputs = worker_output_configurations(channel, &store)?;
+        let fallback_slate = store
+            .read_channel_fallback_slate(&channel.channel_id)
+            .map_err(OrchestrationError::Storage)?
+            .map(|selection| WorkerFallbackSlate {
+                asset_id: selection.image_asset.asset_id,
+                format: match selection.image_asset.mime_type.as_str() {
+                    "image/png" => CgImageFormat::Png,
+                    "image/jpeg" => CgImageFormat::Jpeg,
+                    _ => unreachable!("storage validates managed fallback slate image MIME"),
+                },
+            });
         let output_expectations = channel
             .output_sinks
             .iter()
@@ -719,7 +730,7 @@ impl ChannelController {
             })
             .collect();
         let worker_id = format!("station-worker-{}", channel.channel_id);
-        let supervisor = WorkerSupervisor::launch_with_outputs_and_roots(
+        let supervisor = WorkerSupervisor::launch_with_outputs_roots_and_fallback_slate(
             worker_executable,
             &worker_id,
             &channel.channel_id,
@@ -727,6 +738,7 @@ impl ChannelController {
             &outputs,
             &managed_cg_image_root(database_path),
             &managed_output_proof_root(database_path),
+            fallback_slate,
             channel.output_profile,
             timeout.max(MINIMUM_WORKER_BOOTSTRAP_TIMEOUT),
         )

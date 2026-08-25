@@ -282,11 +282,12 @@ fn main() {
         );
     }
     let mut media = Some(
-        PersistentPlayout::start_configured_outputs_with_profile_and_roots(
+        PersistentPlayout::start_configured_outputs_with_profile_roots_and_fallback_slate(
             &outputs,
             output_profile,
             Some(&cg_image_root),
             Some(&proof_artifact_root),
+            bootstrap.fallback_slate.as_ref(),
         )
         .unwrap_or_else(|error| fatal(8, "start its fallback graph", &format!("{error:?}"))),
     );

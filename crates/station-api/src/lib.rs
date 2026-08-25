@@ -22,7 +22,7 @@ use station_alerting::probe_system_resources;
 use station_auth::{OperatorAccount, SecretToken, digest_secret};
 use station_cg::{
     CgAuditEvent, CgBoard, CgBulletin, CgBulletinState, CgFeedItem, CgFeedItemApproval,
-    CgFeedSource, CgZoneConfig, built_in_templates,
+    CgFeedSource, CgImageAsset, CgImageReadiness, CgZoneConfig, built_in_templates,
 };
 use station_domain::{
     AlertChannel, AlertChannelKind, AlertConditionKind, AlertEventState, AlertRule, AlertSeverity,
@@ -51,8 +51,9 @@ use station_schedule::{
     HeadendProfileApplyRequest, MediaAsset, OUTPUT_PROFILES, ScheduleItem, ScheduleState,
 };
 use station_storage::{
-    AlertChannelSecret, CgSnapshotReadError, CgWriteError, ChannelWriteError,
-    CommissioningSupportBundleReceipt, CommitWriteError, ExternalReceiverAcceptanceReceipt,
+    AlertChannelSecret, CgSnapshotReadError, CgWriteError, ChannelFallbackSlate,
+    ChannelFallbackSlateAuditEvent, ChannelWriteError, CommissioningSupportBundleReceipt,
+    CommitWriteError, ExternalReceiverAcceptanceReceipt, FallbackSlateWriteError,
     HeadendProfileWriteError, OutputLoudnessProofJob, OutputLoudnessProofJobRecord,
     OutputLoudnessProofJobState, ProfileWriteError, ReceiverAcceptanceOutcome,
     ReceiverEvidenceMethod, ReferenceStationTierWrite, ReferenceStationTierWriteError,
@@ -467,6 +468,40 @@ struct CreateReceiverReceiptRequest {
     evidence_reference: String,
     detail: String,
     observed_at_unix_ms: i64,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PutFallbackSlateRequest {
+    image_asset_id: String,
+    expected_revision: u64,
+}
+
+#[derive(Debug, Serialize)]
+struct FallbackSlateSelectionResponse {
+    channel_id: String,
+    image_asset: CgImageAsset,
+    revision: u64,
+    created_at_unix_ms: i64,
+    updated_at_unix_ms: i64,
+    updated_by: String,
+}
+
+#[derive(Debug, Serialize)]
+struct FallbackSlateAuditResponse {
+    audit_id: String,
+    channel_id: String,
+    image_asset_id: String,
+    revision: u64,
+    actor: String,
+    occurred_at_unix_ms: i64,
+}
+
+#[derive(Debug, Serialize)]
+struct FallbackSlateAuthorityResponse {
+    channel_id: String,
+    selection: Option<FallbackSlateSelectionResponse>,
+    audit: Vec<FallbackSlateAuditResponse>,
 }
 
 #[derive(Debug, Serialize)]
@@ -983,6 +1018,16 @@ impl Api {
                     && path.ends_with("/receiver-receipts") =>
             {
                 self.list_receiver_receipts(path)
+            }
+            ("GET", path)
+                if path.starts_with("/api/v1/channels/") && path.ends_with("/fallback-slate") =>
+            {
+                self.read_fallback_slate(path)
+            }
+            ("PUT", path)
+                if path.starts_with("/api/v1/channels/") && path.ends_with("/fallback-slate") =>
+            {
+                self.put_fallback_slate(path, body, actor)
             }
             ("POST", path)
                 if path.starts_with("/api/v1/channels/")
@@ -2212,6 +2257,123 @@ impl Api {
         self.headend_readiness(Some(channel_id))
     }
 
+    fn read_fallback_slate(&self, path: &str) -> ApiResponse {
+        let Some(channel_id) = path_identity(path, "/api/v1/channels/", "/fallback-slate") else {
+            return error_response(400, "invalid_path", "The channel identity is invalid.");
+        };
+        if !is_api_uuid(channel_id) {
+            return error_response(400, "invalid_path", "The channel identity is invalid.");
+        }
+        let channel_exists = match self.storage.list_channels() {
+            Ok(channels) => channels
+                .iter()
+                .any(|channel| channel.channel_id == channel_id),
+            Err(message) => return error_response(500, "storage_error", &message),
+        };
+        if !channel_exists {
+            return error_response(404, "channel_not_found", "The channel does not exist.");
+        }
+        let selection = match self.storage.read_channel_fallback_slate(channel_id) {
+            Ok(selection) => selection.map(fallback_slate_selection_response),
+            Err(message) => return error_response(500, "storage_error", &message),
+        };
+        let audit = match self.storage.list_channel_fallback_slate_audit(channel_id) {
+            Ok(events) => events
+                .into_iter()
+                .map(fallback_slate_audit_response)
+                .collect(),
+            Err(message) => return error_response(500, "storage_error", &message),
+        };
+        json_response(
+            200,
+            serde_json::to_vec(&FallbackSlateAuthorityResponse {
+                channel_id: channel_id.into(),
+                selection,
+                audit,
+            })
+            .expect("serializing fallback slate authority cannot fail"),
+        )
+    }
+
+    fn put_fallback_slate(
+        &self,
+        path: &str,
+        body: Option<&[u8]>,
+        actor: Option<&OperatorAccount>,
+    ) -> ApiResponse {
+        let Some(channel_id) = path_identity(path, "/api/v1/channels/", "/fallback-slate") else {
+            return error_response(400, "invalid_path", "The channel identity is invalid.");
+        };
+        if !is_api_uuid(channel_id) {
+            return error_response(400, "invalid_path", "The channel identity is invalid.");
+        }
+        let Some(actor) = actor.filter(|account| {
+            account.enabled()
+                && account
+                    .roles()
+                    .contains(&station_auth::OperatorRole::SetupAdmin)
+        }) else {
+            return error_response(
+                403,
+                "setup_admin_required",
+                "Selecting a fallback slate requires the Setup Admin role.",
+            );
+        };
+        let Some(request) = parse_body::<PutFallbackSlateRequest>(body) else {
+            return error_response(
+                400,
+                "invalid_json",
+                "A fallback slate selection body is required.",
+            );
+        };
+        let occurred_at_unix_ms = match system_time_millis() {
+            Ok(value) => value,
+            Err(message) => return error_response(500, "clock_error", &message),
+        };
+        let audit_id = match secure_canonical_uuid() {
+            Ok(value) => value,
+            Err(message) => return error_response(500, "entropy_unavailable", &message),
+        };
+        match self.storage.write_channel_fallback_slate(
+            channel_id,
+            &request.image_asset_id,
+            request.expected_revision,
+            actor.account_id().as_str(),
+            occurred_at_unix_ms,
+            &audit_id,
+        ) {
+            Ok(selection) => json_response(
+                200,
+                serde_json::to_vec(&fallback_slate_selection_response(selection))
+                    .expect("serializing fallback slate selection cannot fail"),
+            ),
+            Err(FallbackSlateWriteError::NotFound) => {
+                error_response(404, "channel_not_found", "The channel does not exist.")
+            }
+            Err(FallbackSlateWriteError::MustBeStopped) => error_response(
+                409,
+                "channel_must_be_stopped",
+                "Stop this output before changing its fallback slate.",
+            ),
+            Err(FallbackSlateWriteError::ImageNotReady) => error_response(
+                409,
+                "fallback_slate_not_ready",
+                "The selected managed image is missing, corrupt, or not ready.",
+            ),
+            Err(FallbackSlateWriteError::Conflict(current_revision)) => error_response(
+                409,
+                "revision_conflict",
+                &format!("The current fallback slate revision is {current_revision}."),
+            ),
+            Err(FallbackSlateWriteError::Invalid(message)) => {
+                error_response(422, "validation_failed", &message)
+            }
+            Err(FallbackSlateWriteError::Storage(message)) => {
+                error_response(500, "storage_error", &message)
+            }
+        }
+    }
+
     fn create_receiver_receipt(
         &self,
         path: &str,
@@ -3060,25 +3222,71 @@ impl Api {
             };
             Some(safe_to_air)
         };
+        let mut fallback_slates = Vec::with_capacity(enabled.len());
+        for channel in &enabled {
+            let selection = match self
+                .storage
+                .read_channel_fallback_slate(&channel.channel_id)
+            {
+                Ok(selection) => selection,
+                Err(message) => return error_response(500, "storage_error", &message),
+            };
+            fallback_slates.push((channel, selection));
+        }
+        let ready_fallback_count = fallback_slates
+            .iter()
+            .filter(|(_, selection)| {
+                selection
+                    .as_ref()
+                    .is_some_and(|value| value.image_asset.readiness == CgImageReadiness::Ready)
+            })
+            .count();
+        let runtime_is_green = safe_to_air
+            .as_ref()
+            .is_some_and(|status| status.color == SafeToAirColor::Green);
+        let fallback_slate_pass =
+            !enabled.is_empty() && ready_fallback_count == enabled.len() && runtime_is_green;
+        let fallback_evidence = fallback_slates
+            .iter()
+            .map(|(channel, selection)| match selection {
+                Some(selection) => format!(
+                    "{}=revision {} image {} ({:?})",
+                    channel.channel_id,
+                    selection.revision,
+                    &selection.image_asset.asset_id[..12],
+                    selection.image_asset.readiness
+                ),
+                None => format!("{}=missing", channel.channel_id),
+            })
+            .collect::<Vec<_>>()
+            .join("; ");
         checks.push(commissioning_check(
             "fallback_slate",
             "Fallback output and configured station slate",
             CommissioningPhase::SourcesOutputs,
-            CommissioningCheckStatus::Blocked,
+            if fallback_slate_pass {
+                CommissioningCheckStatus::Pass
+            } else {
+                CommissioningCheckStatus::Blocked
+            },
             true,
             Some("channels"),
-            match safe_to_air.as_ref() {
-                Some(status) if status.color == SafeToAirColor::Green => format!(
-                    "{} No durable operator-selected fallback/slate authority exists yet.",
-                    status.operator_message
-                ),
-                Some(status) => format!(
-                    "{} A durable operator-selected fallback/slate authority is also missing.",
-                    status.operator_message
-                ),
-                None => "No enabled channel or durable operator-selected fallback/slate authority exists.".into(),
+            format!(
+                "{} of {} enabled channel(s) have a current verified fallback slate. {}",
+                ready_fallback_count,
+                enabled.len(),
+                safe_to_air.as_ref().map_or(
+                    "No enabled runtime is available.".into(),
+                    |status| status.operator_message.clone()
+                )
+            ),
+            if fallback_evidence.is_empty() {
+                "no enabled channel has fallback-slate runtime evidence".into()
+            } else {
+                format!(
+                    "durable channel fallback-slate authority plus current heartbeat-derived runtime: {fallback_evidence}"
+                )
             },
-            "current heartbeat-derived runtime plus absence of a durable fallback/slate configuration record",
             CommissioningBoundary::LocalAuthority,
         ));
         checks.push(commissioning_check(
@@ -5228,6 +5436,32 @@ fn loudness_job_state_name(state: OutputLoudnessProofJobState) -> &'static str {
     }
 }
 
+fn fallback_slate_selection_response(
+    selection: ChannelFallbackSlate,
+) -> FallbackSlateSelectionResponse {
+    FallbackSlateSelectionResponse {
+        channel_id: selection.channel_id,
+        image_asset: selection.image_asset,
+        revision: selection.revision,
+        created_at_unix_ms: selection.created_at_unix_ms,
+        updated_at_unix_ms: selection.updated_at_unix_ms,
+        updated_by: selection.updated_by,
+    }
+}
+
+fn fallback_slate_audit_response(
+    event: ChannelFallbackSlateAuditEvent,
+) -> FallbackSlateAuditResponse {
+    FallbackSlateAuditResponse {
+        audit_id: event.audit_id,
+        channel_id: event.channel_id,
+        image_asset_id: event.image_asset_id,
+        revision: event.revision,
+        actor: event.actor,
+        occurred_at_unix_ms: event.occurred_at_unix_ms,
+    }
+}
+
 fn loudness_job_response(record: OutputLoudnessProofJobRecord) -> LoudnessProofJobResponse {
     LoudnessProofJobResponse {
         job_id: record.job_id,
@@ -6887,6 +7121,117 @@ mod tests {
             1,
         )
         .unwrap()
+    }
+
+    #[test]
+    fn setup_admin_selects_a_verified_fallback_slate_and_commissioning_consumes_it() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "townlight-fallback-slate-api-{}-{nonce}",
+            std::process::id()
+        ));
+        let application = root.join("application");
+        std::fs::create_dir_all(&application).unwrap();
+        let database = root.join("station.db");
+        let api =
+            Api::open_with_station_box_probe(&database, &application, station_box_probe()).unwrap();
+        let channel_id = "11111111-2222-4333-8444-555555555555";
+        let mut channel = ChannelConfiguration {
+            channel_id: channel_id.into(),
+            display_name: "Fallback proof".into(),
+            output_profile: station_schedule::OutputProfileId::Proof360p30,
+            output_sinks: vec![station_schedule::OutputSinkConfiguration::required_udp(
+                "22222222-3333-4444-8555-666666666666",
+                "Proof output",
+                "127.0.0.1:5500",
+                -16.0,
+            )],
+            enabled: false,
+        };
+        api.storage.put_channel(&channel).unwrap();
+        let image = api.storage.admit_cg_image_asset(PNG_1X1).unwrap();
+        let admin = test_actor(station_auth::OperatorRole::SetupAdmin);
+
+        let forbidden = api.route(
+            "PUT",
+            &format!("/api/v1/channels/{channel_id}/fallback-slate"),
+            Some(
+                format!(
+                    r#"{{"image_asset_id":"{}","expected_revision":0}}"#,
+                    image.asset_id
+                )
+                .as_bytes(),
+            ),
+            None,
+        );
+        assert_eq!(forbidden.status, 403);
+
+        let selected = api.route(
+            "PUT",
+            &format!("/api/v1/channels/{channel_id}/fallback-slate"),
+            Some(
+                format!(
+                    r#"{{"image_asset_id":"{}","expected_revision":0}}"#,
+                    image.asset_id
+                )
+                .as_bytes(),
+            ),
+            Some(&admin),
+        );
+        assert_eq!(
+            selected.status,
+            200,
+            "{}",
+            String::from_utf8_lossy(&selected.body)
+        );
+        let selected: serde_json::Value = serde_json::from_slice(&selected.body).unwrap();
+        assert_eq!(selected["revision"], 1);
+        assert_eq!(selected["updated_by"], admin.account_id().as_str());
+
+        let authority = api.handle_in_process(
+            "GET",
+            &format!("/api/v1/channels/{channel_id}/fallback-slate"),
+            None,
+        );
+        let authority: serde_json::Value = serde_json::from_slice(&authority.body).unwrap();
+        assert_eq!(authority["selection"]["image_asset"]["readiness"], "ready");
+        assert_eq!(authority["audit"].as_array().unwrap().len(), 1);
+
+        channel.enabled = true;
+        api.storage.put_channel(&channel).unwrap();
+        let now = system_time_millis().unwrap();
+        api.storage
+            .put_channel_runtime(&station_domain::ChannelRuntimeObservation {
+                channel_id: channel_id.into(),
+                state: ChannelRuntimeState::HealthyFallback,
+                on_air_asset_id: None,
+                state_started_at_unix_ms: now,
+                heartbeat_at_unix_ms: now,
+                detail: None,
+            })
+            .unwrap();
+        let report = api.route("GET", "/api/v1/commissioning/report", None, Some(&admin));
+        assert_eq!(report.status, 200);
+        let report: serde_json::Value = serde_json::from_slice(&report.body).unwrap();
+        let fallback = report["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|check| check["id"] == "fallback_slate")
+            .unwrap();
+        assert_eq!(fallback["status"], "pass");
+        assert!(
+            fallback["evidence"]
+                .as_str()
+                .unwrap()
+                .contains("revision 1")
+        );
+
+        drop(api);
+        let _ = std::fs::remove_dir_all(root);
     }
 
     fn raw_request(method: &str, path: &str, headers: &[(&str, &str)], body: &[u8]) -> Vec<u8> {

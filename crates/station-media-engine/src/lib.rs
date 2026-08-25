@@ -18,6 +18,7 @@ use sha2::{Digest, Sha256};
 use station_media_protocol::{
     CgImageFormat, CgOverlayContent, CgSnapshot, LoudnessTarget, MAX_CG_SLOTS, MAX_CG_TEXT_BYTES,
     MAX_OUTPUT_PROOF_BYTES, MAX_OUTPUT_PROOF_DURATION_MS, MIN_OUTPUT_PROOF_DURATION_MS,
+    WorkerFallbackSlate,
 };
 use station_schedule::{OutputProfile, OutputProfileId};
 
@@ -418,6 +419,7 @@ impl PersistentPlayout {
             output_profile,
             cg_image_root,
             None,
+            None,
         )
     }
 
@@ -442,6 +444,7 @@ impl PersistentPlayout {
             output_profile,
             None,
             None,
+            None,
         )
     }
 
@@ -462,7 +465,7 @@ impl PersistentPlayout {
                 "at least one transport output is required".into(),
             ));
         }
-        Self::start_outputs_with_program(outputs, None, output_profile, cg_image_root, None)
+        Self::start_outputs_with_program(outputs, None, output_profile, cg_image_root, None, None)
     }
 
     pub fn start_configured_outputs_with_profile_and_roots(
@@ -482,6 +485,29 @@ impl PersistentPlayout {
             output_profile,
             cg_image_root,
             proof_artifact_root,
+            None,
+        )
+    }
+
+    pub fn start_configured_outputs_with_profile_roots_and_fallback_slate(
+        outputs: &[ConfiguredTransportOutput],
+        output_profile: OutputProfileId,
+        cg_image_root: Option<&Path>,
+        proof_artifact_root: Option<&Path>,
+        fallback_slate: Option<&WorkerFallbackSlate>,
+    ) -> Result<Self, EngineError> {
+        if outputs.is_empty() {
+            return Err(EngineError::Pipeline(
+                "at least one transport output is required".into(),
+            ));
+        }
+        Self::start_outputs_with_program(
+            outputs,
+            None,
+            output_profile,
+            cg_image_root,
+            proof_artifact_root,
+            fallback_slate,
         )
     }
 
@@ -491,6 +517,7 @@ impl PersistentPlayout {
         output_profile: OutputProfileId,
         cg_image_root: Option<&Path>,
         proof_artifact_root: Option<&Path>,
+        fallback_slate: Option<&WorkerFallbackSlate>,
     ) -> Result<Self, EngineError> {
         if !output_profile.is_runnable() {
             return Err(EngineError::ProfileNotRunnable {
@@ -504,6 +531,16 @@ impl PersistentPlayout {
         let proof_artifact_root = proof_artifact_root
             .map(validate_proof_artifact_root)
             .transpose()?;
+        let fallback_pixbuf = fallback_slate
+            .map(|slate| {
+                let root = cg_image_root.ok_or_else(|| {
+                    EngineError::CgInvalid(
+                        "a fallback slate requires the managed CG image root".into(),
+                    )
+                })?;
+                load_managed_cg_image(root, &slate.asset_id, slate.format)
+            })
+            .transpose()?;
 
         let pipeline = gst::Pipeline::with_name("townlight-synthetic-playout");
         let fallback = gst::ElementFactory::make("videotestsrc")
@@ -512,6 +549,49 @@ impl PersistentPlayout {
             .property_from_str("pattern", "black")
             .build()
             .map_err(|error| build_error("videotestsrc", error))?;
+        let fallback_convert = element("videoconvert", "fallback-video-convert")?;
+        let fallback_overlay = gst::ElementFactory::make("gdkpixbufoverlay")
+            .name("fallback-slate-overlay")
+            .property("alpha", if fallback_pixbuf.is_some() { 1.0 } else { 0.0 })
+            .build()
+            .map_err(|error| build_error("gdkpixbufoverlay", error))?;
+        if let Some(pixbuf) = fallback_pixbuf.as_ref() {
+            let (x, y, width, height) = fallback_slate_geometry(
+                profile.width,
+                profile.height,
+                u32::try_from(pixbuf.width()).map_err(|_| {
+                    EngineError::CgInvalid("fallback slate width is invalid".into())
+                })?,
+                u32::try_from(pixbuf.height()).map_err(|_| {
+                    EngineError::CgInvalid("fallback slate height is invalid".into())
+                })?,
+            )?;
+            fallback_overlay.set_property("pixbuf", pixbuf);
+            fallback_overlay.set_property(
+                "offset-x",
+                i32::try_from(x).map_err(|_| {
+                    EngineError::CgInvalid("fallback slate x offset exceeds range".into())
+                })?,
+            );
+            fallback_overlay.set_property(
+                "offset-y",
+                i32::try_from(y).map_err(|_| {
+                    EngineError::CgInvalid("fallback slate y offset exceeds range".into())
+                })?,
+            );
+            fallback_overlay.set_property(
+                "overlay-width",
+                i32::try_from(width).map_err(|_| {
+                    EngineError::CgInvalid("fallback slate width exceeds range".into())
+                })?,
+            );
+            fallback_overlay.set_property(
+                "overlay-height",
+                i32::try_from(height).map_err(|_| {
+                    EngineError::CgInvalid("fallback slate height exceeds range".into())
+                })?,
+            );
+        }
         let fallback_queue = element("queue", "fallback-queue")?;
         let program = gst::ElementFactory::make("videotestsrc")
             .name("program-source")
@@ -671,6 +751,8 @@ impl PersistentPlayout {
         pipeline
             .add_many([
                 &fallback,
+                &fallback_convert,
+                &fallback_overlay,
                 &fallback_queue,
                 &program,
                 &program_queue,
@@ -723,7 +805,16 @@ impl PersistentPlayout {
                 ])
                 .map_err(|error| EngineError::Pipeline(error.to_string()))?;
         }
-        link(&fallback, &fallback_queue, "videotestsrc", "queue")?;
+        gst::Element::link_many([
+            &fallback,
+            &fallback_convert,
+            &fallback_overlay,
+            &fallback_queue,
+        ])
+        .map_err(|_| EngineError::Link {
+            from: "fallback-source",
+            to: "fallback-queue",
+        })?;
         link(&program, &program_queue, "videotestsrc", "queue")?;
         gst::Element::link_many([
             &fallback_audio,
@@ -3505,6 +3596,46 @@ fn load_managed_cg_image(
     }
     Pixbuf::from_read(std::io::Cursor::new(bytes))
         .map_err(|error| EngineError::CgInvalid(format!("managed image decode failed: {error}")))
+}
+
+fn fallback_slate_geometry(
+    frame_width: u32,
+    frame_height: u32,
+    image_width: u32,
+    image_height: u32,
+) -> Result<(u32, u32, u32, u32), EngineError> {
+    if frame_width == 0 || frame_height == 0 || image_width == 0 || image_height == 0 {
+        return Err(EngineError::CgInvalid(
+            "fallback slate geometry cannot be empty".into(),
+        ));
+    }
+    let (width, height) = if u64::from(frame_width) * u64::from(image_height)
+        <= u64::from(frame_height) * u64::from(image_width)
+    {
+        (
+            frame_width,
+            u32::try_from(
+                u64::from(image_height) * u64::from(frame_width) / u64::from(image_width),
+            )
+            .map_err(|_| EngineError::CgInvalid("fallback slate height overflow".into()))?
+            .max(1),
+        )
+    } else {
+        (
+            u32::try_from(
+                u64::from(image_width) * u64::from(frame_height) / u64::from(image_height),
+            )
+            .map_err(|_| EngineError::CgInvalid("fallback slate width overflow".into()))?
+            .max(1),
+            frame_height,
+        )
+    };
+    Ok((
+        (frame_width - width) / 2,
+        (frame_height - height) / 2,
+        width,
+        height,
+    ))
 }
 
 fn sanitize_text(text: &str) -> Result<String, EngineError> {

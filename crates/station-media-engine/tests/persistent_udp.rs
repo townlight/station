@@ -15,8 +15,13 @@ use gstreamer_pbutils as gst_pbutils;
 use image::{ImageBuffer, ImageFormat, Rgba};
 use sha2::{Digest, Sha256};
 use station_media_assets::ingest_media;
-use station_media_engine::{EngineError, PersistentPlayout, SourceRole, TransportOutput};
-use station_media_protocol::{CgImageFormat, CgOverlay, CgOverlayContent, CgRect, CgSnapshot};
+use station_media_engine::{
+    ConfiguredTransportOutput, EngineError, PersistentPlayout, SourceRole, TransportOutput,
+};
+use station_media_protocol::{
+    CgImageFormat, CgOverlay, CgOverlayContent, CgRect, CgSnapshot, LoudnessTarget,
+    WorkerFallbackSlate,
+};
 use station_schedule::OutputProfileId;
 
 static PERSISTENT_GRAPH_TEST_LOCK: Mutex<()> = Mutex::new(());
@@ -781,6 +786,53 @@ fn managed_png_jpeg_image_apply_clear_reapply_and_invalid_retain_pixels() {
     assert!(after_clear_bytes > before_bytes);
     assert!(after_jpeg_bytes > after_clear_bytes);
     assert!(after_invalid_bytes > after_jpeg_bytes);
+    playout.stop().unwrap();
+    stop_test_pipeline(&decoder);
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn configured_fallback_slate_is_aspect_fitted_and_visible_in_decoded_output() {
+    let _guard = persistent_graph_test_guard();
+    gst::init().unwrap();
+    let root = test_root("fallback-slate-pixels");
+    fs::create_dir_all(&root).unwrap();
+    let (asset_id, _) = write_image_fixture(&root, ImageFormat::Png, [0, 255, 0, 255]);
+    let reservation = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let port = reservation.local_addr().unwrap().port();
+    drop(reservation);
+    let (decoder, sink) = start_udp_decoder(port);
+    decoder.set_state(gst::State::Playing).unwrap();
+    let output = ConfiguredTransportOutput::udp(
+        format!("127.0.0.1:{port}").parse().unwrap(),
+        LoudnessTarget::STREAMING,
+    );
+    let playout =
+        PersistentPlayout::start_configured_outputs_with_profile_roots_and_fallback_slate(
+            &[output],
+            OutputProfileId::Proof360p30,
+            Some(&root),
+            None,
+            Some(&WorkerFallbackSlate {
+                asset_id,
+                format: CgImageFormat::Png,
+            }),
+        )
+        .unwrap();
+    std::thread::sleep(Duration::from_secs(5));
+    let frame = pull_decoded_frame(&sink);
+    let sample = |x: usize, y: usize| -> [u8; 4] {
+        let index = y * frame.stride + x * 4;
+        frame.bytes[index..index + 4].try_into().unwrap()
+    };
+    let outside = sample(50, 180);
+    let slate_right = sample(430, 180);
+    assert!(outside[..3].iter().all(|channel| *channel < 35));
+    assert!(
+        slate_right[1] > slate_right[0] + 40 && slate_right[1] > slate_right[2] + 40,
+        "decoded fallback center did not contain the selected green slate: {slate_right:?}"
+    );
+    assert!(playout.output_bytes_sent().unwrap()[0] > 0);
     playout.stop().unwrap();
     stop_test_pipeline(&decoder);
     let _ = fs::remove_dir_all(root);

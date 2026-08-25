@@ -2,9 +2,17 @@
 
 TownLight Station is a locally installed Windows broadcast appliance for LPM and PEG operations. It is being built as one traceable product: station control, deterministic media execution, operator workflows, installation, recovery, distribution, and proof will all ship from this repository.
 
-The current foundation provides a versioned station-profile API, strict commissioning validation, an authoritative commissioning report and guided operator workflow, SQLite persistence in WAL mode, a native Windows service, an installed same-origin operator console, durable runtime health/incident authority, encrypted email/SMS/webhook operator alert delivery, editable re-alert policy, service-owned Windows resource sampling, scheduled evidence-bearing self-tests, redacted manifested support-bundle export with completed-broadcast receipt binding, and a signed immutable update lifecycle with out-of-process activation, post-update proof, and automatic rollback. It is a working vertical slice of the station control plane, not a feature-complete release.
+The current foundation provides a versioned station-profile API, strict commissioning validation, an authoritative commissioning report and guided operator workflow, SQLite persistence in WAL mode, a native Windows service, an installed same-origin operator console, durable runtime health/incident authority, authenticated per-channel fallback-slate selection, encrypted email/SMS/webhook operator alert delivery, editable re-alert policy, service-owned Windows resource sampling, scheduled evidence-bearing self-tests, redacted manifested support-bundle export with completed-broadcast receipt binding, and a signed immutable update lifecycle with out-of-process activation, post-update proof, and automatic rollback. It is a working vertical slice of the station control plane, not a feature-complete release.
 
 The repository also contains a supervised isolated channel worker, a length-framed typed command/event protocol, a durable per-channel event journal, and a machine-proven persistent media graph with durable typed output profiles and stable output branches. The station runtime launches and handshakes the real worker over a private named pipe, validates every identity and sequence, enforces response deadlines, and guarantees process cleanup. The GStreamer graph keeps one video encoder alive while switching raw fallback and program sources, then builds one exact loudness-normalization, AAC, and MPEG-TS variant for each distinct output target and fans that variant only to its matching UDP/SRT sinks. Missing targets, unknown major versions, stale commands, corrupted journals, malformed frames, missed deadlines, unsupported profiles or loudness targets, and MPEG-TS continuity errors fail visibly.
+
+Fallback slate selection is now a first-class stopped-channel workflow. `GET` and `PUT` on
+`/api/v1/channels/{channel_id}/fallback-slate` expose current selection and immutable history; PUT
+requires an authenticated Setup Admin and accepts only a managed, currently verified PNG/JPEG plus
+its expected revision. The server owns actor, time, revision, and audit identity. Protocol v5 sends
+only the content digest and format to the worker, which rehashes and decodes the exact image before
+reporting Ready. Commissioning consumes the same authority plus green current runtime; EAS forced
+slate and tones remain separate unfinished S11 work.
 
 ## Architecture
 

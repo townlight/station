@@ -321,6 +321,36 @@ pub enum CgWriteError {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FallbackSlateWriteError {
+    NotFound,
+    MustBeStopped,
+    ImageNotReady,
+    Conflict(u64),
+    Invalid(String),
+    Storage(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChannelFallbackSlate {
+    pub channel_id: String,
+    pub image_asset: CgImageAsset,
+    pub revision: u64,
+    pub created_at_unix_ms: i64,
+    pub updated_at_unix_ms: i64,
+    pub updated_by: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChannelFallbackSlateAuditEvent {
+    pub audit_id: String,
+    pub channel_id: String,
+    pub image_asset_id: String,
+    pub revision: u64,
+    pub actor: String,
+    pub occurred_at_unix_ms: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HeadendProfileWriteError {
     NotFound,
     MustBeStopped,
@@ -967,6 +997,7 @@ impl StationStore {
         store.migrate_output_loudness_jobs()?;
         store.initialize_reference_station_tier_schema()?;
         store.initialize_cg_schema()?;
+        store.initialize_fallback_slate_schema()?;
         store.migrate_cg_feed_cache_schema()?;
         store.initialize_operator_auth_schema()?;
         store.execute(
@@ -7111,6 +7142,224 @@ impl StationStore {
         })
     }
 
+    pub fn read_channel_fallback_slate(
+        &self,
+        channel_id: &str,
+    ) -> Result<Option<ChannelFallbackSlate>, String> {
+        if !is_canonical_uuid(channel_id) {
+            return Err("fallback slate channel identity is invalid".into());
+        }
+        let statement = self.prepare(
+            "SELECT s.channel_id, a.asset_id, a.mime_type, a.byte_size, a.width, a.height, \
+                    a.readiness, s.revision, s.created_at_unix_ms, s.updated_at_unix_ms, s.updated_by \
+             FROM channel_fallback_slates s \
+             JOIN cg_image_assets a ON a.asset_id=s.image_asset_id \
+             WHERE s.channel_id=?1",
+        )?;
+        let channel_id = c_string(channel_id, "fallback slate channel identity")?;
+        bind_text(self.database, statement.raw, 1, &channel_id)?;
+        match unsafe { sqlite3_step(statement.raw) } {
+            SQLITE_ROW => {
+                let image_asset =
+                    self.verify_cg_image_asset(read_cg_image_asset_columns(statement.raw, 1)?);
+                let selection = ChannelFallbackSlate {
+                    channel_id: column_text(statement.raw, 0)?,
+                    image_asset,
+                    revision: column_u64(statement.raw, 7, "fallback slate revision")?,
+                    created_at_unix_ms: unsafe { sqlite3_column_int64(statement.raw, 8) },
+                    updated_at_unix_ms: unsafe { sqlite3_column_int64(statement.raw, 9) },
+                    updated_by: column_text(statement.raw, 10)?,
+                };
+                validate_fallback_slate_selection(&selection)?;
+                Ok(Some(selection))
+            }
+            SQLITE_DONE => Ok(None),
+            _ => Err(sqlite_error(self.database)),
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn write_channel_fallback_slate(
+        &self,
+        channel_id: &str,
+        image_asset_id: &str,
+        expected_revision: u64,
+        actor: &str,
+        occurred_at_unix_ms: i64,
+        audit_id: &str,
+    ) -> Result<ChannelFallbackSlate, FallbackSlateWriteError> {
+        if !is_canonical_uuid(channel_id)
+            || !is_sha256_identity(image_asset_id)
+            || !is_canonical_uuid(audit_id)
+            || occurred_at_unix_ms < 0
+            || !secret_field(actor, 200)
+        {
+            return Err(FallbackSlateWriteError::Invalid(
+                "fallback slate write facts are invalid or unbounded".into(),
+            ));
+        }
+        self.execute("BEGIN IMMEDIATE")
+            .map_err(FallbackSlateWriteError::Storage)?;
+        let outcome = (|| {
+            let channel = self
+                .list_channels()
+                .map_err(FallbackSlateWriteError::Storage)?
+                .into_iter()
+                .find(|channel| channel.channel_id == channel_id)
+                .ok_or(FallbackSlateWriteError::NotFound)?;
+            if channel.enabled {
+                return Err(FallbackSlateWriteError::MustBeStopped);
+            }
+            let asset = self
+                .read_cg_image_asset(image_asset_id)
+                .map_err(FallbackSlateWriteError::Storage)?
+                .map(|asset| self.verify_cg_image_asset(asset))
+                .filter(|asset| asset.readiness == CgImageReadiness::Ready)
+                .ok_or(FallbackSlateWriteError::ImageNotReady)?;
+            let current = self
+                .read_channel_fallback_slate(channel_id)
+                .map_err(FallbackSlateWriteError::Storage)?;
+            let current_revision = current.as_ref().map_or(0, |value| value.revision);
+            if current_revision != expected_revision {
+                return Err(FallbackSlateWriteError::Conflict(current_revision));
+            }
+            if current
+                .as_ref()
+                .is_some_and(|value| occurred_at_unix_ms < value.updated_at_unix_ms)
+            {
+                return Err(FallbackSlateWriteError::Invalid(
+                    "fallback slate write time precedes current authority".into(),
+                ));
+            }
+            let revision = current_revision.checked_add(1).ok_or_else(|| {
+                FallbackSlateWriteError::Invalid("fallback slate revision overflow".into())
+            })?;
+            let created_at_unix_ms = current
+                .as_ref()
+                .map_or(occurred_at_unix_ms, |value| value.created_at_unix_ms);
+            let statement = self
+                .prepare(
+                    "INSERT INTO channel_fallback_slates(\
+                       channel_id, image_asset_id, revision, created_at_unix_ms, updated_at_unix_ms, updated_by\
+                     ) VALUES(?1, ?2, ?3, ?4, ?5, ?6) \
+                     ON CONFLICT(channel_id) DO UPDATE SET \
+                       image_asset_id=excluded.image_asset_id, revision=excluded.revision, \
+                       updated_at_unix_ms=excluded.updated_at_unix_ms, updated_by=excluded.updated_by",
+                )
+                .map_err(FallbackSlateWriteError::Storage)?;
+            let channel = c_string(channel_id, "fallback slate channel identity")
+                .map_err(FallbackSlateWriteError::Storage)?;
+            let image = c_string(&asset.asset_id, "fallback slate image identity")
+                .map_err(FallbackSlateWriteError::Storage)?;
+            let actor_value = c_string(actor, "fallback slate actor")
+                .map_err(FallbackSlateWriteError::Storage)?;
+            bind_text(self.database, statement.raw, 1, &channel)
+                .map_err(FallbackSlateWriteError::Storage)?;
+            bind_text(self.database, statement.raw, 2, &image)
+                .map_err(FallbackSlateWriteError::Storage)?;
+            bind_i64(
+                self.database,
+                statement.raw,
+                3,
+                checked_i64(revision, "fallback slate revision")
+                    .map_err(FallbackSlateWriteError::Storage)?,
+            )
+            .map_err(FallbackSlateWriteError::Storage)?;
+            bind_i64(self.database, statement.raw, 4, created_at_unix_ms)
+                .map_err(FallbackSlateWriteError::Storage)?;
+            bind_i64(self.database, statement.raw, 5, occurred_at_unix_ms)
+                .map_err(FallbackSlateWriteError::Storage)?;
+            bind_text(self.database, statement.raw, 6, &actor_value)
+                .map_err(FallbackSlateWriteError::Storage)?;
+            expect_done(self.database, statement.raw).map_err(FallbackSlateWriteError::Storage)?;
+
+            let audit = self
+                .prepare(
+                    "INSERT INTO channel_fallback_slate_audit(\
+                       audit_id, channel_id, image_asset_id, revision, actor, occurred_at_unix_ms\
+                     ) VALUES(?1, ?2, ?3, ?4, ?5, ?6)",
+                )
+                .map_err(FallbackSlateWriteError::Storage)?;
+            let audit_identity = c_string(audit_id, "fallback slate audit identity")
+                .map_err(FallbackSlateWriteError::Storage)?;
+            bind_text(self.database, audit.raw, 1, &audit_identity)
+                .map_err(FallbackSlateWriteError::Storage)?;
+            bind_text(self.database, audit.raw, 2, &channel)
+                .map_err(FallbackSlateWriteError::Storage)?;
+            bind_text(self.database, audit.raw, 3, &image)
+                .map_err(FallbackSlateWriteError::Storage)?;
+            bind_i64(
+                self.database,
+                audit.raw,
+                4,
+                checked_i64(revision, "fallback slate audit revision")
+                    .map_err(FallbackSlateWriteError::Storage)?,
+            )
+            .map_err(FallbackSlateWriteError::Storage)?;
+            bind_text(self.database, audit.raw, 5, &actor_value)
+                .map_err(FallbackSlateWriteError::Storage)?;
+            bind_i64(self.database, audit.raw, 6, occurred_at_unix_ms)
+                .map_err(FallbackSlateWriteError::Storage)?;
+            expect_done(self.database, audit.raw).map_err(FallbackSlateWriteError::Storage)?;
+
+            self.read_channel_fallback_slate(channel_id)
+                .map_err(FallbackSlateWriteError::Storage)?
+                .ok_or_else(|| {
+                    FallbackSlateWriteError::Storage(
+                        "fallback slate disappeared during its write transaction".into(),
+                    )
+                })
+        })();
+        match outcome {
+            Ok(selection) => match self.execute("COMMIT") {
+                Ok(()) => Ok(selection),
+                Err(error) => {
+                    let _ = self.execute("ROLLBACK");
+                    Err(FallbackSlateWriteError::Storage(error))
+                }
+            },
+            Err(error) => {
+                let _ = self.execute("ROLLBACK");
+                Err(error)
+            }
+        }
+    }
+
+    pub fn list_channel_fallback_slate_audit(
+        &self,
+        channel_id: &str,
+    ) -> Result<Vec<ChannelFallbackSlateAuditEvent>, String> {
+        if !is_canonical_uuid(channel_id) {
+            return Err("fallback slate channel identity is invalid".into());
+        }
+        let statement = self.prepare(
+            "SELECT audit_id, channel_id, image_asset_id, revision, actor, occurred_at_unix_ms \
+             FROM channel_fallback_slate_audit WHERE channel_id=?1 \
+             ORDER BY revision, audit_id",
+        )?;
+        let channel = c_string(channel_id, "fallback slate channel identity")?;
+        bind_text(self.database, statement.raw, 1, &channel)?;
+        let mut events = Vec::new();
+        loop {
+            match unsafe { sqlite3_step(statement.raw) } {
+                SQLITE_ROW => {
+                    let event = ChannelFallbackSlateAuditEvent {
+                        audit_id: column_text(statement.raw, 0)?,
+                        channel_id: column_text(statement.raw, 1)?,
+                        image_asset_id: column_text(statement.raw, 2)?,
+                        revision: column_u64(statement.raw, 3, "fallback slate audit revision")?,
+                        actor: column_text(statement.raw, 4)?,
+                        occurred_at_unix_ms: unsafe { sqlite3_column_int64(statement.raw, 5) },
+                    };
+                    validate_fallback_slate_audit(&event)?;
+                    events.push(event);
+                }
+                SQLITE_DONE => return Ok(events),
+                _ => return Err(sqlite_error(self.database)),
+            }
+        }
+    }
+
     pub fn list_media_assets(&self) -> Result<Vec<MediaAsset>, String> {
         let statement = self.prepare(
             "SELECT asset_id, media_path, duration_ms, readiness FROM media_assets ORDER BY asset_id",
@@ -9026,6 +9275,42 @@ impl StationStore {
         )
     }
 
+    fn initialize_fallback_slate_schema(&self) -> Result<(), String> {
+        self.execute(
+            "CREATE TABLE IF NOT EXISTS channel_fallback_slates (\
+               channel_id TEXT PRIMARY KEY,\
+               image_asset_id TEXT NOT NULL,\
+               revision INTEGER NOT NULL CHECK (revision >= 1),\
+               created_at_unix_ms INTEGER NOT NULL CHECK (created_at_unix_ms >= 0),\
+               updated_at_unix_ms INTEGER NOT NULL CHECK (updated_at_unix_ms >= created_at_unix_ms),\
+               updated_by TEXT NOT NULL CHECK (length(updated_by) BETWEEN 1 AND 200),\
+               CHECK (updated_by = trim(updated_by)),\
+               FOREIGN KEY(channel_id) REFERENCES channels(channel_id),\
+               FOREIGN KEY(image_asset_id) REFERENCES cg_image_assets(asset_id)\
+             );\
+             CREATE TABLE IF NOT EXISTS channel_fallback_slate_audit (\
+               audit_id TEXT PRIMARY KEY,\
+               channel_id TEXT NOT NULL,\
+               image_asset_id TEXT NOT NULL,\
+               revision INTEGER NOT NULL CHECK (revision >= 1),\
+               actor TEXT NOT NULL CHECK (length(actor) BETWEEN 1 AND 200),\
+               occurred_at_unix_ms INTEGER NOT NULL CHECK (occurred_at_unix_ms >= 0),\
+               CHECK (actor = trim(actor)),\
+               UNIQUE(channel_id, revision),\
+               FOREIGN KEY(channel_id) REFERENCES channels(channel_id),\
+               FOREIGN KEY(image_asset_id) REFERENCES cg_image_assets(asset_id)\
+             );\
+             CREATE INDEX IF NOT EXISTS channel_fallback_slate_audit_time \
+               ON channel_fallback_slate_audit(channel_id, occurred_at_unix_ms, audit_id);\
+             CREATE TRIGGER IF NOT EXISTS channel_fallback_slate_audit_no_update \
+               BEFORE UPDATE ON channel_fallback_slate_audit \
+               BEGIN SELECT RAISE(ABORT, 'channel fallback slate audit is append-only'); END;\
+             CREATE TRIGGER IF NOT EXISTS channel_fallback_slate_audit_no_delete \
+               BEFORE DELETE ON channel_fallback_slate_audit \
+               BEGIN SELECT RAISE(ABORT, 'channel fallback slate audit is append-only'); END;",
+        )
+    }
+
     fn migrate_cg_feed_cache_schema(&self) -> Result<(), String> {
         let statement = self.prepare("PRAGMA table_info(cg_feed_sources)")?;
         let mut has_tags = false;
@@ -9948,19 +10233,51 @@ fn read_media_asset_row(statement: *mut SqliteStatement) -> Result<MediaAsset, S
 }
 
 fn read_cg_image_asset_row(statement: *mut SqliteStatement) -> Result<CgImageAsset, String> {
+    read_cg_image_asset_columns(statement, 0)
+}
+
+fn read_cg_image_asset_columns(
+    statement: *mut SqliteStatement,
+    first_column: c_int,
+) -> Result<CgImageAsset, String> {
     let asset = CgImageAsset {
-        asset_id: column_text(statement, 0)?,
-        mime_type: column_text(statement, 1)?,
-        byte_size: u64::try_from(unsafe { sqlite3_column_int64(statement, 2) })
+        asset_id: column_text(statement, first_column)?,
+        mime_type: column_text(statement, first_column + 1)?,
+        byte_size: u64::try_from(unsafe { sqlite3_column_int64(statement, first_column + 2) })
             .map_err(|_| "database returned an invalid CG image byte size".to_string())?,
-        width: u32::try_from(unsafe { sqlite3_column_int64(statement, 3) })
+        width: u32::try_from(unsafe { sqlite3_column_int64(statement, first_column + 3) })
             .map_err(|_| "database returned an invalid CG image width".to_string())?,
-        height: u32::try_from(unsafe { sqlite3_column_int64(statement, 4) })
+        height: u32::try_from(unsafe { sqlite3_column_int64(statement, first_column + 4) })
             .map_err(|_| "database returned an invalid CG image height".to_string())?,
-        readiness: cg_image_readiness_from_name(&column_text(statement, 5)?)?,
+        readiness: cg_image_readiness_from_name(&column_text(statement, first_column + 5)?)?,
     };
     asset.validate().map_err(str::to_string)?;
     Ok(asset)
+}
+
+fn validate_fallback_slate_selection(selection: &ChannelFallbackSlate) -> Result<(), String> {
+    if !is_canonical_uuid(&selection.channel_id)
+        || selection.revision == 0
+        || selection.created_at_unix_ms < 0
+        || selection.updated_at_unix_ms < selection.created_at_unix_ms
+        || !secret_field(&selection.updated_by, 200)
+    {
+        return Err("database returned invalid fallback slate authority".into());
+    }
+    selection.image_asset.validate().map_err(str::to_string)
+}
+
+fn validate_fallback_slate_audit(event: &ChannelFallbackSlateAuditEvent) -> Result<(), String> {
+    if !is_canonical_uuid(&event.audit_id)
+        || !is_canonical_uuid(&event.channel_id)
+        || !is_sha256_identity(&event.image_asset_id)
+        || event.revision == 0
+        || !secret_field(&event.actor, 200)
+        || event.occurred_at_unix_ms < 0
+    {
+        return Err("database returned invalid fallback slate audit event".into());
+    }
+    Ok(())
 }
 
 fn read_channel_runtime_row(

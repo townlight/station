@@ -1,9 +1,9 @@
 use station_media_protocol::{
-    ChannelCommand, CommandEnvelope, LiveArmToken, LiveInputConfiguration, LiveReturnTarget,
-    LoudnessTarget, OutputTransportObservation, PROTOCOL_VERSION, ProtocolError, ProtocolVersion,
-    SrtPassphrase, WorkerBootstrapEnvelope, WorkerEvent, WorkerEventEnvelope,
-    WorkerOutputConfiguration, decode_bootstrap_frame, decode_command_frame, decode_event_frame,
-    encode_bootstrap_frame, encode_command_frame, encode_event_frame,
+    CgImageFormat, ChannelCommand, CommandEnvelope, LiveArmToken, LiveInputConfiguration,
+    LiveReturnTarget, LoudnessTarget, OutputTransportObservation, PROTOCOL_VERSION, ProtocolError,
+    ProtocolVersion, SrtPassphrase, WorkerBootstrapEnvelope, WorkerEvent, WorkerEventEnvelope,
+    WorkerFallbackSlate, WorkerOutputConfiguration, decode_bootstrap_frame, decode_command_frame,
+    decode_event_frame, encode_bootstrap_frame, encode_command_frame, encode_event_frame,
 };
 use std::num::NonZeroU16;
 
@@ -145,6 +145,10 @@ fn round_trips_private_worker_bootstrap_without_process_arguments() {
         output_profile: "atsc-720p5994".into(),
         cg_image_root: r"C:\ProgramData\TownLight Station\cg-images".into(),
         proof_artifact_root: r"C:\ProgramData\TownLight Station\output-proofs".into(),
+        fallback_slate: Some(WorkerFallbackSlate {
+            asset_id: "a".repeat(64),
+            format: CgImageFormat::Png,
+        }),
         outputs: vec![
             WorkerOutputConfiguration::UdpTs {
                 sink_id: "11111111-2222-4333-8444-555555555555".into(),
@@ -211,6 +215,27 @@ fn image_overlay_carries_identity_and_format_but_no_path() {
 }
 
 #[test]
+fn bootstrap_rejects_a_noncanonical_fallback_slate_identity() {
+    let bootstrap = WorkerBootstrapEnvelope {
+        version: PROTOCOL_VERSION,
+        worker_id: "worker".into(),
+        channel_id: "channel".into(),
+        output_profile: "proof-360p30".into(),
+        cg_image_root: r"C:\ProgramData\TownLight Station\cg-images".into(),
+        proof_artifact_root: r"C:\ProgramData\TownLight Station\output-proofs".into(),
+        fallback_slate: Some(WorkerFallbackSlate {
+            asset_id: "A".repeat(64),
+            format: CgImageFormat::Png,
+        }),
+        outputs: Vec::new(),
+    };
+    assert!(matches!(
+        encode_bootstrap_frame(&bootstrap),
+        Err(ProtocolError::InvalidFallbackSlate(_))
+    ));
+}
+
+#[test]
 fn bootstrap_rejects_relative_traversing_or_wrong_managed_image_roots() {
     for root in [
         "cg-images",
@@ -224,6 +249,7 @@ fn bootstrap_rejects_relative_traversing_or_wrong_managed_image_roots() {
             output_profile: "profile".into(),
             cg_image_root: root.into(),
             proof_artifact_root: r"C:\ProgramData\TownLight Station\output-proofs".into(),
+            fallback_slate: None,
             outputs: Vec::new(),
         };
         assert!(matches!(

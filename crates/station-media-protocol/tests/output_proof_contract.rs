@@ -232,6 +232,7 @@ fn proof_start_must_bind_sink_and_target_to_bootstrap_output_index() {
         output_profile: "proof-360p30".into(),
         cg_image_root: r"C:\ProgramData\TownLight Station\cg-images".into(),
         proof_artifact_root: r"C:\ProgramData\TownLight Station\output-proofs".into(),
+        fallback_slate: None,
         outputs: vec![
             WorkerOutputConfiguration::UdpTs {
                 sink_id: SINK_ID.into(),
@@ -283,6 +284,7 @@ fn bootstrap_rejects_unsafe_managed_proof_roots_and_duplicate_sink_ids() {
         cg_image_root: r"C:\ProgramData\TownLight Station\cg-images".into(),
         proof_artifact_root: r"C:\ProgramData\TownLight Station\output-proofs\..\output-proofs"
             .into(),
+        fallback_slate: None,
         outputs: Vec::new(),
     };
     assert!(encode_bootstrap_frame(&bootstrap).is_err());
