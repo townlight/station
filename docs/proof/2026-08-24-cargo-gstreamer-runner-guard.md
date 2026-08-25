@@ -39,3 +39,11 @@ created modal Windows loader errors for hashed `target\debug\deps` test executab
   dialogs. Repeated desktop window inventories during and after execution found no loader dialog.
 - `scripts/invoke-cargo.ps1 clippy --offline --workspace --all-targets --all-features -- -D warnings`
   passed.
+- A later full-workspace guarded replay again remained free of loader dialogs. Under the peak
+  concurrent native-media load it exposed a separate one-second socket deadline in the
+  `Expect: 100-continue` test. That test now uses the same bounded five-second read deadline as the
+  adjacent HTTP contracts and passed ten consecutive isolated runs while the installed services
+  remained active.
+- The same replay also exposed a transient Windows file-sharing lock during generated-media cleanup.
+  API integration cleanup now uses the repository's bounded two-second retry contract. The complete
+  `station-api` package then passed with the installed services active.

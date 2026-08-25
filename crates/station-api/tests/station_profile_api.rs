@@ -7,7 +7,7 @@ use std::sync::{
     mpsc,
 };
 use std::thread;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use gst::prelude::*;
 use gstreamer as gst;
@@ -35,6 +35,18 @@ fn temporary_database(name: &str) -> PathBuf {
         .expect("system clock is before Unix epoch")
         .as_nanos();
     std::env::temp_dir().join(format!("townlight-station-{name}-{nonce}.db"))
+}
+
+fn remove_directory(path: &Path) {
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        match std::fs::remove_dir_all(path) {
+            Ok(()) => return,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
+            Err(_) if Instant::now() < deadline => thread::sleep(Duration::from_millis(25)),
+            Err(error) => panic!("could not remove {}: {error}", path.display()),
+        }
+    }
 }
 
 fn http_request(database: &Path, request: &[u8]) -> Vec<u8> {
@@ -290,7 +302,7 @@ fn commissioning_watch_folder_requires_durable_success_and_present_directory_aft
     assert!(passed["evidence"].as_str().unwrap().contains(config_id));
     drop(restarted);
 
-    std::fs::remove_dir_all(&watch_directory).unwrap();
+    remove_directory(&watch_directory);
     let missing = Api::open(&database).unwrap();
     let missing = missing.handle_in_process("GET", "/api/v1/commissioning/report", None);
     let missing: serde_json::Value = serde_json::from_slice(&missing.body).unwrap();
@@ -1527,7 +1539,7 @@ fn creates_and_downloads_a_manifested_support_bundle_without_path_escape() {
     assert!(headers.contains("X-Content-Type-Options: nosniff\r\n"));
 
     drop(api);
-    std::fs::remove_dir_all(root).unwrap();
+    remove_directory(&root);
 }
 
 #[test]
@@ -1582,7 +1594,7 @@ fn reports_an_honest_unconfigured_update_state_and_refuses_a_network_check() {
     assert_eq!(notes.status, 404);
 
     drop(api);
-    std::fs::remove_dir_all(root).unwrap();
+    remove_directory(&root);
 }
 
 #[test]
@@ -1872,7 +1884,7 @@ fn admits_real_media_into_the_managed_library_and_refuses_declared_readiness() {
     );
     drop(api);
     let _ = std::fs::remove_file(database);
-    std::fs::remove_dir_all(root).unwrap();
+    remove_directory(&root);
 }
 
 fn generate_media_fixture(path: &Path) {
@@ -2064,7 +2076,7 @@ fn acknowledges_expect_continue_before_waiting_for_the_request_body() {
     );
     let mut client = TcpStream::connect(address).unwrap();
     client
-        .set_read_timeout(Some(Duration::from_secs(1)))
+        .set_read_timeout(Some(Duration::from_secs(5)))
         .unwrap();
     client.write_all(headers.as_bytes()).unwrap();
 
