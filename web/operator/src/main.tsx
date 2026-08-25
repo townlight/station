@@ -8,6 +8,8 @@ import { FallbackSlatePanel } from "./fallback-slate";
 import { CaptionPolicyPanel } from "./caption-policy";
 import { CaptionTrackEditor } from "./caption-tracks";
 import { AutomationPanel } from "./automation";
+import { MetadataPanel } from "./metadata";
+import { ScheduledRecordingsPanel } from "./recordings";
 import {
   HeadendProfile,
   HeadendReadiness,
@@ -20,7 +22,7 @@ import { AuthoritativeCommissioning as Commissioning } from "./commissioning";
 import { ApiError, apiRequest as request } from "./api-client";
 import { AuthBoundary } from "./auth";
 
-type CoreView = "overview" | "media" | "channels" | "schedule" | "live" | "automation" | "health" | "commissioning";
+type CoreView = "overview" | "media" | "channels" | "schedule" | "live" | "automation" | "metadata" | "recordings" | "health" | "commissioning";
 type View = CoreView | CgRoute;
 type JobStatus = "pending" | "running" | "awaiting_transcode" | "completed" | "failed" | "cancelled";
 
@@ -383,7 +385,7 @@ interface MaintenanceStatus {
 
 function initialView(): View {
   const requested = new URLSearchParams(window.location.search).get("view");
-  return ["overview", "media", "channels", "schedule", "live", "automation", "health", "commissioning", ...CG_ROUTES.map((item) => item.id)].includes(requested ?? "")
+  return ["overview", "media", "channels", "schedule", "live", "automation", "metadata", "recordings", "health", "commissioning", ...CG_ROUTES.map((item) => item.id)].includes(requested ?? "")
     ? requested as View
     : "overview";
 }
@@ -424,6 +426,8 @@ function Icon({ name }: { name: CoreView }) {
     schedule: <><rect x="3" y="5" width="18" height="16" rx="2" /><path d="M8 3v4M16 3v4M3 10h18M8 14h3M8 17h7" /></>,
     live: <><circle cx="12" cy="12" r="8" /><circle cx="12" cy="12" r="3" /><path d="M12 2v2M12 20v2M2 12h2M20 12h2" /></>,
     automation: <><path d="M8 4h8M9 8h6M7 12h10M5 16h14M8 20h8" /><circle cx="5" cy="12" r="1" /><circle cx="19" cy="16" r="1" /></>,
+    metadata: <><path d="M5 4h14v16H5z" /><path d="M8 8h8M8 12h8M8 16h5" /></>,
+    recordings: <><circle cx="12" cy="12" r="8" /><path d="M12 8v5l3 2M4 4l2 2M20 4l-2 2" /></>,
     health: <><path d="M3 12h4l2-5 4 10 2-5h6" /><path d="M4 5a10 10 0 1 1-1 11" /></>,
     commissioning: <><path d="M12 3 4 7v5c0 5 3.4 8 8 9 4.6-1 8-4 8-9V7z" /><path d="m9 12 2 2 4-4" /></>,
   };
@@ -1121,7 +1125,7 @@ function App() {
   }, []);
   useEffect(() => { void request<StationDocument>("/api/v1/station").then((value) => { setStation(value); void refresh(); }).catch((problem) => { if (problem instanceof ApiError && problem.status === 404) setStation(null); else { setStation(null); setError(problem instanceof Error ? problem.message : "Station profile could not be read."); } }); }, [refresh]);
   useEffect(() => { if (!station) return; const timer = window.setInterval(() => void refresh(), 5_000); return () => window.clearInterval(timer); }, [refresh, station]);
-  const nav = useMemo(() => ([{ id: "overview" as CoreView, label: "Overview" }, { id: "media" as CoreView, label: "Media" }, { id: "channels" as CoreView, label: "Channels" }, { id: "schedule" as CoreView, label: "Schedule" }, { id: "live" as CoreView, label: "Live" }, { id: "automation" as CoreView, label: "Automation" }, { id: "health" as CoreView, label: "Health" }, { id: "commissioning" as CoreView, label: "Commission" }]), []);
+  const nav = useMemo(() => ([{ id: "overview" as CoreView, label: "Overview" }, { id: "media" as CoreView, label: "Media" }, { id: "channels" as CoreView, label: "Channels" }, { id: "schedule" as CoreView, label: "Schedule" }, { id: "live" as CoreView, label: "Live" }, { id: "automation" as CoreView, label: "Automation" }, { id: "metadata" as CoreView, label: "Metadata" }, { id: "recordings" as CoreView, label: "Recordings" }, { id: "health" as CoreView, label: "Health" }, { id: "commissioning" as CoreView, label: "Commission" }]), []);
   const cgNav = useMemo(() => CG_ROUTES.map((item) => ({ id: item.id as View, label: item.shortLabel })), []);
   const navigate = useCallback((next: View) => {
     setView(next);
@@ -1131,7 +1135,7 @@ function App() {
   }, []);
   if (station === undefined) return <div className="boot"><div className="mark">TL</div><div className="boot-line"><i /></div><p>Connecting to TownLight Station…</p></div>;
   if (!station) return <SetupWizard onComplete={(value) => { setStation(value); navigate("commissioning"); void refresh(); }} />;
-  return <div className="app-shell"><aside className="sidebar"><div className="brand-lockup"><div className="mark small">TL</div><div><strong>TownLight</strong><span>Station</span></div></div><nav>{nav.map((item) => <button key={item.id} className={view === item.id ? "selected" : ""} onClick={() => navigate(item.id)}><Icon name={item.id} /><span>{item.label}</span>{item.id === "media" && Boolean(dashboard?.failed_ingest_count) && <b>{dashboard?.failed_ingest_count}</b>}{item.id === "health" && Boolean(runtime?.active_critical_alerts || runtime?.active_warning_alerts) && <b>{(runtime?.active_critical_alerts ?? 0) + (runtime?.active_warning_alerts ?? 0)}</b>}</button>)}<p className="nav-section-label">CG authoring</p>{cgNav.map((item) => <button key={item.id} className={`cg-nav-item ${view === item.id ? "selected" : ""}`} onClick={() => navigate(item.id)}><span className="cg-nav-mark">CG</span><span>{item.label}</span></button>)}</nav><div className="station-card"><span className={`live-dot runtime-${runtime?.color ?? "yellow"}`} /><div><strong>{station.display_name}</strong><small>{runtime?.label ?? station.timezone}</small></div></div></aside><main className="workspace">{error && <div className="global-error" role="alert">{error}<button onClick={() => void refresh()}>Retry</button></div>}{view === "overview" && <Overview station={station} dashboard={dashboard} channels={channels} runtime={runtime} onNavigate={navigate} />}{view === "media" && <Media dashboard={dashboard} onRefresh={refresh} />}{view === "channels" && <Channels channels={channels} outputProfiles={outputProfiles} onRefresh={refresh} />}{view === "schedule" && <Schedule dashboard={dashboard} channels={channels} />}{view === "live" && <Live channels={channels} />}{view === "automation" && <AutomationPanel />}{view === "health" && <Health runtime={runtime} resources={resources} selfTests={selfTests} selfTestSchedules={selfTestSchedules} updateStatus={updateStatus} alerts={alerts} alertChannels={alertChannels} deliveries={deliveries} rules={rules} outputChannels={channels} onRefresh={refresh} />}{view === "commissioning" && <Commissioning onNavigate={navigate} />}{view.startsWith("cg-") && <CgOperator channelId={channels[0]?.channel_id} channels={channels.map((channel) => ({ channel_id: channel.channel_id, display_name: channel.display_name }))} route={view as CgRoute} onNavigate={(route) => navigate(route)} />}</main><nav className="mobile-nav">{[...nav, { id: "cg-moderation" as View, label: "CG" }].map((item) => <button key={item.id} aria-label={item.label} className={view === item.id || (item.id === "cg-moderation" && view.startsWith("cg-")) ? "selected" : ""} onClick={() => navigate(item.id)}>{"id" in item && item.id.startsWith("cg-") ? <span className="cg-nav-mark">CG</span> : <Icon name={item.id as CoreView} />}<span>{item.label}</span></button>)}</nav></div>;
+  return <div className="app-shell"><aside className="sidebar"><div className="brand-lockup"><div className="mark small">TL</div><div><strong>TownLight</strong><span>Station</span></div></div><nav>{nav.map((item) => <button key={item.id} className={view === item.id ? "selected" : ""} onClick={() => navigate(item.id)}><Icon name={item.id} /><span>{item.label}</span>{item.id === "media" && Boolean(dashboard?.failed_ingest_count) && <b>{dashboard?.failed_ingest_count}</b>}{item.id === "health" && Boolean(runtime?.active_critical_alerts || runtime?.active_warning_alerts) && <b>{(runtime?.active_critical_alerts ?? 0) + (runtime?.active_warning_alerts ?? 0)}</b>}</button>)}<p className="nav-section-label">CG authoring</p>{cgNav.map((item) => <button key={item.id} className={`cg-nav-item ${view === item.id ? "selected" : ""}`} onClick={() => navigate(item.id)}><span className="cg-nav-mark">CG</span><span>{item.label}</span></button>)}</nav><div className="station-card"><span className={`live-dot runtime-${runtime?.color ?? "yellow"}`} /><div><strong>{station.display_name}</strong><small>{runtime?.label ?? station.timezone}</small></div></div></aside><main className="workspace">{error && <div className="global-error" role="alert">{error}<button onClick={() => void refresh()}>Retry</button></div>}{view === "overview" && <Overview station={station} dashboard={dashboard} channels={channels} runtime={runtime} onNavigate={navigate} />}{view === "media" && <Media dashboard={dashboard} onRefresh={refresh} />}{view === "channels" && <Channels channels={channels} outputProfiles={outputProfiles} onRefresh={refresh} />}{view === "schedule" && <Schedule dashboard={dashboard} channels={channels} />}{view === "live" && <Live channels={channels} />}{view === "automation" && <AutomationPanel />}{view === "metadata" && <MetadataPanel assets={dashboard?.by_asset ?? []} />}{view === "recordings" && <ScheduledRecordingsPanel channels={channels.map((channel) => ({ channel_id: channel.channel_id, display_name: channel.display_name }))} />}{view === "health" && <Health runtime={runtime} resources={resources} selfTests={selfTests} selfTestSchedules={selfTestSchedules} updateStatus={updateStatus} alerts={alerts} alertChannels={alertChannels} deliveries={deliveries} rules={rules} outputChannels={channels} onRefresh={refresh} />}{view === "commissioning" && <Commissioning onNavigate={navigate} />}{view.startsWith("cg-") && <CgOperator channelId={channels[0]?.channel_id} channels={channels.map((channel) => ({ channel_id: channel.channel_id, display_name: channel.display_name }))} route={view as CgRoute} onNavigate={(route) => navigate(route)} />}</main><nav className="mobile-nav">{[...nav, { id: "cg-moderation" as View, label: "CG" }].map((item) => <button key={item.id} aria-label={item.label} className={view === item.id || (item.id === "cg-moderation" && view.startsWith("cg-")) ? "selected" : ""} onClick={() => navigate(item.id)}>{"id" in item && item.id.startsWith("cg-") ? <span className="cg-nav-mark">CG</span> : <Icon name={item.id as CoreView} />}<span>{item.label}</span></button>)}</nav></div>;
 }
 
 createRoot(document.getElementById("root")!).render(<React.StrictMode><AuthBoundary><App /></AuthBoundary></React.StrictMode>);
