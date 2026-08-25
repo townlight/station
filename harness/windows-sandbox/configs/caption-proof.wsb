@@ -18,11 +18,6 @@
       <ReadOnly>true</ReadOnly>
     </MappedFolder>
     <MappedFolder>
-      <HostFolder>C:\Users\scott\Desktop\Code\townlight-station\scripts</HostFolder>
-      <SandboxFolder>C:\TownLightScripts</SandboxFolder>
-      <ReadOnly>true</ReadOnly>
-    </MappedFolder>
-    <MappedFolder>
       <HostFolder>C:\ProgramData\TownLight Station\SandboxInputs</HostFolder>
       <SandboxFolder>C:\TownLightInputs</SandboxFolder>
       <ReadOnly>true</ReadOnly>

@@ -1,7 +1,6 @@
 param()
 
 $ErrorActionPreference = 'Stop'
-. 'C:\TownLightScripts\installed-proof-api.ps1'
 
 $candidateRoot = 'C:\TownLightCandidate'
 $evidenceRoot = 'C:\TownLightEvidence'
@@ -17,7 +16,8 @@ $partPath = "$resultPath.part"
 $installerLog = Join-Path $evidenceRoot ("caption-proof-$runId-installer.log")
 $baseUri = [uri]'http://127.0.0.1:4070'
 $origin = $baseUri.GetLeftPart([UriPartial]::Authority)
-$apiSession = $null
+$apiCookieHeader = $null
+$apiCsrfToken = $null
 $proofChannel = $null
 $result = [ordered]@{
     schema_version = 1
@@ -41,14 +41,42 @@ function Invoke-Api {
         $Body = $null,
         [int]$TimeoutSec = 30
     )
-    $parameters = @{
-        Session = $script:apiSession
-        Method = $Method
-        Path = $Path
-        TimeoutSec = $TimeoutSec
+    if ([string]::IsNullOrWhiteSpace($script:apiCookieHeader) -or
+        [string]::IsNullOrWhiteSpace($script:apiCsrfToken)) {
+        throw 'Caption proof API session authority is unavailable.'
     }
-    if ($null -ne $Body) { $parameters.Body = $Body }
-    Invoke-TownLightProofApi @parameters
+    if ([string]::IsNullOrWhiteSpace($Path) -or -not $Path.StartsWith('/') -or
+        $Path.StartsWith('//') -or $Path.Contains('://') -or $Path.Contains('#') -or
+        $Path.Contains('..')) {
+        throw 'Caption proof API path is invalid or unbounded.'
+    }
+    $headers = @{ Cookie = $script:apiCookieHeader }
+    if ($Method -ne 'Get') {
+        $headers.Origin = $script:origin
+        $headers['Sec-Fetch-Site'] = 'same-origin'
+        $headers['X-TownLight-CSRF'] = $script:apiCsrfToken
+    }
+    $parameters = @{
+        Method = $Method
+        Uri = "$($script:origin)/api/v1$Path"
+        Headers = $headers
+        TimeoutSec = $TimeoutSec
+        MaximumRedirection = 0
+        UseBasicParsing = $true
+        ErrorAction = 'Stop'
+    }
+    if ($null -ne $Body) {
+        $parameters.ContentType = 'application/json'
+        $parameters.Body = $Body | ConvertTo-Json -Depth 32 -Compress
+    }
+    try {
+        $response = Invoke-WebRequest @parameters
+        if ([string]::IsNullOrWhiteSpace([string]$response.Content)) { return $null }
+        $response.Content | ConvertFrom-Json -ErrorAction Stop
+    }
+    catch {
+        throw "Caption proof API $Method $Path failed; response content was not recorded."
+    }
 }
 
 function Wait-For {
@@ -138,7 +166,6 @@ try {
     }
     $capability = $rawCapability.Substring(0, 43)
     $proofCredential = New-RandomProofCredential
-    $bootstrapSession = [Microsoft.PowerShell.Commands.WebRequestSession]::new()
     $bootstrapResponse = $null
     try {
         $bootstrapBody = [ordered]@{
@@ -148,7 +175,7 @@ try {
             password = $proofCredential.PlainText
         } | ConvertTo-Json -Compress
         $bootstrapResponse = Invoke-WebRequest -Method Post -Uri "$origin/api/v1/auth/bootstrap" `
-            -WebSession $bootstrapSession -Headers @{
+            -Headers @{
                 Origin = $origin
                 'Sec-Fetch-Site' = 'same-origin'
             } -ContentType 'application/json' -Body $bootstrapBody -TimeoutSec 20 `
@@ -165,27 +192,13 @@ try {
         $capability = $null
         $rawCapability = $null
     }
-    # Windows PowerShell 5 can retain only one of multiple Set-Cookie response headers.
-    # Reconstruct the in-memory jar from the exact bounded response headers; never persist tokens.
+    # Windows PowerShell 5 does not reliably replay this server's multiple Set-Cookie headers.
+    # Retain both exact bounded tokens only in process memory and emit one explicit Cookie header.
     $sessionToken = Get-ExactResponseCookie -Response $bootstrapResponse -Name 'townlight_session_v1'
     $csrfToken = Get-ExactResponseCookie -Response $bootstrapResponse -Name 'townlight_csrf_v1'
-    $apiWebSession = [Microsoft.PowerShell.Commands.WebRequestSession]::new()
-    $apiWebSession.Cookies.SetCookies(
-        [uri]"$origin/api/v1/",
-        "townlight_session_v1=$sessionToken; Path=/api/v1/"
-    )
-    $apiWebSession.Cookies.SetCookies(
-        [uri]"$origin/",
-        "townlight_csrf_v1=$csrfToken; Path=/"
-    )
-    $apiSession = [pscustomobject]@{
-        Origin = $origin
-        ApiRoot = "$origin/api/v1"
-        WebSession = $apiWebSession
-        Identity = $bootstrapDocument.session
-    }
-    $apiSession.PSObject.TypeNames.Insert(0, 'TownLight.InstalledProofSession')
-    $confirmed = Invoke-TownLightProofApi -Session $apiSession -Method Get -Path '/auth/session'
+    $apiCookieHeader = "townlight_session_v1=$sessionToken; townlight_csrf_v1=$csrfToken"
+    $apiCsrfToken = $csrfToken
+    $confirmed = Invoke-Api 'Get' '/auth/session'
     if ($confirmed.session.username -ne $proofCredential.Credential.UserName) {
         throw 'Bootstrap-established session could not be confirmed through the public API.'
     }
@@ -365,6 +378,8 @@ catch {
     $result.error = $_.Exception.Message
 }
 finally {
+    $apiCookieHeader = $null
+    $apiCsrfToken = $null
     $result.completed_at_utc = [datetime]::UtcNow.ToString('o')
     $json = ($result | ConvertTo-Json -Depth 16) + [Environment]::NewLine
     [IO.File]::WriteAllText($partPath, $json, [Text.UTF8Encoding]::new($false))

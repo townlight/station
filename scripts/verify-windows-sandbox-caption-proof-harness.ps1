@@ -21,7 +21,6 @@ $requirements = [ordered]@{
     'network is disabled' = '<Networking>Disable</Networking>'
     'candidate input is read-only' = '<SandboxFolder>C:\TownLightCandidate</SandboxFolder>'
     'verifier input is read-only' = '<SandboxFolder>C:\TownLightVerifier</SandboxFolder>'
-    'proof scripts are read-only' = '<SandboxFolder>C:\TownLightScripts</SandboxFolder>'
     'fixture input is read-only' = '<SandboxFolder>C:\TownLightInputs</SandboxFolder>'
     'harness input is read-only' = '<SandboxFolder>C:\TownLightHarness</SandboxFolder>'
     'evidence output is separate' = '<SandboxFolder>C:\TownLightEvidence</SandboxFolder>'
@@ -29,9 +28,10 @@ $requirements = [ordered]@{
     'host uses only the ownership guard' = 'invoke-owned-windows-sandbox.ps1'
     'fixture bytes are exact' = $fixtureHash
     'guest verifies installed candidate' = 'verify-installed.ps1'
-    'guest authenticates through public API' = 'installed-proof-api.ps1'
+    'guest authenticates through public API' = '/auth/bootstrap'
     'guest uses the canonical protected handoff' = 'operator-bootstrap.capability'
-    'guest retains the bootstrap session in memory' = 'Get-ExactResponseCookie'
+    'guest retains exact cookies only in memory' = 'Get-ExactResponseCookie'
+    'guest sends an explicit bounded cookie header' = 'Cookie = $script:apiCookieHeader'
     'guest creates caption authority' = '/caption-tracks/'
     'guest requests final-sink proof' = '/caption-proof'
     'guest requires verified decode-back' = "outcome -ne 'verified'"
@@ -51,8 +51,8 @@ if ($configurationText -match '(?i)<HostFolder>.*Claude.*</HostFolder>') {
 }
 [xml]$configurationDocument = $configurationText
 $mappings = @($configurationDocument.Configuration.MappedFolders.MappedFolder)
-if ($mappings.Count -ne 6) {
-    throw 'Caption-proof Sandbox configuration must expose exactly five read-only inputs and one writable evidence boundary.'
+if ($mappings.Count -ne 5) {
+    throw 'Caption-proof Sandbox configuration must expose exactly four read-only inputs and one writable evidence boundary.'
 }
 if (@($mappings | Where-Object { $_.ReadOnly -eq 'false' }).Count -ne 1 -or
     @($mappings | Where-Object { $_.ReadOnly -eq 'false' })[0].SandboxFolder -ne 'C:\TownLightEvidence') {
