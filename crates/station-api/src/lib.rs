@@ -22,7 +22,10 @@ use station_alerting::probe_system_resources;
 use station_auth::{OperatorAccount, SecretToken, digest_secret};
 use station_captions::{
     AssetCaptionCue, AssetCaptionTrack, AssetCaptionTrackAuditEvent, AssetCaptionTrackWrite,
-    CaptionTrackSourceKind, CaptionTrackWriteError,
+    CaptionEgressProof, CaptionEgressProofJob, CaptionEgressProofJobRecord,
+    CaptionEgressProofJobState, CaptionProofCaptureFacts, CaptionTrackSourceKind,
+    CaptionTrackWriteError, MAX_CAPTION_PROOF_CAPTURE_BYTES, MAX_CAPTION_PROOF_CAPTURE_DURATION_MS,
+    expected_caption_evidence_for_window,
 };
 use station_cg::{
     CgAuditEvent, CgBoard, CgBulletin, CgBulletinState, CgFeedItem, CgFeedItemApproval,
@@ -53,6 +56,7 @@ use station_readiness::{
 use station_schedule::{
     AssetReadiness, ChannelConfiguration, CommitReport, DispatchStatus, HEADEND_PROFILES,
     HeadendProfileApplyRequest, MediaAsset, OUTPUT_PROFILES, ScheduleItem, ScheduleState,
+    ScheduleWindow,
 };
 use station_storage::{
     AlertChannelSecret, CaptionPolicyWriteError, CgSnapshotReadError, CgWriteError,
@@ -79,6 +83,9 @@ const LOUDNESS_PROOF_MAX_AGE_MS: i64 = 24 * 60 * 60 * 1_000;
 const LOUDNESS_PROOF_MIN_DURATION_MS: u64 = 3_000;
 const LOUDNESS_PROOF_MAX_DURATION_MS: u64 = 600_000;
 const LOUDNESS_PROOF_MAX_CAPTURE_BYTES: u64 = 1024 * 1024 * 1024;
+const CAPTION_PROOF_MIN_DURATION_MS: u64 = 3_000;
+const CAPTION_PROOF_RUNTIME_MAX_AGE_MS: i64 = 15_000;
+const CAPTION_PROOF_EXECUTION_LEAD_MS: u64 = 1_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -446,6 +453,60 @@ struct LoudnessProofJobCaptureResponse {
     capture_bytes: u64,
     sample_duration_ms: u64,
     capture_sha256: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RequestCaptionProofJob {
+    report_id: String,
+    sink_id: String,
+    capture_duration_ms: u64,
+    max_capture_bytes: u64,
+}
+
+#[derive(Debug, Serialize)]
+struct CaptionProofJobResponse {
+    job_id: String,
+    channel_id: String,
+    sink_id: String,
+    report_id: String,
+    asset_id: String,
+    track_id: String,
+    track_revision: u64,
+    cues_sha256: String,
+    caption_policy_revision: u64,
+    language: String,
+    service_number: u8,
+    candidate_version: String,
+    source_commit: String,
+    configuration_hash: String,
+    capture_started_asset_offset_ms: u64,
+    capture_duration_ms: u64,
+    max_capture_bytes: u64,
+    expected_cue_count: u32,
+    expected_text_sha256: String,
+    state: &'static str,
+    created_at_unix_ms: i64,
+    updated_at_unix_ms: i64,
+    lease_expires_at_unix_ms: Option<i64>,
+    capture: Option<CaptionProofCaptureResponse>,
+    completed_at_unix_ms: Option<i64>,
+    failed_at_unix_ms: Option<i64>,
+    failure_detail: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct CaptionProofCaptureResponse {
+    artifact_relative_path: String,
+    capture_bytes: u64,
+    capture_duration_ms: u64,
+    capture_sha256: String,
+}
+
+#[derive(Debug, Serialize)]
+struct ChannelCaptionProofResponse {
+    channel_id: String,
+    proofs: Vec<CaptionEgressProof>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1174,6 +1235,22 @@ impl Api {
                     && path.contains("/loudness-proof/jobs/") =>
             {
                 self.channel_loudness_proof_job(path)
+            }
+            ("POST", path)
+                if path.starts_with("/api/v1/channels/") && path.ends_with("/caption-proof") =>
+            {
+                self.request_channel_caption_proof(path, body)
+            }
+            ("GET", path)
+                if path.starts_with("/api/v1/channels/") && path.ends_with("/caption-proof") =>
+            {
+                self.channel_caption_proof(path)
+            }
+            ("GET", path)
+                if path.starts_with("/api/v1/channels/")
+                    && path.contains("/caption-proof/jobs/") =>
+            {
+                self.channel_caption_proof_job(path)
             }
             ("POST", path)
                 if path.starts_with("/api/v1/channels/") && path.ends_with("/headend-profile") =>
@@ -3259,6 +3336,377 @@ impl Api {
             200,
             serde_json::to_vec(&loudness_job_response(record))
                 .expect("serializing loudness proof job response cannot fail"),
+        )
+    }
+
+    fn request_channel_caption_proof(&self, path: &str, body: Option<&[u8]>) -> ApiResponse {
+        let Some(channel_id) = path_identity(path, "/api/v1/channels/", "/caption-proof") else {
+            return error_response(400, "invalid_path", "The channel identity is invalid.");
+        };
+        if !is_api_uuid(channel_id) {
+            return error_response(400, "invalid_path", "The channel identity is invalid.");
+        }
+        let Some(request) = parse_body::<RequestCaptionProofJob>(body) else {
+            return error_response(
+                400,
+                "invalid_json",
+                "A caption proof job request body is required.",
+            );
+        };
+        if request.report_id.trim().is_empty()
+            || request.report_id.len() > 200
+            || request.report_id.chars().any(char::is_control)
+            || !is_canonical_api_uuid(&request.sink_id)
+            || !(CAPTION_PROOF_MIN_DURATION_MS..=MAX_CAPTION_PROOF_CAPTURE_DURATION_MS)
+                .contains(&request.capture_duration_ms)
+            || !(1..=MAX_CAPTION_PROOF_CAPTURE_BYTES).contains(&request.max_capture_bytes)
+        {
+            return error_response(
+                422,
+                "validation_failed",
+                "The report identity, sink identity, capture duration, or capture limit is invalid or unbounded.",
+            );
+        }
+
+        let now = match system_time_millis() {
+            Ok(value) => value,
+            Err(message) => return error_response(500, "clock_error", &message),
+        };
+        let report = match self.storage.read_commit_report(&request.report_id) {
+            Ok(Some(report)) => report,
+            Ok(None) => {
+                return error_response(
+                    404,
+                    "commit_report_not_found",
+                    "The schedule commit report does not exist.",
+                );
+            }
+            Err(message) => return error_response(500, "storage_error", &message),
+        };
+        if report.channel_id != channel_id {
+            return error_response(
+                404,
+                "commit_report_not_found",
+                "The schedule commit report does not exist for this channel.",
+            );
+        }
+        if report.dispatch_status != DispatchStatus::Acknowledged {
+            return error_response(
+                409,
+                "schedule_not_on_air",
+                "Caption proof requires an acknowledged on-air schedule report.",
+            );
+        }
+        let item = match self.storage.read_schedule_item(&report.schedule_item_id) {
+            Ok(Some(item)) => item,
+            Ok(None) => {
+                return error_response(
+                    409,
+                    "schedule_binding_changed",
+                    "The committed schedule item no longer exists.",
+                );
+            }
+            Err(message) => return error_response(500, "storage_error", &message),
+        };
+        if item.state != ScheduleState::Committed
+            || item.channel_id != report.channel_id
+            || item.asset_id != report.asset_id
+        {
+            return error_response(
+                409,
+                "schedule_binding_changed",
+                "The committed schedule binding has changed.",
+            );
+        }
+        let current_asset_offset_ms = match item.window_at(now) {
+            Ok(ScheduleWindow::Active { media_offset_ms }) => media_offset_ms,
+            Ok(ScheduleWindow::Future | ScheduleWindow::Ended) => {
+                return error_response(
+                    409,
+                    "schedule_not_on_air",
+                    "The committed schedule item is not currently active.",
+                );
+            }
+            Err(_) => {
+                return error_response(
+                    409,
+                    "schedule_binding_changed",
+                    "The committed schedule window is invalid.",
+                );
+            }
+        };
+        let runtime = match self.storage.read_channel_runtime(channel_id) {
+            Ok(Some(runtime)) => runtime,
+            Ok(None) => {
+                return error_response(
+                    409,
+                    "runtime_not_on_air",
+                    "The channel has no current on-air runtime observation.",
+                );
+            }
+            Err(message) => return error_response(500, "storage_error", &message),
+        };
+        let runtime_age_ms = now.checked_sub(runtime.heartbeat_at_unix_ms);
+        if runtime.state != ChannelRuntimeState::OnAir
+            || runtime.on_air_asset_id.as_deref() != Some(report.asset_id.as_str())
+            || runtime_age_ms.is_none_or(|age| age > CAPTION_PROOF_RUNTIME_MAX_AGE_MS)
+        {
+            return error_response(
+                409,
+                "runtime_not_on_air",
+                "Caption proof requires a fresh runtime observation of the exact scheduled asset on air.",
+            );
+        }
+        let asset = match self.storage.read_media_asset(&report.asset_id) {
+            Ok(Some(asset)) if asset.readiness == AssetReadiness::Ready => asset,
+            Ok(Some(_)) => {
+                return error_response(
+                    409,
+                    "asset_not_ready",
+                    "The on-air asset is not currently ready.",
+                );
+            }
+            Ok(None) => {
+                return error_response(409, "asset_not_ready", "The on-air asset does not exist.");
+            }
+            Err(message) => return error_response(500, "storage_error", &message),
+        };
+        let policy = match self.storage.read_channel_caption_policy(channel_id) {
+            Ok(Some(policy)) if policy.mode == ChannelCaptionMode::Cea708 => policy,
+            Ok(_) => {
+                return error_response(
+                    409,
+                    "caption_policy_not_enabled",
+                    "The channel does not have an enabled CEA-708 caption policy.",
+                );
+            }
+            Err(message) => return error_response(500, "storage_error", &message),
+        };
+        let tracks = match self.storage.list_asset_caption_tracks(&report.asset_id) {
+            Ok(tracks) => tracks,
+            Err(message) => return error_response(500, "storage_error", &message),
+        };
+        let Some(track) = tracks.into_iter().find(|track| {
+            track.language == policy.language && track.service_number == policy.service_number
+        }) else {
+            return error_response(
+                409,
+                "caption_track_not_ready",
+                "The on-air asset has no reviewed track matching the active caption policy.",
+            );
+        };
+        let earliest_capture_offset_ms =
+            match current_asset_offset_ms.checked_add(CAPTION_PROOF_EXECUTION_LEAD_MS) {
+                Some(value) => value,
+                None => {
+                    return error_response(
+                        409,
+                        "capture_window_unavailable",
+                        "No bounded future caption capture window remains in the on-air asset.",
+                    );
+                }
+            };
+        let mut capture_offsets = Vec::with_capacity(track.cues.len() + 1);
+        capture_offsets.push(earliest_capture_offset_ms);
+        capture_offsets.extend(
+            track
+                .cues
+                .iter()
+                .map(|cue| cue.start_ms)
+                .filter(|start| *start > earliest_capture_offset_ms),
+        );
+        let schedule_media_duration_ms = item.duration_ms.min(asset.duration_ms);
+        let selected_window = capture_offsets.into_iter().find_map(|capture_offset| {
+            let capture_end = capture_offset.checked_add(request.capture_duration_ms)?;
+            if capture_end > schedule_media_duration_ms {
+                return None;
+            }
+            expected_caption_evidence_for_window(
+                &track,
+                asset.duration_ms,
+                capture_offset,
+                request.capture_duration_ms,
+            )
+            .ok()
+            .map(|expected| (capture_offset, expected))
+        });
+        let Some((capture_started_asset_offset_ms, expected)) = selected_window else {
+            return error_response(
+                409,
+                "capture_window_unavailable",
+                "No bounded future capture window with expected captions remains in the on-air asset.",
+            );
+        };
+
+        let station_box = match self.station_box_profile_uncached() {
+            Ok(profile) => profile,
+            Err(message) => return error_response(500, "readiness_probe_failed", &message),
+        };
+        if !station_box.release.candidate_verified {
+            return error_response(
+                409,
+                "candidate_not_verified",
+                "A verified installed candidate is required before requesting caption proof.",
+            );
+        }
+        let Some(source_commit) = station_box.source_commit.as_deref() else {
+            return error_response(
+                409,
+                "candidate_not_verified",
+                "The verified candidate has no usable source commit identity.",
+            );
+        };
+        if !is_api_source_commit(source_commit) {
+            return error_response(
+                409,
+                "candidate_not_verified",
+                "The verified candidate source commit identity is invalid.",
+            );
+        }
+        let source_commit = source_commit.to_owned();
+        let snapshot = match self
+            .storage
+            .read_channel_loudness_proof_snapshot(channel_id)
+        {
+            Ok(Some(snapshot)) => snapshot,
+            Ok(None) => {
+                return error_response(404, "channel_not_found", "The channel does not exist.");
+            }
+            Err(message) => return error_response(500, "storage_error", &message),
+        };
+        if !snapshot
+            .output_sinks
+            .iter()
+            .any(|sink| sink.sink_id == request.sink_id)
+        {
+            return error_response(
+                409,
+                "sink_not_enabled",
+                "The requested sink is not an enabled UDP or SRT output.",
+            );
+        }
+        let job_id = match secure_canonical_uuid() {
+            Ok(value) => value,
+            Err(message) => return error_response(500, "entropy_unavailable", &message),
+        };
+        let job = CaptionEgressProofJob {
+            job_id,
+            channel_id: channel_id.into(),
+            sink_id: request.sink_id,
+            report_id: report.report_id,
+            asset_id: report.asset_id,
+            track_id: track.track_id,
+            track_revision: track.revision,
+            cues_sha256: track.cues_sha256,
+            caption_policy_revision: policy.revision,
+            language: policy.language,
+            service_number: policy.service_number,
+            candidate_version: station_box.product_version,
+            source_commit,
+            configuration_hash: snapshot.configuration_hash,
+            capture_started_asset_offset_ms,
+            capture_duration_ms: request.capture_duration_ms,
+            max_capture_bytes: request.max_capture_bytes,
+            expected_cue_count: expected.cue_count,
+            expected_text_sha256: expected.text_sha256,
+            created_at_unix_ms: now,
+        };
+        let created = match self.storage.create_caption_egress_job(&job) {
+            Ok(created) => created,
+            Err(message) => return caption_job_storage_error(&message),
+        };
+        if !created {
+            return error_response(
+                409,
+                "job_already_active",
+                "An active caption proof job already exists for this channel and sink.",
+            );
+        }
+        let record = match self.storage.read_caption_egress_job(&job.job_id) {
+            Ok(Some(record)) => record,
+            Ok(None) => {
+                return error_response(500, "storage_error", "The created job disappeared.");
+            }
+            Err(message) => return error_response(500, "storage_error", &message),
+        };
+        json_response(
+            202,
+            serde_json::to_vec(&caption_job_response(record))
+                .expect("serializing caption proof job response cannot fail"),
+        )
+    }
+
+    fn channel_caption_proof(&self, path: &str) -> ApiResponse {
+        let Some(channel_id) = path_identity(path, "/api/v1/channels/", "/caption-proof") else {
+            return error_response(400, "invalid_path", "The channel identity is invalid.");
+        };
+        if !is_api_uuid(channel_id) {
+            return error_response(400, "invalid_path", "The channel identity is invalid.");
+        }
+        match self
+            .storage
+            .read_channel_loudness_proof_snapshot(channel_id)
+        {
+            Ok(Some(_)) => {}
+            Ok(None) => {
+                return error_response(404, "channel_not_found", "The channel does not exist.");
+            }
+            Err(message) => return error_response(500, "storage_error", &message),
+        }
+        let proofs = match self
+            .storage
+            .list_caption_egress_proofs(channel_id, None, 100)
+        {
+            Ok(proofs) => proofs,
+            Err(message) => return error_response(500, "storage_error", &message),
+        };
+        json_response(
+            200,
+            serde_json::to_vec(&ChannelCaptionProofResponse {
+                channel_id: channel_id.into(),
+                proofs,
+            })
+            .expect("serializing caption proof history cannot fail"),
+        )
+    }
+
+    fn channel_caption_proof_job(&self, path: &str) -> ApiResponse {
+        let Some((channel_id, job_id)) = caption_job_path(path) else {
+            return error_response(
+                400,
+                "invalid_path",
+                "The channel or job identity is invalid.",
+            );
+        };
+        if !is_api_uuid(channel_id) || !is_canonical_api_uuid(job_id) {
+            return error_response(
+                400,
+                "invalid_path",
+                "The channel or job identity is invalid.",
+            );
+        }
+        let record = match self.storage.read_caption_egress_job(job_id) {
+            Ok(Some(record)) => record,
+            Ok(None) => {
+                return error_response(
+                    404,
+                    "job_not_found",
+                    "The caption proof job does not exist.",
+                );
+            }
+            Err(message) => return error_response(500, "storage_error", &message),
+        };
+        if record.job.channel_id != channel_id {
+            return error_response(
+                404,
+                "job_not_found",
+                "The caption proof job does not exist.",
+            );
+        }
+        json_response(
+            200,
+            serde_json::to_vec(&caption_job_response(record))
+                .expect("serializing caption proof job response cannot fail"),
         )
     }
 
@@ -5868,6 +6316,18 @@ fn loudness_job_path(path: &str) -> Option<(&str, &str)> {
     .then_some((channel_id, job_id))
 }
 
+fn caption_job_path(path: &str) -> Option<(&str, &str)> {
+    let remainder = path.strip_prefix("/api/v1/channels/")?;
+    let (channel_id, job_id) = remainder.split_once("/caption-proof/jobs/")?;
+    (!channel_id.is_empty()
+        && !job_id.is_empty()
+        && !channel_id.contains('/')
+        && !job_id.contains('/')
+        && !channel_id.contains(['?', '%', '\\'])
+        && !job_id.contains(['?', '%', '\\']))
+    .then_some((channel_id, job_id))
+}
+
 fn loudness_job_state_name(state: OutputLoudnessProofJobState) -> &'static str {
     match state {
         OutputLoudnessProofJobState::Pending => "pending",
@@ -5876,6 +6336,17 @@ fn loudness_job_state_name(state: OutputLoudnessProofJobState) -> &'static str {
         OutputLoudnessProofJobState::Analyzing => "analyzing",
         OutputLoudnessProofJobState::Completed => "completed",
         OutputLoudnessProofJobState::Failed => "failed",
+    }
+}
+
+fn caption_job_state_name(state: CaptionEgressProofJobState) -> &'static str {
+    match state {
+        CaptionEgressProofJobState::Pending => "pending",
+        CaptionEgressProofJobState::Claimed => "claimed",
+        CaptionEgressProofJobState::CapturePending => "capture_pending",
+        CaptionEgressProofJobState::Analyzing => "analyzing",
+        CaptionEgressProofJobState::Completed => "completed",
+        CaptionEgressProofJobState::Failed => "failed",
     }
 }
 
@@ -5970,6 +6441,46 @@ fn loudness_job_response(record: OutputLoudnessProofJobRecord) -> LoudnessProofJ
     }
 }
 
+fn caption_job_response(record: CaptionEgressProofJobRecord) -> CaptionProofJobResponse {
+    let job = record.job;
+    CaptionProofJobResponse {
+        job_id: job.job_id,
+        channel_id: job.channel_id,
+        sink_id: job.sink_id,
+        report_id: job.report_id,
+        asset_id: job.asset_id,
+        track_id: job.track_id,
+        track_revision: job.track_revision,
+        cues_sha256: job.cues_sha256,
+        caption_policy_revision: job.caption_policy_revision,
+        language: job.language,
+        service_number: job.service_number,
+        candidate_version: job.candidate_version,
+        source_commit: job.source_commit,
+        configuration_hash: job.configuration_hash,
+        capture_started_asset_offset_ms: job.capture_started_asset_offset_ms,
+        capture_duration_ms: job.capture_duration_ms,
+        max_capture_bytes: job.max_capture_bytes,
+        expected_cue_count: job.expected_cue_count,
+        expected_text_sha256: job.expected_text_sha256,
+        state: caption_job_state_name(record.state),
+        created_at_unix_ms: job.created_at_unix_ms,
+        updated_at_unix_ms: record.updated_at_unix_ms,
+        lease_expires_at_unix_ms: record.lease_expires_at_unix_ms,
+        capture: record.capture.map(|capture: CaptionProofCaptureFacts| {
+            CaptionProofCaptureResponse {
+                artifact_relative_path: capture.artifact_relative_path,
+                capture_bytes: capture.capture_bytes,
+                capture_duration_ms: capture.capture_duration_ms,
+                capture_sha256: capture.capture_sha256,
+            }
+        }),
+        completed_at_unix_ms: record.completed_at_unix_ms,
+        failed_at_unix_ms: record.failed_at_unix_ms,
+        failure_detail: record.failure_detail,
+    }
+}
+
 fn loudness_job_storage_error(message: &str) -> ApiResponse {
     if message.contains("already") || message.contains("active") {
         return error_response(409, "job_already_active", message);
@@ -5978,6 +6489,25 @@ fn loudness_job_storage_error(message: &str) -> ApiResponse {
         return error_response(409, "configuration_changed", message);
     }
     if message.contains("not currently configured") || message.contains("not an enabled") {
+        return error_response(409, "sink_not_enabled", message);
+    }
+    if message.contains("invalid") || message.contains("must ") || message.contains("unbounded") {
+        return error_response(422, "validation_failed", message);
+    }
+    error_response(500, "storage_error", message)
+}
+
+fn caption_job_storage_error(message: &str) -> ApiResponse {
+    if message.contains("already") || message.contains("active") {
+        return error_response(409, "job_already_active", message);
+    }
+    if message.contains("stale") || message.contains("changed") {
+        return error_response(409, "authority_changed", message);
+    }
+    if message.contains("not ready") || message.contains("does not exist") {
+        return error_response(409, "authority_unavailable", message);
+    }
+    if message.contains("not enabled") || message.contains("not an enabled") {
         return error_response(409, "sink_not_enabled", message);
     }
     if message.contains("invalid") || message.contains("must ") || message.contains("unbounded") {
@@ -10103,6 +10633,268 @@ mod tests {
 
         std::fs::remove_dir_all(application).unwrap();
         let _ = std::fs::remove_file(database);
+    }
+
+    #[test]
+    fn caption_proof_job_post_derives_live_authority_and_get_returns_status() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "townlight-caption-proof-job-api-{}-{nonce}",
+            std::process::id()
+        ));
+        let application = root.join("application");
+        let media_path = root.join("captioned.ts");
+        std::fs::create_dir_all(&application).unwrap();
+        std::fs::write(&media_path, b"test media boundary").unwrap();
+        let database = root.join("station.db");
+        let mut api =
+            Api::open_with_station_box_probe(&database, &application, station_box_probe()).unwrap();
+        let channel_id = "11111111-2222-4333-8444-555555555555";
+        let sink_id = "22222222-3333-4444-8555-666666666666";
+        let asset_id = "b".repeat(64);
+        let track_id = "33333333-4444-4555-8666-777777777777";
+        let item_id = "44444444-5555-4666-8777-888888888888";
+        let report_id = "caption-report-1";
+        let now = system_time_millis().unwrap();
+        let mut channel = ChannelConfiguration {
+            channel_id: channel_id.into(),
+            display_name: "Caption proof output".into(),
+            output_profile: station_schedule::OutputProfileId::Proof360p30,
+            output_sinks: vec![station_schedule::OutputSinkConfiguration::required_udp(
+                sink_id,
+                "Proof output",
+                "127.0.0.1:5500",
+                -16.0,
+            )],
+            enabled: false,
+        };
+        api.storage.put_channel(&channel).unwrap();
+        api.storage
+            .put_media_asset(&MediaAsset {
+                asset_id: asset_id.clone(),
+                media_path: media_path.to_string_lossy().into_owned(),
+                duration_ms: 20_000,
+                readiness: AssetReadiness::Ready,
+            })
+            .unwrap();
+        api.storage
+            .write_asset_caption_track(&station_captions::AssetCaptionTrackWrite {
+                track_id: track_id.into(),
+                asset_id: asset_id.clone(),
+                language: "en-US".into(),
+                service_number: 1,
+                source_kind: station_captions::CaptionTrackSourceKind::External,
+                label: "Reviewed English".into(),
+                cues: vec![station_captions::AssetCaptionCue {
+                    cue_id: "55555555-6666-4777-8888-999999999999".into(),
+                    start_ms: 0,
+                    duration_ms: 5_000,
+                    text: "Town Council is now in session".into(),
+                }],
+                expected_revision: 0,
+                actor: "setup-admin".into(),
+                occurred_at_unix_ms: now - 2_000,
+                audit_id: "66666666-7777-4888-8999-aaaaaaaaaaaa".into(),
+            })
+            .unwrap();
+        api.storage
+            .write_channel_caption_policy(
+                channel_id,
+                ChannelCaptionMode::Cea708,
+                1,
+                "en-US",
+                0,
+                "setup-admin",
+                now - 2_000,
+                "77777777-8888-4999-8aaa-bbbbbbbbbbbb",
+            )
+            .unwrap();
+        api.storage
+            .put_schedule_item(&ScheduleItem {
+                item_id: item_id.into(),
+                channel_id: channel_id.into(),
+                asset_id: asset_id.clone(),
+                title: "Caption proof program".into(),
+                starts_at_unix_ms: now - 1_000,
+                duration_ms: 20_000,
+                state: ScheduleState::Draft,
+            })
+            .unwrap();
+        api.storage
+            .commit_schedule(
+                report_id,
+                "caption-plan-1",
+                item_id,
+                "meeting-operator",
+                now - 1_500,
+                "Caption proof fixture",
+            )
+            .unwrap();
+        api.storage
+            .advance_dispatch_status(report_id, DispatchStatus::Pending, DispatchStatus::Queued)
+            .unwrap();
+        api.storage
+            .advance_dispatch_status(
+                report_id,
+                DispatchStatus::Queued,
+                DispatchStatus::Acknowledged,
+            )
+            .unwrap();
+        channel.enabled = true;
+        api.storage.put_channel(&channel).unwrap();
+        api.storage
+            .put_channel_runtime(&station_domain::ChannelRuntimeObservation {
+                channel_id: channel_id.into(),
+                state: ChannelRuntimeState::OnAir,
+                on_air_asset_id: Some(asset_id.clone()),
+                state_started_at_unix_ms: now - 20_000,
+                heartbeat_at_unix_ms: now - 20_000,
+                detail: Some("scheduled asset is advancing".into()),
+            })
+            .unwrap();
+
+        let request_body = format!(
+            r#"{{"report_id":"{report_id}","sink_id":"{sink_id}","capture_duration_ms":3000,"max_capture_bytes":1000000}}"#
+        );
+        let forged_body = format!(
+            r#"{{"report_id":"{report_id}","sink_id":"{sink_id}","capture_duration_ms":3000,"max_capture_bytes":1000000,"asset_id":"{asset_id}"}}"#
+        );
+        let forged = api.handle_in_process(
+            "POST",
+            &format!("/api/v1/channels/{channel_id}/caption-proof"),
+            Some(forged_body.as_bytes()),
+        );
+        assert_eq!(forged.status, 400);
+        let forged: serde_json::Value = serde_json::from_slice(&forged.body).unwrap();
+        assert_eq!(forged["error"]["code"], "invalid_json");
+
+        let stale_runtime = api.handle_in_process(
+            "POST",
+            &format!("/api/v1/channels/{channel_id}/caption-proof"),
+            Some(request_body.as_bytes()),
+        );
+        assert_eq!(stale_runtime.status, 409);
+        let stale_runtime: serde_json::Value = serde_json::from_slice(&stale_runtime.body).unwrap();
+        assert_eq!(stale_runtime["error"]["code"], "runtime_not_on_air");
+
+        api.storage
+            .put_channel_runtime(&station_domain::ChannelRuntimeObservation {
+                channel_id: channel_id.into(),
+                state: ChannelRuntimeState::OnAir,
+                on_air_asset_id: Some(asset_id.clone()),
+                state_started_at_unix_ms: now - 20_000,
+                heartbeat_at_unix_ms: now,
+                detail: Some("scheduled asset is advancing".into()),
+            })
+            .unwrap();
+        let no_future_window_body = format!(
+            r#"{{"report_id":"{report_id}","sink_id":"{sink_id}","capture_duration_ms":120000,"max_capture_bytes":1000000}}"#
+        );
+        let no_future_window = api.handle_in_process(
+            "POST",
+            &format!("/api/v1/channels/{channel_id}/caption-proof"),
+            Some(no_future_window_body.as_bytes()),
+        );
+        assert_eq!(no_future_window.status, 409);
+        let no_future_window: serde_json::Value =
+            serde_json::from_slice(&no_future_window.body).unwrap();
+        assert_eq!(
+            no_future_window["error"]["code"],
+            "capture_window_unavailable"
+        );
+        let mut unverified_probe = station_box_probe();
+        unverified_probe.release.candidate_verified = false;
+        unverified_probe.release.state = StationReadinessState::Blocked;
+        api.station_box_probe_override = Some(unverified_probe);
+        let unverified = api.handle_in_process(
+            "POST",
+            &format!("/api/v1/channels/{channel_id}/caption-proof"),
+            Some(request_body.as_bytes()),
+        );
+        assert_eq!(unverified.status, 409);
+        let unverified: serde_json::Value = serde_json::from_slice(&unverified.body).unwrap();
+        assert_eq!(unverified["error"]["code"], "candidate_not_verified");
+        api.station_box_probe_override = Some(station_box_probe());
+
+        let response = api.handle_in_process(
+            "POST",
+            &format!("/api/v1/channels/{channel_id}/caption-proof"),
+            Some(request_body.as_bytes()),
+        );
+        assert_eq!(
+            response.status,
+            202,
+            "{}",
+            String::from_utf8_lossy(&response.body)
+        );
+        let created: serde_json::Value = serde_json::from_slice(&response.body).unwrap();
+        let job_id = created["job_id"].as_str().unwrap();
+        assert_eq!(created["state"], "pending");
+        assert_eq!(created["asset_id"], asset_id);
+        assert_eq!(created["track_id"], track_id);
+        assert_eq!(created["track_revision"], 1);
+        assert_eq!(created["caption_policy_revision"], 1);
+        assert_eq!(created["language"], "en-US");
+        assert_eq!(created["service_number"], 1);
+        assert_eq!(created["expected_cue_count"], 1);
+        assert!(created["capture_started_asset_offset_ms"].as_u64().unwrap() >= 2_000);
+        assert!(created["capture_started_asset_offset_ms"].as_u64().unwrap() < 5_000);
+        assert_eq!(created["candidate_version"], "0.1.0");
+        assert_eq!(
+            created["source_commit"],
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        );
+
+        let status = api.handle_in_process(
+            "GET",
+            &format!("/api/v1/channels/{channel_id}/caption-proof/jobs/{job_id}"),
+            None,
+        );
+        assert_eq!(status.status, 200);
+        let status: serde_json::Value = serde_json::from_slice(&status.body).unwrap();
+        assert_eq!(status["job_id"], job_id);
+        assert_eq!(status["report_id"], report_id);
+        assert_eq!(status["sink_id"], sink_id);
+        assert!(status["capture"].is_null());
+
+        let wrong_channel = api.handle_in_process(
+            "GET",
+            &format!(
+                "/api/v1/channels/99999999-aaaa-4bbb-8ccc-dddddddddddd/caption-proof/jobs/{job_id}"
+            ),
+            None,
+        );
+        assert_eq!(wrong_channel.status, 404);
+
+        let duplicate = api.handle_in_process(
+            "POST",
+            &format!("/api/v1/channels/{channel_id}/caption-proof"),
+            Some(request_body.as_bytes()),
+        );
+        assert_eq!(duplicate.status, 409);
+        let duplicate: serde_json::Value = serde_json::from_slice(&duplicate.body).unwrap();
+        assert_eq!(duplicate["error"]["code"], "job_already_active");
+
+        let history = api.handle_in_process(
+            "GET",
+            &format!("/api/v1/channels/{channel_id}/caption-proof"),
+            None,
+        );
+        assert_eq!(
+            history.status,
+            200,
+            "{}",
+            String::from_utf8_lossy(&history.body)
+        );
+        let history: serde_json::Value = serde_json::from_slice(&history.body).unwrap();
+        assert_eq!(history["channel_id"], channel_id);
+        assert_eq!(history["proofs"], serde_json::json!([]));
+
+        drop(api);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

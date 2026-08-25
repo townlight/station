@@ -18,7 +18,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   text; a real generated CEA-708 MPEG-TS capture proves the path. Durable proof jobs now bind the
   precomputed expected window, enforce one active request per channel/sink, advance by leased CAS,
   recover expired work without retaining partial capture facts, and atomically append the immutable
-  proof with terminal completion. Orchestration execution remains unfinished.
+  proof with terminal completion. Authenticated per-channel APIs now create those jobs from bounded
+  operator intent only: the server requires the exact acknowledged asset on a fresh on-air runtime,
+  selects a future cue-bearing window, derives policy/track/candidate/configuration facts, rejects
+  forged authority fields, and exposes channel-scoped job status plus bounded proof history.
+  Orchestration execution remains unfinished.
 
 - Asset caption authority now stores bounded, ordered, non-overlapping cue sets against the exact
   content-addressed media identity, language, and CEA service. Writes require ready media, reject

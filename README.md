@@ -32,8 +32,12 @@ active cue, and sends bounded relative-delay cues only with worker acknowledgmen
 append-only caption egress ledger rejects receipts not bound to the exact schedule report/asset,
 enabled sink configuration, current policy revision, current track revision/digest, installed
 source commit, managed transport capture, and independent decode-back result. It cannot mark
-mismatched or absent decoded evidence verified. Proof-job execution, already-queued cue clearing at
-unscheduled source transitions, live ASR, and installed/field evidence remain separate work, so
+mismatched or absent decoded evidence verified. Authenticated caption-proof routes now accept only
+report, enabled sink, duration, and byte-limit intent; the server derives a fresh exact on-air
+schedule/runtime binding, selects a bounded future cue-bearing window, binds the verified installed
+candidate and current output configuration, creates one leased job per channel/sink, and exposes
+channel-scoped job status plus bounded immutable proof history. Proof-job execution,
+already-queued cue clearing at unscheduled source transitions, live ASR, and installed/field evidence remain separate work, so
 commissioning still reports the caption authority as blocked.
 
 ## Architecture
@@ -91,6 +95,14 @@ The exact commissioning candidate `8e9a27d3286815e0b34a0fad961cb2e5dc9a5a84` pas
 Exact candidate `bd032f00f142dfd3475a76b406391fde611b5788` passed installed Generic UDP SPTS and TelVue HyperCaster IP transport/loudness proofs after an adversarial arbitrary-GOP regression established the bounded four-second decode-headroom contract. See the [installed progressive headend proof](docs/proof/2026-08-23-installed-progressive-headend.md). External receiver acceptance and field-duration gates remain separate.
 
 ## API
+
+Caption decode-back requests use `POST /api/v1/channels/{channel_id}/caption-proof` with only
+`report_id`, `sink_id`, `capture_duration_ms`, and `max_capture_bytes`. The server requires that
+exact committed report to be acknowledged and currently on air with a fresh matching runtime,
+selects a bounded future window containing reviewed cues, and derives policy, track, expected text,
+verified candidate, and output-configuration authority itself. Unknown caller-supplied authority
+fields are rejected. `GET` on the same path returns the newest 100 immutable proofs; `GET
+/api/v1/channels/{channel_id}/caption-proof/jobs/{job_id}` returns channel-confined leased status.
 
 `GET /health` reports local database availability plus current-boot orchestration liveness. It returns HTTP 503 until the orchestration loop completes its first reconcile and after a supervisor failure or stale-progress deadline. This is a control-plane health contract, not a safe-to-air or receiver-acceptance claim; those remain on their dedicated runtime and headend-readiness endpoints.
 

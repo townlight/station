@@ -31,12 +31,20 @@ pending with partial capture facts cleared. Completion appends the immutable pro
 job to terminal `completed` in one transaction. A mismatch between proof, capture, or original job
 facts rolls back both changes. Terminal failure remains durable and bounded.
 
+The authenticated request boundary accepts only schedule report, enabled sink, duration, and byte
+limit. It rejects extra caller-supplied authority facts, requires that report's exact asset to be on
+air under a fresh runtime heartbeat, and selects a future cue-bearing half-open window with execution
+lead time. Policy, track revision/digest, expected semantic evidence, candidate version/source
+commit, and canonical output configuration are all server-derived. Job reads are channel-confined;
+proof history is bounded to the newest 100 immutable records.
+
 ## Boundaries
 
 The independent decoder accepts only an absolute executable path, hashes the exact executable into
 the evidence, enforces capture/output/deadline bounds, parses SRT, removes only known FFmpeg-generated
 CEA-708 presentation wrappers, and hashes canonical semantic text. Its real graph test generates,
 captures, independently decodes, and matches an MPEG-TS cue. The orchestration job that requests the
-selected-sink capture, invokes this decoder, rechecks the installed candidate at the final write
-boundary, and exposes current status through the API remains unfinished. Headend carriage and viewer
-rendering remain external acceptance evidence, not local decode-back proof.
+selected-sink capture, invokes this decoder, and rechecks the installed candidate at the final write
+boundary remains unfinished. The API request, status, and immutable-history boundary is implemented.
+Headend carriage and viewer rendering remain external acceptance evidence, not local decode-back
+proof.
