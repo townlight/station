@@ -88,7 +88,101 @@ impl StationStore {
              CREATE TRIGGER IF NOT EXISTS automation_execution_jobs_no_delete \
                BEFORE DELETE ON automation_execution_jobs \
                BEGIN SELECT RAISE(ABORT, 'automation execution jobs are durable history'); END;",
-        )
+        )?;
+        self.attest_automation_execution_schema_v1()
+    }
+
+    fn attest_automation_execution_schema_v1(&self) -> Result<(), String> {
+        let objects = [
+            (
+                "table",
+                "automation_execution_jobs",
+                "CREATE TABLE automation_execution_jobs (
+                   job_id TEXT PRIMARY KEY,
+                   feature TEXT NOT NULL CHECK (feature IN ('captions','summaries','translation')),
+                   policy_id TEXT NOT NULL,
+                   policy_revision INTEGER NOT NULL CHECK (policy_revision >= 1),
+                   adapter_id TEXT NOT NULL,
+                   adapter_revision INTEGER NOT NULL CHECK (adapter_revision >= 1),
+                   configuration_hash TEXT NOT NULL CHECK (length(configuration_hash)=64),
+                   candidate_version TEXT NOT NULL,
+                   source_commit TEXT NOT NULL CHECK (length(source_commit)=40),
+                   install_generation INTEGER NOT NULL CHECK (install_generation >= 1),
+                   input_sha256 TEXT NOT NULL CHECK (length(input_sha256)=64),
+                   input_bytes INTEGER NOT NULL CHECK (input_bytes >= 1),
+                   state TEXT NOT NULL CHECK (state IN ('pending','claimed','completed','failed')),
+                   attempt_count INTEGER NOT NULL CHECK (attempt_count BETWEEN 0 AND 10),
+                   lease_owner TEXT NOT NULL,
+                   lease_expires_at_unix_ms INTEGER NOT NULL CHECK (lease_expires_at_unix_ms >= -1),
+                   claim_id TEXT NOT NULL,
+                   claimed_at_unix_ms INTEGER NOT NULL CHECK (claimed_at_unix_ms >= -1),
+                   receipt_id TEXT NOT NULL,
+                   last_failure_code TEXT NOT NULL,
+                   created_at_unix_ms INTEGER NOT NULL CHECK (created_at_unix_ms >= 0),
+                   completed_at_unix_ms INTEGER NOT NULL CHECK (completed_at_unix_ms >= -1),
+                   request_json TEXT NOT NULL,
+                   FOREIGN KEY(policy_id) REFERENCES automation_feature_policies(policy_id),
+                   FOREIGN KEY(adapter_id) REFERENCES automation_adapter_descriptors(adapter_id)
+                 )",
+            ),
+            (
+                "index",
+                "automation_execution_jobs_pending",
+                "CREATE INDEX automation_execution_jobs_pending ON automation_execution_jobs(state, created_at_unix_ms, job_id)",
+            ),
+            (
+                "table",
+                "automation_execution_receipts",
+                "CREATE TABLE automation_execution_receipts (
+                   receipt_id TEXT PRIMARY KEY,
+                   job_id TEXT NOT NULL UNIQUE,
+                   install_generation INTEGER NOT NULL CHECK (install_generation >= 1),
+                   claim_id TEXT NOT NULL,
+                   output_sha256 TEXT NOT NULL CHECK (length(output_sha256)=64),
+                   output_bytes INTEGER NOT NULL CHECK (output_bytes >= 1),
+                   completed_at_unix_ms INTEGER NOT NULL CHECK (completed_at_unix_ms >= 0),
+                   record_json TEXT NOT NULL,
+                   FOREIGN KEY(job_id) REFERENCES automation_execution_jobs(job_id)
+                 )",
+            ),
+            (
+                "trigger",
+                "automation_execution_receipts_no_update",
+                "CREATE TRIGGER automation_execution_receipts_no_update BEFORE UPDATE ON automation_execution_receipts BEGIN SELECT RAISE(ABORT, 'automation execution receipts are append-only'); END",
+            ),
+            (
+                "trigger",
+                "automation_execution_receipts_no_delete",
+                "CREATE TRIGGER automation_execution_receipts_no_delete BEFORE DELETE ON automation_execution_receipts BEGIN SELECT RAISE(ABORT, 'automation execution receipts are append-only'); END",
+            ),
+            (
+                "trigger",
+                "automation_execution_jobs_binding_immutable",
+                "CREATE TRIGGER automation_execution_jobs_binding_immutable BEFORE UPDATE OF job_id,feature,policy_id,policy_revision,adapter_id,adapter_revision,configuration_hash,candidate_version,source_commit,install_generation,input_sha256,input_bytes,created_at_unix_ms,request_json ON automation_execution_jobs BEGIN SELECT RAISE(ABORT, 'automation execution job binding is immutable'); END",
+            ),
+            (
+                "trigger",
+                "automation_execution_jobs_terminal_immutable",
+                "CREATE TRIGGER automation_execution_jobs_terminal_immutable BEFORE UPDATE ON automation_execution_jobs WHEN OLD.state IN ('completed','failed') BEGIN SELECT RAISE(ABORT, 'terminal automation execution jobs are immutable'); END",
+            ),
+            (
+                "trigger",
+                "automation_execution_jobs_no_delete",
+                "CREATE TRIGGER automation_execution_jobs_no_delete BEFORE DELETE ON automation_execution_jobs BEGIN SELECT RAISE(ABORT, 'automation execution jobs are durable history'); END",
+            ),
+        ];
+        for (kind, name, expected) in objects {
+            let actual = self
+                .sqlite_schema_object_sql(kind, name)?
+                .ok_or_else(|| format!("automation execution schema is missing {kind} {name}"))?;
+            if canonical_automation_schema_sql(&actual) != canonical_automation_schema_sql(expected)
+            {
+                return Err(format!(
+                    "automation execution schema v1 {kind} {name} is not canonical"
+                ));
+            }
+        }
+        Ok(())
     }
 
     pub fn enqueue_automation_execution_job(
@@ -852,6 +946,15 @@ fn parse_automation_execution_state(value: &str) -> Result<AutomationExecutionJo
         "failed" => Ok(AutomationExecutionJobState::Failed),
         _ => Err("database returned invalid automation execution job state".into()),
     }
+}
+
+fn canonical_automation_schema_sql(value: &str) -> String {
+    value
+        .chars()
+        .filter(|character| !character.is_whitespace() && *character != ';')
+        .flat_map(char::to_lowercase)
+        .collect::<String>()
+        .replace("ifnotexists", "")
 }
 
 fn valid_automation_execution_failure_code(value: &str) -> bool {

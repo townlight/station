@@ -478,6 +478,34 @@ fn durable_job_bindings_and_terminal_rows_are_immutable() {
 }
 
 #[test]
+fn reopening_rejects_same_name_noop_trigger_and_consistent_authority_rebind() {
+    let (database, store) = configured_store("automation-execution-schema-drift");
+    store
+        .enqueue_automation_execution_job(&request(), &candidate(), 100)
+        .unwrap();
+    drop(store);
+
+    let mut rebound = request();
+    rebound.input.artifact_sha256 = "e".repeat(64);
+    let rebound_json = serde_json::to_string(&rebound).unwrap();
+    let corruption = format!(
+        "DROP TRIGGER automation_execution_jobs_binding_immutable;\
+         CREATE TRIGGER automation_execution_jobs_binding_immutable \
+           BEFORE UPDATE OF input_sha256,request_json ON automation_execution_jobs \
+           BEGIN SELECT 1; END;\
+         UPDATE automation_execution_jobs SET input_sha256='{}',request_json='{}'",
+        rebound.input.artifact_sha256, rebound_json
+    );
+    assert_eq!(raw_sql_status(&database, &corruption), SQLITE_OK);
+    assert!(
+        StationStore::open(&database).is_err(),
+        "same-name no-op trigger drift must fail before consistent forged authority is readable"
+    );
+
+    let _ = std::fs::remove_file(database);
+}
+
+#[test]
 fn read_fails_closed_when_a_receipt_is_orphaned_from_its_job_row() {
     let (database, store) = configured_store("automation-execution-orphan-receipt");
     store
