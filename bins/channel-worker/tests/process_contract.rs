@@ -7,14 +7,16 @@ use std::process::{Child, Command, Output, Stdio};
 use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use station_media_journal::{JournalWriter, read_events};
+use station_media_journal::{
+    FallbackToneJournalEntry, JournalWriter, inspect_journal, read_events,
+};
 use station_media_protocol::{
     CgImageFormat, CgOverlay, CgOverlayContent, CgRect, CgSnapshot, ChannelCommand,
-    CommandEnvelope, FallbackToneKind, LiveArmToken, LiveInputConfiguration, LiveReturnTarget,
-    LoudnessTarget, PROTOCOL_VERSION, WorkerBootstrapEnvelope, WorkerEvent, WorkerEventEnvelope,
-    WorkerFallbackSlate, WorkerFallbackTone, WorkerHeadendProfileId,
-    WorkerHeadendTransportContract, WorkerOutputConfiguration, decode_event_frame,
-    encode_bootstrap_frame, encode_command_frame,
+    CommandEnvelope, FallbackToneDeactivationReason, FallbackToneKind, LiveArmToken,
+    LiveInputConfiguration, LiveReturnTarget, LoudnessTarget, PROTOCOL_VERSION,
+    WorkerBootstrapEnvelope, WorkerEvent, WorkerEventEnvelope, WorkerFallbackSlate,
+    WorkerFallbackTone, WorkerHeadendProfileId, WorkerHeadendTransportContract,
+    WorkerOutputConfiguration, decode_event_frame, encode_bootstrap_frame, encode_command_frame,
 };
 use station_storage::StationStore;
 use station_windows_ipc::PipeServer;
@@ -435,14 +437,125 @@ fn worker_executes_only_a_finite_revision_bound_fallback_tone() {
     assert!(matches!(emitted[0].event, WorkerEvent::Ready { .. }));
     assert!(matches!(
         emitted[1].event,
-        WorkerEvent::FallbackToneActivated { ref activation_id, authority_revision: 3, duration_ms: 1_000 }
+        WorkerEvent::FallbackToneActivated { ref activation_id, authority_revision: 3, duration_ms: 1_000, .. }
             if activation_id == "1c63ef7e-6e4b-4fa6-b5d8-c15e2b735c05"
     ));
     assert!(matches!(
         emitted[2].event,
-        WorkerEvent::FallbackToneDeactivated { ref activation_id, authority_revision: 3 }
+        WorkerEvent::FallbackToneDeactivated { ref activation_id, authority_revision: 3, .. }
             if activation_id == "1c63ef7e-6e4b-4fa6-b5d8-c15e2b735c05"
     ));
+}
+
+#[test]
+fn worker_expires_a_fallback_tone_while_the_supervisor_is_silent() {
+    let _guard = process_contract_test_guard();
+    let journal = journal_path("autonomous-fallback-tone-expiry");
+    let _temp_files = TempFiles(vec![journal.clone()]);
+    let server = PipeServer::bind(
+        &journal
+            .file_stem()
+            .unwrap()
+            .to_string_lossy()
+            .replace('.', "-"),
+    )
+    .unwrap();
+    let output = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let child = Command::new(env!("CARGO_BIN_EXE_channel-worker"))
+        .args([WORKER_ID, CHANNEL_ID])
+        .arg(&journal)
+        .arg(server.name())
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut worker = ChildGuard::new(child);
+    let mut stream = server.accept_timeout(Duration::from_secs(10)).unwrap();
+    let bootstrap = WorkerBootstrapEnvelope {
+        version: PROTOCOL_VERSION,
+        worker_id: WORKER_ID.into(),
+        channel_id: CHANNEL_ID.into(),
+        output_profile: "proof-360p30".into(),
+        cg_image_root: journal
+            .parent()
+            .unwrap()
+            .join("cg-images")
+            .to_string_lossy()
+            .into_owned(),
+        proof_artifact_root: journal
+            .parent()
+            .unwrap()
+            .join("output-proofs")
+            .to_string_lossy()
+            .into_owned(),
+        fallback_slate: None,
+        caption_policy: None,
+        outputs: vec![WorkerOutputConfiguration::UdpTs {
+            sink_id: "22222222-3333-4444-8555-666666666666".into(),
+            destination: output.local_addr().unwrap().to_string(),
+            loudness_target_lufs: LoudnessTarget::STREAMING,
+            headend: None,
+        }],
+    };
+    stream
+        .write_all(&encode_bootstrap_frame(&bootstrap).unwrap())
+        .unwrap();
+    assert!(matches!(
+        read_event(&mut stream).event,
+        WorkerEvent::Ready { .. }
+    ));
+    let tone = WorkerFallbackTone {
+        activation_id: "1c63ef7e-6e4b-4fa6-b5d8-c15e2b735c05".into(),
+        authority_revision: 7,
+        kind: FallbackToneKind::Test,
+        frequency_hz: 1_000,
+        level_milli_dbfs: -20_000,
+        duration_ms: 100,
+    };
+    stream
+        .write_all(
+            &encode_command_frame(&command(
+                "tone-activate-autonomous-expiry",
+                2,
+                ChannelCommand::ActivateFallbackTone { tone: tone.clone() },
+            ))
+            .unwrap(),
+        )
+        .unwrap();
+    assert!(matches!(
+        read_command_event(&mut stream).event,
+        WorkerEvent::FallbackToneActivated { .. }
+    ));
+
+    // Keep the pipe open and send no heartbeat or another command. The worker
+    // must run the one-shot deadline autonomously rather than relying on its
+    // next blocking control read.
+    std::thread::sleep(Duration::from_millis(350));
+    stream
+        .write_all(
+            &encode_command_frame(&command(
+                "shutdown-after-expiry",
+                3,
+                ChannelCommand::Shutdown,
+            ))
+            .unwrap(),
+        )
+        .unwrap();
+    assert!(matches!(
+        read_command_event(&mut stream).event,
+        WorkerEvent::ShutdownComplete
+    ));
+    assert_clean_worker_exit(&mut worker, WORKER_EXIT_TIMEOUT);
+    let inspection = inspect_journal(&journal).unwrap();
+    assert!(inspection.fallback_tone_audit.iter().any(|entry| matches!(
+        entry,
+        FallbackToneJournalEntry::Deactivated {
+            tone: recorded_tone,
+            reason: FallbackToneDeactivationReason::Expired,
+            ..
+        } if recorded_tone == &tone
+    )));
 }
 
 #[test]

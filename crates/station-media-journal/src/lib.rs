@@ -9,8 +9,9 @@ use std::os::windows::fs::OpenOptionsExt;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use station_media_protocol::{
-    MAX_FRAME_BYTES, OutputTransportObservation, ProtocolError, WorkerEvent, WorkerEventEnvelope,
-    decode_event_frame, decode_persisted_event_frame, encode_event_frame,
+    FallbackToneDeactivationReason, MAX_FRAME_BYTES, OutputTransportObservation, ProtocolError,
+    WorkerEvent, WorkerEventEnvelope, WorkerFallbackTone, decode_event_frame,
+    decode_persisted_event_frame, encode_event_frame,
 };
 
 const MAGIC: [u8; 4] = *b"TLJR";
@@ -21,6 +22,7 @@ const MAX_EVENT_FRAME_BYTES: usize = MAX_FRAME_BYTES + 4;
 const RECORD_KIND_EVENT: u16 = 0;
 const RECORD_KIND_HEARTBEAT_SUMMARY: u16 = 1;
 const RECORD_KIND_COMPACTION_COMMIT: u16 = 2;
+const RECORD_KIND_FALLBACK_TONE_AUDIT: u16 = 3;
 const COMPACT_AFTER_RAW_HEARTBEATS: usize = 512;
 const RETAIN_RAW_HEARTBEATS: usize = 256;
 const MAX_SUMMARY_OUTPUTS: usize = 64;
@@ -52,7 +54,26 @@ pub struct JournalInspection {
     pub channel_id: Option<String>,
     pub retained_events: Vec<WorkerEventEnvelope>,
     pub compacted_heartbeat_ranges: Vec<CompactedHeartbeatRange>,
+    pub fallback_tone_audit: Vec<FallbackToneJournalEntry>,
     pub next_sequence: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+pub enum FallbackToneJournalEntry {
+    Activated {
+        worker_id: String,
+        channel_id: String,
+        tone: WorkerFallbackTone,
+        activated_at_monotonic_ms: u64,
+    },
+    Deactivated {
+        worker_id: String,
+        channel_id: String,
+        tone: WorkerFallbackTone,
+        reason: FallbackToneDeactivationReason,
+        deactivated_at_monotonic_ms: u64,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -64,6 +85,7 @@ struct CompactionCommit {
 
 struct JournalSnapshot {
     events: Vec<WorkerEventEnvelope>,
+    fallback_tone_audit: Vec<FallbackToneJournalEntry>,
     heartbeat_summary: Option<HeartbeatSummary>,
     identity: Option<(String, String)>,
     next_sequence: u64,
@@ -177,6 +199,24 @@ impl JournalWriter {
         Ok(())
     }
 
+    pub fn append_fallback_tone_audit(
+        &mut self,
+        entry: &FallbackToneJournalEntry,
+    ) -> Result<(), JournalError> {
+        let (worker_id, channel_id) = fallback_tone_audit_identity(entry);
+        if worker_id != self.worker_id || channel_id != self.channel_id {
+            return Err(JournalError::WrongIdentity);
+        }
+        let payload = serde_json::to_vec(entry)
+            .map_err(|error| JournalError::Io(format!("serialize fallback tone audit: {error}")))?;
+        let file = self.file.as_mut().ok_or_else(|| {
+            JournalError::Io("journal writer is unavailable after replacement failure".into())
+        })?;
+        write_record(file, RECORD_KIND_FALLBACK_TONE_AUDIT, &payload)?;
+        file.flush().map_err(io_error)?;
+        file.sync_data().map_err(io_error)
+    }
+
     fn compact_heartbeats(&mut self) -> Result<(), JournalError> {
         self.compact_heartbeats_with(replace_file)
     }
@@ -199,6 +239,7 @@ impl JournalWriter {
                 channel_id: self.channel_id.clone(),
                 ranges: Vec::new(),
             });
+        let fallback_tone_audit = snapshot.fallback_tone_audit.clone();
         let mut removed = 0_usize;
         let mut retained = Vec::with_capacity(snapshot.events.len() - remove_count);
         for event in snapshot.events {
@@ -236,6 +277,12 @@ impl JournalWriter {
         for event in &retained {
             let payload = encode_event_frame(event).map_err(JournalError::Protocol)?;
             write_record(&mut output, RECORD_KIND_EVENT, &payload)?;
+        }
+        for entry in &fallback_tone_audit {
+            let payload = serde_json::to_vec(entry).map_err(|error| {
+                corrupt(0, format!("could not encode fallback tone audit: {error}"))
+            })?;
+            write_record(&mut output, RECORD_KIND_FALLBACK_TONE_AUDIT, &payload)?;
         }
         let commit_payload = serde_json::to_vec(&CompactionCommit {
             worker_id: self.worker_id.clone(),
@@ -362,8 +409,24 @@ pub fn inspect_journal(path: impl AsRef<Path>) -> Result<JournalInspection, Jour
         compacted_heartbeat_ranges: snapshot
             .heartbeat_summary
             .map_or_else(Vec::new, |summary| summary.ranges),
+        fallback_tone_audit: snapshot.fallback_tone_audit,
         next_sequence: snapshot.next_sequence,
     })
+}
+
+fn fallback_tone_audit_identity(entry: &FallbackToneJournalEntry) -> (String, String) {
+    match entry {
+        FallbackToneJournalEntry::Activated {
+            worker_id,
+            channel_id,
+            ..
+        }
+        | FallbackToneJournalEntry::Deactivated {
+            worker_id,
+            channel_id,
+            ..
+        } => (worker_id.clone(), channel_id.clone()),
+    }
 }
 
 fn read_snapshot(path: &Path) -> Result<JournalSnapshot, JournalError> {
@@ -372,6 +435,7 @@ fn read_snapshot(path: &Path) -> Result<JournalSnapshot, JournalError> {
         Err(error) if error.kind() == ErrorKind::NotFound => {
             return Ok(JournalSnapshot {
                 events: Vec::new(),
+                fallback_tone_audit: Vec::new(),
                 heartbeat_summary: None,
                 identity: None,
                 next_sequence: 1,
@@ -383,6 +447,7 @@ fn read_snapshot(path: &Path) -> Result<JournalSnapshot, JournalError> {
     };
     file.seek(SeekFrom::Start(0)).map_err(io_error)?;
     let mut events = Vec::new();
+    let mut fallback_tone_audit = Vec::new();
     let mut offset = 0_u64;
     let mut identity: Option<(String, String)> = None;
     let mut heartbeat_summary: Option<HeartbeatSummary> = None;
@@ -502,6 +567,21 @@ fn read_snapshot(path: &Path) -> Result<JournalSnapshot, JournalError> {
                 }
                 compaction_commit = Some((commit, events.len()));
             }
+            RECORD_KIND_FALLBACK_TONE_AUDIT if version == JOURNAL_VERSION => {
+                let entry: FallbackToneJournalEntry =
+                    serde_json::from_slice(&payload).map_err(|error| {
+                        corrupt(offset, format!("invalid fallback tone audit: {error}"))
+                    })?;
+                let audit_identity = fallback_tone_audit_identity(&entry);
+                match &identity {
+                    Some(expected) if expected != &audit_identity => {
+                        return Err(corrupt(offset, "worker or channel identity changed"));
+                    }
+                    None => identity = Some(audit_identity),
+                    _ => {}
+                }
+                fallback_tone_audit.push(entry);
+            }
             _ => {
                 return Err(corrupt(
                     offset,
@@ -533,6 +613,7 @@ fn read_snapshot(path: &Path) -> Result<JournalSnapshot, JournalError> {
         .count();
     Ok(JournalSnapshot {
         events,
+        fallback_tone_audit,
         heartbeat_summary,
         identity,
         next_sequence,

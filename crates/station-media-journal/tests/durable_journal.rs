@@ -3,10 +3,13 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use station_media_journal::{JournalError, JournalWriter, inspect_journal, read_events};
+use station_media_journal::{
+    FallbackToneJournalEntry, JournalError, JournalWriter, inspect_journal, read_events,
+};
 use station_media_protocol::{
-    OutputTransportObservation, PROTOCOL_VERSION, ProtocolError, ProtocolVersion, WorkerEvent,
-    WorkerEventEnvelope, decode_event_frame, encode_event_frame,
+    FallbackToneDeactivationReason, FallbackToneKind, OutputTransportObservation, PROTOCOL_VERSION,
+    ProtocolError, ProtocolVersion, WorkerEvent, WorkerEventEnvelope, WorkerFallbackTone,
+    decode_event_frame, encode_event_frame,
 };
 
 const WORKER_ID: &str = "ae819b97-2920-434b-9d96-0b51a8ea9abb";
@@ -96,6 +99,58 @@ fn persists_events_across_reopen_without_sequence_loss() {
     let _ = std::fs::remove_file(path);
 }
 
+#[test]
+fn preserves_exact_fallback_tone_activation_and_expiry_audit_across_reopen() {
+    let path = journal_path("fallback-tone-audit");
+    let tone = WorkerFallbackTone {
+        activation_id: "1c63ef7e-6e4b-4fa6-b5d8-c15e2b735c05".into(),
+        authority_revision: 3,
+        kind: FallbackToneKind::Test,
+        frequency_hz: 1_000,
+        level_milli_dbfs: -20_000,
+        duration_ms: 1_000,
+    };
+    let mut writer = JournalWriter::open(&path, WORKER_ID, CHANNEL_ID).unwrap();
+    writer
+        .append_fallback_tone_audit(&FallbackToneJournalEntry::Activated {
+            worker_id: WORKER_ID.into(),
+            channel_id: CHANNEL_ID.into(),
+            tone: tone.clone(),
+            activated_at_monotonic_ms: 500,
+        })
+        .unwrap();
+    writer
+        .append_fallback_tone_audit(&FallbackToneJournalEntry::Deactivated {
+            worker_id: WORKER_ID.into(),
+            channel_id: CHANNEL_ID.into(),
+            tone: tone.clone(),
+            reason: FallbackToneDeactivationReason::Expired,
+            deactivated_at_monotonic_ms: 1_500,
+        })
+        .unwrap();
+    drop(writer);
+
+    assert_eq!(
+        inspect_journal(&path).unwrap().fallback_tone_audit,
+        vec![
+            FallbackToneJournalEntry::Activated {
+                worker_id: WORKER_ID.into(),
+                channel_id: CHANNEL_ID.into(),
+                tone: tone.clone(),
+                activated_at_monotonic_ms: 500,
+            },
+            FallbackToneJournalEntry::Deactivated {
+                worker_id: WORKER_ID.into(),
+                channel_id: CHANNEL_ID.into(),
+                tone,
+                reason: FallbackToneDeactivationReason::Expired,
+                deactivated_at_monotonic_ms: 1_500,
+            },
+        ]
+    );
+    let _ = std::fs::remove_file(path);
+}
+
 #[cfg(windows)]
 #[test]
 fn refuses_a_second_writer_until_the_first_owner_retires() {
@@ -134,7 +189,7 @@ fn reopens_and_replays_an_immediately_previous_major_durable_event() {
 
 #[test]
 fn durable_replay_rejects_older_and_future_protocol_majors_while_ipc_rejects_v8() {
-    for (label, major) in [("legacy-v7", 7_u16), ("future-v10", 10_u16)] {
+    for (label, major) in [("legacy-v9", 9_u16), ("future-v12", 12_u16)] {
         let path = journal_path(label);
         let (_, frame) = persisted_event_frame(1, major);
         write_event_record(&path, &frame, 1);

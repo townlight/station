@@ -94,7 +94,7 @@ fn round_trips_scheduled_take_command_and_on_air_event() {
 fn protocol_requires_the_tone_capability_major() {
     // A worker that cannot enforce the finite fallback-tone contract must not
     // participate in a mixed-version station.
-    assert_eq!(PROTOCOL_VERSION.major, 10);
+    assert_eq!(PROTOCOL_VERSION.major, 11);
 }
 
 fn fallback_tone() -> WorkerFallbackTone {
@@ -155,6 +155,30 @@ fn fallback_tone_rejects_unbounded_or_unsafe_values() {
         };
         assert!(matches!(
             encode_command_frame(&command),
+            Err(ProtocolError::InvalidFallbackTone(_))
+        ));
+    }
+}
+
+#[test]
+fn decode_rejects_hostile_raw_fallback_tone_frames() {
+    let command = CommandEnvelope {
+        version: PROTOCOL_VERSION,
+        channel_id: "62a47b7e-2a03-48d6-8703-a6e5ce986527".into(),
+        command_id: "71e2acfe-5d73-491d-9a1c-242cadc8e97d".into(),
+        expected_sequence: 42,
+        command: ChannelCommand::ActivateFallbackTone {
+            tone: fallback_tone(),
+        },
+    };
+    let frame = encode_command_frame(&command).unwrap();
+    for (from, to) in [
+        ("\"frequency_hz\":1000", "\"frequency_hz\":1501"),
+        ("\"level_milli_dbfs\":-20000", "\"level_milli_dbfs\":-11999"),
+        ("\"duration_ms\":1000", "\"duration_ms\":10001"),
+    ] {
+        assert!(matches!(
+            decode_command_frame(&replace_frame_json(&frame, from, to)),
             Err(ProtocolError::InvalidFallbackTone(_))
         ));
     }

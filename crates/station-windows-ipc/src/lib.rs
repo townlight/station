@@ -335,6 +335,21 @@ pub struct PipeStream {
     file: File,
 }
 
+impl PipeStream {
+    /// Duplicates the local handle so the worker can dedicate one handle to
+    /// blocking reads while its control owner continues to emit responses and
+    /// timer-originated safety events on the other duplex handle.
+    pub fn try_clone(&self) -> Result<Self, IpcError> {
+        self.file
+            .try_clone()
+            .map(|file| Self { file })
+            .map_err(|error| IpcError::Os {
+                operation: "duplicate pipe handle",
+                code: error.raw_os_error().unwrap_or_default() as u32,
+            })
+    }
+}
+
 /// Starts a process with its first thread suspended, assigns it to a dedicated
 /// kill-on-close Job Object, and only then resumes it.
 ///

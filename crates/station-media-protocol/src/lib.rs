@@ -74,11 +74,10 @@ impl<'de> Deserialize<'de> for LoudnessTarget {
 }
 
 pub const MAX_FRAME_BYTES: usize = 65_536;
-// A scheduled take acknowledgement carries the durable schedule binding and
-// worker-observed air time. It is a breaking worker capability, so mixed
-// pre-v9 workers fail closed.
+// Revisioned fallback-tone acknowledgement and audit fields are a breaking
+// worker capability, so mixed pre-v11 workers fail closed on the control pipe.
 pub const PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion {
-    major: 10,
+    major: 11,
     minor: 0,
 };
 
@@ -141,6 +140,49 @@ pub struct WorkerFallbackTone {
     pub frequency_hz: u16,
     pub level_milli_dbfs: i32,
     pub duration_ms: u64,
+}
+
+impl WorkerFallbackTone {
+    /// Verifies the finite worker-side authority boundary. Media execution
+    /// calls this too, so an in-process caller cannot bypass the wire decoder.
+    pub fn validate(&self) -> Result<(), String> {
+        validate_canonical_uuid(&self.activation_id, "fallback tone activation_id")?;
+        if self.authority_revision == 0 {
+            return Err("fallback tone authority_revision must be nonzero".into());
+        }
+        if !(MIN_FALLBACK_TONE_FREQUENCY_HZ..=MAX_FALLBACK_TONE_FREQUENCY_HZ)
+            .contains(&self.frequency_hz)
+        {
+            return Err("fallback tone frequency is outside the safe worker range".into());
+        }
+        if !(MIN_FALLBACK_TONE_LEVEL_MILLI_DBFS..=MAX_FALLBACK_TONE_LEVEL_MILLI_DBFS)
+            .contains(&self.level_milli_dbfs)
+        {
+            return Err("fallback tone level is outside the safe worker range".into());
+        }
+        if !(MIN_FALLBACK_TONE_DURATION_MS..=MAX_FALLBACK_TONE_DURATION_MS)
+            .contains(&self.duration_ms)
+        {
+            return Err("fallback tone duration is outside the safe worker range".into());
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FallbackToneDeactivationReason {
+    Explicit,
+    Expired,
+    SourceTransition,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkerFallbackToneDeactivation {
+    pub tone: WorkerFallbackTone,
+    pub reason: FallbackToneDeactivationReason,
+    pub deactivated_at_monotonic_ms: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -604,10 +646,16 @@ pub enum WorkerEvent {
         activation_id: String,
         authority_revision: u64,
         duration_ms: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tone: Option<WorkerFallbackTone>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        activated_at_monotonic_ms: Option<u64>,
     },
     FallbackToneDeactivated {
         activation_id: String,
         authority_revision: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        deactivation: Option<WorkerFallbackToneDeactivation>,
     },
     CommandRejected {
         command_id: String,
@@ -860,25 +908,7 @@ fn validate_caption_policy(policy: Option<&WorkerCaptionPolicy>) -> Result<(), S
 }
 
 fn validate_fallback_tone(tone: &WorkerFallbackTone) -> Result<(), String> {
-    validate_canonical_uuid(&tone.activation_id, "fallback tone activation_id")?;
-    if tone.authority_revision == 0 {
-        return Err("fallback tone authority_revision must be nonzero".into());
-    }
-    if !(MIN_FALLBACK_TONE_FREQUENCY_HZ..=MAX_FALLBACK_TONE_FREQUENCY_HZ)
-        .contains(&tone.frequency_hz)
-    {
-        return Err("fallback tone frequency is outside the safe worker range".into());
-    }
-    if !(MIN_FALLBACK_TONE_LEVEL_MILLI_DBFS..=MAX_FALLBACK_TONE_LEVEL_MILLI_DBFS)
-        .contains(&tone.level_milli_dbfs)
-    {
-        return Err("fallback tone level is outside the safe worker range".into());
-    }
-    if !(MIN_FALLBACK_TONE_DURATION_MS..=MAX_FALLBACK_TONE_DURATION_MS).contains(&tone.duration_ms)
-    {
-        return Err("fallback tone duration is outside the safe worker range".into());
-    }
-    Ok(())
+    tone.validate()
 }
 
 fn validate_fallback_tone_command(command: &ChannelCommand) -> Result<(), String> {
@@ -904,6 +934,8 @@ fn validate_fallback_tone_event(event: &WorkerEvent) -> Result<(), String> {
             activation_id,
             authority_revision,
             duration_ms,
+            tone,
+            ..
         } => {
             validate_canonical_uuid(activation_id, "fallback tone activation_id")?;
             if *authority_revision == 0
@@ -912,15 +944,37 @@ fn validate_fallback_tone_event(event: &WorkerEvent) -> Result<(), String> {
             {
                 return Err("fallback tone activation acknowledgement is invalid".into());
             }
+            if let Some(tone) = tone {
+                validate_fallback_tone(tone)?;
+                if tone.activation_id != *activation_id
+                    || tone.authority_revision != *authority_revision
+                    || tone.duration_ms != *duration_ms
+                {
+                    return Err(
+                        "fallback tone activation acknowledgement disagrees with its tone".into(),
+                    );
+                }
+            }
             Ok(())
         }
         WorkerEvent::FallbackToneDeactivated {
             activation_id,
             authority_revision,
+            deactivation,
         } => {
             validate_canonical_uuid(activation_id, "fallback tone activation_id")?;
             if *authority_revision == 0 {
                 return Err("fallback tone deactivation acknowledgement is invalid".into());
+            }
+            if let Some(deactivation) = deactivation {
+                validate_fallback_tone(&deactivation.tone)?;
+                if deactivation.tone.activation_id != *activation_id
+                    || deactivation.tone.authority_revision != *authority_revision
+                {
+                    return Err(
+                        "fallback tone deactivation acknowledgement disagrees with its tone".into(),
+                    );
+                }
             }
             Ok(())
         }
@@ -1344,6 +1398,7 @@ pub fn decode_command_frame(frame: &[u8]) -> Result<CommandEnvelope, ProtocolErr
     validate_live_command(&command.command).map_err(ProtocolError::InvalidLiveCommand)?;
     validate_scheduled_take_command(&command).map_err(ProtocolError::InvalidScheduledTake)?;
     validate_output_proof_command(&command.command).map_err(ProtocolError::InvalidOutputProof)?;
+    validate_fallback_tone_command(&command.command).map_err(ProtocolError::InvalidFallbackTone)?;
     Ok(command)
 }
 
