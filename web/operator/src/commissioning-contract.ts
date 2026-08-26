@@ -1,6 +1,6 @@
 export type CommissioningStatus = "pass" | "warning" | "pending" | "blocked" | "not_verified" | "unknown" | "recoverable";
 export type CommissioningPhase = "identity" | "station_box" | "sources_outputs" | "guided_air_proof" | "external_proof";
-export type CommissioningAction = "station" | "health" | "media" | "channels" | "schedule" | "publishing";
+export type CommissioningAction = "station" | "health" | "media" | "channels" | "schedule" | "publishing" | "automation";
 
 export interface AuthoritativeCommissioningCheck {
   id: string;
@@ -51,6 +51,7 @@ const FALLBACK_ACTIONS: Record<string, CommissioningAction> = {
   fallback_slate: "channels",
   cea708_captions: "channels",
   publish_targets: "publishing",
+  automation_model_policy: "automation",
   headend_output_setup: "channels",
   cable_transport_validation: "health",
   ready_media: "media",

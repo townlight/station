@@ -267,6 +267,7 @@ fn commissioning_report_is_ordered_and_does_not_claim_field_proof() {
         .find(|check| check["id"] == "publish_targets")
         .unwrap();
     assert_eq!(publish_targets["status"], "blocked");
+    assert_eq!(publish_targets["action"], "publishing");
     assert!(
         publish_targets["detail"]
             .as_str()
@@ -285,6 +286,7 @@ fn commissioning_report_is_ordered_and_does_not_claim_field_proof() {
         .find(|check| check["id"] == "automation_model_policy")
         .unwrap();
     assert_eq!(automation["status"], "blocked");
+    assert_eq!(automation["action"], "automation");
     assert!(
         automation["detail"]
             .as_str()

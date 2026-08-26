@@ -7745,7 +7745,7 @@ impl Api {
             CommissioningPhase::SourcesOutputs,
             if publish_targets_pass { CommissioningCheckStatus::Pass } else { CommissioningCheckStatus::Blocked },
             true,
-            None,
+            Some("publishing"),
             publication_readiness.as_ref().map_or_else(
                 || "No current-candidate publish-target connection authority is available because the installed candidate is not verified.".into(),
                 |readiness| format!(
@@ -7813,7 +7813,7 @@ impl Api {
             CommissioningPhase::SourcesOutputs,
             if automation_policy_pass { CommissioningCheckStatus::Pass } else { CommissioningCheckStatus::Blocked },
             true,
-            None,
+            Some("automation"),
             automation_readiness.as_ref().map_or_else(
                 || "No current-candidate automation connection authority is available because the installed candidate is not verified.".into(),
                 |readiness| format!(

@@ -29,7 +29,7 @@ import {
 } from "./station-box-contract";
 import type { StationBoxProfile } from "./station-box-contract";
 
-type CommissioningDestination = "health" | "media" | "channels" | "schedule" | "publishing";
+type CommissioningDestination = "health" | "media" | "channels" | "schedule" | "publishing" | "automation";
 
 interface CommissioningProps {
   onNavigate: (view: CommissioningDestination) => void;
@@ -40,7 +40,7 @@ function actionView(action: CommissioningAction | null): CommissioningDestinatio
 }
 
 function actionLabel(action: CommissioningAction): string {
-  return { station: "station identity", health: "system health", media: "media setup", channels: "channel setup", schedule: "schedule", publishing: "publishing authority" }[action];
+  return { station: "station identity", health: "system health", media: "media setup", channels: "channel setup", schedule: "schedule", publishing: "publishing authority", automation: "automation policy" }[action];
 }
 
 function statusTone(status: CommissioningStatus | "fail"): CommissioningStatus {
