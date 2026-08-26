@@ -9,8 +9,9 @@ use station_media_journal::{
 };
 use station_media_protocol::{WorkerEvent, WorkerEventEnvelope, encode_event_frame};
 use station_reporting::runtime::{
-    AsRunProjectionRuntime, AsRunState, JournalTake, PendingScheduledTake, ProjectionCheckpoint,
-    ProjectionInput, ProjectionWindow, ReportingRuntime,
+    ASRUN_CHECKPOINT_VERSION, AsRunProjectionRuntime, AsRunState, JournalTake,
+    PendingScheduledTake, ProjectionCheckpoint, ProjectionInput, ProjectionWindow,
+    ReportingRuntime,
 };
 use std::path::Path;
 
@@ -108,7 +109,7 @@ pub fn project_durable_journal(
     channel_id: &str,
     station_timezone: &str,
     now_utc_ms: i64,
-    verify_checkpoint_prefix: bool,
+    _verify_checkpoint_prefix: bool,
 ) -> Result<AsRunProjectionRuntime, AsRunJournalAdapterError> {
     if !uuid(channel_id)
         || expected_worker_id != format!("station-worker-{channel_id}")
@@ -134,8 +135,49 @@ pub fn project_durable_journal(
         Vec::new()
     };
     let prior = existing.as_ref().map(|projection| &projection.checkpoint);
+    let legacy_checkpoint = prior.is_some_and(|checkpoint| checkpoint.checkpoint_version == 0);
+    // A version-zero cursor is never resumed. Establish the retained canonical
+    // frame anchor before a rollover can write anything, then use that anchor
+    // as the crash-safe v2 baseline if an old local day needs closing.
+    let legacy_anchor = if legacy_checkpoint {
+        let checkpoint = prior.expect("legacy projection has a checkpoint");
+        Some(legacy_checkpoint_anchor(
+            journal_path.as_ref(),
+            checkpoint,
+            expected_worker_id,
+            channel_id,
+            existing
+                .as_ref()
+                .is_some_and(|projection| !projection.entries.is_empty()),
+        )?)
+    } else {
+        None
+    };
+    if !continues_window && let Some(previous) = existing.as_ref() {
+        let mut rollover_previous = previous.clone();
+        if let Some((Some(cursor), rederived_pending)) = &legacy_anchor {
+            rollover_previous.checkpoint = legacy_checkpoint_v2_baseline(
+                &previous.checkpoint,
+                cursor,
+                rederived_pending.clone(),
+            )?;
+        }
+        close_elapsed_projection_windows(
+            store,
+            &rollover_previous,
+            station_timezone,
+            &window,
+            now_utc_ms,
+        )?;
+    }
     let mut pending = prior.and_then(|checkpoint| checkpoint.pending_start.clone());
     let mut pending_is_uncovered = prior.is_some_and(|checkpoint| checkpoint.pending_is_uncovered);
+    if let Some((_, rederived_pending)) = &legacy_anchor
+        && prior.is_some_and(|checkpoint| checkpoint.pending_start.is_some())
+    {
+        pending = rederived_pending.clone();
+        pending_is_uncovered = prior.is_some_and(|checkpoint| checkpoint.pending_is_uncovered);
+    }
     let mut committed_sequence = if continues_window {
         prior.map_or(0, materialized_sequence)
     } else {
@@ -146,22 +188,36 @@ pub fn project_durable_journal(
     } else {
         String::new()
     };
-    let source_cursor = prior.and_then(|checkpoint| {
-        (checkpoint.reader_byte_offset > 0).then(|| JournalCursor {
-            byte_offset: checkpoint.reader_byte_offset,
-            raw_sequence: checkpoint.reader_raw_sequence,
-            prefix_hash: checkpoint.reader_prefix_hash.clone(),
-            file_identity: checkpoint.reader_file_identity.clone(),
-            saw_heartbeat_summary: checkpoint.reader_saw_heartbeat_summary,
-            saw_compaction_commit: checkpoint.reader_saw_compaction_commit,
+    let source_cursor = if legacy_checkpoint {
+        legacy_anchor
+            .as_ref()
+            .and_then(|(cursor, _)| cursor.clone())
+    } else {
+        prior.and_then(|checkpoint| {
+            (checkpoint.reader_byte_offset > 0).then(|| JournalCursor {
+                byte_offset: checkpoint.reader_byte_offset,
+                raw_sequence: checkpoint.reader_raw_sequence,
+                prefix_hash: checkpoint.reader_prefix_hash.clone(),
+                file_identity: checkpoint.reader_file_identity.clone(),
+                worker_id: (!checkpoint.reader_worker_id.is_empty())
+                    .then(|| checkpoint.reader_worker_id.clone()),
+                channel_id: (!checkpoint.reader_channel_id.is_empty())
+                    .then(|| checkpoint.reader_channel_id.clone()),
+                saw_heartbeat_summary: checkpoint.reader_saw_heartbeat_summary,
+                saw_compaction_commit: checkpoint.reader_saw_compaction_commit,
+                compaction_next_sequence: checkpoint.reader_compaction_next_sequence,
+            })
         })
-    });
+    };
     let path = journal_path.as_ref();
     let read = match read_journal_incremental(
         path,
         source_cursor.as_ref(),
         MAX_INCREMENTAL_JOURNAL_EVENTS,
-        verify_checkpoint_prefix && source_cursor.is_some(),
+        // Reporting runs once per minute, outside the control loop. Verify
+        // every durable prefix here so an in-place valid rewrite before the
+        // cursor cannot hide behind a still-valid suffix.
+        source_cursor.is_some(),
     ) {
         Ok(read) => read,
         Err(error) if source_cursor.is_some() && compaction_recovery_allowed(&error) => {
@@ -171,8 +227,7 @@ pub fn project_durable_journal(
             if anchor_sequence == 0 && anchor_hash.is_empty() {
                 if checkpoint.pending_start.is_some() || materialized_sequence(checkpoint) != 0 {
                     return Err(AsRunJournalAdapterError::Journal(
-                        "journal replacement has no independent retained event-frame anchor"
-                            .into(),
+                        "journal replacement has no independent retained event-frame anchor".into(),
                     ));
                 }
                 read_journal_incremental(path, None, MAX_INCREMENTAL_JOURNAL_EVENTS, false)
@@ -190,8 +245,7 @@ pub fn project_durable_journal(
                     || frame_hash(expected_worker_id, &anchor)? != *anchor_hash
                 {
                     return Err(AsRunJournalAdapterError::Journal(
-                        "journal replacement does not retain the durable event-frame anchor"
-                            .into(),
+                        "journal replacement does not retain the durable event-frame anchor".into(),
                     ));
                 }
                 pending = scheduled_pending(&anchor, expected_worker_id)?;
@@ -257,6 +311,13 @@ pub fn project_durable_journal(
         ));
     }
     let checkpoint = ProjectionCheckpoint {
+        checkpoint_version: ASRUN_CHECKPOINT_VERSION,
+        projection_revision: next_projection_revision(
+            prior,
+            continues_window,
+            legacy_checkpoint,
+            &read.cursor,
+        )?,
         channel_id: channel_id.into(),
         journal_id: expected_worker_id.into(),
         journal_sequence: read.cursor.raw_sequence,
@@ -267,8 +328,11 @@ pub fn project_durable_journal(
         reader_raw_sequence: read.cursor.raw_sequence,
         reader_prefix_hash: read.cursor.prefix_hash,
         reader_file_identity: read.cursor.file_identity,
+        reader_worker_id: read.cursor.worker_id.unwrap_or_default(),
+        reader_channel_id: read.cursor.channel_id.unwrap_or_default(),
         reader_saw_heartbeat_summary: read.cursor.saw_heartbeat_summary,
         reader_saw_compaction_commit: read.cursor.saw_compaction_commit,
+        reader_compaction_next_sequence: read.cursor.compaction_next_sequence,
         source_anchor_sequence: pending
             .as_ref()
             .map_or(committed_sequence, |open| open.journal_sequence),
@@ -337,6 +401,86 @@ fn projection_from_entries(
     projection.checkpoint = checkpoint;
     projection.window = Some(window);
     Ok(projection)
+}
+
+/// A scheduled transition remains open until its successor arrives. When the
+/// reporting day rolls over first, materialize the exact half-open part of
+/// that source transition in every elapsed local-day window before beginning
+/// the current window. Each persisted segment keeps the same source sequence
+/// but has a distinct time-derived evidence identity, so an interrupted
+/// rollover can replay without overlap or a fabricated hole.
+fn close_elapsed_projection_windows(
+    store: &StationStore,
+    previous: &AsRunProjectionRuntime,
+    station_timezone: &str,
+    target: &ProjectionWindow,
+    now_utc_ms: i64,
+) -> Result<(), AsRunJournalAdapterError> {
+    if previous.station_timezone != station_timezone {
+        return Ok(());
+    }
+    let Some(mut window) = previous.window.clone() else {
+        return Ok(());
+    };
+    if window == *target {
+        return Ok(());
+    }
+    if window.starts_at_utc_ms >= target.starts_at_utc_ms {
+        return Err(AsRunJournalAdapterError::Journal(
+            "as-run projection window moved backwards".into(),
+        ));
+    }
+    let Some(open) = previous.checkpoint.pending_start.clone() else {
+        return Ok(());
+    };
+    let mut entries = previous.entries.clone();
+    let mut checkpoint = previous.checkpoint.clone();
+    for _ in 0..=370 {
+        let start = open.started_at_unix_ms.max(window.starts_at_utc_ms);
+        if start < window.ends_at_utc_ms {
+            let take = closed_take(
+                &open,
+                &previous.channel_id,
+                start,
+                window.ends_at_utc_ms,
+                checkpoint.pending_is_uncovered,
+            );
+            append_or_verify(&mut entries, &take)?;
+            checkpoint.materialized_sequence = take.journal_sequence;
+            checkpoint.materialized_hash = take.journal_hash;
+        }
+        let closed = projection_from_entries(
+            &previous.channel_id,
+            station_timezone,
+            &checkpoint.journal_id,
+            entries.clone(),
+            checkpoint.clone(),
+            window.clone(),
+        )?;
+        store
+            .persist_asrun_projection(&closed, now_utc_ms)
+            .map_err(|error| AsRunJournalAdapterError::Storage(format!("{error:?}")))?;
+        let next = station_local_day_window(station_timezone, window.ends_at_utc_ms)?;
+        if next == *target {
+            return Ok(());
+        }
+        if next.starts_at_utc_ms <= window.starts_at_utc_ms
+            || next.starts_at_utc_ms >= target.starts_at_utc_ms
+        {
+            return Err(AsRunJournalAdapterError::Journal(
+                "as-run projection windows are not consecutive".into(),
+            ));
+        }
+        window = next;
+        entries.clear();
+        // A fresh day has no materialized rows yet. The independently
+        // authenticated pending anchor intentionally survives this reset.
+        checkpoint.materialized_sequence = 0;
+        checkpoint.materialized_hash.clear();
+    }
+    Err(AsRunJournalAdapterError::Journal(
+        "as-run projection rollover exceeds the bounded calendar recovery range".into(),
+    ))
 }
 
 fn append_or_verify(
@@ -469,6 +613,125 @@ fn materialized_hash(checkpoint: &ProjectionCheckpoint) -> String {
     checkpoint.materialized_hash.clone()
 }
 
+fn next_projection_revision(
+    prior: Option<&ProjectionCheckpoint>,
+    continues_window: bool,
+    legacy_checkpoint: bool,
+    cursor: &JournalCursor,
+) -> Result<u64, AsRunJournalAdapterError> {
+    let Some(prior) = prior else {
+        return Ok(1);
+    };
+    let reader_changed = prior.reader_byte_offset != cursor.byte_offset
+        || prior.reader_raw_sequence != cursor.raw_sequence
+        || prior.reader_prefix_hash != cursor.prefix_hash
+        || prior.reader_file_identity != cursor.file_identity
+        || prior.reader_worker_id != cursor.worker_id.as_deref().unwrap_or_default()
+        || prior.reader_channel_id != cursor.channel_id.as_deref().unwrap_or_default()
+        || prior.reader_saw_heartbeat_summary != cursor.saw_heartbeat_summary
+        || prior.reader_saw_compaction_commit != cursor.saw_compaction_commit
+        || prior.reader_compaction_next_sequence != cursor.compaction_next_sequence;
+    if !continues_window || legacy_checkpoint || reader_changed {
+        return prior.projection_revision.checked_add(1).ok_or_else(|| {
+            AsRunJournalAdapterError::Journal(
+                "as-run projection checkpoint revision is exhausted".into(),
+            )
+        });
+    }
+    Ok(prior.projection_revision.max(1))
+}
+
+/// Legacy checkpoints predate a durable version marker. Their saved byte
+/// offsets are deliberately not trusted: re-establish a retained canonical
+/// frame anchor first, then persist a version-two cursor/output transaction.
+/// If the historical output requires an anchor and none can be proven, this
+/// returns before any projection write so the existing state remains intact.
+fn legacy_checkpoint_anchor(
+    path: &Path,
+    checkpoint: &ProjectionCheckpoint,
+    expected_worker_id: &str,
+    channel_id: &str,
+    has_projection_output: bool,
+) -> Result<(Option<JournalCursor>, Option<PendingScheduledTake>), AsRunJournalAdapterError> {
+    let (sequence, hash, requires_pending) = if let Some(pending) = &checkpoint.pending_start {
+        (pending.journal_sequence, pending.journal_hash.clone(), true)
+    } else if checkpoint.materialized_sequence > 0 && !checkpoint.materialized_hash.is_empty() {
+        (
+            checkpoint.materialized_sequence,
+            checkpoint.materialized_hash.clone(),
+            false,
+        )
+    } else {
+        if checkpoint.reader_byte_offset > 0 || has_projection_output {
+            return Err(AsRunJournalAdapterError::Journal(
+                "legacy reader checkpoint has no independently verifiable event anchor".into(),
+            ));
+        }
+        return Ok((None, None));
+    };
+    if sequence == 0 || !valid_frame_hash(&hash) {
+        return Err(AsRunJournalAdapterError::Journal(
+            "legacy retained event anchor is invalid".into(),
+        ));
+    }
+    let (anchor, cursor) = find_journal_event_cursor(path, sequence).map_err(journal_error)?;
+    if anchor.worker_id != expected_worker_id
+        || anchor.channel_id != channel_id
+        || frame_hash(expected_worker_id, &anchor)? != hash
+    {
+        return Err(AsRunJournalAdapterError::Journal(
+            "legacy checkpoint anchor is absent or does not match its canonical frame".into(),
+        ));
+    }
+    let rederived_pending = scheduled_pending(&anchor, expected_worker_id)?;
+    if requires_pending && rederived_pending.is_none() {
+        return Err(AsRunJournalAdapterError::Journal(
+            "legacy pending checkpoint anchor is not a scheduled transition".into(),
+        ));
+    }
+    Ok((Some(cursor), rederived_pending.filter(|_| requires_pending)))
+}
+
+/// Replaces an untrusted legacy byte position with the cursor immediately
+/// after its revalidated canonical event frame. This baseline is safe to
+/// persist during a day rollover: a crash can replay the suffix after the
+/// retained frame, but can never skip it using a legacy offset.
+fn legacy_checkpoint_v2_baseline(
+    legacy: &ProjectionCheckpoint,
+    cursor: &JournalCursor,
+    pending: Option<PendingScheduledTake>,
+) -> Result<ProjectionCheckpoint, AsRunJournalAdapterError> {
+    let mut checkpoint = legacy.clone();
+    checkpoint.checkpoint_version = ASRUN_CHECKPOINT_VERSION;
+    checkpoint.projection_revision =
+        legacy.projection_revision.checked_add(1).ok_or_else(|| {
+            AsRunJournalAdapterError::Journal(
+                "as-run projection checkpoint revision is exhausted".into(),
+            )
+        })?;
+    checkpoint.journal_sequence = cursor.raw_sequence;
+    checkpoint.journal_hash = cursor.prefix_hash.clone();
+    checkpoint.reader_byte_offset = cursor.byte_offset;
+    checkpoint.reader_raw_sequence = cursor.raw_sequence;
+    checkpoint.reader_prefix_hash = cursor.prefix_hash.clone();
+    checkpoint.reader_file_identity = cursor.file_identity.clone();
+    checkpoint.reader_worker_id = cursor.worker_id.clone().unwrap_or_default();
+    checkpoint.reader_channel_id = cursor.channel_id.clone().unwrap_or_default();
+    checkpoint.reader_saw_heartbeat_summary = cursor.saw_heartbeat_summary;
+    checkpoint.reader_saw_compaction_commit = cursor.saw_compaction_commit;
+    checkpoint.reader_compaction_next_sequence = cursor.compaction_next_sequence;
+    checkpoint.pending_is_uncovered = pending.is_some() && legacy.pending_is_uncovered;
+    checkpoint.pending_start = pending;
+    if let Some(open) = &checkpoint.pending_start {
+        checkpoint.source_anchor_sequence = open.journal_sequence;
+        checkpoint.source_anchor_frame_hash = open.journal_hash.clone();
+    } else {
+        checkpoint.source_anchor_sequence = checkpoint.materialized_sequence;
+        checkpoint.source_anchor_frame_hash = checkpoint.materialized_hash.clone();
+    }
+    Ok(checkpoint)
+}
+
 fn valid_frame_hash(value: &str) -> bool {
     value.len() == 64 && value.as_bytes().iter().all(u8::is_ascii_hexdigit)
 }
@@ -477,7 +740,9 @@ fn compaction_recovery_allowed(error: &JournalError) -> bool {
     matches!(
         error,
         JournalError::Corrupt { reason, .. }
-            if reason.contains("truncated") || reason.contains("file identity changed")
+            if reason.contains("truncated")
+                || reason.contains("file identity changed")
+                || reason.contains("cursor compaction seal is incomplete")
     )
 }
 

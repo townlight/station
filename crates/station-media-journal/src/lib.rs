@@ -66,6 +66,15 @@ pub struct JournalCursor {
     pub raw_sequence: u64,
     pub prefix_hash: String,
     pub file_identity: String,
+    #[serde(default)]
+    pub worker_id: Option<String>,
+    #[serde(default)]
+    pub channel_id: Option<String>,
+    /// `next_sequence` declared by the compaction commit in this prefix.
+    /// It remains with a cursor inside retained frames so a later same-file
+    /// truncation cannot make an authenticated compacted suffix disappear.
+    #[serde(default)]
+    pub compaction_next_sequence: u64,
     /// Layout facts are part of the durable position. They let a bounded
     /// reader validate the eventual compaction commit even when a retained
     /// event batch ends before that commit record.
@@ -269,10 +278,10 @@ impl JournalWriter {
         for summary_payload in encode_summary_chunks(&summary)? {
             write_record(&mut output, RECORD_KIND_HEARTBEAT_SUMMARY, &summary_payload)?;
         }
-        for event in &retained {
-            let payload = encode_event_frame(event).map_err(JournalError::Protocol)?;
-            write_record(&mut output, RECORD_KIND_EVENT, &payload)?;
-        }
+        // Seal the compacted summary before exposing the retained frames. A
+        // bounded consumer may checkpoint after any retained event, so the
+        // commit has to be inside that persisted prefix rather than delayed
+        // until after the retained batch.
         let commit_payload = serde_json::to_vec(&CompactionCommit {
             worker_id: self.worker_id.clone(),
             channel_id: self.channel_id.clone(),
@@ -280,6 +289,10 @@ impl JournalWriter {
         })
         .map_err(|error| corrupt(0, format!("could not encode compaction commit: {error}")))?;
         write_record(&mut output, RECORD_KIND_COMPACTION_COMMIT, &commit_payload)?;
+        for event in &retained {
+            let payload = encode_event_frame(event).map_err(JournalError::Protocol)?;
+            write_record(&mut output, RECORD_KIND_EVENT, &payload)?;
+        }
         output.flush().map_err(io_error)?;
         output.sync_all().map_err(io_error)?;
         drop(output);
@@ -409,12 +422,11 @@ pub fn inspect_journal_bounded(
 /// Reads at most `event_limit` newly appended worker events after `cursor`.
 ///
 /// The normal path seeks directly to the durable byte offset; it neither
-/// allocates nor rescans retained history. A caller should request
-/// `verify_prefix` once after process restart. That one recovery check streams
-/// the already-consumed prefix and compares the durable hash chain before any
-/// new output is accepted. Subsequent calls retain the checkpoint proof while
-/// doing only incremental work. A changed file identity or a shorter file is
-/// rejected rather than guessed at; callers can use
+/// allocates nor rescans retained history. Callers that make durable output
+/// decisions must request `verify_prefix` on every pass: that authenticated
+/// scan detects an in-place valid rewrite before the cursor even when its
+/// suffix still parses. A changed file identity or a shorter file is rejected
+/// rather than guessed at; callers can use
 /// [`find_journal_event_cursor`] to make an explicit, validated compaction
 /// recovery from a retained transition anchor.
 pub fn read_journal_incremental(
@@ -460,26 +472,46 @@ pub fn read_journal_incremental(
     let mut prefix_hash = cursor
         .map(|value| value.prefix_hash.clone())
         .unwrap_or_else(initial_prefix_hash);
-    let mut coverage = SequenceCoverage::after_raw(cursor.map_or(0, |value| value.raw_sequence), offset)?;
-    let mut worker_id = None;
-    let mut channel_id = None;
+    let mut coverage =
+        SequenceCoverage::after_raw(cursor.map_or(0, |value| value.raw_sequence), offset)?;
+    let mut worker_id = cursor.and_then(|value| value.worker_id.clone());
+    let mut channel_id = cursor.and_then(|value| value.channel_id.clone());
+    if worker_id.is_some() != channel_id.is_some() {
+        return Err(corrupt(offset, "journal cursor identity is incomplete"));
+    }
     let mut events = Vec::new();
     let mut summary_seen = cursor.is_some_and(|value| value.saw_heartbeat_summary);
     let mut commit_seen = cursor.is_some_and(|value| value.saw_compaction_commit);
+    let mut compaction_next_sequence = cursor.map_or(0, |value| value.compaction_next_sequence);
+    if commit_seen != (compaction_next_sequence != 0) {
+        return Err(corrupt(
+            offset,
+            "journal cursor compaction seal is incomplete",
+        ));
+    }
+    let mut compaction_coverage_complete =
+        commit_seen && coverage.next_sequence() >= compaction_next_sequence;
     let mut saw_event = cursor.is_some();
     let mut summary_ranges = Vec::new();
     let mut summary_range_index = 0_usize;
-
-    while events.len() < event_limit {
-        let Some(record) = read_stream_record(&mut file, offset)? else {
-            break;
-        };
+    // A compaction file is only authoritative once its commit record seals
+    // the complete summary + retained-event coverage. If a bounded result
+    // ends earlier, retain its cursor but continue streaming only for
+    // validation; never return (and therefore never persist) unsealed rows.
+    let mut bounded_cursor = None;
+    while let Some(record) = read_stream_record(&mut file, offset)? {
         let record_end = offset
             .checked_add(record.total_bytes)
             .ok_or_else(|| corrupt(offset, "journal offset overflow"))?;
         prefix_hash = next_prefix_hash(&prefix_hash, &record.raw_bytes);
         match record.kind {
             StreamRecordKind::Event(event) => {
+                if summary_seen && !commit_seen {
+                    return Err(corrupt(
+                        offset,
+                        "retained events require a preceding compaction commit; heartbeat summary has no compaction commit",
+                    ));
+                }
                 let identity = (event.worker_id.clone(), event.channel_id.clone());
                 bind_stream_identity(&mut worker_id, &mut channel_id, identity, offset)?;
                 // This is deliberately equality, not merely monotonicity: a
@@ -502,8 +534,31 @@ pub fn read_journal_incremental(
                         offset,
                     )?;
                 }
+                update_compaction_coverage(
+                    &coverage,
+                    commit_seen,
+                    compaction_next_sequence,
+                    &mut compaction_coverage_complete,
+                    offset,
+                )?;
                 saw_event = true;
-                events.push(event);
+                if events.len() < event_limit {
+                    events.push(event);
+                    if events.len() == event_limit {
+                        bounded_cursor = Some(stream_cursor(
+                            record_end,
+                            &coverage,
+                            &prefix_hash,
+                            &file_identity,
+                            (&worker_id, &channel_id),
+                            (summary_seen, commit_seen, compaction_next_sequence),
+                        ));
+                        if !summary_seen || compaction_coverage_complete {
+                            offset = record_end;
+                            break;
+                        }
+                    }
+                }
             }
             StreamRecordKind::HeartbeatSummary(summary) => {
                 if saw_event || commit_seen || cursor.is_some() {
@@ -521,49 +576,72 @@ pub fn read_journal_incremental(
                 summary_seen = true;
             }
             StreamRecordKind::CompactionCommit(commit) => {
-                if cursor.is_none() {
-                    finish_summary_coverage(
-                        &mut coverage,
-                        &summary_ranges,
-                        &mut summary_range_index,
-                        offset,
-                    )?;
-                }
-                if !summary_seen || commit_seen {
+                if !summary_seen || commit_seen || saw_event {
                     return Err(corrupt(
                         offset,
-                        "compaction commit requires one preceding heartbeat summary",
+                        "compaction commit must seal heartbeat summaries before retained events",
                     ));
                 }
                 if worker_id.as_deref() != Some(&commit.worker_id)
                     || channel_id.as_deref() != Some(&commit.channel_id)
-                    || commit.next_sequence != coverage.next_sequence()
                 {
-                    return Err(corrupt(
-                        offset,
-                        "compaction commit does not bind sequence and identity",
-                    ));
+                    return Err(corrupt(offset, "compaction commit does not bind identity"));
                 }
                 commit_seen = true;
+                compaction_next_sequence = commit.next_sequence;
+                update_compaction_coverage(
+                    &coverage,
+                    true,
+                    compaction_next_sequence,
+                    &mut compaction_coverage_complete,
+                    offset,
+                )?;
             }
         }
         offset = record_end;
+        if bounded_cursor.is_some() && (!summary_seen || compaction_coverage_complete) {
+            break;
+        }
     }
-    if summary_seen && !commit_seen && events.len() < event_limit {
+    if summary_seen && !commit_seen {
         return Err(corrupt(0, "heartbeat summary has no compaction commit"));
     }
+    if commit_seen && !compaction_coverage_complete {
+        finish_summary_coverage(
+            &mut coverage,
+            &summary_ranges,
+            &mut summary_range_index,
+            offset,
+        )?;
+        update_compaction_coverage(
+            &coverage,
+            true,
+            compaction_next_sequence,
+            &mut compaction_coverage_complete,
+            offset,
+        )?;
+    }
+    if commit_seen && !compaction_coverage_complete {
+        return Err(corrupt(
+            offset,
+            "compaction commit does not cover every retained sequence",
+        ));
+    }
+    let final_cursor = bounded_cursor.unwrap_or_else(|| {
+        stream_cursor(
+            offset,
+            &coverage,
+            &prefix_hash,
+            &file_identity,
+            (&worker_id, &channel_id),
+            (summary_seen, commit_seen, compaction_next_sequence),
+        )
+    });
     Ok(IncrementalJournalRead {
         worker_id,
         channel_id,
         events,
-        cursor: JournalCursor {
-            byte_offset: offset,
-            raw_sequence: coverage.raw_sequence(),
-            prefix_hash,
-            file_identity,
-            saw_heartbeat_summary: summary_seen,
-            saw_compaction_commit: commit_seen,
-        },
+        cursor: final_cursor,
     })
 }
 
@@ -586,9 +664,12 @@ pub fn find_journal_event_cursor(
     let mut offset = 0_u64;
     let mut coverage = SequenceCoverage::new();
     let mut prefix_hash = initial_prefix_hash();
-    let mut identity: Option<(String, String)> = None;
+    let mut worker_id = None;
+    let mut channel_id = None;
     let mut summary_seen = false;
     let mut commit_seen = false;
+    let mut compaction_next_sequence = 0_u64;
+    let mut compaction_coverage_complete = false;
     let mut saw_event = false;
     let mut summary_ranges = Vec::new();
     let mut summary_range_index = 0_usize;
@@ -600,14 +681,18 @@ pub fn find_journal_event_cursor(
         prefix_hash = next_prefix_hash(&prefix_hash, &record.raw_bytes);
         match record.kind {
             StreamRecordKind::Event(event) => {
-                let event_identity = (event.worker_id.clone(), event.channel_id.clone());
-                if identity
-                    .as_ref()
-                    .is_some_and(|value| value != &event_identity)
-                {
-                    return Err(corrupt(offset, "worker or channel identity changed"));
+                if summary_seen && !commit_seen {
+                    return Err(corrupt(
+                        offset,
+                        "retained events require a preceding compaction commit; heartbeat summary has no compaction commit",
+                    ));
                 }
-                identity.get_or_insert(event_identity);
+                bind_stream_identity(
+                    &mut worker_id,
+                    &mut channel_id,
+                    (event.worker_id.clone(), event.channel_id.clone()),
+                    offset,
+                )?;
                 apply_summary_coverage(
                     &mut coverage,
                     &summary_ranges,
@@ -621,15 +706,22 @@ pub fn find_journal_event_cursor(
                     &mut summary_range_index,
                     offset,
                 )?;
+                update_compaction_coverage(
+                    &coverage,
+                    commit_seen,
+                    compaction_next_sequence,
+                    &mut compaction_coverage_complete,
+                    offset,
+                )?;
                 saw_event = true;
-                let cursor = JournalCursor {
-                    byte_offset: record_end,
-                    raw_sequence: coverage.raw_sequence(),
-                    prefix_hash: prefix_hash.clone(),
-                    file_identity: file_identity.clone(),
-                    saw_heartbeat_summary: summary_seen,
-                    saw_compaction_commit: commit_seen,
-                };
+                let cursor = stream_cursor(
+                    record_end,
+                    &coverage,
+                    &prefix_hash,
+                    &file_identity,
+                    (&worker_id, &channel_id),
+                    (summary_seen, commit_seen, compaction_next_sequence),
+                );
                 if event.sequence == sequence {
                     found = Some((event, cursor));
                 }
@@ -639,31 +731,24 @@ pub fn find_journal_event_cursor(
                     return Err(corrupt(offset, "heartbeat summary records are invalid"));
                 }
                 validate_summary(&summary, offset)?;
-                let summary_identity = (summary.worker_id.clone(), summary.channel_id.clone());
-                if identity
-                    .as_ref()
-                    .is_some_and(|value| value != &summary_identity)
-                {
-                    return Err(corrupt(offset, "worker or channel identity changed"));
-                }
-                identity.get_or_insert(summary_identity);
+                bind_stream_identity(
+                    &mut worker_id,
+                    &mut channel_id,
+                    (summary.worker_id.clone(), summary.channel_id.clone()),
+                    offset,
+                )?;
                 for range in &summary.ranges {
                     summary_ranges.push((range.first_sequence, range.last_sequence));
                 }
                 summary_seen = true;
             }
             StreamRecordKind::CompactionCommit(commit) => {
-                finish_summary_coverage(
-                    &mut coverage,
-                    &summary_ranges,
-                    &mut summary_range_index,
-                    offset,
-                )?;
                 if !summary_seen
                     || commit_seen
-                    || identity.as_ref()
-                        != Some(&(commit.worker_id.clone(), commit.channel_id.clone()))
-                    || commit.next_sequence != coverage.next_sequence()
+                    || saw_event
+                    || commit.next_sequence == 0
+                    || worker_id.as_deref() != Some(&commit.worker_id)
+                    || channel_id.as_deref() != Some(&commit.channel_id)
                 {
                     return Err(corrupt(
                         offset,
@@ -671,6 +756,14 @@ pub fn find_journal_event_cursor(
                     ));
                 }
                 commit_seen = true;
+                compaction_next_sequence = commit.next_sequence;
+                update_compaction_coverage(
+                    &coverage,
+                    true,
+                    compaction_next_sequence,
+                    &mut compaction_coverage_complete,
+                    offset,
+                )?;
             }
         }
         offset = record_end;
@@ -678,7 +771,33 @@ pub fn find_journal_event_cursor(
     if summary_seen && !commit_seen {
         return Err(corrupt(0, "heartbeat summary has no compaction commit"));
     }
-    found.ok_or_else(|| corrupt(offset, "durable reader anchor is absent after journal replacement"))
+    if commit_seen && !compaction_coverage_complete {
+        finish_summary_coverage(
+            &mut coverage,
+            &summary_ranges,
+            &mut summary_range_index,
+            offset,
+        )?;
+        update_compaction_coverage(
+            &coverage,
+            true,
+            compaction_next_sequence,
+            &mut compaction_coverage_complete,
+            offset,
+        )?;
+    }
+    if commit_seen && !compaction_coverage_complete {
+        return Err(corrupt(
+            offset,
+            "compaction commit does not cover every retained sequence",
+        ));
+    }
+    found.ok_or_else(|| {
+        corrupt(
+            offset,
+            "durable reader anchor is absent after journal replacement",
+        )
+    })
 }
 
 fn inspection_from_snapshot(snapshot: JournalSnapshot) -> Result<JournalInspection, JournalError> {
@@ -798,6 +917,50 @@ fn valid_prefix_hash(value: &str) -> bool {
     value.len() == 64 && value.as_bytes().iter().all(u8::is_ascii_hexdigit)
 }
 
+fn stream_cursor(
+    byte_offset: u64,
+    coverage: &SequenceCoverage,
+    prefix_hash: &str,
+    file_identity: &str,
+    identity: (&Option<String>, &Option<String>),
+    layout: (bool, bool, u64),
+) -> JournalCursor {
+    JournalCursor {
+        byte_offset,
+        raw_sequence: coverage.raw_sequence(),
+        prefix_hash: prefix_hash.into(),
+        file_identity: file_identity.into(),
+        worker_id: identity.0.clone(),
+        channel_id: identity.1.clone(),
+        saw_heartbeat_summary: layout.0,
+        saw_compaction_commit: layout.1,
+        compaction_next_sequence: layout.2,
+    }
+}
+
+fn update_compaction_coverage(
+    coverage: &SequenceCoverage,
+    commit_seen: bool,
+    committed_next_sequence: u64,
+    complete: &mut bool,
+    offset: u64,
+) -> Result<(), JournalError> {
+    if !commit_seen || *complete {
+        return Ok(());
+    }
+    match coverage.next_sequence().cmp(&committed_next_sequence) {
+        std::cmp::Ordering::Less => Ok(()),
+        std::cmp::Ordering::Equal => {
+            *complete = true;
+            Ok(())
+        }
+        std::cmp::Ordering::Greater => Err(corrupt(
+            offset,
+            "compaction commit next sequence is exceeded by retained coverage",
+        )),
+    }
+}
+
 /// The journal is an exact sequence, not merely a monotonically ordered
 /// collection. Keeping this small streaming accumulator shared with snapshot
 /// inspection avoids accepting a CRC-valid omission between a compaction
@@ -903,6 +1066,7 @@ fn verify_journal_cursor_prefix(path: &Path, cursor: &JournalCursor) -> Result<(
     let mut channel_id = None;
     let mut summary_seen = false;
     let mut commit_seen = false;
+    let mut compaction_next_sequence = 0_u64;
     let mut saw_event = false;
     let mut summary_ranges = Vec::new();
     let mut summary_range_index = 0_usize;
@@ -921,6 +1085,12 @@ fn verify_journal_cursor_prefix(path: &Path, cursor: &JournalCursor) -> Result<(
         prefix_hash = next_prefix_hash(&prefix_hash, &record.raw_bytes);
         match record.kind {
             StreamRecordKind::Event(event) => {
+                if summary_seen && !commit_seen {
+                    return Err(corrupt(
+                        offset,
+                        "retained events require a preceding compaction commit; heartbeat summary has no compaction commit",
+                    ));
+                }
                 bind_stream_identity(
                     &mut worker_id,
                     &mut channel_id,
@@ -959,32 +1129,31 @@ fn verify_journal_cursor_prefix(path: &Path, cursor: &JournalCursor) -> Result<(
                 summary_seen = true;
             }
             StreamRecordKind::CompactionCommit(commit) => {
-                finish_summary_coverage(
-                    &mut coverage,
-                    &summary_ranges,
-                    &mut summary_range_index,
-                    offset,
-                )?;
                 if !summary_seen
                     || commit_seen
+                    || saw_event
+                    || commit.next_sequence == 0
                     || worker_id.as_deref() != Some(&commit.worker_id)
                     || channel_id.as_deref() != Some(&commit.channel_id)
-                    || commit.next_sequence != coverage.next_sequence()
                 {
                     return Err(corrupt(
                         offset,
-                        "compaction commit does not match complete sequence coverage",
+                        "compaction commit does not bind sequence and identity",
                     ));
                 }
                 commit_seen = true;
+                compaction_next_sequence = commit.next_sequence;
             }
         }
     }
     if offset != cursor.byte_offset
         || coverage.raw_sequence() != cursor.raw_sequence
         || prefix_hash != cursor.prefix_hash
+        || worker_id != cursor.worker_id
+        || channel_id != cursor.channel_id
         || summary_seen != cursor.saw_heartbeat_summary
         || commit_seen != cursor.saw_compaction_commit
+        || compaction_next_sequence != cursor.compaction_next_sequence
     {
         return Err(corrupt(
             cursor.byte_offset,
@@ -1042,7 +1211,7 @@ fn read_snapshot_bounded(path: &Path, event_limit: usize) -> Result<JournalSnaps
     let mut offset = 0_u64;
     let mut identity: Option<(String, String)> = None;
     let mut heartbeat_summary: Option<HeartbeatSummary> = None;
-    let mut compaction_commit: Option<(CompactionCommit, usize)> = None;
+    let mut compaction_commit: Option<CompactionCommit> = None;
     let mut saw_event = false;
 
     loop {
@@ -1090,6 +1259,12 @@ fn read_snapshot_bounded(path: &Path, event_limit: usize) -> Result<JournalSnaps
         }
         match record_kind {
             RECORD_KIND_EVENT => {
+                if heartbeat_summary.is_some() && compaction_commit.is_none() {
+                    return Err(corrupt(
+                        offset,
+                        "retained events require a preceding compaction commit; heartbeat summary has no compaction commit",
+                    ));
+                }
                 let event =
                     decode_persisted_event_frame(&payload).map_err(JournalError::Protocol)?;
                 let event_identity = (event.worker_id.clone(), event.channel_id.clone());
@@ -1145,7 +1320,7 @@ fn read_snapshot_bounded(path: &Path, event_limit: usize) -> Result<JournalSnaps
                 }
             }
             RECORD_KIND_COMPACTION_COMMIT if version == JOURNAL_VERSION => {
-                if heartbeat_summary.is_none() || compaction_commit.is_some() {
+                if heartbeat_summary.is_none() || compaction_commit.is_some() || saw_event {
                     return Err(corrupt(
                         offset,
                         "compaction commit requires one preceding heartbeat summary",
@@ -1159,7 +1334,10 @@ fn read_snapshot_bounded(path: &Path, event_limit: usize) -> Result<JournalSnaps
                 if identity.as_ref() != Some(&commit_identity) {
                     return Err(corrupt(offset, "compaction commit identity changed"));
                 }
-                compaction_commit = Some((commit, events.len()));
+                if commit.next_sequence == 0 {
+                    return Err(corrupt(offset, "compaction commit sequence is invalid"));
+                }
+                compaction_commit = Some(commit);
             }
             _ => {
                 return Err(corrupt(
@@ -1175,9 +1353,18 @@ fn read_snapshot_bounded(path: &Path, event_limit: usize) -> Result<JournalSnaps
     if heartbeat_summary.is_some() && compaction_commit.is_none() {
         return Err(corrupt(0, "heartbeat summary has no compaction commit"));
     }
-    if let Some((commit, event_count)) = &compaction_commit {
+    let next_sequence = sequence_after_coverage(heartbeat_summary.as_ref(), &events, offset)?;
+    if let Some(commit) = &compaction_commit {
+        // Events at or after the declared next sequence are ordinary appends
+        // after the atomic compaction. Only the summary plus retained events
+        // before that boundary belong to the sealed replacement image.
+        let retained: Vec<_> = events
+            .iter()
+            .filter(|event| event.sequence < commit.next_sequence)
+            .cloned()
+            .collect();
         let committed_next =
-            sequence_after_coverage(heartbeat_summary.as_ref(), &events[..*event_count], offset)?;
+            sequence_after_coverage(heartbeat_summary.as_ref(), &retained, offset)?;
         if commit.next_sequence != committed_next {
             return Err(corrupt(
                 offset,
@@ -1185,7 +1372,6 @@ fn read_snapshot_bounded(path: &Path, event_limit: usize) -> Result<JournalSnaps
             ));
         }
     }
-    let next_sequence = sequence_after_coverage(heartbeat_summary.as_ref(), &events, offset)?;
     let raw_heartbeat_count = events
         .iter()
         .filter(|event| matches!(event.event, WorkerEvent::Heartbeat { .. }))
@@ -1730,10 +1916,6 @@ mod tests {
         let mut file = File::create(path).unwrap();
         let summary = serde_json::to_vec(&compacted_summary()).unwrap();
         write_record(&mut file, RECORD_KIND_HEARTBEAT_SUMMARY, &summary).unwrap();
-        for envelope in retained {
-            let frame = encode_event_frame(envelope).unwrap();
-            write_record(&mut file, RECORD_KIND_EVENT, &frame).unwrap();
-        }
         let commit = serde_json::to_vec(&CompactionCommit {
             worker_id: WORKER_ID.into(),
             channel_id: CHANNEL_ID.into(),
@@ -1741,6 +1923,10 @@ mod tests {
         })
         .unwrap();
         write_record(&mut file, RECORD_KIND_COMPACTION_COMMIT, &commit).unwrap();
+        for envelope in retained {
+            let frame = encode_event_frame(envelope).unwrap();
+            write_record(&mut file, RECORD_KIND_EVENT, &frame).unwrap();
+        }
         for envelope in tail {
             let frame = encode_event_frame(envelope).unwrap();
             write_record(&mut file, RECORD_KIND_EVENT, &frame).unwrap();
@@ -1787,6 +1973,111 @@ mod tests {
             read_journal_incremental(&path, None, 8, false),
             Err(JournalError::Corrupt { reason, .. })
                 if reason.contains("compaction commit")
+        ));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn bounded_reader_never_releases_an_exact_limit_batch_before_compaction_is_sealed() {
+        let path = test_path();
+        let mut file = File::create(&path).unwrap();
+        let summary = serde_json::to_vec(&compacted_summary()).unwrap();
+        write_record(&mut file, RECORD_KIND_HEARTBEAT_SUMMARY, &summary).unwrap();
+        let frame =
+            encode_event_frame(&event(2, WorkerEvent::Ready { graph_revision: 1 })).unwrap();
+        write_record(&mut file, RECORD_KIND_EVENT, &frame).unwrap();
+        file.sync_all().unwrap();
+
+        // The one retained frame is exactly the caller's bounded limit. A
+        // naive reader would return it and let its durable consumer persist a
+        // checkpoint before discovering that the compaction was never sealed.
+        assert!(matches!(
+            read_journal_incremental(&path, None, 1, false),
+            Err(JournalError::Corrupt { reason, .. })
+                if reason.contains("retained events require a preceding compaction commit")
+        ));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn bounded_reader_rejects_a_late_compaction_commit_before_checkpointing_the_exact_cap() {
+        let path = test_path();
+        let mut file = File::create(&path).unwrap();
+        let summary = serde_json::to_vec(&compacted_summary()).unwrap();
+        write_record(&mut file, RECORD_KIND_HEARTBEAT_SUMMARY, &summary).unwrap();
+        write_record(
+            &mut file,
+            RECORD_KIND_EVENT,
+            &encode_event_frame(&event(2, WorkerEvent::Ready { graph_revision: 1 })).unwrap(),
+        )
+        .unwrap();
+        let late_commit = serde_json::to_vec(&CompactionCommit {
+            worker_id: WORKER_ID.into(),
+            channel_id: CHANNEL_ID.into(),
+            next_sequence: 3,
+        })
+        .unwrap();
+        write_record(&mut file, RECORD_KIND_COMPACTION_COMMIT, &late_commit).unwrap();
+        file.sync_all().unwrap();
+
+        // The retained event is exactly the caller's cap. A late, otherwise
+        // CRC-valid seal must not let this call return a checkpoint whose
+        // prefix does not authenticate that seal.
+        assert!(matches!(
+            read_journal_incremental(&path, None, 1, false),
+            Err(JournalError::Corrupt { reason, .. })
+                if reason.contains("retained events require a preceding compaction commit")
+        ));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn prefix_verification_rejects_a_crc_valid_same_file_rewrite_before_cursor() {
+        let path = test_path();
+        let first = event(1, WorkerEvent::Ready { graph_revision: 1 });
+        let second = event(2, WorkerEvent::ShutdownComplete);
+        let mut file = File::create(&path).unwrap();
+        write_record(
+            &mut file,
+            RECORD_KIND_EVENT,
+            &encode_event_frame(&first).unwrap(),
+        )
+        .unwrap();
+        write_record(
+            &mut file,
+            RECORD_KIND_EVENT,
+            &encode_event_frame(&second).unwrap(),
+        )
+        .unwrap();
+        file.sync_all().unwrap();
+        drop(file);
+        let cursor = read_journal_incremental(&path, None, 1, false)
+            .unwrap()
+            .cursor;
+
+        // Rewrite the existing file in place with independently CRC-valid
+        // frames and preserve the valid suffix. The durable prefix hash, not
+        // a parse error or file identity change, must catch this mutation.
+        let replacement = event(1, WorkerEvent::Ready { graph_revision: 2 });
+        let mut file = File::create(&path).unwrap();
+        write_record(
+            &mut file,
+            RECORD_KIND_EVENT,
+            &encode_event_frame(&replacement).unwrap(),
+        )
+        .unwrap();
+        write_record(
+            &mut file,
+            RECORD_KIND_EVENT,
+            &encode_event_frame(&second).unwrap(),
+        )
+        .unwrap();
+        file.sync_all().unwrap();
+        drop(file);
+        assert!(matches!(
+            read_journal_incremental(&path, Some(&cursor), 8, true),
+            Err(JournalError::Corrupt { reason, .. })
+                if reason.contains("prefix integrity")
         ));
         let _ = std::fs::remove_file(path);
     }

@@ -211,6 +211,16 @@ pub struct ProjectedEntry {
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProjectionCheckpoint {
+    /// Version 2 binds a sealed journal reader checkpoint to an independent
+    /// event-frame anchor. A missing value is legacy and must be migrated by
+    /// the durable adapter before its byte cursor can be used.
+    #[serde(default)]
+    pub checkpoint_version: u8,
+    /// Monotonic persisted projection/checkpoint revision. It invalidates
+    /// opaque continuation tokens when a migration replaces an otherwise
+    /// identical visible projection with a newly authenticated source state.
+    #[serde(default)]
+    pub projection_revision: u64,
     pub channel_id: String,
     pub journal_id: String,
     /// Last journal transition that was materialized as a projection row.
@@ -231,9 +241,15 @@ pub struct ProjectionCheckpoint {
     #[serde(default)]
     pub reader_file_identity: String,
     #[serde(default)]
+    pub reader_worker_id: String,
+    #[serde(default)]
+    pub reader_channel_id: String,
+    #[serde(default)]
     pub reader_saw_heartbeat_summary: bool,
     #[serde(default)]
     pub reader_saw_compaction_commit: bool,
+    #[serde(default)]
+    pub reader_compaction_next_sequence: u64,
     /// Exact durable event-frame anchor retained independently of the reader
     /// prefix chain. It is normally the open scheduled transition, so a day
     /// rollover with no closed rows can still recover across heartbeat
@@ -247,6 +263,8 @@ pub struct ProjectionCheckpoint {
     #[serde(default)]
     pub pending_is_uncovered: bool,
 }
+
+pub const ASRUN_CHECKPOINT_VERSION: u8 = 2;
 
 /// The one authoritative, station-local calendar day represented by a
 /// persisted projection. UTC instants are half-open so the window remains
@@ -323,6 +341,8 @@ impl ReportingRuntime {
             station_timezone: input.station_timezone,
             entries,
             checkpoint: ProjectionCheckpoint {
+                checkpoint_version: ASRUN_CHECKPOINT_VERSION,
+                projection_revision: 0,
                 channel_id: input.channel_id.clone(),
                 journal_id: last.journal_id.clone(),
                 journal_sequence: last.journal_sequence,
@@ -333,8 +353,11 @@ impl ReportingRuntime {
                 reader_raw_sequence: 0,
                 reader_prefix_hash: String::new(),
                 reader_file_identity: String::new(),
+                reader_worker_id: String::new(),
+                reader_channel_id: String::new(),
                 reader_saw_heartbeat_summary: false,
                 reader_saw_compaction_commit: false,
+                reader_compaction_next_sequence: 0,
                 source_anchor_sequence: 0,
                 source_anchor_frame_hash: String::new(),
                 pending_start: None,
@@ -401,11 +424,16 @@ pub fn render_xmltv(
     out.push_str("</tv>");
     Ok(out)
 }
-fn event_id(t: &JournalTake) -> String {
+/// Segment identity is source-frame-bound *and* interval-bound. The same
+/// scheduled source transition can therefore produce one durable row on each
+/// side of a station-local midnight without colliding with itself.
+pub fn projected_segment_event_id(t: &JournalTake) -> String {
     let mut h = Sha256::new();
     h.update(t.journal_id.as_bytes());
     h.update(t.journal_sequence.to_le_bytes());
     h.update(t.journal_hash.as_bytes());
+    h.update(t.started_at_unix_ms.to_le_bytes());
+    h.update(t.ended_at_unix_ms.to_le_bytes());
     let mut d = h.finalize();
     d[6] = (d[6] & 0x0f) | 0x40;
     d[8] = (d[8] & 0x3f) | 0x80;
@@ -417,6 +445,10 @@ fn event_id(t: &JournalTake) -> String {
         u16::from_be_bytes(d[8..10].try_into().unwrap()),
         u64::from_be_bytes(d[10..18].try_into().unwrap()) & 0xffffffffffff
     )
+}
+
+fn event_id(t: &JournalTake) -> String {
+    projected_segment_event_id(t)
 }
 fn uuid(v: &str) -> bool {
     v.len() == 36
