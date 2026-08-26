@@ -557,6 +557,10 @@ fn publish_generation_manifest(
     };
     let temporary = generation_manifest_temp_path(root);
     if temporary.try_exists().map_err(io_error)? {
+        // A manifest temp is never authority. Every caller reaches this point
+        // only after proving the sealed candidate and durable active segment,
+        // so a crash before its rename is recovered by discarding and
+        // regenerating this byte-for-byte derived manifest.
         std::fs::remove_file(&temporary).map_err(io_error)?;
     }
     let mut output = OpenOptions::new()
@@ -577,7 +581,13 @@ fn publish_generation_manifest(
 }
 
 fn file_sha256(path: &Path) -> Result<String, JournalError> {
-    let mut file = File::open(path).map_err(io_error)?;
+    let file = File::open(path).map_err(io_error)?;
+    file_sha256_file(&file)
+}
+
+fn file_sha256_file(file: &File) -> Result<String, JournalError> {
+    let mut file = file.try_clone().map_err(io_error)?;
+    file.seek(SeekFrom::Start(0)).map_err(io_error)?;
     let mut digest = Sha256::new();
     let mut buffer = [0_u8; 64 * 1024];
     loop {
@@ -625,24 +635,7 @@ fn write_generation_publication_intent(
     root: &Path,
     intent: &GenerationPublicationIntent,
 ) -> Result<(), JournalError> {
-    if intent.version != GENERATION_PUBLICATION_VERSION
-        || intent.generation == 0
-        || intent.source_next_sequence == 0
-        || intent.worker_id.trim().is_empty()
-        || intent.channel_id.trim().is_empty()
-        || intent.source_identity_worker_id != intent.worker_id
-        || intent.source_identity_channel_id != intent.channel_id
-        || intent.candidate_sha256.len() != 64
-        || !intent
-            .candidate_sha256
-            .bytes()
-            .all(|byte| byte.is_ascii_hexdigit())
-    {
-        return Err(corrupt(
-            0,
-            "journal generation publication intent is invalid",
-        ));
-    }
+    validate_generation_publication_intent(intent, intent.generation)?;
     let published = generation_publication_path(root, intent.generation);
     let temporary = generation_publication_temp_path(root, intent.generation);
     if published.try_exists().map_err(io_error)? || temporary.try_exists().map_err(io_error)? {
@@ -678,12 +671,28 @@ fn read_generation_publication_intent(
         Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(io_error(error)),
     };
-    let intent: GenerationPublicationIntent = serde_json::from_slice(&bytes).map_err(|error| {
+    let intent = parse_generation_publication_intent(&bytes, generation)?;
+    Ok(Some(intent))
+}
+
+fn parse_generation_publication_intent(
+    bytes: &[u8],
+    generation: u64,
+) -> Result<GenerationPublicationIntent, JournalError> {
+    let intent: GenerationPublicationIntent = serde_json::from_slice(bytes).map_err(|error| {
         corrupt(
             0,
             format!("journal generation publication intent is invalid: {error}"),
         )
     })?;
+    validate_generation_publication_intent(&intent, generation)?;
+    Ok(intent)
+}
+
+fn validate_generation_publication_intent(
+    intent: &GenerationPublicationIntent,
+    generation: u64,
+) -> Result<(), JournalError> {
     if intent.version != GENERATION_PUBLICATION_VERSION
         || intent.generation != generation
         || intent.generation == 0
@@ -703,7 +712,7 @@ fn read_generation_publication_intent(
             "journal generation publication intent is invalid",
         ));
     }
-    Ok(Some(intent))
+    Ok(())
 }
 
 fn remove_generation_publication_intent(root: &Path, generation: u64) -> Result<(), JournalError> {
@@ -713,6 +722,80 @@ fn remove_generation_publication_intent(root: &Path, generation: u64) -> Result<
         Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
         Err(error) => Err(io_error(error)),
     }
+}
+
+fn read_generation_publication_temp(
+    root: &Path,
+    generation: u64,
+) -> Result<Option<GenerationPublicationIntent>, JournalError> {
+    const MAX_PUBLICATION_INTENT_BYTES: u64 = 4 * 1024;
+    let path = generation_publication_temp_path(root, generation);
+    let metadata = match std::fs::symlink_metadata(&path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(io_error(error)),
+    };
+    if !metadata.is_file() || metadata.file_type().is_symlink() || is_reparse_point(&metadata) {
+        return Err(corrupt(
+            0,
+            "journal generation publication temporary is not a regular non-reparse file",
+        ));
+    }
+    if metadata.len() == 0 || metadata.len() > MAX_PUBLICATION_INTENT_BYTES {
+        return Err(corrupt(
+            0,
+            "journal generation publication temporary has an invalid size",
+        ));
+    }
+    let file = File::open(&path).map_err(io_error)?;
+    let identity = journal_file_identity(&file)?;
+    let bytes = std::fs::read(&path).map_err(io_error)?;
+    let reopened = File::open(&path).map_err(io_error)?;
+    if journal_file_identity(&reopened)? != identity {
+        return Err(corrupt(
+            0,
+            "journal generation publication temporary changed while reading",
+        ));
+    }
+    parse_generation_publication_intent(&bytes, generation).map(Some)
+}
+
+fn validate_generation_publication_intent_source(
+    root: &Path,
+    location: &JournalLocation,
+    intent: &GenerationPublicationIntent,
+    worker_id: &str,
+    channel_id: &str,
+) -> Result<(), JournalError> {
+    let expected_generation = location
+        .generation
+        .checked_add(1)
+        .ok_or_else(|| corrupt(0, "journal generation exhausted during recovery"))?;
+    if intent.generation != expected_generation
+        || intent.source_generation != location.generation
+        || intent.worker_id != worker_id
+        || intent.channel_id != channel_id
+        || intent.source_identity_worker_id != worker_id
+        || intent.source_identity_channel_id != channel_id
+    {
+        return Err(corrupt(
+            0,
+            "journal generation publication intent does not bind the published source",
+        ));
+    }
+    let current = read_snapshot(root)?;
+    if current.next_sequence != intent.source_next_sequence
+        || current.identity.as_ref().is_none_or(|identity| {
+            identity.0 != intent.source_identity_worker_id
+                || identity.1 != intent.source_identity_channel_id
+        })
+    {
+        return Err(corrupt(
+            0,
+            "journal generation publication source changed before manifest publication",
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(windows)]
@@ -1329,6 +1412,76 @@ fn promote_file_write_through(source: &Path, destination: &Path) -> std::io::Res
     std::fs::rename(source, destination)
 }
 
+#[cfg(windows)]
+fn is_reparse_point(metadata: &std::fs::Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt;
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+    metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+}
+
+#[cfg(not(windows))]
+fn is_reparse_point(_metadata: &std::fs::Metadata) -> bool {
+    false
+}
+
+fn validate_empty_regular_file(path: &Path, description: &str) -> Result<(), JournalError> {
+    let metadata = std::fs::symlink_metadata(path).map_err(io_error)?;
+    if !metadata.is_file() || metadata.file_type().is_symlink() || is_reparse_point(&metadata) {
+        return Err(corrupt(
+            0,
+            format!("{description} is not a regular non-reparse file"),
+        ));
+    }
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path)
+        .map_err(io_error)?;
+    let opened_metadata = file.metadata().map_err(io_error)?;
+    if !opened_metadata.is_file() || is_reparse_point(&opened_metadata) {
+        return Err(corrupt(
+            0,
+            format!("{description} is not a regular non-reparse file"),
+        ));
+    }
+    if opened_metadata.len() != 0 || file_sha256_file(&file)? != empty_file_sha256() {
+        return Err(corrupt(0, format!("{description} is not exactly empty")));
+    }
+    let identity = journal_file_identity(&file)?;
+    file.sync_all().map_err(io_error)?;
+    drop(file);
+
+    // Re-open by the exact expected path after syncing and before promotion,
+    // so a path replacement cannot turn an authenticated empty temp into the
+    // object selected by the next rename.
+    let metadata = std::fs::symlink_metadata(path).map_err(io_error)?;
+    if !metadata.is_file() || metadata.file_type().is_symlink() || is_reparse_point(&metadata) {
+        return Err(corrupt(
+            0,
+            format!("{description} changed before promotion"),
+        ));
+    }
+    let reopened = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path)
+        .map_err(io_error)?;
+    if reopened.metadata().map_err(io_error)?.len() != 0
+        || file_sha256_file(&reopened)? != empty_file_sha256()
+        || journal_file_identity(&reopened)? != identity
+    {
+        return Err(corrupt(
+            0,
+            format!("{description} changed before promotion"),
+        ));
+    }
+    Ok(())
+}
+
+fn empty_file_sha256() -> String {
+    format!("{:x}", Sha256::digest([]))
+}
+
 fn create_empty_active_segment(root: &Path, generation: u64) -> Result<PathBuf, JournalError> {
     let active = active_segment_path(root, generation);
     if active.try_exists().map_err(io_error)? {
@@ -1336,10 +1489,14 @@ fn create_empty_active_segment(root: &Path, generation: u64) -> Result<PathBuf, 
     }
     let temporary = active_segment_temp_path(root, generation);
     if temporary.try_exists().map_err(io_error)? {
-        return Err(corrupt(
-            0,
-            "journal active segment temporary already exists",
-        ));
+        // This is the crash point after the empty active contents are durable
+        // but before the write-through rename. The path is generation-derived
+        // and the intent/sealed proof was already validated by the caller.
+        // Promote only an exact, synced empty regular file; nonempty, reparse,
+        // or swapped artifacts remain fail-closed and are never overwritten.
+        validate_empty_regular_file(&temporary, "journal active segment temporary")?;
+        promote_generation(&temporary, &active).map_err(io_error)?;
+        return Ok(active);
     }
     let file = OpenOptions::new()
         .create_new(true)
@@ -1348,6 +1505,7 @@ fn create_empty_active_segment(root: &Path, generation: u64) -> Result<PathBuf, 
         .map_err(io_error)?;
     file.sync_all().map_err(io_error)?;
     drop(file);
+    validate_empty_regular_file(&temporary, "journal active segment temporary")?;
     promote_generation(&temporary, &active).map_err(io_error)?;
     Ok(active)
 }
@@ -3834,7 +3992,58 @@ fn recover_compaction_temp(
     replace_file(&temporary, path).map_err(io_error)
 }
 
+/// Completes the intent sidecar's own fsync-before-rename boundary. Unlike a
+/// manifest temp, an intent is needed to establish authority for the pending
+/// candidate, so only promote it after the exact source and candidate are
+/// fully authenticated. A missing or ambiguous candidate is fail-closed.
+fn recover_generation_publication_temp(
+    root: &Path,
+    location: &JournalLocation,
+    worker_id: &str,
+    channel_id: &str,
+) -> Result<(), JournalError> {
+    let generation = location
+        .generation
+        .checked_add(1)
+        .ok_or_else(|| corrupt(0, "journal generation exhausted during recovery"))?;
+    let Some(intent) = read_generation_publication_temp(root, generation)? else {
+        return Ok(());
+    };
+    let published = generation_publication_path(root, generation);
+    if published.try_exists().map_err(io_error)? {
+        return Err(corrupt(
+            0,
+            "journal generation publication has both final and temporary intents",
+        ));
+    }
+    validate_generation_publication_intent_source(root, location, &intent, worker_id, channel_id)?;
+    let candidate = generation_path(root, generation);
+    let candidate_temp = generation_temp_path(root, generation);
+    let candidate_exists = candidate.try_exists().map_err(io_error)?;
+    let candidate_temp_exists = candidate_temp.try_exists().map_err(io_error)?;
+    if candidate_exists == candidate_temp_exists {
+        return Err(corrupt(
+            0,
+            "journal generation publication temporary lacks one exact candidate",
+        ));
+    }
+    let candidate = if candidate_exists {
+        candidate
+    } else {
+        candidate_temp
+    };
+    let _ = validate_generation_publication_candidate(
+        root, location, &intent, &candidate, worker_id, channel_id,
+    )?;
+    promote_generation(
+        &generation_publication_temp_path(root, generation),
+        &published,
+    )
+    .map_err(io_error)
+}
+
 fn validate_empty_active_segment(path: &Path) -> Result<(), JournalError> {
+    validate_empty_regular_file(path, "orphan journal active segment")?;
     let snapshot = read_snapshot_bounded_direct(path, usize::MAX)?;
     if !snapshot.events.is_empty() || snapshot.identity.is_some() {
         return Err(corrupt(
@@ -3853,22 +4062,7 @@ fn validate_generation_publication_candidate(
     worker_id: &str,
     channel_id: &str,
 ) -> Result<JournalCursor, JournalError> {
-    let expected_generation = location
-        .generation
-        .checked_add(1)
-        .ok_or_else(|| corrupt(0, "journal generation exhausted during recovery"))?;
-    if intent.generation != expected_generation
-        || intent.source_generation != location.generation
-        || intent.worker_id != worker_id
-        || intent.channel_id != channel_id
-        || intent.source_identity_worker_id != worker_id
-        || intent.source_identity_channel_id != channel_id
-    {
-        return Err(corrupt(
-            0,
-            "journal generation publication intent does not bind the published source",
-        ));
-    }
+    validate_generation_publication_intent_source(root, location, intent, worker_id, channel_id)?;
     if file_sha256(candidate)? != intent.candidate_sha256 {
         return Err(corrupt(
             0,
@@ -3876,17 +4070,6 @@ fn validate_generation_publication_candidate(
         ));
     }
     let current = read_snapshot(root)?;
-    if current.next_sequence != intent.source_next_sequence
-        || current.identity.as_ref().is_none_or(|identity| {
-            identity.0 != intent.source_identity_worker_id
-                || identity.1 != intent.source_identity_channel_id
-        })
-    {
-        return Err(corrupt(
-            0,
-            "journal generation publication source changed before manifest publication",
-        ));
-    }
     let candidate_snapshot = read_snapshot_bounded_direct(candidate, usize::MAX)?;
     let current_non_heartbeat: Vec<_> = current
         .events
@@ -4032,6 +4215,7 @@ fn recover_orphan_generation(
     channel_id: &str,
 ) -> Result<(), JournalError> {
     let location = resolve_journal_location(root)?;
+    recover_generation_publication_temp(root, &location, worker_id, channel_id)?;
     reject_ambiguous_generation_artifacts(root, location.generation)?;
 
     // A power loss after manifest replacement but before intent cleanup has
@@ -4786,6 +4970,207 @@ mod tests {
             read_events(&path).unwrap().last().unwrap().sequence,
             current.next_sequence
         );
+    }
+
+    #[test]
+    fn writer_recovers_an_empty_synced_active_temp_before_its_promotion() {
+        let path = test_path();
+        let mut writer = JournalWriter::open(&path, WORKER_ID, CHANNEL_ID).unwrap();
+        writer
+            .append(&event(
+                1,
+                WorkerEvent::Heartbeat {
+                    monotonic_milliseconds: 5_000,
+                    outputs: Vec::new(),
+                },
+            ))
+            .unwrap();
+        writer
+            .append(&event(2, WorkerEvent::Ready { graph_revision: 1 }))
+            .unwrap();
+        drop(writer);
+
+        let (generation, _, current) = stage_generation_publication(&path);
+        let active_temp = active_segment_temp_path(&path, generation);
+        let active_temp_file = File::create(&active_temp).unwrap();
+        active_temp_file.sync_all().unwrap();
+        drop(active_temp_file);
+
+        let recovered = JournalWriter::open(&path, WORKER_ID, CHANNEL_ID).unwrap();
+        assert_eq!(recovered.generation, generation);
+        assert_eq!(recovered.next_sequence(), current.next_sequence);
+        drop(recovered);
+        assert!(active_segment_path(&path, generation).exists());
+        assert!(!active_temp.exists());
+        assert!(!generation_publication_path(&path, generation).exists());
+    }
+
+    #[test]
+    fn writer_rejects_a_nonempty_active_temp_without_publishing_it() {
+        let path = test_path();
+        let mut writer = JournalWriter::open(&path, WORKER_ID, CHANNEL_ID).unwrap();
+        writer
+            .append(&event(
+                1,
+                WorkerEvent::Heartbeat {
+                    monotonic_milliseconds: 5_000,
+                    outputs: Vec::new(),
+                },
+            ))
+            .unwrap();
+        writer
+            .append(&event(2, WorkerEvent::Ready { graph_revision: 1 }))
+            .unwrap();
+        drop(writer);
+
+        let (generation, _, _) = stage_generation_publication(&path);
+        let active_temp = active_segment_temp_path(&path, generation);
+        let mut active_temp_file = File::create(&active_temp).unwrap();
+        active_temp_file.write_all(b"not empty").unwrap();
+        active_temp_file.sync_all().unwrap();
+        drop(active_temp_file);
+
+        assert!(matches!(
+            JournalWriter::open(&path, WORKER_ID, CHANNEL_ID),
+            Err(JournalError::Corrupt { reason, .. }) if reason.contains("not exactly empty")
+        ));
+        assert!(!active_segment_path(&path, generation).exists());
+        assert!(active_temp.exists());
+        assert!(generation_publication_path(&path, generation).exists());
+        assert!(!generation_manifest_path(&path).exists());
+    }
+
+    #[test]
+    fn writer_rejects_a_wrong_generation_active_temp_before_publication() {
+        let path = test_path();
+        let mut writer = JournalWriter::open(&path, WORKER_ID, CHANNEL_ID).unwrap();
+        writer
+            .append(&event(1, WorkerEvent::Ready { graph_revision: 1 }))
+            .unwrap();
+        drop(writer);
+
+        let wrong_generation_temp = active_segment_temp_path(&path, 2);
+        let wrong_generation_file = File::create(&wrong_generation_temp).unwrap();
+        wrong_generation_file.sync_all().unwrap();
+        drop(wrong_generation_file);
+
+        assert!(matches!(
+            JournalWriter::open(&path, WORKER_ID, CHANNEL_ID),
+            Err(JournalError::Corrupt { reason, .. })
+                if reason.contains("multiple future generation")
+        ));
+        assert!(wrong_generation_temp.exists());
+        assert!(!generation_manifest_path(&path).exists());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn writer_rejects_a_reparse_active_temp_without_publishing_it() {
+        use std::os::windows::fs::symlink_file;
+
+        let path = test_path();
+        let mut writer = JournalWriter::open(&path, WORKER_ID, CHANNEL_ID).unwrap();
+        writer
+            .append(&event(
+                1,
+                WorkerEvent::Heartbeat {
+                    monotonic_milliseconds: 5_000,
+                    outputs: Vec::new(),
+                },
+            ))
+            .unwrap();
+        writer
+            .append(&event(2, WorkerEvent::Ready { graph_revision: 1 }))
+            .unwrap();
+        drop(writer);
+
+        let (generation, _, _) = stage_generation_publication(&path);
+        let target = path.with_extension("active-temp-target");
+        File::create(&target).unwrap().sync_all().unwrap();
+        let active_temp = active_segment_temp_path(&path, generation);
+        if let Err(error) = symlink_file(&target, &active_temp) {
+            if error.raw_os_error() == Some(1314) {
+                return;
+            }
+            panic!("could not create active-temp reparse fixture: {error}");
+        }
+
+        assert!(matches!(
+            JournalWriter::open(&path, WORKER_ID, CHANNEL_ID),
+            Err(JournalError::Corrupt { reason, .. })
+                if reason.contains("regular non-reparse")
+        ));
+        assert!(!active_segment_path(&path, generation).exists());
+        assert!(active_temp.exists());
+        assert!(!generation_manifest_path(&path).exists());
+    }
+
+    #[test]
+    fn writer_recovers_a_synced_intent_temp_before_its_promotion() {
+        let path = test_path();
+        let mut writer = JournalWriter::open(&path, WORKER_ID, CHANNEL_ID).unwrap();
+        writer
+            .append(&event(
+                1,
+                WorkerEvent::Heartbeat {
+                    monotonic_milliseconds: 5_000,
+                    outputs: Vec::new(),
+                },
+            ))
+            .unwrap();
+        writer
+            .append(&event(2, WorkerEvent::Ready { graph_revision: 1 }))
+            .unwrap();
+        drop(writer);
+
+        let (generation, _, current) = stage_generation_publication(&path);
+        let candidate = generation_path(&path, generation);
+        let candidate_temp = generation_temp_path(&path, generation);
+        std::fs::rename(&candidate, &candidate_temp).unwrap();
+        let intent = generation_publication_path(&path, generation);
+        let intent_temp = generation_publication_temp_path(&path, generation);
+        std::fs::rename(&intent, &intent_temp).unwrap();
+
+        let recovered = JournalWriter::open(&path, WORKER_ID, CHANNEL_ID).unwrap();
+        assert_eq!(recovered.generation, generation);
+        assert_eq!(recovered.next_sequence(), current.next_sequence);
+        drop(recovered);
+        assert!(generation_manifest_path(&path).exists());
+        assert!(!candidate_temp.exists());
+        assert!(!intent_temp.exists());
+    }
+
+    #[test]
+    fn writer_regenerates_a_manifest_temp_only_after_reproving_the_candidate() {
+        let path = test_path();
+        let mut writer = JournalWriter::open(&path, WORKER_ID, CHANNEL_ID).unwrap();
+        writer
+            .append(&event(
+                1,
+                WorkerEvent::Heartbeat {
+                    monotonic_milliseconds: 5_000,
+                    outputs: Vec::new(),
+                },
+            ))
+            .unwrap();
+        writer
+            .append(&event(2, WorkerEvent::Ready { graph_revision: 1 }))
+            .unwrap();
+        drop(writer);
+
+        let (generation, _, _) = stage_generation_publication(&path);
+        create_empty_active_segment(&path, generation).unwrap();
+        let manifest_temp = generation_manifest_temp_path(&path);
+        let mut file = File::create(&manifest_temp).unwrap();
+        file.write_all(b"untrusted manifest temp").unwrap();
+        file.sync_all().unwrap();
+        drop(file);
+
+        let recovered = JournalWriter::open(&path, WORKER_ID, CHANNEL_ID).unwrap();
+        assert_eq!(recovered.generation, generation);
+        drop(recovered);
+        assert!(generation_manifest_path(&path).exists());
+        assert!(!manifest_temp.exists());
     }
 
     #[test]
