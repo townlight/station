@@ -39,15 +39,18 @@ use station_readiness::derive_loudness_outcome;
 use station_readiness::{
     CandidateIdentity, LoudnessProofOutcome, ReceiverAcceptance, SinkLoudnessProof,
 };
-use station_runtime::{SupervisorError, WorkerSupervisor};
+use station_runtime::{
+    CommandAttemptFailure, CommandAttemptPhase, SupervisorError, WorkerSupervisor,
+};
 use station_schedule::{
     ChannelConfiguration, DispatchJob, DispatchStatus, HeadendProfileId, HeadendSinkContract,
     OutputProfileId, OutputSinkKind, ScheduleWindow,
 };
 use station_storage::{
-    CgSnapshotReadError, CgWriteError, ChannelCaptionMode, OutputLoudnessCaptureFacts,
-    OutputLoudnessProofJobRecord, OutputLoudnessProofJobState, ScheduledTakeAcknowledgement,
-    ScheduledTakeAcknowledgementBinding, ScheduledTakeApplyOutcome, StationStore,
+    CaptionCueMissResolutionFence, CgSnapshotReadError, CgWriteError, ChannelCaptionMode,
+    OutputLoudnessCaptureFacts, OutputLoudnessProofJobRecord, OutputLoudnessProofJobState,
+    ScheduledTakeAcknowledgement, ScheduledTakeAcknowledgementBinding, ScheduledTakeApplyOutcome,
+    StationStore,
 };
 
 static ALERT_SEQUENCE: AtomicU64 = AtomicU64::new(1);
@@ -151,9 +154,18 @@ fn observe_caption_cue_misses(
         .map_err(OrchestrationError::Storage)
 }
 
+fn caption_miss_reason_for_attempt_failure(
+    failure: &CommandAttemptFailure,
+) -> CaptionCueMissReason {
+    match failure.phase() {
+        CommandAttemptPhase::BeforeDelivery => CaptionCueMissReason::CommandNotDelivered,
+        CommandAttemptPhase::DeliveryUncertain => CaptionCueMissReason::CommandDeliveryUncertain,
+    }
+}
+
 fn resolve_caption_cue_miss_after_admission(
     store: &StationStore,
-    channel_id: &str,
+    fence: Option<&CaptionCueMissResolutionFence>,
     accepted_cue_count: usize,
     batch_had_miss: bool,
 ) -> Result<(), OrchestrationError> {
@@ -164,12 +176,11 @@ fn resolve_caption_cue_miss_after_admission(
     if accepted_cue_count == 0 || batch_had_miss {
         return Ok(());
     }
+    let Some(fence) = fence else {
+        return Ok(());
+    };
     store
-        .resolve_alert(
-            AlertConditionKind::CaptionCueMissed,
-            channel_id,
-            system_time_millis()?,
-        )
+        .resolve_caption_cue_miss_if_unchanged(fence, system_time_millis()?)
         .map_err(OrchestrationError::Storage)?;
     Ok(())
 }
@@ -2607,6 +2618,9 @@ impl ChannelController {
             self.caption_dispatch_detail = None;
             return Ok(());
         };
+        let resolution_fence = store
+            .caption_cue_miss_resolution_fence(&self.channel_id)
+            .map_err(OrchestrationError::Storage)?;
         if self.caption_dispatch.as_ref().is_none_or(|state| {
             state.report_id != job.report.report_id
                 || state.track_id != track.track_id
@@ -2667,17 +2681,45 @@ impl ChannelController {
         }
         let mut accepted_cue_count = 0usize;
         for cue in plan.due {
-            let event = self
-                .supervisor
-                .command(
-                    &format!(
-                        "caption-{}-{}-{}",
-                        job.report.report_id, track.revision, cue.cue_id
-                    ),
-                    ChannelCommand::PushCaptionCue { cue: cue.clone() },
-                    self.command_timeout,
-                )
-                .map_err(OrchestrationError::Worker)?;
+            let event = match self.supervisor.command_with_delivery_status(
+                &format!(
+                    "caption-{}-{}-{}",
+                    job.report.report_id, track.revision, cue.cue_id
+                ),
+                ChannelCommand::PushCaptionCue { cue: cue.clone() },
+                self.command_timeout,
+            ) {
+                Ok(event) => event,
+                Err(failure) => {
+                    let reason = caption_miss_reason_for_attempt_failure(&failure);
+                    let cue_ids = vec![cue.cue_id.clone()];
+                    let newly_observed = observe_caption_cue_misses(
+                        store,
+                        &self.channel_id,
+                        &job.report.report_id,
+                        &track,
+                        media_offset_ms,
+                        reason,
+                        &cue_ids,
+                    )?;
+                    self.caption_dispatch_detail = Some(format!(
+                        "Caption cue {} missed its admission attempt for report {} (delivery classification {}; durable evidence {}).",
+                        cue.cue_id,
+                        job.report.report_id,
+                        match reason {
+                            CaptionCueMissReason::CommandNotDelivered => "not delivered",
+                            CaptionCueMissReason::CommandDeliveryUncertain => "uncertain",
+                            _ => unreachable!("attempt failure has a delivery classification"),
+                        },
+                        if newly_observed {
+                            "recorded"
+                        } else {
+                            "already recorded"
+                        },
+                    ));
+                    return Err(OrchestrationError::Worker(failure.into_error()));
+                }
+            };
             if !matches!(event.event, WorkerEvent::CaptionCueAccepted { ref cue_id } if cue_id == &cue.cue_id)
             {
                 let cue_ids = vec![cue.cue_id.clone()];
@@ -2721,7 +2763,7 @@ impl ChannelController {
         if accepted_cue_count > 0 {
             resolve_caption_cue_miss_after_admission(
                 store,
-                &self.channel_id,
+                resolution_fence.as_ref(),
                 accepted_cue_count,
                 batch_had_miss,
             )?;
@@ -4329,13 +4371,13 @@ fn replay_scheduled_take_journal(
 mod tests {
     use super::{
         CaptionCaptureTiming, CgSnapshotState, OrchestrationError, OutputExpectation,
-        caption_capture_timing, capture_duration_for_sample, cleanup_orphan_output_proof_artifacts,
-        due_caption_cues, expire_due_bulletins, generate_live_arm_token, hash_capture,
-        is_abort_confirmation, lease_renewal_due, managed_cg_image_root,
-        observe_caption_cue_misses, on_air_source_started_at, promote_caption_proof_artifact,
-        proof_artifact_path, proof_bindings_match, ready_duration_is_bounded,
-        resolve_caption_cue_miss_after_admission, resolved_snapshot_to_protocol,
-        stalled_required_output,
+        caption_capture_timing, caption_miss_reason_for_attempt_failure,
+        capture_duration_for_sample, cleanup_orphan_output_proof_artifacts, due_caption_cues,
+        expire_due_bulletins, generate_live_arm_token, hash_capture, is_abort_confirmation,
+        lease_renewal_due, managed_cg_image_root, observe_caption_cue_misses,
+        on_air_source_started_at, promote_caption_proof_artifact, proof_artifact_path,
+        proof_bindings_match, ready_duration_is_bounded, resolve_caption_cue_miss_after_admission,
+        resolved_snapshot_to_protocol, stalled_required_output,
     };
     use sha2::{Digest, Sha256};
     use station_captions::{
@@ -4357,6 +4399,7 @@ mod tests {
         ChannelCommand, CommandEnvelope, PROTOCOL_VERSION, WorkerEvent, WorkerEventEnvelope,
         decode_command_frame, encode_command_frame,
     };
+    use station_runtime::{CommandAttemptFailure, SupervisorError};
     use station_schedule::{
         AssetReadiness, ChannelConfiguration, DispatchStatus, MediaAsset, OutputProfileId,
         OutputSinkConfiguration, ScheduleItem, ScheduleState,
@@ -4370,6 +4413,7 @@ mod tests {
         ChannelCaptionMode, OutputLoudnessProofJob, OutputLoudnessProofJobState, ScheduleItemWrite,
         ScheduleMaterializationApplyOutcome, ScheduleMaterializationOutcome, StationStore,
     };
+    use station_windows_ipc::IpcError;
     use std::collections::{BTreeMap, HashSet};
     use std::path::PathBuf;
     use std::sync::{
@@ -6363,7 +6407,7 @@ mod tests {
                 &cue_ids,
             )
             .unwrap(),
-            "restart/replay of exact miss evidence must not re-alert"
+            "a later offset observation of the same logical cue miss must not re-alert"
         );
 
         let events = store.list_alert_events().unwrap();
@@ -6400,8 +6444,13 @@ mod tests {
             "time passing and unrelated resolution must not clear the incident"
         );
 
-        resolve_caption_cue_miss_after_admission(&store, CHANNEL_ID, 0, false).unwrap();
-        resolve_caption_cue_miss_after_admission(&store, CHANNEL_ID, 1, true).unwrap();
+        let resolution_fence = store
+            .caption_cue_miss_resolution_fence(CHANNEL_ID)
+            .unwrap()
+            .unwrap();
+        resolve_caption_cue_miss_after_admission(&store, Some(&resolution_fence), 0, false)
+            .unwrap();
+        resolve_caption_cue_miss_after_admission(&store, Some(&resolution_fence), 1, true).unwrap();
         assert!(
             store
                 .read_alert_event(&firing.event_id)
@@ -6409,13 +6458,43 @@ mod tests {
                 .is_some_and(|event| event.state == station_domain::AlertEventState::Firing),
             "empty or mixed dispatch batches cannot make readiness healthy"
         );
-        resolve_caption_cue_miss_after_admission(&store, CHANNEL_ID, 1, false).unwrap();
+        resolve_caption_cue_miss_after_admission(&store, Some(&resolution_fence), 1, false)
+            .unwrap();
         assert!(
             store
                 .read_alert_event(&firing.event_id)
                 .unwrap()
                 .is_some_and(|event| event.state == station_domain::AlertEventState::Resolved),
             "only the subsequent successful-admission path resolves the channel incident"
+        );
+    }
+
+    #[test]
+    fn caption_command_attempt_failures_preserve_delivery_truth_for_hostile_no_ack_paths() {
+        let failures = [
+            CommandAttemptFailure::delivery_uncertain(SupervisorError::Ipc(IpcError::TimedOut {
+                operation: "ReadFile",
+            })),
+            CommandAttemptFailure::delivery_uncertain(SupervisorError::Ipc(IpcError::Closed)),
+            CommandAttemptFailure::delivery_uncertain(SupervisorError::ProcessExit(Some(23))),
+            CommandAttemptFailure::delivery_uncertain(SupervisorError::WrongSequence {
+                expected: 11,
+                actual: 12,
+            }),
+        ];
+        for failure in &failures {
+            assert_eq!(
+                caption_miss_reason_for_attempt_failure(failure),
+                CaptionCueMissReason::CommandDeliveryUncertain,
+                "timeout, EOF, process exit, and sequence fault after write cannot claim delivery or acknowledgment"
+            );
+        }
+        let before_delivery =
+            CommandAttemptFailure::before_delivery(SupervisorError::AlreadyStopped);
+        assert_eq!(
+            caption_miss_reason_for_attempt_failure(&before_delivery),
+            CaptionCueMissReason::CommandNotDelivered,
+            "a pre-write failure must not claim the worker received the cue"
         );
     }
 }

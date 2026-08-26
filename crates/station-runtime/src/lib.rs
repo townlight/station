@@ -49,6 +49,46 @@ pub enum SupervisorError {
     LifecycleEventOverflow,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommandAttemptPhase {
+    BeforeDelivery,
+    DeliveryUncertain,
+}
+
+#[derive(Debug)]
+pub struct CommandAttemptFailure {
+    phase: CommandAttemptPhase,
+    error: SupervisorError,
+}
+
+impl CommandAttemptFailure {
+    pub const fn phase(&self) -> CommandAttemptPhase {
+        self.phase
+    }
+
+    pub const fn error(&self) -> &SupervisorError {
+        &self.error
+    }
+
+    pub fn into_error(self) -> SupervisorError {
+        self.error
+    }
+
+    pub fn before_delivery(error: SupervisorError) -> Self {
+        Self {
+            phase: CommandAttemptPhase::BeforeDelivery,
+            error,
+        }
+    }
+
+    pub fn delivery_uncertain(error: SupervisorError) -> Self {
+        Self {
+            phase: CommandAttemptPhase::DeliveryUncertain,
+            error,
+        }
+    }
+}
+
 pub struct WorkerSupervisor {
     child: Option<ContainedProcess>,
     containment: Option<ProcessContainment>,
@@ -419,11 +459,24 @@ impl WorkerSupervisor {
         command: ChannelCommand,
         timeout: Duration,
     ) -> Result<WorkerEventEnvelope, SupervisorError> {
+        self.command_with_delivery_status(command_id, command, timeout)
+            .map_err(CommandAttemptFailure::into_error)
+    }
+
+    pub fn command_with_delivery_status(
+        &mut self,
+        command_id: &str,
+        command: ChannelCommand,
+        timeout: Duration,
+    ) -> Result<WorkerEventEnvelope, CommandAttemptFailure> {
         if self.child.is_none() {
-            return Err(SupervisorError::AlreadyStopped);
+            return Err(CommandAttemptFailure::before_delivery(
+                SupervisorError::AlreadyStopped,
+            ));
         }
         let started = Instant::now();
-        self.drain_unsolicited_events()?;
+        self.drain_unsolicited_events()
+            .map_err(CommandAttemptFailure::before_delivery)?;
         let expected_sequence = self.last_sequence + 1;
         let envelope = CommandEnvelope {
             version: PROTOCOL_VERSION,
@@ -432,26 +485,34 @@ impl WorkerSupervisor {
             expected_sequence,
             command,
         };
-        let frame = encode_command_frame(&envelope).map_err(SupervisorError::Protocol)?;
+        let frame = encode_command_frame(&envelope)
+            .map_err(SupervisorError::Protocol)
+            .map_err(CommandAttemptFailure::before_delivery)?;
         self.pipe
             .write_all_timeout(&frame, timeout.saturating_sub(started.elapsed()))
-            .map_err(SupervisorError::Ipc)?;
+            .map_err(SupervisorError::Ipc)
+            .map_err(CommandAttemptFailure::delivery_uncertain)?;
 
         loop {
-            let event = read_event(&mut self.pipe, timeout.saturating_sub(started.elapsed()))?;
-            self.accept_sequenced_event(&event)?;
+            let event = read_event(&mut self.pipe, timeout.saturating_sub(started.elapsed()))
+                .map_err(CommandAttemptFailure::delivery_uncertain)?;
+            self.accept_sequenced_event(&event)
+                .map_err(CommandAttemptFailure::delivery_uncertain)?;
             if is_unsolicited_lifecycle_event(&event) {
-                self.queue_lifecycle_event(event)?;
+                self.queue_lifecycle_event(event)
+                    .map_err(CommandAttemptFailure::delivery_uncertain)?;
                 continue;
             }
             // A command acknowledgement must be the next non-lifecycle event
             // after its sequence was assigned.  Lifecycle events advance the
             // cursor but cannot be returned as a command response.
             if event.sequence < expected_sequence {
-                return Err(SupervisorError::WrongSequence {
-                    expected: expected_sequence,
-                    actual: event.sequence,
-                });
+                return Err(CommandAttemptFailure::delivery_uncertain(
+                    SupervisorError::WrongSequence {
+                        expected: expected_sequence,
+                        actual: event.sequence,
+                    },
+                ));
             }
             return Ok(event);
         }

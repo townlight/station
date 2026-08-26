@@ -26,7 +26,7 @@ cue authority underneath the cursor.
 A `CaptionCueAccepted` event proves only that the isolated worker accepted the server-derived cue.
 It does not prove MPEG-TS insertion, decode-back, headend carriage, viewer display, or FCC compliance.
 Those require current candidate/configuration/policy/track-bound output evidence. Expired-cue runtime
-detail is not yet a durable incident or safe-to-air readiness authority. An asset without a
+detail is backed by durable incident and safe-to-air readiness authority. An asset without a
 matching reviewed track stays explicitly uncaptioned rather than causing unrelated program playout
 to fail.
 

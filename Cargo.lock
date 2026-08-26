@@ -1954,6 +1954,7 @@ dependencies = [
  "station-schedule",
  "station-schedule-automation",
  "station-storage",
+ "station-windows-ipc",
 ]
 
 [[package]]

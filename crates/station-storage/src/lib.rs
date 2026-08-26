@@ -129,6 +129,13 @@ const OUTPUT_LOUDNESS_MIN_DURATION_MS: u64 = 3_000;
 const OUTPUT_LOUDNESS_MAX_DURATION_MS: u64 = 600_000;
 const OUTPUT_LOUDNESS_MAX_TARGET_GROUP_TEXT: usize = 64;
 const OUTPUT_LOUDNESS_MAX_CANDIDATE_TEXT: usize = 200;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CaptionCueMissResolutionFence {
+    pub event_id: String,
+    pub channel_id: String,
+    pub last_observed_at_unix_ms: i64,
+}
 const MAX_CUSTOM_METADATA_SCHEMAS: usize = 64;
 const MAX_CUSTOM_METADATA_RECORDS_PER_ASSET: usize = 128;
 const MAX_CUSTOM_METADATA_HISTORY: usize = 128;
@@ -1225,6 +1232,7 @@ impl StationStore {
         store.initialize_fallback_slate_schema()?;
         store.initialize_caption_policy_schema()?;
         store.initialize_caption_cue_miss_evidence_schema()?;
+        store.migrate_caption_cue_miss_evidence_schema()?;
         store.initialize_asset_caption_track_schema()?;
         store.initialize_caption_egress_proof_schema()?;
         store.initialize_caption_egress_job_schema()?;
@@ -7319,6 +7327,7 @@ impl StationStore {
         }
         self.execute("BEGIN IMMEDIATE")?;
         let mut newly_recorded = 0usize;
+        let mut first_new_terminal = None;
         let outcome = (|| {
             for item in evidence {
                 let statement = self.prepare(
@@ -7354,15 +7363,44 @@ impl StationStore {
                 )?;
                 bind_i64(self.database, statement.raw, 8, item.observed_at_unix_ms)?;
                 expect_done(self.database, statement.raw)?;
+                let terminal = self.prepare(
+                    "INSERT OR IGNORE INTO caption_cue_miss_terminals(channel_id, report_id, track_id, track_revision, cue_id, first_reason, first_media_offset_ms, first_observed_at_unix_ms) \
+                     VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                )?;
+                bind_text(self.database, terminal.raw, 1, &channel)?;
+                bind_text(self.database, terminal.raw, 2, &report)?;
+                bind_text(self.database, terminal.raw, 3, &track)?;
+                bind_i64(
+                    self.database,
+                    terminal.raw,
+                    4,
+                    i64::try_from(item.track_revision)
+                        .map_err(|_| "caption miss track revision exceeds i64")?,
+                )?;
+                bind_text(self.database, terminal.raw, 5, &cue)?;
+                bind_text(self.database, terminal.raw, 6, &reason)?;
+                bind_i64(
+                    self.database,
+                    terminal.raw,
+                    7,
+                    i64::try_from(item.media_offset_ms)
+                        .map_err(|_| "caption miss media offset exceeds i64")?,
+                )?;
+                bind_i64(self.database, terminal.raw, 8, item.observed_at_unix_ms)?;
+                expect_done(self.database, terminal.raw)?;
                 if self.changes() == 1 {
                     newly_recorded = newly_recorded
                         .checked_add(1)
                         .ok_or_else(|| "caption miss evidence count overflowed".to_string())?;
+                    first_new_terminal.get_or_insert_with(|| item.clone());
                 }
             }
             if newly_recorded == 0 {
                 return Ok(());
             }
+            let first = first_new_terminal
+                .as_ref()
+                .ok_or_else(|| "caption miss terminal count lost its first evidence".to_string())?;
             let detail = format!(
                 "{newly_recorded} caption cue(s) {} for report {}, track {} revision {}, at media offset {} ms (first cue {}). Cue text is intentionally not retained.",
                 caption_cue_miss_reason_detail(first.reason),
@@ -7701,6 +7739,51 @@ impl StationStore {
         let mut resolved = None;
         let outcome = (|| {
             resolved = self.resolve_alert_locked(condition, resource_ref, resolved_at_unix_ms)?;
+            Ok(())
+        })();
+        self.finish_transaction(outcome)?;
+        Ok(resolved)
+    }
+
+    pub fn caption_cue_miss_resolution_fence(
+        &self,
+        channel_id: &str,
+    ) -> Result<Option<CaptionCueMissResolutionFence>, String> {
+        Ok(self
+            .read_firing_alert(AlertConditionKind::CaptionCueMissed, channel_id)?
+            .map(|event| CaptionCueMissResolutionFence {
+                event_id: event.event_id,
+                channel_id: event.resource_ref,
+                last_observed_at_unix_ms: event.last_observed_at_unix_ms,
+            }))
+    }
+
+    pub fn resolve_caption_cue_miss_if_unchanged(
+        &self,
+        fence: &CaptionCueMissResolutionFence,
+        resolved_at_unix_ms: i64,
+    ) -> Result<Option<AlertEvent>, String> {
+        if resolved_at_unix_ms < fence.last_observed_at_unix_ms {
+            return Err("caption miss resolution moved backward".into());
+        }
+        self.execute("BEGIN IMMEDIATE")?;
+        let mut resolved = None;
+        let outcome = (|| {
+            let Some(current) =
+                self.read_firing_alert(AlertConditionKind::CaptionCueMissed, &fence.channel_id)?
+            else {
+                return Ok(());
+            };
+            if current.event_id != fence.event_id
+                || current.last_observed_at_unix_ms != fence.last_observed_at_unix_ms
+            {
+                return Ok(());
+            }
+            resolved = self.resolve_alert_locked(
+                AlertConditionKind::CaptionCueMissed,
+                &fence.channel_id,
+                resolved_at_unix_ms,
+            )?;
             Ok(())
         })();
         self.finish_transaction(outcome)?;
@@ -13751,10 +13834,16 @@ impl StationStore {
                track_id TEXT NOT NULL CHECK (length(track_id) BETWEEN 1 AND 160),\
                track_revision INTEGER NOT NULL CHECK (track_revision >= 1),\
                cue_id TEXT NOT NULL CHECK (length(cue_id) BETWEEN 1 AND 160),\
-               reason TEXT NOT NULL CHECK (reason IN ('expired-before-admission','worker-did-not-acknowledge')),\
+               reason TEXT NOT NULL CHECK (reason IN ('expired-before-admission','command-not-delivered','command-delivery-uncertain','worker-did-not-acknowledge')),\
                media_offset_ms INTEGER NOT NULL CHECK (media_offset_ms >= 0),\
                observed_at_unix_ms INTEGER NOT NULL CHECK (observed_at_unix_ms >= 0),\
-               PRIMARY KEY(channel_id, report_id, track_id, track_revision, cue_id, reason)\
+               PRIMARY KEY(channel_id, report_id, track_id, track_revision, cue_id, reason, media_offset_ms)\
+             );\
+             CREATE TABLE IF NOT EXISTS caption_cue_miss_terminals (\
+               channel_id TEXT NOT NULL, report_id TEXT NOT NULL, track_id TEXT NOT NULL,\
+               track_revision INTEGER NOT NULL, cue_id TEXT NOT NULL, first_reason TEXT NOT NULL,\
+               first_media_offset_ms INTEGER NOT NULL, first_observed_at_unix_ms INTEGER NOT NULL,\
+               PRIMARY KEY(channel_id, report_id, track_id, track_revision, cue_id)\
              );\
              CREATE INDEX IF NOT EXISTS caption_cue_miss_evidence_channel_time \
                ON caption_cue_miss_evidence(channel_id, observed_at_unix_ms DESC, report_id, track_id, cue_id);\
@@ -13763,8 +13852,51 @@ impl StationStore {
                BEGIN SELECT RAISE(ABORT, 'caption cue miss evidence is append-only'); END;\
              CREATE TRIGGER IF NOT EXISTS caption_cue_miss_evidence_no_delete \
                BEFORE DELETE ON caption_cue_miss_evidence \
-               BEGIN SELECT RAISE(ABORT, 'caption cue miss evidence is append-only'); END;",
+               BEGIN SELECT RAISE(ABORT, 'caption cue miss evidence is append-only'); END;\
+             CREATE TRIGGER IF NOT EXISTS caption_cue_miss_terminals_no_update \
+               BEFORE UPDATE ON caption_cue_miss_terminals \
+               BEGIN SELECT RAISE(ABORT, 'caption cue miss terminal is append-only'); END;\
+             CREATE TRIGGER IF NOT EXISTS caption_cue_miss_terminals_no_delete \
+               BEFORE DELETE ON caption_cue_miss_terminals \
+               BEGIN SELECT RAISE(ABORT, 'caption cue miss terminal is append-only'); END;",
         )
+    }
+
+    fn migrate_caption_cue_miss_evidence_schema(&self) -> Result<(), String> {
+        let statement = self.prepare(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='caption_cue_miss_evidence'",
+        )?;
+        if unsafe { sqlite3_step(statement.raw) } != SQLITE_ROW {
+            return Err("caption cue miss evidence schema disappeared".into());
+        }
+        let sql = column_text(statement.raw, 0)?;
+        if sql.contains("cue_id, reason, media_offset_ms)") {
+            return Ok(());
+        }
+        drop(statement);
+        self.execute(
+            "BEGIN IMMEDIATE;\
+             DROP TRIGGER IF EXISTS caption_cue_miss_evidence_no_update;\
+             DROP TRIGGER IF EXISTS caption_cue_miss_evidence_no_delete;\
+             DROP INDEX IF EXISTS caption_cue_miss_evidence_channel_time;\
+             ALTER TABLE caption_cue_miss_evidence RENAME TO caption_cue_miss_evidence_v1;\
+             CREATE TABLE caption_cue_miss_evidence (\
+               channel_id TEXT NOT NULL, report_id TEXT NOT NULL, track_id TEXT NOT NULL,\
+               track_revision INTEGER NOT NULL, cue_id TEXT NOT NULL, reason TEXT NOT NULL,\
+               media_offset_ms INTEGER NOT NULL, observed_at_unix_ms INTEGER NOT NULL,\
+               PRIMARY KEY(channel_id, report_id, track_id, track_revision, cue_id, reason, media_offset_ms));\
+             INSERT INTO caption_cue_miss_evidence SELECT channel_id, report_id, track_id, track_revision, cue_id, reason, media_offset_ms, observed_at_unix_ms FROM caption_cue_miss_evidence_v1;\
+             INSERT OR IGNORE INTO caption_cue_miss_terminals(channel_id, report_id, track_id, track_revision, cue_id, first_reason, first_media_offset_ms, first_observed_at_unix_ms) \
+               SELECT channel_id, report_id, track_id, track_revision, cue_id, reason, media_offset_ms, observed_at_unix_ms FROM caption_cue_miss_evidence_v1 ORDER BY observed_at_unix_ms, rowid;\
+             DROP TABLE caption_cue_miss_evidence_v1;\
+             CREATE INDEX caption_cue_miss_evidence_channel_time ON caption_cue_miss_evidence(channel_id, observed_at_unix_ms DESC, report_id, track_id, cue_id);\
+             CREATE TRIGGER caption_cue_miss_evidence_no_update BEFORE UPDATE ON caption_cue_miss_evidence BEGIN SELECT RAISE(ABORT, 'caption cue miss evidence is append-only'); END;\
+             CREATE TRIGGER caption_cue_miss_evidence_no_delete BEFORE DELETE ON caption_cue_miss_evidence BEGIN SELECT RAISE(ABORT, 'caption cue miss evidence is append-only'); END;\
+             COMMIT;",
+        )
+        .inspect_err(|_| {
+            let _ = self.execute("ROLLBACK");
+        })
     }
 
     fn initialize_asset_caption_track_schema(&self) -> Result<(), String> {
@@ -16786,6 +16918,8 @@ fn alert_condition_name(value: AlertConditionKind) -> &'static str {
 fn caption_cue_miss_reason_name(value: CaptionCueMissReason) -> &'static str {
     match value {
         CaptionCueMissReason::ExpiredBeforeAdmission => "expired-before-admission",
+        CaptionCueMissReason::CommandNotDelivered => "command-not-delivered",
+        CaptionCueMissReason::CommandDeliveryUncertain => "command-delivery-uncertain",
         CaptionCueMissReason::WorkerDidNotAcknowledge => "worker-did-not-acknowledge",
     }
 }
@@ -16793,6 +16927,10 @@ fn caption_cue_miss_reason_name(value: CaptionCueMissReason) -> &'static str {
 fn caption_cue_miss_reason_detail(value: CaptionCueMissReason) -> &'static str {
     match value {
         CaptionCueMissReason::ExpiredBeforeAdmission => "expired before worker admission",
+        CaptionCueMissReason::CommandNotDelivered => "could not be delivered to the caption worker",
+        CaptionCueMissReason::CommandDeliveryUncertain => {
+            "had uncertain delivery and no exact worker acknowledgment"
+        }
         CaptionCueMissReason::WorkerDidNotAcknowledge => {
             "was not acknowledged by the caption worker"
         }
@@ -21105,8 +21243,8 @@ mod tests {
             track_id: "65a26343-0339-4654-a92c-4bf9384f18df".into(),
             track_revision: 7,
             cue_id: "11111111-1111-4111-8111-111111111111".into(),
-            reason: CaptionCueMissReason::ExpiredBeforeAdmission,
-            media_offset_ms: 1_000,
+            reason: CaptionCueMissReason::WorkerDidNotAcknowledge,
+            media_offset_ms: 500,
             observed_at_unix_ms: 100,
         };
         assert!(
@@ -21124,6 +21262,23 @@ mod tests {
             row_count(&store, "SELECT COUNT(*) FROM caption_cue_miss_evidence"),
             1
         );
+        assert_eq!(
+            row_count(&store, "SELECT COUNT(*) FROM caption_cue_miss_terminals"),
+            1
+        );
+        let mut later_offset = first.clone();
+        later_offset.media_offset_ms = 700;
+        later_offset.observed_at_unix_ms = 101;
+        assert!(
+            !store
+                .observe_caption_cue_misses_and_route(std::slice::from_ref(&later_offset))
+                .unwrap(),
+            "a supplemental offset is durable evidence, not a second logical occurrence"
+        );
+        assert_eq!(
+            row_count(&store, "SELECT COUNT(*) FROM caption_cue_miss_evidence"),
+            2
+        );
         let firing = store
             .list_alert_events()
             .unwrap()
@@ -21140,7 +21295,7 @@ mod tests {
             .unwrap();
         let mut second = first.clone();
         second.cue_id = "22222222-2222-4222-8222-222222222222".into();
-        second.observed_at_unix_ms = 101;
+        second.observed_at_unix_ms = 102;
         assert!(
             store
                 .observe_caption_cue_misses_and_route(std::slice::from_ref(&second))
@@ -21149,8 +21304,13 @@ mod tests {
         );
         assert_eq!(
             row_count(&store, "SELECT COUNT(*) FROM caption_cue_miss_evidence"),
-            1,
+            2,
             "failed alert routing must roll back newly proposed evidence"
+        );
+        assert_eq!(
+            row_count(&store, "SELECT COUNT(*) FROM caption_cue_miss_terminals"),
+            1,
+            "failed alert routing must also roll back the terminal cue identity"
         );
         store
             .execute("DROP TRIGGER reject_caption_miss_alert_update")
@@ -21162,11 +21322,23 @@ mod tests {
         );
         assert_eq!(
             row_count(&store, "SELECT COUNT(*) FROM caption_cue_miss_evidence"),
-            2
+            3
         );
         drop(store);
 
         let reopened = StationStore::open(&database).unwrap();
+        let mut reclassified_after_restart = first.clone();
+        reclassified_after_restart.reason = CaptionCueMissReason::ExpiredBeforeAdmission;
+        reclassified_after_restart.media_offset_ms = 1_200;
+        reclassified_after_restart.observed_at_unix_ms = 103;
+        assert!(
+            !reopened
+                .observe_caption_cue_misses_and_route(std::slice::from_ref(
+                    &reclassified_after_restart,
+                ))
+                .unwrap(),
+            "restart must preserve the first causal classification and suppress re-alert"
+        );
         assert!(
             !reopened
                 .observe_caption_cue_misses_and_route(std::slice::from_ref(&second))
@@ -21180,7 +21352,145 @@ mod tests {
             .find(|event| event.condition == AlertConditionKind::CaptionCueMissed)
             .unwrap();
         assert_eq!(replayed.occurrence_count, 2);
+        assert_eq!(
+            row_count(&reopened, "SELECT COUNT(*) FROM caption_cue_miss_evidence"),
+            4,
+            "supplemental offset and reason evidence remains immutable"
+        );
+        assert_eq!(
+            row_count(&reopened, "SELECT COUNT(*) FROM caption_cue_miss_terminals"),
+            2
+        );
         drop(reopened);
+        for candidate in [
+            database.clone(),
+            PathBuf::from(format!("{}-wal", database.display())),
+            PathBuf::from(format!("{}-shm", database.display())),
+        ] {
+            let _ = std::fs::remove_file(candidate);
+        }
+    }
+
+    #[test]
+    fn caption_miss_resolution_fence_cannot_clear_a_newer_occurrence() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let database =
+            std::env::temp_dir().join(format!("townlight-caption-miss-fence-{nonce}.db"));
+        let store = StationStore::open(&database).unwrap();
+        let first = CaptionCueMissEvidence {
+            channel_id: "5d85189a-cd1f-43dc-a619-66a2aeb09ac4".into(),
+            report_id: "b4e1eacb-ef88-4af5-a0d0-a74a76448801".into(),
+            track_id: "65a26343-0339-4654-a92c-4bf9384f18df".into(),
+            track_revision: 7,
+            cue_id: "11111111-1111-4111-8111-111111111111".into(),
+            reason: CaptionCueMissReason::ExpiredBeforeAdmission,
+            media_offset_ms: 1_000,
+            observed_at_unix_ms: 100,
+        };
+        store
+            .observe_caption_cue_misses_and_route(std::slice::from_ref(&first))
+            .unwrap();
+        let stale_fence = store
+            .caption_cue_miss_resolution_fence(&first.channel_id)
+            .unwrap()
+            .unwrap();
+
+        let mut concurrent = first.clone();
+        concurrent.cue_id = "22222222-2222-4222-8222-222222222222".into();
+        concurrent.observed_at_unix_ms = 101;
+        store
+            .observe_caption_cue_misses_and_route(std::slice::from_ref(&concurrent))
+            .unwrap();
+        assert!(
+            store
+                .resolve_caption_cue_miss_if_unchanged(&stale_fence, 102)
+                .unwrap()
+                .is_none(),
+            "a clean batch may not resolve a miss observed after its causal fence"
+        );
+        let current = store
+            .caption_cue_miss_resolution_fence(&first.channel_id)
+            .unwrap()
+            .unwrap();
+        assert_ne!(
+            current.last_observed_at_unix_ms,
+            stale_fence.last_observed_at_unix_ms
+        );
+        assert!(
+            store
+                .resolve_caption_cue_miss_if_unchanged(&current, 102)
+                .unwrap()
+                .is_some(),
+            "the exact current generation remains resolvable"
+        );
+        drop(store);
+        for candidate in [
+            database.clone(),
+            PathBuf::from(format!("{}-wal", database.display())),
+            PathBuf::from(format!("{}-shm", database.display())),
+        ] {
+            let _ = std::fs::remove_file(candidate);
+        }
+    }
+
+    #[test]
+    fn caption_miss_schema_migration_adds_offset_identity_and_logical_terminal() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let database =
+            std::env::temp_dir().join(format!("townlight-caption-miss-migration-{nonce}.db"));
+        let legacy = StationStore::open(&database).unwrap();
+        legacy
+            .execute(
+                "DROP TRIGGER caption_cue_miss_evidence_no_update; \
+                 DROP TRIGGER caption_cue_miss_evidence_no_delete; \
+                 DROP INDEX caption_cue_miss_evidence_channel_time; \
+                 DROP TABLE caption_cue_miss_evidence; \
+                 CREATE TABLE caption_cue_miss_evidence (\
+                   channel_id TEXT NOT NULL, report_id TEXT NOT NULL, track_id TEXT NOT NULL,\
+                   track_revision INTEGER NOT NULL, cue_id TEXT NOT NULL, reason TEXT NOT NULL,\
+                   media_offset_ms INTEGER NOT NULL, observed_at_unix_ms INTEGER NOT NULL,\
+                   PRIMARY KEY(channel_id, report_id, track_id, track_revision, cue_id, reason)); \
+                 INSERT INTO caption_cue_miss_evidence VALUES (\
+                   'channel','report','track',1,'cue','worker-did-not-acknowledge',500,100);",
+            )
+            .unwrap();
+        drop(legacy);
+
+        let migrated = StationStore::open(&database).unwrap();
+        assert_eq!(
+            row_count(
+                &migrated,
+                "SELECT COUNT(*) FROM caption_cue_miss_terminals WHERE first_reason='worker-did-not-acknowledge' AND first_media_offset_ms=500"
+            ),
+            1
+        );
+        let supplemental = CaptionCueMissEvidence {
+            channel_id: "channel".into(),
+            report_id: "report".into(),
+            track_id: "track".into(),
+            track_revision: 1,
+            cue_id: "cue".into(),
+            reason: CaptionCueMissReason::WorkerDidNotAcknowledge,
+            media_offset_ms: 700,
+            observed_at_unix_ms: 101,
+        };
+        assert!(
+            !migrated
+                .observe_caption_cue_misses_and_route(std::slice::from_ref(&supplemental))
+                .unwrap(),
+            "the migrated terminal suppresses re-alert while the distinct offset is retained"
+        );
+        assert_eq!(
+            row_count(&migrated, "SELECT COUNT(*) FROM caption_cue_miss_evidence"),
+            2
+        );
+        drop(migrated);
         for candidate in [
             database.clone(),
             PathBuf::from(format!("{}-wal", database.display())),

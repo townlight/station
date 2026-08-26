@@ -425,6 +425,8 @@ pub enum AlertConditionKind {
 #[serde(rename_all = "kebab-case")]
 pub enum CaptionCueMissReason {
     ExpiredBeforeAdmission,
+    CommandNotDelivered,
+    CommandDeliveryUncertain,
     WorkerDidNotAcknowledge,
 }
 
