@@ -17,3 +17,11 @@ The `windows-service` Rust crate is available under MIT OR Apache-2.0 from <http
 The Windows setup executable is produced with Inno Setup. Inno Setup source, license, and commercial-use terms are available from <https://jrsoftware.org/isinfo.php>.
 
 The development installation used for machine tests may contain additional plugins that TownLight Station does not call. Product packaging will inventory and ship only required runtime components, preserve their license files, and provide corresponding-source notices where a component's license requires them.
+
+TownLight Station's bounded future transport-capture packaging lane carries the
+unmodified TSDuck Windows x64 portable runtime. TSDuck is distributed under the
+BSD 2-Clause License; its `LICENSE.txt` and `OTHERS.txt` files are preserved in
+the installed runtime. The pinned source is <https://github.com/tsduck/tsduck>
+release `v3.44-4676`, asset
+`TSDuck-Win64-3.44-4676-Portable.zip`. The source archive SHA-256 is
+`b0ca0f963fcd77488b8c32d6f9d85030daa891ed753c36e57bbb458807a44eb1`.

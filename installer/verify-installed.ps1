@@ -73,6 +73,7 @@ $commonApplicationData = Get-TrustedKnownFolder 'CommonApplicationData'
 $application = Join-Path $programFiles 'TownLight Station'
 $data = Join-Path $commonApplicationData 'TownLight Station'
 $runtime = Join-Path $application 'runtime\gstreamer'
+$tsduckRuntime = Join-Path $application 'runtime\tsduck'
 $captionDecoder = Join-Path $application 'runtime\caption-decoder\ffmpeg.exe'
 $captionDecoderLicense = Join-Path $application 'runtime\caption-decoder\LICENSE.txt'
 $candidatePair = Get-TownLightCandidateIdentity -ManifestPath $Manifest
@@ -88,6 +89,8 @@ $receipt = Get-Content -LiteralPath (Join-Path $data 'install-receipt.json') -Ra
 $activeReceipt = Get-Content -LiteralPath (Join-Path $data 'active-slot.json') -Raw | ConvertFrom-Json
 $runtimeManifestPath = Join-Path $data 'runtime-manifest.json'
 $runtimeManifest = Get-Content -LiteralPath $runtimeManifestPath -Raw | ConvertFrom-Json
+$tsduckRuntimeManifestPath = Join-Path $data 'tsduck-runtime-manifest.json'
+$tsduckRuntimeManifest = Get-Content -LiteralPath $tsduckRuntimeManifestPath -Raw | ConvertFrom-Json
 
 $expectedStationPath = '"' + (Join-Path $application 'stationd.exe') + '" service --database "' + (Join-Path $data 'station.db') + '" --address 127.0.0.1:4070'
 $expectedUpdaterPath = '"' + (Join-Path $application 'station-updater.exe') + '" service --database "' + (Join-Path $data 'station.db') + '" --application-root "' + $application + '"'
@@ -177,9 +180,29 @@ if ($runtimeManifest.schema_version -ne 1 -or
     $runtimeManifest.runtime_package_sha256 -ne $manifestDocument.media_runtime_sha256) {
     throw 'The installed runtime manifest identity does not match the candidate.'
 }
+$tsduckRuntimeManifestHash = (Get-FileHash -LiteralPath $tsduckRuntimeManifestPath -Algorithm SHA256).Hash.ToLowerInvariant()
+if ($receipt.tsduck_version -cne [string]$manifestDocument.tsduck_version -or
+    $receipt.tsduck_source_url -cne [string]$manifestDocument.tsduck_source_url -or
+    $receipt.tsduck_archive_name -cne [string]$manifestDocument.tsduck_archive_name -or
+    $receipt.tsduck_runtime_sha256 -cne [string]$manifestDocument.tsduck_runtime_sha256 -or
+    $receipt.tsduck_runtime_manifest_sha256 -cne $tsduckRuntimeManifestHash) {
+    throw 'The installation receipt does not match the pinned TSDuck candidate identity.'
+}
+if ($tsduckRuntimeManifest.schema_version -ne 1 -or
+    $tsduckRuntimeManifest.product -ne 'TownLight Station' -or
+    $tsduckRuntimeManifest.runtime_package_sha256 -ne $manifestDocument.tsduck_runtime_sha256) {
+    throw 'The installed TSDuck runtime manifest identity does not match the candidate.'
+}
 
 $runtimeVerification = Assert-TownLightInstalledPrivateRuntime `
     -RuntimeRoot $runtime -RuntimeManifest $runtimeManifest
+$tsduckRuntimeVerification = Assert-TownLightInstalledPrivateRuntime `
+    -RuntimeRoot $tsduckRuntime -RuntimeManifest $tsduckRuntimeManifest
+foreach ($requiredTSDuckFile in @('LICENSE.txt', 'OTHERS.txt', 'bin\tsp.exe', 'bin\tsanalyze.exe', 'bin\tsduck.dll', 'bin\tscore.dll')) {
+    if (-not (Test-Path -LiteralPath (Join-Path $tsduckRuntime $requiredTSDuckFile) -PathType Leaf)) {
+        throw "Installed TSDuck runtime is missing required payload: $requiredTSDuckFile"
+    }
+}
 if ($activeReceipt.active.relative_directory -ne '.' -or
     $activeReceipt.active.package_manifest.source_commit -ne $manifestDocument.source_commit -or
     $activeReceipt.active.package_manifest.version -ne $manifestDocument.version -or
@@ -246,6 +269,8 @@ if ($LASTEXITCODE -ne 0) {
     caption_decoder_sha256 = $captionDecoderHash
     caption_decoder_license_sha256 = $captionDecoderLicenseHash
     runtime_manifest_sha256 = $runtimeManifestHash
+    tsduck_runtime_manifest_sha256 = $tsduckRuntimeManifestHash
+    tsduck_runtime_file_count = $tsduckRuntimeVerification.file_count
     media_factories = 'ready'
     data_path = $data
 } | ConvertTo-Json

@@ -1,11 +1,13 @@
 param(
     [string]$GStreamerInstaller,
     [string]$CaptionDecoderArchive,
+    [string]$TSDuckRuntimeArchive,
     [string]$InnoCompiler,
     [switch]$AllowDirty
 )
 
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot '..\scripts\tsduck-runtime.ps1')
 
 function Get-TrustedKnownFolder([string]$Name) {
     $knownPath = switch ($Name) {
@@ -31,9 +33,11 @@ if (-not [string]::IsNullOrWhiteSpace($env:RUSTUP_HOME) -or
 
 $expectedGStreamerInstallerPath = Join-Path $trustedLocalAppData 'Temp\TownLightStation-Toolchain-20260820\gstreamer-1.0-msvc-x86_64-1.28.6.exe'
 $expectedCaptionDecoderArchivePath = Join-Path $trustedLocalAppData 'Temp\TownLightStation-Toolchain-20260825\ffmpeg-n9.0.1-6-g9d4ca21220-win64-lgpl-9.0.zip'
+$expectedTSDuckRuntimeArchivePath = Join-Path $trustedLocalAppData 'Temp\TownLightStation-Toolchain-20260826\TSDuck-Win64-3.44-4676-Portable.zip'
 $expectedInnoPath = Join-Path $trustedLocalAppData 'Programs\Inno Setup 6\ISCC.exe'
 if ([string]::IsNullOrWhiteSpace($GStreamerInstaller)) { $GStreamerInstaller = $expectedGStreamerInstallerPath }
 if ([string]::IsNullOrWhiteSpace($CaptionDecoderArchive)) { $CaptionDecoderArchive = $expectedCaptionDecoderArchivePath }
+if ([string]::IsNullOrWhiteSpace($TSDuckRuntimeArchive)) { $TSDuckRuntimeArchive = $expectedTSDuckRuntimeArchivePath }
 if ([string]::IsNullOrWhiteSpace($InnoCompiler)) { $InnoCompiler = $expectedInnoPath }
 
 $expectedRuntimeHash = '059251444d1267b486eba390b18d25fed87e10315e72f757ec6c7e912fa746b5'
@@ -284,8 +288,12 @@ function Remove-PublishedCandidateFile([string]$Path, [string]$Label) {
 foreach ($requiredFile in @($GStreamerInstaller, $CaptionDecoderArchive, $InnoCompiler, $contract, $innoScript, $cargoWrapper)) {
     if (-not (Test-Path -LiteralPath $requiredFile -PathType Leaf)) { throw "Required installer input is missing: $requiredFile" }
 }
+if (-not (Test-Path -LiteralPath $TSDuckRuntimeArchive -PathType Leaf)) {
+    throw "Required pinned TSDuck runtime archive is missing: $TSDuckRuntimeArchive"
+}
 Assert-CanonicalPath $GStreamerInstaller $expectedGStreamerInstallerPath 'GStreamer installer'
 Assert-CanonicalPath $CaptionDecoderArchive $expectedCaptionDecoderArchivePath 'Caption decoder archive'
+Assert-CanonicalPath $TSDuckRuntimeArchive $expectedTSDuckRuntimeArchivePath 'TSDuck runtime archive'
 Assert-CanonicalPath $InnoCompiler $expectedInnoPath 'Inno compiler'
 
 Push-Location $repository
@@ -304,6 +312,9 @@ $runtimeHash = (Get-FileHash -LiteralPath $GStreamerInstaller -Algorithm SHA256)
 if ($runtimeHash -ne $expectedRuntimeHash) { throw "GStreamer runtime hash mismatch. Expected $expectedRuntimeHash, got $runtimeHash." }
 $captionDecoderArchiveHash = (Get-FileHash -LiteralPath $CaptionDecoderArchive -Algorithm SHA256).Hash.ToLowerInvariant()
 if ($captionDecoderArchiveHash -ne $expectedCaptionDecoderArchiveHash) { throw "Caption decoder archive hash mismatch. Expected $expectedCaptionDecoderArchiveHash, got $captionDecoderArchiveHash." }
+$tsduckRuntimeArchiveHash = (Get-FileHash -LiteralPath $TSDuckRuntimeArchive -Algorithm SHA256).Hash.ToLowerInvariant()
+$tsduckPin = Get-TownLightTSDuckPin
+if ($tsduckRuntimeArchiveHash -cne $tsduckPin.archive_sha256) { throw "TSDuck runtime archive hash mismatch. Expected $($tsduckPin.archive_sha256), got $tsduckRuntimeArchiveHash." }
 
 $captionDecoderStage = Join-Path ([IO.Path]::GetTempPath()) ("TownLight-caption-decoder-" + [guid]::NewGuid().ToString('N'))
 $captionDecoder = Join-Path $captionDecoderStage 'ffmpeg.exe'
@@ -355,6 +366,9 @@ try {
     if (($runParentItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw 'Release run parent is a reparse point; refusing publication.' }
     New-Item -ItemType Directory -Path $releaseRunDirectory -ErrorAction Stop | Out-Null
     $releaseRunOwned = $true
+
+    $tsduckRuntimeRoot = Expand-TownLightTSDuckRuntime -ArchivePath $TSDuckRuntimeArchive `
+        -DestinationPath (Join-Path $releaseRunDirectory 'tsduck-runtime')
 
     Add-Type -AssemblyName System.IO.Compression.FileSystem
     $archive = [IO.Compression.ZipFile]::OpenRead($CaptionDecoderArchive)
@@ -421,7 +435,7 @@ try {
     $workerSize = (Get-Item -LiteralPath $channelWorker).Length
     $updaterSize = (Get-Item -LiteralPath $stationUpdater).Length
 
-    & $InnoCompiler "/DSourceCommit=$sourceCommit" "/DStationdPath=$stationd" "/DChannelWorkerPath=$channelWorker" "/DStationUpdaterPath=$stationUpdater" "/DStationdSha256=$stationdHash" "/DChannelWorkerSha256=$workerHash" "/DStationUpdaterSha256=$updaterHash" "/DStationdSize=$stationdSize" "/DChannelWorkerSize=$workerSize" "/DStationUpdaterSize=$updaterSize" "/DGStreamerInstaller=$GStreamerInstaller" "/DCaptionDecoderPath=$captionDecoder" "/DCaptionDecoderLicensePath=$captionDecoderLicense" "/DCaptionDecoderArchiveSha256=$captionDecoderArchiveHash" "/DCaptionDecoderSha256=$captionDecoderHash" "/DCaptionDecoderSize=$expectedCaptionDecoderSize" "/DCaptionDecoderLicenseSha256=$captionDecoderLicenseHash" "/DCaptionDecoderLicenseSize=$expectedCaptionDecoderLicenseSize" "/DOutputDirectory=$releaseRunDirectory" $innoScript
+    & $InnoCompiler "/DSourceCommit=$sourceCommit" "/DStationdPath=$stationd" "/DChannelWorkerPath=$channelWorker" "/DStationUpdaterPath=$stationUpdater" "/DStationdSha256=$stationdHash" "/DChannelWorkerSha256=$workerHash" "/DStationUpdaterSha256=$updaterHash" "/DStationdSize=$stationdSize" "/DChannelWorkerSize=$workerSize" "/DStationUpdaterSize=$updaterSize" "/DGStreamerInstaller=$GStreamerInstaller" "/DCaptionDecoderPath=$captionDecoder" "/DCaptionDecoderLicensePath=$captionDecoderLicense" "/DCaptionDecoderArchiveSha256=$captionDecoderArchiveHash" "/DCaptionDecoderSha256=$captionDecoderHash" "/DCaptionDecoderSize=$expectedCaptionDecoderSize" "/DCaptionDecoderLicenseSha256=$captionDecoderLicenseHash" "/DCaptionDecoderLicenseSize=$expectedCaptionDecoderLicenseSize" "/DTSDuckRuntimeArchive=$TSDuckRuntimeArchive" "/DTSDuckRuntimeSha256=$tsduckRuntimeArchiveHash" "/DTSDuckVersion=$($tsduckPin.version)" "/DTSDuckSourceUrl=$($tsduckPin.source_url)" "/DTSDuckArchiveName=$($tsduckPin.archive_name)" "/DOutputDirectory=$releaseRunDirectory" $innoScript
     if ($LASTEXITCODE -ne 0) { throw 'Inno Setup compilation failed.' }
     $stagedInstaller = Join-Path $releaseRunDirectory $installerName
     if (-not (Test-Path -LiteralPath $stagedInstaller -PathType Leaf)) { throw "Expected installer was not produced: $stagedInstaller" }
@@ -437,6 +451,10 @@ try {
         channel_worker_sha256 = $workerHash
         station_updater_sha256 = $updaterHash
         media_runtime_sha256 = $runtimeHash
+        tsduck_version = $tsduckPin.version
+        tsduck_source_url = $tsduckPin.source_url
+        tsduck_archive_name = $tsduckPin.archive_name
+        tsduck_runtime_sha256 = $tsduckRuntimeArchiveHash
         caption_decoder_archive_sha256 = $captionDecoderArchiveHash
         caption_decoder_sha256 = $captionDecoderHash
         caption_decoder_size_bytes = $expectedCaptionDecoderSize
