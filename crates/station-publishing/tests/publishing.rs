@@ -1,7 +1,8 @@
 use station_publishing::{
     ConnectionTestOutcome, PublishCandidateIdentity, PublishConnectionTestEvidence,
-    PublishTargetAccount, PublishTargetKind, PublishTargetProfile, PublishTargetStatus,
-    RequiredTierStatus, derive_publication_readiness, derive_publish_target_status,
+    PublishExecutionReceipt, PublishExecutionStage, PublishTargetAccount, PublishTargetKind,
+    PublishTargetProfile, PublishTargetStatus, RequiredTierStatus, derive_publication_readiness,
+    derive_publish_target_status, validate_receipt_successor,
 };
 
 const ACCOUNT_ID: &str = "8b626c01-bdf8-419a-8a2e-b0a7caa1ff7e";
@@ -313,4 +314,73 @@ fn uppercase_uuid_is_not_a_canonical_identity() {
     let mut uppercase_identity = portal_account();
     uppercase_identity.account_id = "8B626C01-BDF8-419A-8A2E-B0A7CAA1FF7E".into();
     assert!(uppercase_identity.validate().is_err());
+}
+
+fn receipt(kind: PublishTargetKind, stage: PublishExecutionStage) -> PublishExecutionReceipt {
+    PublishExecutionReceipt {
+        receipt_id: "44444444-2222-4333-8444-555555555555".into(),
+        job_id: "55555555-2222-4333-8444-555555555555".into(),
+        account_id: ACCOUNT_ID.into(),
+        account_revision: 3,
+        target_id: TARGET_ID.into(),
+        target_revision: 5,
+        target_kind: kind,
+        configuration_hash: CONFIGURATION.into(),
+        credential_version: 2,
+        candidate: candidate(),
+        media_sha256: "d".repeat(64),
+        media_bytes: 188,
+        stage,
+        delivery_identity_sha256: "e".repeat(64),
+        occurred_at_unix_ms: 100,
+        recorded_at_unix_ms: 101,
+        detail: "Provider acknowledged the exact bounded request.".into(),
+    }
+}
+
+#[test]
+fn execution_truth_does_not_overclaim_provider_success() {
+    assert!(
+        !receipt(PublishTargetKind::Portal, PublishExecutionStage::Uploaded)
+            .satisfies_required_delivery()
+    );
+    assert!(
+        receipt(PublishTargetKind::Portal, PublishExecutionStage::Published)
+            .satisfies_required_delivery()
+    );
+    assert!(
+        receipt(
+            PublishTargetKind::LocalNas,
+            PublishExecutionStage::Delivered
+        )
+        .satisfies_required_delivery()
+    );
+    assert!(
+        !receipt(
+            PublishTargetKind::YouTubeLive,
+            PublishExecutionStage::Delivered
+        )
+        .satisfies_required_delivery()
+    );
+    assert!(
+        !receipt(
+            PublishTargetKind::Podcast,
+            PublishExecutionStage::ExternallyVerified
+        )
+        .satisfies_required_delivery()
+    );
+}
+
+#[test]
+fn execution_receipts_advance_only_the_same_exact_binding() {
+    let prior = receipt(PublishTargetKind::Portal, PublishExecutionStage::Attempted);
+    let mut next = prior.clone();
+    next.receipt_id = "66666666-2222-4333-8444-555555555555".into();
+    next.stage = PublishExecutionStage::Published;
+    next.occurred_at_unix_ms = 102;
+    next.recorded_at_unix_ms = 102;
+    assert!(validate_receipt_successor(&prior, &next).is_ok());
+
+    next.target_revision += 1;
+    assert!(validate_receipt_successor(&prior, &next).is_err());
 }

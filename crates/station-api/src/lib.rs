@@ -780,8 +780,20 @@ struct PutPublishTargetAccountRequest {
     kind: PublishTargetKind,
     label: String,
     enabled: bool,
-    credential_configured: bool,
     expected_revision: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PutPublishAccountCredentialRequest {
+    expected_account_revision: u64,
+    credential: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DeletePublishAccountCredentialRequest {
+    expected_account_revision: u64,
 }
 
 /// The browser proposes non-secret target configuration. Identity, revision,
@@ -2014,6 +2026,12 @@ impl Api {
                 self.put_automation_policy(path, body, actor)
             }
             ("GET", "/api/v1/publishing/accounts") => self.list_publish_target_accounts(actor),
+            ("PUT", path) if publish_account_credential_path(path).is_some() => {
+                self.put_publish_account_credential(path, body, actor)
+            }
+            ("DELETE", path) if publish_account_credential_path(path).is_some() => {
+                self.delete_publish_account_credential(path, body, actor)
+            }
             ("GET", path) if publish_target_account_history_path(path).is_some() => {
                 self.list_publish_target_account_history(path, actor)
             }
@@ -3024,7 +3042,12 @@ impl Api {
             kind: request.kind,
             label: request.label,
             enabled: request.enabled,
-            credential_configured: request.credential_configured,
+            credential_configured: self
+                .storage
+                .read_publish_target_account(account_id)
+                .ok()
+                .flatten()
+                .is_some_and(|current| current.credential_configured),
             revision,
         };
         match self.storage.write_publish_target_account(
@@ -3038,6 +3061,148 @@ impl Api {
                 serde_json::to_vec(&account).expect("serializing publish account cannot fail"),
             ),
             Err(error) => publishing_write_error_response(error),
+        }
+    }
+
+    fn put_publish_account_credential(
+        &self,
+        path: &str,
+        body: Option<&[u8]>,
+        actor: Option<&OperatorAccount>,
+    ) -> ApiResponse {
+        let Some(account_id) = publish_account_credential_path(path) else {
+            return error_response(
+                400,
+                "invalid_path",
+                "The publishing account identity is invalid.",
+            );
+        };
+        let Some(actor) = actor.filter(|account| account.enabled() && is_setup_admin(account))
+        else {
+            return error_response(
+                403,
+                "setup_admin_required",
+                "Publishing credentials require the Setup Admin role.",
+            );
+        };
+        let Some(request) = parse_body::<PutPublishAccountCredentialRequest>(body) else {
+            return error_response(
+                400,
+                "invalid_json",
+                "A bounded write-only credential body is required.",
+            );
+        };
+        if request.credential.len() < 8
+            || request.credential.len() > 16_384
+            || request
+                .credential
+                .chars()
+                .any(|character| character == '\0')
+        {
+            return error_response(
+                422,
+                "validation_failed",
+                "The publishing credential is invalid or oversized.",
+            );
+        }
+        let now = match system_time_millis() {
+            Ok(now) => now,
+            Err(message) => return error_response(500, "clock_error", &message),
+        };
+        match self.storage.provision_publish_account_credential(
+            account_id,
+            request.expected_account_revision,
+            request.credential.as_bytes(),
+            actor.account_id().as_str(),
+            now,
+        ) {
+            Ok(_) => match self.storage.read_publish_target_account(account_id) {
+                Ok(Some(account)) => json_response(
+                    200,
+                    serde_json::to_vec(&account)
+                        .expect("serializing redacted publish account cannot fail"),
+                ),
+                Ok(None) => error_response(
+                    404,
+                    "publish_target_account_not_found",
+                    "The publishing account does not exist.",
+                ),
+                Err(message) => error_response(500, "storage_error", &message),
+            },
+            Err(message) if message.contains("changed") => {
+                error_response(409, "revision_conflict", &message)
+            }
+            Err(message) if message.contains("missing") => {
+                error_response(404, "publish_target_account_not_found", &message)
+            }
+            Err(message) if message.contains("invalid") || message.contains("oversized") => {
+                error_response(422, "validation_failed", &message)
+            }
+            Err(message) => error_response(500, "credential_provisioning_failed", &message),
+        }
+    }
+
+    fn delete_publish_account_credential(
+        &self,
+        path: &str,
+        body: Option<&[u8]>,
+        actor: Option<&OperatorAccount>,
+    ) -> ApiResponse {
+        let Some(account_id) = publish_account_credential_path(path) else {
+            return error_response(
+                400,
+                "invalid_path",
+                "The publishing account identity is invalid.",
+            );
+        };
+        let Some(actor) = actor.filter(|account| account.enabled() && is_setup_admin(account))
+        else {
+            return error_response(
+                403,
+                "setup_admin_required",
+                "Publishing credentials require the Setup Admin role.",
+            );
+        };
+        let Some(request) = parse_body::<DeletePublishAccountCredentialRequest>(body) else {
+            return error_response(
+                400,
+                "invalid_json",
+                "The expected account revision is required.",
+            );
+        };
+        let now = match system_time_millis() {
+            Ok(now) => now,
+            Err(message) => return error_response(500, "clock_error", &message),
+        };
+        match self.storage.delete_publish_account_credential(
+            account_id,
+            request.expected_account_revision,
+            actor.account_id().as_str(),
+            now,
+        ) {
+            Ok(_) => match self.storage.read_publish_target_account(account_id) {
+                Ok(Some(account)) => json_response(
+                    200,
+                    serde_json::to_vec(&account)
+                        .expect("serializing redacted publish account cannot fail"),
+                ),
+                Ok(None) => error_response(
+                    404,
+                    "publish_target_account_not_found",
+                    "The publishing account does not exist.",
+                ),
+                Err(message) => error_response(500, "storage_error", &message),
+            },
+            Err(message) if message.contains("changed") => {
+                error_response(409, "revision_conflict", &message)
+            }
+            Err(message) if message.contains("missing") => {
+                error_response(404, "publish_target_account_not_found", &message)
+            }
+            Err(message) if message.contains("not configured") => {
+                error_response(409, "credential_not_configured", &message)
+            }
+            Err(message) => error_response(500, "credential_deletion_failed", &message),
         }
     }
 
@@ -10808,6 +10973,11 @@ fn publish_target_account_path(path: &str) -> Option<&str> {
         .filter(|identity| is_canonical_api_uuid(identity))
 }
 
+fn publish_account_credential_path(path: &str) -> Option<&str> {
+    path_identity(path, "/api/v1/publishing/accounts/", "/credential")
+        .filter(|identity| is_canonical_api_uuid(identity))
+}
+
 fn publish_target_account_history_path(path: &str) -> Option<(&str, usize)> {
     publishing_history_path(path, "/api/v1/publishing/accounts/")
 }
@@ -17004,7 +17174,7 @@ mod tests {
         for (index, (account_id, target_id, kind)) in targets.iter().enumerate() {
             let account_request = serde_json::to_vec(&serde_json::json!({
                 "kind": kind, "label": format!("{kind:?} account"), "enabled": true,
-                "credential_configured": true, "expected_revision": null
+                "expected_revision": null
             }))
             .unwrap();
             assert_eq!(
@@ -17016,6 +17186,24 @@ mod tests {
                 )
                 .status,
                 201
+            );
+            let credential_request = serde_json::to_vec(&serde_json::json!({
+                "expected_account_revision": 1,
+                "credential": format!("provider-secret-{index}")
+            }))
+            .unwrap();
+            let credential_response = api.handle_authenticated(
+                "PUT",
+                &format!("/api/v1/publishing/accounts/{account_id}/credential"),
+                Some(&credential_request),
+                &setup_admin,
+            );
+            assert_eq!(credential_response.status, 200);
+            assert!(
+                !credential_response
+                    .body
+                    .windows(15)
+                    .any(|bytes| bytes == b"provider-secret")
             );
             let target_request = serde_json::to_vec(&serde_json::json!({
                 "account_id": account_id, "kind": kind, "label": format!("{kind:?} target"),
@@ -17047,10 +17235,13 @@ mod tests {
                 .status,
             403
         );
+        let account_list =
+            api.handle_authenticated("GET", "/api/v1/publishing/accounts", None, &reader);
         assert_eq!(
-            api.handle_authenticated("GET", "/api/v1/publishing/accounts", None, &reader)
-                .status,
-            200
+            account_list.status,
+            200,
+            "{}",
+            String::from_utf8_lossy(&account_list.body)
         );
         assert_eq!(
             api.handle_authenticated(

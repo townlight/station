@@ -9,6 +9,7 @@ const MAX_DETAIL: usize = 1_000;
 const MAX_TARGETS: usize = 64;
 const MAX_EVIDENCE: usize = 128;
 const MAX_TEST_WINDOW_MS: i64 = 86_400_000;
+const MAX_MEDIA_BYTES: u64 = 1_099_511_627_776;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -90,6 +91,109 @@ pub struct PublishConnectionTestEvidence {
     pub tested_at_unix_ms: i64,
     pub expires_at_unix_ms: i64,
     pub detail: String,
+}
+
+/// Durable provider truth advances one explicit stage at a time. A later stage
+/// never implies audience reach, playback, or retention beyond the provider's
+/// exact acknowledgement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PublishExecutionStage {
+    Attempted,
+    Uploaded,
+    Delivered,
+    Published,
+    ExternallyVerified,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PublishExecutionReceipt {
+    pub receipt_id: String,
+    pub job_id: String,
+    pub account_id: String,
+    pub account_revision: u64,
+    pub target_id: String,
+    pub target_revision: u64,
+    pub target_kind: PublishTargetKind,
+    pub configuration_hash: String,
+    pub credential_version: u64,
+    pub candidate: PublishCandidateIdentity,
+    pub media_sha256: String,
+    pub media_bytes: u64,
+    pub stage: PublishExecutionStage,
+    /// Digest of the bounded provider acknowledgement or verified destination
+    /// bytes. Raw provider response bodies never enter durable authority.
+    pub delivery_identity_sha256: String,
+    pub occurred_at_unix_ms: i64,
+    pub recorded_at_unix_ms: i64,
+    pub detail: String,
+}
+
+impl PublishExecutionReceipt {
+    pub fn validate(&self) -> Result<(), String> {
+        for (value, field) in [
+            (&self.receipt_id, "publish receipt identity"),
+            (&self.job_id, "publish job identity"),
+            (&self.account_id, "publish account identity"),
+            (&self.target_id, "publish target identity"),
+        ] {
+            validate_uuid(value, field)?;
+        }
+        if self.account_revision == 0
+            || self.target_revision == 0
+            || self.credential_version == 0
+            || !is_sha256(&self.configuration_hash)
+            || !is_sha256(&self.media_sha256)
+            || !is_sha256(&self.delivery_identity_sha256)
+            || self.media_bytes == 0
+            || self.media_bytes > MAX_MEDIA_BYTES
+            || self.occurred_at_unix_ms < 0
+            || self.recorded_at_unix_ms < self.occurred_at_unix_ms
+        {
+            return Err("publish execution receipt binding or evidence is invalid".into());
+        }
+        self.candidate.validate()?;
+        validate_visible(&self.detail, MAX_DETAIL, "publish execution detail")
+    }
+
+    pub fn satisfies_required_delivery(&self) -> bool {
+        let minimum = match self.target_kind {
+            PublishTargetKind::Portal | PublishTargetKind::YouTubeLive => {
+                PublishExecutionStage::Published
+            }
+            PublishTargetKind::InternetArchive | PublishTargetKind::LocalNas => {
+                PublishExecutionStage::Delivered
+            }
+            PublishTargetKind::Syndication | PublishTargetKind::Podcast => return false,
+        };
+        self.stage >= minimum
+    }
+}
+
+pub fn validate_receipt_successor(
+    prior: &PublishExecutionReceipt,
+    next: &PublishExecutionReceipt,
+) -> Result<(), String> {
+    prior.validate()?;
+    next.validate()?;
+    if prior.job_id != next.job_id
+        || prior.account_id != next.account_id
+        || prior.account_revision != next.account_revision
+        || prior.target_id != next.target_id
+        || prior.target_revision != next.target_revision
+        || prior.target_kind != next.target_kind
+        || prior.configuration_hash != next.configuration_hash
+        || prior.credential_version != next.credential_version
+        || prior.candidate != next.candidate
+        || prior.media_sha256 != next.media_sha256
+        || prior.media_bytes != next.media_bytes
+        || next.stage <= prior.stage
+        || next.occurred_at_unix_ms < prior.occurred_at_unix_ms
+    {
+        return Err("publish execution receipt does not advance the exact job binding".into());
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
