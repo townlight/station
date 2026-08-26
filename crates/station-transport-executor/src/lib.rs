@@ -575,6 +575,36 @@ fn is_sha256(value: &str) -> bool {
     value.len() == 64 && value.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
+fn validate_tstables_json(output: &[u8], service_id: u64, pmt_pid: u64) -> Result<(), String> {
+    if output.is_empty() || output.len() > MAX_PROCESS_OUTPUT_BYTES {
+        return Err("TSDuck tables output is missing or oversized".into());
+    }
+    let tables: Vec<serde_json::Value> =
+        serde_json::from_slice(output).map_err(|_| "TSDuck tables output is malformed")?;
+    if tables.len() > 128 {
+        return Err("TSDuck tables output exceeds its table bound".into());
+    }
+    let pat = tables
+        .iter()
+        .find(|table| table["#name"] == "PAT")
+        .ok_or("TSDuck PAT table is missing")?;
+    let pmt = tables
+        .iter()
+        .find(|table| table["#name"] == "PMT" && table["service_id"].as_u64() == Some(service_id))
+        .ok_or("TSDuck PMT table is missing")?;
+    let pat_matches = pat["#nodes"].as_array().is_some_and(|nodes| {
+        nodes.iter().any(|node| {
+            node["#name"] == "service"
+                && node["service_id"].as_u64() == Some(service_id)
+                && node["program_map_pid"].as_u64() == Some(pmt_pid)
+        })
+    });
+    if !pat_matches || pmt["pcr_pid"].as_u64().is_none() {
+        return Err("TSDuck PAT and PMT tables are inconsistent".into());
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -688,5 +718,15 @@ mod tests {
         assert_eq!(findings.packet_count, 287);
         assert_eq!(findings.pat_program_count, 1);
         assert_eq!(findings.pmt_stream_count, 1);
+    }
+
+    #[test]
+    fn validates_the_retained_pat_and_pmt_table_binding() {
+        validate_tstables_json(
+            include_bytes!("../tests/fixtures/tsduck-3.44-h264-aac-tables.json"),
+            1,
+            4096,
+        )
+        .unwrap();
     }
 }
