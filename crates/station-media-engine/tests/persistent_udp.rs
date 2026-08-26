@@ -21,8 +21,9 @@ use station_media_engine::{
     PersistentPlayout, SourceRole, TransportOutput,
 };
 use station_media_protocol::{
-    CaptionCue, CgImageFormat, CgOverlay, CgOverlayContent, CgRect, CgSnapshot, LoudnessTarget,
-    WorkerCaptionMode, WorkerCaptionPolicy, WorkerFallbackSlate,
+    CaptionCue, CgImageFormat, CgOverlay, CgOverlayContent, CgRect, CgSnapshot, FallbackToneKind,
+    LoudnessTarget, WorkerCaptionMode, WorkerCaptionPolicy, WorkerFallbackSlate,
+    WorkerFallbackTone,
 };
 use station_schedule::OutputProfileId;
 
@@ -73,6 +74,36 @@ fn fans_one_persistent_transport_out_to_two_independent_udp_sinks() {
         assert!(truth.video_pts_samples >= 3);
         assert!(truth.audio_pts_samples >= 3);
     }
+    playout.stop().unwrap();
+}
+
+#[test]
+fn fallback_tone_reuses_the_running_fallback_audio_branch() {
+    let _guard = persistent_graph_test_guard();
+    let receiver = UdpSocket::bind("127.0.0.1:0").unwrap();
+    receiver
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    let mut playout = PersistentPlayout::start_udp_fanout_with_profile(
+        &[receiver.local_addr().unwrap()],
+        OutputProfileId::Proof360p30,
+    )
+    .expect("persistent fallback graph starts");
+    let before = playout.output_bytes_sent().unwrap()[0];
+    playout
+        .activate_fallback_tone(&WorkerFallbackTone {
+            activation_id: "1c63ef7e-6e4b-4fa6-b5d8-c15e2b735c05".into(),
+            authority_revision: 1,
+            kind: FallbackToneKind::Test,
+            frequency_hz: 1_000,
+            level_milli_dbfs: -20_000,
+            duration_ms: 1_000,
+        })
+        .expect("tone changes only the existing fallback source");
+    std::thread::sleep(Duration::from_millis(100));
+    assert!(playout.output_bytes_sent().unwrap()[0] > before);
+    playout.deactivate_fallback_tone();
+    assert_eq!(playout.active_source().unwrap(), SourceRole::Fallback);
     playout.stop().unwrap();
 }
 

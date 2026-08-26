@@ -77,7 +77,10 @@ pub const MAX_FRAME_BYTES: usize = 65_536;
 // A scheduled take acknowledgement carries the durable schedule binding and
 // worker-observed air time. It is a breaking worker capability, so mixed
 // pre-v9 workers fail closed.
-pub const PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion { major: 9, minor: 0 };
+pub const PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion {
+    major: 10,
+    minor: 0,
+};
 
 pub const MAX_OUTPUT_PROOF_INDEX: u16 = 255;
 // Operator-requested analyzable program is capped at ten minutes. The worker
@@ -111,6 +114,34 @@ pub const MAX_CAPTION_START_AFTER_MS: u64 = 60_000;
 /// detail; this is not durable incident/readiness authority.
 pub const MIN_CAPTION_DURATION_MS: u64 = 1;
 pub const MAX_CAPTION_DURATION_MS: u64 = 60_000;
+/// Tones are deliberately much more constrained than captions: the worker
+/// accepts only these finite frequencies, levels, and durations and must
+/// return to silence after expiry.  This is a local fallback-audio facility,
+/// not an EAS encoder or evidence of an external transmission.
+pub const MIN_FALLBACK_TONE_FREQUENCY_HZ: u16 = 440;
+pub const MAX_FALLBACK_TONE_FREQUENCY_HZ: u16 = 1_500;
+pub const MIN_FALLBACK_TONE_LEVEL_MILLI_DBFS: i32 = -36_000;
+pub const MAX_FALLBACK_TONE_LEVEL_MILLI_DBFS: i32 = -12_000;
+pub const MIN_FALLBACK_TONE_DURATION_MS: u64 = 100;
+pub const MAX_FALLBACK_TONE_DURATION_MS: u64 = 10_000;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FallbackToneKind {
+    Emergency,
+    Test,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkerFallbackTone {
+    pub activation_id: String,
+    pub authority_revision: u64,
+    pub kind: FallbackToneKind,
+    pub frequency_hz: u16,
+    pub level_milli_dbfs: i32,
+    pub duration_ms: u64,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -438,6 +469,13 @@ pub enum ChannelCommand {
         cue: CaptionCue,
     },
     ClearCaptionCues,
+    ActivateFallbackTone {
+        tone: WorkerFallbackTone,
+    },
+    DeactivateFallbackTone {
+        activation_id: String,
+        authority_revision: u64,
+    },
     LoadAsset {
         asset_id: String,
         media_path: String,
@@ -562,6 +600,15 @@ pub enum WorkerEvent {
         cue_id: String,
     },
     CaptionCuesCleared,
+    FallbackToneActivated {
+        activation_id: String,
+        authority_revision: u64,
+        duration_ms: u64,
+    },
+    FallbackToneDeactivated {
+        activation_id: String,
+        authority_revision: u64,
+    },
     CommandRejected {
         command_id: String,
         code: String,
@@ -701,6 +748,7 @@ pub enum ProtocolError {
     InvalidFallbackSlate(String),
     InvalidCaptionPolicy(String),
     InvalidCaptionCue(String),
+    InvalidFallbackTone(String),
     InvalidLiveCommand(String),
     InvalidLiveEvent(String),
     InvalidScheduledTake(String),
@@ -713,6 +761,7 @@ pub fn encode_command_frame(command: &CommandEnvelope) -> Result<Vec<u8>, Protoc
     validate_live_command(&command.command).map_err(ProtocolError::InvalidLiveCommand)?;
     validate_scheduled_take_command(command).map_err(ProtocolError::InvalidScheduledTake)?;
     validate_output_proof_command(&command.command).map_err(ProtocolError::InvalidOutputProof)?;
+    validate_fallback_tone_command(&command.command).map_err(ProtocolError::InvalidFallbackTone)?;
     encode_frame(command)
 }
 
@@ -808,6 +857,75 @@ fn validate_caption_policy(policy: Option<&WorkerCaptionPolicy>) -> Result<(), S
         return Err("caption policy language is invalid or unbounded".into());
     }
     Ok(())
+}
+
+fn validate_fallback_tone(tone: &WorkerFallbackTone) -> Result<(), String> {
+    validate_canonical_uuid(&tone.activation_id, "fallback tone activation_id")?;
+    if tone.authority_revision == 0 {
+        return Err("fallback tone authority_revision must be nonzero".into());
+    }
+    if !(MIN_FALLBACK_TONE_FREQUENCY_HZ..=MAX_FALLBACK_TONE_FREQUENCY_HZ)
+        .contains(&tone.frequency_hz)
+    {
+        return Err("fallback tone frequency is outside the safe worker range".into());
+    }
+    if !(MIN_FALLBACK_TONE_LEVEL_MILLI_DBFS..=MAX_FALLBACK_TONE_LEVEL_MILLI_DBFS)
+        .contains(&tone.level_milli_dbfs)
+    {
+        return Err("fallback tone level is outside the safe worker range".into());
+    }
+    if !(MIN_FALLBACK_TONE_DURATION_MS..=MAX_FALLBACK_TONE_DURATION_MS).contains(&tone.duration_ms)
+    {
+        return Err("fallback tone duration is outside the safe worker range".into());
+    }
+    Ok(())
+}
+
+fn validate_fallback_tone_command(command: &ChannelCommand) -> Result<(), String> {
+    match command {
+        ChannelCommand::ActivateFallbackTone { tone } => validate_fallback_tone(tone),
+        ChannelCommand::DeactivateFallbackTone {
+            activation_id,
+            authority_revision,
+        } => {
+            validate_canonical_uuid(activation_id, "fallback tone activation_id")?;
+            if *authority_revision == 0 {
+                return Err("fallback tone authority_revision must be nonzero".into());
+            }
+            Ok(())
+        }
+        _ => Ok(()),
+    }
+}
+
+fn validate_fallback_tone_event(event: &WorkerEvent) -> Result<(), String> {
+    match event {
+        WorkerEvent::FallbackToneActivated {
+            activation_id,
+            authority_revision,
+            duration_ms,
+        } => {
+            validate_canonical_uuid(activation_id, "fallback tone activation_id")?;
+            if *authority_revision == 0
+                || !(MIN_FALLBACK_TONE_DURATION_MS..=MAX_FALLBACK_TONE_DURATION_MS)
+                    .contains(duration_ms)
+            {
+                return Err("fallback tone activation acknowledgement is invalid".into());
+            }
+            Ok(())
+        }
+        WorkerEvent::FallbackToneDeactivated {
+            activation_id,
+            authority_revision,
+        } => {
+            validate_canonical_uuid(activation_id, "fallback tone activation_id")?;
+            if *authority_revision == 0 {
+                return Err("fallback tone deactivation acknowledgement is invalid".into());
+            }
+            Ok(())
+        }
+        _ => Ok(()),
+    }
 }
 
 fn validate_canonical_uuid(value: &str, field: &str) -> Result<(), String> {
@@ -1271,6 +1389,7 @@ pub fn encode_event_frame(event: &WorkerEventEnvelope) -> Result<Vec<u8>, Protoc
     validate_live_event(&event.event).map_err(ProtocolError::InvalidLiveEvent)?;
     validate_scheduled_take_event(event).map_err(ProtocolError::InvalidScheduledTake)?;
     validate_output_proof_event(&event.event).map_err(ProtocolError::InvalidOutputProof)?;
+    validate_fallback_tone_event(&event.event).map_err(ProtocolError::InvalidFallbackTone)?;
     encode_frame(event)
 }
 
@@ -1305,6 +1424,7 @@ fn validate_decoded_event(
     validate_live_event(&event.event).map_err(ProtocolError::InvalidLiveEvent)?;
     validate_scheduled_take_event(event).map_err(ProtocolError::InvalidScheduledTake)?;
     validate_output_proof_event(&event.event).map_err(ProtocolError::InvalidOutputProof)?;
+    validate_fallback_tone_event(&event.event).map_err(ProtocolError::InvalidFallbackTone)?;
     Ok(event.clone())
 }
 

@@ -12,8 +12,8 @@ use station_media_journal::JournalWriter;
 use station_media_protocol::{
     ChannelCommand, CommandEnvelope, LiveArmToken, LiveReturnTarget, MAX_FRAME_BYTES,
     OutputTransportObservation, PROTOCOL_VERSION, WorkerBootstrapEnvelope, WorkerEvent,
-    WorkerEventEnvelope, WorkerOutputConfiguration, decode_bootstrap_frame, decode_command_frame,
-    encode_event_frame,
+    WorkerEventEnvelope, WorkerFallbackTone, WorkerOutputConfiguration, decode_bootstrap_frame,
+    decode_command_frame, encode_event_frame,
 };
 use station_schedule::OutputProfileId;
 use station_windows_ipc::PipeStream;
@@ -54,6 +54,12 @@ enum LiveBufferStatus {
 
 const MAX_CONSECUTIVE_LIVE_STALLS: u8 = 2;
 const MAX_LIVE_STALL_MILLISECONDS: u64 = 2_000;
+
+struct ActiveFallbackTone {
+    activation_id: String,
+    authority_revision: u64,
+    expires_at_monotonic_ms: u64,
+}
 
 impl LiveState {
     fn is_on_air(&self) -> bool {
@@ -308,6 +314,7 @@ fn main() {
     let worker_instance_id = format!("{worker_id}-{}", std::process::id());
     let mut graph_revision = 1_u64;
     let mut proof_graph_revisions = HashMap::new();
+    let mut fallback_tone = None;
 
     loop {
         let frame = match read_command_frame(&mut pipe) {
@@ -332,6 +339,7 @@ fn main() {
             &worker_boot_id,
             &mut graph_revision,
             &mut proof_graph_revisions,
+            &mut fallback_tone,
         );
         if should_stop {
             media
@@ -457,6 +465,98 @@ fn read_command_frame(input: &mut impl Read) -> Result<Option<Vec<u8>>, String> 
     Ok(Some(frame))
 }
 
+fn activate_fallback_tone(
+    command: &CommandEnvelope,
+    media: &mut PersistentPlayout,
+    active: &mut Option<ActiveFallbackTone>,
+    tone: &WorkerFallbackTone,
+    monotonic_milliseconds: u64,
+) -> (WorkerEvent, bool) {
+    if active.is_some() {
+        return (
+            rejection(
+                command,
+                "fallback_tone_active",
+                "A fallback tone is already active; explicitly deactivate it before another activation.",
+            ),
+            false,
+        );
+    }
+    let Some(expires_at_monotonic_ms) = monotonic_milliseconds.checked_add(tone.duration_ms) else {
+        return (
+            rejection(
+                command,
+                "fallback_tone_expiry_invalid",
+                "The fallback tone expiry overflowed.",
+            ),
+            false,
+        );
+    };
+    match media.activate_fallback_tone(tone) {
+        Ok(()) => {
+            *active = Some(ActiveFallbackTone {
+                activation_id: tone.activation_id.clone(),
+                authority_revision: tone.authority_revision,
+                expires_at_monotonic_ms,
+            });
+            (
+                WorkerEvent::FallbackToneActivated {
+                    activation_id: tone.activation_id.clone(),
+                    authority_revision: tone.authority_revision,
+                    duration_ms: tone.duration_ms,
+                },
+                false,
+            )
+        }
+        Err(error) => (
+            rejection(
+                command,
+                "fallback_tone_activation_failed",
+                &format!("The fallback tone could not be activated: {error:?}"),
+            ),
+            false,
+        ),
+    }
+}
+
+fn deactivate_fallback_tone(
+    command: &CommandEnvelope,
+    media: &mut PersistentPlayout,
+    active: &mut Option<ActiveFallbackTone>,
+    activation_id: &str,
+    authority_revision: u64,
+) -> (WorkerEvent, bool) {
+    let Some(current) = active.as_ref() else {
+        return (
+            rejection(
+                command,
+                "fallback_tone_inactive",
+                "No fallback tone is active.",
+            ),
+            false,
+        );
+    };
+    if current.activation_id != activation_id || current.authority_revision != authority_revision {
+        return (
+            rejection(
+                command,
+                "fallback_tone_authority_mismatch",
+                "The fallback tone activation identity or authority revision is stale.",
+            ),
+            false,
+        );
+    }
+    media.deactivate_fallback_tone();
+    *active = None;
+    (
+        WorkerEvent::FallbackToneDeactivated {
+            activation_id: activation_id.into(),
+            authority_revision,
+        },
+        false,
+    )
+}
+
 #[allow(clippy::too_many_arguments)]
 fn decide_event(
     command: &CommandEnvelope,
@@ -471,6 +571,7 @@ fn decide_event(
     worker_boot_id: &str,
     graph_revision: &mut u64,
     proof_graph_revisions: &mut HashMap<String, u64>,
+    fallback_tone: &mut Option<ActiveFallbackTone>,
 ) -> (WorkerEvent, bool) {
     if command.channel_id != channel_id {
         return (
@@ -494,6 +595,16 @@ fn decide_event(
             ),
             false,
         );
+    }
+    // The supervisor sends a protected heartbeat at least every five seconds.
+    // Expiry is checked before every command, so a silent/blocked supervisor
+    // cannot extend a tone and worker loss removes the output altogether.
+    if fallback_tone
+        .as_ref()
+        .is_some_and(|active| monotonic_milliseconds >= active.expires_at_monotonic_ms)
+    {
+        media.deactivate_fallback_tone();
+        *fallback_tone = None;
     }
     match &command.command {
         ChannelCommand::Ping => {
@@ -629,6 +740,19 @@ fn decide_event(
                 false,
             ),
         },
+        ChannelCommand::ActivateFallbackTone { tone } => {
+            activate_fallback_tone(command, media, fallback_tone, tone, monotonic_milliseconds)
+        }
+        ChannelCommand::DeactivateFallbackTone {
+            activation_id,
+            authority_revision,
+        } => deactivate_fallback_tone(
+            command,
+            media,
+            fallback_tone,
+            activation_id,
+            *authority_revision,
+        ),
         ChannelCommand::LoadAsset {
             asset_id,
             media_path,

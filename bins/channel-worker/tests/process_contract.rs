@@ -10,10 +10,11 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use station_media_journal::{JournalWriter, read_events};
 use station_media_protocol::{
     CgImageFormat, CgOverlay, CgOverlayContent, CgRect, CgSnapshot, ChannelCommand,
-    CommandEnvelope, LiveArmToken, LiveInputConfiguration, LiveReturnTarget, LoudnessTarget,
-    PROTOCOL_VERSION, WorkerBootstrapEnvelope, WorkerEvent, WorkerEventEnvelope,
-    WorkerFallbackSlate, WorkerHeadendProfileId, WorkerHeadendTransportContract,
-    WorkerOutputConfiguration, decode_event_frame, encode_bootstrap_frame, encode_command_frame,
+    CommandEnvelope, FallbackToneKind, LiveArmToken, LiveInputConfiguration, LiveReturnTarget,
+    LoudnessTarget, PROTOCOL_VERSION, WorkerBootstrapEnvelope, WorkerEvent, WorkerEventEnvelope,
+    WorkerFallbackSlate, WorkerFallbackTone, WorkerHeadendProfileId,
+    WorkerHeadendTransportContract, WorkerOutputConfiguration, decode_event_frame,
+    encode_bootstrap_frame, encode_command_frame,
 };
 use station_storage::StationStore;
 use station_windows_ipc::PipeServer;
@@ -390,6 +391,57 @@ fn spawned_worker_stops_cleanly_after_its_control_pipe_closes() {
     assert!(matches!(
         emitted[0].event,
         WorkerEvent::Ready { graph_revision: 1 }
+    ));
+}
+
+#[test]
+fn worker_executes_only_a_finite_revision_bound_fallback_tone() {
+    let _guard = process_contract_test_guard();
+    let journal = journal_path("finite-fallback-tone");
+    let _temp_files = TempFiles(vec![journal.clone()]);
+    let activation_id = "1c63ef7e-6e4b-4fa6-b5d8-c15e2b735c05";
+    let mut input = encode_command_frame(&command(
+        "tone-activate",
+        2,
+        ChannelCommand::ActivateFallbackTone {
+            tone: WorkerFallbackTone {
+                activation_id: activation_id.into(),
+                authority_revision: 3,
+                kind: FallbackToneKind::Test,
+                frequency_hz: 1_000,
+                level_milli_dbfs: -20_000,
+                duration_ms: 1_000,
+            },
+        },
+    ))
+    .unwrap();
+    input.extend(
+        encode_command_frame(&command(
+            "tone-deactivate",
+            3,
+            ChannelCommand::DeactivateFallbackTone {
+                activation_id: activation_id.into(),
+                authority_revision: 3,
+            },
+        ))
+        .unwrap(),
+    );
+    let (output, emitted) = run_worker(&journal, &input, 3);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(matches!(emitted[0].event, WorkerEvent::Ready { .. }));
+    assert!(matches!(
+        emitted[1].event,
+        WorkerEvent::FallbackToneActivated { ref activation_id, authority_revision: 3, duration_ms: 1_000 }
+            if activation_id == "1c63ef7e-6e4b-4fa6-b5d8-c15e2b735c05"
+    ));
+    assert!(matches!(
+        emitted[2].event,
+        WorkerEvent::FallbackToneDeactivated { ref activation_id, authority_revision: 3 }
+            if activation_id == "1c63ef7e-6e4b-4fa6-b5d8-c15e2b735c05"
     ));
 }
 

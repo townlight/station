@@ -20,6 +20,7 @@ use station_media_protocol::{
     MAX_CAPTION_DURATION_MS, MAX_CAPTION_START_AFTER_MS, MAX_CAPTION_TEXT_BYTES, MAX_CG_SLOTS,
     MAX_CG_TEXT_BYTES, MAX_OUTPUT_PROOF_BYTES, MAX_OUTPUT_PROOF_DURATION_MS,
     MIN_OUTPUT_PROOF_DURATION_MS, WorkerCaptionMode, WorkerCaptionPolicy, WorkerFallbackSlate,
+    WorkerFallbackTone,
 };
 use station_schedule::{OutputProfile, OutputProfileId};
 
@@ -288,6 +289,7 @@ pub struct PersistentPlayout {
     video_fallback_pad: gst::Pad,
     video_program_pad: gst::Pad,
     audio_selector: gst::Element,
+    fallback_audio: gst::Element,
     audio_fallback_pad: gst::Pad,
     audio_program_pad: gst::Pad,
     output_counters: Vec<OutputCounter>,
@@ -1143,6 +1145,7 @@ impl PersistentPlayout {
             video_fallback_pad: fallback_pad,
             video_program_pad: program_pad,
             audio_selector,
+            fallback_audio,
             audio_fallback_pad,
             audio_program_pad,
             output_counters,
@@ -1622,6 +1625,29 @@ impl PersistentPlayout {
 
     pub fn current_cg_snapshot(&self) -> Option<&CgSnapshot> {
         self.cg_revision.as_ref()
+    }
+
+    /// Alters only the already-running fallback audio source.  It never adds a
+    /// source or rebuilds an encoder, selector, mux, or output branch.
+    pub fn activate_fallback_tone(&mut self, tone: &WorkerFallbackTone) -> Result<(), EngineError> {
+        self.fallback_audio.set_property_from_str("wave", "sine");
+        self.fallback_audio
+            .set_property("freq", f64::from(tone.frequency_hz));
+        let amplitude = 10_f64.powf(f64::from(tone.level_milli_dbfs) / 20_000.0);
+        if !amplitude.is_finite() || !(0.0..=1.0).contains(&amplitude) {
+            return Err(EngineError::State(
+                "fallback tone level is not renderable".into(),
+            ));
+        }
+        self.fallback_audio.set_property("volume", amplitude);
+        Ok(())
+    }
+
+    /// Restores the fallback audio branch to silence without changing the
+    /// current video/program/live selection.
+    pub fn deactivate_fallback_tone(&mut self) {
+        self.fallback_audio.set_property("volume", 0.0_f64);
+        self.fallback_audio.set_property_from_str("wave", "silence");
     }
 
     pub fn active_source(&self) -> Result<SourceRole, EngineError> {

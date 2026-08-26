@@ -1,10 +1,10 @@
 use station_media_protocol::{
-    CaptionCue, CgImageFormat, ChannelCommand, CommandEnvelope, LiveArmToken,
+    CaptionCue, CgImageFormat, ChannelCommand, CommandEnvelope, FallbackToneKind, LiveArmToken,
     LiveInputConfiguration, LiveReturnTarget, LoudnessTarget, OutputTransportObservation,
     PROTOCOL_VERSION, ProtocolError, ProtocolVersion, SrtPassphrase, WorkerBootstrapEnvelope,
     WorkerCaptionMode, WorkerCaptionPolicy, WorkerEvent, WorkerEventEnvelope, WorkerFallbackSlate,
-    WorkerOutputConfiguration, decode_bootstrap_frame, decode_command_frame, decode_event_frame,
-    encode_bootstrap_frame, encode_command_frame, encode_event_frame,
+    WorkerFallbackTone, WorkerOutputConfiguration, decode_bootstrap_frame, decode_command_frame,
+    decode_event_frame, encode_bootstrap_frame, encode_command_frame, encode_event_frame,
 };
 use std::num::NonZeroU16;
 
@@ -88,6 +88,76 @@ fn round_trips_scheduled_take_command_and_on_air_event() {
     let event = scheduled_asset_on_air_event();
     let frame = encode_event_frame(&event).unwrap();
     assert_eq!(decode_event_frame(&frame).unwrap(), event);
+}
+
+#[test]
+fn protocol_requires_the_tone_capability_major() {
+    // A worker that cannot enforce the finite fallback-tone contract must not
+    // participate in a mixed-version station.
+    assert_eq!(PROTOCOL_VERSION.major, 10);
+}
+
+fn fallback_tone() -> WorkerFallbackTone {
+    WorkerFallbackTone {
+        activation_id: "1c63ef7e-6e4b-4fa6-b5d8-c15e2b735c05".into(),
+        authority_revision: 7,
+        kind: FallbackToneKind::Test,
+        frequency_hz: 1_000,
+        level_milli_dbfs: -20_000,
+        duration_ms: 1_000,
+    }
+}
+
+#[test]
+fn fallback_tone_commands_are_typed_bounded_and_versioned() {
+    let activation = CommandEnvelope {
+        version: PROTOCOL_VERSION,
+        channel_id: "62a47b7e-2a03-48d6-8703-a6e5ce986527".into(),
+        command_id: "71e2acfe-5d73-491d-9a1c-242cadc8e97d".into(),
+        expected_sequence: 42,
+        command: ChannelCommand::ActivateFallbackTone {
+            tone: fallback_tone(),
+        },
+    };
+    let frame = encode_command_frame(&activation).unwrap();
+    assert_eq!(decode_command_frame(&frame).unwrap(), activation);
+
+    let deactivation = CommandEnvelope {
+        command: ChannelCommand::DeactivateFallbackTone {
+            activation_id: fallback_tone().activation_id,
+            authority_revision: 7,
+        },
+        ..activation
+    };
+    assert_eq!(
+        decode_command_frame(&encode_command_frame(&deactivation).unwrap()).unwrap(),
+        deactivation
+    );
+}
+
+#[test]
+fn fallback_tone_rejects_unbounded_or_unsafe_values() {
+    for (frequency_hz, level_milli_dbfs, duration_ms) in [
+        (439, -20_000, 1_000),
+        (1_000, -11_999, 1_000),
+        (1_000, -20_000, 10_001),
+    ] {
+        let mut tone = fallback_tone();
+        tone.frequency_hz = frequency_hz;
+        tone.level_milli_dbfs = level_milli_dbfs;
+        tone.duration_ms = duration_ms;
+        let command = CommandEnvelope {
+            version: PROTOCOL_VERSION,
+            channel_id: "62a47b7e-2a03-48d6-8703-a6e5ce986527".into(),
+            command_id: "71e2acfe-5d73-491d-9a1c-242cadc8e97d".into(),
+            expected_sequence: 42,
+            command: ChannelCommand::ActivateFallbackTone { tone },
+        };
+        assert!(matches!(
+            encode_command_frame(&command),
+            Err(ProtocolError::InvalidFallbackTone(_))
+        ));
+    }
 }
 
 #[test]
@@ -646,14 +716,15 @@ fn round_trips_worker_events_and_rejects_an_incompatible_major() {
     assert_eq!(decode_event_frame(&frame).unwrap(), caption);
 
     let mut incompatible = event;
+    let future_major = PROTOCOL_VERSION.major + 1;
     incompatible.version = ProtocolVersion {
-        major: 10,
+        major: future_major,
         minor: 0,
     };
     let frame = encode_event_frame(&incompatible).expect("event encodes");
     assert_eq!(
         decode_event_frame(&frame),
-        Err(ProtocolError::UnsupportedMajor(10))
+        Err(ProtocolError::UnsupportedMajor(future_major))
     );
 }
 
