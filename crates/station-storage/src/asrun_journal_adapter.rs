@@ -6,7 +6,7 @@ use jiff::{Timestamp, civil::DateTime, tz::TimeZone};
 use sha2::{Digest, Sha256};
 use station_media_journal::{
     JournalCursor, JournalError, acknowledge_incremental_reader, find_journal_event_cursor,
-    read_journal_incremental,
+    read_journal_incremental, verify_incremental_reader_authority,
 };
 use station_media_protocol::{WorkerEvent, WorkerEventEnvelope, encode_event_frame};
 use station_reporting::runtime::{
@@ -276,6 +276,10 @@ pub fn project_durable_journal(
             "journal channel identity does not match the configured channel".into(),
         ));
     }
+    // `ProjectionCheckpoint` consumes individual cursor fields below; keep
+    // the exact authenticated position for the acknowledgement-boundary
+    // manifest proof immediately before persistence.
+    let acknowledgement_cursor = read.cursor.clone();
 
     for envelope in &read.events {
         if envelope.worker_id != expected_worker_id || envelope.channel_id != channel_id {
@@ -363,6 +367,11 @@ pub fn project_durable_journal(
         checkpoint,
         window,
     )?;
+    // The read may have shared a live writer's DELETE-bearing manifest handle.
+    // Re-bind the exact cursor immediately before the output/checkpoint
+    // transaction, so a writer exit or manifest handoff cannot be
+    // acknowledged as projection authority.
+    verify_incremental_reader_authority(path, &acknowledgement_cursor).map_err(journal_error)?;
     store
         .persist_asrun_projection(&projection, now_utc_ms)
         .map_err(|error| AsRunJournalAdapterError::Storage(format!("{error:?}")))?;
