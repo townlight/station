@@ -2793,12 +2793,16 @@ fn verify_journal_cursor_prefix_file(
     let mut saw_event = false;
     let mut summary_ranges = Vec::new();
     let mut summary_range_index = 0_usize;
+    let mut verified_records = 0_u64;
     while offset < cursor.byte_offset {
         let record = read_stream_record(&mut file, offset)?
             .ok_or_else(|| corrupt(offset, "journal ended before the durable reader checkpoint"))?;
         offset = offset
             .checked_add(record.total_bytes)
             .ok_or_else(|| corrupt(offset, "journal offset overflow"))?;
+        verified_records = verified_records.saturating_add(1);
+        #[cfg(test)]
+        pause_prefix_proof_for_multiprocess_test(verified_records);
         if offset > cursor.byte_offset {
             return Err(corrupt(
                 cursor.byte_offset,
@@ -2895,6 +2899,40 @@ fn verify_journal_cursor_prefix_file(
         ));
     }
     Ok(())
+}
+
+/// Test-only deterministic barrier proving that a real process holds the
+/// cross-process lease while it is still rebuilding a large authenticated
+/// prefix, rather than only after the read has returned to its caller.
+#[cfg(test)]
+fn pause_prefix_proof_for_multiprocess_test(verified_records: u64) {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static PAUSED: AtomicBool = AtomicBool::new(false);
+    let Some(after) = std::env::var_os("TOWNLIGHT_JOURNAL_PROOF_PAUSE_AFTER") else {
+        return;
+    };
+    let Ok(after) = after.to_string_lossy().parse::<u64>() else {
+        return;
+    };
+    if verified_records < after || PAUSED.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    let (Some(barrier), Some(release)) = (
+        std::env::var_os("TOWNLIGHT_JOURNAL_LEASE_BARRIER"),
+        std::env::var_os("TOWNLIGHT_JOURNAL_LEASE_RELEASE"),
+    ) else {
+        return;
+    };
+    let barrier = PathBuf::from(barrier);
+    let release = PathBuf::from(release);
+    File::create(barrier).expect("test proof barrier is writable");
+    for _ in 0..500 {
+        if release.exists() {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    panic!("parent did not release the prefix-proof barrier");
 }
 
 #[cfg(windows)]
@@ -4605,8 +4643,8 @@ mod tests {
             // Use the production reader, not a test-only sidecar. It holds a
             // cross-process lease and an authenticated generation session
             // from its read through the parent-controlled acknowledgement.
-            let checkpoint = read_journal_incremental(&journal, None, 1, true).unwrap();
-            assert_eq!(checkpoint.events.len(), 1);
+            let checkpoint = read_journal_incremental(&journal, None, usize::MAX, true).unwrap();
+            assert!(checkpoint.events.len() > 10_000);
             File::create(barrier).unwrap();
             for _ in 0..500 {
                 if release.exists() {
@@ -4621,22 +4659,36 @@ mod tests {
         let path = test_path();
         let barrier = test_path();
         let release = test_path();
-        let mut writer = JournalWriter::open(&path, WORKER_ID, CHANNEL_ID).unwrap();
-        writer
-            .append(&event(1, WorkerEvent::Ready { graph_revision: 1 }))
-            .unwrap();
-        for sequence in 2..=513 {
-            writer
-                .append(&event(
+        // A real process will restart against this large legacy root and
+        // pause inside its full authenticated-prefix proof. The worker then
+        // reaches a real heartbeat compaction while that lease is live.
+        let mut source = File::create(&path).unwrap();
+        for sequence in 1..=513 {
+            write_record(
+                &mut source,
+                RECORD_KIND_EVENT,
+                &encode_event_frame(&event(
                     sequence,
                     WorkerEvent::Heartbeat {
                         monotonic_milliseconds: sequence * 5_000,
                         outputs: Vec::new(),
                     },
                 ))
-                .unwrap();
+                .unwrap(),
+            )
+            .unwrap();
         }
-        drop(writer);
+        for sequence in 514..=10_513 {
+            write_record(
+                &mut source,
+                RECORD_KIND_EVENT,
+                &encode_event_frame(&event(sequence, WorkerEvent::Ready { graph_revision: 1 }))
+                    .unwrap(),
+            )
+            .unwrap();
+        }
+        source.sync_all().unwrap();
+        drop(source);
         let mut child = Command::new(std::env::current_exe().unwrap())
             .arg("--exact")
             .arg("tests::multiprocess_reporter_lease_defers_then_allows_compaction")
@@ -4644,6 +4696,7 @@ mod tests {
             .env(JOURNAL, &path)
             .env(BARRIER, &barrier)
             .env(RELEASE, &release)
+            .env("TOWNLIGHT_JOURNAL_PROOF_PAUSE_AFTER", "128")
             .spawn()
             .unwrap();
         for _ in 0..500 {
@@ -4659,7 +4712,7 @@ mod tests {
             .arg("tests::multiprocess_reporter_lease_defers_then_allows_compaction")
             .env(WORKER, "1")
             .env(JOURNAL, &path)
-            .env(SEQUENCE, "514")
+            .env(SEQUENCE, "10514")
             .status()
             .unwrap();
         assert!(worker.success(), "worker must defer rather than fatal-exit");
@@ -4676,13 +4729,13 @@ mod tests {
             .arg("tests::multiprocess_reporter_lease_defers_then_allows_compaction")
             .env(WORKER, "1")
             .env(JOURNAL, &path)
-            .env(SEQUENCE, "515")
+            .env(SEQUENCE, "10515")
             .status()
             .unwrap();
         assert!(worker.success());
         let compacted = read_snapshot(&path).unwrap();
         assert!(compacted.compaction_committed);
-        assert_eq!(compacted.next_sequence, 516);
+        assert_eq!(compacted.next_sequence, 10_516);
         assert!(generation_manifest_path(&path).exists());
         assert!(generation_path(&path, 1).exists());
         assert!(
