@@ -3,7 +3,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use station_publishing::{
     ConnectionTestOutcome, PublishCandidateIdentity, PublishConnectionTestEvidence,
-    PublishTargetAccount, PublishTargetKind, PublishTargetProfile,
+    PublishTargetAccount, PublishTargetKind, PublishTargetProfile, RequiredTierStatus,
 };
 use station_storage::{PublishingAuthorityWriteError, StationStore};
 
@@ -107,6 +107,12 @@ fn publishing_authority_persists_cas_history_and_current_candidate_evidence() {
             .unwrap(),
         vec![evidence()]
     );
+    let readiness = store
+        .derive_current_publication_readiness(&candidate(), 200)
+        .unwrap();
+    assert_eq!(readiness.canonical_portal, RequiredTierStatus::Passed);
+    assert_eq!(readiness.permanence, RequiredTierStatus::Blocked);
+    assert_eq!(readiness.reach_capacity, RequiredTierStatus::Blocked);
 
     let mut next = account(2);
     next.label = "Renamed portal account".into();

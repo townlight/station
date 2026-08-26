@@ -1,7 +1,8 @@
 use super::*;
 use station_publishing::{
-    PublishCandidateIdentity, PublishConnectionTestEvidence, PublishTargetAccount,
-    PublishTargetKind, PublishTargetProfile, PublishTargetStatus, derive_publish_target_status,
+    PublicationReadiness, PublishCandidateIdentity, PublishConnectionTestEvidence,
+    PublishTargetAccount, PublishTargetKind, PublishTargetProfile, PublishTargetStatus,
+    derive_publication_readiness, derive_publish_target_status,
 };
 
 const MAX_PUBLISHING_RECORDS: usize = 64;
@@ -90,6 +91,11 @@ impl StationStore {
              );\
              CREATE INDEX IF NOT EXISTS publish_connection_test_evidence_current \
                ON publish_connection_test_evidence(target_id, candidate_version, source_commit, tested_at_unix_ms DESC, evidence_id DESC);\
+             CREATE TABLE IF NOT EXISTS publish_authority_epoch (\
+               singleton INTEGER PRIMARY KEY CHECK (singleton=1),\
+               revision INTEGER NOT NULL CHECK (revision >= 0)\
+             );\
+             INSERT OR IGNORE INTO publish_authority_epoch(singleton,revision) VALUES(1,0);\
              CREATE TRIGGER IF NOT EXISTS publish_target_account_history_no_update \
                BEFORE UPDATE ON publish_target_account_history BEGIN SELECT RAISE(ABORT, 'publish target account history is append-only'); END;\
              CREATE TRIGGER IF NOT EXISTS publish_target_account_history_no_delete \
@@ -274,7 +280,9 @@ impl StationStore {
             .map_err(PublishingAuthorityWriteError::Storage)?;
             bind_i64(self.database, history.raw, 6, occurred_at_unix_ms)
                 .map_err(PublishingAuthorityWriteError::Storage)?;
-            expect_done(self.database, history.raw).map_err(PublishingAuthorityWriteError::Storage)
+            expect_done(self.database, history.raw)
+                .map_err(PublishingAuthorityWriteError::Storage)?;
+            advance_publish_authority_epoch(self).map_err(PublishingAuthorityWriteError::Storage)
         })();
         finish_publishing_write(self, outcome)
     }
@@ -435,7 +443,9 @@ impl StationStore {
             .map_err(PublishingAuthorityWriteError::Storage)?;
             bind_i64(self.database, history.raw, 8, occurred_at_unix_ms)
                 .map_err(PublishingAuthorityWriteError::Storage)?;
-            expect_done(self.database, history.raw).map_err(PublishingAuthorityWriteError::Storage)
+            expect_done(self.database, history.raw)
+                .map_err(PublishingAuthorityWriteError::Storage)?;
+            advance_publish_authority_epoch(self).map_err(PublishingAuthorityWriteError::Storage)
         })();
         finish_publishing_write(self, outcome)
     }
@@ -505,7 +515,8 @@ impl StationStore {
             bind_i64(self.database, statement.raw, 8, evidence.tested_at_unix_ms)?;
             bind_i64(self.database, statement.raw, 9, evidence.expires_at_unix_ms)?;
             bind_text(self.database, statement.raw, 10, &values[5])?;
-            expect_done(self.database, statement.raw)
+            expect_done(self.database, statement.raw)?;
+            advance_publish_authority_epoch(self)
         })();
         self.finish_transaction(outcome)
     }
@@ -532,6 +543,39 @@ impl StationStore {
                 SQLITE_DONE => return Ok(evidence),
                 _ => return Err(sqlite_error(self.database)),
             }
+        }
+    }
+
+    pub fn derive_current_publication_readiness(
+        &self,
+        current_candidate: &PublishCandidateIdentity,
+        now_unix_ms: i64,
+    ) -> Result<PublicationReadiness, String> {
+        let epoch_before = self.read_publish_authority_epoch()?;
+        let accounts = self.list_publish_target_accounts()?;
+        let targets = self.list_publish_target_profiles()?;
+        let mut evidence = Vec::with_capacity(targets.len());
+        for target in &targets {
+            evidence.extend(self.list_publish_connection_test_evidence(&target.target_id, 1)?);
+        }
+        let epoch_after = self.read_publish_authority_epoch()?;
+        ensure_publish_authority_epoch_stable(epoch_before, epoch_after)?;
+        derive_publication_readiness(
+            &accounts,
+            &targets,
+            &evidence,
+            current_candidate,
+            now_unix_ms,
+        )
+    }
+
+    fn read_publish_authority_epoch(&self) -> Result<u64, String> {
+        let statement =
+            self.prepare("SELECT revision FROM publish_authority_epoch WHERE singleton=1")?;
+        match unsafe { sqlite3_step(statement.raw) } {
+            SQLITE_ROW => column_u64(statement.raw, 0, "publish authority epoch"),
+            SQLITE_DONE => Err("publish authority epoch is missing".into()),
+            _ => Err(sqlite_error(self.database)),
         }
     }
 
@@ -760,13 +804,34 @@ fn finish_publishing_write(
     outcome: Result<(), PublishingAuthorityWriteError>,
 ) -> Result<(), PublishingAuthorityWriteError> {
     match outcome {
-        Ok(()) => store
-            .execute("COMMIT")
-            .map_err(PublishingAuthorityWriteError::Storage),
+        Ok(()) => match store.execute("COMMIT") {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                let _ = store.execute("ROLLBACK");
+                Err(PublishingAuthorityWriteError::Storage(error))
+            }
+        },
         Err(error) => {
             let _ = store.execute("ROLLBACK");
             Err(error)
         }
+    }
+}
+
+fn advance_publish_authority_epoch(store: &StationStore) -> Result<(), String> {
+    store.execute("UPDATE publish_authority_epoch SET revision=revision+1 WHERE singleton=1")?;
+    if store.changes() == 1 {
+        Ok(())
+    } else {
+        Err("publish authority epoch could not be advanced".into())
+    }
+}
+
+fn ensure_publish_authority_epoch_stable(before: u64, after: u64) -> Result<(), String> {
+    if before == after {
+        Ok(())
+    } else {
+        Err("publish authority changed while readiness was being read".into())
     }
 }
 fn publish_kind_name(kind: PublishTargetKind) -> &'static str {
@@ -787,4 +852,48 @@ where
     let record = serde_json::from_str::<T>(&record_json)
         .map_err(|error| format!("database returned invalid {record_name} JSON: {error}"))?;
     Ok(record)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn epoch_fence_rejects_a_mixed_authority_read() {
+        assert!(ensure_publish_authority_epoch_stable(7, 7).is_ok());
+        assert_eq!(
+            ensure_publish_authority_epoch_stable(7, 8).unwrap_err(),
+            "publish authority changed while readiness was being read"
+        );
+    }
+
+    #[test]
+    fn failed_commit_rolls_back_the_publishing_transaction() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let database =
+            std::env::temp_dir().join(format!("townlight-publishing-commit-rollback-{nonce}.db"));
+        let store = StationStore::open(&database).unwrap();
+        store.execute("BEGIN IMMEDIATE").unwrap();
+        store.execute("PRAGMA defer_foreign_keys=ON").unwrap();
+        store
+            .execute(
+                "INSERT INTO publish_target_profiles(target_id,account_id,kind,revision,configuration_hash,record_json) \
+                 VALUES('22222222-2222-4333-8444-555555555555','11111111-2222-4333-8444-555555555555','portal',1,'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb','{}')",
+            )
+            .unwrap();
+
+        assert!(matches!(
+            finish_publishing_write(&store, Ok(())),
+            Err(PublishingAuthorityWriteError::Storage(_))
+        ));
+        store.execute("BEGIN IMMEDIATE").unwrap();
+        store.execute("ROLLBACK").unwrap();
+
+        drop(store);
+        std::fs::remove_file(database).unwrap();
+    }
 }

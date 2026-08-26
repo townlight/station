@@ -56,7 +56,7 @@ use station_metadata::{
 use station_publishing::{
     ConnectionTestOutcome as PublishConnectionTestOutcome, PublishCandidateIdentity,
     PublishConnectionTestEvidence, PublishTargetAccount, PublishTargetKind, PublishTargetProfile,
-    RequiredTierStatus, derive_publication_readiness,
+    RequiredTierStatus,
 };
 use station_readiness::{
     BackupProbeInput, CandidateIdentity, CapabilitySupport, ChannelOutputRuntimeProbe,
@@ -7436,31 +7436,10 @@ impl Api {
                     version: station_box.product_version.clone(),
                     source_commit: source_commit.into(),
                 };
-                let accounts = match self.storage.list_publish_target_accounts() {
-                    Ok(accounts) => accounts,
-                    Err(message) => return error_response(500, "storage_error", &message),
-                };
-                let targets = match self.storage.list_publish_target_profiles() {
-                    Ok(targets) => targets,
-                    Err(message) => return error_response(500, "storage_error", &message),
-                };
-                let mut evidence = Vec::with_capacity(targets.len());
-                for target in &targets {
-                    match self
-                        .storage
-                        .list_publish_connection_test_evidence(&target.target_id, 1)
-                    {
-                        Ok(mut records) => evidence.extend(records.drain(..)),
-                        Err(message) => return error_response(500, "storage_error", &message),
-                    }
-                }
-                match derive_publication_readiness(
-                    &accounts,
-                    &targets,
-                    &evidence,
-                    &candidate,
-                    generated_at_unix_ms,
-                ) {
+                match self
+                    .storage
+                    .derive_current_publication_readiness(&candidate, generated_at_unix_ms)
+                {
                     Ok(readiness) => Some(readiness),
                     Err(message) => return error_response(500, "storage_error", &message),
                 }
