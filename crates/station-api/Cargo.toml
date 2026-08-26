@@ -30,6 +30,7 @@ station-storage.workspace = true
 station-support.workspace = true
 station-update.workspace = true
 station-update-coordinator.workspace = true
+station-transport-proof.workspace = true
 
 [dev-dependencies]
 gstreamer.workspace = true

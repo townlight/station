@@ -87,22 +87,23 @@ use station_source_evidence::{
     CanonicalProjectionSha256, EvidenceScopeSha256, StationSourceEvidenceAuthority,
 };
 use station_storage::{
-    AlertChannelSecret, AssetMetadataWriteError, CaptionPolicyWriteError, CatalogAssetWriteError,
-    CgSnapshotReadError, CgWriteError, ChannelCaptionMode, ChannelCaptionPolicy,
-    ChannelCaptionPolicyAuditEvent, ChannelFallbackSlate, ChannelFallbackSlateAuditEvent,
-    ChannelWriteError, CommissioningSupportBundleReceipt, CommitWriteError,
-    CustomMetadataSchemaWriteError, ExistingScheduleSnapshot, ExternalReceiverAcceptanceReceipt,
-    FallbackSlateWriteError, HeadendProfileWriteError, OutputLoudnessProofJob,
-    OutputLoudnessProofJobRecord, OutputLoudnessProofJobState, ProfileWriteError,
-    PublishingAuthorityWriteError, ReceiverAcceptanceOutcome, ReceiverEvidenceMethod,
-    ReferenceStationTierWrite, ReferenceStationTierWriteError, ScheduleAutomationWriteError,
-    ScheduleItemWrite, ScheduleMaterializationApplyOutcome, ScheduleMaterializationHistoryCursor,
-    ScheduleMaterializationHistoryEntry, ScheduleMaterializationHistoryReadError,
-    ScheduleMaterializationOutcome, ScheduleMaterializationOutcomeRecord,
-    ScheduleMaterializationPlanRecord, ScheduleMaterializationRun,
-    ScheduleMaterializationRunOrigin, ScheduleMaterializationWriteError, StationStore,
-    StoredSinkLoudnessProof,
+    AlertChannelSecret, AssetMetadataWriteError, CableTransportValidationSnapshot,
+    CaptionPolicyWriteError, CatalogAssetWriteError, CgSnapshotReadError, CgWriteError,
+    ChannelCaptionMode, ChannelCaptionPolicy, ChannelCaptionPolicyAuditEvent, ChannelFallbackSlate,
+    ChannelFallbackSlateAuditEvent, ChannelWriteError, CommissioningSupportBundleReceipt,
+    CommitWriteError, CustomMetadataSchemaWriteError, ExistingScheduleSnapshot,
+    ExternalReceiverAcceptanceReceipt, FallbackSlateWriteError, HeadendProfileWriteError,
+    OutputLoudnessProofJob, OutputLoudnessProofJobRecord, OutputLoudnessProofJobState,
+    ProfileWriteError, PublishingAuthorityWriteError, ReceiverAcceptanceOutcome,
+    ReceiverEvidenceMethod, ReferenceStationTierWrite, ReferenceStationTierWriteError,
+    ScheduleAutomationWriteError, ScheduleItemWrite, ScheduleMaterializationApplyOutcome,
+    ScheduleMaterializationHistoryCursor, ScheduleMaterializationHistoryEntry,
+    ScheduleMaterializationHistoryReadError, ScheduleMaterializationOutcome,
+    ScheduleMaterializationOutcomeRecord, ScheduleMaterializationPlanRecord,
+    ScheduleMaterializationRun, ScheduleMaterializationRunOrigin,
+    ScheduleMaterializationWriteError, StationStore, StoredSinkLoudnessProof,
 };
+use station_transport_proof::{CableTransportValidation, TargetDeviceConfig, TargetProtocol};
 use station_update::UpdateCheckTrigger;
 use station_update_coordinator::CoordinatorError;
 
@@ -315,6 +316,45 @@ fn commissioning_check(
         evidence: evidence.into(),
         boundary,
     }
+}
+
+fn aggregate_cable_transport_snapshot(
+    validations: &[CableTransportValidationSnapshot],
+) -> (bool, Vec<String>) {
+    if validations.is_empty() {
+        return (
+            false,
+            vec![
+                "No enabled required transport sink is present in the authoritative snapshot."
+                    .into(),
+            ],
+        );
+    }
+    let mut details = Vec::with_capacity(validations.len());
+    let mut passes = true;
+    for snapshot in validations {
+        match snapshot.validation.as_ref() {
+            Some(validation) if validation.outcome.is_some() => details.push(format!(
+                "{} / {} has current analysis and target reachability proof",
+                snapshot.channel_id, snapshot.sink_id
+            )),
+            Some(validation) => {
+                passes = false;
+                details.push(format!(
+                    "{} / {} remains blocked: {}",
+                    snapshot.channel_id, snapshot.sink_id, validation.detail
+                ));
+            }
+            None => {
+                passes = false;
+                details.push(format!(
+                    "{} / {} has no configured target device",
+                    snapshot.channel_id, snapshot.sink_id
+                ));
+            }
+        }
+    }
+    (passes, details)
 }
 
 fn headend_receiver_verified(headend: &station_readiness::HeadendReadiness) -> bool {
@@ -665,6 +705,25 @@ struct CreateReceiverReceiptRequest {
     evidence_reference: String,
     detail: String,
     observed_at_unix_ms: i64,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PutTransportTargetRequest {
+    target_id: String,
+    label: String,
+    protocol: TargetProtocol,
+    host: String,
+    port: u16,
+    credential_configured: bool,
+    expected_revision: Option<u64>,
+}
+
+#[derive(Debug, Serialize)]
+struct TransportProofResponse {
+    channel_id: String,
+    history: station_storage::TransportProofHistory,
+    validations: Vec<CableTransportValidation>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1650,6 +1709,9 @@ pub struct Api {
     station_box_cache: Arc<Mutex<Option<(Instant, StationBoxProfile)>>>,
     orchestration_health: Arc<OrchestrationHealth>,
     source_evidence_authority: Arc<StationSourceEvidenceAuthority>,
+    #[cfg(test)]
+    commissioning_after_channel_read_hook:
+        Option<Arc<dyn Fn(&StationStore) + Send + Sync + 'static>>,
 }
 
 /// Complete receipt-backed input for one server-owned S19 materialization.
@@ -1718,6 +1780,8 @@ impl Api {
             station_box_cache,
             orchestration_health,
             source_evidence_authority,
+            #[cfg(test)]
+            commissioning_after_channel_read_hook: None,
         })
     }
 
@@ -1736,6 +1800,8 @@ impl Api {
             station_box_cache: Arc::new(Mutex::new(None)),
             orchestration_health: OrchestrationHealth::ready_without_supervisor(),
             source_evidence_authority: new_source_evidence_authority()?,
+            #[cfg(test)]
+            commissioning_after_channel_read_hook: None,
         })
     }
 
@@ -2092,6 +2158,21 @@ impl Api {
                     && path.ends_with("/receiver-receipts") =>
             {
                 self.list_receiver_receipts(path)
+            }
+            ("GET", path)
+                if path.starts_with("/api/v1/channels/") && path.ends_with("/transport-proof") =>
+            {
+                self.read_transport_proof(path, actor)
+            }
+            ("GET", path)
+                if path.starts_with("/api/v1/channels/") && path.ends_with("/transport-target") =>
+            {
+                self.read_transport_target(path, actor)
+            }
+            ("PUT", path)
+                if path.starts_with("/api/v1/channels/") && path.ends_with("/transport-target") =>
+            {
+                self.put_transport_target(path, body, actor)
             }
             ("GET", path)
                 if path.starts_with("/api/v1/channels/") && path.ends_with("/fallback-slate") =>
@@ -6080,6 +6161,211 @@ impl Api {
         }
     }
 
+    fn put_transport_target(
+        &self,
+        path: &str,
+        body: Option<&[u8]>,
+        actor: Option<&OperatorAccount>,
+    ) -> ApiResponse {
+        let Some(actor) = actor.filter(|account| {
+            account.enabled()
+                && account
+                    .roles()
+                    .contains(&station_auth::OperatorRole::SetupAdmin)
+        }) else {
+            return error_response(
+                403,
+                "setup_admin_required",
+                "Configuring a target device requires the Setup Admin role.",
+            );
+        };
+        let Some(channel_id) = path_identity(path, "/api/v1/channels/", "/transport-target") else {
+            return error_response(400, "invalid_path", "The transport target path is invalid.");
+        };
+        let Some(request) = parse_body::<PutTransportTargetRequest>(body) else {
+            return error_response(
+                400,
+                "invalid_json",
+                "A transport target configuration body is required.",
+            );
+        };
+        let now = match system_time_millis() {
+            Ok(now) => now,
+            Err(message) => return error_response(500, "clock_error", &message),
+        };
+        let config = TargetDeviceConfig {
+            target_id: request.target_id,
+            label: request.label,
+            protocol: request.protocol,
+            host: request.host,
+            port: request.port,
+            credential_configured: request.credential_configured,
+            revision: 1,
+            created_at_unix_ms: now,
+            updated_at_unix_ms: now,
+            updated_by: actor.account_id().as_str().into(),
+        };
+        // Target configuration is attached to a specific sink. The body may not
+        // select an arbitrary output; require the canonical required sink when
+        // the channel has only one, otherwise reject the ambiguity.
+        let channel = match self.storage.list_channels() {
+            Ok(channels) => channels
+                .into_iter()
+                .find(|value| value.channel_id == channel_id),
+            Err(message) => return error_response(500, "storage_error", &message),
+        };
+        let Some(channel) = channel else {
+            return error_response(404, "channel_not_found", "The channel does not exist.");
+        };
+        let sinks = channel
+            .output_sinks
+            .iter()
+            .filter(|sink| sink.enabled && sink.required)
+            .collect::<Vec<_>>();
+        if sinks.len() != 1 {
+            return error_response(
+                409,
+                "transport_target_sink_ambiguous",
+                "Target configuration requires exactly one enabled required transport sink.",
+            );
+        }
+        match self.storage.write_transport_target_config(
+            channel_id,
+            &sinks[0].sink_id,
+            request.expected_revision,
+            &config,
+        ) {
+            Ok(stored) => json_response(
+                200,
+                serde_json::to_vec(&stored)
+                    .expect("serializing transport target configuration cannot fail"),
+            ),
+            Err(message) if message.contains("revision conflict") => {
+                error_response(409, "revision_conflict", &message)
+            }
+            Err(message) => error_response(422, "validation_failed", &message),
+        }
+    }
+
+    fn read_transport_target(&self, path: &str, actor: Option<&OperatorAccount>) -> ApiResponse {
+        if !is_scheduling_reader(actor) {
+            return error_response(
+                403,
+                "operator_required",
+                "Reading target device configuration requires an enabled operator account.",
+            );
+        }
+        let Some(channel_id) = path_identity(path, "/api/v1/channels/", "/transport-target") else {
+            return error_response(400, "invalid_path", "The transport target path is invalid.");
+        };
+        let channel = match self.storage.list_channels() {
+            Ok(channels) => channels
+                .into_iter()
+                .find(|value| value.channel_id == channel_id),
+            Err(message) => return error_response(500, "storage_error", &message),
+        };
+        let Some(channel) = channel else {
+            return error_response(404, "channel_not_found", "The channel does not exist.");
+        };
+        let sinks = channel
+            .output_sinks
+            .iter()
+            .filter(|sink| sink.enabled && sink.required)
+            .collect::<Vec<_>>();
+        if sinks.len() != 1 {
+            return error_response(
+                409,
+                "transport_target_sink_ambiguous",
+                "Target configuration requires exactly one enabled required transport sink.",
+            );
+        }
+        match self
+            .storage
+            .read_transport_target_config(channel_id, &sinks[0].sink_id)
+        {
+            Ok(Some(config)) => json_response(
+                200,
+                serde_json::to_vec(&config)
+                    .expect("serializing transport target configuration cannot fail"),
+            ),
+            Ok(None) => error_response(
+                404,
+                "transport_target_not_configured",
+                "No target device is configured for the required transport sink.",
+            ),
+            Err(message) => error_response(500, "storage_error", &message),
+        }
+    }
+
+    fn read_transport_proof(&self, path: &str, actor: Option<&OperatorAccount>) -> ApiResponse {
+        if !is_scheduling_reader(actor) {
+            return error_response(
+                403,
+                "operator_required",
+                "Reading transport proof requires an enabled operator account.",
+            );
+        }
+        let Some(channel_id) = path_identity(path, "/api/v1/channels/", "/transport-proof") else {
+            return error_response(400, "invalid_path", "The transport proof path is invalid.");
+        };
+        let now_unix_ms = match system_time_millis() {
+            Ok(value) => value,
+            Err(message) => return error_response(500, "clock_error", &message),
+        };
+        let history = match self
+            .storage
+            .read_transport_proof_history(channel_id, None, 1_000)
+        {
+            Ok(history) => history,
+            Err(message) => return error_response(500, "storage_error", &message),
+        };
+        let station_box = self.cached_station_box_profile().ok();
+        let candidate = station_box.as_ref().and_then(|profile| {
+            profile.release.candidate_verified.then(|| {
+                (
+                    profile.product_version.as_str(),
+                    profile.source_commit.as_deref(),
+                )
+            })
+        });
+        let mut validations = Vec::new();
+        if let Some((candidate_version, Some(source_commit))) = candidate {
+            if let Ok(channels) = self.storage.list_channels() {
+                if let Some(channel) = channels
+                    .into_iter()
+                    .find(|value| value.channel_id == channel_id)
+                {
+                    for sink in channel
+                        .output_sinks
+                        .iter()
+                        .filter(|sink| sink.enabled && sink.required)
+                    {
+                        if let Ok(Some(validation)) =
+                            self.storage.read_current_cable_transport_validation(
+                                channel_id,
+                                &sink.sink_id,
+                                candidate_version,
+                                source_commit,
+                                now_unix_ms,
+                            )
+                        {
+                            validations.push(validation);
+                        }
+                    }
+                }
+            }
+        }
+        json_response(
+            200,
+            serde_json::to_vec(&TransportProofResponse {
+                channel_id: channel_id.into(),
+                history,
+                validations,
+            })
+            .expect("serializing transport proof cannot fail"),
+        )
+    }
+
     fn create_receiver_receipt(
         &self,
         path: &str,
@@ -7256,6 +7542,10 @@ impl Api {
             Err(message) => return error_response(500, "storage_error", &message),
         };
         let enabled: Vec<_> = channels.iter().filter(|channel| channel.enabled).collect();
+        #[cfg(test)]
+        if let Some(hook) = &self.commissioning_after_channel_read_hook {
+            hook(&self.storage);
+        }
         let safe_to_air = if enabled.is_empty() {
             None
         } else {
@@ -7605,15 +7895,41 @@ impl Api {
             "current StationBox capability, named sink contract, and worker heartbeat authority",
             CommissioningBoundary::LocalAuthority,
         ));
+        let (cable_transport_pass, cable_transport_detail) = if let Some((
+            candidate_version,
+            source_commit,
+        )) = receiver_candidate
+        {
+            let validations = match self.storage.read_current_cable_transport_validations(
+                candidate_version,
+                source_commit,
+                generated_at_unix_ms,
+            ) {
+                Ok(validations) => validations,
+                Err(message) => return error_response(500, "storage_error", &message),
+            };
+            aggregate_cable_transport_snapshot(&validations)
+        } else {
+            let detail = "The installed candidate identity is unavailable, so transport evidence cannot be bound.";
+            (false, vec![detail.into()])
+        };
         checks.push(commissioning_check(
             "cable_transport_validation",
             "Cable transport analysis and device reachability",
             CommissioningPhase::SourcesOutputs,
-            CommissioningCheckStatus::Blocked,
+            if cable_transport_pass {
+                CommissioningCheckStatus::Pass
+            } else {
+                CommissioningCheckStatus::Blocked
+            },
             true,
-            Some("health"),
-            "No durable TSDuck transport-analysis result and no authenticated target-device reachability result are stored yet.",
-            "the current control plane has no TSDuck/device-reachability evidence authority",
+            Some("channels"),
+            if cable_transport_detail.is_empty() {
+                "No enabled channel has a current cable transport validation.".into()
+            } else {
+                cable_transport_detail.join("; ")
+            },
+            "durable transport analysis and authenticated target-device reachability receipts bound to the current candidate and output configuration",
             CommissioningBoundary::LocalAuthority,
         ));
 
@@ -19221,6 +19537,223 @@ mod tests {
         }
 
         drop(api);
+        let _ = std::fs::remove_file(database);
+    }
+
+    #[test]
+    fn transport_target_api_rejects_secret_bearing_hosts_and_never_echoes_them() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let database = std::env::temp_dir().join(format!("townlight-target-api-{nonce}.db"));
+        let api = Api::open(&database).unwrap();
+        let channel_id = "11111111-2222-4333-8444-555555555555";
+        api.storage
+            .put_channel(&ChannelConfiguration {
+                channel_id: channel_id.into(),
+                display_name: "Transport target API".into(),
+                output_profile: station_schedule::OutputProfileId::Proof360p30,
+                output_sinks: vec![station_schedule::OutputSinkConfiguration::required_udp(
+                    "22222222-3333-4444-8555-666666666666",
+                    "Required sink",
+                    "127.0.0.1:5500",
+                    -16.0,
+                )],
+                enabled: false,
+            })
+            .unwrap();
+        let secret = "not-a-real-secret";
+        let body = serde_json::to_vec(&serde_json::json!({
+            "target_id": "target-1",
+            "label": "Headend receiver",
+            "protocol": "https_api",
+            "host": format!("receiver.example.test/api/{secret}"),
+            "port": 443,
+            "credential_configured": true,
+            "expected_revision": null
+        }))
+        .unwrap();
+        let path = format!("/api/v1/channels/{channel_id}/transport-target");
+
+        let unauthenticated = api.handle_in_process("PUT", &path, Some(&body));
+        assert_eq!(unauthenticated.status, 403);
+        assert!(!String::from_utf8_lossy(&unauthenticated.body).contains(secret));
+
+        let setup_admin = test_actor(station_auth::OperatorRole::SetupAdmin);
+        let rejected = api.handle_authenticated("PUT", &path, Some(&body), &setup_admin);
+        assert_eq!(rejected.status, 422);
+        assert!(!String::from_utf8_lossy(&rejected.body).contains(secret));
+        assert!(
+            api.storage
+                .read_transport_target_config(channel_id, "22222222-3333-4444-8555-666666666666")
+                .unwrap()
+                .is_none()
+        );
+
+        drop(api);
+        let _ = std::fs::remove_file(database);
+    }
+
+    #[test]
+    fn commissioning_transport_uses_the_authoritative_sink_snapshot_after_a_stale_channel_read() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let database = std::env::temp_dir().join(format!(
+            "townlight-commissioning-transport-snapshot-{}-{nonce}.db",
+            std::process::id()
+        ));
+        let application = database.with_extension("application");
+        std::fs::create_dir_all(&application).unwrap();
+        let probe = station_box_probe();
+        let candidate_version = probe.product_version.clone();
+        let source_commit = probe
+            .source_commit
+            .clone()
+            .expect("verified test candidate");
+        let mut api = Api::open_with_station_box_probe(&database, &application, probe).unwrap();
+        let channel_id = "11111111-2222-4333-8444-555555555555";
+        let sink_a = "22222222-3333-4444-8555-666666666666";
+        let sink_b = "33333333-4444-4555-8666-777777777777";
+        let sink_a_config = station_schedule::OutputSinkConfiguration::required_udp(
+            sink_a,
+            "Sink A",
+            "127.0.0.1:5500",
+            -16.0,
+        );
+        api.storage
+            .put_channel(&ChannelConfiguration {
+                channel_id: channel_id.into(),
+                display_name: "Commissioning transport snapshot".into(),
+                output_profile: station_schedule::OutputProfileId::Proof360p30,
+                output_sinks: vec![sink_a_config.clone()],
+                enabled: true,
+            })
+            .unwrap();
+        let now = system_time_millis().unwrap();
+        let hook_fired = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let hook_observed = Arc::clone(&hook_fired);
+        let hook_channel_id = channel_id.to_string();
+        let hook_sink_a = sink_a.to_string();
+        let hook_sink_b = sink_b.to_string();
+        let hook_candidate_version = candidate_version.clone();
+        let hook_source_commit = source_commit.clone();
+        api.commissioning_after_channel_read_hook = Some(Arc::new(move |storage| {
+            if hook_observed.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                return;
+            }
+            storage
+                .put_channel(&ChannelConfiguration {
+                    channel_id: hook_channel_id.clone(),
+                    display_name: "Commissioning transport snapshot".into(),
+                    output_profile: station_schedule::OutputProfileId::Proof360p30,
+                    output_sinks: vec![
+                        sink_a_config.clone(),
+                        station_schedule::OutputSinkConfiguration::required_udp(
+                            &hook_sink_b,
+                            "Sink B",
+                            "127.0.0.1:5501",
+                            -16.0,
+                        ),
+                    ],
+                    enabled: true,
+                })
+                .unwrap();
+            let target = TargetDeviceConfig {
+                target_id: "target-a".into(),
+                label: "Target A".into(),
+                protocol: TargetProtocol::HttpsApi,
+                host: "receiver-a.example.test".into(),
+                port: 443,
+                credential_configured: true,
+                revision: 1,
+                created_at_unix_ms: now,
+                updated_at_unix_ms: now,
+                updated_by: "setup-admin".into(),
+            };
+            storage
+                .write_transport_target_config(&hook_channel_id, &hook_sink_a, None, &target)
+                .unwrap();
+            let configuration_hash = storage
+                .current_channel_output_configuration_hash(&hook_channel_id)
+                .unwrap();
+            storage
+                .append_transport_analysis_receipt(
+                    &station_storage::TransportAnalysisReceipt {
+                        proof_id: "analysis-a".into(),
+                        channel_id: hook_channel_id.clone(),
+                        sink_id: hook_sink_a.clone(),
+                        target_id: target.target_id.clone(),
+                        target_revision: 1,
+                        candidate_version: hook_candidate_version.clone(),
+                        source_commit: hook_source_commit.clone(),
+                        configuration_hash: configuration_hash.clone(),
+                        analyzer_id: "test-analyzer".into(),
+                        analyzer_version: "1".into(),
+                        analyzer_sha256: "a".repeat(64),
+                        outcome: station_storage::ProofOutcome::Pass,
+                        findings: station_storage::TransportFindings {
+                            packet_size_bytes: 188,
+                            packet_count: 10,
+                            capture_duration_ms: 1_000,
+                            bitrate_bps: 1_000_000,
+                            pat_program_count: 1,
+                            pmt_stream_count: 1,
+                            continuity_errors: 0,
+                            pcr_errors: 0,
+                            analyzer_output_sha256: "b".repeat(64),
+                        },
+                        captured_at_unix_ms: now,
+                        recorded_at_unix_ms: now,
+                        recorded_by: "worker".into(),
+                        detail: "A passed".into(),
+                    },
+                    now,
+                )
+                .unwrap();
+            storage
+                .append_target_device_reachability_receipt(
+                    &station_storage::TargetDeviceReachabilityReceipt {
+                        proof_id: "reach-a".into(),
+                        channel_id: hook_channel_id.clone(),
+                        sink_id: hook_sink_a.clone(),
+                        target_id: target.target_id,
+                        target_revision: 1,
+                        candidate_version: hook_candidate_version.clone(),
+                        source_commit: hook_source_commit.clone(),
+                        configuration_hash,
+                        adapter_id: "test-adapter".into(),
+                        adapter_version: "1".into(),
+                        auth_method: "challenge".into(),
+                        outcome: station_storage::ProofOutcome::Pass,
+                        response_identity_sha256: "c".repeat(64),
+                        latency_ms: 1,
+                        observed_at_unix_ms: now,
+                        recorded_at_unix_ms: now,
+                        recorded_by: "worker".into(),
+                        detail: "A reached".into(),
+                    },
+                    now,
+                )
+                .unwrap();
+        }));
+
+        let report = api.handle_in_process("GET", "/api/v1/commissioning/report", None);
+        assert!(hook_fired.load(std::sync::atomic::Ordering::SeqCst));
+        let report: serde_json::Value = serde_json::from_slice(&report.body).unwrap();
+        let cable = report["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|check| check["id"] == "cable_transport_validation")
+            .unwrap();
+        assert_eq!(cable["status"], "blocked");
+        assert!(cable["detail"].as_str().unwrap().contains(sink_b));
+
+        drop(api);
+        std::fs::remove_dir_all(application).unwrap();
         let _ = std::fs::remove_file(database);
     }
 }
