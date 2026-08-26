@@ -73,6 +73,8 @@ static FORCED_RUNNER_FAILURE_POINT: AtomicUsize = AtomicUsize::new(0);
 #[cfg(test)]
 static ACTIVE_PROCESS_DRAINS: AtomicUsize = AtomicUsize::new(0);
 #[cfg(test)]
+static FORCED_STDERR_DRAIN_DELAY_MS: AtomicUsize = AtomicUsize::new(0);
+#[cfg(test)]
 static RUNNER_FAULT_TEST_LOCK: Mutex<()> = Mutex::new(());
 
 /// A capture namespace exclusively owned by stationd.  It rejects reparse
@@ -1028,6 +1030,11 @@ impl ProcessRunner for RealProcessRunner {
         let stdout_drain = std::thread::spawn(move || {
             #[cfg(test)]
             ACTIVE_PROCESS_DRAINS.fetch_add(1, Ordering::AcqRel);
+            #[cfg(test)]
+            if FORCED_RUNNER_FAILURE_POINT.load(Ordering::Acquire) == 4 {
+                ACTIVE_PROCESS_DRAINS.fetch_sub(1, Ordering::AcqRel);
+                panic!("injected stdout drain panic");
+            }
             let _ = stdout_tx.send(drain_stdout(stdout));
             #[cfg(test)]
             ACTIVE_PROCESS_DRAINS.fetch_sub(1, Ordering::AcqRel);
@@ -1035,6 +1042,13 @@ impl ProcessRunner for RealProcessRunner {
         let stderr_drain = std::thread::spawn(move || {
             #[cfg(test)]
             ACTIVE_PROCESS_DRAINS.fetch_add(1, Ordering::AcqRel);
+            #[cfg(test)]
+            {
+                let delay = FORCED_STDERR_DRAIN_DELAY_MS.swap(0, Ordering::AcqRel);
+                if delay > 0 {
+                    std::thread::sleep(Duration::from_millis(delay as u64));
+                }
+            }
             let _ = stderr_tx.send(drain_stderr(stderr));
             #[cfg(test)]
             ACTIVE_PROCESS_DRAINS.fetch_sub(1, Ordering::AcqRel);
@@ -1928,12 +1942,14 @@ fn collect_process_drains(
     }
     // TerminateJobObject closes every descendant write handle. Retain and join
     // both owned readers even when cancellation reported a race/failure.
-    stdout_thread
-        .join()
-        .map_err(|_| "TSDuck stdout drain thread panicked".to_string())?;
-    stderr_thread
-        .join()
-        .map_err(|_| "TSDuck stderr drain thread panicked".to_string())?;
+    let stdout_join = stdout_thread.join();
+    let stderr_join = stderr_thread.join();
+    if stdout_join.is_err() {
+        return Err("TSDuck stdout drain thread panicked".into());
+    }
+    if stderr_join.is_err() {
+        return Err("TSDuck stderr drain thread panicked".into());
+    }
     if cancellation_failed {
         return Err("TSDuck pipe drain cancellation raced before both drains joined".into());
     }
@@ -2898,6 +2914,33 @@ mod tests {
             assert_eq!(result.unwrap_err(), "injected heartbeat failure");
             assert_eq!(ACTIVE_PROCESS_DRAINS.load(Ordering::Acquire), 0);
         }
+    }
+
+    #[test]
+    fn real_runner_joins_sibling_after_one_drain_panics() {
+        let _guard = RUNNER_FAULT_TEST_LOCK.lock().unwrap();
+        let executable = std::env::var_os("COMSPEC")
+            .map(PathBuf::from)
+            .expect("Windows command interpreter is available");
+        FORCED_RUNNER_FAILURE_POINT.store(4, Ordering::Release);
+        FORCED_STDERR_DRAIN_DELAY_MS.store(150, Ordering::Release);
+        let started = Instant::now();
+        let result = RealProcessRunner.run(
+            &executable,
+            &["/C".into(), "ping 127.0.0.1 -n 30".into()],
+            Duration::from_millis(20),
+        );
+        FORCED_RUNNER_FAILURE_POINT.store(0, Ordering::Release);
+        assert_eq!(result.unwrap_err(), "TSDuck process exceeded its deadline");
+        assert!(
+            started.elapsed() >= Duration::from_millis(150),
+            "the runner returned before joining the delayed stderr sibling"
+        );
+        assert_eq!(
+            ACTIVE_PROCESS_DRAINS.load(Ordering::Acquire),
+            0,
+            "the live stderr sibling must be joined before the stdout panic is surfaced"
+        );
     }
 
     #[test]
