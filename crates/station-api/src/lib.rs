@@ -1702,6 +1702,9 @@ impl ApiResponse {
     }
 }
 
+#[cfg(test)]
+type CommissioningAfterChannelReadHook = Arc<dyn Fn(&StationStore) + Send + Sync + 'static>;
+
 pub struct Api {
     storage: StationStore,
     database_path: PathBuf,
@@ -1711,8 +1714,7 @@ pub struct Api {
     orchestration_health: Arc<OrchestrationHealth>,
     source_evidence_authority: Arc<StationSourceEvidenceAuthority>,
     #[cfg(test)]
-    commissioning_after_channel_read_hook:
-        Option<Arc<dyn Fn(&StationStore) + Send + Sync + 'static>>,
+    commissioning_after_channel_read_hook: Option<CommissioningAfterChannelReadHook>,
 }
 
 /// Complete receipt-backed input for one server-owned S19 materialization.
@@ -6462,7 +6464,7 @@ impl Api {
         };
         let station_box = self.cached_station_box_profile().ok();
         let candidate = station_box.as_ref().and_then(|profile| {
-            profile.release.candidate_verified.then(|| {
+            profile.release.candidate_verified.then_some({
                 (
                     profile.product_version.as_str(),
                     profile.source_commit.as_deref(),
@@ -6470,29 +6472,25 @@ impl Api {
             })
         });
         let mut validations = Vec::new();
-        if let Some((candidate_version, Some(source_commit))) = candidate {
-            if let Ok(channels) = self.storage.list_channels() {
-                if let Some(channel) = channels
-                    .into_iter()
-                    .find(|value| value.channel_id == channel_id)
-                {
-                    for sink in channel
-                        .output_sinks
-                        .iter()
-                        .filter(|sink| sink.enabled && sink.required)
-                    {
-                        if let Ok(Some(validation)) =
-                            self.storage.read_current_cable_transport_validation(
-                                channel_id,
-                                &sink.sink_id,
-                                candidate_version,
-                                source_commit,
-                                now_unix_ms,
-                            )
-                        {
-                            validations.push(validation);
-                        }
-                    }
+        if let Some((candidate_version, Some(source_commit))) = candidate
+            && let Ok(channels) = self.storage.list_channels()
+            && let Some(channel) = channels
+                .into_iter()
+                .find(|value| value.channel_id == channel_id)
+        {
+            for sink in channel
+                .output_sinks
+                .iter()
+                .filter(|sink| sink.enabled && sink.required)
+            {
+                if let Ok(Some(validation)) = self.storage.read_current_cable_transport_validation(
+                    channel_id,
+                    &sink.sink_id,
+                    candidate_version,
+                    source_commit,
+                    now_unix_ms,
+                ) {
+                    validations.push(validation);
                 }
             }
         }
@@ -7888,7 +7886,7 @@ impl Api {
             CommissioningPhase::SourcesOutputs,
             if publish_targets_pass { CommissioningCheckStatus::Pass } else { CommissioningCheckStatus::Blocked },
             true,
-            None,
+            Some("publishing"),
             publication_readiness.as_ref().map_or_else(
                 || "No current-candidate publish-target connection authority is available because the installed candidate is not verified.".into(),
                 |readiness| format!(
@@ -7930,7 +7928,7 @@ impl Api {
                         .storage
                         .list_automation_connection_test_evidence(&policy.policy_id, 1)
                     {
-                        Ok(mut records) => evidence.extend(records.drain(..)),
+                        Ok(mut records) => evidence.append(&mut records),
                         Err(message) => return error_response(500, "storage_error", &message),
                     }
                 }
@@ -7956,7 +7954,7 @@ impl Api {
             CommissioningPhase::SourcesOutputs,
             if automation_policy_pass { CommissioningCheckStatus::Pass } else { CommissioningCheckStatus::Blocked },
             true,
-            None,
+            Some("automation"),
             automation_readiness.as_ref().map_or_else(
                 || "No current-candidate automation connection authority is available because the installed candidate is not verified.".into(),
                 |readiness| format!(

@@ -1069,9 +1069,16 @@ fn spawned_worker_live_takeover_preserves_audible_audio() {
 
     let input_probe = UdpSocket::bind("127.0.0.1:0").unwrap();
     let input_port = input_probe.local_addr().unwrap().port();
-    drop(input_probe);
+    input_probe
+        .set_read_timeout(Some(Duration::from_secs(30)))
+        .unwrap();
     let mut sender = start_ffmpeg_live_sender(input_port);
-    std::thread::sleep(Duration::from_secs(10));
+    let mut sender_probe = [0_u8; 65_536];
+    assert!(
+        input_probe.recv(&mut sender_probe).unwrap() > 0,
+        "the live sender must emit a datagram before the worker arms its receiver"
+    );
+    drop(input_probe);
     assert!(sender.try_wait().unwrap().is_none());
 
     let session_id = "e8d9c07d-1d04-40cc-9fb7-5c1b13f0e961";
@@ -1098,14 +1105,19 @@ fn spawned_worker_live_takeover_preserves_audible_audio() {
             .unwrap(),
         )
         .unwrap();
-    assert!(matches!(
-        read_command_event(&mut stream).event,
-        WorkerEvent::LiveArmed {
-            session_id: ref event_session,
-            ..
-        }
-            if event_session == session_id
-    ));
+    let arm_event = read_command_event(&mut stream);
+    assert!(
+        matches!(
+            arm_event.event,
+            WorkerEvent::LiveArmed {
+                session_id: ref event_session,
+                ..
+            }
+                if event_session == session_id
+        ),
+        "unexpected arm event: {:?}",
+        arm_event.event
+    );
     stream
         .write_all(
             &encode_command_frame(&command(

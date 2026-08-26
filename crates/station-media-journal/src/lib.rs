@@ -884,6 +884,7 @@ fn io_error(error: std::io::Error) -> JournalError {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use station_media_protocol::PROTOCOL_VERSION;
@@ -892,13 +893,18 @@ mod tests {
 
     const WORKER_ID: &str = "d4af49c4-a230-44c5-8f55-c9a0224846b4";
     const CHANNEL_ID: &str = "1500c96b-26c2-4534-a97f-2a8c2ed7fa5e";
+    static NEXT_TEST_PATH: AtomicU64 = AtomicU64::new(0);
 
     fn test_path() -> PathBuf {
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("system clock is before Unix epoch")
             .as_nanos();
-        std::env::temp_dir().join(format!("townlight-replace-failure-{nonce}.tlj"))
+        let sequence = NEXT_TEST_PATH.fetch_add(1, Ordering::Relaxed);
+        std::env::temp_dir().join(format!(
+            "townlight-replace-failure-{}-{nonce}-{sequence}.tlj",
+            std::process::id()
+        ))
     }
 
     fn event(sequence: u64, event: WorkerEvent) -> WorkerEventEnvelope {
