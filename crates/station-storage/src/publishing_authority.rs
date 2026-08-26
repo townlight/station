@@ -189,7 +189,7 @@ impl StationStore {
         if !secret_field(changed_by, 200) || occurred_at_unix_ms < 0 {
             return Err("publish credential attribution is invalid".into());
         }
-        if secret.len() < 8 || secret.len() > 16_384 || secret.iter().any(|byte| *byte == 0) {
+        if secret.len() < 8 || secret.len() > 16_384 || secret.contains(&0) {
             return Err("publish provider credential is empty, oversized, or invalid".into());
         }
         let protected = protect_local_machine(secret)?;

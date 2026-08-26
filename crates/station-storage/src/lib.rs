@@ -100,8 +100,13 @@ pub use schedule_automation_authority::{
 mod catalog_authority;
 pub use catalog_authority::{CatalogAssetHistoryEntry, CatalogAssetPage, CatalogAssetWriteError};
 mod publishing_authority;
+mod publishing_executor;
 pub use publishing_authority::{
     PublishTargetAccountHistory, PublishTargetProfileHistory, PublishingAuthorityWriteError,
+};
+pub use publishing_executor::{
+    PublishExecutionJob, PublishExecutionJobRecord, PublishExecutionJobState,
+    run_publish_controller_iteration,
 };
 mod actual_airing_authority;
 pub use actual_airing_authority::{
@@ -1387,6 +1392,7 @@ impl StationStore {
         store.initialize_caption_egress_job_schema()?;
         store.initialize_automation_policy_schema()?;
         store.initialize_publishing_authority_schema()?;
+        store.initialize_publishing_executor_schema()?;
         store.initialize_custom_metadata_schema()?;
         store.initialize_schedule_automation_schema()?;
         store.initialize_catalog_authority_schema()?;
