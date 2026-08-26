@@ -402,7 +402,7 @@ try {
         label = 'Installed reviewed English'
         cues = @([ordered]@{
             cue_id = $cueId
-            start_ms = 8000
+            start_ms = 20000
             duration_ms = 2500
             text = 'TownLight caption path verified'
         })
@@ -421,7 +421,7 @@ try {
         }).Count -eq 1
     } -Description 'caption proof channel healthy fallback' -Seconds 90 | Out-Null
 
-    $startsAt = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() + 12000
+    $startsAt = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() + 30000
     Invoke-Api 'Put' '/schedule/items' ([ordered]@{
         item_id = $scheduleItemId
         revision = 1
@@ -429,7 +429,7 @@ try {
         asset_id = $assetId
         title = 'Installed caption proof program'
         starts_at_unix_ms = $startsAt
-        duration_ms = 30000
+        duration_ms = 60000
         state = 'draft'
     }) | Out-Null
     $prepared = Invoke-Api 'Post' '/schedule/prepare' ([ordered]@{

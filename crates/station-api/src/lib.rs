@@ -115,7 +115,10 @@ const LOUDNESS_PROOF_MAX_DURATION_MS: u64 = 600_000;
 const LOUDNESS_PROOF_MAX_CAPTURE_BYTES: u64 = 1024 * 1024 * 1024;
 const CAPTION_PROOF_MIN_DURATION_MS: u64 = 3_000;
 const CAPTION_PROOF_RUNTIME_MAX_AGE_MS: i64 = 15_000;
-const CAPTION_PROOF_EXECUTION_LEAD_MS: u64 = 1_000;
+// The controller and worker must claim the proof before its narrow acceptance
+// window opens. This is deliberately finite: it reserves a bounded command
+// budget without allowing a late capture to silently become valid.
+const CAPTION_PROOF_EXECUTION_LEAD_MS: u64 = 5_000;
 const AUTOMATION_CONNECTION_TEST_TTL_MS: i64 = 24 * 60 * 60 * 1_000;
 const RECORDING_WORKER_ACTOR_ID: &str = "00000000-0000-4000-8000-000000000021";
 const RECORDING_CANDIDATE_FUTURE_WINDOW_MS: i64 = 31 * 24 * 60 * 60 * 1_000;
@@ -14808,7 +14811,7 @@ mod tests {
                 label: "Reviewed English".into(),
                 cues: vec![station_captions::AssetCaptionCue {
                     cue_id: "55555555-6666-4777-8888-999999999999".into(),
-                    start_ms: 0,
+                    start_ms: 10_000,
                     duration_ms: 5_000,
                     text: "Town Council is now in session".into(),
                 }],
@@ -14959,8 +14962,11 @@ mod tests {
         assert_eq!(created["language"], "en-US");
         assert_eq!(created["service_number"], 1);
         assert_eq!(created["expected_cue_count"], 1);
-        assert!(created["capture_started_asset_offset_ms"].as_u64().unwrap() >= 2_000);
-        assert!(created["capture_started_asset_offset_ms"].as_u64().unwrap() < 5_000);
+        assert_eq!(
+            created["capture_started_asset_offset_ms"].as_u64(),
+            Some(10_000),
+            "the API must select the future cue window after reserving the bounded controller-start lead"
+        );
         assert_eq!(created["candidate_version"], "0.1.0");
         assert_eq!(
             created["source_commit"],
@@ -15021,7 +15027,7 @@ mod tests {
             .read_asset_caption_track(track_id)
             .unwrap()
             .unwrap();
-        let expected = expected_caption_evidence_for_window(&track, 20_000, 2_000, 3_000).unwrap();
+        let expected = expected_caption_evidence_for_window(&track, 20_000, 10_000, 3_000).unwrap();
         let proof = CaptionEgressProof {
             proof_id: "88888888-9999-4aaa-8bbb-cccccccccccc".into(),
             channel_id: channel_id.into(),
@@ -15037,7 +15043,7 @@ mod tests {
             candidate_version: "0.1.0".into(),
             source_commit: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
             configuration_hash,
-            capture_started_asset_offset_ms: 2_000,
+            capture_started_asset_offset_ms: 10_000,
             capture_duration_ms: 3_000,
             capture_bytes: 1_000,
             capture_sha256: "d".repeat(64),
@@ -15125,6 +15131,11 @@ mod tests {
 
         drop(api);
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn caption_proof_execution_lead_reserves_a_bounded_controller_start_budget() {
+        assert_eq!(CAPTION_PROOF_EXECUTION_LEAD_MS, 5_000);
     }
 
     #[test]

@@ -46,6 +46,9 @@ $requirements = [ordered]@{
     'guest sends an explicit bounded cookie header' = 'Cookie = $script:apiCookieHeader'
     'guest uses byte-exact loopback HTTP for authenticated calls' = '[Net.Sockets.TcpClient]::new()'
     'guest creates caption authority' = '/caption-tracks/'
+    'guest schedules its only caption after the bounded controller-start lead' = 'start_ms = 20000'
+    'guest reserves a future schedule start for installed proof setup' = 'UtcNow.ToUnixTimeMilliseconds() + 30000'
+    'guest keeps the caption proof window inside the scheduled program' = 'duration_ms = 60000'
     'guest creates a complete revision-one schedule item' = 'revision = 1'
     'guest requests final-sink proof' = '/caption-proof'
     'guest requires verified decode-back' = "outcome -ne 'verified'"
