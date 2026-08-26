@@ -82,6 +82,10 @@ pub use schedule_automation_authority::{
 };
 mod catalog_authority;
 pub use catalog_authority::{CatalogAssetHistoryEntry, CatalogAssetPage, CatalogAssetWriteError};
+mod publishing_authority;
+pub use publishing_authority::{
+    PublishTargetAccountHistory, PublishTargetProfileHistory, PublishingAuthorityWriteError,
+};
 mod actual_airing_authority;
 pub use actual_airing_authority::{
     ActualAiringFact, ActualAiringObservation, ActualAiringReadError, ActualAiringWriteError,
@@ -1202,6 +1206,7 @@ impl StationStore {
         store.initialize_caption_egress_proof_schema()?;
         store.initialize_caption_egress_job_schema()?;
         store.initialize_automation_policy_schema()?;
+        store.initialize_publishing_authority_schema()?;
         store.initialize_custom_metadata_schema()?;
         store.initialize_schedule_automation_schema()?;
         store.initialize_catalog_authority_schema()?;

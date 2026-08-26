@@ -12,6 +12,7 @@ sha2.workspace = true
 station-live.workspace = true
 station-alerting.workspace = true
 station-automation-policy.workspace = true
+station-publishing.workspace = true
 station-auth.workspace = true
 station-cg.workspace = true
 station-captions.workspace = true

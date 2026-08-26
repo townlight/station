@@ -23,7 +23,7 @@ use station_auth::{OperatorAccount, SecretToken, digest_secret};
 use station_automation_policy::{
     AdaptiveDefaultHint, AutomationCandidateIdentity, AutomationConnectionTestEvidence,
     AutomationFeature, AutomationFeaturePolicy, ConnectionTestOutcome, FeatureAutomationStatus,
-    derive_feature_automation_status,
+    derive_automation_readiness, derive_feature_automation_status,
 };
 use station_captions::{
     AssetCaptionCue, AssetCaptionTrack, AssetCaptionTrackAuditEvent, AssetCaptionTrackWrite,
@@ -52,6 +52,11 @@ use station_media_lifecycle::{
 };
 use station_metadata::{
     AssetMetadataRecord, AssetMetadataValue, MetadataFieldDefinition, MetadataSchema,
+};
+use station_publishing::{
+    ConnectionTestOutcome as PublishConnectionTestOutcome, PublishCandidateIdentity,
+    PublishConnectionTestEvidence, PublishTargetAccount, PublishTargetKind, PublishTargetProfile,
+    RequiredTierStatus, derive_publication_readiness,
 };
 use station_readiness::{
     BackupProbeInput, CandidateIdentity, CapabilitySupport, ChannelOutputRuntimeProbe,
@@ -89,9 +94,9 @@ use station_storage::{
     CustomMetadataSchemaWriteError, ExistingScheduleSnapshot, ExternalReceiverAcceptanceReceipt,
     FallbackSlateWriteError, HeadendProfileWriteError, OutputLoudnessProofJob,
     OutputLoudnessProofJobRecord, OutputLoudnessProofJobState, ProfileWriteError,
-    ReceiverAcceptanceOutcome, ReceiverEvidenceMethod, ReferenceStationTierWrite,
-    ReferenceStationTierWriteError, ScheduleAutomationWriteError, ScheduleItemWrite,
-    ScheduleMaterializationApplyOutcome, ScheduleMaterializationHistoryCursor,
+    PublishingAuthorityWriteError, ReceiverAcceptanceOutcome, ReceiverEvidenceMethod,
+    ReferenceStationTierWrite, ReferenceStationTierWriteError, ScheduleAutomationWriteError,
+    ScheduleItemWrite, ScheduleMaterializationApplyOutcome, ScheduleMaterializationHistoryCursor,
     ScheduleMaterializationHistoryEntry, ScheduleMaterializationHistoryReadError,
     ScheduleMaterializationOutcome, ScheduleMaterializationOutcomeRecord,
     ScheduleMaterializationPlanRecord, ScheduleMaterializationRun,
@@ -120,6 +125,7 @@ const CAPTION_PROOF_RUNTIME_MAX_AGE_MS: i64 = 15_000;
 // budget without allowing a late capture to silently become valid.
 const CAPTION_PROOF_EXECUTION_LEAD_MS: u64 = 5_000;
 const AUTOMATION_CONNECTION_TEST_TTL_MS: i64 = 24 * 60 * 60 * 1_000;
+const PUBLISH_CONNECTION_TEST_TTL_MS: i64 = 24 * 60 * 60 * 1_000;
 const RECORDING_WORKER_ACTOR_ID: &str = "00000000-0000-4000-8000-000000000021";
 const RECORDING_CANDIDATE_FUTURE_WINDOW_MS: i64 = 31 * 24 * 60 * 60 * 1_000;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -671,6 +677,31 @@ struct PutAutomationFeaturePolicyRequest {
     expected_revision: Option<u64>,
 }
 
+/// The browser proposes non-secret account settings. Identity, revision,
+/// attribution, and occurrence time are always server-derived.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PutPublishTargetAccountRequest {
+    kind: PublishTargetKind,
+    label: String,
+    enabled: bool,
+    credential_configured: bool,
+    expected_revision: Option<u64>,
+}
+
+/// The browser proposes non-secret target configuration. Identity, revision,
+/// attribution, and occurrence time are always server-derived.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PutPublishTargetProfileRequest {
+    account_id: String,
+    kind: PublishTargetKind,
+    label: String,
+    enabled: bool,
+    configuration_hash: String,
+    expected_revision: Option<u64>,
+}
+
 /// The browser proposes only mutable field definitions. Schema identity,
 /// revision, attribution, and time are derived by the server.
 #[derive(Debug, Deserialize)]
@@ -716,6 +747,20 @@ struct AutomationFeaturePolicyStatusResponse {
 #[derive(Debug, Serialize)]
 struct AutomationFeaturePolicyHistoryResponse {
     policy: AutomationFeaturePolicy,
+    changed_by: String,
+    occurred_at_unix_ms: i64,
+}
+
+#[derive(Debug, Serialize)]
+struct PublishTargetAccountHistoryResponse {
+    account: PublishTargetAccount,
+    changed_by: String,
+    occurred_at_unix_ms: i64,
+}
+
+#[derive(Debug, Serialize)]
+struct PublishTargetProfileHistoryResponse {
+    target: PublishTargetProfile,
     changed_by: String,
     occurred_at_unix_ms: i64,
 }
@@ -1051,6 +1096,16 @@ pub struct TrustedAutomationConnectionTestObservation {
     pub adapter_revision: u64,
     pub configuration_hash: String,
     pub outcome: ConnectionTestOutcome,
+    pub detail: String,
+}
+
+/// Trusted provider observation. Candidate identity, account/target revisions,
+/// configuration hash, timestamps, and expiry are server-derived.
+#[derive(Debug, Clone)]
+pub struct TrustedPublishConnectionTestObservation {
+    pub evidence_id: String,
+    pub target_id: String,
+    pub outcome: PublishConnectionTestOutcome,
     pub detail: String,
 }
 
@@ -1853,6 +1908,26 @@ impl Api {
             }
             ("PUT", path) if automation_policy_path(path).is_some() => {
                 self.put_automation_policy(path, body, actor)
+            }
+            ("GET", "/api/v1/publishing/accounts") => self.list_publish_target_accounts(actor),
+            ("GET", path) if publish_target_account_history_path(path).is_some() => {
+                self.list_publish_target_account_history(path, actor)
+            }
+            ("GET", path) if publish_target_account_path(path).is_some() => {
+                self.read_publish_target_account(path, actor)
+            }
+            ("PUT", path) if publish_target_account_path(path).is_some() => {
+                self.put_publish_target_account(path, body, actor)
+            }
+            ("GET", "/api/v1/publishing/targets") => self.list_publish_target_profiles(actor),
+            ("GET", path) if publish_target_profile_history_path(path).is_some() => {
+                self.list_publish_target_profile_history(path, actor)
+            }
+            ("GET", path) if publish_target_profile_path(path).is_some() => {
+                self.read_publish_target_profile(path, actor)
+            }
+            ("PUT", path) if publish_target_profile_path(path).is_some() => {
+                self.put_publish_target_profile(path, body, actor)
             }
             ("GET", path) if saved_search_history_path(path).is_some() => {
                 self.list_saved_search_history(path, actor)
@@ -2688,6 +2763,337 @@ impl Api {
                 "A verified installed candidate is required for automation evidence.".to_string()
             })?;
         let candidate = AutomationCandidateIdentity {
+            version: station_box.product_version,
+            source_commit,
+        };
+        candidate.validate()?;
+        Ok(candidate)
+    }
+
+    fn list_publish_target_accounts(&self, actor: Option<&OperatorAccount>) -> ApiResponse {
+        if !is_publishing_reader(actor) {
+            return publishing_reader_required();
+        }
+        match self.storage.list_publish_target_accounts() {
+            Ok(accounts) => json_response(
+                200,
+                serde_json::to_vec(&accounts).expect("serializing publish accounts cannot fail"),
+            ),
+            Err(message) => error_response(500, "storage_error", &message),
+        }
+    }
+
+    fn read_publish_target_account(
+        &self,
+        path: &str,
+        actor: Option<&OperatorAccount>,
+    ) -> ApiResponse {
+        if !is_publishing_reader(actor) {
+            return publishing_reader_required();
+        }
+        let Some(account_id) = publish_target_account_path(path) else {
+            return error_response(
+                400,
+                "invalid_path",
+                "The publish target account identity is invalid.",
+            );
+        };
+        match self.storage.read_publish_target_account(account_id) {
+            Ok(Some(account)) => json_response(
+                200,
+                serde_json::to_vec(&account).expect("serializing publish account cannot fail"),
+            ),
+            Ok(None) => error_response(
+                404,
+                "publish_target_account_not_found",
+                "The publish target account does not exist.",
+            ),
+            Err(message) => error_response(500, "storage_error", &message),
+        }
+    }
+
+    fn list_publish_target_account_history(
+        &self,
+        path: &str,
+        actor: Option<&OperatorAccount>,
+    ) -> ApiResponse {
+        if !is_publishing_reader(actor) {
+            return publishing_reader_required();
+        }
+        let Some((account_id, limit)) = publish_target_account_history_path(path) else {
+            return error_response(
+                400,
+                "invalid_path",
+                "The publish target account history path is invalid.",
+            );
+        };
+        match self
+            .storage
+            .list_publish_target_account_history(account_id, limit)
+        {
+            Ok(history) => json_response(
+                200,
+                serde_json::to_vec(
+                    &history
+                        .into_iter()
+                        .map(|entry| PublishTargetAccountHistoryResponse {
+                            account: entry.account,
+                            changed_by: entry.changed_by,
+                            occurred_at_unix_ms: entry.occurred_at_unix_ms,
+                        })
+                        .collect::<Vec<_>>(),
+                )
+                .expect("serializing publish account history cannot fail"),
+            ),
+            Err(message) if message.contains("invalid") || message.contains("unbounded") => {
+                error_response(422, "validation_failed", &message)
+            }
+            Err(message) => error_response(500, "storage_error", &message),
+        }
+    }
+
+    fn put_publish_target_account(
+        &self,
+        path: &str,
+        body: Option<&[u8]>,
+        actor: Option<&OperatorAccount>,
+    ) -> ApiResponse {
+        let Some(account_id) = publish_target_account_path(path) else {
+            return error_response(
+                400,
+                "invalid_path",
+                "The publish target account identity is invalid.",
+            );
+        };
+        let Some(actor) = actor.filter(|account| account.enabled() && is_setup_admin(account))
+        else {
+            return error_response(
+                403,
+                "setup_admin_required",
+                "Changing a publish target account requires the Setup Admin role.",
+            );
+        };
+        let Some(request) = parse_body::<PutPublishTargetAccountRequest>(body) else {
+            return error_response(
+                400,
+                "invalid_json",
+                "A complete publish target account body is required.",
+            );
+        };
+        let revision = match next_authority_revision(request.expected_revision) {
+            Ok(revision) => revision,
+            Err(response) => return response,
+        };
+        let now = match system_time_millis() {
+            Ok(now) => now,
+            Err(message) => return error_response(500, "clock_error", &message),
+        };
+        let account = PublishTargetAccount {
+            account_id: account_id.into(),
+            kind: request.kind,
+            label: request.label,
+            enabled: request.enabled,
+            credential_configured: request.credential_configured,
+            revision,
+        };
+        match self.storage.write_publish_target_account(
+            &account,
+            request.expected_revision,
+            actor.account_id().as_str(),
+            now,
+        ) {
+            Ok(()) => json_response(
+                if revision == 1 { 201 } else { 200 },
+                serde_json::to_vec(&account).expect("serializing publish account cannot fail"),
+            ),
+            Err(error) => publishing_write_error_response(error),
+        }
+    }
+
+    fn list_publish_target_profiles(&self, actor: Option<&OperatorAccount>) -> ApiResponse {
+        if !is_publishing_reader(actor) {
+            return publishing_reader_required();
+        }
+        match self.storage.list_publish_target_profiles() {
+            Ok(targets) => json_response(
+                200,
+                serde_json::to_vec(&targets).expect("serializing publish targets cannot fail"),
+            ),
+            Err(message) => error_response(500, "storage_error", &message),
+        }
+    }
+
+    fn read_publish_target_profile(
+        &self,
+        path: &str,
+        actor: Option<&OperatorAccount>,
+    ) -> ApiResponse {
+        if !is_publishing_reader(actor) {
+            return publishing_reader_required();
+        }
+        let Some(target_id) = publish_target_profile_path(path) else {
+            return error_response(
+                400,
+                "invalid_path",
+                "The publish target identity is invalid.",
+            );
+        };
+        match self.storage.read_publish_target_profile(target_id) {
+            Ok(Some(target)) => json_response(
+                200,
+                serde_json::to_vec(&target).expect("serializing publish target cannot fail"),
+            ),
+            Ok(None) => error_response(
+                404,
+                "publish_target_not_found",
+                "The publish target does not exist.",
+            ),
+            Err(message) => error_response(500, "storage_error", &message),
+        }
+    }
+
+    fn list_publish_target_profile_history(
+        &self,
+        path: &str,
+        actor: Option<&OperatorAccount>,
+    ) -> ApiResponse {
+        if !is_publishing_reader(actor) {
+            return publishing_reader_required();
+        }
+        let Some((target_id, limit)) = publish_target_profile_history_path(path) else {
+            return error_response(
+                400,
+                "invalid_path",
+                "The publish target history path is invalid.",
+            );
+        };
+        match self
+            .storage
+            .list_publish_target_profile_history(target_id, limit)
+        {
+            Ok(history) => json_response(
+                200,
+                serde_json::to_vec(
+                    &history
+                        .into_iter()
+                        .map(|entry| PublishTargetProfileHistoryResponse {
+                            target: entry.target,
+                            changed_by: entry.changed_by,
+                            occurred_at_unix_ms: entry.occurred_at_unix_ms,
+                        })
+                        .collect::<Vec<_>>(),
+                )
+                .expect("serializing publish target history cannot fail"),
+            ),
+            Err(message) if message.contains("invalid") || message.contains("unbounded") => {
+                error_response(422, "validation_failed", &message)
+            }
+            Err(message) => error_response(500, "storage_error", &message),
+        }
+    }
+
+    fn put_publish_target_profile(
+        &self,
+        path: &str,
+        body: Option<&[u8]>,
+        actor: Option<&OperatorAccount>,
+    ) -> ApiResponse {
+        let Some(target_id) = publish_target_profile_path(path) else {
+            return error_response(
+                400,
+                "invalid_path",
+                "The publish target identity is invalid.",
+            );
+        };
+        let Some(actor) = actor.filter(|account| account.enabled() && is_setup_admin(account))
+        else {
+            return error_response(
+                403,
+                "setup_admin_required",
+                "Changing a publish target requires the Setup Admin role.",
+            );
+        };
+        let Some(request) = parse_body::<PutPublishTargetProfileRequest>(body) else {
+            return error_response(
+                400,
+                "invalid_json",
+                "A complete publish target body is required.",
+            );
+        };
+        let revision = match next_authority_revision(request.expected_revision) {
+            Ok(revision) => revision,
+            Err(response) => return response,
+        };
+        let now = match system_time_millis() {
+            Ok(now) => now,
+            Err(message) => return error_response(500, "clock_error", &message),
+        };
+        let target = PublishTargetProfile {
+            target_id: target_id.into(),
+            account_id: request.account_id,
+            kind: request.kind,
+            label: request.label,
+            enabled: request.enabled,
+            configuration_hash: request.configuration_hash,
+            revision,
+        };
+        match self.storage.write_publish_target_profile(
+            &target,
+            request.expected_revision,
+            actor.account_id().as_str(),
+            now,
+        ) {
+            Ok(()) => json_response(
+                if revision == 1 { 201 } else { 200 },
+                serde_json::to_vec(&target).expect("serializing publish target cannot fail"),
+            ),
+            Err(error) => publishing_write_error_response(error),
+        }
+    }
+
+    pub fn record_trusted_publish_connection_test_evidence(
+        &self,
+        observation: TrustedPublishConnectionTestObservation,
+    ) -> Result<(), String> {
+        let candidate = self.current_publish_candidate()?;
+        let now = system_time_millis()?;
+        let expires_at_unix_ms = now
+            .checked_add(PUBLISH_CONNECTION_TEST_TTL_MS)
+            .ok_or_else(|| "publish connection evidence expiry overflowed".to_string())?;
+        let target = self
+            .storage
+            .read_publish_target_profile(&observation.target_id)?
+            .ok_or_else(|| "publish connection evidence target does not exist".to_string())?;
+        let account = self
+            .storage
+            .read_publish_target_account(&target.account_id)?
+            .ok_or_else(|| "publish connection evidence account does not exist".to_string())?;
+        let evidence = PublishConnectionTestEvidence {
+            evidence_id: observation.evidence_id,
+            target_id: target.target_id,
+            account_revision: account.revision,
+            target_revision: target.revision,
+            configuration_hash: target.configuration_hash,
+            candidate,
+            outcome: observation.outcome,
+            tested_at_unix_ms: now,
+            expires_at_unix_ms,
+            detail: observation.detail,
+        };
+        self.storage
+            .append_publish_connection_test_evidence(&evidence, &evidence.candidate, now)
+    }
+
+    fn current_publish_candidate(&self) -> Result<PublishCandidateIdentity, String> {
+        let station_box = self.station_box_profile_uncached()?;
+        let source_commit = station_box
+            .source_commit
+            .filter(|_| station_box.release.candidate_verified)
+            .ok_or_else(|| {
+                "A verified installed candidate is required for publish-target evidence."
+                    .to_string()
+            })?;
+        let candidate = PublishCandidateIdentity {
             version: station_box.product_version,
             source_commit,
         };
@@ -7020,26 +7426,141 @@ impl Api {
             CommissioningBoundary::LocalAuthority,
         ));
 
+        let publication_readiness = match station_box
+            .source_commit
+            .as_deref()
+            .filter(|_| station_box.release.candidate_verified)
+        {
+            Some(source_commit) => {
+                let candidate = PublishCandidateIdentity {
+                    version: station_box.product_version.clone(),
+                    source_commit: source_commit.into(),
+                };
+                let accounts = match self.storage.list_publish_target_accounts() {
+                    Ok(accounts) => accounts,
+                    Err(message) => return error_response(500, "storage_error", &message),
+                };
+                let targets = match self.storage.list_publish_target_profiles() {
+                    Ok(targets) => targets,
+                    Err(message) => return error_response(500, "storage_error", &message),
+                };
+                let mut evidence = Vec::with_capacity(targets.len());
+                for target in &targets {
+                    match self
+                        .storage
+                        .list_publish_connection_test_evidence(&target.target_id, 1)
+                    {
+                        Ok(mut records) => evidence.extend(records.drain(..)),
+                        Err(message) => return error_response(500, "storage_error", &message),
+                    }
+                }
+                match derive_publication_readiness(
+                    &accounts,
+                    &targets,
+                    &evidence,
+                    &candidate,
+                    generated_at_unix_ms,
+                ) {
+                    Ok(readiness) => Some(readiness),
+                    Err(message) => return error_response(500, "storage_error", &message),
+                }
+            }
+            None => None,
+        };
+        let publish_targets_pass = publication_readiness.as_ref().is_some_and(|readiness| {
+            readiness.canonical_portal == RequiredTierStatus::Passed
+                && readiness.permanence == RequiredTierStatus::Passed
+                && readiness.reach_capacity == RequiredTierStatus::Passed
+        });
         checks.push(commissioning_check(
             "publish_targets",
             "Required publish targets",
             CommissioningPhase::SourcesOutputs,
-            CommissioningCheckStatus::Blocked,
+            if publish_targets_pass { CommissioningCheckStatus::Pass } else { CommissioningCheckStatus::Blocked },
             true,
             None,
-            "Generic channel output sinks and headend destinations are not publish-target account authority. No server-authoritative publish-target model exists yet.",
-            "the current control plane has no publish-target credential/account model",
+            publication_readiness.as_ref().map_or_else(
+                || "No current-candidate publish-target connection authority is available because the installed candidate is not verified.".into(),
+                |readiness| format!(
+                    "Current publish-target authority: canonical portal={:?}; permanence={:?}; reach capacity={:?}; {} target record(s).",
+                    readiness.canonical_portal, readiness.permanence, readiness.reach_capacity, readiness.targets.len()
+                ),
+            ),
+            publication_readiness.as_ref().map_or_else(
+                || "requires a verified installed candidate plus current account, target, and connection-test authority only; this does not claim publication, delivery, or audience reach".into(),
+                |readiness| format!(
+                    "current-candidate connection-test authority only: portal={:?}; permanence={:?}; reach_capacity={:?}; it does not claim publication, delivery, or audience reach",
+                    readiness.canonical_portal, readiness.permanence, readiness.reach_capacity
+                ),
+            ),
             CommissioningBoundary::LocalAuthority,
         ));
+
+        let automation_readiness = match station_box
+            .source_commit
+            .as_deref()
+            .filter(|_| station_box.release.candidate_verified)
+        {
+            Some(source_commit) => {
+                let candidate = AutomationCandidateIdentity {
+                    version: station_box.product_version.clone(),
+                    source_commit: source_commit.into(),
+                };
+                let adapters = match self.storage.list_automation_adapter_descriptors() {
+                    Ok(adapters) => adapters,
+                    Err(message) => return error_response(500, "storage_error", &message),
+                };
+                let policies = match self.storage.list_automation_feature_policies() {
+                    Ok(policies) => policies,
+                    Err(message) => return error_response(500, "storage_error", &message),
+                };
+                let mut evidence = Vec::with_capacity(policies.len());
+                for policy in &policies {
+                    match self
+                        .storage
+                        .list_automation_connection_test_evidence(&policy.policy_id, 1)
+                    {
+                        Ok(mut records) => evidence.extend(records.drain(..)),
+                        Err(message) => return error_response(500, "storage_error", &message),
+                    }
+                }
+                match derive_automation_readiness(
+                    &adapters,
+                    &policies,
+                    &evidence,
+                    &candidate,
+                    generated_at_unix_ms,
+                ) {
+                    Ok(readiness) => Some(readiness),
+                    Err(message) => return error_response(500, "storage_error", &message),
+                }
+            }
+            None => None,
+        };
+        let automation_policy_pass = automation_readiness.as_ref().is_some_and(|readiness| {
+            readiness.overall == station_automation_policy::AutomationReadinessStatus::Ready
+        });
         checks.push(commissioning_check(
             "automation_model_policy",
             "Automation and model policy",
             CommissioningPhase::SourcesOutputs,
-            CommissioningCheckStatus::Blocked,
+            if automation_policy_pass { CommissioningCheckStatus::Pass } else { CommissioningCheckStatus::Blocked },
             true,
             None,
-            "No server-authoritative automation policy, model selection policy, or approval boundary exists yet.",
-            "the current control plane has no automation/model policy authority",
+            automation_readiness.as_ref().map_or_else(
+                || "No current-candidate automation connection authority is available because the installed candidate is not verified.".into(),
+                |readiness| format!(
+                    "Current automation authority: captions={:?}; summaries={:?}; translation={:?}; overall={:?}.",
+                    readiness.captions, readiness.summaries, readiness.translation, readiness.overall
+                ),
+            ),
+            automation_readiness.as_ref().map_or_else(
+                || "requires a verified installed candidate and all feature policies with connection tests only; this does not claim model execution or output quality".into(),
+                |readiness| format!(
+                    "current-candidate connection tests only: captions={:?}; summaries={:?}; translation={:?}; it does not claim model execution or output quality",
+                    readiness.captions, readiness.summaries, readiness.translation
+                ),
+            ),
             CommissioningBoundary::LocalAuthority,
         ));
 
@@ -8879,6 +9400,52 @@ fn is_automation_reader(actor: Option<&OperatorAccount>) -> bool {
     })
 }
 
+fn is_publishing_reader(actor: Option<&OperatorAccount>) -> bool {
+    is_automation_reader(actor)
+}
+
+fn publishing_reader_required() -> ApiResponse {
+    error_response(
+        403,
+        "operator_required",
+        "Reading publishing authority requires an enabled Setup Admin or Meeting Operator account.",
+    )
+}
+
+fn next_authority_revision(expected_revision: Option<u64>) -> Result<u64, ApiResponse> {
+    match expected_revision {
+        Some(revision) => revision.checked_add(1).ok_or_else(|| {
+            error_response(
+                422,
+                "validation_failed",
+                "The expected revision is invalid.",
+            )
+        }),
+        None => Ok(1),
+    }
+}
+
+fn publishing_write_error_response(error: PublishingAuthorityWriteError) -> ApiResponse {
+    match error {
+        PublishingAuthorityWriteError::Conflict { current_revision } => error_response(
+            409,
+            "revision_conflict",
+            &format!("The publish authority changed; current revision is {current_revision:?}."),
+        ),
+        PublishingAuthorityWriteError::Rebound => error_response(
+            409,
+            "authority_rebound",
+            "A publish authority identity cannot be rebound to another account or target kind.",
+        ),
+        PublishingAuthorityWriteError::Invalid(message) => {
+            error_response(422, "validation_failed", &message)
+        }
+        PublishingAuthorityWriteError::Storage(message) => {
+            error_response(500, "storage_error", &message)
+        }
+    }
+}
+
 fn is_scheduling_reader(actor: Option<&OperatorAccount>) -> bool {
     actor.is_some_and(|account| {
         account.enabled()
@@ -9659,6 +10226,34 @@ fn automation_policy_history_path(path: &str) -> Option<(&str, usize)> {
     }
     let limit = query.strip_prefix("limit=")?.parse::<usize>().ok()?;
     (1..=128).contains(&limit).then_some((policy_id, limit))
+}
+
+fn publish_target_account_path(path: &str) -> Option<&str> {
+    path_identity(path, "/api/v1/publishing/accounts/", "")
+        .filter(|identity| is_canonical_api_uuid(identity))
+}
+
+fn publish_target_account_history_path(path: &str) -> Option<(&str, usize)> {
+    publishing_history_path(path, "/api/v1/publishing/accounts/")
+}
+
+fn publish_target_profile_path(path: &str) -> Option<&str> {
+    path_identity(path, "/api/v1/publishing/targets/", "")
+        .filter(|identity| is_canonical_api_uuid(identity))
+}
+
+fn publish_target_profile_history_path(path: &str) -> Option<(&str, usize)> {
+    publishing_history_path(path, "/api/v1/publishing/targets/")
+}
+
+fn publishing_history_path<'a>(path: &'a str, prefix: &str) -> Option<(&'a str, usize)> {
+    let remainder = path.strip_prefix(prefix)?;
+    let (identity, query) = remainder.split_once("/history?")?;
+    if !is_canonical_api_uuid(identity) || query.contains('&') {
+        return None;
+    }
+    let limit = query.strip_prefix("limit=")?.parse::<usize>().ok()?;
+    (1..=128).contains(&limit).then_some((identity, limit))
 }
 
 fn saved_search_path(path: &str) -> Option<&str> {
@@ -15550,6 +16145,134 @@ mod tests {
             )
             .status,
             403
+        );
+
+        drop(api);
+        let _ = std::fs::remove_file(database);
+        let _ = std::fs::remove_dir_all(application);
+    }
+
+    #[test]
+    fn publishing_authority_api_and_commissioning_require_current_trusted_tier_evidence() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let database = std::env::temp_dir().join(format!("townlight-publishing-api-{nonce}.db"));
+        let application = database.with_extension("application");
+        std::fs::create_dir_all(&application).unwrap();
+        let api =
+            Api::open_with_station_box_probe(&database, &application, station_box_probe()).unwrap();
+        let setup_admin = test_actor(station_auth::OperatorRole::SetupAdmin);
+        let reader = test_actor(station_auth::OperatorRole::MeetingOperator);
+        let targets = [
+            (
+                "11111111-2222-4333-8444-555555555551",
+                "22222222-2222-4333-8444-555555555551",
+                station_publishing::PublishTargetKind::Portal,
+            ),
+            (
+                "11111111-2222-4333-8444-555555555552",
+                "22222222-2222-4333-8444-555555555552",
+                station_publishing::PublishTargetKind::InternetArchive,
+            ),
+            (
+                "11111111-2222-4333-8444-555555555553",
+                "22222222-2222-4333-8444-555555555553",
+                station_publishing::PublishTargetKind::LocalNas,
+            ),
+            (
+                "11111111-2222-4333-8444-555555555554",
+                "22222222-2222-4333-8444-555555555554",
+                station_publishing::PublishTargetKind::YouTubeLive,
+            ),
+        ];
+        for (index, (account_id, target_id, kind)) in targets.iter().enumerate() {
+            let account_request = serde_json::to_vec(&serde_json::json!({
+                "kind": kind, "label": format!("{kind:?} account"), "enabled": true,
+                "credential_configured": true, "expected_revision": null
+            }))
+            .unwrap();
+            assert_eq!(
+                api.handle_authenticated(
+                    "PUT",
+                    &format!("/api/v1/publishing/accounts/{account_id}"),
+                    Some(&account_request),
+                    &setup_admin
+                )
+                .status,
+                201
+            );
+            let target_request = serde_json::to_vec(&serde_json::json!({
+                "account_id": account_id, "kind": kind, "label": format!("{kind:?} target"),
+                "enabled": true, "configuration_hash": "b".repeat(64), "expected_revision": null
+            }))
+            .unwrap();
+            assert_eq!(
+                api.handle_authenticated(
+                    "PUT",
+                    &format!("/api/v1/publishing/targets/{target_id}"),
+                    Some(&target_request),
+                    &setup_admin
+                )
+                .status,
+                201
+            );
+            api.record_trusted_publish_connection_test_evidence(
+                TrustedPublishConnectionTestObservation {
+                    evidence_id: format!("33333333-2222-4333-8444-55555555555{}", index + 1),
+                    target_id: (*target_id).into(),
+                    outcome: station_publishing::ConnectionTestOutcome::Passed,
+                    detail: "Trusted provider connection test passed.".into(),
+                },
+            )
+            .unwrap();
+        }
+        assert_eq!(
+            api.handle_in_process("GET", "/api/v1/publishing/accounts", None)
+                .status,
+            403
+        );
+        assert_eq!(
+            api.handle_authenticated("GET", "/api/v1/publishing/accounts", None, &reader)
+                .status,
+            200
+        );
+        assert_eq!(
+            api.handle_authenticated(
+                "GET",
+                "/api/v1/publishing/accounts/11111111-2222-4333-8444-555555555551/history?limit=1",
+                None,
+                &reader
+            )
+            .status,
+            200
+        );
+        assert_eq!(
+            api.handle_in_process(
+                "POST",
+                "/api/v1/publishing/targets/22222222-2222-4333-8444-555555555551/evidence",
+                Some(br#"{"candidate":{"source_commit":"forged"}}"#)
+            )
+            .status,
+            404
+        );
+
+        let report = api.handle_in_process("GET", "/api/v1/commissioning/report", None);
+        assert_eq!(report.status, 200);
+        let report: serde_json::Value = serde_json::from_slice(&report.body).unwrap();
+        let publish = report["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|check| check["id"] == "publish_targets")
+            .unwrap();
+        assert_eq!(publish["status"], "pass");
+        assert!(
+            publish["evidence"]
+                .as_str()
+                .unwrap()
+                .contains("does not claim publication")
         );
 
         drop(api);

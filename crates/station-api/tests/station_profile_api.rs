@@ -262,6 +262,42 @@ fn commissioning_report_is_ordered_and_does_not_claim_field_proof() {
         .unwrap();
     assert_eq!(receiver["status"], "not_verified");
 
+    let publish_targets = checks
+        .iter()
+        .find(|check| check["id"] == "publish_targets")
+        .unwrap();
+    assert_eq!(publish_targets["status"], "blocked");
+    assert!(
+        publish_targets["detail"]
+            .as_str()
+            .unwrap()
+            .contains("No current-candidate publish-target connection authority")
+    );
+    assert!(
+        publish_targets["evidence"]
+            .as_str()
+            .unwrap()
+            .contains("connection-test authority only")
+    );
+
+    let automation = checks
+        .iter()
+        .find(|check| check["id"] == "automation_model_policy")
+        .unwrap();
+    assert_eq!(automation["status"], "blocked");
+    assert!(
+        automation["detail"]
+            .as_str()
+            .unwrap()
+            .contains("No current-candidate automation connection authority")
+    );
+    assert!(
+        automation["evidence"]
+            .as_str()
+            .unwrap()
+            .contains("connection tests only")
+    );
+
     let profile = br#"{"station_id":"3f5f721f-96c7-48b1-b061-1bf1ad1e62c2","display_name":"KTLT","timezone":"America/Denver"}"#;
     assert_eq!(
         api.handle_in_process("PUT", "/api/v1/station", Some(profile))
