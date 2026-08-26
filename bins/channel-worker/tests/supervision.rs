@@ -14,7 +14,7 @@ use station_captions::{
 };
 use station_domain::{AlertConditionKind, AlertEventState, ChannelRuntimeState};
 use station_live::{LiveEndpoint, LiveSource, TakeoverSession, TakeoverState};
-use station_media_journal::read_events;
+use station_media_journal::{FallbackToneJournalEntry, read_events};
 use station_media_protocol::{
     ChannelCommand, FallbackToneDeactivationReason, FallbackToneKind, WorkerEvent,
     WorkerFallbackTone,
@@ -370,11 +370,19 @@ fn supervisor_drains_autonomous_tone_expiry_before_the_next_command_and_replay_s
 }
 
 #[test]
-fn supervisor_keeps_a_command_frame_synchronized_when_expiry_crosses_dispatch() {
+fn restart_reconciles_a_crash_active_tone_before_reactivation() {
     let _guard = supervision_test_guard();
     let journal = journal_path();
     let output = UdpSocket::bind("127.0.0.1:0").unwrap();
     let executable = PathBuf::from(env!("CARGO_BIN_EXE_channel-worker"));
+    let tone = WorkerFallbackTone {
+        activation_id: "33333333-4444-4333-8444-555555555555".into(),
+        authority_revision: 10,
+        kind: FallbackToneKind::Test,
+        frequency_hz: 1_000,
+        level_milli_dbfs: -20_000,
+        duration_ms: 10_000,
+    };
     let mut supervisor = WorkerSupervisor::launch_with_output_profile(
         &executable,
         WORKER_ID,
@@ -385,66 +393,102 @@ fn supervisor_keeps_a_command_frame_synchronized_when_expiry_crosses_dispatch() 
         Duration::from_secs(30),
     )
     .unwrap();
-    let tone = WorkerFallbackTone {
-        activation_id: "33333333-4444-4333-8444-555555555555".into(),
-        authority_revision: 10,
-        kind: FallbackToneKind::Test,
-        frequency_hz: 1_000,
-        level_milli_dbfs: -20_000,
-        duration_ms: 100,
-    };
     let activated = supervisor
         .command(
-            "activate-dispatch-race",
-            ChannelCommand::ActivateFallbackTone { tone },
+            "activate-before-crash",
+            ChannelCommand::ActivateFallbackTone { tone: tone.clone() },
             Duration::from_secs(2),
         )
         .unwrap();
     assert_eq!(activated.sequence, 2);
 
-    // Publish the next command immediately before the worker's finite tone
-    // deadline. Depending on the scheduler, expiry can be observed before
-    // this command, between its pipe read and dispatch, or after its reply.
-    // Every ordering must still return a response; once a complete frame has
-    // been consumed it cannot be discarded by the expiry path.
-    thread::sleep(Duration::from_millis(98));
-    let response = supervisor
+    // Simulate a worker crash after the activation audit/event but before its
+    // deactivation. The replacement must close the durable active state before
+    // it reports Ready, then permit a fresh activation with the same identity.
+    supervisor.force_terminate().unwrap();
+    drop(supervisor);
+
+    let mut restarted = WorkerSupervisor::launch_with_output_profile(
+        &executable,
+        WORKER_ID,
+        CHANNEL_ID,
+        &journal,
+        output.local_addr().unwrap(),
+        OutputProfileId::Proof360p30,
+        Duration::from_secs(30),
+    )
+    .unwrap();
+    assert_eq!(restarted.ready().sequence, 4);
+    let recovery = restarted.take_lifecycle_events();
+    assert_eq!(recovery.len(), 1);
+    assert!(matches!(
+        &recovery[0].event,
+        WorkerEvent::FallbackToneDeactivated {
+            activation_id,
+            authority_revision: 10,
+            deactivation: Some(deactivation),
+        } if activation_id == &tone.activation_id
+            && deactivation.tone == tone
+            && deactivation.reason == FallbackToneDeactivationReason::Recovery
+    ));
+    assert_eq!(recovery[0].sequence, 3);
+
+    let reactivated = restarted
         .command(
-            "ping-across-expiry",
-            ChannelCommand::Ping,
+            "reactivate-after-recovery",
+            ChannelCommand::ActivateFallbackTone { tone: tone.clone() },
             Duration::from_secs(2),
         )
         .unwrap();
-    assert!(
-        matches!(response.event, WorkerEvent::Heartbeat { .. })
-            || matches!(
-                response.event,
-                WorkerEvent::CommandRejected { code, .. } if code == "sequence_conflict"
-            ),
-        "the command must yield its own acknowledgement or a sequenced rejection"
-    );
-    let lifecycle = supervisor.take_lifecycle_events();
-    assert!(
-        lifecycle.iter().all(|event| matches!(
-            &event.event,
-            WorkerEvent::FallbackToneDeactivated {
-                deactivation: Some(deactivation),
-                ..
-            } if deactivation.reason == FallbackToneDeactivationReason::Expired
-        )),
-        "only autonomous expiry may be interposed"
-    );
-
-    let stopped = supervisor
-        .shutdown("shutdown-after-dispatch-race", Duration::from_secs(2))
+    assert_eq!(reactivated.sequence, 5);
+    let deactivated = restarted
+        .command(
+            "deactivate-after-recovery",
+            ChannelCommand::DeactivateFallbackTone {
+                activation_id: tone.activation_id.clone(),
+                authority_revision: tone.authority_revision,
+            },
+            Duration::from_secs(2),
+        )
         .unwrap();
-    assert!(matches!(stopped.event, WorkerEvent::ShutdownComplete));
-    let sequences = read_events(&journal)
-        .unwrap()
-        .into_iter()
-        .map(|event| event.sequence)
-        .collect::<Vec<_>>();
-    assert_eq!(sequences, (1..=sequences.len() as u64).collect::<Vec<_>>());
+    assert_eq!(deactivated.sequence, 6);
+    assert!(matches!(
+        deactivated.event,
+        WorkerEvent::FallbackToneDeactivated {
+            deactivation: Some(deactivation),
+            ..
+        } if deactivation.reason == FallbackToneDeactivationReason::Explicit
+    ));
+    let stopped = restarted
+        .shutdown("shutdown-after-recovery", Duration::from_secs(2))
+        .unwrap();
+    assert_eq!(stopped.sequence, 7);
+
+    let events = read_events(&journal).unwrap();
+    assert_eq!(
+        events
+            .iter()
+            .map(|event| event.sequence)
+            .collect::<Vec<_>>(),
+        (1..=7).collect::<Vec<_>>()
+    );
+    let inspection = station_media_journal::inspect_journal(&journal).unwrap();
+    assert!(inspection.fallback_tone_audit.iter().any(|entry| matches!(
+        entry,
+        FallbackToneJournalEntry::Deactivated {
+            tone: recorded_tone,
+            reason: FallbackToneDeactivationReason::Recovery,
+            ..
+        } if recorded_tone == &tone
+    )));
+    assert!(inspection.fallback_tone_audit.iter().any(|entry| matches!(
+        entry,
+        FallbackToneJournalEntry::Deactivated {
+            tone: recorded_tone,
+            reason: FallbackToneDeactivationReason::Explicit,
+            ..
+        } if recorded_tone == &tone
+    )));
     let _ = fs::remove_file(journal);
 }
 

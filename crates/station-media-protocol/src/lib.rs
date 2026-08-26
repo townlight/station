@@ -176,6 +176,7 @@ pub enum FallbackToneDeactivationReason {
     Expired,
     SourceTransition,
     Shutdown,
+    Recovery,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

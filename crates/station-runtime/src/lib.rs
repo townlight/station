@@ -298,29 +298,67 @@ impl WorkerSupervisor {
                 SupervisorError::Ipc(error),
             ));
         }
-        let ready = match read_event(&mut pipe, timeout.saturating_sub(started.elapsed())) {
-            Ok(event) => event,
-            Err(error) => {
+        let mut pending_lifecycle_events = VecDeque::new();
+        let mut initial_sequence: Option<u64> = None;
+        let ready = loop {
+            let event = match read_event(&mut pipe, timeout.saturating_sub(started.elapsed())) {
+                Ok(event) => event,
+                Err(error) => {
+                    return Err(abandon_launch(child, containment, error));
+                }
+            };
+            if let Err(error) = validate_identity(&event, worker_id, channel_id) {
                 return Err(abandon_launch(child, containment, error));
             }
+            if event.sequence == 0 {
+                return Err(abandon_launch(
+                    child,
+                    containment,
+                    SupervisorError::InvalidInitialSequence,
+                ));
+            }
+            if let Some(previous) = initial_sequence {
+                let expected = match previous.checked_add(1) {
+                    Some(expected) => expected,
+                    None => {
+                        return Err(abandon_launch(
+                            child,
+                            containment,
+                            SupervisorError::InvalidInitialSequence,
+                        ));
+                    }
+                };
+                if event.sequence != expected {
+                    return Err(abandon_launch(
+                        child,
+                        containment,
+                        SupervisorError::WrongSequence {
+                            expected,
+                            actual: event.sequence,
+                        },
+                    ));
+                }
+            }
+            initial_sequence = Some(event.sequence);
+            if matches!(event.event, WorkerEvent::Ready { .. }) {
+                break event;
+            }
+            if !is_recovery_lifecycle_event(&event) {
+                return Err(abandon_launch(
+                    child,
+                    containment,
+                    SupervisorError::UnexpectedInitialEvent,
+                ));
+            }
+            if pending_lifecycle_events.len() == MAX_PENDING_LIFECYCLE_EVENTS {
+                return Err(abandon_launch(
+                    child,
+                    containment,
+                    SupervisorError::LifecycleEventOverflow,
+                ));
+            }
+            pending_lifecycle_events.push_back(event);
         };
-        if let Err(error) = validate_identity(&ready, worker_id, channel_id) {
-            return Err(abandon_launch(child, containment, error));
-        }
-        if ready.sequence == 0 {
-            return Err(abandon_launch(
-                child,
-                containment,
-                SupervisorError::InvalidInitialSequence,
-            ));
-        }
-        if !matches!(ready.event, WorkerEvent::Ready { .. }) {
-            return Err(abandon_launch(
-                child,
-                containment,
-                SupervisorError::UnexpectedInitialEvent,
-            ));
-        }
 
         Ok(Self {
             child: Some(child),
@@ -330,7 +368,7 @@ impl WorkerSupervisor {
             channel_id: channel_id.to_string(),
             last_sequence: ready.sequence,
             ready,
-            pending_lifecycle_events: VecDeque::new(),
+            pending_lifecycle_events,
         })
     }
 
@@ -592,7 +630,22 @@ fn is_unsolicited_lifecycle_event(event: &WorkerEventEnvelope) -> bool {
         WorkerEvent::FallbackToneDeactivated {
             deactivation: Some(deactivation),
             ..
-        } if matches!(deactivation.reason, station_media_protocol::FallbackToneDeactivationReason::Expired | station_media_protocol::FallbackToneDeactivationReason::Shutdown)
+        } if matches!(
+            deactivation.reason,
+            station_media_protocol::FallbackToneDeactivationReason::Expired
+                | station_media_protocol::FallbackToneDeactivationReason::Shutdown
+                | station_media_protocol::FallbackToneDeactivationReason::Recovery
+        )
+    )
+}
+
+fn is_recovery_lifecycle_event(event: &WorkerEventEnvelope) -> bool {
+    matches!(
+        &event.event,
+        WorkerEvent::FallbackToneDeactivated {
+            deactivation: Some(deactivation),
+            ..
+        } if deactivation.reason == station_media_protocol::FallbackToneDeactivationReason::Recovery
     )
 }
 

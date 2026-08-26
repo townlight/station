@@ -66,6 +66,23 @@ enum CommandFramePoll {
     Closed,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ConsumedFrameDispatchOrder {
+    Dispatch,
+    ExpiryThenDispatch,
+}
+
+fn consumed_frame_dispatch_order(
+    now_monotonic_ms: u64,
+    expires_at_monotonic_ms: Option<u64>,
+) -> ConsumedFrameDispatchOrder {
+    if expires_at_monotonic_ms.is_some_and(|expires_at| now_monotonic_ms >= expires_at) {
+        ConsumedFrameDispatchOrder::ExpiryThenDispatch
+    } else {
+        ConsumedFrameDispatchOrder::Dispatch
+    }
+}
+
 const CONTROL_POLL_INTERVAL: Duration = Duration::from_millis(10);
 const EVENT_WRITE_TIMEOUT: Duration = Duration::from_secs(2);
 
@@ -297,6 +314,34 @@ fn main() {
             "at least one output is required",
         );
     }
+    let recovered_fallback_tones =
+        journal
+            .recover_active_fallback_tones()
+            .unwrap_or_else(|error| {
+                fatal(
+                    7,
+                    "reconcile an active fallback tone",
+                    &format!("{error:?}"),
+                )
+            });
+    for (tone, recovered_at_monotonic_ms) in &recovered_fallback_tones {
+        record_and_emit(
+            &mut journal,
+            &mut pipe,
+            &worker_id,
+            &channel_id,
+            WorkerEvent::FallbackToneDeactivated {
+                activation_id: tone.activation_id.clone(),
+                authority_revision: tone.authority_revision,
+                deactivation: Some(station_media_protocol::WorkerFallbackToneDeactivation {
+                    tone: tone.clone(),
+                    reason: FallbackToneDeactivationReason::Recovery,
+                    deactivated_at_monotonic_ms: *recovered_at_monotonic_ms,
+                }),
+            },
+        )
+        .unwrap_or_else(|error| fatal(7, "record and emit fallback tone recovery", &error));
+    }
     let mut media = Some(
         PersistentPlayout::start_configured_outputs_with_profile_roots_and_authorities(
             &outputs,
@@ -363,7 +408,15 @@ fn main() {
             // Emitting expiry first is the ordering decision; dropping this
             // frame would strand the supervisor waiting for an acknowledgement.
             let now = started.elapsed().as_millis() as u64;
-            if let Some(event) = expire_fallback_tone_if_due(
+            if matches!(
+                consumed_frame_dispatch_order(
+                    now,
+                    fallback_tone
+                        .as_ref()
+                        .map(|active| active.expires_at_monotonic_ms),
+                ),
+                ConsumedFrameDispatchOrder::ExpiryThenDispatch
+            ) && let Some(event) = expire_fallback_tone_if_due(
                 &mut journal,
                 &worker_id,
                 &channel_id,
@@ -1825,6 +1878,19 @@ mod tests {
             health.observe((8, 10), 1_500),
             LiveBufferStatus::Advanced
         ));
+    }
+
+    #[test]
+    fn consumed_frame_at_expiry_orders_lifecycle_before_one_dispatch() {
+        let order = consumed_frame_dispatch_order(1_000, Some(1_000));
+        assert_eq!(order, ConsumedFrameDispatchOrder::ExpiryThenDispatch);
+
+        let mut actions = Vec::new();
+        if order == ConsumedFrameDispatchOrder::ExpiryThenDispatch {
+            actions.push("expiry");
+        }
+        actions.push("dispatch");
+        assert_eq!(actions, ["expiry", "dispatch"]);
     }
 
     #[test]

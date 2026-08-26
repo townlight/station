@@ -176,6 +176,61 @@ fn preserves_exact_fallback_tone_activation_and_expiry_audit_across_reopen() {
 }
 
 #[test]
+fn recovers_one_active_fallback_tone_and_allows_a_new_activation() {
+    let path = journal_path("fallback-tone-recovery");
+    let tone = WorkerFallbackTone {
+        activation_id: "1c63ef7e-6e4b-4fa6-b5d8-c15e2b735c05".into(),
+        authority_revision: 3,
+        kind: FallbackToneKind::Test,
+        frequency_hz: 1_000,
+        level_milli_dbfs: -20_000,
+        duration_ms: 1_000,
+    };
+    let mut writer = JournalWriter::open(&path, WORKER_ID, CHANNEL_ID).unwrap();
+    writer
+        .append_fallback_tone_audit(&FallbackToneJournalEntry::Activated {
+            worker_id: WORKER_ID.into(),
+            channel_id: CHANNEL_ID.into(),
+            tone: tone.clone(),
+            activated_at_monotonic_ms: 500,
+        })
+        .unwrap();
+    assert_eq!(
+        writer.recover_active_fallback_tones().unwrap(),
+        vec![(tone.clone(), 500)]
+    );
+    writer
+        .append_fallback_tone_audit(&FallbackToneJournalEntry::Activated {
+            worker_id: WORKER_ID.into(),
+            channel_id: CHANNEL_ID.into(),
+            tone: tone.clone(),
+            activated_at_monotonic_ms: 1,
+        })
+        .unwrap();
+    assert!(matches!(
+        writer.append_fallback_tone_audit(&FallbackToneJournalEntry::Activated {
+            worker_id: WORKER_ID.into(),
+            channel_id: CHANNEL_ID.into(),
+            tone: tone.clone(),
+            activated_at_monotonic_ms: 2,
+        }),
+        Err(JournalError::InvalidFallbackToneAudit(_))
+    ));
+    drop(writer);
+
+    let audit = inspect_journal(&path).unwrap().fallback_tone_audit;
+    assert!(matches!(
+        &audit[1],
+        FallbackToneJournalEntry::Deactivated {
+            reason: FallbackToneDeactivationReason::Recovery,
+            deactivated_at_monotonic_ms: 500,
+            ..
+        }
+    ));
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
 fn rejects_fallback_tone_audits_with_invalid_tones_or_inconsistent_expiry() {
     let path = journal_path("invalid-fallback-tone-audit");
     let mut tone = WorkerFallbackTone {

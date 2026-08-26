@@ -227,6 +227,35 @@ impl JournalWriter {
         Ok(())
     }
 
+    /// Reconciles a tone that was durably activated by a prior worker but did
+    /// not reach its deactivation record before that worker retired. A fresh
+    /// media graph starts silent, so this closes the durable state before the
+    /// replacement worker can report readiness. The prior worker's monotonic
+    /// clock is not comparable to the new process; using the activation mark
+    /// for the recovery record preserves the audit ordering without inventing
+    /// a cross-process timestamp.
+    pub fn recover_active_fallback_tones(
+        &mut self,
+    ) -> Result<Vec<(WorkerFallbackTone, u64)>, JournalError> {
+        let active = self
+            .active_fallback_tones
+            .values()
+            .map(|(tone, activated_at_monotonic_ms)| (tone.clone(), *activated_at_monotonic_ms))
+            .collect::<Vec<_>>();
+        let worker_id = self.worker_id.clone();
+        let channel_id = self.channel_id.clone();
+        for (tone, activated_at_monotonic_ms) in &active {
+            self.append_fallback_tone_audit(&FallbackToneJournalEntry::Deactivated {
+                worker_id: worker_id.clone(),
+                channel_id: channel_id.clone(),
+                tone: tone.clone(),
+                reason: FallbackToneDeactivationReason::Recovery,
+                deactivated_at_monotonic_ms: *activated_at_monotonic_ms,
+            })?;
+        }
+        Ok(active)
+    }
+
     fn compact_heartbeats(&mut self) -> Result<(), JournalError> {
         self.compact_heartbeats_with(replace_file)
     }
@@ -473,8 +502,18 @@ fn apply_fallback_tone_audit_entry(
             if activated != tone {
                 return Err("fallback tone audit deactivation tone differs from activation".into());
             }
-            if *deactivated_at_monotonic_ms < *activated_at_monotonic_ms {
-                return Err("fallback tone audit deactivation predates activation".into());
+            match reason {
+                FallbackToneDeactivationReason::Recovery
+                    if *deactivated_at_monotonic_ms != *activated_at_monotonic_ms =>
+                {
+                    return Err(
+                        "fallback tone recovery must preserve the prior activation mark".into(),
+                    );
+                }
+                _ if *deactivated_at_monotonic_ms < *activated_at_monotonic_ms => {
+                    return Err("fallback tone audit deactivation predates activation".into());
+                }
+                _ => {}
             }
             if matches!(reason, FallbackToneDeactivationReason::Expired) {
                 let expires_at_monotonic_ms = activated_at_monotonic_ms
