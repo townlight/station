@@ -48,59 +48,76 @@ Assert-True ($source -notmatch '(?i)\bRemove-Item\b|\bMove-Item\b|\bRename-Item\
     'the launcher must not mutate or clean up another harness owner file'
 
 $check = & $launcherPath -CheckOnly
-Assert-True ($check.status -eq 'no_active_sandbox_detected') `
-    'the guard must report only what it observed instead of assuming the shared sandbox is free'
-Assert-True ($check.ownership -eq 'none_observed') `
-    'the guard must distinguish no observed owner from proved availability'
-Assert-True ($check.launch_allowed) 'the current machine check must explicitly allow launch'
-Assert-True ($check.sandbox_process_count -eq 0) 'the available result must contain no sandbox processes'
-Assert-True ($check.guard_reason -match 'instantaneous') `
-    'the no-process result must state that the observation is instantaneous'
+if ($check.sandbox_process_count -eq 0) {
+    Assert-True ($check.status -eq 'no_active_sandbox_detected') `
+        'an idle guard check must report only what it observed instead of assuming the shared sandbox is free'
+    Assert-True ($check.ownership -eq 'none_observed') `
+        'the guard must distinguish no observed owner from proved availability'
+    Assert-True ($check.launch_allowed) 'an idle machine check must explicitly allow launch'
+    Assert-True ($check.processes.Count -eq 0) 'the idle result must contain no sandbox processes'
+    Assert-True ($check.guard_reason -match 'instantaneous') `
+        'the no-process result must state that the observation is instantaneous'
+} else {
+    Assert-True ($check.status -eq 'occupied') `
+        'an active Sandbox must be reported as occupied, never treated as idle'
+    Assert-True ($check.ownership -in @('external_or_unclaimed', 'townlight_harness')) `
+        'an active Sandbox must retain its observed external or claimed ownership state'
+    Assert-True (-not $check.launch_allowed) `
+        'any active Sandbox must fail closed and deny a new launch'
+    Assert-True ($check.processes.Count -eq $check.sandbox_process_count -and $check.processes.Count -gt 0) `
+        'the occupied result must contain every observed Sandbox process identity'
+    Assert-True ($check.guard_reason -match 'no-touch boundary') `
+        'the occupied result must state the no-touch boundary reason'
+}
 
 $temporaryRoot = Join-Path ([IO.Path]::GetTempPath()) "townlight-sandbox-guard-$([guid]::NewGuid().ToString('N'))"
-$fakeSandboxPath = Join-Path $temporaryRoot 'WindowsSandbox.exe'
 [void][IO.Directory]::CreateDirectory($temporaryRoot)
-Copy-Item -LiteralPath (Join-Path $env:WINDIR 'System32\ping.exe') -Destination $fakeSandboxPath
-$fakeSandbox = Start-Process -FilePath $fakeSandboxPath `
-    -ArgumentList @('127.0.0.1', '-n', '4') -WindowStyle Hidden -PassThru
-try {
-    $occupied = & $launcherPath -CheckOnly
-    Assert-True ($occupied.status -eq 'occupied') `
-        'an observed WindowsSandbox.exe process must be reported as occupied'
-    Assert-True ($occupied.ownership -eq 'external_or_unclaimed') `
-        'an observed process without exact harness evidence must never be claimed by TownLight'
-    Assert-True (-not $occupied.launch_allowed) `
-        'an unclaimed WindowsSandbox.exe process must make the pre-launch guard fail closed'
-    Assert-True ($occupied.processes.Count -eq 1) `
-        'the ownership check must return the exact observed process identity'
-    Assert-True ($occupied.processes[0].process_id -eq $fakeSandbox.Id) `
-        'the ownership check must identify the exact occupied process'
-
-    $occupiedLaunchCaught = $false
+if ($check.sandbox_process_count -eq 0) {
+    $fakeSandboxPath = Join-Path $temporaryRoot 'WindowsSandbox.exe'
+    Copy-Item -LiteralPath (Join-Path $env:WINDIR 'System32\ping.exe') -Destination $fakeSandboxPath
+    $fakeSandbox = Start-Process -FilePath $fakeSandboxPath `
+        -ArgumentList @('127.0.0.1', '-n', '4') -WindowStyle Hidden -PassThru
     try {
-        & $launcherPath -ConfigurationPath $launcherPath | Out-Null
-    } catch {
-        $occupiedLaunchCaught = $_.Exception.Message -match 'occupied by an external or unclaimed owner'
+        $occupied = & $launcherPath -CheckOnly
+        Assert-True ($occupied.status -eq 'occupied') `
+            'an observed WindowsSandbox.exe process must be reported as occupied'
+        Assert-True ($occupied.ownership -eq 'external_or_unclaimed') `
+            'an observed process without exact harness evidence must never be claimed by TownLight'
+        Assert-True (-not $occupied.launch_allowed) `
+            'an unclaimed WindowsSandbox.exe process must make the pre-launch guard fail closed'
+        Assert-True ($occupied.processes.Count -eq 1) `
+            'the ownership check must return the exact observed process identity'
+        Assert-True ($occupied.processes[0].process_id -eq $fakeSandbox.Id) `
+            'the ownership check must identify the exact occupied process'
+
+        $occupiedLaunchCaught = $false
+        try {
+            & $launcherPath -ConfigurationPath $launcherPath | Out-Null
+        } catch {
+            $occupiedLaunchCaught = $_.Exception.Message -match 'occupied by an external or unclaimed owner'
+        }
+        Assert-True $occupiedLaunchCaught `
+            'the launch path must reject occupied state before inspecting or starting a configuration'
+    } finally {
+        if (-not $fakeSandbox.WaitForExit(10000)) {
+            throw 'The verifier-owned sandbox-name simulation did not exit on its own.'
+        }
+        $fakeSandbox.Dispose()
     }
-    Assert-True $occupiedLaunchCaught `
-        'the launch path must reject occupied state before inspecting or starting a configuration'
-} finally {
-    if (-not $fakeSandbox.WaitForExit(10000)) {
-        throw 'The verifier-owned sandbox-name simulation did not exit on its own.'
-    }
-    $fakeSandbox.Dispose()
 }
 
-$foreignConfiguration = Join-Path $temporaryRoot 'claude-owned-or-unclaimed.wsb'
-[IO.File]::WriteAllText($foreignConfiguration, '<Configuration />', [Text.UTF8Encoding]::new($false))
-$foreignPathCaught = $false
-try {
-    & $launcherPath -ConfigurationPath $foreignConfiguration | Out-Null
-} catch {
-    $foreignPathCaught = $_.Exception.Message -match 'must be a TownLight-owned file'
+if ($check.sandbox_process_count -eq 0) {
+    $foreignConfiguration = Join-Path $temporaryRoot 'claude-owned-or-unclaimed.wsb'
+    [IO.File]::WriteAllText($foreignConfiguration, '<Configuration />', [Text.UTF8Encoding]::new($false))
+    $foreignPathCaught = $false
+    try {
+        & $launcherPath -ConfigurationPath $foreignConfiguration | Out-Null
+    } catch {
+        $foreignPathCaught = $_.Exception.Message -match 'must be a TownLight-owned file'
+    }
+    Assert-True $foreignPathCaught `
+        'the launcher must reject a configuration outside the TownLight-owned configuration root'
 }
-Assert-True $foreignPathCaught `
-    'the launcher must reject a configuration outside the TownLight-owned configuration root'
 
 $mutexMarker = Join-Path $temporaryRoot 'mutex-acquired.txt'
 $mutexHelper = Join-Path $temporaryRoot 'hold-mutex.ps1'
