@@ -329,6 +329,19 @@ impl StationStore {
         }
     }
 
+    pub fn current_publish_account_credential_version(
+        &self,
+        account_id: &str,
+        account_revision: u64,
+    ) -> Result<Option<u64>, String> {
+        Ok(self
+            .read_current_publish_account_credential(account_id, account_revision)?
+            .map(|(version, mut secret)| {
+                secret.fill(0);
+                version
+            }))
+    }
+
     fn current_publish_credential_version(
         &self,
         account_id: &str,

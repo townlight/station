@@ -12,7 +12,8 @@ const MAX_PUBLISH_ATTEMPTS: u32 = 8;
 const MAX_PUBLISH_LEASE_MS: i64 = 900_000;
 const MAX_PROVIDER_RESPONSE_BYTES: usize = 1_048_576;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum PublishExecutionJobState {
     Pending,
     Running,
@@ -20,7 +21,7 @@ pub enum PublishExecutionJobState {
     Failed,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct PublishExecutionJob {
     pub job_id: String,
     pub account_id: String,
@@ -64,7 +65,7 @@ impl PublishExecutionJob {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct PublishExecutionJobRecord {
     pub job: PublishExecutionJob,
     pub state: PublishExecutionJobState,
@@ -315,6 +316,41 @@ impl StationStore {
             match unsafe { sqlite3_step(statement.raw) } {
                 SQLITE_ROW => records.push(read_publish_job(statement.raw)?),
                 SQLITE_DONE => return Ok(records),
+                _ => return Err(sqlite_error(self.database)),
+            }
+        }
+    }
+
+    pub fn list_publish_execution_receipts(
+        &self,
+        job_id: &str,
+        limit: usize,
+    ) -> Result<Vec<PublishExecutionReceipt>, String> {
+        if !is_canonical_uuid(job_id) || !(1..=128).contains(&limit) {
+            return Err("publish receipt query is invalid or unbounded".into());
+        }
+        let statement = self.prepare("SELECT record_json FROM publish_execution_receipts WHERE job_id=?1 ORDER BY recorded_at_unix_ms,receipt_id LIMIT ?2")?;
+        bind_text(
+            self.database,
+            statement.raw,
+            1,
+            &c_string(job_id, "publish job")?,
+        )?;
+        bind_i64(self.database, statement.raw, 2, limit as i64)?;
+        let mut receipts = Vec::new();
+        loop {
+            match unsafe { sqlite3_step(statement.raw) } {
+                SQLITE_ROW => {
+                    let json = column_text(statement.raw, 0)?;
+                    let receipt: PublishExecutionReceipt = serde_json::from_str(&json)
+                        .map_err(|_| "publish execution receipt is corrupt".to_string())?;
+                    receipt.validate()?;
+                    if receipt.job_id != job_id {
+                        return Err("publish execution receipt job binding is corrupt".into());
+                    }
+                    receipts.push(receipt);
+                }
+                SQLITE_DONE => return Ok(receipts),
                 _ => return Err(sqlite_error(self.database)),
             }
         }
