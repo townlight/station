@@ -8,6 +8,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- Added a bounded, deterministic as-run runtime-projection foundation that accepts
+  only already authenticated catalog/schedule-enriched journal takes, exposes
+  explicit unavailable states, and renders escaped UTC CSV/XMLTV without asserting
+  export delivery or field proof.
+
 - The operator console now includes a Publishing authority workspace. Enabled Setup Admins can
   create and revise bounded account and target records with the server's exact compare-and-swap
   revision, while permitted readers can inspect redacted current records, bounded immutable
