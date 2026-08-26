@@ -71,8 +71,8 @@ use station_schedule::{
     ScheduleState, apply_headend_profile, prepare_commit,
 };
 pub use station_transport_proof::{
-    CableTransportValidation, ProofOutcome, TargetDeviceConfig, TargetDeviceReachabilityReceipt,
-    TargetProtocol, TransportAnalysisReceipt, TransportFindings,
+    CableTransportValidation, CableTransportValidationInput, ProofOutcome, TargetDeviceConfig,
+    TargetDeviceReachabilityReceipt, TargetProtocol, TransportAnalysisReceipt, TransportFindings,
 };
 use station_update::{
     PreparedSlotRecord, StagedPackageRecord, UpdateCheckOutcome, UpdateCheckRecord,
@@ -10948,15 +10948,15 @@ impl StationStore {
         now_unix_ms: i64,
     ) -> Result<(), String> {
         receipt.validate_fresh_at(now_unix_ms)?;
-        self.validate_transport_proof_binding(
-            &receipt.channel_id,
-            &receipt.sink_id,
-            &receipt.target_id,
-            receipt.target_revision,
-            &receipt.candidate_version,
-            &receipt.source_commit,
-            &receipt.configuration_hash,
-        )?;
+        self.validate_transport_proof_binding(TransportProofBinding {
+            channel_id: &receipt.channel_id,
+            sink_id: &receipt.sink_id,
+            target_id: &receipt.target_id,
+            target_revision: receipt.target_revision,
+            candidate_version: &receipt.candidate_version,
+            source_commit: &receipt.source_commit,
+            configuration_hash: &receipt.configuration_hash,
+        })?;
         let record = serde_json::to_string(receipt)
             .map_err(|error| format!("serialize transport analysis receipt: {error}"))?;
         self.execute("BEGIN IMMEDIATE")?;
@@ -11029,15 +11029,15 @@ impl StationStore {
         now_unix_ms: i64,
     ) -> Result<(), String> {
         receipt.validate_fresh_at(now_unix_ms)?;
-        self.validate_transport_proof_binding(
-            &receipt.channel_id,
-            &receipt.sink_id,
-            &receipt.target_id,
-            receipt.target_revision,
-            &receipt.candidate_version,
-            &receipt.source_commit,
-            &receipt.configuration_hash,
-        )?;
+        self.validate_transport_proof_binding(TransportProofBinding {
+            channel_id: &receipt.channel_id,
+            sink_id: &receipt.sink_id,
+            target_id: &receipt.target_id,
+            target_revision: receipt.target_revision,
+            candidate_version: &receipt.candidate_version,
+            source_commit: &receipt.source_commit,
+            configuration_hash: &receipt.configuration_hash,
+        })?;
         let target = self
             .read_transport_target_config(&receipt.channel_id, &receipt.sink_id)?
             .ok_or_else(|| "target device is not configured".to_string())?;
@@ -11284,15 +11284,17 @@ impl StationStore {
             &config_hash,
         )?;
         Ok(Some(CableTransportValidation::derive(
-            channel_id,
-            sink_id,
-            &target,
-            candidate_version,
-            source_commit,
-            &config_hash,
-            now_unix_ms,
-            analysis,
-            reachability,
+            CableTransportValidationInput {
+                channel_id,
+                sink_id,
+                target: &target,
+                candidate_version,
+                source_commit,
+                configuration_hash: &config_hash,
+                now_unix_ms,
+                analysis,
+                reachability,
+            },
         )?))
     }
 
@@ -11314,12 +11316,14 @@ impl StationStore {
         bind_transport_receipt_lookup(
             self.database,
             statement.raw,
-            channel_id,
-            sink_id,
-            target,
-            candidate_version,
-            source_commit,
-            configuration_hash,
+            TransportReceiptLookup {
+                channel_id,
+                sink_id,
+                target,
+                candidate_version,
+                source_commit,
+                configuration_hash,
+            },
         )?;
         match unsafe { sqlite3_step(statement.raw) } {
             SQLITE_ROW => {
@@ -11353,12 +11357,14 @@ impl StationStore {
         bind_transport_receipt_lookup(
             self.database,
             statement.raw,
-            channel_id,
-            sink_id,
-            target,
-            candidate_version,
-            source_commit,
-            configuration_hash,
+            TransportReceiptLookup {
+                channel_id,
+                sink_id,
+                target,
+                candidate_version,
+                source_commit,
+                configuration_hash,
+            },
         )?;
         match unsafe { sqlite3_step(statement.raw) } {
             SQLITE_ROW => {
@@ -11376,14 +11382,17 @@ impl StationStore {
 
     fn validate_transport_proof_binding(
         &self,
-        channel_id: &str,
-        sink_id: &str,
-        target_id: &str,
-        target_revision: u64,
-        candidate_version: &str,
-        source_commit: &str,
-        configuration_hash: &str,
+        binding: TransportProofBinding<'_>,
     ) -> Result<(), String> {
+        let TransportProofBinding {
+            channel_id,
+            sink_id,
+            target_id,
+            target_revision,
+            candidate_version,
+            source_commit,
+            configuration_hash,
+        } = binding;
         let target = self
             .read_transport_target_config(channel_id, sink_id)?
             .ok_or_else(|| "target device is not configured".to_string())?;
@@ -14899,16 +14908,38 @@ impl StationStore {
     }
 }
 
+struct TransportProofBinding<'a> {
+    channel_id: &'a str,
+    sink_id: &'a str,
+    target_id: &'a str,
+    target_revision: u64,
+    candidate_version: &'a str,
+    source_commit: &'a str,
+    configuration_hash: &'a str,
+}
+
+struct TransportReceiptLookup<'a> {
+    channel_id: &'a str,
+    sink_id: &'a str,
+    target: &'a TargetDeviceConfig,
+    candidate_version: &'a str,
+    source_commit: &'a str,
+    configuration_hash: &'a str,
+}
+
 fn bind_transport_receipt_lookup(
     database: *mut Sqlite3,
     statement: *mut SqliteStatement,
-    channel_id: &str,
-    sink_id: &str,
-    target: &TargetDeviceConfig,
-    candidate_version: &str,
-    source_commit: &str,
-    configuration_hash: &str,
+    lookup: TransportReceiptLookup<'_>,
 ) -> Result<(), String> {
+    let TransportReceiptLookup {
+        channel_id,
+        sink_id,
+        target,
+        candidate_version,
+        source_commit,
+        configuration_hash,
+    } = lookup;
     for (value, index, field) in [
         (channel_id, 1, "transport channel"),
         (sink_id, 2, "transport sink"),
