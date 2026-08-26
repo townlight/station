@@ -583,6 +583,23 @@ impl StationStore {
         validate_publishing_attribution(changed_by, occurred_at_unix_ms)?;
         self.execute("BEGIN IMMEDIATE")
             .map_err(PublishingAuthorityWriteError::Storage)?;
+        let outcome = self.write_publish_target_profile_in_transaction(
+            target,
+            expected_revision,
+            changed_by,
+            occurred_at_unix_ms,
+        );
+        finish_publishing_write(self, outcome)
+    }
+
+    #[allow(clippy::let_and_return)]
+    pub(crate) fn write_publish_target_profile_in_transaction(
+        &self,
+        target: &PublishTargetProfile,
+        expected_revision: Option<u64>,
+        changed_by: &str,
+        occurred_at_unix_ms: i64,
+    ) -> Result<(), PublishingAuthorityWriteError> {
         let outcome = (|| {
             let account = self
                 .read_publish_target_account(&target.account_id)
@@ -665,7 +682,7 @@ impl StationStore {
                 .map_err(PublishingAuthorityWriteError::Storage)?;
             advance_publish_authority_epoch(self).map_err(PublishingAuthorityWriteError::Storage)
         })();
-        finish_publishing_write(self, outcome)
+        outcome
     }
 
     pub fn append_publish_connection_test_evidence(
@@ -1017,7 +1034,7 @@ fn validate_publishing_cas(
         Ok(())
     }
 }
-fn finish_publishing_write(
+pub(super) fn finish_publishing_write(
     store: &StationStore,
     outcome: Result<(), PublishingAuthorityWriteError>,
 ) -> Result<(), PublishingAuthorityWriteError> {

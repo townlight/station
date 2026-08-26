@@ -1,7 +1,8 @@
 use super::*;
 use station_publishing::{
     PublishCandidateIdentity, PublishExecutionReceipt, PublishExecutionStage,
-    PublishExecutionTargetConfig, PublishTargetKind, validate_receipt_successor,
+    PublishExecutionTargetConfig, PublishTargetKind, PublishTargetProfile,
+    validate_receipt_successor,
 };
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
@@ -162,11 +163,29 @@ impl StationStore {
         if !secret_field(changed_by, 200) || occurred_at_unix_ms < 0 {
             return Err("publish execution configuration attribution is invalid".into());
         }
+        self.execute("BEGIN IMMEDIATE")?;
+        let outcome = self.insert_publish_execution_target_config(
+            target_id,
+            expected_target_revision,
+            config,
+            changed_by,
+            occurred_at_unix_ms,
+        );
+        self.finish_value_transaction(outcome)
+    }
+
+    fn insert_publish_execution_target_config(
+        &self,
+        target_id: &str,
+        expected_target_revision: u64,
+        config: &PublishExecutionTargetConfig,
+        changed_by: &str,
+        occurred_at_unix_ms: i64,
+    ) -> Result<String, String> {
         let record_json = serde_json::to_string(config)
             .map_err(|error| format!("serialize publish execution configuration: {error}"))?;
         let configuration_hash = format!("{:x}", Sha256::digest(record_json.as_bytes()));
-        self.execute("BEGIN IMMEDIATE")?;
-        let outcome = (|| {
+        (|| {
             let target = self
                 .read_publish_target_profile(target_id)?
                 .ok_or_else(|| "publish target is missing".to_string())?;
@@ -201,8 +220,60 @@ impl StationStore {
             bind_i64(self.database, statement.raw, 6, occurred_at_unix_ms)?;
             expect_done(self.database, statement.raw)?;
             Ok(configuration_hash.clone())
-        })();
-        self.finish_value_transaction(outcome)
+        })()
+    }
+
+    pub fn write_publish_target_profile_with_execution_config(
+        &self,
+        target: &PublishTargetProfile,
+        expected_revision: Option<u64>,
+        config: &PublishExecutionTargetConfig,
+        changed_by: &str,
+        occurred_at_unix_ms: i64,
+    ) -> Result<(), PublishingAuthorityWriteError> {
+        target
+            .validate()
+            .map_err(PublishingAuthorityWriteError::Invalid)?;
+        config
+            .validate()
+            .map_err(PublishingAuthorityWriteError::Invalid)?;
+        if target.kind != config.kind() || !secret_field(changed_by, 200) || occurred_at_unix_ms < 0
+        {
+            return Err(PublishingAuthorityWriteError::Invalid(
+                "publish execution target configuration is invalid".into(),
+            ));
+        }
+        let config_json = serde_json::to_string(config).map_err(|error| {
+            PublishingAuthorityWriteError::Storage(format!(
+                "serialize publish execution configuration: {error}"
+            ))
+        })?;
+        if target.configuration_hash != format!("{:x}", Sha256::digest(config_json.as_bytes())) {
+            return Err(PublishingAuthorityWriteError::Invalid(
+                "publish target configuration digest does not match typed configuration".into(),
+            ));
+        }
+        self.execute("BEGIN IMMEDIATE")
+            .map_err(PublishingAuthorityWriteError::Storage)?;
+        let outcome = self
+            .write_publish_target_profile_in_transaction(
+                target,
+                expected_revision,
+                changed_by,
+                occurred_at_unix_ms,
+            )
+            .and_then(|_| {
+                self.insert_publish_execution_target_config(
+                    &target.target_id,
+                    target.revision,
+                    config,
+                    changed_by,
+                    occurred_at_unix_ms,
+                )
+                .map(|_| ())
+                .map_err(PublishingAuthorityWriteError::Storage)
+            });
+        crate::publishing_authority::finish_publishing_write(self, outcome)
     }
 
     pub fn read_publish_execution_target_config(
@@ -582,11 +653,10 @@ impl StationStore {
             validate_receipt_successor(&pair[0], &pair[1])?;
         }
         let job = &lease.record.job;
-        let final_receipt = receipts.last().unwrap();
         if receipts
             .iter()
             .any(|receipt| !receipt_matches_job(receipt, job))
-            || !final_receipt.satisfies_required_delivery()
+            || !receipt_chain_proves_required_delivery(job.target_kind, receipts)
         {
             return Err("publish receipts do not prove required delivery for the exact job".into());
         }
@@ -665,6 +735,21 @@ impl StationStore {
             return Err("publish execution job is stale for current account, target, credential, configuration, or media".into());
         }
         Ok(())
+    }
+}
+
+fn receipt_chain_proves_required_delivery(
+    kind: PublishTargetKind,
+    receipts: &[PublishExecutionReceipt],
+) -> bool {
+    match kind {
+        PublishTargetKind::Portal | PublishTargetKind::YouTubeLive => receipts
+            .iter()
+            .any(|receipt| receipt.stage == PublishExecutionStage::Published),
+        PublishTargetKind::InternetArchive | PublishTargetKind::LocalNas => receipts
+            .iter()
+            .any(|receipt| receipt.stage == PublishExecutionStage::Delivered),
+        PublishTargetKind::Syndication | PublishTargetKind::Podcast => false,
     }
 }
 
@@ -1231,6 +1316,36 @@ mod tests {
 
     struct FakeProvider;
 
+    #[test]
+    fn youtube_capability_evidence_cannot_skip_published_delivery() {
+        let receipt = PublishExecutionReceipt {
+            receipt_id: "11111111-2222-4333-8444-555555555555".into(),
+            job_id: "22222222-2222-4333-8444-555555555555".into(),
+            account_id: "33333333-2222-4333-8444-555555555555".into(),
+            account_revision: 1,
+            target_id: "44444444-2222-4333-8444-555555555555".into(),
+            target_revision: 1,
+            target_kind: PublishTargetKind::YouTubeLive,
+            configuration_hash: "a".repeat(64),
+            credential_version: 1,
+            candidate: PublishCandidateIdentity {
+                version: "0.2.0".into(),
+                source_commit: "1".repeat(40),
+            },
+            media_sha256: "b".repeat(64),
+            media_bytes: 1,
+            stage: PublishExecutionStage::ExternallyVerified,
+            delivery_identity_sha256: "c".repeat(64),
+            occurred_at_unix_ms: 1,
+            recorded_at_unix_ms: 1,
+            detail: "Exact channel capability only; no media was published.".into(),
+        };
+        assert!(!receipt_chain_proves_required_delivery(
+            PublishTargetKind::YouTubeLive,
+            &[receipt]
+        ));
+    }
+
     impl PublishProviderAdapter for FakeProvider {
         fn execute(
             &self,
@@ -1331,7 +1446,7 @@ mod tests {
         let config_json = serde_json::to_string(&config).unwrap();
         let config_hash = format!("{:x}", Sha256::digest(config_json.as_bytes()));
         store
-            .write_publish_target_profile(
+            .write_publish_target_profile_with_execution_config(
                 &PublishTargetProfile {
                     target_id: target_id.into(),
                     account_id: account_id.into(),
@@ -1342,12 +1457,10 @@ mod tests {
                     revision: 1,
                 },
                 None,
+                &config,
                 "setup",
                 3,
             )
-            .unwrap();
-        store
-            .write_publish_execution_target_config(target_id, 1, &config, "setup", 4)
             .unwrap();
         store
             .put_media_asset(&MediaAsset {

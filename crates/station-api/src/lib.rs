@@ -3370,25 +3370,19 @@ impl Api {
             configuration_hash,
             revision,
         };
-        match self.storage.write_publish_target_profile(
-            &target,
-            request.expected_revision,
-            actor.account_id().as_str(),
-            now,
-        ) {
-            Ok(()) => match self.storage.write_publish_execution_target_config(
-                &target.target_id,
-                target.revision,
+        match self
+            .storage
+            .write_publish_target_profile_with_execution_config(
+                &target,
+                request.expected_revision,
                 &request.configuration,
                 actor.account_id().as_str(),
                 now,
             ) {
-                Ok(_) => json_response(
-                    if revision == 1 { 201 } else { 200 },
-                    serde_json::to_vec(&target).expect("serializing publish target cannot fail"),
-                ),
-                Err(message) => error_response(500, "storage_error", &message),
-            },
+            Ok(()) => json_response(
+                if revision == 1 { 201 } else { 200 },
+                serde_json::to_vec(&target).expect("serializing publish target cannot fail"),
+            ),
             Err(error) => publishing_write_error_response(error),
         }
     }
