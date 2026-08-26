@@ -10,7 +10,6 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use station_storage::{
     ProofOutcome, StationStore, TargetDeviceConfig, TargetDeviceReachabilityReceipt,
@@ -307,16 +306,6 @@ impl<R: ProcessRunner> TsdDuckTransportExecutor<R> {
     }
 }
 
-#[derive(Deserialize)]
-struct AnalyzerJson {
-    packet_size_bytes: u32,
-    packet_count: u64,
-    bitrate_bps: u64,
-    pat_program_count: u32,
-    pmt_stream_count: u32,
-    continuity_errors: u64,
-    pcr_errors: u64,
-}
 fn parse_tsanalyze_json(
     output: &[u8],
     bytes: u64,
@@ -325,20 +314,90 @@ fn parse_tsanalyze_json(
     if output.is_empty() || output.len() > MAX_PROCESS_OUTPUT_BYTES {
         return Err("TSDuck analysis output is missing or oversized".into());
     }
-    let report: AnalyzerJson =
-        serde_json::from_slice(output).map_err(|_| "TSDuck analysis output is malformed")?;
-    if report.continuity_errors > MAX_ANALYSIS_ERRORS || report.pcr_errors > MAX_ANALYSIS_ERRORS {
+    // TSDuck 3.44 writes `--error-analysis` diagnostics before the JSON report.
+    // Keep that diagnostic channel bounded and accept only its documented logger
+    // prefixes; arbitrary process chatter is never treated as analyzer evidence.
+    let json_start = output
+        .iter()
+        .position(|byte| *byte == b'{')
+        .ok_or_else(|| "TSDuck analysis JSON report is missing".to_string())?;
+    let preamble = std::str::from_utf8(&output[..json_start])
+        .map_err(|_| "TSDuck analysis preamble is malformed")?;
+    if preamble.lines().any(|line| {
+        !line.is_empty()
+            && !(line.starts_with("TITLE: ")
+                || line.starts_with("INFO: ")
+                || line.starts_with("TS:")
+                || line.starts_with("SUMMARY: "))
+    }) {
+        return Err("TSDuck analysis preamble is unexpected".into());
+    }
+    let report: serde_json::Value = serde_json::from_slice(&output[json_start..])
+        .map_err(|_| "TSDuck analysis output is malformed")?;
+    let pids = report["pids"]
+        .as_array()
+        .ok_or("TSDuck PID report is missing")?;
+    let services = report["services"]
+        .as_array()
+        .ok_or("TSDuck service report is missing")?;
+    let ts = report
+        .get("ts")
+        .ok_or("TSDuck transport report is missing")?;
+    let packet_count = ts["packets"]["total"]
+        .as_u64()
+        .ok_or("TSDuck packet count is missing")?;
+    let bitrate_bps = ts["bitrate"].as_u64().ok_or("TSDuck bitrate is missing")?;
+    let pat = pids.iter().any(|pid| {
+        pid["description"] == "PAT" && pid["packets"]["total"].as_u64().unwrap_or(0) > 0
+    });
+    let pmt = pids.iter().filter(|pid| pid["pmt"] == true).count() as u32;
+    let video = pids.iter().any(|pid| {
+        pid["video"] == true
+            && pid["description"]
+                .as_str()
+                .is_some_and(|text| text.contains("AVC"))
+    });
+    let audio = pids.iter().any(|pid| {
+        pid["audio"] == true
+            && pid["description"]
+                .as_str()
+                .is_some_and(|text| text.contains("AAC"))
+    });
+    let pcr = pids
+        .iter()
+        .any(|pid| pid["packets"]["pcr"].as_u64().unwrap_or(0) > 0);
+    let continuity_errors: u64 = pids
+        .iter()
+        .map(|pid| {
+            pid["packets"]["discontinuities"]
+                .as_u64()
+                .unwrap_or(u64::MAX)
+        })
+        .sum();
+    let pcr_errors: u64 = pids
+        .iter()
+        .map(|pid| pid["packets"]["pcr-leap"].as_u64().unwrap_or(u64::MAX))
+        .sum();
+    if !pat
+        || pmt == 0
+        || services.is_empty()
+        || !video
+        || !audio
+        || !pcr
+        || continuity_errors > MAX_ANALYSIS_ERRORS
+        || pcr_errors > MAX_ANALYSIS_ERRORS
+    {
         return Err("TSDuck analysis reported transport anomalies".into());
     }
     let findings = TransportFindings {
-        packet_size_bytes: report.packet_size_bytes,
-        packet_count: report.packet_count,
+        packet_size_bytes: 188,
+        packet_count,
         capture_duration_ms: duration_ms,
-        bitrate_bps: report.bitrate_bps,
-        pat_program_count: report.pat_program_count,
-        pmt_stream_count: report.pmt_stream_count,
-        continuity_errors: report.continuity_errors,
-        pcr_errors: report.pcr_errors,
+        bitrate_bps,
+        pat_program_count: u32::from(pat),
+        pmt_stream_count: pmt,
+        continuity_errors,
+        pcr_errors,
         analyzer_output_sha256: sha256(output),
     };
     findings.validate()?;
@@ -619,5 +678,15 @@ mod tests {
             .persist_reachability(&store, &b, &target)
             .is_err()
         );
+    }
+
+    #[test]
+    fn parses_the_retained_real_tsduck_344_h264_aac_report() {
+        let output = include_bytes!("../tests/fixtures/tsduck-3.44-h264-aac-analysis.txt");
+        let findings = parse_tsanalyze_json(output, 53_956, 2_000).unwrap();
+        assert_eq!(findings.packet_size_bytes, 188);
+        assert_eq!(findings.packet_count, 287);
+        assert_eq!(findings.pat_program_count, 1);
+        assert_eq!(findings.pmt_stream_count, 1);
     }
 }
