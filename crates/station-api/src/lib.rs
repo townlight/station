@@ -674,7 +674,8 @@ struct PutTransportTargetRequest {
     target_id: String,
     label: String,
     protocol: TargetProtocol,
-    endpoint: String,
+    host: String,
+    port: u16,
     credential_configured: bool,
     expected_revision: Option<u64>,
 }
@@ -6150,7 +6151,8 @@ impl Api {
             target_id: request.target_id,
             label: request.label,
             protocol: request.protocol,
-            endpoint: request.endpoint,
+            host: request.host,
+            port: request.port,
             credential_configured: request.credential_configured,
             revision: 1,
             created_at_unix_ms: now,
@@ -6260,6 +6262,10 @@ impl Api {
         let Some(channel_id) = path_identity(path, "/api/v1/channels/", "/transport-proof") else {
             return error_response(400, "invalid_path", "The transport proof path is invalid.");
         };
+        let now_unix_ms = match system_time_millis() {
+            Ok(value) => value,
+            Err(message) => return error_response(500, "clock_error", &message),
+        };
         let history = match self
             .storage
             .read_transport_proof_history(channel_id, None, 1_000)
@@ -6294,6 +6300,7 @@ impl Api {
                                 &sink.sink_id,
                                 candidate_version,
                                 source_commit,
+                                now_unix_ms,
                             )
                         {
                             validations.push(validation);
@@ -7861,6 +7868,7 @@ impl Api {
                         &sink.sink_id,
                         candidate_version,
                         source_commit,
+                        generated_at_unix_ms,
                     ) {
                         Ok(Some(validation)) if validation.outcome.is_some() => {
                             cable_transport_detail.push(format!(
@@ -19517,6 +19525,61 @@ mod tests {
                 400
             );
         }
+
+        drop(api);
+        let _ = std::fs::remove_file(database);
+    }
+
+    #[test]
+    fn transport_target_api_rejects_secret_bearing_hosts_and_never_echoes_them() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let database = std::env::temp_dir().join(format!("townlight-target-api-{nonce}.db"));
+        let api = Api::open(&database).unwrap();
+        let channel_id = "11111111-2222-4333-8444-555555555555";
+        api.storage
+            .put_channel(&ChannelConfiguration {
+                channel_id: channel_id.into(),
+                display_name: "Transport target API".into(),
+                output_profile: OutputProfileId::Proof360p30,
+                output_sinks: vec![OutputSinkConfiguration::required_udp(
+                    "22222222-3333-4444-8555-666666666666",
+                    "Required sink",
+                    "127.0.0.1:5500",
+                    -16.0,
+                )],
+                enabled: false,
+            })
+            .unwrap();
+        let secret = "not-a-real-secret";
+        let body = serde_json::to_vec(&serde_json::json!({
+            "target_id": "target-1",
+            "label": "Headend receiver",
+            "protocol": "https_api",
+            "host": format!("receiver.example.test/api/{secret}"),
+            "port": 443,
+            "credential_configured": true,
+            "expected_revision": null
+        }))
+        .unwrap();
+        let path = format!("/api/v1/channels/{channel_id}/transport-target");
+
+        let unauthenticated = api.handle_in_process("PUT", &path, Some(&body));
+        assert_eq!(unauthenticated.status, 403);
+        assert!(!String::from_utf8_lossy(&unauthenticated.body).contains(secret));
+
+        let setup_admin = test_actor(station_auth::OperatorRole::SetupAdmin);
+        let rejected = api.handle_authenticated("PUT", &path, Some(&body), &setup_admin);
+        assert_eq!(rejected.status, 422);
+        assert!(!String::from_utf8_lossy(&rejected.body).contains(secret));
+        assert!(
+            api.storage
+                .read_transport_target_config(channel_id, "22222222-3333-4444-8555-666666666666")
+                .unwrap()
+                .is_none()
+        );
 
         drop(api);
         let _ = std::fs::remove_file(database);

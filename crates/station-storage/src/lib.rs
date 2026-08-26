@@ -1486,6 +1486,7 @@ impl StationStore {
                channel_id TEXT NOT NULL,\
                sink_id TEXT NOT NULL,\
                target_id TEXT NOT NULL,\
+               target_revision INTEGER NOT NULL CHECK (target_revision >= 1),\
                candidate_version TEXT NOT NULL,\
                source_commit TEXT NOT NULL,\
                configuration_hash TEXT NOT NULL,\
@@ -1495,7 +1496,7 @@ impl StationStore {
                record_json TEXT NOT NULL\
              );\
              CREATE INDEX IF NOT EXISTS transport_analysis_current \
-               ON transport_analysis_receipts(channel_id, sink_id, target_id, candidate_version, source_commit, configuration_hash, recorded_at_unix_ms DESC, proof_id DESC);\
+               ON transport_analysis_receipts(channel_id, sink_id, target_id, target_revision, candidate_version, source_commit, configuration_hash, recorded_at_unix_ms DESC, proof_id DESC);\
              CREATE TABLE IF NOT EXISTS target_device_reachability_receipts (\
                proof_id TEXT PRIMARY KEY,\
                channel_id TEXT NOT NULL,\
@@ -10758,12 +10759,14 @@ impl StationStore {
     pub fn append_transport_analysis_receipt(
         &self,
         receipt: &TransportAnalysisReceipt,
+        now_unix_ms: i64,
     ) -> Result<(), String> {
-        receipt.validate()?;
+        receipt.validate_fresh_at(now_unix_ms)?;
         self.validate_transport_proof_binding(
             &receipt.channel_id,
             &receipt.sink_id,
             &receipt.target_id,
+            receipt.target_revision,
             &receipt.candidate_version,
             &receipt.source_commit,
             &receipt.configuration_hash,
@@ -10773,16 +10776,16 @@ impl StationStore {
         self.execute("BEGIN IMMEDIATE")?;
         let outcome = (|| {
             let statement = self.prepare(
-                "INSERT INTO transport_analysis_receipts(proof_id, channel_id, sink_id, target_id, candidate_version, source_commit, configuration_hash, outcome, captured_at_unix_ms, recorded_at_unix_ms, record_json) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                "INSERT INTO transport_analysis_receipts(proof_id, channel_id, sink_id, target_id, target_revision, candidate_version, source_commit, configuration_hash, outcome, captured_at_unix_ms, recorded_at_unix_ms, record_json) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
             )?;
             let values = [
                 (&receipt.proof_id, 1),
                 (&receipt.channel_id, 2),
                 (&receipt.sink_id, 3),
                 (&receipt.target_id, 4),
-                (&receipt.candidate_version, 5),
-                (&receipt.source_commit, 6),
-                (&receipt.configuration_hash, 7),
+                (&receipt.candidate_version, 6),
+                (&receipt.source_commit, 7),
+                (&receipt.configuration_hash, 8),
             ];
             for (value, index) in values {
                 bind_text(
@@ -10795,7 +10798,7 @@ impl StationStore {
             bind_text(
                 self.database,
                 statement.raw,
-                8,
+                9,
                 &c_string(
                     match receipt.outcome {
                         ProofOutcome::Pass => "pass",
@@ -10804,17 +10807,29 @@ impl StationStore {
                     "transport analysis outcome",
                 )?,
             )?;
-            bind_i64(self.database, statement.raw, 9, receipt.captured_at_unix_ms)?;
+            bind_i64(
+                self.database,
+                statement.raw,
+                5,
+                i64::try_from(receipt.target_revision)
+                    .map_err(|_| "target revision exceeds SQLite range".to_string())?,
+            )?;
             bind_i64(
                 self.database,
                 statement.raw,
                 10,
+                receipt.captured_at_unix_ms,
+            )?;
+            bind_i64(
+                self.database,
+                statement.raw,
+                11,
                 receipt.recorded_at_unix_ms,
             )?;
             bind_text(
                 self.database,
                 statement.raw,
-                11,
+                12,
                 &c_string(&record, "transport analysis record")?,
             )?;
             expect_done(self.database, statement.raw)
@@ -10825,12 +10840,14 @@ impl StationStore {
     pub fn append_target_device_reachability_receipt(
         &self,
         receipt: &TargetDeviceReachabilityReceipt,
+        now_unix_ms: i64,
     ) -> Result<(), String> {
-        receipt.validate()?;
+        receipt.validate_fresh_at(now_unix_ms)?;
         self.validate_transport_proof_binding(
             &receipt.channel_id,
             &receipt.sink_id,
             &receipt.target_id,
+            receipt.target_revision,
             &receipt.candidate_version,
             &receipt.source_commit,
             &receipt.configuration_hash,
@@ -10990,6 +11007,7 @@ impl StationStore {
         sink_id: &str,
         candidate_version: &str,
         source_commit: &str,
+        now_unix_ms: i64,
     ) -> Result<Option<CableTransportValidation>, String> {
         let Some(target) = self.read_transport_target_config(channel_id, sink_id)? else {
             return Ok(None);
@@ -10997,19 +11015,20 @@ impl StationStore {
         let config_hash = self.current_channel_output_configuration_hash(channel_id)?;
         let mut history = self.read_transport_proof_history(channel_id, Some(sink_id), 1_000)?;
         let analysis = history.analysis.drain(..).find(|value| {
-            value.outcome == ProofOutcome::Pass
-                && value.target_id == target.target_id
-                && value.candidate_version == candidate_version
-                && value.source_commit == source_commit
-                && value.configuration_hash == config_hash
-        });
-        let reachability = history.reachability.drain(..).find(|value| {
-            value.outcome == ProofOutcome::Pass
-                && value.target_id == target.target_id
+            value.target_id == target.target_id
                 && value.target_revision == target.revision
                 && value.candidate_version == candidate_version
                 && value.source_commit == source_commit
                 && value.configuration_hash == config_hash
+                && value.validate_fresh_at(now_unix_ms).is_ok()
+        });
+        let reachability = history.reachability.drain(..).find(|value| {
+            value.target_id == target.target_id
+                && value.target_revision == target.revision
+                && value.candidate_version == candidate_version
+                && value.source_commit == source_commit
+                && value.configuration_hash == config_hash
+                && value.validate_fresh_at(now_unix_ms).is_ok()
         });
         Ok(Some(CableTransportValidation::derive(
             channel_id,
@@ -11018,6 +11037,7 @@ impl StationStore {
             candidate_version,
             source_commit,
             &config_hash,
+            now_unix_ms,
             analysis,
             reachability,
         )?))
@@ -11028,6 +11048,7 @@ impl StationStore {
         channel_id: &str,
         sink_id: &str,
         target_id: &str,
+        target_revision: u64,
         candidate_version: &str,
         source_commit: &str,
         configuration_hash: &str,
@@ -11036,6 +11057,7 @@ impl StationStore {
             .read_transport_target_config(channel_id, sink_id)?
             .ok_or_else(|| "target device is not configured".to_string())?;
         if target.target_id != target_id
+            || target.revision != target_revision
             || self.current_channel_output_configuration_hash(channel_id)? != configuration_hash
             || candidate_version.is_empty()
             || source_commit.len() != 40
@@ -20360,8 +20382,9 @@ mod tests {
         let target = TargetDeviceConfig {
             target_id: "target-1".into(),
             label: "Lab target".into(),
-            protocol: TargetProtocol::FakeAuthenticatedV1,
-            endpoint: "fake://target-1".into(),
+            protocol: TargetProtocol::HttpsApi,
+            host: "target-1.example.test".into(),
+            port: 443,
             credential_configured: true,
             revision: 1,
             created_at_unix_ms: 1,
@@ -20379,6 +20402,7 @@ mod tests {
             channel_id: channel_id.into(),
             sink_id: sink_id.into(),
             target_id: "target-1".into(),
+            target_revision: 1,
             candidate_version: "0.1.0".into(),
             source_commit: "a".repeat(40),
             configuration_hash: hash.clone(),
@@ -20402,14 +20426,17 @@ mod tests {
             recorded_by: "worker".into(),
             detail: "analysis passed".into(),
         };
-        store.append_transport_analysis_receipt(&analysis).unwrap();
+        store
+            .append_transport_analysis_receipt(&analysis, 2)
+            .unwrap();
         assert_eq!(
             store
                 .read_current_cable_transport_validation(
                     channel_id,
                     sink_id,
                     "0.1.0",
-                    &"a".repeat(40)
+                    &"a".repeat(40),
+                    2
                 )
                 .unwrap()
                 .unwrap()
@@ -20437,7 +20464,7 @@ mod tests {
             detail: "target authenticated".into(),
         };
         store
-            .append_target_device_reachability_receipt(&reachability)
+            .append_target_device_reachability_receipt(&reachability, 2)
             .unwrap();
         assert_eq!(
             store
@@ -20445,7 +20472,8 @@ mod tests {
                     channel_id,
                     sink_id,
                     "0.1.0",
-                    &"a".repeat(40)
+                    &"a".repeat(40),
+                    2
                 )
                 .unwrap()
                 .unwrap()
@@ -20453,10 +20481,18 @@ mod tests {
             Some(ProofOutcome::Pass)
         );
         let mut changed = target;
-        changed.endpoint = "fake://target-2".into();
+        changed.host = "target-2.example.test".into();
         changed.updated_at_unix_ms = 3;
         store
             .write_transport_target_config(channel_id, sink_id, Some(1), &changed)
+            .unwrap();
+        let mut current_reachability = reachability;
+        current_reachability.proof_id = "reach-2".into();
+        current_reachability.target_revision = 2;
+        current_reachability.recorded_at_unix_ms = 3;
+        current_reachability.observed_at_unix_ms = 3;
+        store
+            .append_target_device_reachability_receipt(&current_reachability, 3)
             .unwrap();
         assert_eq!(
             store
@@ -20464,12 +20500,37 @@ mod tests {
                     channel_id,
                     sink_id,
                     "0.1.0",
-                    &"a".repeat(40)
+                    &"a".repeat(40),
+                    3
                 )
                 .unwrap()
                 .unwrap()
                 .outcome,
             None
+        );
+        assert_eq!(
+            store
+                .read_current_cable_transport_validation(
+                    channel_id,
+                    sink_id,
+                    "0.1.0",
+                    &"a".repeat(40),
+                    station_transport_proof::TRANSPORT_PROOF_FRESHNESS_MS + 4,
+                )
+                .unwrap()
+                .unwrap()
+                .outcome,
+            None
+        );
+        let mut expired_analysis = analysis;
+        expired_analysis.proof_id = "analysis-expired".into();
+        assert!(
+            store
+                .append_transport_analysis_receipt(
+                    &expired_analysis,
+                    station_transport_proof::TRANSPORT_PROOF_FRESHNESS_MS + 4,
+                )
+                .is_err()
         );
         assert!(
             store

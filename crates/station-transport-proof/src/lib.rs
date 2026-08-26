@@ -6,14 +6,15 @@
 //! candidate, output configuration, sink, and target-device revision.
 
 use serde::{Deserialize, Serialize};
+#[cfg(test)]
 use sha2::{Digest, Sha256};
 
 pub const MAX_LABEL: usize = 200;
-pub const MAX_ENDPOINT: usize = 500;
+pub const MAX_HOST: usize = 253;
 pub const MAX_DETAIL: usize = 2_000;
-pub const MAX_ANALYZER_OUTPUT_DIGEST: usize = 64;
 pub const MAX_PROOF_DURATION_MS: u64 = 600_000;
 pub const MAX_PROOF_CAPTURE_BYTES: u64 = 1_073_741_824;
+pub const TRANSPORT_PROOF_FRESHNESS_MS: i64 = 24 * 60 * 60 * 1_000;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -27,7 +28,6 @@ pub enum ProofOutcome {
 pub enum TargetProtocol {
     HttpsApi,
     SnmpTls,
-    FakeAuthenticatedV1,
 }
 
 impl TargetProtocol {
@@ -35,7 +35,6 @@ impl TargetProtocol {
         match self {
             Self::HttpsApi => "https_api",
             Self::SnmpTls => "snmp_tls",
-            Self::FakeAuthenticatedV1 => "fake_authenticated_v1",
         }
     }
 }
@@ -45,7 +44,10 @@ pub struct TargetDeviceConfig {
     pub target_id: String,
     pub label: String,
     pub protocol: TargetProtocol,
-    pub endpoint: String,
+    /// DNS name or IPv4 address only. Paths, queries, user information, and
+    /// credentials are structurally impossible in this field.
+    pub host: String,
+    pub port: u16,
     pub credential_configured: bool,
     pub revision: u64,
     pub created_at_unix_ms: i64,
@@ -57,7 +59,7 @@ impl TargetDeviceConfig {
     pub fn validate(&self) -> Result<(), String> {
         bounded_token(&self.target_id, 100, "target id")?;
         bounded_text(&self.label, MAX_LABEL, "target label")?;
-        bounded_text(&self.endpoint, MAX_ENDPOINT, "target endpoint")?;
+        validate_host(&self.host)?;
         bounded_text(&self.updated_by, MAX_LABEL, "target attribution")?;
         if self.revision == 0
             || self.created_at_unix_ms < 0
@@ -65,17 +67,8 @@ impl TargetDeviceConfig {
         {
             return Err("target configuration revision and timestamps are invalid".into());
         }
-        if self.endpoint.contains(['@', '?', '#']) || self.endpoint.chars().any(char::is_whitespace)
-        {
-            return Err("target endpoint cannot contain credentials or whitespace".into());
-        }
-        let accepted = match self.protocol {
-            TargetProtocol::HttpsApi => self.endpoint.starts_with("https://"),
-            TargetProtocol::SnmpTls => self.endpoint.starts_with("snmp+tls://"),
-            TargetProtocol::FakeAuthenticatedV1 => self.endpoint.starts_with("fake://"),
-        };
-        if !accepted {
-            return Err("target endpoint scheme does not match the configured protocol".into());
+        if self.port == 0 {
+            return Err("target port is invalid".into());
         }
         Ok(())
     }
@@ -116,6 +109,7 @@ pub struct TransportAnalysisReceipt {
     pub channel_id: String,
     pub sink_id: String,
     pub target_id: String,
+    pub target_revision: u64,
     pub candidate_version: String,
     pub source_commit: String,
     pub configuration_hash: String,
@@ -150,6 +144,9 @@ impl TransportAnalysisReceipt {
         if !sha256(&self.analyzer_sha256) {
             return Err("analyzer executable hash is invalid".into());
         }
+        if self.target_revision == 0 {
+            return Err("transport analysis target revision is invalid".into());
+        }
         match self.outcome {
             ProofOutcome::Pass => self.findings.validate(),
             ProofOutcome::Fail => {
@@ -161,6 +158,16 @@ impl TransportAnalysisReceipt {
                 Ok(())
             }
         }
+    }
+
+    pub fn validate_fresh_at(&self, now_unix_ms: i64) -> Result<(), String> {
+        self.validate()?;
+        validate_freshness(self.captured_at_unix_ms, now_unix_ms, "transport analysis")?;
+        validate_freshness(
+            self.recorded_at_unix_ms,
+            now_unix_ms,
+            "transport analysis recording",
+        )
     }
 }
 
@@ -209,6 +216,16 @@ impl TargetDeviceReachabilityReceipt {
         }
         Ok(())
     }
+
+    pub fn validate_fresh_at(&self, now_unix_ms: i64) -> Result<(), String> {
+        self.validate()?;
+        validate_freshness(self.observed_at_unix_ms, now_unix_ms, "target reachability")?;
+        validate_freshness(
+            self.recorded_at_unix_ms,
+            now_unix_ms,
+            "target reachability recording",
+        )
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -220,6 +237,7 @@ pub struct CableTransportValidation {
     pub candidate_version: String,
     pub source_commit: String,
     pub configuration_hash: String,
+    pub evaluated_at_unix_ms: i64,
     pub transport_analysis: Option<TransportAnalysisReceipt>,
     pub target_reachability: Option<TargetDeviceReachabilityReceipt>,
     pub outcome: Option<ProofOutcome>,
@@ -234,6 +252,7 @@ impl CableTransportValidation {
         candidate_version: &str,
         source_commit: &str,
         configuration_hash: &str,
+        now_unix_ms: i64,
         analysis: Option<TransportAnalysisReceipt>,
         reachability: Option<TargetDeviceReachabilityReceipt>,
     ) -> Result<Self, String> {
@@ -244,14 +263,19 @@ impl CableTransportValidation {
         {
             return Err("current transport validation binding is invalid".into());
         }
+        if now_unix_ms < 0 {
+            return Err("transport validation time is invalid".into());
+        }
         let both_current = analysis.as_ref().is_some_and(|value| {
             value.outcome == ProofOutcome::Pass
                 && value.channel_id == channel_id
                 && value.sink_id == sink_id
                 && value.target_id == target.target_id
+                && value.target_revision == target.revision
                 && value.candidate_version == candidate_version
                 && value.source_commit == source_commit
                 && value.configuration_hash == configuration_hash
+                && value.validate_fresh_at(now_unix_ms).is_ok()
         }) && reachability.as_ref().is_some_and(|value| {
             value.outcome == ProofOutcome::Pass
                 && value.channel_id == channel_id
@@ -261,6 +285,7 @@ impl CableTransportValidation {
                 && value.candidate_version == candidate_version
                 && value.source_commit == source_commit
                 && value.configuration_hash == configuration_hash
+                && value.validate_fresh_at(now_unix_ms).is_ok()
         });
         let detail = if both_current {
             "Current transport analysis and authenticated target-device reachability both pass."
@@ -276,6 +301,7 @@ impl CableTransportValidation {
             candidate_version: candidate_version.into(),
             source_commit: source_commit.into(),
             configuration_hash: configuration_hash.into(),
+            evaluated_at_unix_ms: now_unix_ms,
             transport_analysis: analysis,
             target_reachability: reachability,
             outcome: both_current.then_some(ProofOutcome::Pass),
@@ -350,20 +376,53 @@ fn sha256(value: &str) -> bool {
     value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
+fn validate_host(value: &str) -> Result<(), String> {
+    if value.is_empty()
+        || value.len() > MAX_HOST
+        || value.trim() != value
+        || value.starts_with(['.', '-'])
+        || value.ends_with(['.', '-'])
+        || value
+            .bytes()
+            .any(|byte| !(byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-')))
+    {
+        return Err("target host must be a normalized DNS name or IPv4 address".into());
+    }
+    Ok(())
+}
+
+fn validate_freshness(
+    recorded_at_unix_ms: i64,
+    now_unix_ms: i64,
+    authority: &str,
+) -> Result<(), String> {
+    let age = now_unix_ms
+        .checked_sub(recorded_at_unix_ms)
+        .ok_or_else(|| format!("{authority} time is outside the supported range"))?;
+    if age < 0 || age > TRANSPORT_PROOF_FRESHNESS_MS {
+        return Err(format!("{authority} evidence is future-dated or expired"));
+    }
+    Ok(())
+}
+
 /// A fake analyzer used only by unit tests and future executor integration tests.
+#[cfg(test)]
 pub trait TransportAnalyzer {
     fn analyze(&self, capture: &[u8]) -> Result<TransportFindings, String>;
 }
 
 /// A fake authenticated target adapter used only by tests. It returns an identity
 /// digest only after its configured secret and challenge match.
+#[cfg(test)]
 pub trait AuthenticatedTargetAdapter {
     fn probe(&self, target: &TargetDeviceConfig, challenge: &[u8]) -> Result<String, String>;
 }
 
 #[derive(Debug, Clone, Copy)]
+#[cfg(test)]
 pub struct FakeTransportAnalyzer;
 
+#[cfg(test)]
 impl TransportAnalyzer for FakeTransportAnalyzer {
     fn analyze(&self, capture: &[u8]) -> Result<TransportFindings, String> {
         if capture.is_empty() {
@@ -385,10 +444,12 @@ impl TransportAnalyzer for FakeTransportAnalyzer {
 }
 
 #[derive(Debug, Clone)]
+#[cfg(test)]
 pub struct FakeAuthenticatedTargetAdapter {
     pub expected_secret: String,
 }
 
+#[cfg(test)]
 impl AuthenticatedTargetAdapter for FakeAuthenticatedTargetAdapter {
     fn probe(&self, target: &TargetDeviceConfig, challenge: &[u8]) -> Result<String, String> {
         if !target.credential_configured || challenge.is_empty() {
@@ -410,8 +471,9 @@ mod tests {
         TargetDeviceConfig {
             target_id: "target-1".into(),
             label: "Lab receiver".into(),
-            protocol: TargetProtocol::FakeAuthenticatedV1,
-            endpoint: "fake://receiver-1".into(),
+            protocol: TargetProtocol::HttpsApi,
+            host: "receiver-1.example.test".into(),
+            port: 443,
             credential_configured: true,
             revision: 1,
             created_at_unix_ms: 1,
@@ -426,6 +488,7 @@ mod tests {
             channel_id: "channel-1".into(),
             sink_id: "sink-1".into(),
             target_id: "target-1".into(),
+            target_revision: 1,
             candidate_version: "0.1.0".into(),
             source_commit: "a".repeat(40),
             configuration_hash: "b".repeat(64),
@@ -476,6 +539,7 @@ mod tests {
             "0.1.0",
             &"a".repeat(40),
             &"b".repeat(64),
+            2,
             Some(analysis()),
             None,
         )
@@ -488,6 +552,7 @@ mod tests {
             "0.1.0",
             &"a".repeat(40),
             &"b".repeat(64),
+            2,
             Some(analysis()),
             Some(reachability()),
         )
@@ -508,6 +573,7 @@ mod tests {
                 "0.1.0",
                 &"a".repeat(40),
                 &"b".repeat(64),
+                2,
                 Some(analysis()),
                 Some(r)
             )
@@ -524,6 +590,7 @@ mod tests {
                 "0.2.0",
                 &"a".repeat(40),
                 &"b".repeat(64),
+                2,
                 Some(analysis()),
                 None
             )
@@ -566,8 +633,48 @@ mod tests {
     #[test]
     fn target_endpoint_rejects_embedded_query_secrets() {
         let mut target = target();
-        target.endpoint = "https://receiver.example.test/api?token=secret".into();
-        target.protocol = TargetProtocol::HttpsApi;
+        target.host = "receiver.example.test?token=secret".into();
         assert!(target.validate().is_err());
+    }
+
+    #[test]
+    fn target_endpoint_rejects_path_token_leakage() {
+        let mut target = target();
+        target.host = "receiver.example.test/api/token/secret".into();
+        assert!(target.validate().is_err());
+    }
+
+    #[test]
+    fn fake_protocol_is_not_valid_production_configuration() {
+        let value = serde_json::json!({
+            "target_id": "target-1",
+            "label": "Fake target",
+            "protocol": "fake_authenticated_v1",
+            "host": "receiver.example.test",
+            "port": 443,
+            "credential_configured": true,
+            "revision": 1,
+            "created_at_unix_ms": 1,
+            "updated_at_unix_ms": 1,
+            "updated_by": "operator-1"
+        });
+        assert!(serde_json::from_value::<TargetDeviceConfig>(value).is_err());
+    }
+
+    #[test]
+    fn expired_evidence_cannot_pass_the_composite() {
+        let validation = CableTransportValidation::derive(
+            "channel-1",
+            "sink-1",
+            &target(),
+            "0.1.0",
+            &"a".repeat(40),
+            &"b".repeat(64),
+            TRANSPORT_PROOF_FRESHNESS_MS + 3,
+            Some(analysis()),
+            Some(reachability()),
+        )
+        .expect("valid composite");
+        assert_eq!(validation.outcome, None);
     }
 }
