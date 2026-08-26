@@ -52,6 +52,21 @@
 #ifndef CaptionDecoderLicenseSize
   #error CaptionDecoderLicenseSize must be supplied by build-installer.ps1
 #endif
+#ifndef TSDuckRuntimeArchive
+  #error TSDuckRuntimeArchive must be supplied by build-installer.ps1
+#endif
+#ifndef TSDuckRuntimeSha256
+  #error TSDuckRuntimeSha256 must be supplied by build-installer.ps1
+#endif
+#ifndef TSDuckVersion
+  #error TSDuckVersion must be supplied by build-installer.ps1
+#endif
+#ifndef TSDuckSourceUrl
+  #error TSDuckSourceUrl must be supplied by build-installer.ps1
+#endif
+#ifndef TSDuckArchiveName
+  #error TSDuckArchiveName must be supplied by build-installer.ps1
+#endif
 #ifndef OutputDirectory
   #error OutputDirectory must be supplied by build-installer.ps1
 #endif
@@ -103,6 +118,7 @@ Source: "{#ChannelWorkerPath}"; DestName: "channel-worker.exe"; Flags: dontcopy 
 Source: "{#StationUpdaterPath}"; DestName: "station-updater.exe"; Flags: dontcopy noencryption
 Source: "{#CaptionDecoderPath}"; DestName: "caption-decoder-ffmpeg.exe"; Flags: dontcopy noencryption
 Source: "{#CaptionDecoderLicensePath}"; DestName: "caption-decoder-LICENSE.txt"; Flags: dontcopy noencryption
+Source: "{#TSDuckRuntimeArchive}"; DestName: "tsduck-runtime.zip"; Flags: dontcopy noencryption
 Source: "..\THIRD-PARTY-NOTICES.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\LICENSE"; DestDir: "{app}"; Flags: ignoreversion
 
@@ -131,6 +147,10 @@ const
   CaptionDecoderSize = '{#CaptionDecoderSize}';
   CaptionDecoderLicenseSha256 = '{#CaptionDecoderLicenseSha256}';
   CaptionDecoderLicenseSize = '{#CaptionDecoderLicenseSize}';
+  TSDuckRuntimeSha256Value = '{#TSDuckRuntimeSha256}';
+  TSDuckVersionValue = '{#TSDuckVersion}';
+  TSDuckSourceUrlValue = '{#TSDuckSourceUrl}';
+  TSDuckArchiveNameValue = '{#TSDuckArchiveName}';
   AuthStateBootstrapRequired = 1;
   AuthStateLoginRequired = 2;
   AuthStateAuthenticated = 3;
@@ -148,6 +168,7 @@ var
   StationServiceCreatedByCandidate: Boolean;
   UpdaterServiceCreatedByCandidate: Boolean;
   RuntimeManifestSha256: String;
+  TSDuckRuntimeManifestSha256: String;
 
 function NativeShellExecute(hWnd: Integer; lpOperation, lpFile,
   lpParameters, lpDirectory: String; nShowCmd: Integer): Integer;
@@ -299,6 +320,8 @@ begin
     '{commonappdata}\TownLight Station\active-slot.json'));
   DeleteFile(ExpandConstant(
     '{commonappdata}\TownLight Station\runtime-manifest.json'));
+  DeleteFile(ExpandConstant(
+    '{commonappdata}\TownLight Station\tsduck-runtime-manifest.json'));
   RemoveCandidateApplicationDirectory;
 end;
 
@@ -530,11 +553,24 @@ begin
     FileExists(RuntimeRoot + '\bin\srt.dll');
 end;
 
+function TSDuckRuntimeIsComplete(const RuntimeRoot: String): Boolean;
+begin
+  Result :=
+    FileExists(RuntimeRoot + '\LICENSE.txt') and
+    FileExists(RuntimeRoot + '\OTHERS.txt') and
+    FileExists(RuntimeRoot + '\bin\tsp.exe') and
+    FileExists(RuntimeRoot + '\bin\tsanalyze.exe') and
+    FileExists(RuntimeRoot + '\bin\tsduck.dll') and
+    FileExists(RuntimeRoot + '\bin\tscore.dll');
+end;
+
 procedure InstallPrivateRuntime;
 var
   ResultCode: Integer;
   RuntimeInstaller: String;
   RuntimeRoot: String;
+  TSDuckRoot: String;
+  RuntimeParent: String;
   Parameters: String;
 begin
   RuntimeRoot := ExpandConstant('{app}\runtime\gstreamer');
@@ -553,6 +589,23 @@ begin
 
   if not PrivateRuntimeIsComplete(RuntimeRoot) then
     RaiseException('The bundled media runtime did not produce every required library and plugin.');
+
+  TSDuckRoot := ExpandConstant('{app}\runtime\tsduck');
+  RuntimeParent := ExpandConstant('{app}\runtime');
+  if DirExists(TSDuckRoot) or FileExists(TSDuckRoot) then
+    RaiseException('The private TSDuck runtime root already exists before clean extraction.');
+  ExtractTemporaryFile('tsduck-runtime.zip');
+  Parameters := '-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "' +
+    '$ErrorActionPreference=''Stop''; Expand-Archive -LiteralPath ''' +
+    ExpandConstant('{tmp}\tsduck-runtime.zip') + ''' -DestinationPath ''' +
+    RuntimeParent + ''' -Force"';
+  if (not Exec(ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe'),
+    Parameters, '', SW_HIDE, ewWaitUntilTerminated, ResultCode)) or
+    (ResultCode <> 0) then
+    RaiseException('The bundled TSDuck runtime could not be extracted (exit ' +
+      IntToStr(ResultCode) + ').');
+  if not TSDuckRuntimeIsComplete(TSDuckRoot) then
+    RaiseException('The bundled TSDuck runtime did not contain every required analyzer payload.');
 end;
 
 procedure WriteRuntimeManifest;
@@ -577,6 +630,31 @@ begin
   RuntimeManifestSha256 := Lowercase(GetSHA256OfFile(ManifestPath));
   if Length(RuntimeManifestSha256) <> 64 then
     RaiseException('The installed media runtime manifest digest is invalid.');
+end;
+
+procedure WriteTSDuckRuntimeManifest;
+var
+  ManifestPath: String;
+  Parameters: String;
+  ResultCode: Integer;
+  RuntimeRoot: String;
+begin
+  RuntimeRoot := ExpandConstant('{app}\runtime\tsduck');
+  ManifestPath := ExpandConstant(
+    '{commonappdata}\TownLight Station\tsduck-runtime-manifest.json');
+  Parameters := 'release write-runtime-manifest --runtime-root "' +
+    RuntimeRoot + '" --output "' + ManifestPath +
+    '" --version "' + CandidateVersion + '" --source-commit "' +
+    CandidateCommit + '" --runtime-package-sha256 "' +
+    TSDuckRuntimeSha256Value + '"';
+  if (not RunStationdWithPrivateRuntime(Parameters, ResultCode)) or
+    (ResultCode <> 0) then
+    RaiseException('The installed TSDuck runtime manifest could not be created.');
+  if not FileExists(ManifestPath) then
+    RaiseException('The installed TSDuck runtime manifest is missing after creation.');
+  TSDuckRuntimeManifestSha256 := Lowercase(GetSHA256OfFile(ManifestPath));
+  if Length(TSDuckRuntimeManifestSha256) <> 64 then
+    RaiseException('The installed TSDuck runtime manifest digest is invalid.');
 end;
 
 procedure StageStationBinaries;
@@ -771,6 +849,11 @@ begin
     '"source_commit":"' + CandidateCommit + '",' +
     '"media_runtime_sha256":"' + RuntimeSha256 + '",' +
     '"runtime_manifest_sha256":"' + RuntimeManifestSha256 + '",' +
+    '"tsduck_version":"' + TSDuckVersionValue + '",' +
+    '"tsduck_source_url":"' + TSDuckSourceUrlValue + '",' +
+    '"tsduck_archive_name":"' + TSDuckArchiveNameValue + '",' +
+    '"tsduck_runtime_sha256":"' + TSDuckRuntimeSha256Value + '",' +
+    '"tsduck_runtime_manifest_sha256":"' + TSDuckRuntimeManifestSha256 + '",' +
     '"caption_decoder_archive_sha256":"' + CaptionDecoderArchiveSha256 + '",' +
     '"caption_decoder_sha256":"' + CaptionDecoderSha256 + '",' +
     '"caption_decoder_size_bytes":' + CaptionDecoderSize + ',' +
@@ -831,6 +914,7 @@ begin
       StageStationBinaries;
       InstallPrivateRuntime;
       WriteRuntimeManifest;
+      WriteTSDuckRuntimeManifest;
       CreateAndStartService;
       if not WaitForHealthyStation then
         RaiseException('TownLight Station did not become healthy within 75 seconds.');

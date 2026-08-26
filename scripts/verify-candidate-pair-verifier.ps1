@@ -49,6 +49,10 @@ try {
         caption_decoder_size_bytes = 4
         caption_decoder_license_sha256 = ('1' * 64)
         caption_decoder_license_size_bytes = 4
+        tsduck_version = '3.44-4676'
+        tsduck_source_url = 'https://github.com/tsduck/tsduck/releases/download/v3.44-4676/TSDuck-Win64-3.44-4676-Portable.zip'
+        tsduck_archive_name = 'TSDuck-Win64-3.44-4676-Portable.zip'
+        tsduck_runtime_sha256 = ('2' * 64)
         build_toolchain = [ordered]@{
             inno = [ordered]@{ path = 'C:\iscc.exe'; size_bytes = 1; sha256 = ('b' * 64); signer_thumbprint = 'ABC123'; signer_subject = 'CN=TownLight Fixture' }
             rustc = [ordered]@{ path = 'C:\rustc.exe'; version = '1.0.0'; commit = ('a' * 40); host = 'x86_64-pc-windows-msvc'; executable = $fileIdentity }
@@ -69,6 +73,15 @@ try {
     if (-not $valid) {
         throw 'ASSERTION FAILED: a canonical manifest and exact sibling installer must validate as one candidate pair.'
     }
+
+    $manifest.tsduck_source_url = 'https://example.invalid/TSDuck.zip'
+    [IO.File]::WriteAllText($manifestPath, ($manifest | ConvertTo-Json -Depth 8), [Text.UTF8Encoding]::new($false))
+    $rejectedTSDuckSource = $false
+    try { Get-TownLightCandidateIdentity -ManifestPath $manifestPath | Out-Null } catch { $rejectedTSDuckSource = $true }
+    if (-not $rejectedTSDuckSource) {
+        throw 'ASSERTION FAILED: a TSDuck source URL outside the pinned official asset must fail.'
+    }
+    $manifest.tsduck_source_url = 'https://github.com/tsduck/tsduck/releases/download/v3.44-4676/TSDuck-Win64-3.44-4676-Portable.zip'
 
     $sizeCases = @(
         [pscustomobject]@{ label = 'Int32'; value = [int32]4; accepted = $true }
@@ -193,7 +206,7 @@ try {
         throw 'ASSERTION FAILED: an unsigned identity with signer metadata must fail signature coherence validation.'
     }
 
-    Write-Output 'Candidate-pair verifier fixture harness passed (size-type matrix + 12 hostile assertions).'
+    Write-Output 'Candidate-pair verifier fixture harness passed (size-type matrix + 13 hostile assertions).'
 }
 finally {
     if (Test-Path -LiteralPath $fixtureRoot -PathType Container) {
