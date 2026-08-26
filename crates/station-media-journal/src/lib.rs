@@ -1607,6 +1607,18 @@ impl JournalWriter {
         self.ownership.take();
     }
 
+    /// A reporter acquires the root lease before it opens/proves a manifest
+    /// and releases it only after its projection transaction is durable. On
+    /// graceful writer retirement, keep the publisher's no-delete handle
+    /// alive through that acknowledgement instead of leaving a verified
+    /// reporter with only a DELETE-sharing handle.
+    fn wait_for_reader_transaction_before_retirement(&self) -> Result<(), JournalError> {
+        while reader_lease_is_active(&self.root_path)? {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        Ok(())
+    }
+
     pub fn append(&mut self, event: &WorkerEventEnvelope) -> Result<(), JournalError> {
         if event.worker_id != self.worker_id || event.channel_id != self.channel_id {
             return Err(JournalError::WrongIdentity);
@@ -2418,6 +2430,20 @@ impl Drop for JournalWriter {
             return;
         }
         observe_writer_authority_retirement_interleaving(&self.root_path);
+        if self
+            .wait_for_reader_transaction_before_retirement()
+            .is_err()
+        {
+            // As above, an unobservable retirement failure must retain both
+            // handles rather than opening a path-replacement window.
+            if let Some(authority) = self.manifest_authority.take() {
+                std::mem::forget(authority);
+            }
+            if let Some(ownership) = self.ownership.take() {
+                std::mem::forget(ownership);
+            }
+            return;
+        }
         self.manifest_authority.take();
         self.ownership.take();
     }
@@ -6594,11 +6620,46 @@ mod tests {
         // sharing violation alone.
         verify_incremental_reader_authority(&path, &report.cursor).unwrap();
         schedule_writer_authority_retirement_interleaving(path.clone(), report.cursor.clone());
-        drop(writer);
-        // The scheduled interleaving attempted the acknowledgement proof
-        // after sidecar invalidation and before authority release. It must
-        // fail before persistence, not after a mutable-path window opens.
+        let retiring = thread::spawn(move || drop(writer));
+        let (manifest_hash, manifest_identity, _) =
+            retained_manifest_authority_binding(&path).expect("reporter holds manifest authority");
+        for _ in 0..500 {
+            if !writer_owns_matching_manifest_authority(
+                &path,
+                Some(&manifest_hash),
+                Some(&manifest_identity),
+            )
+            .unwrap()
+            {
+                break;
+            }
+            thread::sleep(Duration::from_millis(1));
+        }
+        assert!(
+            !writer_owns_matching_manifest_authority(
+                &path,
+                Some(&manifest_hash),
+                Some(&manifest_identity),
+            )
+            .unwrap(),
+            "writer retirement did not durably invalidate its sidecar"
+        );
+        // This models the exact time of check/time of persistence interleave:
+        // the reporter has successfully verified its cursor, the writer has
+        // retired its sidecar, and a separate process tries to replace the
+        // manifest before projection commit/acknowledgement. The writer's
+        // retained no-delete source authority must still deny the move.
+        assert_manifest_replacement_is_blocked(
+            &while_writer_live,
+            &generation_manifest_path(&path),
+        );
+        // Acknowledgement is issued only after projection persistence in the
+        // production adapter. It releases the lease, then writer retirement
+        // may close the no-delete authority.
         acknowledge_incremental_reader(&path);
+        retiring
+            .join()
+            .expect("writer retirement completes after acknowledgement");
     }
 
     #[cfg(windows)]
@@ -7304,10 +7365,13 @@ mod tests {
         const JOURNAL: &str = "TOWNLIGHT_JOURNAL_LEASE_PATH";
         const BARRIER: &str = "TOWNLIGHT_JOURNAL_LEASE_BARRIER";
         const RELEASE: &str = "TOWNLIGHT_JOURNAL_LEASE_RELEASE";
+        const WORKER_DONE: &str = "TOWNLIGHT_JOURNAL_WORKER_DONE";
         const SEQUENCE: &str = "TOWNLIGHT_JOURNAL_WORKER_SEQUENCE";
         if std::env::var_os(WORKER).is_some() {
             let journal = PathBuf::from(std::env::var_os(JOURNAL).unwrap());
             let sequence = std::env::var(SEQUENCE).unwrap().parse::<u64>().unwrap();
+            let release = PathBuf::from(std::env::var_os(RELEASE).unwrap());
+            let done = PathBuf::from(std::env::var_os(WORKER_DONE).unwrap());
             let mut writer = JournalWriter::open(&journal, WORKER_ID, CHANNEL_ID).unwrap();
             writer
                 .append(&event(
@@ -7318,7 +7382,18 @@ mod tests {
                     },
                 ))
                 .unwrap();
-            return;
+            // A writer that has deferred compaction must retain its manifest
+            // authority until the reporter finishes its durable transaction.
+            // Tell the parent that append returned, then let `Drop` run only
+            // after the reporter acknowledgement has been requested.
+            File::create(done).unwrap();
+            for _ in 0..500 {
+                if release.exists() {
+                    return;
+                }
+                thread::sleep(Duration::from_millis(10));
+            }
+            panic!("parent did not release the reporter transaction");
         }
         if std::env::var_os(CHILD).is_some() {
             let journal = PathBuf::from(std::env::var_os(JOURNAL).unwrap());
@@ -7343,6 +7418,7 @@ mod tests {
         let path = test_path();
         let barrier = test_path();
         let release = test_path();
+        let worker_done = test_path();
         // A real process will restart against this large legacy root and
         // pause inside its full authenticated-prefix proof. The worker then
         // reaches a real heartbeat compaction while that lease is live.
@@ -7391,15 +7467,26 @@ mod tests {
         }
         assert!(barrier.exists(), "child reporter did not acquire its lease");
 
-        let worker = Command::new(std::env::current_exe().unwrap())
+        let mut worker = Command::new(std::env::current_exe().unwrap())
             .arg("--exact")
             .arg("tests::multiprocess_reporter_lease_defers_then_allows_compaction")
             .env(WORKER, "1")
             .env(JOURNAL, &path)
+            .env(RELEASE, &release)
+            .env(WORKER_DONE, &worker_done)
             .env(SEQUENCE, "10514")
-            .status()
+            .spawn()
             .unwrap();
-        assert!(worker.success(), "worker must defer rather than fatal-exit");
+        for _ in 0..500 {
+            if worker_done.exists() {
+                break;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            worker_done.exists(),
+            "worker must defer compaction rather than fatal-exit"
+        );
         assert!(read_snapshot(&path).unwrap().raw_heartbeat_count > RETAIN_RAW_HEARTBEATS);
         assert!(
             path.exists() && !generation_manifest_path(&path).exists(),
@@ -7408,11 +7495,14 @@ mod tests {
 
         File::create(&release).unwrap();
         assert!(child.wait().unwrap().success());
+        assert!(worker.wait().unwrap().success());
         let worker = Command::new(std::env::current_exe().unwrap())
             .arg("--exact")
             .arg("tests::multiprocess_reporter_lease_defers_then_allows_compaction")
             .env(WORKER, "1")
             .env(JOURNAL, &path)
+            .env(RELEASE, &release)
+            .env(WORKER_DONE, &worker_done)
             .env(SEQUENCE, "10515")
             .status()
             .unwrap();
@@ -7430,6 +7520,7 @@ mod tests {
         let _ = std::fs::remove_file(generation_manifest_path(&path));
         let _ = std::fs::remove_file(barrier);
         let _ = std::fs::remove_file(release);
+        let _ = std::fs::remove_file(worker_done);
     }
 
     #[test]
