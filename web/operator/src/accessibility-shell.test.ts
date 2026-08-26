@@ -43,18 +43,31 @@ test("S20 keeps dense CG controls reflowable and contrast-safe", () => {
 
 test("operator state changes expose stable assistive-technology semantics", () => {
   assert.match(cg, /role="tablist"/);
-  assert.match(cg, /role="tab" aria-selected=\{route === item\.id\}/);
+  assert.match(cg, /id=\{`cg-tab-\$\{item\.id\}`\}/);
+  assert.match(cg, /role="tab" aria-selected=\{route === item\.id\} aria-controls="cg-tabpanel" tabIndex=\{route === item\.id \? 0 : -1\}/);
+  assert.match(cg, /if \(event\.key === "ArrowRight"\)/);
+  assert.match(cg, /if \(event\.key === "ArrowLeft"\)/);
+  assert.match(cg, /if \(event\.key === "Home"\)/);
+  assert.match(cg, /if \(event\.key === "End"\)/);
+  assert.match(cg, /tabRefs\.current\[index\]\?\.focus\(\)/);
+  assert.match(cg, /onNavigate\(CG_ROUTES\[index\]\.id\)/);
+  assert.match(cg, /id="cg-tabpanel" role="tabpanel" aria-labelledby=\{`cg-tab-\$\{route\}`} tabIndex=\{0\}/);
   assert.match(metadata, /aria-pressed=\{schema\?\.schema_id === item\.schema_id\}/);
   assert.match(captionTracks, /aria-pressed=\{track\.track_id === trackId\}/);
   assert.match(recordings, /aria-pressed=\{selected\?\.definition\.recording_id === item\.definition\.recording_id\}/);
   assert.match(shell, /className="live-state-copy" role="status" aria-live="polite" aria-atomic="true"/);
   assert.match(shell, /<\/small><\/div>\{session\.state === "on_air" && <div className="live-duration">/);
-  assert.match(shell, /role="alertdialog" aria-labelledby="live-confirm-take-title"/);
-  assert.match(shell, /role="alertdialog" aria-labelledby="live-confirm-return-title"/);
+  assert.match(shell, /role="dialog" aria-labelledby="live-confirm-take-title"/);
+  assert.match(shell, /role="dialog" aria-labelledby="live-confirm-return-title"/);
+  assert.doesNotMatch(shell, /role="alertdialog"/);
   assert.doesNotMatch(shell, /aria-modal="true"/);
-  assert.match(shell, /confirmationDialogRef\.current\?\.focus\(\)/);
-  assert.match(shell, /confirmationTriggerRef\.current\.focus\(\)/);
+  assert.match(shell, /session\.session_id !== confirmationSessionIdRef\.current \|\| session\.state !== expectedState \|\| !dialog/);
+  assert.match(shell, /\[confirmAction, session\?\.session_id, session\?\.state\]/);
+  assert.match(shell, /if \(!dialog\.contains\(document\.activeElement\)\) dialog\.focus\(\)/);
+  assert.match(shell, /trigger\?\.isConnected && !trigger\.disabled/);
+  assert.match(shell, /confirmationFallbackRef\.current\?\.focus\(\)/);
   assert.match(shell, /onKeyDown=\{\(event\) => \{ if \(event\.key === "Escape"\) setConfirmAction\(null\); \}\}/);
+  assert.match(shell, /role=\{session\.state === "failed" \? "alert" : "status"\}/);
   assert.match(cg, /role="alert"/);
   assert.match(cg, /role="status"/);
   assert.match(cg, /cg-preview-status" role="status" aria-live="polite"/);

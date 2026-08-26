@@ -1,4 +1,4 @@
-import { ReactNode, useCallback, useEffect, useMemo, useState } from "react";
+import { KeyboardEvent, ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ApiError, apiRequest } from "./api-client";
 import { withoutBrowserIdentity } from "./auth-contract";
 
@@ -424,7 +424,25 @@ function MutationResult({ error, message }: { error: string | null; message: str
 }
 
 function CgTabs({ route, onNavigate }: { route: CgRoute; onNavigate: (route: CgRoute) => void }) {
-  return <nav className="cg-tabs" aria-label="CG operator screens" role="tablist">{CG_ROUTES.map((item) => <button key={item.id} role="tab" aria-selected={route === item.id} className={route === item.id ? "selected" : ""} onClick={() => onNavigate(item.id)}>{item.label}</button>)}</nav>;
+  const tabRefs = useRef<Array<HTMLButtonElement | null>>([]);
+
+  function selectTab(index: number) {
+    tabRefs.current[index]?.focus();
+    onNavigate(CG_ROUTES[index].id);
+  }
+
+  function handleKeyDown(event: KeyboardEvent<HTMLButtonElement>, index: number) {
+    let nextIndex: number | null = null;
+    if (event.key === "ArrowRight") nextIndex = (index + 1) % CG_ROUTES.length;
+    if (event.key === "ArrowLeft") nextIndex = (index - 1 + CG_ROUTES.length) % CG_ROUTES.length;
+    if (event.key === "Home") nextIndex = 0;
+    if (event.key === "End") nextIndex = CG_ROUTES.length - 1;
+    if (nextIndex === null) return;
+    event.preventDefault();
+    selectTab(nextIndex);
+  }
+
+  return <nav className="cg-tabs" aria-label="CG operator screens" role="tablist">{CG_ROUTES.map((item, index) => <button key={item.id} id={`cg-tab-${item.id}`} ref={(element) => { tabRefs.current[index] = element; }} role="tab" aria-selected={route === item.id} aria-controls="cg-tabpanel" tabIndex={route === item.id ? 0 : -1} className={route === item.id ? "selected" : ""} onKeyDown={(event) => handleKeyDown(event, index)} onClick={() => onNavigate(item.id)}>{item.label}</button>)}</nav>;
 }
 
 function BulletinExpirationAction({ channelId, onRefresh }: { channelId: string; onRefresh: () => Promise<void> }) {
@@ -1044,6 +1062,6 @@ export function CgOperator({ channelId, channels, route, onNavigate }: { channel
   return <>
     <header className="page-header cg-operator-header"><div><p className="eyebrow">CG / Bulletin board</p><h1>{CG_ROUTES.find((item) => item.id === route)?.label ?? "Operator tools"}</h1><p>Authenticated authoring and management contract</p></div><div className="header-actions"><span className="cg-channel-badge">Signed-in identity</span><label className="cg-channel-picker">Channel<select value={activeChannelId} onChange={(event) => setSelectedChannelId(event.target.value)}>{channels.map((channel) => <option key={channel.channel_id} value={channel.channel_id}>{channel.display_name}</option>)}</select></label><span className="cg-channel-badge">{data?.board?.active ? "Board active" : "Board not configured"}</span><button className="secondary" onClick={() => void load()} disabled={refreshing}>{refreshing ? "Reading…" : "Refresh"}</button></div></header>
     <CgTabs route={route} onNavigate={onNavigate} />
-    {error ? <CgError error={error} onRetry={() => void load()} /> : !data ? <CgLoading /> : route === "cg-moderation" ? <ModerationQueue data={data} channelId={activeChannelId} onRefresh={load} /> : route === "cg-board" ? <BoardDesigner data={data} channelId={activeChannelId} onRefresh={load} /> : route === "cg-feeds" ? <FeedManager data={data} channelId={activeChannelId} onRefresh={load} /> : route === "cg-preview" ? <LivePreview data={data} channelId={activeChannelId} /> : <SettingsHistory data={data} />}
+    <div id="cg-tabpanel" role="tabpanel" aria-labelledby={`cg-tab-${route}`} tabIndex={0}>{error ? <CgError error={error} onRetry={() => void load()} /> : !data ? <CgLoading /> : route === "cg-moderation" ? <ModerationQueue data={data} channelId={activeChannelId} onRefresh={load} /> : route === "cg-board" ? <BoardDesigner data={data} channelId={activeChannelId} onRefresh={load} /> : route === "cg-feeds" ? <FeedManager data={data} channelId={activeChannelId} onRefresh={load} /> : route === "cg-preview" ? <LivePreview data={data} channelId={activeChannelId} /> : <SettingsHistory data={data} />}</div>
   </>;
 }
