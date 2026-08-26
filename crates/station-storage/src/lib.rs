@@ -94,6 +94,13 @@ mod catalog_candidate_projection;
 pub use catalog_candidate_projection::CatalogCandidateProjection;
 mod materialization_evidence;
 pub use materialization_evidence::MaterializationEvidenceSnapshot;
+mod schedule_materialization;
+pub use schedule_materialization::{
+    ExistingScheduleSnapshot, ScheduleMaterializationApplyOutcome, ScheduleMaterializationOutcome,
+    ScheduleMaterializationOutcomeRecord, ScheduleMaterializationPlanRecord,
+    ScheduleMaterializationRun, ScheduleMaterializationSourceSnapshot,
+    ScheduleMaterializationWriteError,
+};
 
 const SQLITE_OK: c_int = 0;
 const SQLITE_ROW: c_int = 100;
@@ -1194,6 +1201,7 @@ impl StationStore {
         store.initialize_schedule_automation_schema()?;
         store.initialize_catalog_authority_schema()?;
         store.initialize_actual_airing_authority_schema()?;
+        store.initialize_schedule_materialization_schema()?;
         store.initialize_scheduled_recording_schema()?;
         store.migrate_caption_egress_history_sink_foreign_keys()?;
         store.migrate_cg_feed_cache_schema()?;

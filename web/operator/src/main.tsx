@@ -11,6 +11,8 @@ import { AutomationPanel } from "./automation";
 import { MetadataPanel } from "./metadata";
 import { CatalogAssetEditor } from "./catalog-editor";
 import { ScheduledRecordingsPanel } from "./recordings";
+import { ScheduleMaterializationCard } from "./schedule-materialization";
+import { channelSchedulePath } from "./schedule-materialization-contract";
 import {
   HeadendProfile,
   HeadendReadiness,
@@ -698,12 +700,133 @@ function Channels({ channels, outputProfiles, onRefresh }: { channels: Channel[]
 
 function Schedule({ dashboard, channels }: { dashboard: Dashboard | null; channels: Channel[] }) {
   const readyAssets = dashboard?.by_asset.filter((asset) => asset.readiness_state === "ready") ?? [];
-  const [channelId, setChannelId] = useState(channels[0]?.channel_id ?? ""); const [assetId, setAssetId] = useState(readyAssets[0]?.asset_id ?? ""); const [title, setTitle] = useState(""); const [start, setStart] = useState(""); const [duration, setDuration] = useState("60"); const [plan, setPlan] = useState<CommitPlan | null>(null); const [item, setItem] = useState<ScheduleItem | null>(null); const [report, setReport] = useState<CommitReport | null>(null); const [busy, setBusy] = useState(false); const [error, setError] = useState<string | null>(null);
-  useEffect(() => { if (!channelId && channels[0]) setChannelId(channels[0].channel_id); }, [channelId, channels]);
-  useEffect(() => { if (!assetId && readyAssets[0]) setAssetId(readyAssets[0].asset_id); }, [assetId, readyAssets]);
-  async function prepare(event: FormEvent) { event.preventDefault(); setBusy(true); setError(null); setReport(null); try { const scheduleItem: ScheduleItem = { item_id: crypto.randomUUID(), channel_id: channelId, asset_id: assetId, title: title.trim(), starts_at_unix_ms: new Date(start).getTime(), duration_ms: Math.round(Number(duration) * 1000), state: "draft" }; await request<ScheduleItem>("/api/v1/schedule/items", { method: "PUT", body: JSON.stringify(scheduleItem) }); const nextPlan = await request<CommitPlan>("/api/v1/schedule/prepare", { method: "POST", body: JSON.stringify({ plan_id: `plan-${crypto.randomUUID()}`, schedule_item_id: scheduleItem.item_id }) }); setItem(scheduleItem); setPlan(nextPlan); } catch (problem) { setError(problem instanceof Error ? problem.message : "The schedule could not be prepared."); } finally { setBusy(false); } }
-  async function approve() { if (!plan || !item) return; setBusy(true); setError(null); try { const nextReport = await request<CommitReport>("/api/v1/schedule/commit", { method: "POST", body: JSON.stringify({ report_id: `report-${crypto.randomUUID()}`, plan_id: plan.plan_id, schedule_item_id: item.item_id, operator_notes: "Approved in TownLight Station operator console." }) }); setReport(nextReport); const reportId = nextReport.report_id; const deadline = Date.now() + Math.max(30_000, item.starts_at_unix_ms - Date.now() + item.duration_ms + 10_000); const poll = async () => { const current = await request<CommitReport>(`/api/v1/schedule/commits/${reportId}`); setReport(current); if (!["completed", "error", "cancelled"].includes(current.dispatch_status) && Date.now() < deadline) window.setTimeout(() => void poll(), 500); }; void poll(); } catch (problem) { setError(problem instanceof Error ? problem.message : "Approval could not be committed."); } finally { setBusy(false); } }
-  return <><header className="page-header"><div><p className="eyebrow">Commit to air</p><h1>Schedule a program</h1><p>Every approval reruns readiness and conflict checks under the station write lock.</p></div></header>{(!channels.length || !readyAssets.length) ? <section className="panel"><Empty title="Schedule prerequisites are missing" detail={!channels.length ? "Configure a channel before scheduling." : "Import and verify at least one air-ready asset."} action={!channels.length ? "Channel required" : "Ready media required"} onAction={() => undefined} /></section> : <section className="split-grid schedule-layout"><article className="panel sticky-form"><p className="eyebrow">Program details</p><h2>Create draft</h2><form onSubmit={prepare}><label>Channel<select required value={channelId} onChange={(event) => setChannelId(event.target.value)}>{channels.map((channel) => <option key={channel.channel_id} value={channel.channel_id}>{channel.display_name}</option>)}</select></label><label>Air-ready asset<select required value={assetId} onChange={(event) => setAssetId(event.target.value)}>{readyAssets.map((asset) => <option key={asset.asset_id} value={asset.asset_id}>{asset.media_path.split(/[\\/]/).pop()} · {formatDuration(asset.duration_ms)}</option>)}</select></label><label>Program title<input required value={title} onChange={(event) => setTitle(event.target.value)} placeholder="City Council Meeting" /></label><label>Starts at<input required type="datetime-local" value={start} onChange={(event) => setStart(event.target.value)} /></label><label>Air duration (seconds)<input required type="number" min="1" value={duration} onChange={(event) => setDuration(event.target.value)} /></label>{error && <div className="error-box">{error}</div>}<button className="primary wide" disabled={busy}>{busy ? "Checking…" : "Prepare commit"}</button></form></article><article className="panel"><p className="eyebrow">Approval gate</p><h2>Commit preview</h2>{!plan || !item ? <Empty title="No draft prepared" detail="Enter the program details to run conflict, gap, duration, and media-readiness checks." action="Complete the form" onAction={() => document.querySelector<HTMLInputElement>(".schedule-layout input")?.focus()} /> : <div className="commit-preview"><div className={`gate-banner ${plan.dry_run_passed ? "pass" : "fail"}`}><span>{plan.dry_run_passed ? "✓" : "!"}</span><div><strong>{plan.dry_run_passed ? "Safe to commit" : "Commit blocked"}</strong><p>{plan.dry_run_passed ? "No conflicts or missing media were found." : "Resolve every blocker, then prepare again."}</p></div></div><dl><div><dt>Program</dt><dd>{item.title}</dd></div><div><dt>Starts</dt><dd>{formatTime(item.starts_at_unix_ms)}</dd></div><div><dt>Duration</dt><dd>{formatDuration(item.duration_ms)}</dd></div><div><dt>Conflicts</dt><dd>{plan.conflicts.length}</dd></div><div><dt>Missing media</dt><dd>{plan.missing_media_detail ? 1 : 0}</dd></div></dl>{plan.missing_media_detail && <div className="error-box">{plan.missing_media_detail}</div>}<button className="primary wide" disabled={!plan.dry_run_passed || busy || Boolean(report)} onClick={() => void approve()}>{report ? "Approval recorded" : "Approve & commit to air"}</button>{report && <div className="dispatch"><span className="live-dot" /><div><strong>Dispatch {report.dispatch_status.replaceAll("_", " ")}</strong><p>The channel worker advances this record only after durable acknowledgements.</p></div><StatusPill status={report.dispatch_status} /></div>}</div>}</article></section>}</>;
+  const [channelId, setChannelId] = useState(channels[0]?.channel_id ?? "");
+  const [assetId, setAssetId] = useState(readyAssets[0]?.asset_id ?? "");
+  const [title, setTitle] = useState("");
+  const [start, setStart] = useState("");
+  const [duration, setDuration] = useState("60");
+  const [plan, setPlan] = useState<CommitPlan | null>(null);
+  const [item, setItem] = useState<ScheduleItem | null>(null);
+  const [report, setReport] = useState<CommitReport | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [scheduleItems, setScheduleItems] = useState<ScheduleItem[]>([]);
+  const [scheduleLoading, setScheduleLoading] = useState(false);
+  const [scheduleError, setScheduleError] = useState<string | null>(null);
+  const scheduleRequest = useRef(0);
+
+  const loadSchedule = useCallback(async (selectedChannelId: string) => {
+    const requestId = ++scheduleRequest.current;
+    if (!selectedChannelId) {
+      setScheduleItems([]);
+      setScheduleError(null);
+      setScheduleLoading(false);
+      return;
+    }
+    setScheduleLoading(true);
+    try {
+      const next = await request<ScheduleItem[]>(channelSchedulePath(selectedChannelId));
+      if (requestId !== scheduleRequest.current) return;
+      setScheduleItems(
+        next
+          .filter((scheduleItem) => scheduleItem.channel_id === selectedChannelId)
+          .sort((left, right) => left.starts_at_unix_ms - right.starts_at_unix_ms),
+      );
+      setScheduleError(null);
+    } catch (problem) {
+      if (requestId === scheduleRequest.current) {
+        setScheduleItems([]);
+        const message = problem instanceof Error ? problem.message.trim() : "";
+        setScheduleError((message || "The channel schedule could not be read.").slice(0, 500));
+      }
+    } finally {
+      if (requestId === scheduleRequest.current) setScheduleLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!channels.some((channel) => channel.channel_id === channelId)) {
+      setChannelId(channels[0]?.channel_id ?? "");
+    }
+  }, [channelId, channels]);
+  useEffect(() => {
+    if (!assetId && readyAssets[0]) setAssetId(readyAssets[0].asset_id);
+  }, [assetId, readyAssets]);
+  useEffect(() => {
+    setPlan(null);
+    setItem(null);
+    setReport(null);
+    setError(null);
+    void loadSchedule(channelId);
+  }, [channelId, loadSchedule]);
+
+  async function prepare(event: FormEvent) {
+    event.preventDefault();
+    setBusy(true);
+    setError(null);
+    setReport(null);
+    try {
+      const scheduleItem: ScheduleItem = {
+        item_id: crypto.randomUUID(),
+        channel_id: channelId,
+        asset_id: assetId,
+        title: title.trim(),
+        starts_at_unix_ms: new Date(start).getTime(),
+        duration_ms: Math.round(Number(duration) * 1000),
+        state: "draft",
+      };
+      await request<ScheduleItem>("/api/v1/schedule/items", { method: "PUT", body: JSON.stringify(scheduleItem) });
+      const nextPlan = await request<CommitPlan>("/api/v1/schedule/prepare", { method: "POST", body: JSON.stringify({ plan_id: `plan-${crypto.randomUUID()}`, schedule_item_id: scheduleItem.item_id }) });
+      setItem(scheduleItem);
+      setPlan(nextPlan);
+      await loadSchedule(channelId);
+    } catch (problem) {
+      setError(problem instanceof Error ? problem.message : "The schedule could not be prepared.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function approve() {
+    if (!plan || !item) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const nextReport = await request<CommitReport>("/api/v1/schedule/commit", { method: "POST", body: JSON.stringify({ report_id: `report-${crypto.randomUUID()}`, plan_id: plan.plan_id, schedule_item_id: item.item_id, operator_notes: "Approved in TownLight Station operator console." }) });
+      setReport(nextReport);
+      await loadSchedule(channelId);
+      const reportId = nextReport.report_id;
+      const deadline = Date.now() + Math.max(30_000, item.starts_at_unix_ms - Date.now() + item.duration_ms + 10_000);
+      const poll = async () => {
+        const current = await request<CommitReport>(`/api/v1/schedule/commits/${reportId}`);
+        setReport(current);
+        if (!["completed", "error", "cancelled"].includes(current.dispatch_status) && Date.now() < deadline) window.setTimeout(() => void poll(), 500);
+      };
+      void poll();
+    } catch (problem) {
+      setError(problem instanceof Error ? problem.message : "Approval could not be committed.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const selectedChannel = channels.find((channel) => channel.channel_id === channelId);
+  const visibleSchedule = scheduleItems.slice(0, 24);
+
+  return <>
+    <header className="page-header"><div><p className="eyebrow">Commit to air</p><h1>Schedule a program</h1><p>Generate recurring Drafts, then review and commit exact items through the station write lock.</p></div></header>
+    {!channels.length ? <section className="panel"><Empty title="Schedule prerequisites are missing" detail="Configure a channel before scheduling." action="Channel required" onAction={() => undefined} /></section> : <>
+      <section className="panel schedule-channel-scope"><label>Schedule channel<select required value={channelId} onChange={(event) => setChannelId(event.target.value)}>{channels.map((channel) => <option key={channel.channel_id} value={channel.channel_id}>{channel.display_name}</option>)}</select><small>Recurring generation and the schedule list below are scoped to this output channel.</small></label></section>
+      <ScheduleMaterializationCard channelId={channelId} channelName={selectedChannel?.display_name ?? channelId} onApplied={() => loadSchedule(channelId)} />
+      <section className="panel channel-schedule-list" aria-labelledby="channel-schedule-title">
+        <div className="panel-head"><div><p className="eyebrow">Current channel authority</p><h2 id="channel-schedule-title">Schedule items</h2></div><div className="button-row"><span className="count">{scheduleItems.length}</span><button type="button" className="text-button" disabled={scheduleLoading} onClick={() => void loadSchedule(channelId)}>{scheduleLoading ? "Refreshing…" : "Refresh schedule"}</button></div></div>
+        {scheduleError && <div className="error-box" role="alert">{scheduleError}</div>}
+        {scheduleLoading && !scheduleItems.length ? <div className="schedule-list-state" role="status">Reading the channel schedule…</div> : !scheduleItems.length ? <div className="schedule-list-state"><strong>No schedule items</strong><span>Generated and manual Drafts for this channel will appear here.</span></div> : <div className="schedule-item-list">{visibleSchedule.map((scheduleItem) => <article key={scheduleItem.item_id}><div><strong>{scheduleItem.title}</strong><span>{formatTime(scheduleItem.starts_at_unix_ms)} · {formatDuration(scheduleItem.duration_ms)}</span><code>{scheduleItem.item_id}</code></div><StatusPill status={scheduleItem.state} /></article>)}</div>}
+        {scheduleItems.length > visibleSchedule.length && <small className="muted">Showing the first {visibleSchedule.length} of {scheduleItems.length} items in UTC start order.</small>}
+      </section>
+      {!readyAssets.length ? <section className="panel"><Empty title="Manual draft prerequisites are missing" detail="Import and verify at least one air-ready asset to create a manual Draft. Recurring generation remains available above and records no-match outcomes when appropriate." action="Ready media required" onAction={() => undefined} /></section> : <section className="split-grid schedule-layout"><article className="panel sticky-form"><p className="eyebrow">Program details</p><h2>Create manual draft</h2><form onSubmit={prepare}><label>Air-ready asset<select required value={assetId} onChange={(event) => setAssetId(event.target.value)}>{readyAssets.map((asset) => <option key={asset.asset_id} value={asset.asset_id}>{asset.media_path.split(/[\\/]/).pop()} · {formatDuration(asset.duration_ms)}</option>)}</select></label><label>Program title<input required value={title} onChange={(event) => setTitle(event.target.value)} placeholder="City Council Meeting" /></label><label>Starts at<input required type="datetime-local" value={start} onChange={(event) => setStart(event.target.value)} /></label><label>Air duration (seconds)<input required type="number" min="1" value={duration} onChange={(event) => setDuration(event.target.value)} /></label>{error && <div className="error-box" role="alert">{error}</div>}<button className="primary wide" disabled={busy}>{busy ? "Checking…" : "Prepare commit"}</button></form></article><article className="panel"><p className="eyebrow">Approval gate</p><h2>Commit preview</h2>{!plan || !item ? <Empty title="No draft prepared" detail="Enter the program details to run conflict, gap, duration, and media-readiness checks." action="Complete the form" onAction={() => document.querySelector<HTMLInputElement>(".schedule-layout input")?.focus()} /> : <div className="commit-preview"><div className={`gate-banner ${plan.dry_run_passed ? "pass" : "fail"}`}><span>{plan.dry_run_passed ? "✓" : "!"}</span><div><strong>{plan.dry_run_passed ? "Safe to commit" : "Commit blocked"}</strong><p>{plan.dry_run_passed ? "No conflicts or missing media were found." : "Resolve every blocker, then prepare again."}</p></div></div><dl><div><dt>Program</dt><dd>{item.title}</dd></div><div><dt>Starts</dt><dd>{formatTime(item.starts_at_unix_ms)}</dd></div><div><dt>Duration</dt><dd>{formatDuration(item.duration_ms)}</dd></div><div><dt>Conflicts</dt><dd>{plan.conflicts.length}</dd></div><div><dt>Missing media</dt><dd>{plan.missing_media_detail ? 1 : 0}</dd></div></dl>{plan.missing_media_detail && <div className="error-box" role="alert">{plan.missing_media_detail}</div>}<button className="primary wide" disabled={!plan.dry_run_passed || busy || Boolean(report)} onClick={() => void approve()}>{report ? "Approval recorded" : "Approve & commit to air"}</button>{report && <div className="dispatch"><span className="live-dot" /><div><strong>Dispatch {report.dispatch_status.replaceAll("_", " ")}</strong><p>The channel worker advances this record only after durable acknowledgements.</p></div><StatusPill status={report.dispatch_status} /></div>}</div>}</article></section>}
+    </>}
+  </>;
 }
 
 function AlertRuleEditor({ rule, destinations, outputChannels, onRefresh }: { rule: AlertRule; destinations: AlertChannel[]; outputChannels: Channel[]; onRefresh: () => Promise<void> }) {

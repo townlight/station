@@ -9,8 +9,8 @@
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
 use station_schedule_automation::{
-    MAX_EVIDENCE_RECEIPT_LIFETIME_MS, SourceEvidenceKind, SourceEvidenceReceipt,
-    SourceEvidenceVerifier,
+    MAX_EVIDENCE_RECEIPT_LIFETIME_MS, SourceEvidenceAuthority, SourceEvidenceKind,
+    SourceEvidenceReceipt, SourceEvidenceVerifier,
 };
 use std::fmt::{Display, Formatter};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
@@ -316,6 +316,27 @@ impl SourceEvidenceVerifier for StationSourceEvidenceAuthority {
     }
 }
 
+impl SourceEvidenceAuthority for StationSourceEvidenceAuthority {
+    fn observed_at_utc_ms(&self) -> Result<i64, String> {
+        StationSourceEvidenceAuthority::observed_at_utc_ms(self).map_err(|error| error.to_string())
+    }
+
+    fn issue_source_evidence(
+        &self,
+        kind: SourceEvidenceKind,
+        scope_sha256: &str,
+        payload_sha256: &str,
+        lifetime_ms: i64,
+    ) -> Result<SourceEvidenceReceipt, String> {
+        let scope =
+            EvidenceScopeSha256::try_from(scope_sha256).map_err(|error| error.to_string())?;
+        let payload = CanonicalProjectionSha256::try_from(payload_sha256)
+            .map_err(|error| error.to_string())?;
+        self.issue(kind, &scope, &payload, lifetime_ms)
+            .map_err(|error| error.to_string())
+    }
+}
+
 fn encode_attestation(
     mac: &mut HmacSha256,
     kind: SourceEvidenceKind,
@@ -568,6 +589,78 @@ mod tests {
                         lifetime_ms,
                     )
                     .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn authority_trait_adapter_owns_time_and_issues_verifiable_evidence() {
+        let authority = deterministic_authority(3);
+        let scope = sha('a');
+        let payload = sha('b');
+
+        assert_eq!(
+            SourceEvidenceAuthority::observed_at_utc_ms(&authority).unwrap(),
+            NOW
+        );
+        let receipt = SourceEvidenceAuthority::issue_source_evidence(
+            &authority,
+            SourceEvidenceKind::CandidateProjection,
+            &scope,
+            &payload,
+            60_000,
+        )
+        .unwrap();
+        assert_eq!(receipt.issued_at_utc_ms, NOW);
+        assert_eq!(receipt.expires_at_utc_ms, NOW + 60_000);
+        assert_eq!(receipt.scope_sha256, scope);
+
+        authority.set_test_now_utc_ms(NOW + 1);
+        assert_eq!(
+            SourceEvidenceAuthority::observed_at_utc_ms(&authority).unwrap(),
+            NOW + 1
+        );
+        SourceEvidenceVerifier::verify(
+            &authority,
+            SourceEvidenceKind::CandidateProjection,
+            &receipt,
+            &scope,
+            &payload,
+            i64::MIN,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn authority_trait_adapter_rejects_malformed_digest_strings() {
+        let authority = deterministic_authority(4);
+        let valid_scope = sha('a');
+        let valid_payload = sha('b');
+
+        for malformed_scope in ["short".to_string(), sha('A'), sha('g')] {
+            assert_eq!(
+                SourceEvidenceAuthority::issue_source_evidence(
+                    &authority,
+                    SourceEvidenceKind::CandidateProjection,
+                    &malformed_scope,
+                    &valid_payload,
+                    60_000,
+                )
+                .unwrap_err(),
+                "evidence scope is not a lowercase SHA-256"
+            );
+        }
+        for malformed_payload in ["short".to_string(), sha('B'), sha('g')] {
+            assert_eq!(
+                SourceEvidenceAuthority::issue_source_evidence(
+                    &authority,
+                    SourceEvidenceKind::PriorAirings,
+                    &valid_scope,
+                    &malformed_payload,
+                    60_000,
+                )
+                .unwrap_err(),
+                "canonical projection is not a lowercase SHA-256"
             );
         }
     }

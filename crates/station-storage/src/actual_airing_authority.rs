@@ -174,6 +174,8 @@ impl StationStore {
                ON actual_airings(channel_id, aired_at_utc_ms, asset_sha256, airing_id);\
              CREATE INDEX IF NOT EXISTS actual_airings_worker_ack \
                ON actual_airings(worker_ack_id);\
+             CREATE INDEX IF NOT EXISTS actual_airings_schedule_item \
+               ON actual_airings(schedule_item_id, schedule_item_revision);\
              CREATE UNIQUE INDEX IF NOT EXISTS actual_airings_worker_sequence \
                ON actual_airings(channel_id, worker_boot_id, worker_sequence);\
              CREATE TRIGGER IF NOT EXISTS actual_airings_capacity \

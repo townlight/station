@@ -19,3 +19,7 @@ station-readiness.workspace = true
 station-runtime.workspace = true
 station-schedule.workspace = true
 station-storage.workspace = true
+
+[dev-dependencies]
+station-catalog.workspace = true
+station-schedule-automation.workspace = true

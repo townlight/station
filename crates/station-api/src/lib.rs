@@ -86,11 +86,15 @@ use station_storage::{
     CgSnapshotReadError, CgWriteError, ChannelCaptionMode, ChannelCaptionPolicy,
     ChannelCaptionPolicyAuditEvent, ChannelFallbackSlate, ChannelFallbackSlateAuditEvent,
     ChannelWriteError, CommissioningSupportBundleReceipt, CommitWriteError,
-    CustomMetadataSchemaWriteError, ExternalReceiverAcceptanceReceipt, FallbackSlateWriteError,
-    HeadendProfileWriteError, OutputLoudnessProofJob, OutputLoudnessProofJobRecord,
-    OutputLoudnessProofJobState, ProfileWriteError, ReceiverAcceptanceOutcome,
-    ReceiverEvidenceMethod, ReferenceStationTierWrite, ReferenceStationTierWriteError,
-    ScheduleAutomationWriteError, ScheduleItemWrite, StationStore, StoredSinkLoudnessProof,
+    CustomMetadataSchemaWriteError, ExistingScheduleSnapshot, ExternalReceiverAcceptanceReceipt,
+    FallbackSlateWriteError, HeadendProfileWriteError, OutputLoudnessProofJob,
+    OutputLoudnessProofJobRecord, OutputLoudnessProofJobState, ProfileWriteError,
+    ReceiverAcceptanceOutcome, ReceiverEvidenceMethod, ReferenceStationTierWrite,
+    ReferenceStationTierWriteError, ScheduleAutomationWriteError, ScheduleItemWrite,
+    ScheduleMaterializationApplyOutcome, ScheduleMaterializationOutcome,
+    ScheduleMaterializationOutcomeRecord, ScheduleMaterializationPlanRecord,
+    ScheduleMaterializationRun, ScheduleMaterializationWriteError, StationStore,
+    StoredSinkLoudnessProof,
 };
 use station_update::UpdateCheckTrigger;
 use station_update_coordinator::CoordinatorError;
@@ -784,6 +788,146 @@ struct RecurringRuleHistoryResponse {
     occurred_at_unix_ms: i64,
 }
 
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum ScheduleMaterializationDispositionResponse {
+    Applied,
+    AlreadyApplied,
+}
+
+#[derive(Debug, Serialize)]
+struct MaterializationWindowResponse {
+    starts_at_utc_ms: i64,
+    ends_at_utc_ms: i64,
+}
+
+#[derive(Debug, Serialize)]
+struct ExistingScheduleSnapshotResponse<'a> {
+    schedule_item_id: &'a str,
+    revision: u64,
+    channel_id: &'a str,
+    asset_sha256: &'a str,
+    title: &'a str,
+    starts_at_utc_ms: i64,
+    duration_ms: u64,
+    state: &'a str,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum ScheduleMaterializationOutcomeResponse<'a> {
+    Proposed {
+        occurrence_id: &'a str,
+        schedule_item_id: &'a str,
+        asset_sha256: &'a str,
+        asset_title: &'a str,
+        starts_at_utc_ms: i64,
+        ends_at_utc_ms: i64,
+    },
+    NoMatch {
+        starts_at_utc_ms: i64,
+    },
+    Blocked {
+        starts_at_utc_ms: i64,
+    },
+    SuppressedByPrecedence {
+        starts_at_utc_ms: i64,
+        winner_rule_id: &'a str,
+        candidate_priority: i16,
+        winner_priority: i16,
+        reason: &'a str,
+    },
+    ExistingAutomationDraftUnchanged {
+        occurrence_id: &'a str,
+        schedule_item_id: &'a str,
+        existing: ExistingScheduleSnapshotResponse<'a>,
+    },
+    ExistingAutomationDraftChanged {
+        occurrence_id: &'a str,
+        schedule_item_id: &'a str,
+        existing: ExistingScheduleSnapshotResponse<'a>,
+    },
+    ExistingCommitted {
+        occurrence_id: &'a str,
+        schedule_item_id: &'a str,
+        existing: ExistingScheduleSnapshotResponse<'a>,
+    },
+    CancelledOccurrence {
+        occurrence_id: &'a str,
+        schedule_item_id: &'a str,
+        existing: ExistingScheduleSnapshotResponse<'a>,
+    },
+    AlreadyAired {
+        occurrence_id: &'a str,
+        schedule_item_id: &'a str,
+        existing: ExistingScheduleSnapshotResponse<'a>,
+    },
+    SuppressedByExistingSchedule {
+        occurrence_id: &'a str,
+        schedule_item_id: &'a str,
+        existing: ExistingScheduleSnapshotResponse<'a>,
+        existing_owner: &'a str,
+    },
+}
+
+#[derive(Debug, Serialize)]
+struct ScheduleMaterializationPlanResponse<'a> {
+    ordinal: u32,
+    rule_id: &'a str,
+    rule_revision: u64,
+    channel_id: &'a str,
+    saved_search_id: &'a str,
+    saved_search_revision: u64,
+    block_id: &'a str,
+    block_revision: u64,
+    window: MaterializationWindowResponse,
+    source_authority_sha256: &'a str,
+    candidate_projection_sha256: &'a str,
+    candidate_receipt_sha256: &'a str,
+    prior_airings_sha256: &'a str,
+    prior_receipt_sha256: &'a str,
+    prior_airings_coverage: MaterializationWindowResponse,
+    scope_sha256: &'a str,
+    source_input_sha256: &'a str,
+}
+
+#[derive(Debug, Serialize)]
+struct ScheduleMaterializationOutcomeRecordResponse<'a> {
+    ordinal: u32,
+    rule_id: &'a str,
+    rule_revision: u64,
+    channel_id: &'a str,
+    saved_search_id: &'a str,
+    saved_search_revision: u64,
+    block_id: &'a str,
+    block_revision: u64,
+    plan_window: MaterializationWindowResponse,
+    materialization_id: Option<&'a str>,
+    source_authority_sha256: &'a str,
+    candidate_projection_sha256: &'a str,
+    prior_airings_sha256: &'a str,
+    prior_airings_coverage: MaterializationWindowResponse,
+    scope_sha256: &'a str,
+    source_input_sha256: &'a str,
+    compiled_outcome: ScheduleMaterializationOutcomeResponse<'a>,
+    outcome: ScheduleMaterializationOutcomeResponse<'a>,
+}
+
+#[derive(Debug, Serialize)]
+struct ScheduleMaterializationResponse<'a> {
+    disposition: ScheduleMaterializationDispositionResponse,
+    run_id: &'a str,
+    request_sha256: &'a str,
+    result_sha256: &'a str,
+    batch_sha256: &'a str,
+    window: MaterializationWindowResponse,
+    observed_at_utc_ms: i64,
+    changed_by: &'a str,
+    occurred_at_unix_ms: i64,
+    plans: Vec<ScheduleMaterializationPlanResponse<'a>>,
+    outcomes: Vec<ScheduleMaterializationOutcomeRecordResponse<'a>>,
+}
+
 /// The browser proposes only mutable editorial text and CAS intent. Asset
 /// identity, revision, state, first-publication time, actor, and event time are
 /// derived by the server.
@@ -1045,6 +1189,7 @@ struct LiveAuthorityRead {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct PrepareScheduleCommit {
     plan_id: String,
     schedule_item_id: String,
@@ -1369,13 +1514,6 @@ pub struct Api {
     station_box_probe_override: Option<StationBoxProbeInput>,
     station_box_cache: Arc<Mutex<Option<(Instant, StationBoxProfile)>>>,
     orchestration_health: Arc<OrchestrationHealth>,
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "the server-owned S19 materializer is wired in the next integration slice"
-        )
-    )]
     source_evidence_authority: Arc<StationSourceEvidenceAuthority>,
 }
 
@@ -1672,15 +1810,20 @@ impl Api {
             ("GET", path) if recurring_rule_list_path(path).is_some() => {
                 self.list_recurring_rules(path, actor)
             }
-            ("GET" | "PUT", path) if path.starts_with("/api/v1/scheduling/") => error_response(
-                400,
-                "invalid_path",
-                "The scheduling automation path or bounded query is invalid.",
-            ),
+            ("POST", path) if schedule_materialization_path(path).is_some() => {
+                self.materialize_scheduled_channel(path, body, actor)
+            }
+            ("GET" | "PUT" | "POST", path) if path.starts_with("/api/v1/scheduling/") => {
+                error_response(
+                    400,
+                    "invalid_path",
+                    "The scheduling automation path or bounded query is invalid.",
+                )
+            }
             (_, path) if path.starts_with("/api/v1/scheduling/") => error_response(
                 405,
                 "method_not_allowed",
-                "Scheduling automation supports only its documented GET and PUT operations.",
+                "Scheduling automation supports only its documented GET, PUT, and POST operations.",
             ),
             ("GET", path) if catalog_asset_history_path(path).is_some() => {
                 self.list_catalog_asset_history(path, actor)
@@ -2890,6 +3033,60 @@ impl Api {
             .list_channels()?
             .iter()
             .any(|channel| channel.channel_id == channel_id))
+    }
+
+    fn materialize_scheduled_channel(
+        &self,
+        path: &str,
+        body: Option<&[u8]>,
+        actor: Option<&OperatorAccount>,
+    ) -> ApiResponse {
+        let Some(channel_id) = schedule_materialization_path(path) else {
+            return scheduling_invalid_path();
+        };
+        let Some(actor) = scheduling_writer(actor) else {
+            return scheduling_writer_required();
+        };
+        if body.is_some_and(|body| !body.is_empty()) {
+            return error_response(
+                400,
+                "unexpected_body",
+                "Schedule materialization does not accept a request body.",
+            );
+        }
+        match self.scheduling_channel_exists(channel_id) {
+            Ok(true) => {}
+            Ok(false) => return scheduling_not_found("channel"),
+            Err(_) => {
+                return error_response(
+                    500,
+                    "storage_error",
+                    "Schedule materialization could not validate the channel authority.",
+                );
+            }
+        }
+
+        match self.storage.materialize_scheduled_channel(
+            channel_id,
+            actor.account_id().as_str(),
+            self.source_evidence_authority.as_ref(),
+        ) {
+            Ok(ScheduleMaterializationApplyOutcome::Applied(run)) => {
+                schedule_materialization_success_response(
+                    201,
+                    ScheduleMaterializationDispositionResponse::Applied,
+                    &run,
+                )
+            }
+            Ok(ScheduleMaterializationApplyOutcome::AlreadyApplied(run)) => {
+                schedule_materialization_success_response(
+                    200,
+                    ScheduleMaterializationDispositionResponse::AlreadyApplied,
+                    &run,
+                )
+            }
+            Err(error) => schedule_materialization_write_error_response(error),
+        }
     }
 
     fn list_catalog_assets(&self, path: &str, actor: Option<&OperatorAccount>) -> ApiResponse {
@@ -8667,6 +8864,245 @@ fn scheduling_write_error_response(
     }
 }
 
+fn schedule_materialization_success_response(
+    status: u16,
+    disposition: ScheduleMaterializationDispositionResponse,
+    run: &ScheduleMaterializationRun,
+) -> ApiResponse {
+    let response = ScheduleMaterializationResponse {
+        disposition,
+        run_id: &run.run_id,
+        request_sha256: &run.request_sha256,
+        result_sha256: &run.result_sha256,
+        batch_sha256: &run.batch_sha256,
+        window: materialization_window_response(&run.window),
+        observed_at_utc_ms: run.observed_at_utc_ms,
+        changed_by: &run.changed_by,
+        occurred_at_unix_ms: run.occurred_at_unix_ms,
+        plans: run
+            .plans
+            .iter()
+            .map(schedule_materialization_plan_response)
+            .collect(),
+        outcomes: run
+            .outcomes
+            .iter()
+            .map(schedule_materialization_outcome_record_response)
+            .collect(),
+    };
+    json_response(
+        status,
+        serde_json::to_vec(&response)
+            .expect("serializing a schedule materialization response cannot fail"),
+    )
+}
+
+fn materialization_window_response(
+    window: &MaterializationWindow,
+) -> MaterializationWindowResponse {
+    MaterializationWindowResponse {
+        starts_at_utc_ms: window.starts_at_utc_ms,
+        ends_at_utc_ms: window.ends_at_utc_ms,
+    }
+}
+
+fn existing_schedule_snapshot_response(
+    existing: &ExistingScheduleSnapshot,
+) -> ExistingScheduleSnapshotResponse<'_> {
+    ExistingScheduleSnapshotResponse {
+        schedule_item_id: &existing.schedule_item_id,
+        revision: existing.revision,
+        channel_id: &existing.channel_id,
+        asset_sha256: &existing.asset_sha256,
+        title: &existing.title,
+        starts_at_utc_ms: existing.starts_at_utc_ms,
+        duration_ms: existing.duration_ms,
+        state: &existing.state,
+    }
+}
+
+fn schedule_materialization_outcome_response(
+    outcome: &ScheduleMaterializationOutcome,
+) -> ScheduleMaterializationOutcomeResponse<'_> {
+    match outcome {
+        ScheduleMaterializationOutcome::Proposed {
+            occurrence_id,
+            schedule_item_id,
+            asset_sha256,
+            asset_title,
+            starts_at_utc_ms,
+            ends_at_utc_ms,
+        } => ScheduleMaterializationOutcomeResponse::Proposed {
+            occurrence_id,
+            schedule_item_id,
+            asset_sha256,
+            asset_title,
+            starts_at_utc_ms: *starts_at_utc_ms,
+            ends_at_utc_ms: *ends_at_utc_ms,
+        },
+        ScheduleMaterializationOutcome::NoMatch { starts_at_utc_ms } => {
+            ScheduleMaterializationOutcomeResponse::NoMatch {
+                starts_at_utc_ms: *starts_at_utc_ms,
+            }
+        }
+        ScheduleMaterializationOutcome::Blocked { starts_at_utc_ms } => {
+            ScheduleMaterializationOutcomeResponse::Blocked {
+                starts_at_utc_ms: *starts_at_utc_ms,
+            }
+        }
+        ScheduleMaterializationOutcome::SuppressedByPrecedence {
+            starts_at_utc_ms,
+            winner_rule_id,
+            candidate_priority,
+            winner_priority,
+            reason,
+        } => ScheduleMaterializationOutcomeResponse::SuppressedByPrecedence {
+            starts_at_utc_ms: *starts_at_utc_ms,
+            winner_rule_id,
+            candidate_priority: *candidate_priority,
+            winner_priority: *winner_priority,
+            reason,
+        },
+        ScheduleMaterializationOutcome::ExistingAutomationDraftUnchanged {
+            occurrence_id,
+            schedule_item_id,
+            existing,
+        } => ScheduleMaterializationOutcomeResponse::ExistingAutomationDraftUnchanged {
+            occurrence_id,
+            schedule_item_id,
+            existing: existing_schedule_snapshot_response(existing),
+        },
+        ScheduleMaterializationOutcome::ExistingAutomationDraftChanged {
+            occurrence_id,
+            schedule_item_id,
+            existing,
+        } => ScheduleMaterializationOutcomeResponse::ExistingAutomationDraftChanged {
+            occurrence_id,
+            schedule_item_id,
+            existing: existing_schedule_snapshot_response(existing),
+        },
+        ScheduleMaterializationOutcome::ExistingCommitted {
+            occurrence_id,
+            schedule_item_id,
+            existing,
+        } => ScheduleMaterializationOutcomeResponse::ExistingCommitted {
+            occurrence_id,
+            schedule_item_id,
+            existing: existing_schedule_snapshot_response(existing),
+        },
+        ScheduleMaterializationOutcome::CancelledOccurrence {
+            occurrence_id,
+            schedule_item_id,
+            existing,
+        } => ScheduleMaterializationOutcomeResponse::CancelledOccurrence {
+            occurrence_id,
+            schedule_item_id,
+            existing: existing_schedule_snapshot_response(existing),
+        },
+        ScheduleMaterializationOutcome::AlreadyAired {
+            occurrence_id,
+            schedule_item_id,
+            existing,
+        } => ScheduleMaterializationOutcomeResponse::AlreadyAired {
+            occurrence_id,
+            schedule_item_id,
+            existing: existing_schedule_snapshot_response(existing),
+        },
+        ScheduleMaterializationOutcome::SuppressedByExistingSchedule {
+            occurrence_id,
+            schedule_item_id,
+            existing,
+            existing_owner,
+        } => ScheduleMaterializationOutcomeResponse::SuppressedByExistingSchedule {
+            occurrence_id,
+            schedule_item_id,
+            existing: existing_schedule_snapshot_response(existing),
+            existing_owner,
+        },
+    }
+}
+
+fn schedule_materialization_plan_response(
+    plan: &ScheduleMaterializationPlanRecord,
+) -> ScheduleMaterializationPlanResponse<'_> {
+    ScheduleMaterializationPlanResponse {
+        ordinal: plan.ordinal,
+        rule_id: &plan.rule_id,
+        rule_revision: plan.rule_revision,
+        channel_id: &plan.channel_id,
+        saved_search_id: &plan.saved_search_id,
+        saved_search_revision: plan.saved_search_revision,
+        block_id: &plan.block_id,
+        block_revision: plan.block_revision,
+        window: materialization_window_response(&plan.window),
+        source_authority_sha256: &plan.source_authority_sha256,
+        candidate_projection_sha256: &plan.candidate_projection_sha256,
+        candidate_receipt_sha256: &plan.candidate_receipt_sha256,
+        prior_airings_sha256: &plan.prior_airings_sha256,
+        prior_receipt_sha256: &plan.prior_receipt_sha256,
+        prior_airings_coverage: materialization_window_response(&plan.prior_airings_coverage),
+        scope_sha256: &plan.scope_sha256,
+        source_input_sha256: &plan.source_input_sha256,
+    }
+}
+
+fn schedule_materialization_outcome_record_response(
+    record: &ScheduleMaterializationOutcomeRecord,
+) -> ScheduleMaterializationOutcomeRecordResponse<'_> {
+    ScheduleMaterializationOutcomeRecordResponse {
+        ordinal: record.ordinal,
+        rule_id: &record.rule_id,
+        rule_revision: record.rule_revision,
+        channel_id: &record.channel_id,
+        saved_search_id: &record.saved_search_id,
+        saved_search_revision: record.saved_search_revision,
+        block_id: &record.block_id,
+        block_revision: record.block_revision,
+        plan_window: materialization_window_response(&record.plan_window),
+        materialization_id: record.materialization_id.as_deref(),
+        source_authority_sha256: &record.source_authority_sha256,
+        candidate_projection_sha256: &record.candidate_projection_sha256,
+        prior_airings_sha256: &record.prior_airings_sha256,
+        prior_airings_coverage: materialization_window_response(&record.prior_airings_coverage),
+        scope_sha256: &record.scope_sha256,
+        source_input_sha256: &record.source_input_sha256,
+        compiled_outcome: schedule_materialization_outcome_response(&record.compiled_outcome),
+        outcome: schedule_materialization_outcome_response(&record.outcome),
+    }
+}
+
+fn schedule_materialization_write_error_response(
+    error: ScheduleMaterializationWriteError,
+) -> ApiResponse {
+    match error {
+        ScheduleMaterializationWriteError::StaleAuthority(_) => error_response(
+            409,
+            "materialization_authority_conflict",
+            "Schedule materialization authority is unavailable or stale.",
+        ),
+        ScheduleMaterializationWriteError::Invalid(_) => error_response(
+            422,
+            "materialization_invalid",
+            "Server-derived schedule materialization input is invalid.",
+        ),
+        ScheduleMaterializationWriteError::Capacity => error_response(
+            422,
+            "materialization_capacity_exceeded",
+            "Schedule materialization exceeded a bounded station capacity.",
+        ),
+        ScheduleMaterializationWriteError::Collision(_) => error_response(
+            500,
+            "materialization_integrity_error",
+            "Schedule materialization encountered an integrity contradiction and was rolled back.",
+        ),
+        ScheduleMaterializationWriteError::Storage(_) => error_response(
+            500,
+            "storage_error",
+            "Schedule materialization could not be completed.",
+        ),
+    }
+}
+
 fn is_catalog_reader(actor: Option<&OperatorAccount>) -> bool {
     actor.is_some_and(|account| {
         account.enabled()
@@ -8997,6 +9433,11 @@ fn recurring_rule_history_path(path: &str) -> Option<(&str, usize)> {
 
 fn recurring_rule_list_path(path: &str) -> Option<(&str, usize)> {
     scheduling_channel_list_path(path, "/api/v1/scheduling/recurring-rules?")
+}
+
+fn schedule_materialization_path(path: &str) -> Option<&str> {
+    path_identity(path, "/api/v1/scheduling/channels/", "/materializations")
+        .filter(|identity| is_canonical_api_uuid(identity))
 }
 
 fn scheduling_history_path<'a>(path: &'a str, prefix: &str) -> Option<(&'a str, usize)> {
@@ -11343,6 +11784,21 @@ mod tests {
         test_actor_with_account("dc3c0d56-44c8-4c4f-bd32-b501c56d34f6", "setup.admin", role)
     }
 
+    fn disabled_test_actor(role: station_auth::OperatorRole) -> OperatorAccount {
+        OperatorAccount::new(
+            station_auth::AccountId::try_from("eeeeeeee-ffff-4000-8000-111111111111").unwrap(),
+            station_auth::OperatorUsername::try_from("disabled.operator").unwrap(),
+            station_auth::OperatorDisplayName::try_from("Disabled Operator").unwrap(),
+            station_auth::PasswordPhc::try_from(TEST_PASSWORD_PHC).unwrap(),
+            BTreeSet::from([role]),
+            station_auth::CredentialVersion::new(1).unwrap(),
+            false,
+            1,
+            1,
+        )
+        .unwrap()
+    }
+
     fn put_catalog_test_media(api: &Api, asset_sha256: &str, readiness: AssetReadiness) {
         api.storage
             .put_media_asset(&MediaAsset {
@@ -11420,6 +11876,26 @@ mod tests {
                 .status,
             200
         );
+        for forged_prepare in [
+            br#"{"plan_id":"plan-1","schedule_item_id":"256d5a07-92d3-4718-aec9-05cad42fae7d","actor_id":"forged"}"#.as_slice(),
+            br#"{"plan_id":"plan-1","schedule_item_id":"256d5a07-92d3-4718-aec9-05cad42fae7d","approved_by":"forged"}"#.as_slice(),
+            br#"{"plan_id":"plan-1","schedule_item_id":"256d5a07-92d3-4718-aec9-05cad42fae7d","approved_at_unix_ms":1}"#.as_slice(),
+            br#"{"plan_id":"plan-1","schedule_item_id":"256d5a07-92d3-4718-aec9-05cad42fae7d","occurred_at_unix_ms":1}"#.as_slice(),
+            br#"{"plan_id":"plan-1","schedule_item_id":"256d5a07-92d3-4718-aec9-05cad42fae7d","approval":true}"#.as_slice(),
+            br#"{"plan_id":"plan-1","schedule_item_id":"256d5a07-92d3-4718-aec9-05cad42fae7d","extra":"ignored-before-hardening"}"#.as_slice(),
+        ] {
+            let rejected = api.handle_in_process(
+                "POST",
+                "/api/v1/schedule/prepare",
+                Some(forged_prepare),
+            );
+            assert_eq!(rejected.status, 400);
+            assert_eq!(
+                serde_json::from_slice::<serde_json::Value>(&rejected.body).unwrap()["error"]
+                    ["code"],
+                "invalid_json"
+            );
+        }
         let prepare = api.handle_in_process(
             "POST",
             "/api/v1/schedule/prepare",
@@ -15982,6 +16458,256 @@ mod tests {
     }
 
     #[test]
+    fn schedule_materialization_post_validates_the_server_owned_channel() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let database =
+            std::env::temp_dir().join(format!("townlight-materialization-api-red-{nonce}.db"));
+        let api = Api::open(&database).unwrap();
+        let operator = test_actor(station_auth::OperatorRole::MeetingOperator);
+        let response = api.handle_authenticated(
+            "POST",
+            "/api/v1/scheduling/channels/11111111-2222-4333-8444-555555555555/materializations",
+            None,
+            &operator,
+        );
+
+        assert_eq!(response.status, 404);
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&response.body).unwrap()["error"]["code"],
+            "channel_not_found"
+        );
+
+        drop(api);
+        let _ = std::fs::remove_file(database);
+    }
+
+    #[test]
+    fn schedule_materialization_post_rejects_browser_authority_and_retries_exactly() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let database =
+            std::env::temp_dir().join(format!("townlight-materialization-api-{nonce}.db"));
+        let api = Api::open(&database).unwrap();
+        let operator = test_actor(station_auth::OperatorRole::MeetingOperator);
+        let admin = test_actor_with_account(
+            "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+            "materialization.admin",
+            station_auth::OperatorRole::SetupAdmin,
+        );
+        let support = test_actor(station_auth::OperatorRole::SupportAdmin);
+        let records = test_actor(station_auth::OperatorRole::RecordsClerk);
+        let disabled = disabled_test_actor(station_auth::OperatorRole::SetupAdmin);
+        let (search, block, rule) = source_evidence_authorities();
+        api.storage
+            .put_channel(&ChannelConfiguration {
+                channel_id: rule.channel_id.clone(),
+                display_name: "Materialization proof".into(),
+                output_profile: station_schedule::OutputProfileId::Proof360p30,
+                output_sinks: vec![station_schedule::OutputSinkConfiguration::required_udp(
+                    "22222222-3333-4444-8555-666666666666",
+                    "Proof output",
+                    "127.0.0.1:5500",
+                    -16.0,
+                )],
+                enabled: false,
+            })
+            .unwrap();
+        seed_source_evidence_authorities(&api, &search, &block, &rule);
+        let path = format!(
+            "/api/v1/scheduling/channels/{}/materializations",
+            rule.channel_id
+        );
+
+        assert_eq!(api.handle_in_process("POST", &path, None).status, 403);
+        for rejected in [&support, &records, &disabled] {
+            assert_eq!(
+                api.handle_authenticated("POST", &path, None, rejected)
+                    .status,
+                403
+            );
+        }
+        for malformed in [
+            format!("{path}/"),
+            format!("{path}?window_days=60"),
+            format!("{path}/preview"),
+            "/api/v1/scheduling/channels/not-a-uuid/materializations".into(),
+        ] {
+            let response = api.handle_authenticated("POST", &malformed, None, &operator);
+            assert_eq!(response.status, 400, "{malformed}");
+            assert_eq!(
+                serde_json::from_slice::<serde_json::Value>(&response.body).unwrap()["error"]["code"],
+                "invalid_path"
+            );
+        }
+        assert_eq!(
+            api.handle_authenticated("GET", &path, None, &operator)
+                .status,
+            400
+        );
+        assert_eq!(
+            api.handle_authenticated("DELETE", &path, None, &operator)
+                .status,
+            405
+        );
+
+        for forged_body in [
+            br#"{}"#.as_slice(),
+            b"\n".as_slice(),
+            br#"{"window":{"starts_at_utc_ms":1,"ends_at_utc_ms":2}}"#.as_slice(),
+            br#"{"rule_ids":[],"candidates":[],"prior_airings":[]}"#.as_slice(),
+            br#"{"actor":"forged","approved":true,"occurred_at_unix_ms":1}"#.as_slice(),
+        ] {
+            let response = api.handle_authenticated("POST", &path, Some(forged_body), &operator);
+            assert_eq!(response.status, 400);
+            assert_eq!(
+                serde_json::from_slice::<serde_json::Value>(&response.body).unwrap()["error"]["code"],
+                "unexpected_body"
+            );
+        }
+
+        let applied = api.handle_authenticated("POST", &path, Some(&[]), &operator);
+        assert_eq!(
+            applied.status,
+            201,
+            "{}",
+            String::from_utf8_lossy(&applied.body)
+        );
+        let applied_json: serde_json::Value = serde_json::from_slice(&applied.body).unwrap();
+        assert_eq!(applied_json["disposition"], "applied");
+        assert_eq!(applied_json["changed_by"], operator.account_id().as_str());
+        assert!(applied_json["observed_at_utc_ms"].as_i64().unwrap() > 0);
+        assert!(applied_json["occurred_at_unix_ms"].as_i64().unwrap() > 0);
+        assert_eq!(applied_json["request_sha256"].as_str().unwrap().len(), 64);
+        assert_eq!(applied_json["result_sha256"].as_str().unwrap().len(), 64);
+        assert_eq!(applied_json["batch_sha256"], applied_json["result_sha256"]);
+        assert_eq!(applied_json["plans"].as_array().unwrap().len(), 1);
+        assert_eq!(applied_json["plans"][0]["rule_id"], rule.rule_id);
+        assert_eq!(applied_json["plans"][0]["channel_id"], rule.channel_id);
+        assert_eq!(
+            applied_json["plans"][0]["saved_search_id"],
+            search.search_id
+        );
+        assert_eq!(applied_json["plans"][0]["block_id"], block.block_id);
+        assert!(applied_json["plans"][0]["candidate_receipt_sha256"].is_string());
+        assert!(applied_json["plans"][0]["prior_receipt_sha256"].is_string());
+        let outcomes = applied_json["outcomes"].as_array().unwrap();
+        assert!(!outcomes.is_empty());
+        assert!(outcomes.iter().all(|outcome| {
+            outcome["compiled_outcome"]["kind"] == "no_match"
+                && outcome["outcome"]["kind"] == "no_match"
+                && outcome["rule_id"] == rule.rule_id
+                && outcome["materialization_id"].is_null()
+        }));
+
+        let retry = api.handle_authenticated("POST", &path, None, &operator);
+        let (expected_applied_json, retry) = if retry.status == 201 {
+            // A call straddling the authority-owned minute boundary legitimately
+            // derives a new server window. Retry that exact new observation.
+            (
+                serde_json::from_slice::<serde_json::Value>(&retry.body).unwrap(),
+                api.handle_authenticated("POST", &path, None, &operator),
+            )
+        } else {
+            (applied_json.clone(), retry)
+        };
+        assert_eq!(
+            retry.status,
+            200,
+            "{}",
+            String::from_utf8_lossy(&retry.body)
+        );
+        let retry_json: serde_json::Value = serde_json::from_slice(&retry.body).unwrap();
+        assert_eq!(retry_json["disposition"], "already_applied");
+        assert_eq!(retry_json["run_id"], expected_applied_json["run_id"]);
+        assert_eq!(
+            retry_json["result_sha256"],
+            expected_applied_json["result_sha256"]
+        );
+
+        let admin_retry = api.handle_authenticated("POST", &path, None, &admin);
+        assert!(matches!(admin_retry.status, 200 | 201));
+
+        drop(api);
+        let _ = std::fs::remove_file(database);
+    }
+
+    #[test]
+    fn schedule_materialization_post_maps_stale_and_fail_closed_errors() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let database =
+            std::env::temp_dir().join(format!("townlight-materialization-api-empty-{nonce}.db"));
+        let api = Api::open(&database).unwrap();
+        let operator = test_actor(station_auth::OperatorRole::MeetingOperator);
+        let channel_id = "11111111-2222-4333-8444-555555555555";
+        api.storage
+            .put_channel(&ChannelConfiguration {
+                channel_id: channel_id.into(),
+                display_name: "No automation".into(),
+                output_profile: station_schedule::OutputProfileId::Proof360p30,
+                output_sinks: vec![station_schedule::OutputSinkConfiguration::required_udp(
+                    "22222222-3333-4444-8555-666666666666",
+                    "Proof output",
+                    "127.0.0.1:5500",
+                    -16.0,
+                )],
+                enabled: false,
+            })
+            .unwrap();
+        let path = format!("/api/v1/scheduling/channels/{channel_id}/materializations");
+        let stale = api.handle_authenticated("POST", &path, Some(&[]), &operator);
+        assert_eq!(stale.status, 409);
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&stale.body).unwrap()["error"]["code"],
+            "materialization_authority_conflict"
+        );
+
+        for (error, status, code) in [
+            (
+                ScheduleMaterializationWriteError::StaleAuthority("private stale detail".into()),
+                409,
+                "materialization_authority_conflict",
+            ),
+            (
+                ScheduleMaterializationWriteError::Invalid("private invalid detail".into()),
+                422,
+                "materialization_invalid",
+            ),
+            (
+                ScheduleMaterializationWriteError::Capacity,
+                422,
+                "materialization_capacity_exceeded",
+            ),
+            (
+                ScheduleMaterializationWriteError::Collision("private collision detail".into()),
+                500,
+                "materialization_integrity_error",
+            ),
+            (
+                ScheduleMaterializationWriteError::Storage("private storage detail".into()),
+                500,
+                "storage_error",
+            ),
+        ] {
+            let response = schedule_materialization_write_error_response(error);
+            assert_eq!(response.status, status);
+            let body: serde_json::Value = serde_json::from_slice(&response.body).unwrap();
+            assert_eq!(body["error"]["code"], code);
+            assert!(!String::from_utf8_lossy(&response.body).contains("private"));
+        }
+
+        drop(api);
+        let _ = std::fs::remove_file(database);
+    }
+
+    #[test]
     fn scheduling_automation_api_enforces_owner_roles_cas_and_dependencies() {
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -17014,7 +17740,7 @@ mod tests {
             assert_eq!(api.handle_in_process("GET", path, None).status, 400);
             assert_eq!(
                 api.handle_in_process("POST", path, Some(forged)).status,
-                405
+                400
             );
         }
 

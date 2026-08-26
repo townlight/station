@@ -6,10 +6,11 @@ use station_schedule_automation::{
     MaterializationAuthorities, MaterializationOutcome, MaterializationPlan, MaterializationWindow,
     MetadataValue, PriorAiring, RecurrenceTimeZone, RecurringRule, RuleSlotCandidate, SavedSearch,
     SavedSearchOrder, SavedSearchQuery, SlotMaterializationOutcome, SourceEvidenceKind,
-    SourceEvidenceReceipt, SourceEvidenceVerifier, arbitrate_rule_slots,
-    canonical_candidate_projection_bytes, canonical_candidate_projection_sha256,
-    canonical_intent_bytes, canonical_prior_airings_sha256, canonical_source_bytes,
-    derive_arbitrated_materialization_batch, derive_materialization_intent,
+    SourceEvidenceReceipt, SourceEvidenceVerifier, WindowedBatchMaterializationRequest,
+    arbitrate_rule_slots, canonical_candidate_projection_bytes,
+    canonical_candidate_projection_sha256, canonical_intent_bytes, canonical_prior_airings_sha256,
+    canonical_source_bytes, derive_arbitrated_materialization_batch,
+    derive_arbitrated_materialization_batch_for_windows, derive_materialization_intent,
     materialization_evidence_scope_sha256, materialization_prior_airings_coverage_window,
     resolve_asset,
 };
@@ -359,6 +360,117 @@ fn derive(
         &inputs,
         &TestEvidenceVerifier,
     )
+}
+
+#[test]
+fn materialization_plans_bind_normal_and_zero_outcome_authorities() {
+    let search = search();
+    let block = block();
+    let rule = rule();
+    let window = window();
+    let proposed = plan(
+        derive(
+            &search,
+            &block,
+            &rule,
+            window.clone(),
+            vec![candidate('a', "Council meeting", 1_700_000_000_000)],
+            vec![],
+        )
+        .unwrap(),
+    );
+    assert!(
+        proposed
+            .outcomes
+            .iter()
+            .any(|outcome| matches!(outcome, SlotMaterializationOutcome::Proposed(_)))
+    );
+    assert_eq!(proposed.authority_binding().rule_id, rule.rule_id);
+    assert_eq!(proposed.authority_binding().rule_revision, rule.revision);
+    assert_eq!(proposed.authority_binding().channel_id, rule.channel_id);
+    assert_eq!(
+        proposed.authority_binding().saved_search_id,
+        search.search_id
+    );
+    assert_eq!(
+        proposed.authority_binding().saved_search_revision,
+        search.revision
+    );
+    assert_eq!(proposed.authority_binding().block_id, block.block_id);
+    assert_eq!(proposed.authority_binding().block_revision, block.revision);
+    assert_eq!(proposed.authority_binding().window, window);
+    proposed
+        .validate_authority_against(&search, &block, &rule)
+        .unwrap();
+
+    let empty_window = MaterializationWindow {
+        starts_at_utc_ms: OBSERVED_AT_UTC_MS,
+        ends_at_utc_ms: OBSERVED_AT_UTC_MS + 1,
+    };
+    let empty = plan(
+        derive(
+            &search,
+            &block,
+            &rule,
+            empty_window.clone(),
+            vec![candidate('a', "Council meeting", 1_700_000_000_000)],
+            vec![],
+        )
+        .unwrap(),
+    );
+    assert!(empty.outcomes.is_empty());
+    assert!(empty.draft_intent.is_none());
+    assert_eq!(empty.authority_binding().rule_id, rule.rule_id);
+    assert_eq!(empty.authority_binding().window, empty_window);
+    empty
+        .validate_authority_against(&search, &block, &rule)
+        .unwrap();
+}
+
+#[test]
+fn materialization_plan_authority_validation_rejects_changed_revisions() {
+    let search = search();
+    let block = block();
+    let rule = rule();
+    let plan = plan(
+        derive(
+            &search,
+            &block,
+            &rule,
+            window(),
+            vec![candidate('a', "Council meeting", 1_700_000_000_000)],
+            vec![],
+        )
+        .unwrap(),
+    );
+
+    let mut changed_rule = rule.clone();
+    changed_rule.revision += 1;
+    assert_eq!(
+        plan.validate_authority_against(&search, &block, &changed_rule)
+            .unwrap_err(),
+        "materialization plan source authority is stale or rebound"
+    );
+
+    let mut changed_search = search.clone();
+    changed_search.revision += 1;
+    let mut search_rebound_rule = rule.clone();
+    search_rebound_rule.saved_search_revision = changed_search.revision;
+    assert_eq!(
+        plan.validate_authority_against(&changed_search, &block, &search_rebound_rule)
+            .unwrap_err(),
+        "materialization plan source authority is stale or rebound"
+    );
+
+    let mut changed_block = block.clone();
+    changed_block.revision += 1;
+    let mut block_rebound_rule = rule;
+    block_rebound_rule.block_revision = changed_block.revision;
+    assert_eq!(
+        plan.validate_authority_against(&search, &changed_block, &block_rebound_rule)
+            .unwrap_err(),
+        "materialization plan source authority is stale or rebound"
+    );
 }
 
 #[test]
@@ -1300,6 +1412,49 @@ fn authenticated_batch_suppresses_same_channel_lower_priority_drafts() {
 }
 
 #[test]
+fn zero_draft_batch_retains_exact_plan_authority_binding_and_rejects_rebound_source() {
+    let current_search = search();
+    let current_block = block();
+    let current_rule = rule();
+    let current_window = window();
+    let no_match_inputs = inputs(
+        &current_search,
+        &current_block,
+        &current_rule,
+        &current_window,
+        vec![],
+        vec![],
+    );
+    let batch = derive_arbitrated_materialization_batch(
+        &[BatchMaterializationRequest {
+            authorities: MaterializationAuthorities {
+                search: &current_search,
+                block: &current_block,
+                rule: &current_rule,
+            },
+            inputs: &no_match_inputs,
+        }],
+        current_window.clone(),
+        OBSERVED_AT_UTC_MS,
+        &TestEvidenceVerifier,
+    )
+    .unwrap();
+    let plan = &batch.plans()[0];
+    assert!(plan.draft_intent.is_none());
+    assert_eq!(plan.authority_binding().rule_id, current_rule.rule_id);
+    assert_eq!(plan.authority_binding().window, current_window);
+    plan.validate_authority_against(&current_search, &current_block, &current_rule)
+        .unwrap();
+
+    let mut rebound = current_rule.clone();
+    rebound.revision += 1;
+    assert!(
+        plan.validate_authority_against(&current_search, &current_block, &rebound)
+            .is_err()
+    );
+}
+
+#[test]
 fn authenticated_batch_records_equal_priority_rule_id_precedence() {
     let current_search = search();
     let current_block = block();
@@ -1585,4 +1740,209 @@ fn arbitration_uses_pairwise_nonoverlapping_winners_for_overlap_chains() {
         &outcomes[2],
         ArbitrationOutcome::Winner { rule_id, .. } if rule_id == &id("07")
     ));
+}
+
+#[test]
+fn public_arbitration_keeps_its_64_candidate_bound() {
+    let candidates = (0..65)
+        .map(|ordinal| RuleSlotCandidate {
+            rule_id: format!("00000000-0000-4000-8000-{ordinal:012x}"),
+            channel_id: id("02"),
+            priority: 1,
+            starts_at_utc_ms: ordinal * 2,
+            ends_at_utc_ms: ordinal * 2 + 1,
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        arbitrate_rule_slots(&candidates).unwrap_err(),
+        "rule overlap arbitration input is unbounded"
+    );
+}
+
+fn outcome_starts_at_utc_ms(outcome: &SlotMaterializationOutcome) -> i64 {
+    match outcome {
+        SlotMaterializationOutcome::Proposed(occurrence) => occurrence.starts_at_utc_ms,
+        SlotMaterializationOutcome::NoMatch { starts_at_utc_ms }
+        | SlotMaterializationOutcome::Blocked { starts_at_utc_ms }
+        | SlotMaterializationOutcome::SuppressedByPrecedence {
+            starts_at_utc_ms, ..
+        } => *starts_at_utc_ms,
+    }
+}
+
+#[test]
+fn windowed_batch_binds_14_and_60_day_horizons_and_arbitrates_the_union() {
+    const DAY_MS: i64 = 86_400_000;
+    let current_search = search();
+    let current_block = block();
+    let mut short_rule = rule();
+    short_rule.priority = 4;
+    short_rule.timezone = RecurrenceTimeZone::Utc;
+    let mut long_rule = short_rule.clone();
+    long_rule.rule_id = id("06");
+    long_rule.rolling_window_days = 60;
+    long_rule.priority = 3;
+    let short_window = MaterializationWindow {
+        starts_at_utc_ms: OBSERVED_AT_UTC_MS,
+        ends_at_utc_ms: OBSERVED_AT_UTC_MS + 14 * DAY_MS,
+    };
+    let long_window = MaterializationWindow {
+        starts_at_utc_ms: OBSERVED_AT_UTC_MS,
+        ends_at_utc_ms: OBSERVED_AT_UTC_MS + 60 * DAY_MS,
+    };
+    let candidates = vec![candidate('a', "Alpha council", 1_700_000_000_000)];
+    let short_inputs = inputs(
+        &current_search,
+        &current_block,
+        &short_rule,
+        &short_window,
+        candidates.clone(),
+        vec![],
+    );
+    let long_inputs = inputs(
+        &current_search,
+        &current_block,
+        &long_rule,
+        &long_window,
+        candidates,
+        vec![],
+    );
+    let batch = derive_arbitrated_materialization_batch_for_windows(
+        &[
+            WindowedBatchMaterializationRequest {
+                authorities: MaterializationAuthorities {
+                    search: &current_search,
+                    block: &current_block,
+                    rule: &short_rule,
+                },
+                inputs: &short_inputs,
+                window: short_window.clone(),
+            },
+            WindowedBatchMaterializationRequest {
+                authorities: MaterializationAuthorities {
+                    search: &current_search,
+                    block: &current_block,
+                    rule: &long_rule,
+                },
+                inputs: &long_inputs,
+                window: long_window.clone(),
+            },
+        ],
+        OBSERVED_AT_UTC_MS,
+        &TestEvidenceVerifier,
+    )
+    .unwrap();
+
+    let short_plan = batch
+        .plans()
+        .iter()
+        .find(|plan| plan.authority_binding().rule_id == short_rule.rule_id)
+        .unwrap();
+    let long_plan = batch
+        .plans()
+        .iter()
+        .find(|plan| plan.authority_binding().rule_id == long_rule.rule_id)
+        .unwrap();
+    assert_eq!(short_plan.authority_binding().window, short_window);
+    assert_eq!(long_plan.authority_binding().window, long_window);
+    assert!(short_plan.outcomes.iter().all(|outcome| {
+        let start = outcome_starts_at_utc_ms(outcome);
+        start >= short_window.starts_at_utc_ms && start < short_window.ends_at_utc_ms
+    }));
+    assert!(long_plan.outcomes.iter().all(|outcome| {
+        let start = outcome_starts_at_utc_ms(outcome);
+        start >= long_window.starts_at_utc_ms && start < long_window.ends_at_utc_ms
+    }));
+    assert!(
+        long_plan
+            .outcomes
+            .iter()
+            .any(|outcome| { outcome_starts_at_utc_ms(outcome) >= short_window.ends_at_utc_ms })
+    );
+    assert!(long_plan.outcomes.iter().any(|outcome| matches!(
+        outcome,
+        SlotMaterializationOutcome::SuppressedByPrecedence {
+            winner_rule_id,
+            candidate_priority: 3,
+            winner_priority: 4,
+            ..
+        } if winner_rule_id == &short_rule.rule_id
+    )));
+    assert!(long_plan.outcomes.iter().any(|outcome| matches!(
+        outcome,
+        SlotMaterializationOutcome::Proposed(occurrence)
+            if occurrence.starts_at_utc_ms >= short_window.ends_at_utc_ms
+    )));
+    assert_ne!(
+        short_inputs.candidate_projection.receipt.scope_sha256,
+        long_inputs.candidate_projection.receipt.scope_sha256
+    );
+    assert_ne!(
+        short_inputs.prior_airings.receipt.scope_sha256,
+        long_inputs.prior_airings.receipt.scope_sha256
+    );
+}
+
+#[test]
+fn windowed_batch_rejects_rebound_scopes_duplicates_and_capacity() {
+    const DAY_MS: i64 = 86_400_000;
+    let current_search = search();
+    let current_block = block();
+    let current_rule = rule();
+    let short_window = MaterializationWindow {
+        starts_at_utc_ms: OBSERVED_AT_UTC_MS,
+        ends_at_utc_ms: OBSERVED_AT_UTC_MS + 14 * DAY_MS,
+    };
+    let rebound_window = MaterializationWindow {
+        starts_at_utc_ms: OBSERVED_AT_UTC_MS + DAY_MS,
+        ends_at_utc_ms: OBSERVED_AT_UTC_MS + 15 * DAY_MS,
+    };
+    let authenticated = inputs(
+        &current_search,
+        &current_block,
+        &current_rule,
+        &short_window,
+        vec![candidate('a', "Alpha council", 1_700_000_000_000)],
+        vec![],
+    );
+    let request = WindowedBatchMaterializationRequest {
+        authorities: MaterializationAuthorities {
+            search: &current_search,
+            block: &current_block,
+            rule: &current_rule,
+        },
+        inputs: &authenticated,
+        window: short_window.clone(),
+    };
+    assert!(
+        derive_arbitrated_materialization_batch_for_windows(
+            &[WindowedBatchMaterializationRequest {
+                window: rebound_window,
+                ..request.clone()
+            }],
+            OBSERVED_AT_UTC_MS,
+            &TestEvidenceVerifier,
+        )
+        .unwrap_err()
+        .contains("scope")
+    );
+    assert!(
+        derive_arbitrated_materialization_batch_for_windows(
+            &[request.clone(), request.clone()],
+            OBSERVED_AT_UTC_MS,
+            &TestEvidenceVerifier,
+        )
+        .unwrap_err()
+        .contains("duplicate recurring-rule authority")
+    );
+    assert!(
+        derive_arbitrated_materialization_batch_for_windows(
+            &vec![request; 65],
+            OBSERVED_AT_UTC_MS,
+            &TestEvidenceVerifier,
+        )
+        .unwrap_err()
+        .contains("empty or unbounded")
+    );
 }

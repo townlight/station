@@ -4228,10 +4228,12 @@ mod tests {
         promote_caption_proof_artifact, proof_artifact_path, proof_bindings_match,
         ready_duration_is_bounded, resolved_snapshot_to_protocol, stalled_required_output,
     };
+    use sha2::{Digest, Sha256};
     use station_captions::{
         AssetCaptionCue, AssetCaptionTrack, AssetCaptionTrackWrite, CaptionEgressProofJob,
         CaptionEgressProofJobState, CaptionTrackSourceKind, canonical_caption_text_sha256,
     };
+    use station_catalog::{CatalogAssetRecord, CatalogEditorialState};
     use station_cg::{
         CgAuditEvent, CgAuditEventKind, CgBoard, CgBulletin, CgBulletinContent, CgBulletinState,
         CgZoneConfig,
@@ -4241,20 +4243,28 @@ mod tests {
         CgTemplateKind, CgZoneKind,
     };
     use station_media_journal::JournalWriter;
-    use station_media_protocol::{PROTOCOL_VERSION, WorkerEvent, WorkerEventEnvelope};
+    use station_media_protocol::{
+        ChannelCommand, CommandEnvelope, PROTOCOL_VERSION, WorkerEvent, WorkerEventEnvelope,
+        decode_command_frame, encode_command_frame,
+    };
     use station_schedule::{
-        AssetReadiness, ChannelConfiguration, MediaAsset, OutputProfileId, OutputSinkConfiguration,
-        ScheduleItem, ScheduleState,
+        AssetReadiness, ChannelConfiguration, DispatchStatus, MediaAsset, OutputProfileId,
+        OutputSinkConfiguration, ScheduleItem, ScheduleState,
+    };
+    use station_schedule_automation::{
+        AssetPickStrategy, AssetPredicate, DaypartBlock, LocalDate, RecurrenceTimeZone,
+        RecurringRule, SavedSearch, SavedSearchOrder, SavedSearchQuery, SourceEvidenceAuthority,
+        SourceEvidenceKind, SourceEvidenceReceipt, SourceEvidenceVerifier,
     };
     use station_storage::{
         ChannelCaptionMode, OutputLoudnessProofJob, OutputLoudnessProofJobState, ScheduleItemWrite,
-        StationStore,
+        ScheduleMaterializationApplyOutcome, ScheduleMaterializationOutcome, StationStore,
     };
     use std::collections::{BTreeMap, HashSet};
     use std::path::PathBuf;
     use std::sync::{
         Arc,
-        atomic::{AtomicBool, AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
     };
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -4905,6 +4915,401 @@ mod tests {
             .unwrap();
         drop(writer);
         (database, journal, store, report_id, now)
+    }
+
+    struct S19TestEvidenceAuthority {
+        observed_at_utc_ms: i64,
+        sequence: AtomicU64,
+    }
+
+    impl S19TestEvidenceAuthority {
+        fn new(observed_at_utc_ms: i64) -> Self {
+            Self {
+                observed_at_utc_ms,
+                sequence: AtomicU64::new(1),
+            }
+        }
+
+        fn attestation(
+            kind: SourceEvidenceKind,
+            receipt_id: &str,
+            scope_sha256: &str,
+            payload_sha256: &str,
+        ) -> String {
+            let mut digest = Sha256::new();
+            digest.update(match kind {
+                SourceEvidenceKind::CandidateProjection => b"candidate".as_slice(),
+                SourceEvidenceKind::PriorAirings => b"prior".as_slice(),
+            });
+            for value in [receipt_id, scope_sha256, payload_sha256] {
+                digest.update((value.len() as u64).to_le_bytes());
+                digest.update(value.as_bytes());
+            }
+            format!("{:x}", digest.finalize())
+        }
+    }
+
+    impl SourceEvidenceVerifier for S19TestEvidenceAuthority {
+        fn verify(
+            &self,
+            kind: SourceEvidenceKind,
+            receipt: &SourceEvidenceReceipt,
+            scope_sha256: &str,
+            payload_sha256: &str,
+            observed_at_utc_ms: i64,
+        ) -> Result<(), String> {
+            if receipt.issuer_id != "10000000-0000-4000-8000-000000000001"
+                || receipt.scope_sha256 != scope_sha256
+                || receipt.issued_at_utc_ms > observed_at_utc_ms
+                || receipt.expires_at_utc_ms <= observed_at_utc_ms
+                || receipt.attestation_sha256
+                    != Self::attestation(kind, &receipt.receipt_id, scope_sha256, payload_sha256)
+            {
+                return Err("S19 test evidence failed exact authentication".into());
+            }
+            Ok(())
+        }
+    }
+
+    impl SourceEvidenceAuthority for S19TestEvidenceAuthority {
+        fn observed_at_utc_ms(&self) -> Result<i64, String> {
+            Ok(self.observed_at_utc_ms)
+        }
+
+        fn issue_source_evidence(
+            &self,
+            kind: SourceEvidenceKind,
+            scope_sha256: &str,
+            payload_sha256: &str,
+            lifetime_ms: i64,
+        ) -> Result<SourceEvidenceReceipt, String> {
+            let sequence = self.sequence.fetch_add(1, Ordering::Relaxed);
+            let receipt_id = format!("10000000-0000-4000-8000-{sequence:012}");
+            Ok(SourceEvidenceReceipt {
+                issuer_id: "10000000-0000-4000-8000-000000000001".into(),
+                receipt_id: receipt_id.clone(),
+                issued_at_utc_ms: self.observed_at_utc_ms,
+                expires_at_utc_ms: self.observed_at_utc_ms + lifetime_ms,
+                scope_sha256: scope_sha256.into(),
+                attestation_sha256: Self::attestation(
+                    kind,
+                    &receipt_id,
+                    scope_sha256,
+                    payload_sha256,
+                ),
+            })
+        }
+    }
+
+    #[test]
+    fn s19_draft_identity_survives_edit_then_s4_v9_worker_confirmation_and_durable_as_run() {
+        const SEARCH_ID: &str = "20000000-0000-4000-8000-000000000001";
+        const BLOCK_ID: &str = "20000000-0000-4000-8000-000000000002";
+        const RULE_ID: &str = "20000000-0000-4000-8000-000000000003";
+        const OWNER_ID: &str = "20000000-0000-4000-8000-000000000004";
+        const ASSET_ID: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        const REPORT_ID: &str = "s19-s4-v9-as-run-report";
+        const PLAN_ID: &str = "s19-s4-handoff-plan";
+        const WORKER_BOOT_ID: &str = "30000000-0000-4000-8000-000000000001";
+
+        let root = database_path("s19-s4-v9-as-run").with_extension("station-root");
+        std::fs::create_dir_all(&root).unwrap();
+        let database = root.join("station.db");
+        let media = root.join("council.ts");
+        std::fs::write(&media, b"S19 generated schedule media").unwrap();
+        let store = StationStore::open(&database).unwrap();
+        store
+            .put_channel(&ChannelConfiguration {
+                channel_id: CHANNEL_ID.into(),
+                display_name: "S19 handoff proof".into(),
+                output_profile: OutputProfileId::Proof360p30,
+                output_sinks: vec![OutputSinkConfiguration::required_udp(
+                    OUTPUT_SINK_ID,
+                    "S19 proof output",
+                    "127.0.0.1:5500",
+                    -24.0,
+                )],
+                enabled: false,
+            })
+            .unwrap();
+        store
+            .put_media_asset(&MediaAsset {
+                asset_id: ASSET_ID.into(),
+                media_path: media.to_string_lossy().into_owned(),
+                duration_ms: 60_000,
+                readiness: AssetReadiness::Ready,
+            })
+            .unwrap();
+        let catalog_draft = CatalogAssetRecord {
+            asset_sha256: ASSET_ID.into(),
+            title: "Council meeting".into(),
+            meeting_body: Some("City Council".into()),
+            editorial_state: CatalogEditorialState::Draft,
+            published_at_utc_ms: None,
+            revision: 1,
+        };
+        store
+            .write_catalog_asset(ASSET_ID, &catalog_draft, None, "catalog", 1)
+            .unwrap();
+        store
+            .write_catalog_asset(
+                ASSET_ID,
+                &CatalogAssetRecord {
+                    editorial_state: CatalogEditorialState::Published,
+                    published_at_utc_ms: Some(2),
+                    revision: 2,
+                    ..catalog_draft
+                },
+                Some(1),
+                "catalog",
+                2,
+            )
+            .unwrap();
+        store
+            .write_saved_search(
+                &SavedSearch {
+                    search_id: SEARCH_ID.into(),
+                    name: "Council programs".into(),
+                    owner_operator_id: OWNER_ID.into(),
+                    created_at_utc_ms: 1,
+                    query: SavedSearchQuery {
+                        all_of: vec![AssetPredicate::TitleContains("Council".into())],
+                        any_of: vec![],
+                        order_by: SavedSearchOrder::PublishedNewest,
+                        limit: 8,
+                    },
+                    revision: 1,
+                },
+                None,
+                OWNER_ID,
+                3,
+            )
+            .unwrap();
+        store
+            .write_daypart_block(
+                &DaypartBlock {
+                    block_id: BLOCK_ID.into(),
+                    channel_id: CHANNEL_ID.into(),
+                    label: "Daily civic".into(),
+                    starts_local_minute: 0,
+                    ends_local_minute: 1_440,
+                    weekday_mask: 0b0111_1111,
+                    season_starts_on: None,
+                    season_ends_on: None,
+                    allow_rule_ids: vec![RULE_ID.into()],
+                    revision: 1,
+                },
+                None,
+                OWNER_ID,
+                4,
+            )
+            .unwrap();
+        store
+            .write_recurring_rule(
+                &RecurringRule {
+                    rule_id: RULE_ID.into(),
+                    channel_id: CHANNEL_ID.into(),
+                    saved_search_id: SEARCH_ID.into(),
+                    saved_search_revision: 1,
+                    pick_strategy: AssetPickStrategy::Top,
+                    rolling_window_days: 14,
+                    avoid_repeat_within_days: None,
+                    enabled: true,
+                    priority: 1,
+                    block_id: BLOCK_ID.into(),
+                    block_revision: 1,
+                    weekday_mask: 0b0111_1111,
+                    interval_weeks: 1,
+                    anchor_date: LocalDate {
+                        year: 2020,
+                        month: 1,
+                        day: 1,
+                    },
+                    timezone: RecurrenceTimeZone::Utc,
+                    local_start_minute: 0,
+                    duration_minutes: 1,
+                    revision: 1,
+                },
+                None,
+                OWNER_ID,
+                5,
+            )
+            .unwrap();
+
+        let authority = S19TestEvidenceAuthority::new(super::system_time_millis().unwrap());
+        let materialization = store
+            .materialize_scheduled_channel(CHANNEL_ID, OWNER_ID, &authority)
+            .unwrap();
+        let run = match &materialization {
+            ScheduleMaterializationApplyOutcome::Applied(run) => run,
+            ScheduleMaterializationApplyOutcome::AlreadyApplied(_) => {
+                panic!("first S19 handoff materialization must apply")
+            }
+        };
+        let (schedule_item_id, generated_starts_at_utc_ms) = run
+            .outcomes
+            .iter()
+            .find_map(|record| match &record.outcome {
+                ScheduleMaterializationOutcome::Proposed {
+                    schedule_item_id,
+                    starts_at_utc_ms,
+                    ..
+                } => Some((schedule_item_id.clone(), *starts_at_utc_ms)),
+                _ => None,
+            })
+            .expect("S19 must generate at least one Draft");
+        let generated = store
+            .read_schedule_item(&schedule_item_id)
+            .unwrap()
+            .expect("the S19 Draft must be current");
+        assert_eq!(generated.state, ScheduleState::Draft);
+        assert_eq!(generated.starts_at_unix_ms, generated_starts_at_utc_ms);
+
+        // Production S19 intentionally creates only future Drafts. Move this
+        // same generated identity into an active test window through the
+        // ordinary Draft write path; the immutable materialization run remains
+        // bound to its original proposed time and item identity.
+        let actual_on_air_at_unix_ms = super::system_time_millis().unwrap();
+        let active_starts_at_unix_ms = actual_on_air_at_unix_ms - 1_000;
+        store
+            .write_schedule_item(&ScheduleItemWrite {
+                item: ScheduleItem {
+                    revision: generated.revision + 1,
+                    starts_at_unix_ms: active_starts_at_unix_ms,
+                    ..generated.clone()
+                },
+                changed_by: OWNER_ID.into(),
+                occurred_at_unix_ms: active_starts_at_unix_ms,
+            })
+            .unwrap();
+        assert!(
+            store
+                .read_schedule_materialization_run(&run.run_id)
+                .unwrap()
+                .unwrap()
+                .outcomes
+                .iter()
+                .any(|record| matches!(
+                    &record.outcome,
+                    ScheduleMaterializationOutcome::Proposed {
+                        schedule_item_id: durable_item_id,
+                        starts_at_utc_ms,
+                        ..
+                    } if durable_item_id == &schedule_item_id
+                        && *starts_at_utc_ms == generated_starts_at_utc_ms
+                ))
+        );
+
+        let plan = store
+            .prepare_schedule_commit(PLAN_ID, &schedule_item_id)
+            .unwrap();
+        assert!(plan.dry_run_passed);
+        let report = store
+            .commit_schedule(
+                REPORT_ID,
+                PLAN_ID,
+                &schedule_item_id,
+                OWNER_ID,
+                actual_on_air_at_unix_ms - 500,
+                "S19 to S4 handoff proof",
+            )
+            .unwrap();
+        assert_eq!(report.dispatch_status, DispatchStatus::Pending);
+        assert!(
+            store
+                .advance_dispatch_status(REPORT_ID, DispatchStatus::Pending, DispatchStatus::Queued)
+                .unwrap()
+        );
+        let dispatch = CommandEnvelope {
+            version: PROTOCOL_VERSION,
+            channel_id: CHANNEL_ID.into(),
+            command_id: format!("take-{REPORT_ID}"),
+            expected_sequence: 1,
+            command: ChannelCommand::TakeScheduledAsset {
+                report_id: REPORT_ID.into(),
+                schedule_item_id: schedule_item_id.clone(),
+                schedule_item_revision: report.schedule_item_revision,
+                asset_id: ASSET_ID.into(),
+                media_offset_ms: 1_000,
+            },
+        };
+        assert_eq!(
+            decode_command_frame(&encode_command_frame(&dispatch).unwrap()).unwrap(),
+            dispatch
+        );
+        assert_eq!(dispatch.version.major, 9);
+
+        let journal = root
+            .join("channel-journals")
+            .join(format!("{CHANNEL_ID}.tlj"));
+        std::fs::create_dir_all(journal.parent().unwrap()).unwrap();
+        let worker_id = format!("station-worker-{CHANNEL_ID}");
+        let mut writer = JournalWriter::open(&journal, &worker_id, CHANNEL_ID).unwrap();
+        writer
+            .append(&WorkerEventEnvelope {
+                version: PROTOCOL_VERSION,
+                worker_id,
+                channel_id: CHANNEL_ID.into(),
+                sequence: 1,
+                event: WorkerEvent::ScheduledAssetOnAir {
+                    report_id: REPORT_ID.into(),
+                    schedule_item_id: schedule_item_id.clone(),
+                    schedule_item_revision: report.schedule_item_revision,
+                    asset_id: ASSET_ID.into(),
+                    media_offset_ms: 1_000,
+                    worker_boot_id: WORKER_BOOT_ID.into(),
+                    actual_on_air_at_unix_ms,
+                },
+            })
+            .unwrap();
+        drop(writer);
+
+        super::replay_scheduled_take_journal(&store, &journal, CHANNEL_ID).unwrap();
+        assert_eq!(
+            store
+                .read_commit_report(REPORT_ID)
+                .unwrap()
+                .unwrap()
+                .dispatch_status,
+            DispatchStatus::Acknowledged
+        );
+        let facts = store
+            .list_actual_airings(
+                CHANNEL_ID,
+                actual_on_air_at_unix_ms - 1,
+                actual_on_air_at_unix_ms + 60_001,
+                8,
+            )
+            .unwrap();
+        assert_eq!(facts.len(), 1);
+        assert_eq!(
+            facts[0].schedule_item_id.as_deref(),
+            Some(schedule_item_id.as_str())
+        );
+        assert_eq!(
+            facts[0].schedule_item_revision,
+            Some(report.schedule_item_revision)
+        );
+        assert_eq!(facts[0].report_id, REPORT_ID);
+        assert_eq!(facts[0].asset_sha256, ASSET_ID);
+        assert_eq!(PROTOCOL_VERSION.major, 9);
+
+        super::replay_scheduled_take_journal(&store, &journal, CHANNEL_ID).unwrap();
+        assert_eq!(
+            store
+                .list_actual_airings(
+                    CHANNEL_ID,
+                    actual_on_air_at_unix_ms - 1,
+                    actual_on_air_at_unix_ms + 60_001,
+                    8,
+                )
+                .unwrap()
+                .len(),
+            1
+        );
+
+        drop(store);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

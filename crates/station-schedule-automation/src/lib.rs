@@ -11,6 +11,7 @@ const MAX_QUERY_FILTERS: usize = 8;
 const MAX_QUERY_LIMIT: usize = 128;
 const MAX_WINDOW_MS: i64 = 60 * 86_400_000;
 const MAX_SLOTS: usize = 64;
+const MAX_BATCH_SLOTS: usize = MAX_SLOTS * MAX_SLOTS;
 /// A source projection is the deduplicated candidate union for every slot in
 /// one bounded materialization request. This is deliberately independent from
 /// a saved search's per-slot `query.limit`.
@@ -164,6 +165,21 @@ pub trait SourceEvidenceVerifier {
     ) -> Result<(), String>;
 }
 
+/// Server-only capability which both issues and verifies source evidence.
+/// Storage uses this boundary while holding its materialization transaction,
+/// so projection receipts cannot be prepared from an earlier snapshot.
+pub trait SourceEvidenceAuthority: SourceEvidenceVerifier {
+    fn observed_at_utc_ms(&self) -> Result<i64, String>;
+
+    fn issue_source_evidence(
+        &self,
+        kind: SourceEvidenceKind,
+        scope_sha256: &str,
+        payload_sha256: &str,
+        lifetime_ms: i64,
+    ) -> Result<SourceEvidenceReceipt, String>;
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AuthenticatedCandidateProjection {
     pub receipt: SourceEvidenceReceipt,
@@ -201,6 +217,15 @@ pub struct BatchMaterializationRequest<'a> {
     pub inputs: &'a AuthenticatedMaterializationInputs,
 }
 
+/// One authenticated rule input with its exact server-derived compilation
+/// horizon. The window participates in evidence scope and plan authority.
+#[derive(Clone)]
+pub struct WindowedBatchMaterializationRequest<'a> {
+    pub authorities: MaterializationAuthorities<'a>,
+    pub inputs: &'a AuthenticatedMaterializationInputs,
+    pub window: MaterializationWindow,
+}
+
 /// Opaque output of authenticated batch compilation and precedence resolution.
 ///
 /// A future station-storage writer must accept this result only after it has
@@ -216,6 +241,21 @@ impl ArbitratedMaterializationBatch {
     pub fn plans(&self) -> &[MaterializationPlan] {
         &self.plans
     }
+}
+
+/// Exact source-authority identity carried by every compiled plan, including
+/// plans which contain no Draft intent because every slot was blocked,
+/// unmatched, or suppressed by arbitration.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MaterializationPlanAuthorityBinding {
+    pub rule_id: String,
+    pub rule_revision: u64,
+    pub channel_id: String,
+    pub saved_search_id: String,
+    pub saved_search_revision: u64,
+    pub block_id: String,
+    pub block_revision: u64,
+    pub window: MaterializationWindow,
 }
 
 /// Exact, immutable source evidence carried in a plan and draft intent.
@@ -373,11 +413,46 @@ pub enum MaterializationOutcome {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MaterializationPlan {
+    authority_binding: MaterializationPlanAuthorityBinding,
     pub source_authority_sha256: String,
     pub source_input_binding: MaterializationInputBinding,
     /// Draft-only: this pure layer never commits the derived schedule items.
     pub draft_intent: Option<Box<MaterializationIntent>>,
     pub outcomes: Vec<SlotMaterializationOutcome>,
+}
+
+impl MaterializationPlan {
+    pub fn authority_binding(&self) -> &MaterializationPlanAuthorityBinding {
+        &self.authority_binding
+    }
+
+    /// Revalidates the plan's exact authority identity and digest against a
+    /// transaction-reread source triple. This does not reauthenticate evidence;
+    /// storage must recompile the batch with the original authenticated inputs.
+    pub fn validate_authority_against(
+        &self,
+        search: &SavedSearch,
+        block: &DaypartBlock,
+        rule: &RecurringRule,
+    ) -> Result<(), String> {
+        rule.validate_against(search, block)?;
+        let expected = MaterializationPlanAuthorityBinding {
+            rule_id: rule.rule_id.clone(),
+            rule_revision: rule.revision,
+            channel_id: rule.channel_id.clone(),
+            saved_search_id: search.search_id.clone(),
+            saved_search_revision: search.revision,
+            block_id: block.block_id.clone(),
+            block_revision: block.revision,
+            window: self.authority_binding.window.clone(),
+        };
+        if self.authority_binding != expected
+            || self.source_authority_sha256 != authority_hash(search, block, rule)
+        {
+            return Err("materialization plan source authority is stale or rebound".into());
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1226,7 +1301,7 @@ pub fn derive_materialization_intent(
             channel_id: rule.channel_id.clone(),
             block_id: block.block_id.clone(),
             block_revision: block.revision,
-            window,
+            window: window.clone(),
             slots: proposed_slots,
             source_authority_sha256: source_authority_sha256.clone(),
             source_input_binding: source_input_binding.clone(),
@@ -1236,6 +1311,16 @@ pub fn derive_materialization_intent(
         Some(Box::new(intent))
     };
     Ok(MaterializationOutcome::Plan(MaterializationPlan {
+        authority_binding: MaterializationPlanAuthorityBinding {
+            rule_id: rule.rule_id.clone(),
+            rule_revision: rule.revision,
+            channel_id: rule.channel_id.clone(),
+            saved_search_id: search.search_id.clone(),
+            saved_search_revision: search.revision,
+            block_id: block.block_id.clone(),
+            block_revision: block.revision,
+            window: window.clone(),
+        },
         source_authority_sha256,
         source_input_binding,
         draft_intent,
@@ -1255,6 +1340,23 @@ pub fn derive_arbitrated_materialization_batch(
     observed_at_utc_ms: i64,
     verifier: &impl SourceEvidenceVerifier,
 ) -> Result<ArbitratedMaterializationBatch, String> {
+    let windowed = requests
+        .iter()
+        .map(|request| WindowedBatchMaterializationRequest {
+            authorities: request.authorities,
+            inputs: request.inputs,
+            window: window.clone(),
+        })
+        .collect::<Vec<_>>();
+    derive_arbitrated_materialization_batch_for_windows(&windowed, observed_at_utc_ms, verifier)
+}
+
+/// Derives each authenticated rule against its own exact horizon.
+pub fn derive_arbitrated_materialization_batch_for_windows(
+    requests: &[WindowedBatchMaterializationRequest<'_>],
+    observed_at_utc_ms: i64,
+    verifier: &impl SourceEvidenceVerifier,
+) -> Result<ArbitratedMaterializationBatch, String> {
     if requests.is_empty() || requests.len() > MAX_SLOTS {
         return Err("materialization batch is empty or unbounded".into());
     }
@@ -1262,7 +1364,6 @@ pub fn derive_arbitrated_materialization_batch(
     let mut plans = Vec::with_capacity(requests.len());
     let mut candidates = Vec::new();
     let mut slot_keys = BTreeSet::new();
-
     for request in requests {
         let MaterializationAuthorities {
             search,
@@ -1276,7 +1377,7 @@ pub fn derive_arbitrated_materialization_batch(
             search,
             block,
             rule,
-            window.clone(),
+            request.window.clone(),
             observed_at_utc_ms,
             request.inputs,
             verifier,
@@ -1307,7 +1408,7 @@ pub fn derive_arbitrated_materialization_batch(
         plans.push(plan);
     }
 
-    let outcomes = arbitrate_rule_slots(&candidates)?;
+    let outcomes = arbitrate_rule_slots_bounded(&candidates, MAX_BATCH_SLOTS)?;
     let mut suppressions = BTreeMap::new();
     for outcome in outcomes {
         if let ArbitrationOutcome::SuppressedByPrecedence {
@@ -1418,7 +1519,14 @@ fn block_applies_on(block: &DaypartBlock, date: &LocalDate) -> bool {
 pub fn arbitrate_rule_slots(
     candidates: &[RuleSlotCandidate],
 ) -> Result<Vec<ArbitrationOutcome>, String> {
-    if candidates.len() > MAX_SLOTS {
+    arbitrate_rule_slots_bounded(candidates, MAX_SLOTS)
+}
+
+fn arbitrate_rule_slots_bounded(
+    candidates: &[RuleSlotCandidate],
+    max_candidates: usize,
+) -> Result<Vec<ArbitrationOutcome>, String> {
+    if candidates.len() > max_candidates {
         return Err("rule overlap arbitration input is unbounded".into());
     }
     for candidate in candidates {
@@ -2457,5 +2565,27 @@ fn encode_metadata_value(digest: &mut impl CanonicalSink, value: &MetadataValue)
             digest.write([4]);
             put(digest, value);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn authenticated_batch_arbitration_rejects_more_than_4096_candidates() {
+        let candidate = RuleSlotCandidate {
+            rule_id: "00000000-0000-4000-8000-000000000001".into(),
+            channel_id: "00000000-0000-4000-8000-000000000002".into(),
+            priority: 1,
+            starts_at_utc_ms: 1,
+            ends_at_utc_ms: 2,
+        };
+
+        assert_eq!(
+            arbitrate_rule_slots_bounded(&vec![candidate; MAX_BATCH_SLOTS + 1], MAX_BATCH_SLOTS,)
+                .unwrap_err(),
+            "rule overlap arbitration input is unbounded"
+        );
     }
 }

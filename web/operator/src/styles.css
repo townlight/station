@@ -292,3 +292,34 @@ form { display:grid; gap:16px; margin-top:20px; }label { display:grid; gap:7px; 
 /* Scheduled recording intent is distinct from trusted worker capture/finalization. */
 .recording-layout { display:grid; grid-template-columns:minmax(300px,.8fr) minmax(0,1.2fr); gap:15px; align-items:start; }.recording-create,.recording-list,.recording-detail { min-width:0; }.recording-schedule-fact { display:grid; gap:4px; padding:12px; border:1px solid #dce5de; border-radius:11px; background:#f7faf7; }.recording-schedule-fact strong { color:var(--ink); font-size:12px; }.recording-schedule-fact span,.recording-schedule-fact small { color:var(--muted); font-size:10px; }.recording-empty { display:grid; justify-items:start; gap:5px; padding:18px 3px; color:var(--muted); font-size:11px; }.recording-empty p { margin:0; line-height:1.5; }.recording-cards { display:grid; gap:8px; }.recording-cards>button { display:grid; grid-template-columns:minmax(0,1fr) auto; gap:10px; align-items:center; width:100%; padding:12px; border:1px solid var(--line); border-radius:11px; background:#fbfcfa; color:var(--ink); text-align:left; }.recording-cards>button:hover,.recording-cards>button.selected { border-color:#77a98a; background:#f2f8f3; box-shadow:inset 3px 0 #77a98a; }.recording-cards>button>span { display:grid; gap:4px; min-width:0; }.recording-cards strong { font-size:11px; text-transform:capitalize; }.recording-cards small,.recording-cards code { color:var(--muted); font-size:9px; }.recording-cards b { display:grid; place-items:center; width:29px; height:29px; border-radius:50%; background:#e7f2ea; color:var(--green); font-size:10px; }.recording-detail { margin-top:15px; }.recording-facts { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:9px; }.recording-facts>div { display:grid; gap:4px; min-width:0; padding:11px; border:1px solid #dce5de; border-radius:11px; background:#f7faf7; }.recording-facts span { color:var(--muted); font-size:9px; font-weight:800; text-transform:uppercase; letter-spacing:.4px; }.recording-facts strong { color:var(--ink); font-size:11px; }.recording-facts small { color:var(--muted); font-size:9px; overflow-wrap:anywhere; }.recording-actions { display:flex; align-items:flex-start; gap:10px; flex-wrap:wrap; margin-top:15px; }.recording-cancel-form { flex:1 1 100%; max-width:600px; margin-top:4px; }.recording-cancel-form textarea { width:100%; min-height:70px; resize:vertical; border:1px solid #ccd8d1; border-radius:11px; padding:10px 12px; color:var(--ink); background:#fbfcfa; font:inherit; font-size:11px; }.recording-boundary { display:grid; gap:3px; margin-bottom:15px; padding:11px 13px; border:1px solid #e2d1a4; border-radius:11px; background:#fff8e8; color:#735922; font-size:10px; line-height:1.45; }.recording-boundary strong { font-size:11px; }.recording-history { margin-top:18px; border-top:1px solid #edf0ed; padding-top:12px; }.recording-history summary { cursor:pointer; color:var(--green); font-size:10px; font-weight:800; }.recording-history>div { display:flex; justify-content:space-between; gap:12px; padding:9px 0; border-bottom:1px solid #edf0ed; font-size:10px; }.recording-history>div>span { display:grid; gap:3px; }.recording-history small { color:var(--muted); }.danger { min-height:44px; border:1px solid transparent; border-radius:11px; padding:0 18px; background:#9e3e38; color:white; font-weight:700; }.danger:disabled { opacity:.5; cursor:not-allowed; }
 @media (max-width:900px) { .recording-layout { grid-template-columns:1fr; }.recording-facts { grid-template-columns:1fr; } }
+
+/* Recurring materialization is a server-derived Draft generator, never a commit shortcut. */
+.schedule-channel-scope { display:grid; grid-template-columns:minmax(240px,520px); }
+.schedule-materialization-card { display:grid; gap:13px; border-color:#cadccf; background:linear-gradient(145deg,#fff,#f5faf5); }
+.schedule-materialization-card .panel-head { margin-bottom:0; }
+.schedule-materialization-card>.muted { max-width:820px; margin:0; font-size:11px; }
+.schedule-materialization-card>.primary { justify-self:start; min-width:230px; }
+.schedule-materialization-card>small { color:var(--muted); font-size:9px; line-height:1.5; }
+.schedule-materialization-boundary { display:grid; gap:3px; padding:11px 13px; border:1px solid #e2d1a4; border-radius:11px; background:#fff8e8; color:#735922; font-size:10px; line-height:1.45; }
+.schedule-materialization-result { display:grid; gap:12px; padding:15px; border:1px solid #c8ddce; border-radius:13px; background:#f4faf5; }
+.schedule-materialization-result-head { display:flex; align-items:flex-start; justify-content:space-between; gap:14px; }
+.schedule-materialization-result-head>div { display:grid; gap:4px; }
+.schedule-materialization-result-head strong { color:var(--ink); font-size:13px; }
+.schedule-materialization-result-head span:not(.pill) { color:var(--muted); font-size:10px; }
+.schedule-materialization-result dl { display:grid; margin:0; }
+.schedule-materialization-result dl>div { display:grid; grid-template-columns:125px minmax(0,1fr); gap:12px; padding:8px 0; border-top:1px solid #deebe1; }
+.schedule-materialization-result dt { color:var(--muted); font-size:9px; }
+.schedule-materialization-result dd { margin:0; color:var(--ink); font-size:10px; overflow-wrap:anywhere; }
+.schedule-materialization-result code { font-size:9px; }
+.schedule-materialization-summary { display:flex; flex-wrap:wrap; gap:7px; }
+.schedule-materialization-summary>span { padding:6px 9px; border-radius:999px; background:#e4f0e7; color:#386a50; font-size:9px; text-transform:capitalize; }
+.pill-warning { background:#f2ead4; color:#72571f; }
+.channel-schedule-list { min-width:0; }
+.schedule-list-state { display:grid; gap:4px; padding:18px 3px; color:var(--muted); font-size:11px; }
+.schedule-list-state strong { color:var(--ink); }
+.schedule-item-list { display:grid; }
+.schedule-item-list>article { display:grid; grid-template-columns:minmax(0,1fr) auto; align-items:center; gap:12px; padding:12px 0; border-top:1px solid #edf0ed; }
+.schedule-item-list>article>div { display:grid; gap:3px; min-width:0; }
+.schedule-item-list strong { color:var(--ink); font-size:11px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.schedule-item-list span,.schedule-item-list code { color:var(--muted); font-size:9px; overflow-wrap:anywhere; }
+@media (max-width:620px) { .schedule-materialization-card>.primary { width:100%; }.schedule-materialization-result-head { align-items:flex-start; flex-direction:column; }.schedule-materialization-result dl>div { grid-template-columns:1fr; gap:4px; } }
