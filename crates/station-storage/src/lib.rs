@@ -136,6 +136,7 @@ pub struct CaptionCueMissResolutionFence {
     pub channel_id: String,
     pub last_observed_at_unix_ms: i64,
     pub occurrence_count: u64,
+    pub causal_generation: u64,
 }
 const MAX_CUSTOM_METADATA_SCHEMAS: usize = 64;
 const MAX_CUSTOM_METADATA_RECORDS_PER_ASSET: usize = 128;
@@ -1232,7 +1233,6 @@ impl StationStore {
         store.initialize_cg_schema()?;
         store.initialize_fallback_slate_schema()?;
         store.initialize_caption_policy_schema()?;
-        store.initialize_caption_cue_miss_evidence_schema()?;
         store.migrate_caption_cue_miss_evidence_schema()?;
         store.initialize_asset_caption_track_schema()?;
         store.initialize_caption_egress_proof_schema()?;
@@ -7329,12 +7329,14 @@ impl StationStore {
         }
         self.execute("BEGIN IMMEDIATE")?;
         let mut newly_recorded = 0usize;
+        let mut newly_terminal = 0usize;
         let mut first_new_terminal = None;
         let outcome = (|| {
             for item in evidence {
                 let statement = self.prepare(
-                    "INSERT OR IGNORE INTO caption_cue_miss_evidence(channel_id, report_id, track_id, track_revision, cue_id, reason, media_offset_ms, observed_at_unix_ms) \
-                     VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                    "INSERT INTO caption_cue_miss_evidence(channel_id, report_id, track_id, track_revision, cue_id, reason, media_offset_ms, observed_at_unix_ms) \
+                     VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8) \
+                     ON CONFLICT(channel_id, report_id, track_id, track_revision, cue_id, reason, media_offset_ms) DO NOTHING",
                 )?;
                 let channel = c_string(&item.channel_id, "caption miss channel")?;
                 let report = c_string(&item.report_id, "caption miss report")?;
@@ -7365,9 +7367,22 @@ impl StationStore {
                 )?;
                 bind_i64(self.database, statement.raw, 8, item.observed_at_unix_ms)?;
                 expect_done(self.database, statement.raw)?;
+                let evidence_inserted = self.changes() == 1;
+                if evidence_inserted {
+                    newly_recorded = newly_recorded
+                        .checked_add(1)
+                        .ok_or_else(|| "caption miss evidence count overflowed".to_string())?;
+                } else if self.caption_cue_miss_evidence_exists(item)? {
+                    continue;
+                } else {
+                    return Err(
+                        "caption miss evidence conflict did not preserve its exact identity".into(),
+                    );
+                }
                 let terminal = self.prepare(
-                    "INSERT OR IGNORE INTO caption_cue_miss_terminals(channel_id, report_id, track_id, track_revision, cue_id, first_reason, first_media_offset_ms, first_observed_at_unix_ms) \
-                     VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                    "INSERT INTO caption_cue_miss_terminals(channel_id, report_id, track_id, track_revision, cue_id, first_reason, first_media_offset_ms, first_observed_at_unix_ms) \
+                     VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8) \
+                     ON CONFLICT(channel_id, report_id, track_id, track_revision, cue_id) DO NOTHING",
                 )?;
                 bind_text(self.database, terminal.raw, 1, &channel)?;
                 bind_text(self.database, terminal.raw, 2, &report)?;
@@ -7391,13 +7406,22 @@ impl StationStore {
                 bind_i64(self.database, terminal.raw, 8, item.observed_at_unix_ms)?;
                 expect_done(self.database, terminal.raw)?;
                 if self.changes() == 1 {
-                    newly_recorded = newly_recorded
+                    newly_terminal = newly_terminal
                         .checked_add(1)
-                        .ok_or_else(|| "caption miss evidence count overflowed".to_string())?;
+                        .ok_or_else(|| "caption miss terminal count overflowed".to_string())?;
                     first_new_terminal.get_or_insert_with(|| item.clone());
+                } else if !self.caption_cue_miss_terminal_exists(item)? {
+                    return Err(
+                        "caption miss terminal conflict did not preserve its logical identity"
+                            .into(),
+                    );
                 }
             }
             if newly_recorded == 0 {
+                return Ok(());
+            }
+            self.validate_caption_cue_miss_evidence_correspondence()?;
+            if newly_terminal == 0 {
                 return Ok(());
             }
             let first = first_new_terminal
@@ -7439,7 +7463,89 @@ impl StationStore {
             Ok(())
         })();
         self.finish_transaction(outcome)?;
-        Ok(newly_recorded > 0)
+        Ok(newly_terminal > 0)
+    }
+
+    fn caption_cue_miss_evidence_exists(
+        &self,
+        item: &CaptionCueMissEvidence,
+    ) -> Result<bool, String> {
+        let statement = self.prepare(
+            "SELECT 1 FROM caption_cue_miss_evidence \
+             WHERE channel_id=?1 AND report_id=?2 AND track_id=?3 AND track_revision=?4 AND \
+                   cue_id=?5 AND reason=?6 AND media_offset_ms=?7 AND observed_at_unix_ms=?8",
+        )?;
+        self.bind_caption_cue_miss_evidence_identity(statement.raw, item)?;
+        match unsafe { sqlite3_step(statement.raw) } {
+            SQLITE_ROW => Ok(true),
+            SQLITE_DONE => Ok(false),
+            _ => Err(sqlite_error(self.database)),
+        }
+    }
+
+    fn caption_cue_miss_terminal_exists(
+        &self,
+        item: &CaptionCueMissEvidence,
+    ) -> Result<bool, String> {
+        let statement = self.prepare(
+            "SELECT 1 FROM caption_cue_miss_terminals \
+             WHERE channel_id=?1 AND report_id=?2 AND track_id=?3 AND track_revision=?4 AND cue_id=?5",
+        )?;
+        let channel = c_string(&item.channel_id, "caption miss channel")?;
+        let report = c_string(&item.report_id, "caption miss report")?;
+        let track = c_string(&item.track_id, "caption miss track")?;
+        let cue = c_string(&item.cue_id, "caption miss cue")?;
+        bind_text(self.database, statement.raw, 1, &channel)?;
+        bind_text(self.database, statement.raw, 2, &report)?;
+        bind_text(self.database, statement.raw, 3, &track)?;
+        bind_i64(
+            self.database,
+            statement.raw,
+            4,
+            i64::try_from(item.track_revision)
+                .map_err(|_| "caption miss track revision exceeds i64")?,
+        )?;
+        bind_text(self.database, statement.raw, 5, &cue)?;
+        match unsafe { sqlite3_step(statement.raw) } {
+            SQLITE_ROW => Ok(true),
+            SQLITE_DONE => Ok(false),
+            _ => Err(sqlite_error(self.database)),
+        }
+    }
+
+    fn bind_caption_cue_miss_evidence_identity(
+        &self,
+        statement: *mut SqliteStatement,
+        item: &CaptionCueMissEvidence,
+    ) -> Result<(), String> {
+        let channel = c_string(&item.channel_id, "caption miss channel")?;
+        let report = c_string(&item.report_id, "caption miss report")?;
+        let track = c_string(&item.track_id, "caption miss track")?;
+        let cue = c_string(&item.cue_id, "caption miss cue")?;
+        let reason = c_string(
+            caption_cue_miss_reason_name(item.reason),
+            "caption miss reason",
+        )?;
+        bind_text(self.database, statement, 1, &channel)?;
+        bind_text(self.database, statement, 2, &report)?;
+        bind_text(self.database, statement, 3, &track)?;
+        bind_i64(
+            self.database,
+            statement,
+            4,
+            i64::try_from(item.track_revision)
+                .map_err(|_| "caption miss track revision exceeds i64")?,
+        )?;
+        bind_text(self.database, statement, 5, &cue)?;
+        bind_text(self.database, statement, 6, &reason)?;
+        bind_i64(
+            self.database,
+            statement,
+            7,
+            i64::try_from(item.media_offset_ms)
+                .map_err(|_| "caption miss media offset exceeds i64")?,
+        )?;
+        bind_i64(self.database, statement, 8, item.observed_at_unix_ms)
     }
 
     /// Records one operator-visible automatic materialization failure per
@@ -7754,12 +7860,17 @@ impl StationStore {
         self.validate_caption_cue_miss_evidence_correspondence()?;
         Ok(self
             .read_firing_alert(AlertConditionKind::CaptionCueMissed, channel_id)?
-            .map(|event| CaptionCueMissResolutionFence {
-                event_id: event.event_id,
-                channel_id: event.resource_ref,
-                last_observed_at_unix_ms: event.last_observed_at_unix_ms,
-                occurrence_count: event.occurrence_count,
-            }))
+            .map(|event| {
+                Ok::<_, String>(CaptionCueMissResolutionFence {
+                    event_id: event.event_id,
+                    causal_generation: self
+                        .caption_cue_miss_causal_generation(&event.resource_ref)?,
+                    channel_id: event.resource_ref,
+                    last_observed_at_unix_ms: event.last_observed_at_unix_ms,
+                    occurrence_count: event.occurrence_count,
+                })
+            })
+            .transpose()?)
     }
 
     pub fn resolve_caption_cue_miss_if_unchanged(
@@ -7781,6 +7892,8 @@ impl StationStore {
             if current.event_id != fence.event_id
                 || current.last_observed_at_unix_ms != fence.last_observed_at_unix_ms
                 || current.occurrence_count != fence.occurrence_count
+                || self.caption_cue_miss_causal_generation(&fence.channel_id)?
+                    != fence.causal_generation
             {
                 return Ok(());
             }
@@ -7793,6 +7906,22 @@ impl StationStore {
         })();
         self.finish_transaction(outcome)?;
         Ok(resolved)
+    }
+
+    fn caption_cue_miss_causal_generation(&self, channel_id: &str) -> Result<u64, String> {
+        let statement =
+            self.prepare("SELECT COUNT(*) FROM caption_cue_miss_evidence WHERE channel_id=?1")?;
+        bind_text(
+            self.database,
+            statement.raw,
+            1,
+            &c_string(channel_id, "caption miss channel")?,
+        )?;
+        match unsafe { sqlite3_step(statement.raw) } {
+            SQLITE_ROW => u64::try_from(unsafe { sqlite3_column_int64(statement.raw, 0) })
+                .map_err(|_| "caption miss causal generation is invalid".into()),
+            _ => Err(sqlite_error(self.database)),
+        }
     }
 
     fn resolve_alert_locked(
@@ -13833,7 +13962,10 @@ impl StationStore {
 
     fn initialize_caption_cue_miss_evidence_schema(&self) -> Result<(), String> {
         self.execute(
-            "CREATE TABLE IF NOT EXISTS caption_cue_miss_evidence (\
+            "CREATE TABLE IF NOT EXISTS caption_cue_miss_schema_version (\
+               singleton INTEGER PRIMARY KEY CHECK (singleton=1),\
+               schema_version INTEGER NOT NULL CHECK (schema_version=2));\
+             CREATE TABLE IF NOT EXISTS caption_cue_miss_evidence (\
                channel_id TEXT NOT NULL CHECK (length(channel_id) BETWEEN 1 AND 160),\
                report_id TEXT NOT NULL CHECK (length(report_id) BETWEEN 1 AND 160),\
                track_id TEXT NOT NULL CHECK (length(track_id) BETWEEN 1 AND 160),\
@@ -13873,82 +14005,372 @@ impl StationStore {
     }
 
     fn migrate_caption_cue_miss_evidence_schema(&self) -> Result<(), String> {
-        self.execute(
-            "CREATE TABLE IF NOT EXISTS caption_cue_miss_schema_version (\
-               singleton INTEGER PRIMARY KEY CHECK (singleton=1),\
-               schema_version INTEGER NOT NULL CHECK (schema_version=2));",
-        )?;
-        let version = self.prepare(
-            "SELECT schema_version FROM caption_cue_miss_schema_version WHERE singleton=1",
-        )?;
-        let current = match unsafe { sqlite3_step(version.raw) } {
-            SQLITE_ROW => Some(unsafe { sqlite3_column_int64(version.raw, 0) }),
-            SQLITE_DONE => None,
-            _ => return Err(sqlite_error(self.database)),
-        };
-        drop(version);
-        if current.is_some_and(|value| value != 2) {
-            return Err("unsupported caption cue miss schema version".into());
+        if self.sqlite_table_exists("caption_cue_miss_schema_version")? {
+            let version = self.prepare(
+                "SELECT schema_version FROM caption_cue_miss_schema_version WHERE singleton=1",
+            )?;
+            let current = match unsafe { sqlite3_step(version.raw) } {
+                SQLITE_ROW => Some(unsafe { sqlite3_column_int64(version.raw, 0) }),
+                SQLITE_DONE => None,
+                _ => return Err(sqlite_error(self.database)),
+            };
+            if current.is_some_and(|value| value != 2) {
+                return Err("unsupported caption cue miss schema version".into());
+            }
+            if current == Some(2) {
+                return self.validate_caption_cue_miss_evidence_correspondence();
+            }
+            if !self.sqlite_table_exists("caption_cue_miss_evidence")? {
+                return Err("caption cue miss schema marker has no evidence table".into());
+            }
         }
-        if current.is_none() {
-            self.execute("BEGIN IMMEDIATE")?;
-            let outcome = (|| {
+
+        self.execute("BEGIN IMMEDIATE")?;
+        let outcome = (|| {
+            let evidence_exists = self.sqlite_table_exists("caption_cue_miss_evidence")?;
+            let terminals_exist = self.sqlite_table_exists("caption_cue_miss_terminals")?;
+            if !evidence_exists && !terminals_exist {
+                self.initialize_caption_cue_miss_evidence_schema()?;
+            } else {
+                if !evidence_exists {
+                    return Err("caption cue miss migration is missing its evidence table".into());
+                }
                 self.execute(
                     "DROP TRIGGER IF EXISTS caption_cue_miss_evidence_no_update;\
                      DROP TRIGGER IF EXISTS caption_cue_miss_evidence_no_delete;\
                      DROP TRIGGER IF EXISTS caption_cue_miss_terminals_no_update;\
                      DROP TRIGGER IF EXISTS caption_cue_miss_terminals_no_delete;\
                      DROP INDEX IF EXISTS caption_cue_miss_evidence_channel_time;\
-                     ALTER TABLE caption_cue_miss_evidence RENAME TO caption_cue_miss_evidence_legacy;\
-                     ALTER TABLE caption_cue_miss_terminals RENAME TO caption_cue_miss_terminals_legacy;",
+                     ALTER TABLE caption_cue_miss_evidence RENAME TO caption_cue_miss_evidence_legacy;",
                 )?;
+                if terminals_exist {
+                    self.execute(
+                        "ALTER TABLE caption_cue_miss_terminals RENAME TO caption_cue_miss_terminals_legacy;",
+                    )?;
+                }
                 self.initialize_caption_cue_miss_evidence_schema()?;
                 self.execute(
                     "INSERT INTO caption_cue_miss_evidence \
-                       SELECT * FROM caption_cue_miss_evidence_legacy;\
-                     INSERT INTO caption_cue_miss_terminals \
-                       SELECT * FROM caption_cue_miss_terminals_legacy;\
-                     INSERT INTO caption_cue_miss_terminals \
-                       SELECT e.channel_id,e.report_id,e.track_id,e.track_revision,e.cue_id,\
-                              e.reason,e.media_offset_ms,e.observed_at_unix_ms \
-                       FROM caption_cue_miss_evidence e \
-                       WHERE NOT EXISTS (SELECT 1 FROM caption_cue_miss_terminals) \
-                         AND NOT EXISTS (SELECT 1 FROM caption_cue_miss_evidence prior WHERE \
-                           prior.channel_id=e.channel_id AND prior.report_id=e.report_id AND \
-                           prior.track_id=e.track_id AND prior.track_revision=e.track_revision AND \
-                           prior.cue_id=e.cue_id AND (prior.observed_at_unix_ms < e.observed_at_unix_ms OR \
-                             (prior.observed_at_unix_ms=e.observed_at_unix_ms AND prior.rowid < e.rowid)));",
+                     SELECT * FROM caption_cue_miss_evidence_legacy;",
                 )?;
-                self.validate_caption_cue_miss_evidence_correspondence()?;
+                if terminals_exist {
+                    self.execute(
+                        "INSERT INTO caption_cue_miss_terminals \
+                         SELECT * FROM caption_cue_miss_terminals_legacy;",
+                    )?;
+                }
                 self.execute(
-                    "DROP TABLE caption_cue_miss_evidence_legacy;\
-                     DROP TABLE caption_cue_miss_terminals_legacy;\
-                     INSERT INTO caption_cue_miss_schema_version(singleton,schema_version) VALUES(1,2);",
+                    "INSERT INTO caption_cue_miss_terminals \
+                     SELECT e.channel_id,e.report_id,e.track_id,e.track_revision,e.cue_id,\
+                            e.reason,e.media_offset_ms,e.observed_at_unix_ms \
+                     FROM caption_cue_miss_evidence e \
+                     WHERE NOT EXISTS (SELECT 1 FROM caption_cue_miss_terminals terminal WHERE \
+                       terminal.channel_id=e.channel_id AND terminal.report_id=e.report_id AND \
+                       terminal.track_id=e.track_id AND terminal.track_revision=e.track_revision AND \
+                       terminal.cue_id=e.cue_id) \
+                       AND NOT EXISTS (SELECT 1 FROM caption_cue_miss_evidence prior WHERE \
+                         prior.channel_id=e.channel_id AND prior.report_id=e.report_id AND \
+                         prior.track_id=e.track_id AND prior.track_revision=e.track_revision AND \
+                         prior.cue_id=e.cue_id AND (prior.observed_at_unix_ms < e.observed_at_unix_ms OR \
+                           (prior.observed_at_unix_ms=e.observed_at_unix_ms AND (prior.reason < e.reason OR \
+                             (prior.reason=e.reason AND prior.media_offset_ms < e.media_offset_ms)))));",
                 )?;
-                Ok(())
-            })();
-            self.finish_transaction(outcome)?;
-        }
-        self.validate_caption_cue_miss_evidence_correspondence()
+                self.execute("DROP TABLE caption_cue_miss_evidence_legacy;")?;
+                if terminals_exist {
+                    self.execute("DROP TABLE caption_cue_miss_terminals_legacy;")?;
+                }
+            }
+            self.execute(
+                "INSERT INTO caption_cue_miss_schema_version(singleton,schema_version) VALUES(1,2)",
+            )?;
+            self.validate_caption_cue_miss_evidence_correspondence()
+        })();
+        self.finish_transaction(outcome)
     }
 
     fn validate_caption_cue_miss_evidence_correspondence(&self) -> Result<(), String> {
+        if !self.caption_cue_miss_schema_is_canonical()? {
+            return Err("caption cue miss schema is not canonical".into());
+        }
         let statement = self.prepare(
-            "SELECT \
-               (SELECT COUNT(*) FROM caption_cue_miss_terminals) != \
-               (SELECT COUNT(*) FROM (SELECT DISTINCT channel_id,report_id,track_id,track_revision,cue_id FROM caption_cue_miss_evidence)) \
-             OR EXISTS (SELECT 1 FROM caption_cue_miss_terminals t WHERE NOT EXISTS (\
-               SELECT 1 FROM caption_cue_miss_evidence e WHERE \
-                 e.channel_id=t.channel_id AND e.report_id=t.report_id AND e.track_id=t.track_id AND \
-                 e.track_revision=t.track_revision AND e.cue_id=t.cue_id AND \
-                 e.reason=t.first_reason AND e.media_offset_ms=t.first_media_offset_ms AND \
-                 e.observed_at_unix_ms=t.first_observed_at_unix_ms))",
+            "SELECT channel_id,report_id,track_id,track_revision,cue_id,reason,media_offset_ms,observed_at_unix_ms,\
+                    typeof(channel_id),typeof(report_id),typeof(track_id),typeof(track_revision),\
+                    typeof(cue_id),typeof(reason),typeof(media_offset_ms),typeof(observed_at_unix_ms) \
+             FROM caption_cue_miss_evidence",
+        )?;
+        let mut evidence = BTreeMap::new();
+        loop {
+            match unsafe { sqlite3_step(statement.raw) } {
+                SQLITE_ROW => {
+                    if !caption_cue_miss_row_types(statement.raw, 8) {
+                        return Err(
+                            "caption cue miss evidence has noncanonical SQLite types".into()
+                        );
+                    }
+                    let row = CaptionCueMissEvidence {
+                        channel_id: column_text(statement.raw, 0)?,
+                        report_id: column_text(statement.raw, 1)?,
+                        track_id: column_text(statement.raw, 2)?,
+                        track_revision: u64::try_from(unsafe {
+                            sqlite3_column_int64(statement.raw, 3)
+                        })
+                        .map_err(|_| "caption cue miss evidence has invalid track revision")?,
+                        cue_id: column_text(statement.raw, 4)?,
+                        reason: parse_caption_cue_miss_reason(&column_text(statement.raw, 5)?)?,
+                        media_offset_ms: u64::try_from(unsafe {
+                            sqlite3_column_int64(statement.raw, 6)
+                        })
+                        .map_err(|_| "caption cue miss evidence has invalid media offset")?,
+                        observed_at_unix_ms: unsafe { sqlite3_column_int64(statement.raw, 7) },
+                    };
+                    row.validate().map_err(str::to_string)?;
+                    let logical = (
+                        row.channel_id.clone(),
+                        row.report_id.clone(),
+                        row.track_id.clone(),
+                        row.track_revision,
+                        row.cue_id.clone(),
+                    );
+                    let identity = (
+                        caption_cue_miss_reason_name(row.reason).to_string(),
+                        row.media_offset_ms,
+                    );
+                    if evidence.insert((logical.clone(), identity), row).is_some() {
+                        return Err("caption cue miss evidence has a duplicate identity".into());
+                    }
+                }
+                SQLITE_DONE => break,
+                _ => return Err(sqlite_error(self.database)),
+            }
+        }
+        let mut earliest = BTreeMap::new();
+        for ((logical, _), row) in &evidence {
+            let candidate = (
+                row.observed_at_unix_ms,
+                caption_cue_miss_reason_name(row.reason),
+                row.media_offset_ms,
+            );
+            match earliest.get(logical) {
+                Some(current) if *current <= candidate => {}
+                _ => {
+                    earliest.insert(logical.clone(), candidate);
+                }
+            }
+        }
+        let statement = self.prepare(
+            "SELECT channel_id,report_id,track_id,track_revision,cue_id,first_reason,first_media_offset_ms,first_observed_at_unix_ms,\
+                    typeof(channel_id),typeof(report_id),typeof(track_id),typeof(track_revision),\
+                    typeof(cue_id),typeof(first_reason),typeof(first_media_offset_ms),typeof(first_observed_at_unix_ms) \
+             FROM caption_cue_miss_terminals",
+        )?;
+        let mut terminals = BTreeSet::new();
+        loop {
+            match unsafe { sqlite3_step(statement.raw) } {
+                SQLITE_ROW => {
+                    if !caption_cue_miss_row_types(statement.raw, 8) {
+                        return Err(
+                            "caption cue miss terminal has noncanonical SQLite types".into()
+                        );
+                    }
+                    let logical = (
+                        column_text(statement.raw, 0)?,
+                        column_text(statement.raw, 1)?,
+                        column_text(statement.raw, 2)?,
+                        u64::try_from(unsafe { sqlite3_column_int64(statement.raw, 3) })
+                            .map_err(|_| "caption cue miss terminal has invalid track revision")?,
+                        column_text(statement.raw, 4)?,
+                    );
+                    let reason = parse_caption_cue_miss_reason(&column_text(statement.raw, 5)?)?;
+                    let offset =
+                        u64::try_from(unsafe { sqlite3_column_int64(statement.raw, 6) })
+                            .map_err(|_| "caption cue miss terminal has invalid media offset")?;
+                    let observed = unsafe { sqlite3_column_int64(statement.raw, 7) };
+                    let terminal = CaptionCueMissEvidence {
+                        channel_id: logical.0.clone(),
+                        report_id: logical.1.clone(),
+                        track_id: logical.2.clone(),
+                        track_revision: logical.3,
+                        cue_id: logical.4.clone(),
+                        reason,
+                        media_offset_ms: offset,
+                        observed_at_unix_ms: observed,
+                    };
+                    terminal.validate().map_err(str::to_string)?;
+                    if !terminals.insert(logical.clone()) {
+                        return Err(
+                            "caption cue miss terminal has a duplicate logical identity".into()
+                        );
+                    }
+                    let expected = earliest
+                        .get(&logical)
+                        .ok_or_else(|| "caption cue miss terminal is orphaned".to_string())?;
+                    if *expected != (observed, caption_cue_miss_reason_name(reason), offset) {
+                        return Err("caption cue miss terminal does not retain the deterministic earliest evidence".into());
+                    }
+                }
+                SQLITE_DONE => break,
+                _ => return Err(sqlite_error(self.database)),
+            }
+        }
+        if terminals.len() != earliest.len() || !earliest.keys().all(|key| terminals.contains(key))
+        {
+            return Err("caption cue miss terminal/evidence authority is inconsistent".into());
+        }
+        Ok(())
+    }
+
+    fn caption_cue_miss_schema_is_canonical(&self) -> Result<bool, String> {
+        let tables = [
+            (
+                "caption_cue_miss_schema_version",
+                &[
+                    "singletonintegerprimarykeycheck(singleton=1)",
+                    "schema_versioninteger not null check(schema_version=2)",
+                ][..],
+            ),
+            (
+                "caption_cue_miss_evidence",
+                &[
+                    "channel_idtextnotnullcheck(length(channel_id)between1and160)",
+                    "report_idtextnotnullcheck(length(report_id)between1and160)",
+                    "track_idtextnotnullcheck(length(track_id)between1and160)",
+                    "track_revisioninteger not null check(track_revision>=1)",
+                    "cue_idtextnotnullcheck(length(cue_id)between1and160)",
+                    "reasontextnotnullcheck(reasonin('expired-before-admission','command-not-delivered','command-delivery-uncertain','worker-did-not-acknowledge'))",
+                    "media_offset_msinteger not null check(media_offset_ms>=0)",
+                    "observed_at_unix_msinteger not null check(observed_at_unix_ms>=0)",
+                    "primarykey(channel_id,report_id,track_id,track_revision,cue_id,reason,media_offset_ms)",
+                ][..],
+            ),
+            (
+                "caption_cue_miss_terminals",
+                &[
+                    "channel_idtextnotnullcheck(length(channel_id)between1and160)",
+                    "report_idtextnotnullcheck(length(report_id)between1and160)",
+                    "track_idtextnotnullcheck(length(track_id)between1and160)",
+                    "track_revisioninteger not null check(track_revision>=1)",
+                    "cue_idtextnotnullcheck(length(cue_id)between1and160)",
+                    "first_reasontextnotnullcheck(first_reasonin('expired-before-admission','command-not-delivered','command-delivery-uncertain','worker-did-not-acknowledge'))",
+                    "first_media_offset_msinteger not null check(first_media_offset_ms>=0)",
+                    "first_observed_at_unix_msinteger not null check(first_observed_at_unix_ms>=0)",
+                    "primarykey(channel_id,report_id,track_id,track_revision,cue_id)",
+                ][..],
+            ),
+        ];
+        for (table, fragments) in tables {
+            let Some(sql) = self.sqlite_schema_object_sql("table", table)? else {
+                return Ok(false);
+            };
+            let normalized = normalize_sql(&sql);
+            if !fragments
+                .iter()
+                .all(|fragment| normalized.contains(&normalize_sql(fragment)))
+                || !self.caption_cue_miss_table_columns_are_canonical(table)?
+            {
+                return Ok(false);
+            }
+        }
+        for (kind, name, fragment) in [
+            (
+                "index",
+                "caption_cue_miss_evidence_channel_time",
+                "createindexcaption_cue_miss_evidence_channel_timeoncaption_cue_miss_evidence(channel_id,observed_at_unix_msdesc,report_id,track_id,cue_id)",
+            ),
+            (
+                "trigger",
+                "caption_cue_miss_evidence_no_update",
+                "beforeupdateoncaption_cue_miss_evidencebeginselectraise(abort,'captioncuemissevidenceisappend-only');end",
+            ),
+            (
+                "trigger",
+                "caption_cue_miss_evidence_no_delete",
+                "beforedeleteoncaption_cue_miss_evidencebeginselectraise(abort,'captioncuemissevidenceisappend-only');end",
+            ),
+            (
+                "trigger",
+                "caption_cue_miss_terminals_no_update",
+                "beforeupdateoncaption_cue_miss_terminalsbeginselectraise(abort,'captioncuemissterminalisappend-only');end",
+            ),
+            (
+                "trigger",
+                "caption_cue_miss_terminals_no_delete",
+                "beforedeleteoncaption_cue_miss_terminalsbeginselectraise(abort,'captioncuemissterminalisappend-only');end",
+            ),
+        ] {
+            let Some(sql) = self.sqlite_schema_object_sql(kind, name)? else {
+                return Ok(false);
+            };
+            if !normalize_sql(&sql).contains(&normalize_sql(fragment)) {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
+    fn caption_cue_miss_table_columns_are_canonical(&self, table: &str) -> Result<bool, String> {
+        let expected: &[(&str, &str, i64)] = match table {
+            "caption_cue_miss_schema_version" => &[
+                ("singleton", "INTEGER", 1),
+                ("schema_version", "INTEGER", 0),
+            ],
+            "caption_cue_miss_evidence" => &[
+                ("channel_id", "TEXT", 1),
+                ("report_id", "TEXT", 2),
+                ("track_id", "TEXT", 3),
+                ("track_revision", "INTEGER", 4),
+                ("cue_id", "TEXT", 5),
+                ("reason", "TEXT", 6),
+                ("media_offset_ms", "INTEGER", 7),
+                ("observed_at_unix_ms", "INTEGER", 0),
+            ],
+            "caption_cue_miss_terminals" => &[
+                ("channel_id", "TEXT", 1),
+                ("report_id", "TEXT", 2),
+                ("track_id", "TEXT", 3),
+                ("track_revision", "INTEGER", 4),
+                ("cue_id", "TEXT", 5),
+                ("first_reason", "TEXT", 0),
+                ("first_media_offset_ms", "INTEGER", 0),
+                ("first_observed_at_unix_ms", "INTEGER", 0),
+            ],
+            _ => return Ok(false),
+        };
+        let statement = self.prepare(&format!("PRAGMA table_info({table})"))?;
+        let mut actual = Vec::new();
+        loop {
+            match unsafe { sqlite3_step(statement.raw) } {
+                SQLITE_ROW => actual.push((
+                    column_text(statement.raw, 1)?,
+                    column_text(statement.raw, 2)?,
+                    unsafe { sqlite3_column_int64(statement.raw, 5) },
+                )),
+                SQLITE_DONE => break,
+                _ => return Err(sqlite_error(self.database)),
+            }
+        }
+        Ok(actual.len() == expected.len()
+            && actual.iter().zip(expected).all(|(actual, expected)| {
+                actual.0 == expected.0 && actual.1 == expected.1 && actual.2 == expected.2
+            }))
+    }
+
+    fn sqlite_schema_object_sql(&self, kind: &str, name: &str) -> Result<Option<String>, String> {
+        let statement = self.prepare("SELECT sql FROM sqlite_master WHERE type=?1 AND name=?2")?;
+        bind_text(
+            self.database,
+            statement.raw,
+            1,
+            &c_string(kind, "SQLite object kind")?,
+        )?;
+        bind_text(
+            self.database,
+            statement.raw,
+            2,
+            &c_string(name, "SQLite object name")?,
         )?;
         match unsafe { sqlite3_step(statement.raw) } {
-            SQLITE_ROW if unsafe { sqlite3_column_int64(statement.raw, 0) } == 0 => Ok(()),
-            SQLITE_ROW => {
-                Err("caption cue miss terminal/evidence authority is inconsistent".into())
-            }
+            SQLITE_ROW => Ok(Some(column_text(statement.raw, 0)?)),
+            SQLITE_DONE => Ok(None),
             _ => Err(sqlite_error(self.database)),
         }
     }
@@ -16976,6 +17398,39 @@ fn caption_cue_miss_reason_name(value: CaptionCueMissReason) -> &'static str {
         CaptionCueMissReason::CommandDeliveryUncertain => "command-delivery-uncertain",
         CaptionCueMissReason::WorkerDidNotAcknowledge => "worker-did-not-acknowledge",
     }
+}
+
+fn parse_caption_cue_miss_reason(value: &str) -> Result<CaptionCueMissReason, String> {
+    match value {
+        "expired-before-admission" => Ok(CaptionCueMissReason::ExpiredBeforeAdmission),
+        "command-not-delivered" => Ok(CaptionCueMissReason::CommandNotDelivered),
+        "command-delivery-uncertain" => Ok(CaptionCueMissReason::CommandDeliveryUncertain),
+        "worker-did-not-acknowledge" => Ok(CaptionCueMissReason::WorkerDidNotAcknowledge),
+        _ => Err("caption cue miss reason is invalid".into()),
+    }
+}
+
+fn caption_cue_miss_row_types(statement: *mut SqliteStatement, first_type_column: c_int) -> bool {
+    [
+        "text", "text", "text", "integer", "text", "text", "integer", "integer",
+    ]
+    .iter()
+    .enumerate()
+    .all(|(offset, expected)| {
+        column_text(
+            statement,
+            first_type_column + c_int::try_from(offset).unwrap(),
+        )
+        .is_ok_and(|actual| actual == *expected)
+    })
+}
+
+fn normalize_sql(value: &str) -> String {
+    value
+        .chars()
+        .filter(|character| !character.is_whitespace())
+        .flat_map(char::to_lowercase)
+        .collect()
 }
 
 fn caption_cue_miss_reason_detail(value: CaptionCueMissReason) -> &'static str {
@@ -21453,8 +21908,8 @@ mod tests {
             .unwrap();
 
         let mut concurrent = first.clone();
-        concurrent.cue_id = "22222222-2222-4222-8222-222222222222".into();
-        concurrent.observed_at_unix_ms = 100;
+        concurrent.reason = CaptionCueMissReason::WorkerDidNotAcknowledge;
+        concurrent.media_offset_ms = 1_001;
         store
             .observe_caption_cue_misses_and_route(std::slice::from_ref(&concurrent))
             .unwrap();
@@ -21471,9 +21926,14 @@ mod tests {
             .unwrap();
         assert_eq!(
             current.last_observed_at_unix_ms, stale_fence.last_observed_at_unix_ms,
-            "the hostile interleaving deliberately shares one clock millisecond"
+            "the hostile same-cue reclassification deliberately shares one clock millisecond"
         );
-        assert_ne!(current.occurrence_count, stale_fence.occurrence_count);
+        assert_eq!(current.occurrence_count, stale_fence.occurrence_count);
+        assert_eq!(
+            current.causal_generation,
+            stale_fence.causal_generation + 1,
+            "every newly inserted immutable evidence row advances the causal generation"
+        );
         assert!(
             store
                 .resolve_caption_cue_miss_if_unchanged(&current, 102)
@@ -21621,6 +22081,121 @@ mod tests {
             StationStore::open(&database).is_err(),
             "startup must reject orphan terminal authority"
         );
+        for candidate in [
+            database.clone(),
+            PathBuf::from(format!("{}-wal", database.display())),
+            PathBuf::from(format!("{}-shm", database.display())),
+        ] {
+            let _ = std::fs::remove_file(candidate);
+        }
+    }
+
+    #[test]
+    fn caption_miss_v2_marker_rejects_recreated_or_drifted_objects() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let database =
+            std::env::temp_dir().join(format!("townlight-caption-miss-v2-drift-{nonce}.db"));
+        let store = StationStore::open(&database).unwrap();
+        store
+            .execute(
+                "DROP TRIGGER caption_cue_miss_evidence_no_update;\
+                 DROP TABLE caption_cue_miss_evidence;\
+                 CREATE TABLE caption_cue_miss_evidence (\
+                   channel_id TEXT,report_id TEXT,track_id TEXT,track_revision INTEGER,cue_id TEXT,\
+                   reason TEXT,media_offset_ms INTEGER,observed_at_unix_ms INTEGER);",
+            )
+            .unwrap();
+        assert!(store.caption_cue_miss_resolution_fence("channel").is_err());
+        drop(store);
+        assert!(
+            StationStore::open(&database).is_err(),
+            "a v2 marker must not bless a dropped/recreated evidence table or missing trigger"
+        );
+        for candidate in [
+            database.clone(),
+            PathBuf::from(format!("{}-wal", database.display())),
+            PathBuf::from(format!("{}-shm", database.display())),
+        ] {
+            let _ = std::fs::remove_file(candidate);
+        }
+    }
+
+    #[test]
+    fn caption_miss_v2_rows_and_later_terminal_substitution_fail_closed() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let database =
+            std::env::temp_dir().join(format!("townlight-caption-miss-v2-rows-{nonce}.db"));
+        let store = StationStore::open(&database).unwrap();
+        let first = CaptionCueMissEvidence {
+            channel_id: "5d85189a-cd1f-43dc-a619-66a2aeb09ac4".into(),
+            report_id: "b4e1eacb-ef88-4af5-a0d0-a74a76448801".into(),
+            track_id: "65a26343-0339-4654-a92c-4bf9384f18df".into(),
+            track_revision: 7,
+            cue_id: "11111111-1111-4111-8111-111111111111".into(),
+            reason: CaptionCueMissReason::WorkerDidNotAcknowledge,
+            media_offset_ms: 500,
+            observed_at_unix_ms: 100,
+        };
+        store
+            .observe_caption_cue_misses_and_route(std::slice::from_ref(&first))
+            .unwrap();
+        let mut later = first.clone();
+        later.reason = CaptionCueMissReason::ExpiredBeforeAdmission;
+        later.media_offset_ms = 600;
+        later.observed_at_unix_ms = 101;
+        store
+            .observe_caption_cue_misses_and_route(std::slice::from_ref(&later))
+            .unwrap();
+        store
+            .execute(
+                "DROP TRIGGER caption_cue_miss_terminals_no_update;\
+                 UPDATE caption_cue_miss_terminals SET \
+                   first_reason='expired-before-admission',first_media_offset_ms=600,first_observed_at_unix_ms=101;",
+            )
+            .unwrap();
+        assert!(
+            store
+                .caption_cue_miss_resolution_fence(&first.channel_id)
+                .is_err(),
+            "a later evidence row may match the terminal fields but cannot replace the deterministic earliest row"
+        );
+        drop(store);
+        assert!(StationStore::open(&database).is_err());
+        for candidate in [
+            database.clone(),
+            PathBuf::from(format!("{}-wal", database.display())),
+            PathBuf::from(format!("{}-shm", database.display())),
+        ] {
+            let _ = std::fs::remove_file(candidate);
+        }
+    }
+
+    #[test]
+    fn caption_miss_v2_rejects_malformed_sqlite_evidence_types() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let database =
+            std::env::temp_dir().join(format!("townlight-caption-miss-v2-types-{nonce}.db"));
+        let store = StationStore::open(&database).unwrap();
+        store
+            .execute(
+                "PRAGMA ignore_check_constraints=ON;\
+                 INSERT INTO caption_cue_miss_evidence VALUES (\
+                   'channel','report','track',x'00','cue','expired-before-admission',500,100);\
+                 PRAGMA ignore_check_constraints=OFF;",
+            )
+            .unwrap();
+        assert!(store.caption_cue_miss_resolution_fence("channel").is_err());
+        drop(store);
+        assert!(StationStore::open(&database).is_err());
         for candidate in [
             database.clone(),
             PathBuf::from(format!("{}-wal", database.display())),
