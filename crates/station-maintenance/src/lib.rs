@@ -227,6 +227,16 @@ fn verify_install_fence_security(
 /// over its verified-candidate read and durable decision.
 pub struct InstallAuthorityFence {
     handle: HANDLE,
+    abandoned: bool,
+}
+
+impl InstallAuthorityFence {
+    /// An abandoned wait transfers mutex ownership to this caller.  Only the
+    /// interrupted-update recovery path may continue under that ownership;
+    /// ordinary writers must release it and fail closed.
+    pub fn was_abandoned(&self) -> bool {
+        self.abandoned
+    }
 }
 
 impl Drop for InstallAuthorityFence {
@@ -273,11 +283,14 @@ fn acquire_install_authority_fence_for(
     }
     let wait_ms = timeout.as_millis().min(u128::from(u32::MAX)) as u32;
     match unsafe { WaitForSingleObject(handle, wait_ms) } {
-        WAIT_OBJECT_0 => Ok(InstallAuthorityFence { handle }),
-        WAIT_ABANDONED => {
-            unsafe { CloseHandle(handle) };
-            Err("installation authority fence was abandoned; recover the interrupted update before writing evidence".into())
-        }
+        WAIT_OBJECT_0 => Ok(InstallAuthorityFence {
+            handle,
+            abandoned: false,
+        }),
+        WAIT_ABANDONED => Ok(InstallAuthorityFence {
+            handle,
+            abandoned: true,
+        }),
         _ => {
             unsafe { CloseHandle(handle) };
             Err("installation authority fence is busy".into())
@@ -559,7 +572,10 @@ pub fn activate_prepared_slot(
     // commit, and any rollback.  Narrower locking permits a competing updater
     // to replace the active slot while this transaction still believes its
     // original `current` receipt is authoritative.
-    let _authority_fence = acquire_install_authority_fence(data_directory)?;
+    let authority_fence = acquire_install_authority_fence(data_directory)?;
+    if authority_fence.was_abandoned() {
+        return Err("installation authority fence was abandoned; recover the interrupted update before activation".into());
+    }
     let active_path = data_directory.join(ACTIVE_SLOT_RECEIPT_NAME);
     let current = read_active_slot_receipt(&active_path)?;
     verify_active_application(application_root, &current.active)?;
@@ -2578,6 +2594,49 @@ mod tests {
             "a pre-created object with the caller default DACL must not become install authority"
         );
         unsafe { CloseHandle(squatted) };
+        remove_tree(&root).unwrap();
+    }
+
+    #[test]
+    fn abandoned_fence_retains_ownership_until_recovery_releases_it() {
+        let root = root("install-authority-abandoned");
+        let data = root.join("data");
+        std::fs::create_dir_all(&data).unwrap();
+        let name = install_authority_fence_name(&data).unwrap();
+        let retained = std::thread::spawn(move || {
+            let wide: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
+            let security = InstallFenceSecurity::local_system_and_administrators().unwrap();
+            let attributes = security.attributes();
+            let handle = unsafe { CreateMutexW(&attributes, 1, wide.as_ptr()) };
+            assert!(!handle.is_null());
+            handle as usize
+        })
+        .join()
+        .unwrap();
+
+        assert_eq!(
+            unsafe { WaitForSingleObject(retained as HANDLE, 1_000) },
+            WAIT_ABANDONED
+        );
+        let abandoned = InstallAuthorityFence {
+            handle: retained as HANDLE,
+            abandoned: true,
+        };
+        assert!(abandoned.was_abandoned());
+        let contender_data = data.clone();
+        assert!(
+            std::thread::spawn(move || {
+                acquire_install_authority_fence_for(&contender_data, Duration::from_millis(25))
+                    .is_err()
+            })
+            .join()
+            .unwrap()
+        );
+        drop(abandoned);
+        let normal =
+            acquire_install_authority_fence_for(&data, Duration::from_millis(100)).unwrap();
+        assert!(!normal.was_abandoned());
+        drop(normal);
         remove_tree(&root).unwrap();
     }
 

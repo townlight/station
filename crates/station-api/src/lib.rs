@@ -6495,7 +6495,7 @@ impl Api {
                 );
             }
         };
-        let _install_authority_fence = match acquire_install_authority_fence(data_directory) {
+        let install_authority_fence = match acquire_install_authority_fence(data_directory) {
             Ok(fence) => fence,
             Err(_) => {
                 return error_response(
@@ -6505,6 +6505,13 @@ impl Api {
                 );
             }
         };
+        if install_authority_fence.was_abandoned() {
+            return error_response(
+                409,
+                "candidate_authority_recovery_required",
+                "Candidate authority requires interrupted-update recovery before transport proof can be requested.",
+            );
+        }
         let candidate = match read_verified_install_authority(
             data_directory,
             &self.application_directory,

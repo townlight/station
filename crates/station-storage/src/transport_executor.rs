@@ -5,7 +5,7 @@
 //! digests reach the append-only authority in `station-storage`.
 
 use std::fs::{self, File};
-use std::io::{Read, Write};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::os::windows::fs::MetadataExt;
 use std::os::windows::fs::OpenOptionsExt;
 use std::os::windows::io::AsRawHandle;
@@ -73,6 +73,12 @@ struct PinnedAnalysisInput {
     _directories: Vec<File>,
 }
 
+struct PinnedCaptureOutput {
+    path: PathBuf,
+    file: File,
+    _directories: Vec<File>,
+}
+
 impl PinnedAnalysisInput {
     fn bytes(&self, max: u64) -> Result<Vec<u8>, String> {
         let file = self
@@ -95,7 +101,7 @@ impl ManagedCaptureRoot {
         Ok(Self { root })
     }
 
-    pub(crate) fn begin_job(&self, job_id: &str) -> Result<PathBuf, String> {
+    fn begin_job(&self, job_id: &str) -> Result<PinnedCaptureOutput, String> {
         if !is_canonical_uuid(job_id) {
             return Err("transport capture job identity is invalid".into());
         }
@@ -118,7 +124,21 @@ impl ManagedCaptureRoot {
         fs::create_dir(&job).map_err(|_| "transport capture job directory could not be created")?;
         ensure_non_reparse_ancestry(&job)?;
         write_quarantine_owner(&job, job_id)?;
-        Ok(job.join("capture.partial.ts"))
+        let path = job.join("capture.ts");
+        let file = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .share_mode(0)
+            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+            .open(&path)
+            .map_err(|_| "transport capture output handle could not be created")?;
+        let directories = pin_directory_ancestry(&self.root, &job)?;
+        Ok(PinnedCaptureOutput {
+            path,
+            file,
+            _directories: directories,
+        })
     }
 
     /// Quarantine is service-owned and bounded.  Every candidate is inspected
@@ -219,8 +239,9 @@ impl ManagedCaptureRoot {
     /// Hashes the closed partial capture, then atomically promotes it to the
     /// only analysis name.  The returned bytes are retained by the controller
     /// for analysis, so no later pathname substitution can affect findings.
-    pub(crate) fn seal_capture(
+    fn seal_capture(
         &self,
+        capture: &mut PinnedCaptureOutput,
         job_id: &str,
         started_at_unix_ms: i64,
         ended_at_unix_ms: i64,
@@ -231,13 +252,29 @@ impl ManagedCaptureRoot {
         }
         let job = self.root.join(job_id);
         ensure_non_reparse_ancestry(&job)?;
-        let partial = job.join("capture.partial.ts");
         let final_path = job.join("capture.ts");
-        if final_path.exists() {
-            return Err("transport capture has already been sealed".into());
+        if capture.path != final_path {
+            return Err("transport capture handle is not bound to this job".into());
         }
-        ensure_non_reparse_ancestry(&partial)?;
-        let bytes = bounded_capture(&partial, max_capture_bytes)?;
+        capture
+            .file
+            .flush()
+            .map_err(|_| "transport capture could not be flushed")?;
+        capture
+            .file
+            .sync_all()
+            .map_err(|_| "transport capture could not be committed")?;
+        capture
+            .file
+            .seek(SeekFrom::Start(0))
+            .map_err(|_| "transport capture could not be rewound")?;
+        let bytes = bounded_capture_file(
+            capture
+                .file
+                .try_clone()
+                .map_err(|_| "transport capture handle could not be cloned")?,
+            max_capture_bytes,
+        )?;
         let facts = TransportProofCaptureFacts {
             artifact_relative_path: format!("{job_id}/capture.ts"),
             capture_bytes: u64::try_from(bytes.len())
@@ -247,9 +284,6 @@ impl ManagedCaptureRoot {
             ended_at_unix_ms,
         };
         facts.validate(max_capture_bytes)?;
-        fs::rename(&partial, &final_path)
-            .map_err(|_| "transport capture could not be atomically sealed")?;
-        ensure_non_reparse_ancestry(&final_path)?;
         Ok((facts, bytes))
     }
 
@@ -369,7 +403,7 @@ fn execute_claimed_transport_job(
         .ok_or("transport proof sink is unavailable")?;
     let (host, port) = parse_udp_destination(&sink.destination)?;
     let root = ManagedCaptureRoot::open(data_directory.join("artifacts").join("transport-proof"))?;
-    let partial = root.begin_job(&job.job.job_id)?;
+    let mut capture_output = root.begin_job(&job.job.job_id)?;
     let runtime = AttestedTsdDuckRuntime::from_verified_install(data_directory, application_root)?;
     let executor = TsdDuckTransportExecutor {
         runtime,
@@ -380,13 +414,18 @@ fn execute_claimed_transport_job(
         udp_port: port,
         duration_ms: MAX_PROOF_DURATION_MS,
         max_bytes: job.job.max_capture_bytes,
-        artifact_path: partial,
+        artifact_path: capture_output.path.clone(),
     };
     let started = unix_time_millis()?;
-    executor.capture(&capture)?;
+    executor.capture_to_pinned_handle(&capture, &capture_output.file)?;
     let ended = unix_time_millis()?;
-    let (facts, sealed_bytes) =
-        root.seal_capture(&job.job.job_id, started, ended, job.job.max_capture_bytes)?;
+    let (facts, sealed_bytes) = root.seal_capture(
+        &mut capture_output,
+        &job.job.job_id,
+        started,
+        ended,
+        job.job.max_capture_bytes,
+    )?;
     let analyzing =
         store.begin_transport_proof_analysis(execution, &facts, ended, ANALYSIS_LEASE_MS)?;
     let analysis_input = root.write_analysis_copy(&job.job.job_id, &facts, &sealed_bytes)?;
@@ -443,8 +482,11 @@ fn execute_claimed_transport_job(
     // remains held through that transaction, so activation cannot replace the
     // active-slot receipt after this verified read and before the durable
     // completion decision.
-    let _install_authority_fence =
+    let install_authority_fence =
         station_maintenance::acquire_install_authority_fence(data_directory)?;
+    if install_authority_fence.was_abandoned() {
+        return Err("installation authority fence was abandoned; transport evidence requires update recovery".into());
+    }
     store.complete_transport_proof_job_with_analysis(
         execution,
         &receipt,
@@ -712,6 +754,7 @@ impl ProcessRunner for RealProcessRunner {
         heartbeat: &mut dyn FnMut() -> Result<(), String>,
     ) -> Result<ProcessResult, String> {
         heartbeat()?;
+        let _executable_pin = open_attested_executable_unverified(executable)?;
         let job = WindowsProcessTree::new()?;
         let mut child = Command::new(executable)
             .args(argv)
@@ -802,6 +845,73 @@ impl ProcessRunner for RealProcessRunner {
     }
 }
 
+impl RealProcessRunner {
+    fn run_capture_to_handle(
+        &self,
+        executable: &Path,
+        argv: &[String],
+        timeout: Duration,
+        output: &File,
+    ) -> Result<ProcessResult, String> {
+        let _executable_pin = open_attested_executable_unverified(executable)?;
+        let job = WindowsProcessTree::new()?;
+        let output = output
+            .try_clone()
+            .map_err(|_| "transport capture output handle could not be inherited")?;
+        let mut child = Command::new(executable)
+            .args(argv)
+            .stdin(Stdio::null())
+            .stdout(Stdio::from(output))
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|_| "TSDuck capture process could not be spawned")?;
+        if let Err(error) = job.assign(&child) {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(error);
+        }
+        let stderr = child
+            .stderr
+            .take()
+            .ok_or("TSDuck stderr pipe was unavailable")?;
+        let (tx, rx) = mpsc::sync_channel(1);
+        let drain = std::thread::spawn(move || {
+            let _ = tx.send(drain_stderr(stderr));
+        });
+        let started = Instant::now();
+        let status = loop {
+            if let Some(status) = child
+                .try_wait()
+                .map_err(|_| "TSDuck capture status could not be read")?
+            {
+                break status;
+            }
+            if started.elapsed() >= timeout {
+                job.terminate();
+                let _ = child.wait();
+                return Err("TSDuck capture process exceeded its deadline".into());
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        let stderr_result = rx
+            .recv_timeout(POST_EXIT_DRAIN_TIMEOUT)
+            .map_err(|_| "TSDuck capture stderr drain exceeded its deadline")?;
+        if !drain.is_finished() {
+            job.terminate();
+            unsafe { CancelSynchronousIo(drain.as_raw_handle() as HANDLE) };
+            return Err("TSDuck capture stderr drain did not stop".into());
+        }
+        drain
+            .join()
+            .map_err(|_| "TSDuck capture stderr drain panicked")?;
+        stderr_result?;
+        Ok(ProcessResult {
+            status_success: status.success(),
+            output: Vec::new(),
+        })
+    }
+}
+
 #[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct FakeProcessRunner {
@@ -852,6 +962,7 @@ impl<R: ProcessRunner> TsdDuckTransportExecutor<R> {
             return Err("transport analyzer input handle does not match its request".into());
         }
         let (_, analyzer, tables) = self.runtime.verify()?;
+        let _analyzer_pin = open_attested_executable(&analyzer, &self.runtime.tsanalyze_sha256)?;
         let bytes = input.bytes(capture.max_bytes)?;
         let argv = vec![
             "--json".into(),
@@ -870,6 +981,7 @@ impl<R: ProcessRunner> TsdDuckTransportExecutor<R> {
         }
         let mut findings =
             parse_tsanalyze_json(&result.output, bytes.len() as u64, capture.duration_ms)?;
+        let _tables_pin = open_attested_executable(&tables, &self.runtime.tstables_sha256)?;
         let tables_argv = vec![
             "--json-output".into(),
             "-".into(),
@@ -920,25 +1032,30 @@ impl<R: ProcessRunner> TsdDuckTransportExecutor<R> {
             capture.artifact_path.to_string_lossy().into_owned(),
         ])
     }
+}
 
-    /// Capture terminates through TSDuck's packet and time plugins, with the
-    /// process deadline as an independent fail-closed supervisor.
-    fn capture(&self, capture: &CaptureRequest) -> Result<(), String> {
+impl TsdDuckTransportExecutor<RealProcessRunner> {
+    fn capture_to_pinned_handle(
+        &self,
+        capture: &CaptureRequest,
+        output: &File,
+    ) -> Result<(), String> {
         capture.validate()?;
-        if capture.artifact_path.exists() {
-            return Err("transport capture artifact already exists".into());
-        }
         let (tsp, _, _) = self.runtime.verify()?;
-        let argv = self.capture_argv(capture)?;
-        let result = self.runner.run(
+        let _tsp_pin = open_attested_executable(&tsp, &self.runtime.tsp_sha256)?;
+        let mut argv = self.capture_argv(capture)?;
+        let destination = argv.last_mut().ok_or("TSDuck capture output is missing")?;
+        *destination = "-".into();
+        let result = self.runner.run_capture_to_handle(
             &tsp,
             &argv,
             Duration::from_millis(capture.duration_ms.saturating_add(5_000)),
+            output,
         )?;
         if !result.status_success {
             return Err("TSDuck capture process failed".into());
         }
-        bounded_capture(&capture.artifact_path, capture.max_bytes).map(|_| ())
+        Ok(())
     }
 }
 
@@ -1342,10 +1459,20 @@ fn collect_process_drains(
         }
     }
     let join_deadline = Instant::now() + Duration::from_secs(1);
+    let mut heartbeat_error = None;
     while (!stdout_thread.is_finished() || !stderr_thread.is_finished())
         && Instant::now() < join_deadline
     {
-        heartbeat()?;
+        if heartbeat_error.is_none()
+            && let Err(error) = heartbeat()
+        {
+            heartbeat_error = Some(error);
+            job.terminate();
+            unsafe {
+                CancelSynchronousIo(stdout_thread.as_raw_handle() as HANDLE);
+                CancelSynchronousIo(stderr_thread.as_raw_handle() as HANDLE);
+            }
+        }
         std::thread::sleep(Duration::from_millis(10));
     }
     if !stdout_thread.is_finished() || !stderr_thread.is_finished() {
@@ -1357,6 +1484,9 @@ fn collect_process_drains(
     stderr_thread
         .join()
         .map_err(|_| "TSDuck stderr drain thread panicked".to_string())?;
+    if let Some(error) = heartbeat_error {
+        return Err(error);
+    }
     stderr_result?;
     stdout_result
 }
@@ -1435,6 +1565,43 @@ fn open_private_capture_no_follow(path: &Path) -> Result<File, String> {
     if metadata.file_attributes() & 0x0400 != 0 || !metadata.is_file() {
         return Err("TSDuck capture artifact is a reparse point or not a file".into());
     }
+    Ok(file)
+}
+
+fn open_attested_executable_unverified(path: &Path) -> Result<File, String> {
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .share_mode(FILE_SHARE_READ)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)
+        .map_err(|_| "attested executable could not be pinned")?;
+    let metadata = file
+        .metadata()
+        .map_err(|_| "attested executable could not be inspected")?;
+    if metadata.file_attributes() & 0x0400 != 0 || !metadata.is_file() {
+        return Err("attested executable is a reparse point or not a file".into());
+    }
+    Ok(file)
+}
+
+fn open_attested_executable(path: &Path, expected_sha256: &str) -> Result<File, String> {
+    let mut file = open_attested_executable_unverified(path)?;
+    let mut digest = Sha256::new();
+    let mut buffer = [0_u8; 8192];
+    loop {
+        let count = file
+            .read(&mut buffer)
+            .map_err(|_| "attested executable could not be read")?;
+        if count == 0 {
+            break;
+        }
+        digest.update(&buffer[..count]);
+    }
+    if format!("{:x}", digest.finalize()) != expected_sha256 {
+        return Err("attested executable handle does not match its verified identity".into());
+    }
+    file.seek(SeekFrom::Start(0))
+        .map_err(|_| "attested executable could not be rewound")?;
     Ok(file)
 }
 
@@ -1963,9 +2130,11 @@ mod tests {
         let base = root();
         let managed = ManagedCaptureRoot::open(base.join("managed")).unwrap();
         let job_id = "11111111-2222-4333-8444-555555555555";
-        let partial = managed.begin_job(job_id).unwrap();
-        fs::write(&partial, vec![0x47; 188]).unwrap();
-        let (facts, bytes) = managed.seal_capture(job_id, 1, 600_001, 1_024).unwrap();
+        let mut partial = managed.begin_job(job_id).unwrap();
+        partial.file.write_all(&[0x47; 188]).unwrap();
+        let (facts, bytes) = managed
+            .seal_capture(&mut partial, job_id, 1, 600_001, 1_024)
+            .unwrap();
         let input = managed.write_analysis_copy(job_id, &facts, &bytes).unwrap();
         assert!(fs::rename(&input.path, input.path.with_extension("replaced")).is_err());
         let job_directory = input.path.parent().unwrap();
@@ -1977,6 +2146,7 @@ mod tests {
                 .is_err()
         );
         drop(input);
+        drop(partial);
         fs::remove_dir_all(base).unwrap();
     }
 
@@ -1985,8 +2155,9 @@ mod tests {
         let base = root();
         let managed = ManagedCaptureRoot::open(base.join("managed")).unwrap();
         let job_id = "11111111-2222-4333-8444-555555555555";
-        let partial = managed.begin_job(job_id).unwrap();
-        fs::write(partial, b"partial").unwrap();
+        let mut partial = managed.begin_job(job_id).unwrap();
+        partial.file.write_all(b"partial").unwrap();
+        drop(partial);
         let job = managed.root.join(job_id);
         let tombstone = managed.root.join(".deleting-test-owned");
         fs::rename(&job, &tombstone).unwrap();
@@ -2306,14 +2477,27 @@ mod tests {
         let root = root();
         let managed = ManagedCaptureRoot::open(root.join("artifacts")).unwrap();
         let job_id = "11111111-2222-4333-8444-555555555555";
-        let partial = managed.begin_job(job_id).unwrap();
-        fs::write(&partial, vec![0x47; 188]).unwrap();
-        let (facts, bytes) = managed.seal_capture(job_id, 1_000, 601_000, 1_024).unwrap();
+        let mut partial = managed.begin_job(job_id).unwrap();
+        assert!(fs::rename(&partial.path, partial.path.with_extension("hostile")).is_err());
+        let job_directory = partial.path.parent().unwrap();
+        assert!(fs::rename(job_directory, job_directory.with_extension("hostile")).is_err());
+        assert!(
+            fs::OpenOptions::new()
+                .write(true)
+                .open(&partial.path)
+                .is_err()
+        );
+        partial.file.write_all(&[0x47; 188]).unwrap();
+        let (facts, bytes) = managed
+            .seal_capture(&mut partial, job_id, 1_000, 601_000, 1_024)
+            .unwrap();
         assert_eq!(facts.artifact_relative_path, format!("{job_id}/capture.ts"));
         assert_eq!(facts.capture_bytes, 188);
         assert_eq!(facts.capture_sha256, sha256(&bytes));
+        drop(partial);
         let retry = managed.begin_job(job_id).unwrap();
-        assert!(retry.ends_with("capture.partial.ts"));
+        assert!(retry.path.ends_with("capture.ts"));
+        drop(retry);
         assert!(fs::read_dir(root.join("artifacts")).unwrap().any(|entry| {
             entry
                 .unwrap()
