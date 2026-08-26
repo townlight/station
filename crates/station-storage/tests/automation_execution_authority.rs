@@ -490,3 +490,87 @@ fn read_fails_closed_when_a_receipt_is_orphaned_from_its_job_row() {
     drop(reopened);
     let _ = std::fs::remove_file(database);
 }
+
+#[test]
+fn attempt_failures_retry_only_under_the_live_owner_and_can_finish_terminally() {
+    let (database, store) = configured_store("automation-execution-attempt-failure");
+    store
+        .enqueue_automation_execution_job(&request(), &candidate(), 100)
+        .unwrap();
+    store
+        .claim_automation_execution_job(JOB_ID, "automation-worker-1", &candidate(), 150, 1_000)
+        .unwrap();
+
+    assert!(
+        store
+            .record_automation_execution_attempt_failure(
+                JOB_ID,
+                "automation-worker-2",
+                "adapter_timeout",
+                true,
+                200,
+            )
+            .is_err()
+    );
+    let pending = store
+        .record_automation_execution_attempt_failure(
+            JOB_ID,
+            "automation-worker-1",
+            "adapter_timeout",
+            true,
+            200,
+        )
+        .unwrap();
+    assert_eq!(pending.state, AutomationExecutionJobState::Pending);
+    assert_eq!(pending.attempt_count, 1);
+    assert_eq!(
+        pending.last_failure_code.as_deref(),
+        Some("adapter_timeout")
+    );
+    assert!(pending.lease_owner.is_none());
+    assert!(pending.completed_at_unix_ms.is_none());
+
+    store
+        .claim_automation_execution_job(JOB_ID, "automation-worker-2", &candidate(), 250, 1_000)
+        .unwrap();
+    let failed = store
+        .record_automation_execution_attempt_failure(
+            JOB_ID,
+            "automation-worker-2",
+            "invalid_provider_response",
+            false,
+            300,
+        )
+        .unwrap();
+    assert_eq!(failed.state, AutomationExecutionJobState::Failed);
+    assert_eq!(failed.attempt_count, 2);
+    assert_eq!(
+        failed.last_failure_code.as_deref(),
+        Some("invalid_provider_response")
+    );
+    assert_eq!(failed.completed_at_unix_ms, Some(300));
+    assert!(failed.receipt.is_none());
+    assert!(
+        store
+            .record_automation_execution_attempt_failure(
+                JOB_ID,
+                "automation-worker-2",
+                "retry_after_terminal",
+                true,
+                301,
+            )
+            .is_err()
+    );
+
+    drop(store);
+    let reopened = StationStore::open(&database).unwrap();
+    assert_eq!(
+        reopened
+            .read_automation_execution_job(JOB_ID)
+            .unwrap()
+            .unwrap(),
+        failed
+    );
+    drop(reopened);
+    let _ = std::fs::remove_file(database);
+}

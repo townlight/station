@@ -411,6 +411,78 @@ impl StationStore {
         self.finish_automation_execution_transaction(outcome)
     }
 
+    pub fn record_automation_execution_attempt_failure(
+        &self,
+        job_id: &str,
+        worker_id: &str,
+        failure_code: &str,
+        retryable: bool,
+        now_unix_ms: i64,
+    ) -> Result<AutomationExecutionJobRecord, String> {
+        if !is_canonical_uuid(job_id)
+            || !secret_field(worker_id, 200)
+            || !valid_automation_execution_failure_code(failure_code)
+            || now_unix_ms < 0
+        {
+            return Err("automation execution failure report is invalid or unbounded".into());
+        }
+        self.execute("BEGIN IMMEDIATE")?;
+        let outcome = (|| {
+            let current = self
+                .read_automation_execution_job(job_id)?
+                .ok_or_else(|| "automation execution job does not exist".to_string())?;
+            if current.state != AutomationExecutionJobState::Claimed
+                || current.lease_owner.as_deref() != Some(worker_id)
+                || current
+                    .lease_expires_at_unix_ms
+                    .is_none_or(|expiry| expiry <= now_unix_ms)
+            {
+                return Err("automation execution failure lacks a live exact lease".into());
+            }
+            let terminal = !retryable || current.attempt_count >= MAX_AUTOMATION_EXECUTION_ATTEMPTS;
+            let update = if terminal {
+                self.prepare(
+                    "UPDATE automation_execution_jobs SET state='failed',lease_owner='',lease_expires_at_unix_ms=-1,last_failure_code=?1,completed_at_unix_ms=?2 \
+                     WHERE job_id=?3 AND state='claimed' AND lease_owner=?4 AND lease_expires_at_unix_ms>?2",
+                )?
+            } else {
+                self.prepare(
+                    "UPDATE automation_execution_jobs SET state='pending',lease_owner='',lease_expires_at_unix_ms=-1,last_failure_code=?1 \
+                     WHERE job_id=?3 AND state='claimed' AND lease_owner=?4 AND lease_expires_at_unix_ms>?2",
+                )?
+            };
+            let code = c_string(failure_code, "automation execution failure code")?;
+            let job = c_string(job_id, "automation execution job identity")?;
+            let worker = c_string(worker_id, "automation execution worker identity")?;
+            bind_text(self.database, update.raw, 1, &code)?;
+            bind_i64(self.database, update.raw, 2, now_unix_ms)?;
+            bind_text(self.database, update.raw, 3, &job)?;
+            bind_text(self.database, update.raw, 4, &worker)?;
+            expect_done(self.database, update.raw)?;
+            if self.changes() != 1 {
+                return Err("automation execution failure compare-and-set was lost".into());
+            }
+            let updated = self
+                .read_automation_execution_job(job_id)?
+                .ok_or_else(|| "automation execution job disappeared after failure".to_string())?;
+            let expected_state = if terminal {
+                AutomationExecutionJobState::Failed
+            } else {
+                AutomationExecutionJobState::Pending
+            };
+            if updated.state != expected_state
+                || updated.last_failure_code.as_deref() != Some(failure_code)
+                || updated.lease_owner.is_some()
+                || updated.lease_expires_at_unix_ms.is_some()
+                || terminal != updated.completed_at_unix_ms.is_some()
+            {
+                return Err("automation execution failure was not durably exact".into());
+            }
+            Ok(updated)
+        })();
+        self.finish_automation_execution_transaction(outcome)
+    }
+
     fn finish_automation_execution_transaction<T>(
         &self,
         outcome: Result<T, String>,
@@ -581,6 +653,13 @@ fn parse_automation_execution_state(value: &str) -> Result<AutomationExecutionJo
         "failed" => Ok(AutomationExecutionJobState::Failed),
         _ => Err("database returned invalid automation execution job state".into()),
     }
+}
+
+fn valid_automation_execution_failure_code(value: &str) -> bool {
+    (1..=80).contains(&value.len())
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
 }
 
 fn validate_automation_execution_job_state(
