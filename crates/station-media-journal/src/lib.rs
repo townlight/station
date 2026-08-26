@@ -445,6 +445,12 @@ fn apply_fallback_tone_audit_entry(
             ..
         } => {
             tone.validate()?;
+            // The worker owns one physical fallback-tone renderer, represented
+            // by Option<ActiveFallbackTone>; durable replay must preserve that
+            // same single-active invariant.
+            if !active.is_empty() {
+                return Err("fallback tone audit activates while another tone is active".into());
+            }
             if active.contains_key(&tone.activation_id) {
                 return Err("fallback tone audit activates an already-active identity".into());
             }
@@ -470,11 +476,15 @@ fn apply_fallback_tone_audit_entry(
             if *deactivated_at_monotonic_ms < *activated_at_monotonic_ms {
                 return Err("fallback tone audit deactivation predates activation".into());
             }
-            if matches!(reason, FallbackToneDeactivationReason::Expired)
-                && *deactivated_at_monotonic_ms
-                    < activated_at_monotonic_ms.saturating_add(tone.duration_ms)
-            {
-                return Err("fallback tone audit expiry predates its configured duration".into());
+            if matches!(reason, FallbackToneDeactivationReason::Expired) {
+                let expires_at_monotonic_ms = activated_at_monotonic_ms
+                    .checked_add(tone.duration_ms)
+                    .ok_or_else(|| "fallback tone audit activation expiry overflows".to_string())?;
+                if *deactivated_at_monotonic_ms < expires_at_monotonic_ms {
+                    return Err(
+                        "fallback tone audit expiry predates its configured duration".into(),
+                    );
+                }
             }
             active.remove(&tone.activation_id);
         }

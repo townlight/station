@@ -75,20 +75,26 @@ fn write_event_record(path: &Path, frame: &[u8], journal_version: u16) {
 }
 
 fn write_fallback_tone_audit_record(path: &Path, entry: &FallbackToneJournalEntry) {
-    let payload = serde_json::to_vec(entry).unwrap();
+    write_fallback_tone_audit_records(path, std::slice::from_ref(entry));
+}
+
+fn write_fallback_tone_audit_records(path: &Path, entries: &[FallbackToneJournalEntry]) {
     let mut file = OpenOptions::new()
         .create(true)
         .write(true)
         .truncate(true)
         .open(path)
         .unwrap();
-    file.write_all(b"TLJR").unwrap();
-    file.write_all(&2_u16.to_le_bytes()).unwrap();
-    file.write_all(&3_u16.to_le_bytes()).unwrap();
-    file.write_all(&(payload.len() as u32).to_le_bytes())
-        .unwrap();
-    file.write_all(&crc32(&payload).to_le_bytes()).unwrap();
-    file.write_all(&payload).unwrap();
+    for entry in entries {
+        let payload = serde_json::to_vec(entry).unwrap();
+        file.write_all(b"TLJR").unwrap();
+        file.write_all(&2_u16.to_le_bytes()).unwrap();
+        file.write_all(&3_u16.to_le_bytes()).unwrap();
+        file.write_all(&(payload.len() as u32).to_le_bytes())
+            .unwrap();
+        file.write_all(&crc32(&payload).to_le_bytes()).unwrap();
+        file.write_all(&payload).unwrap();
+    }
     file.sync_all().unwrap();
 }
 
@@ -241,6 +247,83 @@ fn replay_rejects_an_invalid_fallback_tone_audit_record() {
         inspect_journal(&path),
         Err(JournalError::Corrupt { reason, .. }) if reason.contains("invalid fallback tone audit")
     ));
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn rejects_a_second_active_fallback_tone_on_append_and_replay() {
+    let path = journal_path("multiple-active-fallback-tones");
+    let first = WorkerFallbackTone {
+        activation_id: "1c63ef7e-6e4b-4fa6-b5d8-c15e2b735c05".into(),
+        authority_revision: 3,
+        kind: FallbackToneKind::Test,
+        frequency_hz: 1_000,
+        level_milli_dbfs: -20_000,
+        duration_ms: 1_000,
+    };
+    let mut second = first.clone();
+    second.activation_id = "2c63ef7e-6e4b-4fa6-b5d8-c15e2b735c05".into();
+    second.authority_revision = 4;
+    let first_entry = FallbackToneJournalEntry::Activated {
+        worker_id: WORKER_ID.into(),
+        channel_id: CHANNEL_ID.into(),
+        tone: first,
+        activated_at_monotonic_ms: 1,
+    };
+    let second_entry = FallbackToneJournalEntry::Activated {
+        worker_id: WORKER_ID.into(),
+        channel_id: CHANNEL_ID.into(),
+        tone: second,
+        activated_at_monotonic_ms: 2,
+    };
+    let mut writer = JournalWriter::open(&path, WORKER_ID, CHANNEL_ID).unwrap();
+    writer.append_fallback_tone_audit(&first_entry).unwrap();
+    assert!(matches!(
+        writer.append_fallback_tone_audit(&second_entry),
+        Err(JournalError::InvalidFallbackToneAudit(_))
+    ));
+    drop(writer);
+    let _ = std::fs::remove_file(&path);
+
+    write_fallback_tone_audit_records(&path, &[first_entry, second_entry]);
+    assert!(
+        matches!(inspect_journal(&path), Err(JournalError::Corrupt { reason, .. }) if reason.contains("another tone is active"))
+    );
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn replay_fails_closed_when_fallback_tone_expiry_overflows() {
+    let path = journal_path("fallback-tone-expiry-overflow");
+    let tone = WorkerFallbackTone {
+        activation_id: "1c63ef7e-6e4b-4fa6-b5d8-c15e2b735c05".into(),
+        authority_revision: 3,
+        kind: FallbackToneKind::Test,
+        frequency_hz: 1_000,
+        level_milli_dbfs: -20_000,
+        duration_ms: 1_000,
+    };
+    write_fallback_tone_audit_records(
+        &path,
+        &[
+            FallbackToneJournalEntry::Activated {
+                worker_id: WORKER_ID.into(),
+                channel_id: CHANNEL_ID.into(),
+                tone: tone.clone(),
+                activated_at_monotonic_ms: u64::MAX,
+            },
+            FallbackToneJournalEntry::Deactivated {
+                worker_id: WORKER_ID.into(),
+                channel_id: CHANNEL_ID.into(),
+                tone,
+                reason: FallbackToneDeactivationReason::Expired,
+                deactivated_at_monotonic_ms: u64::MAX,
+            },
+        ],
+    );
+    assert!(
+        matches!(inspect_journal(&path), Err(JournalError::Corrupt { reason, .. }) if reason.contains("expiry overflows"))
+    );
     let _ = std::fs::remove_file(path);
 }
 

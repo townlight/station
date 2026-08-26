@@ -465,6 +465,138 @@ fn worker_executes_only_a_finite_revision_bound_fallback_tone() {
 }
 
 #[test]
+fn shutdown_durably_deactivates_an_active_fallback_tone_before_stopping() {
+    let _guard = process_contract_test_guard();
+    let journal = journal_path("shutdown-active-fallback-tone");
+    let _temp_files = TempFiles(vec![journal.clone()]);
+    let tone = WorkerFallbackTone {
+        activation_id: "1c63ef7e-6e4b-4fa6-b5d8-c15e2b735c05".into(),
+        authority_revision: 3,
+        kind: FallbackToneKind::Test,
+        frequency_hz: 1_000,
+        level_milli_dbfs: -20_000,
+        duration_ms: 10_000,
+    };
+    let mut input = encode_command_frame(&command(
+        "activate-before-shutdown",
+        2,
+        ChannelCommand::ActivateFallbackTone { tone: tone.clone() },
+    ))
+    .unwrap();
+    input.extend(
+        encode_command_frame(&command(
+            "shutdown-active-tone",
+            3,
+            ChannelCommand::Shutdown,
+        ))
+        .unwrap(),
+    );
+    let (output, emitted) = run_worker(&journal, &input, 4);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(matches!(
+        emitted[1].event,
+        WorkerEvent::FallbackToneActivated { .. }
+    ));
+    assert!(matches!(
+        &emitted[2].event,
+        WorkerEvent::FallbackToneDeactivated {
+            deactivation: Some(deactivation), ..
+        } if deactivation.tone == tone && deactivation.reason == FallbackToneDeactivationReason::Shutdown
+    ));
+    assert!(matches!(emitted[3].event, WorkerEvent::ShutdownComplete));
+    assert!(
+        inspect_journal(&journal)
+            .unwrap()
+            .fallback_tone_audit
+            .iter()
+            .any(|entry| matches!(
+                entry,
+                FallbackToneJournalEntry::Deactivated {
+                    tone: recorded_tone,
+                    reason: FallbackToneDeactivationReason::Shutdown,
+                    ..
+                } if recorded_tone == &tone
+            ))
+    );
+}
+
+#[test]
+fn failed_live_take_keeps_the_active_fallback_tone_audited_until_shutdown() {
+    let _guard = process_contract_test_guard();
+    let journal = journal_path("failed-live-keeps-fallback-tone");
+    let _temp_files = TempFiles(vec![journal.clone()]);
+    let tone = WorkerFallbackTone {
+        activation_id: "1c63ef7e-6e4b-4fa6-b5d8-c15e2b735c05".into(),
+        authority_revision: 3,
+        kind: FallbackToneKind::Test,
+        frequency_hz: 1_000,
+        level_milli_dbfs: -20_000,
+        duration_ms: 10_000,
+    };
+    let mut input = encode_command_frame(&command(
+        "activate-before-failed-live",
+        2,
+        ChannelCommand::ActivateFallbackTone { tone: tone.clone() },
+    ))
+    .unwrap();
+    input.extend(
+        encode_command_frame(&command(
+            "failed-live-take",
+            3,
+            ChannelCommand::TakeLive {
+                session_id: "e8d9c07d-1d04-40cc-9fb7-5c1b13f0e961".into(),
+                arm_token: LiveArmToken::new("unarmed-live-token".into()).unwrap(),
+            },
+        ))
+        .unwrap(),
+    );
+    input.extend(
+        encode_command_frame(&command(
+            "shutdown-after-failed-live",
+            4,
+            ChannelCommand::Shutdown,
+        ))
+        .unwrap(),
+    );
+    let (output, emitted) = run_worker(&journal, &input, 5);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(matches!(
+        &emitted[2].event,
+        WorkerEvent::CommandRejected { code, .. } if code == "live_not_armed"
+    ));
+    assert!(matches!(
+        &emitted[3].event,
+        WorkerEvent::FallbackToneDeactivated {
+            deactivation: Some(deactivation), ..
+        } if deactivation.tone == tone && deactivation.reason == FallbackToneDeactivationReason::Shutdown
+    ));
+    let audit = inspect_journal(&journal).unwrap().fallback_tone_audit;
+    assert_eq!(
+        audit.len(),
+        2,
+        "failed take must not create a false deactivation"
+    );
+    assert!(
+        matches!(audit[0], FallbackToneJournalEntry::Activated { tone: ref recorded_tone, .. } if recorded_tone == &tone)
+    );
+    assert!(matches!(
+        audit[1],
+        FallbackToneJournalEntry::Deactivated {
+            reason: FallbackToneDeactivationReason::Shutdown,
+            ..
+        }
+    ));
+}
+
+#[test]
 fn worker_expires_a_fallback_tone_while_the_supervisor_is_silent() {
     let _guard = process_contract_test_guard();
     let journal = journal_path("autonomous-fallback-tone-expiry");

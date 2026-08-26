@@ -1675,9 +1675,10 @@ impl PersistentPlayout {
     }
 
     pub fn select(&mut self, role: SourceRole) -> Result<(), EngineError> {
-        if role != SourceRole::Fallback {
-            self.deactivate_fallback_tone();
-        }
+        // Do not silence the physical fallback tone until the caller has a
+        // confirmed source transition.  In particular, taking a live input
+        // can fail after validation; clearing it here would leave the channel
+        // silent while the worker still records an active fallback tone.
         if role == SourceRole::Program
             && self
                 .file_program

@@ -430,6 +430,14 @@ fn main() {
                     _ => None,
                 };
                 if let Some(reason) = reason {
+                    // select() deliberately leaves the tone audible until its
+                    // replacement source is proven live.  This is the one
+                    // authoritative point where a successful source
+                    // transition clears and audits that physical tone.
+                    media
+                        .as_mut()
+                        .expect("a running worker owns its media graph")
+                        .deactivate_fallback_tone();
                     append_tone_deactivation_audit(
                         &mut journal,
                         &worker_id,
@@ -443,6 +451,42 @@ fn main() {
                 }
             }
             if should_stop {
+                if let Some(active) = fallback_tone.take() {
+                    let tone = active.tone;
+                    media
+                        .as_mut()
+                        .expect("a running worker owns its media graph")
+                        .deactivate_fallback_tone();
+                    append_tone_deactivation_audit(
+                        &mut journal,
+                        &worker_id,
+                        &channel_id,
+                        &tone,
+                        FallbackToneDeactivationReason::Shutdown,
+                        now,
+                    )
+                    .unwrap_or_else(|error| fatal(7, "record fallback tone shutdown", &error));
+                    record_and_emit(
+                        &mut journal,
+                        &mut pipe,
+                        &worker_id,
+                        &channel_id,
+                        WorkerEvent::FallbackToneDeactivated {
+                            activation_id: tone.activation_id.clone(),
+                            authority_revision: tone.authority_revision,
+                            deactivation: Some(
+                                station_media_protocol::WorkerFallbackToneDeactivation {
+                                    tone,
+                                    reason: FallbackToneDeactivationReason::Shutdown,
+                                    deactivated_at_monotonic_ms: now,
+                                },
+                            ),
+                        },
+                    )
+                    .unwrap_or_else(|error| {
+                        fatal(7, "record and emit fallback tone shutdown", &error)
+                    });
+                }
                 media
                     .take()
                     .expect("a running worker owns its media graph")
