@@ -102,6 +102,8 @@ mod asrun_epg_authority;
 pub use asrun_epg_authority::{
     AsRunProjectionPage, AsRunProjectionWriteError, MAX_ASRUN_EPG_PAGE_SIZE,
 };
+mod asrun_journal_adapter;
+pub use asrun_journal_adapter::{AsRunJournalAdapterError, project_durable_journal};
 mod catalog_candidate_projection;
 pub use catalog_candidate_projection::CatalogCandidateProjection;
 mod materialization_evidence;

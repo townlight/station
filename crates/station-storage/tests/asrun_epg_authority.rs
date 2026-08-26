@@ -1,8 +1,11 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use station_media_journal::JournalWriter;
+use station_media_protocol::{PROTOCOL_VERSION, WorkerEvent, WorkerEventEnvelope};
 use station_reporting::runtime::{AsRunState, JournalTake, ProjectionInput, ReportingRuntime};
 use station_storage::StationStore;
+use station_storage::project_durable_journal;
 
 static SEQUENCE: AtomicU64 = AtomicU64::new(0);
 const CHANNEL: &str = "00000000-0000-0000-0000-000000000001";
@@ -32,6 +35,7 @@ fn projection() -> station_reporting::runtime::AsRunProjectionRuntime {
         catalog_revision: 1,
         schedule_revision: 1,
         journal_hash: "a".repeat(64),
+        unavailable_reason: None,
     };
     ReportingRuntime::new()
         .project(ProjectionInput::new(CHANNEL, "America/Denver", vec![take]).unwrap())
@@ -65,4 +69,61 @@ fn durable_projection_replays_idempotently_and_survives_restart() {
         .unwrap();
     assert_eq!(page.checkpoint_sequence, 1);
     assert_eq!(page.station_timezone, "America/Denver");
+}
+
+#[test]
+fn durable_journal_adapter_replays_and_keeps_missing_authority_explicit() {
+    let path = database();
+    let journal = path.with_extension("tlj");
+    let mut writer =
+        JournalWriter::open(&journal, "00000000-0000-0000-0000-000000000010", CHANNEL).unwrap();
+    writer
+        .append(&WorkerEventEnvelope {
+            version: PROTOCOL_VERSION,
+            worker_id: "00000000-0000-0000-0000-000000000010".into(),
+            channel_id: CHANNEL.into(),
+            sequence: 1,
+            event: WorkerEvent::ScheduledAssetOnAir {
+                report_id: "report".into(),
+                schedule_item_id: "00000000-0000-0000-0000-000000000020".into(),
+                schedule_item_revision: 1,
+                asset_id: "a".repeat(64),
+                media_offset_ms: 0,
+                worker_boot_id: "00000000-0000-0000-0000-000000000030".into(),
+                actual_on_air_at_unix_ms: 1_700_000_000_000,
+            },
+        })
+        .unwrap();
+    drop(writer);
+    let store = StationStore::open(&path).unwrap();
+    let first = project_durable_journal(
+        &store,
+        &journal,
+        "00000000-0000-0000-0000-000000000040",
+        CHANNEL,
+        "America/Denver",
+        1_700_000_000_000,
+        1_700_000_060_000,
+        1_700_000_060_000,
+    )
+    .unwrap();
+    assert!(
+        first.entries[0]
+            .unavailable_reason
+            .as_deref()
+            .unwrap()
+            .contains("schedule")
+    );
+    let second = project_durable_journal(
+        &store,
+        &journal,
+        "00000000-0000-0000-0000-000000000040",
+        CHANNEL,
+        "America/Denver",
+        1_700_000_000_000,
+        1_700_000_060_000,
+        1_700_000_060_000,
+    )
+    .unwrap();
+    assert_eq!(first.entries, second.entries);
 }

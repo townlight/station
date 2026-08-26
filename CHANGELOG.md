@@ -21,6 +21,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   export reads with server-attributed append-only access audit records. No browser
   route can submit an aired fact, catalog binding, schedule binding, or projection.
 
+- Added a trusted durable-journal adapter for timed scheduled-airing events. It
+  persists replay-safe projections with exact schedule/catalog joins where
+  available, and explicitly marks unavailable taxonomy/authority and untimed gaps.
+
 - The operator console now includes a Publishing authority workspace. Enabled Setup Admins can
   create and revise bounded account and target records with the server's exact compare-and-swap
   revision, while permitted readers can inspect redacted current records, bounded immutable

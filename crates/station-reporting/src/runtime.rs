@@ -72,6 +72,7 @@ pub struct JournalTake {
     pub catalog_revision: u64,
     pub schedule_revision: u64,
     pub journal_hash: String,
+    pub unavailable_reason: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -119,7 +120,12 @@ impl ProjectionInput {
                 || take.title.chars().any(char::is_control)
                 || !matches!(
                     take.category.as_str(),
-                    "program" | "news" | "public_affairs" | "underwriting" | "interstitial"
+                    "program"
+                        | "news"
+                        | "public_affairs"
+                        | "underwriting"
+                        | "interstitial"
+                        | "unavailable"
                 )
             {
                 return Err("journal take has an invalid authority binding".into());
@@ -197,7 +203,10 @@ impl ReportingRuntime {
                 catalog_revision: take.catalog_revision,
                 schedule_revision: take.schedule_revision,
                 journal_hash: take.journal_hash.clone(),
-                unavailable_reason: take.state.unavailable_reason().map(str::to_owned),
+                unavailable_reason: take
+                    .unavailable_reason
+                    .clone()
+                    .or_else(|| take.state.unavailable_reason().map(str::to_owned)),
             })
             .collect();
         let last = input.takes.last().expect("validated non-empty");

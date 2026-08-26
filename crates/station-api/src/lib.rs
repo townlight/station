@@ -13206,6 +13206,7 @@ mod tests {
             catalog_revision: 1,
             schedule_revision: 1,
             journal_hash: "a".repeat(64),
+            unavailable_reason: None,
         };
         let projection = station_reporting::runtime::ReportingRuntime::new()
             .project(

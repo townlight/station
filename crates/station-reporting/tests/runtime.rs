@@ -19,6 +19,7 @@ fn take(sequence: u64, start: i64, end: i64, state: AsRunState) -> JournalTake {
         catalog_revision: 7,
         schedule_revision: 9,
         journal_hash: "a".repeat(64),
+        unavailable_reason: None,
     }
 }
 

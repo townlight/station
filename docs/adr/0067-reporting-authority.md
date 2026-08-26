@@ -65,6 +65,16 @@ move backwards. Reopening the database reads and validates the saved projection.
 This persistence boundary accepts only a trusted in-process projection; it is not an
 HTTP ingestion route and therefore does not let a browser assert aired facts.
 
+The trusted journal adapter reads CRC-checked durable `ScheduledAssetOnAir`
+records and joins the exact current schedule item identity/revision/channel/asset
+before reading the catalog asset authority. It persists the catalog revision and
+title when available. The current catalog schema does not contain franchise or
+category identities, so those values remain explicitly unavailable; no taxonomy is
+derived from title or meeting body. Other worker events (live, CG, caption, and
+fallback changes) have no durable wall-clock instant, and therefore cannot create a
+UTC airing interval: the adapter records uncovered time as an explicit gap rather
+than inventing timing or airplay.
+
 Authenticated enabled Setup Admin and Meeting Operator accounts may read bounded
 pages of an already persisted projection or request bounded CSV/XMLTV bytes. The
 API has no projection-write or fact-ingestion route. Every successful read/export

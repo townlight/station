@@ -25,6 +25,8 @@ station-schedule-automation.workspace = true
 station-update.workspace = true
 station-transport-proof.workspace = true
 station-reporting.workspace = true
+station-media-journal.workspace = true
+station-media-protocol.workspace = true
 
 [dev-dependencies]
 image.workspace = true
