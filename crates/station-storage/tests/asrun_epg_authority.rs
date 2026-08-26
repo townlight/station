@@ -4,7 +4,9 @@ use std::ptr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use station_media_journal::{JournalWriter, read_events, retire_incremental_reader};
+use station_media_journal::{
+    JournalWriter, current_journal_generation_path, read_events, retire_incremental_reader,
+};
 use station_media_protocol::{PROTOCOL_VERSION, WorkerEvent, WorkerEventEnvelope};
 use station_reporting::runtime::{
     ASRUN_CHECKPOINT_VERSION, AsRunState, JournalTake, ProjectionInput, ReportingRuntime,
@@ -852,7 +854,8 @@ fn hostile_late_compaction_seal_cannot_advance_projection_authority() {
     // Reorder a valid compacted image into Summary -> retained Events ->
     // Commit. Every frame and CRC remains valid, but the seal is deliberately
     // after a consumer's bounded first retained batch.
-    let bytes = std::fs::read(&journal).unwrap();
+    let active = current_journal_generation_path(&journal).unwrap();
+    let bytes = std::fs::read(&active).unwrap();
     let mut offset = 0_usize;
     let mut summaries = Vec::new();
     let mut events = Vec::new();
@@ -870,7 +873,7 @@ fn hostile_late_compaction_seal_cannot_advance_projection_authority() {
     }
     summaries.extend_from_slice(&events);
     summaries.extend_from_slice(&commits);
-    std::fs::write(&journal, summaries).unwrap();
+    std::fs::write(&active, summaries).unwrap();
 
     let store = StationStore::open(&path).unwrap();
     assert!(

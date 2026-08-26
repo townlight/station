@@ -1,9 +1,9 @@
+#[cfg(windows)]
+use std::collections::HashMap;
 use std::ffi::OsString;
 use std::fs::{File, OpenOptions};
 use std::io::{ErrorKind, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
-#[cfg(windows)]
-use std::collections::HashMap;
 #[cfg(windows)]
 use std::sync::{Mutex, OnceLock};
 
@@ -30,10 +30,19 @@ const RETAIN_RAW_HEARTBEATS: usize = 256;
 const MAX_SUMMARY_OUTPUTS: usize = 64;
 const COMPACTION_LAYOUT_RETAINED_THEN_COMMIT: u8 = 1;
 const COMPACTION_LAYOUT_COMMIT_THEN_RETAINED: u8 = 2;
+const GENERATION_MANIFEST_VERSION: u8 = 1;
 
 #[cfg(windows)]
 struct VerifiedPrefixSession {
     file: File,
+    /// The small, process-visible lease protects the validation/read/persist
+    /// transaction. Unlike the file handle it is deliberately released after
+    /// the projection transaction commits, so a worker may publish a new
+    /// immutable generation without depending on another process to release
+    /// this process's range lock.
+    lease: Option<File>,
+    data_path: PathBuf,
+    generation: u64,
     cursor: JournalCursor,
 }
 
@@ -46,15 +55,212 @@ fn verified_prefix_sessions() -> &'static Mutex<HashMap<PathBuf, VerifiedPrefixS
 fn release_verified_prefix_session(path: &Path) {
     #[cfg(windows)]
     {
-        verified_prefix_sessions()
+        let removed = verified_prefix_sessions()
             .lock()
             .expect("verified prefix sessions are not poisoned")
             .remove(path);
+        drop(removed);
+        let lease = reader_lease_path(path);
+        let _ = std::fs::remove_file(lease);
     }
     #[cfg(not(windows))]
     {
         let _ = path;
     }
+}
+
+/// Acknowledge the projection transaction without discarding this process's
+/// authenticated byte-range session. The next pass on the same immutable
+/// generation only proves its bounded suffix; a changed manifest retires the
+/// stale session before it can advance authority.
+pub fn acknowledge_incremental_reader(path: impl AsRef<Path>) {
+    #[cfg(windows)]
+    {
+        let root = path.as_ref();
+        let mut sessions = verified_prefix_sessions()
+            .lock()
+            .expect("verified prefix sessions are not poisoned");
+        if let Some(session) = sessions.get_mut(root) {
+            session.lease.take();
+        }
+        drop(sessions);
+        let _ = std::fs::remove_file(reader_lease_path(root));
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = path;
+    }
+}
+
+#[cfg(windows)]
+fn reader_lease_path(path: &Path) -> PathBuf {
+    let mut lease: OsString = path.as_os_str().to_owned();
+    lease.push(".reader-lease");
+    lease.into()
+}
+
+fn generation_manifest_path(root: &Path) -> PathBuf {
+    let mut path: OsString = root.as_os_str().to_owned();
+    path.push(".generation-manifest");
+    path.into()
+}
+
+fn generation_manifest_temp_path(root: &Path) -> PathBuf {
+    let mut path: OsString = root.as_os_str().to_owned();
+    path.push(".generation-manifest.tmp");
+    path.into()
+}
+
+fn generation_path(root: &Path, generation: u64) -> PathBuf {
+    let mut path: OsString = root.as_os_str().to_owned();
+    path.push(format!(".generation-{generation}"));
+    path.into()
+}
+
+fn generation_temp_path(root: &Path, generation: u64) -> PathBuf {
+    let mut path: OsString = root.as_os_str().to_owned();
+    path.push(format!(".generation-{generation}.compact.tmp"));
+    path.into()
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct JournalGenerationManifest {
+    version: u8,
+    generation: u64,
+    worker_id: String,
+    channel_id: String,
+    file_identity: String,
+    sealed_next_sequence: u64,
+}
+
+#[derive(Debug, Clone)]
+struct JournalLocation {
+    data_path: PathBuf,
+    generation: u64,
+}
+
+/// The root journal path is a stable rendezvous point. Once compaction has
+/// happened, a tiny atomically replaced manifest selects a generation file;
+/// already-published generations are never overwritten. A missing manifest is
+/// the legacy root journal (generation zero), retained for rolling upgrade.
+fn resolve_journal_location(root: &Path) -> Result<JournalLocation, JournalError> {
+    let manifest_path = generation_manifest_path(root);
+    let manifest_bytes = match std::fs::read(&manifest_path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == ErrorKind::NotFound => {
+            return Ok(JournalLocation {
+                data_path: root.to_path_buf(),
+                generation: 0,
+            });
+        }
+        Err(error) => return Err(io_error(error)),
+    };
+    let manifest: JournalGenerationManifest = serde_json::from_slice(&manifest_bytes)
+        .map_err(|e| corrupt(0, format!("journal generation manifest is invalid: {e}")))?;
+    if manifest.version != GENERATION_MANIFEST_VERSION
+        || manifest.generation == 0
+        || manifest.worker_id.trim().is_empty()
+        || manifest.channel_id.trim().is_empty()
+        || manifest.sealed_next_sequence == 0
+        || manifest.file_identity.trim().is_empty()
+    {
+        return Err(corrupt(0, "journal generation manifest is invalid"));
+    }
+    let data_path = generation_path(root, manifest.generation);
+    let file = File::open(&data_path).map_err(|error| {
+        corrupt(
+            0,
+            format!("published journal generation is unavailable: {error}"),
+        )
+    })?;
+    if journal_file_identity(&file)? != manifest.file_identity {
+        return Err(corrupt(0, "published journal generation identity changed"));
+    }
+    // The writer fully validates and fsyncs the candidate before publication;
+    // the manifest binds its immutable object identity and sealed boundary.
+    // Do not replay this generation here: cache hits must only read the small
+    // manifest plus their bounded journal suffix. A reader cache miss proves
+    // the persisted cursor against the exact handle before authority moves.
+    Ok(JournalLocation {
+        data_path,
+        generation: manifest.generation,
+    })
+}
+
+fn publish_generation_manifest(
+    root: &Path,
+    generation: u64,
+    worker_id: &str,
+    channel_id: &str,
+    sealed_next_sequence: u64,
+) -> Result<(), JournalError> {
+    let data_path = generation_path(root, generation);
+    let data = File::open(&data_path).map_err(io_error)?;
+    let manifest = JournalGenerationManifest {
+        version: GENERATION_MANIFEST_VERSION,
+        generation,
+        worker_id: worker_id.into(),
+        channel_id: channel_id.into(),
+        file_identity: journal_file_identity(&data)?,
+        sealed_next_sequence,
+    };
+    let temporary = generation_manifest_temp_path(root);
+    if temporary.try_exists().map_err(io_error)? {
+        std::fs::remove_file(&temporary).map_err(io_error)?;
+    }
+    let mut output = OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(&temporary)
+        .map_err(io_error)?;
+    serde_json::to_writer(&mut output, &manifest).map_err(|error| {
+        corrupt(
+            0,
+            format!("could not encode journal generation manifest: {error}"),
+        )
+    })?;
+    output.flush().map_err(io_error)?;
+    output.sync_all().map_err(io_error)?;
+    drop(output);
+    replace_file(&temporary, &generation_manifest_path(root)).map_err(io_error)
+}
+
+#[cfg(windows)]
+fn acquire_reader_lease(path: &Path) -> Result<File, JournalError> {
+    let mut options = OpenOptions::new();
+    options.create(true).read(true).write(true);
+    // An exclusive sidecar is a process-visible lease. A writer may continue
+    // append-only I/O but must defer path replacement while this handle lives.
+    options.share_mode(0);
+    options.open(reader_lease_path(path)).map_err(io_error)
+}
+
+#[cfg(windows)]
+fn reader_lease_is_active(path: &Path) -> Result<bool, JournalError> {
+    let lease = reader_lease_path(path);
+    let mut options = OpenOptions::new();
+    options.create(true).read(true).write(true);
+    options.share_mode(0);
+    match options.open(&lease) {
+        Ok(file) => {
+            drop(file);
+            let _ = std::fs::remove_file(lease);
+            Ok(false)
+        }
+        Err(error)
+            if error.kind() == ErrorKind::PermissionDenied || error.raw_os_error() == Some(32) =>
+        {
+            Ok(true)
+        }
+        Err(error) => Err(io_error(error)),
+    }
+}
+
+#[cfg(not(windows))]
+fn reader_lease_is_active(path: &Path) -> Result<bool, JournalError> {
+    let _ = path;
+    Ok(false)
 }
 
 #[cfg(test)]
@@ -114,6 +320,10 @@ pub struct JournalInspection {
 /// resuming in a truncated, replaced, or modified prefix.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct JournalCursor {
+    /// The immutable journal generation selected by the root manifest. Zero
+    /// denotes the pre-manifest legacy root file during rolling upgrade.
+    #[serde(default)]
+    pub generation: u64,
     pub byte_offset: u64,
     pub raw_sequence: u64,
     pub prefix_hash: String,
@@ -212,7 +422,9 @@ pub enum JournalError {
 pub struct JournalWriter {
     file: Option<File>,
     ownership: Option<JournalWriterOwnership>,
+    root_path: PathBuf,
     path: PathBuf,
+    generation: u64,
     worker_id: String,
     channel_id: String,
     next_sequence: u64,
@@ -225,13 +437,14 @@ impl JournalWriter {
         worker_id: &str,
         channel_id: &str,
     ) -> Result<Self, JournalError> {
-        let path = path.as_ref().to_path_buf();
+        let root_path = path.as_ref().to_path_buf();
         // Take exclusive, process-owned ownership before recovery or
         // inspection.  Otherwise an old worker and its replacement could both
         // observe the same next sequence and append independently.
-        let ownership = acquire_writer_ownership(&path)?;
-        recover_compaction_temp(&path, worker_id, channel_id)?;
-        let mut snapshot = read_snapshot(&path)?;
+        let ownership = acquire_writer_ownership(&root_path)?;
+        recover_compaction_temp(&root_path, worker_id, channel_id)?;
+        let mut location = resolve_journal_location(&root_path)?;
+        let mut snapshot = read_snapshot(&location.data_path)?;
         if snapshot
             .identity
             .as_ref()
@@ -243,18 +456,32 @@ impl JournalWriter {
             || (snapshot.compaction_layout == Some(CompactionLayout::CommitThenRetained)
                 && !snapshot.compaction_layout_is_explicit)
         {
-            migrate_legacy_compaction_layout(&path, &snapshot, worker_id, channel_id)?;
-            snapshot = read_snapshot(&path)?;
+            let generation = location.generation.max(1);
+            let temporary = generation_temp_path(&root_path, generation);
+            write_compacted_image(&temporary, &snapshot, worker_id, channel_id)?;
+            promote_generation(&temporary, &generation_path(&root_path, generation))
+                .map_err(io_error)?;
+            publish_generation_manifest(
+                &root_path,
+                generation,
+                worker_id,
+                channel_id,
+                snapshot.next_sequence,
+            )?;
+            location = resolve_journal_location(&root_path)?;
+            snapshot = read_snapshot(&location.data_path)?;
         }
         let file = OpenOptions::new()
             .create(true)
             .append(true)
-            .open(&path)
+            .open(&location.data_path)
             .map_err(io_error)?;
         Ok(Self {
             file: Some(file),
             ownership: Some(ownership),
-            path,
+            root_path,
+            path: location.data_path,
+            generation: location.generation,
             worker_id: worker_id.to_string(),
             channel_id: channel_id.to_string(),
             next_sequence: snapshot.next_sequence,
@@ -299,13 +526,21 @@ impl JournalWriter {
     }
 
     fn compact_heartbeats(&mut self) -> Result<(), JournalError> {
-        self.compact_heartbeats_with(replace_file)
+        self.compact_heartbeats_with(promote_generation)
     }
 
     fn compact_heartbeats_with(
         &mut self,
         replacer: impl FnOnce(&Path, &Path) -> std::io::Result<()>,
     ) -> Result<(), JournalError> {
+        // The root lease spans one reporter's authenticated read through its
+        // projection transaction. Deferring publication here is safe: this
+        // writer keeps appending its current generation and retries after the
+        // reporter acknowledges. Unlike path replacement, a published new
+        // generation never touches a reader's old locked object.
+        if reader_lease_is_active(&self.root_path)? {
+            return Ok(());
+        }
         let snapshot = read_snapshot(&self.path)?;
         let remove_count = snapshot
             .raw_heartbeat_count
@@ -342,37 +577,31 @@ impl JournalWriter {
             ));
         }
 
-        let temporary = compaction_temp_path(&self.path);
+        let next_generation = self
+            .generation
+            .checked_add(1)
+            .ok_or_else(|| corrupt(0, "journal generation exhausted"))?;
+        let temporary = generation_temp_path(&self.root_path, next_generation);
         if temporary.try_exists().map_err(io_error)? {
             std::fs::remove_file(&temporary).map_err(io_error)?;
         }
-        let mut output = OpenOptions::new()
-            .create_new(true)
-            .write(true)
-            .open(&temporary)
-            .map_err(io_error)?;
-        for summary_payload in encode_summary_chunks(&summary)? {
-            write_record(&mut output, RECORD_KIND_HEARTBEAT_SUMMARY, &summary_payload)?;
-        }
-        // Seal the compacted summary before exposing the retained frames. A
-        // bounded consumer may checkpoint after any retained event, so the
-        // commit has to be inside that persisted prefix rather than delayed
-        // until after the retained batch.
-        let commit_payload = serde_json::to_vec(&CompactionCommit {
-            worker_id: self.worker_id.clone(),
-            channel_id: self.channel_id.clone(),
+        let compact_source = JournalSnapshot {
+            events: retained,
+            heartbeat_summary: Some(summary),
+            identity: snapshot.identity.clone(),
             next_sequence: snapshot.next_sequence,
-            layout_version: Some(COMPACTION_LAYOUT_COMMIT_THEN_RETAINED),
-        })
-        .map_err(|error| corrupt(0, format!("could not encode compaction commit: {error}")))?;
-        write_record(&mut output, RECORD_KIND_COMPACTION_COMMIT, &commit_payload)?;
-        for event in &retained {
-            let payload = encode_event_frame(event).map_err(JournalError::Protocol)?;
-            write_record(&mut output, RECORD_KIND_EVENT, &payload)?;
-        }
-        output.flush().map_err(io_error)?;
-        output.sync_all().map_err(io_error)?;
-        drop(output);
+            raw_heartbeat_count: RETAIN_RAW_HEARTBEATS,
+            compaction_committed: true,
+            compaction_layout: Some(CompactionLayout::CommitThenRetained),
+            compaction_layout_is_explicit: true,
+            compaction_next_sequence: snapshot.next_sequence,
+        };
+        write_compacted_image(
+            &temporary,
+            &compact_source,
+            &self.worker_id,
+            &self.channel_id,
+        )?;
 
         let compacted = read_snapshot(&temporary)?;
         if compacted.next_sequence != snapshot.next_sequence
@@ -386,70 +615,84 @@ impl JournalWriter {
             ));
         }
 
-        drop(self.file.take());
-        // A verified reporting reader locks the old bytes against mutation.
-        // Compaction replaces that whole object atomically, so retire its
-        // in-process lock immediately before the replacement. The next
-        // reporting pass sees the new file identity and performs explicit
-        // anchored recovery instead of mixing objects.
-        release_verified_prefix_session(&self.path);
-        if let Err(error) = replacer(&temporary, &self.path) {
+        // A reporter may have started after the initial check while this
+        // candidate generation was being prepared. Keep the verified temp
+        // private and defer publication until a later heartbeat.
+        if reader_lease_is_active(&self.root_path)? {
+            let _ = std::fs::remove_file(&temporary);
+            return Ok(());
+        }
+
+        let generation_path = generation_path(&self.root_path, next_generation);
+        if let Err(error) = replacer(&temporary, &generation_path) {
             return Err(io_error(error));
         }
+        // The manifest is the sole publication point. A crash before this
+        // atomic replacement leaves an unreachable immutable candidate; a
+        // crash after it leaves a complete, validated generation.
+        publish_generation_manifest(
+            &self.root_path,
+            next_generation,
+            &self.worker_id,
+            &self.channel_id,
+            compacted.next_sequence,
+        )?;
+        let previous_path = self.path.clone();
+        self.file.take();
         self.file = Some(
             OpenOptions::new()
                 .append(true)
-                .open(&self.path)
+                .open(&generation_path)
                 .map_err(io_error)?,
         );
+        self.path = generation_path;
+        self.generation = next_generation;
         self.raw_heartbeat_count = compacted.raw_heartbeat_count;
+        // Publication happened only after observing no live reporter lease.
+        // Reclaiming the old name is best-effort: a stale non-reporting handle
+        // must never make the worker fatal, and a later compaction retries it.
+        // Windows readers open generations with FILE_SHARE_DELETE, so their
+        // handle remains valid while the name is retired.
+        let _ = std::fs::remove_file(previous_path);
         Ok(())
     }
 }
 
-/// Rewrites an authenticated implicit or legacy v2 compaction image into the
-/// explicitly marked Summary -> Commit -> retained Events layout. This only
-/// runs while the writer lock is held, after complete snapshot/coverage
-/// validation, and replaces the file atomically.
-fn migrate_legacy_compaction_layout(
-    path: &Path,
+fn write_compacted_image(
+    temporary: &Path,
     snapshot: &JournalSnapshot,
     worker_id: &str,
     channel_id: &str,
 ) -> Result<(), JournalError> {
-    if !snapshot.compaction_committed
-        || snapshot.identity.as_ref() != Some(&(worker_id.into(), channel_id.into()))
-        || snapshot.compaction_next_sequence == 0
-    {
+    if snapshot.compaction_committed && snapshot.compaction_next_sequence == 0 {
         return Err(corrupt(
             0,
-            "legacy compaction migration has no validated source image",
+            "compacted source has an invalid committed sequence boundary",
         ));
+    }
+    if temporary.try_exists().map_err(io_error)? {
+        std::fs::remove_file(temporary).map_err(io_error)?;
     }
     let summary = snapshot
         .heartbeat_summary
         .as_ref()
-        .ok_or_else(|| corrupt(0, "legacy compaction migration has no summary"))?;
-    let temporary = compaction_temp_path(path);
-    if temporary.try_exists().map_err(io_error)? {
-        std::fs::remove_file(&temporary).map_err(io_error)?;
-    }
+        .ok_or_else(|| corrupt(0, "compacted image has no heartbeat summary"))?;
     let mut output = OpenOptions::new()
         .create_new(true)
         .write(true)
-        .open(&temporary)
+        .open(temporary)
         .map_err(io_error)?;
     for summary_payload in encode_summary_chunks(summary)? {
         write_record(&mut output, RECORD_KIND_HEARTBEAT_SUMMARY, &summary_payload)?;
     }
-    let commit = serde_json::to_vec(&CompactionCommit {
+    let commit_payload = serde_json::to_vec(&CompactionCommit {
         worker_id: worker_id.into(),
         channel_id: channel_id.into(),
-        next_sequence: snapshot.compaction_next_sequence,
+        next_sequence: snapshot.next_sequence,
         layout_version: Some(COMPACTION_LAYOUT_COMMIT_THEN_RETAINED),
     })
-    .map_err(|error| corrupt(0, format!("could not encode compaction migration: {error}")))?;
-    write_record(&mut output, RECORD_KIND_COMPACTION_COMMIT, &commit)?;
+    .map_err(|error| corrupt(0, format!("could not encode compaction commit: {error}")))?;
+    write_record(&mut output, RECORD_KIND_COMPACTION_COMMIT, &commit_payload)?;
     for event in &snapshot.events {
         let payload = encode_event_frame(event).map_err(JournalError::Protocol)?;
         write_record(&mut output, RECORD_KIND_EVENT, &payload)?;
@@ -457,37 +700,44 @@ fn migrate_legacy_compaction_layout(
     output.flush().map_err(io_error)?;
     output.sync_all().map_err(io_error)?;
     drop(output);
-
-    let migrated = read_snapshot(&temporary)?;
-    if migrated.compaction_layout != Some(CompactionLayout::CommitThenRetained)
-        || !migrated.compaction_layout_is_explicit
-        || migrated.compaction_next_sequence != snapshot.compaction_next_sequence
-        || migrated.next_sequence != snapshot.next_sequence
-        || migrated.identity != snapshot.identity
+    let compacted = read_snapshot(temporary)?;
+    if compacted.next_sequence != snapshot.next_sequence
+        || compacted.identity != snapshot.identity
+        || !compacted.compaction_committed
+        || compacted.compaction_layout != Some(CompactionLayout::CommitThenRetained)
+        || !compacted.compaction_layout_is_explicit
     {
         return Err(corrupt(
             0,
-            "legacy compaction migration did not preserve coverage",
+            "compacted journal did not preserve its contract",
         ));
     }
-    release_verified_prefix_session(path);
-    replace_file(&temporary, path).map_err(io_error)
+    Ok(())
+}
+
+fn promote_generation(source: &Path, destination: &Path) -> std::io::Result<()> {
+    if destination.try_exists()? {
+        return Err(std::io::Error::new(
+            ErrorKind::AlreadyExists,
+            "journal generation already exists",
+        ));
+    }
+    std::fs::rename(source, destination)
 }
 
 impl Drop for JournalWriter {
     fn drop(&mut self) {
-        // Close the mutable journal first.  The ownership handle is separate
-        // so compaction can replace the journal file without releasing
+        // Close the mutable generation first. The root ownership handle is
+        // separate, so publication can switch generations without releasing
         // writer authority; it is released only when this writer retires.
         self.file.take();
         self.ownership.take();
     }
 }
 
-/// A separate sidecar is intentionally used instead of locking the journal
-/// file itself.  Heartbeat compaction atomically replaces the journal path;
-/// releasing a lock on that path during replacement would create a window for
-/// a second worker to append to the new file.
+/// A separate root sidecar owns the writer identity across immutable
+/// generation publication. Releasing an in-file lock during a switch would
+/// create a window for a second worker to append independently.
 struct JournalWriterOwnership {
     lock_handle: Option<File>,
     lock_path: PathBuf,
@@ -544,7 +794,16 @@ fn acquire_writer_ownership(_path: &Path) -> Result<JournalWriterOwnership, Jour
 }
 
 pub fn read_events(path: impl AsRef<Path>) -> Result<Vec<WorkerEventEnvelope>, JournalError> {
-    Ok(read_snapshot(path.as_ref())?.events)
+    let location = resolve_journal_location(path.as_ref())?;
+    Ok(read_snapshot(&location.data_path)?.events)
+}
+
+/// Returns the immutable generation currently selected by a stable journal
+/// root. This is intended for diagnostics and fault-injection tests; ordinary
+/// readers must use the root path so manifest switches are checked on every
+/// authority boundary.
+pub fn current_journal_generation_path(path: impl AsRef<Path>) -> Result<PathBuf, JournalError> {
+    Ok(resolve_journal_location(path.as_ref())?.data_path)
 }
 
 /// Retires this process's authenticated incremental-reader handle for a
@@ -563,11 +822,13 @@ pub fn read_events_bounded(
     path: impl AsRef<Path>,
     limit: usize,
 ) -> Result<Vec<WorkerEventEnvelope>, JournalError> {
-    Ok(read_snapshot_bounded(path.as_ref(), limit)?.events)
+    let location = resolve_journal_location(path.as_ref())?;
+    Ok(read_snapshot_bounded(&location.data_path, limit)?.events)
 }
 
 pub fn inspect_journal(path: impl AsRef<Path>) -> Result<JournalInspection, JournalError> {
-    let snapshot = read_snapshot(path.as_ref())?;
+    let location = resolve_journal_location(path.as_ref())?;
+    let snapshot = read_snapshot(&location.data_path)?;
     inspection_from_snapshot(snapshot)
 }
 
@@ -575,7 +836,8 @@ pub fn inspect_journal_bounded(
     path: impl AsRef<Path>,
     limit: usize,
 ) -> Result<JournalInspection, JournalError> {
-    inspection_from_snapshot(read_snapshot_bounded(path.as_ref(), limit)?)
+    let location = resolve_journal_location(path.as_ref())?;
+    inspection_from_snapshot(read_snapshot_bounded(&location.data_path, limit)?)
 }
 
 /// Reads at most `event_limit` newly appended worker events after `cursor`.
@@ -600,12 +862,21 @@ pub fn read_journal_incremental(
     if event_limit == 0 {
         return Err(corrupt(0, "incremental event limit must be positive"));
     }
-    let path = path.as_ref();
+    let root = path.as_ref();
+    let location = resolve_journal_location(root)?;
+    let path = location.data_path.as_path();
     let prior_cursor = cursor.cloned();
-    let path_metadata = std::fs::metadata(path).map_err(io_error)?;
-    let path_file_identity = journal_file_identity(&path_metadata);
+    let path_probe = File::open(path).map_err(io_error)?;
+    let path_metadata = path_probe.metadata().map_err(io_error)?;
+    let path_file_identity = journal_file_identity(&path_probe)?;
     let path_length = path_metadata.len();
     if let Some(cursor) = cursor {
+        if cursor.generation != location.generation {
+            return Err(corrupt(
+                cursor.byte_offset,
+                "journal generation changed after the durable reader checkpoint",
+            ));
+        }
         if cursor.byte_offset > path_length {
             return Err(corrupt(
                 cursor.byte_offset,
@@ -627,11 +898,13 @@ pub fn read_journal_incremental(
     }
 
     let mut file = match (cursor, verify_prefix) {
-        (Some(cursor), true) => verified_prefix_session_file(path, cursor)?,
+        (Some(cursor), true) => {
+            verified_prefix_session_file(root, path, location.generation, cursor)?
+        }
         _ => File::open(path).map_err(io_error)?,
     };
     let metadata = file.metadata().map_err(io_error)?;
-    let file_identity = journal_file_identity(&metadata);
+    let file_identity = journal_file_identity(&file)?;
     let length = metadata.len();
     if let Some(cursor) = cursor {
         if cursor.byte_offset > length {
@@ -741,6 +1014,7 @@ pub fn read_journal_incremental(
                     events.push(event);
                     if events.len() == event_limit {
                         bounded_cursor = Some(stream_cursor(
+                            location.generation,
                             record_end,
                             &coverage,
                             &prefix_hash,
@@ -809,7 +1083,13 @@ pub fn read_journal_incremental(
     }
     if let Some(cursor) = bounded_cursor {
         if verify_prefix {
-            advance_verified_prefix_session(path, prior_cursor.as_ref(), &cursor)?;
+            advance_verified_prefix_session(
+                root,
+                path,
+                location.generation,
+                prior_cursor.as_ref(),
+                &cursor,
+            )?;
         }
         return Ok(IncrementalJournalRead {
             worker_id,
@@ -844,6 +1124,7 @@ pub fn read_journal_incremental(
     }
     let final_cursor = bounded_cursor.unwrap_or_else(|| {
         stream_cursor(
+            location.generation,
             offset,
             &coverage,
             &prefix_hash,
@@ -858,7 +1139,13 @@ pub fn read_journal_incremental(
         )
     });
     if verify_prefix {
-        advance_verified_prefix_session(path, prior_cursor.as_ref(), &final_cursor)?;
+        advance_verified_prefix_session(
+            root,
+            path,
+            location.generation,
+            prior_cursor.as_ref(),
+            &final_cursor,
+        )?;
     }
     Ok(IncrementalJournalRead {
         worker_id,
@@ -880,10 +1167,10 @@ pub fn find_journal_event_cursor(
     if sequence == 0 {
         return Err(corrupt(0, "journal recovery sequence is invalid"));
     }
-    let path = path.as_ref();
-    let metadata = std::fs::metadata(path).map_err(io_error)?;
-    let file_identity = journal_file_identity(&metadata);
+    let location = resolve_journal_location(path.as_ref())?;
+    let path = location.data_path.as_path();
     let mut file = File::open(path).map_err(io_error)?;
+    let file_identity = journal_file_identity(&file)?;
     let mut offset = 0_u64;
     let mut coverage = SequenceCoverage::new();
     let mut prefix_hash = initial_prefix_hash();
@@ -939,6 +1226,7 @@ pub fn find_journal_event_cursor(
                 )?;
                 saw_event = true;
                 let cursor = stream_cursor(
+                    location.generation,
                     record_end,
                     &coverage,
                     &prefix_hash,
@@ -1157,36 +1445,67 @@ fn valid_prefix_hash(value: &str) -> bool {
 /// exact authenticated prefix or has just reconstructed and locked it. The
 /// lock lets normal appends proceed beyond the prefix while preventing a
 /// CRC-valid rewrite of already-authoritative bytes between reporting passes.
-fn ensure_verified_prefix_session(path: &Path, cursor: &JournalCursor) -> Result<(), JournalError> {
+fn ensure_verified_prefix_session(
+    root: &Path,
+    data_path: &Path,
+    generation: u64,
+    cursor: &JournalCursor,
+) -> Result<(), JournalError> {
     #[cfg(windows)]
     {
         {
-            let sessions = verified_prefix_sessions()
+            let mut sessions = verified_prefix_sessions()
                 .lock()
                 .expect("verified prefix sessions are not poisoned");
-            if let Some(session) = sessions.get(path)
+            if let Some(session) = sessions.get_mut(root)
+                && session.data_path == data_path
+                && session.generation == generation
                 && session.cursor == *cursor
             {
-                ensure_current_path_is_locked_file(path, &session.file, cursor)?;
+                if session.lease.is_none() {
+                    session.lease = Some(acquire_reader_lease(root)?);
+                }
+                ensure_current_generation_is_locked_file(
+                    root,
+                    data_path,
+                    generation,
+                    &session.file,
+                    cursor,
+                )?;
                 return Ok(());
             }
+            // A manifest switch can only occur after its preceding lease was
+            // acknowledged. Retire that old immutable object now; the writer
+            // may reclaim it once no reader retains a handle.
+            sessions.remove(root);
         }
         // A restart/cache miss pays one complete proof before the prefix is
         // protected. Re-check after taking the lock to close that acquisition
         // race; later passes only inspect their bounded suffix.
-        let file = open_prefix_lock_handle(path)?;
+        let lease = acquire_reader_lease(root)?;
+        let file = match open_prefix_lock_handle(data_path) {
+            Ok(file) => file,
+            Err(error) => {
+                drop(lease);
+                let _ = std::fs::remove_file(reader_lease_path(root));
+                return Err(error);
+            }
+        };
         ensure_locked_file_matches_cursor(&file, cursor)?;
         verify_journal_cursor_prefix_file(&file, cursor)?;
         lock_file_range(&file, 0, cursor.byte_offset)?;
         verify_journal_cursor_prefix_file(&file, cursor)?;
-        ensure_current_path_is_locked_file(path, &file, cursor)?;
+        ensure_current_generation_is_locked_file(root, data_path, generation, &file, cursor)?;
         verified_prefix_sessions()
             .lock()
             .expect("verified prefix sessions are not poisoned")
             .insert(
-                path.to_path_buf(),
+                root.to_path_buf(),
                 VerifiedPrefixSession {
                     file,
+                    lease: Some(lease),
+                    data_path: data_path.to_path_buf(),
+                    generation,
                     cursor: cursor.clone(),
                 },
             );
@@ -1194,7 +1513,7 @@ fn ensure_verified_prefix_session(path: &Path, cursor: &JournalCursor) -> Result
     }
     #[cfg(not(windows))]
     {
-        verify_journal_cursor_prefix(path, cursor)
+        verify_journal_cursor_prefix(data_path, cursor)
     }
 }
 
@@ -1202,14 +1521,19 @@ fn ensure_verified_prefix_session(path: &Path, cursor: &JournalCursor) -> Result
 /// durable cursor. Reading this instead of reopening `path` prevents a
 /// rename-replacement race from mixing a protected prefix with an unprotected
 /// suffix from a different journal object.
-fn verified_prefix_session_file(path: &Path, cursor: &JournalCursor) -> Result<File, JournalError> {
+fn verified_prefix_session_file(
+    root: &Path,
+    data_path: &Path,
+    generation: u64,
+    cursor: &JournalCursor,
+) -> Result<File, JournalError> {
     #[cfg(windows)]
     {
-        ensure_verified_prefix_session(path, cursor)?;
+        ensure_verified_prefix_session(root, data_path, generation, cursor)?;
         let sessions = verified_prefix_sessions()
             .lock()
             .expect("verified prefix sessions are not poisoned");
-        let session = sessions.get(path).ok_or_else(|| {
+        let session = sessions.get(root).ok_or_else(|| {
             corrupt(
                 cursor.byte_offset,
                 "verified reader session disappeared before journal read",
@@ -1221,13 +1545,25 @@ fn verified_prefix_session_file(path: &Path, cursor: &JournalCursor) -> Result<F
                 "verified reader session does not match the durable checkpoint",
             ));
         }
-        ensure_current_path_is_locked_file(path, &session.file, cursor)?;
+        if session.data_path != data_path || session.generation != generation {
+            return Err(corrupt(
+                cursor.byte_offset,
+                "verified reader session is for a different journal generation",
+            ));
+        }
+        ensure_current_generation_is_locked_file(
+            root,
+            data_path,
+            generation,
+            &session.file,
+            cursor,
+        )?;
         session.file.try_clone().map_err(io_error)
     }
     #[cfg(not(windows))]
     {
-        ensure_verified_prefix_session(path, cursor)?;
-        File::open(path).map_err(io_error)
+        ensure_verified_prefix_session(root, data_path, generation, cursor)?;
+        File::open(data_path).map_err(io_error)
     }
 }
 
@@ -1236,28 +1572,39 @@ fn verified_prefix_session_file(path: &Path, cursor: &JournalCursor) -> Result<F
 /// This preserves the prefix-chain proof without rereading an unbounded
 /// already-locked history on every reporting pass.
 fn advance_verified_prefix_session(
-    path: &Path,
+    root: &Path,
+    data_path: &Path,
+    generation: u64,
     prior: Option<&JournalCursor>,
     cursor: &JournalCursor,
 ) -> Result<(), JournalError> {
     #[cfg(windows)]
     {
         let Some(prior) = prior else {
-            return ensure_verified_prefix_session(path, cursor);
+            return ensure_verified_prefix_session(root, data_path, generation, cursor);
         };
         let mut sessions = verified_prefix_sessions()
             .lock()
             .expect("verified prefix sessions are not poisoned");
-        let Some(session) = sessions.get_mut(path) else {
+        let Some(session) = sessions.get_mut(root) else {
             drop(sessions);
-            return ensure_verified_prefix_session(path, cursor);
+            return ensure_verified_prefix_session(root, data_path, generation, cursor);
         };
-        if session.cursor != *prior {
+        if session.cursor != *prior
+            || session.data_path != data_path
+            || session.generation != generation
+        {
             drop(sessions);
-            return ensure_verified_prefix_session(path, cursor);
+            return ensure_verified_prefix_session(root, data_path, generation, cursor);
         }
         ensure_locked_file_matches_cursor(&session.file, cursor)?;
-        ensure_current_path_is_locked_file(path, &session.file, cursor)?;
+        ensure_current_generation_is_locked_file(
+            root,
+            data_path,
+            generation,
+            &session.file,
+            cursor,
+        )?;
         if cursor.byte_offset < prior.byte_offset {
             return Err(corrupt(
                 cursor.byte_offset,
@@ -1266,14 +1613,20 @@ fn advance_verified_prefix_session(
         }
         lock_file_range(&session.file, prior.byte_offset, cursor.byte_offset)?;
         verify_journal_cursor_suffix(&session.file, prior, cursor)?;
-        ensure_current_path_is_locked_file(path, &session.file, cursor)?;
+        ensure_current_generation_is_locked_file(
+            root,
+            data_path,
+            generation,
+            &session.file,
+            cursor,
+        )?;
         session.cursor = cursor.clone();
         Ok(())
     }
     #[cfg(not(windows))]
     {
         let _ = prior;
-        verify_journal_cursor_prefix(path, cursor)
+        verify_journal_cursor_prefix(data_path, cursor)
     }
 }
 
@@ -1293,7 +1646,8 @@ fn verify_journal_cursor_suffix(
         return Ok(());
     }
     let mut file = locked_file.try_clone().map_err(io_error)?;
-    file.seek(SeekFrom::Start(prior.byte_offset)).map_err(io_error)?;
+    file.seek(SeekFrom::Start(prior.byte_offset))
+        .map_err(io_error)?;
     let mut offset = prior.byte_offset;
     let mut prefix_hash = prior.prefix_hash.clone();
     let mut coverage = SequenceCoverage::after_raw(prior.raw_sequence, offset)?;
@@ -1306,7 +1660,10 @@ fn verify_journal_cursor_suffix(
     if commit_seen != (compaction_next_sequence != 0)
         || (commit_seen && compaction_layout_version != COMPACTION_LAYOUT_COMMIT_THEN_RETAINED)
     {
-        return Err(corrupt(offset, "verified reader compaction state is invalid"));
+        return Err(corrupt(
+            offset,
+            "verified reader compaction state is invalid",
+        ));
     }
     while offset < cursor.byte_offset {
         let record = read_stream_record(&mut file, offset)?
@@ -1371,7 +1728,10 @@ fn verify_journal_cursor_suffix(
 }
 
 #[cfg(windows)]
-fn ensure_locked_file_matches_cursor(file: &File, cursor: &JournalCursor) -> Result<(), JournalError> {
+fn ensure_locked_file_matches_cursor(
+    file: &File,
+    cursor: &JournalCursor,
+) -> Result<(), JournalError> {
     let metadata = file.metadata().map_err(io_error)?;
     if cursor.byte_offset > metadata.len() {
         return Err(corrupt(
@@ -1379,7 +1739,7 @@ fn ensure_locked_file_matches_cursor(file: &File, cursor: &JournalCursor) -> Res
             "locked journal handle was truncated before the durable reader checkpoint",
         ));
     }
-    if journal_file_identity(&metadata) != cursor.file_identity {
+    if journal_file_identity(file)? != cursor.file_identity {
         return Err(corrupt(
             cursor.byte_offset,
             "locked journal handle identity changed after the durable reader checkpoint",
@@ -1388,19 +1748,29 @@ fn ensure_locked_file_matches_cursor(file: &File, cursor: &JournalCursor) -> Res
     Ok(())
 }
 
-/// A compaction can atomically replace the pathname while a reader still owns
-/// the former object. The locked object remains safe to inspect, but it must
-/// never advance authority for a path that now names another journal.
+/// A manifest can switch from one immutable generation to another while a
+/// reader still owns the former object. The locked object remains safe to
+/// inspect, but it must never advance authority unless the root still selects
+/// this exact generation and FileIdInfo proves the named object is the one
+/// retained by this process.
 #[cfg(windows)]
-fn ensure_current_path_is_locked_file(
-    path: &Path,
+fn ensure_current_generation_is_locked_file(
+    root: &Path,
+    data_path: &Path,
+    generation: u64,
     locked_file: &File,
     cursor: &JournalCursor,
 ) -> Result<(), JournalError> {
-    let path_metadata = std::fs::metadata(path).map_err(io_error)?;
-    let locked_metadata = locked_file.metadata().map_err(io_error)?;
-    let path_identity = journal_file_identity(&path_metadata);
-    let locked_identity = journal_file_identity(&locked_metadata);
+    let current = resolve_journal_location(root)?;
+    if current.generation != generation || current.data_path != data_path {
+        return Err(corrupt(
+            cursor.byte_offset,
+            "journal generation changed while the verified reader held its locked object",
+        ));
+    }
+    let path_file = File::open(data_path).map_err(io_error)?;
+    let path_identity = journal_file_identity(&path_file)?;
+    let locked_identity = journal_file_identity(locked_file)?;
     if path_identity != locked_identity || locked_identity != cursor.file_identity {
         return Err(corrupt(
             cursor.byte_offset,
@@ -1434,6 +1804,12 @@ struct PrefixLockOverlapped {
 #[cfg(windows)]
 #[link(name = "kernel32")]
 unsafe extern "system" {
+    fn GetFileInformationByHandleEx(
+        file: isize,
+        info_class: i32,
+        info: *mut std::ffi::c_void,
+        info_size: u32,
+    ) -> i32;
     fn LockFileEx(
         file: isize,
         flags: u32,
@@ -1478,6 +1854,7 @@ fn lock_file_range(file: &File, start: u64, end: u64) -> Result<(), JournalError
 }
 
 fn stream_cursor(
+    generation: u64,
     byte_offset: u64,
     coverage: &SequenceCoverage,
     prefix_hash: &str,
@@ -1486,6 +1863,7 @@ fn stream_cursor(
     layout: (bool, bool, u64, u8),
 ) -> JournalCursor {
     JournalCursor {
+        generation,
         byte_offset,
         raw_sequence: coverage.raw_sequence(),
         prefix_hash: prefix_hash.into(),
@@ -1747,27 +2125,62 @@ fn verify_journal_cursor_prefix_file(
 }
 
 #[cfg(windows)]
-fn journal_file_identity(metadata: &std::fs::Metadata) -> String {
-    use std::os::windows::fs::MetadataExt;
-    // Creation time survives ordinary appends, while atomic replacement gives
-    // the replacement a distinct identity. The cursor's prefix hash covers
-    // in-place modification when the reader is restarted.
-    format!(
-        "windows:{}:{}",
-        metadata.creation_time(),
-        metadata.file_attributes()
-    )
+#[repr(C)]
+struct WindowsFileId128 {
+    bytes: [u8; 16],
+}
+
+#[cfg(windows)]
+#[repr(C)]
+struct WindowsFileIdInfo {
+    volume_serial_number: u64,
+    file_id: WindowsFileId128,
+}
+
+#[cfg(windows)]
+fn journal_file_identity(file: &File) -> Result<String, JournalError> {
+    const FILE_ID_INFO_CLASS: i32 = 18;
+    let mut info = WindowsFileIdInfo {
+        volume_serial_number: 0,
+        file_id: WindowsFileId128 { bytes: [0; 16] },
+    };
+    // SAFETY: `file` is live, `info` is correctly sized for FileIdInfo, and
+    // Windows fills the output synchronously.
+    let result = unsafe {
+        GetFileInformationByHandleEx(
+            file.as_raw_handle() as isize,
+            FILE_ID_INFO_CLASS,
+            (&mut info as *mut WindowsFileIdInfo).cast(),
+            std::mem::size_of::<WindowsFileIdInfo>() as u32,
+        )
+    };
+    if result == 0 {
+        return Err(io_error(std::io::Error::last_os_error()));
+    }
+    Ok(format!(
+        "windows-file-id:{:016x}:{}",
+        info.volume_serial_number,
+        info.file_id
+            .bytes
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
+    ))
 }
 
 #[cfg(unix)]
-fn journal_file_identity(metadata: &std::fs::Metadata) -> String {
+fn journal_file_identity(file: &File) -> Result<String, JournalError> {
     use std::os::unix::fs::MetadataExt;
-    format!("unix:{}:{}", metadata.dev(), metadata.ino())
+    let metadata = file.metadata().map_err(io_error)?;
+    Ok(format!("unix:{}:{}", metadata.dev(), metadata.ino()))
 }
 
 #[cfg(not(any(windows, unix)))]
-fn journal_file_identity(metadata: &std::fs::Metadata) -> String {
-    format!("portable:{}", metadata.len())
+fn journal_file_identity(file: &File) -> Result<String, JournalError> {
+    Ok(format!(
+        "portable:{}",
+        file.metadata().map_err(io_error)?.len()
+    ))
 }
 
 fn read_snapshot(path: &Path) -> Result<JournalSnapshot, JournalError> {
@@ -1775,7 +2188,15 @@ fn read_snapshot(path: &Path) -> Result<JournalSnapshot, JournalError> {
 }
 
 fn read_snapshot_bounded(path: &Path, event_limit: usize) -> Result<JournalSnapshot, JournalError> {
-    let mut file = match File::open(path) {
+    let location = resolve_journal_location(path)?;
+    read_snapshot_bounded_direct(&location.data_path, event_limit)
+}
+
+fn read_snapshot_bounded_direct(
+    path: &Path,
+    event_limit: usize,
+) -> Result<JournalSnapshot, JournalError> {
+    let file = match File::open(path) {
         Ok(file) => file,
         Err(error) if error.kind() == ErrorKind::NotFound => {
             return Ok(JournalSnapshot {
@@ -1792,6 +2213,14 @@ fn read_snapshot_bounded(path: &Path, event_limit: usize) -> Result<JournalSnaps
         }
         Err(error) => return Err(io_error(error)),
     };
+    read_snapshot_bounded_file(&file, event_limit)
+}
+
+fn read_snapshot_bounded_file(
+    file: &File,
+    event_limit: usize,
+) -> Result<JournalSnapshot, JournalError> {
+    let mut file = file.try_clone().map_err(io_error)?;
     file.seek(SeekFrom::Start(0)).map_err(io_error)?;
     let mut events = Vec::new();
     let mut offset = 0_u64;
@@ -1802,6 +2231,8 @@ fn read_snapshot_bounded(path: &Path, event_limit: usize) -> Result<JournalSnaps
     let mut saw_event = false;
 
     loop {
+        #[cfg(test)]
+        STREAM_RECORD_READS.with(|reads| reads.set(reads.get() + 1));
         let mut header = [0_u8; HEADER_BYTES];
         match file.read(&mut header[..1]) {
             Ok(0) => break,
@@ -2195,6 +2626,15 @@ fn recover_compaction_temp(
     worker_id: &str,
     channel_id: &str,
 ) -> Result<(), JournalError> {
+    // Legacy `.compact.tmp` recovery predates immutable generations. Once a
+    // manifest is authoritative, such a root-side temporary is unreachable
+    // and must never be promoted over the stable rendezvous path.
+    if generation_manifest_path(path)
+        .try_exists()
+        .map_err(io_error)?
+    {
+        return Ok(());
+    }
     let temporary = compaction_temp_path(path);
     if !temporary.try_exists().map_err(io_error)? {
         return Ok(());
@@ -2298,7 +2738,10 @@ fn io_error(error: std::io::Error) -> JournalError {
 
 #[cfg(test)]
 mod tests {
+    use std::process::Command;
     use std::sync::atomic::{AtomicU64, Ordering};
+    use std::thread;
+    use std::time::Duration;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use station_media_protocol::PROTOCOL_VERSION;
@@ -2332,9 +2775,9 @@ mod tests {
     }
 
     #[test]
-    fn replacement_failure_poisoned_the_writer_without_creating_a_new_journal() {
+    fn failed_generation_publication_keeps_the_old_writer_and_root_authoritative() {
         let path = test_path();
-        let temporary = compaction_temp_path(&path);
+        let temporary = generation_temp_path(&path, 1);
         let mut writer = JournalWriter::open(&path, WORKER_ID, CHANNEL_ID).unwrap();
         writer
             .append(&event(1, WorkerEvent::Ready { graph_revision: 1 }))
@@ -2355,20 +2798,20 @@ mod tests {
             writer.compact_heartbeats_with(|_, _| Err(std::io::Error::other("injected"))),
             Err(JournalError::Io(reason)) if reason.contains("injected")
         ));
-        assert!(writer.file.is_none());
+        assert!(writer.file.is_some());
         assert!(path.is_file());
         assert!(temporary.is_file());
-        assert!(matches!(
-            writer.append(&event(514, WorkerEvent::ShutdownComplete)),
-            Err(JournalError::Io(reason)) if reason.contains("unavailable")
-        ));
+        writer
+            .append(&event(514, WorkerEvent::ShutdownComplete))
+            .unwrap();
         drop(writer);
 
         let reopened = JournalWriter::open(&path, WORKER_ID, CHANNEL_ID).unwrap();
-        assert_eq!(reopened.next_sequence(), 514);
-        assert!(!temporary.exists());
+        assert_eq!(reopened.next_sequence(), 515);
+        assert!(temporary.exists());
         drop(reopened);
         let _ = std::fs::remove_file(path);
+        let _ = std::fs::remove_file(temporary);
     }
 
     #[test]
@@ -2764,7 +3207,11 @@ mod tests {
         reset_stream_record_reads();
         let appended = read_journal_incremental(&path, Some(&initial.cursor), 8, true).unwrap();
         assert_eq!(
-            appended.events.iter().map(|event| event.sequence).collect::<Vec<_>>(),
+            appended
+                .events
+                .iter()
+                .map(|event| event.sequence)
+                .collect::<Vec<_>>(),
             vec![3]
         );
         let append_reads = stream_record_reads();
@@ -2772,6 +3219,152 @@ mod tests {
             (2..=4).contains(&append_reads),
             "an append pass must inspect only the new suffix"
         );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn manifest_generation_restart_proves_once_then_reads_only_bounded_suffixes() {
+        let path = test_path();
+        let mut file = File::create(&path).unwrap();
+        // Avoid per-event fsync in the setup. The writer's next heartbeat
+        // compacts this large retained history into generation one.
+        for sequence in 1..=513 {
+            write_record(
+                &mut file,
+                RECORD_KIND_EVENT,
+                &encode_event_frame(&event(
+                    sequence,
+                    WorkerEvent::Heartbeat {
+                        monotonic_milliseconds: sequence * 5_000,
+                        outputs: Vec::new(),
+                    },
+                ))
+                .unwrap(),
+            )
+            .unwrap();
+        }
+        for sequence in 514..=10_513 {
+            write_record(
+                &mut file,
+                RECORD_KIND_EVENT,
+                &encode_event_frame(&event(sequence, WorkerEvent::Ready { graph_revision: 1 }))
+                    .unwrap(),
+            )
+            .unwrap();
+        }
+        file.sync_all().unwrap();
+        drop(file);
+        let mut writer = JournalWriter::open(&path, WORKER_ID, CHANNEL_ID).unwrap();
+        writer
+            .append(&event(
+                10_514,
+                WorkerEvent::Heartbeat {
+                    monotonic_milliseconds: 10_514 * 5_000,
+                    outputs: Vec::new(),
+                },
+            ))
+            .unwrap();
+        drop(writer);
+        assert!(generation_manifest_path(&path).exists());
+
+        let mut batch = read_journal_incremental(&path, None, 256, true).unwrap();
+        while !batch.events.is_empty() {
+            acknowledge_incremental_reader(&path);
+            batch = read_journal_incremental(&path, Some(&batch.cursor), 256, true).unwrap();
+        }
+        let checkpoint = batch.cursor;
+        assert_eq!(checkpoint.generation, 1);
+        forget_verified_prefix_session(&path);
+
+        reset_stream_record_reads();
+        let restarted = read_journal_incremental(&path, Some(&checkpoint), 256, true).unwrap();
+        let restart_reads = stream_record_reads();
+        assert!(restarted.events.is_empty());
+        assert!(
+            restart_reads > 10_000,
+            "a true restart must fully prove the large authenticated generation once: {restart_reads}"
+        );
+        acknowledge_incremental_reader(&path);
+
+        reset_stream_record_reads();
+        let idle = read_journal_incremental(&path, Some(&checkpoint), 256, true).unwrap();
+        let idle_reads = stream_record_reads();
+        assert!(idle.events.is_empty());
+        assert!(
+            (1..=2).contains(&idle_reads),
+            "an idle manifest-generation pass must not rescan a historical prefix: {idle_reads}"
+        );
+        acknowledge_incremental_reader(&path);
+
+        let mut writer = JournalWriter::open(&path, WORKER_ID, CHANNEL_ID).unwrap();
+        writer
+            .append(&event(10_515, WorkerEvent::ShutdownComplete))
+            .unwrap();
+        drop(writer);
+        reset_stream_record_reads();
+        let appended = read_journal_incremental(&path, Some(&checkpoint), 256, true).unwrap();
+        let append_reads = stream_record_reads();
+        assert_eq!(
+            appended.events,
+            vec![event(10_515, WorkerEvent::ShutdownComplete)]
+        );
+        assert!(
+            (2..=4).contains(&append_reads),
+            "an append pass must only read its new suffix: {append_reads}"
+        );
+        forget_verified_prefix_session(&path);
+        let current = generation_path(&path, 1);
+        let _ = std::fs::remove_file(current);
+        let _ = std::fs::remove_file(generation_manifest_path(&path));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn manifest_identity_rejects_a_replaced_generation_before_cursor_advance() {
+        let path = test_path();
+        let mut writer = JournalWriter::open(&path, WORKER_ID, CHANNEL_ID).unwrap();
+        for sequence in 1..=513 {
+            writer
+                .append(&event(
+                    sequence,
+                    WorkerEvent::Heartbeat {
+                        monotonic_milliseconds: sequence * 5_000,
+                        outputs: Vec::new(),
+                    },
+                ))
+                .unwrap();
+        }
+        writer
+            .append(&event(514, WorkerEvent::Ready { graph_revision: 1 }))
+            .unwrap();
+        writer
+            .append(&event(
+                515,
+                WorkerEvent::Heartbeat {
+                    monotonic_milliseconds: 515 * 5_000,
+                    outputs: Vec::new(),
+                },
+            ))
+            .unwrap();
+        drop(writer);
+        let checkpoint = read_journal_incremental(&path, None, 8, true)
+            .unwrap()
+            .cursor;
+        forget_verified_prefix_session(&path);
+        let active = generation_path(&path, 1);
+        let replacement = test_path();
+        std::fs::copy(&active, &replacement).unwrap();
+        replace_file(&replacement, &active).unwrap();
+
+        assert!(matches!(
+            read_journal_incremental(&path, Some(&checkpoint), 8, true),
+            Err(JournalError::Corrupt { reason, .. })
+                if reason.contains("published journal generation identity changed")
+        ));
+        let _ = std::fs::remove_file(active);
+        let _ = std::fs::remove_file(generation_manifest_path(&path));
         let _ = std::fs::remove_file(path);
     }
 
@@ -2820,10 +3413,13 @@ mod tests {
 
         reset_stream_record_reads();
         let result = read_journal_incremental(&path, Some(&checkpoint), 8, true);
-        assert!(matches!(
-            &result,
-            Err(JournalError::Corrupt { reason, .. }) if reason.contains("prefix integrity")
-        ), "expected authenticated pre-cursor rewrite rejection, got {result:?}");
+        assert!(
+            matches!(
+                &result,
+                Err(JournalError::Corrupt { reason, .. }) if reason.contains("prefix integrity")
+            ),
+            "expected authenticated pre-cursor rewrite rejection, got {result:?}"
+        );
         assert!(
             stream_record_reads() > 0,
             "the restarted authority must authenticate the persisted prefix before state advance"
@@ -2876,9 +3472,9 @@ mod tests {
         drop(appender);
 
         // Windows refuses an atomic replace while the reader owns a locked
-        // prefix. The regular writer explicitly retires that in-process lock
-        // immediately before compaction replacement; a stale checkpoint must
-        // then fail at the next reader boundary rather than bind the new path.
+        // prefix. The regular writer avoids this operation by publishing a
+        // new generation through the manifest; an attempted same-path swap
+        // remains rejected and cannot bind a stale checkpoint.
         let replacement = test_path();
         let mut file = File::create(&replacement).unwrap();
         for envelope in [
@@ -2907,6 +3503,182 @@ mod tests {
             Err(JournalError::Corrupt { reason, .. }) if reason.contains("identity changed")
         ));
         let _ = std::fs::remove_file(path);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn worker_defers_compaction_while_another_process_reader_lease_is_live() {
+        let path = test_path();
+        let mut writer = JournalWriter::open(&path, WORKER_ID, CHANNEL_ID).unwrap();
+        writer
+            .append(&event(1, WorkerEvent::Ready { graph_revision: 1 }))
+            .unwrap();
+        for sequence in 2..=513 {
+            writer
+                .append(&event(
+                    sequence,
+                    WorkerEvent::Heartbeat {
+                        monotonic_milliseconds: sequence * 5_000,
+                        outputs: Vec::new(),
+                    },
+                ))
+                .unwrap();
+        }
+
+        // The exclusive sidecar is observed by an independently opened
+        // writer handle exactly as it would be by stationd/channel-worker.
+        let lease = acquire_reader_lease(&path).unwrap();
+        writer
+            .append(&event(
+                514,
+                WorkerEvent::Heartbeat {
+                    monotonic_milliseconds: 514 * 5_000,
+                    outputs: Vec::new(),
+                },
+            ))
+            .unwrap();
+        assert!(
+            read_snapshot(&path).unwrap().raw_heartbeat_count > RETAIN_RAW_HEARTBEATS,
+            "a live reporter lease defers replacement but never makes the worker fatal"
+        );
+
+        drop(lease);
+        std::fs::remove_file(reader_lease_path(&path)).unwrap();
+        writer
+            .append(&event(
+                515,
+                WorkerEvent::Heartbeat {
+                    monotonic_milliseconds: 515 * 5_000,
+                    outputs: Vec::new(),
+                },
+            ))
+            .unwrap();
+        let compacted = read_snapshot(&path).unwrap();
+        assert!(compacted.compaction_committed);
+        assert!(compacted.raw_heartbeat_count <= RETAIN_RAW_HEARTBEATS);
+        drop(writer);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn multiprocess_reporter_lease_defers_then_allows_compaction() {
+        const CHILD: &str = "TOWNLIGHT_JOURNAL_LEASE_CHILD";
+        const WORKER: &str = "TOWNLIGHT_JOURNAL_WORKER_CHILD";
+        const JOURNAL: &str = "TOWNLIGHT_JOURNAL_LEASE_PATH";
+        const BARRIER: &str = "TOWNLIGHT_JOURNAL_LEASE_BARRIER";
+        const RELEASE: &str = "TOWNLIGHT_JOURNAL_LEASE_RELEASE";
+        const SEQUENCE: &str = "TOWNLIGHT_JOURNAL_WORKER_SEQUENCE";
+        if std::env::var_os(WORKER).is_some() {
+            let journal = PathBuf::from(std::env::var_os(JOURNAL).unwrap());
+            let sequence = std::env::var(SEQUENCE).unwrap().parse::<u64>().unwrap();
+            let mut writer = JournalWriter::open(&journal, WORKER_ID, CHANNEL_ID).unwrap();
+            writer
+                .append(&event(
+                    sequence,
+                    WorkerEvent::Heartbeat {
+                        monotonic_milliseconds: sequence * 5_000,
+                        outputs: Vec::new(),
+                    },
+                ))
+                .unwrap();
+            return;
+        }
+        if std::env::var_os(CHILD).is_some() {
+            let journal = PathBuf::from(std::env::var_os(JOURNAL).unwrap());
+            let barrier = PathBuf::from(std::env::var_os(BARRIER).unwrap());
+            let release = PathBuf::from(std::env::var_os(RELEASE).unwrap());
+            // Use the production reader, not a test-only sidecar. It holds a
+            // cross-process lease and an authenticated generation session
+            // from its read through the parent-controlled acknowledgement.
+            let checkpoint = read_journal_incremental(&journal, None, 1, true).unwrap();
+            assert_eq!(checkpoint.events.len(), 1);
+            File::create(barrier).unwrap();
+            for _ in 0..500 {
+                if release.exists() {
+                    acknowledge_incremental_reader(&journal);
+                    return;
+                }
+                thread::sleep(Duration::from_millis(10));
+            }
+            panic!("parent did not acknowledge the reporter lease");
+        }
+
+        let path = test_path();
+        let barrier = test_path();
+        let release = test_path();
+        let mut writer = JournalWriter::open(&path, WORKER_ID, CHANNEL_ID).unwrap();
+        writer
+            .append(&event(1, WorkerEvent::Ready { graph_revision: 1 }))
+            .unwrap();
+        for sequence in 2..=513 {
+            writer
+                .append(&event(
+                    sequence,
+                    WorkerEvent::Heartbeat {
+                        monotonic_milliseconds: sequence * 5_000,
+                        outputs: Vec::new(),
+                    },
+                ))
+                .unwrap();
+        }
+        drop(writer);
+        let mut child = Command::new(std::env::current_exe().unwrap())
+            .arg("--exact")
+            .arg("tests::multiprocess_reporter_lease_defers_then_allows_compaction")
+            .env(CHILD, "1")
+            .env(JOURNAL, &path)
+            .env(BARRIER, &barrier)
+            .env(RELEASE, &release)
+            .spawn()
+            .unwrap();
+        for _ in 0..500 {
+            if barrier.exists() {
+                break;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(barrier.exists(), "child reporter did not acquire its lease");
+
+        let worker = Command::new(std::env::current_exe().unwrap())
+            .arg("--exact")
+            .arg("tests::multiprocess_reporter_lease_defers_then_allows_compaction")
+            .env(WORKER, "1")
+            .env(JOURNAL, &path)
+            .env(SEQUENCE, "514")
+            .status()
+            .unwrap();
+        assert!(worker.success(), "worker must defer rather than fatal-exit");
+        assert!(read_snapshot(&path).unwrap().raw_heartbeat_count > RETAIN_RAW_HEARTBEATS);
+        assert!(
+            path.exists() && !generation_manifest_path(&path).exists(),
+            "the old generation remains named while the reporter lease is live"
+        );
+
+        File::create(&release).unwrap();
+        assert!(child.wait().unwrap().success());
+        let worker = Command::new(std::env::current_exe().unwrap())
+            .arg("--exact")
+            .arg("tests::multiprocess_reporter_lease_defers_then_allows_compaction")
+            .env(WORKER, "1")
+            .env(JOURNAL, &path)
+            .env(SEQUENCE, "515")
+            .status()
+            .unwrap();
+        assert!(worker.success());
+        let compacted = read_snapshot(&path).unwrap();
+        assert!(compacted.compaction_committed);
+        assert_eq!(compacted.next_sequence, 516);
+        assert!(generation_manifest_path(&path).exists());
+        assert!(generation_path(&path, 1).exists());
+        assert!(
+            !path.exists(),
+            "the old root generation is reclaimed only after reporter acknowledgement"
+        );
+        let _ = std::fs::remove_file(generation_path(&path, 1));
+        let _ = std::fs::remove_file(generation_manifest_path(&path));
+        let _ = std::fs::remove_file(barrier);
+        let _ = std::fs::remove_file(release);
     }
 
     #[test]

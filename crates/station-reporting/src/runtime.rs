@@ -240,6 +240,11 @@ pub struct ProjectionCheckpoint {
     pub reader_prefix_hash: String,
     #[serde(default)]
     pub reader_file_identity: String,
+    /// Immutable generation selected by the journal manifest. Zero remains
+    /// the explicit legacy-root value for checkpoints written before the
+    /// manifest rollout.
+    #[serde(default)]
+    pub reader_generation: u64,
     #[serde(default)]
     pub reader_worker_id: String,
     #[serde(default)]
@@ -355,6 +360,7 @@ impl ReportingRuntime {
                 reader_raw_sequence: 0,
                 reader_prefix_hash: String::new(),
                 reader_file_identity: String::new(),
+                reader_generation: 0,
                 reader_worker_id: String::new(),
                 reader_channel_id: String::new(),
                 reader_saw_heartbeat_summary: false,

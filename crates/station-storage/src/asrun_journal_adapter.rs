@@ -5,7 +5,8 @@ use super::StationStore;
 use jiff::{Timestamp, civil::DateTime, tz::TimeZone};
 use sha2::{Digest, Sha256};
 use station_media_journal::{
-    JournalCursor, JournalError, find_journal_event_cursor, read_journal_incremental,
+    JournalCursor, JournalError, acknowledge_incremental_reader, find_journal_event_cursor,
+    read_journal_incremental,
 };
 use station_media_protocol::{WorkerEvent, WorkerEventEnvelope, encode_event_frame};
 use station_reporting::runtime::{
@@ -195,6 +196,7 @@ pub fn project_durable_journal(
     } else {
         prior.and_then(|checkpoint| {
             (checkpoint.reader_byte_offset > 0).then(|| JournalCursor {
+                generation: checkpoint.reader_generation,
                 byte_offset: checkpoint.reader_byte_offset,
                 raw_sequence: checkpoint.reader_raw_sequence,
                 prefix_hash: checkpoint.reader_prefix_hash.clone(),
@@ -329,6 +331,7 @@ pub fn project_durable_journal(
         reader_raw_sequence: read.cursor.raw_sequence,
         reader_prefix_hash: read.cursor.prefix_hash,
         reader_file_identity: read.cursor.file_identity,
+        reader_generation: read.cursor.generation,
         reader_worker_id: read.cursor.worker_id.unwrap_or_default(),
         reader_channel_id: read.cursor.channel_id.unwrap_or_default(),
         reader_saw_heartbeat_summary: read.cursor.saw_heartbeat_summary,
@@ -355,6 +358,10 @@ pub fn project_durable_journal(
     store
         .persist_asrun_projection(&projection, now_utc_ms)
         .map_err(|error| AsRunJournalAdapterError::Storage(format!("{error:?}")))?;
+    // This is the projection transaction's acknowledgment boundary. Releasing
+    // the cross-process reader lease now lets the worker compact only after
+    // the cursor/output pair is durable.
+    acknowledge_incremental_reader(path);
     Ok(projection)
 }
 
@@ -628,6 +635,7 @@ fn next_projection_revision(
         || prior.reader_raw_sequence != cursor.raw_sequence
         || prior.reader_prefix_hash != cursor.prefix_hash
         || prior.reader_file_identity != cursor.file_identity
+        || prior.reader_generation != cursor.generation
         || prior.reader_worker_id != cursor.worker_id.as_deref().unwrap_or_default()
         || prior.reader_channel_id != cursor.channel_id.as_deref().unwrap_or_default()
         || prior.reader_saw_heartbeat_summary != cursor.saw_heartbeat_summary
@@ -718,6 +726,7 @@ fn legacy_checkpoint_v2_baseline(
     checkpoint.reader_raw_sequence = cursor.raw_sequence;
     checkpoint.reader_prefix_hash = cursor.prefix_hash.clone();
     checkpoint.reader_file_identity = cursor.file_identity.clone();
+    checkpoint.reader_generation = cursor.generation;
     checkpoint.reader_worker_id = cursor.worker_id.clone().unwrap_or_default();
     checkpoint.reader_channel_id = cursor.channel_id.clone().unwrap_or_default();
     checkpoint.reader_saw_heartbeat_summary = cursor.saw_heartbeat_summary;
@@ -746,6 +755,7 @@ fn compaction_recovery_allowed(error: &JournalError) -> bool {
         JournalError::Corrupt { reason, .. }
             if reason.contains("truncated")
                 || reason.contains("file identity changed")
+                || reason.contains("generation changed")
                 || reason.contains("cursor compaction seal is incomplete")
     )
 }
