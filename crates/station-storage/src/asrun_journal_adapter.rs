@@ -1,15 +1,19 @@
 //! Trusted adapter from the durable worker journal to persisted as-run authority.
-use std::path::Path;
-
+//!
+//! The journal CRC detects accidental corruption, not authentication. This
+//! adapter trusts the local worker-journal ownership boundary; its evidence hash
+//! binds the complete canonical protocol frame (including channel, worker boot,
+//! report and media-offset facts) plus configured journal identity.
+use super::StationStore;
 use sha2::{Digest, Sha256};
 use station_media_journal::read_events;
-use station_media_protocol::WorkerEvent;
+use station_media_protocol::{WorkerEvent, encode_event_frame};
 use station_reporting::runtime::{
     AsRunProjectionRuntime, AsRunState, JournalTake, ProjectionInput, ReportingRuntime,
 };
-
-use super::StationStore;
-
+use std::path::Path;
+const MAX_JOURNAL_BYTES: u64 = 8 * 1024 * 1024;
+const MAX_JOURNAL_EVENTS: usize = 10_000;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AsRunJournalAdapterError {
     Invalid(String),
@@ -17,10 +21,10 @@ pub enum AsRunJournalAdapterError {
     Storage(String),
 }
 
-/// Reads only durable journal frames. The caller supplies a fixed reporting
-/// window and journal identity from station configuration; no browser input is
-/// accepted by this boundary. Untimed worker events cannot establish an aired
-/// interval and are therefore represented by explicit gap intervals.
+/// Projects only closed intervals. The newest start stays pending until another
+/// durable timed event closes it, so no synthetic trailing interval can block a
+/// later append/replay of the journal.
+#[allow(clippy::too_many_arguments)] // Public fixed-scope adapter boundary; no browser input.
 pub fn project_durable_journal(
     store: &StationStore,
     journal_path: impl AsRef<Path>,
@@ -35,109 +39,71 @@ pub fn project_durable_journal(
         || !uuid(channel_id)
         || starts_at_unix_ms < 0
         || ends_at_unix_ms <= starts_at_unix_ms
-        || now_utc_ms < 0
+        || ends_at_unix_ms > now_utc_ms
     {
         return Err(AsRunJournalAdapterError::Invalid(
-            "journal projection scope is invalid".into(),
+            "journal projection scope is invalid or extends beyond now".into(),
         ));
-    }
-    let events = read_events(journal_path)
-        .map_err(|e| AsRunJournalAdapterError::Journal(format!("{e:?}")))?;
-    if events.iter().any(|event| event.channel_id != channel_id) {
+    };
+    let path = journal_path.as_ref();
+    if std::fs::metadata(path)
+        .map_err(|e| AsRunJournalAdapterError::Journal(e.to_string()))?
+        .len()
+        > MAX_JOURNAL_BYTES
+    {
+        return Err(AsRunJournalAdapterError::Journal(
+            "journal exceeds bounded adapter read size".into(),
+        ));
+    };
+    let events =
+        read_events(path).map_err(|e| AsRunJournalAdapterError::Journal(format!("{e:?}")))?;
+    if events.len() > MAX_JOURNAL_EVENTS {
+        return Err(AsRunJournalAdapterError::Journal(
+            "journal exceeds bounded adapter event count".into(),
+        ));
+    };
+    if events.iter().any(|e| e.channel_id != channel_id) {
         return Err(AsRunJournalAdapterError::Journal(
             "journal channel identity does not match the requested channel".into(),
         ));
+    };
+    let mut scheduled = Vec::new();
+    for envelope in events {
+        if let WorkerEvent::ScheduledAssetOnAir {
+            schedule_item_id,
+            schedule_item_revision,
+            asset_id,
+            actual_on_air_at_unix_ms,
+            ..
+        } = &envelope.event
+            && *actual_on_air_at_unix_ms >= starts_at_unix_ms
+            && *actual_on_air_at_unix_ms < ends_at_unix_ms
+        {
+            scheduled.push((
+                schedule_item_id.clone(),
+                *schedule_item_revision,
+                asset_id.clone(),
+                *actual_on_air_at_unix_ms,
+                frame_hash(journal_id, &envelope)?,
+            ));
+        }
     }
-    let mut takes = Vec::new();
-    let mut cursor = starts_at_unix_ms;
-    let mut projection_sequence = 1_u64;
-    let scheduled: Vec<_> = events
-        .into_iter()
-        .filter_map(|envelope| match envelope.event {
-            WorkerEvent::ScheduledAssetOnAir {
-                report_id: _,
-                schedule_item_id,
-                schedule_item_revision,
-                asset_id,
-                actual_on_air_at_unix_ms,
-                ..
-            } => Some((
-                envelope.sequence,
-                schedule_item_id,
-                schedule_item_revision,
-                asset_id,
-                actual_on_air_at_unix_ms,
-            )),
-            _ => None,
-        })
-        .filter(|item| item.4 >= starts_at_unix_ms && item.4 < ends_at_unix_ms)
-        .collect();
-    for (index, (raw_sequence, item_id, item_revision, asset_id, actual_start)) in
-        scheduled.iter().enumerate()
-    {
-        if *actual_start < cursor {
-            return Err(AsRunJournalAdapterError::Journal(
-                "scheduled as-run journal timestamps are nonmonotonic".into(),
-            ));
-        }
-        if *actual_start > cursor {
-            takes.push(gap(
-                journal_id,
-                projection_sequence,
-                channel_id,
-                cursor,
-                *actual_start,
-                raw_sequence,
-            ));
-            projection_sequence += 1;
-        }
-        let end = scheduled
-            .get(index + 1)
-            .map(|next| next.4)
-            .unwrap_or(ends_at_unix_ms);
-        if end <= *actual_start {
-            return Err(AsRunJournalAdapterError::Journal(
-                "scheduled as-run journal interval is invalid".into(),
-            ));
-        }
-        let (title, catalog_revision, category, reason) = match store.read_schedule_item(item_id).map_err(AsRunJournalAdapterError::Storage)? {
-            Some(schedule) if schedule.revision == *item_revision && schedule.channel_id == channel_id && schedule.asset_id == *asset_id => match store.read_catalog_asset(asset_id).map_err(AsRunJournalAdapterError::Storage)? { Some(catalog) => (catalog.title, catalog.revision, "unavailable".into(), Some("Franchise and category authority are unavailable in the current catalog schema.".into())), None => (String::new(),0,"unavailable".into(),Some("Catalog authority is unavailable for this journal-derived asset.".into())) },
-            _ => (String::new(),0,"unavailable".into(),Some("Exact schedule item/revision authority is unavailable for this journal-derived event.".into())),
-        };
-        takes.push(JournalTake {
-            journal_id: journal_id.into(),
-            journal_sequence: projection_sequence,
-            channel_id: channel_id.into(),
-            started_at_unix_ms: *actual_start,
-            ended_at_unix_ms: end,
-            state: AsRunState::Program,
-            content_id: asset_id.clone(),
-            franchise_id: String::new(),
-            category,
-            title,
-            catalog_revision: catalog_revision.max(1),
-            schedule_revision: (*item_revision).max(1),
-            journal_hash: event_hash(
-                *raw_sequence,
-                item_id,
-                item_revision,
-                asset_id,
-                *actual_start,
-            ),
-            unavailable_reason: reason,
-        });
-        projection_sequence += 1;
-        cursor = end;
-    }
-    if cursor < ends_at_unix_ms {
-        takes.push(gap(
-            journal_id,
-            projection_sequence,
-            channel_id,
-            cursor,
-            ends_at_unix_ms,
-            &0,
+    if scheduled.len() < 2 {
+        return Err(AsRunJournalAdapterError::Journal(
+            "no closed journal-derived as-run interval is available yet".into(),
         ));
+    };
+    let mut takes = Vec::with_capacity(scheduled.len() - 1);
+    for (index, (item, revision, asset, start, hash)) in
+        scheduled.iter().enumerate().take(scheduled.len() - 1)
+    {
+        let end = scheduled[index + 1].3;
+        if *start < 0 || end <= *start || end > now_utc_ms {
+            return Err(AsRunJournalAdapterError::Journal(
+                "scheduled as-run journal timestamps are nonmonotonic or future".into(),
+            ));
+        };
+        takes.push(JournalTake{journal_id:journal_id.into(),journal_sequence:(index+1)as u64,channel_id:channel_id.into(),started_at_unix_ms:*start,ended_at_unix_ms:end,state:AsRunState::Program,content_id:Some(asset.clone()),franchise_id:None,category:None,title:None,catalog_revision:None,schedule_revision:None,journal_hash:hash.clone(),unavailable_reason:Some(format!("Exact immutable schedule/catalog snapshot authority is unavailable for journal item {item} revision {revision}; no mutable current-row substitution was used."))});
     }
     let mut runtime = ReportingRuntime::new();
     let projection = runtime
@@ -151,30 +117,27 @@ pub fn project_durable_journal(
         .map_err(|e| AsRunJournalAdapterError::Storage(format!("{e:?}")))?;
     Ok(projection)
 }
-fn gap(
+fn frame_hash(
     journal_id: &str,
-    sequence: u64,
-    channel_id: &str,
-    start: i64,
-    end: i64,
-    raw: &u64,
-) -> JournalTake {
-    JournalTake{journal_id:journal_id.into(),journal_sequence:sequence,channel_id:channel_id.into(),started_at_unix_ms:start,ended_at_unix_ms:end,state:AsRunState::Gap,content_id:String::new(),franchise_id:String::new(),category:"unavailable".into(),title:String::new(),catalog_revision:1,schedule_revision:1,journal_hash:event_hash(*raw,"",&0,"",start),unavailable_reason:Some("No timed scheduled-airing journal event covers this interval; no aired content is asserted.".into())}
-}
-fn event_hash(sequence: u64, item: &str, revision: &u64, asset: &str, time: i64) -> String {
+    envelope: &station_media_protocol::WorkerEventEnvelope,
+) -> Result<String, AsRunJournalAdapterError> {
+    let frame = encode_event_frame(envelope).map_err(|e| {
+        AsRunJournalAdapterError::Journal(format!("canonical event frame unavailable: {e:?}"))
+    })?;
     let mut h = Sha256::new();
-    h.update(sequence.to_le_bytes());
-    h.update(item.as_bytes());
-    h.update(revision.to_le_bytes());
-    h.update(asset.as_bytes());
-    h.update(time.to_le_bytes());
-    format!("{:x}", h.finalize())
+    h.update(b"townlight-asrun-journal-frame-v1\0");
+    h.update(journal_id.as_bytes());
+    h.update([0]);
+    h.update(frame);
+    Ok(format!("{:x}", h.finalize()))
 }
-fn uuid(value: &str) -> bool {
-    value.len() == 36
-        && value
-            .as_bytes()
-            .iter()
-            .enumerate()
-            .all(|(i, b)| matches!(i, 8 | 13 | 18 | 23) && *b == b'-' || b.is_ascii_hexdigit())
+fn uuid(v: &str) -> bool {
+    v.len() == 36
+        && v.as_bytes().iter().enumerate().all(|(i, b)| {
+            if matches!(i, 8 | 13 | 18 | 23) {
+                *b == b'-'
+            } else {
+                b.is_ascii_hexdigit()
+            }
+        })
 }

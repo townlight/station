@@ -105,12 +105,11 @@ impl StationStore {
             if let Some(current) = self
                 .read_asrun_projection(&projection.channel_id)
                 .map_err(AsRunProjectionWriteError::Storage)?
+                && current.checkpoint.journal_sequence > projection.checkpoint.journal_sequence
             {
-                if current.checkpoint.journal_sequence > projection.checkpoint.journal_sequence {
-                    return Err(AsRunProjectionWriteError::Conflict(
-                        "as-run checkpoint cannot move backwards".into(),
-                    ));
-                }
+                return Err(AsRunProjectionWriteError::Conflict(
+                    "as-run checkpoint cannot move backwards".into(),
+                ));
             }
             let statement = self.prepare("INSERT INTO asrun_epg_projection_state(channel_id,station_timezone,projection_json,checkpoint_sequence,checkpoint_hash,updated_at_utc_ms) VALUES(?1,?2,?3,?4,?5,?6) ON CONFLICT(channel_id) DO UPDATE SET station_timezone=excluded.station_timezone,projection_json=excluded.projection_json,checkpoint_sequence=excluded.checkpoint_sequence,checkpoint_hash=excluded.checkpoint_hash,updated_at_utc_ms=excluded.updated_at_utc_ms").map_err(AsRunProjectionWriteError::Storage)?;
             bind_text(
@@ -161,11 +160,13 @@ impl StationStore {
             Ok(())
         })();
         match outcome {
-            Ok(()) => {
-                self.execute("COMMIT")
-                    .map_err(AsRunProjectionWriteError::Storage)?;
-                Ok(())
-            }
+            Ok(()) => match self.execute("COMMIT") {
+                Ok(()) => Ok(()),
+                Err(error) => {
+                    let _ = self.execute("ROLLBACK");
+                    Err(AsRunProjectionWriteError::Storage(error))
+                }
+            },
             Err(e) => {
                 let _ = self.execute("ROLLBACK");
                 Err(e)
@@ -187,7 +188,10 @@ impl StationStore {
         if offset > projection.entries.len() {
             return Err("as-run page offset is invalid".into());
         }
-        let end = (offset + limit).min(projection.entries.len());
+        let end = offset
+            .checked_add(limit)
+            .ok_or("as-run page offset overflows")?
+            .min(projection.entries.len());
         Ok(Some(AsRunProjectionPage {
             channel_id: projection.channel_id,
             station_timezone: projection.station_timezone,
@@ -201,7 +205,7 @@ impl StationStore {
         channel_id: &str,
     ) -> Result<Option<AsRunProjectionRuntime>, String> {
         let statement = self.prepare(
-            "SELECT projection_json FROM asrun_epg_projection_state WHERE channel_id=?1",
+            "SELECT channel_id,projection_json,checkpoint_sequence,checkpoint_hash,updated_at_utc_ms FROM asrun_epg_projection_state WHERE channel_id=?1",
         )?;
         bind_text(
             self.database,
@@ -211,10 +215,24 @@ impl StationStore {
         )?;
         match unsafe { sqlite3_step(statement.raw) } {
             SQLITE_ROW => {
-                let json = column_text(statement.raw, 0)?;
+                let row_channel = column_text(statement.raw, 0)?;
+                let json = column_text(statement.raw, 1)?;
+                let checkpoint_sequence = unsafe { sqlite3_column_int64(statement.raw, 2) };
+                let checkpoint_hash = column_text(statement.raw, 3)?;
+                let updated_at = unsafe { sqlite3_column_int64(statement.raw, 4) };
                 let p: AsRunProjectionRuntime = serde_json::from_str(&json)
                     .map_err(|_| "stored as-run projection is corrupt")?;
-                validate_projection(&p, 0)?;
+                if row_channel != channel_id
+                    || p.channel_id != row_channel
+                    || checkpoint_sequence < 1
+                    || p.checkpoint.journal_sequence != checkpoint_sequence as u64
+                    || p.checkpoint.journal_hash != checkpoint_hash
+                    || updated_at < 0
+                {
+                    return Err("stored as-run projection row parity check failed".into());
+                }
+                validate_projection(&p, updated_at)?;
+                self.verify_asrun_evidence_rows(&p)?;
                 Ok(Some(p))
             }
             SQLITE_DONE => Ok(None),
@@ -285,6 +303,35 @@ impl StationStore {
             ))),
         }
     }
+    fn verify_asrun_evidence_rows(
+        &self,
+        projection: &AsRunProjectionRuntime,
+    ) -> Result<(), String> {
+        for entry in &projection.entries {
+            let statement = self.prepare("SELECT channel_id,journal_sequence,record_json FROM asrun_epg_projection_evidence WHERE event_id=?1")?;
+            bind_text(
+                self.database,
+                statement.raw,
+                1,
+                &c_string(&entry.event_id, "event")?,
+            )?;
+            if unsafe { sqlite3_step(statement.raw) } != SQLITE_ROW {
+                return Err("stored as-run evidence row is missing".into());
+            }
+            let channel = column_text(statement.raw, 0)?;
+            let sequence = unsafe { sqlite3_column_int64(statement.raw, 1) };
+            let record = column_text(statement.raw, 2)?;
+            let expected = serde_json::to_string(entry).map_err(|error| error.to_string())?;
+            if channel != projection.channel_id
+                || sequence < 1
+                || sequence as u64 != entry.journal_sequence
+                || record != expected
+            {
+                return Err("stored as-run evidence row parity check failed".into());
+            }
+        }
+        Ok(())
+    }
 }
 fn validate_projection(p: &AsRunProjectionRuntime, now: i64) -> Result<(), String> {
     if !is_uuid(&p.channel_id)
@@ -293,6 +340,7 @@ fn validate_projection(p: &AsRunProjectionRuntime, now: i64) -> Result<(), Strin
         || p.entries.len() > 10_000
         || p.checkpoint.channel_id != p.channel_id
         || p.checkpoint.journal_sequence != p.entries.last().unwrap().journal_sequence
+        || p.checkpoint.journal_hash != p.entries.last().unwrap().journal_hash
         || now < 0
     {
         return Err("as-run projection is invalid".into());
@@ -305,16 +353,30 @@ fn validate_projection(p: &AsRunProjectionRuntime, now: i64) -> Result<(), Strin
     for e in &p.entries {
         if !is_uuid(&e.event_id)
             || !sha(&e.journal_hash)
+            || e.started_at_unix_ms < 0
             || e.ended_at_unix_ms <= e.started_at_unix_ms
+            || e.unavailable_reason.as_deref().is_some_and(|value| {
+                value.is_empty() || value.len() > 512 || value.chars().any(char::is_control)
+            })
         {
             return Err("as-run entry is invalid".into());
         }
-        if let Some(x) = prior {
-            if e.journal_sequence != x.journal_sequence + 1
-                || e.started_at_unix_ms != x.ended_at_unix_ms
-            {
-                return Err("as-run projection is noncontiguous".into());
-            }
+        if !matches!(e.state, station_reporting::runtime::AsRunState::Program)
+            && (e.content_id.is_some()
+                || e.franchise_id.is_some()
+                || e.category.is_some()
+                || e.title.is_some()
+                || e.catalog_revision.is_some()
+                || e.schedule_revision.is_some()
+                || e.unavailable_reason.is_none())
+        {
+            return Err("non-program as-run entry carries program authority".into());
+        }
+        if let Some(x) = prior
+            && (e.journal_sequence != x.journal_sequence + 1
+                || e.started_at_unix_ms != x.ended_at_unix_ms)
+        {
+            return Err("as-run projection is noncontiguous".into());
         }
         prior = Some(e)
     }
@@ -322,10 +384,13 @@ fn validate_projection(p: &AsRunProjectionRuntime, now: i64) -> Result<(), Strin
 }
 fn is_uuid(v: &str) -> bool {
     v.len() == 36
-        && v.as_bytes()
-            .iter()
-            .enumerate()
-            .all(|(i, b)| matches!(i, 8 | 13 | 18 | 23) && *b == b'-' || b.is_ascii_hexdigit())
+        && v.as_bytes().iter().enumerate().all(|(i, b)| {
+            if matches!(i, 8 | 13 | 18 | 23) {
+                *b == b'-'
+            } else {
+                b.is_ascii_hexdigit()
+            }
+        })
 }
 fn sha(v: &str) -> bool {
     v.len() == 64 && v.as_bytes().iter().all(u8::is_ascii_hexdigit)

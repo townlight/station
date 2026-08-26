@@ -2572,25 +2572,25 @@ impl Api {
                 "The server clock is unavailable for as-run auditing.",
             );
         };
-        if self
-            .storage
-            .audit_asrun_access(channel_id, actor_id, "read", now)
-            .is_err()
-        {
-            return error_response(
-                500,
-                "storage_error",
-                "The authoritative as-run access audit could not be recorded.",
-            );
-        }
         match self
             .storage
             .page_asrun_projection(channel_id, offset, limit)
         {
-            Ok(Some(page)) => json_response(
-                200,
-                serde_json::to_vec(&page).expect("serializing as-run page cannot fail"),
-            ),
+            Ok(Some(page)) => {
+                let body = serde_json::to_vec(&page).expect("serializing as-run page cannot fail");
+                if self
+                    .storage
+                    .audit_asrun_access(channel_id, actor_id, "read", now)
+                    .is_err()
+                {
+                    return error_response(
+                        500,
+                        "storage_error",
+                        "The authoritative as-run access audit could not be recorded.",
+                    );
+                }
+                json_response(200, body)
+            }
             Ok(None) => error_response(
                 404,
                 "asrun_unavailable",
@@ -2631,17 +2631,6 @@ impl Api {
                 "The server clock is unavailable for as-run auditing.",
             );
         };
-        if self
-            .storage
-            .audit_asrun_access(channel_id, actor_id, action, now)
-            .is_err()
-        {
-            return error_response(
-                500,
-                "storage_error",
-                "The authoritative as-run access audit could not be recorded.",
-            );
-        }
         let projection = match self.storage.read_asrun_projection(channel_id) {
             Ok(Some(value)) => value,
             Ok(None) => {
@@ -2669,6 +2658,17 @@ impl Api {
         };
         match rendered {
             Ok((content_type, filename, body)) => {
+                if self
+                    .storage
+                    .audit_asrun_access(channel_id, actor_id, action, now)
+                    .is_err()
+                {
+                    return error_response(
+                        500,
+                        "storage_error",
+                        "The authoritative as-run access audit could not be recorded.",
+                    );
+                }
                 attachment_response(200, content_type, filename.into(), body.into_bytes())
             }
             Err(_) => error_response(
@@ -13199,12 +13199,12 @@ mod tests {
             started_at_unix_ms: 1_700_000_000_000,
             ended_at_unix_ms: 1_700_000_060_000,
             state: station_reporting::runtime::AsRunState::Program,
-            content_id: "00000000-0000-0000-0000-000000000003".into(),
-            franchise_id: "00000000-0000-0000-0000-000000000004".into(),
-            category: "program".into(),
-            title: "=Council <Meeting>".into(),
-            catalog_revision: 1,
-            schedule_revision: 1,
+            content_id: Some("00000000-0000-0000-0000-000000000003".into()),
+            franchise_id: Some("00000000-0000-0000-0000-000000000004".into()),
+            category: Some("program".into()),
+            title: Some("=Council <Meeting>".into()),
+            catalog_revision: Some(1),
+            schedule_revision: Some(1),
             journal_hash: "a".repeat(64),
             unavailable_reason: None,
         };

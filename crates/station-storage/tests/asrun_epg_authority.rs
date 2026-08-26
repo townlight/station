@@ -28,12 +28,12 @@ fn projection() -> station_reporting::runtime::AsRunProjectionRuntime {
         started_at_unix_ms: 1_700_000_000_000,
         ended_at_unix_ms: 1_700_000_060_000,
         state: AsRunState::Program,
-        content_id: "00000000-0000-0000-0000-000000000003".into(),
-        franchise_id: "00000000-0000-0000-0000-000000000004".into(),
-        category: "program".into(),
-        title: "Council".into(),
-        catalog_revision: 1,
-        schedule_revision: 1,
+        content_id: Some("00000000-0000-0000-0000-000000000003".into()),
+        franchise_id: Some("00000000-0000-0000-0000-000000000004".into()),
+        category: Some("program".into()),
+        title: Some("Council".into()),
+        catalog_revision: Some(1),
+        schedule_revision: Some(1),
         journal_hash: "a".repeat(64),
         unavailable_reason: None,
     };
@@ -91,6 +91,23 @@ fn durable_journal_adapter_replays_and_keeps_missing_authority_explicit() {
                 media_offset_ms: 0,
                 worker_boot_id: "00000000-0000-0000-0000-000000000030".into(),
                 actual_on_air_at_unix_ms: 1_700_000_000_000,
+            },
+        })
+        .unwrap();
+    writer
+        .append(&WorkerEventEnvelope {
+            version: PROTOCOL_VERSION,
+            worker_id: "00000000-0000-0000-0000-000000000010".into(),
+            channel_id: CHANNEL.into(),
+            sequence: 2,
+            event: WorkerEvent::ScheduledAssetOnAir {
+                report_id: "report-2".into(),
+                schedule_item_id: "00000000-0000-0000-0000-000000000021".into(),
+                schedule_item_revision: 1,
+                asset_id: "b".repeat(64),
+                media_offset_ms: 0,
+                worker_boot_id: "00000000-0000-0000-0000-000000000030".into(),
+                actual_on_air_at_unix_ms: 1_700_000_030_000,
             },
         })
         .unwrap();

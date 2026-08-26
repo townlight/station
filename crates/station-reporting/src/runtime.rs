@@ -12,8 +12,12 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 pub const MAX_RUNTIME_ENTRIES: usize = 10_000;
+pub const MAX_RUNTIME_CHANNELS: usize = 128;
 pub const MAX_EXPORT_ENTRIES: usize = 10_000;
 pub const MAX_TITLE_BYTES: usize = 240;
+pub const MAX_FIELD_BYTES: usize = 240;
+pub const MAX_UNAVAILABLE_REASON_BYTES: usize = 512;
+pub const MAX_RENDERED_EXPORT_BYTES: usize = 4 * 1024 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -65,12 +69,12 @@ pub struct JournalTake {
     pub started_at_unix_ms: i64,
     pub ended_at_unix_ms: i64,
     pub state: AsRunState,
-    pub content_id: String,
-    pub franchise_id: String,
-    pub category: String,
-    pub title: String,
-    pub catalog_revision: u64,
-    pub schedule_revision: u64,
+    pub content_id: Option<String>,
+    pub franchise_id: Option<String>,
+    pub category: Option<String>,
+    pub title: Option<String>,
+    pub catalog_revision: Option<u64>,
+    pub schedule_revision: Option<u64>,
     pub journal_hash: String,
     pub unavailable_reason: Option<String>,
 }
@@ -113,37 +117,80 @@ impl ProjectionInput {
                 || take.journal_sequence == 0
                 || take.started_at_unix_ms < 0
                 || take.ended_at_unix_ms <= take.started_at_unix_ms
-                || take.catalog_revision == 0
-                || take.schedule_revision == 0
                 || !sha256(&take.journal_hash)
-                || take.title.len() > MAX_TITLE_BYTES
-                || take.title.chars().any(char::is_control)
-                || !matches!(
-                    take.category.as_str(),
-                    "program"
-                        | "news"
-                        | "public_affairs"
-                        | "underwriting"
-                        | "interstitial"
-                        | "unavailable"
-                )
+                || !metadata_valid(take)
             {
                 return Err("journal take has an invalid authority binding".into());
             }
-            if let Some(prior) = previous {
-                if take.journal_sequence != prior.journal_sequence + 1
-                    || take.started_at_unix_ms != prior.ended_at_unix_ms
-                {
-                    return Err(
-                        "journal projection is noncontiguous; explicit gap records are required"
-                            .into(),
-                    );
-                }
+            if let Some(prior) = previous
+                && (take.journal_sequence != prior.journal_sequence + 1
+                    || take.started_at_unix_ms != prior.ended_at_unix_ms)
+            {
+                return Err(
+                    "journal projection is noncontiguous; explicit gap records are required".into(),
+                );
             }
             previous = Some(take);
         }
         Ok(())
     }
+}
+
+fn metadata_valid(take: &JournalTake) -> bool {
+    let valid = [
+        &take.content_id,
+        &take.franchise_id,
+        &take.category,
+        &take.title,
+    ]
+    .into_iter()
+    .all(|field| {
+        field
+            .as_deref()
+            .is_none_or(|value| bounded(value, MAX_FIELD_BYTES))
+    });
+    if !valid
+        || take
+            .unavailable_reason
+            .as_deref()
+            .is_some_and(|value| !bounded(value, MAX_UNAVAILABLE_REASON_BYTES))
+    {
+        return false;
+    }
+    if !matches!(take.state, AsRunState::Program) {
+        return take.content_id.is_none()
+            && take.franchise_id.is_none()
+            && take.category.is_none()
+            && take.title.is_none()
+            && take.catalog_revision.is_none()
+            && take.schedule_revision.is_none()
+            && take
+                .unavailable_reason
+                .as_deref()
+                .is_some_and(|value| !value.trim().is_empty());
+    }
+    if take.catalog_revision == Some(0)
+        || take.schedule_revision == Some(0)
+        || take.category.as_deref().is_some_and(|value| {
+            !matches!(
+                value,
+                "program" | "news" | "public_affairs" | "underwriting" | "interstitial"
+            )
+        })
+    {
+        return false;
+    }
+    let incomplete = take.content_id.is_none()
+        || take.franchise_id.is_none()
+        || take.category.is_none()
+        || take.title.is_none()
+        || take.catalog_revision.is_none()
+        || take.schedule_revision.is_none();
+    !incomplete
+        || take
+            .unavailable_reason
+            .as_deref()
+            .is_some_and(|value| !value.trim().is_empty())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -153,12 +200,12 @@ pub struct ProjectedEntry {
     pub started_at_unix_ms: i64,
     pub ended_at_unix_ms: i64,
     pub state: AsRunState,
-    pub content_id: String,
-    pub franchise_id: String,
-    pub category: String,
-    pub title: String,
-    pub catalog_revision: u64,
-    pub schedule_revision: u64,
+    pub content_id: Option<String>,
+    pub franchise_id: Option<String>,
+    pub category: Option<String>,
+    pub title: Option<String>,
+    pub catalog_revision: Option<u64>,
+    pub schedule_revision: Option<u64>,
     pub journal_hash: String,
     pub unavailable_reason: Option<String>,
 }
@@ -187,6 +234,11 @@ impl ReportingRuntime {
     }
     pub fn project(&mut self, input: ProjectionInput) -> Result<AsRunProjectionRuntime, String> {
         input.validate()?;
+        if !self.projections.contains_key(&input.channel_id)
+            && self.projections.len() >= MAX_RUNTIME_CHANNELS
+        {
+            return Err("as-run runtime channel capacity exceeded".into());
+        }
         let entries: Vec<_> = input
             .takes
             .iter()
@@ -221,10 +273,10 @@ impl ReportingRuntime {
                 journal_hash: last.journal_hash.clone(),
             },
         };
-        if let Some(previous) = self.projections.get(&input.channel_id) {
-            if previous.checkpoint.journal_sequence > projected.checkpoint.journal_sequence {
-                return Err("projection checkpoint cannot move backwards".into());
-            }
+        if let Some(previous) = self.projections.get(&input.channel_id)
+            && previous.checkpoint.journal_sequence > projected.checkpoint.journal_sequence
+        {
+            return Err("projection checkpoint cannot move backwards".into());
         }
         self.projections.insert(input.channel_id, projected.clone());
         Ok(projected)
@@ -232,28 +284,29 @@ impl ReportingRuntime {
 }
 
 pub fn render_csv(projection: &AsRunProjectionRuntime) -> Result<String, String> {
-    if projection.entries.len() > MAX_EXPORT_ENTRIES {
-        return Err("export row count is unbounded".into());
-    }
+    validate_renderable(projection)?;
     let mut out = String::from(
         "journal_sequence,started_at_utc,ended_at_utc,state,title,content_id,franchise_id,category,availability\n",
     );
     for entry in &projection.entries {
         out.push_str(&format!(
-            "{},\"{}\",\"{}\",{},\"{}\",{}, {},{},\"{}\"\n",
+            "{},{},{},{},{},{},{},{},{}\n",
             entry.journal_sequence,
-            utc(entry.started_at_unix_ms),
-            utc(entry.ended_at_unix_ms),
-            entry.state.as_str(),
-            csv(&entry.title),
-            entry.content_id,
-            entry.franchise_id,
-            entry.category,
+            csv(&utc(entry.started_at_unix_ms))?,
+            csv(&utc(entry.ended_at_unix_ms))?,
+            csv(entry.state.as_str())?,
+            csv(entry.title.as_deref().unwrap_or(""))?,
+            csv(entry.content_id.as_deref().unwrap_or(""))?,
+            csv(entry.franchise_id.as_deref().unwrap_or(""))?,
+            csv(entry.category.as_deref().unwrap_or(""))?,
             csv(entry
                 .unavailable_reason
                 .as_deref()
-                .unwrap_or("authoritative journal-derived as-run fact"))
+                .unwrap_or("authoritative journal-derived as-run fact"))?
         ));
+        if out.len() > MAX_RENDERED_EXPORT_BYTES {
+            return Err("export rendered byte limit exceeded".into());
+        }
     }
     Ok(out)
 }
@@ -261,20 +314,20 @@ pub fn render_xmltv(
     projection: &AsRunProjectionRuntime,
     service_name: &str,
 ) -> Result<String, String> {
-    if projection.entries.len() > MAX_EXPORT_ENTRIES
-        || service_name.is_empty()
-        || service_name.len() > 200
-        || service_name.chars().any(char::is_control)
-    {
+    validate_renderable(projection)?;
+    if !bounded(service_name, 200) {
         return Err("XMLTV export input is invalid or unbounded".into());
     }
     let mut out = format!(
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?><tv><channel id=\"{}\"><display-name>{}</display-name></channel>",
-        xml(&projection.channel_id),
-        xml(service_name)
+        xml(&projection.channel_id)?,
+        xml(service_name)?
     );
     for entry in &projection.entries {
-        out.push_str(&format!("<programme channel=\"{}\" start=\"{}\" stop=\"{}\"><title>{}</title><desc>{}</desc></programme>", xml(&projection.channel_id), xmltv_time(entry.started_at_unix_ms), xmltv_time(entry.ended_at_unix_ms), xml(&entry.title), xml(entry.unavailable_reason.as_deref().unwrap_or("Authoritative journal-derived as-run fact; delivery and field proof unavailable."))));
+        out.push_str(&format!("<programme channel=\"{}\" start=\"{}\" stop=\"{}\"><title>{}</title><desc>{}</desc></programme>", xml(&projection.channel_id)?, xmltv_time(entry.started_at_unix_ms), xmltv_time(entry.ended_at_unix_ms), xml(entry.title.as_deref().unwrap_or("Unavailable"))?, xml(entry.unavailable_reason.as_deref().unwrap_or("Authoritative journal-derived as-run fact; delivery and field proof unavailable."))?));
+        if out.len() > MAX_RENDERED_EXPORT_BYTES {
+            return Err("export rendered byte limit exceeded".into());
+        }
     }
     out.push_str("</tv>");
     Ok(out)
@@ -296,28 +349,53 @@ fn event_id(t: &JournalTake) -> String {
 }
 fn uuid(v: &str) -> bool {
     v.len() == 36
-        && v.as_bytes()
-            .iter()
-            .enumerate()
-            .all(|(i, b)| matches!(i, 8 | 13 | 18 | 23) && *b == b'-' || b.is_ascii_hexdigit())
+        && v.as_bytes().iter().enumerate().all(|(i, b)| {
+            if matches!(i, 8 | 13 | 18 | 23) {
+                *b == b'-'
+            } else {
+                b.is_ascii_hexdigit()
+            }
+        })
 }
 fn sha256(v: &str) -> bool {
     v.len() == 64 && v.as_bytes().iter().all(u8::is_ascii_hexdigit)
 }
-fn csv(v: &str) -> String {
+fn csv(v: &str) -> Result<String, String> {
+    if v.chars().any(char::is_control) {
+        return Err("CSV fields cannot contain control characters".into());
+    }
     let protected = if v.starts_with(['=', '+', '-', '@']) {
         format!("'{v}")
     } else {
         v.to_owned()
     };
-    protected.replace('"', "\"\"")
+    Ok(format!("\"{}\"", protected.replace('"', "\"\"")))
 }
-fn xml(v: &str) -> String {
-    v.replace('&', "&amp;")
+fn xml(v: &str) -> Result<String, String> {
+    if v.chars().any(char::is_control) {
+        return Err("XML fields cannot contain control characters".into());
+    }
+    Ok(v.replace('&', "&amp;")
         .replace('<', "&lt;")
         .replace('>', "&gt;")
         .replace('"', "&quot;")
-        .replace('\'', "&apos;")
+        .replace('\'', "&apos;"))
+}
+fn bounded(value: &str, max: usize) -> bool {
+    !value.trim().is_empty() && value.len() <= max && !value.chars().any(char::is_control)
+}
+fn validate_renderable(projection: &AsRunProjectionRuntime) -> Result<(), String> {
+    if projection.entries.len() > MAX_EXPORT_ENTRIES {
+        return Err("export row count is unbounded".into());
+    }
+    if projection
+        .entries
+        .iter()
+        .any(|entry| entry.started_at_unix_ms < 0 || entry.ended_at_unix_ms < 0)
+    {
+        return Err("export contains invalid timestamp".into());
+    }
+    Ok(())
 }
 /// Converts a non-negative Unix millisecond instant without consulting the host
 /// clock or locale.  Export timestamps are always exact UTC; the configured

@@ -66,20 +66,28 @@ This persistence boundary accepts only a trusted in-process projection; it is no
 HTTP ingestion route and therefore does not let a browser assert aired facts.
 
 The trusted journal adapter reads CRC-checked durable `ScheduledAssetOnAir`
-records and joins the exact current schedule item identity/revision/channel/asset
-before reading the catalog asset authority. It persists the catalog revision and
-title when available. The current catalog schema does not contain franchise or
-category identities, so those values remain explicitly unavailable; no taxonomy is
-derived from title or meeting body. Other worker events (live, CG, caption, and
-fallback changes) have no durable wall-clock instant, and therefore cannot create a
-UTC airing interval: the adapter records uncovered time as an explicit gap rather
-than inventing timing or airplay.
+records. A CRC detects accidental corruption; it is not an authenticator. Its
+projection hash covers the complete canonical protocol frame plus configured journal
+identity, making channel, worker boot, report, media-offset, protocol, and event
+field changes visible in immutable stored evidence. Local journal ownership remains
+the trust boundary.
+
+The current event does not carry an immutable catalog revision/snapshot. The adapter
+therefore never substitutes a mutable current schedule or catalog row during replay:
+title, franchise, category, catalog revision, and schedule revision are `None` with
+a bounded unavailable reason. The journal asset identity is retained as a
+journal-derived binding, not a catalog claim. It projects only intervals closed by
+the next durable timed event; no synthetic trailing gap is created, so later journal
+growth can replay without conflicting with persisted evidence. Live, CG, caption,
+and fallback events lack a durable timing fact and cannot establish an airing
+interval. This is truthful incompleteness, not delivery or field proof.
 
 Authenticated enabled Setup Admin and Meeting Operator accounts may read bounded
 pages of an already persisted projection or request bounded CSV/XMLTV bytes. The
 API has no projection-write or fact-ingestion route. Every successful read/export
-first appends a server-attributed immutable access-audit row; invalid query shapes,
-oversized pages, unavailable projection, and audit failure fail closed.
+appends a server-attributed immutable access-audit row only after the bounded page
+or bytes are constructed; invalid query shapes, unavailable projection, render
+failure, and audit failure fail closed without a success audit.
 
 This crate has no journal adapter, UTC timing derivation, content/franchise/category
 enrichment, evidence authenticator, worker-journal reader/writer, persistence, API,

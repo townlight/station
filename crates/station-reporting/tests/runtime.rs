@@ -12,12 +12,12 @@ fn take(sequence: u64, start: i64, end: i64, state: AsRunState) -> JournalTake {
         started_at_unix_ms: start,
         ended_at_unix_ms: end,
         state,
-        content_id: "00000000-0000-0000-0000-000000000020".into(),
-        franchise_id: "00000000-0000-0000-0000-000000000030".into(),
-        category: "program".into(),
-        title: "Council & Budget".into(),
-        catalog_revision: 7,
-        schedule_revision: 9,
+        content_id: Some("00000000-0000-0000-0000-000000000020".into()),
+        franchise_id: Some("00000000-0000-0000-0000-000000000030".into()),
+        category: Some("program".into()),
+        title: Some("Council & Budget".into()),
+        catalog_revision: Some(7),
+        schedule_revision: Some(9),
         journal_hash: "a".repeat(64),
         unavailable_reason: None,
     }
@@ -27,7 +27,15 @@ fn take(sequence: u64, start: i64, end: i64, state: AsRunState) -> JournalTake {
 fn journal_projection_is_idempotent_contiguous_and_marks_explicit_gap() {
     let mut runtime = ReportingRuntime::new();
     let first = take(1, 1_700_000_000_000, 1_700_000_060_000, AsRunState::Program);
-    let gap = take(2, 1_700_000_060_000, 1_700_000_120_000, AsRunState::Gap);
+    let mut gap = take(2, 1_700_000_060_000, 1_700_000_120_000, AsRunState::Gap);
+    gap.content_id = None;
+    gap.franchise_id = None;
+    gap.category = None;
+    gap.title = None;
+    gap.catalog_revision = None;
+    gap.schedule_revision = None;
+    gap.unavailable_reason =
+        Some("Journal recorded an explicit gap; no aired content is asserted.".into());
     let input = ProjectionInput::new(CHANNEL, "America/Denver", vec![first, gap]).unwrap();
     let once = runtime.project(input.clone()).unwrap();
     let twice = runtime.project(input).unwrap();
@@ -81,9 +89,26 @@ fn projection_rejects_noncontiguous_journal_and_exports_escape_without_claiming_
 fn csv_neutralizes_spreadsheet_formula_prefixes() {
     let mut runtime = ReportingRuntime::new();
     let mut formula = take(1, 1_700_000_000_000, 1_700_000_060_000, AsRunState::Program);
-    formula.title = "=SUM(1,1)".into();
+    formula.title = Some("=SUM(1,1)".into());
     let projection = runtime
         .project(ProjectionInput::new(CHANNEL, "America/Denver", vec![formula]).unwrap())
         .unwrap();
     assert!(render_csv(&projection).unwrap().contains("\"'=SUM(1,1)\""));
+}
+
+#[test]
+fn hostile_metadata_is_rejected_and_csv_quotes_every_field() {
+    let mut non_program = take(1, 1_700_000_000_000, 1_700_000_060_000, AsRunState::Live);
+    assert!(ProjectionInput::new(CHANNEL, "America/Denver", vec![non_program.clone()]).is_err());
+    non_program.content_id = None;
+    non_program.franchise_id = None;
+    non_program.category = None;
+    non_program.title = None;
+    non_program.catalog_revision = None;
+    non_program.schedule_revision = None;
+    non_program.unavailable_reason = Some("Live authority unavailable.".into());
+    assert!(ProjectionInput::new(CHANNEL, "America/Denver", vec![non_program]).is_ok());
+    let mut control = take(1, 1_700_000_000_000, 1_700_000_060_000, AsRunState::Program);
+    control.title = Some("bad\nvalue".into());
+    assert!(ProjectionInput::new(CHANNEL, "America/Denver", vec![control]).is_err());
 }
