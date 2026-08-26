@@ -5,6 +5,10 @@ import { test } from "node:test";
 
 const shell = readFileSync(new URL("./main.tsx", import.meta.url), "utf8");
 const cg = readFileSync(new URL("./cg.tsx", import.meta.url), "utf8");
+const metadata = readFileSync(new URL("./metadata.tsx", import.meta.url), "utf8");
+const captionTracks = readFileSync(new URL("./caption-tracks.tsx", import.meta.url), "utf8");
+const recordings = readFileSync(new URL("./recordings.tsx", import.meta.url), "utf8");
+const commissioning = readFileSync(new URL("./commissioning.tsx", import.meta.url), "utf8");
 const styles = readFileSync(new URL("./styles.css", import.meta.url), "utf8");
 
 test("station shell exposes current-page semantics and moves focus with routed content", () => {
@@ -35,4 +39,35 @@ test("S20 keeps dense CG controls reflowable and contrast-safe", () => {
   assert.match(styles, /\.metric strong small \{ color:#5d746b; \}/);
   assert.match(styles, /\.cg-url \{ color:#4f6c62; \}/);
   assert.match(styles, /\.commission-evidence>div>span,\.stationbox-dimensions small \{ color:#4f6c62; \}/);
+});
+
+test("operator state changes expose stable assistive-technology semantics", () => {
+  assert.match(cg, /role="tablist"/);
+  assert.match(cg, /role="tab" aria-selected=\{route === item\.id\}/);
+  assert.match(metadata, /aria-pressed=\{schema\?\.schema_id === item\.schema_id\}/);
+  assert.match(captionTracks, /aria-pressed=\{track\.track_id === trackId\}/);
+  assert.match(recordings, /aria-pressed=\{selected\?\.definition\.recording_id === item\.definition\.recording_id\}/);
+  assert.match(shell, /className="live-state-copy" role="status" aria-live="polite" aria-atomic="true"/);
+  assert.match(shell, /<\/small><\/div>\{session\.state === "on_air" && <div className="live-duration">/);
+  assert.match(shell, /role="alertdialog" aria-labelledby="live-confirm-take-title"/);
+  assert.match(shell, /role="alertdialog" aria-labelledby="live-confirm-return-title"/);
+  assert.doesNotMatch(shell, /aria-modal="true"/);
+  assert.match(shell, /confirmationDialogRef\.current\?\.focus\(\)/);
+  assert.match(shell, /confirmationTriggerRef\.current\.focus\(\)/);
+  assert.match(shell, /onKeyDown=\{\(event\) => \{ if \(event\.key === "Escape"\) setConfirmAction\(null\); \}\}/);
+  assert.match(cg, /role="alert"/);
+  assert.match(cg, /role="status"/);
+  assert.match(cg, /cg-preview-status" role="status" aria-live="polite"/);
+  assert.match(cg, /cg-preview-status cg-preview-status-error" role="alert"/);
+  assert.match(shell, /<div className="notice" role="status">/);
+  assert.match(shell, /formError && <div className="error-box" role="alert">/);
+  assert.match(shell, /supportError && <div className="error-box" role="alert">/);
+  assert.match(shell, /retention_warning && <div className="error-box" role="alert">/);
+  assert.match(shell, /updateError && <div className="error-box" role="alert">/);
+  assert.doesNotMatch(shell, /onAction=\{\(\) => undefined\}/);
+  assert.doesNotMatch(shell, /<div className="notice">/);
+  assert.doesNotMatch(shell, /<div className="error-box">\{(?:error|formError|supportError|updateError)\}/);
+  assert.match(commissioning, /aria-controls=\{.*commission-evidence/);
+  assert.match(commissioning, /id=\{.*commission-evidence/);
+  assert.match(commissioning, /commission-evidence-\$\{checkIndex\}/);
 });

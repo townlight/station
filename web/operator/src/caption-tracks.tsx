@@ -210,7 +210,7 @@ export function CaptionTrackEditor({
     <div className="caption-track-layout">
       <aside className="caption-track-list">
         <div className="caption-track-list-head"><strong>Tracks</strong><button className="secondary" onClick={startNew}>New track</button></div>
-        {tracks === null ? <div className="caption-track-loading" role="status">Loading caption tracks…</div> : tracks.length === 0 ? <div className="caption-track-empty"><strong>No caption tracks</strong><p>Import a reviewed WebVTT or SRT file to create the first authority.</p></div> : tracks.map((track) => <button key={track.track_id} className={track.track_id === trackId ? "selected" : ""} onClick={() => void openTrack(track.track_id)} disabled={loadingTrack}><span><strong>{track.label}</strong><small>{track.language} · service {track.service_number} · {track.cue_count.toLocaleString()} cues</small></span><b>r{track.revision}</b></button>)}
+        {tracks === null ? <div className="caption-track-loading" role="status">Loading caption tracks…</div> : tracks.length === 0 ? <div className="caption-track-empty"><strong>No caption tracks</strong><p>Import a reviewed WebVTT or SRT file to create the first authority.</p></div> : tracks.map((track) => <button key={track.track_id} aria-pressed={track.track_id === trackId} className={track.track_id === trackId ? "selected" : ""} onClick={() => void openTrack(track.track_id)} disabled={loadingTrack}><span><strong>{track.label}</strong><small>{track.language} · service {track.service_number} · {track.cue_count.toLocaleString()} cues</small></span><b>r{track.revision}</b></button>)}
       </aside>
       <div className="caption-track-workspace">
         <div className="caption-track-fields">
