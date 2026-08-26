@@ -248,6 +248,23 @@ fn read_event(stream: &mut impl Read) -> WorkerEventEnvelope {
     decode_event_frame(&frame).unwrap()
 }
 
+fn read_event_timeout(
+    stream: &mut station_windows_ipc::PipeStream,
+    timeout: Duration,
+) -> WorkerEventEnvelope {
+    let started = Instant::now();
+    let mut length = [0_u8; 4];
+    stream.read_exact_timeout(&mut length, timeout).unwrap();
+    let payload_length = u32::from_le_bytes(length) as usize;
+    let mut frame = Vec::with_capacity(4 + payload_length);
+    frame.extend_from_slice(&length);
+    frame.resize(4 + payload_length, 0);
+    stream
+        .read_exact_timeout(&mut frame[4..], timeout.saturating_sub(started.elapsed()))
+        .unwrap();
+    decode_event_frame(&frame).unwrap()
+}
+
 fn read_command_event(stream: &mut impl Read) -> WorkerEventEnvelope {
     loop {
         let event = read_event(stream);
@@ -505,7 +522,7 @@ fn worker_expires_a_fallback_tone_while_the_supervisor_is_silent() {
         read_event(&mut stream).event,
         WorkerEvent::Ready { .. }
     ));
-    let tone = WorkerFallbackTone {
+    let mut tone = WorkerFallbackTone {
         activation_id: "1c63ef7e-6e4b-4fa6-b5d8-c15e2b735c05".into(),
         authority_revision: 7,
         kind: FallbackToneKind::Test,
@@ -528,15 +545,73 @@ fn worker_expires_a_fallback_tone_while_the_supervisor_is_silent() {
         WorkerEvent::FallbackToneActivated { .. }
     ));
 
+    stream
+        .write_all(
+            &encode_command_frame(&command(
+                "tone-deactivate-before-reuse",
+                3,
+                ChannelCommand::DeactivateFallbackTone {
+                    activation_id: tone.activation_id.clone(),
+                    authority_revision: tone.authority_revision,
+                },
+            ))
+            .unwrap(),
+        )
+        .unwrap();
+    assert!(matches!(
+        read_command_event(&mut stream).event,
+        WorkerEvent::FallbackToneDeactivated {
+            deactivation: Some(ref deactivation),
+            ..
+        } if deactivation.reason == FallbackToneDeactivationReason::Explicit
+    ));
+
+    // Reusing authority supplied by the supervisor must not let the old
+    // activation's former timer expire the newer activation. The worker owns
+    // one deadline and replaces it atomically with this later activation.
+    tone.duration_ms = 500;
+    stream
+        .write_all(
+            &encode_command_frame(&command(
+                "tone-reactivate-after-reuse",
+                4,
+                ChannelCommand::ActivateFallbackTone { tone: tone.clone() },
+            ))
+            .unwrap(),
+        )
+        .unwrap();
+    assert!(matches!(
+        read_command_event(&mut stream).event,
+        WorkerEvent::FallbackToneActivated {
+            duration_ms: 500,
+            ..
+        }
+    ));
+    let mut unexpected_event_length = [0_u8; 4];
+    assert!(matches!(
+        stream.read_exact_timeout(&mut unexpected_event_length, Duration::from_millis(250)),
+        Err(station_windows_ipc::IpcError::TimedOut { .. })
+    ));
+
     // Keep the pipe open and send no heartbeat or another command. The worker
-    // must run the one-shot deadline autonomously rather than relying on its
-    // next blocking control read.
-    std::thread::sleep(Duration::from_millis(350));
+    // must run the deadline autonomously and publish the resulting
+    // deactivation rather than leaving the supervisor to infer it from a
+    // journal side effect.
+    assert!(matches!(
+        read_event_timeout(&mut stream, Duration::from_secs(2)).event,
+        WorkerEvent::FallbackToneDeactivated {
+            activation_id: ref event_activation_id,
+            authority_revision: 7,
+            deactivation: Some(ref deactivation),
+        } if event_activation_id == &tone.activation_id
+            && deactivation.tone == tone
+            && deactivation.reason == FallbackToneDeactivationReason::Expired
+    ));
     stream
         .write_all(
             &encode_command_frame(&command(
                 "shutdown-after-expiry",
-                3,
+                6,
                 ChannelCommand::Shutdown,
             ))
             .unwrap(),

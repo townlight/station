@@ -74,6 +74,24 @@ fn write_event_record(path: &Path, frame: &[u8], journal_version: u16) {
     file.sync_all().unwrap();
 }
 
+fn write_fallback_tone_audit_record(path: &Path, entry: &FallbackToneJournalEntry) {
+    let payload = serde_json::to_vec(entry).unwrap();
+    let mut file = OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(path)
+        .unwrap();
+    file.write_all(b"TLJR").unwrap();
+    file.write_all(&2_u16.to_le_bytes()).unwrap();
+    file.write_all(&3_u16.to_le_bytes()).unwrap();
+    file.write_all(&(payload.len() as u32).to_le_bytes())
+        .unwrap();
+    file.write_all(&crc32(&payload).to_le_bytes()).unwrap();
+    file.write_all(&payload).unwrap();
+    file.sync_all().unwrap();
+}
+
 #[test]
 fn persists_events_across_reopen_without_sequence_loss() {
     let path = journal_path("reopen");
@@ -148,6 +166,81 @@ fn preserves_exact_fallback_tone_activation_and_expiry_audit_across_reopen() {
             },
         ]
     );
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn rejects_fallback_tone_audits_with_invalid_tones_or_inconsistent_expiry() {
+    let path = journal_path("invalid-fallback-tone-audit");
+    let mut tone = WorkerFallbackTone {
+        activation_id: "1c63ef7e-6e4b-4fa6-b5d8-c15e2b735c05".into(),
+        authority_revision: 3,
+        kind: FallbackToneKind::Test,
+        frequency_hz: 1_000,
+        level_milli_dbfs: -20_000,
+        duration_ms: 1_000,
+    };
+    let mut writer = JournalWriter::open(&path, WORKER_ID, CHANNEL_ID).unwrap();
+    tone.frequency_hz = 1_501;
+    assert!(
+        writer
+            .append_fallback_tone_audit(&FallbackToneJournalEntry::Activated {
+                worker_id: WORKER_ID.into(),
+                channel_id: CHANNEL_ID.into(),
+                tone: tone.clone(),
+                activated_at_monotonic_ms: 500,
+            })
+            .is_err()
+    );
+
+    tone.frequency_hz = 1_000;
+    writer
+        .append_fallback_tone_audit(&FallbackToneJournalEntry::Activated {
+            worker_id: WORKER_ID.into(),
+            channel_id: CHANNEL_ID.into(),
+            tone: tone.clone(),
+            activated_at_monotonic_ms: 500,
+        })
+        .unwrap();
+    assert!(
+        writer
+            .append_fallback_tone_audit(&FallbackToneJournalEntry::Deactivated {
+                worker_id: WORKER_ID.into(),
+                channel_id: CHANNEL_ID.into(),
+                tone,
+                reason: FallbackToneDeactivationReason::Expired,
+                deactivated_at_monotonic_ms: 1_499,
+            })
+            .is_err()
+    );
+    drop(writer);
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn replay_rejects_an_invalid_fallback_tone_audit_record() {
+    let path = journal_path("invalid-fallback-tone-audit-replay");
+    write_fallback_tone_audit_record(
+        &path,
+        &FallbackToneJournalEntry::Activated {
+            worker_id: WORKER_ID.into(),
+            channel_id: CHANNEL_ID.into(),
+            tone: WorkerFallbackTone {
+                activation_id: "1c63ef7e-6e4b-4fa6-b5d8-c15e2b735c05".into(),
+                authority_revision: 3,
+                kind: FallbackToneKind::Test,
+                frequency_hz: 1_501,
+                level_milli_dbfs: -20_000,
+                duration_ms: 1_000,
+            },
+            activated_at_monotonic_ms: 500,
+        },
+    );
+
+    assert!(matches!(
+        inspect_journal(&path),
+        Err(JournalError::Corrupt { reason, .. }) if reason.contains("invalid fallback tone audit")
+    ));
     let _ = std::fs::remove_file(path);
 }
 

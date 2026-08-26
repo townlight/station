@@ -4,7 +4,8 @@ use station_media_protocol::{
     PROTOCOL_VERSION, ProtocolError, ProtocolVersion, SrtPassphrase, WorkerBootstrapEnvelope,
     WorkerCaptionMode, WorkerCaptionPolicy, WorkerEvent, WorkerEventEnvelope, WorkerFallbackSlate,
     WorkerFallbackTone, WorkerOutputConfiguration, decode_bootstrap_frame, decode_command_frame,
-    decode_event_frame, encode_bootstrap_frame, encode_command_frame, encode_event_frame,
+    decode_event_frame, decode_persisted_event_frame, encode_bootstrap_frame, encode_command_frame,
+    encode_event_frame,
 };
 use std::num::NonZeroU16;
 
@@ -106,6 +107,80 @@ fn fallback_tone() -> WorkerFallbackTone {
         level_milli_dbfs: -20_000,
         duration_ms: 1_000,
     }
+}
+
+fn fallback_tone_activation_event() -> WorkerEventEnvelope {
+    WorkerEventEnvelope {
+        version: PROTOCOL_VERSION,
+        worker_id: "ae819b97-2920-434b-9d96-0b51a8ea9abb".into(),
+        channel_id: "62a47b7e-2a03-48d6-8703-a6e5ce986527".into(),
+        sequence: 43,
+        event: WorkerEvent::FallbackToneActivated {
+            activation_id: fallback_tone().activation_id,
+            authority_revision: 7,
+            duration_ms: 1_000,
+            tone: Some(fallback_tone()),
+            activated_at_monotonic_ms: Some(500),
+        },
+    }
+}
+
+#[test]
+fn current_major_requires_complete_fallback_tone_audit_fields() {
+    let mut activation = fallback_tone_activation_event();
+    if let WorkerEvent::FallbackToneActivated {
+        tone,
+        activated_at_monotonic_ms,
+        ..
+    } = &mut activation.event
+    {
+        *tone = None;
+        *activated_at_monotonic_ms = None;
+    }
+    assert!(matches!(
+        encode_event_frame(&activation),
+        Err(ProtocolError::InvalidFallbackTone(_))
+    ));
+    let payload = serde_json::to_vec(&activation).unwrap();
+    let mut raw_activation = (payload.len() as u32).to_le_bytes().to_vec();
+    raw_activation.extend_from_slice(&payload);
+    assert!(matches!(
+        decode_event_frame(&raw_activation),
+        Err(ProtocolError::InvalidFallbackTone(_))
+    ));
+
+    let deactivation = WorkerEventEnvelope {
+        event: WorkerEvent::FallbackToneDeactivated {
+            activation_id: fallback_tone().activation_id,
+            authority_revision: 7,
+            deactivation: None,
+        },
+        ..fallback_tone_activation_event()
+    };
+    assert!(matches!(
+        encode_event_frame(&deactivation),
+        Err(ProtocolError::InvalidFallbackTone(_))
+    ));
+}
+
+#[test]
+fn immediately_prior_persisted_major_may_omit_fallback_tone_audit_fields() {
+    let mut legacy = fallback_tone_activation_event();
+    legacy.version.major -= 1;
+    if let WorkerEvent::FallbackToneActivated {
+        tone,
+        activated_at_monotonic_ms,
+        ..
+    } = &mut legacy.event
+    {
+        *tone = None;
+        *activated_at_monotonic_ms = None;
+    }
+    let payload = serde_json::to_vec(&legacy).unwrap();
+    let mut frame = (payload.len() as u32).to_le_bytes().to_vec();
+    frame.extend_from_slice(&payload);
+
+    assert_eq!(decode_persisted_event_frame(&frame).unwrap(), legacy);
 }
 
 #[test]

@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::ffi::OsString;
 use std::fs::{File, OpenOptions};
 use std::io::{ErrorKind, Read, Seek, SeekFrom, Write};
@@ -114,6 +115,7 @@ pub enum JournalError {
         expected: u64,
         actual: u64,
     },
+    InvalidFallbackToneAudit(String),
     Protocol(ProtocolError),
 }
 
@@ -125,6 +127,7 @@ pub struct JournalWriter {
     channel_id: String,
     next_sequence: u64,
     raw_heartbeat_count: usize,
+    active_fallback_tones: HashMap<String, (WorkerFallbackTone, u64)>,
 }
 
 impl JournalWriter {
@@ -160,6 +163,8 @@ impl JournalWriter {
             channel_id: channel_id.to_string(),
             next_sequence: snapshot.next_sequence,
             raw_heartbeat_count: snapshot.raw_heartbeat_count,
+            active_fallback_tones: fallback_tone_audit_state(&snapshot.fallback_tone_audit)
+                .map_err(JournalError::InvalidFallbackToneAudit)?,
         })
     }
 
@@ -207,6 +212,9 @@ impl JournalWriter {
         if worker_id != self.worker_id || channel_id != self.channel_id {
             return Err(JournalError::WrongIdentity);
         }
+        let mut next_active = self.active_fallback_tones.clone();
+        apply_fallback_tone_audit_entry(entry, &mut next_active)
+            .map_err(JournalError::InvalidFallbackToneAudit)?;
         let payload = serde_json::to_vec(entry)
             .map_err(|error| JournalError::Io(format!("serialize fallback tone audit: {error}")))?;
         let file = self.file.as_mut().ok_or_else(|| {
@@ -214,7 +222,9 @@ impl JournalWriter {
         })?;
         write_record(file, RECORD_KIND_FALLBACK_TONE_AUDIT, &payload)?;
         file.flush().map_err(io_error)?;
-        file.sync_data().map_err(io_error)
+        file.sync_data().map_err(io_error)?;
+        self.active_fallback_tones = next_active;
+        Ok(())
     }
 
     fn compact_heartbeats(&mut self) -> Result<(), JournalError> {
@@ -414,6 +424,64 @@ pub fn inspect_journal(path: impl AsRef<Path>) -> Result<JournalInspection, Jour
     })
 }
 
+fn fallback_tone_audit_state(
+    entries: &[FallbackToneJournalEntry],
+) -> Result<HashMap<String, (WorkerFallbackTone, u64)>, String> {
+    let mut active = HashMap::new();
+    for entry in entries {
+        apply_fallback_tone_audit_entry(entry, &mut active)?;
+    }
+    Ok(active)
+}
+
+fn apply_fallback_tone_audit_entry(
+    entry: &FallbackToneJournalEntry,
+    active: &mut HashMap<String, (WorkerFallbackTone, u64)>,
+) -> Result<(), String> {
+    match entry {
+        FallbackToneJournalEntry::Activated {
+            tone,
+            activated_at_monotonic_ms,
+            ..
+        } => {
+            tone.validate()?;
+            if active.contains_key(&tone.activation_id) {
+                return Err("fallback tone audit activates an already-active identity".into());
+            }
+            active.insert(
+                tone.activation_id.clone(),
+                (tone.clone(), *activated_at_monotonic_ms),
+            );
+        }
+        FallbackToneJournalEntry::Deactivated {
+            tone,
+            reason,
+            deactivated_at_monotonic_ms,
+            ..
+        } => {
+            tone.validate()?;
+            let (activated, activated_at_monotonic_ms) =
+                active.get(&tone.activation_id).ok_or_else(|| {
+                    "fallback tone audit deactivates an inactive identity".to_string()
+                })?;
+            if activated != tone {
+                return Err("fallback tone audit deactivation tone differs from activation".into());
+            }
+            if *deactivated_at_monotonic_ms < *activated_at_monotonic_ms {
+                return Err("fallback tone audit deactivation predates activation".into());
+            }
+            if matches!(reason, FallbackToneDeactivationReason::Expired)
+                && *deactivated_at_monotonic_ms
+                    < activated_at_monotonic_ms.saturating_add(tone.duration_ms)
+            {
+                return Err("fallback tone audit expiry predates its configured duration".into());
+            }
+            active.remove(&tone.activation_id);
+        }
+    }
+    Ok(())
+}
+
 fn fallback_tone_audit_identity(entry: &FallbackToneJournalEntry) -> (String, String) {
     match entry {
         FallbackToneJournalEntry::Activated {
@@ -611,6 +679,8 @@ fn read_snapshot(path: &Path) -> Result<JournalSnapshot, JournalError> {
         .iter()
         .filter(|event| matches!(event.event, WorkerEvent::Heartbeat { .. }))
         .count();
+    fallback_tone_audit_state(&fallback_tone_audit)
+        .map_err(|reason| corrupt(offset, format!("invalid fallback tone audit: {reason}")))?;
     Ok(JournalSnapshot {
         events,
         fallback_tone_audit,

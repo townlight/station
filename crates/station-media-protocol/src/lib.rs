@@ -928,14 +928,17 @@ fn validate_fallback_tone_command(command: &ChannelCommand) -> Result<(), String
     }
 }
 
-fn validate_fallback_tone_event(event: &WorkerEvent) -> Result<(), String> {
+fn validate_fallback_tone_event(
+    event: &WorkerEvent,
+    require_complete_audit: bool,
+) -> Result<(), String> {
     match event {
         WorkerEvent::FallbackToneActivated {
             activation_id,
             authority_revision,
             duration_ms,
             tone,
-            ..
+            activated_at_monotonic_ms,
         } => {
             validate_canonical_uuid(activation_id, "fallback tone activation_id")?;
             if *authority_revision == 0
@@ -943,6 +946,11 @@ fn validate_fallback_tone_event(event: &WorkerEvent) -> Result<(), String> {
                     .contains(duration_ms)
             {
                 return Err("fallback tone activation acknowledgement is invalid".into());
+            }
+            if require_complete_audit && (tone.is_none() || activated_at_monotonic_ms.is_none()) {
+                return Err(
+                    "fallback tone activation acknowledgement omits required audit fields".into(),
+                );
             }
             if let Some(tone) = tone {
                 validate_fallback_tone(tone)?;
@@ -965,6 +973,11 @@ fn validate_fallback_tone_event(event: &WorkerEvent) -> Result<(), String> {
             validate_canonical_uuid(activation_id, "fallback tone activation_id")?;
             if *authority_revision == 0 {
                 return Err("fallback tone deactivation acknowledgement is invalid".into());
+            }
+            if require_complete_audit && deactivation.is_none() {
+                return Err(
+                    "fallback tone deactivation acknowledgement omits required audit fields".into(),
+                );
             }
             if let Some(deactivation) = deactivation {
                 validate_fallback_tone(&deactivation.tone)?;
@@ -1444,7 +1457,8 @@ pub fn encode_event_frame(event: &WorkerEventEnvelope) -> Result<Vec<u8>, Protoc
     validate_live_event(&event.event).map_err(ProtocolError::InvalidLiveEvent)?;
     validate_scheduled_take_event(event).map_err(ProtocolError::InvalidScheduledTake)?;
     validate_output_proof_event(&event.event).map_err(ProtocolError::InvalidOutputProof)?;
-    validate_fallback_tone_event(&event.event).map_err(ProtocolError::InvalidFallbackTone)?;
+    validate_fallback_tone_event(&event.event, event.version.major == PROTOCOL_VERSION.major)
+        .map_err(ProtocolError::InvalidFallbackTone)?;
     encode_frame(event)
 }
 
@@ -1453,7 +1467,7 @@ pub fn decode_event_frame(frame: &[u8]) -> Result<WorkerEventEnvelope, ProtocolE
     if event.version.major != PROTOCOL_VERSION.major {
         return Err(ProtocolError::UnsupportedMajor(event.version.major));
     }
-    validate_decoded_event(&event)
+    validate_decoded_event(&event, true)
 }
 
 /// Decodes an event persisted in the durable worker journal.
@@ -1469,17 +1483,19 @@ pub fn decode_persisted_event_frame(frame: &[u8]) -> Result<WorkerEventEnvelope,
     {
         return Err(ProtocolError::UnsupportedMajor(event.version.major));
     }
-    validate_decoded_event(&event)
+    validate_decoded_event(&event, event.version.major == PROTOCOL_VERSION.major)
 }
 
 fn validate_decoded_event(
     event: &WorkerEventEnvelope,
+    require_complete_tone_audit: bool,
 ) -> Result<WorkerEventEnvelope, ProtocolError> {
     validate_caption_event(&event.event).map_err(ProtocolError::InvalidCaptionCue)?;
     validate_live_event(&event.event).map_err(ProtocolError::InvalidLiveEvent)?;
     validate_scheduled_take_event(event).map_err(ProtocolError::InvalidScheduledTake)?;
     validate_output_proof_event(&event.event).map_err(ProtocolError::InvalidOutputProof)?;
-    validate_fallback_tone_event(&event.event).map_err(ProtocolError::InvalidFallbackTone)?;
+    validate_fallback_tone_event(&event.event, require_complete_tone_audit)
+        .map_err(ProtocolError::InvalidFallbackTone)?;
     Ok(event.clone())
 }
 
