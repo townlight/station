@@ -6,8 +6,10 @@
 
 use std::fs::{self, File};
 use std::io::Read;
+use std::os::windows::fs::MetadataExt;
+use std::os::windows::io::AsRawHandle;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, ChildStderr, ChildStdout, Command, Stdio};
 use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
@@ -17,9 +19,15 @@ use std::time::{Duration, Instant};
 use sha2::{Digest, Sha256};
 use station_storage::{
     ProofOutcome, StationStore, TargetDeviceConfig, TargetDeviceReachabilityReceipt,
-    TransportAnalysisReceipt, TransportFindings,
+    TransportAnalysisReceipt, TransportFindings, TransportProofCaptureFacts,
 };
 use station_transport_proof::{MAX_PROOF_CAPTURE_BYTES, MAX_PROOF_DURATION_MS, TargetProtocol};
+use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE};
+use windows_sys::Win32::System::JobObjects::{
+    AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+    JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
+    SetInformationJobObject, TerminateJobObject,
+};
 
 const MAX_PROCESS_OUTPUT_BYTES: usize = 64 * 1024;
 const MAX_RECEIVER_RESPONSE_BYTES: usize = 8 * 1024;
@@ -27,20 +35,192 @@ const MAX_ANALYSIS_ERRORS: u64 = 0;
 const TSDUCK_ANALYZER_ID: &str = "tsduck-tsanalyze";
 const RECEIVER_ADAPTER_ID: &str = "townlight-https-receiver-v1";
 
-/// Service-owned durable queue supervisor.  This deliberately performs only
-/// lease recovery until the capture/process boundary is attached: it never
-/// claims a job it cannot execute, and therefore cannot accidentally turn a
-/// queued operator request into a fabricated proof pass.
+/// A capture namespace exclusively owned by stationd.  It rejects reparse
+/// points from its root through the per-job directory and exposes no API for a
+/// caller to nominate an absolute artifact path.
+#[derive(Debug, Clone)]
+pub struct ManagedCaptureRoot {
+    root: PathBuf,
+}
+
+impl ManagedCaptureRoot {
+    pub fn open(root: impl AsRef<Path>) -> Result<Self, String> {
+        fs::create_dir_all(root.as_ref())
+            .map_err(|_| "transport artifact root could not be created")?;
+        let root = fs::canonicalize(root.as_ref())
+            .map_err(|_| "transport artifact root could not be resolved")?;
+        ensure_non_reparse_ancestry(&root)?;
+        Ok(Self { root })
+    }
+
+    pub fn begin_job(&self, job_id: &str) -> Result<PathBuf, String> {
+        if !is_canonical_uuid(job_id) {
+            return Err("transport capture job identity is invalid".into());
+        }
+        ensure_non_reparse_ancestry(&self.root)?;
+        let job = self.root.join(job_id);
+        fs::create_dir(&job).map_err(
+            |_| "transport capture job directory already exists or could not be created",
+        )?;
+        ensure_non_reparse_ancestry(&job)?;
+        Ok(job.join("capture.partial.ts"))
+    }
+
+    /// Hashes the closed partial capture, then atomically promotes it to the
+    /// only analysis name.  The returned bytes are retained by the controller
+    /// for analysis, so no later pathname substitution can affect findings.
+    pub fn seal_capture(
+        &self,
+        job_id: &str,
+        started_at_unix_ms: i64,
+        ended_at_unix_ms: i64,
+        max_capture_bytes: u64,
+    ) -> Result<(TransportProofCaptureFacts, Vec<u8>), String> {
+        if !is_canonical_uuid(job_id) {
+            return Err("transport capture job identity is invalid".into());
+        }
+        let job = self.root.join(job_id);
+        ensure_non_reparse_ancestry(&job)?;
+        let partial = job.join("capture.partial.ts");
+        let final_path = job.join("capture.ts");
+        if final_path.exists() {
+            return Err("transport capture has already been sealed".into());
+        }
+        ensure_non_reparse_ancestry(&partial)?;
+        let bytes = bounded_capture(&partial, max_capture_bytes)?;
+        let facts = TransportProofCaptureFacts {
+            artifact_relative_path: format!("{job_id}/capture.ts"),
+            capture_bytes: u64::try_from(bytes.len())
+                .map_err(|_| "transport capture size overflowed")?,
+            capture_sha256: sha256(&bytes),
+            started_at_unix_ms,
+            ended_at_unix_ms,
+        };
+        facts.validate(max_capture_bytes)?;
+        fs::rename(&partial, &final_path)
+            .map_err(|_| "transport capture could not be atomically sealed")?;
+        ensure_non_reparse_ancestry(&final_path)?;
+        Ok((facts, bytes))
+    }
+}
+
+/// Service-owned durable queue supervisor.  Each claim is revalidated against
+/// the verified installed candidate and current output configuration before a
+/// managed capture can start; every fault becomes a durable failure, never a
+/// fabricated pass.
 pub fn run_transport_proof_queue_controller(
     database: &Path,
+    application_root: &Path,
     stop: Arc<AtomicBool>,
 ) -> Result<(), String> {
     while !stop.load(Ordering::Acquire) {
         let now = unix_time_millis()?;
-        StationStore::open(database)?.recover_expired_transport_proof_jobs(now)?;
+        let store = StationStore::open(database)?;
+        store.recover_expired_transport_proof_jobs(now)?;
+        if let Some(job) = store.claim_next_transport_proof_job(now, 900_000)? {
+            let result = execute_claimed_transport_job(&store, database, application_root, &job);
+            if let Err(_) = result {
+                // Details are deliberately static: process output, targets, and
+                // credentials never enter durable evidence or error receipts.
+                let _ = store.fail_transport_proof_job(
+                    &job.job.job_id,
+                    unix_time_millis().unwrap_or(now),
+                    "Transport proof execution failed before a passing receipt could be produced.",
+                );
+            }
+        }
         std::thread::sleep(Duration::from_millis(250));
     }
     Ok(())
+}
+
+fn execute_claimed_transport_job(
+    store: &StationStore,
+    database: &Path,
+    application_root: &Path,
+    job: &station_storage::TransportProofJobRecord,
+) -> Result<(), String> {
+    let data_directory = database
+        .parent()
+        .ok_or("transport proof data directory is unavailable")?;
+    let candidate =
+        station_maintenance::read_verified_candidate_identity(data_directory, application_root)?;
+    if candidate.version != job.job.candidate_version
+        || candidate.source_commit != job.job.source_commit
+    {
+        return Err("transport proof candidate changed after request".into());
+    }
+    let snapshot = store
+        .read_channel_loudness_proof_snapshot(&job.job.channel_id)?
+        .ok_or("transport proof channel is unavailable")?;
+    if snapshot.configuration_hash != job.job.configuration_hash {
+        return Err("transport proof configuration changed after request".into());
+    }
+    let sink = snapshot
+        .output_sinks
+        .into_iter()
+        .find(|sink| sink.sink_id == job.job.sink_id && sink.enabled)
+        .ok_or("transport proof sink is unavailable")?;
+    let (host, port) = parse_udp_destination(&sink.destination)?;
+    let root = ManagedCaptureRoot::open(data_directory.join("artifacts").join("transport-proof"))?;
+    let partial = root.begin_job(&job.job.job_id)?;
+    let runtime = AttestedTsdDuckRuntime::from_verified_install(data_directory, application_root)?;
+    let executor = TsdDuckTransportExecutor {
+        runtime,
+        runner: RealProcessRunner,
+    };
+    let capture = CaptureRequest {
+        udp_host: host,
+        udp_port: port,
+        duration_ms: MAX_PROOF_DURATION_MS,
+        max_bytes: job.job.max_capture_bytes,
+        artifact_path: partial,
+    };
+    let started = unix_time_millis()?;
+    executor.capture(&capture)?;
+    let ended = unix_time_millis()?;
+    let (facts, _) =
+        root.seal_capture(&job.job.job_id, started, ended, job.job.max_capture_bytes)?;
+    let analyzing =
+        store.begin_transport_proof_analysis(&job.job.job_id, &facts, ended, 300_000)?;
+    let final_capture = root.root.join(&facts.artifact_relative_path);
+    if sha256(&bounded_capture(&final_capture, job.job.max_capture_bytes)?) != facts.capture_sha256
+    {
+        return Err("sealed transport capture hash changed before analysis".into());
+    }
+    let findings = executor.analyze_capture(&CaptureRequest {
+        artifact_path: final_capture,
+        ..capture
+    })?;
+    if sha256(&bounded_capture(
+        &root.root.join(&facts.artifact_relative_path),
+        job.job.max_capture_bytes,
+    )?) != facts.capture_sha256
+    {
+        return Err("sealed transport capture hash changed during analysis".into());
+    }
+    store.complete_transport_proof_job(
+        &analyzing.job.job_id,
+        &findings.analyzer_output_sha256,
+        unix_time_millis()?,
+    )?;
+    Ok(())
+}
+
+fn parse_udp_destination(value: &str) -> Result<(String, u16), String> {
+    if value.len() > 253 || value.contains(['/', '\\', '?', '#', '@']) {
+        return Err("transport sink destination is invalid".into());
+    }
+    let (host, port) = value
+        .rsplit_once(':')
+        .ok_or("transport sink destination has no port")?;
+    let port = port
+        .parse::<u16>()
+        .map_err(|_| "transport sink port is invalid")?;
+    if host.is_empty() || port == 0 {
+        return Err("transport sink destination is invalid".into());
+    }
+    Ok((host.into(), port))
 }
 
 fn unix_time_millis() -> Result<i64, String> {
@@ -187,6 +367,7 @@ impl ProcessRunner for RealProcessRunner {
         argv: &[String],
         timeout: Duration,
     ) -> Result<ProcessResult, String> {
+        let job = WindowsProcessTree::new()?;
         let mut child = Command::new(executable)
             .args(argv)
             .stdin(Stdio::null())
@@ -194,22 +375,35 @@ impl ProcessRunner for RealProcessRunner {
             .stderr(Stdio::piped())
             .spawn()
             .map_err(|_| "TSDuck process could not be spawned")?;
+        job.assign(&child)?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or("TSDuck stdout pipe was unavailable")?;
+        let stderr = child
+            .stderr
+            .take()
+            .ok_or("TSDuck stderr pipe was unavailable")?;
+        let stdout_drain = std::thread::spawn(move || drain_stdout(stdout));
+        let stderr_drain = std::thread::spawn(move || drain_stderr(stderr));
         let started = Instant::now();
         loop {
             if let Some(status) = child
                 .try_wait()
                 .map_err(|_| "TSDuck process status could not be read")?
             {
-                let mut output = read_process_output(child.stdout.take(), Vec::new())?;
-                output = read_process_output(child.stderr.take(), output)?;
+                let output = join_drain(stdout_drain, "stdout")?;
+                join_drain(stderr_drain, "stderr")?;
                 return Ok(ProcessResult {
                     status_success: status.success(),
                     output,
                 });
             }
             if started.elapsed() >= timeout {
-                let _ = child.kill();
+                job.terminate();
                 let _ = child.wait();
+                let _ = stdout_drain.join();
+                let _ = stderr_drain.join();
                 return Err("TSDuck process exceeded its deadline".into());
             }
             std::thread::sleep(Duration::from_millis(10));
@@ -551,17 +745,80 @@ impl<A: AuthenticatedReceiver> ReceiverProofExecutor<A> {
     }
 }
 
-fn read_process_output<T: Read>(stream: Option<T>, mut output: Vec<u8>) -> Result<Vec<u8>, String> {
-    if let Some(stream) = stream {
-        stream
-            .take((MAX_PROCESS_OUTPUT_BYTES + 1) as u64)
-            .read_to_end(&mut output)
-            .map_err(|_| "TSDuck process output could not be read")?;
-        if output.len() > MAX_PROCESS_OUTPUT_BYTES {
-            return Err("TSDuck process output exceeded its bound".into());
+struct WindowsProcessTree(HANDLE);
+
+impl WindowsProcessTree {
+    fn new() -> Result<Self, String> {
+        let handle = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
+        if handle == INVALID_HANDLE_VALUE || handle.is_null() {
+            return Err("TSDuck process tree boundary could not be created".into());
         }
+        let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+        limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        let ok = unsafe {
+            SetInformationJobObject(
+                handle,
+                JobObjectExtendedLimitInformation,
+                (&limits as *const JOBOBJECT_EXTENDED_LIMIT_INFORMATION).cast(),
+                u32::try_from(std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>())
+                    .expect("job object limit structure fits u32"),
+            )
+        };
+        if ok == 0 {
+            unsafe { CloseHandle(handle) };
+            return Err("TSDuck process tree boundary could not be configured".into());
+        }
+        Ok(Self(handle))
+    }
+
+    fn assign(&self, child: &Child) -> Result<(), String> {
+        let process = child.as_raw_handle() as HANDLE;
+        if unsafe { AssignProcessToJobObject(self.0, process) } == 0 {
+            self.terminate();
+            return Err("TSDuck process could not be contained in its job object".into());
+        }
+        Ok(())
+    }
+
+    fn terminate(&self) {
+        unsafe { TerminateJobObject(self.0, 1) };
+    }
+}
+
+impl Drop for WindowsProcessTree {
+    fn drop(&mut self) {
+        unsafe { CloseHandle(self.0) };
+    }
+}
+
+fn drain_stdout(stream: ChildStdout) -> Result<Vec<u8>, String> {
+    drain_process_stream(stream).map_err(|_| "TSDuck stdout could not be read".into())
+}
+
+fn drain_stderr(stream: ChildStderr) -> Result<Vec<u8>, String> {
+    drain_process_stream(stream).map_err(|_| "TSDuck stderr could not be read".into())
+}
+
+fn drain_process_stream<T: Read>(stream: T) -> Result<Vec<u8>, ()> {
+    let mut output = Vec::new();
+    stream
+        .take((MAX_PROCESS_OUTPUT_BYTES + 1) as u64)
+        .read_to_end(&mut output)
+        .map_err(|_| ())?;
+    if output.len() > MAX_PROCESS_OUTPUT_BYTES {
+        return Err(());
     }
     Ok(output)
+}
+
+fn join_drain(
+    drain: std::thread::JoinHandle<Result<Vec<u8>, String>>,
+    stream: &str,
+) -> Result<Vec<u8>, String> {
+    drain
+        .join()
+        .map_err(|_| format!("TSDuck {stream} drain thread panicked"))?
+        .map_err(|_| format!("TSDuck {stream} output exceeded its bound or could not be read"))
 }
 fn bounded_capture(path: &Path, max: u64) -> Result<Vec<u8>, String> {
     let meta = fs::metadata(path).map_err(|_| "TSDuck capture artifact is unavailable")?;
@@ -580,6 +837,27 @@ fn bounded_capture(path: &Path, max: u64) -> Result<Vec<u8>, String> {
         return Err("TSDuck capture artifact changed while being analyzed".into());
     }
     Ok(out)
+}
+
+fn ensure_non_reparse_ancestry(path: &Path) -> Result<(), String> {
+    let mut current = Some(path);
+    while let Some(candidate) = current {
+        let metadata = fs::symlink_metadata(candidate)
+            .map_err(|_| "transport artifact ancestry is unavailable")?;
+        if metadata.file_attributes() & 0x0400 != 0 {
+            return Err("transport artifact ancestry contains a reparse point".into());
+        }
+        current = candidate.parent();
+    }
+    Ok(())
+}
+
+fn is_canonical_uuid(value: &str) -> bool {
+    value.len() == 36
+        && value.bytes().enumerate().all(|(index, byte)| {
+            matches!(index, 8 | 13 | 18 | 23) && byte == b'-'
+                || !matches!(index, 8 | 13 | 18 | 23) && byte.is_ascii_hexdigit()
+        })
 }
 fn hash_file(path: &Path) -> Result<String, String> {
     let mut file = File::open(path).map_err(|_| "attested executable cannot be opened")?;
@@ -792,5 +1070,20 @@ mod tests {
                 "{removed}"
             );
         }
+    }
+
+    #[test]
+    fn managed_capture_root_seals_one_hashed_ten_minute_capture() {
+        let root = root();
+        let managed = ManagedCaptureRoot::open(root.join("artifacts")).unwrap();
+        let job_id = "11111111-2222-4333-8444-555555555555";
+        let partial = managed.begin_job(job_id).unwrap();
+        fs::write(&partial, vec![0x47; 188]).unwrap();
+        let (facts, bytes) = managed.seal_capture(job_id, 1_000, 601_000, 1_024).unwrap();
+        assert_eq!(facts.artifact_relative_path, format!("{job_id}/capture.ts"));
+        assert_eq!(facts.capture_bytes, 188);
+        assert_eq!(facts.capture_sha256, sha256(&bytes));
+        assert!(managed.begin_job(job_id).is_err());
+        fs::remove_dir_all(root).unwrap();
     }
 }

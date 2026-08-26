@@ -11321,6 +11321,42 @@ impl StationStore {
         self.finish_value_transaction(outcome)
     }
 
+    pub fn fail_transport_proof_job(
+        &self,
+        job_id: &str,
+        now_unix_ms: i64,
+        failure_detail: &str,
+    ) -> Result<TransportProofJobRecord, String> {
+        validate_transport_proof_job_id(job_id)?;
+        if now_unix_ms < 0 || !secret_field(failure_detail, 500) {
+            return Err("transport proof failure detail is invalid".into());
+        }
+        self.execute("BEGIN IMMEDIATE")?;
+        let outcome = (|| {
+            let statement = self.prepare("UPDATE transport_proof_jobs SET state='failed',updated_at_unix_ms=?1,lease_expires_at_unix_ms=-1,failed_at_unix_ms=?1,failure_detail=?2 WHERE job_id=?3 AND state IN ('claimed','capturing','analyzing')")?;
+            bind_i64(self.database, statement.raw, 1, now_unix_ms)?;
+            bind_text(
+                self.database,
+                statement.raw,
+                2,
+                &c_string(failure_detail, "transport proof failure detail")?,
+            )?;
+            bind_text(
+                self.database,
+                statement.raw,
+                3,
+                &c_string(job_id, "transport proof job identity")?,
+            )?;
+            expect_done(self.database, statement.raw)?;
+            if self.changes() != 1 {
+                return Err("transport proof failure compare-and-set failed".into());
+            }
+            self.read_transport_proof_job(job_id)?
+                .ok_or_else(|| "transport proof job disappeared".to_string())
+        })();
+        self.finish_value_transaction(outcome)
+    }
+
     pub fn append_transport_analysis_receipt(
         &self,
         receipt: &TransportAnalysisReceipt,
@@ -17450,7 +17486,7 @@ fn validate_transport_proof_job_id(value: &str) -> Result<(), String> {
 }
 
 fn validate_transport_proof_lease(now_unix_ms: i64, lease_duration_ms: i64) -> Result<(), String> {
-    if now_unix_ms < 0 || !(1_000..=300_000).contains(&lease_duration_ms) {
+    if now_unix_ms < 0 || !(1_000..=1_200_000).contains(&lease_duration_ms) {
         return Err("transport proof lease request is invalid".into());
     }
     Ok(())

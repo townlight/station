@@ -328,8 +328,11 @@ fn run_console(config: DaemonConfig) -> Result<(), String> {
             return Err(append_cleanup_error(error, cleanup.result));
         }
     };
-    let transport_queue =
-        spawn_transport_proof_queue_controller(&config.database, Arc::clone(&stop))?;
+    let transport_queue = spawn_transport_proof_queue_controller(
+        &config.database,
+        &update_application,
+        Arc::clone(&stop),
+    )?;
     let ingest_database = config.database.clone();
     let ingest_library = media_library(&config.database);
     let ingest_stop = Arc::clone(&stop);
@@ -558,8 +561,11 @@ fn run_service(config: DaemonConfig) -> Result<(), String> {
             return Err(append_cleanup_error(error, cleanup.result));
         }
     };
-    let transport_queue =
-        spawn_transport_proof_queue_controller(&config.database, Arc::clone(&stop))?;
+    let transport_queue = spawn_transport_proof_queue_controller(
+        &config.database,
+        &update_application,
+        Arc::clone(&stop),
+    )?;
     let ingest_database = config.database.clone();
     let ingest_library = media_library(&config.database);
     let ingest_stop = Arc::clone(&stop);
@@ -963,13 +969,19 @@ fn spawn_feed_fetch_worker(
 
 fn spawn_transport_proof_queue_controller(
     database: &std::path::Path,
+    application_root: &std::path::Path,
     stop: Arc<AtomicBool>,
 ) -> Result<std::thread::JoinHandle<Result<(), String>>, String> {
     let database = database.to_path_buf();
+    let application_root = application_root.to_path_buf();
     std::thread::Builder::new()
         .name("station-transport-proof-queue".into())
         .spawn(move || {
-            station_transport_executor::run_transport_proof_queue_controller(&database, stop)
+            station_transport_executor::run_transport_proof_queue_controller(
+                &database,
+                &application_root,
+                stop,
+            )
         })
         .map_err(|error| format!("could not start transport proof queue controller: {error}"))
 }

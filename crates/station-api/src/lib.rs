@@ -101,7 +101,8 @@ use station_storage::{
     ScheduleMaterializationHistoryReadError, ScheduleMaterializationOutcome,
     ScheduleMaterializationOutcomeRecord, ScheduleMaterializationPlanRecord,
     ScheduleMaterializationRun, ScheduleMaterializationRunOrigin,
-    ScheduleMaterializationWriteError, StationStore, StoredSinkLoudnessProof,
+    ScheduleMaterializationWriteError, StationStore, StoredSinkLoudnessProof, TransportProofJob,
+    TransportProofJobRecord, TransportProofJobState,
 };
 use station_transport_proof::{CableTransportValidation, TargetDeviceConfig, TargetProtocol};
 use station_update::UpdateCheckTrigger;
@@ -724,6 +725,22 @@ struct TransportProofResponse {
     channel_id: String,
     history: station_storage::TransportProofHistory,
     validations: Vec<CableTransportValidation>,
+}
+
+#[derive(Debug, Serialize)]
+struct TransportProofJobResponse {
+    job_id: String,
+    channel_id: String,
+    sink_id: String,
+    target_id: String,
+    target_revision: u64,
+    candidate_version: String,
+    source_commit: String,
+    configuration_hash: String,
+    state: &'static str,
+    created_at_unix_ms: i64,
+    updated_at_unix_ms: i64,
+    lease_expires_at_unix_ms: Option<i64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2163,6 +2180,18 @@ impl Api {
                 if path.starts_with("/api/v1/channels/") && path.ends_with("/transport-proof") =>
             {
                 self.read_transport_proof(path, actor)
+            }
+            ("POST", path)
+                if path.starts_with("/api/v1/channels/")
+                    && path.ends_with("/transport-proof/jobs") =>
+            {
+                self.request_transport_proof_job(path, body, actor)
+            }
+            ("GET", path)
+                if path.starts_with("/api/v1/channels/")
+                    && path.contains("/transport-proof/jobs/") =>
+            {
+                self.read_transport_proof_job(path, actor)
             }
             ("GET", path)
                 if path.starts_with("/api/v1/channels/") && path.ends_with("/transport-target") =>
@@ -6364,6 +6393,201 @@ impl Api {
             })
             .expect("serializing transport proof cannot fail"),
         )
+    }
+
+    /// A browser may request work, but it cannot nominate the candidate,
+    /// target, configuration, actor, clock, capture path, or outcome.  Those
+    /// facts are derived by the server and the store rechecks target/config in
+    /// its insertion transaction.
+    fn request_transport_proof_job(
+        &self,
+        path: &str,
+        body: Option<&[u8]>,
+        actor: Option<&OperatorAccount>,
+    ) -> ApiResponse {
+        let Some(actor) = actor.filter(|account| account.enabled() && is_setup_admin(account))
+        else {
+            return error_response(
+                403,
+                "setup_admin_required",
+                "Requesting transport proof requires the Setup Admin role.",
+            );
+        };
+        if body.is_some_and(|bytes| !bytes.is_empty()) {
+            return error_response(
+                400,
+                "invalid_json",
+                "A transport-proof request accepts no caller authority fields.",
+            );
+        }
+        let Some(channel_id) = path_identity(path, "/api/v1/channels/", "/transport-proof/jobs")
+        else {
+            return error_response(
+                400,
+                "invalid_path",
+                "The transport proof job path is invalid.",
+            );
+        };
+        if !is_api_uuid(channel_id) {
+            return error_response(400, "invalid_path", "The channel identity is invalid.");
+        }
+        let channel = match self.storage.list_channels() {
+            Ok(channels) => channels
+                .into_iter()
+                .find(|channel| channel.channel_id == channel_id),
+            Err(message) => return error_response(500, "storage_error", &message),
+        };
+        let Some(channel) = channel else {
+            return error_response(404, "channel_not_found", "The channel does not exist.");
+        };
+        let sinks = channel
+            .output_sinks
+            .into_iter()
+            .filter(|sink| {
+                sink.enabled
+                    && sink.required
+                    && matches!(
+                        sink.kind,
+                        station_schedule::OutputSinkKind::UdpTs
+                            | station_schedule::OutputSinkKind::Srt
+                    )
+            })
+            .collect::<Vec<_>>();
+        let [sink] = sinks.as_slice() else {
+            return error_response(
+                409,
+                "transport_sink_ambiguous",
+                "Transport proof requires exactly one enabled required UDP or SRT sink.",
+            );
+        };
+        let target = match self
+            .storage
+            .read_transport_target_config(channel_id, &sink.sink_id)
+        {
+            Ok(Some(target)) => target,
+            Ok(None) => {
+                return error_response(
+                    409,
+                    "transport_target_not_configured",
+                    "The required transport sink has no target configuration.",
+                );
+            }
+            Err(message) => return error_response(500, "storage_error", &message),
+        };
+        let data_directory = match self.database_path.parent() {
+            Some(path) => path,
+            None => {
+                return error_response(
+                    500,
+                    "candidate_authority_unavailable",
+                    "The station data directory is unavailable.",
+                );
+            }
+        };
+        let candidate = match read_verified_candidate_identity(
+            data_directory,
+            &self.application_directory,
+        ) {
+            Ok(candidate) => candidate,
+            Err(_) => {
+                return error_response(
+                    409,
+                    "candidate_not_verified",
+                    "A verified installed candidate is required before requesting transport proof.",
+                );
+            }
+        };
+        let now = match system_time_millis() {
+            Ok(now) => now,
+            Err(message) => return error_response(500, "clock_error", &message),
+        };
+        let job_id = match secure_canonical_uuid() {
+            Ok(value) => value,
+            Err(message) => return error_response(500, "entropy_unavailable", &message),
+        };
+        let configuration_hash = match self
+            .storage
+            .current_channel_output_configuration_hash(channel_id)
+        {
+            Ok(value) => value,
+            Err(message) => return error_response(500, "storage_error", &message),
+        };
+        let job = TransportProofJob {
+            job_id,
+            channel_id: channel_id.into(),
+            sink_id: sink.sink_id.clone(),
+            target_id: target.target_id,
+            target_revision: target.revision,
+            candidate_version: candidate.version,
+            source_commit: candidate.source_commit,
+            configuration_hash,
+            requested_by: actor.account_id().as_str().into(),
+            created_at_unix_ms: now,
+            max_capture_bytes: station_transport_proof::MAX_PROOF_CAPTURE_BYTES,
+        };
+        match self.storage.create_transport_proof_job(&job) {
+            Ok(true) => json_response(
+                202,
+                serde_json::to_vec(&transport_proof_job_response(
+                    self.storage
+                        .read_transport_proof_job(&job.job_id)
+                        .ok()
+                        .flatten()
+                        .expect("created transport job must be readable"),
+                ))
+                .expect("serializing transport proof job cannot fail"),
+            ),
+            Ok(false) => error_response(
+                409,
+                "job_already_active",
+                "An active transport proof job already exists for this sink.",
+            ),
+            Err(message) if message.contains("stale") || message.contains("not configured") => {
+                error_response(
+                    409,
+                    "stale_authority",
+                    "The target or output configuration changed; refresh and request again.",
+                )
+            }
+            Err(message) => error_response(500, "storage_error", &message),
+        }
+    }
+
+    fn read_transport_proof_job(&self, path: &str, actor: Option<&OperatorAccount>) -> ApiResponse {
+        if !is_scheduling_reader(actor) {
+            return error_response(
+                403,
+                "operator_required",
+                "Reading transport proof jobs requires an enabled operator account.",
+            );
+        }
+        let Some((channel_id, job_id)) = transport_proof_job_path(path) else {
+            return error_response(
+                400,
+                "invalid_path",
+                "The transport proof job path is invalid.",
+            );
+        };
+        if !is_api_uuid(channel_id) || !is_canonical_api_uuid(job_id) {
+            return error_response(
+                400,
+                "invalid_path",
+                "The transport proof job identity is invalid.",
+            );
+        }
+        match self.storage.read_transport_proof_job(job_id) {
+            Ok(Some(record)) if record.job.channel_id == channel_id => json_response(
+                200,
+                serde_json::to_vec(&transport_proof_job_response(record))
+                    .expect("serializing transport proof job cannot fail"),
+            ),
+            Ok(_) => error_response(
+                404,
+                "job_not_found",
+                "The transport proof job does not exist.",
+            ),
+            Err(message) => error_response(500, "storage_error", &message),
+        }
     }
 
     fn create_receiver_receipt(
@@ -11118,6 +11342,18 @@ fn loudness_job_path(path: &str) -> Option<(&str, &str)> {
     .then_some((channel_id, job_id))
 }
 
+fn transport_proof_job_path(path: &str) -> Option<(&str, &str)> {
+    let remainder = path.strip_prefix("/api/v1/channels/")?;
+    let (channel_id, job_id) = remainder.split_once("/transport-proof/jobs/")?;
+    (!channel_id.is_empty()
+        && !job_id.is_empty()
+        && !channel_id.contains('/')
+        && !job_id.contains('/')
+        && !channel_id.contains(['?', '%', '\\'])
+        && !job_id.contains(['?', '%', '\\']))
+    .then_some((channel_id, job_id))
+}
+
 fn caption_job_path(path: &str) -> Option<(&str, &str)> {
     let remainder = path.strip_prefix("/api/v1/channels/")?;
     let (channel_id, job_id) = remainder.split_once("/caption-proof/jobs/")?;
@@ -11138,6 +11374,17 @@ fn loudness_job_state_name(state: OutputLoudnessProofJobState) -> &'static str {
         OutputLoudnessProofJobState::Analyzing => "analyzing",
         OutputLoudnessProofJobState::Completed => "completed",
         OutputLoudnessProofJobState::Failed => "failed",
+    }
+}
+
+fn transport_proof_job_state_name(state: TransportProofJobState) -> &'static str {
+    match state {
+        TransportProofJobState::Pending => "pending",
+        TransportProofJobState::Claimed => "claimed",
+        TransportProofJobState::Capturing => "capturing",
+        TransportProofJobState::Analyzing => "analyzing",
+        TransportProofJobState::Completed => "completed",
+        TransportProofJobState::Failed => "failed",
     }
 }
 
@@ -11240,6 +11487,24 @@ fn loudness_job_response(record: OutputLoudnessProofJobRecord) -> LoudnessProofJ
         completed_at_unix_ms: record.completed_at_unix_ms,
         failed_at_unix_ms: record.failed_at_unix_ms,
         failure_detail: record.failure_detail,
+    }
+}
+
+fn transport_proof_job_response(record: TransportProofJobRecord) -> TransportProofJobResponse {
+    let job = record.job;
+    TransportProofJobResponse {
+        job_id: job.job_id,
+        channel_id: job.channel_id,
+        sink_id: job.sink_id,
+        target_id: job.target_id,
+        target_revision: job.target_revision,
+        candidate_version: job.candidate_version,
+        source_commit: job.source_commit,
+        configuration_hash: job.configuration_hash,
+        state: transport_proof_job_state_name(record.state),
+        created_at_unix_ms: job.created_at_unix_ms,
+        updated_at_unix_ms: record.updated_at_unix_ms,
+        lease_expires_at_unix_ms: record.lease_expires_at_unix_ms,
     }
 }
 
