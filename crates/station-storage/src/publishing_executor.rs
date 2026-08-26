@@ -44,6 +44,7 @@ pub struct PublishExecutionJob {
     pub asset_id: String,
     pub media_sha256: String,
     pub media_bytes: u64,
+    pub media_duration_ms: u64,
     pub requested_by: String,
     pub created_at_unix_ms: i64,
 }
@@ -61,6 +62,7 @@ impl PublishExecutionJob {
             || !is_sha256_identity(&self.asset_id)
             || self.asset_id != self.media_sha256
             || self.media_bytes == 0
+            || !(1..=43_200_000).contains(&self.media_duration_ms)
             || !secret_field(&self.candidate_version, 200)
             || !is_source_commit_identity(&self.source_commit)
             || !secret_field(&self.requested_by, 200)
@@ -140,7 +142,7 @@ impl StationStore {
                target_id TEXT NOT NULL, target_revision INTEGER NOT NULL, target_kind TEXT NOT NULL,\
                configuration_hash TEXT NOT NULL, credential_version INTEGER NOT NULL,\
                candidate_version TEXT NOT NULL, source_commit TEXT NOT NULL, install_generation INTEGER NOT NULL,\
-               asset_id TEXT NOT NULL, media_sha256 TEXT NOT NULL, media_bytes INTEGER NOT NULL, requested_by TEXT NOT NULL,\
+               asset_id TEXT NOT NULL, media_sha256 TEXT NOT NULL, media_bytes INTEGER NOT NULL, media_duration_ms INTEGER NOT NULL CHECK(media_duration_ms BETWEEN 1 AND 43200000), requested_by TEXT NOT NULL,\
                created_at_unix_ms INTEGER NOT NULL, state TEXT NOT NULL CHECK(state IN ('pending','running','completed','failed')),\
                attempts INTEGER NOT NULL DEFAULT 0, next_attempt_at_unix_ms INTEGER NOT NULL, updated_at_unix_ms INTEGER NOT NULL,\
                lease_token TEXT, lease_expires_at_unix_ms INTEGER, completed_at_unix_ms INTEGER, failure_class TEXT);\
@@ -153,7 +155,14 @@ impl StationStore {
              CREATE TRIGGER IF NOT EXISTS publish_execution_configs_no_delete BEFORE DELETE ON publish_execution_target_configs BEGIN SELECT RAISE(ABORT,'publish execution configuration is append-only'); END;\
              CREATE TRIGGER IF NOT EXISTS publish_execution_receipts_no_update BEFORE UPDATE ON publish_execution_receipts BEGIN SELECT RAISE(ABORT,'publish execution receipt is append-only'); END;\
              CREATE TRIGGER IF NOT EXISTS publish_execution_receipts_no_delete BEFORE DELETE ON publish_execution_receipts BEGIN SELECT RAISE(ABORT,'publish execution receipt is append-only'); END;",
-        )
+        )?;
+        if !self.sqlite_table_has_column("publish_execution_jobs", "media_duration_ms")? {
+            self.execute(
+                "ALTER TABLE publish_execution_jobs ADD COLUMN media_duration_ms INTEGER NOT NULL DEFAULT -1;\
+                 UPDATE publish_execution_jobs SET media_duration_ms=COALESCE((SELECT duration_ms FROM media_assets WHERE media_assets.asset_id=publish_execution_jobs.asset_id),-1)",
+            )?;
+        }
+        Ok(())
     }
 
     pub fn write_publish_execution_target_config(
@@ -321,7 +330,7 @@ impl StationStore {
         self.execute("BEGIN IMMEDIATE")?;
         let outcome = (|| {
             self.validate_publish_execution_job_current(job)?;
-            let statement = self.prepare("INSERT INTO publish_execution_jobs(job_id,account_id,account_revision,target_id,target_revision,target_kind,configuration_hash,credential_version,candidate_version,source_commit,install_generation,asset_id,media_sha256,media_bytes,requested_by,created_at_unix_ms,state,next_attempt_at_unix_ms,updated_at_unix_ms) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,'pending',?16,?16)")?;
+            let statement = self.prepare("INSERT INTO publish_execution_jobs(job_id,account_id,account_revision,target_id,target_revision,target_kind,configuration_hash,credential_version,candidate_version,source_commit,install_generation,asset_id,media_sha256,media_bytes,media_duration_ms,requested_by,created_at_unix_ms,state,next_attempt_at_unix_ms,updated_at_unix_ms) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,'pending',?17,?17)")?;
             let target_kind = publish_kind_name(job.target_kind).to_string();
             let values = [
                 (&job.job_id, 1, "publish job"),
@@ -333,7 +342,7 @@ impl StationStore {
                 (&job.source_commit, 10, "publish source commit"),
                 (&job.asset_id, 12, "publish asset"),
                 (&job.media_sha256, 13, "publish media hash"),
-                (&job.requested_by, 15, "publish actor"),
+                (&job.requested_by, 16, "publish actor"),
             ];
             for (value, index, field) in values {
                 bind_text(
@@ -349,6 +358,7 @@ impl StationStore {
                 (job.credential_version, 8, "credential version"),
                 (job.install_generation, 11, "install generation"),
                 (job.media_bytes, 14, "media bytes"),
+                (job.media_duration_ms, 15, "media duration"),
             ] {
                 bind_i64(
                     self.database,
@@ -357,7 +367,7 @@ impl StationStore {
                     checked_i64(value, field)?,
                 )?;
             }
-            bind_i64(self.database, statement.raw, 16, job.created_at_unix_ms)?;
+            bind_i64(self.database, statement.raw, 17, job.created_at_unix_ms)?;
             expect_done(self.database, statement.raw)
         })();
         self.finish_value_transaction(outcome)
@@ -735,6 +745,7 @@ impl StationStore {
             || credential.as_ref().map(|value| value.0) != Some(job.credential_version)
             || config.as_ref().map(PublishExecutionTargetConfig::kind) != Some(job.target_kind)
             || asset.asset_id != job.media_sha256
+            || asset.duration_ms != job.media_duration_ms
             || asset.readiness != AssetReadiness::Ready
         {
             return Err("publish execution job is stale for current account, target, credential, configuration, or media".into());
@@ -928,6 +939,7 @@ fn run_publish_controller_iteration_with<A: PublishProviderAdapter>(
         let evidence = adapter.execute(&job, &config, &media_path, &credential, &mut heartbeat);
         credential.fill(0);
         let evidence = evidence?;
+        let completed_at_unix_ms = clock()?;
         ensure_install_matches(&job, &current_install()?)?;
         let receipts = evidence
             .into_iter()
@@ -950,8 +962,8 @@ fn run_publish_controller_iteration_with<A: PublishProviderAdapter>(
                 media_bytes: job.media_bytes,
                 stage: evidence.stage,
                 delivery_identity_sha256: evidence.digest,
-                occurred_at_unix_ms: now_unix_ms,
-                recorded_at_unix_ms: now_unix_ms,
+                occurred_at_unix_ms: completed_at_unix_ms,
+                recorded_at_unix_ms: completed_at_unix_ms,
                 detail: evidence.detail,
             })
             .collect::<Vec<_>>();
@@ -960,7 +972,7 @@ fn run_publish_controller_iteration_with<A: PublishProviderAdapter>(
                 .as_ref()
                 .expect("publish lease is retained until completion"),
             &receipts,
-            now_unix_ms,
+            completed_at_unix_ms,
         )?;
         lease.take();
         Ok(())
@@ -1222,7 +1234,7 @@ fn unix_time_millis() -> Result<i64, String> {
 }
 
 fn publish_job_select() -> &'static str {
-    "SELECT job_id,account_id,account_revision,target_id,target_revision,target_kind,configuration_hash,credential_version,candidate_version,source_commit,install_generation,asset_id,media_sha256,media_bytes,requested_by,created_at_unix_ms,state,attempts,next_attempt_at_unix_ms,updated_at_unix_ms,COALESCE(lease_expires_at_unix_ms,-1),COALESCE(completed_at_unix_ms,-1),COALESCE(failure_class,'') FROM publish_execution_jobs"
+    "SELECT job_id,account_id,account_revision,target_id,target_revision,target_kind,configuration_hash,credential_version,candidate_version,source_commit,install_generation,asset_id,media_sha256,media_bytes,media_duration_ms,requested_by,created_at_unix_ms,state,attempts,next_attempt_at_unix_ms,updated_at_unix_ms,COALESCE(lease_expires_at_unix_ms,-1),COALESCE(completed_at_unix_ms,-1),COALESCE(failure_class,'') FROM publish_execution_jobs"
 }
 
 fn read_publish_job(statement: *mut SqliteStatement) -> Result<PublishExecutionJobRecord, String> {
@@ -1241,11 +1253,12 @@ fn read_publish_job(statement: *mut SqliteStatement) -> Result<PublishExecutionJ
         asset_id: column_text(statement, 11)?,
         media_sha256: column_text(statement, 12)?,
         media_bytes: column_u64(statement, 13, "media bytes")?,
-        requested_by: column_text(statement, 14)?,
-        created_at_unix_ms: unsafe { sqlite3_column_int64(statement, 15) },
+        media_duration_ms: column_u64(statement, 14, "media duration")?,
+        requested_by: column_text(statement, 15)?,
+        created_at_unix_ms: unsafe { sqlite3_column_int64(statement, 16) },
     };
     job.validate()?;
-    let state = match column_text(statement, 16)?.as_str() {
+    let state = match column_text(statement, 17)?.as_str() {
         "pending" => PublishExecutionJobState::Pending,
         "running" => PublishExecutionJobState::Running,
         "completed" => PublishExecutionJobState::Completed,
@@ -1255,13 +1268,13 @@ fn read_publish_job(statement: *mut SqliteStatement) -> Result<PublishExecutionJ
     Ok(PublishExecutionJobRecord {
         job,
         state,
-        attempts: u32::try_from(column_u64(statement, 17, "publish attempts")?)
+        attempts: u32::try_from(column_u64(statement, 18, "publish attempts")?)
             .map_err(|_| "publish attempts overflowed")?,
-        next_attempt_at_unix_ms: unsafe { sqlite3_column_int64(statement, 18) },
-        updated_at_unix_ms: unsafe { sqlite3_column_int64(statement, 19) },
-        lease_expires_at_unix_ms: optional_i64(statement, 20),
-        completed_at_unix_ms: optional_i64(statement, 21),
-        failure_class: optional_column_text(statement, 22)?,
+        next_attempt_at_unix_ms: unsafe { sqlite3_column_int64(statement, 19) },
+        updated_at_unix_ms: unsafe { sqlite3_column_int64(statement, 20) },
+        lease_expires_at_unix_ms: optional_i64(statement, 21),
+        completed_at_unix_ms: optional_i64(statement, 22),
+        failure_class: optional_column_text(statement, 23)?,
     })
 }
 
@@ -1485,6 +1498,7 @@ mod tests {
             asset_id: media_sha.clone(),
             media_sha256: media_sha,
             media_bytes: 21,
+            media_duration_ms: 1_000,
             requested_by: "setup".into(),
             created_at_unix_ms: 5,
         };

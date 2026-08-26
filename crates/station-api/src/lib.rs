@@ -3546,6 +3546,7 @@ impl Api {
             asset_id: asset.asset_id,
             media_sha256,
             media_bytes,
+            media_duration_ms: asset.duration_ms,
             requested_by: actor.account_id().as_str().into(),
             created_at_unix_ms: now,
         };

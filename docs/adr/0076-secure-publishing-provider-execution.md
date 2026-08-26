@@ -53,13 +53,21 @@ evidence remain separate acceptance gates.
 ## YouTube Live execution boundary
 
 The official YouTube contract requires a broadcast bound to exactly one live stream, actual encoder
-delivery to the stream's provider-issued RTMPS/HLS ingestion endpoint, observation that the stream is
-`active`, transition of the exact broadcast to `live`, and an authoritative read showing the exact
-broadcast in `lifeCycleStatus=live` with its configured privacy. TownLight therefore never treats a
-channel lookup, OAuth success, resource creation, bind response, `ready` stream, or
-`externally_verified` receipt as publication. The current source implements protected OAuth refresh
-and exact resource binding verification; until the supervised encoder handoff and live transition
-are wired, YouTube execution remains fail-closed and commissioning cannot pass.
+delivery to the stream's provider-issued RTMPS endpoint, observation that the stream is active and
+healthy, transition of the exact broadcast to `live`, complete delivery of the exact media, and an
+authoritative terminal read of that exact broadcast. TownLight therefore never treats a channel
+lookup, OAuth success, resource creation, bind response, `ready` stream, momentary `live` state, or
+`externally_verified` receipt as publication. The production controller refreshes OAuth, verifies the
+exact configured resources, and starts the verified installed channel worker under a bounded Windows
+Job Object. A bounded stdin-only command supplies the provider-issued RTMPS authority and key without
+putting either in argv or the environment. The worker retains no-write/no-delete handles for the
+managed media root and exact media file, verifies its byte/hash/duration binding, streams that retained
+handle through an in-process GStreamer pipeline, and succeeds only after clean EOS with the same final
+byte/hash identity. The controller additionally requires an active, good-health stream with no
+configuration issues, transitions the exact broadcast through `live` and `complete`, and appends
+`published` only after the full worker result and authoritative exact terminal provider observation.
+Tests inject the HTTP, process, and clock boundaries into this same lifecycle; they do not call Google,
+start the installed encoder, or prove a real account, installed candidate, playback, or audience reach.
 
 Primary contracts: [broadcasts and streams](https://developers.google.com/youtube/v3/live/guides/implementation/broadcasts-and-streams),
 [live broadcast lifecycle](https://developers.google.com/youtube/v3/live/life-of-a-broadcast),

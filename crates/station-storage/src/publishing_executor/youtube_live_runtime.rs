@@ -7,17 +7,14 @@ use super::{ProviderStageEvidence, PublishExecutionJob};
 use sha2::{Digest, Sha256};
 use station_publishing::{PublishExecutionStage, YouTubePrivacyStatus};
 use std::fs::{self, File, OpenOptions};
-use std::io::{Read, Seek, SeekFrom};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
 use std::os::windows::io::AsRawHandle;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::mpsc;
-use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE};
 use windows_sys::Win32::Storage::FileSystem::{FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_READ};
-use windows_sys::Win32::System::IO::CancelSynchronousIo;
 use windows_sys::Win32::System::JobObjects::{
     AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
     JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
@@ -28,16 +25,18 @@ const MAX_HTTP_BODY_BYTES: usize = 1_048_576;
 const MAX_SECRET_BYTES: usize = 4_096;
 const STREAM_ACTIVE_TIMEOUT: Duration = Duration::from_secs(60);
 const BROADCAST_LIVE_TIMEOUT: Duration = Duration::from_secs(60);
+const BROADCAST_COMPLETE_TIMEOUT: Duration = Duration::from_secs(60);
 const POLL_INTERVAL: Duration = Duration::from_millis(500);
 const PROCESS_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
-const PROCESS_OUTPUT_BYTES: usize = 64 * 1024;
+const WORKER_RESULT_BYTES: usize = 4 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Endpoint {
     OAuthToken,
     Broadcast { id: String },
     Stream { id: String },
-    Transition { id: String },
+    TransitionLive { id: String },
+    TransitionComplete { id: String },
 }
 
 struct HttpRequest {
@@ -46,7 +45,6 @@ struct HttpRequest {
     form: Vec<(String, String)>,
 }
 
-#[derive(Debug, Clone)]
 struct HttpResponse {
     status: u16,
     location: Option<String>,
@@ -55,12 +53,20 @@ struct HttpResponse {
 
 impl Drop for HttpResponse {
     fn drop(&mut self) {
+        if let Some(location) = &mut self.location {
+            zero_string(location);
+        }
         self.body.fill(0);
     }
 }
 
 trait RunningFfmpeg {
     fn try_wait(&mut self) -> Result<Option<bool>, String>;
+    fn wait_for_delivery(
+        &mut self,
+        maximum_runtime: Duration,
+        heartbeat: &mut dyn FnMut() -> Result<(), String>,
+    ) -> Result<WorkerDelivery, String>;
     fn terminate_and_join(
         &mut self,
         heartbeat: &mut dyn FnMut() -> Result<(), String>,
@@ -72,7 +78,7 @@ trait RuntimeIo {
     fn start_ffmpeg(
         &mut self,
         executable: &Path,
-        argv: &[String],
+        command: &mut WorkerCommand,
     ) -> Result<Box<dyn RunningFfmpeg>, String>;
     fn now(&mut self) -> Result<i64, String>;
     fn sleep(&mut self, duration: Duration);
@@ -82,6 +88,35 @@ trait RuntimeIo {
 struct VerifiedFfmpeg {
     executable: PathBuf,
     sha256: String,
+}
+
+#[derive(serde::Serialize)]
+struct WorkerCommand {
+    schema_version: u8,
+    managed_media_root: String,
+    media_path: String,
+    expected_bytes: u64,
+    expected_sha256: String,
+    expected_duration_ms: u64,
+    rtmps_ingestion_address: String,
+    stream_key: String,
+}
+
+impl Drop for WorkerCommand {
+    fn drop(&mut self) {
+        zero_string(&mut self.rtmps_ingestion_address);
+        zero_string(&mut self.stream_key);
+    }
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WorkerDelivery {
+    schema_version: u8,
+    outcome: String,
+    media_bytes: u64,
+    media_sha256: String,
+    failure_code: Option<String>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -98,7 +133,7 @@ pub(super) fn execute_system(
     heartbeat: &mut dyn FnMut() -> Result<(), String>,
 ) -> Result<ProviderStageEvidence, String> {
     let ffmpeg = verify_installed_ffmpeg(application_root, data_root)?;
-    let mut runtime = SystemRuntimeIo::new();
+    let mut runtime = SystemRuntimeIo::new(application_root);
     execute_with(
         &mut runtime,
         job,
@@ -107,6 +142,7 @@ pub(super) fn execute_system(
         stream_id,
         privacy_status,
         media_path,
+        &data_root.join("media"),
         credential,
         &ffmpeg,
         heartbeat,
@@ -122,6 +158,7 @@ fn execute_with<R: RuntimeIo>(
     stream_id: &str,
     privacy_status: YouTubePrivacyStatus,
     media_path: &Path,
+    managed_media_root: &Path,
     credential: &[u8],
     ffmpeg: &VerifiedFfmpeg,
     heartbeat: &mut dyn FnMut() -> Result<(), String>,
@@ -146,21 +183,28 @@ fn execute_with<R: RuntimeIo>(
                 privacy_status,
                 false,
             )?;
+            let broadcast_digest = broadcast.digest();
             broadcast.zeroize();
             let mut stream = get_stream(runtime, stream_id, &authorization)?;
             let mut ingestion = require_stream_binding(&stream, channel_id, stream_id, false)?;
-            let mut argv = ffmpeg_argv(media_path, &ingestion)?;
+            let stream_binding_digest = stream.digest();
+            let mut command = WorkerCommand {
+                schema_version: 1,
+                managed_media_root: managed_media_root.to_string_lossy().into_owned(),
+                media_path: media_path.to_string_lossy().into_owned(),
+                expected_bytes: job.media_bytes,
+                expected_sha256: job.media_sha256.clone(),
+                expected_duration_ms: job.media_duration_ms,
+                rtmps_ingestion_address: std::mem::take(&mut ingestion.address),
+                stream_key: std::mem::take(&mut ingestion.stream_key),
+            };
             ingestion.zeroize();
             stream.zeroize();
-            let process = runtime.start_ffmpeg(&ffmpeg.executable, &argv)?;
-            // The child owns a Windows command-line copy. Wipe our only copy that
-            // contains the provider-issued stream name before polling or returning.
-            for argument in &mut argv {
-                zero_string(argument);
-            }
+            let process = runtime.start_ffmpeg(&ffmpeg.executable, &mut command)?;
+            drop(command);
             let mut process = Some(process);
             let outcome = (|| {
-                poll_stream_active(
+                let mut active_stream = poll_stream_active(
                     runtime,
                     process.as_deref_mut().expect("ffmpeg process retained"),
                     channel_id,
@@ -168,7 +212,10 @@ fn execute_with<R: RuntimeIo>(
                     &authorization,
                     heartbeat,
                 )?;
-                let mut transitioned = transition_broadcast(runtime, broadcast_id, &authorization)?;
+                let active_stream_digest = active_stream.digest();
+                active_stream.zeroize();
+                let mut transitioned =
+                    transition_broadcast_live(runtime, broadcast_id, &authorization)?;
                 require_broadcast_binding(
                     &transitioned,
                     channel_id,
@@ -177,6 +224,7 @@ fn execute_with<R: RuntimeIo>(
                     privacy_status,
                     false,
                 )?;
+                let live_transition_digest = transitioned.digest();
                 transitioned.zeroize();
                 let mut observed = poll_broadcast_live(
                     runtime,
@@ -188,27 +236,60 @@ fn execute_with<R: RuntimeIo>(
                     &authorization,
                     heartbeat,
                 )?;
+                let live_observation_digest = observed.digest();
                 observed.zeroize();
-                // Never digest or retain raw provider JSON: stream documents carry
-                // the provider-issued stream key. This contains only exact safe
-                // bindings and the media identity already held by the durable job.
-                let evidence = format!(
-                    "youtube-live-v1|{}|{}|{}|{}|{}",
+                let maximum_runtime = Duration::from_millis(job.media_duration_ms)
+                    .saturating_mul(2)
+                    .saturating_add(Duration::from_secs(600))
+                    .min(Duration::from_secs(24 * 60 * 60));
+                let delivery = process
+                    .as_deref_mut()
+                    .expect("publisher process retained")
+                    .wait_for_delivery(maximum_runtime, heartbeat)?;
+                validate_worker_delivery(&delivery, job)?;
+                process.take();
+                let mut completed =
+                    transition_broadcast_complete(runtime, broadcast_id, &authorization)?;
+                require_broadcast_lifecycle(
+                    &completed,
                     channel_id,
                     broadcast_id,
                     stream_id,
-                    match privacy_status {
-                        YouTubePrivacyStatus::Public => "public",
-                        YouTubePrivacyStatus::Unlisted => "unlisted",
-                    },
+                    privacy_status,
+                    "complete",
+                )?;
+                let complete_transition_digest = completed.digest();
+                completed.zeroize();
+                let mut completed_observation = poll_broadcast_complete(
+                    runtime,
+                    channel_id,
+                    broadcast_id,
+                    stream_id,
+                    privacy_status,
+                    &authorization,
+                    heartbeat,
+                )?;
+                let complete_observation_digest = completed_observation.digest();
+                completed_observation.zeroize();
+                let evidence = format!(
+                    "youtube-live-v2|{}|{}|{}|{}|{}|{}|{}|{}|{}",
+                    broadcast_digest,
+                    stream_binding_digest,
+                    active_stream_digest,
+                    live_transition_digest,
+                    live_observation_digest,
+                    complete_transition_digest,
+                    complete_observation_digest,
                     job.media_sha256,
+                    job.media_bytes,
                 );
                 Ok::<_, String>(format!("{:x}", Sha256::digest(evidence.as_bytes())))
             })();
-            let cleanup = process
-                .take()
-                .expect("ffmpeg process retained")
-                .terminate_and_join(heartbeat);
+            let cleanup = if let Some(mut process) = process.take() {
+                process.terminate_and_join(heartbeat)
+            } else {
+                Ok(())
+            };
             match (outcome, cleanup) {
                 (Ok(digest), Ok(())) => Ok(digest),
                 (Err(primary), Ok(())) => Err(primary),
@@ -229,7 +310,6 @@ fn execute_with<R: RuntimeIo>(
     })
 }
 
-#[derive(Debug)]
 struct OAuthCredential {
     client_id: String,
     client_secret: String,
@@ -381,7 +461,7 @@ fn get_stream<R: RuntimeIo>(
     )
 }
 
-fn transition_broadcast<R: RuntimeIo>(
+fn transition_broadcast_live<R: RuntimeIo>(
     runtime: &mut R,
     broadcast_id: &str,
     authorization: &str,
@@ -390,7 +470,7 @@ fn transition_broadcast<R: RuntimeIo>(
         request_and_zeroize(
             runtime,
             HttpRequest {
-                endpoint: Endpoint::Transition {
+                endpoint: Endpoint::TransitionLive {
                     id: broadcast_id.into(),
                 },
                 authorization: Some(authorization.into()),
@@ -405,12 +485,40 @@ fn transition_broadcast<R: RuntimeIo>(
     )
 }
 
+fn transition_broadcast_complete<R: RuntimeIo>(
+    runtime: &mut R,
+    broadcast_id: &str,
+    authorization: &str,
+) -> Result<YouTubeDocument, String> {
+    let mut response = checked_response(
+        request_and_zeroize(
+            runtime,
+            HttpRequest {
+                endpoint: Endpoint::TransitionComplete {
+                    id: broadcast_id.into(),
+                },
+                authorization: Some(authorization.into()),
+                form: Vec::new(),
+            },
+        )?,
+        "YouTube broadcast completion transition",
+    )?;
+    YouTubeDocument::parse(
+        std::mem::take(&mut response.body),
+        "YouTube completion transition response",
+    )
+}
+
 fn checked_response(mut response: HttpResponse, label: &str) -> Result<HttpResponse, String> {
     if response.location.is_some() || (300..400).contains(&response.status) {
         response.body.fill(0);
         return Err(format!(
             "{label} redirected; authorization was not forwarded"
         ));
+    }
+    if response.status == 403 && youtube_retryable_forbidden(&response.body) {
+        response.body.fill(0);
+        return Err(format!("{label} hit a provider quota or retryable failure"));
     }
     if response.status == 401 || response.status == 403 {
         response.body.fill(0);
@@ -429,6 +537,34 @@ fn checked_response(mut response: HttpResponse, label: &str) -> Result<HttpRespo
         return Err(format!("{label} response is empty or oversized"));
     }
     Ok(response)
+}
+
+fn youtube_retryable_forbidden(body: &[u8]) -> bool {
+    #[derive(serde::Deserialize)]
+    struct ErrorEntry {
+        reason: String,
+    }
+    #[derive(serde::Deserialize)]
+    struct ErrorBody {
+        errors: Vec<ErrorEntry>,
+    }
+    #[derive(serde::Deserialize)]
+    struct Document {
+        error: ErrorBody,
+    }
+    let Ok(mut document) = serde_json::from_slice::<Document>(body) else {
+        return false;
+    };
+    let retryable = document.error.errors.iter().any(|error| {
+        matches!(
+            error.reason.as_str(),
+            "rateLimitExceeded" | "quotaExceeded" | "concurrentBroadcasts"
+        )
+    });
+    for error in &mut document.error.errors {
+        zero_string(&mut error.reason);
+    }
+    retryable
 }
 
 fn request_and_zeroize<R: RuntimeIo>(
@@ -460,6 +596,7 @@ impl Drop for HttpRequest {
 
 struct YouTubeDocument {
     value: serde_json::Value,
+    response_sha256: String,
 }
 
 impl YouTubeDocument {
@@ -489,10 +626,18 @@ fn zero_json(value: &mut serde_json::Value) {
 
 impl YouTubeDocument {
     fn parse(mut body: Vec<u8>, label: &str) -> Result<Self, String> {
+        let response_sha256 = format!("{:x}", Sha256::digest(&body));
         let parsed = serde_json::from_slice(&body);
         body.fill(0);
         let value = parsed.map_err(|_| format!("{label} was malformed"))?;
-        Ok(Self { value })
+        Ok(Self {
+            value,
+            response_sha256,
+        })
+    }
+
+    fn digest(&self) -> String {
+        self.response_sha256.clone()
     }
 
     fn only_item(&self, label: &str) -> Result<&serde_json::Value, String> {
@@ -551,6 +696,48 @@ fn require_broadcast_binding(
     Ok(())
 }
 
+fn require_broadcast_lifecycle(
+    document: &YouTubeDocument,
+    channel_id: &str,
+    broadcast_id: &str,
+    stream_id: &str,
+    privacy_status: YouTubePrivacyStatus,
+    lifecycle: &str,
+) -> Result<(), String> {
+    require_broadcast_binding(
+        document,
+        channel_id,
+        broadcast_id,
+        stream_id,
+        privacy_status,
+        false,
+    )?;
+    if document
+        .only_item("YouTube broadcast")?
+        .pointer("/status/lifeCycleStatus")
+        .and_then(serde_json::Value::as_str)
+        != Some(lifecycle)
+    {
+        return Err("YouTube broadcast did not reach the exact required lifecycle".into());
+    }
+    Ok(())
+}
+
+fn validate_worker_delivery(
+    delivery: &WorkerDelivery,
+    job: &PublishExecutionJob,
+) -> Result<(), String> {
+    if delivery.schema_version != 1
+        || delivery.outcome != "published"
+        || delivery.failure_code.is_some()
+        || delivery.media_bytes != job.media_bytes
+        || delivery.media_sha256 != job.media_sha256
+    {
+        return Err("YouTube media worker did not prove exact full-media delivery".into());
+    }
+    Ok(())
+}
+
 struct Ingestion {
     address: String,
     stream_key: String,
@@ -597,8 +784,25 @@ fn require_stream_binding(
     if !require_active && !matches!(status, Some("ready" | "active")) {
         return Err("YouTube stream is not ready for the configured broadcast".into());
     }
+    let health = item
+        .pointer("/status/healthStatus/status")
+        .and_then(serde_json::Value::as_str);
+    if require_active && health != Some("good") {
+        return Err("YouTube active stream is not in good provider health".into());
+    }
+    if require_active {
+        let issues = item
+            .pointer("/status/healthStatus/configurationIssues")
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(|| {
+                "YouTube active stream health omitted its configuration issues".to_string()
+            })?;
+        if !issues.is_empty() {
+            return Err("YouTube active stream reports configuration issues".into());
+        }
+    }
     let address = item
-        .pointer("/cdn/ingestionInfo/ingestionAddress")
+        .pointer("/cdn/ingestionInfo/rtmpsIngestionAddress")
         .and_then(serde_json::Value::as_str)
         .ok_or_else(|| "YouTube stream is missing a provider-issued RTMPS address".to_string())?
         .to_owned();
@@ -607,7 +811,7 @@ fn require_stream_binding(
         .and_then(serde_json::Value::as_str)
         .ok_or_else(|| "YouTube stream is missing a provider-issued stream key".to_string())?
         .to_owned();
-    if address != "rtmps://a.rtmp.youtube.com/live2"
+    if address != "rtmps://a.rtmp.youtube.com:443/live2"
         || address.len() > 512
         || address.chars().any(char::is_control)
         || stream_key.is_empty()
@@ -622,35 +826,6 @@ fn require_stream_binding(
     })
 }
 
-fn ffmpeg_argv(media_path: &Path, ingestion: &Ingestion) -> Result<Vec<String>, String> {
-    if !media_path.is_absolute() || !media_path.is_file() {
-        return Err("YouTube media path is unavailable".into());
-    }
-    let endpoint = format!(
-        "{}/{}",
-        ingestion.address.trim_end_matches('/'),
-        ingestion.stream_key
-    );
-    Ok(vec![
-        "-nostdin".into(),
-        "-hide_banner".into(),
-        "-loglevel".into(),
-        "error".into(),
-        "-re".into(),
-        "-i".into(),
-        media_path.to_string_lossy().into_owned(),
-        "-map".into(),
-        "0:v?".into(),
-        "-map".into(),
-        "0:a?".into(),
-        "-c".into(),
-        "copy".into(),
-        "-f".into(),
-        "flv".into(),
-        endpoint,
-    ])
-}
-
 fn poll_stream_active<R: RuntimeIo>(
     runtime: &mut R,
     process: &mut dyn RunningFfmpeg,
@@ -658,7 +833,7 @@ fn poll_stream_active<R: RuntimeIo>(
     stream_id: &str,
     authorization: &str,
     heartbeat: &mut dyn FnMut() -> Result<(), String>,
-) -> Result<(), String> {
+) -> Result<YouTubeDocument, String> {
     let deadline = runtime
         .now()?
         .checked_add(STREAM_ACTIVE_TIMEOUT.as_millis() as i64)
@@ -670,11 +845,13 @@ fn poll_stream_active<R: RuntimeIo>(
         }
         let mut document = get_stream(runtime, stream_id, authorization)?;
         let state = require_stream_binding(&document, channel_id, stream_id, true);
-        document.zeroize();
         match state {
-            Ok(_) => return Ok(()),
-            Err(error) if error == "YouTube stream is not active yet" => {}
-            Err(error) => return Err(error),
+            Ok(_) => return Ok(document),
+            Err(error) if error == "YouTube stream is not active yet" => document.zeroize(),
+            Err(error) => {
+                document.zeroize();
+                return Err(error);
+            }
         }
         if runtime.now()? >= deadline {
             return Err("YouTube stream did not become active before its bounded deadline".into());
@@ -729,6 +906,49 @@ fn poll_broadcast_live<R: RuntimeIo>(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+fn poll_broadcast_complete<R: RuntimeIo>(
+    runtime: &mut R,
+    channel_id: &str,
+    broadcast_id: &str,
+    stream_id: &str,
+    privacy_status: YouTubePrivacyStatus,
+    authorization: &str,
+    heartbeat: &mut dyn FnMut() -> Result<(), String>,
+) -> Result<YouTubeDocument, String> {
+    let deadline = runtime
+        .now()?
+        .checked_add(BROADCAST_COMPLETE_TIMEOUT.as_millis() as i64)
+        .ok_or_else(|| "YouTube completion observation deadline overflowed".to_string())?;
+    loop {
+        heartbeat()?;
+        let mut document = get_broadcast(runtime, broadcast_id, authorization)?;
+        match require_broadcast_lifecycle(
+            &document,
+            channel_id,
+            broadcast_id,
+            stream_id,
+            privacy_status,
+            "complete",
+        ) {
+            Ok(()) => return Ok(document),
+            Err(error)
+                if error == "YouTube broadcast did not reach the exact required lifecycle" =>
+            {
+                document.zeroize();
+            }
+            Err(error) => {
+                document.zeroize();
+                return Err(error);
+            }
+        }
+        if runtime.now()? >= deadline {
+            return Err("YouTube broadcast did not complete before its bounded deadline".into());
+        }
+        runtime.sleep(POLL_INTERVAL);
+    }
+}
+
 fn verify_ffmpeg_identity(ffmpeg: &VerifiedFfmpeg) -> Result<File, String> {
     if !ffmpeg.executable.is_absolute() || !is_sha256(&ffmpeg.sha256) {
         return Err("YouTube ffmpeg runtime identity is invalid".into());
@@ -766,33 +986,26 @@ fn verify_installed_ffmpeg(
     if !application_root.is_absolute() || !data_root.is_absolute() {
         return Err("YouTube installed runtime roots must be absolute".into());
     }
-    // This validates the installation/active-slot authority before reading the
-    // decoder identity written by the same installer transaction.
+    // This validates the complete active application before selecting the
+    // already-required channel worker from that exact signed package manifest.
     let _authority =
         station_maintenance::read_verified_install_authority(data_root, application_root)
             .map_err(|_| "YouTube installed candidate authority is unavailable")?;
-    let receipt_path = data_root.join("install-receipt.json");
-    let bytes =
-        fs::read(&receipt_path).map_err(|_| "YouTube installation receipt is unavailable")?;
-    if bytes.is_empty() || bytes.len() > 64 * 1024 {
-        return Err("YouTube installation receipt is invalid or oversized".into());
-    }
-    let document: serde_json::Value =
-        serde_json::from_slice(&bytes).map_err(|_| "YouTube installation receipt is malformed")?;
-    let sha256 = document
-        .get("caption_decoder_sha256")
-        .and_then(serde_json::Value::as_str)
-        .filter(|value| is_sha256(value))
-        .ok_or_else(|| {
-            "YouTube installation receipt lacks the private ffmpeg identity".to_string()
-        })?
-        .to_owned();
-    let executable = application_root
-        .join("runtime")
-        .join("caption-decoder")
-        .join("ffmpeg.exe");
+    let active = station_maintenance::read_active_slot_receipt(
+        &data_root.join(station_maintenance::ACTIVE_SLOT_RECEIPT_NAME),
+    )?;
+    let active_directory = active.active.directory(application_root)?;
+    let worker = active
+        .active
+        .package_manifest
+        .files
+        .iter()
+        .find(|file| file.path == "channel-worker.exe")
+        .ok_or_else(|| "YouTube installed package lacks its media worker".to_string())?;
+    let sha256 = worker.sha256.clone();
+    let executable = active_directory.join("channel-worker.exe");
     if !executable.starts_with(application_root) {
-        return Err("YouTube ffmpeg escaped the application root".into());
+        return Err("YouTube media worker escaped the application root".into());
     }
     Ok(VerifiedFfmpeg { executable, sha256 })
 }
@@ -829,10 +1042,12 @@ fn zero_string(value: &mut String) {
 
 struct SystemRuntimeIo {
     agent: ureq::Agent,
+    started: Instant,
+    gstreamer_runtime: PathBuf,
 }
 
 impl SystemRuntimeIo {
-    fn new() -> Self {
+    fn new(application_root: &Path) -> Self {
         Self {
             agent: ureq::Agent::config_builder()
                 .timeout_global(Some(Duration::from_secs(30)))
@@ -844,6 +1059,8 @@ impl SystemRuntimeIo {
                 .max_redirects_will_error(true)
                 .build()
                 .into(),
+            started: Instant::now(),
+            gstreamer_runtime: application_root.join("runtime").join("gstreamer"),
         }
     }
 }
@@ -856,21 +1073,14 @@ impl RuntimeIo for SystemRuntimeIo {
                 if request.authorization.is_some() {
                     return Err("YouTube OAuth request attempted to carry authorization".into());
                 }
-                let mut form = request
-                    .form
-                    .iter()
-                    .map(|(key, value)| {
-                        format!("{}={}", form_component(key), form_component(value))
-                    })
-                    .collect::<Vec<_>>()
-                    .join("&");
+                let mut form = encode_secret_form(&request.form);
                 let result = self
                     .agent
                     .post(&url)
                     .header("Content-Type", "application/x-www-form-urlencoded")
-                    .send(form.as_bytes())
+                    .send(form.as_slice())
                     .map_err(|_| "YouTube OAuth refresh transport failed");
-                zero_string(&mut form);
+                form.fill(0);
                 result?
             }
             Endpoint::Broadcast { .. } | Endpoint::Stream { .. } => self
@@ -885,7 +1095,7 @@ impl RuntimeIo for SystemRuntimeIo {
                 )
                 .call()
                 .map_err(|_| "YouTube live-resource transport failed")?,
-            Endpoint::Transition { .. } => self
+            Endpoint::TransitionLive { .. } | Endpoint::TransitionComplete { .. } => self
                 .agent
                 .post(&url)
                 .header(
@@ -922,18 +1132,46 @@ impl RuntimeIo for SystemRuntimeIo {
     fn start_ffmpeg(
         &mut self,
         executable: &Path,
-        argv: &[String],
+        command: &mut WorkerCommand,
     ) -> Result<Box<dyn RunningFfmpeg>, String> {
-        SystemFfmpegProcess::spawn(executable, argv)
+        SystemFfmpegProcess::spawn(executable, command, &self.gstreamer_runtime)
             .map(|process| Box::new(process) as Box<dyn RunningFfmpeg>)
     }
 
     fn now(&mut self) -> Result<i64, String> {
-        super::unix_time_millis()
+        self.started
+            .elapsed()
+            .as_millis()
+            .try_into()
+            .map_err(|_| "YouTube monotonic runtime exceeded its bound".into())
     }
 
     fn sleep(&mut self, duration: Duration) {
         std::thread::sleep(duration);
+    }
+}
+
+fn encode_secret_form(fields: &[(String, String)]) -> Vec<u8> {
+    let mut encoded = Vec::new();
+    for (index, (name, value)) in fields.iter().enumerate() {
+        if index != 0 {
+            encoded.push(b'&');
+        }
+        encode_form_bytes(name.as_bytes(), &mut encoded);
+        encoded.push(b'=');
+        encode_form_bytes(value.as_bytes(), &mut encoded);
+    }
+    encoded
+}
+
+fn encode_form_bytes(value: &[u8], output: &mut Vec<u8>) {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    for &byte in value {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~') {
+            output.push(byte);
+        } else {
+            output.extend_from_slice(&[b'%', HEX[(byte >> 4) as usize], HEX[(byte & 15) as usize]]);
+        }
     }
 }
 
@@ -948,8 +1186,12 @@ fn endpoint_url(endpoint: &Endpoint) -> Result<String, String> {
             "https://www.googleapis.com/youtube/v3/liveStreams?part=snippet,cdn,status&id={}",
             form_component(id)
         )),
-        Endpoint::Transition { id } => Ok(format!(
+        Endpoint::TransitionLive { id } => Ok(format!(
             "https://www.googleapis.com/youtube/v3/liveBroadcasts/transition?broadcastStatus=live&id={}&part=status,snippet,contentDetails",
+            form_component(id)
+        )),
+        Endpoint::TransitionComplete { id } => Ok(format!(
+            "https://www.googleapis.com/youtube/v3/liveBroadcasts/transition?broadcastStatus=complete&id={}&part=status,snippet,contentDetails",
             form_component(id)
         )),
     }
@@ -1015,20 +1257,29 @@ impl Drop for WindowsProcessTree {
 struct SystemFfmpegProcess {
     child: Child,
     job: WindowsProcessTree,
-    stdout: mpsc::Receiver<Result<(), String>>,
-    stderr: mpsc::Receiver<Result<(), String>>,
-    stdout_drain: Option<JoinHandle<()>>,
-    stderr_drain: Option<JoinHandle<()>>,
+    stdout: Option<std::process::ChildStdout>,
 }
 
 impl SystemFfmpegProcess {
-    fn spawn(executable: &Path, argv: &[String]) -> Result<Self, String> {
+    fn spawn(
+        executable: &Path,
+        command: &mut WorkerCommand,
+        gstreamer_runtime: &Path,
+    ) -> Result<Self, String> {
         let job = WindowsProcessTree::new()?;
+        let plugin_path = gstreamer_runtime.join("lib").join("gstreamer-1.0");
+        let mut path = gstreamer_runtime.join("bin").into_os_string();
+        path.push(";");
+        path.push(std::env::var_os("PATH").unwrap_or_default());
         let mut child = Command::new(executable)
-            .args(argv)
-            .stdin(Stdio::null())
+            .arg("--youtube-publish-worker")
+            .env("PATH", path)
+            .env("GST_PLUGIN_PATH_1_0", &plugin_path)
+            .env("GST_PLUGIN_SYSTEM_PATH_1_0", &plugin_path)
+            .env("GST_DEBUG", "0")
+            .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
+            .stderr(Stdio::null())
             .spawn()
             .map_err(|_| "YouTube ffmpeg process could not be started")?;
         if let Err(error) = job.assign(&child) {
@@ -1036,103 +1287,45 @@ impl SystemFfmpegProcess {
             let _ = child.wait();
             return Err(error);
         }
+        let mut stdin = child.stdin.take().ok_or_else(|| {
+            job.terminate();
+            let _ = child.wait();
+            "YouTube publisher stdin pipe was unavailable"
+        })?;
+        let mut encoded = match serde_json::to_vec(command) {
+            Ok(encoded) => encoded,
+            Err(_) => {
+                job.terminate();
+                let _ = child.wait();
+                return Err("YouTube publisher command could not be encoded".into());
+            }
+        };
+        let write = stdin.write_all(&encoded).and_then(|_| stdin.flush());
+        encoded.fill(0);
+        drop(stdin);
+        if write.is_err() {
+            job.terminate();
+            let _ = child.wait();
+            return Err("YouTube publisher command could not be delivered".into());
+        }
         let stdout = child.stdout.take().ok_or_else(|| {
             job.terminate();
             let _ = child.wait();
-            "YouTube ffmpeg stdout pipe was unavailable"
+            "YouTube publisher stdout pipe was unavailable"
         })?;
-        let stderr = child.stderr.take().ok_or_else(|| {
-            job.terminate();
-            let _ = child.wait();
-            "YouTube ffmpeg stderr pipe was unavailable"
-        })?;
-        let (stdout_tx, stdout_rx) = mpsc::sync_channel(1);
-        let (stderr_tx, stderr_rx) = mpsc::sync_channel(1);
-        let stdout_drain = std::thread::spawn(move || {
-            let _ = stdout_tx.send(drain(stdout));
-        });
-        let stderr_drain = std::thread::spawn(move || {
-            let _ = stderr_tx.send(drain(stderr));
-        });
         Ok(Self {
             child,
             job,
-            stdout: stdout_rx,
-            stderr: stderr_rx,
-            stdout_drain: Some(stdout_drain),
-            stderr_drain: Some(stderr_drain),
+            stdout: Some(stdout),
         })
     }
 
-    fn collect_drains(
-        &mut self,
-        heartbeat: &mut dyn FnMut() -> Result<(), String>,
-    ) -> Result<(), String> {
-        let deadline = Instant::now() + PROCESS_DRAIN_TIMEOUT;
-        let receive = |receiver: &mpsc::Receiver<Result<(), String>>,
-                       label: &str,
-                       heartbeat: &mut dyn FnMut() -> Result<(), String>|
-         -> Result<(), String> {
-            loop {
-                let left = deadline.saturating_duration_since(Instant::now());
-                if left.is_zero() {
-                    return Err(format!(
-                        "YouTube ffmpeg {label} drain exceeded its deadline"
-                    ));
-                }
-                match receiver.recv_timeout(left.min(Duration::from_millis(100))) {
-                    Ok(value) => return value,
-                    Err(mpsc::RecvTimeoutError::Timeout) => heartbeat()?,
-                    Err(mpsc::RecvTimeoutError::Disconnected) => {
-                        return Err(format!("YouTube ffmpeg {label} drain stopped unexpectedly"));
-                    }
-                }
-            }
-        };
-        let stdout = receive(&self.stdout, "stdout", heartbeat);
-        let stderr = receive(&self.stderr, "stderr", heartbeat);
-        if stdout.is_err() || stderr.is_err() {
-            self.job.terminate();
-        }
-        self.join_drains(heartbeat)?;
-        stdout?;
-        stderr
-    }
-
-    fn join_drains(
-        &mut self,
-        heartbeat: &mut dyn FnMut() -> Result<(), String>,
-    ) -> Result<(), String> {
-        let mut heartbeat_error = None;
-        for drain in [&mut self.stdout_drain, &mut self.stderr_drain] {
-            let Some(handle) = drain.as_ref() else {
-                continue;
-            };
-            let deadline = Instant::now() + Duration::from_secs(1);
-            while !handle.is_finished() && Instant::now() < deadline {
-                self.job.terminate();
-                unsafe { CancelSynchronousIo(handle.as_raw_handle() as HANDLE) };
-                if heartbeat_error.is_none()
-                    && let Err(error) = heartbeat()
-                {
-                    heartbeat_error = Some(error);
-                }
-                std::thread::sleep(Duration::from_millis(10));
-            }
-        }
-        let mut join_panicked = false;
-        for drain in [&mut self.stdout_drain, &mut self.stderr_drain] {
-            if let Some(handle) = drain.take() {
-                join_panicked |= handle.join().is_err();
-            }
-        }
-        if join_panicked {
-            return Err("YouTube ffmpeg pipe drain panicked".into());
-        }
-        if let Some(error) = heartbeat_error {
-            return Err(error);
-        }
-        Ok(())
+    fn read_result(&mut self) -> Result<Vec<u8>, String> {
+        let stdout = self
+            .stdout
+            .take()
+            .ok_or_else(|| "YouTube publisher result was already consumed".to_string())?;
+        drain_bytes(stdout, WORKER_RESULT_BYTES)
     }
 }
 
@@ -1142,6 +1335,59 @@ impl RunningFfmpeg for SystemFfmpegProcess {
             .try_wait()
             .map(|status| status.map(|value| value.success()))
             .map_err(|_| "YouTube ffmpeg status could not be read".into())
+    }
+
+    fn wait_for_delivery(
+        &mut self,
+        maximum_runtime: Duration,
+        heartbeat: &mut dyn FnMut() -> Result<(), String>,
+    ) -> Result<WorkerDelivery, String> {
+        let deadline = Instant::now() + maximum_runtime;
+        let success = loop {
+            match self.child.try_wait() {
+                Ok(Some(status)) => break status.success(),
+                Ok(None) if Instant::now() < deadline => {
+                    if let Err(heartbeat_error) = heartbeat() {
+                        let teardown = self.terminate_and_join(&mut || Ok(()));
+                        return Err(match teardown {
+                            Ok(()) => heartbeat_error,
+                            Err(teardown_error) => {
+                                format!("{heartbeat_error}; {teardown_error}")
+                            }
+                        });
+                    }
+                    std::thread::sleep(Duration::from_millis(100));
+                }
+                Ok(None) => {
+                    self.terminate_and_join(heartbeat)?;
+                    return Err("YouTube publisher exceeded its bounded media deadline".into());
+                }
+                Err(_) => {
+                    self.terminate_and_join(heartbeat)?;
+                    return Err("YouTube publisher status could not be read".into());
+                }
+            }
+        };
+        let mut output = self.read_result()?;
+        let parsed = serde_json::from_slice::<WorkerDelivery>(&output)
+            .map_err(|_| "YouTube publisher returned a malformed result".to_string());
+        output.fill(0);
+        let delivery = parsed?;
+        if !success {
+            let safe_code = delivery.failure_code.as_deref().is_some_and(|code| {
+                !code.is_empty()
+                    && code.len() <= 100
+                    && code
+                        .bytes()
+                        .all(|byte| byte.is_ascii_lowercase() || byte == b'_')
+            });
+            return Err(if safe_code {
+                "YouTube publisher failed before exact full-media delivery".into()
+            } else {
+                "YouTube publisher failed with an invalid result".into()
+            });
+        }
+        Ok(delivery)
     }
 
     fn terminate_and_join(
@@ -1163,39 +1409,57 @@ impl RunningFfmpeg for SystemFfmpegProcess {
                     std::thread::sleep(Duration::from_millis(10));
                 }
                 Ok(None) => {
+                    self.job.terminate();
+                    let _ = self.child.kill();
+                    if self.child.wait().is_err() {
+                        return Err("YouTube publisher could not be definitively reaped".into());
+                    }
                     wait_error.get_or_insert_with(|| {
-                        "YouTube ffmpeg did not exit before its bounded teardown deadline".into()
+                        "YouTube publisher exceeded its bounded teardown deadline".into()
                     });
                     break;
                 }
                 Err(_) => {
-                    wait_error
-                        .get_or_insert_with(|| "YouTube ffmpeg status could not be read".into());
-                    break;
+                    self.job.terminate();
+                    let _ = self.child.kill();
+                    self.child
+                        .wait()
+                        .map_err(|_| "YouTube publisher could not be definitively reaped")?;
+                    return Err("YouTube publisher status could not be read".into());
                 }
             }
         }
-        let drains = self.collect_drains(heartbeat);
-        match (wait_error, drains) {
-            (None, Ok(())) => Ok(()),
-            (Some(wait), Ok(())) => Err(wait),
-            (None, Err(drains)) => Err(drains),
-            (Some(wait), Err(drains)) => Err(format!("{wait}; {drains}")),
+        let result = self.read_result();
+        match (wait_error, result) {
+            (None, Ok(mut output)) => {
+                output.fill(0);
+                Ok(())
+            }
+            (Some(wait), Ok(mut output)) => {
+                output.fill(0);
+                Err(wait)
+            }
+            (None, Err(result)) => Err(result),
+            (Some(wait), Err(result)) => Err(format!("{wait}; {result}")),
         }
     }
 }
 
-fn drain<T: Read>(stream: T) -> Result<(), String> {
+fn drain_bytes<T: Read>(stream: T, maximum: usize) -> Result<Vec<u8>, String> {
     let mut output = Vec::new();
-    stream
-        .take((PROCESS_OUTPUT_BYTES + 1) as u64)
+    if stream
+        .take((maximum + 1) as u64)
         .read_to_end(&mut output)
-        .map_err(|_| "YouTube ffmpeg process output could not be read")?;
-    if output.len() > PROCESS_OUTPUT_BYTES {
-        return Err("YouTube ffmpeg process output exceeded its bound".into());
+        .is_err()
+    {
+        output.fill(0);
+        return Err("YouTube publisher result could not be read".into());
     }
-    output.fill(0);
-    Ok(())
+    if output.len() > maximum {
+        output.fill(0);
+        return Err("YouTube publisher result exceeded its bound".into());
+    }
+    Ok(output)
 }
 
 #[cfg(test)]
@@ -1215,6 +1479,19 @@ mod tests {
         fn try_wait(&mut self) -> Result<Option<bool>, String> {
             Ok(None)
         }
+        fn wait_for_delivery(
+            &mut self,
+            _: Duration,
+            _: &mut dyn FnMut() -> Result<(), String>,
+        ) -> Result<WorkerDelivery, String> {
+            Ok(WorkerDelivery {
+                schema_version: 1,
+                outcome: "published".into(),
+                media_bytes: 1,
+                media_sha256: "c".repeat(64),
+                failure_code: None,
+            })
+        }
         fn terminate_and_join(
             &mut self,
             _: &mut dyn FnMut() -> Result<(), String>,
@@ -1229,7 +1506,7 @@ mod tests {
         requests: Vec<(String, bool)>,
         now: i64,
         executable: Option<PathBuf>,
-        argv: Vec<String>,
+        worker_command_seen: bool,
         terminated: Arc<AtomicBool>,
     }
 
@@ -1246,10 +1523,12 @@ mod tests {
         fn start_ffmpeg(
             &mut self,
             executable: &Path,
-            argv: &[String],
+            command: &mut WorkerCommand,
         ) -> Result<Box<dyn RunningFfmpeg>, String> {
             self.executable = Some(executable.to_path_buf());
-            self.argv = argv.to_vec();
+            self.worker_command_seen = command.schema_version == 1
+                && command.expected_duration_ms == 1_000
+                && Path::new(&command.managed_media_root).is_absolute();
             Ok(Box::new(FakeProcess {
                 terminated: Arc::clone(&self.terminated),
             }))
@@ -1278,6 +1557,7 @@ mod tests {
             asset_id: "c".repeat(64),
             media_sha256: "c".repeat(64),
             media_bytes: 1,
+            media_duration_ms: 1_000,
             requested_by: "test".into(),
             created_at_unix_ms: 1,
         }
@@ -1299,7 +1579,7 @@ mod tests {
 
     fn stream(status: &str) -> HttpResponse {
         response(
-            serde_json::json!({"items":[{"id":"stream","snippet":{"channelId":"channel"},"cdn":{"ingestionType":"rtmp","ingestionInfo":{"ingestionAddress":"rtmps://a.rtmp.youtube.com/live2","streamName":"never-durable-key"}},"status":{"streamStatus":status}}]}),
+            serde_json::json!({"items":[{"id":"stream","snippet":{"channelId":"channel"},"cdn":{"ingestionType":"rtmp","ingestionInfo":{"rtmpsIngestionAddress":"rtmps://a.rtmp.youtube.com:443/live2","streamName":"never-durable-key"}},"status":{"streamStatus":status,"healthStatus":{"status":"good","configurationIssues":[]}}}]}),
         )
     }
 
@@ -1315,7 +1595,7 @@ mod tests {
             requests: Vec::new(),
             now: 0,
             executable: None,
-            argv: Vec::new(),
+            worker_command_seen: false,
             terminated: Arc::new(AtomicBool::new(false)),
         }
     }
@@ -1329,6 +1609,7 @@ mod tests {
             "stream",
             YouTubePrivacyStatus::Unlisted,
             media,
+            media.parent().expect("test media has a managed root"),
             br#"{"client_id":"id","client_secret":"secret","refresh_token":"refresh"}"#,
             &ffmpeg(),
             &mut || Ok(()),
@@ -1349,6 +1630,8 @@ mod tests {
             stream("active"),
             broadcast("live"),
             broadcast("live"),
+            broadcast("complete"),
+            broadcast("complete"),
         ]);
         let mut beats = 0;
         let result = execute_with(
@@ -1359,6 +1642,7 @@ mod tests {
             "stream",
             YouTubePrivacyStatus::Unlisted,
             &media,
+            media.parent().expect("test media has a managed root"),
             br#"{"client_id":"id","client_secret":"secret","refresh_token":"refresh"}"#,
             &ffmpeg(),
             &mut || {
@@ -1367,9 +1651,9 @@ mod tests {
             },
         );
         let _ = fs::remove_file(media);
-        let result = result.expect("exact controlled YouTube lifecycle must publish");
+        let result = result.unwrap();
         assert_eq!(result.stage, PublishExecutionStage::Published);
-        assert!(result.detail.contains("exact configured broadcast live"));
+        assert!(runtime.worker_command_seen);
         assert!(runtime.requests[0].0.contains("OAuthToken") && !runtime.requests[0].1);
         assert!(
             runtime
@@ -1378,17 +1662,8 @@ mod tests {
                 .skip(1)
                 .all(|(_, authorized)| *authorized)
         );
-        assert!(
-            runtime
-                .argv
-                .iter()
-                .any(|argument| argument.contains("never-durable-key"))
-        );
         assert!(!format!("{result:?}").contains("never-durable-key"));
-        assert!(runtime.terminated.load(Ordering::Acquire));
-        for argument in &mut runtime.argv {
-            zero_string(argument);
-        }
+        assert!(!runtime.terminated.load(Ordering::Acquire));
     }
 
     #[test]

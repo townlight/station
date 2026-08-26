@@ -206,7 +206,7 @@ export interface PublishExecutionJob {
   job_id: string; account_id: string; account_revision: number; target_id: string; target_revision: number;
   target_kind: PublishTargetKind; configuration_hash: string; credential_version: number;
   candidate_version: string; source_commit: string; install_generation: number; asset_id: string;
-  media_sha256: string; media_bytes: number; requested_by: string; created_at_unix_ms: number;
+  media_sha256: string; media_bytes: number; media_duration_ms: number; requested_by: string; created_at_unix_ms: number;
 }
 
 export interface PublishExecutionJobResponse {
