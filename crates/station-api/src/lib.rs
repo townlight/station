@@ -71,6 +71,7 @@ use station_recording::{
     RecordingActor, RecordingActorRole, RecordingCandidateIdentity, RecordingEvent,
     RecordingExecutionAuthority, RecordingTransitionRequest, ScheduledRecording,
 };
+use station_reporting::runtime::{render_csv, render_xmltv};
 use station_schedule::{
     AssetReadiness, ChannelConfiguration, CommitReport, DispatchStatus, HEADEND_PROFILES,
     HeadendProfileApplyRequest, MediaAsset, OUTPUT_PROFILES, ScheduleItem, ScheduleState,
@@ -1963,6 +1964,13 @@ impl Api {
             ("GET", "/api/v1/station-box-profile/readiness") => self.station_box_profile(true),
             ("GET", "/api/v1/automation/adapters") => self.list_automation_adapters(actor),
             ("GET", "/api/v1/automation/policies") => self.list_automation_policies(actor),
+            ("GET", path) if asrun_page_path(path).is_some() => self.read_asrun_page(path, actor),
+            ("GET", path) if asrun_export_path(path).is_some() => self.export_asrun(path, actor),
+            ("GET", path) if path.starts_with("/api/v1/reporting/as-run/") => error_response(
+                400,
+                "invalid_path",
+                "The as-run path or bounded query is invalid.",
+            ),
             ("GET", path) if automation_policy_status_path(path).is_some() => {
                 self.read_automation_policy_status(path, actor)
             }
@@ -2535,6 +2543,139 @@ impl Api {
             Err(ReferenceStationTierWriteError::Storage(message)) => {
                 error_response(500, "storage_error", &message)
             }
+        }
+    }
+
+    fn read_asrun_page(&self, path: &str, actor: Option<&OperatorAccount>) -> ApiResponse {
+        if !is_automation_reader(actor) {
+            return error_response(
+                403,
+                "operator_required",
+                "Reading as-run authority requires an enabled Setup Admin or Meeting Operator account.",
+            );
+        }
+        let Some((channel_id, offset, limit)) = asrun_page_path(path) else {
+            return error_response(
+                400,
+                "invalid_path",
+                "The as-run path or bounded query is invalid.",
+            );
+        };
+        let actor_id = actor
+            .expect("role predicate retained actor")
+            .account_id()
+            .as_str();
+        let Ok(now) = system_time_millis() else {
+            return error_response(
+                500,
+                "clock_error",
+                "The server clock is unavailable for as-run auditing.",
+            );
+        };
+        if self
+            .storage
+            .audit_asrun_access(channel_id, actor_id, "read", now)
+            .is_err()
+        {
+            return error_response(
+                500,
+                "storage_error",
+                "The authoritative as-run access audit could not be recorded.",
+            );
+        }
+        match self
+            .storage
+            .page_asrun_projection(channel_id, offset, limit)
+        {
+            Ok(Some(page)) => json_response(
+                200,
+                serde_json::to_vec(&page).expect("serializing as-run page cannot fail"),
+            ),
+            Ok(None) => error_response(
+                404,
+                "asrun_unavailable",
+                "No authoritative as-run projection is available for this channel.",
+            ),
+            Err(_) => error_response(
+                422,
+                "invalid_query",
+                "The as-run page query is invalid or exceeds its bound.",
+            ),
+        }
+    }
+
+    fn export_asrun(&self, path: &str, actor: Option<&OperatorAccount>) -> ApiResponse {
+        if !is_automation_reader(actor) {
+            return error_response(
+                403,
+                "operator_required",
+                "Exporting as-run authority requires an enabled Setup Admin or Meeting Operator account.",
+            );
+        }
+        let Some((channel_id, format)) = asrun_export_path(path) else {
+            return error_response(400, "invalid_path", "The as-run export path is invalid.");
+        };
+        let action = if format == "csv" {
+            "export_csv"
+        } else {
+            "export_xmltv"
+        };
+        let actor_id = actor
+            .expect("role predicate retained actor")
+            .account_id()
+            .as_str();
+        let Ok(now) = system_time_millis() else {
+            return error_response(
+                500,
+                "clock_error",
+                "The server clock is unavailable for as-run auditing.",
+            );
+        };
+        if self
+            .storage
+            .audit_asrun_access(channel_id, actor_id, action, now)
+            .is_err()
+        {
+            return error_response(
+                500,
+                "storage_error",
+                "The authoritative as-run access audit could not be recorded.",
+            );
+        }
+        let projection = match self.storage.read_asrun_projection(channel_id) {
+            Ok(Some(value)) => value,
+            Ok(None) => {
+                return error_response(
+                    404,
+                    "asrun_unavailable",
+                    "No authoritative as-run projection is available for this channel.",
+                );
+            }
+            Err(_) => {
+                return error_response(
+                    500,
+                    "storage_error",
+                    "The authoritative as-run projection could not be read.",
+                );
+            }
+        };
+        let rendered = match format {
+            "csv" => {
+                render_csv(&projection).map(|body| ("text/csv; charset=utf-8", "as-run.csv", body))
+            }
+            "xmltv" => render_xmltv(&projection, "TownLight Station")
+                .map(|body| ("application/xml; charset=utf-8", "as-run.xml", body)),
+            _ => unreachable!(),
+        };
+        match rendered {
+            Ok((content_type, filename, body)) => {
+                attachment_response(200, content_type, filename.into(), body.into_bytes())
+            }
+            Err(_) => error_response(
+                422,
+                "export_unavailable",
+                "The authoritative as-run export exceeds its safety bounds.",
+            ),
         }
     }
 
@@ -10503,6 +10644,39 @@ fn path_identity<'a>(path: &'a str, prefix: &str, suffix: &str) -> Option<&'a st
         .then_some(identity)
 }
 
+/// The reporting read surface accepts exactly two unsigned decimal parameters,
+/// avoiding permissive query parsing or browser-controlled authority fields.
+fn asrun_page_path(path: &str) -> Option<(&str, usize, usize)> {
+    let rest = path.strip_prefix("/api/v1/reporting/as-run/")?;
+    let (channel_id, query) = rest.split_once('?')?;
+    if !is_canonical_api_uuid(channel_id) {
+        return None;
+    }
+    let mut offset = None;
+    let mut limit = None;
+    for part in query.split('&') {
+        let (key, value) = part.split_once('=')?;
+        match key {
+            "offset" if offset.is_none() => offset = value.parse::<usize>().ok(),
+            "limit" if limit.is_none() => limit = value.parse::<usize>().ok(),
+            _ => return None,
+        }
+    }
+    let (offset, limit) = (offset?, limit?);
+    (limit > 0 && limit <= station_storage::MAX_ASRUN_EPG_PAGE_SIZE)
+        .then_some((channel_id, offset, limit))
+}
+fn asrun_export_path(path: &str) -> Option<(&str, &'static str)> {
+    for (suffix, format) in [("/export.csv", "csv"), ("/export.xmltv", "xmltv")] {
+        if let Some(channel_id) = path_identity(path, "/api/v1/reporting/as-run/", suffix)
+            .filter(|id| is_canonical_api_uuid(id))
+        {
+            return Some((channel_id, format));
+        }
+    }
+    None
+}
+
 fn automation_policy_path(path: &str) -> Option<&str> {
     path_identity(path, "/api/v1/automation/policies/", "")
         .filter(|identity| is_canonical_api_uuid(identity))
@@ -13006,6 +13180,83 @@ mod tests {
             1,
         )
         .unwrap()
+    }
+
+    #[test]
+    fn asrun_reads_and_exports_require_roles_and_are_bounded() {
+        let path = std::env::temp_dir().join(format!(
+            "townlight-api-asrun-{}.db",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let api = Api::open(&path).unwrap();
+        let take = station_reporting::runtime::JournalTake {
+            journal_id: "00000000-0000-0000-0000-000000000002".into(),
+            journal_sequence: 1,
+            channel_id: "00000000-0000-0000-0000-000000000001".into(),
+            started_at_unix_ms: 1_700_000_000_000,
+            ended_at_unix_ms: 1_700_000_060_000,
+            state: station_reporting::runtime::AsRunState::Program,
+            content_id: "00000000-0000-0000-0000-000000000003".into(),
+            franchise_id: "00000000-0000-0000-0000-000000000004".into(),
+            category: "program".into(),
+            title: "=Council <Meeting>".into(),
+            catalog_revision: 1,
+            schedule_revision: 1,
+            journal_hash: "a".repeat(64),
+        };
+        let projection = station_reporting::runtime::ReportingRuntime::new()
+            .project(
+                station_reporting::runtime::ProjectionInput::new(
+                    "00000000-0000-0000-0000-000000000001",
+                    "America/Denver",
+                    vec![take],
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        api.storage
+            .persist_asrun_projection(&projection, 1_700_000_060_000)
+            .unwrap();
+        let page = "/api/v1/reporting/as-run/00000000-0000-0000-0000-000000000001?offset=0&limit=1";
+        assert_eq!(api.handle_in_process("GET", page, None).status, 403);
+        let actor = test_actor(station_auth::OperatorRole::SetupAdmin);
+        assert_eq!(
+            api.handle_authenticated("GET", page, None, &actor).status,
+            200
+        );
+        assert_eq!(
+            api.handle_authenticated(
+                "GET",
+                "/api/v1/reporting/as-run/00000000-0000-0000-0000-000000000001?offset=0&limit=201",
+                None,
+                &actor
+            )
+            .status,
+            400
+        );
+        let csv = api.handle_authenticated(
+            "GET",
+            "/api/v1/reporting/as-run/00000000-0000-0000-0000-000000000001/export.csv",
+            None,
+            &actor,
+        );
+        assert_eq!(csv.status, 200);
+        assert!(String::from_utf8(csv.body).unwrap().contains("'=Council"));
+        let xml = api.handle_authenticated(
+            "GET",
+            "/api/v1/reporting/as-run/00000000-0000-0000-0000-000000000001/export.xmltv",
+            None,
+            &actor,
+        );
+        assert_eq!(xml.status, 200);
+        assert!(
+            String::from_utf8(xml.body)
+                .unwrap()
+                .contains("&lt;Meeting&gt;")
+        );
     }
 
     fn put_catalog_test_media(api: &Api, asset_sha256: &str, readiness: AssetReadiness) {

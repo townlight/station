@@ -65,6 +65,12 @@ move backwards. Reopening the database reads and validates the saved projection.
 This persistence boundary accepts only a trusted in-process projection; it is not an
 HTTP ingestion route and therefore does not let a browser assert aired facts.
 
+Authenticated enabled Setup Admin and Meeting Operator accounts may read bounded
+pages of an already persisted projection or request bounded CSV/XMLTV bytes. The
+API has no projection-write or fact-ingestion route. Every successful read/export
+first appends a server-attributed immutable access-audit row; invalid query shapes,
+oversized pages, unavailable projection, and audit failure fail closed.
+
 This crate has no journal adapter, UTC timing derivation, content/franchise/category
 enrichment, evidence authenticator, worker-journal reader/writer, persistence, API,
 UI, catalog metadata join, EPG feed renderer, filesystem/network export delivery,

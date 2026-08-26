@@ -1734,6 +1734,7 @@ dependencies = [
  "station-publishing",
  "station-readiness",
  "station-recording",
+ "station-reporting",
  "station-schedule",
  "station-schedule-automation",
  "station-source-evidence",

@@ -32,7 +32,10 @@ impl StationStore {
           journal_sequence INTEGER NOT NULL CHECK(journal_sequence>=1), record_json TEXT NOT NULL,\
           UNIQUE(channel_id,journal_sequence));\
           CREATE TRIGGER IF NOT EXISTS asrun_epg_evidence_no_update BEFORE UPDATE ON asrun_epg_projection_evidence BEGIN SELECT RAISE(ABORT,'as-run evidence is append-only'); END;\
-          CREATE TRIGGER IF NOT EXISTS asrun_epg_evidence_no_delete BEFORE DELETE ON asrun_epg_projection_evidence BEGIN SELECT RAISE(ABORT,'as-run evidence is append-only'); END;")
+          CREATE TRIGGER IF NOT EXISTS asrun_epg_evidence_no_delete BEFORE DELETE ON asrun_epg_projection_evidence BEGIN SELECT RAISE(ABORT,'as-run evidence is append-only'); END;
+          CREATE TABLE IF NOT EXISTS asrun_epg_access_audit (audit_id INTEGER PRIMARY KEY AUTOINCREMENT,channel_id TEXT NOT NULL CHECK(length(channel_id)=36),actor_id TEXT NOT NULL CHECK(length(actor_id)=36),action TEXT NOT NULL CHECK(action IN ('read','export_csv','export_xmltv')),occurred_at_utc_ms INTEGER NOT NULL CHECK(occurred_at_utc_ms>=0));
+          CREATE TRIGGER IF NOT EXISTS asrun_epg_access_audit_no_update BEFORE UPDATE ON asrun_epg_access_audit BEGIN SELECT RAISE(ABORT,'as-run access audit is append-only'); END;
+          CREATE TRIGGER IF NOT EXISTS asrun_epg_access_audit_no_delete BEFORE DELETE ON asrun_epg_access_audit BEGIN SELECT RAISE(ABORT,'as-run access audit is append-only'); END;")
     }
 
     /// Transactionally persists a server-derived projection. Retried journal replay is
@@ -216,6 +219,46 @@ impl StationStore {
             }
             SQLITE_DONE => Ok(None),
             _ => Err(sqlite_error(self.database)),
+        }
+    }
+    pub fn audit_asrun_access(
+        &self,
+        channel_id: &str,
+        actor_id: &str,
+        action: &str,
+        occurred_at_utc_ms: i64,
+    ) -> Result<(), String> {
+        if !is_uuid(channel_id)
+            || !is_uuid(actor_id)
+            || !matches!(action, "read" | "export_csv" | "export_xmltv")
+            || occurred_at_utc_ms < 0
+        {
+            return Err("as-run access audit is invalid".into());
+        }
+        let statement = self.prepare("INSERT INTO asrun_epg_access_audit(channel_id,actor_id,action,occurred_at_utc_ms) VALUES(?1,?2,?3,?4)")?;
+        bind_text(
+            self.database,
+            statement.raw,
+            1,
+            &c_string(channel_id, "channel")?,
+        )?;
+        bind_text(
+            self.database,
+            statement.raw,
+            2,
+            &c_string(actor_id, "actor")?,
+        )?;
+        bind_text(
+            self.database,
+            statement.raw,
+            3,
+            &c_string(action, "action")?,
+        )?;
+        bind_i64(self.database, statement.raw, 4, occurred_at_utc_ms)?;
+        if unsafe { sqlite3_step(statement.raw) } == SQLITE_DONE {
+            Ok(())
+        } else {
+            Err(sqlite_error(self.database))
         }
     }
     fn read_asrun_evidence(
