@@ -41,7 +41,8 @@ $candidateConsumerNames = @(
     'prove-clean-install-in-owned-sandbox.ps1',
     'prove-caption-in-owned-sandbox.ps1',
     'run-clean-install.ps1',
-    'run-caption-proof.ps1'
+    'run-caption-proof.ps1',
+    'run-automatic-materialization.ps1'
 )
 function Assert-Contract([bool]$Condition, [string]$Message) {
     $script:assertions++

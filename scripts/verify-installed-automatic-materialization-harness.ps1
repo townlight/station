@@ -127,6 +127,29 @@ Assert-Contract ($source -match 'git .*status|status --porcelain') `
     'the proof must fail closed for a dirty source candidate.'
 Assert-Contract ($source -match 'source_commit') `
     'the proof must bind every result to the exact source commit.'
+Assert-Contract ($source -match 'SourceRepositoryRoot' -and
+    $source -match 'Resolve-Path -LiteralPath \$SourceRepositoryRoot' -and
+    $source -match 'SourceRepositoryRoot must be an existing canonical source checkout') `
+    'the proof must accept an explicit canonical source checkout when invoked from a mapped guest helper root.'
+Assert-Contract ($source -match 'OuterHostAttested' -and
+    $source -match 'ExpectedCandidateManifestSha256' -and
+    $source -match 'ExpectedInstallerSha256' -and
+    $source -match 'outer_host_attestation_invalid' -and
+    $source -match 'outer_host_manifest_hash_mismatch' -and
+    $source -match 'outer_host_installer_hash_mismatch') `
+    'the proof must support a fail-closed outer-host-attested mode with exact source, manifest, and installer identity.'
+Assert-Contract ($source -match '\$repository = \$null' -and
+    $source -match 'if \(\$OuterHostAttested\)' -and
+    $source -match 'OuterHostAttested cannot be combined with SourceRepositoryRoot' -and
+    $source -match 'Split-Path \$PSScriptRoot -Parent') `
+    'outer-host-attested mode must not resolve or validate the mapped helper parent as a standalone repository or invoke guest git.'
+Assert-Contract ($source -match "mode = 'outer_host_attested'" -and
+    $source -match 'host_upgrade_required = \$true' -and
+    $source -match "status -notin @\('passed', 'outer_host_attested'\)") `
+    'outer-host-attested receipts must never claim standalone passed provenance and must remain upgradeable only by the host.'
+Assert-Contract ($source -match '\[switch\]\$NoProcessExit' -and
+    $source -match '-not \$NoProcessExit -and \$result\.status -notin') `
+    'an in-process orchestrator may suppress only the final process exit while default CLI failure semantics remain intact.'
 Assert-Contract ($source -notmatch '(?i)ConvertTo-SecureString.*-AsPlainText|\$env:[A-Za-z0-9_]*(?:PASSWORD|CREDENTIAL|SECRET)|-Password\b') `
     'the proof must not introduce a plaintext credential path.'
 Assert-Contract ($source -notmatch '(?i)\bStart-Process\b|\bRestart-Service\b|\bStop-Process\b|\btaskkill(?:\.exe)?\b|\.Kill\s*\(|restart HTTP endpoint') `

@@ -24,6 +24,10 @@ param(
     [ValidatePattern('^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$')]
     [string]$ChannelId,
     [string]$ExpectedSourceCommit = '',
+    [string]$SourceRepositoryRoot = '',
+    [switch]$OuterHostAttested,
+    [string]$ExpectedCandidateManifestSha256 = '',
+    [string]$ExpectedInstallerSha256 = '',
     [string]$CandidateManifestPath = (Join-Path (Split-Path $PSScriptRoot -Parent) 'dist\candidate-manifest.json'),
     [string]$BaseUri = 'http://127.0.0.1:4070',
     [ValidateRange(5, 300)]
@@ -35,6 +39,7 @@ param(
     [ValidateRange(1, 8)]
     [int]$MaxHistoryPages = 8,
     [switch]$EnableServiceRestartProof,
+    [switch]$NoProcessExit,
     [string]$ResultPath = ''
 )
 
@@ -44,7 +49,23 @@ $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'installed-automatic-materialization-proof-state.ps1')
 . (Join-Path $PSScriptRoot 'installed-private-runtime-verifier.ps1')
 
-$repository = Split-Path $PSScriptRoot -Parent
+$repository = $null
+if ($OuterHostAttested) {
+    if (-not [string]::IsNullOrWhiteSpace($SourceRepositoryRoot)) {
+        throw 'OuterHostAttested cannot be combined with SourceRepositoryRoot.'
+    }
+} else {
+    $repository = if ([string]::IsNullOrWhiteSpace($SourceRepositoryRoot)) {
+        Split-Path $PSScriptRoot -Parent
+    } else {
+        try { [IO.Path]::GetFullPath((Resolve-Path -LiteralPath $SourceRepositoryRoot -ErrorAction Stop).Path) }
+        catch { throw 'SourceRepositoryRoot must be an existing canonical source checkout.' }
+    }
+    if (-not (Test-Path -LiteralPath $repository -PathType Container) -or
+        [IO.Path]::GetFileName($repository.TrimEnd('\')) -eq '') {
+        throw 'SourceRepositoryRoot must resolve to a non-root source checkout.'
+    }
+}
 $trustedWindowsRoot = [Environment]::GetFolderPath([Environment+SpecialFolder]::Windows)
 $trustedSystemDirectory = [Environment]::GetFolderPath([Environment+SpecialFolder]::System)
 $trustedProgramFilesRoot = [Environment]::GetFolderPath([Environment+SpecialFolder]::ProgramFiles)
@@ -198,12 +219,26 @@ function Get-ReadyHealth {
 }
 
 function Assert-ExactInstalledCandidate {
-    $head = (& git -C $repository rev-parse HEAD).Trim()
-    $dirty = @(& git -C $repository status --porcelain)
-    if ($LASTEXITCODE -ne 0 -or $head -notmatch '^[0-9a-f]{40}$') { Stop-Proof 'source_commit_unavailable' }
-    if ($dirty.Count -ne 0) { Stop-Proof 'dirty_candidate' }
+    if ($OuterHostAttested) {
+        if (-not [string]::IsNullOrWhiteSpace($SourceRepositoryRoot) -or
+            $ExpectedSourceCommit -cnotmatch '^[0-9a-f]{40}$' -or
+            $ExpectedCandidateManifestSha256 -cnotmatch '^[0-9a-f]{64}$' -or
+            $ExpectedInstallerSha256 -cnotmatch '^[0-9a-f]{64}$') {
+            Stop-Proof 'outer_host_attestation_invalid'
+        }
+        $head = $ExpectedSourceCommit
+    } else {
+        $head = (& git -C $repository rev-parse HEAD).Trim()
+        $dirty = @(& git -C $repository status --porcelain)
+        if ($LASTEXITCODE -ne 0 -or $head -notmatch '^[0-9a-f]{40}$') { Stop-Proof 'source_commit_unavailable' }
+        if ($dirty.Count -ne 0) { Stop-Proof 'dirty_candidate' }
+    }
 
     $manifestPath = [IO.Path]::GetFullPath((Resolve-Path -LiteralPath $CandidateManifestPath -ErrorAction Stop).Path)
+    if ($OuterHostAttested -and
+        (Get-FileHash -LiteralPath $manifestPath -Algorithm SHA256).Hash.ToLowerInvariant() -cne $ExpectedCandidateManifestSha256) {
+        Stop-Proof 'outer_host_manifest_hash_mismatch'
+    }
     try { $candidatePair = Get-TownLightCandidateIdentity -ManifestPath $manifestPath -ExpectedSourceCommit $head }
     catch { Stop-Proof 'candidate_pair_invalid' }
     $manifest = $candidatePair.manifest
@@ -239,6 +274,9 @@ function Assert-ExactInstalledCandidate {
         stationd_sha256 = Get-FileSha256 (Join-Path $applicationRoot 'stationd.exe')
         channel_worker_sha256 = Get-FileSha256 (Join-Path $applicationRoot 'channel-worker.exe')
         station_updater_sha256 = Get-FileSha256 (Join-Path $applicationRoot 'station-updater.exe')
+    }
+    if ($OuterHostAttested -and $candidatePair.installer_sha256 -cne $ExpectedInstallerSha256) {
+        Stop-Proof 'outer_host_installer_hash_mismatch'
     }
     foreach ($name in $installedHashes.Keys) {
         if ([string]$installedHashes[$name] -cne ([string]$manifest.$name).ToLowerInvariant()) {
@@ -469,6 +507,16 @@ try {
         stationd_sha256 = [string]$candidate.installed_hashes.stationd_sha256
         channel_worker_sha256 = [string]$candidate.installed_hashes.channel_worker_sha256; station_updater_sha256 = [string]$candidate.installed_hashes.station_updater_sha256
     }
+    $result.candidate_provenance = if ($OuterHostAttested) {
+        [ordered]@{
+            mode = 'outer_host_attested'; standalone = $false; host_upgrade_required = $true
+            expected_source_commit = $ExpectedSourceCommit.ToLowerInvariant()
+            candidate_manifest_sha256 = $ExpectedCandidateManifestSha256.ToLowerInvariant()
+            installer_sha256 = $ExpectedInstallerSha256.ToLowerInvariant()
+        }
+    } else {
+        [ordered]@{ mode = 'standalone_git_clean'; standalone = $true; host_upgrade_required = $false }
+    }
     $stationIdentity = Get-VerifiedServiceIdentity -Name $stationServiceName -ExpectedState 'Running'
     $updaterIdentity = Get-VerifiedServiceIdentity -Name $updaterServiceName -ExpectedState 'Running'
     $health = Get-ReadyHealth
@@ -536,7 +584,7 @@ try {
         alerts = Get-AlertObservation -Alerts $after.alerts; duplicate_current_day_automatic_run = $false
         duplicate_generated_draft_identifier = $false; newer_automatic_run = $false
     }
-    $result.status = 'passed'
+    $result.status = if ($OuterHostAttested) { 'outer_host_attested' } else { 'passed' }
 }
 catch {
     $message = [string]$_.Exception.Message
@@ -555,4 +603,4 @@ finally {
 }
 
 Write-ProofResult
-if ($result.status -ne 'passed') { exit 1 }
+if (-not $NoProcessExit -and $result.status -notin @('passed', 'outer_host_attested')) { exit 1 }
