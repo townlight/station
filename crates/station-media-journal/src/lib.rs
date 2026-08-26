@@ -55,6 +55,30 @@ pub struct JournalInspection {
     pub next_sequence: u64,
 }
 
+/// Durable position of a streaming journal consumer. `prefix_hash` is a
+/// domain-separated hash chain over every complete record before
+/// `byte_offset`. It is deliberately persisted with the file identity and the
+/// final covered raw sequence so a restarted reader can prove that it is not
+/// resuming in a truncated, replaced, or modified prefix.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct JournalCursor {
+    pub byte_offset: u64,
+    pub raw_sequence: u64,
+    pub prefix_hash: String,
+    pub file_identity: String,
+}
+
+/// One bounded streaming read. Summary and compaction records advance the
+/// cursor but are not surfaced as worker events; callers never need to retain
+/// the whole journal merely to move their checkpoint forward.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IncrementalJournalRead {
+    pub worker_id: Option<String>,
+    pub channel_id: Option<String>,
+    pub events: Vec<WorkerEventEnvelope>,
+    pub cursor: JournalCursor,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct CompactionCommit {
     worker_id: String,
@@ -375,6 +399,313 @@ pub fn inspect_journal_bounded(
     inspection_from_snapshot(read_snapshot_bounded(path.as_ref(), limit)?)
 }
 
+/// Reads at most `event_limit` newly appended worker events after `cursor`.
+///
+/// The normal path seeks directly to the durable byte offset; it neither
+/// allocates nor rescans retained history. A caller should request
+/// `verify_prefix` once after process restart. That one recovery check streams
+/// the already-consumed prefix and compares the durable hash chain before any
+/// new output is accepted. Subsequent calls retain the checkpoint proof while
+/// doing only incremental work. A changed file identity or a shorter file is
+/// rejected rather than guessed at; callers can use
+/// [`find_journal_event_cursor`] to make an explicit, validated compaction
+/// recovery from a retained transition anchor.
+pub fn read_journal_incremental(
+    path: impl AsRef<Path>,
+    cursor: Option<&JournalCursor>,
+    event_limit: usize,
+    verify_prefix: bool,
+) -> Result<IncrementalJournalRead, JournalError> {
+    if event_limit == 0 {
+        return Err(corrupt(0, "incremental event limit must be positive"));
+    }
+    let path = path.as_ref();
+    let metadata = std::fs::metadata(path).map_err(io_error)?;
+    let file_identity = journal_file_identity(&metadata);
+    let length = metadata.len();
+    if let Some(cursor) = cursor {
+        if cursor.byte_offset > length {
+            return Err(corrupt(
+                cursor.byte_offset,
+                "journal was truncated before the durable reader checkpoint",
+            ));
+        }
+        if cursor.file_identity != file_identity {
+            return Err(corrupt(
+                cursor.byte_offset,
+                "journal file identity changed after the durable reader checkpoint",
+            ));
+        }
+        if !valid_prefix_hash(&cursor.prefix_hash) {
+            return Err(corrupt(
+                cursor.byte_offset,
+                "journal cursor prefix hash is invalid",
+            ));
+        }
+        if verify_prefix {
+            verify_journal_cursor_prefix(path, cursor)?;
+        }
+    }
+
+    let mut file = File::open(path).map_err(io_error)?;
+    let mut offset = cursor.map_or(0, |value| value.byte_offset);
+    file.seek(SeekFrom::Start(offset)).map_err(io_error)?;
+    let mut prefix_hash = cursor
+        .map(|value| value.prefix_hash.clone())
+        .unwrap_or_else(initial_prefix_hash);
+    let mut raw_sequence = cursor.map_or(0, |value| value.raw_sequence);
+    let mut worker_id = None;
+    let mut channel_id = None;
+    let mut events = Vec::new();
+    let mut summary_seen = offset != 0;
+    let mut commit_seen = false;
+    let mut saw_event = offset != 0;
+    let mut last_event_sequence = None;
+    // Compaction summaries physically precede retained events, so keep only
+    // their compact sequence ranges long enough to merge them with this
+    // bounded initial event batch. This detects a missing summary or a
+    // duplicate covered event without retaining the raw journal history.
+    let mut summary_ranges: Vec<(u64, u64)> = Vec::new();
+    let mut summary_range_index = 0_usize;
+    let mut covered_next_sequence = 1_u64;
+
+    while events.len() < event_limit {
+        let Some(record) = read_stream_record(&mut file, offset)? else {
+            break;
+        };
+        let record_end = offset
+            .checked_add(record.total_bytes)
+            .ok_or_else(|| corrupt(offset, "journal offset overflow"))?;
+        prefix_hash = next_prefix_hash(&prefix_hash, &record.raw_bytes);
+        match record.kind {
+            StreamRecordKind::Event(event) => {
+                if last_event_sequence.is_some_and(|previous| event.sequence <= previous) {
+                    return Err(JournalError::NonMonotonic {
+                        expected: last_event_sequence
+                            .and_then(|previous| previous.checked_add(1))
+                            .unwrap_or(u64::MAX),
+                        actual: event.sequence,
+                    });
+                }
+                let identity = (event.worker_id.clone(), event.channel_id.clone());
+                match (&worker_id, &channel_id) {
+                    (Some(worker), Some(channel))
+                        if (worker, channel) != (&identity.0, &identity.1) =>
+                    {
+                        return Err(corrupt(offset, "worker or channel identity changed"));
+                    }
+                    (None, None) => {
+                        worker_id = Some(identity.0);
+                        channel_id = Some(identity.1);
+                    }
+                    (Some(_), Some(_)) => {}
+                    _ => return Err(corrupt(offset, "journal identity is incomplete")),
+                }
+                if cursor.is_none() {
+                    while summary_range_index < summary_ranges.len()
+                        && summary_ranges[summary_range_index].0 <= event.sequence
+                    {
+                        let (first, last) = summary_ranges[summary_range_index];
+                        if first != covered_next_sequence || last >= event.sequence {
+                            return Err(JournalError::NonMonotonic {
+                                expected: covered_next_sequence,
+                                actual: event.sequence,
+                            });
+                        }
+                        covered_next_sequence = last
+                            .checked_add(1)
+                            .ok_or_else(|| corrupt(offset, "journal sequence exhausted"))?;
+                        summary_range_index += 1;
+                    }
+                    if event.sequence != covered_next_sequence {
+                        return Err(JournalError::NonMonotonic {
+                            expected: covered_next_sequence,
+                            actual: event.sequence,
+                        });
+                    }
+                    covered_next_sequence = covered_next_sequence
+                        .checked_add(1)
+                        .ok_or_else(|| corrupt(offset, "journal sequence exhausted"))?;
+                }
+                raw_sequence = raw_sequence.max(event.sequence);
+                last_event_sequence = Some(event.sequence);
+                saw_event = true;
+                events.push(event);
+            }
+            StreamRecordKind::HeartbeatSummary(summary) => {
+                if saw_event || commit_seen {
+                    return Err(corrupt(
+                        offset,
+                        "heartbeat summary records must be contiguous and precede events",
+                    ));
+                }
+                validate_summary(&summary, offset)?;
+                let identity = (summary.worker_id.clone(), summary.channel_id.clone());
+                match (&worker_id, &channel_id) {
+                    (Some(worker), Some(channel))
+                        if (worker, channel) != (&identity.0, &identity.1) =>
+                    {
+                        return Err(corrupt(offset, "worker or channel identity changed"));
+                    }
+                    (None, None) => {
+                        worker_id = Some(identity.0);
+                        channel_id = Some(identity.1);
+                    }
+                    (Some(_), Some(_)) => {}
+                    _ => return Err(corrupt(offset, "journal identity is incomplete")),
+                }
+                for range in &summary.ranges {
+                    raw_sequence = raw_sequence.max(range.last_sequence);
+                    if summary_ranges
+                        .last()
+                        .is_some_and(|(_, last)| range.first_sequence <= *last)
+                    {
+                        return Err(corrupt(offset, "heartbeat summary ranges overlap"));
+                    }
+                    summary_ranges.push((range.first_sequence, range.last_sequence));
+                }
+                summary_seen = true;
+            }
+            StreamRecordKind::CompactionCommit(commit) => {
+                if !summary_seen || commit_seen {
+                    return Err(corrupt(
+                        offset,
+                        "compaction commit requires one preceding heartbeat summary",
+                    ));
+                }
+                if worker_id.as_deref() != Some(&commit.worker_id)
+                    || channel_id.as_deref() != Some(&commit.channel_id)
+                    || commit.next_sequence == 0
+                {
+                    return Err(corrupt(
+                        offset,
+                        "compaction commit does not bind sequence and identity",
+                    ));
+                }
+                commit_seen = true;
+            }
+        }
+        offset = record_end;
+    }
+    if summary_seen && !commit_seen && cursor.is_none() {
+        return Err(corrupt(0, "heartbeat summary has no compaction commit"));
+    }
+    Ok(IncrementalJournalRead {
+        worker_id,
+        channel_id,
+        events,
+        cursor: JournalCursor {
+            byte_offset: offset,
+            raw_sequence,
+            prefix_hash,
+            file_identity,
+        },
+    })
+}
+
+/// Streams a journal from the beginning until it finds the requested retained
+/// transition. This is intentionally an explicit recovery operation for a
+/// detected atomic compaction/replacement, not the steady-state read path.
+/// It is allocation bounded and verifies record checksums, identities, and
+/// sequence continuity as it walks the prefix.
+pub fn find_journal_event_cursor(
+    path: impl AsRef<Path>,
+    sequence: u64,
+) -> Result<(WorkerEventEnvelope, JournalCursor), JournalError> {
+    if sequence == 0 {
+        return Err(corrupt(0, "journal recovery sequence is invalid"));
+    }
+    let path = path.as_ref();
+    let metadata = std::fs::metadata(path).map_err(io_error)?;
+    let file_identity = journal_file_identity(&metadata);
+    let mut file = File::open(path).map_err(io_error)?;
+    let mut offset = 0_u64;
+    let mut raw_sequence = 0_u64;
+    let mut prefix_hash = initial_prefix_hash();
+    let mut identity: Option<(String, String)> = None;
+    let mut summary_seen = false;
+    let mut commit_seen = false;
+    let mut saw_event = false;
+    let mut last_event_sequence = None;
+    loop {
+        let Some(record) = read_stream_record(&mut file, offset)? else {
+            return Err(corrupt(
+                offset,
+                "durable reader anchor is absent after journal replacement",
+            ));
+        };
+        let record_end = offset
+            .checked_add(record.total_bytes)
+            .ok_or_else(|| corrupt(offset, "journal offset overflow"))?;
+        prefix_hash = next_prefix_hash(&prefix_hash, &record.raw_bytes);
+        match record.kind {
+            StreamRecordKind::Event(event) => {
+                let event_identity = (event.worker_id.clone(), event.channel_id.clone());
+                if identity
+                    .as_ref()
+                    .is_some_and(|value| value != &event_identity)
+                {
+                    return Err(corrupt(offset, "worker or channel identity changed"));
+                }
+                identity.get_or_insert(event_identity);
+                if last_event_sequence.is_some_and(|previous| event.sequence <= previous) {
+                    return Err(JournalError::NonMonotonic {
+                        expected: last_event_sequence
+                            .and_then(|previous| previous.checked_add(1))
+                            .unwrap_or(u64::MAX),
+                        actual: event.sequence,
+                    });
+                }
+                raw_sequence = raw_sequence.max(event.sequence);
+                last_event_sequence = Some(event.sequence);
+                saw_event = true;
+                let cursor = JournalCursor {
+                    byte_offset: record_end,
+                    raw_sequence,
+                    prefix_hash: prefix_hash.clone(),
+                    file_identity: file_identity.clone(),
+                };
+                if event.sequence == sequence {
+                    return Ok((event, cursor));
+                }
+            }
+            StreamRecordKind::HeartbeatSummary(summary) => {
+                if saw_event || commit_seen {
+                    return Err(corrupt(offset, "heartbeat summary records are invalid"));
+                }
+                validate_summary(&summary, offset)?;
+                let summary_identity = (summary.worker_id.clone(), summary.channel_id.clone());
+                if identity
+                    .as_ref()
+                    .is_some_and(|value| value != &summary_identity)
+                {
+                    return Err(corrupt(offset, "worker or channel identity changed"));
+                }
+                identity.get_or_insert(summary_identity);
+                for range in &summary.ranges {
+                    raw_sequence = raw_sequence.max(range.last_sequence);
+                }
+                summary_seen = true;
+            }
+            StreamRecordKind::CompactionCommit(commit) => {
+                if !summary_seen
+                    || commit_seen
+                    || identity.as_ref()
+                        != Some(&(commit.worker_id.clone(), commit.channel_id.clone()))
+                    || commit.next_sequence == 0
+                {
+                    return Err(corrupt(
+                        offset,
+                        "compaction commit does not bind sequence and identity",
+                    ));
+                }
+                commit_seen = true;
+            }
+        }
+        offset = record_end;
+    }
+}
+
 fn inspection_from_snapshot(snapshot: JournalSnapshot) -> Result<JournalInspection, JournalError> {
     let (worker_id, channel_id) = snapshot
         .identity
@@ -390,6 +721,173 @@ fn inspection_from_snapshot(snapshot: JournalSnapshot) -> Result<JournalInspecti
             .map_or_else(Vec::new, |summary| summary.ranges),
         next_sequence: snapshot.next_sequence,
     })
+}
+
+enum StreamRecordKind {
+    Event(WorkerEventEnvelope),
+    HeartbeatSummary(HeartbeatSummary),
+    CompactionCommit(CompactionCommit),
+}
+
+struct StreamRecord {
+    kind: StreamRecordKind,
+    total_bytes: u64,
+    raw_bytes: Vec<u8>,
+}
+
+fn read_stream_record(file: &mut File, offset: u64) -> Result<Option<StreamRecord>, JournalError> {
+    let mut header = [0_u8; HEADER_BYTES];
+    match file.read(&mut header[..1]) {
+        Ok(0) => return Ok(None),
+        Ok(1) => {}
+        Ok(_) => unreachable!("the read buffer has one byte"),
+        Err(error) => return Err(io_error(error)),
+    }
+    read_exact_record(file, &mut header[1..], offset, "truncated record header")?;
+    if header[..4] != MAGIC {
+        return Err(corrupt(offset, "invalid journal magic"));
+    }
+    let version = u16::from_le_bytes(header[4..6].try_into().expect("two header bytes"));
+    if !matches!(version, LEGACY_JOURNAL_VERSION | JOURNAL_VERSION) {
+        return Err(corrupt(
+            offset,
+            format!("unsupported journal version {version}"),
+        ));
+    }
+    let record_kind = u16::from_le_bytes(header[6..8].try_into().expect("two header bytes"));
+    if version == LEGACY_JOURNAL_VERSION && record_kind != RECORD_KIND_EVENT {
+        return Err(corrupt(offset, "reserved header bits are not zero"));
+    }
+    let payload_length =
+        u32::from_le_bytes(header[8..12].try_into().expect("four header bytes")) as usize;
+    if payload_length > MAX_EVENT_FRAME_BYTES {
+        return Err(corrupt(
+            offset,
+            format!("event frame is too large: {payload_length}"),
+        ));
+    }
+    let expected_checksum =
+        u32::from_le_bytes(header[12..16].try_into().expect("four header bytes"));
+    let mut payload = vec![0_u8; payload_length];
+    read_exact_record(file, &mut payload, offset, "truncated event frame")?;
+    if crc32(&payload) != expected_checksum {
+        return Err(corrupt(offset, "event frame checksum mismatch"));
+    }
+    let kind =
+        match record_kind {
+            RECORD_KIND_EVENT => StreamRecordKind::Event(
+                decode_persisted_event_frame(&payload).map_err(JournalError::Protocol)?,
+            ),
+            RECORD_KIND_HEARTBEAT_SUMMARY if version == JOURNAL_VERSION => {
+                StreamRecordKind::HeartbeatSummary(serde_json::from_slice(&payload).map_err(
+                    |error| corrupt(offset, format!("invalid heartbeat summary: {error}")),
+                )?)
+            }
+            RECORD_KIND_COMPACTION_COMMIT if version == JOURNAL_VERSION => {
+                StreamRecordKind::CompactionCommit(serde_json::from_slice(&payload).map_err(
+                    |error| corrupt(offset, format!("invalid compaction commit: {error}")),
+                )?)
+            }
+            _ => {
+                return Err(corrupt(
+                    offset,
+                    format!("unsupported journal record kind {record_kind}"),
+                ));
+            }
+        };
+    let mut raw_bytes = Vec::with_capacity(HEADER_BYTES + payload.len());
+    raw_bytes.extend_from_slice(&header);
+    raw_bytes.extend_from_slice(&payload);
+    Ok(Some(StreamRecord {
+        kind,
+        total_bytes: u64::try_from(raw_bytes.len()).expect("bounded record fits in u64"),
+        raw_bytes,
+    }))
+}
+
+fn initial_prefix_hash() -> String {
+    let mut hash = Sha256::new();
+    hash.update(b"townlight.incremental-journal-prefix.v1\0");
+    format!("{:x}", hash.finalize())
+}
+
+fn next_prefix_hash(previous: &str, record: &[u8]) -> String {
+    let mut hash = Sha256::new();
+    hash.update(b"townlight.incremental-journal-prefix.v1\0");
+    hash.update(previous.as_bytes());
+    hash.update(record);
+    format!("{:x}", hash.finalize())
+}
+
+fn valid_prefix_hash(value: &str) -> bool {
+    value.len() == 64 && value.as_bytes().iter().all(u8::is_ascii_hexdigit)
+}
+
+fn verify_journal_cursor_prefix(path: &Path, cursor: &JournalCursor) -> Result<(), JournalError> {
+    let mut file = File::open(path).map_err(io_error)?;
+    let mut offset = 0_u64;
+    let mut raw_sequence = 0_u64;
+    let mut prefix_hash = initial_prefix_hash();
+    while offset < cursor.byte_offset {
+        let record = read_stream_record(&mut file, offset)?
+            .ok_or_else(|| corrupt(offset, "journal ended before the durable reader checkpoint"))?;
+        offset = offset
+            .checked_add(record.total_bytes)
+            .ok_or_else(|| corrupt(offset, "journal offset overflow"))?;
+        if offset > cursor.byte_offset {
+            return Err(corrupt(
+                cursor.byte_offset,
+                "durable reader checkpoint is not on a journal record boundary",
+            ));
+        }
+        prefix_hash = next_prefix_hash(&prefix_hash, &record.raw_bytes);
+        match record.kind {
+            StreamRecordKind::Event(event) => raw_sequence = raw_sequence.max(event.sequence),
+            StreamRecordKind::HeartbeatSummary(summary) => {
+                raw_sequence = raw_sequence.max(
+                    summary
+                        .ranges
+                        .last()
+                        .map_or(raw_sequence, |range| range.last_sequence),
+                );
+            }
+            StreamRecordKind::CompactionCommit(_) => {}
+        }
+    }
+    if offset != cursor.byte_offset
+        || raw_sequence != cursor.raw_sequence
+        || prefix_hash != cursor.prefix_hash
+    {
+        return Err(corrupt(
+            cursor.byte_offset,
+            "durable reader checkpoint prefix integrity check failed",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn journal_file_identity(metadata: &std::fs::Metadata) -> String {
+    use std::os::windows::fs::MetadataExt;
+    // Creation time survives ordinary appends, while atomic replacement gives
+    // the replacement a distinct identity. The cursor's prefix hash covers
+    // in-place modification when the reader is restarted.
+    format!(
+        "windows:{}:{}",
+        metadata.creation_time(),
+        metadata.file_attributes()
+    )
+}
+
+#[cfg(unix)]
+fn journal_file_identity(metadata: &std::fs::Metadata) -> String {
+    use std::os::unix::fs::MetadataExt;
+    format!("unix:{}:{}", metadata.dev(), metadata.ino())
+}
+
+#[cfg(not(any(windows, unix)))]
+fn journal_file_identity(metadata: &std::fs::Metadata) -> String {
+    format!("portable:{}", metadata.len())
 }
 
 fn read_snapshot(path: &Path) -> Result<JournalSnapshot, JournalError> {

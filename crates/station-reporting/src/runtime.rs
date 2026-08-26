@@ -213,7 +213,49 @@ pub struct ProjectedEntry {
 pub struct ProjectionCheckpoint {
     pub channel_id: String,
     pub journal_id: String,
+    /// Last journal transition that was materialized as a projection row.
+    /// The independent reader cursor below can legitimately be ahead of this
+    /// value while it holds an unclosed scheduled transition.
     pub journal_sequence: u64,
+    pub journal_hash: String,
+    #[serde(default)]
+    pub materialized_sequence: u64,
+    #[serde(default)]
+    pub materialized_hash: String,
+    #[serde(default)]
+    pub reader_byte_offset: u64,
+    #[serde(default)]
+    pub reader_raw_sequence: u64,
+    #[serde(default)]
+    pub reader_prefix_hash: String,
+    #[serde(default)]
+    pub reader_file_identity: String,
+    #[serde(default)]
+    pub pending_start: Option<PendingScheduledTake>,
+    #[serde(default)]
+    pub pending_is_uncovered: bool,
+}
+
+/// The one authoritative, station-local calendar day represented by a
+/// persisted projection. UTC instants are half-open so the window remains
+/// exact on 23- and 25-hour daylight-saving days.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProjectionWindow {
+    pub local_date: String,
+    pub starts_at_utc_ms: i64,
+    pub ends_at_utc_ms: i64,
+}
+
+/// A scheduled transition that has not yet been closed by the next scheduled
+/// transition. It is persisted with the reader cursor so a process crash does
+/// not require replaying an unbounded journal prefix.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingScheduledTake {
+    pub journal_sequence: u64,
+    pub schedule_item_id: String,
+    pub schedule_item_revision: u64,
+    pub asset_id: String,
+    pub started_at_unix_ms: i64,
     pub journal_hash: String,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -222,6 +264,8 @@ pub struct AsRunProjectionRuntime {
     pub station_timezone: String,
     pub entries: Vec<ProjectedEntry>,
     pub checkpoint: ProjectionCheckpoint,
+    #[serde(default)]
+    pub window: Option<ProjectionWindow>,
 }
 #[derive(Debug, Default)]
 pub struct ReportingRuntime {
@@ -271,7 +315,16 @@ impl ReportingRuntime {
                 journal_id: last.journal_id.clone(),
                 journal_sequence: last.journal_sequence,
                 journal_hash: last.journal_hash.clone(),
+                materialized_sequence: last.journal_sequence,
+                materialized_hash: last.journal_hash.clone(),
+                reader_byte_offset: 0,
+                reader_raw_sequence: 0,
+                reader_prefix_hash: String::new(),
+                reader_file_identity: String::new(),
+                pending_start: None,
+                pending_is_uncovered: false,
             },
+            window: None,
         };
         if let Some(previous) = self.projections.get(&input.channel_id)
             && previous.checkpoint.journal_sequence > projected.checkpoint.journal_sequence

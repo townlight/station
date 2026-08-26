@@ -13206,7 +13206,7 @@ mod tests {
             journal_hash: "a".repeat(64),
             unavailable_reason: None,
         };
-        let projection = station_reporting::runtime::ReportingRuntime::new()
+        let mut projection = station_reporting::runtime::ReportingRuntime::new()
             .project(
                 station_reporting::runtime::ProjectionInput::new(
                     "00000000-0000-4000-8000-000000000001",
@@ -13216,16 +13216,22 @@ mod tests {
                 .unwrap(),
             )
             .unwrap();
+        projection.window = Some(station_reporting::runtime::ProjectionWindow {
+            local_date: "2023-11-14".into(),
+            starts_at_utc_ms: 1_699_945_200_000,
+            ends_at_utc_ms: 1_700_031_600_000,
+        });
         api.storage
             .persist_asrun_projection(&projection, 1_700_000_060_000)
             .unwrap();
         let page = "/api/v1/reporting/as-run/00000000-0000-4000-8000-000000000001?offset=0&limit=1";
         assert_eq!(api.handle_in_process("GET", page, None).status, 403);
         let actor = test_actor(station_auth::OperatorRole::SetupAdmin);
-        assert_eq!(
-            api.handle_authenticated("GET", page, None, &actor).status,
-            200
-        );
+        let page_response = api.handle_authenticated("GET", page, None, &actor);
+        assert_eq!(page_response.status, 200);
+        let page_body = String::from_utf8(page_response.body).unwrap();
+        assert!(page_body.contains("\"projection_window\""));
+        assert!(page_body.contains("\"source_journal_id\""));
         assert_eq!(
             api.handle_authenticated(
                 "GET",

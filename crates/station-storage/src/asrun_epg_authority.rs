@@ -1,9 +1,9 @@
 //! Durable single-writer persistence for already authenticated reporting projections.
 use super::*;
-use station_reporting::runtime::{AsRunProjectionRuntime, ProjectedEntry};
+use station_reporting::runtime::{AsRunProjectionRuntime, ProjectedEntry, ProjectionWindow};
 
 pub const MAX_ASRUN_EPG_PAGE_SIZE: usize = 200;
-const MAX_PROJECTION_BYTES: usize = 4 * 1024 * 1024;
+const MAX_PROJECTION_BYTES: usize = 32 * 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AsRunProjectionWriteError {
@@ -15,6 +15,10 @@ pub enum AsRunProjectionWriteError {
 pub struct AsRunProjectionPage {
     pub channel_id: String,
     pub station_timezone: String,
+    pub projection_window: Option<ProjectionWindow>,
+    pub source_journal_id: String,
+    pub source_file_identity: String,
+    pub source_raw_sequence: u64,
     pub entries: Vec<ProjectedEntry>,
     pub next_offset: Option<usize>,
     pub checkpoint_sequence: u64,
@@ -196,6 +200,10 @@ impl StationStore {
         Ok(Some(AsRunProjectionPage {
             channel_id: projection.channel_id,
             station_timezone: projection.station_timezone,
+            projection_window: projection.window,
+            source_journal_id: projection.checkpoint.journal_id,
+            source_file_identity: projection.checkpoint.reader_file_identity,
+            source_raw_sequence: projection.checkpoint.reader_raw_sequence,
             entries: projection.entries[offset..end].to_vec(),
             next_offset: (end < projection.entries.len()).then_some(end),
             checkpoint_sequence: projection.checkpoint.journal_sequence,
@@ -332,6 +340,121 @@ impl StationStore {
             Err(sqlite_error(self.database))
         }
     }
+
+    /// Records a persistent reporting-lane failure and routes one deduplicated
+    /// durable alert through the normal outbox. This transaction is separate
+    /// from the failed projection transaction by design: an invalid journal
+    /// must never advance projection state merely because it can raise an
+    /// operator notification.
+    pub fn observe_asrun_projection_failure_and_route(
+        &self,
+        channel_id: &str,
+        detail: &str,
+        now: i64,
+    ) -> Result<AlertEvent, String> {
+        if !is_uuid(channel_id)
+            || detail.is_empty()
+            || detail.len() > 512
+            || detail.chars().any(char::is_control)
+            || now < 0
+        {
+            return Err("as-run projection failure alert is invalid".into());
+        }
+        let summary = "As-run/EPG projection needs operator attention.";
+        self.execute("BEGIN IMMEDIATE")?;
+        let mut recorded = None;
+        let outcome = (|| {
+            let statement = self.prepare("INSERT INTO asrun_epg_projection_failure(channel_id,detail,first_observed_at_utc_ms,last_observed_at_utc_ms,occurrence_count) VALUES(?1,?2,?3,?3,1) ON CONFLICT(channel_id) DO UPDATE SET detail=excluded.detail,last_observed_at_utc_ms=excluded.last_observed_at_utc_ms,occurrence_count=asrun_epg_projection_failure.occurrence_count+1")?;
+            bind_text(
+                self.database,
+                statement.raw,
+                1,
+                &c_string(channel_id, "channel")?,
+            )?;
+            bind_text(
+                self.database,
+                statement.raw,
+                2,
+                &c_string(detail, "as-run projection failure")?,
+            )?;
+            bind_i64(self.database, statement.raw, 3, now)?;
+            expect_done(self.database, statement.raw)?;
+
+            let current =
+                self.read_firing_alert(AlertConditionKind::AsRunProjectionFailure, channel_id)?;
+            if let Some(current) = &current
+                && current.summary == summary
+                && current.detail == detail
+                && current.source_section == "S23"
+            {
+                recorded = Some(current.clone());
+                return Ok(());
+            }
+            let event_id = match current {
+                Some(current) => current.event_id,
+                None => format!(
+                    "asrun-projection-failure-{channel_id}-{}",
+                    self.next_alert_episode_ordinal_locked(
+                        AlertConditionKind::AsRunProjectionFailure,
+                        channel_id,
+                    )?
+                ),
+            };
+            recorded = Some(self.observe_alert_and_route_locked(&AlertEvent {
+                event_id,
+                condition: AlertConditionKind::AsRunProjectionFailure,
+                severity: AlertSeverity::Warning,
+                state: AlertEventState::Firing,
+                resource_ref: channel_id.into(),
+                summary: summary.into(),
+                detail: detail.into(),
+                source_section: "S23".into(),
+                first_observed_at_unix_ms: now,
+                last_observed_at_unix_ms: now,
+                resolved_at_unix_ms: None,
+                occurrence_count: 1,
+                acknowledged_at_unix_ms: None,
+                acknowledged_by: None,
+            })?);
+            Ok(())
+        })();
+        self.finish_transaction(outcome)?;
+        recorded.ok_or_else(|| "as-run projection failure alert produced no event".into())
+    }
+
+    /// Resolves the projection-failure alert only after a successful durable
+    /// catch-up has committed. A failed or merely attempted reader pass never
+    /// clears the operator-visible condition.
+    pub fn resolve_asrun_projection_failure_after_catch_up(
+        &self,
+        channel_id: &str,
+        now: i64,
+    ) -> Result<Option<AlertEvent>, String> {
+        if !is_uuid(channel_id) || now < 0 {
+            return Err("as-run projection recovery alert is invalid".into());
+        }
+        self.execute("BEGIN IMMEDIATE")?;
+        let mut resolved = None;
+        let outcome = (|| {
+            let statement =
+                self.prepare("DELETE FROM asrun_epg_projection_failure WHERE channel_id=?1")?;
+            bind_text(
+                self.database,
+                statement.raw,
+                1,
+                &c_string(channel_id, "channel")?,
+            )?;
+            expect_done(self.database, statement.raw)?;
+            resolved = self.resolve_alert_locked(
+                AlertConditionKind::AsRunProjectionFailure,
+                channel_id,
+                now,
+            )?;
+            Ok(())
+        })();
+        self.finish_transaction(outcome)?;
+        Ok(resolved)
+    }
     fn read_asrun_evidence(
         &self,
         event_id: &str,
@@ -388,12 +511,11 @@ impl StationStore {
 }
 fn validate_projection(p: &AsRunProjectionRuntime, now: i64) -> Result<(), String> {
     if !is_uuid(&p.channel_id)
-        || p.station_timezone.trim().is_empty()
-        || p.entries.is_empty()
-        || p.entries.len() > 10_000
+        || jiff::tz::TimeZone::get(&p.station_timezone).is_err()
+        || p.entries.len() > 100_000
         || p.checkpoint.channel_id != p.channel_id
-        || p.checkpoint.journal_sequence != p.entries.last().unwrap().journal_sequence
-        || p.checkpoint.journal_hash != p.entries.last().unwrap().journal_hash
+        || p.checkpoint.journal_sequence == 0
+        || !sha(&p.checkpoint.journal_hash)
         || now < 0
         || !p
             .checkpoint
@@ -402,6 +524,58 @@ fn validate_projection(p: &AsRunProjectionRuntime, now: i64) -> Result<(), Strin
             .is_some_and(is_uuid)
     {
         return Err("as-run projection is invalid".into());
+    }
+    let legacy_materialized_sequence = if p.checkpoint.materialized_sequence == 0 {
+        p.checkpoint.journal_sequence
+    } else {
+        p.checkpoint.materialized_sequence
+    };
+    let legacy_materialized_hash = if p.checkpoint.materialized_hash.is_empty() {
+        &p.checkpoint.journal_hash
+    } else {
+        &p.checkpoint.materialized_hash
+    };
+    if !sha(legacy_materialized_hash)
+        || (p.checkpoint.reader_byte_offset == 0
+            && (!p.checkpoint.reader_prefix_hash.is_empty()
+                || !p.checkpoint.reader_file_identity.is_empty()
+                || p.checkpoint.reader_raw_sequence != 0))
+        || (p.checkpoint.reader_byte_offset > 0
+            && (p.checkpoint.reader_raw_sequence == 0
+                || !sha(&p.checkpoint.reader_prefix_hash)
+                || p.checkpoint.reader_file_identity.trim().is_empty()))
+    {
+        return Err("as-run reader checkpoint is invalid".into());
+    }
+    if let Some(window) = &p.window
+        && (window.local_date.len() != 10
+            || !window.local_date.bytes().enumerate().all(|(index, byte)| {
+                matches!(index, 4 | 7) && byte == b'-'
+                    || !matches!(index, 4 | 7) && byte.is_ascii_digit()
+            })
+            || window.starts_at_utc_ms < 0
+            || window.ends_at_utc_ms <= window.starts_at_utc_ms
+            || super::station_local_day_window(&p.station_timezone, window.starts_at_utc_ms)
+                .map_or(true, |expected| expected != *window))
+    {
+        return Err("as-run projection window is invalid".into());
+    }
+    if let Some(pending) = &p.checkpoint.pending_start
+        && (pending.journal_sequence == 0
+            || pending.started_at_unix_ms < 0
+            || pending.started_at_unix_ms > now
+            || !sha(&pending.journal_hash)
+            || pending.schedule_item_id.trim().is_empty()
+            || pending.schedule_item_id.len() > 240
+            || pending.asset_id.len() != 64
+            || !pending
+                .asset_id
+                .as_bytes()
+                .iter()
+                .all(u8::is_ascii_hexdigit)
+            || pending.schedule_item_revision == 0)
+    {
+        return Err("as-run pending transition is invalid".into());
     }
     let bytes = serde_json::to_vec(p).map_err(|e| e.to_string())?;
     if bytes.len() > MAX_PROJECTION_BYTES {
@@ -449,6 +623,15 @@ fn validate_projection(p: &AsRunProjectionRuntime, now: i64) -> Result<(), Strin
             return Err("as-run projection is noncontiguous".into());
         }
         prior = Some(e)
+    }
+    if let Some(last) = p.entries.last()
+        && (legacy_materialized_sequence != last.journal_sequence
+            || legacy_materialized_hash != &last.journal_hash)
+    {
+        return Err("as-run materialized checkpoint does not bind the projection output".into());
+    }
+    if p.entries.is_empty() && p.window.is_none() {
+        return Err("empty as-run projection has no durable projection window".into());
     }
     Ok(())
 }

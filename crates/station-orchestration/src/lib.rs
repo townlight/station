@@ -3748,6 +3748,10 @@ where
     let mut restart_attempts: HashMap<String, u32> = HashMap::new();
     let mut restart_after: HashMap<String, i64> = HashMap::new();
     let mut next_asrun_projection_after: HashMap<String, i64> = HashMap::new();
+    // A durable reader verifies its hash-chain prefix once after this service
+    // starts. Later 60-second passes seek from the persisted byte offset so
+    // reporting cannot add historical work to the 50 ms control loop.
+    let mut verified_asrun_reader_prefixes: HashSet<String> = HashSet::new();
     while !stop.load(Ordering::Acquire) {
         let now = system_time_millis()?;
         let store = StationStore::open(database_path).map_err(OrchestrationError::Storage)?;
@@ -3788,6 +3792,7 @@ where
             }
             restart_attempts.remove(&channel_id);
             restart_after.remove(&channel_id);
+            verified_asrun_reader_prefixes.remove(&channel_id);
         }
         for channel in channels.iter().filter(|channel| channel.enabled) {
             if !controllers.contains_key(&channel.channel_id) {
@@ -3929,7 +3934,6 @@ where
         // legitimately lack a closing lookahead, so an incomplete or corrupt
         // reporting lane is recoverable and must not terminate on-air control.
         if let Some(profile) = store.read_profile().map_err(OrchestrationError::Storage)? {
-            let day_start = dispatch_now - dispatch_now.rem_euclid(86_400_000);
             for channel in channels.iter().filter(|channel| channel.enabled) {
                 if next_asrun_projection_after
                     .get(&channel.channel_id)
@@ -3949,17 +3953,21 @@ where
                         &format!("station-worker-{}", channel.channel_id),
                         &channel.channel_id,
                         &profile.profile.timezone,
-                        day_start,
                         dispatch_now,
-                        dispatch_now,
+                        !verified_asrun_reader_prefixes.contains(&channel.channel_id),
                     ) {
                         Ok(_) => {
-                            let _ = store.resolve_asrun_projection_failure(&channel.channel_id);
+                            verified_asrun_reader_prefixes.insert(channel.channel_id.clone());
+                            let _ = store.resolve_asrun_projection_failure_after_catch_up(
+                                &channel.channel_id,
+                                dispatch_now,
+                            );
                         }
                         Err(error) => {
-                            let detail =
+                            let mut detail =
                                 format!("as-run projection is pending recovery: {error:?}");
-                            let _ = store.record_asrun_projection_failure(
+                            detail.truncate(512);
+                            let _ = store.observe_asrun_projection_failure_and_route(
                                 &channel.channel_id,
                                 &detail,
                                 dispatch_now,

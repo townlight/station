@@ -2036,6 +2036,7 @@ name = "station-storage"
 version = "0.1.0"
 dependencies = [
  "image",
+ "jiff",
  "serde",
  "serde_json",
  "sha2",

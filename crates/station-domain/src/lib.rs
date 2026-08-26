@@ -418,6 +418,7 @@ pub enum AlertConditionKind {
     UpdateCheckFailed,
     UpdateApplyFailed,
     ScheduleMaterializationFailure,
+    AsRunProjectionFailure,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

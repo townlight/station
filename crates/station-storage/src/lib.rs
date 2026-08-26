@@ -103,7 +103,9 @@ pub use asrun_epg_authority::{
     AsRunProjectionPage, AsRunProjectionWriteError, MAX_ASRUN_EPG_PAGE_SIZE,
 };
 mod asrun_journal_adapter;
-pub use asrun_journal_adapter::{AsRunJournalAdapterError, project_durable_journal};
+pub use asrun_journal_adapter::{
+    AsRunJournalAdapterError, project_durable_journal, station_local_day_window,
+};
 mod catalog_candidate_projection;
 pub use catalog_candidate_projection::CatalogCandidateProjection;
 mod materialization_evidence;
@@ -16650,6 +16652,7 @@ fn alert_condition_name(value: AlertConditionKind) -> &'static str {
         AlertConditionKind::UpdateCheckFailed => "update-check-failed",
         AlertConditionKind::UpdateApplyFailed => "update-apply-failed",
         AlertConditionKind::ScheduleMaterializationFailure => "schedule-materialization-failure",
+        AlertConditionKind::AsRunProjectionFailure => "as-run-projection-failure",
     }
 }
 
@@ -16678,6 +16681,7 @@ fn parse_alert_condition(value: &str) -> Result<AlertConditionKind, String> {
         "schedule-materialization-failure" => {
             Ok(AlertConditionKind::ScheduleMaterializationFailure)
         }
+        "as-run-projection-failure" => Ok(AlertConditionKind::AsRunProjectionFailure),
         _ => Err(format!("database returned invalid alert condition {value}")),
     }
 }
@@ -16766,6 +16770,11 @@ fn default_alert_rules() -> Vec<AlertRule> {
         ),
         (
             AlertConditionKind::ScheduleMaterializationFailure,
+            AlertSeverity::Warning,
+            1_800,
+        ),
+        (
+            AlertConditionKind::AsRunProjectionFailure,
             AlertSeverity::Warning,
             1_800,
         ),
@@ -20591,7 +20600,7 @@ mod tests {
             .unwrap();
         assert_eq!(delivery.notification_kind, AlertNotificationKind::Resolved);
         assert_eq!(delivery.state, AlertDeliveryState::Sent);
-        assert_eq!(migrated.list_alert_rules().unwrap().len(), 21);
+        assert_eq!(migrated.list_alert_rules().unwrap().len(), 22);
         drop(migrated);
         for candidate in [
             database.clone(),
