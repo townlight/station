@@ -5,7 +5,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use sha2::{Digest, Sha256};
 use station_catalog::{CatalogAssetRecord, CatalogEditorialState};
-use station_schedule::{AssetReadiness, MediaAsset};
+use station_schedule::{
+    AssetReadiness, ChannelConfiguration, MediaAsset, OutputProfileId, OutputSinkConfiguration,
+};
 use station_schedule_automation::{
     AssetPickStrategy, AssetPredicate, DaypartBlock, LocalDate, MaterializationWindow,
     RecurrenceTimeZone, RecurringRule, SavedSearch, SavedSearchOrder, SavedSearchQuery,
@@ -232,6 +234,20 @@ fn publish_candidate(store: &StationStore, database: &Path) {
 
 fn seed_store(database: &Path, short_enabled: bool, overlapping_slots: bool) -> StationStore {
     let store = StationStore::open(database).unwrap();
+    store
+        .put_channel(&ChannelConfiguration {
+            channel_id: CHANNEL.into(),
+            display_name: "Government".into(),
+            output_profile: OutputProfileId::Proof360p30,
+            output_sinks: vec![OutputSinkConfiguration::required_udp(
+                CHANNEL,
+                "Primary",
+                "127.0.0.1:5500",
+                -24.0,
+            )],
+            enabled: true,
+        })
+        .unwrap();
     store
         .write_saved_search(&saved_search(), None, "operator", 1)
         .unwrap();

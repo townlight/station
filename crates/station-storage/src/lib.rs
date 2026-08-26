@@ -96,10 +96,11 @@ mod materialization_evidence;
 pub use materialization_evidence::MaterializationEvidenceSnapshot;
 mod schedule_materialization;
 pub use schedule_materialization::{
-    ExistingScheduleSnapshot, ScheduleMaterializationApplyOutcome, ScheduleMaterializationOutcome,
-    ScheduleMaterializationOutcomeRecord, ScheduleMaterializationPlanRecord,
-    ScheduleMaterializationRun, ScheduleMaterializationSourceSnapshot,
-    ScheduleMaterializationWriteError,
+    AutomaticMaterializationChannelCheckpoint, ExistingScheduleSnapshot,
+    ScheduleMaterializationApplyOutcome, ScheduleMaterializationFailureClass,
+    ScheduleMaterializationOutcome, ScheduleMaterializationOutcomeRecord,
+    ScheduleMaterializationPlanRecord, ScheduleMaterializationRun,
+    ScheduleMaterializationSourceSnapshot, ScheduleMaterializationWriteError,
 };
 
 const SQLITE_OK: c_int = 0;
@@ -6966,36 +6967,102 @@ impl StationStore {
         self.execute("BEGIN IMMEDIATE")?;
         let mut recorded = None;
         let outcome = (|| {
-            let rule = self
-                .alert_rule_for_condition(proposed.condition)?
-                .ok_or_else(|| "alert condition has no configured rule".to_string())?;
-            if !rule.enabled
-                || rule
-                    .scope_channel_id
-                    .as_deref()
-                    .is_some_and(|scope| scope != proposed.resource_ref)
-            {
-                recorded = Some(proposed.clone());
-                return Ok(());
-            }
-            let mut ruled = proposed.clone();
-            ruled.severity = rule.severity;
-            let (event, is_first_observation) = self.observe_alert_locked(&ruled)?;
-            if is_first_observation {
-                self.route_alert_locked(
-                    &event,
-                    &rule,
-                    AlertNotificationKind::Firing,
-                    event.first_observed_at_unix_ms,
-                )?;
-            } else if rule.re_alert_after_seconds > 0 {
-                self.route_due_realerts_locked(&event, &rule, event.last_observed_at_unix_ms)?;
-            }
-            recorded = Some(event);
+            recorded = Some(self.observe_alert_and_route_locked(proposed)?);
             Ok(())
         })();
         self.finish_transaction(outcome)?;
         recorded.ok_or_else(|| "alert routing transaction produced no event".into())
+    }
+
+    /// Records one operator-visible automatic materialization failure per
+    /// unchanged typed class. The alert and its initial outbox deliveries share
+    /// this transaction, which is deliberately separate from the failed
+    /// materialization write transaction.
+    pub fn observe_schedule_materialization_failure_and_route(
+        &self,
+        channel_id: &str,
+        failure_class: ScheduleMaterializationFailureClass,
+        observed_at_unix_ms: i64,
+    ) -> Result<AlertEvent, String> {
+        if !is_canonical_uuid(channel_id) || observed_at_unix_ms < 0 {
+            return Err("automatic materialization failure alert input is invalid".into());
+        }
+        let summary = "Automatic recurring schedule materialization needs operator attention.";
+        let detail = schedule_materialization_failure_detail(failure_class);
+        self.execute("BEGIN IMMEDIATE")?;
+        let mut recorded = None;
+        let outcome = (|| {
+            let current = self.read_firing_alert(
+                AlertConditionKind::ScheduleMaterializationFailure,
+                channel_id,
+            )?;
+            if let Some(current) = &current
+                && current.summary == summary
+                && current.detail == detail
+                && current.source_section == "S19"
+            {
+                recorded = Some(current.clone());
+                return Ok(());
+            }
+            let event_id = match current {
+                Some(current) => current.event_id,
+                None => format!(
+                    "schedule-materialization-failure-{channel_id}-{}",
+                    self.next_alert_episode_ordinal_locked(
+                        AlertConditionKind::ScheduleMaterializationFailure,
+                        channel_id,
+                    )?
+                ),
+            };
+            recorded = Some(self.observe_alert_and_route_locked(&AlertEvent {
+                event_id,
+                condition: AlertConditionKind::ScheduleMaterializationFailure,
+                severity: AlertSeverity::Warning,
+                state: AlertEventState::Firing,
+                resource_ref: channel_id.into(),
+                summary: summary.into(),
+                detail: detail.into(),
+                source_section: "S19".into(),
+                first_observed_at_unix_ms: observed_at_unix_ms,
+                last_observed_at_unix_ms: observed_at_unix_ms,
+                resolved_at_unix_ms: None,
+                occurrence_count: 1,
+                acknowledged_at_unix_ms: None,
+                acknowledged_by: None,
+            })?);
+            Ok(())
+        })();
+        self.finish_transaction(outcome)?;
+        recorded.ok_or_else(|| "automatic materialization failure alert produced no event".into())
+    }
+
+    fn observe_alert_and_route_locked(&self, proposed: &AlertEvent) -> Result<AlertEvent, String> {
+        validate_new_alert_observation(proposed)?;
+        let rule = self
+            .alert_rule_for_condition(proposed.condition)?
+            .ok_or_else(|| "alert condition has no configured rule".to_string())?;
+        if !rule.enabled
+            || rule
+                .scope_channel_id
+                .as_deref()
+                .is_some_and(|scope| scope != proposed.resource_ref)
+        {
+            return Ok(proposed.clone());
+        }
+        let mut ruled = proposed.clone();
+        ruled.severity = rule.severity;
+        let (event, is_first_observation) = self.observe_alert_locked(&ruled)?;
+        if is_first_observation {
+            self.route_alert_locked(
+                &event,
+                &rule,
+                AlertNotificationKind::Firing,
+                event.first_observed_at_unix_ms,
+            )?;
+        } else if rule.re_alert_after_seconds > 0 {
+            self.route_due_realerts_locked(&event, &rule, event.last_observed_at_unix_ms)?;
+        }
+        Ok(event)
     }
 
     fn observe_alert_locked(&self, proposed: &AlertEvent) -> Result<(AlertEvent, bool), String> {
@@ -7039,6 +7106,27 @@ impl StationStore {
         }
         self.insert_alert(proposed)?;
         Ok((proposed.clone(), true))
+    }
+
+    fn next_alert_episode_ordinal_locked(
+        &self,
+        condition: AlertConditionKind,
+        resource_ref: &str,
+    ) -> Result<u64, String> {
+        let statement = self
+            .prepare("SELECT COUNT(*) FROM alert_events WHERE condition=?1 AND resource_ref=?2")?;
+        let condition = c_string(alert_condition_name(condition), "alert condition")?;
+        let resource_ref = c_string(resource_ref, "alert resource")?;
+        bind_text(self.database, statement.raw, 1, &condition)?;
+        bind_text(self.database, statement.raw, 2, &resource_ref)?;
+        if unsafe { sqlite3_step(statement.raw) } != SQLITE_ROW {
+            return Err("alert episode count is unavailable".into());
+        }
+        let count = u64::try_from(unsafe { sqlite3_column_int64(statement.raw, 0) })
+            .map_err(|_| "alert episode count is invalid".to_string())?;
+        count
+            .checked_add(1)
+            .ok_or_else(|| "alert episode count overflowed".into())
     }
 
     fn route_alert_locked(
@@ -7184,52 +7272,64 @@ impl StationStore {
         self.execute("BEGIN IMMEDIATE")?;
         let mut resolved = None;
         let outcome = (|| {
-            let statement = self.prepare(
-                "UPDATE alert_events SET state='resolved', resolved_at_unix_ms=?1 \
-                 WHERE condition=?2 AND resource_ref=?3 AND state='firing' AND last_observed_at_unix_ms<=?1",
-            )?;
-            let condition = c_string(alert_condition_name(condition), "alert condition")?;
-            let resource_ref = c_string(resource_ref, "alert resource")?;
-            bind_i64(self.database, statement.raw, 1, resolved_at_unix_ms)?;
-            bind_text(self.database, statement.raw, 2, &condition)?;
-            bind_text(self.database, statement.raw, 3, &resource_ref)?;
-            expect_done(self.database, statement.raw)?;
-            if self.changes() == 0 {
-                return Ok(());
-            }
-            let statement = self.prepare(
-                "SELECT event_id, condition, severity, state, resource_ref, summary, detail, source_section, \
-                 first_observed_at_unix_ms, last_observed_at_unix_ms, resolved_at_unix_ms, occurrence_count, \
-                 acknowledged_at_unix_ms, acknowledged_by FROM alert_events \
-                 WHERE condition=?1 AND resource_ref=?2 AND resolved_at_unix_ms=?3 ORDER BY rowid DESC LIMIT 1",
-            )?;
-            bind_text(self.database, statement.raw, 1, &condition)?;
-            bind_text(self.database, statement.raw, 2, &resource_ref)?;
-            bind_i64(self.database, statement.raw, 3, resolved_at_unix_ms)?;
-            let event = match unsafe { sqlite3_step(statement.raw) } {
-                SQLITE_ROW => read_alert_event_row(statement.raw)?,
-                _ => return Err("resolved alert disappeared".into()),
-            };
-            if let Some(rule) = self.alert_rule_for_condition(event.condition)?
-                && rule.enabled
-                && rule.notify_on_resolve
-                && !rule
-                    .scope_channel_id
-                    .as_deref()
-                    .is_some_and(|scope| scope != event.resource_ref)
-            {
-                self.route_alert_locked(
-                    &event,
-                    &rule,
-                    AlertNotificationKind::Resolved,
-                    resolved_at_unix_ms,
-                )?;
-            }
-            resolved = Some(event);
+            resolved = self.resolve_alert_locked(condition, resource_ref, resolved_at_unix_ms)?;
             Ok(())
         })();
         self.finish_transaction(outcome)?;
         Ok(resolved)
+    }
+
+    fn resolve_alert_locked(
+        &self,
+        condition: AlertConditionKind,
+        resource_ref: &str,
+        resolved_at_unix_ms: i64,
+    ) -> Result<Option<AlertEvent>, String> {
+        if resolved_at_unix_ms < 0 {
+            return Err("alert resolution time must be nonnegative".into());
+        }
+        let statement = self.prepare(
+            "UPDATE alert_events SET state='resolved', resolved_at_unix_ms=?1 \
+             WHERE condition=?2 AND resource_ref=?3 AND state='firing' AND last_observed_at_unix_ms<=?1",
+        )?;
+        let condition_name = c_string(alert_condition_name(condition), "alert condition")?;
+        let resource = c_string(resource_ref, "alert resource")?;
+        bind_i64(self.database, statement.raw, 1, resolved_at_unix_ms)?;
+        bind_text(self.database, statement.raw, 2, &condition_name)?;
+        bind_text(self.database, statement.raw, 3, &resource)?;
+        expect_done(self.database, statement.raw)?;
+        if self.changes() == 0 {
+            return Ok(None);
+        }
+        let statement = self.prepare(
+            "SELECT event_id, condition, severity, state, resource_ref, summary, detail, source_section, \
+             first_observed_at_unix_ms, last_observed_at_unix_ms, resolved_at_unix_ms, occurrence_count, \
+             acknowledged_at_unix_ms, acknowledged_by FROM alert_events \
+             WHERE condition=?1 AND resource_ref=?2 AND resolved_at_unix_ms=?3 ORDER BY rowid DESC LIMIT 1",
+        )?;
+        bind_text(self.database, statement.raw, 1, &condition_name)?;
+        bind_text(self.database, statement.raw, 2, &resource)?;
+        bind_i64(self.database, statement.raw, 3, resolved_at_unix_ms)?;
+        let event = match unsafe { sqlite3_step(statement.raw) } {
+            SQLITE_ROW => read_alert_event_row(statement.raw)?,
+            _ => return Err("resolved alert disappeared".into()),
+        };
+        if let Some(rule) = self.alert_rule_for_condition(event.condition)?
+            && rule.enabled
+            && rule.notify_on_resolve
+            && !rule
+                .scope_channel_id
+                .as_deref()
+                .is_some_and(|scope| scope != event.resource_ref)
+        {
+            self.route_alert_locked(
+                &event,
+                &rule,
+                AlertNotificationKind::Resolved,
+                resolved_at_unix_ms,
+            )?;
+        }
+        Ok(Some(event))
     }
 
     pub fn read_alert_event(&self, event_id: &str) -> Result<Option<AlertEvent>, String> {
@@ -15512,6 +15612,7 @@ fn alert_condition_name(value: AlertConditionKind) -> &'static str {
         AlertConditionKind::RelayBlocked => "relay-blocked",
         AlertConditionKind::ComplianceProbeFail => "compliance-probe-fail",
         AlertConditionKind::MissingMedia => "missing-media",
+        AlertConditionKind::ScheduleNoMatch => "schedule-no-match",
         AlertConditionKind::CommitFailure => "commit-failure",
         AlertConditionKind::TakeoverStuck2h => "takeover-stuck-2h",
         AlertConditionKind::AiRuntimeDown => "ai-runtime-down",
@@ -15523,6 +15624,7 @@ fn alert_condition_name(value: AlertConditionKind) -> &'static str {
         AlertConditionKind::UpdateAvailable => "update-available",
         AlertConditionKind::UpdateCheckFailed => "update-check-failed",
         AlertConditionKind::UpdateApplyFailed => "update-apply-failed",
+        AlertConditionKind::ScheduleMaterializationFailure => "schedule-materialization-failure",
     }
 }
 
@@ -15536,6 +15638,7 @@ fn parse_alert_condition(value: &str) -> Result<AlertConditionKind, String> {
         "relay-blocked" => Ok(AlertConditionKind::RelayBlocked),
         "compliance-probe-fail" => Ok(AlertConditionKind::ComplianceProbeFail),
         "missing-media" => Ok(AlertConditionKind::MissingMedia),
+        "schedule-no-match" => Ok(AlertConditionKind::ScheduleNoMatch),
         "commit-failure" => Ok(AlertConditionKind::CommitFailure),
         "takeover-stuck-2h" => Ok(AlertConditionKind::TakeoverStuck2h),
         "ai-runtime-down" => Ok(AlertConditionKind::AiRuntimeDown),
@@ -15547,6 +15650,9 @@ fn parse_alert_condition(value: &str) -> Result<AlertConditionKind, String> {
         "update-available" => Ok(AlertConditionKind::UpdateAvailable),
         "update-check-failed" => Ok(AlertConditionKind::UpdateCheckFailed),
         "update-apply-failed" => Ok(AlertConditionKind::UpdateApplyFailed),
+        "schedule-materialization-failure" => {
+            Ok(AlertConditionKind::ScheduleMaterializationFailure)
+        }
         _ => Err(format!("database returned invalid alert condition {value}")),
     }
 }
@@ -15581,6 +15687,11 @@ fn default_alert_rules() -> Vec<AlertRule> {
             3_600,
         ),
         (AlertConditionKind::MissingMedia, AlertSeverity::Critical, 0),
+        (
+            AlertConditionKind::ScheduleNoMatch,
+            AlertSeverity::Warning,
+            21_600,
+        ),
         (
             AlertConditionKind::CommitFailure,
             AlertSeverity::Warning,
@@ -15628,6 +15739,11 @@ fn default_alert_rules() -> Vec<AlertRule> {
             AlertSeverity::Critical,
             3_600,
         ),
+        (
+            AlertConditionKind::ScheduleMaterializationFailure,
+            AlertSeverity::Warning,
+            1_800,
+        ),
     ];
     definitions
         .into_iter()
@@ -15645,6 +15761,31 @@ fn default_alert_rules() -> Vec<AlertRule> {
             updated_by: "system-seed".into(),
         })
         .collect()
+}
+
+fn schedule_materialization_failure_detail(
+    failure_class: ScheduleMaterializationFailureClass,
+) -> &'static str {
+    match failure_class {
+        ScheduleMaterializationFailureClass::ChannelDisabled => {
+            "Typed automatic materialization failure class: channel-disabled."
+        }
+        ScheduleMaterializationFailureClass::StaleAuthority => {
+            "Typed automatic materialization failure class: stale-authority."
+        }
+        ScheduleMaterializationFailureClass::InvalidDerivedInput => {
+            "Typed automatic materialization failure class: invalid-derived-input."
+        }
+        ScheduleMaterializationFailureClass::Capacity => {
+            "Typed automatic materialization failure class: capacity."
+        }
+        ScheduleMaterializationFailureClass::Integrity => {
+            "Typed automatic materialization failure class: integrity."
+        }
+        ScheduleMaterializationFailureClass::Storage => {
+            "Typed automatic materialization failure class: storage."
+        }
+    }
 }
 
 fn alert_severity_name(value: AlertSeverity) -> &'static str {
@@ -19380,7 +19521,7 @@ mod tests {
             .unwrap();
         assert_eq!(delivery.notification_kind, AlertNotificationKind::Resolved);
         assert_eq!(delivery.state, AlertDeliveryState::Sent);
-        assert_eq!(migrated.list_alert_rules().unwrap().len(), 19);
+        assert_eq!(migrated.list_alert_rules().unwrap().len(), 21);
         drop(migrated);
         for candidate in [
             database.clone(),

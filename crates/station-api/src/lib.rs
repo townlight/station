@@ -16514,7 +16514,7 @@ mod tests {
                     "127.0.0.1:5500",
                     -16.0,
                 )],
-                enabled: false,
+                enabled: true,
             })
             .unwrap();
         seed_source_evidence_authorities(&api, &search, &block, &rule);

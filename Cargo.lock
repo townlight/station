@@ -1865,6 +1865,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "station-materialization-control"
+version = "0.1.0"
+
+[[package]]
 name = "station-media-assets"
 version = "0.1.0"
 dependencies = [
@@ -2131,9 +2135,11 @@ dependencies = [
  "station-alerting",
  "station-api",
  "station-auth",
+ "station-domain",
  "station-feed-fetch",
  "station-ingest",
  "station-maintenance",
+ "station-materialization-control",
  "station-orchestration",
  "station-readiness",
  "station-source-evidence",

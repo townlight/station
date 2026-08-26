@@ -12,10 +12,19 @@ use std::time::Duration;
 
 use config::{DaemonConfig, LaunchMode};
 use station_api::{OrchestrationHealth, OrchestrationHealthStatus};
+use station_materialization_control::{
+    AutomaticMaterializationBackend, AutomaticMaterializationSupervisor, BackendReadError,
+    ChannelCheckpoint, ChannelMaterializationError, ClockFailure, MaterializationAlertError,
+    MaterializationApplyOutcome, SYSTEM_ACTOR_ID, SupervisorConfig, UtcClock,
+    ValidatedRunCheckpoint,
+};
 use station_orchestration::CandidateAuthority;
 use station_readiness::CandidateIdentity;
 use station_source_evidence::StationSourceEvidenceAuthority;
-use station_storage::StationStore;
+use station_storage::{
+    ScheduleMaterializationApplyOutcome, ScheduleMaterializationFailureClass,
+    ScheduleMaterializationRun, ScheduleMaterializationWriteError, StationStore,
+};
 use windows_service::define_windows_service;
 use windows_service::service::{
     ServiceControl, ServiceControlAccept, ServiceExitCode, ServiceState, ServiceStatus, ServiceType,
@@ -36,6 +45,163 @@ static SERVICE_CONFIG: OnceLock<DaemonConfig> = OnceLock::new();
 struct InstalledCandidateAuthority {
     data_directory: PathBuf,
     application_root: PathBuf,
+}
+
+#[derive(Clone, Copy)]
+struct SystemUtcClock;
+
+impl UtcClock for SystemUtcClock {
+    fn now_utc_ms(&self) -> Result<i64, ClockFailure> {
+        let elapsed = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|_| ClockFailure::Unavailable)?;
+        i64::try_from(elapsed.as_millis()).map_err(|_| ClockFailure::Overflow)
+    }
+}
+
+#[derive(Clone)]
+struct StationAutomaticMaterializationBackend {
+    database: PathBuf,
+}
+
+impl AutomaticMaterializationBackend<StationSourceEvidenceAuthority>
+    for StationAutomaticMaterializationBackend
+{
+    fn enabled_channel_checkpoints(&self) -> Result<Vec<ChannelCheckpoint>, BackendReadError> {
+        let store =
+            StationStore::open(&self.database).map_err(|_| BackendReadError::Unavailable)?;
+        store
+            .list_automatic_materialization_channel_checkpoints()
+            .map_err(|_| BackendReadError::CorruptNewestCheckpoint)?
+            .into_iter()
+            .map(|checkpoint| {
+                Ok(ChannelCheckpoint {
+                    channel_id: checkpoint.channel_id.clone(),
+                    last_successful_run: checkpoint
+                        .latest_run
+                        .map(|run| checkpoint_from_materialization_run(&checkpoint.channel_id, run))
+                        .transpose()
+                        .map_err(|_| BackendReadError::CorruptNewestCheckpoint)?,
+                })
+            })
+            .collect()
+    }
+
+    fn materialize_channel(
+        &self,
+        channel_id: &str,
+        actor_id: &str,
+        boot_authority: &Arc<StationSourceEvidenceAuthority>,
+    ) -> Result<MaterializationApplyOutcome, ChannelMaterializationError> {
+        if actor_id != SYSTEM_ACTOR_ID {
+            return Err(ChannelMaterializationError::InvalidDerivedInput);
+        }
+        let store =
+            StationStore::open(&self.database).map_err(|_| ChannelMaterializationError::Storage)?;
+        let outcome = store
+            .materialize_scheduled_channel(channel_id, actor_id, boot_authority.as_ref())
+            .map_err(map_materialization_write_error)?;
+        match outcome {
+            ScheduleMaterializationApplyOutcome::Applied(run) => {
+                checkpoint_from_materialization_run(channel_id, run)
+                    .map(MaterializationApplyOutcome::Applied)
+            }
+            ScheduleMaterializationApplyOutcome::AlreadyApplied(run) => {
+                checkpoint_from_materialization_run(channel_id, run)
+                    .map(MaterializationApplyOutcome::AlreadyApplied)
+            }
+        }
+    }
+
+    fn observe_materialization_failure(
+        &self,
+        channel_id: &str,
+        error: ChannelMaterializationError,
+        observed_at_utc_ms: i64,
+    ) -> Result<(), MaterializationAlertError> {
+        let store =
+            StationStore::open(&self.database).map_err(|_| MaterializationAlertError::Storage)?;
+        store
+            .observe_schedule_materialization_failure_and_route(
+                channel_id,
+                materialization_failure_class(error),
+                observed_at_utc_ms,
+            )
+            .map(|_| ())
+            .map_err(|_| MaterializationAlertError::Storage)
+    }
+
+    fn resolve_materialization_failure(
+        &self,
+        channel_id: &str,
+        resolved_at_utc_ms: i64,
+    ) -> Result<(), MaterializationAlertError> {
+        let store =
+            StationStore::open(&self.database).map_err(|_| MaterializationAlertError::Storage)?;
+        store
+            .resolve_alert(
+                station_domain::AlertConditionKind::ScheduleMaterializationFailure,
+                channel_id,
+                resolved_at_utc_ms,
+            )
+            .map(|_| ())
+            .map_err(|_| MaterializationAlertError::Storage)
+    }
+}
+
+fn checkpoint_from_materialization_run(
+    channel_id: &str,
+    run: ScheduleMaterializationRun,
+) -> Result<ValidatedRunCheckpoint, ChannelMaterializationError> {
+    if run.plans.iter().any(|plan| plan.channel_id != channel_id)
+        || run
+            .outcomes
+            .iter()
+            .any(|outcome| outcome.channel_id != channel_id)
+    {
+        return Err(ChannelMaterializationError::Integrity);
+    }
+    Ok(ValidatedRunCheckpoint {
+        channel_id: channel_id.into(),
+        run_id: run.run_id,
+        result_sha256: run.result_sha256,
+        completed_at_utc_ms: run.occurred_at_unix_ms,
+    })
+}
+
+fn map_materialization_write_error(
+    error: ScheduleMaterializationWriteError,
+) -> ChannelMaterializationError {
+    match error {
+        ScheduleMaterializationWriteError::Invalid(_) => {
+            ChannelMaterializationError::InvalidDerivedInput
+        }
+        ScheduleMaterializationWriteError::StaleAuthority(_) => {
+            ChannelMaterializationError::StaleAuthority
+        }
+        ScheduleMaterializationWriteError::Collision(_) => ChannelMaterializationError::Integrity,
+        ScheduleMaterializationWriteError::Capacity => ChannelMaterializationError::Capacity,
+        ScheduleMaterializationWriteError::Storage(_) => ChannelMaterializationError::Storage,
+    }
+}
+
+fn materialization_failure_class(
+    error: ChannelMaterializationError,
+) -> ScheduleMaterializationFailureClass {
+    match error {
+        ChannelMaterializationError::ChannelDisabled => {
+            ScheduleMaterializationFailureClass::ChannelDisabled
+        }
+        ChannelMaterializationError::StaleAuthority => {
+            ScheduleMaterializationFailureClass::StaleAuthority
+        }
+        ChannelMaterializationError::InvalidDerivedInput => {
+            ScheduleMaterializationFailureClass::InvalidDerivedInput
+        }
+        ChannelMaterializationError::Capacity => ScheduleMaterializationFailureClass::Capacity,
+        ChannelMaterializationError::Integrity => ScheduleMaterializationFailureClass::Integrity,
+        ChannelMaterializationError::Storage => ScheduleMaterializationFailureClass::Storage,
+    }
 }
 
 impl CandidateAuthority for InstalledCandidateAuthority {
@@ -139,6 +305,29 @@ fn run_console(config: DaemonConfig) -> Result<(), String> {
                 return Err(append_cleanup_error(error, cleanup.result));
             }
         };
+    let automatic_receipt = config
+        .database
+        .with_file_name("automatic-materialization-error.txt");
+    let automatic_materialization = match spawn_station_automatic_materialization(
+        &config.database,
+        Arc::clone(&stop),
+        Arc::clone(&source_evidence_authority),
+        Some(automatic_receipt),
+    ) {
+        Ok(worker) => worker,
+        Err(error) => {
+            stop.store(true, Ordering::Release);
+            let cleanup = combine_worker_joins(vec![
+                join_worker(
+                    "channel orchestration",
+                    orchestration,
+                    orchestration_join_timeout(&orchestration_health),
+                ),
+                join_worker("feed fetch worker", feed_fetch, WORKER_SHUTDOWN_TIMEOUT),
+            ]);
+            return Err(append_cleanup_error(error, cleanup.result));
+        }
+    };
     let ingest_database = config.database.clone();
     let ingest_library = media_library(&config.database);
     let ingest_stop = Arc::clone(&stop);
@@ -177,6 +366,11 @@ fn run_console(config: DaemonConfig) -> Result<(), String> {
         join_worker("operator alerting", alerting, WORKER_SHUTDOWN_TIMEOUT),
         join_worker("update monitor", updates, WORKER_SHUTDOWN_TIMEOUT),
         join_worker("feed fetch worker", feed_fetch, WORKER_SHUTDOWN_TIMEOUT),
+        join_worker(
+            "automatic materialization",
+            automatic_materialization,
+            WORKER_SHUTDOWN_TIMEOUT,
+        ),
     ]);
     result.and(worker_cleanup.result)
 }
@@ -325,6 +519,38 @@ fn run_service(config: DaemonConfig) -> Result<(), String> {
                 return Err(append_cleanup_error(error, cleanup.result));
             }
         };
+    let automatic_receipt = config
+        .database
+        .with_file_name("automatic-materialization-error.txt");
+    let automatic_materialization = match spawn_station_automatic_materialization(
+        &config.database,
+        Arc::clone(&stop),
+        Arc::clone(&source_evidence_authority),
+        Some(automatic_receipt),
+    ) {
+        Ok(worker) => worker,
+        Err(error) => {
+            stop.store(true, Ordering::Release);
+            let cleanup = combine_worker_joins(vec![
+                join_worker(
+                    "channel orchestration",
+                    orchestration,
+                    orchestration_join_timeout(&orchestration_health),
+                ),
+                join_worker("feed fetch worker", feed_fetch, WORKER_SHUTDOWN_TIMEOUT),
+            ]);
+            if cleanup.joined {
+                let _ = status.set_service_status(service_status(
+                    ServiceState::Stopped,
+                    ServiceControlAccept::empty(),
+                    0,
+                    Duration::ZERO,
+                    ServiceExitCode::ServiceSpecific(1),
+                ));
+            }
+            return Err(append_cleanup_error(error, cleanup.result));
+        }
+    };
     let ingest_database = config.database.clone();
     let ingest_library = media_library(&config.database);
     let ingest_stop = Arc::clone(&stop);
@@ -378,6 +604,11 @@ fn run_service(config: DaemonConfig) -> Result<(), String> {
             join_worker("operator alerting", alerting, WORKER_SHUTDOWN_TIMEOUT),
             join_worker("update monitor", updates, WORKER_SHUTDOWN_TIMEOUT),
             join_worker("feed fetch worker", feed_fetch, WORKER_SHUTDOWN_TIMEOUT),
+            join_worker(
+                "automatic materialization",
+                automatic_materialization,
+                WORKER_SHUTDOWN_TIMEOUT,
+            ),
         ]);
         if cleanup.joined {
             let _ = status.set_service_status(service_status(
@@ -409,6 +640,11 @@ fn run_service(config: DaemonConfig) -> Result<(), String> {
         join_worker("operator alerting", alerting, WORKER_SHUTDOWN_TIMEOUT),
         join_worker("update monitor", updates, WORKER_SHUTDOWN_TIMEOUT),
         join_worker("feed fetch worker", feed_fetch, WORKER_SHUTDOWN_TIMEOUT),
+        join_worker(
+            "automatic materialization",
+            automatic_materialization,
+            WORKER_SHUTDOWN_TIMEOUT,
+        ),
     ]);
     let result = result.and(worker_cleanup.result);
     if !worker_cleanup.joined {
@@ -531,6 +767,67 @@ where
             result
         })
         .map_err(|error| format!("could not start channel orchestration thread: {error}"))
+}
+
+fn spawn_supervised_automatic_materialization<A, F>(
+    stop: Arc<AtomicBool>,
+    authority: Arc<A>,
+    receipt: Option<PathBuf>,
+    run: F,
+) -> Result<std::thread::JoinHandle<Result<(), String>>, String>
+where
+    A: Send + Sync + 'static,
+    F: FnOnce(Arc<AtomicBool>, Arc<A>) -> Result<(), String> + Send + 'static,
+{
+    let worker_stop = Arc::clone(&stop);
+    std::thread::Builder::new()
+        .name("station-automatic-materialization".into())
+        .spawn(move || {
+            let result = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                run(Arc::clone(&worker_stop), authority)
+            })) {
+                Ok(Ok(())) if worker_stop.load(Ordering::Acquire) => Ok(()),
+                Ok(Ok(())) => Err("automatic materialization stopped unexpectedly".into()),
+                Ok(Err(_)) => Err("automatic materialization controller failed".into()),
+                Err(_) => Err("automatic materialization thread panicked".into()),
+            };
+            if let Err(error) = &result {
+                worker_stop.store(true, Ordering::Release);
+                if let Some(receipt) = receipt {
+                    let _ = std::fs::write(receipt, error);
+                }
+            }
+            result
+        })
+        .map_err(|error| format!("could not start automatic materialization thread: {error}"))
+}
+
+fn spawn_station_automatic_materialization(
+    database: &Path,
+    stop: Arc<AtomicBool>,
+    authority: Arc<StationSourceEvidenceAuthority>,
+    receipt: Option<PathBuf>,
+) -> Result<std::thread::JoinHandle<Result<(), String>>, String> {
+    let backend = StationAutomaticMaterializationBackend {
+        database: database.to_path_buf(),
+    };
+    spawn_supervised_automatic_materialization(
+        stop,
+        authority,
+        receipt,
+        move |worker_stop, boot_authority| {
+            let mut supervisor = AutomaticMaterializationSupervisor::new(
+                SystemUtcClock,
+                backend,
+                boot_authority,
+                SupervisorConfig::default(),
+            )
+            .map_err(|_| "automatic materialization configuration failed".to_string())?;
+            supervisor
+                .run_until_stopped(&worker_stop)
+                .map_err(|_| "automatic materialization controller failed".to_string())
+        },
+    )
 }
 
 fn wait_for_orchestration_ready(
@@ -731,6 +1028,238 @@ mod startup_tests {
         assert_eq!(result, Err("channel orchestration thread panicked".into()));
         assert_eq!(health.status(), OrchestrationHealthStatus::Failed);
         assert!(stop.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn automatic_materialization_error_requests_global_stop_and_redacts_receipt() {
+        let stop = Arc::new(AtomicBool::new(false));
+        let authority = Arc::new(7_u64);
+        let root = std::env::temp_dir().join(format!(
+            "townlight-materialization-supervision-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let receipt = root.join("automatic-materialization-error.txt");
+
+        let worker = spawn_supervised_automatic_materialization(
+            Arc::clone(&stop),
+            authority,
+            Some(receipt.clone()),
+            |_stop, _authority| Err("secret database detail".into()),
+        )
+        .unwrap();
+        let result = worker.join().unwrap();
+
+        assert_eq!(
+            result,
+            Err("automatic materialization controller failed".into())
+        );
+        assert!(stop.load(Ordering::Acquire));
+        assert_eq!(
+            std::fs::read_to_string(&receipt).unwrap(),
+            "automatic materialization controller failed"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn automatic_materialization_reuses_exact_boot_authority_and_accepts_requested_stop() {
+        let stop = Arc::new(AtomicBool::new(false));
+        let authority = Arc::new(7_u64);
+        let expected = Arc::as_ptr(&authority) as usize;
+        let worker = spawn_supervised_automatic_materialization(
+            Arc::clone(&stop),
+            Arc::clone(&authority),
+            None,
+            move |worker_stop, worker_authority| {
+                assert_eq!(Arc::as_ptr(&worker_authority) as usize, expected);
+                worker_stop.store(true, Ordering::Release);
+                Ok(())
+            },
+        )
+        .unwrap();
+
+        assert_eq!(worker.join().unwrap(), Ok(()));
+        assert!(stop.load(Ordering::Acquire));
+        assert_eq!(Arc::strong_count(&authority), 1);
+    }
+
+    #[test]
+    fn automatic_materialization_panic_requests_stop_and_writes_bounded_receipt() {
+        let stop = Arc::new(AtomicBool::new(false));
+        let root = std::env::temp_dir().join(format!(
+            "townlight-materialization-panic-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let receipt = root.join("automatic-materialization-error.txt");
+        let worker = spawn_supervised_automatic_materialization(
+            Arc::clone(&stop),
+            Arc::new(()),
+            Some(receipt.clone()),
+            |_stop, _authority| panic!("sensitive panic payload"),
+        )
+        .unwrap();
+
+        assert_eq!(
+            worker.join().unwrap(),
+            Err("automatic materialization thread panicked".into())
+        );
+        assert!(stop.load(Ordering::Acquire));
+        assert_eq!(
+            std::fs::read_to_string(&receipt).unwrap(),
+            "automatic materialization thread panicked"
+        );
+        assert!(std::fs::metadata(&receipt).unwrap().len() < 128);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn automatic_materialization_early_success_is_a_global_failure() {
+        let stop = Arc::new(AtomicBool::new(false));
+        let worker = spawn_supervised_automatic_materialization(
+            Arc::clone(&stop),
+            Arc::new(()),
+            None,
+            |_stop, _authority| Ok(()),
+        )
+        .unwrap();
+
+        assert_eq!(
+            worker.join().unwrap(),
+            Err("automatic materialization stopped unexpectedly".into())
+        );
+        assert!(stop.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn automatic_materialization_storage_adapter_reads_one_empty_eligible_snapshot() {
+        let root = std::env::temp_dir().join(format!(
+            "townlight-materialization-adapter-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let database = root.join("station.db");
+        initialize_database(&database).unwrap();
+        let backend = StationAutomaticMaterializationBackend { database };
+
+        assert_eq!(backend.enabled_channel_checkpoints().unwrap(), Vec::new());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn automatic_materialization_adapter_persists_typed_failure_and_resolves_it() {
+        let root = std::env::temp_dir().join(format!(
+            "townlight-materialization-alert-adapter-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let database = root.join("station.db");
+        initialize_database(&database).unwrap();
+        let backend = StationAutomaticMaterializationBackend {
+            database: database.clone(),
+        };
+        let channel_id = "10000000-0000-4000-8000-000000000001";
+
+        backend
+            .observe_materialization_failure(
+                channel_id,
+                ChannelMaterializationError::Storage,
+                1_000,
+            )
+            .unwrap();
+        let event = StationStore::open(&database)
+            .unwrap()
+            .list_alert_events()
+            .unwrap()
+            .into_iter()
+            .find(|event| event.resource_ref == channel_id)
+            .unwrap();
+        assert_eq!(
+            event.condition,
+            station_domain::AlertConditionKind::ScheduleMaterializationFailure
+        );
+        assert_eq!(
+            event.detail,
+            "Typed automatic materialization failure class: storage."
+        );
+
+        backend
+            .resolve_materialization_failure(channel_id, 2_000)
+            .unwrap();
+        let resolved = StationStore::open(&database)
+            .unwrap()
+            .read_alert_event(&event.event_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(resolved.state, station_domain::AlertEventState::Resolved);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn automatic_materialization_adapter_rejects_any_non_system_actor_before_storage() {
+        let backend = StationAutomaticMaterializationBackend {
+            database: PathBuf::from(r"Z:\does-not-exist\station.db"),
+        };
+        let authority = Arc::new(StationSourceEvidenceAuthority::new().unwrap());
+
+        assert_eq!(
+            backend.materialize_channel(
+                "10000000-0000-4000-8000-000000000001",
+                "browser-supplied-actor",
+                &authority,
+            ),
+            Err(ChannelMaterializationError::InvalidDerivedInput)
+        );
+    }
+
+    #[test]
+    fn system_materialization_clock_is_nonnegative_utc_milliseconds() {
+        assert!(SystemUtcClock.now_utc_ms().unwrap() > 1_500_000_000_000);
+    }
+
+    #[test]
+    fn automatic_materialization_write_errors_keep_typed_isolation_contract() {
+        assert_eq!(
+            map_materialization_write_error(ScheduleMaterializationWriteError::Invalid(
+                "redacted".into()
+            )),
+            ChannelMaterializationError::InvalidDerivedInput
+        );
+        assert_eq!(
+            map_materialization_write_error(ScheduleMaterializationWriteError::StaleAuthority(
+                "redacted".into()
+            )),
+            ChannelMaterializationError::StaleAuthority
+        );
+        assert_eq!(
+            map_materialization_write_error(ScheduleMaterializationWriteError::Collision(
+                "redacted".into()
+            )),
+            ChannelMaterializationError::Integrity
+        );
+        assert_eq!(
+            map_materialization_write_error(ScheduleMaterializationWriteError::Capacity),
+            ChannelMaterializationError::Capacity
+        );
+        assert_eq!(
+            map_materialization_write_error(ScheduleMaterializationWriteError::Storage(
+                "redacted".into()
+            )),
+            ChannelMaterializationError::Storage
+        );
     }
 
     #[test]

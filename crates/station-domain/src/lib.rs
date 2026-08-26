@@ -398,6 +398,7 @@ pub enum AlertConditionKind {
     RelayBlocked,
     ComplianceProbeFail,
     MissingMedia,
+    ScheduleNoMatch,
     CommitFailure,
     TakeoverStuck2h,
     AiRuntimeDown,
@@ -409,6 +410,7 @@ pub enum AlertConditionKind {
     UpdateAvailable,
     UpdateCheckFailed,
     UpdateApplyFailed,
+    ScheduleMaterializationFailure,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

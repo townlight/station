@@ -185,9 +185,17 @@ through the existing S4 review and commit boundary.
 This decision provides the transactional storage writer, deterministic retry
 and occurrence mapping, immutable provenance, collision policy, and Draft-only
 handoff contract, authenticated bodyless materialization API, and the bounded
-operator generation card. It does not provide preview or rule simulation,
-automatic rolling invocation, a materialization-run read/list/history API or
-screen, filler alerting, bulk approval, automatic commit or dispatch,
-installed-machine evidence, or one- and three-station field proof. Those
+operator generation card. ADR 0073 adds a supervised stationd control-plane
+worker which uses a successful durable run as a once-per-UTC-day checkpoint and
+invokes this same production boundary for each enabled channel with an enabled
+recurring rule that lacks the current day's checkpoint. It also adds the atomic,
+channel-scoped `ScheduleNoMatch` Warning derived only from final durable
+`NoMatch` outcomes.
+
+This does not provide same-day reactivity after a rule, search, block, or
+catalog edit; preview or rule simulation; a materialization-run read/list/history
+API or screen; filler insertion; bulk approval; automatic commit or dispatch;
+installed-machine evidence; or one- and three-station field proof. ADR 0073
+defines the distinct typed automatic-run failure Warning. The remaining
 capabilities must be implemented and proved separately before S19 or the
 product can be called complete.

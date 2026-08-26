@@ -7,14 +7,22 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde_json::to_string;
 use sha2::{Digest, Sha256};
 use station_catalog::{CatalogAssetRecord, CatalogEditorialState};
-use station_schedule::{AssetReadiness, MediaAsset, ScheduleItem, ScheduleState};
+use station_domain::{
+    AlertChannel, AlertChannelKind, AlertConditionKind, AlertEventState,
+    redact_alert_channel_target,
+};
+use station_schedule::{
+    AssetReadiness, ChannelConfiguration, MediaAsset, OutputProfileId, OutputSinkConfiguration,
+    ScheduleItem, ScheduleState,
+};
 use station_schedule_automation::{
     AssetPickStrategy, AssetPredicate, DaypartBlock, LocalDate, MaterializationWindow,
     RecurrenceTimeZone, RecurringRule, SavedSearch, SavedSearchOrder, SavedSearchQuery,
     SourceEvidenceAuthority, SourceEvidenceKind, SourceEvidenceReceipt, SourceEvidenceVerifier,
 };
 use station_storage::{
-    ScheduleItemWrite, ScheduleMaterializationApplyOutcome, ScheduleMaterializationOutcome,
+    AlertChannelSecret, ScheduleItemWrite, ScheduleMaterializationApplyOutcome,
+    ScheduleMaterializationFailureClass, ScheduleMaterializationOutcome,
     ScheduleMaterializationRun, ScheduleMaterializationWriteError, StationStore,
 };
 
@@ -25,6 +33,7 @@ const BLOCK: &str = "44444444-4444-4444-8444-444444444444";
 const RULE: &str = "55555555-5555-4555-8555-555555555555";
 const ASSET: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const OTHER_ASSET: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+const ALERT_CHANNEL: &str = "77777777-7777-4777-8777-777777777777";
 const WINDOW_START: i64 = 4_070_908_800_000; // 2099-01-01T00:00:00Z
 const DAY_MS: i64 = 86_400_000;
 const AUTHORITY_NOW: i64 = 2_000_000_000_000;
@@ -64,12 +73,18 @@ unsafe extern "C" {
 
 struct TestEvidenceAuthority {
     sequence: AtomicU64,
+    observed_at_utc_ms: i64,
 }
 
 impl TestEvidenceAuthority {
     fn new() -> Self {
+        Self::at(AUTHORITY_NOW)
+    }
+
+    fn at(observed_at_utc_ms: i64) -> Self {
         Self {
             sequence: AtomicU64::new(1),
+            observed_at_utc_ms,
         }
     }
 
@@ -116,7 +131,7 @@ impl SourceEvidenceVerifier for TestEvidenceAuthority {
 
 impl SourceEvidenceAuthority for TestEvidenceAuthority {
     fn observed_at_utc_ms(&self) -> Result<i64, String> {
-        Ok(AUTHORITY_NOW)
+        Ok(self.observed_at_utc_ms)
     }
 
     fn issue_source_evidence(
@@ -131,12 +146,93 @@ impl SourceEvidenceAuthority for TestEvidenceAuthority {
         Ok(SourceEvidenceReceipt {
             issuer_id: "99999999-9999-4999-8999-999999999999".into(),
             receipt_id: receipt_id.clone(),
-            issued_at_utc_ms: AUTHORITY_NOW,
-            expires_at_utc_ms: AUTHORITY_NOW + lifetime_ms,
+            issued_at_utc_ms: self.observed_at_utc_ms,
+            expires_at_utc_ms: self.observed_at_utc_ms + lifetime_ms,
             scope_sha256: scope_sha256.into(),
             attestation_sha256: Self::attestation(kind, &receipt_id, scope_sha256, payload_sha256),
         })
     }
+}
+
+fn seed_channel(store: &StationStore, enabled: bool) {
+    store
+        .put_channel(&ChannelConfiguration {
+            channel_id: CHANNEL.into(),
+            display_name: "Government".into(),
+            output_profile: OutputProfileId::Proof360p30,
+            output_sinks: vec![OutputSinkConfiguration::required_udp(
+                CHANNEL,
+                "Primary",
+                "127.0.0.1:5500",
+                -24.0,
+            )],
+            enabled,
+        })
+        .unwrap();
+}
+
+fn seed_raw_eligible_channels(store: &StationStore, database: &Path, count: usize) {
+    store
+        .write_saved_search(&search(), None, "operator", 1)
+        .unwrap();
+    let mut sql = String::new();
+    for index in 0..count {
+        let channel_id = format!("10000000-0000-4000-8000-{index:012}");
+        let block_id = format!("20000000-0000-4000-8000-{index:012}");
+        let rule_id = format!("30000000-0000-4000-8000-{index:012}");
+        let block = DaypartBlock {
+            block_id: block_id.clone(),
+            channel_id: channel_id.clone(),
+            label: format!("Automatic block {index}"),
+            starts_local_minute: 0,
+            ends_local_minute: 1_440,
+            weekday_mask: 0b0111_1111,
+            season_starts_on: None,
+            season_ends_on: None,
+            allow_rule_ids: vec![rule_id.clone()],
+            revision: 1,
+        };
+        let rule = RecurringRule {
+            rule_id: rule_id.clone(),
+            channel_id: channel_id.clone(),
+            saved_search_id: SEARCH.into(),
+            saved_search_revision: 1,
+            pick_strategy: AssetPickStrategy::Top,
+            rolling_window_days: 14,
+            avoid_repeat_within_days: None,
+            enabled: true,
+            priority: 1,
+            block_id: block_id.clone(),
+            block_revision: 1,
+            weekday_mask: 0b0111_1111,
+            interval_weeks: 1,
+            anchor_date: LocalDate {
+                year: 2099,
+                month: 1,
+                day: 1,
+            },
+            timezone: RecurrenceTimeZone::Utc,
+            local_start_minute: 60,
+            duration_minutes: 60,
+            revision: 1,
+        };
+        let block_json = sql_quote(&to_string(&block).unwrap());
+        let rule_json = sql_quote(&to_string(&rule).unwrap());
+        sql.push_str(&format!(
+            "INSERT INTO channels(channel_id,display_name,udp_destination,output_profile,enabled) \
+             VALUES('{channel_id}','Channel {index}','127.0.0.1:5500','proof-360p30',1);\
+             INSERT INTO schedule_automation_daypart_blocks(block_id,channel_id,revision,record_json) \
+             VALUES('{block_id}','{channel_id}',1,'{block_json}');\
+             INSERT INTO schedule_automation_daypart_block_history(block_id,channel_id,revision,record_json,changed_by,occurred_at_unix_ms) \
+             VALUES('{block_id}','{channel_id}',1,'{block_json}','seed',1);\
+             INSERT INTO schedule_automation_recurring_rules(rule_id,channel_id,saved_search_id,saved_search_revision,block_id,block_revision,revision,record_json) \
+             VALUES('{rule_id}','{channel_id}','{search}',1,'{block_id}',1,1,'{rule_json}');\
+             INSERT INTO schedule_automation_recurring_rule_history(rule_id,channel_id,saved_search_id,saved_search_revision,block_id,block_revision,revision,record_json,changed_by,occurred_at_unix_ms) \
+             VALUES('{rule_id}','{channel_id}','{search}',1,'{block_id}',1,1,'{rule_json}','seed',1);",
+            search = SEARCH,
+        ));
+    }
+    assert_eq!(raw_sql_status(database, &sql), SQLITE_OK);
 }
 
 fn temporary_database(name: &str) -> PathBuf {
@@ -370,6 +466,49 @@ fn revise_catalog_title(store: &StationStore) {
     revised.revision = 3;
     store
         .write_catalog_asset(ASSET, &revised, Some(2), "catalog", 6)
+        .unwrap();
+}
+
+fn withdraw_candidate(store: &StationStore) {
+    let mut withdrawn = store.read_catalog_asset(ASSET).unwrap().unwrap();
+    withdrawn.editorial_state = CatalogEditorialState::Withdrawn;
+    withdrawn.revision += 1;
+    store
+        .write_catalog_asset(
+            ASSET,
+            &withdrawn,
+            Some(withdrawn.revision - 1),
+            "catalog",
+            7,
+        )
+        .unwrap();
+}
+
+fn put_alert_destination(store: &StationStore) {
+    let target = "https://alerts.example.org/townlight";
+    store
+        .put_alert_channel(
+            &AlertChannel {
+                channel_id: ALERT_CHANNEL.into(),
+                kind: AlertChannelKind::Webhook,
+                label: "Schedule pager".into(),
+                enabled: true,
+                target_redacted: redact_alert_channel_target(AlertChannelKind::Webhook, target)
+                    .unwrap(),
+                credential_configured: true,
+                quiet_hours_start_utc: None,
+                quiet_hours_end_utc: None,
+                created_at_unix_ms: 1,
+                updated_at_unix_ms: 1,
+            },
+            &AlertChannelSecret {
+                target: target.into(),
+                endpoint: None,
+                sender: None,
+                identity: None,
+                credential: "test-signing-secret".into(),
+            },
+        )
         .unwrap();
 }
 
@@ -687,4 +826,768 @@ fn manual_occupation_of_deterministic_uuid_fails_and_rolls_back_the_new_batch() 
         raw_i64(&database, "SELECT COUNT(*) FROM schedule_items"),
         items_before
     );
+}
+
+#[test]
+fn no_match_fires_a_channel_scoped_s19_alert_and_a_later_match_resolves_it() {
+    let database = temporary_database("no-match-alert");
+    let store = StationStore::open(&database).unwrap();
+    seed_authority(&store, 1);
+    put_alert_destination(&store);
+    let authority = TestEvidenceAuthority::new();
+
+    let unmatched = run_once(&store, &authority);
+    assert!(run_from(&unmatched).outcomes.iter().any(|record| matches!(
+        record.outcome,
+        ScheduleMaterializationOutcome::NoMatch { .. }
+    )));
+    let events = store.list_alert_events().unwrap();
+    let firing = events
+        .iter()
+        .find(|event| {
+            event.condition == AlertConditionKind::ScheduleNoMatch
+                && event.resource_ref == CHANNEL
+                && event.state == AlertEventState::Firing
+        })
+        .expect("a durable channel-scoped no-match alert must fire");
+    let first_event_id = firing.event_id.clone();
+    let first_occurrence_count = firing.occurrence_count;
+    assert_eq!(firing.source_section, "S19");
+    let operator_copy = format!("{} {}", firing.summary, firing.detail).to_ascii_lowercase();
+    assert!(operator_copy.contains("no matching asset"));
+    assert!(!operator_copy.contains("filler"));
+    assert!(!operator_copy.contains("schedule gap"));
+    assert!(!operator_copy.contains("missing media"));
+    assert_eq!(
+        raw_i64(&database, "SELECT COUNT(*) FROM alert_deliveries"),
+        1
+    );
+
+    let exact_retry = run_once(&store, &authority);
+    assert!(matches!(
+        exact_retry,
+        ScheduleMaterializationApplyOutcome::AlreadyApplied(_)
+    ));
+    let firing_after_retry = store
+        .list_alert_events()
+        .unwrap()
+        .into_iter()
+        .find(|event| event.event_id == first_event_id)
+        .unwrap();
+    assert_eq!(firing_after_retry.occurrence_count, first_occurrence_count);
+    assert_eq!(
+        raw_i64(&database, "SELECT COUNT(*) FROM alert_deliveries"),
+        1
+    );
+
+    publish_candidate(&store, &database);
+    let matched = run_once(&store, &authority);
+    assert!(run_from(&matched).outcomes.iter().all(|record| !matches!(
+        record.outcome,
+        ScheduleMaterializationOutcome::NoMatch { .. }
+    )));
+    let events = store.list_alert_events().unwrap();
+    assert!(!events.iter().any(|event| {
+        event.condition == AlertConditionKind::ScheduleNoMatch
+            && event.resource_ref == CHANNEL
+            && event.state == AlertEventState::Firing
+    }));
+    assert!(events.iter().any(|event| {
+        event.condition == AlertConditionKind::ScheduleNoMatch
+            && event.resource_ref == CHANNEL
+            && event.state == AlertEventState::Resolved
+    }));
+    assert_eq!(
+        raw_i64(&database, "SELECT COUNT(*) FROM alert_deliveries"),
+        2
+    );
+
+    withdraw_candidate(&store);
+    let reopened = run_once(&store, &authority);
+    assert!(matches!(
+        reopened,
+        ScheduleMaterializationApplyOutcome::AlreadyApplied(_)
+    ));
+    assert_eq!(run_from(&reopened).run_id, run_from(&unmatched).run_id);
+    let events = store.list_alert_events().unwrap();
+    let second_firing = events
+        .iter()
+        .find(|event| {
+            event.condition == AlertConditionKind::ScheduleNoMatch
+                && event.resource_ref == CHANNEL
+                && event.state == AlertEventState::Firing
+        })
+        .expect("the identical durable no-match result must open a new alert episode");
+    assert_ne!(second_firing.event_id, first_event_id);
+    assert_eq!(second_firing.occurrence_count, 1);
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event.condition == AlertConditionKind::ScheduleNoMatch)
+            .count(),
+        2
+    );
+    assert_eq!(
+        raw_i64(&database, "SELECT COUNT(*) FROM alert_deliveries"),
+        3
+    );
+}
+
+#[test]
+fn automatic_materialization_failures_are_channel_scoped_typed_deduplicated_and_resolved() {
+    let database = temporary_database("automatic-failure-alert");
+    let store = StationStore::open(&database).unwrap();
+    put_alert_destination(&store);
+    let failed_channel = CHANNEL;
+    let unaffected_channel = "88888888-8888-4888-8888-888888888888";
+
+    let default_rule = store
+        .read_alert_rule("default-schedule-materialization-failure")
+        .unwrap()
+        .expect("the automatic materialization failure rule is seeded");
+    assert_eq!(
+        default_rule.severity,
+        station_domain::AlertSeverity::Warning
+    );
+    assert!(default_rule.notify_on_resolve);
+
+    let first = store
+        .observe_schedule_materialization_failure_and_route(
+            failed_channel,
+            ScheduleMaterializationFailureClass::Storage,
+            1_000,
+        )
+        .unwrap();
+    assert_eq!(
+        first.condition,
+        AlertConditionKind::ScheduleMaterializationFailure
+    );
+    assert_eq!(first.resource_ref, failed_channel);
+    assert_eq!(first.source_section, "S19");
+    assert_eq!(first.severity, station_domain::AlertSeverity::Warning);
+    let operator_copy = format!("{} {}", first.summary, first.detail).to_ascii_lowercase();
+    assert!(operator_copy.contains("storage"));
+    assert!(!operator_copy.contains("c:\\"));
+    assert!(!operator_copy.contains("\\\\"));
+    assert_eq!(
+        raw_i64(&database, "SELECT COUNT(*) FROM alert_deliveries"),
+        1
+    );
+
+    let retry = store
+        .observe_schedule_materialization_failure_and_route(
+            failed_channel,
+            ScheduleMaterializationFailureClass::Storage,
+            2_000,
+        )
+        .unwrap();
+    assert_eq!(retry.event_id, first.event_id);
+    assert_eq!(retry.occurrence_count, 1);
+    assert_eq!(
+        raw_i64(&database, "SELECT COUNT(*) FROM alert_deliveries"),
+        1
+    );
+
+    let changed_class = store
+        .observe_schedule_materialization_failure_and_route(
+            failed_channel,
+            ScheduleMaterializationFailureClass::Capacity,
+            2_500,
+        )
+        .unwrap();
+    assert_eq!(changed_class.event_id, first.event_id);
+    assert_eq!(changed_class.occurrence_count, 2);
+    assert_eq!(
+        changed_class.detail,
+        "Typed automatic materialization failure class: capacity."
+    );
+    assert_eq!(
+        raw_i64(&database, "SELECT COUNT(*) FROM alert_deliveries"),
+        1
+    );
+
+    let other = store
+        .observe_schedule_materialization_failure_and_route(
+            unaffected_channel,
+            ScheduleMaterializationFailureClass::Capacity,
+            2_000,
+        )
+        .unwrap();
+    assert_ne!(other.event_id, first.event_id);
+    assert_eq!(other.resource_ref, unaffected_channel);
+    assert_eq!(
+        raw_i64(&database, "SELECT COUNT(*) FROM alert_deliveries"),
+        2
+    );
+
+    let resolved = store
+        .resolve_alert(
+            AlertConditionKind::ScheduleMaterializationFailure,
+            failed_channel,
+            3_000,
+        )
+        .unwrap()
+        .expect("the next successful automatic run resolves its channel alert");
+    assert_eq!(resolved.state, AlertEventState::Resolved);
+    assert_eq!(
+        raw_i64(&database, "SELECT COUNT(*) FROM alert_deliveries"),
+        3
+    );
+    let events = store.list_alert_events().unwrap();
+    assert!(events.iter().any(|event| {
+        event.event_id == first.event_id && event.state == AlertEventState::Resolved
+    }));
+    assert!(events.iter().any(|event| {
+        event.event_id == other.event_id && event.state == AlertEventState::Firing
+    }));
+
+    let reopened = store
+        .observe_schedule_materialization_failure_and_route(
+            failed_channel,
+            ScheduleMaterializationFailureClass::Storage,
+            4_000,
+        )
+        .unwrap();
+    assert_ne!(reopened.event_id, first.event_id);
+    assert_eq!(reopened.occurrence_count, 1);
+    assert_eq!(
+        raw_i64(&database, "SELECT COUNT(*) FROM alert_deliveries"),
+        4
+    );
+}
+
+#[test]
+fn automatic_materialization_failure_outbox_rollback_leaves_no_durable_alert() {
+    let database = temporary_database("automatic-failure-alert-rollback");
+    let store = StationStore::open(&database).unwrap();
+    put_alert_destination(&store);
+    assert_eq!(
+        raw_sql_status(
+            &database,
+            "CREATE TRIGGER force_automatic_failure_delivery_failure BEFORE INSERT ON alert_deliveries \
+             WHEN NEW.notification_kind='firing' BEGIN SELECT RAISE(ABORT,'forced alert delivery failure'); END",
+        ),
+        SQLITE_OK
+    );
+
+    assert!(
+        store
+            .observe_schedule_materialization_failure_and_route(
+                CHANNEL,
+                ScheduleMaterializationFailureClass::Storage,
+                1_000,
+            )
+            .is_err()
+    );
+    assert_eq!(raw_i64(&database, "SELECT COUNT(*) FROM alert_events"), 0);
+    assert_eq!(
+        raw_i64(&database, "SELECT COUNT(*) FROM alert_deliveries"),
+        0
+    );
+}
+
+#[test]
+fn automatic_materialization_failure_resolution_rolls_back_then_can_be_retried() {
+    let database = temporary_database("automatic-failure-resolution-retry");
+    let store = StationStore::open(&database).unwrap();
+    put_alert_destination(&store);
+    let firing = store
+        .observe_schedule_materialization_failure_and_route(
+            CHANNEL,
+            ScheduleMaterializationFailureClass::Storage,
+            1_000,
+        )
+        .unwrap();
+    assert_eq!(
+        raw_sql_status(
+            &database,
+            "CREATE TRIGGER force_automatic_failure_resolution_delivery_failure BEFORE INSERT ON alert_deliveries \
+             WHEN NEW.notification_kind='resolved' BEGIN SELECT RAISE(ABORT,'forced resolved delivery failure'); END",
+        ),
+        SQLITE_OK
+    );
+
+    assert!(
+        store
+            .resolve_alert(
+                AlertConditionKind::ScheduleMaterializationFailure,
+                CHANNEL,
+                2_000,
+            )
+            .is_err()
+    );
+    let still_firing = store.read_alert_event(&firing.event_id).unwrap().unwrap();
+    assert_eq!(still_firing.state, AlertEventState::Firing);
+    assert_eq!(
+        raw_i64(&database, "SELECT COUNT(*) FROM alert_deliveries"),
+        1
+    );
+
+    assert_eq!(
+        raw_sql_status(
+            &database,
+            "DROP TRIGGER force_automatic_failure_resolution_delivery_failure",
+        ),
+        SQLITE_OK
+    );
+    let resolved = store
+        .resolve_alert(
+            AlertConditionKind::ScheduleMaterializationFailure,
+            CHANNEL,
+            2_000,
+        )
+        .unwrap()
+        .unwrap();
+    assert_eq!(resolved.state, AlertEventState::Resolved);
+    assert_eq!(
+        raw_i64(&database, "SELECT COUNT(*) FROM alert_deliveries"),
+        2
+    );
+}
+
+#[test]
+fn automatic_materialization_failure_realert_rollback_preserves_existing_firing_event() {
+    let database = temporary_database("automatic-failure-realert-rollback");
+    let store = StationStore::open(&database).unwrap();
+    put_alert_destination(&store);
+    let first = store
+        .observe_schedule_materialization_failure_and_route(
+            CHANNEL,
+            ScheduleMaterializationFailureClass::Storage,
+            1_000,
+        )
+        .unwrap();
+    let delivery = store
+        .claim_due_alert_delivery(1_000, 1_000)
+        .unwrap()
+        .expect("the firing delivery is due");
+    store
+        .complete_alert_delivery(&delivery.delivery_id, 1_000, None)
+        .unwrap();
+    assert_eq!(
+        raw_sql_status(
+            &database,
+            "CREATE TRIGGER force_automatic_failure_realert_delivery_failure BEFORE INSERT ON alert_deliveries \
+             WHEN NEW.notification_kind='realert' BEGIN SELECT RAISE(ABORT,'forced realert delivery failure'); END",
+        ),
+        SQLITE_OK
+    );
+
+    assert!(
+        store
+            .observe_schedule_materialization_failure_and_route(
+                CHANNEL,
+                ScheduleMaterializationFailureClass::Capacity,
+                1_802_000,
+            )
+            .is_err()
+    );
+    let unchanged = store.read_alert_event(&first.event_id).unwrap().unwrap();
+    assert_eq!(unchanged.state, AlertEventState::Firing);
+    assert_eq!(unchanged.occurrence_count, 1);
+    assert_eq!(
+        unchanged.detail,
+        "Typed automatic materialization failure class: storage."
+    );
+    assert_eq!(
+        raw_i64(&database, "SELECT COUNT(*) FROM alert_deliveries"),
+        1
+    );
+}
+
+#[test]
+fn multiple_no_match_slots_are_aggregated_into_one_alert_observation() {
+    let database = temporary_database("no-match-alert-aggregate");
+    let store = StationStore::open(&database).unwrap();
+    seed_authority(&store, 1);
+    let authority = TestEvidenceAuthority::new();
+    let long_window = MaterializationWindow {
+        starts_at_utc_ms: WINDOW_START,
+        ends_at_utc_ms: WINDOW_START + 14 * DAY_MS,
+    };
+
+    let applied = store
+        .materialize_schedule_batch_with_explicit_window(
+            CHANNEL,
+            &long_window,
+            "operator",
+            &authority,
+        )
+        .unwrap();
+
+    let no_match_count = run_from(&applied)
+        .outcomes
+        .iter()
+        .filter(|record| {
+            matches!(
+                record.outcome,
+                ScheduleMaterializationOutcome::NoMatch { .. }
+            )
+        })
+        .count();
+    assert!(no_match_count > 1);
+    let alerts = store
+        .list_alert_events()
+        .unwrap()
+        .into_iter()
+        .filter(|event| event.condition == AlertConditionKind::ScheduleNoMatch)
+        .collect::<Vec<_>>();
+    assert_eq!(alerts.len(), 1);
+    assert_eq!(alerts[0].occurrence_count, 1);
+    assert!(alerts[0].summary.contains(&no_match_count.to_string()));
+}
+
+#[test]
+fn no_match_alert_routing_failure_rolls_back_the_complete_materialization() {
+    let database = temporary_database("no-match-alert-rollback");
+    let store = StationStore::open(&database).unwrap();
+    seed_authority(&store, 1);
+    assert_eq!(
+        raw_sql_status(
+            &database,
+            "DELETE FROM alert_rules WHERE condition='schedule-no-match'",
+        ),
+        SQLITE_OK
+    );
+    let authority = TestEvidenceAuthority::new();
+
+    let error = store
+        .materialize_schedule_batch_with_explicit_window(CHANNEL, &window(), "operator", &authority)
+        .unwrap_err();
+
+    assert!(matches!(
+        error,
+        ScheduleMaterializationWriteError::Storage(_)
+    ));
+    drop(store);
+    assert_eq!(
+        raw_i64(
+            &database,
+            "SELECT COUNT(*) FROM schedule_materialization_runs"
+        ),
+        0
+    );
+    assert_eq!(raw_i64(&database, "SELECT COUNT(*) FROM alert_events"), 0);
+}
+
+#[test]
+fn resolution_outbox_failure_rolls_back_the_new_run_and_keeps_no_match_firing() {
+    let database = temporary_database("no-match-resolution-rollback");
+    let store = StationStore::open(&database).unwrap();
+    seed_authority(&store, 1);
+    put_alert_destination(&store);
+    let authority = TestEvidenceAuthority::new();
+    let unmatched = run_once(&store, &authority);
+    assert!(matches!(
+        unmatched,
+        ScheduleMaterializationApplyOutcome::Applied(_)
+    ));
+    publish_candidate(&store, &database);
+    assert_eq!(
+        raw_sql_status(
+            &database,
+            "CREATE TRIGGER force_resolved_delivery_failure BEFORE INSERT ON alert_deliveries \
+             WHEN NEW.notification_kind='resolved' BEGIN SELECT RAISE(ABORT,'forced resolved delivery failure'); END",
+        ),
+        SQLITE_OK
+    );
+
+    let error = store
+        .materialize_schedule_batch_with_explicit_window(CHANNEL, &window(), "operator", &authority)
+        .unwrap_err();
+
+    assert!(matches!(
+        error,
+        ScheduleMaterializationWriteError::Storage(_)
+    ));
+    assert_eq!(
+        raw_i64(
+            &database,
+            "SELECT COUNT(*) FROM schedule_materialization_runs"
+        ),
+        1
+    );
+    assert_eq!(raw_i64(&database, "SELECT COUNT(*) FROM schedule_items"), 0);
+    assert_eq!(
+        raw_i64(&database, "SELECT COUNT(*) FROM alert_deliveries"),
+        1
+    );
+    let events = store.list_alert_events().unwrap();
+    assert!(events.iter().any(|event| {
+        event.condition == AlertConditionKind::ScheduleNoMatch
+            && event.resource_ref == CHANNEL
+            && event.state == AlertEventState::Firing
+    }));
+    assert!(!events.iter().any(|event| {
+        event.condition == AlertConditionKind::ScheduleNoMatch
+            && event.state == AlertEventState::Resolved
+    }));
+}
+
+#[test]
+fn production_materialization_rechecks_enabled_channel_inside_its_write_transaction() {
+    let database = temporary_database("disabled-production-channel");
+    let store = StationStore::open(&database).unwrap();
+    seed_channel(&store, true);
+    seed_authority(&store, 1);
+    let enumerated = store
+        .list_automatic_materialization_channel_checkpoints()
+        .unwrap();
+    assert_eq!(enumerated.len(), 1);
+    assert_eq!(enumerated[0].channel_id, CHANNEL);
+    seed_channel(&store, false);
+    let authority = TestEvidenceAuthority::at(current_utc_ms());
+
+    let error = store
+        .materialize_scheduled_channel(CHANNEL, "automatic-worker", &authority)
+        .unwrap_err();
+
+    assert!(matches!(
+        error,
+        ScheduleMaterializationWriteError::StaleAuthority(_)
+    ));
+    assert_eq!(
+        raw_i64(
+            &database,
+            "SELECT COUNT(*) FROM schedule_materialization_runs"
+        ),
+        0
+    );
+    assert_eq!(raw_i64(&database, "SELECT COUNT(*) FROM schedule_items"), 0);
+    assert_eq!(raw_i64(&database, "SELECT COUNT(*) FROM alert_events"), 0);
+}
+
+#[test]
+fn automatic_checkpoint_scan_is_complete_beyond_128_valid_channels() {
+    let database = temporary_database("automatic-checkpoint-over-128");
+    let store = StationStore::open(&database).unwrap();
+    seed_raw_eligible_channels(&store, &database, 129);
+
+    let checkpoints = store
+        .list_automatic_materialization_channel_checkpoints()
+        .unwrap();
+
+    assert_eq!(checkpoints.len(), 129);
+    assert!(
+        checkpoints
+            .iter()
+            .all(|checkpoint| checkpoint.latest_run.is_none())
+    );
+}
+
+#[test]
+fn automatic_checkpoint_scan_rejects_257_eligible_channels_without_partial_results() {
+    let database = temporary_database("automatic-checkpoint-over-channel-cap");
+    let store = StationStore::open(&database).unwrap();
+    seed_raw_eligible_channels(&store, &database, 257);
+
+    let error = store
+        .list_automatic_materialization_channel_checkpoints()
+        .unwrap_err();
+
+    assert!(error.contains("channel capacity"));
+}
+
+#[test]
+fn automatic_checkpoint_scan_rejects_the_16385th_rule_before_parsing_partial_authority() {
+    let database = temporary_database("automatic-checkpoint-over-rule-cap");
+    let store = StationStore::open(&database).unwrap();
+    assert_eq!(
+        raw_sql_status(
+            &database,
+            "WITH RECURSIVE n(x) AS (SELECT 0 UNION ALL SELECT x+1 FROM n WHERE x<16384) \
+             INSERT INTO schedule_automation_recurring_rules(\
+               rule_id,channel_id,saved_search_id,saved_search_revision,block_id,block_revision,revision,record_json) \
+             SELECT printf('rule-%05d',x),'channel','search',1,'block',1,1,'{}' FROM n",
+        ),
+        SQLITE_OK
+    );
+
+    let error = store
+        .list_automatic_materialization_channel_checkpoints()
+        .unwrap_err();
+
+    assert!(error.contains("recurring-rule capacity"));
+}
+
+#[test]
+fn automatic_checkpoint_list_includes_a_manual_run_and_survives_reopen() {
+    let database = temporary_database("automatic-checkpoint-reopen");
+    let store = StationStore::open(&database).unwrap();
+    seed_channel(&store, true);
+    seed_authority(&store, 1);
+    let empty = store
+        .list_automatic_materialization_channel_checkpoints()
+        .unwrap();
+    assert_eq!(empty.len(), 1);
+    assert_eq!(empty[0].channel_id, CHANNEL);
+    assert!(empty[0].latest_run.is_none());
+    let authority = TestEvidenceAuthority::at(current_utc_ms());
+    let manual = store
+        .materialize_scheduled_channel(CHANNEL, "manual-operator", &authority)
+        .unwrap();
+    let run_id = run_from(&manual).run_id.clone();
+
+    let checkpoints = store
+        .list_automatic_materialization_channel_checkpoints()
+        .unwrap();
+    assert_eq!(checkpoints.len(), 1);
+    assert_eq!(checkpoints[0].channel_id, CHANNEL);
+    assert_eq!(checkpoints[0].latest_run.as_ref().unwrap().run_id, run_id);
+    drop(store);
+
+    let reopened = StationStore::open(&database).unwrap();
+    let checkpoints = reopened
+        .list_automatic_materialization_channel_checkpoints()
+        .unwrap();
+    assert_eq!(checkpoints.len(), 1);
+    assert_eq!(checkpoints[0].latest_run.as_ref().unwrap().run_id, run_id);
+}
+
+#[test]
+fn corrupt_newest_checkpoint_fails_instead_of_falling_back_to_an_older_run() {
+    let database = temporary_database("automatic-checkpoint-corrupt-newest");
+    let store = StationStore::open(&database).unwrap();
+    seed_channel(&store, true);
+    seed_authority(&store, 1);
+    let now = current_utc_ms();
+    let first = store
+        .materialize_scheduled_channel(CHANNEL, "manual-operator", &TestEvidenceAuthority::at(now))
+        .unwrap();
+    publish_candidate(&store, &database);
+    let second = store
+        .materialize_scheduled_channel(
+            CHANNEL,
+            "manual-operator",
+            &TestEvidenceAuthority::at(now + 1),
+        )
+        .unwrap();
+    assert_ne!(run_from(&first).run_id, run_from(&second).run_id);
+    let newest_run_id = run_from(&second).run_id.clone();
+    drop(store);
+    let sql = format!(
+        "DROP TRIGGER schedule_materialization_plans_no_update;\
+         UPDATE schedule_materialization_plans SET record_json=replace(record_json,'{rule}','bad') \
+         WHERE run_id='{run_id}'",
+        rule = RULE,
+        run_id = newest_run_id,
+    );
+    assert_eq!(raw_sql_status(&database, &sql), SQLITE_OK);
+
+    let reopened = StationStore::open(&database).unwrap();
+    assert!(
+        reopened
+            .list_automatic_materialization_channel_checkpoints()
+            .is_err(),
+        "newest checkpoint corruption must fail closed, never return the older valid run"
+    );
+}
+
+#[test]
+fn rebound_newest_checkpoint_binding_fails_instead_of_falling_back() {
+    let database = temporary_database("automatic-checkpoint-rebound-binding");
+    let store = StationStore::open(&database).unwrap();
+    seed_channel(&store, true);
+    seed_authority(&store, 1);
+    let now = current_utc_ms();
+    let first = store
+        .materialize_scheduled_channel(CHANNEL, "manual-operator", &TestEvidenceAuthority::at(now))
+        .unwrap();
+    publish_candidate(&store, &database);
+    let second = store
+        .materialize_scheduled_channel(
+            CHANNEL,
+            "manual-operator",
+            &TestEvidenceAuthority::at(now + 1),
+        )
+        .unwrap();
+    assert_ne!(run_from(&first).run_id, run_from(&second).run_id);
+    let newest_run_id = run_from(&second).run_id.clone();
+    let rebound_channel = "99999999-0000-4000-8000-999999999999";
+    let sql = format!(
+        "DROP TRIGGER schedule_materialization_run_channels_no_update;\
+         UPDATE schedule_materialization_run_channels SET channel_id='{rebound}' WHERE run_id='{run_id}'",
+        rebound = rebound_channel,
+        run_id = newest_run_id,
+    );
+    assert_eq!(raw_sql_status(&database, &sql), SQLITE_OK);
+
+    assert!(
+        store
+            .list_automatic_materialization_channel_checkpoints()
+            .is_err(),
+        "a rebound newest binding must not expose the older checkpoint"
+    );
+}
+
+#[test]
+fn deleted_newest_checkpoint_binding_fails_instead_of_falling_back() {
+    let database = temporary_database("automatic-checkpoint-deleted-binding");
+    let store = StationStore::open(&database).unwrap();
+    seed_channel(&store, true);
+    seed_authority(&store, 1);
+    let now = current_utc_ms();
+    let first = store
+        .materialize_scheduled_channel(CHANNEL, "manual-operator", &TestEvidenceAuthority::at(now))
+        .unwrap();
+    publish_candidate(&store, &database);
+    let second = store
+        .materialize_scheduled_channel(
+            CHANNEL,
+            "manual-operator",
+            &TestEvidenceAuthority::at(now + 1),
+        )
+        .unwrap();
+    assert_ne!(run_from(&first).run_id, run_from(&second).run_id);
+    let newest_run_id = run_from(&second).run_id.clone();
+    let sql = format!(
+        "DROP TRIGGER schedule_materialization_run_channels_no_delete;\
+         DELETE FROM schedule_materialization_run_channels WHERE run_id='{newest_run_id}'",
+    );
+    assert_eq!(raw_sql_status(&database, &sql), SQLITE_OK);
+
+    assert!(
+        store
+            .list_automatic_materialization_channel_checkpoints()
+            .is_err(),
+        "a deleted newest binding must not expose the older checkpoint"
+    );
+}
+
+#[test]
+fn tampered_newest_checkpoint_binding_time_fails_closed() {
+    let database = temporary_database("automatic-checkpoint-tampered-binding-time");
+    let store = StationStore::open(&database).unwrap();
+    seed_channel(&store, true);
+    seed_authority(&store, 1);
+    let run = store
+        .materialize_scheduled_channel(
+            CHANNEL,
+            "manual-operator",
+            &TestEvidenceAuthority::at(current_utc_ms()),
+        )
+        .unwrap();
+    let run_id = run_from(&run).run_id.clone();
+    let sql = format!(
+        "DROP TRIGGER schedule_materialization_run_channels_no_update;\
+         UPDATE schedule_materialization_run_channels SET occurred_at_unix_ms=occurred_at_unix_ms+1 WHERE run_id='{run_id}'",
+    );
+    assert_eq!(raw_sql_status(&database, &sql), SQLITE_OK);
+
+    assert!(
+        store
+            .list_automatic_materialization_channel_checkpoints()
+            .is_err(),
+        "a binding timestamp contradiction must fail closed"
+    );
+}
+
+fn current_utc_ms() -> i64 {
+    i64::try_from(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis(),
+    )
+    .unwrap()
 }

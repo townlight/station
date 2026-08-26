@@ -18,6 +18,9 @@ use super::*;
 const MAX_BATCH_REQUESTS: usize = 64;
 const MAX_BATCH_OUTCOMES: usize = 4_096;
 const MAX_AUTOMATION_DRAFTS_PER_CHANNEL: usize = 4_096;
+const MAX_AUTOMATIC_MATERIALIZATION_CHANNELS: usize = 256;
+const MAX_AUTOMATIC_RECURRING_RULE_SCAN: usize =
+    MAX_AUTOMATIC_MATERIALIZATION_CHANNELS * MAX_BATCH_REQUESTS;
 const MATERIALIZATION_ACTOR_MAX: usize = 200;
 const MATERIALIZATION_RECEIPT_LIFETIME_MS: i64 = 60_000;
 const UTC_MINUTE_MS: i64 = 60_000;
@@ -142,6 +145,12 @@ pub struct ScheduleMaterializationRun {
     pub outcomes: Vec<ScheduleMaterializationOutcomeRecord>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AutomaticMaterializationChannelCheckpoint {
+    pub channel_id: String,
+    pub latest_run: Option<ScheduleMaterializationRun>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ScheduleMaterializationPlanRecord {
@@ -177,6 +186,16 @@ pub enum ScheduleMaterializationWriteError {
     Collision(String),
     Capacity,
     Storage(String),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScheduleMaterializationFailureClass {
+    ChannelDisabled,
+    StaleAuthority,
+    InvalidDerivedInput,
+    Capacity,
+    Integrity,
+    Storage,
 }
 
 #[derive(Serialize)]
@@ -283,6 +302,8 @@ impl StationStore {
                rule_id TEXT NOT NULL, channel_id TEXT NOT NULL, record_json TEXT NOT NULL,\
                PRIMARY KEY(run_id, ordinal), FOREIGN KEY(run_id) REFERENCES schedule_materialization_runs(run_id)\
              );\
+             CREATE INDEX IF NOT EXISTS schedule_materialization_plans_channel \
+               ON schedule_materialization_plans(channel_id,run_id,ordinal);\
              CREATE TABLE IF NOT EXISTS schedule_materialization_outcomes (\
                run_id TEXT NOT NULL,\
                ordinal INTEGER NOT NULL CHECK (ordinal BETWEEN 0 AND 4095),\
@@ -296,6 +317,18 @@ impl StationStore {
                ON schedule_materialization_outcomes(rule_id, run_id, ordinal);\
              CREATE INDEX IF NOT EXISTS schedule_materialization_outcomes_channel \
                ON schedule_materialization_outcomes(channel_id, run_id, ordinal);\
+             CREATE TABLE IF NOT EXISTS schedule_materialization_run_channels (\
+               run_id TEXT PRIMARY KEY, channel_id TEXT NOT NULL, occurred_at_unix_ms INTEGER NOT NULL CHECK (occurred_at_unix_ms > 0),\
+               FOREIGN KEY(run_id) REFERENCES schedule_materialization_runs(run_id)\
+             );\
+             INSERT INTO schedule_materialization_run_channels(run_id,channel_id,occurred_at_unix_ms) \
+               SELECT r.run_id,MIN(p.channel_id),r.occurred_at_unix_ms \
+               FROM schedule_materialization_runs r JOIN schedule_materialization_plans p ON p.run_id=r.run_id \
+               WHERE NOT EXISTS (SELECT 1 FROM schedule_materialization_run_channels b WHERE b.run_id=r.run_id) \
+               GROUP BY r.run_id,r.plan_count,r.occurred_at_unix_ms \
+               HAVING COUNT(*)=r.plan_count AND COUNT(DISTINCT p.channel_id)=1;\
+             CREATE INDEX IF NOT EXISTS schedule_materialization_run_channels_latest \
+               ON schedule_materialization_run_channels(channel_id,occurred_at_unix_ms DESC,run_id DESC);\
              CREATE TABLE IF NOT EXISTS schedule_materialization_drafts (\
                schedule_item_id TEXT PRIMARY KEY,\
                run_id TEXT NOT NULL,\
@@ -335,6 +368,8 @@ impl StationStore {
              CREATE TRIGGER IF NOT EXISTS schedule_materialization_plans_no_delete BEFORE DELETE ON schedule_materialization_plans BEGIN SELECT RAISE(ABORT, 'materialization plans are append-only'); END;\
              CREATE TRIGGER IF NOT EXISTS schedule_materialization_outcomes_no_update BEFORE UPDATE ON schedule_materialization_outcomes BEGIN SELECT RAISE(ABORT, 'materialization outcomes are append-only'); END;\
              CREATE TRIGGER IF NOT EXISTS schedule_materialization_outcomes_no_delete BEFORE DELETE ON schedule_materialization_outcomes BEGIN SELECT RAISE(ABORT, 'materialization outcomes are append-only'); END;\
+             CREATE TRIGGER IF NOT EXISTS schedule_materialization_run_channels_no_update BEFORE UPDATE ON schedule_materialization_run_channels BEGIN SELECT RAISE(ABORT, 'materialization run channel bindings are append-only'); END;\
+             CREATE TRIGGER IF NOT EXISTS schedule_materialization_run_channels_no_delete BEFORE DELETE ON schedule_materialization_run_channels BEGIN SELECT RAISE(ABORT, 'materialization run channel bindings are append-only'); END;\
              CREATE TRIGGER IF NOT EXISTS schedule_materialization_drafts_no_update BEFORE UPDATE ON schedule_materialization_drafts BEGIN SELECT RAISE(ABORT, 'materialization draft provenance is append-only'); END;\
              CREATE TRIGGER IF NOT EXISTS schedule_materialization_drafts_no_delete BEFORE DELETE ON schedule_materialization_drafts BEGIN SELECT RAISE(ABORT, 'materialization draft provenance is append-only'); END;",
         )
@@ -379,9 +414,182 @@ impl StationStore {
         }
         self.execute("BEGIN IMMEDIATE")
             .map_err(ScheduleMaterializationWriteError::Storage)?;
-        let outcome =
-            self.materialize_schedule_batch_in_transaction(channel_id, None, changed_by, authority);
+        let outcome = (|| {
+            if self
+                .read_materialization_channel_enabled_locked(channel_id)
+                .map_err(ScheduleMaterializationWriteError::Storage)?
+                != Some(true)
+            {
+                return Err(ScheduleMaterializationWriteError::StaleAuthority(
+                    "materialization channel is missing or disabled".into(),
+                ));
+            }
+            self.materialize_schedule_batch_in_transaction(channel_id, None, changed_by, authority)
+        })();
         finish_materialization_transaction(self, outcome)
+    }
+
+    pub fn list_automatic_materialization_channel_checkpoints(
+        &self,
+    ) -> Result<Vec<AutomaticMaterializationChannelCheckpoint>, String> {
+        self.execute("BEGIN DEFERRED")?;
+        let mut checkpoints = None;
+        let outcome = (|| {
+            let now_utc_ms = station_clock_utc_ms()?;
+            let statement = self.prepare(
+                "SELECT rule_id FROM schedule_automation_recurring_rules ORDER BY rule_id LIMIT ?1",
+            )?;
+            bind_i64(
+                self.database,
+                statement.raw,
+                1,
+                i64::try_from(MAX_AUTOMATIC_RECURRING_RULE_SCAN + 1)
+                    .map_err(|_| "automatic materialization rule bound overflowed".to_string())?,
+            )?;
+            let mut rule_ids = Vec::new();
+            loop {
+                match unsafe { sqlite3_step(statement.raw) } {
+                    SQLITE_ROW => rule_ids.push(column_text(statement.raw, 0)?),
+                    SQLITE_DONE => break,
+                    _ => return Err(sqlite_error(self.database)),
+                }
+            }
+            if rule_ids.len() > MAX_AUTOMATIC_RECURRING_RULE_SCAN {
+                return Err("automatic materialization recurring-rule capacity exceeded".into());
+            }
+            drop(statement);
+
+            let mut eligible_channels = BTreeSet::new();
+            for rule_id in rule_ids {
+                let rule = self.read_recurring_rule(&rule_id)?.ok_or_else(|| {
+                    "automatic materialization recurring rule disappeared".to_string()
+                })?;
+                if rule.enabled
+                    && self.read_materialization_channel_enabled_locked(&rule.channel_id)?
+                        == Some(true)
+                {
+                    eligible_channels.insert(rule.channel_id);
+                }
+            }
+            if eligible_channels.len() > MAX_AUTOMATIC_MATERIALIZATION_CHANNELS {
+                return Err("automatic materialization channel capacity exceeded".into());
+            }
+            let mut resolved = Vec::with_capacity(eligible_channels.len());
+            for channel_id in eligible_channels {
+                let latest = self.latest_materialization_run_binding_locked(&channel_id)?;
+                let plan_latest = self.latest_materialization_run_plan_locked(&channel_id)?;
+                if latest != plan_latest {
+                    return Err(
+                        "automatic materialization newest channel checkpoint contradicts plan authority"
+                            .into(),
+                    );
+                }
+                let latest_run = match latest {
+                    None => None,
+                    Some((run_id, bound_occurred_at_unix_ms)) => {
+                        let run = self
+                            .read_schedule_materialization_run(&run_id)?
+                            .ok_or_else(|| {
+                                "materialization checkpoint run disappeared".to_string()
+                            })?;
+                        if run.occurred_at_unix_ms != bound_occurred_at_unix_ms
+                            || run.occurred_at_unix_ms > now_utc_ms
+                            || run.observed_at_utc_ms > now_utc_ms
+                            || run.plans.iter().any(|plan| plan.channel_id != channel_id)
+                            || run
+                                .outcomes
+                                .iter()
+                                .any(|record| record.channel_id != channel_id)
+                        {
+                            return Err(
+                                "automatic materialization checkpoint authority is invalid".into(),
+                            );
+                        }
+                        let plan_channels = run
+                            .plans
+                            .iter()
+                            .map(|plan| plan.channel_id.as_str())
+                            .collect::<BTreeSet<_>>();
+                        if plan_channels.len() != 1 || !plan_channels.contains(channel_id.as_str())
+                        {
+                            return Err(
+                                "automatic materialization checkpoint has mixed channel plans"
+                                    .into(),
+                            );
+                        }
+                        Some(run)
+                    }
+                };
+                resolved.push(AutomaticMaterializationChannelCheckpoint {
+                    channel_id,
+                    latest_run,
+                });
+            }
+            checkpoints = Some(resolved);
+            Ok(())
+        })();
+        self.finish_transaction(outcome)?;
+        checkpoints
+            .ok_or_else(|| "automatic materialization checkpoint read produced no result".into())
+    }
+
+    fn read_materialization_channel_enabled_locked(
+        &self,
+        channel_id: &str,
+    ) -> Result<Option<bool>, String> {
+        if !is_canonical_uuid(channel_id) {
+            return Err("materialization channel identity is invalid".into());
+        }
+        let statement = self.prepare("SELECT enabled FROM channels WHERE channel_id=?1")?;
+        let channel_id = c_string(channel_id, "materialization channel identity")?;
+        bind_text(self.database, statement.raw, 1, &channel_id)?;
+        match unsafe { sqlite3_step(statement.raw) } {
+            SQLITE_ROW => match unsafe { sqlite3_column_int64(statement.raw, 0) } {
+                0 => Ok(Some(false)),
+                1 => Ok(Some(true)),
+                _ => Err("materialization channel enabled authority is invalid".into()),
+            },
+            SQLITE_DONE => Ok(None),
+            _ => Err(sqlite_error(self.database)),
+        }
+    }
+
+    fn latest_materialization_run_binding_locked(
+        &self,
+        channel_id: &str,
+    ) -> Result<Option<(String, i64)>, String> {
+        let statement = self.prepare(
+            "SELECT run_id,occurred_at_unix_ms FROM schedule_materialization_run_channels WHERE channel_id=?1 ORDER BY occurred_at_unix_ms DESC,run_id DESC LIMIT 1",
+        )?;
+        let channel_id = c_string(channel_id, "materialization checkpoint channel")?;
+        bind_text(self.database, statement.raw, 1, &channel_id)?;
+        match unsafe { sqlite3_step(statement.raw) } {
+            SQLITE_ROW => Ok(Some((column_text(statement.raw, 0)?, unsafe {
+                sqlite3_column_int64(statement.raw, 1)
+            }))),
+            SQLITE_DONE => Ok(None),
+            _ => Err(sqlite_error(self.database)),
+        }
+    }
+
+    fn latest_materialization_run_plan_locked(
+        &self,
+        channel_id: &str,
+    ) -> Result<Option<(String, i64)>, String> {
+        let statement = self.prepare(
+            "SELECT r.run_id,r.occurred_at_unix_ms FROM schedule_materialization_runs r \
+             JOIN schedule_materialization_plans p ON p.run_id=r.run_id \
+             WHERE p.channel_id=?1 ORDER BY r.occurred_at_unix_ms DESC,r.run_id DESC LIMIT 1",
+        )?;
+        let channel_id = c_string(channel_id, "materialization plan checkpoint channel")?;
+        bind_text(self.database, statement.raw, 1, &channel_id)?;
+        match unsafe { sqlite3_step(statement.raw) } {
+            SQLITE_ROW => Ok(Some((column_text(statement.raw, 0)?, unsafe {
+                sqlite3_column_int64(statement.raw, 1)
+            }))),
+            SQLITE_DONE => Ok(None),
+            _ => Err(sqlite_error(self.database)),
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -701,6 +909,13 @@ impl StationStore {
                     "materialization run identity collided with different durable content".into(),
                 ));
             }
+            self.reconcile_schedule_no_match_alert_locked(
+                &existing.run_id,
+                channel_id,
+                observed_at_utc_ms,
+                &existing.outcomes,
+                false,
+            )?;
             return Ok(ScheduleMaterializationApplyOutcome::AlreadyApplied(
                 existing,
             ));
@@ -708,6 +923,7 @@ impl StationStore {
 
         self.insert_materialization_run(
             &run_id,
+            channel_id,
             &request_sha256,
             &result_sha256,
             &batch_window,
@@ -759,6 +975,13 @@ impl StationStore {
             }
             self.insert_materialization_outcome(&run_id, record)?;
         }
+        self.reconcile_schedule_no_match_alert_locked(
+            &run_id,
+            channel_id,
+            observed_at_utc_ms,
+            &records,
+            true,
+        )?;
 
         Ok(ScheduleMaterializationApplyOutcome::Applied(
             ScheduleMaterializationRun {
@@ -774,6 +997,90 @@ impl StationStore {
                 outcomes: records,
             },
         ))
+    }
+
+    fn reconcile_schedule_no_match_alert_locked(
+        &self,
+        run_id: &str,
+        channel_id: &str,
+        observed_at_utc_ms: i64,
+        records: &[ScheduleMaterializationOutcomeRecord],
+        is_new_run: bool,
+    ) -> Result<(), ScheduleMaterializationWriteError> {
+        let no_matches = records
+            .iter()
+            .filter_map(|record| match &record.outcome {
+                ScheduleMaterializationOutcome::NoMatch { starts_at_utc_ms } => {
+                    Some((record.rule_id.as_str(), *starts_at_utc_ms))
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        if no_matches.is_empty() {
+            self.resolve_alert_locked(
+                AlertConditionKind::ScheduleNoMatch,
+                channel_id,
+                observed_at_utc_ms,
+            )
+            .map_err(ScheduleMaterializationWriteError::Storage)?;
+            return Ok(());
+        }
+        if !is_new_run
+            && self
+                .read_firing_alert(AlertConditionKind::ScheduleNoMatch, channel_id)
+                .map_err(ScheduleMaterializationWriteError::Storage)?
+                .is_some()
+        {
+            return Ok(());
+        }
+
+        let earliest = no_matches
+            .iter()
+            .map(|(_, starts_at_utc_ms)| *starts_at_utc_ms)
+            .min()
+            .ok_or_else(|| {
+                ScheduleMaterializationWriteError::Storage(
+                    "no-match alert aggregation produced no earliest slot".into(),
+                )
+            })?;
+        let rules = no_matches
+            .iter()
+            .map(|(rule_id, _)| *rule_id)
+            .collect::<BTreeSet<_>>();
+        let displayed_rules = rules.iter().take(8).copied().collect::<Vec<_>>().join(", ");
+        let omitted_rules = rules.len().saturating_sub(8);
+        let rule_detail = if omitted_rules == 0 {
+            displayed_rules
+        } else {
+            format!("{displayed_rules} (+{omitted_rules} more)")
+        };
+        let episode = self
+            .next_alert_episode_ordinal_locked(AlertConditionKind::ScheduleNoMatch, channel_id)
+            .map_err(ScheduleMaterializationWriteError::Storage)?;
+        self.observe_alert_and_route_locked(&AlertEvent {
+            event_id: format!("schedule-no-match-{run_id}-{episode}"),
+            condition: AlertConditionKind::ScheduleNoMatch,
+            severity: AlertSeverity::Warning,
+            state: AlertEventState::Firing,
+            resource_ref: channel_id.into(),
+            summary: format!(
+                "Recurring schedule generation found {} slots with no matching asset.",
+                no_matches.len()
+            ),
+            detail: format!(
+                "Materialization run {run_id} found no published, ready catalog asset that satisfied the saved-search and repeat policy for {} recurring slots. Earliest affected UTC millisecond: {earliest}. Affected recurring rule identities: {rule_detail}. Review S19 saved-search predicates, catalog editorial/readiness state, publication time, and repeat limits.",
+                no_matches.len()
+            ),
+            source_section: "S19".into(),
+            first_observed_at_unix_ms: observed_at_utc_ms,
+            last_observed_at_unix_ms: observed_at_utc_ms,
+            resolved_at_unix_ms: None,
+            occurrence_count: 1,
+            acknowledged_at_unix_ms: None,
+            acknowledged_by: None,
+        })
+        .map_err(ScheduleMaterializationWriteError::Storage)?;
+        Ok(())
     }
 
     fn reconcile_materialization_capacity_and_collisions(
@@ -1010,6 +1317,7 @@ impl StationStore {
     fn insert_materialization_run(
         &self,
         run_id: &str,
+        channel_id: &str,
         request_sha256: &str,
         result_sha256: &str,
         window: &MaterializationWindow,
@@ -1066,7 +1374,24 @@ impl StationStore {
                 .map_err(ScheduleMaterializationWriteError::Storage)?;
         }
         expect_done(self.database, statement.raw)
-            .map_err(ScheduleMaterializationWriteError::Storage)
+            .map_err(ScheduleMaterializationWriteError::Storage)?;
+        drop(statement);
+        let binding = self
+            .prepare(
+                "INSERT INTO schedule_materialization_run_channels(run_id,channel_id,occurred_at_unix_ms) VALUES(?1,?2,?3)",
+            )
+            .map_err(ScheduleMaterializationWriteError::Storage)?;
+        let run_id = c_string(run_id, "materialization run channel binding")
+            .map_err(ScheduleMaterializationWriteError::Storage)?;
+        let channel_id = c_string(channel_id, "materialization run bound channel")
+            .map_err(ScheduleMaterializationWriteError::Storage)?;
+        bind_text(self.database, binding.raw, 1, &run_id)
+            .map_err(ScheduleMaterializationWriteError::Storage)?;
+        bind_text(self.database, binding.raw, 2, &channel_id)
+            .map_err(ScheduleMaterializationWriteError::Storage)?;
+        bind_i64(self.database, binding.raw, 3, occurred_at_unix_ms)
+            .map_err(ScheduleMaterializationWriteError::Storage)?;
+        expect_done(self.database, binding.raw).map_err(ScheduleMaterializationWriteError::Storage)
     }
 
     fn insert_materialization_outcome(

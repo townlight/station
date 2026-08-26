@@ -3,6 +3,7 @@ $ErrorActionPreference = 'Stop'
 $repoRoot = Split-Path $PSScriptRoot -Parent
 $proofNames = @(
     'prove-installed-activation.ps1',
+    'prove-installed-automatic-materialization.ps1',
     'prove-installed-alert-delivery.ps1',
     'prove-installed-alert-realert.ps1',
     'prove-installed-alert-send-test.ps1',

@@ -5029,7 +5029,7 @@ mod tests {
                     "127.0.0.1:5500",
                     -24.0,
                 )],
-                enabled: false,
+                enabled: true,
             })
             .unwrap();
         store

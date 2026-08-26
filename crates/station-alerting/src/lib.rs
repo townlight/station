@@ -941,6 +941,7 @@ fn alert_condition_label(condition: station_domain::AlertConditionKind) -> &'sta
         AlertConditionKind::RelayBlocked => "relay-blocked",
         AlertConditionKind::ComplianceProbeFail => "compliance-probe-fail",
         AlertConditionKind::MissingMedia => "missing-media",
+        AlertConditionKind::ScheduleNoMatch => "schedule-no-match",
         AlertConditionKind::CommitFailure => "commit-failure",
         AlertConditionKind::TakeoverStuck2h => "takeover-stuck-2h",
         AlertConditionKind::AiRuntimeDown => "ai-runtime-down",
@@ -952,6 +953,7 @@ fn alert_condition_label(condition: station_domain::AlertConditionKind) -> &'sta
         AlertConditionKind::UpdateAvailable => "update-available",
         AlertConditionKind::UpdateCheckFailed => "update-check-failed",
         AlertConditionKind::UpdateApplyFailed => "update-apply-failed",
+        AlertConditionKind::ScheduleMaterializationFailure => "schedule-materialization-failure",
     }
 }
 
