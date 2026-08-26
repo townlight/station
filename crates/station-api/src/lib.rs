@@ -103,6 +103,7 @@ use station_storage::{
     ScheduleMaterializationRunOrigin, ScheduleMaterializationWriteError, StationStore,
     StoredSinkLoudnessProof,
 };
+use station_transport_proof::{CableTransportValidation, TargetDeviceConfig, TargetProtocol};
 use station_update::UpdateCheckTrigger;
 use station_update_coordinator::CoordinatorError;
 
@@ -665,6 +666,24 @@ struct CreateReceiverReceiptRequest {
     evidence_reference: String,
     detail: String,
     observed_at_unix_ms: i64,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PutTransportTargetRequest {
+    target_id: String,
+    label: String,
+    protocol: TargetProtocol,
+    endpoint: String,
+    credential_configured: bool,
+    expected_revision: Option<u64>,
+}
+
+#[derive(Debug, Serialize)]
+struct TransportProofResponse {
+    channel_id: String,
+    history: station_storage::TransportProofHistory,
+    validations: Vec<CableTransportValidation>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2092,6 +2111,21 @@ impl Api {
                     && path.ends_with("/receiver-receipts") =>
             {
                 self.list_receiver_receipts(path)
+            }
+            ("GET", path)
+                if path.starts_with("/api/v1/channels/") && path.ends_with("/transport-proof") =>
+            {
+                self.read_transport_proof(path, actor)
+            }
+            ("GET", path)
+                if path.starts_with("/api/v1/channels/") && path.ends_with("/transport-target") =>
+            {
+                self.read_transport_target(path, actor)
+            }
+            ("PUT", path)
+                if path.starts_with("/api/v1/channels/") && path.ends_with("/transport-target") =>
+            {
+                self.put_transport_target(path, body, actor)
             }
             ("GET", path)
                 if path.starts_with("/api/v1/channels/") && path.ends_with("/fallback-slate") =>
@@ -6080,6 +6114,205 @@ impl Api {
         }
     }
 
+    fn put_transport_target(
+        &self,
+        path: &str,
+        body: Option<&[u8]>,
+        actor: Option<&OperatorAccount>,
+    ) -> ApiResponse {
+        let Some(actor) = actor.filter(|account| {
+            account.enabled()
+                && account
+                    .roles()
+                    .contains(&station_auth::OperatorRole::SetupAdmin)
+        }) else {
+            return error_response(
+                403,
+                "setup_admin_required",
+                "Configuring a target device requires the Setup Admin role.",
+            );
+        };
+        let Some(channel_id) = path_identity(path, "/api/v1/channels/", "/transport-target") else {
+            return error_response(400, "invalid_path", "The transport target path is invalid.");
+        };
+        let Some(request) = parse_body::<PutTransportTargetRequest>(body) else {
+            return error_response(
+                400,
+                "invalid_json",
+                "A transport target configuration body is required.",
+            );
+        };
+        let now = match system_time_millis() {
+            Ok(now) => now,
+            Err(message) => return error_response(500, "clock_error", &message),
+        };
+        let config = TargetDeviceConfig {
+            target_id: request.target_id,
+            label: request.label,
+            protocol: request.protocol,
+            endpoint: request.endpoint,
+            credential_configured: request.credential_configured,
+            revision: 1,
+            created_at_unix_ms: now,
+            updated_at_unix_ms: now,
+            updated_by: actor.account_id().as_str().into(),
+        };
+        // Target configuration is attached to a specific sink. The body may not
+        // select an arbitrary output; require the canonical required sink when
+        // the channel has only one, otherwise reject the ambiguity.
+        let channel = match self.storage.list_channels() {
+            Ok(channels) => channels
+                .into_iter()
+                .find(|value| value.channel_id == channel_id),
+            Err(message) => return error_response(500, "storage_error", &message),
+        };
+        let Some(channel) = channel else {
+            return error_response(404, "channel_not_found", "The channel does not exist.");
+        };
+        let sinks = channel
+            .output_sinks
+            .iter()
+            .filter(|sink| sink.enabled && sink.required)
+            .collect::<Vec<_>>();
+        if sinks.len() != 1 {
+            return error_response(
+                409,
+                "transport_target_sink_ambiguous",
+                "Target configuration requires exactly one enabled required transport sink.",
+            );
+        }
+        match self.storage.write_transport_target_config(
+            channel_id,
+            &sinks[0].sink_id,
+            request.expected_revision,
+            &config,
+        ) {
+            Ok(stored) => json_response(
+                200,
+                serde_json::to_vec(&stored)
+                    .expect("serializing transport target configuration cannot fail"),
+            ),
+            Err(message) if message.contains("revision conflict") => {
+                error_response(409, "revision_conflict", &message)
+            }
+            Err(message) => error_response(422, "validation_failed", &message),
+        }
+    }
+
+    fn read_transport_target(&self, path: &str, actor: Option<&OperatorAccount>) -> ApiResponse {
+        if !is_scheduling_reader(actor) {
+            return error_response(
+                403,
+                "operator_required",
+                "Reading target device configuration requires an enabled operator account.",
+            );
+        }
+        let Some(channel_id) = path_identity(path, "/api/v1/channels/", "/transport-target") else {
+            return error_response(400, "invalid_path", "The transport target path is invalid.");
+        };
+        let channel = match self.storage.list_channels() {
+            Ok(channels) => channels
+                .into_iter()
+                .find(|value| value.channel_id == channel_id),
+            Err(message) => return error_response(500, "storage_error", &message),
+        };
+        let Some(channel) = channel else {
+            return error_response(404, "channel_not_found", "The channel does not exist.");
+        };
+        let sinks = channel
+            .output_sinks
+            .iter()
+            .filter(|sink| sink.enabled && sink.required)
+            .collect::<Vec<_>>();
+        if sinks.len() != 1 {
+            return error_response(
+                409,
+                "transport_target_sink_ambiguous",
+                "Target configuration requires exactly one enabled required transport sink.",
+            );
+        }
+        match self
+            .storage
+            .read_transport_target_config(channel_id, &sinks[0].sink_id)
+        {
+            Ok(Some(config)) => json_response(
+                200,
+                serde_json::to_vec(&config)
+                    .expect("serializing transport target configuration cannot fail"),
+            ),
+            Ok(None) => error_response(
+                404,
+                "transport_target_not_configured",
+                "No target device is configured for the required transport sink.",
+            ),
+            Err(message) => error_response(500, "storage_error", &message),
+        }
+    }
+
+    fn read_transport_proof(&self, path: &str, actor: Option<&OperatorAccount>) -> ApiResponse {
+        if !is_scheduling_reader(actor) {
+            return error_response(
+                403,
+                "operator_required",
+                "Reading transport proof requires an enabled operator account.",
+            );
+        }
+        let Some(channel_id) = path_identity(path, "/api/v1/channels/", "/transport-proof") else {
+            return error_response(400, "invalid_path", "The transport proof path is invalid.");
+        };
+        let history = match self
+            .storage
+            .read_transport_proof_history(channel_id, None, 1_000)
+        {
+            Ok(history) => history,
+            Err(message) => return error_response(500, "storage_error", &message),
+        };
+        let station_box = self.cached_station_box_profile().ok();
+        let candidate = station_box.as_ref().and_then(|profile| {
+            profile.release.candidate_verified.then(|| {
+                (
+                    profile.product_version.as_str(),
+                    profile.source_commit.as_deref(),
+                )
+            })
+        });
+        let mut validations = Vec::new();
+        if let Some((candidate_version, Some(source_commit))) = candidate {
+            if let Ok(channels) = self.storage.list_channels() {
+                if let Some(channel) = channels
+                    .into_iter()
+                    .find(|value| value.channel_id == channel_id)
+                {
+                    for sink in channel
+                        .output_sinks
+                        .iter()
+                        .filter(|sink| sink.enabled && sink.required)
+                    {
+                        if let Ok(Some(validation)) =
+                            self.storage.read_current_cable_transport_validation(
+                                channel_id,
+                                &sink.sink_id,
+                                candidate_version,
+                                source_commit,
+                            )
+                        {
+                            validations.push(validation);
+                        }
+                    }
+                }
+            }
+        }
+        json_response(
+            200,
+            serde_json::to_vec(&TransportProofResponse {
+                channel_id: channel_id.into(),
+                history,
+                validations,
+            })
+            .expect("serializing transport proof cannot fail"),
+        )
+    }
+
     fn create_receiver_receipt(
         &self,
         path: &str,
@@ -7605,15 +7838,80 @@ impl Api {
             "current StationBox capability, named sink contract, and worker heartbeat authority",
             CommissioningBoundary::LocalAuthority,
         ));
+        let mut cable_transport_pass = !enabled.is_empty();
+        let mut cable_transport_detail = Vec::new();
+        if let Some((candidate_version, source_commit)) = receiver_candidate {
+            for channel in &enabled {
+                let sinks = channel
+                    .output_sinks
+                    .iter()
+                    .filter(|sink| sink.enabled && sink.required)
+                    .collect::<Vec<_>>();
+                if sinks.is_empty() {
+                    cable_transport_pass = false;
+                    cable_transport_detail.push(format!(
+                        "{} has no enabled required transport sink",
+                        channel.channel_id
+                    ));
+                    continue;
+                }
+                for sink in sinks {
+                    match self.storage.read_current_cable_transport_validation(
+                        &channel.channel_id,
+                        &sink.sink_id,
+                        candidate_version,
+                        source_commit,
+                    ) {
+                        Ok(Some(validation)) if validation.outcome.is_some() => {
+                            cable_transport_detail.push(format!(
+                                "{} / {} has current analysis and target reachability proof",
+                                channel.channel_id, sink.sink_id
+                            ));
+                        }
+                        Ok(Some(validation)) => {
+                            cable_transport_pass = false;
+                            cable_transport_detail.push(format!(
+                                "{} / {} remains blocked: {}",
+                                channel.channel_id, sink.sink_id, validation.detail
+                            ));
+                        }
+                        Ok(None) => {
+                            cable_transport_pass = false;
+                            cable_transport_detail.push(format!(
+                                "{} / {} has no configured target device",
+                                channel.channel_id, sink.sink_id
+                            ));
+                        }
+                        Err(message) => {
+                            return error_response(500, "storage_error", &message);
+                        }
+                    }
+                }
+            }
+        } else {
+            cable_transport_pass = false;
+            cable_transport_detail.push(
+                "The installed candidate identity is unavailable, so transport evidence cannot be bound."
+                    .into(),
+            );
+        }
         checks.push(commissioning_check(
             "cable_transport_validation",
             "Cable transport analysis and device reachability",
             CommissioningPhase::SourcesOutputs,
-            CommissioningCheckStatus::Blocked,
+            if cable_transport_pass {
+                CommissioningCheckStatus::Pass
+            } else {
+                CommissioningCheckStatus::Blocked
+            },
             true,
-            Some("health"),
-            "No durable TSDuck transport-analysis result and no authenticated target-device reachability result are stored yet.",
-            "the current control plane has no TSDuck/device-reachability evidence authority",
+            Some("channels"),
+            if cable_transport_detail.is_empty() {
+                "No enabled channel has a current cable transport validation.".into()
+            } else {
+                cable_transport_detail.join("; ")
+            },
+            "durable transport analysis and authenticated target-device reachability receipts bound to the current candidate and output configuration",
             CommissioningBoundary::LocalAuthority,
         ));
 

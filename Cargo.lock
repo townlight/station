@@ -1739,6 +1739,7 @@ dependencies = [
  "station-source-evidence",
  "station-storage",
  "station-support",
+ "station-transport-proof",
  "station-update",
  "station-update-coordinator",
  "zip",
@@ -2051,6 +2052,7 @@ dependencies = [
  "station-recording",
  "station-schedule",
  "station-schedule-automation",
+ "station-transport-proof",
  "station-update",
 ]
 
@@ -2075,6 +2077,15 @@ dependencies = [
  "station-storage",
  "station-update",
  "zip",
+]
+
+[[package]]
+name = "station-transport-proof"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "sha2",
 ]
 
 [[package]]
