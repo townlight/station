@@ -11802,6 +11802,7 @@ impl StationStore {
         &self,
         execution: &TransportProofExecution,
         receipt: &TransportAnalysisReceipt,
+        reachability: &TargetDeviceReachabilityReceipt,
         now_unix_ms: i64,
         verify_installed_candidate: F,
     ) -> Result<TransportProofJobRecord, String>
@@ -11811,6 +11812,7 @@ impl StationStore {
         let job_id = &execution.job_id;
         validate_transport_proof_job_id(job_id)?;
         receipt.validate_fresh_at(now_unix_ms)?;
+        reachability.validate_fresh_at(now_unix_ms)?;
         self.execute("BEGIN IMMEDIATE")?;
         let outcome = (|| {
             let current = self
@@ -11836,6 +11838,15 @@ impl StationStore {
                 || receipt.configuration_hash != current.job.configuration_hash
                 || receipt.outcome != ProofOutcome::Pass
                 || receipt.findings.analyzer_output_sha256.is_empty()
+                || reachability.proof_id != current.job.job_id
+                || reachability.channel_id != current.job.channel_id
+                || reachability.sink_id != current.job.sink_id
+                || reachability.target_id != current.job.target_id
+                || reachability.target_revision != current.job.target_revision
+                || reachability.candidate_version != current.job.candidate_version
+                || reachability.source_commit != current.job.source_commit
+                || reachability.configuration_hash != current.job.configuration_hash
+                || reachability.outcome != ProofOutcome::Pass
             {
                 return Err(
                     "transport proof completion receipt does not match its claimed job".into(),
@@ -11859,6 +11870,12 @@ impl StationStore {
                     "transport proof completion receipt does not bind the sealed capture".into(),
                 );
             }
+            let reachability_record = serde_json::to_string(reachability)
+                .map_err(|_| "serialize target reachability receipt failed")?;
+            self.insert_target_device_reachability_receipt_locked(
+                reachability,
+                &reachability_record,
+            )?;
             let record = serde_json::to_string(receipt)
                 .map_err(|_| "serialize transport analysis receipt failed")?;
             let insert = self.prepare("INSERT INTO transport_analysis_receipts(proof_id,channel_id,sink_id,target_id,target_revision,candidate_version,source_commit,configuration_hash,outcome,captured_at_unix_ms,recorded_at_unix_ms,record_json) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,'pass',?9,?10,?11)")?;
@@ -12058,6 +12075,7 @@ impl StationStore {
         self.finish_value_transaction(outcome)
     }
 
+    #[cfg(test)]
     pub(crate) fn append_target_device_reachability_receipt(
         &self,
         receipt: &TargetDeviceReachabilityReceipt,
@@ -12084,66 +12102,72 @@ impl StationStore {
         let record = serde_json::to_string(receipt)
             .map_err(|error| format!("serialize target reachability receipt: {error}"))?;
         self.execute("BEGIN IMMEDIATE")?;
-        let outcome = (|| {
-            let statement = self.prepare(
+        let outcome = self.insert_target_device_reachability_receipt_locked(receipt, &record);
+        self.finish_transaction(outcome)
+    }
+
+    fn insert_target_device_reachability_receipt_locked(
+        &self,
+        receipt: &TargetDeviceReachabilityReceipt,
+        record: &str,
+    ) -> Result<(), String> {
+        let statement = self.prepare(
                 "INSERT INTO target_device_reachability_receipts(proof_id, channel_id, sink_id, target_id, target_revision, candidate_version, source_commit, configuration_hash, outcome, observed_at_unix_ms, recorded_at_unix_ms, record_json) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
             )?;
-            for (value, index) in [
-                (&receipt.proof_id, 1),
-                (&receipt.channel_id, 2),
-                (&receipt.sink_id, 3),
-                (&receipt.target_id, 4),
-                (&receipt.candidate_version, 6),
-                (&receipt.source_commit, 7),
-                (&receipt.configuration_hash, 8),
-            ] {
-                bind_text(
-                    self.database,
-                    statement.raw,
-                    index,
-                    &c_string(value, "reachability field")?,
-                )?;
-            }
-            bind_i64(
-                self.database,
-                statement.raw,
-                5,
-                i64::try_from(receipt.target_revision)
-                    .map_err(|_| "target revision exceeds SQLite range".to_string())?,
-            )?;
+        for (value, index) in [
+            (&receipt.proof_id, 1),
+            (&receipt.channel_id, 2),
+            (&receipt.sink_id, 3),
+            (&receipt.target_id, 4),
+            (&receipt.candidate_version, 6),
+            (&receipt.source_commit, 7),
+            (&receipt.configuration_hash, 8),
+        ] {
             bind_text(
                 self.database,
                 statement.raw,
-                9,
-                &c_string(
-                    match receipt.outcome {
-                        ProofOutcome::Pass => "pass",
-                        ProofOutcome::Fail => "fail",
-                    },
-                    "reachability outcome",
-                )?,
+                index,
+                &c_string(value, "reachability field")?,
             )?;
-            bind_i64(
-                self.database,
-                statement.raw,
-                10,
-                receipt.observed_at_unix_ms,
-            )?;
-            bind_i64(
-                self.database,
-                statement.raw,
-                11,
-                receipt.recorded_at_unix_ms,
-            )?;
-            bind_text(
-                self.database,
-                statement.raw,
-                12,
-                &c_string(&record, "reachability record")?,
-            )?;
-            expect_done(self.database, statement.raw)
-        })();
-        self.finish_value_transaction(outcome)
+        }
+        bind_i64(
+            self.database,
+            statement.raw,
+            5,
+            i64::try_from(receipt.target_revision)
+                .map_err(|_| "target revision exceeds SQLite range".to_string())?,
+        )?;
+        bind_text(
+            self.database,
+            statement.raw,
+            9,
+            &c_string(
+                match receipt.outcome {
+                    ProofOutcome::Pass => "pass",
+                    ProofOutcome::Fail => "fail",
+                },
+                "reachability outcome",
+            )?,
+        )?;
+        bind_i64(
+            self.database,
+            statement.raw,
+            10,
+            receipt.observed_at_unix_ms,
+        )?;
+        bind_i64(
+            self.database,
+            statement.raw,
+            11,
+            receipt.recorded_at_unix_ms,
+        )?;
+        bind_text(
+            self.database,
+            statement.raw,
+            12,
+            &c_string(record, "reachability record")?,
+        )?;
+        expect_done(self.database, statement.raw)
     }
 
     pub fn read_transport_proof_history(
@@ -12415,6 +12439,7 @@ impl StationStore {
         }
     }
 
+    #[cfg(test)]
     fn validate_transport_proof_binding(
         &self,
         binding: TransportProofBinding<'_>,
@@ -15956,6 +15981,7 @@ impl StationStore {
     }
 }
 
+#[cfg(test)]
 struct TransportProofBinding<'a> {
     channel_id: &'a str,
     sink_id: &'a str,

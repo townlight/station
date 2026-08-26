@@ -12,6 +12,8 @@ use std::os::windows::io::AsRawHandle;
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStderr, ChildStdout, Command, Stdio};
 #[cfg(test)]
+use std::sync::Mutex;
+#[cfg(test)]
 use std::sync::atomic::AtomicUsize;
 use std::sync::{
     Arc,
@@ -64,6 +66,14 @@ const RECEIVER_RESOURCE_PATH: &str = "/api/v1/townlight/reachability";
 static FORCE_JOB_ASSIGN_FAILURE: AtomicBool = AtomicBool::new(false);
 #[cfg(test)]
 static FORCED_CANCEL_FAILURES: AtomicUsize = AtomicUsize::new(0);
+#[cfg(test)]
+static FORCED_CAPTURE_DRAIN_DELAY_MS: AtomicUsize = AtomicUsize::new(0);
+#[cfg(test)]
+static FORCED_RUNNER_FAILURE_POINT: AtomicUsize = AtomicUsize::new(0);
+#[cfg(test)]
+static ACTIVE_PROCESS_DRAINS: AtomicUsize = AtomicUsize::new(0);
+#[cfg(test)]
+static RUNNER_FAULT_TEST_LOCK: Mutex<()> = Mutex::new(());
 
 /// A capture namespace exclusively owned by stationd.  It rejects reparse
 /// points from its root through the per-job directory and exposes no API for a
@@ -87,10 +97,12 @@ struct PinnedCaptureOutput {
 
 impl PinnedAnalysisInput {
     fn bytes(&self, max: u64) -> Result<Vec<u8>, String> {
-        let file = self
+        let mut file = self
             .file
             .try_clone()
             .map_err(|_| "transport analysis input handle could not be cloned")?;
+        file.seek(SeekFrom::Start(0))
+            .map_err(|_| "transport analysis input handle could not be rewound")?;
         bounded_capture_file(file, max)
     }
 }
@@ -448,6 +460,53 @@ fn execute_claimed_transport_job(
     application_root: &Path,
     execution: &TransportProofExecution,
 ) -> Result<(), String> {
+    let mut clock = unix_time_millis;
+    execute_claimed_transport_job_with(
+        store,
+        database,
+        application_root,
+        execution,
+        TransportExecutionAdapters {
+            clock: &mut clock,
+            runner: RealProcessRunner,
+            receiver_factory: HttpsReceiverAdapter::new,
+            post_probe_action: PostProbeAction::None,
+        },
+    )
+}
+
+struct TransportExecutionAdapters<'a, R, F> {
+    clock: &'a mut dyn FnMut() -> Result<i64, String>,
+    runner: R,
+    receiver_factory: F,
+    post_probe_action: PostProbeAction,
+}
+
+#[derive(Clone, Copy)]
+enum PostProbeAction {
+    None,
+    #[cfg(feature = "test-support")]
+    Mutate(InjectedAuthorityMutation),
+}
+
+fn execute_claimed_transport_job_with<R, A, F>(
+    store: &StationStore,
+    database: &Path,
+    application_root: &Path,
+    execution: &TransportProofExecution,
+    adapters: TransportExecutionAdapters<'_, R, F>,
+) -> Result<(), String>
+where
+    R: CaptureProcessRunner,
+    A: AuthenticatedReceiver,
+    F: FnOnce(String) -> Result<A, String>,
+{
+    let TransportExecutionAdapters {
+        clock,
+        runner,
+        receiver_factory,
+        post_probe_action,
+    } = adapters;
     let job = execution.job();
     let data_directory = database
         .parent()
@@ -474,10 +533,7 @@ fn execute_claimed_transport_job(
     let root = ManagedCaptureRoot::open(data_directory.join("artifacts").join("transport-proof"))?;
     let mut capture_output = root.begin_job(&job.job.job_id)?;
     let runtime = AttestedTsdDuckRuntime::from_verified_install(data_directory, application_root)?;
-    let executor = TsdDuckTransportExecutor {
-        runtime,
-        runner: RealProcessRunner,
-    };
+    let executor = TsdDuckTransportExecutor { runtime, runner };
     let capture = CaptureRequest {
         udp_host: host,
         udp_port: port,
@@ -485,9 +541,9 @@ fn execute_claimed_transport_job(
         max_bytes: job.job.max_capture_bytes,
         artifact_path: capture_output.path.clone(),
     };
-    let started = unix_time_millis()?;
+    let started = clock()?;
     executor.capture_to_pinned_handle(&capture, &capture_output.file)?;
-    let ended = unix_time_millis()?;
+    let ended = clock()?;
     let (facts, sealed_bytes) = root.seal_capture(
         &mut capture_output,
         &job.job.job_id,
@@ -524,7 +580,7 @@ fn execute_claimed_transport_job(
     fs::remove_file(&analysis_input_path)
         .map_err(|_| "transport analysis input could not be removed")?;
     analysis_lease.renew_now()?;
-    let recorded_at_unix_ms = unix_time_millis()?;
+    let recorded_at_unix_ms = clock()?;
     let receipt = TransportAnalysisReceipt {
         proof_id: analyzing.job.job_id.clone(),
         channel_id: analyzing.job.channel_id.clone(),
@@ -556,7 +612,7 @@ fn execute_claimed_transport_job(
         &target,
     )?;
     let receiver = ReceiverProofExecutor {
-        adapter: HttpsReceiverAdapter::new(authorization)?,
+        adapter: receiver_factory(authorization)?,
         adapter_version: "1".into(),
     };
     let receiver_binding = ProofBinding {
@@ -570,6 +626,7 @@ fn execute_claimed_transport_job(
         now_unix_ms: recorded_at_unix_ms,
     };
     let reachability = receiver.probe_receipt(&receiver_binding, &target)?;
+    apply_post_probe_action(post_probe_action, store, &target, data_directory, &job.job)?;
     // The closure is executed by storage after BEGIN IMMEDIATE, alongside its
     // current target/configuration revalidation. The shared installation fence
     // remains held through that transaction, so activation cannot replace the
@@ -587,14 +644,73 @@ fn execute_claimed_transport_job(
     if current_target != target {
         return Err("transport proof target changed during receiver verification".into());
     }
-    store.append_target_device_reachability_receipt(&reachability, recorded_at_unix_ms)?;
     store.complete_transport_proof_job_with_analysis(
         execution,
         &receipt,
+        &reachability,
         recorded_at_unix_ms,
         || station_maintenance::read_verified_install_authority(data_directory, application_root),
     )?;
     Ok(())
+}
+
+fn apply_post_probe_action(
+    action: PostProbeAction,
+    _store: &StationStore,
+    _target: &TargetDeviceConfig,
+    _data_directory: &Path,
+    _job: &station_storage::TransportProofJob,
+) -> Result<(), String> {
+    match action {
+        PostProbeAction::None => Ok(()),
+        #[cfg(feature = "test-support")]
+        PostProbeAction::Mutate(mutation) => {
+            let (store, target, data_directory, job) = (_store, _target, _data_directory, _job);
+            match mutation {
+                InjectedAuthorityMutation::None => {}
+                InjectedAuthorityMutation::TargetRevision => {
+                    let mut changed = target.clone();
+                    changed.updated_at_unix_ms = changed.updated_at_unix_ms.saturating_add(1);
+                    changed.credential_configured = false;
+                    store.write_transport_target_config(
+                        &job.channel_id,
+                        &job.sink_id,
+                        Some(target.revision),
+                        &changed,
+                    )?;
+                }
+                InjectedAuthorityMutation::OutputConfiguration => {
+                    let mut channel = store
+                        .list_channels()?
+                        .into_iter()
+                        .find(|channel| channel.channel_id == job.channel_id)
+                        .ok_or("injected controller channel disappeared")?;
+                    let sink = channel
+                        .output_sinks
+                        .iter_mut()
+                        .find(|sink| sink.sink_id == job.sink_id)
+                        .ok_or("injected controller sink disappeared")?;
+                    sink.destination = "127.0.0.1:5501".into();
+                    store.put_channel(&channel)?;
+                }
+                InjectedAuthorityMutation::InstallGeneration => {
+                    let active_path =
+                        data_directory.join(station_maintenance::ACTIVE_SLOT_RECEIPT_NAME);
+                    let mut active: serde_json::Value = serde_json::from_slice(
+                        &fs::read(&active_path)
+                            .map_err(|_| "injected active slot could not be read")?,
+                    )
+                    .map_err(|_| "injected active slot is invalid")?;
+                    active["generation"] = serde_json::json!(
+                        active["generation"].as_u64().unwrap_or(0).saturating_add(1)
+                    );
+                    fs::write(&active_path, active.to_string())
+                        .map_err(|_| "injected active slot could not be mutated")?;
+                }
+            }
+            Ok(())
+        }
+    }
 }
 
 struct AnalysisLeaseHeartbeat<'a> {
@@ -827,6 +943,16 @@ trait ProcessRunner: sealed::Process + Send + Sync {
     }
 }
 
+trait CaptureProcessRunner: ProcessRunner {
+    fn capture_to_handle(
+        &self,
+        executable: &Path,
+        argv: &[String],
+        timeout: Duration,
+        output: &File,
+    ) -> Result<ProcessResult, String>;
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ProcessResult {
     pub status_success: bool,
@@ -872,77 +998,92 @@ impl ProcessRunner for RealProcessRunner {
             let _ = child.wait();
             return Err(error);
         }
-        let stdout = child
-            .stdout
-            .take()
-            .ok_or("TSDuck stdout pipe was unavailable")?;
-        let stderr = child
-            .stderr
-            .take()
-            .ok_or("TSDuck stderr pipe was unavailable")?;
+        #[cfg(test)]
+        if FORCED_RUNNER_FAILURE_POINT.load(Ordering::Acquire) == 1 {
+            drop(child.stdout.take());
+        }
+        let stdout = match child.stdout.take() {
+            Some(stdout) => stdout,
+            None => {
+                job.terminate();
+                let _ = child.wait();
+                return Err("TSDuck stdout pipe was unavailable".into());
+            }
+        };
+        #[cfg(test)]
+        if FORCED_RUNNER_FAILURE_POINT.load(Ordering::Acquire) == 2 {
+            drop(child.stderr.take());
+        }
+        let stderr = match child.stderr.take() {
+            Some(stderr) => stderr,
+            None => {
+                job.terminate();
+                let _ = child.wait();
+                drop(stdout);
+                return Err("TSDuck stderr pipe was unavailable".into());
+            }
+        };
         let (stdout_tx, stdout_rx) = mpsc::sync_channel(1);
         let (stderr_tx, stderr_rx) = mpsc::sync_channel(1);
         let stdout_drain = std::thread::spawn(move || {
+            #[cfg(test)]
+            ACTIVE_PROCESS_DRAINS.fetch_add(1, Ordering::AcqRel);
             let _ = stdout_tx.send(drain_stdout(stdout));
+            #[cfg(test)]
+            ACTIVE_PROCESS_DRAINS.fetch_sub(1, Ordering::AcqRel);
         });
         let stderr_drain = std::thread::spawn(move || {
+            #[cfg(test)]
+            ACTIVE_PROCESS_DRAINS.fetch_add(1, Ordering::AcqRel);
             let _ = stderr_tx.send(drain_stderr(stderr));
+            #[cfg(test)]
+            ACTIVE_PROCESS_DRAINS.fetch_sub(1, Ordering::AcqRel);
         });
         let started = Instant::now();
         let mut last_heartbeat = Instant::now();
-        loop {
+        let process_outcome = loop {
             if last_heartbeat.elapsed() >= ANALYSIS_LEASE_HEARTBEAT_INTERVAL {
                 if let Err(error) = heartbeat() {
-                    job.terminate();
-                    let _ = child.wait();
-                    let _ = collect_process_drains(
-                        &job,
-                        stdout_rx,
-                        stderr_rx,
-                        stdout_drain,
-                        stderr_drain,
-                        heartbeat,
-                    );
-                    return Err(error);
+                    break Err(error);
                 }
                 last_heartbeat = Instant::now();
             }
-            if let Some(status) = child
-                .try_wait()
-                .map_err(|_| "TSDuck process status could not be read")?
-            {
-                heartbeat()?;
-                let output = collect_process_drains(
-                    &job,
-                    stdout_rx,
-                    stderr_rx,
-                    stdout_drain,
-                    stderr_drain,
-                    heartbeat,
-                )?;
-                heartbeat()?;
-                return Ok(ProcessResult {
-                    status_success: status.success(),
-                    output,
-                });
+            #[cfg(test)]
+            if FORCED_RUNNER_FAILURE_POINT.load(Ordering::Acquire) == 3 {
+                break Err("TSDuck process status could not be read".into());
+            }
+            match child.try_wait() {
+                Ok(Some(status)) => break Ok(status),
+                Ok(None) => {}
+                Err(_) => break Err("TSDuck process status could not be read".into()),
             }
             if started.elapsed() >= timeout {
-                heartbeat()?;
-                job.terminate();
-                let _ = child.wait();
-                collect_process_drains(
-                    &job,
-                    stdout_rx,
-                    stderr_rx,
-                    stdout_drain,
-                    stderr_drain,
-                    heartbeat,
-                )?;
-                heartbeat()?;
-                return Err("TSDuck process exceeded its deadline".into());
+                break match heartbeat() {
+                    Ok(()) => Err("TSDuck process exceeded its deadline".into()),
+                    Err(error) => Err(error),
+                };
             }
             std::thread::sleep(Duration::from_millis(10));
+        };
+        if process_outcome.is_err() {
+            job.terminate();
         }
+        let _ = child.wait();
+        let drains = collect_process_drains(
+            &job,
+            stdout_rx,
+            stderr_rx,
+            stdout_drain,
+            stderr_drain,
+            heartbeat,
+        );
+        let status = process_outcome?;
+        let output = drains?;
+        heartbeat()?;
+        Ok(ProcessResult {
+            status_success: status.success(),
+            output,
+        })
     }
 }
 
@@ -978,6 +1119,13 @@ impl RealProcessRunner {
         })?;
         let (tx, rx) = mpsc::sync_channel(1);
         let drain = std::thread::spawn(move || {
+            #[cfg(test)]
+            {
+                let delay = FORCED_CAPTURE_DRAIN_DELAY_MS.swap(0, Ordering::AcqRel);
+                if delay > 0 {
+                    std::thread::sleep(Duration::from_millis(delay as u64));
+                }
+            }
             let _ = tx.send(drain_stderr(stderr));
         });
         let started = Instant::now();
@@ -1015,6 +1163,18 @@ impl RealProcessRunner {
     }
 }
 
+impl CaptureProcessRunner for RealProcessRunner {
+    fn capture_to_handle(
+        &self,
+        executable: &Path,
+        argv: &[String],
+        timeout: Duration,
+        output: &File,
+    ) -> Result<ProcessResult, String> {
+        self.run_capture_to_handle(executable, argv, timeout, output)
+    }
+}
+
 #[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct FakeProcessRunner {
@@ -1034,12 +1194,12 @@ struct TsdDuckTransportExecutor<R> {
     pub runner: R,
 }
 impl<R: ProcessRunner> TsdDuckTransportExecutor<R> {
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(test)]
     fn analyze_capture(&self, capture: &CaptureRequest) -> Result<TransportFindings, String> {
         self.analyze_capture_with_heartbeat(capture, &mut || Ok(()))
     }
 
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(test)]
     fn analyze_capture_with_heartbeat(
         &self,
         capture: &CaptureRequest,
@@ -1137,7 +1297,7 @@ impl<R: ProcessRunner> TsdDuckTransportExecutor<R> {
     }
 }
 
-impl TsdDuckTransportExecutor<RealProcessRunner> {
+impl<R: CaptureProcessRunner> TsdDuckTransportExecutor<R> {
     fn capture_to_pinned_handle(
         &self,
         capture: &CaptureRequest,
@@ -1149,7 +1309,7 @@ impl TsdDuckTransportExecutor<RealProcessRunner> {
         let mut argv = self.capture_argv(capture)?;
         let destination = argv.last_mut().ok_or("TSDuck capture output is missing")?;
         *destination = "-".into();
-        let result = self.runner.run_capture_to_handle(
+        let result = self.runner.capture_to_handle(
             &tsp,
             &argv,
             Duration::from_millis(capture.duration_ms.saturating_add(5_000)),
@@ -1439,6 +1599,34 @@ impl ProcessRunner for InjectedFixtureRunner {
 }
 
 #[cfg(feature = "test-support")]
+impl CaptureProcessRunner for InjectedFixtureRunner {
+    fn capture_to_handle(
+        &self,
+        _: &Path,
+        argv: &[String],
+        _: Duration,
+        output: &File,
+    ) -> Result<ProcessResult, String> {
+        if argv.last().map(String::as_str) != Some("-") {
+            return Err("injected capture escaped its pinned stdout handle".into());
+        }
+        let mut output = output
+            .try_clone()
+            .map_err(|_| "injected capture handle could not be cloned")?;
+        output
+            .write_all(include_bytes!("../tests/fixtures/tsduck-3.44-h264-aac.ts"))
+            .map_err(|_| "injected capture fixture could not be written")?;
+        output
+            .flush()
+            .map_err(|_| "injected capture fixture could not be flushed")?;
+        Ok(ProcessResult {
+            status_success: true,
+            output: Vec::new(),
+        })
+    }
+}
+
+#[cfg(feature = "test-support")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InjectedAuthorityMutation {
     None,
@@ -1466,162 +1654,41 @@ pub fn run_injected_transport_controller_iteration(
     let execution = store
         .claim_next_transport_proof_job(now, CLAIM_LEASE_MS)?
         .ok_or("injected controller found no queued transport proof job")?;
-    let outcome = (|| {
-        let job = execution.job();
-        let target = store
-            .read_transport_target_config(&job.job.channel_id, &job.job.sink_id)?
-            .ok_or("injected controller target is unavailable")?;
-        let authorization = store.read_transport_target_authorization(
-            &job.job.channel_id,
-            &job.job.sink_id,
-            &target,
-        )?;
-        if authorization != expected_authorization
-            || RECEIVER_RESOURCE_PATH != "/api/v1/townlight/reachability"
-        {
-            return Err("injected receiver authority did not match its exact contract".into());
+    let expected_authorization = expected_authorization.to_string();
+    let response = receiver_response.to_vec();
+    let mut clock_calls = 0_u8;
+    let mut clock = || {
+        clock_calls = clock_calls.saturating_add(1);
+        if clock_calls == 1 {
+            now.checked_sub(i64::try_from(MAX_PROOF_DURATION_MS).expect("duration fits i64"))
+                .ok_or_else(|| "injected capture time underflowed".to_string())
+        } else {
+            Ok(now)
         }
-        let data_directory = database
-            .parent()
-            .ok_or("injected controller data directory is unavailable")?;
-        ensure_current_candidate(data_directory, application_root, &job.job)?;
-        let artifact_directory = data_directory
-            .join("artifacts")
-            .join("transport-proof")
-            .join(&job.job.job_id);
-        fs::create_dir_all(&artifact_directory)
-            .map_err(|_| "injected capture directory could not be created")?;
-        let artifact = artifact_directory.join("capture.ts");
-        let capture_bytes = include_bytes!("../tests/fixtures/tsduck-3.44-h264-aac.ts").as_slice();
-        fs::write(&artifact, capture_bytes)
-            .map_err(|_| "injected capture fixture could not be written")?;
-        let capture_started = now
-            .checked_sub(i64::try_from(MAX_PROOF_DURATION_MS).expect("duration fits i64"))
-            .ok_or("injected capture time underflowed")?;
-        let facts = TransportProofCaptureFacts {
-            artifact_relative_path: format!("{}/capture.ts", job.job.job_id),
-            capture_bytes: u64::try_from(capture_bytes.len())
-                .map_err(|_| "injected capture size overflowed")?,
-            capture_sha256: sha256(capture_bytes),
-            started_at_unix_ms: capture_started,
-            ended_at_unix_ms: now,
-        };
-        let analyzing =
-            store.begin_transport_proof_analysis(&execution, &facts, now, ANALYSIS_LEASE_MS)?;
-        let runtime =
-            AttestedTsdDuckRuntime::from_verified_install(data_directory, application_root)?;
-        let executor = TsdDuckTransportExecutor {
-            runtime,
+    };
+    let outcome = execute_claimed_transport_job_with(
+        &store,
+        database,
+        application_root,
+        &execution,
+        TransportExecutionAdapters {
+            clock: &mut clock,
             runner: InjectedFixtureRunner,
-        };
-        let findings = executor.analyze_capture(&CaptureRequest {
-            udp_host: "127.0.0.1".into(),
-            udp_port: 5500,
-            duration_ms: MAX_PROOF_DURATION_MS,
-            max_bytes: job.job.max_capture_bytes,
-            artifact_path: artifact,
-        })?;
-        let analysis = TransportAnalysisReceipt {
-            proof_id: analyzing.job.job_id.clone(),
-            channel_id: analyzing.job.channel_id.clone(),
-            sink_id: analyzing.job.sink_id.clone(),
-            target_id: analyzing.job.target_id.clone(),
-            target_revision: analyzing.job.target_revision,
-            candidate_version: analyzing.job.candidate_version.clone(),
-            source_commit: analyzing.job.source_commit.clone(),
-            configuration_hash: analyzing.job.configuration_hash.clone(),
-            analyzer_id: TSDUCK_ANALYZER_ID.into(),
-            analyzer_version: executor.runtime.version.clone(),
-            analyzer_sha256: executor.runtime.tsanalyze_sha256.clone(),
-            capture_bytes: facts.capture_bytes,
-            capture_sha256: facts.capture_sha256.clone(),
-            outcome: ProofOutcome::Pass,
-            findings,
-            captured_at_unix_ms: now,
-            recorded_at_unix_ms: now,
-            recorded_by: "stationd-transport-proof-controller".into(),
-            detail: "Bounded TSDuck transport analysis passed.".into(),
-        };
-        let binding = ProofBinding {
-            proof_id: analyzing.job.job_id.clone(),
-            channel_id: analyzing.job.channel_id.clone(),
-            sink_id: analyzing.job.sink_id.clone(),
-            candidate_version: analyzing.job.candidate_version.clone(),
-            source_commit: analyzing.job.source_commit.clone(),
-            configuration_hash: analyzing.job.configuration_hash.clone(),
-            recorded_by: "stationd-transport-proof-controller".into(),
-            now_unix_ms: now,
-        };
-        let reachability = ReceiverProofExecutor {
-            adapter: FakeAuthenticatedReceiver {
-                response: Ok(receiver_response.to_vec()),
+            receiver_factory: move |authorization| {
+                if authorization != expected_authorization
+                    || RECEIVER_RESOURCE_PATH != "/api/v1/townlight/reachability"
+                {
+                    return Err(
+                        "injected receiver authority did not match its exact contract".into(),
+                    );
+                }
+                Ok(FakeAuthenticatedReceiver {
+                    response: Ok(response),
+                })
             },
-            adapter_version: "1".into(),
-        }
-        .probe_receipt(&binding, &target)?;
-
-        match mutation {
-            InjectedAuthorityMutation::None => {}
-            InjectedAuthorityMutation::TargetRevision => {
-                let mut changed = target.clone();
-                changed.updated_at_unix_ms = changed.updated_at_unix_ms.saturating_add(1);
-                changed.credential_configured = false;
-                store.write_transport_target_config(
-                    &job.job.channel_id,
-                    &job.job.sink_id,
-                    Some(target.revision),
-                    &changed,
-                )?;
-            }
-            InjectedAuthorityMutation::OutputConfiguration => {
-                let mut channel = store
-                    .list_channels()?
-                    .into_iter()
-                    .find(|channel| channel.channel_id == job.job.channel_id)
-                    .ok_or("injected controller channel disappeared")?;
-                let sink = channel
-                    .output_sinks
-                    .iter_mut()
-                    .find(|sink| sink.sink_id == job.job.sink_id)
-                    .ok_or("injected controller sink disappeared")?;
-                sink.destination = "127.0.0.1:5501".into();
-                store.put_channel(&channel)?;
-            }
-            InjectedAuthorityMutation::InstallGeneration => {
-                let active_path =
-                    data_directory.join(station_maintenance::ACTIVE_SLOT_RECEIPT_NAME);
-                let mut active: serde_json::Value = serde_json::from_slice(
-                    &fs::read(&active_path)
-                        .map_err(|_| "injected active slot could not be read")?,
-                )
-                .map_err(|_| "injected active slot is invalid")?;
-                active["generation"] =
-                    serde_json::json!(active["generation"].as_u64().unwrap_or(0).saturating_add(1));
-                fs::write(&active_path, active.to_string())
-                    .map_err(|_| "injected active slot could not be mutated")?;
-            }
-        }
-
-        let fence = station_maintenance::acquire_install_authority_fence(data_directory)?;
-        if fence.was_abandoned() {
-            return Err("injected install authority fence was abandoned".into());
-        }
-        ensure_current_candidate(data_directory, application_root, &job.job)?;
-        let current_target = store
-            .read_transport_target_config(&job.job.channel_id, &job.job.sink_id)?
-            .ok_or("injected controller target disappeared")?;
-        if current_target != target
-            || store.current_channel_output_configuration_hash(&job.job.channel_id)?
-                != job.job.configuration_hash
-        {
-            return Err("injected controller authority changed before completion".into());
-        }
-        store.append_target_device_reachability_receipt(&reachability, now)?;
-        store.complete_transport_proof_job_with_analysis(&execution, &analysis, now, || {
-            station_maintenance::read_verified_install_authority(data_directory, application_root)
-        })?;
-        Ok(())
-    })();
+            post_probe_action: PostProbeAction::Mutate(mutation),
+        },
+    );
     if outcome.is_err() {
         let _ = store.fail_transport_proof_job(
             &execution,
@@ -2687,11 +2754,35 @@ mod tests {
             recorded_by: "stationd-transport-proof-controller".into(),
             detail: "Bounded TSDuck transport analysis passed.".into(),
         };
+        let reachability = TargetDeviceReachabilityReceipt {
+            proof_id: job.job_id.clone(),
+            channel_id: channel_id.into(),
+            sink_id: sink_id.into(),
+            target_id: "receiver-1".into(),
+            target_revision: 1,
+            candidate_version: job.candidate_version.clone(),
+            source_commit: job.source_commit.clone(),
+            configuration_hash: job.configuration_hash.clone(),
+            adapter_id: RECEIVER_ADAPTER_ID.into(),
+            adapter_version: "1".into(),
+            auth_method: "configured_https_credential".into(),
+            outcome: ProofOutcome::Pass,
+            latency_ms: 1,
+            response_identity_sha256: "c".repeat(64),
+            observed_at_unix_ms: 600_002,
+            recorded_at_unix_ms: 600_002,
+            recorded_by: "stationd-transport-proof-controller".into(),
+            detail: "Authenticated receiver reachability passed.".into(),
+        };
         let _fence = station_maintenance::acquire_install_authority_fence(&data).unwrap();
         let completed = store
-            .complete_transport_proof_job_with_analysis(&execution, &receipt, 600_002, || {
-                station_maintenance::read_verified_install_authority(&data, &application)
-            })
+            .complete_transport_proof_job_with_analysis(
+                &execution,
+                &receipt,
+                &reachability,
+                600_002,
+                || station_maintenance::read_verified_install_authority(&data, &application),
+            )
             .unwrap();
         assert_eq!(
             completed.state,
@@ -2743,11 +2834,70 @@ mod tests {
 
     #[test]
     fn assignment_failure_explicitly_reaps_the_uncontained_child() {
+        let _guard = RUNNER_FAULT_TEST_LOCK.lock().unwrap();
         FORCE_JOB_ASSIGN_FAILURE.store(true, Ordering::Release);
         let executable = std::env::current_exe().unwrap();
         let result = RealProcessRunner.run(&executable, &["--help".into()], Duration::from_secs(1));
         FORCE_JOB_ASSIGN_FAILURE.store(false, Ordering::Release);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn real_runner_post_assignment_failures_leave_no_owned_drains() {
+        let _guard = RUNNER_FAULT_TEST_LOCK.lock().unwrap();
+        let executable = std::env::var_os("COMSPEC")
+            .map(PathBuf::from)
+            .expect("Windows command interpreter is available");
+        for (point, expected) in [
+            (1, "stdout pipe"),
+            (2, "stderr pipe"),
+            (3, "status could not be read"),
+        ] {
+            FORCED_RUNNER_FAILURE_POINT.store(point, Ordering::Release);
+            let result = RealProcessRunner.run(
+                &executable,
+                &["/C".into(), "ping 127.0.0.1 -n 30".into()],
+                Duration::from_secs(1),
+            );
+            FORCED_RUNNER_FAILURE_POINT.store(0, Ordering::Release);
+            assert!(
+                result
+                    .as_ref()
+                    .err()
+                    .is_some_and(|error| error.contains(expected)),
+                "unexpected injected runner result at point {point}: {result:?}"
+            );
+            assert_eq!(ACTIVE_PROCESS_DRAINS.load(Ordering::Acquire), 0);
+        }
+    }
+
+    #[test]
+    fn real_runner_heartbeat_failures_finalize_before_return() {
+        let _guard = RUNNER_FAULT_TEST_LOCK.lock().unwrap();
+        let executable = std::env::var_os("COMSPEC")
+            .map(PathBuf::from)
+            .expect("Windows command interpreter is available");
+        for (command, timeout) in [
+            ("exit 0", Duration::from_secs(1)),
+            ("ping 127.0.0.1 -n 30", Duration::from_millis(20)),
+        ] {
+            let mut calls = 0_u8;
+            let result = RealProcessRunner.run_with_heartbeat(
+                &executable,
+                &["/C".into(), command.into()],
+                timeout,
+                &mut || {
+                    calls = calls.saturating_add(1);
+                    if calls > 1 {
+                        Err("injected heartbeat failure".into())
+                    } else {
+                        Ok(())
+                    }
+                },
+            );
+            assert_eq!(result.unwrap_err(), "injected heartbeat failure");
+            assert_eq!(ACTIVE_PROCESS_DRAINS.load(Ordering::Acquire), 0);
+        }
     }
 
     #[test]
@@ -2763,6 +2913,8 @@ mod tests {
             .expect("Windows command interpreter is available");
         // Keep stderr open well past the runner deadline. The test would hang
         // or retain its drain thread if the timeout path merely returned.
+        FORCED_CANCEL_FAILURES.store(2, Ordering::Release);
+        FORCED_CAPTURE_DRAIN_DELAY_MS.store(5_200, Ordering::Release);
         let result = RealProcessRunner.run_capture_to_handle(
             &command,
             &["/C".into(), "ping 127.0.0.1 -n 30 1>&2".into()],
@@ -2776,6 +2928,11 @@ mod tests {
                 .is_some_and(|error| error.contains("deadline")),
             "unexpected capture result: {result:?}"
         );
+        assert_eq!(
+            FORCED_CANCEL_FAILURES.load(Ordering::Acquire),
+            0,
+            "the real collector must retry injected cancellation failures"
+        );
         // A second open proves the child and its inherited output handle have
         // been closed before this function returned.
         drop(capture);
@@ -2784,28 +2941,6 @@ mod tests {
             .open(root.join("capture.ts"))
             .unwrap();
         fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn cancellation_failure_race_retains_and_joins_the_owned_drain_thread() {
-        let active = Arc::new(AtomicUsize::new(0));
-        let thread_active = Arc::clone(&active);
-        FORCED_CANCEL_FAILURES.store(2, Ordering::Release);
-        let drain = std::thread::spawn(move || {
-            thread_active.fetch_add(1, Ordering::AcqRel);
-            std::thread::sleep(Duration::from_millis(50));
-            thread_active.fetch_sub(1, Ordering::AcqRel);
-        });
-        while active.load(Ordering::Acquire) == 0 {
-            std::thread::yield_now();
-        }
-        assert!(
-            cancel_until_finished(&drain, Duration::from_millis(250)),
-            "the injected CancelSynchronousIo failures must be observed"
-        );
-        drain.join().unwrap();
-        assert_eq!(active.load(Ordering::Acquire), 0);
-        assert_eq!(FORCED_CANCEL_FAILURES.load(Ordering::Acquire), 0);
     }
 
     #[test]
