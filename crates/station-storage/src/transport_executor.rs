@@ -14,6 +14,7 @@ use std::process::{Child, ChildStderr, ChildStdout, Command, Stdio};
 use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
+    mpsc,
 };
 use std::time::{Duration, Instant};
 
@@ -21,10 +22,14 @@ use sha2::{Digest, Sha256};
 use station_storage::{
     ProofOutcome, StationStore, TargetDeviceConfig, TargetDeviceReachabilityReceipt,
     TransportAnalysisReceipt, TransportFindings, TransportProofCaptureFacts,
+    TransportProofExecution,
 };
 use station_transport_proof::{MAX_PROOF_CAPTURE_BYTES, MAX_PROOF_DURATION_MS, TargetProtocol};
 use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE};
-use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT;
+use windows_sys::Win32::Storage::FileSystem::{
+    FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_READ, FILE_SHARE_WRITE,
+};
+use windows_sys::Win32::System::IO::CancelSynchronousIo;
 use windows_sys::Win32::System::JobObjects::{
     AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
     JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
@@ -40,9 +45,14 @@ const MAX_CAPTURE_ELAPSED_MS: u64 = MAX_PROOF_DURATION_MS + 5_000;
 const CLAIM_LEASE_MS: i64 = 1_900_000;
 const ANALYSIS_LEASE_MS: i64 = 1_200_000;
 const ANALYSIS_LEASE_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(30);
+const POST_EXIT_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_QUARANTINE_ENTRIES: usize = 8;
 const MAX_QUARANTINE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 const QUARANTINE_MAX_AGE: Duration = Duration::from_secs(24 * 60 * 60);
+const QUARANTINE_MARKER: &str = ".townlight-transport-owner-v1";
+const MAX_QUARANTINE_TREE_ENTRIES: usize = 10_000;
+const MAX_QUARANTINE_TREE_DEPTH: usize = 32;
+const QUARANTINE_SCAN_TIMEOUT: Duration = Duration::from_secs(2);
 const TSDUCK_ANALYZER_ID: &str = "tsduck-tsanalyze";
 const RECEIVER_ADAPTER_ID: &str = "townlight-https-receiver-v1";
 
@@ -55,6 +65,22 @@ static FORCE_JOB_ASSIGN_FAILURE: AtomicBool = AtomicBool::new(false);
 #[derive(Debug, Clone)]
 pub(crate) struct ManagedCaptureRoot {
     root: PathBuf,
+}
+
+struct PinnedAnalysisInput {
+    path: PathBuf,
+    file: File,
+    _directories: Vec<File>,
+}
+
+impl PinnedAnalysisInput {
+    fn bytes(&self, max: u64) -> Result<Vec<u8>, String> {
+        let file = self
+            .file
+            .try_clone()
+            .map_err(|_| "transport analysis input handle could not be cloned")?;
+        bounded_capture_file(file, max)
+    }
 }
 
 impl ManagedCaptureRoot {
@@ -78,6 +104,7 @@ impl ManagedCaptureRoot {
         let job = self.root.join(job_id);
         if job.exists() {
             ensure_non_reparse_ancestry(&job)?;
+            verify_quarantine_owner(&job, job_id)?;
             let nonce = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map_err(|_| "transport artifact clock is unavailable")?
@@ -90,6 +117,7 @@ impl ManagedCaptureRoot {
         self.cleanup_quarantine()?;
         fs::create_dir(&job).map_err(|_| "transport capture job directory could not be created")?;
         ensure_non_reparse_ancestry(&job)?;
+        write_quarantine_owner(&job, job_id)?;
         Ok(job.join("capture.partial.ts"))
     }
 
@@ -99,15 +127,34 @@ impl ManagedCaptureRoot {
     /// it outside the artifact namespace.
     fn cleanup_quarantine(&self) -> Result<(), String> {
         let now = std::time::SystemTime::now();
+        let scan_deadline = Instant::now() + QUARANTINE_SCAN_TIMEOUT;
         let mut entries = Vec::new();
+        let mut root_entries = 0_usize;
         for entry in fs::read_dir(&self.root)
             .map_err(|_| "transport artifact root could not be enumerated")?
         {
             let entry = entry.map_err(|_| "transport artifact root entry could not be read")?;
+            root_entries += 1;
+            if root_entries > MAX_QUARANTINE_TREE_ENTRIES || Instant::now() >= scan_deadline {
+                return Err("transport artifact root scan exceeded its bound".into());
+            }
             let name = entry.file_name();
             let name = name.to_string_lossy();
-            if !name.contains(".quarantine-") {
+            if name.starts_with(".deleting-") {
+                let path = entry.path();
+                ensure_non_reparse_ancestry(&path)?;
+                let owner = read_quarantine_owner(&path)?;
+                verify_quarantine_owner(&path, &owner)?;
+                quarantine_tree_bytes(&path, scan_deadline)?;
+                fs::remove_dir_all(&path)
+                    .map_err(|_| "transport quarantine tombstone could not be recovered")?;
                 continue;
+            }
+            let Some((job_id, _)) = name.split_once(".quarantine-") else {
+                continue;
+            };
+            if !is_canonical_uuid(job_id) {
+                return Err("transport quarantine name is not service-owned".into());
             }
             let path = entry.path();
             ensure_non_reparse_ancestry(&path)?;
@@ -116,8 +163,13 @@ impl ManagedCaptureRoot {
             if !metadata.is_dir() {
                 return Err("transport quarantine is not a directory".into());
             }
+            verify_quarantine_owner(&path, job_id)?;
             let modified = metadata.modified().unwrap_or(std::time::UNIX_EPOCH);
-            entries.push((path, modified, quarantine_tree_bytes(&entry.path())?));
+            entries.push((
+                path,
+                modified,
+                quarantine_tree_bytes(&entry.path(), scan_deadline)?,
+            ));
         }
         entries.sort_by_key(|(_, modified, _)| *modified);
         let mut total = entries.iter().try_fold(0_u64, |sum, (_, _, bytes)| {
@@ -131,7 +183,27 @@ impl ManagedCaptureRoot {
                 break;
             }
             ensure_non_reparse_ancestry(&path)?;
-            fs::remove_dir_all(&path)
+            let deleting = self.root.join(format!(
+                ".deleting-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_err(|_| "transport quarantine clock is unavailable")?
+                    .as_nanos()
+            ));
+            fs::rename(&path, &deleting)
+                .map_err(|_| "transport quarantine could not be claimed for deletion")?;
+            ensure_non_reparse_ancestry(&deleting)?;
+            verify_quarantine_owner(
+                &deleting,
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .and_then(|name| name.split_once(".quarantine-"))
+                    .map(|pair| pair.0)
+                    .ok_or("transport quarantine identity was lost")?,
+            )?;
+            quarantine_tree_bytes(&deleting, Instant::now() + QUARANTINE_SCAN_TIMEOUT)?;
+            fs::remove_dir_all(&deleting)
                 .map_err(|_| "transport quarantine could not be removed safely")?;
             total = total
                 .checked_sub(bytes)
@@ -189,7 +261,7 @@ impl ManagedCaptureRoot {
         job_id: &str,
         facts: &TransportProofCaptureFacts,
         bytes: &[u8],
-    ) -> Result<PathBuf, String> {
+    ) -> Result<PinnedAnalysisInput, String> {
         if !is_canonical_uuid(job_id)
             || facts.capture_bytes
                 != u64::try_from(bytes.len()).map_err(|_| "capture size overflowed")?
@@ -209,12 +281,30 @@ impl ManagedCaptureRoot {
             .map_err(|_| "transport analysis input could not be written")?;
         copy.sync_all()
             .map_err(|_| "transport analysis input could not be sealed")?;
+        drop(copy);
         ensure_non_reparse_ancestry(&path)?;
         let copied = bounded_capture(&path, facts.capture_bytes)?;
         if copied != bytes {
             return Err("transport analysis input changed after sealing".into());
         }
-        Ok(path)
+        let directories = pin_directory_ancestry(&self.root, &job)?;
+        let file = fs::OpenOptions::new()
+            .read(true)
+            // TSDuck may open the same leaf for reading. No writer or deleter
+            // can open/replace it while this handle remains alive.
+            .share_mode(FILE_SHARE_READ)
+            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+            .open(&path)
+            .map_err(|_| "transport analysis input could not be pinned")?;
+        let pinned = PinnedAnalysisInput {
+            path,
+            file,
+            _directories: directories,
+        };
+        if pinned.bytes(facts.capture_bytes)? != bytes {
+            return Err("transport analysis input changed before handle pinning".into());
+        }
+        Ok(pinned)
     }
 }
 
@@ -231,13 +321,14 @@ pub fn run_transport_proof_queue_controller(
         let now = unix_time_millis()?;
         let store = StationStore::open(database)?;
         store.recover_expired_transport_proof_jobs(now)?;
-        if let Some(job) = store.claim_next_transport_proof_job(now, CLAIM_LEASE_MS)? {
-            let result = execute_claimed_transport_job(&store, database, application_root, &job);
+        if let Some(execution) = store.claim_next_transport_proof_job(now, CLAIM_LEASE_MS)? {
+            let result =
+                execute_claimed_transport_job(&store, database, application_root, &execution);
             if result.is_err() {
                 // Details are deliberately static: process output, targets, and
                 // credentials never enter durable evidence or error receipts.
                 let _ = store.fail_transport_proof_job(
-                    &job.job.job_id,
+                    &execution,
                     unix_time_millis().unwrap_or(now),
                     "Transport proof execution failed before a passing receipt could be produced.",
                 );
@@ -252,8 +343,9 @@ fn execute_claimed_transport_job(
     store: &StationStore,
     database: &Path,
     application_root: &Path,
-    job: &station_storage::TransportProofJobRecord,
+    execution: &TransportProofExecution,
 ) -> Result<(), String> {
+    let job = execution.job();
     let data_directory = database
         .parent()
         .ok_or("transport proof data directory is unavailable")?;
@@ -296,7 +388,7 @@ fn execute_claimed_transport_job(
     let (facts, sealed_bytes) =
         root.seal_capture(&job.job.job_id, started, ended, job.job.max_capture_bytes)?;
     let analyzing =
-        store.begin_transport_proof_analysis(&job.job.job_id, &facts, ended, ANALYSIS_LEASE_MS)?;
+        store.begin_transport_proof_analysis(execution, &facts, ended, ANALYSIS_LEASE_MS)?;
     let analysis_input = root.write_analysis_copy(&job.job.job_id, &facts, &sealed_bytes)?;
     let measured_duration_ms = u64::try_from(
         facts
@@ -305,20 +397,23 @@ fn execute_claimed_transport_job(
             .ok_or("transport capture clock ordering is invalid")?,
     )
     .map_err(|_| "transport capture duration is invalid")?;
-    let mut analysis_lease = AnalysisLeaseHeartbeat::new(store, &analyzing.job.job_id, ended);
-    let findings = executor.analyze_capture_with_heartbeat(
+    let mut analysis_lease = AnalysisLeaseHeartbeat::new(store, execution, ended);
+    let findings = executor.analyze_pinned_capture_with_heartbeat(
         &CaptureRequest {
-            artifact_path: analysis_input.clone(),
+            artifact_path: analysis_input.path.clone(),
             duration_ms: measured_duration_ms,
             ..capture
         },
+        &analysis_input,
         &mut || analysis_lease.renew_if_due(),
     )?;
     // Renew immediately before and after removing the analyzer input. A slow
     // filesystem teardown cannot turn a still-running controller into an
     // expired lease that a second controller may recover.
     analysis_lease.renew_now()?;
-    fs::remove_file(&analysis_input)
+    let analysis_input_path = analysis_input.path.clone();
+    drop(analysis_input);
+    fs::remove_file(&analysis_input_path)
         .map_err(|_| "transport analysis input could not be removed")?;
     analysis_lease.renew_now()?;
     let recorded_at_unix_ms = unix_time_millis()?;
@@ -351,7 +446,7 @@ fn execute_claimed_transport_job(
     let _install_authority_fence =
         station_maintenance::acquire_install_authority_fence(data_directory)?;
     store.complete_transport_proof_job_with_analysis(
-        &analyzing.job.job_id,
+        execution,
         &receipt,
         recorded_at_unix_ms,
         || station_maintenance::read_verified_install_authority(data_directory, application_root),
@@ -361,15 +456,19 @@ fn execute_claimed_transport_job(
 
 struct AnalysisLeaseHeartbeat<'a> {
     store: &'a StationStore,
-    job_id: &'a str,
+    execution: &'a TransportProofExecution,
     last_renewed_at_unix_ms: i64,
 }
 
 impl<'a> AnalysisLeaseHeartbeat<'a> {
-    fn new(store: &'a StationStore, job_id: &'a str, started_at_unix_ms: i64) -> Self {
+    fn new(
+        store: &'a StationStore,
+        execution: &'a TransportProofExecution,
+        started_at_unix_ms: i64,
+    ) -> Self {
         Self {
             store,
-            job_id,
+            execution,
             last_renewed_at_unix_ms: started_at_unix_ms,
         }
     }
@@ -394,7 +493,7 @@ impl<'a> AnalysisLeaseHeartbeat<'a> {
 
     fn renew_at(&mut self, now_unix_ms: i64) -> Result<(), String> {
         self.store.renew_transport_proof_analysis_lease(
-            self.job_id,
+            self.execution,
             now_unix_ms,
             ANALYSIS_LEASE_MS,
         )?;
@@ -637,8 +736,14 @@ impl ProcessRunner for RealProcessRunner {
             .stderr
             .take()
             .ok_or("TSDuck stderr pipe was unavailable")?;
-        let stdout_drain = std::thread::spawn(move || drain_stdout(stdout));
-        let stderr_drain = std::thread::spawn(move || drain_stderr(stderr));
+        let (stdout_tx, stdout_rx) = mpsc::sync_channel(1);
+        let (stderr_tx, stderr_rx) = mpsc::sync_channel(1);
+        let stdout_drain = std::thread::spawn(move || {
+            let _ = stdout_tx.send(drain_stdout(stdout));
+        });
+        let stderr_drain = std::thread::spawn(move || {
+            let _ = stderr_tx.send(drain_stderr(stderr));
+        });
         let started = Instant::now();
         let mut last_heartbeat = Instant::now();
         loop {
@@ -646,8 +751,14 @@ impl ProcessRunner for RealProcessRunner {
                 if let Err(error) = heartbeat() {
                     job.terminate();
                     let _ = child.wait();
-                    let _ = stdout_drain.join();
-                    let _ = stderr_drain.join();
+                    let _ = collect_process_drains(
+                        &job,
+                        stdout_rx,
+                        stderr_rx,
+                        stdout_drain,
+                        stderr_drain,
+                        heartbeat,
+                    );
                     return Err(error);
                 }
                 last_heartbeat = Instant::now();
@@ -657,8 +768,14 @@ impl ProcessRunner for RealProcessRunner {
                 .map_err(|_| "TSDuck process status could not be read")?
             {
                 heartbeat()?;
-                let output = join_drain(stdout_drain, "stdout")?;
-                join_drain(stderr_drain, "stderr")?;
+                let output = collect_process_drains(
+                    &job,
+                    stdout_rx,
+                    stderr_rx,
+                    stdout_drain,
+                    stderr_drain,
+                    heartbeat,
+                )?;
                 heartbeat()?;
                 return Ok(ProcessResult {
                     status_success: status.success(),
@@ -669,8 +786,14 @@ impl ProcessRunner for RealProcessRunner {
                 heartbeat()?;
                 job.terminate();
                 let _ = child.wait();
-                let _ = stdout_drain.join();
-                let _ = stderr_drain.join();
+                collect_process_drains(
+                    &job,
+                    stdout_rx,
+                    stderr_rx,
+                    stdout_drain,
+                    stderr_drain,
+                    heartbeat,
+                )?;
                 heartbeat()?;
                 return Err("TSDuck process exceeded its deadline".into());
             }
@@ -703,14 +826,33 @@ impl<R: ProcessRunner> TsdDuckTransportExecutor<R> {
         self.analyze_capture_with_heartbeat(capture, &mut || Ok(()))
     }
 
+    #[cfg(test)]
     fn analyze_capture_with_heartbeat(
         &self,
         capture: &CaptureRequest,
         heartbeat: &mut dyn FnMut() -> Result<(), String>,
     ) -> Result<TransportFindings, String> {
+        let file = open_private_capture_no_follow(&capture.artifact_path)?;
+        let input = PinnedAnalysisInput {
+            path: capture.artifact_path.clone(),
+            file,
+            _directories: Vec::new(),
+        };
+        self.analyze_pinned_capture_with_heartbeat(capture, &input, heartbeat)
+    }
+
+    fn analyze_pinned_capture_with_heartbeat(
+        &self,
+        capture: &CaptureRequest,
+        input: &PinnedAnalysisInput,
+        heartbeat: &mut dyn FnMut() -> Result<(), String>,
+    ) -> Result<TransportFindings, String> {
         capture.validate()?;
+        if capture.artifact_path != input.path {
+            return Err("transport analyzer input handle does not match its request".into());
+        }
         let (_, analyzer, tables) = self.runtime.verify()?;
-        let bytes = bounded_capture(&capture.artifact_path, capture.max_bytes)?;
+        let bytes = input.bytes(capture.max_bytes)?;
         let argv = vec![
             "--json".into(),
             "--deterministic".into(),
@@ -728,13 +870,9 @@ impl<R: ProcessRunner> TsdDuckTransportExecutor<R> {
         }
         let mut findings =
             parse_tsanalyze_json(&result.output, bytes.len() as u64, capture.duration_ms)?;
-        let tables_output = capture.artifact_path.with_extension("tables.json");
-        if tables_output.exists() {
-            return Err("TSDuck tables output path already exists".into());
-        }
         let tables_argv = vec![
             "--json-output".into(),
-            tables_output.to_string_lossy().into_owned(),
+            "-".into(),
             capture.artifact_path.to_string_lossy().into_owned(),
         ];
         let tables_result = self.runner.run_with_heartbeat(
@@ -747,9 +885,11 @@ impl<R: ProcessRunner> TsdDuckTransportExecutor<R> {
             return Err("TSDuck tables process failed".into());
         }
         heartbeat()?;
-        let tables_bytes = bounded_capture(&tables_output, MAX_PROCESS_OUTPUT_BYTES as u64)?;
+        let tables_bytes = tables_result.output;
+        if tables_bytes.is_empty() || tables_bytes.len() > MAX_PROCESS_OUTPUT_BYTES {
+            return Err("TSDuck tables output is missing or oversized".into());
+        }
         let validation = validate_tstables_json(&tables_bytes, &findings);
-        let _ = fs::remove_file(&tables_output);
         heartbeat()?;
         validation?;
         findings.tables_output_sha256 = sha256(&tables_bytes);
@@ -864,15 +1004,18 @@ fn parse_tsanalyze_json(
             .as_array()
             .is_some_and(|ids| ids.len() == 1 && ids[0].as_u64() == Some(service_id))
     };
-    let pat = pids.iter().any(|pid| {
-        pid["description"] == "PAT" && pid["packets"]["total"].as_u64().unwrap_or(0) > 0
-    });
-    let pmt = pids
+    let pat_pid_count = pids
+        .iter()
+        .filter(|pid| {
+            pid["description"] == "PAT" && pid["packets"]["total"].as_u64().unwrap_or(0) > 0
+        })
+        .count();
+    let pmt_pid_count = pids
         .iter()
         .filter(|pid| {
             pid["pmt"] == true && pid["id"].as_u64() == Some(pmt_pid) && service_has_pid(pid)
         })
-        .count() as u32;
+        .count();
     let video_pids: Vec<u64> = pids
         .iter()
         .filter_map(|pid| {
@@ -916,11 +1059,21 @@ fn parse_tsanalyze_json(
         .map(|pid| pid["packets"]["pcr-leap"].as_u64().unwrap_or(u64::MAX))
         .try_fold(0_u64, |total, count| total.checked_add(count))
         .ok_or("TSDuck PCR error count overflows")?;
-    if !pat
-        || pmt == 0
-        || services.is_empty()
+    let elementary_pids: Vec<u64> = pids
+        .iter()
+        .filter_map(|pid| {
+            (service_has_pid(pid) && pid["pmt"] != true)
+                .then(|| pid["id"].as_u64())
+                .flatten()
+        })
+        .collect();
+    if pat_pid_count != 1
+        || pmt_pid_count != 1
         || video_pids.len() != 1
         || audio_pids.len() != 1
+        || elementary_pids.len() != 2
+        || !elementary_pids.contains(&video_pids[0])
+        || !elementary_pids.contains(&audio_pids[0])
         || !pcr
         || continuity_errors > MAX_ANALYSIS_ERRORS
         || pcr_errors > MAX_ANALYSIS_ERRORS
@@ -932,8 +1085,10 @@ fn parse_tsanalyze_json(
         packet_count,
         capture_duration_ms: duration_ms,
         bitrate_bps,
-        pat_program_count: u32::from(pat),
-        pmt_stream_count: pmt,
+        pat_program_count: u32::try_from(services.len())
+            .map_err(|_| "TSDuck service count overflows")?,
+        pmt_stream_count: u32::try_from(elementary_pids.len())
+            .map_err(|_| "TSDuck component count overflows")?,
         continuity_errors,
         pcr_errors,
         analyzer_output_sha256: sha256(output),
@@ -1136,17 +1291,81 @@ fn drain_process_stream<T: Read>(stream: T) -> Result<Vec<u8>, ()> {
     Ok(output)
 }
 
-fn join_drain(
-    drain: std::thread::JoinHandle<Result<Vec<u8>, String>>,
-    stream: &str,
+fn collect_process_drains(
+    job: &WindowsProcessTree,
+    stdout_rx: mpsc::Receiver<Result<Vec<u8>, String>>,
+    stderr_rx: mpsc::Receiver<Result<Vec<u8>, String>>,
+    stdout_thread: std::thread::JoinHandle<()>,
+    stderr_thread: std::thread::JoinHandle<()>,
+    heartbeat: &mut dyn FnMut() -> Result<(), String>,
 ) -> Result<Vec<u8>, String> {
-    drain
+    let deadline = Instant::now() + POST_EXIT_DRAIN_TIMEOUT;
+    let receive = |receiver: &mpsc::Receiver<Result<Vec<u8>, String>>,
+                   stream: &str,
+                   heartbeat: &mut dyn FnMut() -> Result<(), String>|
+     -> Result<Vec<u8>, String> {
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err(format!("TSDuck {stream} pipe drain exceeded its deadline"));
+            }
+            match receiver.recv_timeout(remaining.min(Duration::from_millis(100))) {
+                Ok(result) => {
+                    return result.map_err(|_| {
+                        format!("TSDuck {stream} output exceeded its bound or could not be read")
+                    });
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => heartbeat()?,
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    return Err(format!("TSDuck {stream} drain thread stopped unexpectedly"));
+                }
+            }
+        }
+    };
+    let stdout_result = receive(&stdout_rx, "stdout", heartbeat);
+    let stderr_result = receive(&stderr_rx, "stderr", heartbeat);
+    if stdout_result.is_err() || stderr_result.is_err() {
+        // A descendant retaining an inherited pipe must not leave controller
+        // resources behind after the bounded drain deadline. Cancel the exact
+        // synchronous reads before joining their owning threads.
+        job.terminate();
+        let (stdout_cancelled, stderr_cancelled) = unsafe {
+            (
+                CancelSynchronousIo(stdout_thread.as_raw_handle() as HANDLE),
+                CancelSynchronousIo(stderr_thread.as_raw_handle() as HANDLE),
+            )
+        };
+        if stdout_cancelled == 0 && !stdout_thread.is_finished()
+            || stderr_cancelled == 0 && !stderr_thread.is_finished()
+        {
+            return Err("TSDuck pipe drain cancellation failed".into());
+        }
+    }
+    let join_deadline = Instant::now() + Duration::from_secs(1);
+    while (!stdout_thread.is_finished() || !stderr_thread.is_finished())
+        && Instant::now() < join_deadline
+    {
+        heartbeat()?;
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    if !stdout_thread.is_finished() || !stderr_thread.is_finished() {
+        return Err("TSDuck pipe drain threads did not stop after cancellation".into());
+    }
+    stdout_thread
         .join()
-        .map_err(|_| format!("TSDuck {stream} drain thread panicked"))?
-        .map_err(|_| format!("TSDuck {stream} output exceeded its bound or could not be read"))
+        .map_err(|_| "TSDuck stdout drain thread panicked".to_string())?;
+    stderr_thread
+        .join()
+        .map_err(|_| "TSDuck stderr drain thread panicked".to_string())?;
+    stderr_result?;
+    stdout_result
 }
 fn bounded_capture(path: &Path, max: u64) -> Result<Vec<u8>, String> {
     let file = open_private_capture_no_follow(path)?;
+    bounded_capture_file(file, max)
+}
+
+fn bounded_capture_file(file: File, max: u64) -> Result<Vec<u8>, String> {
     let meta = file
         .metadata()
         .map_err(|_| "TSDuck capture artifact is unavailable")?;
@@ -1163,6 +1382,41 @@ fn bounded_capture(path: &Path, max: u64) -> Result<Vec<u8>, String> {
         return Err("TSDuck capture artifact changed while being analyzed".into());
     }
     Ok(out)
+}
+
+fn pin_directory_ancestry(root: &Path, leaf_directory: &Path) -> Result<Vec<File>, String> {
+    if !leaf_directory.starts_with(root) {
+        return Err("transport analysis directory escaped its managed root".into());
+    }
+    let mut paths = vec![root.to_path_buf()];
+    let mut current = root.to_path_buf();
+    for component in leaf_directory
+        .strip_prefix(root)
+        .map_err(|_| "transport analysis directory escaped its managed root")?
+        .components()
+    {
+        current.push(component.as_os_str());
+        paths.push(current.clone());
+    }
+    paths
+        .into_iter()
+        .map(|path| {
+            fs::OpenOptions::new()
+                .read(true)
+                .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+                .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+                .open(&path)
+                .and_then(|file| {
+                    let metadata = file.metadata()?;
+                    if metadata.file_attributes() & 0x0400 != 0 || !metadata.is_dir() {
+                        Err(std::io::Error::other("directory is not a real directory"))
+                    } else {
+                        Ok(file)
+                    }
+                })
+                .map_err(|_| "transport analysis ancestry could not be pinned".to_string())
+        })
+        .collect()
 }
 
 /// Opens the leaf through a Windows no-follow handle.  `FILE_FLAG_OPEN_REPARSE_POINT`
@@ -1237,26 +1491,87 @@ fn create_non_reparse_directory_chain(path: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn quarantine_tree_bytes(path: &Path) -> Result<u64, String> {
-    let metadata = fs::symlink_metadata(path)
-        .map_err(|_| "transport quarantine entry could not be inspected")?;
-    if metadata.file_attributes() & 0x0400 != 0 {
-        return Err("transport quarantine contains a reparse point".into());
+fn write_quarantine_owner(directory: &Path, job_id: &str) -> Result<(), String> {
+    let mut marker = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(directory.join(QUARANTINE_MARKER))
+        .map_err(|_| "transport capture ownership marker could not be created")?;
+    marker
+        .write_all(format!("TownLight transport capture v1\n{job_id}\n").as_bytes())
+        .and_then(|()| marker.sync_all())
+        .map_err(|_| "transport capture ownership marker could not be sealed".to_string())
+}
+
+fn verify_quarantine_owner(directory: &Path, job_id: &str) -> Result<(), String> {
+    if read_quarantine_owner(directory)? != job_id {
+        return Err("transport quarantine ownership marker is invalid".into());
     }
-    if metadata.is_file() {
-        return Ok(metadata.len());
+    Ok(())
+}
+
+fn read_quarantine_owner(directory: &Path) -> Result<String, String> {
+    let marker = open_private_capture_no_follow(&directory.join(QUARANTINE_MARKER))?;
+    let mut bytes = Vec::new();
+    marker
+        .take(256)
+        .read_to_end(&mut bytes)
+        .map_err(|_| "transport quarantine ownership marker could not be read")?;
+    let text = std::str::from_utf8(&bytes)
+        .map_err(|_| "transport quarantine ownership marker is invalid")?;
+    let job_id = text
+        .strip_prefix("TownLight transport capture v1\n")
+        .and_then(|value| value.strip_suffix('\n'))
+        .filter(|value| is_canonical_uuid(value))
+        .ok_or("transport quarantine ownership marker is invalid")?;
+    if bytes != format!("TownLight transport capture v1\n{job_id}\n").as_bytes() {
+        return Err("transport quarantine ownership marker is invalid".into());
     }
-    if !metadata.is_dir() {
-        return Err("transport quarantine contains an unsupported entry".into());
+    Ok(job_id.to_string())
+}
+
+fn quarantine_tree_bytes(path: &Path, deadline: Instant) -> Result<u64, String> {
+    let mut stack = vec![(path.to_path_buf(), 0_usize)];
+    let mut total = 0_u64;
+    let mut entries = 0_usize;
+    while let Some((candidate, depth)) = stack.pop() {
+        if Instant::now() >= deadline {
+            return Err("transport quarantine scan exceeded its deadline".into());
+        }
+        entries = entries
+            .checked_add(1)
+            .ok_or("transport quarantine entry count overflowed")?;
+        if entries > MAX_QUARANTINE_TREE_ENTRIES || depth > MAX_QUARANTINE_TREE_DEPTH {
+            return Err("transport quarantine tree exceeds its structural bounds".into());
+        }
+        let metadata = fs::symlink_metadata(&candidate)
+            .map_err(|_| "transport quarantine entry could not be inspected")?;
+        if metadata.file_attributes() & 0x0400 != 0 {
+            return Err("transport quarantine contains a reparse point".into());
+        }
+        if metadata.is_file() {
+            total = total
+                .checked_add(metadata.len())
+                .ok_or("transport quarantine size overflowed")?;
+            if total > MAX_QUARANTINE_BYTES {
+                return Err("transport quarantine scan exceeded its byte bound".into());
+            }
+        } else if metadata.is_dir() {
+            for entry in fs::read_dir(&candidate)
+                .map_err(|_| "transport quarantine directory could not be read")?
+            {
+                stack.push((
+                    entry
+                        .map_err(|_| "transport quarantine entry could not be read")?
+                        .path(),
+                    depth + 1,
+                ));
+            }
+        } else {
+            return Err("transport quarantine contains an unsupported entry".into());
+        }
     }
-    fs::read_dir(path)
-        .map_err(|_| "transport quarantine directory could not be read")?
-        .try_fold(0_u64, |total, entry| {
-            let entry = entry.map_err(|_| "transport quarantine entry could not be read")?;
-            total
-                .checked_add(quarantine_tree_bytes(&entry.path())?)
-                .ok_or_else(|| "transport quarantine size overflowed".into())
-        })
+    Ok(total)
 }
 
 fn is_canonical_uuid(value: &str) -> bool {
@@ -1304,14 +1619,19 @@ fn validate_tstables_json(output: &[u8], findings: &TransportFindings) -> Result
     if pats.len() != 1 {
         return Err("TSDuck tables must contain exactly one PAT".into());
     }
-    let pmts: Vec<&serde_json::Value> = tables
+    let all_pmts: Vec<&serde_json::Value> = tables
         .iter()
+        .filter(|table| table["#name"] == "PMT")
+        .collect();
+    let pmts: Vec<&serde_json::Value> = all_pmts
+        .iter()
+        .copied()
         .filter(|table| {
             table["#name"] == "PMT" && table["service_id"].as_u64() == Some(findings.service_id)
         })
         .collect();
-    if pmts.len() != 1 {
-        return Err("TSDuck tables must contain exactly one selected-service PMT".into());
+    if all_pmts.len() != 1 || pmts.len() != 1 {
+        return Err("TSDuck tables must contain exactly one PMT for the selected service".into());
     }
     let pat_nodes = pats[0]["#nodes"]
         .as_array()
@@ -1319,15 +1639,14 @@ fn validate_tstables_json(output: &[u8], findings: &TransportFindings) -> Result
     if pat_nodes.len() > 512 {
         return Err("TSDuck PAT nodes exceed their bound".into());
     }
-    let pat_matches = pat_nodes
+    let pat_services: Vec<&serde_json::Value> = pat_nodes
         .iter()
-        .filter(|node| {
-            node["#name"] == "service"
-                && node["service_id"].as_u64() == Some(findings.service_id)
-                && node["program_map_pid"].as_u64() == Some(findings.pmt_pid)
-        })
-        .count()
-        == 1;
+        .filter(|node| node["#name"] == "service")
+        .collect();
+    let pat_matches = pat_services.len() == findings.pat_program_count as usize
+        && pat_services.len() == 1
+        && pat_services[0]["service_id"].as_u64() == Some(findings.service_id)
+        && pat_services[0]["program_map_pid"].as_u64() == Some(findings.pmt_pid);
     let pmt = pmts[0];
     let components = pmt["#nodes"]
         .as_array()
@@ -1335,20 +1654,27 @@ fn validate_tstables_json(output: &[u8], findings: &TransportFindings) -> Result
     if components.len() > 512 {
         return Err("TSDuck PMT nodes exceed their bound".into());
     }
-    let component_pid = |pid| {
-        components
+    let stream_components: Vec<&serde_json::Value> = components
+        .iter()
+        .filter(|node| node["#name"] == "component")
+        .collect();
+    let component = |pid, stream_type| {
+        stream_components
             .iter()
             .filter(|node| {
-                node["#name"] == "component" && node["elementary_pid"].as_u64() == Some(pid)
+                node["elementary_pid"].as_u64() == Some(pid)
+                    && node["stream_type"].as_u64() == Some(stream_type)
             })
             .count()
             == 1
     };
     if !pat_matches
         || pmt["pcr_pid"].as_u64() != Some(findings.pcr_pid)
-        || !component_pid(findings.pcr_pid)
-        || !component_pid(findings.video_pid)
-        || !component_pid(findings.audio_pid)
+        || findings.pcr_pid != findings.video_pid
+        || stream_components.len() != findings.pmt_stream_count as usize
+        || stream_components.len() != 2
+        || !component(findings.video_pid, 27)
+        || !component(findings.audio_pid, 15)
     {
         return Err("TSDuck PAT and PMT tables are inconsistent".into());
     }
@@ -1360,6 +1686,90 @@ mod tests {
     use super::*;
     use std::time::{SystemTime, UNIX_EPOCH};
 
+    fn verified_candidate(root: &Path) -> (PathBuf, PathBuf) {
+        const VERSION: &str = "0.2.0";
+        const COMMIT: &str = "0123456789abcdef0123456789abcdef01234567";
+        const RUNTIME_SHA: &str =
+            "abcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcd";
+        const TSDUCK_SHA: &str = "b0ca0f963fcd77488b8c32d6f9d85030daa891ed753c36e57bbb458807a44eb1";
+        let data = root.join("data");
+        let application = root.join("application");
+        let runtime = application.join("runtime/gstreamer");
+        let tsduck = application.join("runtime/tsduck");
+        fs::create_dir_all(runtime.join("bin")).unwrap();
+        fs::create_dir_all(runtime.join("lib/gstreamer-1.0")).unwrap();
+        fs::create_dir_all(runtime.join("lib/gst-validate-launcher/python/launcher/apps")).unwrap();
+        for (path, bytes) in [
+            ("bin/gstreamer.dll", b"runtime".as_slice()),
+            ("lib/gstreamer-1.0/plugin.dll", b"plugin".as_slice()),
+            (
+                "lib/gst-validate-launcher/python/launcher/apps/empty.py",
+                b"".as_slice(),
+            ),
+        ] {
+            fs::write(runtime.join(path), bytes).unwrap();
+        }
+        for (path, bytes) in [
+            ("LICENSE.txt", b"license".as_slice()),
+            ("OTHERS.txt", b"notices".as_slice()),
+            ("bin/tsp.exe", b"tsp".as_slice()),
+            ("bin/tsanalyze.exe", b"analyze".as_slice()),
+            ("bin/tstables.exe", b"tables".as_slice()),
+            ("bin/tsduck.dll", b"tsduck".as_slice()),
+            ("bin/tscore.dll", b"tscore".as_slice()),
+        ] {
+            let destination = tsduck.join(path);
+            fs::create_dir_all(destination.parent().unwrap()).unwrap();
+            fs::write(destination, bytes).unwrap();
+        }
+        let runtime_manifest_sha = station_maintenance::write_installed_runtime_manifest(
+            &runtime,
+            &data.join(station_maintenance::INSTALLED_RUNTIME_MANIFEST_NAME),
+            VERSION,
+            COMMIT,
+            RUNTIME_SHA,
+        )
+        .unwrap();
+        let tsduck_manifest_sha = station_maintenance::write_installed_runtime_manifest(
+            &tsduck,
+            &data.join(station_maintenance::TSDUCK_RUNTIME_MANIFEST_NAME),
+            VERSION,
+            COMMIT,
+            TSDUCK_SHA,
+        )
+        .unwrap();
+        let files = [
+            ("stationd.exe", b"stationd".as_slice()),
+            ("channel-worker.exe", b"worker".as_slice()),
+        ];
+        let manifest = station_update::UpdatePackageManifest {
+            schema_version: 2,
+            product: "TownLight Station".into(),
+            version: VERSION.into(),
+            source_commit: COMMIT.into(),
+            files: files
+                .iter()
+                .map(|(path, bytes)| station_update::UpdatePackageFile {
+                    path: (*path).into(),
+                    size_bytes: bytes.len() as u64,
+                    sha256: sha256(bytes),
+                })
+                .collect(),
+        };
+        for (path, bytes) in files {
+            fs::write(application.join(path), bytes).unwrap();
+        }
+        fs::write(
+            data.join(station_maintenance::ACTIVE_SLOT_RECEIPT_NAME),
+            serde_json::json!({"schema_version":1,"generation":7,"activated_at_unix_ms":1,"transaction_id":"bootstrap","active":{"relative_directory":".","package_manifest":manifest},"previous":null}).to_string(),
+        ).unwrap();
+        fs::write(
+            data.join(station_maintenance::INSTALL_RECEIPT_NAME),
+            serde_json::json!({"product":"TownLight Station","version":VERSION,"source_commit":COMMIT,"media_runtime_sha256":RUNTIME_SHA,"runtime_manifest_sha256":runtime_manifest_sha,"tsduck_version":"3.44-4676","tsduck_source_url":"https://github.com/tsduck/tsduck/releases/download/v3.44-4676/TSDuck-Win64-3.44-4676-Portable.zip","tsduck_archive_name":"TSDuck-Win64-3.44-4676-Portable.zip","tsduck_runtime_sha256":TSDUCK_SHA,"tsduck_runtime_manifest_sha256":tsduck_manifest_sha,"installed_at_unix_ms":1,"health_uri":"http://127.0.0.1:4070/health"}).to_string(),
+        ).unwrap();
+        (data, application)
+    }
+
     struct RetainedFixtureRunner;
 
     impl sealed::Process for RetainedFixtureRunner {}
@@ -1367,15 +1777,13 @@ mod tests {
     impl ProcessRunner for RetainedFixtureRunner {
         fn run(&self, _: &Path, argv: &[String], _: Duration) -> Result<ProcessResult, String> {
             if argv.first().is_some_and(|arg| arg == "--json-output") {
-                let output = argv.get(1).ok_or("tables output argument is missing")?;
-                fs::write(
-                    output,
-                    include_bytes!("../tests/fixtures/tsduck-3.44-h264-aac-tables.json"),
-                )
-                .map_err(|_| "fixture tables output could not be written")?;
+                if argv.get(1).map(String::as_str) != Some("-") {
+                    return Err("tables output is not bound to stdout".into());
+                }
                 Ok(ProcessResult {
                     status_success: true,
-                    output: Vec::new(),
+                    output: include_bytes!("../tests/fixtures/tsduck-3.44-h264-aac-tables.json")
+                        .to_vec(),
                 })
             } else {
                 Ok(ProcessResult {
@@ -1496,7 +1904,7 @@ mod tests {
         assert_eq!(findings.packet_size_bytes, 188);
         assert_eq!(findings.packet_count, 287);
         assert_eq!(findings.pat_program_count, 1);
-        assert_eq!(findings.pmt_stream_count, 1);
+        assert_eq!(findings.pmt_stream_count, 2);
         assert_eq!(findings.service_id, 1);
         assert_eq!(findings.pmt_pid, 4096);
         assert_eq!(findings.pcr_pid, 256);
@@ -1548,6 +1956,177 @@ mod tests {
             ))
         );
         assert!(!capture.with_extension("tables.json").exists());
+    }
+
+    #[test]
+    fn pinned_analysis_handles_block_leaf_and_ancestor_replacement() {
+        let base = root();
+        let managed = ManagedCaptureRoot::open(base.join("managed")).unwrap();
+        let job_id = "11111111-2222-4333-8444-555555555555";
+        let partial = managed.begin_job(job_id).unwrap();
+        fs::write(&partial, vec![0x47; 188]).unwrap();
+        let (facts, bytes) = managed.seal_capture(job_id, 1, 600_001, 1_024).unwrap();
+        let input = managed.write_analysis_copy(job_id, &facts, &bytes).unwrap();
+        assert!(fs::rename(&input.path, input.path.with_extension("replaced")).is_err());
+        let job_directory = input.path.parent().unwrap();
+        assert!(fs::rename(job_directory, job_directory.with_extension("replaced")).is_err());
+        assert!(
+            fs::OpenOptions::new()
+                .write(true)
+                .open(&input.path)
+                .is_err()
+        );
+        drop(input);
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn quarantine_recovery_removes_only_owned_tombstones_and_rejects_unowned_trees() {
+        let base = root();
+        let managed = ManagedCaptureRoot::open(base.join("managed")).unwrap();
+        let job_id = "11111111-2222-4333-8444-555555555555";
+        let partial = managed.begin_job(job_id).unwrap();
+        fs::write(partial, b"partial").unwrap();
+        let job = managed.root.join(job_id);
+        let tombstone = managed.root.join(".deleting-test-owned");
+        fs::rename(&job, &tombstone).unwrap();
+        managed.cleanup_quarantine().unwrap();
+        assert!(!tombstone.exists());
+
+        let unowned = managed
+            .root
+            .join("22222222-3333-4444-8555-666666666666.quarantine-hostile");
+        fs::create_dir(&unowned).unwrap();
+        assert!(
+            managed.cleanup_quarantine().is_err(),
+            "an unmarked lookalike must never be recursively deleted"
+        );
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn private_controller_authority_completes_exact_bound_evidence() {
+        let base = root();
+        let (data, application) = verified_candidate(&base);
+        let store = StationStore::open(data.join("station.db")).unwrap();
+        let channel_id = "11111111-2222-4333-8444-555555555555";
+        let sink_id = "22222222-3333-4444-8555-666666666666";
+        store
+            .put_channel(&station_schedule::ChannelConfiguration {
+                channel_id: channel_id.into(),
+                display_name: "Transport controller".into(),
+                output_profile: station_schedule::OutputProfileId::Proof360p30,
+                output_sinks: vec![station_schedule::OutputSinkConfiguration::required_udp(
+                    sink_id,
+                    "Proof output",
+                    "127.0.0.1:5500",
+                    -16.0,
+                )],
+                enabled: true,
+            })
+            .unwrap();
+        store
+            .write_transport_target_config(
+                channel_id,
+                sink_id,
+                None,
+                &TargetDeviceConfig {
+                    target_id: "receiver-1".into(),
+                    label: "Receiver".into(),
+                    protocol: TargetProtocol::HttpsApi,
+                    host: "receiver.example.test".into(),
+                    port: 443,
+                    credential_configured: true,
+                    revision: 1,
+                    created_at_unix_ms: 1,
+                    updated_at_unix_ms: 1,
+                    updated_by: "setup-admin".into(),
+                },
+            )
+            .unwrap();
+        let job = station_storage::TransportProofJob {
+            job_id: "33333333-4444-4555-8666-777777777777".into(),
+            channel_id: channel_id.into(),
+            sink_id: sink_id.into(),
+            target_id: "receiver-1".into(),
+            target_revision: 1,
+            candidate_version: "0.2.0".into(),
+            source_commit: "0123456789abcdef0123456789abcdef01234567".into(),
+            install_generation: Some(7),
+            configuration_hash: store
+                .current_channel_output_configuration_hash(channel_id)
+                .unwrap(),
+            requested_by: "setup-admin".into(),
+            created_at_unix_ms: 1,
+            max_capture_bytes: 100_000,
+        };
+        assert!(
+            store
+                .enqueue_transport_proof_job(&job, || {
+                    station_maintenance::read_verified_install_authority(&data, &application)
+                })
+                .unwrap()
+        );
+        let execution = store
+            .claim_next_transport_proof_job(2, 1_200_000)
+            .unwrap()
+            .unwrap();
+        let capture = TransportProofCaptureFacts {
+            artifact_relative_path: format!("{}/capture.ts", job.job_id),
+            capture_bytes: 53_956,
+            capture_sha256: "a".repeat(64),
+            started_at_unix_ms: 1,
+            ended_at_unix_ms: 600_001,
+        };
+        store
+            .begin_transport_proof_analysis(&execution, &capture, 600_001, 1_200_000)
+            .unwrap();
+        let mut findings = parse_tsanalyze_json(
+            include_bytes!("../tests/fixtures/tsduck-3.44-h264-aac-analysis.txt"),
+            capture.capture_bytes,
+            600_000,
+        )
+        .unwrap();
+        findings.tables_output_sha256 = sha256(include_bytes!(
+            "../tests/fixtures/tsduck-3.44-h264-aac-tables.json"
+        ));
+        let receipt = TransportAnalysisReceipt {
+            proof_id: job.job_id.clone(),
+            channel_id: channel_id.into(),
+            sink_id: sink_id.into(),
+            target_id: "receiver-1".into(),
+            target_revision: 1,
+            candidate_version: job.candidate_version.clone(),
+            source_commit: job.source_commit.clone(),
+            configuration_hash: job.configuration_hash.clone(),
+            analyzer_id: TSDUCK_ANALYZER_ID.into(),
+            analyzer_version: "3.44-4676".into(),
+            analyzer_sha256: "b".repeat(64),
+            capture_bytes: capture.capture_bytes,
+            capture_sha256: capture.capture_sha256.clone(),
+            outcome: ProofOutcome::Pass,
+            findings,
+            captured_at_unix_ms: capture.ended_at_unix_ms,
+            recorded_at_unix_ms: 600_002,
+            recorded_by: "stationd-transport-proof-controller".into(),
+            detail: "Bounded TSDuck transport analysis passed.".into(),
+        };
+        let _fence = station_maintenance::acquire_install_authority_fence(&data).unwrap();
+        let completed = store
+            .complete_transport_proof_job_with_analysis(&execution, &receipt, 600_002, || {
+                station_maintenance::read_verified_install_authority(&data, &application)
+            })
+            .unwrap();
+        assert_eq!(
+            completed.state,
+            station_storage::TransportProofJobState::Completed
+        );
+        assert_eq!(
+            completed.analyzer_output_sha256,
+            Some(receipt.findings.analyzer_output_sha256)
+        );
+        drop(store);
+        fs::remove_dir_all(base).unwrap();
     }
 
     #[test]
@@ -1615,6 +2194,76 @@ mod tests {
         .unwrap();
         tables[2]["pcr_pid"] = serde_json::json!(257);
         assert!(validate_tstables_json(&serde_json::to_vec(&tables).unwrap(), &findings).is_err());
+
+        let mut tables: Vec<serde_json::Value> = serde_json::from_slice(include_bytes!(
+            "../tests/fixtures/tsduck-3.44-h264-aac-tables.json"
+        ))
+        .unwrap();
+        tables[1]["#nodes"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({
+                "#name": "service",
+                "program_map_pid": 4097,
+                "service_id": 2
+            }));
+        assert!(validate_tstables_json(&serde_json::to_vec(&tables).unwrap(), &findings).is_err());
+
+        let mut tables: Vec<serde_json::Value> = serde_json::from_slice(include_bytes!(
+            "../tests/fixtures/tsduck-3.44-h264-aac-tables.json"
+        ))
+        .unwrap();
+        tables[2]["#nodes"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({
+                "#name": "component",
+                "elementary_pid": 258,
+                "stream_type": 15
+            }));
+        assert!(validate_tstables_json(&serde_json::to_vec(&tables).unwrap(), &findings).is_err());
+
+        let mut inconsistent = findings.clone();
+        inconsistent.pmt_stream_count = 3;
+        assert!(
+            validate_tstables_json(
+                include_bytes!("../tests/fixtures/tsduck-3.44-h264-aac-tables.json"),
+                &inconsistent
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn rejects_extra_analyzer_programs_and_components() {
+        let fixture = include_bytes!("../tests/fixtures/tsduck-3.44-h264-aac-analysis.txt");
+        let json_start = fixture.iter().position(|byte| *byte == b'{').unwrap();
+        let mut report: serde_json::Value = serde_json::from_slice(&fixture[json_start..]).unwrap();
+        let duplicate_service = report["services"][0].clone();
+        report["services"]
+            .as_array_mut()
+            .unwrap()
+            .push(duplicate_service);
+        assert!(
+            parse_tsanalyze_json(&serde_json::to_vec(&report).unwrap(), 53_956, 2_000).is_err()
+        );
+
+        let mut report: serde_json::Value = serde_json::from_slice(&fixture[json_start..]).unwrap();
+        report["pids"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({
+                "audio": false,
+                "description": "private component",
+                "id": 258,
+                "packets": {"discontinuities": 0, "pcr-leap": 0, "total": 1},
+                "pmt": false,
+                "services": [1],
+                "video": false
+            }));
+        assert!(
+            parse_tsanalyze_json(&serde_json::to_vec(&report).unwrap(), 53_956, 2_000).is_err()
+        );
     }
 
     #[test]

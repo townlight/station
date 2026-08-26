@@ -1,4 +1,8 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+
+extern crate self as station_storage;
+
+mod transport_executor;
 use std::ffi::{CStr, CString, c_char, c_int, c_longlong, c_void};
 use std::os::windows::fs::MetadataExt;
 use std::path::{Component, Path, PathBuf};
@@ -11,6 +15,10 @@ use std::{
         atomic::{AtomicU64, Ordering},
     },
     time::{Instant, SystemTime},
+};
+pub use transport_executor::{
+    AuthenticatedReceiver, HttpsReceiverAdapter, ProofBinding, ReceiverProofExecutor,
+    run_transport_proof_queue_controller,
 };
 
 use serde::de::DeserializeOwned;
@@ -872,6 +880,21 @@ pub struct TransportProofJobRecord {
     pub failure_detail: Option<String>,
 }
 
+/// Opaque lease capability issued only by the transactional queue claim. A
+/// production caller cannot manufacture one from a job id or receipt, so the
+/// successful state-machine methods below are no longer general append seams.
+struct TransportProofExecution {
+    job_id: String,
+    capability_sha256: String,
+    claimed: TransportProofJobRecord,
+}
+
+impl TransportProofExecution {
+    fn job(&self) -> &TransportProofJobRecord {
+        &self.claimed
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OperatorLoginAuthority {
     pub account: OperatorAccount,
@@ -1674,6 +1697,7 @@ impl StationStore {
                failed_at_unix_ms INTEGER NOT NULL DEFAULT -1 CHECK (failed_at_unix_ms >= -1),\
                failure_detail TEXT NOT NULL DEFAULT '',\
                install_generation INTEGER NOT NULL DEFAULT -1 CHECK (install_generation >= -1)\
+               ,execution_capability_sha256 TEXT NOT NULL DEFAULT ''\
              );\
              CREATE UNIQUE INDEX IF NOT EXISTS transport_proof_jobs_active_sink \
                ON transport_proof_jobs(channel_id, sink_id) WHERE state NOT IN ('completed','failed');\
@@ -1717,13 +1741,15 @@ impl StationStore {
         let jobs_exist = self.sqlite_table_exists("transport_proof_jobs")?;
         let jobs_need_install_generation = jobs_exist
             && !self.sqlite_table_has_column("transport_proof_jobs", "install_generation")?;
+        let jobs_need_execution_capability = jobs_exist
+            && !self
+                .sqlite_table_has_column("transport_proof_jobs", "execution_capability_sha256")?;
         let migrated_configs = if target_configs_exist {
             self.legacy_transport_target_config_rewrites()?
         } else {
             Vec::new()
         };
-        if !analysis_needs_revision && migrated_configs.is_empty() && !jobs_need_install_generation
-        {
+        if !analysis_needs_revision && migrated_configs.is_empty() && !jobs_exist {
             return Ok(());
         }
 
@@ -1825,6 +1851,20 @@ impl StationStore {
                 // accidental match to generation zero.
                 self.execute(
                     "ALTER TABLE transport_proof_jobs ADD COLUMN install_generation INTEGER NOT NULL DEFAULT -1 CHECK (install_generation >= -1)",
+                )?;
+            }
+            if jobs_need_execution_capability {
+                self.execute(
+                    "ALTER TABLE transport_proof_jobs ADD COLUMN execution_capability_sha256 TEXT NOT NULL DEFAULT ''",
+                )?;
+            }
+            if jobs_exist {
+                // Pre-generation work has no candidate epoch and can never be
+                // executed safely. Terminalize it in the migration transaction
+                // so the active-sink unique index cannot let an unclaimable
+                // legacy row permanently block a current request.
+                self.execute(
+                    "UPDATE transport_proof_jobs SET state='failed',lease_expires_at_unix_ms=-1,failed_at_unix_ms=updated_at_unix_ms,failure_detail='Legacy transport proof quarantined: install generation is unavailable.' WHERE install_generation=-1 AND state NOT IN ('completed','failed')",
                 )?;
             }
             Ok(())
@@ -11314,11 +11354,11 @@ impl StationStore {
     /// Atomically recovers expired leases and claims the next queued job.  The
     /// controller receives only the stored binding; no capture endpoint or
     /// runtime path travels through this queue boundary.
-    pub fn claim_next_transport_proof_job(
+    fn claim_next_transport_proof_job(
         &self,
         now_unix_ms: i64,
         lease_duration_ms: i64,
-    ) -> Result<Option<TransportProofJobRecord>, String> {
+    ) -> Result<Option<TransportProofExecution>, String> {
         validate_transport_proof_lease(now_unix_ms, lease_duration_ms)?;
         let lease_expires_at = now_unix_ms
             .checked_add(lease_duration_ms)
@@ -11326,6 +11366,13 @@ impl StationStore {
         self.execute("BEGIN IMMEDIATE")?;
         let outcome = (|| {
             recover_expired_transport_proof_jobs_in_transaction(self, now_unix_ms)?;
+            // Defensive repair for databases copied from a pre-generation
+            // build after schema migration. This update and the next claim are
+            // one transaction, so an unbound head entry cannot starve the
+            // current queue.
+            let legacy = self.prepare("UPDATE transport_proof_jobs SET state='failed',updated_at_unix_ms=MAX(updated_at_unix_ms,?1),lease_expires_at_unix_ms=-1,failed_at_unix_ms=MAX(updated_at_unix_ms,?1),failure_detail='Legacy transport proof quarantined: install generation is unavailable.' WHERE install_generation=-1 AND state NOT IN ('completed','failed')")?;
+            bind_i64(self.database, legacy.raw, 1, now_unix_ms)?;
+            expect_done(self.database, legacy.raw)?;
             let select = self.prepare("SELECT job_id FROM transport_proof_jobs WHERE state='pending' ORDER BY created_at_unix_ms,job_id LIMIT 1")?;
             let job_id = match unsafe { sqlite3_step(select.raw) } {
                 SQLITE_ROW => column_text(select.raw, 0)?,
@@ -11337,7 +11384,11 @@ impl StationStore {
                 .read_transport_proof_job(&job_id)?
                 .ok_or_else(|| "selected transport proof job disappeared".to_string())?;
             self.validate_transport_proof_job_current(&queued.job)?;
-            let update = self.prepare("UPDATE transport_proof_jobs SET state='claimed',updated_at_unix_ms=?1,lease_expires_at_unix_ms=?2 WHERE job_id=?3 AND state='pending'")?;
+            let mut capability = [0_u8; 32];
+            getrandom::fill(&mut capability)
+                .map_err(|_| "transport proof execution capability could not be issued")?;
+            let capability_sha256 = format!("{:x}", Sha256::digest(capability));
+            let update = self.prepare("UPDATE transport_proof_jobs SET state='claimed',updated_at_unix_ms=?1,lease_expires_at_unix_ms=?2,execution_capability_sha256=?4 WHERE job_id=?3 AND state='pending'")?;
             bind_i64(self.database, update.raw, 1, now_unix_ms)?;
             bind_i64(self.database, update.raw, 2, lease_expires_at)?;
             bind_text(
@@ -11346,11 +11397,23 @@ impl StationStore {
                 3,
                 &c_string(&job_id, "transport proof job identity")?,
             )?;
+            bind_text(
+                self.database,
+                update.raw,
+                4,
+                &c_string(&capability_sha256, "transport execution capability")?,
+            )?;
             expect_done(self.database, update.raw)?;
             if self.changes() != 1 {
                 return Err("transport proof next-job claim lost its write lock".into());
             }
-            self.read_transport_proof_job(&job_id)
+            self.read_transport_proof_job(&job_id).map(|record| {
+                record.map(|claimed| TransportProofExecution {
+                    job_id,
+                    capability_sha256,
+                    claimed,
+                })
+            })
         })();
         self.finish_value_transaction(outcome)
     }
@@ -11358,7 +11421,7 @@ impl StationStore {
     /// Startup recovery used by the stationd-owned controller.  It cannot
     /// manufacture a completion: expired work returns to `pending` and has its
     /// untrusted partial-capture fields discarded.
-    pub fn recover_expired_transport_proof_jobs(&self, now_unix_ms: i64) -> Result<u64, String> {
+    fn recover_expired_transport_proof_jobs(&self, now_unix_ms: i64) -> Result<u64, String> {
         if now_unix_ms < 0 {
             return Err("transport proof recovery time is invalid".into());
         }
@@ -11370,13 +11433,14 @@ impl StationStore {
     /// Attach the closed capture identity exactly once, then enter analysis.
     /// The analyzer output hash is separately persisted by completion, binding
     /// analysis to this immutable capture rather than a reopened pathname.
-    pub fn begin_transport_proof_analysis(
+    fn begin_transport_proof_analysis(
         &self,
-        job_id: &str,
+        execution: &TransportProofExecution,
         capture: &TransportProofCaptureFacts,
         now_unix_ms: i64,
         lease_duration_ms: i64,
     ) -> Result<TransportProofJobRecord, String> {
+        let job_id = &execution.job_id;
         validate_transport_proof_job_id(job_id)?;
         validate_transport_proof_lease(now_unix_ms, lease_duration_ms)?;
         let lease_expires_at = now_unix_ms
@@ -11388,7 +11452,7 @@ impl StationStore {
                 .read_transport_proof_job(job_id)?
                 .ok_or_else(|| "transport proof job does not exist".to_string())?;
             capture.validate(current.job.max_capture_bytes)?;
-            let statement = self.prepare("UPDATE transport_proof_jobs SET state='analyzing',updated_at_unix_ms=?1,lease_expires_at_unix_ms=?2,capture_relative_path=?3,capture_bytes=?4,capture_sha256=?5,capture_started_at_unix_ms=?6,capture_ended_at_unix_ms=?7 WHERE job_id=?8 AND state='claimed' AND lease_expires_at_unix_ms>?1")?;
+            let statement = self.prepare("UPDATE transport_proof_jobs SET state='analyzing',updated_at_unix_ms=?1,lease_expires_at_unix_ms=?2,capture_relative_path=?3,capture_bytes=?4,capture_sha256=?5,capture_started_at_unix_ms=?6,capture_ended_at_unix_ms=?7 WHERE job_id=?8 AND state='claimed' AND lease_expires_at_unix_ms>?1 AND execution_capability_sha256=?9")?;
             bind_i64(self.database, statement.raw, 1, now_unix_ms)?;
             bind_i64(self.database, statement.raw, 2, lease_expires_at)?;
             bind_text(
@@ -11396,6 +11460,15 @@ impl StationStore {
                 statement.raw,
                 3,
                 &c_string(&capture.artifact_relative_path, "transport capture path")?,
+            )?;
+            bind_text(
+                self.database,
+                statement.raw,
+                9,
+                &c_string(
+                    &execution.capability_sha256,
+                    "transport execution capability",
+                )?,
             )?;
             bind_i64(
                 self.database,
@@ -11432,12 +11505,13 @@ impl StationStore {
     /// Renew the active analyzer lease. This is a strict compare-and-set: a
     /// controller that has paused past expiry cannot reclaim a job another
     /// controller may already have recovered.
-    pub fn renew_transport_proof_analysis_lease(
+    fn renew_transport_proof_analysis_lease(
         &self,
-        job_id: &str,
+        execution: &TransportProofExecution,
         now_unix_ms: i64,
         lease_duration_ms: i64,
     ) -> Result<TransportProofJobRecord, String> {
+        let job_id = &execution.job_id;
         validate_transport_proof_job_id(job_id)?;
         validate_transport_proof_lease(now_unix_ms, lease_duration_ms)?;
         let lease_expires_at = now_unix_ms
@@ -11446,7 +11520,7 @@ impl StationStore {
         self.execute("BEGIN IMMEDIATE")?;
         let outcome = (|| {
             let statement = self.prepare(
-                "UPDATE transport_proof_jobs SET updated_at_unix_ms=?1,lease_expires_at_unix_ms=?2 WHERE job_id=?3 AND state='analyzing' AND lease_expires_at_unix_ms>?1",
+                "UPDATE transport_proof_jobs SET updated_at_unix_ms=?1,lease_expires_at_unix_ms=?2 WHERE job_id=?3 AND state='analyzing' AND lease_expires_at_unix_ms>?1 AND execution_capability_sha256=?4",
             )?;
             bind_i64(self.database, statement.raw, 1, now_unix_ms)?;
             bind_i64(self.database, statement.raw, 2, lease_expires_at)?;
@@ -11455,6 +11529,15 @@ impl StationStore {
                 statement.raw,
                 3,
                 &c_string(job_id, "transport proof job identity")?,
+            )?;
+            bind_text(
+                self.database,
+                statement.raw,
+                4,
+                &c_string(
+                    &execution.capability_sha256,
+                    "transport execution capability",
+                )?,
             )?;
             expect_done(self.database, statement.raw)?;
             if self.changes() != 1 {
@@ -11513,9 +11596,9 @@ impl StationStore {
 
     /// The only successful terminal transition: append the exact current
     /// analysis receipt and mark the queue job completed in one transaction.
-    pub fn complete_transport_proof_job_with_analysis<F>(
+    fn complete_transport_proof_job_with_analysis<F>(
         &self,
-        job_id: &str,
+        execution: &TransportProofExecution,
         receipt: &TransportAnalysisReceipt,
         now_unix_ms: i64,
         verify_installed_candidate: F,
@@ -11523,6 +11606,7 @@ impl StationStore {
     where
         F: FnOnce() -> Result<station_maintenance::VerifiedInstallAuthority, String>,
     {
+        let job_id = &execution.job_id;
         validate_transport_proof_job_id(job_id)?;
         receipt.validate_fresh_at(now_unix_ms)?;
         self.execute("BEGIN IMMEDIATE")?;
@@ -11602,7 +11686,7 @@ impl StationStore {
                 &c_string(&record, "transport analysis receipt")?,
             )?;
             expect_done(self.database, insert.raw)?;
-            let update = self.prepare("UPDATE transport_proof_jobs SET state='completed',updated_at_unix_ms=?1,lease_expires_at_unix_ms=-1,analyzer_output_sha256=?2,completed_at_unix_ms=?1 WHERE job_id=?3 AND state='analyzing' AND lease_expires_at_unix_ms>?1")?;
+            let update = self.prepare("UPDATE transport_proof_jobs SET state='completed',updated_at_unix_ms=?1,lease_expires_at_unix_ms=-1,execution_capability_sha256='',analyzer_output_sha256=?2,completed_at_unix_ms=?1 WHERE job_id=?3 AND state='analyzing' AND lease_expires_at_unix_ms>?1 AND execution_capability_sha256=?4")?;
             bind_i64(self.database, update.raw, 1, now_unix_ms)?;
             bind_text(
                 self.database,
@@ -11611,6 +11695,15 @@ impl StationStore {
                 &c_string(
                     &receipt.findings.analyzer_output_sha256,
                     "analyzer output hash",
+                )?,
+            )?;
+            bind_text(
+                self.database,
+                update.raw,
+                4,
+                &c_string(
+                    &execution.capability_sha256,
+                    "transport execution capability",
                 )?,
             )?;
             bind_text(
@@ -11632,25 +11725,35 @@ impl StationStore {
         self.finish_value_transaction(outcome)
     }
 
-    pub fn fail_transport_proof_job(
+    fn fail_transport_proof_job(
         &self,
-        job_id: &str,
+        execution: &TransportProofExecution,
         now_unix_ms: i64,
         failure_detail: &str,
     ) -> Result<TransportProofJobRecord, String> {
+        let job_id = &execution.job_id;
         validate_transport_proof_job_id(job_id)?;
         if now_unix_ms < 0 || !secret_field(failure_detail, 500) {
             return Err("transport proof failure detail is invalid".into());
         }
         self.execute("BEGIN IMMEDIATE")?;
         let outcome = (|| {
-            let statement = self.prepare("UPDATE transport_proof_jobs SET state='failed',updated_at_unix_ms=?1,lease_expires_at_unix_ms=-1,failed_at_unix_ms=?1,failure_detail=?2 WHERE job_id=?3 AND state IN ('claimed','capturing','analyzing')")?;
+            let statement = self.prepare("UPDATE transport_proof_jobs SET state='failed',updated_at_unix_ms=?1,lease_expires_at_unix_ms=-1,execution_capability_sha256='',failed_at_unix_ms=?1,failure_detail=?2 WHERE job_id=?3 AND state IN ('claimed','capturing','analyzing') AND execution_capability_sha256=?4")?;
             bind_i64(self.database, statement.raw, 1, now_unix_ms)?;
             bind_text(
                 self.database,
                 statement.raw,
                 2,
                 &c_string(failure_detail, "transport proof failure detail")?,
+            )?;
+            bind_text(
+                self.database,
+                statement.raw,
+                4,
+                &c_string(
+                    &execution.capability_sha256,
+                    "transport execution capability",
+                )?,
             )?;
             bind_text(
                 self.database,
@@ -17888,7 +17991,7 @@ fn recover_expired_transport_proof_jobs_in_transaction(
     now_unix_ms: i64,
 ) -> Result<u64, String> {
     let statement = store.prepare(
-        "UPDATE transport_proof_jobs SET state='pending',updated_at_unix_ms=?1,lease_expires_at_unix_ms=-1,capture_relative_path='',capture_bytes=-1,capture_sha256='',capture_started_at_unix_ms=-1,capture_ended_at_unix_ms=-1,analyzer_output_sha256='' WHERE state IN ('claimed','capturing','analyzing') AND lease_expires_at_unix_ms<=?1",
+        "UPDATE transport_proof_jobs SET state='pending',updated_at_unix_ms=?1,lease_expires_at_unix_ms=-1,execution_capability_sha256='',capture_relative_path='',capture_bytes=-1,capture_sha256='',capture_started_at_unix_ms=-1,capture_ended_at_unix_ms=-1,analyzer_output_sha256='' WHERE state IN ('claimed','capturing','analyzing') AND lease_expires_at_unix_ms<=?1",
     )?;
     bind_i64(store.database, statement.raw, 1, now_unix_ms)?;
     expect_done(store.database, statement.raw)?;
@@ -22138,14 +22241,40 @@ mod tests {
             created_at_unix_ms: 10,
             max_capture_bytes: 1_073_741_824,
         };
+        let legacy = TransportProofJob {
+            job_id: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee".into(),
+            ..job.clone()
+        };
+        assert!(store.seed_transport_proof_job_for_test(&legacy).unwrap());
+        store
+            .execute(&format!(
+                "UPDATE transport_proof_jobs SET install_generation=-1 WHERE job_id='{}'",
+                legacy.job_id
+            ))
+            .unwrap();
+        assert!(
+            store
+                .claim_next_transport_proof_job(11, 1_200_000)
+                .unwrap()
+                .is_none()
+        );
+        let legacy_record = store
+            .read_transport_proof_job(&legacy.job_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(legacy_record.state, TransportProofJobState::Failed);
+        assert_eq!(
+            legacy_record.failure_detail.as_deref(),
+            Some("Legacy transport proof quarantined: install generation is unavailable.")
+        );
         assert!(store.seed_transport_proof_job_for_test(&job).unwrap());
         assert!(!store.seed_transport_proof_job_for_test(&job).unwrap());
         let claimed = store
             .claim_next_transport_proof_job(20, 1_200_000)
             .unwrap()
             .unwrap();
-        assert_eq!(claimed.state, TransportProofJobState::Claimed);
-        assert_eq!(claimed.job.target_revision, 1);
+        assert_eq!(claimed.job().state, TransportProofJobState::Claimed);
+        assert_eq!(claimed.job().job.target_revision, 1);
         let capture = TransportProofCaptureFacts {
             artifact_relative_path:
                 "transport-proof/33333333-4444-4555-8666-777777777777/capture.ts".into(),
@@ -22155,12 +22284,12 @@ mod tests {
             ended_at_unix_ms: 600_100,
         };
         let analyzing = store
-            .begin_transport_proof_analysis(&job.job_id, &capture, 600_101, 1_200_000)
+            .begin_transport_proof_analysis(&claimed, &capture, 600_101, 1_200_000)
             .unwrap();
         assert_eq!(analyzing.capture.as_ref(), Some(&capture));
         assert_eq!(analyzing.state, TransportProofJobState::Analyzing);
         let renewed = store
-            .renew_transport_proof_analysis_lease(&job.job_id, 600_102, 1_200_000)
+            .renew_transport_proof_analysis_lease(&claimed, 600_102, 1_200_000)
             .unwrap();
         assert_eq!(renewed.lease_expires_at_unix_ms, Some(1_800_102));
         let completed = store
@@ -22193,18 +22322,31 @@ mod tests {
             ..job.clone()
         };
         assert!(store.seed_transport_proof_job_for_test(&expired).unwrap());
-        store
+        let expired_execution = store
             .claim_next_transport_proof_job(51, 1_000)
             .unwrap()
             .unwrap();
         store
-            .begin_transport_proof_analysis(&expired.job_id, &capture, 52, 1_000)
+            .begin_transport_proof_analysis(&expired_execution, &capture, 52, 1_000)
             .unwrap();
         assert!(
             store
-                .renew_transport_proof_analysis_lease(&expired.job_id, 1_052, 1_000)
+                .renew_transport_proof_analysis_lease(&expired_execution, 1_052, 1_000)
                 .is_err()
         );
+        let replacement_execution = store
+            .claim_next_transport_proof_job(1_052, 1_000)
+            .unwrap()
+            .unwrap();
+        assert!(
+            store
+                .begin_transport_proof_analysis(&expired_execution, &capture, 1_053, 1_000)
+                .is_err(),
+            "an expired execution capability must not control the recovered claim"
+        );
+        store
+            .fail_transport_proof_job(&replacement_execution, 1_053, "test recovery cleanup")
+            .unwrap();
         let mut revised = store
             .read_transport_target_config(channel_id, sink_id)
             .unwrap()

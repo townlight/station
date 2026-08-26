@@ -6,6 +6,7 @@ use station_update::{
     verify_prepared_slot,
 };
 use std::collections::BTreeSet;
+use std::ffi::c_void;
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -14,7 +15,8 @@ use windows_sys::Win32::Storage::FileSystem::{
     MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
 };
 use windows_sys::Win32::{
-    Foundation::{CloseHandle, HANDLE, WAIT_ABANDONED, WAIT_OBJECT_0},
+    Foundation::{CloseHandle, HANDLE, LocalFree, WAIT_ABANDONED, WAIT_OBJECT_0},
+    Security::{GetKernelObjectSecurity, SECURITY_ATTRIBUTES},
     System::Threading::{CreateMutexW, ReleaseMutex, WaitForSingleObject},
 };
 
@@ -55,6 +57,168 @@ const REQUIRED_TSDUCK_RUNTIME_FILES: [&str; 7] = [
     "bin/tscore.dll",
 ];
 const INSTALL_AUTHORITY_FENCE_TIMEOUT: Duration = Duration::from_secs(30);
+// MUTEX_ALL_ACCESS after Windows applies the kernel object's generic mapping.
+const INSTALL_AUTHORITY_FENCE_SDDL: &str = "D:P(A;;0x1f0001;;;SY)(A;;0x1f0001;;;BA)";
+const DACL_SECURITY_INFORMATION: u32 = 0x0000_0004;
+const SECURITY_DESCRIPTOR_REVISION: u32 = 1;
+
+#[link(name = "advapi32")]
+unsafe extern "system" {
+    fn ConvertStringSecurityDescriptorToSecurityDescriptorW(
+        string_security_descriptor: *const u16,
+        string_revision: u32,
+        security_descriptor: *mut *mut c_void,
+        security_descriptor_size: *mut u32,
+    ) -> i32;
+    fn ConvertSecurityDescriptorToStringSecurityDescriptorW(
+        security_descriptor: *const c_void,
+        string_revision: u32,
+        security_information: u32,
+        string_security_descriptor: *mut *mut u16,
+        string_security_descriptor_length: *mut u32,
+    ) -> i32;
+    fn GetSecurityDescriptorDacl(
+        security_descriptor: *const c_void,
+        dacl_present: *mut i32,
+        dacl: *mut *mut c_void,
+        dacl_defaulted: *mut i32,
+    ) -> i32;
+}
+
+#[repr(C)]
+struct AclHeader {
+    revision: u8,
+    sbz1: u8,
+    size: u16,
+}
+
+struct InstallFenceSecurity(*mut c_void);
+
+impl InstallFenceSecurity {
+    fn local_system_and_administrators() -> Result<Self, String> {
+        let wide: Vec<u16> = INSTALL_AUTHORITY_FENCE_SDDL
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect();
+        let mut descriptor = std::ptr::null_mut();
+        if unsafe {
+            ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                wide.as_ptr(),
+                SECURITY_DESCRIPTOR_REVISION,
+                &mut descriptor,
+                std::ptr::null_mut(),
+            )
+        } == 0
+            || descriptor.is_null()
+        {
+            return Err("installation authority fence security could not be created".into());
+        }
+        Ok(Self(descriptor))
+    }
+
+    fn attributes(&self) -> SECURITY_ATTRIBUTES {
+        SECURITY_ATTRIBUTES {
+            nLength: u32::try_from(std::mem::size_of::<SECURITY_ATTRIBUTES>())
+                .expect("security attributes fit u32"),
+            lpSecurityDescriptor: self.0,
+            bInheritHandle: 0,
+        }
+    }
+
+    fn canonical_dacl(&self) -> Result<String, String> {
+        descriptor_dacl_string(self.0)
+    }
+}
+
+impl Drop for InstallFenceSecurity {
+    fn drop(&mut self) {
+        unsafe { LocalFree(self.0) };
+    }
+}
+
+fn descriptor_dacl_bytes(descriptor: *mut c_void) -> Result<Vec<u8>, String> {
+    let mut present = 0;
+    let mut defaulted = 0;
+    let mut dacl = std::ptr::null_mut();
+    if unsafe { GetSecurityDescriptorDacl(descriptor, &mut present, &mut dacl, &mut defaulted) }
+        == 0
+        || present == 0
+        || dacl.is_null()
+        || defaulted != 0
+    {
+        return Err("installation authority fence DACL is unavailable or inherited".into());
+    }
+    let size = usize::from(unsafe { (*(dacl.cast::<AclHeader>())).size });
+    if size < std::mem::size_of::<AclHeader>() || size > 4_096 {
+        return Err("installation authority fence DACL size is invalid".into());
+    }
+    Ok(unsafe { std::slice::from_raw_parts(dacl.cast::<u8>(), size) }.to_vec())
+}
+
+fn descriptor_dacl_string(descriptor: *mut c_void) -> Result<String, String> {
+    // Validate the ACL structure before asking Windows to serialize it.
+    let _ = descriptor_dacl_bytes(descriptor)?;
+    let mut wide = std::ptr::null_mut();
+    let mut length = 0_u32;
+    if unsafe {
+        ConvertSecurityDescriptorToStringSecurityDescriptorW(
+            descriptor,
+            SECURITY_DESCRIPTOR_REVISION,
+            DACL_SECURITY_INFORMATION,
+            &mut wide,
+            &mut length,
+        )
+    } == 0
+        || wide.is_null()
+        || length == 0
+        || length > 4_096
+    {
+        return Err("installation authority fence DACL could not be serialized".into());
+    }
+    let value = String::from_utf16(unsafe { std::slice::from_raw_parts(wide, length as usize) })
+        .map(|value| value.trim_end_matches('\0').to_string())
+        .map_err(|_| "installation authority fence DACL is malformed".to_string());
+    unsafe { LocalFree(wide.cast()) };
+    value
+}
+
+fn verify_install_fence_security(
+    handle: HANDLE,
+    expected: &InstallFenceSecurity,
+) -> Result<(), String> {
+    let mut required = 0_u32;
+    unsafe {
+        GetKernelObjectSecurity(
+            handle,
+            DACL_SECURITY_INFORMATION,
+            std::ptr::null_mut(),
+            0,
+            &mut required,
+        )
+    };
+    if required == 0 || required > 16 * 1024 {
+        return Err("installation authority fence security could not be measured".into());
+    }
+    let mut actual = vec![0_u8; required as usize];
+    if unsafe {
+        GetKernelObjectSecurity(
+            handle,
+            DACL_SECURITY_INFORMATION,
+            actual.as_mut_ptr().cast(),
+            required,
+            &mut required,
+        )
+    } == 0
+    {
+        return Err("installation authority fence security could not be read".into());
+    }
+    let actual_dacl = descriptor_dacl_string(actual.as_mut_ptr().cast())?;
+    let expected_dacl = expected.canonical_dacl()?;
+    if actual_dacl != expected_dacl {
+        return Err("installation authority fence has an unexpected security policy".into());
+    }
+    Ok(())
+}
 
 /// Cross-process fence shared by activation and evidence writers.  The active
 /// slot and install receipt live outside SQLite, so a SQLite transaction alone
@@ -90,19 +254,22 @@ fn acquire_install_authority_fence_for(
     if !data_directory.is_absolute() || !data_directory.is_dir() {
         return Err("installation authority data directory is invalid".into());
     }
-    let canonical = std::fs::canonicalize(data_directory)
-        .map_err(|_| "installation authority data directory is unavailable")?;
-    let digest = sha256_lowercase(canonical.to_string_lossy().as_bytes());
+    let name = install_authority_fence_name(data_directory)?;
     // The updater may run as a service while a diagnostic/once invocation runs
     // in an interactive session. `Global` is therefore required; `Local`
     // would create independent per-session locks and reopen the replacement
     // race. Failure to create the global fence is fail-closed.
-    let name = format!("Global\\TownLightStation.InstallAuthority.{digest}");
     let mut wide: Vec<u16> = name.encode_utf16().collect();
     wide.push(0);
-    let handle = unsafe { CreateMutexW(std::ptr::null(), 0, wide.as_ptr()) };
+    let security = InstallFenceSecurity::local_system_and_administrators()?;
+    let attributes = security.attributes();
+    let handle = unsafe { CreateMutexW(&attributes, 0, wide.as_ptr()) };
     if handle.is_null() {
         return Err("installation authority fence could not be created".into());
+    }
+    if let Err(error) = verify_install_fence_security(handle, &security) {
+        unsafe { CloseHandle(handle) };
+        return Err(error);
     }
     let wait_ms = timeout.as_millis().min(u128::from(u32::MAX)) as u32;
     match unsafe { WaitForSingleObject(handle, wait_ms) } {
@@ -116,6 +283,15 @@ fn acquire_install_authority_fence_for(
             Err("installation authority fence is busy".into())
         }
     }
+}
+
+fn install_authority_fence_name(data_directory: &Path) -> Result<String, String> {
+    let canonical = std::fs::canonicalize(data_directory)
+        .map_err(|_| "installation authority data directory is unavailable")?;
+    let digest = sha256_lowercase(canonical.to_string_lossy().as_bytes());
+    Ok(format!(
+        "Global\\TownLightStation.InstallAuthority.{digest}"
+    ))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -379,6 +555,11 @@ pub fn activate_prepared_slot(
     let data_directory = database_path
         .parent()
         .ok_or_else(|| "station database has no data directory".to_string())?;
+    // One authority epoch spans the first receipt read, candidate proof,
+    // commit, and any rollback.  Narrower locking permits a competing updater
+    // to replace the active slot while this transaction still believes its
+    // original `current` receipt is authoritative.
+    let _authority_fence = acquire_install_authority_fence(data_directory)?;
     let active_path = data_directory.join(ACTIVE_SLOT_RECEIPT_NAME);
     let current = read_active_slot_receipt(&active_path)?;
     verify_active_application(application_root, &current.active)?;
@@ -480,7 +661,6 @@ pub fn activate_prepared_slot(
         // Hold the same fence used by stationd while it rechecks a candidate
         // and commits evidence. This serializes the active-slot/receipt swap
         // with the SQLite decision that names an install generation.
-        let authority_fence = acquire_install_authority_fence(data_directory)?;
         // The first proof runs the candidate against the old receipts. Stop it
         // again before changing candidate authority so no running stationd can
         // append evidence across the receipt-generation boundary.
@@ -495,7 +675,6 @@ pub fn activate_prepared_slot(
         receipt.validate()?;
         write_json_atomic(&active_path, &receipt, "active-slot receipt")?;
         write_install_identity(data_directory, &receipt.active, now_unix_ms)?;
-        drop(authority_fence);
         host.start_station()?;
         host.prove_station(&receipt.active, Duration::from_secs(60))?;
         advance(
@@ -1334,6 +1513,13 @@ pub fn recover_incomplete_transaction(
     now_unix_ms: i64,
     host: &mut impl MaintenanceHost,
 ) -> Result<MaintenanceTransactionRecord, String> {
+    let data_directory = database_path
+        .parent()
+        .ok_or_else(|| "station database has no data directory".to_string())?;
+    // Recovery performs the same authority writes as activation and rollback;
+    // it must share their cross-process epoch before inspecting transaction or
+    // active-slot state.
+    let _authority_fence = acquire_install_authority_fence(data_directory)?;
     let mut transaction = read_transaction(transaction_path)?;
     if transaction.journal_snapshot.is_none() {
         transaction.journal_snapshot = discover_journal_snapshot(transaction_path, &transaction)?;
@@ -2374,6 +2560,24 @@ mod tests {
         assert!(blocked, "activation/evidence fence must serialize writers");
         drop(fence);
         acquire_install_authority_fence_for(&data, Duration::from_millis(25)).unwrap();
+        remove_tree(&root).unwrap();
+    }
+
+    #[test]
+    fn install_authority_fence_rejects_a_squatted_permissive_object() {
+        let root = root("install-authority-squat");
+        let data = root.join("data");
+        std::fs::create_dir_all(&data).unwrap();
+        let name = install_authority_fence_name(&data).unwrap();
+        let wide: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
+        let squatted = unsafe { CreateMutexW(std::ptr::null(), 0, wide.as_ptr()) };
+        assert!(!squatted.is_null());
+        let result = acquire_install_authority_fence_for(&data, Duration::from_millis(25));
+        assert!(
+            result.is_err(),
+            "a pre-created object with the caller default DACL must not become install authority"
+        );
+        unsafe { CloseHandle(squatted) };
         remove_tree(&root).unwrap();
     }
 

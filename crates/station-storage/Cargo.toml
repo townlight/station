@@ -5,6 +5,7 @@ edition.workspace = true
 publish.workspace = true
 
 [dependencies]
+getrandom.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
@@ -25,6 +26,8 @@ station-schedule.workspace = true
 station-schedule-automation.workspace = true
 station-update.workspace = true
 station-transport-proof.workspace = true
+ureq.workspace = true
+windows-sys.workspace = true
 
 [dev-dependencies]
 image.workspace = true

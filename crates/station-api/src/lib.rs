@@ -13270,6 +13270,88 @@ mod tests {
 
     const TEST_PASSWORD_PHC: &str = "$argon2id$v=19$m=65536,t=3,p=1$c2FsdHNhbHRzYWx0c2FsdA$QUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUE";
 
+    fn install_transport_candidate(data: &Path, application: &Path) {
+        const VERSION: &str = "0.2.0";
+        const COMMIT: &str = "0123456789abcdef0123456789abcdef01234567";
+        const RUNTIME_SHA: &str =
+            "abcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcd";
+        const TSDUCK_SHA: &str = "b0ca0f963fcd77488b8c32d6f9d85030daa891ed753c36e57bbb458807a44eb1";
+        let runtime = application.join("runtime/gstreamer");
+        let tsduck = application.join("runtime/tsduck");
+        std::fs::create_dir_all(runtime.join("bin")).unwrap();
+        std::fs::create_dir_all(runtime.join("lib/gstreamer-1.0")).unwrap();
+        std::fs::create_dir_all(runtime.join("lib/gst-validate-launcher/python/launcher/apps"))
+            .unwrap();
+        for (path, bytes) in [
+            ("bin/gstreamer.dll", b"runtime".as_slice()),
+            ("lib/gstreamer-1.0/plugin.dll", b"plugin".as_slice()),
+            (
+                "lib/gst-validate-launcher/python/launcher/apps/empty.py",
+                b"".as_slice(),
+            ),
+        ] {
+            std::fs::write(runtime.join(path), bytes).unwrap();
+        }
+        for (path, bytes) in [
+            ("LICENSE.txt", b"license".as_slice()),
+            ("OTHERS.txt", b"notices".as_slice()),
+            ("bin/tsp.exe", b"tsp".as_slice()),
+            ("bin/tsanalyze.exe", b"analyze".as_slice()),
+            ("bin/tstables.exe", b"tables".as_slice()),
+            ("bin/tsduck.dll", b"tsduck".as_slice()),
+            ("bin/tscore.dll", b"tscore".as_slice()),
+        ] {
+            let destination = tsduck.join(path);
+            std::fs::create_dir_all(destination.parent().unwrap()).unwrap();
+            std::fs::write(destination, bytes).unwrap();
+        }
+        let runtime_manifest_sha = station_maintenance::write_installed_runtime_manifest(
+            &runtime,
+            &data.join(station_maintenance::INSTALLED_RUNTIME_MANIFEST_NAME),
+            VERSION,
+            COMMIT,
+            RUNTIME_SHA,
+        )
+        .unwrap();
+        let tsduck_manifest_sha = station_maintenance::write_installed_runtime_manifest(
+            &tsduck,
+            &data.join(station_maintenance::TSDUCK_RUNTIME_MANIFEST_NAME),
+            VERSION,
+            COMMIT,
+            TSDUCK_SHA,
+        )
+        .unwrap();
+        let files = [
+            ("stationd.exe", b"stationd".as_slice()),
+            ("channel-worker.exe", b"worker".as_slice()),
+        ];
+        let manifest = station_update::UpdatePackageManifest {
+            schema_version: 2,
+            product: "TownLight Station".into(),
+            version: VERSION.into(),
+            source_commit: COMMIT.into(),
+            files: files
+                .iter()
+                .map(|(path, bytes)| station_update::UpdatePackageFile {
+                    path: (*path).into(),
+                    size_bytes: bytes.len() as u64,
+                    sha256: format!("{:x}", Sha256::digest(bytes)),
+                })
+                .collect(),
+        };
+        for (path, bytes) in files {
+            std::fs::write(application.join(path), bytes).unwrap();
+        }
+        std::fs::write(
+            data.join(station_maintenance::ACTIVE_SLOT_RECEIPT_NAME),
+            serde_json::json!({"schema_version":1,"generation":7,"activated_at_unix_ms":1,"transaction_id":"bootstrap","active":{"relative_directory":".","package_manifest":manifest},"previous":null}).to_string(),
+        ).unwrap();
+        std::fs::write(
+            data.join(station_maintenance::INSTALL_RECEIPT_NAME),
+            serde_json::json!({"product":"TownLight Station","version":VERSION,"source_commit":COMMIT,"media_runtime_sha256":RUNTIME_SHA,"runtime_manifest_sha256":runtime_manifest_sha,"tsduck_version":"3.44-4676","tsduck_source_url":"https://github.com/tsduck/tsduck/releases/download/v3.44-4676/TSDuck-Win64-3.44-4676-Portable.zip","tsduck_archive_name":"TSDuck-Win64-3.44-4676-Portable.zip","tsduck_runtime_sha256":TSDUCK_SHA,"tsduck_runtime_manifest_sha256":tsduck_manifest_sha,"installed_at_unix_ms":1,"health_uri":"http://127.0.0.1:4070/health"}).to_string(),
+        ).unwrap();
+    }
+
     fn test_actor_with_account(
         account_id: &str,
         username: &str,
@@ -15944,6 +16026,104 @@ mod tests {
 
         std::fs::remove_dir_all(application).unwrap();
         let _ = std::fs::remove_file(database);
+    }
+
+    #[test]
+    fn authenticated_transport_post_and_get_derive_server_authority() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "townlight-transport-job-api-{}-{nonce}",
+            std::process::id()
+        ));
+        let application = root.join("application");
+        let database = root.join("data/station.db");
+        std::fs::create_dir_all(database.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(&application).unwrap();
+        install_transport_candidate(database.parent().unwrap(), &application);
+        let api =
+            Api::open_with_station_box_probe(&database, &application, station_box_probe()).unwrap();
+        let channel_id = "11111111-2222-4333-8444-555555555555";
+        let sink_id = "22222222-3333-4444-8555-666666666666";
+        api.storage
+            .put_channel(&ChannelConfiguration {
+                channel_id: channel_id.into(),
+                display_name: "Transport proof".into(),
+                output_profile: station_schedule::OutputProfileId::Proof360p30,
+                output_sinks: vec![station_schedule::OutputSinkConfiguration::required_udp(
+                    sink_id,
+                    "Cable primary",
+                    "127.0.0.1:5500",
+                    -24.0,
+                )],
+                enabled: true,
+            })
+            .unwrap();
+        api.storage
+            .write_transport_target_config(
+                channel_id,
+                sink_id,
+                None,
+                &TargetDeviceConfig {
+                    target_id: "receiver-1".into(),
+                    label: "Headend receiver".into(),
+                    protocol: TargetProtocol::HttpsApi,
+                    host: "receiver.example.test".into(),
+                    port: 443,
+                    credential_configured: true,
+                    revision: 1,
+                    created_at_unix_ms: 1,
+                    updated_at_unix_ms: 1,
+                    updated_by: "setup-admin".into(),
+                },
+            )
+            .unwrap();
+        let admin = test_actor(station_auth::OperatorRole::SetupAdmin);
+        let forbidden = api.handle_authenticated(
+            "POST",
+            &format!("/api/v1/channels/{channel_id}/transport-proof/jobs"),
+            None,
+            &test_actor(station_auth::OperatorRole::MeetingOperator),
+        );
+        assert_eq!(forbidden.status, 403);
+        let forged = api.handle_authenticated(
+            "POST",
+            &format!("/api/v1/channels/{channel_id}/transport-proof/jobs"),
+            Some(br#"{"candidate_version":"forged"}"#),
+            &admin,
+        );
+        assert_eq!(forged.status, 400);
+        let created = api.handle_authenticated(
+            "POST",
+            &format!("/api/v1/channels/{channel_id}/transport-proof/jobs"),
+            None,
+            &admin,
+        );
+        assert_eq!(
+            created.status,
+            202,
+            "{}",
+            String::from_utf8_lossy(&created.body)
+        );
+        let created: serde_json::Value = serde_json::from_slice(&created.body).unwrap();
+        assert_eq!(created["state"], "pending");
+        assert_eq!(created["target_id"], "receiver-1");
+        assert_eq!(created["candidate_version"], "0.2.0");
+        let job_id = created["job_id"].as_str().unwrap();
+        let status = api.handle_authenticated(
+            "GET",
+            &format!("/api/v1/channels/{channel_id}/transport-proof/jobs/{job_id}"),
+            None,
+            &admin,
+        );
+        assert_eq!(status.status, 200);
+        let status: serde_json::Value = serde_json::from_slice(&status.body).unwrap();
+        assert_eq!(status["job_id"], job_id);
+        assert_eq!(status["state"], "pending");
+        drop(api);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
