@@ -54,17 +54,21 @@ function Assert-TownLightTSDuckArchiveLayout {
         $names = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
         $required = @{}
         foreach ($entry in $entries) {
-            $name = [string]$entry.FullName
+            $rawName = [string]$entry.FullName
+            # The official Windows archive uses backslashes in ZIP entry names.
+            # Normalize both legal ZIP separator spellings before applying one
+            # traversal, collision, root, and required-file policy.
+            $name = $rawName.Replace('\', '/')
             $directoryEntry = $name.EndsWith('/')
             $trimmed = $name.TrimEnd('/')
             $segments = @($trimmed -split '/')
             if ([string]::IsNullOrWhiteSpace($name) -or $name.Length -gt 1024 -or
-                $name.Contains('\') -or $name.StartsWith('/') -or $name.Contains(':') -or
+                $name.StartsWith('/') -or $name.Contains(':') -or
                 $segments.Count -eq 0 -or $segments[0] -cne $script:TownLightTSDuckArchiveRoot -or
                 $segments -contains '' -or $segments -contains '.' -or $segments -contains '..' -or
                 -not $names.Add($name) -or
                 (([int64]$entry.ExternalAttributes -shr 16) -band 0xF000) -eq 0xA000) {
-                throw "Pinned TSDuck archive contains an unsafe entry: $name"
+                throw "Pinned TSDuck archive contains an unsafe entry: $rawName"
             }
             if (-not $directoryEntry) {
                 if ([int64]$entry.Length -gt $script:TownLightTSDuckMaximumPayloadBytes) {

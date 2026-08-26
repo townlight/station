@@ -10,7 +10,11 @@ if ($null -eq $layoutValidator) {
 }
 
 function New-TownLightTSDuckFixtureArchive {
-    param([Parameter(Mandatory = $true)][string]$Path, [switch]$UnsafeEntry)
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [switch]$UnsafeEntry,
+        [switch]$WindowsSeparators
+    )
     Add-Type -AssemblyName System.IO.Compression
     Add-Type -AssemblyName System.IO.Compression.FileSystem
     $archive = [IO.Compression.ZipFile]::Open($Path, [IO.Compression.ZipArchiveMode]::Create)
@@ -21,7 +25,8 @@ function New-TownLightTSDuckFixtureArchive {
         )
         if ($UnsafeEntry) { $entries += 'TSDuck/../escaped.txt' }
         foreach ($name in $entries) {
-            $entry = $archive.CreateEntry($name)
+            $entryName = if ($WindowsSeparators) { $name.Replace('/', '\') } else { $name }
+            $entry = $archive.CreateEntry($entryName)
             $writer = [IO.StreamWriter]::new($entry.Open())
             try { $writer.Write('fixture') } finally { $writer.Dispose() }
         }
@@ -35,6 +40,9 @@ try {
     $validLayout = Join-Path $layoutRoot 'valid.zip'
     New-TownLightTSDuckFixtureArchive -Path $validLayout
     Assert-TownLightTSDuckArchiveLayout $validLayout
+    $officialWindowsLayout = Join-Path $layoutRoot 'official-windows-layout.zip'
+    New-TownLightTSDuckFixtureArchive -Path $officialWindowsLayout -WindowsSeparators
+    Assert-TownLightTSDuckArchiveLayout $officialWindowsLayout
     $priorArchiveName = $script:TownLightTSDuckArchiveName
     $priorArchiveSize = $script:TownLightTSDuckArchiveSizeBytes
     $priorArchiveHash = $script:TownLightTSDuckArchiveSha256
