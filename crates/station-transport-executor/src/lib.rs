@@ -730,4 +730,39 @@ mod tests {
         )
         .unwrap();
     }
+
+    #[test]
+    fn rejects_unknown_or_oversized_tsdduck_preamble() {
+        let fixture = include_str!("../tests/fixtures/tsduck-3.44-h264-aac-analysis.txt");
+        assert!(
+            parse_tsanalyze_json(format!("SECRET: no\\n{fixture}").as_bytes(), 53_956, 2_000)
+                .is_err()
+        );
+        assert!(
+            parse_tsanalyze_json(
+                format!("{}{{}}", "TITLE: x\\n".repeat(10_000)).as_bytes(),
+                53_956,
+                2_000
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn rejects_missing_required_real_report_evidence() {
+        let fixture = include_str!("../tests/fixtures/tsduck-3.44-h264-aac-analysis.txt");
+        for removed in ["PAT", "\"video\": true", "\"audio\": true", "\"pcr\": 20"] {
+            assert!(
+                parse_tsanalyze_json(
+                    fixture
+                        .replacen(removed, "\\\"removed\\\": true", 1)
+                        .as_bytes(),
+                    53_956,
+                    2_000
+                )
+                .is_err(),
+                "{removed}"
+            );
+        }
+    }
 }
