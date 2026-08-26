@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::io::{ErrorKind, Read, Write};
 use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
-use std::time::Instant;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use station_media_engine::{
     ConfiguredTransportOutput, MpegTsMuxContract, OutputCaptureRequest, OutputCaptureStatus,
@@ -128,6 +128,8 @@ fn main() {
     let mut journal = JournalWriter::open(&journal_path, &worker_id, &channel_id)
         .unwrap_or_else(|error| fatal(3, "open its journal", &format!("{error:?}")));
     let started = Instant::now();
+    let worker_boot_id = generate_worker_boot_id()
+        .unwrap_or_else(|error| fatal(10, "generate its worker boot identity", &error));
     let mut pipe = PipeStream::connect(&pipe_name)
         .unwrap_or_else(|error| fatal(5, "connect to its control pipe", &format!("{error:?}")));
     let bootstrap_frame = read_command_frame(&mut pipe)
@@ -327,6 +329,7 @@ fn main() {
             &mut live_state,
             &bootstrap,
             &worker_instance_id,
+            &worker_boot_id,
             &mut graph_revision,
             &mut proof_graph_revisions,
         );
@@ -465,6 +468,7 @@ fn decide_event(
     live_state: &mut Option<LiveState>,
     bootstrap: &WorkerBootstrapEnvelope,
     worker_instance_id: &str,
+    worker_boot_id: &str,
     graph_revision: &mut u64,
     proof_graph_revisions: &mut HashMap<String, u64>,
 ) -> (WorkerEvent, bool) {
@@ -678,6 +682,62 @@ fn decide_event(
                         },
                         false,
                     ),
+                    Err(error) => (
+                        rejection(
+                            command,
+                            "take_failed",
+                            &format!("The asset could not be taken on air: {error:?}"),
+                        ),
+                        false,
+                    ),
+                }
+            }
+        }
+        ChannelCommand::TakeScheduledAsset {
+            report_id,
+            schedule_item_id,
+            schedule_item_revision,
+            asset_id,
+            media_offset_ms,
+        } => {
+            if live_state.as_ref().is_some_and(LiveState::is_on_air) {
+                (
+                    rejection(
+                        command,
+                        "live_active",
+                        "The active live session must be returned before taking an asset.",
+                    ),
+                    false,
+                )
+            } else if loaded_asset.as_deref() != Some(asset_id.as_str()) {
+                (
+                    rejection(
+                        command,
+                        "asset_not_loaded",
+                        "The requested asset is not loaded in this channel worker.",
+                    ),
+                    false,
+                )
+            } else {
+                match media.take_program_at(*media_offset_ms) {
+                    Ok(()) => {
+                        let actual_on_air_at_unix_ms =
+                            actual_on_air_at_unix_ms().unwrap_or_else(|error| {
+                                fatal(11, "capture the actual on-air wall time", &error)
+                            });
+                        (
+                            WorkerEvent::ScheduledAssetOnAir {
+                                report_id: report_id.clone(),
+                                schedule_item_id: schedule_item_id.clone(),
+                                schedule_item_revision: *schedule_item_revision,
+                                asset_id: asset_id.clone(),
+                                media_offset_ms: *media_offset_ms,
+                                worker_boot_id: worker_boot_id.to_string(),
+                                actual_on_air_at_unix_ms,
+                            },
+                            false,
+                        )
+                    }
                     Err(error) => (
                         rejection(
                             command,
@@ -1247,6 +1307,33 @@ fn incomplete_frame(error: std::io::Error, field: &str) -> String {
     }
 }
 
+fn actual_on_air_at_unix_ms() -> Result<i64, String> {
+    let elapsed = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| "system clock is before the Unix epoch".to_string())?;
+    i64::try_from(elapsed.as_millis())
+        .map_err(|_| "system clock exceeds the representable Unix-millisecond range".into())
+}
+
+fn generate_worker_boot_id() -> Result<String, String> {
+    let mut bytes = [0_u8; 16];
+    getrandom::fill(&mut bytes)
+        .map_err(|error| format!("OS randomness is unavailable: {error}"))?;
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut value = String::with_capacity(36);
+    for (index, byte) in bytes.into_iter().enumerate() {
+        if matches!(index, 4 | 6 | 8 | 10) {
+            value.push('-');
+        }
+        value.push(char::from(HEX[usize::from(byte >> 4)]));
+        value.push(char::from(HEX[usize::from(byte & 0x0f)]));
+    }
+    Ok(value)
+}
+
 fn fatal(code: i32, action: &str, error: &str) -> ! {
     eprintln!("channel worker could not {action}: {error}");
     std::process::exit(code);
@@ -1353,5 +1440,28 @@ mod tests {
             health.observe((8, 10), 1_500),
             LiveBufferStatus::Advanced
         ));
+    }
+
+    #[test]
+    fn worker_boot_identity_is_canonical_random_uuid_v4() {
+        let first = generate_worker_boot_id().unwrap();
+        let second = generate_worker_boot_id().unwrap();
+
+        for value in [&first, &second] {
+            let bytes = value.as_bytes();
+            assert_eq!(bytes.len(), 36);
+            assert_eq!(bytes[8], b'-');
+            assert_eq!(bytes[13], b'-');
+            assert_eq!(bytes[18], b'-');
+            assert_eq!(bytes[23], b'-');
+            assert_eq!(bytes[14], b'4');
+            assert!(matches!(bytes[19], b'8' | b'9' | b'a' | b'b'));
+            assert!(bytes.iter().enumerate().all(|(index, byte)| {
+                matches!(index, 8 | 13 | 18 | 23)
+                    || byte.is_ascii_digit()
+                    || (b'a'..=b'f').contains(byte)
+            }));
+        }
+        assert_ne!(first, second);
     }
 }

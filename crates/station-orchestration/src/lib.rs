@@ -26,6 +26,7 @@ use station_live::{LiveEndpoint, TakeoverSession, TakeoverState};
 use station_media_assets::{
     DecodedCaptionEvidence, decode_output_captions, measure_output_loudness,
 };
+use station_media_journal::inspect_journal;
 use station_media_protocol::{
     CaptionCue as WorkerCaptionCue, CgImageFormat, CgOverlay, CgOverlayContent, CgRect, CgSnapshot,
     ChannelCommand, LiveArmToken, LiveInputConfiguration, LiveReturnTarget, LoudnessTarget,
@@ -45,7 +46,8 @@ use station_schedule::{
 };
 use station_storage::{
     CgSnapshotReadError, CgWriteError, ChannelCaptionMode, OutputLoudnessCaptureFacts,
-    OutputLoudnessProofJobRecord, OutputLoudnessProofJobState, StationStore,
+    OutputLoudnessProofJobRecord, OutputLoudnessProofJobState, ScheduledTakeAcknowledgement,
+    ScheduledTakeAcknowledgementBinding, ScheduledTakeApplyOutcome, StationStore,
 };
 
 static ALERT_SEQUENCE: AtomicU64 = AtomicU64::new(1);
@@ -176,6 +178,19 @@ fn cg_read_requires_clear(error: &CgSnapshotReadError) -> bool {
     )
 }
 
+fn ambiguous_worker_command_failure(
+    operation: impl Into<String>,
+    cause: impl Into<String>,
+    retire: impl FnOnce() -> Result<(), SupervisorError>,
+) -> OrchestrationError {
+    let termination_failure = retire().err().map(|error| format!("{error:?}"));
+    OrchestrationError::WorkerSessionAmbiguous {
+        operation: operation.into(),
+        cause: cause.into(),
+        termination_failure,
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DispatchTransition {
     Loaded { report_id: String },
@@ -207,6 +222,14 @@ pub enum OrchestrationError {
     },
     LiveControl(String),
     CaptionAuthority(String),
+    /// A worker command may have taken effect before its reply was lost or
+    /// malformed. The session is retired before this error is returned, so a
+    /// later command can never reuse an ambiguous protected-pipe sequence.
+    WorkerSessionAmbiguous {
+        operation: String,
+        cause: String,
+        termination_failure: Option<String>,
+    },
     Clock(String),
     InvalidCgSnapshot(String),
 }
@@ -1106,9 +1129,16 @@ impl ChannelController {
         match self.abort_output_proof(proof_id) {
             Ok(()) => None,
             Err(error) => {
-                self.supervisor.force_terminate();
+                let termination = match self.supervisor.force_terminate() {
+                    Ok(()) => "worker terminated".to_string(),
+                    Err(stop_error) => {
+                        format!(
+                            "worker termination failed and the session was retired: {stop_error:?}"
+                        )
+                    }
+                };
                 Some(format!(
-                    "worker proof abort was ambiguous and the worker was terminated: {error:?}"
+                    "worker proof abort was ambiguous; {termination}: {error:?}"
                 ))
             }
         }
@@ -1246,14 +1276,17 @@ impl ChannelController {
                 // The worker may have accepted StartOutputProof before its
                 // reply was lost. Sequence state is ambiguous, so no later
                 // pipe command can safely reconcile it.
-                self.supervisor.force_terminate();
+                let termination = match self.supervisor.force_terminate() {
+                    Ok(()) => "worker terminated".to_string(),
+                    Err(stop_error) => format!(
+                        "worker termination failed and the session was retired: {stop_error:?}"
+                    ),
+                };
                 self.fail_output_proof_job_after_cleanup(
                     store,
                     &job,
                     now_unix_ms,
-                    format!(
-                        "worker output proof start was ambiguous; worker terminated: {error:?}"
-                    ),
+                    format!("worker output proof start was ambiguous; {termination}: {error:?}"),
                 )?;
                 return Ok(OutputProofState::Idle);
             }
@@ -1270,12 +1303,17 @@ impl ChannelController {
             graph_revision,
         } = response.event
         else {
-            self.supervisor.force_terminate();
+            let termination = match self.supervisor.force_terminate() {
+                Ok(()) => "worker terminated".to_string(),
+                Err(stop_error) => {
+                    format!("worker termination failed and the session was retired: {stop_error:?}")
+                }
+            };
             self.fail_output_proof_job_after_cleanup(
                 store,
                 &job,
                 now_unix_ms,
-                "worker returned an invalid output proof start response and was terminated",
+                format!("worker returned an invalid output proof start response; {termination}"),
             )?;
             return Ok(OutputProofState::Idle);
         };
@@ -1747,7 +1785,10 @@ impl ChannelController {
         let item = store
             .read_schedule_item(&report.schedule_item_id)?
             .ok_or_else(|| "caption proof schedule item no longer exists".to_string())?;
-        if item.channel_id != self.channel_id || item.asset_id != job.job.asset_id {
+        if item.revision != report.schedule_item_revision
+            || item.channel_id != self.channel_id
+            || item.asset_id != job.job.asset_id
+        {
             return Err("caption proof schedule item binding is stale".into());
         }
         let snapshot = store
@@ -1898,14 +1939,17 @@ impl ChannelController {
         ) {
             Ok(response) => response,
             Err(error) => {
-                self.supervisor.force_terminate();
+                let termination = match self.supervisor.force_terminate() {
+                    Ok(()) => "worker terminated".to_string(),
+                    Err(stop_error) => format!(
+                        "worker termination failed and the session was retired: {stop_error:?}"
+                    ),
+                };
                 self.fail_caption_proof_job_after_cleanup(
                     store,
                     &job,
                     now_unix_ms,
-                    format!(
-                        "worker caption proof start was ambiguous; worker terminated: {error:?}"
-                    ),
+                    format!("worker caption proof start was ambiguous; {termination}: {error:?}"),
                 )?;
                 return Ok(CaptionProofState::Idle);
             }
@@ -1922,12 +1966,17 @@ impl ChannelController {
             graph_revision,
         } = response.event
         else {
-            self.supervisor.force_terminate();
+            let termination = match self.supervisor.force_terminate() {
+                Ok(()) => "worker terminated".to_string(),
+                Err(stop_error) => {
+                    format!("worker termination failed and the session was retired: {stop_error:?}")
+                }
+            };
             self.fail_caption_proof_job_after_cleanup(
                 store,
                 &job,
                 now_unix_ms,
-                "worker returned an invalid caption proof start response and was terminated",
+                format!("worker returned an invalid caption proof start response; {termination}"),
             )?;
             return Ok(CaptionProofState::Idle);
         };
@@ -3216,27 +3265,108 @@ impl ChannelController {
                     .supervisor
                     .command(
                         &format!("take-{report_id}"),
-                        ChannelCommand::TakeAsset {
+                        ChannelCommand::TakeScheduledAsset {
+                            report_id: report_id.clone(),
+                            schedule_item_id: job.report.schedule_item_id.clone(),
+                            schedule_item_revision: job.report.schedule_item_revision,
                             asset_id: job.asset.asset_id.clone(),
                             media_offset_ms,
                         },
                         self.command_timeout,
                     )
                     .map_err(OrchestrationError::Worker)?;
-                if !matches!(event.event, WorkerEvent::OnAirChanged { ref source_kind, ref source_id }
-                    if source_kind == "asset" && source_id == &job.asset.asset_id)
-                {
+                let WorkerEvent::ScheduledAssetOnAir {
+                    report_id: confirmed_report_id,
+                    schedule_item_id,
+                    schedule_item_revision,
+                    asset_id,
+                    media_offset_ms: confirmed_offset_ms,
+                    worker_boot_id,
+                    actual_on_air_at_unix_ms,
+                } = &event.event
+                else {
+                    self.supervisor
+                        .force_terminate()
+                        .map_err(OrchestrationError::Worker)?;
                     return self.reject_worker_event(&store, &report_id, DispatchStatus::Queued);
+                };
+                if confirmed_report_id != &report_id
+                    || schedule_item_id != &job.report.schedule_item_id
+                    || *schedule_item_revision != job.report.schedule_item_revision
+                    || asset_id != &job.asset.asset_id
+                    || *confirmed_offset_ms != media_offset_ms
+                {
+                    self.supervisor
+                        .force_terminate()
+                        .map_err(OrchestrationError::Worker)?;
+                    return Err(OrchestrationError::UnexpectedWorkerEvent);
                 }
-                self.advance(
-                    &store,
-                    &report_id,
-                    DispatchStatus::Queued,
-                    DispatchStatus::Acknowledged,
-                )?;
+                let acknowledgement = match ScheduledTakeAcknowledgement::from_binding(
+                    ScheduledTakeAcknowledgementBinding {
+                        report_id: confirmed_report_id.clone(),
+                        channel_id: event.channel_id.clone(),
+                        schedule_item_id: schedule_item_id.clone(),
+                        schedule_item_revision: *schedule_item_revision,
+                        asset_sha256: asset_id.clone(),
+                        aired_at_utc_ms: *actual_on_air_at_unix_ms,
+                        media_offset_ms: *confirmed_offset_ms,
+                        worker_boot_id: worker_boot_id.clone(),
+                        worker_sequence: event.sequence,
+                        worker_id: event.worker_id.clone(),
+                    },
+                ) {
+                    Ok(acknowledgement) => acknowledgement,
+                    Err(error) => {
+                        self.supervisor
+                            .force_terminate()
+                            .map_err(OrchestrationError::Worker)?;
+                        return Err(OrchestrationError::Storage(error));
+                    }
+                };
+                let apply_outcome = match store
+                    .apply_scheduled_take_acknowledgement(&acknowledgement)
+                {
+                    Ok(outcome) => outcome,
+                    Err(error) => {
+                        self.supervisor
+                            .force_terminate()
+                            .map_err(OrchestrationError::Worker)?;
+                        return Err(OrchestrationError::Storage(format!(
+                            "scheduled take acknowledgement was not persisted atomically: {error:?}"
+                        )));
+                    }
+                };
+                if apply_outcome == ScheduledTakeApplyOutcome::AppliedHistorical {
+                    let event = self
+                        .supervisor
+                        .command(
+                            &format!("complete-historical-{report_id}"),
+                            ChannelCommand::ReturnToSchedule,
+                            self.command_timeout.max(MEDIA_TEARDOWN_TIMEOUT),
+                        )
+                        .map_err(OrchestrationError::Worker)?;
+                    if !matches!(event.event, WorkerEvent::OnAirChanged { ref source_kind, .. }
+                        if source_kind == "fallback")
+                    {
+                        return self.reject_worker_event(
+                            &store,
+                            &report_id,
+                            DispatchStatus::Acknowledged,
+                        );
+                    }
+                    self.advance(
+                        &store,
+                        &report_id,
+                        DispatchStatus::Acknowledged,
+                        DispatchStatus::Completed,
+                    )?;
+                    self.on_air_asset_id = None;
+                    self.caption_dispatch = None;
+                    self.mark_state(ChannelRuntimeState::HealthyFallback, system_time_millis()?);
+                    return Ok(Some(DispatchTransition::Completed { report_id }));
+                }
                 self.dispatch_due_caption_cues(&store, &job, media_offset_ms)?;
-                self.on_air_asset_id = Some(job.asset.asset_id);
-                self.mark_state(ChannelRuntimeState::OnAir, now_unix_ms);
+                self.mark_on_air_asset(job.asset.asset_id, *actual_on_air_at_unix_ms);
                 Some(DispatchTransition::OnAir { report_id })
             }
             (DispatchStatus::Acknowledged, ScheduleWindow::Active { media_offset_ms })
@@ -3266,8 +3396,7 @@ impl ChannelController {
                     );
                 }
                 self.dispatch_due_caption_cues(&store, &job, media_offset_ms)?;
-                self.on_air_asset_id = Some(job.asset.asset_id);
-                self.mark_state(ChannelRuntimeState::OnAir, now_unix_ms);
+                self.mark_on_air_asset(job.asset.asset_id, now_unix_ms);
                 Some(DispatchTransition::OnAir { report_id })
             }
             (DispatchStatus::Acknowledged, ScheduleWindow::Active { media_offset_ms }) => {
@@ -3345,7 +3474,12 @@ impl ChannelController {
             self.command_timeout,
         ) {
             Ok(event) => event,
-            Err(_) => return Ok(()),
+            Err(error) => {
+                return Err(self.retire_ambiguous_worker_session(
+                    "apply CG snapshot",
+                    format!("worker command failed before a bound acknowledgment: {error:?}"),
+                ));
+            }
         };
         if !matches!(
             event.event,
@@ -3354,7 +3488,10 @@ impl ChannelController {
                 board_revision
             } if board_id == &protocol.board_id && board_revision == protocol.board_revision
         ) {
-            return Ok(());
+            return Err(self.retire_ambiguous_worker_session(
+                "apply CG snapshot",
+                "worker returned an acknowledgement that did not bind the requested board revision",
+            ));
         }
         candidate.mark_applied(&protocol.board_id, protocol.board_revision);
         self.cg_state = candidate;
@@ -3374,18 +3511,30 @@ impl ChannelController {
             self.command_timeout,
         ) {
             Ok(event) => event,
-            Err(_) => {
-                self.cg_state = candidate;
-                return Ok(());
+            Err(error) => {
+                return Err(self.retire_ambiguous_worker_session(
+                    "clear CG snapshot",
+                    format!("worker command failed before a bound acknowledgment: {error:?}"),
+                ));
             }
         };
         if !matches!(event.event, WorkerEvent::CgCleared) {
-            self.cg_state = candidate;
-            return Ok(());
+            return Err(self.retire_ambiguous_worker_session(
+                "clear CG snapshot",
+                "worker returned an acknowledgement that did not confirm the requested clear",
+            ));
         }
         candidate.mark_cleared();
         self.cg_state = candidate;
         Ok(())
+    }
+
+    fn retire_ambiguous_worker_session(
+        &mut self,
+        operation: impl Into<String>,
+        cause: impl Into<String>,
+    ) -> OrchestrationError {
+        ambiguous_worker_command_failure(operation, cause, || self.supervisor.force_terminate())
     }
 
     pub fn shutdown(self, timeout: Duration) -> Result<(), OrchestrationError> {
@@ -3421,6 +3570,18 @@ impl ChannelController {
         }
     }
 
+    fn mark_on_air_asset(&mut self, asset_id: String, actual_started_at_unix_ms: i64) {
+        self.state_started_at_unix_ms = on_air_source_started_at(
+            self.runtime_state,
+            self.on_air_asset_id.as_deref(),
+            self.state_started_at_unix_ms,
+            &asset_id,
+            actual_started_at_unix_ms,
+        );
+        self.runtime_state = ChannelRuntimeState::OnAir;
+        self.on_air_asset_id = Some(asset_id);
+    }
+
     fn advance(
         &self,
         store: &StationStore,
@@ -3443,6 +3604,20 @@ impl ChannelController {
     ) -> Result<Option<DispatchTransition>, OrchestrationError> {
         self.advance(store, report_id, expected, DispatchStatus::Error)?;
         Err(OrchestrationError::UnexpectedWorkerEvent)
+    }
+}
+
+fn on_air_source_started_at(
+    current_state: ChannelRuntimeState,
+    current_asset_id: Option<&str>,
+    current_started_at_unix_ms: i64,
+    next_asset_id: &str,
+    actual_started_at_unix_ms: i64,
+) -> i64 {
+    if current_state != ChannelRuntimeState::OnAir || current_asset_id != Some(next_asset_id) {
+        actual_started_at_unix_ms
+    } else {
+        current_started_at_unix_ms
     }
 }
 
@@ -3620,13 +3795,18 @@ where
                     continue;
                 }
                 let journal = journal_root.join(format!("{}.tlj", channel.channel_id));
-                let launch_result = ChannelController::launch(
-                    worker_executable,
-                    database_path,
-                    &journal,
-                    channel,
-                    Duration::from_secs(7),
-                );
+                let launch_result =
+                    replay_scheduled_take_journal(&store, &journal, &channel.channel_id).and_then(
+                        |()| {
+                            ChannelController::launch(
+                                worker_executable,
+                                database_path,
+                                &journal,
+                                channel,
+                                Duration::from_secs(7),
+                            )
+                        },
+                    );
                 on_alive();
                 let controller = match launch_result {
                     Ok(controller) => controller,
@@ -3678,13 +3858,23 @@ where
             match result {
                 Ok(transition) => {
                     if transition.is_some() || heartbeat_due {
+                        // Commands may block while media changes state. Persist
+                        // the post-command observation with a fresh station
+                        // clock value rather than the pre-dispatch loop time.
+                        let observed_at = system_time_millis()?;
                         store
-                            .put_channel_runtime(&controller.runtime_observation(dispatch_now))
+                            .put_channel_runtime(&controller.runtime_observation(observed_at))
                             .map_err(OrchestrationError::Storage)?;
-                        controller.mark_heartbeat(dispatch_now);
+                        controller.mark_heartbeat(observed_at);
                     }
                 }
                 Err(error) => {
+                    // Stop uncertain output before any recovery bookkeeping can
+                    // block on the same database that caused the failure.
+                    controller
+                        .supervisor
+                        .force_terminate()
+                        .map_err(OrchestrationError::Worker)?;
                     fail_active_takeover(&store, channel_id, dispatch_now, &error)?;
                     record_channel_failure(&store, channel_id, dispatch_now, &error)?;
                     let attempts = restart_attempts.entry(channel_id.clone()).or_default();
@@ -3890,6 +4080,21 @@ fn operator_failure_detail(error: &OrchestrationError) -> String {
         OrchestrationError::CaptionAuthority(detail) => format!(
             "The scheduled caption authority was not acknowledged; the worker was stopped rather than claim uncertain caption output. {detail}"
         ),
+        OrchestrationError::WorkerSessionAmbiguous {
+            operation,
+            cause,
+            termination_failure,
+        } => {
+            let termination = termination_failure.as_ref().map_or_else(
+                || "The ambiguous worker session was retired before restart.".to_string(),
+                |detail| format!(
+                    "The ambiguous worker session was retired and its kill-on-close containment was released, but worker exit was not confirmed by the bounded deadline: {detail}"
+                ),
+            );
+            format!(
+                "The worker could not safely confirm '{operation}', so TownLight Station stopped using that control session rather than reuse a protected-pipe sequence. {termination} Cause: {cause}"
+            )
+        }
         OrchestrationError::Clock(_) =>
             "The station clock could not provide a valid dispatch time; verify Windows time service before returning this output to service.".into(),
         OrchestrationError::InvalidCgSnapshot(detail) => {
@@ -3932,13 +4137,94 @@ fn system_time_millis() -> Result<i64, OrchestrationError> {
     i64::try_from(millis).map_err(|_| OrchestrationError::Clock("system time exceeds i64".into()))
 }
 
+/// Replays durable worker confirmations before a replacement worker is
+/// launched.  The journal is the worker's crash boundary: a confirmation is
+/// written and flushed before it is emitted over IPC, so a station crash can
+/// only safely recover it from this file.  This function deliberately does
+/// not create a controller or write a runtime observation.  Storage owns the
+/// single atomic receipt/dispatch/runtime transition and decides whether a
+/// first-time late acknowledgement is historical-only; exact replays are
+/// idempotent there.
+fn replay_scheduled_take_journal(
+    store: &StationStore,
+    journal_path: &Path,
+    channel_id: &str,
+) -> Result<(), OrchestrationError> {
+    let expected_worker_id = format!("station-worker-{channel_id}");
+    let inspection = inspect_journal(journal_path).map_err(|error| {
+        OrchestrationError::Storage(format!(
+            "could not read durable channel journal before worker launch: {error:?}"
+        ))
+    })?;
+    match (
+        inspection.worker_id.as_deref(),
+        inspection.channel_id.as_deref(),
+    ) {
+        (None, None) => {}
+        (Some(worker_id), Some(journal_channel_id))
+            if worker_id == expected_worker_id && journal_channel_id == channel_id => {}
+        _ => {
+            return Err(OrchestrationError::Storage(
+                "durable channel journal identity does not match the configured channel worker"
+                    .into(),
+            ));
+        }
+    }
+
+    for envelope in inspection.retained_events {
+        if envelope.worker_id != expected_worker_id || envelope.channel_id != channel_id {
+            return Err(OrchestrationError::Storage(
+                "durable channel journal identity does not match the configured channel worker"
+                    .into(),
+            ));
+        }
+        let WorkerEvent::ScheduledAssetOnAir {
+            report_id,
+            schedule_item_id,
+            schedule_item_revision,
+            asset_id,
+            media_offset_ms,
+            worker_boot_id,
+            actual_on_air_at_unix_ms,
+        } = envelope.event
+        else {
+            continue;
+        };
+        let acknowledgement =
+            ScheduledTakeAcknowledgement::from_binding(ScheduledTakeAcknowledgementBinding {
+                report_id,
+                channel_id: channel_id.into(),
+                schedule_item_id,
+                schedule_item_revision,
+                asset_sha256: asset_id,
+                aired_at_utc_ms: actual_on_air_at_unix_ms,
+                media_offset_ms,
+                worker_boot_id,
+                worker_sequence: envelope.sequence,
+                worker_id: expected_worker_id.clone(),
+            })
+            .map_err(OrchestrationError::Storage)?;
+        // The result is intentionally not projected into controller state.
+        // `Applied`, `AlreadyApplied`, and any future historical-only outcome
+        // are all durably resolved by the authority before launch continues.
+        let _ = store
+            .apply_scheduled_take_acknowledgement(&acknowledgement)
+            .map_err(|error| {
+                OrchestrationError::Storage(format!(
+                    "durable scheduled take acknowledgement could not be replayed: {error:?}"
+                ))
+            })?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         CaptionCaptureTiming, CgSnapshotState, OrchestrationError, OutputExpectation,
         caption_capture_timing, capture_duration_for_sample, cleanup_orphan_output_proof_artifacts,
         due_caption_cues, expire_due_bulletins, generate_live_arm_token, hash_capture,
-        is_abort_confirmation, lease_renewal_due, managed_cg_image_root,
+        is_abort_confirmation, lease_renewal_due, managed_cg_image_root, on_air_source_started_at,
         promote_caption_proof_artifact, proof_artifact_path, proof_bindings_match,
         ready_duration_is_bounded, resolved_snapshot_to_protocol, stalled_required_output,
     };
@@ -3954,7 +4240,8 @@ mod tests {
         CgContentSource, CgRect, CgResolvedContent, CgResolvedSnapshot, CgResolvedZone,
         CgTemplateKind, CgZoneKind,
     };
-    use station_media_protocol::WorkerEvent;
+    use station_media_journal::JournalWriter;
+    use station_media_protocol::{PROTOCOL_VERSION, WorkerEvent, WorkerEventEnvelope};
     use station_schedule::{
         AssetReadiness, ChannelConfiguration, MediaAsset, OutputProfileId, OutputSinkConfiguration,
         ScheduleItem, ScheduleState,
@@ -3997,6 +4284,30 @@ mod tests {
     const BULLETIN_ID: &str = "597f52ae-f16c-4ff8-ab32-60379cd950c4";
     const OTHER_BULLETIN_ID: &str = "697f52ae-f16c-48f8-ab32-60379cd950c4";
     const OUTPUT_PROOF_JOB_ID: &str = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+
+    #[test]
+    fn back_to_back_on_air_asset_uses_the_new_assets_actual_start() {
+        assert_eq!(
+            on_air_source_started_at(
+                station_domain::ChannelRuntimeState::OnAir,
+                Some("asset-a"),
+                1_000,
+                "asset-b",
+                2_000,
+            ),
+            2_000
+        );
+        assert_eq!(
+            on_air_source_started_at(
+                station_domain::ChannelRuntimeState::OnAir,
+                Some("asset-b"),
+                2_000,
+                "asset-b",
+                3_000,
+            ),
+            2_000
+        );
+    }
     const CAPTION_PROOF_JOB_ID: &str = "caaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
     const OUTPUT_SINK_ID: &str = "bbbbbbbb-cccc-4ddd-8eee-ffffffffffff";
     const SOURCE_COMMIT: &str = "0123456789abcdef0123456789abcdef01234567";
@@ -4016,6 +4327,56 @@ mod tests {
             managed_cg_image_root(&database),
             PathBuf::from(r"C:\ProgramData\TownLight Station\cg-images")
         );
+    }
+
+    #[test]
+    fn ambiguous_cg_command_failure_retires_the_session_and_preserves_failure_context() {
+        let retired = Arc::new(AtomicBool::new(false));
+        let observed = Arc::clone(&retired);
+        let error = super::ambiguous_worker_command_failure(
+            "apply CG snapshot",
+            "worker command timed out before acknowledgment",
+            move || {
+                observed.store(true, Ordering::SeqCst);
+                Ok(())
+            },
+        );
+
+        assert!(retired.load(Ordering::SeqCst));
+        assert!(matches!(
+            error,
+            OrchestrationError::WorkerSessionAmbiguous {
+                ref operation,
+                ref cause,
+                termination_failure: None,
+            } if operation == "apply CG snapshot"
+                && cause.contains("timed out")
+        ));
+    }
+
+    #[test]
+    fn ambiguous_cg_command_failure_records_termination_failure_without_resuming_session() {
+        let retired = Arc::new(AtomicBool::new(false));
+        let observed = Arc::clone(&retired);
+        let error = super::ambiguous_worker_command_failure(
+            "clear CG snapshot",
+            "worker returned a mismatched clear acknowledgment",
+            move || {
+                observed.store(true, Ordering::SeqCst);
+                Err(station_runtime::SupervisorError::AlreadyStopped)
+            },
+        );
+
+        assert!(retired.load(Ordering::SeqCst));
+        assert!(matches!(
+            error,
+            OrchestrationError::WorkerSessionAmbiguous {
+                ref operation,
+                ref cause,
+                termination_failure: Some(_),
+            } if operation == "clear CG snapshot"
+                && cause.contains("mismatched")
+        ));
     }
 
     #[test]
@@ -4445,6 +4806,250 @@ mod tests {
             move || callback_stop.store(true, Ordering::Release),
         )
         .unwrap();
+    }
+
+    fn scheduled_take_replay_fixture(
+        label: &str,
+        historical: bool,
+    ) -> (PathBuf, PathBuf, StationStore, String, i64) {
+        let root = database_path(label).with_extension("station-root");
+        std::fs::create_dir_all(&root).unwrap();
+        let database = root.join("station.db");
+        let media = database.with_extension("ts");
+        std::fs::write(&media, b"scheduled replay fixture").unwrap();
+        let store = StationStore::open(&database).unwrap();
+        let now = super::system_time_millis().unwrap();
+        let (starts_at_unix_ms, actual_on_air_at_unix_ms) = if historical {
+            (now - 62_000, now - 61_000)
+        } else {
+            (now - 2_000, now - 1_000)
+        };
+        let asset_id = "a".repeat(64);
+        let item_id = "faaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+        let report_id = format!("replay-{label}");
+        store
+            .put_channel(&ChannelConfiguration {
+                channel_id: CHANNEL_ID.into(),
+                display_name: "Crash replay channel".into(),
+                output_profile: OutputProfileId::Proof360p30,
+                output_sinks: vec![OutputSinkConfiguration::required_udp(
+                    "f103968a-640b-42dc-8084-3fe9e847ff7f",
+                    "Crash replay output",
+                    "127.0.0.1:5500",
+                    -16.0,
+                )],
+                enabled: false,
+            })
+            .unwrap();
+        store
+            .put_media_asset(&MediaAsset {
+                asset_id: asset_id.clone(),
+                media_path: media.to_string_lossy().into_owned(),
+                duration_ms: 60_000,
+                readiness: AssetReadiness::Ready,
+            })
+            .unwrap();
+        store
+            .put_schedule_item(&ScheduleItem {
+                item_id: item_id.into(),
+                revision: 1,
+                channel_id: CHANNEL_ID.into(),
+                asset_id: asset_id.clone(),
+                title: "Crash-replay scheduled item".into(),
+                starts_at_unix_ms,
+                duration_ms: 60_000,
+                state: ScheduleState::Draft,
+            })
+            .unwrap();
+        let report = store
+            .commit_schedule(
+                &report_id,
+                "crash-replay-plan",
+                item_id,
+                "test-harness",
+                now - 3_000,
+                "Crash replay fixture",
+            )
+            .unwrap();
+        assert!(
+            store
+                .advance_dispatch_status(
+                    &report_id,
+                    station_schedule::DispatchStatus::Pending,
+                    station_schedule::DispatchStatus::Queued,
+                )
+                .unwrap()
+        );
+        let journal = root
+            .join("channel-journals")
+            .join(format!("{CHANNEL_ID}.tlj"));
+        std::fs::create_dir_all(journal.parent().unwrap()).unwrap();
+        let worker_id = format!("station-worker-{CHANNEL_ID}");
+        let mut writer = JournalWriter::open(&journal, &worker_id, CHANNEL_ID).unwrap();
+        writer
+            .append(&WorkerEventEnvelope {
+                version: PROTOCOL_VERSION,
+                worker_id,
+                channel_id: CHANNEL_ID.into(),
+                sequence: 1,
+                event: WorkerEvent::ScheduledAssetOnAir {
+                    report_id: report.report_id,
+                    schedule_item_id: report.schedule_item_id,
+                    schedule_item_revision: report.schedule_item_revision,
+                    asset_id,
+                    media_offset_ms: 1_000,
+                    worker_boot_id: "11111111-1111-4111-8111-111111111111".into(),
+                    actual_on_air_at_unix_ms,
+                },
+            })
+            .unwrap();
+        drop(writer);
+        (database, journal, store, report_id, now)
+    }
+
+    #[test]
+    fn prelaunch_replay_durably_recovers_confirmed_take_and_is_idempotent() {
+        let (database, journal, store, report_id, now) =
+            scheduled_take_replay_fixture("confirmed-take", false);
+
+        // Crash window: the worker flushed its confirmation but stationd
+        // died before it received the IPC event. The replacement must ingest
+        // the durable evidence before it may launch a new worker.
+        super::replay_scheduled_take_journal(&store, &journal, CHANNEL_ID).unwrap();
+        assert_eq!(
+            store
+                .read_commit_report(&report_id)
+                .unwrap()
+                .unwrap()
+                .dispatch_status,
+            station_schedule::DispatchStatus::Acknowledged
+        );
+        assert_eq!(
+            store
+                .list_actual_airings(CHANNEL_ID, now - 10_000, now + 10_000, 8)
+                .unwrap()
+                .len(),
+            1
+        );
+
+        // Crash window: IPC reached stationd and storage committed, but the
+        // process died before retiring the worker. Replaying the same journal
+        // must remain read-only and must not manufacture a second airing.
+        super::replay_scheduled_take_journal(&store, &journal, CHANNEL_ID).unwrap();
+        assert_eq!(
+            store
+                .list_actual_airings(CHANNEL_ID, now - 10_000, now + 10_000, 8)
+                .unwrap()
+                .len(),
+            1
+        );
+
+        drop(store);
+        let _ = std::fs::remove_dir_all(database.parent().unwrap());
+    }
+
+    #[test]
+    fn prelaunch_replay_of_exact_receipt_does_not_reopen_or_block_an_errored_report() {
+        let (database, journal, store, report_id, now) =
+            scheduled_take_replay_fixture("errored-confirmed-take", false);
+
+        super::replay_scheduled_take_journal(&store, &journal, CHANNEL_ID).unwrap();
+        assert!(
+            store
+                .advance_dispatch_status(
+                    &report_id,
+                    station_schedule::DispatchStatus::Acknowledged,
+                    station_schedule::DispatchStatus::Error,
+                )
+                .unwrap()
+        );
+
+        // A later worker launch must still be able to replay the retained
+        // confirmation. The immutable fact is already authoritative, and the
+        // terminal dispatch error must remain terminal.
+        super::replay_scheduled_take_journal(&store, &journal, CHANNEL_ID).unwrap();
+        assert_eq!(
+            store
+                .read_commit_report(&report_id)
+                .unwrap()
+                .unwrap()
+                .dispatch_status,
+            station_schedule::DispatchStatus::Error
+        );
+        assert_eq!(
+            store
+                .list_actual_airings(CHANNEL_ID, now - 10_000, now + 10_000, 8)
+                .unwrap()
+                .len(),
+            1
+        );
+
+        drop(store);
+        let _ = std::fs::remove_dir_all(database.parent().unwrap());
+    }
+
+    #[test]
+    fn prelaunch_replay_rejects_foreign_journal_before_authoritative_writes() {
+        let (database, journal, store, report_id, now) =
+            scheduled_take_replay_fixture("foreign-journal", false);
+        let foreign_journal = journal.with_file_name("foreign.tlj");
+        let mut writer = JournalWriter::open(
+            &foreign_journal,
+            "station-worker-99999999-9999-4999-8999-999999999999",
+            CHANNEL_ID,
+        )
+        .unwrap();
+        writer
+            .append(&WorkerEventEnvelope {
+                version: PROTOCOL_VERSION,
+                worker_id: "station-worker-99999999-9999-4999-8999-999999999999".into(),
+                channel_id: CHANNEL_ID.into(),
+                sequence: 1,
+                event: WorkerEvent::Ready { graph_revision: 1 },
+            })
+            .unwrap();
+        drop(writer);
+
+        assert!(
+            super::replay_scheduled_take_journal(&store, &foreign_journal, CHANNEL_ID).is_err()
+        );
+        assert_eq!(
+            store
+                .read_commit_report(&report_id)
+                .unwrap()
+                .unwrap()
+                .dispatch_status,
+            station_schedule::DispatchStatus::Queued
+        );
+        assert!(
+            store
+                .list_actual_airings(CHANNEL_ID, now - 10_000, now + 10_000, 8)
+                .unwrap()
+                .is_empty()
+        );
+
+        drop(store);
+        let _ = std::fs::remove_dir_all(database.parent().unwrap());
+    }
+
+    #[test]
+    fn prelaunch_replay_of_a_late_confirmation_does_not_invent_current_on_air() {
+        let (database, journal, store, report_id, _now) =
+            scheduled_take_replay_fixture("historical-take", true);
+
+        super::replay_scheduled_take_journal(&store, &journal, CHANNEL_ID).unwrap();
+        assert_eq!(
+            store
+                .read_commit_report(&report_id)
+                .unwrap()
+                .unwrap()
+                .dispatch_status,
+            station_schedule::DispatchStatus::Acknowledged
+        );
+        assert_eq!(store.read_channel_runtime(CHANNEL_ID).unwrap(), None);
+
+        drop(store);
+        let _ = std::fs::remove_dir_all(database.parent().unwrap());
     }
 
     #[test]

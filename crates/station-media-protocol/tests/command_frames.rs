@@ -36,6 +36,175 @@ fn take_live_command() -> CommandEnvelope {
     }
 }
 
+fn scheduled_take_command() -> CommandEnvelope {
+    CommandEnvelope {
+        version: PROTOCOL_VERSION,
+        channel_id: "62a47b7e-2a03-48d6-8703-a6e5ce986527".into(),
+        command_id: "71e2acfe-5d73-491d-9a1c-242cadc8e97d".into(),
+        expected_sequence: 42,
+        command: ChannelCommand::TakeScheduledAsset {
+            report_id: "scheduled-report-1".into(),
+            schedule_item_id: "b5c2a5d5-c0b3-4d8b-9cb6-7c3a8f1d2e44".into(),
+            schedule_item_revision: 7,
+            asset_id: "a".repeat(64),
+            media_offset_ms: 12_345,
+        },
+    }
+}
+
+fn scheduled_asset_on_air_event() -> WorkerEventEnvelope {
+    WorkerEventEnvelope {
+        version: PROTOCOL_VERSION,
+        worker_id: "ae819b97-2920-434b-9d96-0b51a8ea9abb".into(),
+        channel_id: "62a47b7e-2a03-48d6-8703-a6e5ce986527".into(),
+        sequence: 43,
+        event: WorkerEvent::ScheduledAssetOnAir {
+            report_id: "scheduled-report-1".into(),
+            schedule_item_id: "b5c2a5d5-c0b3-4d8b-9cb6-7c3a8f1d2e44".into(),
+            schedule_item_revision: 7,
+            asset_id: "a".repeat(64),
+            media_offset_ms: 12_345,
+            worker_boot_id: "f2e6f9a1-6a5d-4de2-9a2b-8f4c1d7e3b55".into(),
+            actual_on_air_at_unix_ms: 1_767_225_600_000,
+        },
+    }
+}
+
+fn replace_frame_json(frame: &[u8], from: &str, to: &str) -> Vec<u8> {
+    let json = String::from_utf8(frame[4..].to_vec()).unwrap();
+    let tampered = json.replacen(from, to, 1);
+    assert_ne!(tampered, json);
+    let mut result = (tampered.len() as u32).to_le_bytes().to_vec();
+    result.extend_from_slice(tampered.as_bytes());
+    result
+}
+
+#[test]
+fn round_trips_scheduled_take_command_and_on_air_event() {
+    let command = scheduled_take_command();
+    let frame = encode_command_frame(&command).unwrap();
+    assert_eq!(decode_command_frame(&frame).unwrap(), command);
+
+    let event = scheduled_asset_on_air_event();
+    let frame = encode_event_frame(&event).unwrap();
+    assert_eq!(decode_event_frame(&frame).unwrap(), event);
+}
+
+#[test]
+fn rejects_invalid_scheduled_take_command_fields() {
+    let mut cases = Vec::new();
+
+    let mut invalid = scheduled_take_command();
+    if let ChannelCommand::TakeScheduledAsset {
+        schedule_item_revision,
+        ..
+    } = &mut invalid.command
+    {
+        *schedule_item_revision = 0;
+    }
+    cases.push(invalid);
+
+    let mut invalid = scheduled_take_command();
+    if let ChannelCommand::TakeScheduledAsset {
+        schedule_item_revision,
+        ..
+    } = &mut invalid.command
+    {
+        *schedule_item_revision = i64::MAX as u64 + 1;
+    }
+    cases.push(invalid);
+
+    let mut invalid = scheduled_take_command();
+    if let ChannelCommand::TakeScheduledAsset { asset_id, .. } = &mut invalid.command {
+        asset_id.replace_range(..1, "A");
+    }
+    cases.push(invalid);
+
+    let mut invalid = scheduled_take_command();
+    if let ChannelCommand::TakeScheduledAsset {
+        schedule_item_id, ..
+    } = &mut invalid.command
+    {
+        *schedule_item_id = "not-a-uuid".into();
+    }
+    cases.push(invalid);
+
+    let oversized_report_id = "r".repeat(201);
+    for report_id in ["", "report\ncontrol", oversized_report_id.as_str()] {
+        let mut invalid = scheduled_take_command();
+        if let ChannelCommand::TakeScheduledAsset {
+            report_id: value, ..
+        } = &mut invalid.command
+        {
+            *value = report_id.into();
+        }
+        cases.push(invalid);
+    }
+
+    let mut invalid = scheduled_take_command();
+    invalid.channel_id = "not-a-uuid".into();
+    cases.push(invalid);
+
+    for invalid in cases {
+        assert!(matches!(
+            encode_command_frame(&invalid),
+            Err(ProtocolError::InvalidScheduledTake(_))
+        ));
+    }
+}
+
+#[test]
+fn rejects_invalid_scheduled_asset_on_air_event_fields() {
+    let mut invalid = scheduled_asset_on_air_event();
+    if let WorkerEvent::ScheduledAssetOnAir { worker_boot_id, .. } = &mut invalid.event {
+        *worker_boot_id = "malformed-boot-id".into();
+    }
+    assert!(matches!(
+        encode_event_frame(&invalid),
+        Err(ProtocolError::InvalidScheduledTake(_))
+    ));
+
+    let mut invalid = scheduled_asset_on_air_event();
+    if let WorkerEvent::ScheduledAssetOnAir {
+        actual_on_air_at_unix_ms,
+        ..
+    } = &mut invalid.event
+    {
+        *actual_on_air_at_unix_ms = -1;
+    }
+    assert!(matches!(
+        encode_event_frame(&invalid),
+        Err(ProtocolError::InvalidScheduledTake(_))
+    ));
+}
+
+#[test]
+fn decode_rejects_tampered_scheduled_revision_and_actual_time() {
+    let command = scheduled_take_command();
+    let frame = encode_command_frame(&command).unwrap();
+    let tampered = replace_frame_json(
+        &frame,
+        "schedule_item_revision\":7",
+        "schedule_item_revision\":0",
+    );
+    assert!(matches!(
+        decode_command_frame(&tampered),
+        Err(ProtocolError::InvalidScheduledTake(_))
+    ));
+
+    let event = scheduled_asset_on_air_event();
+    let frame = encode_event_frame(&event).unwrap();
+    let tampered = replace_frame_json(
+        &frame,
+        "actual_on_air_at_unix_ms\":1767225600000",
+        "actual_on_air_at_unix_ms\":-1",
+    );
+    assert!(matches!(
+        decode_event_frame(&tampered),
+        Err(ProtocolError::InvalidScheduledTake(_))
+    ));
+}
+
 #[test]
 fn round_trips_live_arm_and_lifecycle_commands() {
     for command in [
@@ -477,11 +646,14 @@ fn round_trips_worker_events_and_rejects_an_incompatible_major() {
     assert_eq!(decode_event_frame(&frame).unwrap(), caption);
 
     let mut incompatible = event;
-    incompatible.version = ProtocolVersion { major: 9, minor: 0 };
+    incompatible.version = ProtocolVersion {
+        major: 10,
+        minor: 0,
+    };
     let frame = encode_event_frame(&incompatible).expect("event encodes");
     assert_eq!(
         decode_event_frame(&frame),
-        Err(ProtocolError::UnsupportedMajor(9))
+        Err(ProtocolError::UnsupportedMajor(10))
     );
 }
 

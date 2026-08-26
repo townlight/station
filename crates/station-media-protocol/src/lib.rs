@@ -74,9 +74,10 @@ impl<'de> Deserialize<'de> for LoudnessTarget {
 }
 
 pub const MAX_FRAME_BYTES: usize = 65_536;
-// Caption clear is mandatory before every source-role transition. It is a
-// breaking worker capability, so mixed pre-v8 workers fail closed.
-pub const PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion { major: 8, minor: 0 };
+// A scheduled take acknowledgement carries the durable schedule binding and
+// worker-observed air time. It is a breaking worker capability, so mixed
+// pre-v9 workers fail closed.
+pub const PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion { major: 9, minor: 0 };
 
 pub const MAX_OUTPUT_PROOF_INDEX: u16 = 255;
 // Operator-requested analyzable program is capped at ten minutes. The worker
@@ -95,6 +96,7 @@ pub const MIN_OUTPUT_PROOF_DURATION_MS: u64 = 3_000;
 pub const MAX_OUTPUT_PROOF_BYTES: u64 = 1024 * 1024 * 1024;
 const MAX_OUTPUT_PROOF_ARTIFACT_PATH_BYTES: usize = 2_048;
 const MAX_OUTPUT_PROOF_TEXT_BYTES: usize = 512;
+const MAX_REPORT_ID_BYTES: usize = 200;
 
 const MIN_LIVE_TOKEN_BYTES: usize = 16;
 const MAX_LIVE_TOKEN_BYTES: usize = 128;
@@ -444,6 +446,13 @@ pub enum ChannelCommand {
         asset_id: String,
         media_offset_ms: u64,
     },
+    TakeScheduledAsset {
+        report_id: String,
+        schedule_item_id: String,
+        schedule_item_revision: u64,
+        asset_id: String,
+        media_offset_ms: u64,
+    },
     ArmLive {
         input: LiveInputConfiguration,
         arm_token: LiveArmToken,
@@ -513,6 +522,15 @@ pub enum WorkerEvent {
     OnAirChanged {
         source_kind: String,
         source_id: String,
+    },
+    ScheduledAssetOnAir {
+        report_id: String,
+        schedule_item_id: String,
+        schedule_item_revision: u64,
+        asset_id: String,
+        media_offset_ms: u64,
+        worker_boot_id: String,
+        actual_on_air_at_unix_ms: i64,
     },
     LiveArmed {
         session_id: String,
@@ -685,6 +703,7 @@ pub enum ProtocolError {
     InvalidCaptionCue(String),
     InvalidLiveCommand(String),
     InvalidLiveEvent(String),
+    InvalidScheduledTake(String),
     InvalidOutputProof(String),
     InvalidOutputConfiguration(String),
 }
@@ -692,6 +711,7 @@ pub enum ProtocolError {
 pub fn encode_command_frame(command: &CommandEnvelope) -> Result<Vec<u8>, ProtocolError> {
     validate_caption_command(&command.command).map_err(ProtocolError::InvalidCaptionCue)?;
     validate_live_command(&command.command).map_err(ProtocolError::InvalidLiveCommand)?;
+    validate_scheduled_take_command(command).map_err(ProtocolError::InvalidScheduledTake)?;
     validate_output_proof_command(&command.command).map_err(ProtocolError::InvalidOutputProof)?;
     encode_frame(command)
 }
@@ -801,6 +821,97 @@ fn validate_canonical_uuid(value: &str, field: &str) -> Result<(), String> {
         })
     {
         return Err(format!("{field} must be a lowercase canonical UUID"));
+    }
+    Ok(())
+}
+
+fn validate_lowercase_sha256(value: &str, field: &str) -> Result<(), String> {
+    if value.len() != 64
+        || value
+            .bytes()
+            .any(|byte| !byte.is_ascii_digit() && !(b'a'..=b'f').contains(&byte))
+    {
+        return Err(format!("{field} must be a lowercase SHA-256 digest"));
+    }
+    Ok(())
+}
+
+fn validate_report_id(value: &str) -> Result<(), String> {
+    if value.trim().is_empty()
+        || value.len() > MAX_REPORT_ID_BYTES
+        || value.chars().any(char::is_control)
+    {
+        return Err("report_id must be a bounded visible commit identity".into());
+    }
+    Ok(())
+}
+
+fn validate_scheduled_take_binding(
+    report_id: &str,
+    schedule_item_id: &str,
+    schedule_item_revision: u64,
+    asset_id: &str,
+    media_offset_ms: u64,
+) -> Result<(), String> {
+    validate_report_id(report_id)?;
+    validate_canonical_uuid(schedule_item_id, "schedule_item_id")?;
+    if !(1..=i64::MAX as u64).contains(&schedule_item_revision) {
+        return Err("schedule_item_revision must be nonzero and SQLite-representable".into());
+    }
+    validate_lowercase_sha256(asset_id, "asset_id")?;
+    if media_offset_ms > i64::MAX as u64 {
+        return Err("media_offset_ms must be nonnegative and SQLite-representable".into());
+    }
+    Ok(())
+}
+
+fn validate_scheduled_take_command(command: &CommandEnvelope) -> Result<(), String> {
+    let ChannelCommand::TakeScheduledAsset {
+        report_id,
+        schedule_item_id,
+        schedule_item_revision,
+        asset_id,
+        media_offset_ms,
+    } = &command.command
+    else {
+        return Ok(());
+    };
+
+    validate_canonical_uuid(&command.channel_id, "channel_id")?;
+    validate_scheduled_take_binding(
+        report_id,
+        schedule_item_id,
+        *schedule_item_revision,
+        asset_id,
+        *media_offset_ms,
+    )
+}
+
+fn validate_scheduled_take_event(event: &WorkerEventEnvelope) -> Result<(), String> {
+    let WorkerEvent::ScheduledAssetOnAir {
+        report_id,
+        schedule_item_id,
+        schedule_item_revision,
+        asset_id,
+        media_offset_ms,
+        worker_boot_id,
+        actual_on_air_at_unix_ms,
+    } = &event.event
+    else {
+        return Ok(());
+    };
+
+    validate_canonical_uuid(&event.channel_id, "channel_id")?;
+    validate_scheduled_take_binding(
+        report_id,
+        schedule_item_id,
+        *schedule_item_revision,
+        asset_id,
+        *media_offset_ms,
+    )?;
+    validate_canonical_uuid(worker_boot_id, "worker_boot_id")?;
+    if *actual_on_air_at_unix_ms < 0 {
+        return Err("actual_on_air_at_unix_ms must be nonnegative".into());
     }
     Ok(())
 }
@@ -1113,6 +1224,7 @@ pub fn decode_command_frame(frame: &[u8]) -> Result<CommandEnvelope, ProtocolErr
     }
     validate_caption_command(&command.command).map_err(ProtocolError::InvalidCaptionCue)?;
     validate_live_command(&command.command).map_err(ProtocolError::InvalidLiveCommand)?;
+    validate_scheduled_take_command(&command).map_err(ProtocolError::InvalidScheduledTake)?;
     validate_output_proof_command(&command.command).map_err(ProtocolError::InvalidOutputProof)?;
     Ok(command)
 }
@@ -1157,6 +1269,7 @@ fn validate_live_command(command: &ChannelCommand) -> Result<(), String> {
 pub fn encode_event_frame(event: &WorkerEventEnvelope) -> Result<Vec<u8>, ProtocolError> {
     validate_caption_event(&event.event).map_err(ProtocolError::InvalidCaptionCue)?;
     validate_live_event(&event.event).map_err(ProtocolError::InvalidLiveEvent)?;
+    validate_scheduled_take_event(event).map_err(ProtocolError::InvalidScheduledTake)?;
     validate_output_proof_event(&event.event).map_err(ProtocolError::InvalidOutputProof)?;
     encode_frame(event)
 }
@@ -1166,10 +1279,33 @@ pub fn decode_event_frame(frame: &[u8]) -> Result<WorkerEventEnvelope, ProtocolE
     if event.version.major != PROTOCOL_VERSION.major {
         return Err(ProtocolError::UnsupportedMajor(event.version.major));
     }
+    validate_decoded_event(&event)
+}
+
+/// Decodes an event persisted in the durable worker journal.
+///
+/// IPC remains strict to the current protocol major. Journals may contain the
+/// immediately previous major because their immutable history outlives one
+/// worker binary; the event shape remains backward-compatible and still goes
+/// through every current field validator. No older or future major is accepted.
+pub fn decode_persisted_event_frame(frame: &[u8]) -> Result<WorkerEventEnvelope, ProtocolError> {
+    let event: WorkerEventEnvelope = decode_frame(frame)?;
+    let previous_major = PROTOCOL_VERSION.major.checked_sub(1);
+    if event.version.major != PROTOCOL_VERSION.major && Some(event.version.major) != previous_major
+    {
+        return Err(ProtocolError::UnsupportedMajor(event.version.major));
+    }
+    validate_decoded_event(&event)
+}
+
+fn validate_decoded_event(
+    event: &WorkerEventEnvelope,
+) -> Result<WorkerEventEnvelope, ProtocolError> {
     validate_caption_event(&event.event).map_err(ProtocolError::InvalidCaptionCue)?;
     validate_live_event(&event.event).map_err(ProtocolError::InvalidLiveEvent)?;
+    validate_scheduled_take_event(event).map_err(ProtocolError::InvalidScheduledTake)?;
     validate_output_proof_event(&event.event).map_err(ProtocolError::InvalidOutputProof)?;
-    Ok(event)
+    Ok(event.clone())
 }
 
 fn validate_caption_event(event: &WorkerEvent) -> Result<(), String> {

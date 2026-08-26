@@ -13,6 +13,7 @@ station-captions.workspace = true
 station-domain.workspace = true
 station-live.workspace = true
 station-media-assets.workspace = true
+station-media-journal.workspace = true
 station-media-protocol.workspace = true
 station-readiness.workspace = true
 station-runtime.workspace = true

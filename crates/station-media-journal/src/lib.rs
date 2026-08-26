@@ -3,11 +3,14 @@ use std::fs::{File, OpenOptions};
 use std::io::{ErrorKind, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
+#[cfg(windows)]
+use std::os::windows::fs::OpenOptionsExt;
+
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use station_media_protocol::{
     MAX_FRAME_BYTES, OutputTransportObservation, ProtocolError, WorkerEvent, WorkerEventEnvelope,
-    decode_event_frame, encode_event_frame,
+    decode_event_frame, decode_persisted_event_frame, encode_event_frame,
 };
 
 const MAGIC: [u8; 4] = *b"TLJR";
@@ -43,6 +46,10 @@ struct HeartbeatSummary {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JournalInspection {
+    /// Identity established by either retained events or compacted heartbeat
+    /// summaries. Both values are absent only for a truly empty journal.
+    pub worker_id: Option<String>,
+    pub channel_id: Option<String>,
     pub retained_events: Vec<WorkerEventEnvelope>,
     pub compacted_heartbeat_ranges: Vec<CompactedHeartbeatRange>,
     pub next_sequence: u64,
@@ -67,14 +74,30 @@ struct JournalSnapshot {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum JournalError {
     Io(String),
-    Corrupt { offset: u64, reason: String },
+    /// Another process still owns the writer lock for this journal.  A
+    /// replacement worker must not start until the previous worker's process
+    /// handle has been retired and this lock is released by Windows.
+    WriterAlreadyActive,
+    /// This product only permits a journal writer on Windows, where the lock
+    /// is an OS-owned handle and therefore releases automatically if the
+    /// worker crashes.  Refusing a non-Windows writer is safer than silently
+    /// accepting concurrent appenders on a platform without that contract.
+    WriterOwnershipUnavailable,
+    Corrupt {
+        offset: u64,
+        reason: String,
+    },
     WrongIdentity,
-    NonMonotonic { expected: u64, actual: u64 },
+    NonMonotonic {
+        expected: u64,
+        actual: u64,
+    },
     Protocol(ProtocolError),
 }
 
 pub struct JournalWriter {
     file: Option<File>,
+    ownership: Option<JournalWriterOwnership>,
     path: PathBuf,
     worker_id: String,
     channel_id: String,
@@ -89,6 +112,10 @@ impl JournalWriter {
         channel_id: &str,
     ) -> Result<Self, JournalError> {
         let path = path.as_ref().to_path_buf();
+        // Take exclusive, process-owned ownership before recovery or
+        // inspection.  Otherwise an old worker and its replacement could both
+        // observe the same next sequence and append independently.
+        let ownership = acquire_writer_ownership(&path)?;
         recover_compaction_temp(&path, worker_id, channel_id)?;
         let snapshot = read_snapshot(&path)?;
         if snapshot
@@ -105,6 +132,7 @@ impl JournalWriter {
             .map_err(io_error)?;
         Ok(Self {
             file: Some(file),
+            ownership: Some(ownership),
             path,
             worker_id: worker_id.to_string(),
             channel_id: channel_id.to_string(),
@@ -247,13 +275,89 @@ impl JournalWriter {
     }
 }
 
+impl Drop for JournalWriter {
+    fn drop(&mut self) {
+        // Close the mutable journal first.  The ownership handle is separate
+        // so compaction can replace the journal file without releasing
+        // writer authority; it is released only when this writer retires.
+        self.file.take();
+        self.ownership.take();
+    }
+}
+
+/// A separate sidecar is intentionally used instead of locking the journal
+/// file itself.  Heartbeat compaction atomically replaces the journal path;
+/// releasing a lock on that path during replacement would create a window for
+/// a second worker to append to the new file.
+struct JournalWriterOwnership {
+    lock_handle: Option<File>,
+    lock_path: PathBuf,
+}
+
+impl Drop for JournalWriterOwnership {
+    fn drop(&mut self) {
+        // On Windows a new owner cannot open the sidecar until this exclusive
+        // handle is closed. If a replacement wins the tiny close/remove race,
+        // its zero-share handle makes this remove fail harmlessly.
+        self.lock_handle.take();
+        let _ = std::fs::remove_file(&self.lock_path);
+    }
+}
+
+#[cfg(windows)]
+fn writer_lock_path(path: &Path) -> PathBuf {
+    let mut lock: OsString = path.as_os_str().to_owned();
+    lock.push(".writer.lock");
+    lock.into()
+}
+
+#[cfg(windows)]
+fn acquire_writer_ownership(path: &Path) -> Result<JournalWriterOwnership, JournalError> {
+    let lock_path = writer_lock_path(path);
+    let mut options = OpenOptions::new();
+    options.create(true).read(true).write(true);
+    // A zero share mode asks Windows for an exclusive file handle.  The OS
+    // releases it on process death, unlike an advisory in-file marker.
+    options.share_mode(0);
+    let lock_handle = options.open(&lock_path).map_err(|error| {
+        // ERROR_SHARING_VIOLATION (32) normally maps to PermissionDenied, but
+        // retain the raw check for Windows runtimes that preserve it as a more
+        // generic I/O kind.
+        if error.kind() == ErrorKind::PermissionDenied || error.raw_os_error() == Some(32) {
+            JournalError::WriterAlreadyActive
+        } else {
+            io_error(error)
+        }
+    })?;
+    Ok(JournalWriterOwnership {
+        lock_handle: Some(lock_handle),
+        lock_path,
+    })
+}
+
+#[cfg(not(windows))]
+fn acquire_writer_ownership(_path: &Path) -> Result<JournalWriterOwnership, JournalError> {
+    // Do not fall back to an advisory or best-effort lock: that would let two
+    // workers concurrently append durable command evidence.  TownLight
+    // Station's worker product is Windows-only, and non-Windows builds remain
+    // compile-safe while failing closed at writer startup.
+    Err(JournalError::WriterOwnershipUnavailable)
+}
+
 pub fn read_events(path: impl AsRef<Path>) -> Result<Vec<WorkerEventEnvelope>, JournalError> {
     Ok(read_snapshot(path.as_ref())?.events)
 }
 
 pub fn inspect_journal(path: impl AsRef<Path>) -> Result<JournalInspection, JournalError> {
     let snapshot = read_snapshot(path.as_ref())?;
+    let (worker_id, channel_id) = snapshot
+        .identity
+        .map_or((None, None), |(worker_id, channel_id)| {
+            (Some(worker_id), Some(channel_id))
+        });
     Ok(JournalInspection {
+        worker_id,
+        channel_id,
         retained_events: snapshot.events,
         compacted_heartbeat_ranges: snapshot
             .heartbeat_summary
@@ -330,7 +434,8 @@ fn read_snapshot(path: &Path) -> Result<JournalSnapshot, JournalError> {
         }
         match record_kind {
             RECORD_KIND_EVENT => {
-                let event = decode_event_frame(&payload).map_err(JournalError::Protocol)?;
+                let event =
+                    decode_persisted_event_frame(&payload).map_err(JournalError::Protocol)?;
                 let event_identity = (event.worker_id.clone(), event.channel_id.clone());
                 match &identity {
                     Some(expected) if expected != &event_identity => {
@@ -810,6 +915,92 @@ mod tests {
         assert_eq!(reopened.next_sequence(), 514);
         assert!(!temporary.exists());
         drop(reopened);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn scheduled_asset_on_air_survives_heartbeat_compaction_in_replay_order() {
+        let path = test_path();
+        let mut writer = JournalWriter::open(&path, WORKER_ID, CHANNEL_ID).unwrap();
+        writer
+            .append(&event(1, WorkerEvent::Ready { graph_revision: 1 }))
+            .unwrap();
+        for sequence in 2..=513 {
+            writer
+                .append(&event(
+                    sequence,
+                    WorkerEvent::Heartbeat {
+                        monotonic_milliseconds: sequence * 5_000,
+                        outputs: Vec::new(),
+                    },
+                ))
+                .unwrap();
+        }
+        let confirmation = event(
+            514,
+            WorkerEvent::ScheduledAssetOnAir {
+                report_id: "report-1".into(),
+                schedule_item_id: "11111111-1111-4111-8111-111111111111".into(),
+                schedule_item_revision: 1,
+                asset_id: "a".repeat(64),
+                media_offset_ms: 12_345,
+                worker_boot_id: "22222222-2222-4222-8222-222222222222".into(),
+                actual_on_air_at_unix_ms: 1_700_000_000_000,
+            },
+        );
+        writer.append(&confirmation).unwrap();
+        writer
+            .append(&event(
+                515,
+                WorkerEvent::Heartbeat {
+                    monotonic_milliseconds: 515 * 5_000,
+                    outputs: Vec::new(),
+                },
+            ))
+            .unwrap();
+        drop(writer);
+
+        let inspection = inspect_journal(&path).unwrap();
+        assert!(
+            inspection
+                .compacted_heartbeat_ranges
+                .iter()
+                .any(|range| range.first_sequence == 2 && range.last_sequence == 258)
+        );
+        assert!(
+            inspection
+                .retained_events
+                .windows(2)
+                .all(|pair| pair[0].sequence < pair[1].sequence)
+        );
+        assert_eq!(
+            inspection.retained_events.last(),
+            Some(&event(
+                515,
+                WorkerEvent::Heartbeat {
+                    monotonic_milliseconds: 515 * 5_000,
+                    outputs: Vec::new(),
+                },
+            ))
+        );
+
+        let replayed = read_events(&path).unwrap();
+        let confirmation_index = replayed
+            .iter()
+            .position(|event| event == &confirmation)
+            .expect("scheduled acknowledgement remains replayable after compaction");
+        assert_eq!(replayed[confirmation_index].sequence, 514);
+        assert!(
+            replayed[..confirmation_index]
+                .iter()
+                .all(|event| event.sequence < confirmation.sequence)
+        );
+        assert!(
+            replayed[confirmation_index + 1..]
+                .iter()
+                .all(|event| event.sequence > confirmation.sequence)
+        );
+
         let _ = std::fs::remove_file(path);
     }
 }

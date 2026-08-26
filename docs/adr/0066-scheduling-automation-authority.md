@@ -67,15 +67,24 @@ evidence. ADR 0068 adds durable current/history storage for saved searches, bloc
 and rules. Authenticated API routes expose bounded current/list/history reads and
 server-attributed PUT create/update for those authorities, but not delete,
 saved-search preview, rule simulation, or materialization. ADR 0069 adds fixed
-catalog editorial authority and persistence. The storage layer now constructs a
-bounded transactionally consistent catalog/media/S22 candidate snapshot and its
-canonical digest. ADR 0070 adds the typed boot-scoped HMAC issuer/verifier
-mechanism, but stationd singleton ownership and the adapter that issues a receipt
-for that snapshot remain unwired; no trusted as-run adapter exists. This contract therefore does
-not establish that a saved search finds media, that a projection came from a real
-catalog or as-run journal, that an intent was stored, that a schedule item was
-created, that a worker received a dispatch, or that any item aired. Future work must
-connect the candidate snapshot to the boot authority, add a trusted as-run adapter, persist later
-materialization authority through the single SQLite writer, materialize/commit
-through schedule authority, add filler-alert behavior and the S4 writer, and acquire
-installed-machine and field evidence.
+catalog editorial authority and persistence.
+
+`StationStore::snapshot_materialization_evidence` now supplies the storage boundary
+for authenticated S19 source evidence: one read transaction resolves the current
+rule and exact pinned saved-search/daypart revisions, snapshots the Published/Ready
+catalog and S22 provenance, and reads capped immutable worker-confirmed actual-airing
+facts for the full prior-airing coverage window. The resulting candidate and
+prior-airing projections have distinct canonical digests. ADR 0070 adds the typed
+boot-scoped HMAC issuer/verifier mechanism; stationd owns one authority per
+console/service boot and threads the same instance through every API reconstruction.
+The server-only adapter can issue distinct receipts for both projections. The older
+`snapshot_catalog_candidates` method remains an unauthenticated/testing/diagnostic
+projection and is not an authenticated materialization input.
+
+This pure contract still does not establish that an intent was stored, that a
+schedule item was created, that a worker received a dispatch, or that any item
+aired. Future work must persist later materialization authority through the single
+SQLite writer, materialize/commit through schedule authority, add filler-alert
+behavior and the S4 writer, and acquire installed-machine and field evidence. The
+bounded actual-airing adapter here is S19 prior-airing evidence; it is not the full
+S23 reporting/EPG journal adapter.

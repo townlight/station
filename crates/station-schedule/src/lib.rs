@@ -674,6 +674,8 @@ pub struct CommitReport {
     pub plan_id: String,
     pub channel_id: String,
     pub schedule_item_id: String,
+    /// Immutable post-commit revision of the scheduled item this report bound.
+    pub schedule_item_revision: u64,
     pub asset_id: String,
     pub approved_by: String,
     pub approved_at_unix_ms: i64,

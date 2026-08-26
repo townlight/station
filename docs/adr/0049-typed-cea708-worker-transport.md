@@ -18,6 +18,15 @@ That detail is not durable incident/readiness authority. This is deliberately
 a major-version change: a pre-v8 worker cannot safely participate in
 source transitions because it cannot clear the CEA-708 display state.
 
+The current live worker protocol is version 9. It retains the v8 caption-clear contract and adds
+the scheduled-take acknowledgement contract: `TakeScheduledAsset` carries the exact committed
+report, schedule-item revision, asset, and media offset; `ScheduledAssetOnAir` echoes that binding
+and adds a worker-boot identity and actual on-air wall-clock observation. Orchestration accepts
+that event only after exact identity validation. Storage then binds it atomically to the immutable
+commit report and current schedule revision, appends the actual-airing fact, and performs the
+`Queued` to `Acknowledged` compare-and-set. The durable journal can decode the current v9 and
+immediately prior v8 event formats for bounded replay, while live IPC remains v9-only.
+
 The graph converts timed text directly to the configured CEA-708 service, includes CEA-608 compatibility bytes,
 schedules caption metadata against video frames, inserts that metadata as H.264 SEI, reparses the
 stream, and only then fans the same encoded video into the per-loudness MPEG-TS variants. Caption

@@ -116,7 +116,9 @@ checksum = "9330f8b2ff13f34540b44e946ef35111825727b38d33286ef986142615121801"
 name = "channel-worker"
 version = "0.1.0"
 dependencies = [
+ "getrandom 0.4.3",
  "gstreamer",
+ "station-captions",
  "station-domain",
  "station-live",
  "station-media-assets",
@@ -1733,6 +1735,7 @@ dependencies = [
  "station-recording",
  "station-schedule",
  "station-schedule-automation",
+ "station-source-evidence",
  "station-storage",
  "station-support",
  "station-update",
@@ -1934,6 +1937,7 @@ dependencies = [
  "station-domain",
  "station-live",
  "station-media-assets",
+ "station-media-journal",
  "station-media-protocol",
  "station-readiness",
  "station-runtime",
@@ -2130,6 +2134,7 @@ dependencies = [
  "station-maintenance",
  "station-orchestration",
  "station-readiness",
+ "station-source-evidence",
  "station-storage",
  "station-update-coordinator",
  "windows-service",

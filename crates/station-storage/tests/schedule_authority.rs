@@ -81,9 +81,14 @@ fn reruns_the_gate_under_a_write_lock_and_persists_approval_before_dispatch() {
         )
         .unwrap();
     assert_eq!(report.dispatch_status, DispatchStatus::Pending);
+    assert_eq!(report.schedule_item_revision, 2);
     assert_eq!(
         store.read_schedule_item(ITEM).unwrap().unwrap().state,
         ScheduleState::Committed
+    );
+    assert_eq!(
+        store.read_schedule_item(ITEM).unwrap().unwrap().revision,
+        report.schedule_item_revision
     );
     assert_eq!(
         store.list_commit_reports(CHANNEL).unwrap(),
@@ -121,6 +126,7 @@ fn reruns_the_gate_under_a_write_lock_and_persists_approval_before_dispatch() {
     let reopened = StationStore::open(&database).unwrap();
     let reopened_report = reopened.read_commit_report("report-2").unwrap().unwrap();
     assert_eq!(reopened_report.report_id, report.report_id);
+    assert_eq!(reopened_report.schedule_item_revision, 2);
     assert_eq!(reopened_report.dispatch_status, DispatchStatus::Completed);
     assert_eq!(reopened.list_channel_schedule(CHANNEL).unwrap().len(), 2);
     drop(reopened);
@@ -301,6 +307,59 @@ fn fails_closed_when_a_ready_asset_file_has_disappeared() {
     );
     drop(store);
     remove_database(&database);
+}
+
+#[test]
+fn dispatch_jobs_fail_closed_when_an_active_report_is_bound_to_a_stale_item_revision() {
+    let database = database_path("stale-dispatch-report");
+    let media = database.with_extension("ts");
+    std::fs::write(&media, b"admitted bytes").unwrap();
+    let store = StationStore::open(&database).unwrap();
+    let mut asset = ready_asset();
+    asset.media_path = media.to_string_lossy().into_owned();
+    store.put_media_asset(&asset).unwrap();
+    store
+        .put_schedule_item(&schedule_item(ITEM, 100_000, ScheduleState::Draft))
+        .unwrap();
+
+    let original = store
+        .commit_schedule("stale-original", "plan-original", ITEM, "operator", 1, "")
+        .unwrap();
+    assert_eq!(store.list_dispatch_jobs(CHANNEL).unwrap().len(), 1);
+
+    let mut revised = store.read_schedule_item(ITEM).unwrap().unwrap();
+    revised.revision += 1;
+    revised.state = ScheduleState::Draft;
+    revised.title = "Revised City Council".into();
+    store.put_schedule_item(&revised).unwrap();
+    let replacement = store
+        .commit_schedule(
+            "stale-replacement",
+            "plan-replacement",
+            ITEM,
+            "operator",
+            2,
+            "",
+        )
+        .unwrap();
+    assert!(replacement.schedule_item_revision > original.schedule_item_revision);
+
+    let error = store.list_dispatch_jobs(CHANNEL).unwrap_err();
+    assert!(error.contains("stale-original"));
+    assert!(error.contains("bound to stale schedule item revision"));
+    assert!(error.contains(&original.schedule_item_revision.to_string()));
+    assert_eq!(
+        store
+            .read_commit_report("stale-original")
+            .unwrap()
+            .unwrap()
+            .dispatch_status,
+        DispatchStatus::Pending
+    );
+
+    drop(store);
+    remove_database(&database);
+    std::fs::remove_file(media).unwrap();
 }
 
 fn ready_asset() -> MediaAsset {

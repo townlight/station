@@ -28,54 +28,63 @@ impl StationStore {
     /// are never consulted or inferred.
     pub fn snapshot_catalog_candidates(&self) -> Result<CatalogCandidateProjection, String> {
         self.execute("BEGIN")?;
-        let outcome = (|| {
-            let catalog_records = self.read_catalog_projection_records()?;
-            let mut candidates = Vec::new();
-            for catalog in catalog_records {
-                self.validate_current_catalog_snapshot(&catalog)?;
-                if !catalog.is_published() {
-                    continue;
-                }
-                let Some(media) = self.read_media_asset(&catalog.asset_sha256)? else {
-                    continue;
-                };
-                media.validate().map_err(|error| {
-                    format!("database returned invalid catalog media authority: {error:?}")
-                })?;
-                if media.readiness != AssetReadiness::Ready {
-                    continue;
-                }
-
-                let (indexed_custom_metadata, custom_metadata_authority_sha256) =
-                    self.project_catalog_metadata(&catalog, &media)?;
-                let published_at_utc_ms = catalog.published_at_utc_ms.ok_or_else(|| {
-                    "published catalog record has no publication time".to_string()
-                })?;
-                candidates.push(AssetCandidate {
-                    asset_sha256: catalog.asset_sha256,
-                    title: catalog.title,
-                    meeting_body: catalog.meeting_body,
-                    duration_ms: media.duration_ms,
-                    ready: true,
-                    published: true,
-                    published_at_utc_ms,
-                    custom_metadata_authority_sha256,
-                    indexed_custom_metadata,
-                });
-                if candidates.len() > MAX_CANDIDATE_PROJECTION_ASSETS {
-                    return Err(
-                        "catalog candidate projection exceeds its bounded union capacity".into(),
-                    );
-                }
-            }
-            candidates.sort_by(|left, right| left.asset_sha256.cmp(&right.asset_sha256));
-            let candidate_projection_sha256 = canonical_candidate_projection_sha256(&candidates)?;
-            Ok(CatalogCandidateProjection {
-                candidates,
-                candidate_projection_sha256,
-            })
-        })();
+        let outcome = self.snapshot_catalog_candidates_in_transaction();
         self.finish_value_transaction(outcome)
+    }
+
+    /// Builds the catalog portion of a caller-owned SQLite read snapshot.
+    /// Callers must have already opened a read transaction and must finish it
+    /// with `finish_value_transaction`; keeping this helper crate-private
+    /// prevents an independently timed candidate projection from being paired
+    /// with rule or as-run evidence.
+    pub(crate) fn snapshot_catalog_candidates_in_transaction(
+        &self,
+    ) -> Result<CatalogCandidateProjection, String> {
+        let catalog_records = self.read_catalog_projection_records()?;
+        let mut candidates = Vec::new();
+        for catalog in catalog_records {
+            self.validate_current_catalog_snapshot(&catalog)?;
+            if !catalog.is_published() {
+                continue;
+            }
+            let Some(media) = self.read_media_asset(&catalog.asset_sha256)? else {
+                continue;
+            };
+            media.validate().map_err(|error| {
+                format!("database returned invalid catalog media authority: {error:?}")
+            })?;
+            if media.readiness != AssetReadiness::Ready {
+                continue;
+            }
+
+            let (indexed_custom_metadata, custom_metadata_authority_sha256) =
+                self.project_catalog_metadata(&catalog, &media)?;
+            let published_at_utc_ms = catalog
+                .published_at_utc_ms
+                .ok_or_else(|| "published catalog record has no publication time".to_string())?;
+            candidates.push(AssetCandidate {
+                asset_sha256: catalog.asset_sha256,
+                title: catalog.title,
+                meeting_body: catalog.meeting_body,
+                duration_ms: media.duration_ms,
+                ready: true,
+                published: true,
+                published_at_utc_ms,
+                custom_metadata_authority_sha256,
+                indexed_custom_metadata,
+            });
+            if candidates.len() > MAX_CANDIDATE_PROJECTION_ASSETS {
+                return Err(
+                    "catalog candidate projection exceeds its bounded union capacity".into(),
+                );
+            }
+        }
+        candidates.sort_by(|left, right| left.asset_sha256.cmp(&right.asset_sha256));
+        let candidate_projection_sha256 = canonical_candidate_projection_sha256(&candidates)?;
+        Ok(CatalogCandidateProjection {
+            candidates,
+            candidate_projection_sha256,
+        })
     }
 
     fn read_catalog_projection_records(&self) -> Result<Vec<CatalogAssetRecord>, String> {

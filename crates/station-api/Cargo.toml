@@ -24,6 +24,7 @@ station-readiness.workspace = true
 station-recording.workspace = true
 station-schedule.workspace = true
 station-schedule-automation.workspace = true
+station-source-evidence.workspace = true
 station-storage.workspace = true
 station-support.workspace = true
 station-update.workspace = true

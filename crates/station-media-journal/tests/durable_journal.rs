@@ -5,7 +5,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use station_media_journal::{JournalError, JournalWriter, inspect_journal, read_events};
 use station_media_protocol::{
-    OutputTransportObservation, PROTOCOL_VERSION, WorkerEvent, WorkerEventEnvelope,
+    OutputTransportObservation, PROTOCOL_VERSION, ProtocolError, ProtocolVersion, WorkerEvent,
+    WorkerEventEnvelope, decode_event_frame, encode_event_frame,
 };
 
 const WORKER_ID: &str = "ae819b97-2920-434b-9d96-0b51a8ea9abb";
@@ -47,6 +48,29 @@ fn event(sequence: u64, event: WorkerEvent) -> WorkerEventEnvelope {
     }
 }
 
+fn persisted_event_frame(sequence: u64, major: u16) -> (WorkerEventEnvelope, Vec<u8>) {
+    let mut event = event(sequence, WorkerEvent::Ready { graph_revision: 1 });
+    event.version = ProtocolVersion { major, minor: 0 };
+    let frame = encode_event_frame(&event).unwrap();
+    (event, frame)
+}
+
+fn write_event_record(path: &Path, frame: &[u8], journal_version: u16) {
+    let mut file = OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(path)
+        .unwrap();
+    file.write_all(b"TLJR").unwrap();
+    file.write_all(&journal_version.to_le_bytes()).unwrap();
+    file.write_all(&0_u16.to_le_bytes()).unwrap();
+    file.write_all(&(frame.len() as u32).to_le_bytes()).unwrap();
+    file.write_all(&crc32(frame).to_le_bytes()).unwrap();
+    file.write_all(frame).unwrap();
+    file.sync_all().unwrap();
+}
+
 #[test]
 fn persists_events_across_reopen_without_sequence_loss() {
     let path = journal_path("reopen");
@@ -70,6 +94,69 @@ fn persists_events_across_reopen_without_sequence_loss() {
 
     assert_eq!(read_events(&path).unwrap(), vec![first, second]);
     let _ = std::fs::remove_file(path);
+}
+
+#[cfg(windows)]
+#[test]
+fn refuses_a_second_writer_until_the_first_owner_retires() {
+    let path = journal_path("exclusive-writer");
+    let first = JournalWriter::open(&path, WORKER_ID, CHANNEL_ID).unwrap();
+
+    // The sidecar is opened with an exclusive Windows handle, so this is the
+    // same rejection a replacement worker in another process receives.
+    assert!(matches!(
+        JournalWriter::open(&path, WORKER_ID, CHANNEL_ID),
+        Err(JournalError::WriterAlreadyActive)
+    ));
+
+    drop(first);
+    let replacement = JournalWriter::open(&path, WORKER_ID, CHANNEL_ID).unwrap();
+    drop(replacement);
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn reopens_and_replays_an_immediately_previous_major_durable_event() {
+    let path = journal_path("legacy-v8-replay");
+    let (legacy, frame) = persisted_event_frame(1, PROTOCOL_VERSION.major - 1);
+    write_event_record(&path, &frame, 1);
+
+    let mut reopened = JournalWriter::open(&path, WORKER_ID, CHANNEL_ID).unwrap();
+    assert_eq!(reopened.next_sequence(), 2);
+    assert_eq!(read_events(&path).unwrap(), vec![legacy.clone()]);
+
+    let current = event(2, WorkerEvent::ShutdownComplete);
+    reopened.append(&current).unwrap();
+    drop(reopened);
+    assert_eq!(read_events(&path).unwrap(), vec![legacy, current]);
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn durable_replay_rejects_older_and_future_protocol_majors_while_ipc_rejects_v8() {
+    for (label, major) in [("legacy-v7", 7_u16), ("future-v10", 10_u16)] {
+        let path = journal_path(label);
+        let (_, frame) = persisted_event_frame(1, major);
+        write_event_record(&path, &frame, 1);
+        assert_eq!(
+            read_events(&path),
+            Err(JournalError::Protocol(ProtocolError::UnsupportedMajor(
+                major,
+            )))
+        );
+        assert!(matches!(
+            JournalWriter::open(&path, WORKER_ID, CHANNEL_ID),
+            Err(JournalError::Protocol(ProtocolError::UnsupportedMajor(actual)))
+                if actual == major
+        ));
+        let _ = std::fs::remove_file(path);
+    }
+
+    let (_, v8_frame) = persisted_event_frame(1, PROTOCOL_VERSION.major - 1);
+    assert_eq!(
+        decode_event_frame(&v8_frame),
+        Err(ProtocolError::UnsupportedMajor(PROTOCOL_VERSION.major - 1))
+    );
 }
 
 #[test]
@@ -190,6 +277,8 @@ fn bounds_raw_heartbeat_growth_without_losing_transition_or_sequence_truth() {
     assert!(retained.contains(&transition));
 
     let inspection = inspect_journal(&path).unwrap();
+    assert_eq!(inspection.worker_id.as_deref(), Some(WORKER_ID));
+    assert_eq!(inspection.channel_id.as_deref(), Some(CHANNEL_ID));
     assert_eq!(inspection.next_sequence, 703);
     assert_eq!(inspection.compacted_heartbeat_ranges[0].first_sequence, 2);
     assert!(

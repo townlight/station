@@ -778,6 +778,31 @@ fn commissioning_guided_air_proof_requires_one_persisted_causal_chain() {
     assert_eq!(read_status("support_bundle"), "blocked");
     std::fs::remove_file(&bundle_path).unwrap();
 
+    // A later recommit advances the schedule binding. The completed report
+    // for the prior revision must no longer satisfy guided-air evidence.
+    let store = StationStore::open(&database).unwrap();
+    let current = store
+        .read_schedule_item("7e6e36ae-c6ea-4986-99d7-e848f4248815")
+        .unwrap()
+        .unwrap();
+    let mut draft = current.clone();
+    draft.revision += 1;
+    draft.state = ScheduleState::Draft;
+    draft.title = "Guided first broadcast revision two".into();
+    store.put_schedule_item(&draft).unwrap();
+    store
+        .commit_schedule(
+            "report-guided-recommit",
+            "plan-guided-recommit",
+            &draft.item_id,
+            "operator",
+            now + 5,
+            "Recommitted after the first report.",
+        )
+        .unwrap();
+    drop(store);
+    assert_eq!(read_status("guided_air_proof"), "blocked");
+
     let _ = std::fs::remove_file(database);
     let _ = std::fs::remove_file(historical_media);
     let _ = std::fs::remove_file(guided_media);

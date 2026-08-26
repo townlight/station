@@ -34,11 +34,17 @@ construct canonical, bounded projections from transactionally read authority and
 must use the public S19 digest domains. Browser payloads cannot provide receipts,
 keys, issuer identities, issue times, expiry times, or attestation values.
 
-The crate does not provide catalog/media/S22 joins, prior-airing extraction,
-preview, simulation, materialization persistence, schedule writes, key recovery,
-cross-boot receipt continuity, API/UI, installed-machine evidence, or field proof.
-Stationd singleton wiring is still pending: stationd must construct exactly one
-authority during process startup, retain it for the full process lifetime, and
-provide its authority-owned observation time to the pure S19 pre-validation call.
-Until that wiring and adapter integration exist, this crate is a production-ready
-mechanism rather than proof that production materialization is authenticated.
+Stationd now constructs exactly one authority in each console or service boot and
+passes that same `Arc` into the long-running API server. Per-request `Api`
+reconstruction clones the stationd-owned `Arc`; it does not rotate the key or
+issuer. A server-only adapter consumes the storage-owned one-snapshot S19
+authority/catalog/as-run projection, derives the two public scope/payload pairs,
+and can issue distinct `AuthenticatedCandidateProjection` and
+`AuthenticatedPriorAirings` receipts. No HTTP route accepts candidates, as-run
+facts, authorities, digests, receipt fields, issuer identity, or time authority.
+
+The crate and this wiring do not provide preview, simulation, materialization
+persistence, schedule writes, key recovery, cross-boot receipt continuity, UI,
+installed-machine evidence, or field proof. No production materializer consumes
+these receipts yet. This proves boot-scoped paired source-evidence issuance, not
+that production materialization is complete.

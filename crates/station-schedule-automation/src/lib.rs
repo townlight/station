@@ -15,6 +15,10 @@ const MAX_SLOTS: usize = 64;
 /// one bounded materialization request. This is deliberately independent from
 /// a saved search's per-slot `query.limit`.
 pub const MAX_CANDIDATE_PROJECTION_ASSETS: usize = MAX_SLOTS * MAX_QUERY_LIMIT;
+/// Maximum number of distinct `(asset_sha256, aired_at_utc_ms)` keys in one
+/// authenticated prior-airings projection. This covers more than a full week
+/// of one-minute 24/7 scheduled takes while retaining a firm memory/hash bound.
+pub const MAX_PRIOR_AIRINGS: usize = 16_384;
 pub const MAX_EVIDENCE_RECEIPT_LIFETIME_MS: i64 = 300_000;
 /// Version three binds each materialization to authenticated catalog and
 /// as-run projections. Version two intents did not contain that evidence and
@@ -532,7 +536,7 @@ pub fn resolve_asset(
     rule.validate()?;
     if occurrence_starts_at_utc_ms < 0
         || candidates.len() > MAX_CANDIDATE_PROJECTION_ASSETS
-        || prior_airings.len() > MAX_QUERY_LIMIT
+        || prior_airings.len() > MAX_PRIOR_AIRINGS
     {
         return Err("asset resolution input is unbounded".into());
     }
@@ -2214,6 +2218,16 @@ pub fn canonical_prior_airings_bytes(airings: &[PriorAiring]) -> Result<Vec<u8>,
     Ok(bytes)
 }
 
+/// Digest the exact canonical prior-airings bytes required by the S19 evidence
+/// boundary. This is the typed prior-airings projection digest a receipt issuer
+/// signs and a verifier receives.
+pub fn canonical_prior_airings_sha256(airings: &[PriorAiring]) -> Result<String, String> {
+    Ok(projection_hash(
+        SourceEvidenceKind::PriorAirings,
+        &canonical_prior_airings_bytes(airings)?,
+    ))
+}
+
 pub fn canonical_unverified_input_binding_bytes(
     binding: &MaterializationInputBinding,
 ) -> Result<Vec<u8>, String> {
@@ -2254,7 +2268,7 @@ fn validate_candidate_projection(candidates: &[AssetCandidate]) -> Result<(), St
 }
 
 fn validate_prior_airings_projection(airings: &[PriorAiring]) -> Result<(), String> {
-    if airings.len() > MAX_QUERY_LIMIT {
+    if airings.len() > MAX_PRIOR_AIRINGS {
         return Err("prior-airings projection is unbounded".into());
     }
     for airing in airings {

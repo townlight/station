@@ -2,12 +2,13 @@ use station_schedule_automation::{
     ArbitrationOutcome, ArbitrationPrecedence, AssetCandidate, AssetPickStrategy, AssetPredicate,
     AssetResolution, AuthenticatedCandidateProjection, AuthenticatedMaterializationInputs,
     AuthenticatedPriorAirings, BatchMaterializationRequest, CustomMetadataPredicate, DaypartBlock,
-    DstApplication, LocalDate, MAX_CANDIDATE_PROJECTION_ASSETS, MaterializationAuthorities,
-    MaterializationOutcome, MaterializationPlan, MaterializationWindow, MetadataValue, PriorAiring,
-    RecurrenceTimeZone, RecurringRule, RuleSlotCandidate, SavedSearch, SavedSearchOrder,
-    SavedSearchQuery, SlotMaterializationOutcome, SourceEvidenceKind, SourceEvidenceReceipt,
-    SourceEvidenceVerifier, arbitrate_rule_slots, canonical_candidate_projection_bytes,
-    canonical_candidate_projection_sha256, canonical_intent_bytes, canonical_source_bytes,
+    DstApplication, LocalDate, MAX_CANDIDATE_PROJECTION_ASSETS, MAX_PRIOR_AIRINGS,
+    MaterializationAuthorities, MaterializationOutcome, MaterializationPlan, MaterializationWindow,
+    MetadataValue, PriorAiring, RecurrenceTimeZone, RecurringRule, RuleSlotCandidate, SavedSearch,
+    SavedSearchOrder, SavedSearchQuery, SlotMaterializationOutcome, SourceEvidenceKind,
+    SourceEvidenceReceipt, SourceEvidenceVerifier, arbitrate_rule_slots,
+    canonical_candidate_projection_bytes, canonical_candidate_projection_sha256,
+    canonical_intent_bytes, canonical_prior_airings_sha256, canonical_source_bytes,
     derive_arbitrated_materialization_batch, derive_materialization_intent,
     materialization_evidence_scope_sha256, materialization_prior_airings_coverage_window,
     resolve_asset,
@@ -430,6 +431,52 @@ fn candidate_projection_capacity_is_the_bounded_multi_slot_union() {
     overflow.asset_sha256 = format!("{MAX_CANDIDATE_PROJECTION_ASSETS:064x}");
     over_capacity.push(overflow);
     assert!(canonical_candidate_projection_bytes(&over_capacity).is_err());
+}
+
+#[test]
+fn prior_airings_projection_hash_is_deterministic_and_fails_closed() {
+    let airings = vec![
+        PriorAiring {
+            asset_sha256: sha('a'),
+            aired_at_utc_ms: 10,
+        },
+        PriorAiring {
+            asset_sha256: sha('a'),
+            aired_at_utc_ms: 20,
+        },
+        PriorAiring {
+            asset_sha256: sha('b'),
+            aired_at_utc_ms: 0,
+        },
+    ];
+    let first = canonical_prior_airings_sha256(&airings).unwrap();
+    assert_eq!(first, canonical_prior_airings_sha256(&airings).unwrap());
+
+    let mut changed = airings.clone();
+    changed[1].aired_at_utc_ms += 1;
+    assert_ne!(first, canonical_prior_airings_sha256(&changed).unwrap());
+
+    let mut unordered = airings.clone();
+    unordered.swap(0, 1);
+    assert!(canonical_prior_airings_sha256(&unordered).is_err());
+
+    let mut duplicate = airings.clone();
+    duplicate[1] = duplicate[0].clone();
+    assert!(canonical_prior_airings_sha256(&duplicate).is_err());
+
+    let at_capacity = (0..MAX_PRIOR_AIRINGS)
+        .map(|index| PriorAiring {
+            asset_sha256: format!("{index:064x}"),
+            aired_at_utc_ms: 0,
+        })
+        .collect::<Vec<_>>();
+    assert!(canonical_prior_airings_sha256(&at_capacity).is_ok());
+    let mut over_capacity = at_capacity;
+    over_capacity.push(PriorAiring {
+        asset_sha256: format!("{MAX_PRIOR_AIRINGS:064x}"),
+        aired_at_utc_ms: 0,
+    });
+    assert!(canonical_prior_airings_sha256(&over_capacity).is_err());
 }
 
 #[test]

@@ -72,8 +72,14 @@ use station_schedule::{
     ScheduleWindow,
 };
 use station_schedule_automation::{
-    AssetPickStrategy, DaypartBlock, LocalDate, RecurrenceTimeZone, RecurringRule, SavedSearch,
-    SavedSearchQuery,
+    AssetPickStrategy, AuthenticatedCandidateProjection, AuthenticatedMaterializationInputs,
+    AuthenticatedPriorAirings, DaypartBlock, LocalDate, MAX_EVIDENCE_RECEIPT_LIFETIME_MS,
+    MaterializationWindow, RecurrenceTimeZone, RecurringRule, SavedSearch, SavedSearchQuery,
+    SourceEvidenceKind, canonical_candidate_projection_sha256, canonical_prior_airings_sha256,
+    materialization_evidence_scope_sha256,
+};
+use station_source_evidence::{
+    CanonicalProjectionSha256, EvidenceScopeSha256, StationSourceEvidenceAuthority,
 };
 use station_storage::{
     AlertChannelSecret, AssetMetadataWriteError, CaptionPolicyWriteError, CatalogAssetWriteError,
@@ -107,7 +113,6 @@ const CAPTION_PROOF_EXECUTION_LEAD_MS: u64 = 1_000;
 const AUTOMATION_CONNECTION_TEST_TTL_MS: i64 = 24 * 60 * 60 * 1_000;
 const RECORDING_WORKER_ACTOR_ID: &str = "00000000-0000-4000-8000-000000000021";
 const RECORDING_CANDIDATE_FUTURE_WINDOW_MS: i64 = 31 * 24 * 60 * 60 * 1_000;
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OrchestrationHealthStatus {
@@ -368,6 +373,7 @@ fn collect_guided_air_evidence(storage: &StationStore) -> Result<GuidedAirEviden
             schedule_items.iter().any(|item| {
                 item.state == ScheduleState::Committed
                     && item.item_id == report.schedule_item_id
+                    && item.revision == report.schedule_item_revision
                     && item.channel_id == report.channel_id
                     && item.asset_id == report.asset_id
             })
@@ -1312,6 +1318,15 @@ pub struct ApiResponseHeader {
     pub value: String,
 }
 
+/// Creates one authority for a standalone API/server lifetime. Production
+/// stationd supplies its own boot-owned authority explicitly; this fallback
+/// must never survive across sequential server boots in one process.
+fn new_source_evidence_authority() -> Result<Arc<StationSourceEvidenceAuthority>, String> {
+    StationSourceEvidenceAuthority::new()
+        .map(Arc::new)
+        .map_err(|error| error.to_string())
+}
+
 impl ApiResponse {
     pub fn with_header(
         mut self,
@@ -1354,9 +1369,33 @@ pub struct Api {
     station_box_probe_override: Option<StationBoxProbeInput>,
     station_box_cache: Arc<Mutex<Option<(Instant, StationBoxProfile)>>>,
     orchestration_health: Arc<OrchestrationHealth>,
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "the server-owned S19 materializer is wired in the next integration slice"
+        )
+    )]
+    source_evidence_authority: Arc<StationSourceEvidenceAuthority>,
+}
+
+/// Complete receipt-backed input for one server-owned S19 materialization.
+/// It is deliberately available only to trusted in-process callers; no HTTP
+/// route accepts authorities, window, raw catalog candidates, or as-run facts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuthenticatedMaterializationEvidence {
+    pub search: SavedSearch,
+    pub block: DaypartBlock,
+    pub rule: RecurringRule,
+    pub window: MaterializationWindow,
+    pub prior_airings_coverage: MaterializationWindow,
+    pub inputs: AuthenticatedMaterializationInputs,
 }
 
 impl Api {
+    /// Standalone/test constructor backed by a fresh authority for this API
+    /// lifetime. Stationd production serving uses its explicit boot-owned
+    /// authority instead.
     pub fn open(database_path: impl AsRef<Path>) -> Result<Self, String> {
         let application_directory = std::env::current_exe()
             .ok()
@@ -1386,6 +1425,7 @@ impl Api {
             application_directory,
             Arc::new(Mutex::new(None)),
             orchestration_health,
+            new_source_evidence_authority()?,
         )
     }
 
@@ -1394,6 +1434,7 @@ impl Api {
         application_directory: impl AsRef<Path>,
         station_box_cache: Arc<Mutex<Option<(Instant, StationBoxProfile)>>>,
         orchestration_health: Arc<OrchestrationHealth>,
+        source_evidence_authority: Arc<StationSourceEvidenceAuthority>,
     ) -> Result<Self, String> {
         let database_path = database_path.as_ref().to_path_buf();
         Ok(Self {
@@ -1403,6 +1444,7 @@ impl Api {
             station_box_probe_override: None,
             station_box_cache,
             orchestration_health,
+            source_evidence_authority,
         })
     }
 
@@ -1420,6 +1462,101 @@ impl Api {
             station_box_probe_override: Some(probe),
             station_box_cache: Arc::new(Mutex::new(None)),
             orchestration_health: OrchestrationHealth::ready_without_supervisor(),
+            source_evidence_authority: new_source_evidence_authority()?,
+        })
+    }
+
+    /// Builds both receipt-backed S19 source projections from one storage
+    /// snapshot. The caller supplies only the recurring-rule identity and a
+    /// server-owned materialization window; authorities are never accepted
+    /// from a caller and no HTTP route exposes this boundary.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "the server-owned S19 materializer is wired in the next integration slice"
+        )
+    )]
+    pub(crate) fn snapshot_authenticated_materialization_evidence(
+        &self,
+        rule_id: &str,
+        window: &MaterializationWindow,
+    ) -> Result<AuthenticatedMaterializationEvidence, String> {
+        let snapshot = self
+            .storage
+            .snapshot_materialization_evidence(rule_id, window)?;
+        let candidate_scope_sha256 = materialization_evidence_scope_sha256(
+            &snapshot.search,
+            &snapshot.block,
+            &snapshot.rule,
+            window,
+            SourceEvidenceKind::CandidateProjection,
+        )?;
+        let candidate_scope_sha256 =
+            EvidenceScopeSha256::new(candidate_scope_sha256).map_err(|error| error.to_string())?;
+        let candidate_projection_sha256 =
+            canonical_candidate_projection_sha256(&snapshot.candidate_projection.candidates)?;
+        if snapshot.candidate_projection.candidate_projection_sha256 != candidate_projection_sha256
+        {
+            return Err(
+                "catalog snapshot digest disagrees with the public S19 canonical projection".into(),
+            );
+        }
+        let candidate_payload_sha256 = CanonicalProjectionSha256::new(candidate_projection_sha256)
+            .map_err(|error| error.to_string())?;
+        let candidate_receipt = self
+            .source_evidence_authority
+            .issue(
+                SourceEvidenceKind::CandidateProjection,
+                &candidate_scope_sha256,
+                &candidate_payload_sha256,
+                MAX_EVIDENCE_RECEIPT_LIFETIME_MS,
+            )
+            .map_err(|error| error.to_string())?;
+        let prior_scope_sha256 = materialization_evidence_scope_sha256(
+            &snapshot.search,
+            &snapshot.block,
+            &snapshot.rule,
+            window,
+            SourceEvidenceKind::PriorAirings,
+        )?;
+        let prior_scope_sha256 =
+            EvidenceScopeSha256::new(prior_scope_sha256).map_err(|error| error.to_string())?;
+        let prior_projection_sha256 = canonical_prior_airings_sha256(&snapshot.prior_airings)?;
+        if snapshot.prior_airings_sha256 != prior_projection_sha256 {
+            return Err(
+                "prior-airings snapshot digest disagrees with the public S19 canonical projection"
+                    .into(),
+            );
+        }
+        let prior_payload_sha256 = CanonicalProjectionSha256::new(prior_projection_sha256)
+            .map_err(|error| error.to_string())?;
+        let prior_receipt = self
+            .source_evidence_authority
+            .issue(
+                SourceEvidenceKind::PriorAirings,
+                &prior_scope_sha256,
+                &prior_payload_sha256,
+                MAX_EVIDENCE_RECEIPT_LIFETIME_MS,
+            )
+            .map_err(|error| error.to_string())?;
+
+        Ok(AuthenticatedMaterializationEvidence {
+            search: snapshot.search,
+            block: snapshot.block,
+            rule: snapshot.rule,
+            window: snapshot.window,
+            prior_airings_coverage: snapshot.prior_airings_coverage,
+            inputs: AuthenticatedMaterializationInputs {
+                candidate_projection: AuthenticatedCandidateProjection {
+                    receipt: candidate_receipt,
+                    candidates: snapshot.candidate_projection.candidates,
+                },
+                prior_airings: AuthenticatedPriorAirings {
+                    receipt: prior_receipt,
+                    airings: snapshot.prior_airings,
+                },
+            },
         })
     }
 
@@ -5737,6 +5874,7 @@ impl Api {
             Err(message) => return error_response(500, "storage_error", &message),
         };
         if item.state != ScheduleState::Committed
+            || item.revision != report.schedule_item_revision
             || item.channel_id != report.channel_id
             || item.asset_id != report.asset_id
         {
@@ -10159,12 +10297,35 @@ pub fn serve_until_with_application_directory(
     )
 }
 
+/// Standalone/test serve wrapper backed by one fresh authority for this serve
+/// invocation. Stationd uses the explicit boot-authority entrypoint below.
 pub fn serve_until_with_application_directory_and_health(
     listener: TcpListener,
     database_path: impl AsRef<Path>,
     application_directory: impl AsRef<Path>,
     stop: Arc<AtomicBool>,
     orchestration_health: Arc<OrchestrationHealth>,
+) -> Result<(), String> {
+    serve_until_with_application_directory_and_health_and_source_evidence_authority(
+        listener,
+        database_path,
+        application_directory,
+        stop,
+        orchestration_health,
+        new_source_evidence_authority()?,
+    )
+}
+
+/// Production serve entrypoint. The authority must be constructed once by
+/// stationd for the current console/service boot and retained here across all
+/// per-request `Api` reconstruction.
+pub fn serve_until_with_application_directory_and_health_and_source_evidence_authority(
+    listener: TcpListener,
+    database_path: impl AsRef<Path>,
+    application_directory: impl AsRef<Path>,
+    stop: Arc<AtomicBool>,
+    orchestration_health: Arc<OrchestrationHealth>,
+    source_evidence_authority: Arc<StationSourceEvidenceAuthority>,
 ) -> Result<(), String> {
     let database_path = database_path.as_ref().to_path_buf();
     let application_directory = application_directory.as_ref().to_path_buf();
@@ -10175,6 +10336,7 @@ pub fn serve_until_with_application_directory_and_health(
         &application_directory,
         Arc::clone(&station_box_cache),
         Arc::clone(&orchestration_health),
+        Arc::clone(&source_evidence_authority),
     )?;
     let active_requests = Arc::new(AtomicUsize::new(0));
     listener
@@ -10215,6 +10377,7 @@ pub fn serve_until_with_application_directory_and_health(
                 let request_application = application_directory.clone();
                 let request_station_box_cache = Arc::clone(&station_box_cache);
                 let request_orchestration_health = Arc::clone(&orchestration_health);
+                let request_source_evidence_authority = Arc::clone(&source_evidence_authority);
                 let request_count = Arc::clone(&active_requests);
                 let request_auth_runtime = Arc::clone(&auth_runtime);
                 std::thread::spawn(move || {
@@ -10224,6 +10387,7 @@ pub fn serve_until_with_application_directory_and_health(
                         &request_application,
                         request_station_box_cache,
                         request_orchestration_health,
+                        request_source_evidence_authority,
                     )
                     .and_then(|api| serve_stream(&mut stream, &api, &request_auth_runtime));
                     if let Err(error) = result {
@@ -11122,6 +11286,9 @@ fn error_response(status: u16, code: &str, message: &str) -> ApiResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use station_schedule_automation::{
+        AssetPredicate, DstApplication, SavedSearchOrder, SourceEvidenceVerifier,
+    };
     use std::collections::BTreeSet;
     use std::net::TcpListener;
     use std::thread;
@@ -14136,6 +14303,34 @@ mod tests {
             .unwrap();
         assert_eq!(caption_check["status"], "blocked");
 
+        // Recommitting the same item creates a new schedule revision. The
+        // existing proof request must reject the old acknowledged report.
+        let current = api.storage.read_schedule_item(item_id).unwrap().unwrap();
+        let mut draft = current.clone();
+        draft.revision += 1;
+        draft.state = ScheduleState::Draft;
+        draft.title = "Caption proof program revision two".into();
+        api.storage.put_schedule_item(&draft).unwrap();
+        api.storage
+            .commit_schedule(
+                "caption-report-recommit",
+                "caption-plan-recommit",
+                item_id,
+                "meeting-operator",
+                now + 1,
+                "Recommitted after the original proof request.",
+            )
+            .unwrap();
+        let stale_revision = api.handle_in_process(
+            "POST",
+            &format!("/api/v1/channels/{channel_id}/caption-proof"),
+            Some(request_body.as_bytes()),
+        );
+        assert_eq!(stale_revision.status, 409);
+        let stale_revision: serde_json::Value =
+            serde_json::from_slice(&stale_revision.body).unwrap();
+        assert_eq!(stale_revision["error"]["code"], "schedule_binding_changed");
+
         drop(api);
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -16496,5 +16691,334 @@ mod tests {
         }
         let _ = std::fs::remove_file(media_path);
         let _ = std::fs::remove_dir_all(application);
+    }
+
+    fn source_evidence_authorities() -> (SavedSearch, DaypartBlock, RecurringRule) {
+        let search_id = "00000000-0000-4000-8000-000000000001";
+        let channel_id = "00000000-0000-4000-8000-000000000002";
+        let block_id = "00000000-0000-4000-8000-000000000004";
+        let rule_id = "00000000-0000-4000-8000-000000000005";
+        let search = SavedSearch {
+            search_id: search_id.into(),
+            name: "Council meeting rotation".into(),
+            owner_operator_id: "00000000-0000-4000-8000-000000000003".into(),
+            created_at_utc_ms: 1_700_000_000_000,
+            query: SavedSearchQuery {
+                all_of: vec![AssetPredicate::TitleContains("Council".into())],
+                any_of: Vec::new(),
+                order_by: SavedSearchOrder::TitleAscending,
+                limit: 8,
+            },
+            revision: 1,
+        };
+        let block = DaypartBlock {
+            block_id: block_id.into(),
+            channel_id: channel_id.into(),
+            label: "Weeknight civic".into(),
+            starts_local_minute: 1_080,
+            ends_local_minute: 1_320,
+            weekday_mask: 0b0111_1111,
+            season_starts_on: None,
+            season_ends_on: None,
+            allow_rule_ids: vec![rule_id.into()],
+            revision: 1,
+        };
+        let rule = RecurringRule {
+            rule_id: rule_id.into(),
+            channel_id: channel_id.into(),
+            saved_search_id: search_id.into(),
+            saved_search_revision: 1,
+            pick_strategy: AssetPickStrategy::Top,
+            rolling_window_days: 14,
+            avoid_repeat_within_days: None,
+            enabled: true,
+            priority: 0,
+            block_id: block_id.into(),
+            block_revision: 1,
+            weekday_mask: 0b0111_1111,
+            interval_weeks: 1,
+            anchor_date: LocalDate {
+                year: 2026,
+                month: 1,
+                day: 1,
+            },
+            timezone: RecurrenceTimeZone::Named {
+                iana_name: "America/Denver".into(),
+                dst: DstApplication::EarlierFold,
+            },
+            local_start_minute: 1_140,
+            duration_minutes: 60,
+            revision: 1,
+        };
+        (search, block, rule)
+    }
+
+    fn source_evidence_window() -> MaterializationWindow {
+        MaterializationWindow {
+            starts_at_utc_ms: 1_767_225_600_000,
+            ends_at_utc_ms: 1_768_435_200_000,
+        }
+    }
+
+    fn open_api_with_source_evidence(
+        database: &Path,
+        authority: Arc<StationSourceEvidenceAuthority>,
+    ) -> Api {
+        Api::open_with_application_directory_and_cache(
+            database,
+            database.with_extension("application"),
+            Arc::new(Mutex::new(None)),
+            OrchestrationHealth::ready_without_supervisor(),
+            authority,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn standalone_api_lifetimes_use_distinct_source_evidence_authorities() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let database = std::env::temp_dir().join(format!(
+            "townlight-source-evidence-authority-lifetime-{nonce}.db"
+        ));
+        let application = database.with_extension("application");
+        std::fs::create_dir_all(&application).unwrap();
+
+        let first_authority = {
+            let first_api = Api::open_with_application_directory(&database, &application).unwrap();
+            Arc::clone(&first_api.source_evidence_authority)
+        };
+        let second_api = Api::open_with_application_directory(&database, &application).unwrap();
+
+        assert!(!Arc::ptr_eq(
+            &first_authority,
+            &second_api.source_evidence_authority
+        ));
+
+        drop(second_api);
+        for candidate in [
+            database.clone(),
+            PathBuf::from(format!("{}-wal", database.display())),
+            PathBuf::from(format!("{}-shm", database.display())),
+        ] {
+            let _ = std::fs::remove_file(candidate);
+        }
+        let _ = std::fs::remove_dir_all(application);
+    }
+
+    fn seed_source_evidence_authorities(
+        api: &Api,
+        search: &SavedSearch,
+        block: &DaypartBlock,
+        rule: &RecurringRule,
+    ) {
+        api.storage
+            .write_saved_search(search, None, &search.owner_operator_id, 1)
+            .unwrap();
+        api.storage
+            .write_daypart_block(block, None, &search.owner_operator_id, 2)
+            .unwrap();
+        api.storage
+            .write_recurring_rule(rule, None, &search.owner_operator_id, 3)
+            .unwrap();
+    }
+
+    #[test]
+    fn materialization_evidence_snapshot_survives_same_boot_reconstruction_and_binds_both_inputs() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let database = std::env::temp_dir().join(format!(
+            "townlight-candidate-source-evidence-same-boot-{nonce}.db"
+        ));
+        let authority = Arc::new(StationSourceEvidenceAuthority::new().unwrap());
+        let (search, block, rule) = source_evidence_authorities();
+        let window = source_evidence_window();
+        let first_api = open_api_with_source_evidence(&database, Arc::clone(&authority));
+        seed_source_evidence_authorities(&first_api, &search, &block, &rule);
+        assert!(Arc::ptr_eq(
+            &first_api.source_evidence_authority,
+            &authority
+        ));
+        let evidence = first_api
+            .snapshot_authenticated_materialization_evidence(&rule.rule_id, &window)
+            .unwrap();
+        assert_eq!(evidence.search, search);
+        assert_eq!(evidence.block, block);
+        assert_eq!(evidence.rule, rule);
+        assert_eq!(evidence.window, window);
+        assert!(evidence.inputs.candidate_projection.candidates.is_empty());
+        assert!(evidence.inputs.prior_airings.airings.is_empty());
+        drop(first_api);
+
+        let reconstructed_api = open_api_with_source_evidence(&database, Arc::clone(&authority));
+        assert!(Arc::ptr_eq(
+            &reconstructed_api.source_evidence_authority,
+            &authority
+        ));
+        let candidate_scope_sha256 = materialization_evidence_scope_sha256(
+            &search,
+            &block,
+            &rule,
+            &window,
+            SourceEvidenceKind::CandidateProjection,
+        )
+        .unwrap();
+        let candidate_payload_sha256 =
+            canonical_candidate_projection_sha256(&evidence.inputs.candidate_projection.candidates)
+                .unwrap();
+        authority
+            .verify(
+                SourceEvidenceKind::CandidateProjection,
+                &evidence.inputs.candidate_projection.receipt,
+                &candidate_scope_sha256,
+                &candidate_payload_sha256,
+                0,
+            )
+            .unwrap();
+
+        let prior_scope_sha256 = materialization_evidence_scope_sha256(
+            &search,
+            &block,
+            &rule,
+            &window,
+            SourceEvidenceKind::PriorAirings,
+        )
+        .unwrap();
+        let prior_payload_sha256 =
+            canonical_prior_airings_sha256(&evidence.inputs.prior_airings.airings).unwrap();
+        authority
+            .verify(
+                SourceEvidenceKind::PriorAirings,
+                &evidence.inputs.prior_airings.receipt,
+                &prior_scope_sha256,
+                &prior_payload_sha256,
+                0,
+            )
+            .unwrap();
+
+        let mut rebound_search = search.clone();
+        rebound_search.name.push_str(" rebound");
+        let rebound_scope_sha256 = materialization_evidence_scope_sha256(
+            &rebound_search,
+            &block,
+            &rule,
+            &window,
+            SourceEvidenceKind::CandidateProjection,
+        )
+        .unwrap();
+        assert!(
+            authority
+                .verify(
+                    SourceEvidenceKind::CandidateProjection,
+                    &evidence.inputs.candidate_projection.receipt,
+                    &rebound_scope_sha256,
+                    &candidate_payload_sha256,
+                    i64::MAX,
+                )
+                .is_err()
+        );
+        let mut rebound_payload_sha256 = candidate_payload_sha256.clone();
+        rebound_payload_sha256.replace_range(
+            ..1,
+            if candidate_payload_sha256.starts_with('0') {
+                "1"
+            } else {
+                "0"
+            },
+        );
+        assert!(
+            authority
+                .verify(
+                    SourceEvidenceKind::CandidateProjection,
+                    &evidence.inputs.candidate_projection.receipt,
+                    &candidate_scope_sha256,
+                    &rebound_payload_sha256,
+                    i64::MAX,
+                )
+                .is_err()
+        );
+
+        drop(reconstructed_api);
+        let _ = std::fs::remove_file(database);
+    }
+
+    #[test]
+    fn materialization_evidence_receipts_are_invalid_after_authority_restart() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let database =
+            std::env::temp_dir().join(format!("townlight-candidate-source-restart-{nonce}.db"));
+        let first_authority = Arc::new(StationSourceEvidenceAuthority::new().unwrap());
+        let first_api = open_api_with_source_evidence(&database, Arc::clone(&first_authority));
+        let (search, block, rule) = source_evidence_authorities();
+        let window = source_evidence_window();
+        seed_source_evidence_authorities(&first_api, &search, &block, &rule);
+        let evidence = first_api
+            .snapshot_authenticated_materialization_evidence(&rule.rule_id, &window)
+            .unwrap();
+        let scope_sha256 = materialization_evidence_scope_sha256(
+            &search,
+            &block,
+            &rule,
+            &window,
+            SourceEvidenceKind::CandidateProjection,
+        )
+        .unwrap();
+        let payload_sha256 =
+            canonical_candidate_projection_sha256(&evidence.inputs.candidate_projection.candidates)
+                .unwrap();
+        let replacement_authority = StationSourceEvidenceAuthority::new().unwrap();
+        assert!(
+            replacement_authority
+                .verify(
+                    SourceEvidenceKind::CandidateProjection,
+                    &evidence.inputs.candidate_projection.receipt,
+                    &scope_sha256,
+                    &payload_sha256,
+                    0,
+                )
+                .is_err()
+        );
+
+        drop(first_api);
+        let _ = std::fs::remove_file(database);
+    }
+
+    #[test]
+    fn source_evidence_candidate_adapter_has_no_public_http_route() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let database =
+            std::env::temp_dir().join(format!("townlight-source-evidence-no-route-{nonce}.db"));
+        let api = Api::open(&database).unwrap();
+        let forged = br#"{
+            "candidates": [],
+            "scope_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "payload_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "receipt": {"issuer_id": "browser"},
+            "observed_at_utc_ms": 0
+        }"#;
+        for path in [
+            "/api/v1/scheduling/candidate-projection",
+            "/api/v1/scheduling/source-evidence",
+            "/api/v1/scheduling/materialize",
+        ] {
+            assert_eq!(api.handle_in_process("GET", path, None).status, 400);
+            assert_eq!(
+                api.handle_in_process("POST", path, Some(forged)).status,
+                405
+            );
+        }
+
+        drop(api);
+        let _ = std::fs::remove_file(database);
     }
 }

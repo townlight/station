@@ -8,6 +8,10 @@ use std::sync::{
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use station_captions::{
+    AssetCaptionCue, AssetCaptionTrackWrite, CaptionEgressProofJob, CaptionTrackSourceKind,
+    canonical_caption_text_sha256,
+};
 use station_domain::{AlertConditionKind, AlertEventState, ChannelRuntimeState};
 use station_live::{LiveEndpoint, LiveSource, TakeoverSession, TakeoverState};
 use station_media_journal::read_events;
@@ -18,11 +22,26 @@ use station_schedule::{
     AssetReadiness, ChannelConfiguration, DispatchStatus, MediaAsset, OutputProfileId,
     OutputSinkConfiguration, ScheduleItem, ScheduleState,
 };
-use station_storage::StationStore;
+use station_storage::{ChannelCaptionMode, ScheduleItemWrite, StationStore};
 
 const WORKER_ID: &str = "256d5a07-92d3-4718-aec9-05cad42fae7d";
 const CHANNEL_ID: &str = "8b626c01-bdf8-419a-8a2e-b0a7caa1ff7e";
+const CAPTION_PROOF_JOB_ID: &str = "9a1044ce-1845-49a9-82f1-783ae0573aa8";
 static SUPERVISION_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+trait ScheduleStoreTestExt {
+    fn put_schedule_item(&self, item: &ScheduleItem) -> Result<(), String>;
+}
+
+impl ScheduleStoreTestExt for StationStore {
+    fn put_schedule_item(&self, item: &ScheduleItem) -> Result<(), String> {
+        self.write_schedule_item(&ScheduleItemWrite {
+            item: item.clone(),
+            changed_by: "channel-worker-test".into(),
+            occurred_at_unix_ms: 1,
+        })
+    }
+}
 
 fn supervision_test_guard() -> MutexGuard<'static, ()> {
     SUPERVISION_TEST_LOCK
@@ -127,7 +146,10 @@ fn launches_handshakes_commands_and_cleanly_stops_the_real_worker() {
     let on_air = supervisor
         .command(
             "take-asset-1",
-            ChannelCommand::TakeAsset {
+            ChannelCommand::TakeScheduledAsset {
+                report_id: "report-1".into(),
+                schedule_item_id: "30d42a8e-07d2-4c90-b02e-b29c71a66d6b".into(),
+                schedule_item_revision: 1,
                 asset_id: asset.asset_id.clone(),
                 media_offset_ms: 0,
             },
@@ -135,11 +157,29 @@ fn launches_handshakes_commands_and_cleanly_stops_the_real_worker() {
         )
         .unwrap();
     assert_eq!(on_air.sequence, 5);
-    assert!(matches!(
-        &on_air.event,
-        WorkerEvent::OnAirChanged { source_kind, source_id }
-            if source_kind == "asset" && source_id == &asset.asset_id
-    ));
+    let WorkerEvent::ScheduledAssetOnAir {
+        report_id,
+        schedule_item_id,
+        schedule_item_revision,
+        asset_id,
+        media_offset_ms,
+        worker_boot_id,
+        actual_on_air_at_unix_ms,
+    } = &on_air.event
+    else {
+        panic!("the scheduled take did not produce an authoritative on-air event");
+    };
+    assert_eq!(report_id, "report-1");
+    assert_eq!(schedule_item_id, "30d42a8e-07d2-4c90-b02e-b29c71a66d6b");
+    assert_eq!(*schedule_item_revision, 1);
+    assert_eq!(asset_id, &asset.asset_id);
+    assert_eq!(*media_offset_ms, 0);
+    assert_eq!(worker_boot_id.len(), 36);
+    assert_eq!(worker_boot_id.as_bytes()[8], b'-');
+    assert_eq!(worker_boot_id.as_bytes()[13], b'-');
+    assert_eq!(worker_boot_id.as_bytes()[18], b'-');
+    assert_eq!(worker_boot_id.as_bytes()[23], b'-');
+    assert!(*actual_on_air_at_unix_ms >= 0);
     let received = output.recv(&mut datagram).unwrap();
     assert_eq!(received % 188, 0);
 
@@ -276,18 +316,19 @@ fn committed_schedule_is_loaded_aired_and_completed_only_after_worker_acknowledg
         .put_media_asset(&MediaAsset {
             asset_id: ingested.asset_id.clone(),
             media_path: ingested.stored_path.to_string_lossy().into_owned(),
-            duration_ms: 6_000,
+            duration_ms: 60_000,
             readiness: AssetReadiness::Ready,
         })
         .unwrap();
     store
         .put_schedule_item(&ScheduleItem {
             item_id: WORKER_ID.into(),
+            revision: 1,
             channel_id: CHANNEL_ID.into(),
             asset_id: ingested.asset_id.clone(),
             title: "Automated council playback".into(),
             starts_at_unix_ms: starts_at,
-            duration_ms: 1_000,
+            duration_ms: 60_000,
             state: ScheduleState::Draft,
         })
         .unwrap();
@@ -372,7 +413,7 @@ fn committed_schedule_is_loaded_aired_and_completed_only_after_worker_acknowledg
         Some(DispatchTransition::OnAir { .. })
     ));
     assert!(matches!(
-        controller.run_once(starts_at + 1_000).unwrap(),
+        controller.run_once(starts_at + 60_000).unwrap(),
         Some(DispatchTransition::Completed { .. })
     ));
     assert_eq!(
@@ -396,9 +437,16 @@ fn committed_schedule_is_loaded_aired_and_completed_only_after_worker_acknowledg
     assert_eq!(
         events
             .iter()
+            .filter(|event| matches!(event.event, WorkerEvent::ScheduledAssetOnAir { .. }))
+            .count(),
+        1
+    );
+    assert_eq!(
+        events
+            .iter()
             .filter(|event| matches!(event.event, WorkerEvent::OnAirChanged { ref source_kind, .. } if source_kind == "asset"))
             .count(),
-        2
+        1
     );
     assert!(events.iter().any(
         |event| matches!(event.event, WorkerEvent::OnAirChanged { ref source_kind, .. } if source_kind == "fallback")
@@ -409,6 +457,199 @@ fn committed_schedule_is_loaded_aired_and_completed_only_after_worker_acknowledg
             .filter(|event| matches!(event.event, WorkerEvent::ShutdownComplete))
             .count(),
         3
+    );
+
+    let _ = fs::remove_file(journal);
+    for candidate in [
+        database.clone(),
+        PathBuf::from(format!("{}-wal", database.display())),
+        PathBuf::from(format!("{}-shm", database.display())),
+    ] {
+        let _ = fs::remove_file(candidate);
+    }
+    remove_directory(&media_root);
+}
+
+#[test]
+fn caption_proof_binding_rejects_a_recommitted_schedule_revision() {
+    let _guard = supervision_test_guard();
+    let journal = journal_path();
+    let database = journal.with_extension("caption-stale.db");
+    let media_root = journal.with_extension("caption-stale-media");
+    fs::create_dir_all(&media_root).unwrap();
+    let media_path = media_root.join("captioned.ts");
+    fs::write(&media_path, b"caption proof stale revision fixture").unwrap();
+    let output = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let mut channel = ChannelConfiguration {
+        channel_id: CHANNEL_ID.into(),
+        display_name: "Caption stale revision".into(),
+        output_profile: Default::default(),
+        output_sinks: vec![OutputSinkConfiguration::required_udp(
+            CHANNEL_ID,
+            "Primary transport",
+            output.local_addr().unwrap().to_string(),
+            -16.0,
+        )],
+        enabled: false,
+    };
+    let store = StationStore::open(&database).unwrap();
+    let asset_id = "a".repeat(64);
+    store.put_channel(&channel).unwrap();
+    store
+        .put_media_asset(&MediaAsset {
+            asset_id: asset_id.clone(),
+            media_path: media_path.to_string_lossy().into_owned(),
+            duration_ms: 60_000,
+            readiness: AssetReadiness::Ready,
+        })
+        .unwrap();
+    store
+        .write_channel_caption_policy(
+            CHANNEL_ID,
+            ChannelCaptionMode::Cea708,
+            1,
+            "en-US",
+            0,
+            "setup-admin",
+            90_001,
+            "eaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+        )
+        .unwrap();
+    let track = store
+        .write_asset_caption_track(&AssetCaptionTrackWrite {
+            track_id: "faaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee".into(),
+            asset_id: asset_id.clone(),
+            language: "en-US".into(),
+            service_number: 1,
+            source_kind: CaptionTrackSourceKind::External,
+            label: "Reviewed English".into(),
+            cues: vec![AssetCaptionCue {
+                cue_id: "abaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee".into(),
+                start_ms: 1_000,
+                duration_ms: 2_000,
+                text: "Town Council".into(),
+            }],
+            expected_revision: 0,
+            actor: "setup-admin".into(),
+            occurred_at_unix_ms: 90_002,
+            audit_id: "acaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee".into(),
+        })
+        .unwrap();
+    store
+        .put_schedule_item(&ScheduleItem {
+            item_id: WORKER_ID.into(),
+            revision: 1,
+            channel_id: CHANNEL_ID.into(),
+            asset_id: asset_id.clone(),
+            title: "Caption proof stale revision".into(),
+            starts_at_unix_ms: 100_000,
+            duration_ms: 60_000,
+            state: ScheduleState::Draft,
+        })
+        .unwrap();
+    store
+        .commit_schedule(
+            "caption-stale-report",
+            "caption-stale-plan",
+            WORKER_ID,
+            "operator-test",
+            90_000,
+            "Caption proof stale revision fixture",
+        )
+        .unwrap();
+    store
+        .advance_dispatch_status(
+            "caption-stale-report",
+            DispatchStatus::Pending,
+            DispatchStatus::Queued,
+        )
+        .unwrap();
+    store
+        .advance_dispatch_status(
+            "caption-stale-report",
+            DispatchStatus::Queued,
+            DispatchStatus::Acknowledged,
+        )
+        .unwrap();
+    let configuration_hash = store
+        .current_channel_output_configuration_hash(CHANNEL_ID)
+        .unwrap();
+    let expected_text_sha256 = canonical_caption_text_sha256(&["Town Council".into()]).unwrap();
+    store
+        .create_caption_egress_job(&CaptionEgressProofJob {
+            job_id: CAPTION_PROOF_JOB_ID.into(),
+            channel_id: CHANNEL_ID.into(),
+            sink_id: CHANNEL_ID.into(),
+            report_id: "caption-stale-report".into(),
+            asset_id: asset_id.clone(),
+            track_id: track.track_id,
+            track_revision: track.revision,
+            cues_sha256: track.cues_sha256,
+            caption_policy_revision: 1,
+            language: "en-US".into(),
+            service_number: 1,
+            candidate_version: "0.1.0".into(),
+            source_commit: "a".repeat(40),
+            configuration_hash,
+            capture_started_asset_offset_ms: 0,
+            capture_duration_ms: 3_000,
+            max_capture_bytes: 1_000_000,
+            expected_cue_count: 1,
+            expected_text_sha256,
+            created_at_unix_ms: 90_003,
+        })
+        .unwrap();
+    channel.enabled = true;
+    store.put_channel(&channel).unwrap();
+
+    let current = store.read_schedule_item(WORKER_ID).unwrap().unwrap();
+    let mut draft = current.clone();
+    draft.revision += 1;
+    draft.state = ScheduleState::Draft;
+    draft.title = "Caption proof stale revision two".into();
+    store.put_schedule_item(&draft).unwrap();
+    store
+        .commit_schedule(
+            "caption-stale-recommit",
+            "caption-stale-plan-two",
+            WORKER_ID,
+            "operator-test",
+            90_004,
+            "Recommitted after caption proof request",
+        )
+        .unwrap();
+    store
+        .advance_dispatch_status(
+            "caption-stale-recommit",
+            DispatchStatus::Pending,
+            DispatchStatus::Cancelled,
+        )
+        .unwrap();
+    drop(store);
+
+    let mut controller = ChannelController::launch(
+        PathBuf::from(env!("CARGO_BIN_EXE_channel-worker")).as_path(),
+        &database,
+        &journal,
+        &channel,
+        Duration::from_secs(7),
+    )
+    .unwrap();
+    let error = controller.run_once(100_000).unwrap_err();
+    assert!(
+        matches!(error, station_orchestration::OrchestrationError::Storage(ref detail)
+            if detail.contains("stale schedule item revision"))
+    );
+    controller.shutdown(Duration::from_secs(3)).unwrap();
+
+    let store = StationStore::open(&database).unwrap();
+    let job = store
+        .read_caption_egress_job(CAPTION_PROOF_JOB_ID)
+        .unwrap()
+        .unwrap();
+    assert_ne!(
+        job.state,
+        station_captions::CaptionEgressProofJobState::Completed
     );
 
     let _ = fs::remove_file(journal);
@@ -463,7 +704,7 @@ fn expired_unstarted_item_is_missed_and_current_item_takes_at_catch_up_time() {
             .put_media_asset(&MediaAsset {
                 asset_id: asset.asset_id.clone(),
                 media_path: asset.stored_path.to_string_lossy().into_owned(),
-                duration_ms: 6_000,
+                duration_ms: 60_000,
                 readiness: AssetReadiness::Ready,
             })
             .unwrap();
@@ -480,13 +721,14 @@ fn expired_unstarted_item_is_missed_and_current_item_takes_at_catch_up_time() {
             CURRENT_ITEM,
             current_asset.asset_id.as_str(),
             now - 500,
-            2_000,
+            60_000,
             "catch-up-current-report",
         ),
     ] {
         store
             .put_schedule_item(&ScheduleItem {
                 item_id: item_id.into(),
+                revision: 1,
                 channel_id: CHANNEL_ID.into(),
                 asset_id: asset_id.into(),
                 title: report_id.into(),
@@ -542,15 +784,15 @@ fn expired_unstarted_item_is_missed_and_current_item_takes_at_catch_up_time() {
     assert!(!events.iter().any(|event| {
         matches!(
             &event.event,
-            WorkerEvent::OnAirChanged { source_kind, source_id }
-                if source_kind == "asset" && source_id == &stale_asset.asset_id
+            WorkerEvent::ScheduledAssetOnAir { asset_id, .. }
+                if asset_id == &stale_asset.asset_id
         )
     }));
     assert!(events.iter().any(|event| {
         matches!(
             &event.event,
-            WorkerEvent::OnAirChanged { source_kind, source_id }
-                if source_kind == "asset" && source_id == &current_asset.asset_id
+            WorkerEvent::ScheduledAssetOnAir { asset_id, .. }
+                if asset_id == &current_asset.asset_id
         )
     }));
 
@@ -605,7 +847,9 @@ fn long_live_takeover_hands_back_to_the_schedule_item_valid_now() {
     let starts_at = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
-        .as_millis() as i64;
+        .as_millis() as i64
+        - 1_000;
+    let next_starts_at = starts_at + 60_000;
     let store = StationStore::open(&database).unwrap();
     store.put_channel(&channel).unwrap();
     store
@@ -629,7 +873,7 @@ fn long_live_takeover_hands_back_to_the_schedule_item_valid_now() {
             .put_media_asset(&MediaAsset {
                 asset_id: asset.asset_id.clone(),
                 media_path: asset.stored_path.to_string_lossy().into_owned(),
-                duration_ms: 6_000,
+                duration_ms: 120_000,
                 readiness: AssetReadiness::Ready,
             })
             .unwrap();
@@ -639,20 +883,21 @@ fn long_live_takeover_hands_back_to_the_schedule_item_valid_now() {
             WORKER_ID,
             first_asset.asset_id.as_str(),
             starts_at,
-            1_000,
+            60_000,
             "live-catch-up-first",
         ),
         (
             NEXT_ITEM,
             next_asset.asset_id.as_str(),
-            starts_at + 1_000,
-            4_000,
+            next_starts_at,
+            60_000,
             "live-catch-up-next",
         ),
     ] {
         store
             .put_schedule_item(&ScheduleItem {
                 item_id: item_id.into(),
+                revision: 1,
                 channel_id: CHANNEL_ID.into(),
                 asset_id: asset_id.into(),
                 title: report_id.into(),
@@ -702,7 +947,7 @@ fn long_live_takeover_hands_back_to_the_schedule_item_valid_now() {
                 operator_id: "operator-test".into(),
                 reason: Some("Live council meeting".into()),
                 requested_at_unix_ms: starts_at + 100,
-                expires_at_unix_ms: starts_at + 60_100,
+                expires_at_unix_ms: starts_at + 180_100,
                 taken_at_unix_ms: None,
                 returned_at_unix_ms: None,
                 state: TakeoverState::Arming,
@@ -733,21 +978,26 @@ fn long_live_takeover_hands_back_to_the_schedule_item_valid_now() {
         controller.run_once(starts_at + 200).unwrap(),
         Some(DispatchTransition::LiveOnAir { .. })
     ));
-    let live_runtime = controller.runtime_observation(starts_at + 200);
+    let live_runtime = controller.runtime_observation(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64,
+    );
     assert_eq!(live_runtime.state, ChannelRuntimeState::Live);
     assert_eq!(live_runtime.on_air_asset_id, None);
     StationStore::open(&database)
         .unwrap()
         .put_channel_runtime(&live_runtime)
         .unwrap();
-    assert_eq!(controller.run_once(starts_at + 2_000).unwrap(), None);
+    assert_eq!(controller.run_once(next_starts_at - 500).unwrap(), None);
     let store = StationStore::open(&database).unwrap();
     store
         .transition_takeover(
             LIVE_SESSION,
             TakeoverState::OnAir,
             TakeoverState::ReturnRequested,
-            starts_at + 2_500,
+            next_starts_at + 500,
             None,
             "operator-test",
             4,
@@ -755,7 +1005,7 @@ fn long_live_takeover_hands_back_to_the_schedule_item_valid_now() {
         .unwrap();
     drop(store);
     assert!(matches!(
-        controller.run_once(starts_at + 2_500).unwrap(),
+        controller.run_once(next_starts_at + 500).unwrap(),
         Some(DispatchTransition::LiveCompleted { .. })
     ));
     let store = StationStore::open(&database).unwrap();
@@ -891,6 +1141,7 @@ fn daemon_loop_discovers_an_enabled_channel_and_completes_its_committed_item() {
     store
         .put_schedule_item(&ScheduleItem {
             item_id: WORKER_ID.into(),
+            revision: 1,
             channel_id: CHANNEL_ID.into(),
             asset_id,
             title: "Daemon dispatch proof".into(),
@@ -941,9 +1192,11 @@ fn daemon_loop_discovers_an_enabled_channel_and_completes_its_committed_item() {
             .join(format!("{CHANNEL_ID}.tlj")),
     )
     .unwrap();
-    assert!(events.iter().any(
-        |event| matches!(event.event, WorkerEvent::OnAirChanged { ref source_kind, .. } if source_kind == "asset")
-    ));
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event.event, WorkerEvent::ScheduledAssetOnAir { .. }))
+    );
     assert!(events.iter().any(
         |event| matches!(event.event, WorkerEvent::OnAirChanged { ref source_kind, .. } if source_kind == "fallback")
     ));

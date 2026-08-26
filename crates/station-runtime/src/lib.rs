@@ -1,7 +1,5 @@
-use std::io::{Read, Write};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
@@ -12,9 +10,13 @@ use station_media_protocol::{
     encode_command_frame,
 };
 use station_schedule::OutputProfileId;
-use station_windows_ipc::{IpcError, PipeServer, PipeStream};
+use station_windows_ipc::{
+    ContainedProcess, IpcError, PipeServer, PipeStream, ProcessContainment,
+    launch_contained_process,
+};
 
 static PIPE_SEQUENCE: AtomicU64 = AtomicU64::new(1);
+const FORCE_TERMINATE_TIMEOUT: Duration = Duration::from_secs(3);
 
 #[derive(Debug)]
 pub enum SupervisorError {
@@ -45,7 +47,8 @@ pub enum SupervisorError {
 }
 
 pub struct WorkerSupervisor {
-    child: Option<Child>,
+    child: Option<ContainedProcess>,
+    containment: Option<ProcessContainment>,
     pipe: PipeStream,
     worker_id: String,
     channel_id: String,
@@ -265,49 +268,59 @@ impl WorkerSupervisor {
             PIPE_SEQUENCE.fetch_add(1, Ordering::Relaxed)
         );
         let server = PipeServer::bind(&suffix).map_err(SupervisorError::Ipc)?;
-        let mut child = Command::new(executable)
-            .args([worker_id, channel_id])
-            .arg(journal_path)
-            .arg(server.name())
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .map_err(|error| io_error("spawn channel worker", error))?;
+        let journal_path = journal_path.to_string_lossy();
+        let (child, containment) = launch_contained_process(
+            executable,
+            &[worker_id, channel_id, &journal_path, server.name()],
+        )
+        .map_err(SupervisorError::Ipc)?;
 
         let mut pipe = match server.accept_timeout(timeout.saturating_sub(started.elapsed())) {
             Ok(pipe) => pipe,
             Err(error) => {
-                terminate(&mut child);
-                return Err(SupervisorError::Ipc(error));
+                return Err(abandon_launch(
+                    child,
+                    containment,
+                    SupervisorError::Ipc(error),
+                ));
             }
         };
-        if let Err(error) = pipe.write_all(&bootstrap_frame).and_then(|_| pipe.flush()) {
-            terminate(&mut child);
-            return Err(io_error("write worker bootstrap", error));
+        if let Err(error) =
+            pipe.write_all_timeout(&bootstrap_frame, timeout.saturating_sub(started.elapsed()))
+        {
+            return Err(abandon_launch(
+                child,
+                containment,
+                SupervisorError::Ipc(error),
+            ));
         }
         let ready = match read_event(&mut pipe, timeout.saturating_sub(started.elapsed())) {
             Ok(event) => event,
             Err(error) => {
-                terminate(&mut child);
-                return Err(error);
+                return Err(abandon_launch(child, containment, error));
             }
         };
         if let Err(error) = validate_identity(&ready, worker_id, channel_id) {
-            terminate(&mut child);
-            return Err(error);
+            return Err(abandon_launch(child, containment, error));
         }
         if ready.sequence == 0 {
-            terminate(&mut child);
-            return Err(SupervisorError::InvalidInitialSequence);
+            return Err(abandon_launch(
+                child,
+                containment,
+                SupervisorError::InvalidInitialSequence,
+            ));
         }
         if !matches!(ready.event, WorkerEvent::Ready { .. }) {
-            terminate(&mut child);
-            return Err(SupervisorError::UnexpectedInitialEvent);
+            return Err(abandon_launch(
+                child,
+                containment,
+                SupervisorError::UnexpectedInitialEvent,
+            ));
         }
 
         Ok(Self {
             child: Some(child),
+            containment: Some(containment),
             pipe,
             worker_id: worker_id.to_string(),
             channel_id: channel_id.to_string(),
@@ -321,14 +334,11 @@ impl WorkerSupervisor {
     }
 
     pub fn ensure_running(&mut self) -> Result<(), SupervisorError> {
-        let child = self.child.as_mut().ok_or(SupervisorError::AlreadyStopped)?;
-        match child
-            .try_wait()
-            .map_err(|error| io_error("query channel worker liveness", error))?
-        {
+        let child = self.child.as_ref().ok_or(SupervisorError::AlreadyStopped)?;
+        match child.try_wait().map_err(SupervisorError::Ipc)? {
             Some(status) => {
                 self.child.take();
-                Err(SupervisorError::ProcessExit(status.code()))
+                Err(SupervisorError::ProcessExit(Some(status as i32)))
             }
             None => Ok(()),
         }
@@ -338,10 +348,19 @@ impl WorkerSupervisor {
     /// command times out, the supervisor cannot know whether the worker acted
     /// before its reply was lost; process termination is the only fail-closed
     /// way to prevent that command from continuing in the background.
-    pub fn force_terminate(&mut self) {
-        if let Some(mut child) = self.child.take() {
-            terminate(&mut child);
-        }
+    pub fn force_terminate(&mut self) -> Result<(), SupervisorError> {
+        let containment = self.containment.take();
+        let Some(child) = self.child.take() else {
+            // The direct worker may already have exited while one of its media
+            // descendants remains in the job. Closing containment is still the
+            // authoritative whole-tree termination action in that state.
+            drop(containment);
+            return Ok(());
+        };
+        // Closing the job asks the kernel to terminate the worker and every
+        // descendant immediately. We then reap the direct child only until the
+        // explicit bound; no detached waiter can survive this controller.
+        terminate_bounded(&child, containment, FORCE_TERMINATE_TIMEOUT)
     }
 
     pub fn command(
@@ -362,14 +381,12 @@ impl WorkerSupervisor {
             command,
         };
         let frame = encode_command_frame(&envelope).map_err(SupervisorError::Protocol)?;
+        let started = Instant::now();
         self.pipe
-            .write_all(&frame)
-            .map_err(|error| io_error("write worker command", error))?;
-        self.pipe
-            .flush()
-            .map_err(|error| io_error("flush worker command", error))?;
+            .write_all_timeout(&frame, timeout)
+            .map_err(SupervisorError::Ipc)?;
 
-        let event = read_event(&mut self.pipe, timeout)?;
+        let event = read_event(&mut self.pipe, timeout.saturating_sub(started.elapsed()))?;
         validate_identity(&event, &self.worker_id, &self.channel_id)?;
         if event.sequence != expected_sequence {
             return Err(SupervisorError::WrongSequence {
@@ -393,10 +410,10 @@ impl WorkerSupervisor {
         }
 
         let remaining = timeout.saturating_sub(started.elapsed());
-        let mut child = self.child.take().ok_or(SupervisorError::AlreadyStopped)?;
-        let status = wait_for_exit(&mut child, remaining)?;
-        if !status.success() {
-            return Err(SupervisorError::ProcessExit(status.code()));
+        let child = self.child.take().ok_or(SupervisorError::AlreadyStopped)?;
+        let status = wait_for_exit(&child, remaining)?;
+        if status != 0 {
+            return Err(SupervisorError::ProcessExit(Some(status as i32)));
         }
         Ok(event)
     }
@@ -438,8 +455,12 @@ fn udp_outputs_for_profile(
 
 impl Drop for WorkerSupervisor {
     fn drop(&mut self) {
-        if let Some(mut child) = self.child.take() {
-            terminate(&mut child);
+        // Job closure is deliberately nonblocking and covers the whole worker
+        // tree. Drop must never wait for process exit, because Drop may run while
+        // unwinding an unrelated station failure.
+        drop(self.containment.take());
+        if let Some(child) = self.child.take() {
+            let _ = request_termination(&child);
         }
     }
 }
@@ -449,24 +470,20 @@ fn read_event(
     timeout: Duration,
 ) -> Result<WorkerEventEnvelope, SupervisorError> {
     let started = Instant::now();
-    pipe.wait_for_bytes(4, timeout)
-        .map_err(SupervisorError::Ipc)?;
     let mut length = [0_u8; 4];
-    pipe.read_exact(&mut length)
-        .map_err(|error| io_error("read worker event length", error))?;
+    pipe.read_exact_timeout(&mut length, timeout)
+        .map_err(SupervisorError::Ipc)?;
     let payload_length = u32::from_le_bytes(length) as usize;
     if payload_length > MAX_FRAME_BYTES {
         return Err(SupervisorError::Protocol(ProtocolError::FrameTooLarge(
             payload_length,
         )));
     }
-    pipe.wait_for_bytes(payload_length, timeout.saturating_sub(started.elapsed()))
-        .map_err(SupervisorError::Ipc)?;
     let mut frame = Vec::with_capacity(4 + payload_length);
     frame.extend_from_slice(&length);
     frame.resize(4 + payload_length, 0);
-    pipe.read_exact(&mut frame[4..])
-        .map_err(|error| io_error("read worker event payload", error))?;
+    pipe.read_exact_timeout(&mut frame[4..], timeout.saturating_sub(started.elapsed()))
+        .map_err(SupervisorError::Ipc)?;
     decode_event_frame(&frame).map_err(SupervisorError::Protocol)
 }
 
@@ -490,30 +507,74 @@ fn validate_identity(
     Ok(())
 }
 
-fn wait_for_exit(child: &mut Child, timeout: Duration) -> Result<ExitStatus, SupervisorError> {
+fn wait_for_exit(child: &ContainedProcess, timeout: Duration) -> Result<u32, SupervisorError> {
     let started = Instant::now();
     loop {
-        if let Some(status) = child
-            .try_wait()
-            .map_err(|error| io_error("query channel worker exit", error))?
-        {
+        if let Some(status) = child.try_wait().map_err(SupervisorError::Ipc)? {
             return Ok(status);
         }
         if started.elapsed() >= timeout {
-            terminate(child);
-            return Err(SupervisorError::ProcessExitTimedOut);
+            return match terminate_bounded(child, None, FORCE_TERMINATE_TIMEOUT) {
+                Ok(()) | Err(SupervisorError::ProcessExitTimedOut) => {
+                    Err(SupervisorError::ProcessExitTimedOut)
+                }
+                Err(error) => Err(error),
+            };
         }
         std::thread::sleep(Duration::from_millis(2));
     }
 }
 
-fn terminate(child: &mut Child) {
-    match child.try_wait() {
-        Ok(Some(_)) => {}
-        Ok(None) | Err(_) => {
-            let _ = child.kill();
-            let _ = child.wait();
+fn abandon_launch(
+    child: ContainedProcess,
+    containment: ProcessContainment,
+    error: SupervisorError,
+) -> SupervisorError {
+    // Releasing the kill-on-close job is a bounded kernel request. The direct handle is
+    // then dropped without waiting, so every failed launch path returns even
+    // if Windows is slow to report process exit.
+    drop(containment);
+    drop(child);
+    error
+}
+
+fn request_termination(child: &ContainedProcess) -> Result<(), SupervisorError> {
+    child.terminate().map_err(SupervisorError::Ipc)
+}
+
+fn terminate_bounded(
+    child: &ContainedProcess,
+    containment: Option<ProcessContainment>,
+    timeout: Duration,
+) -> Result<(), SupervisorError> {
+    // Close containment first. This covers descendants that direct termination
+    // cannot reach and removes the need for an unbounded detached reaper.
+    let job_close_requested_termination = containment.is_some();
+    drop(containment);
+    match child.try_wait().map_err(SupervisorError::Ipc)? {
+        Some(_) => return Ok(()),
+        None => match request_termination(child) {
+            Ok(()) => {}
+            // Closing a job may already have placed its direct process into
+            // termination before the immediate zero-time wait observes the
+            // signaled state. The owned process handle cannot otherwise be
+            // access-denied, so continue the bounded observation in this one
+            // proven-contained case.
+            Err(SupervisorError::Ipc(IpcError::Os { code: 5, .. }))
+                if job_close_requested_termination => {}
+            Err(error) => return Err(error),
+        },
+    }
+
+    let started = Instant::now();
+    loop {
+        if child.try_wait().map_err(SupervisorError::Ipc)?.is_some() {
+            return Ok(());
         }
+        if started.elapsed() >= timeout {
+            return Err(SupervisorError::ProcessExitTimedOut);
+        }
+        std::thread::sleep(Duration::from_millis(2));
     }
 }
 
@@ -527,9 +588,37 @@ fn io_error(operation: &'static str, error: std::io::Error) -> SupervisorError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(windows)]
+    use std::fs;
+    #[cfg(windows)]
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    #[cfg(windows)]
+    static TEST_PATH_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
     fn destination(value: &str) -> SocketAddr {
         value.parse().expect("test destination is valid")
+    }
+
+    #[cfg(windows)]
+    fn unique_test_path(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "townlight-station-runtime-{name}-{}-{}",
+            std::process::id(),
+            TEST_PATH_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        ))
+    }
+
+    #[cfg(windows)]
+    fn wait_for_path(path: &Path, timeout: Duration) -> bool {
+        let started = Instant::now();
+        while started.elapsed() < timeout {
+            if path.exists() {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        path.exists()
     }
 
     #[test]
@@ -600,5 +689,157 @@ mod tests {
             assert_eq!(destination, expected_destination);
             assert_eq!(*loudness_target_lufs, LoudnessTarget::CABLE);
         }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn bounded_termination_kills_and_reaps_a_live_child() {
+        let (child, containment) = launch_contained_process(
+            Path::new("powershell.exe"),
+            &[
+                "-NoLogo",
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                "Start-Sleep -Seconds 30",
+            ],
+        )
+        .unwrap();
+        let started = Instant::now();
+
+        terminate_bounded(&child, Some(containment), Duration::from_secs(3)).unwrap();
+
+        assert!(started.elapsed() < Duration::from_secs(4));
+        assert!(child.try_wait().unwrap().is_some());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn supervisor_drop_is_bounded_and_releases_worker_containment() {
+        let server = PipeServer::bind("runtime-drop-bounded-test").unwrap();
+        let name = server.name().to_string();
+        let peer = std::thread::spawn(move || {
+            let _pipe = PipeStream::connect(&name).unwrap();
+            std::thread::sleep(Duration::from_millis(200));
+        });
+        let pipe = server.accept_timeout(Duration::from_secs(1)).unwrap();
+        let (child, containment) = launch_contained_process(
+            Path::new("powershell.exe"),
+            &[
+                "-NoLogo",
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                "Start-Sleep -Seconds 30",
+            ],
+        )
+        .unwrap();
+        let supervisor = WorkerSupervisor {
+            child: Some(child),
+            containment: Some(containment),
+            pipe,
+            worker_id: "worker".into(),
+            channel_id: "channel".into(),
+            last_sequence: 1,
+            ready: WorkerEventEnvelope {
+                version: PROTOCOL_VERSION,
+                worker_id: "worker".into(),
+                channel_id: "channel".into(),
+                sequence: 1,
+                event: WorkerEvent::Ready { graph_revision: 1 },
+            },
+        };
+        let started = Instant::now();
+
+        drop(supervisor);
+
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "WorkerSupervisor::drop must never wait for process exit"
+        );
+        peer.join().unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn force_terminate_closes_containment_after_direct_worker_has_exited() {
+        let descendant_ready = unique_test_path("descendant-ready");
+        let descendant_marker = unique_test_path("descendant-marker");
+        let _ = fs::remove_file(&descendant_ready);
+        let _ = fs::remove_file(&descendant_marker);
+        let ready_path = descendant_ready.to_string_lossy().replace('\'', "''");
+        let marker_path = descendant_marker.to_string_lossy().replace('\'', "''");
+        let script = format!(
+            "$descendant = Start-Process -FilePath powershell.exe -ArgumentList '-NoLogo','-NoProfile','-NonInteractive','-Command','Start-Sleep -Seconds 3; Set-Content -LiteralPath ''{marker_path}'' -Value escaped' -PassThru; Set-Content -LiteralPath '{ready_path}' -Value $descendant.Id"
+        );
+        let (child, containment) = launch_contained_process(
+            Path::new("powershell.exe"),
+            &[
+                "-NoLogo",
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                &script,
+            ],
+        )
+        .unwrap();
+        assert!(
+            wait_for_path(&descendant_ready, Duration::from_secs(3)),
+            "the direct worker must launch its descendant before exiting"
+        );
+        let exited_at = Instant::now();
+        while child.try_wait().unwrap().is_none() {
+            assert!(
+                exited_at.elapsed() < Duration::from_secs(3),
+                "the direct worker did not exit within the test bound"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        let pipe_suffix = format!(
+            "runtime-exited-parent-{}-{}",
+            std::process::id(),
+            TEST_PATH_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        );
+        let server = PipeServer::bind(&pipe_suffix).unwrap();
+        let name = server.name().to_string();
+        let peer = std::thread::spawn(move || {
+            let _pipe = PipeStream::connect(&name).unwrap();
+            std::thread::sleep(Duration::from_secs(5));
+        });
+        let pipe = server.accept_timeout(Duration::from_secs(1)).unwrap();
+        let mut supervisor = WorkerSupervisor {
+            child: Some(child),
+            containment: Some(containment),
+            pipe,
+            worker_id: "worker".into(),
+            channel_id: "channel".into(),
+            last_sequence: 1,
+            ready: WorkerEventEnvelope {
+                version: PROTOCOL_VERSION,
+                worker_id: "worker".into(),
+                channel_id: "channel".into(),
+                sequence: 1,
+                event: WorkerEvent::Ready { graph_revision: 1 },
+            },
+        };
+
+        assert!(matches!(
+            supervisor.ensure_running(),
+            Err(SupervisorError::ProcessExit(Some(_)))
+        ));
+        assert!(supervisor.child.is_none());
+        supervisor.force_terminate().unwrap();
+        assert!(supervisor.containment.is_none());
+        std::thread::sleep(Duration::from_secs(4));
+        assert!(
+            !descendant_marker.exists(),
+            "force_terminate must close the job even after the direct worker exits"
+        );
+
+        drop(supervisor);
+        peer.join().unwrap();
+        let _ = fs::remove_file(descendant_ready);
+        let _ = fs::remove_file(descendant_marker);
     }
 }

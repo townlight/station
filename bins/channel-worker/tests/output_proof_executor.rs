@@ -12,13 +12,29 @@ use station_schedule::{
     AssetReadiness, ChannelConfiguration, MediaAsset, OutputProfileId, OutputSinkConfiguration,
     ScheduleItem, ScheduleState,
 };
-use station_storage::{OutputLoudnessProofJob, OutputLoudnessProofJobState, StationStore};
+use station_storage::{
+    OutputLoudnessProofJob, OutputLoudnessProofJobState, ScheduleItemWrite, StationStore,
+};
 
 const CHANNEL_ID: &str = "11111111-2222-4333-8444-555555555555";
 const SINK_ID: &str = "22222222-3333-4444-8555-666666666666";
 const JOB_ID: &str = "33333333-4444-4555-8666-777777777777";
 const ITEM_ID: &str = "44444444-5555-4666-8777-888888888888";
 const SOURCE_COMMIT: &str = "0123456789abcdef0123456789abcdef01234567";
+
+trait ScheduleStoreTestExt {
+    fn put_schedule_item(&self, item: &ScheduleItem) -> Result<(), String>;
+}
+
+impl ScheduleStoreTestExt for StationStore {
+    fn put_schedule_item(&self, item: &ScheduleItem) -> Result<(), String> {
+        self.write_schedule_item(&ScheduleItemWrite {
+            item: item.clone(),
+            changed_by: "output-proof-test".into(),
+            occurred_at_unix_ms: 1,
+        })
+    }
+}
 
 struct TestCandidateAuthority;
 
@@ -83,6 +99,7 @@ fn controller_executes_a_durable_proof_job_through_atomic_completion() {
     store
         .put_schedule_item(&ScheduleItem {
             item_id: ITEM_ID.into(),
+            revision: 1,
             channel_id: CHANNEL_ID.into(),
             asset_id: ingested.asset_id,
             title: "Audible proof program".into(),

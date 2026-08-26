@@ -63,9 +63,8 @@ This crate does not provide or infer:
   capability;
 - S22 metadata schema identity/revision, asset-record revision, projected
   facets, or their provenance digest;
-- issuance of an authenticated S19 receipt for the storage-owned transactional
-  catalog/media/S22 candidate snapshot;
-- as-run history, prior-airing evidence, receipt issuance or verification;
+- direct issuance of authenticated S19 receipts (that belongs to the
+  stationd-owned API authority);
 - saved-search resolution, schedule materialization, or schedule writes;
 - an API, UI, or operator authentication; or
 - installer, installed-machine, live-station, or field evidence.
@@ -73,5 +72,12 @@ This crate does not provide or infer:
 Catalog publication state must not be inferred from a filename, directory,
 ingest completion time, or an untrusted client payload. The storage snapshot
 adapter consumes this authority and binds the exact catalog revision plus media
-and S22 source revisions; a later stationd-owned adapter must authenticate that
-snapshot before S19 materialization may consume it.
+and S22 source revisions. `snapshot_catalog_candidates` is intentionally an
+unauthenticated/testing/diagnostic storage projection. Production materialization
+must use `snapshot_materialization_evidence`, which composes this catalog source
+with the exact recurring-rule authorities and bounded worker-confirmed prior-airing
+facts in one SQLite read snapshot. The server-only station API adapter then uses
+the stationd-owned boot authority to issue distinct candidate and prior-airing
+receipts for that exact S19 scope. This closes the catalog/editorial contribution
+to authenticated materialization evidence; it does not itself materialize or write
+the schedule.

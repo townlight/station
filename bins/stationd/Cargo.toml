@@ -13,6 +13,7 @@ station-maintenance.workspace = true
 station-orchestration.workspace = true
 station-readiness.workspace = true
 station-feed-fetch.workspace = true
+station-source-evidence.workspace = true
 station-storage.workspace = true
 station-update-coordinator.workspace = true
 windows-service.workspace = true

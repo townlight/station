@@ -82,8 +82,18 @@ pub use schedule_automation_authority::{
 };
 mod catalog_authority;
 pub use catalog_authority::{CatalogAssetHistoryEntry, CatalogAssetPage, CatalogAssetWriteError};
+mod actual_airing_authority;
+pub use actual_airing_authority::{
+    ActualAiringFact, ActualAiringObservation, ActualAiringReadError, ActualAiringWriteError,
+    ActualAiringWriteOutcome, MAX_ACTUAL_AIRING_FUTURE_SKEW_MS, MAX_ACTUAL_AIRING_QUERY,
+    MAX_ACTUAL_AIRING_QUERY_WINDOW_MS, MAX_ACTUAL_AIRING_RECEIVE_DELAY_MS, MAX_ACTUAL_AIRINGS,
+    ScheduledTakeAcknowledgement, ScheduledTakeAcknowledgementBinding, ScheduledTakeApplyError,
+    ScheduledTakeApplyOutcome,
+};
 mod catalog_candidate_projection;
 pub use catalog_candidate_projection::CatalogCandidateProjection;
+mod materialization_evidence;
+pub use materialization_evidence::MaterializationEvidenceSnapshot;
 
 const SQLITE_OK: c_int = 0;
 const SQLITE_ROW: c_int = 100;
@@ -102,6 +112,15 @@ const MAX_CUSTOM_METADATA_SCHEMAS: usize = 64;
 const MAX_CUSTOM_METADATA_RECORDS_PER_ASSET: usize = 128;
 const MAX_CUSTOM_METADATA_HISTORY: usize = 128;
 static CG_IMAGE_TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(1);
+
+struct LegacyCommitReportRevisionBinding {
+    report_id: String,
+    channel_id: String,
+    schedule_item_id: String,
+    asset_id: String,
+    approved_by: String,
+    approved_at_unix_ms: i64,
+}
 
 #[repr(C)]
 struct Sqlite3 {
@@ -162,6 +181,7 @@ unsafe extern "C" {
     fn sqlite3_column_int64(statement: *mut SqliteStatement, column: c_int) -> c_longlong;
     fn sqlite3_finalize(statement: *mut SqliteStatement) -> c_int;
     fn sqlite3_errmsg(database: *mut Sqlite3) -> *const c_char;
+    fn sqlite3_get_autocommit(database: *mut Sqlite3) -> c_int;
 }
 
 #[repr(C)]
@@ -1086,6 +1106,7 @@ impl StationStore {
                plan_id TEXT NOT NULL,\
                channel_id TEXT NOT NULL,\
                schedule_item_id TEXT NOT NULL,\
+               schedule_item_revision INTEGER NOT NULL CHECK (schedule_item_revision >= 1),\
                asset_id TEXT NOT NULL,\
                approved_by TEXT NOT NULL,\
                approved_at_unix_ms INTEGER NOT NULL,\
@@ -1148,6 +1169,7 @@ impl StationStore {
         store.migrate_ingest_transcode_status()?;
         store.migrate_commit_report_statuses()?;
         store.migrate_schedule_item_revision()?;
+        store.migrate_commit_report_schedule_item_revision()?;
         store.initialize_schedule_item_history_schema()?;
         store.initialize_commissioning_support_bundle_schema()?;
         store.migrate_channel_runtime_live_state()?;
@@ -1171,6 +1193,7 @@ impl StationStore {
         store.initialize_custom_metadata_schema()?;
         store.initialize_schedule_automation_schema()?;
         store.initialize_catalog_authority_schema()?;
+        store.initialize_actual_airing_authority_schema()?;
         store.initialize_scheduled_recording_schema()?;
         store.migrate_caption_egress_history_sink_foreign_keys()?;
         store.migrate_cg_feed_cache_schema()?;
@@ -11904,11 +11927,15 @@ impl StationStore {
                 .read_schedule_item(item_id)
                 .map_err(CommitWriteError::Storage)?
                 .ok_or(CommitWriteError::NotFound)?;
+            let schedule_item_revision = item.revision.checked_add(1).ok_or_else(|| {
+                CommitWriteError::Storage("schedule item revision overflow".into())
+            })?;
             let report = CommitReport {
                 report_id: report_id.to_string(),
                 plan_id: plan_id.to_string(),
                 channel_id: item.channel_id.clone(),
                 schedule_item_id: item.item_id.clone(),
+                schedule_item_revision,
                 asset_id: item.asset_id.clone(),
                 approved_by: approved_by.to_string(),
                 approved_at_unix_ms,
@@ -11917,11 +11944,8 @@ impl StationStore {
             };
             self.insert_commit_report(&report)
                 .map_err(CommitWriteError::Storage)?;
-            let schedule_revision = item.revision.checked_add(1).ok_or_else(|| {
-                CommitWriteError::Storage("schedule item revision overflow".into())
-            })?;
             let committed_item = ScheduleItem {
-                revision: schedule_revision,
+                revision: schedule_item_revision,
                 state: ScheduleState::Committed,
                 ..item
             };
@@ -11950,8 +11974,9 @@ impl StationStore {
 
     pub fn read_commit_report(&self, report_id: &str) -> Result<Option<CommitReport>, String> {
         let statement = self.prepare(
-            "SELECT report_id, plan_id, channel_id, schedule_item_id, asset_id, approved_by, \
-             approved_at_unix_ms, dispatch_status, operator_notes FROM commit_reports WHERE report_id=?1",
+            "SELECT report_id, plan_id, channel_id, schedule_item_id, schedule_item_revision, \
+             asset_id, approved_by, approved_at_unix_ms, dispatch_status, operator_notes \
+             FROM commit_reports WHERE report_id=?1",
         )?;
         let report_id = c_string(report_id, "commit report identity")?;
         bind_text(self.database, statement.raw, 1, &report_id)?;
@@ -11964,8 +11989,8 @@ impl StationStore {
 
     pub fn list_commit_reports(&self, channel_id: &str) -> Result<Vec<CommitReport>, String> {
         let statement = self.prepare(
-            "SELECT report_id, plan_id, channel_id, schedule_item_id, asset_id, approved_by, \
-             approved_at_unix_ms, dispatch_status, operator_notes FROM commit_reports \
+            "SELECT report_id, plan_id, channel_id, schedule_item_id, schedule_item_revision, \
+             asset_id, approved_by, approved_at_unix_ms, dispatch_status, operator_notes FROM commit_reports \
              WHERE channel_id=?1 ORDER BY approved_at_unix_ms, report_id",
         )?;
         let channel_id = c_string(channel_id, "channel identity")?;
@@ -12252,8 +12277,8 @@ impl StationStore {
 
     pub fn list_dispatch_jobs(&self, channel_id: &str) -> Result<Vec<DispatchJob>, String> {
         let statement = self.prepare(
-            "SELECT r.report_id, r.plan_id, r.channel_id, r.schedule_item_id, r.asset_id, r.approved_by, \
-             r.approved_at_unix_ms, r.dispatch_status, r.operator_notes, \
+            "SELECT r.report_id, r.plan_id, r.channel_id, r.schedule_item_id, r.schedule_item_revision, \
+             r.asset_id, r.approved_by, r.approved_at_unix_ms, r.dispatch_status, r.operator_notes, \
              s.item_id, s.revision, s.channel_id, s.asset_id, s.title, s.starts_at_unix_ms, s.duration_ms, s.state, \
              a.asset_id, a.media_path, a.duration_ms, a.readiness \
              FROM commit_reports r JOIN schedule_items s ON s.item_id=r.schedule_item_id \
@@ -12266,25 +12291,35 @@ impl StationStore {
         let mut jobs = Vec::new();
         loop {
             match unsafe { sqlite3_step(statement.raw) } {
-                SQLITE_ROW => jobs.push(DispatchJob {
-                    report: read_commit_report_row(statement.raw)?,
-                    item: ScheduleItem {
-                        item_id: column_text(statement.raw, 9)?,
-                        revision: column_u64(statement.raw, 10, "schedule item revision")?,
-                        channel_id: column_text(statement.raw, 11)?,
-                        asset_id: column_text(statement.raw, 12)?,
-                        title: column_text(statement.raw, 13)?,
-                        starts_at_unix_ms: unsafe { sqlite3_column_int64(statement.raw, 14) },
-                        duration_ms: column_u64(statement.raw, 15, "schedule duration")?,
-                        state: parse_schedule_state(&column_text(statement.raw, 16)?)?,
-                    },
-                    asset: MediaAsset {
-                        asset_id: column_text(statement.raw, 17)?,
-                        media_path: column_text(statement.raw, 18)?,
-                        duration_ms: column_u64(statement.raw, 19, "asset duration")?,
-                        readiness: parse_readiness(&column_text(statement.raw, 20)?)?,
-                    },
-                }),
+                SQLITE_ROW => {
+                    let report = read_commit_report_row(statement.raw)?;
+                    let item = ScheduleItem {
+                        item_id: column_text(statement.raw, 10)?,
+                        revision: column_u64(statement.raw, 11, "schedule item revision")?,
+                        channel_id: column_text(statement.raw, 12)?,
+                        asset_id: column_text(statement.raw, 13)?,
+                        title: column_text(statement.raw, 14)?,
+                        starts_at_unix_ms: unsafe { sqlite3_column_int64(statement.raw, 15) },
+                        duration_ms: column_u64(statement.raw, 16, "schedule duration")?,
+                        state: parse_schedule_state(&column_text(statement.raw, 17)?)?,
+                    };
+                    if report.schedule_item_revision != item.revision {
+                        return Err(format!(
+                            "commit report {} is bound to stale schedule item revision {} instead of {}",
+                            report.report_id, report.schedule_item_revision, item.revision
+                        ));
+                    }
+                    jobs.push(DispatchJob {
+                        report,
+                        item,
+                        asset: MediaAsset {
+                            asset_id: column_text(statement.raw, 18)?,
+                            media_path: column_text(statement.raw, 19)?,
+                            duration_ms: column_u64(statement.raw, 20, "asset duration")?,
+                            readiness: parse_readiness(&column_text(statement.raw, 21)?)?,
+                        },
+                    });
+                }
                 SQLITE_DONE => return Ok(jobs),
                 _ => return Err(sqlite_error(self.database)),
             }
@@ -12315,28 +12350,39 @@ impl StationStore {
 
     fn insert_commit_report(&self, report: &CommitReport) -> Result<(), String> {
         let statement = self.prepare(
-            "INSERT INTO commit_reports(report_id, plan_id, channel_id, schedule_item_id, asset_id, approved_by, \
-             approved_at_unix_ms, dispatch_status, operator_notes) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            "INSERT INTO commit_reports(report_id, plan_id, channel_id, schedule_item_id, schedule_item_revision, \
+             asset_id, approved_by, approved_at_unix_ms, dispatch_status, operator_notes) \
+             VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
         )?;
-        let values = [
-            c_string(&report.report_id, "report identity")?,
-            c_string(&report.plan_id, "plan identity")?,
-            c_string(&report.channel_id, "channel identity")?,
-            c_string(&report.schedule_item_id, "schedule item identity")?,
-            c_string(&report.asset_id, "asset identity")?,
-            c_string(&report.approved_by, "operator identity")?,
-            c_string(
-                dispatch_status_name(report.dispatch_status),
-                "dispatch status",
+        let report_id = c_string(&report.report_id, "report identity")?;
+        let plan_id = c_string(&report.plan_id, "plan identity")?;
+        let channel_id = c_string(&report.channel_id, "channel identity")?;
+        let schedule_item_id = c_string(&report.schedule_item_id, "schedule item identity")?;
+        let asset_id = c_string(&report.asset_id, "asset identity")?;
+        let approved_by = c_string(&report.approved_by, "operator identity")?;
+        let dispatch_status = c_string(
+            dispatch_status_name(report.dispatch_status),
+            "dispatch status",
+        )?;
+        let operator_notes = c_string(&report.operator_notes, "operator notes")?;
+        bind_text(self.database, statement.raw, 1, &report_id)?;
+        bind_text(self.database, statement.raw, 2, &plan_id)?;
+        bind_text(self.database, statement.raw, 3, &channel_id)?;
+        bind_text(self.database, statement.raw, 4, &schedule_item_id)?;
+        bind_i64(
+            self.database,
+            statement.raw,
+            5,
+            checked_i64(
+                report.schedule_item_revision,
+                "commit report schedule item revision",
             )?,
-            c_string(&report.operator_notes, "operator notes")?,
-        ];
-        for (index, value) in values[..6].iter().enumerate() {
-            bind_text(self.database, statement.raw, (index + 1) as c_int, value)?;
-        }
-        bind_i64(self.database, statement.raw, 7, report.approved_at_unix_ms)?;
-        bind_text(self.database, statement.raw, 8, &values[6])?;
-        bind_text(self.database, statement.raw, 9, &values[7])?;
+        )?;
+        bind_text(self.database, statement.raw, 6, &asset_id)?;
+        bind_text(self.database, statement.raw, 7, &approved_by)?;
+        bind_i64(self.database, statement.raw, 8, report.approved_at_unix_ms)?;
+        bind_text(self.database, statement.raw, 9, &dispatch_status)?;
+        bind_text(self.database, statement.raw, 10, &operator_notes)?;
         expect_done(self.database, statement.raw)
     }
 
@@ -12854,7 +12900,17 @@ impl StationStore {
         if definition.contains("'missed'") {
             return Ok(());
         }
-        self.execute(
+        // Keep child foreign keys aimed at the replacement `commit_reports`
+        // table while the legacy parent is renamed. Modern SQLite otherwise
+        // rewrites them to `commit_reports_legacy`, which makes dropping the
+        // copied parent corrupt or fail an upgrade with existing receipts.
+        // SQLite rewrites child-table REFERENCES clauses during a parent
+        // rename whenever foreign-key enforcement is enabled, even with
+        // `legacy_alter_table`. Disable enforcement only for this bounded
+        // schema transaction, then re-enable it and prove the rebuilt graph.
+        self.execute("PRAGMA foreign_keys=OFF")?;
+        self.execute("PRAGMA legacy_alter_table=ON")?;
+        let migration = self.execute(
             "BEGIN IMMEDIATE;\
              DROP INDEX IF EXISTS commit_reports_channel_time;\
              ALTER TABLE commit_reports RENAME TO commit_reports_legacy;\
@@ -12873,10 +12929,29 @@ impl StationStore {
              DROP TABLE commit_reports_legacy;\
              CREATE INDEX commit_reports_channel_time ON commit_reports(channel_id, approved_at_unix_ms);\
              COMMIT;",
-        )
-        .inspect_err(|_| {
+        );
+        if migration.is_err() {
             let _ = self.execute("ROLLBACK");
-        })
+        }
+        let legacy_reset = self.execute("PRAGMA legacy_alter_table=OFF");
+        let foreign_key_reset = self.execute("PRAGMA foreign_keys=ON");
+        migration.and(legacy_reset).and(foreign_key_reset)?;
+
+        let statement = self.prepare("PRAGMA foreign_keys")?;
+        let enforcement_enabled = match unsafe { sqlite3_step(statement.raw) } {
+            SQLITE_ROW => (unsafe { sqlite3_column_int64(statement.raw, 0) }) == 1,
+            _ => return Err(sqlite_error(self.database)),
+        };
+        drop(statement);
+        if !enforcement_enabled {
+            return Err("commit report migration did not restore foreign-key enforcement".into());
+        }
+        let statement = self.prepare("PRAGMA foreign_key_check")?;
+        match unsafe { sqlite3_step(statement.raw) } {
+            SQLITE_DONE => Ok(()),
+            SQLITE_ROW => Err("commit report migration produced a foreign-key violation".into()),
+            _ => Err(sqlite_error(self.database)),
+        }
     }
 
     fn migrate_schedule_item_revision(&self) -> Result<(), String> {
@@ -12894,6 +12969,189 @@ impl StationStore {
             )?;
         }
         Ok(())
+    }
+
+    fn migrate_commit_report_schedule_item_revision(&self) -> Result<(), String> {
+        let statement = self.prepare(
+            "SELECT COUNT(*) FROM pragma_table_info('commit_reports') \
+             WHERE name='schedule_item_revision'",
+        )?;
+        let has_revision = match unsafe { sqlite3_step(statement.raw) } {
+            SQLITE_ROW => (unsafe { sqlite3_column_int64(statement.raw, 0) }) == 1,
+            _ => return Err(sqlite_error(self.database)),
+        };
+        drop(statement);
+        if has_revision {
+            return Ok(());
+        }
+
+        self.execute("BEGIN IMMEDIATE")?;
+        let outcome = (|| {
+            let history_exists = self.table_exists("schedule_item_history")?;
+            let reports = self.read_legacy_commit_report_revision_bindings()?;
+            let mut resolved_revisions = Vec::with_capacity(reports.len());
+            for report in reports {
+                let current = self
+                    .read_schedule_item_for_legacy_commit_report_migration(
+                        &report.schedule_item_id,
+                    )?
+                    .ok_or_else(|| {
+                        format!(
+                            "cannot migrate commit reports: report {} schedule binding is missing",
+                            report.report_id
+                        )
+                    })?;
+
+                let historical_matches = if history_exists {
+                    self.read_schedule_item_history_for_legacy_commit_report_migration(
+                        &report.schedule_item_id,
+                    )?
+                    .into_iter()
+                    .filter(|entry| {
+                        entry.item.channel_id == report.channel_id
+                            && entry.item.asset_id == report.asset_id
+                            && entry.item.state == ScheduleState::Committed
+                            // A modern commit writes these two attributions in the
+                            // same transaction as its report.  Requiring both avoids
+                            // binding an old report to a later recommit by the same
+                            // channel and asset.
+                            && entry.changed_by == report.approved_by
+                            && entry.occurred_at_unix_ms == report.approved_at_unix_ms
+                    })
+                    .map(|entry| entry.item.revision)
+                    .collect::<Vec<_>>()
+                } else {
+                    Vec::new()
+                };
+
+                let revision = match historical_matches.as_slice() {
+                    [revision] => *revision,
+                    [] if current.revision == 1
+                        && current.channel_id == report.channel_id
+                        && current.asset_id == report.asset_id
+                        && current.state == ScheduleState::Committed =>
+                    {
+                        // No history means a revision-1 committed current row is the
+                        // sole possible version of this item.  It is the only safe
+                        // fallback for databases from before schedule history.
+                        1
+                    }
+                    [] => {
+                        return Err(format!(
+                            "cannot migrate commit reports: report {} has no exact committed schedule-history binding",
+                            report.report_id
+                        ));
+                    }
+                    _ => {
+                        return Err(format!(
+                            "cannot migrate commit reports: report {} has ambiguous committed schedule-history bindings",
+                            report.report_id
+                        ));
+                    }
+                };
+                resolved_revisions.push((report.report_id, revision));
+            }
+
+            self.execute(
+                "ALTER TABLE commit_reports ADD COLUMN \
+                 schedule_item_revision INTEGER NOT NULL DEFAULT 1 \
+                 CHECK (schedule_item_revision >= 1)",
+            )?;
+            for (report_id, revision) in resolved_revisions {
+                let statement = self.prepare(
+                    "UPDATE commit_reports SET schedule_item_revision=?1 WHERE report_id=?2",
+                )?;
+                bind_i64(
+                    self.database,
+                    statement.raw,
+                    1,
+                    checked_i64(revision, "legacy commit report schedule item revision")?,
+                )?;
+                let report_id = c_string(&report_id, "legacy commit report identity")?;
+                bind_text(self.database, statement.raw, 2, &report_id)?;
+                expect_done(self.database, statement.raw)?;
+                if self.changes() != 1 {
+                    return Err("legacy commit report disappeared during migration".into());
+                }
+            }
+            Ok(())
+        })();
+        self.finish_transaction(outcome)
+    }
+
+    fn table_exists(&self, table_name: &str) -> Result<bool, String> {
+        let statement =
+            self.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1 LIMIT 1")?;
+        let table_name = c_string(table_name, "SQLite table name")?;
+        bind_text(self.database, statement.raw, 1, &table_name)?;
+        match unsafe { sqlite3_step(statement.raw) } {
+            SQLITE_ROW => Ok(true),
+            SQLITE_DONE => Ok(false),
+            _ => Err(sqlite_error(self.database)),
+        }
+    }
+
+    fn read_legacy_commit_report_revision_bindings(
+        &self,
+    ) -> Result<Vec<LegacyCommitReportRevisionBinding>, String> {
+        let statement = self.prepare(
+            "SELECT report_id, channel_id, schedule_item_id, asset_id, approved_by, approved_at_unix_ms \
+             FROM commit_reports ORDER BY report_id",
+        )?;
+        let mut reports = Vec::new();
+        loop {
+            match unsafe { sqlite3_step(statement.raw) } {
+                SQLITE_ROW => reports.push(LegacyCommitReportRevisionBinding {
+                    report_id: column_text(statement.raw, 0)?,
+                    channel_id: column_text(statement.raw, 1)?,
+                    schedule_item_id: column_text(statement.raw, 2)?,
+                    asset_id: column_text(statement.raw, 3)?,
+                    approved_by: column_text(statement.raw, 4)?,
+                    approved_at_unix_ms: unsafe { sqlite3_column_int64(statement.raw, 5) },
+                }),
+                SQLITE_DONE => break,
+                _ => return Err(sqlite_error(self.database)),
+            }
+        }
+        Ok(reports)
+    }
+
+    fn read_schedule_item_for_legacy_commit_report_migration(
+        &self,
+        item_id: &str,
+    ) -> Result<Option<ScheduleItem>, String> {
+        let statement = self.prepare(
+            "SELECT item_id, revision, channel_id, asset_id, title, starts_at_unix_ms, duration_ms, state \
+             FROM schedule_items WHERE item_id=?1",
+        )?;
+        let item_id = c_string(item_id, "legacy commit report schedule item identity")?;
+        bind_text(self.database, statement.raw, 1, &item_id)?;
+        match unsafe { sqlite3_step(statement.raw) } {
+            SQLITE_ROW => Ok(Some(read_schedule_item_row(statement.raw)?)),
+            SQLITE_DONE => Ok(None),
+            _ => Err(sqlite_error(self.database)),
+        }
+    }
+
+    fn read_schedule_item_history_for_legacy_commit_report_migration(
+        &self,
+        item_id: &str,
+    ) -> Result<Vec<ScheduleItemHistoryEntry>, String> {
+        let statement = self.prepare(
+            "SELECT item_id, revision, record_json, changed_by, occurred_at_unix_ms \
+             FROM schedule_item_history WHERE item_id=?1 ORDER BY revision",
+        )?;
+        let item_id = c_string(item_id, "legacy schedule history item identity")?;
+        bind_text(self.database, statement.raw, 1, &item_id)?;
+        let mut history = Vec::new();
+        loop {
+            match unsafe { sqlite3_step(statement.raw) } {
+                SQLITE_ROW => history.push(read_schedule_item_history_row(statement.raw)?),
+                SQLITE_DONE => break,
+                _ => return Err(sqlite_error(self.database)),
+            }
+        }
+        Ok(history)
     }
 
     fn initialize_schedule_item_history_schema(&self) -> Result<(), String> {
@@ -14866,11 +15124,12 @@ fn read_commit_report_row(statement: *mut SqliteStatement) -> Result<CommitRepor
         plan_id: column_text(statement, 1)?,
         channel_id: column_text(statement, 2)?,
         schedule_item_id: column_text(statement, 3)?,
-        asset_id: column_text(statement, 4)?,
-        approved_by: column_text(statement, 5)?,
-        approved_at_unix_ms: unsafe { sqlite3_column_int64(statement, 6) },
-        dispatch_status: parse_dispatch_status(&column_text(statement, 7)?)?,
-        operator_notes: column_text(statement, 8)?,
+        schedule_item_revision: column_u64(statement, 4, "commit report schedule item revision")?,
+        asset_id: column_text(statement, 5)?,
+        approved_by: column_text(statement, 6)?,
+        approved_at_unix_ms: unsafe { sqlite3_column_int64(statement, 7) },
+        dispatch_status: parse_dispatch_status(&column_text(statement, 8)?)?,
+        operator_notes: column_text(statement, 9)?,
     })
 }
 
@@ -16452,6 +16711,40 @@ mod tests {
         let statement = store.prepare(sql).unwrap();
         assert_eq!(unsafe { sqlite3_step(statement.raw) }, SQLITE_ROW);
         unsafe { sqlite3_column_int64(statement.raw, 0) }
+    }
+
+    fn insert_schedule_history_for_legacy_migration(
+        store: &StationStore,
+        item: &ScheduleItem,
+        changed_by: &str,
+        occurred_at_unix_ms: i64,
+    ) {
+        let record_json = serde_json::to_string(item).unwrap();
+        let statement = store
+            .prepare(
+                "INSERT INTO schedule_item_history(item_id, revision, record_json, changed_by, occurred_at_unix_ms) \
+                 VALUES(?1, ?2, ?3, ?4, ?5)",
+            )
+            .unwrap();
+        let item_id = c_string(
+            &item.item_id,
+            "legacy schedule-history fixture item identity",
+        )
+        .unwrap();
+        let record_json = c_string(&record_json, "legacy schedule-history fixture record").unwrap();
+        let changed_by = c_string(changed_by, "legacy schedule-history fixture actor").unwrap();
+        bind_text(store.database, statement.raw, 1, &item_id).unwrap();
+        bind_i64(
+            store.database,
+            statement.raw,
+            2,
+            checked_i64(item.revision, "legacy schedule-history fixture revision").unwrap(),
+        )
+        .unwrap();
+        bind_text(store.database, statement.raw, 3, &record_json).unwrap();
+        bind_text(store.database, statement.raw, 4, &changed_by).unwrap();
+        bind_i64(store.database, statement.raw, 5, occurred_at_unix_ms).unwrap();
+        expect_done(store.database, statement.raw).unwrap();
     }
 
     fn create_legacy_schedule_items_database(database: &Path) {
@@ -18522,7 +18815,12 @@ mod tests {
                    approved_at_unix_ms INTEGER NOT NULL, dispatch_status TEXT NOT NULL CHECK \
                    (dispatch_status IN ('pending','queued','acknowledged','error','cancelled')),\
                    operator_notes TEXT NOT NULL);\
-                 INSERT INTO commit_reports VALUES('legacy','plan','channel','item','asset','operator',1,'acknowledged','kept');",
+                 INSERT INTO schedule_items(item_id, revision, channel_id, asset_id, title, starts_at_unix_ms, duration_ms, state) \
+                   VALUES('22222222-2222-4222-8222-222222222222',1,'11111111-1111-4111-8111-111111111111',\
+                     'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa','Legacy item',0,1000,'committed');\
+                 INSERT INTO commit_reports VALUES('legacy','plan','11111111-1111-4111-8111-111111111111',\
+                   '22222222-2222-4222-8222-222222222222',\
+                   'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa','operator',1,'acknowledged','kept');",
             )
             .unwrap();
         drop(store);
@@ -18530,6 +18828,7 @@ mod tests {
         let migrated = StationStore::open(&database).unwrap();
         let report = migrated.read_commit_report("legacy").unwrap().unwrap();
         assert_eq!(report.operator_notes, "kept");
+        assert_eq!(report.schedule_item_revision, 1);
         assert!(
             migrated
                 .advance_dispatch_status(
@@ -18576,6 +18875,263 @@ mod tests {
     }
 
     #[test]
+    fn fails_closed_migrating_legacy_commit_reports_with_invalid_schedule_bindings() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let database = std::env::temp_dir().join(format!(
+            "townlight-invalid-commit-report-migration-{nonce}.db"
+        ));
+        let store = StationStore::open(&database).unwrap();
+        store
+            .execute(
+                "DROP TABLE commissioning_support_bundle_receipts;\
+                 DROP TABLE commit_reports;\
+                 CREATE TABLE commit_reports (\
+                   report_id TEXT PRIMARY KEY, plan_id TEXT NOT NULL, channel_id TEXT NOT NULL,\
+                   schedule_item_id TEXT NOT NULL, asset_id TEXT NOT NULL, approved_by TEXT NOT NULL,\
+                   approved_at_unix_ms INTEGER NOT NULL, dispatch_status TEXT NOT NULL CHECK \
+                   (dispatch_status IN ('pending','queued','acknowledged','error','cancelled')),\
+                   operator_notes TEXT NOT NULL);\
+                 INSERT INTO schedule_items(item_id, revision, channel_id, asset_id, title, starts_at_unix_ms, duration_ms, state) \
+                   VALUES('22222222-2222-4222-8222-222222222222',1,'11111111-1111-4111-8111-111111111111',\
+                     'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa','Legacy item',0,1000,'committed');\
+                 INSERT INTO commit_reports VALUES('legacy-missing','plan','11111111-1111-4111-8111-111111111111',\
+                   '33333333-3333-4333-8333-333333333333',\
+                   'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa','operator',1,'pending','missing item');\
+                 INSERT INTO commit_reports VALUES('legacy-mismatched','plan','44444444-4444-4444-8444-444444444444',\
+                   '22222222-2222-4222-8222-222222222222',\
+                   'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa','operator',2,'pending','mismatched channel');",
+            )
+            .unwrap();
+        drop(store);
+
+        let error = match StationStore::open(&database) {
+            Ok(_) => panic!("legacy commit-report migration accepted invalid schedule bindings"),
+            Err(error) => error,
+        };
+        assert!(
+            error.starts_with("cannot migrate commit reports: report legacy-")
+                && (error.contains("schedule binding is missing")
+                    || error.contains("no exact committed schedule-history binding")),
+            "unexpected migration error: {error}"
+        );
+
+        for candidate in [
+            database.clone(),
+            PathBuf::from(format!("{}-wal", database.display())),
+            PathBuf::from(format!("{}-shm", database.display())),
+        ] {
+            let _ = std::fs::remove_file(candidate);
+        }
+    }
+
+    #[test]
+    fn legacy_commit_report_migration_binds_the_exact_historical_commit_after_recommit() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let database = std::env::temp_dir().join(format!(
+            "townlight-historical-commit-report-migration-{nonce}.db"
+        ));
+        let store = StationStore::open(&database).unwrap();
+        store
+            .execute(
+                "DROP TABLE commissioning_support_bundle_receipts;\
+                 DROP TABLE commit_reports;\
+                 CREATE TABLE commit_reports (\
+                   report_id TEXT PRIMARY KEY, plan_id TEXT NOT NULL, channel_id TEXT NOT NULL,\
+                   schedule_item_id TEXT NOT NULL, asset_id TEXT NOT NULL, approved_by TEXT NOT NULL,\
+                   approved_at_unix_ms INTEGER NOT NULL, dispatch_status TEXT NOT NULL CHECK \
+                   (dispatch_status IN ('pending','queued','acknowledged','error','cancelled')),\
+                   operator_notes TEXT NOT NULL);\
+                 INSERT INTO schedule_items(item_id, revision, channel_id, asset_id, title, starts_at_unix_ms, duration_ms, state) \
+                   VALUES('22222222-2222-4222-8222-222222222222',4,'11111111-1111-4111-8111-111111111111',\
+                     'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa','Recommitted item',0,1000,'committed');\
+                 INSERT INTO commit_reports VALUES('legacy-first-commit','plan','11111111-1111-4111-8111-111111111111',\
+                   '22222222-2222-4222-8222-222222222222',\
+                   'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa','operator-one',100,'acknowledged','first commit');",
+            )
+            .unwrap();
+        let initial = ScheduleItem {
+            item_id: "22222222-2222-4222-8222-222222222222".into(),
+            revision: 1,
+            channel_id: "11111111-1111-4111-8111-111111111111".into(),
+            asset_id: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+            title: "Recommitted item".into(),
+            starts_at_unix_ms: 0,
+            duration_ms: 1_000,
+            state: ScheduleState::Draft,
+        };
+        let first_commit = ScheduleItem {
+            revision: 2,
+            state: ScheduleState::Committed,
+            ..initial.clone()
+        };
+        let revised_draft = ScheduleItem {
+            revision: 3,
+            state: ScheduleState::Draft,
+            ..initial.clone()
+        };
+        let second_commit = ScheduleItem {
+            revision: 4,
+            state: ScheduleState::Committed,
+            ..initial.clone()
+        };
+        insert_schedule_history_for_legacy_migration(&store, &initial, "editor", 50);
+        insert_schedule_history_for_legacy_migration(&store, &first_commit, "operator-one", 100);
+        insert_schedule_history_for_legacy_migration(&store, &revised_draft, "editor", 150);
+        insert_schedule_history_for_legacy_migration(&store, &second_commit, "operator-two", 200);
+        drop(store);
+
+        let migrated = StationStore::open(&database).unwrap();
+        assert_eq!(
+            migrated
+                .read_commit_report("legacy-first-commit")
+                .unwrap()
+                .unwrap()
+                .schedule_item_revision,
+            2
+        );
+        drop(migrated);
+        for candidate in [
+            database.clone(),
+            PathBuf::from(format!("{}-wal", database.display())),
+            PathBuf::from(format!("{}-shm", database.display())),
+        ] {
+            let _ = std::fs::remove_file(candidate);
+        }
+    }
+
+    #[test]
+    fn legacy_commit_report_migration_rejects_ambiguous_historical_bindings() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let database = std::env::temp_dir().join(format!(
+            "townlight-ambiguous-commit-report-migration-{nonce}.db"
+        ));
+        let store = StationStore::open(&database).unwrap();
+        store
+            .execute(
+                "DROP TABLE commissioning_support_bundle_receipts;\
+                 DROP TABLE commit_reports;\
+                 CREATE TABLE commit_reports (\
+                   report_id TEXT PRIMARY KEY, plan_id TEXT NOT NULL, channel_id TEXT NOT NULL,\
+                   schedule_item_id TEXT NOT NULL, asset_id TEXT NOT NULL, approved_by TEXT NOT NULL,\
+                   approved_at_unix_ms INTEGER NOT NULL, dispatch_status TEXT NOT NULL CHECK \
+                   (dispatch_status IN ('pending','queued','acknowledged','error','cancelled')),\
+                   operator_notes TEXT NOT NULL);\
+                 INSERT INTO schedule_items(item_id, revision, channel_id, asset_id, title, starts_at_unix_ms, duration_ms, state) \
+                   VALUES('22222222-2222-4222-8222-222222222222',3,'11111111-1111-4111-8111-111111111111',\
+                     'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa','Ambiguous item',0,1000,'committed');\
+                 INSERT INTO commit_reports VALUES('legacy-ambiguous','plan','11111111-1111-4111-8111-111111111111',\
+                   '22222222-2222-4222-8222-222222222222',\
+                   'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa','operator',100,'pending','ambiguous');",
+            )
+            .unwrap();
+        let initial = ScheduleItem {
+            item_id: "22222222-2222-4222-8222-222222222222".into(),
+            revision: 1,
+            channel_id: "11111111-1111-4111-8111-111111111111".into(),
+            asset_id: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+            title: "Ambiguous item".into(),
+            starts_at_unix_ms: 0,
+            duration_ms: 1_000,
+            state: ScheduleState::Draft,
+        };
+        let first_commit = ScheduleItem {
+            revision: 2,
+            state: ScheduleState::Committed,
+            ..initial.clone()
+        };
+        let second_commit = ScheduleItem {
+            revision: 3,
+            state: ScheduleState::Committed,
+            ..initial.clone()
+        };
+        insert_schedule_history_for_legacy_migration(&store, &initial, "editor", 50);
+        insert_schedule_history_for_legacy_migration(&store, &first_commit, "operator", 100);
+        insert_schedule_history_for_legacy_migration(&store, &second_commit, "operator", 100);
+        drop(store);
+
+        let error = match StationStore::open(&database) {
+            Ok(_) => panic!("legacy commit-report migration accepted ambiguous history"),
+            Err(error) => error,
+        };
+        assert!(error.contains(
+            "cannot migrate commit reports: report legacy-ambiguous has ambiguous committed schedule-history bindings"
+        ));
+        for candidate in [
+            database.clone(),
+            PathBuf::from(format!("{}-wal", database.display())),
+            PathBuf::from(format!("{}-shm", database.display())),
+        ] {
+            let _ = std::fs::remove_file(candidate);
+        }
+    }
+
+    #[test]
+    fn legacy_commit_report_migration_rejects_missing_historical_binding_after_revision_one() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let database = std::env::temp_dir().join(format!(
+            "townlight-missing-history-commit-report-migration-{nonce}.db"
+        ));
+        let store = StationStore::open(&database).unwrap();
+        store
+            .execute(
+                "DROP TABLE commissioning_support_bundle_receipts;\
+                 DROP TABLE commit_reports;\
+                 CREATE TABLE commit_reports (\
+                   report_id TEXT PRIMARY KEY, plan_id TEXT NOT NULL, channel_id TEXT NOT NULL,\
+                   schedule_item_id TEXT NOT NULL, asset_id TEXT NOT NULL, approved_by TEXT NOT NULL,\
+                   approved_at_unix_ms INTEGER NOT NULL, dispatch_status TEXT NOT NULL CHECK \
+                   (dispatch_status IN ('pending','queued','acknowledged','error','cancelled')),\
+                   operator_notes TEXT NOT NULL);\
+                 INSERT INTO schedule_items(item_id, revision, channel_id, asset_id, title, starts_at_unix_ms, duration_ms, state) \
+                   VALUES('22222222-2222-4222-8222-222222222222',2,'11111111-1111-4111-8111-111111111111',\
+                     'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa','Missing history item',0,1000,'committed');\
+                 INSERT INTO commit_reports VALUES('legacy-missing-history','plan','11111111-1111-4111-8111-111111111111',\
+                   '22222222-2222-4222-8222-222222222222',\
+                   'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa','operator',100,'pending','missing');",
+            )
+            .unwrap();
+        let initial = ScheduleItem {
+            item_id: "22222222-2222-4222-8222-222222222222".into(),
+            revision: 1,
+            channel_id: "11111111-1111-4111-8111-111111111111".into(),
+            asset_id: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+            title: "Missing history item".into(),
+            starts_at_unix_ms: 0,
+            duration_ms: 1_000,
+            state: ScheduleState::Draft,
+        };
+        insert_schedule_history_for_legacy_migration(&store, &initial, "editor", 50);
+        drop(store);
+
+        let error = match StationStore::open(&database) {
+            Ok(_) => panic!("legacy commit-report migration accepted missing history"),
+            Err(error) => error,
+        };
+        assert!(error.contains(
+            "cannot migrate commit reports: report legacy-missing-history has no exact committed schedule-history binding"
+        ));
+        for candidate in [
+            database.clone(),
+            PathBuf::from(format!("{}-wal", database.display())),
+            PathBuf::from(format!("{}-shm", database.display())),
+        ] {
+            let _ = std::fs::remove_file(candidate);
+        }
+    }
+
+    #[test]
     fn migrates_completed_dispatch_schema_to_missed_without_losing_rows() {
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -18594,8 +19150,18 @@ mod tests {
                    (dispatch_status IN ('pending','queued','acknowledged','completed','error','cancelled')),\
                    operator_notes TEXT NOT NULL);\
                  CREATE INDEX commit_reports_channel_time ON commit_reports(channel_id, approved_at_unix_ms);\
-                 INSERT INTO commit_reports VALUES('legacy-pending','plan','channel','item-p','asset','operator',1,'pending','kept pending');\
-                 INSERT INTO commit_reports VALUES('legacy-completed','plan','channel','item-c','asset','operator',2,'completed','kept completed');",
+                 INSERT INTO schedule_items(item_id, revision, channel_id, asset_id, title, starts_at_unix_ms, duration_ms, state) \
+                   VALUES('22222222-2222-4222-8222-222222222222',1,'11111111-1111-4111-8111-111111111111',\
+                     'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa','Legacy pending',0,1000,'committed');\
+                 INSERT INTO schedule_items(item_id, revision, channel_id, asset_id, title, starts_at_unix_ms, duration_ms, state) \
+                   VALUES('33333333-3333-4333-8333-333333333333',1,'11111111-1111-4111-8111-111111111111',\
+                     'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa','Legacy completed',1000,1000,'committed');\
+                 INSERT INTO commit_reports VALUES('legacy-pending','plan','11111111-1111-4111-8111-111111111111',\
+                   '22222222-2222-4222-8222-222222222222',\
+                   'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa','operator',1,'pending','kept pending');\
+                 INSERT INTO commit_reports VALUES('legacy-completed','plan','11111111-1111-4111-8111-111111111111',\
+                   '33333333-3333-4333-8333-333333333333',\
+                   'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa','operator',2,'completed','kept completed');",
             )
             .unwrap();
         drop(store);
@@ -18638,6 +19204,85 @@ mod tests {
             DispatchStatus::Completed
         );
         drop(reopened);
+        for candidate in [
+            database.clone(),
+            PathBuf::from(format!("{}-wal", database.display())),
+            PathBuf::from(format!("{}-shm", database.display())),
+        ] {
+            let _ = std::fs::remove_file(candidate);
+        }
+    }
+
+    #[test]
+    fn commit_report_status_migration_preserves_existing_support_receipt_foreign_keys() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let database =
+            std::env::temp_dir().join(format!("townlight-commit-report-fk-migration-{nonce}.db"));
+        let store = StationStore::open(&database).unwrap();
+        store
+            .execute(
+                "PRAGMA foreign_keys=OFF;
+                 DROP TABLE commit_reports;
+                 CREATE TABLE commit_reports (
+                   report_id TEXT PRIMARY KEY, plan_id TEXT NOT NULL, channel_id TEXT NOT NULL,
+                   schedule_item_id TEXT NOT NULL, asset_id TEXT NOT NULL, approved_by TEXT NOT NULL,
+                   approved_at_unix_ms INTEGER NOT NULL, dispatch_status TEXT NOT NULL CHECK
+                   (dispatch_status IN ('pending','queued','acknowledged','completed','error','cancelled')),
+                   operator_notes TEXT NOT NULL);
+                 INSERT INTO schedule_items(item_id, revision, channel_id, asset_id, title,
+                   starts_at_unix_ms, duration_ms, state)
+                   VALUES('22222222-2222-4222-8222-222222222222',1,
+                     '11111111-1111-4111-8111-111111111111',
+                     'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+                     'Legacy report item',0,1000,'committed');
+                 INSERT INTO commit_reports VALUES('legacy-fk-report','plan','11111111-1111-4111-8111-111111111111',
+                   '22222222-2222-4222-8222-222222222222',
+                   'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+                   'operator',1,'completed','kept');
+                 INSERT INTO commissioning_support_bundle_receipts VALUES(
+                   'support-bundle-before-migration','legacy-fk-report',
+                   'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',4096,2,'setup-admin');
+                 PRAGMA foreign_keys=ON;",
+            )
+            .unwrap();
+        drop(store);
+
+        let migrated = StationStore::open(&database).unwrap();
+        assert_eq!(
+            migrated
+                .read_commit_report("legacy-fk-report")
+                .unwrap()
+                .unwrap()
+                .schedule_item_revision,
+            1
+        );
+        let receipts = migrated
+            .list_commissioning_support_bundle_receipts(10)
+            .unwrap();
+        assert_eq!(receipts.len(), 1);
+        assert_eq!(receipts[0].bundle_id, "support-bundle-before-migration");
+        migrated
+            .append_commissioning_support_bundle_receipt(&CommissioningSupportBundleReceipt {
+                bundle_id: "support-bundle-after-migration".into(),
+                report_id: "legacy-fk-report".into(),
+                archive_sha256: "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+                    .into(),
+                archive_size_bytes: 4096,
+                created_at_unix_ms: 3,
+                created_by: "setup-admin".into(),
+            })
+            .unwrap();
+        assert_eq!(
+            migrated
+                .list_commissioning_support_bundle_receipts(10)
+                .unwrap()
+                .len(),
+            2
+        );
+        drop(migrated);
         for candidate in [
             database.clone(),
             PathBuf::from(format!("{}-wal", database.display())),
@@ -18805,7 +19450,7 @@ mod tests {
         store
             .execute(
                 "INSERT INTO commit_reports VALUES(\
-                   'report-guided','plan-guided','channel-guided','item-guided','asset-guided',\
+                   'report-guided','plan-guided','channel-guided','item-guided',1,'asset-guided',\
                    'operator',1,'completed','');\
                  INSERT INTO commissioning_support_bundle_receipts VALUES(\
                    'support-bundle-1','report-guided',\

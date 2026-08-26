@@ -14,6 +14,7 @@ use config::{DaemonConfig, LaunchMode};
 use station_api::{OrchestrationHealth, OrchestrationHealthStatus};
 use station_orchestration::CandidateAuthority;
 use station_readiness::CandidateIdentity;
+use station_source_evidence::StationSourceEvidenceAuthority;
 use station_storage::StationStore;
 use windows_service::define_windows_service;
 use windows_service::service::{
@@ -84,6 +85,8 @@ fn main() {
 fn run_console(config: DaemonConfig) -> Result<(), String> {
     let listener = bind(&config)?;
     initialize_database(&config.database)?;
+    let source_evidence_authority =
+        Arc::new(StationSourceEvidenceAuthority::new().map_err(|error| error.to_string())?);
     let worker_executable = worker_executable()?;
     let update_application = application_directory()?;
     let api_application = update_application.clone();
@@ -155,12 +158,13 @@ fn run_console(config: DaemonConfig) -> Result<(), String> {
         "TownLight Station is listening on http://{}",
         config.address
     );
-    let result = station_api::serve_until_with_application_directory_and_health(
+    let result = station_api::serve_until_with_application_directory_and_health_and_source_evidence_authority(
         listener,
         &config.database,
         api_application,
         Arc::clone(&stop),
         Arc::clone(&orchestration_health),
+        source_evidence_authority,
     );
     stop.store(true, Ordering::Release);
     let worker_cleanup = combine_worker_joins(vec![
@@ -250,6 +254,8 @@ fn run_service(config: DaemonConfig) -> Result<(), String> {
         }
     };
     initialize_database(&config.database)?;
+    let source_evidence_authority =
+        Arc::new(StationSourceEvidenceAuthority::new().map_err(|error| error.to_string())?);
     let worker_executable = worker_executable()?;
     let update_application = application_directory()?;
     let api_application = update_application.clone();
@@ -384,12 +390,13 @@ fn run_service(config: DaemonConfig) -> Result<(), String> {
         }
         return Err(append_cleanup_error(error.to_string(), cleanup.result));
     }
-    let result = station_api::serve_until_with_application_directory_and_health(
+    let result = station_api::serve_until_with_application_directory_and_health_and_source_evidence_authority(
         listener,
         &config.database,
         api_application,
         Arc::clone(&stop),
         Arc::clone(&orchestration_health),
+        source_evidence_authority,
     );
     stop.store(true, Ordering::Release);
     let worker_cleanup = combine_worker_joins(vec![
