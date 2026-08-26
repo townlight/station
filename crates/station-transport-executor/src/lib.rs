@@ -1211,6 +1211,33 @@ fn validate_tstables_json(output: &[u8], findings: &TransportFindings) -> Result
 mod tests {
     use super::*;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    struct RetainedFixtureRunner;
+
+    impl sealed::Process for RetainedFixtureRunner {}
+
+    impl ProcessRunner for RetainedFixtureRunner {
+        fn run(&self, _: &Path, argv: &[String], _: Duration) -> Result<ProcessResult, String> {
+            if argv.first().is_some_and(|arg| arg == "--json-output") {
+                let output = argv.get(1).ok_or("tables output argument is missing")?;
+                fs::write(
+                    output,
+                    include_bytes!("../tests/fixtures/tsduck-3.44-h264-aac-tables.json"),
+                )
+                .map_err(|_| "fixture tables output could not be written")?;
+                Ok(ProcessResult {
+                    status_success: true,
+                    output: Vec::new(),
+                })
+            } else {
+                Ok(ProcessResult {
+                    status_success: true,
+                    output: include_bytes!("../tests/fixtures/tsduck-3.44-h264-aac-analysis.txt")
+                        .to_vec(),
+                })
+            }
+        }
+    }
     fn root() -> PathBuf {
         let root = std::env::temp_dir().join(format!(
             "townlight-tsduck-executor-{}",
@@ -1342,6 +1369,37 @@ mod tests {
             &findings,
         )
         .unwrap();
+    }
+
+    #[test]
+    fn production_analyzer_path_writes_and_binds_the_retained_tables_artifact() {
+        let root = root();
+        let capture = root.join("capture.ts");
+        fs::write(
+            &capture,
+            include_bytes!("../tests/fixtures/tsduck-3.44-h264-aac.ts"),
+        )
+        .unwrap();
+        let executor = TsdDuckTransportExecutor {
+            runtime: runtime(&root),
+            runner: RetainedFixtureRunner,
+        };
+        let findings = executor
+            .analyze_capture(&CaptureRequest {
+                udp_host: "127.0.0.1".into(),
+                udp_port: 5000,
+                duration_ms: 2_000,
+                max_bytes: 100_000,
+                artifact_path: capture.clone(),
+            })
+            .unwrap();
+        assert_eq!(
+            findings.tables_output_sha256,
+            sha256(include_bytes!(
+                "../tests/fixtures/tsduck-3.44-h264-aac-tables.json"
+            ))
+        );
+        assert!(!capture.with_extension("tables.json").exists());
     }
 
     #[test]
