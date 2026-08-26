@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::ffi::OsString;
 use std::fs::{File, OpenOptions};
 use std::io::{ErrorKind, Read, Seek, SeekFrom, Write};
@@ -9,8 +10,9 @@ use std::os::windows::fs::OpenOptionsExt;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use station_media_protocol::{
-    MAX_FRAME_BYTES, OutputTransportObservation, ProtocolError, WorkerEvent, WorkerEventEnvelope,
-    decode_event_frame, decode_persisted_event_frame, encode_event_frame,
+    FallbackToneDeactivationReason, MAX_FRAME_BYTES, OutputTransportObservation, ProtocolError,
+    WorkerEvent, WorkerEventEnvelope, WorkerFallbackTone, decode_event_frame,
+    decode_persisted_event_frame, encode_event_frame,
 };
 
 const MAGIC: [u8; 4] = *b"TLJR";
@@ -21,6 +23,7 @@ const MAX_EVENT_FRAME_BYTES: usize = MAX_FRAME_BYTES + 4;
 const RECORD_KIND_EVENT: u16 = 0;
 const RECORD_KIND_HEARTBEAT_SUMMARY: u16 = 1;
 const RECORD_KIND_COMPACTION_COMMIT: u16 = 2;
+const RECORD_KIND_FALLBACK_TONE_AUDIT: u16 = 3;
 const COMPACT_AFTER_RAW_HEARTBEATS: usize = 512;
 const RETAIN_RAW_HEARTBEATS: usize = 256;
 const MAX_SUMMARY_OUTPUTS: usize = 64;
@@ -52,7 +55,26 @@ pub struct JournalInspection {
     pub channel_id: Option<String>,
     pub retained_events: Vec<WorkerEventEnvelope>,
     pub compacted_heartbeat_ranges: Vec<CompactedHeartbeatRange>,
+    pub fallback_tone_audit: Vec<FallbackToneJournalEntry>,
     pub next_sequence: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+pub enum FallbackToneJournalEntry {
+    Activated {
+        worker_id: String,
+        channel_id: String,
+        tone: WorkerFallbackTone,
+        activated_at_monotonic_ms: u64,
+    },
+    Deactivated {
+        worker_id: String,
+        channel_id: String,
+        tone: WorkerFallbackTone,
+        reason: FallbackToneDeactivationReason,
+        deactivated_at_monotonic_ms: u64,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -64,6 +86,7 @@ struct CompactionCommit {
 
 struct JournalSnapshot {
     events: Vec<WorkerEventEnvelope>,
+    fallback_tone_audit: Vec<FallbackToneJournalEntry>,
     heartbeat_summary: Option<HeartbeatSummary>,
     identity: Option<(String, String)>,
     next_sequence: u64,
@@ -92,6 +115,7 @@ pub enum JournalError {
         expected: u64,
         actual: u64,
     },
+    InvalidFallbackToneAudit(String),
     Protocol(ProtocolError),
 }
 
@@ -103,6 +127,7 @@ pub struct JournalWriter {
     channel_id: String,
     next_sequence: u64,
     raw_heartbeat_count: usize,
+    active_fallback_tones: HashMap<String, (WorkerFallbackTone, u64)>,
 }
 
 impl JournalWriter {
@@ -138,6 +163,8 @@ impl JournalWriter {
             channel_id: channel_id.to_string(),
             next_sequence: snapshot.next_sequence,
             raw_heartbeat_count: snapshot.raw_heartbeat_count,
+            active_fallback_tones: fallback_tone_audit_state(&snapshot.fallback_tone_audit)
+                .map_err(JournalError::InvalidFallbackToneAudit)?,
         })
     }
 
@@ -177,6 +204,58 @@ impl JournalWriter {
         Ok(())
     }
 
+    pub fn append_fallback_tone_audit(
+        &mut self,
+        entry: &FallbackToneJournalEntry,
+    ) -> Result<(), JournalError> {
+        let (worker_id, channel_id) = fallback_tone_audit_identity(entry);
+        if worker_id != self.worker_id || channel_id != self.channel_id {
+            return Err(JournalError::WrongIdentity);
+        }
+        let mut next_active = self.active_fallback_tones.clone();
+        apply_fallback_tone_audit_entry(entry, &mut next_active)
+            .map_err(JournalError::InvalidFallbackToneAudit)?;
+        let payload = serde_json::to_vec(entry)
+            .map_err(|error| JournalError::Io(format!("serialize fallback tone audit: {error}")))?;
+        let file = self.file.as_mut().ok_or_else(|| {
+            JournalError::Io("journal writer is unavailable after replacement failure".into())
+        })?;
+        write_record(file, RECORD_KIND_FALLBACK_TONE_AUDIT, &payload)?;
+        file.flush().map_err(io_error)?;
+        file.sync_data().map_err(io_error)?;
+        self.active_fallback_tones = next_active;
+        Ok(())
+    }
+
+    /// Reconciles a tone that was durably activated by a prior worker but did
+    /// not reach its deactivation record before that worker retired. A fresh
+    /// media graph starts silent, so this closes the durable state before the
+    /// replacement worker can report readiness. The prior worker's monotonic
+    /// clock is not comparable to the new process; using the activation mark
+    /// for the recovery record preserves the audit ordering without inventing
+    /// a cross-process timestamp.
+    pub fn recover_active_fallback_tones(
+        &mut self,
+    ) -> Result<Vec<(WorkerFallbackTone, u64)>, JournalError> {
+        let active = self
+            .active_fallback_tones
+            .values()
+            .map(|(tone, activated_at_monotonic_ms)| (tone.clone(), *activated_at_monotonic_ms))
+            .collect::<Vec<_>>();
+        let worker_id = self.worker_id.clone();
+        let channel_id = self.channel_id.clone();
+        for (tone, activated_at_monotonic_ms) in &active {
+            self.append_fallback_tone_audit(&FallbackToneJournalEntry::Deactivated {
+                worker_id: worker_id.clone(),
+                channel_id: channel_id.clone(),
+                tone: tone.clone(),
+                reason: FallbackToneDeactivationReason::Recovery,
+                deactivated_at_monotonic_ms: *activated_at_monotonic_ms,
+            })?;
+        }
+        Ok(active)
+    }
+
     fn compact_heartbeats(&mut self) -> Result<(), JournalError> {
         self.compact_heartbeats_with(replace_file)
     }
@@ -199,6 +278,7 @@ impl JournalWriter {
                 channel_id: self.channel_id.clone(),
                 ranges: Vec::new(),
             });
+        let fallback_tone_audit = snapshot.fallback_tone_audit.clone();
         let mut removed = 0_usize;
         let mut retained = Vec::with_capacity(snapshot.events.len() - remove_count);
         for event in snapshot.events {
@@ -236,6 +316,12 @@ impl JournalWriter {
         for event in &retained {
             let payload = encode_event_frame(event).map_err(JournalError::Protocol)?;
             write_record(&mut output, RECORD_KIND_EVENT, &payload)?;
+        }
+        for entry in &fallback_tone_audit {
+            let payload = serde_json::to_vec(entry).map_err(|error| {
+                corrupt(0, format!("could not encode fallback tone audit: {error}"))
+            })?;
+            write_record(&mut output, RECORD_KIND_FALLBACK_TONE_AUDIT, &payload)?;
         }
         let commit_payload = serde_json::to_vec(&CompactionCommit {
             worker_id: self.worker_id.clone(),
@@ -362,8 +448,102 @@ pub fn inspect_journal(path: impl AsRef<Path>) -> Result<JournalInspection, Jour
         compacted_heartbeat_ranges: snapshot
             .heartbeat_summary
             .map_or_else(Vec::new, |summary| summary.ranges),
+        fallback_tone_audit: snapshot.fallback_tone_audit,
         next_sequence: snapshot.next_sequence,
     })
+}
+
+fn fallback_tone_audit_state(
+    entries: &[FallbackToneJournalEntry],
+) -> Result<HashMap<String, (WorkerFallbackTone, u64)>, String> {
+    let mut active = HashMap::new();
+    for entry in entries {
+        apply_fallback_tone_audit_entry(entry, &mut active)?;
+    }
+    Ok(active)
+}
+
+fn apply_fallback_tone_audit_entry(
+    entry: &FallbackToneJournalEntry,
+    active: &mut HashMap<String, (WorkerFallbackTone, u64)>,
+) -> Result<(), String> {
+    match entry {
+        FallbackToneJournalEntry::Activated {
+            tone,
+            activated_at_monotonic_ms,
+            ..
+        } => {
+            tone.validate()?;
+            // The worker owns one physical fallback-tone renderer, represented
+            // by Option<ActiveFallbackTone>; durable replay must preserve that
+            // same single-active invariant.
+            if !active.is_empty() {
+                return Err("fallback tone audit activates while another tone is active".into());
+            }
+            if active.contains_key(&tone.activation_id) {
+                return Err("fallback tone audit activates an already-active identity".into());
+            }
+            active.insert(
+                tone.activation_id.clone(),
+                (tone.clone(), *activated_at_monotonic_ms),
+            );
+        }
+        FallbackToneJournalEntry::Deactivated {
+            tone,
+            reason,
+            deactivated_at_monotonic_ms,
+            ..
+        } => {
+            tone.validate()?;
+            let (activated, activated_at_monotonic_ms) =
+                active.get(&tone.activation_id).ok_or_else(|| {
+                    "fallback tone audit deactivates an inactive identity".to_string()
+                })?;
+            if activated != tone {
+                return Err("fallback tone audit deactivation tone differs from activation".into());
+            }
+            match reason {
+                FallbackToneDeactivationReason::Recovery
+                    if *deactivated_at_monotonic_ms != *activated_at_monotonic_ms =>
+                {
+                    return Err(
+                        "fallback tone recovery must preserve the prior activation mark".into(),
+                    );
+                }
+                _ if *deactivated_at_monotonic_ms < *activated_at_monotonic_ms => {
+                    return Err("fallback tone audit deactivation predates activation".into());
+                }
+                _ => {}
+            }
+            if matches!(reason, FallbackToneDeactivationReason::Expired) {
+                let expires_at_monotonic_ms = activated_at_monotonic_ms
+                    .checked_add(tone.duration_ms)
+                    .ok_or_else(|| "fallback tone audit activation expiry overflows".to_string())?;
+                if *deactivated_at_monotonic_ms < expires_at_monotonic_ms {
+                    return Err(
+                        "fallback tone audit expiry predates its configured duration".into(),
+                    );
+                }
+            }
+            active.remove(&tone.activation_id);
+        }
+    }
+    Ok(())
+}
+
+fn fallback_tone_audit_identity(entry: &FallbackToneJournalEntry) -> (String, String) {
+    match entry {
+        FallbackToneJournalEntry::Activated {
+            worker_id,
+            channel_id,
+            ..
+        }
+        | FallbackToneJournalEntry::Deactivated {
+            worker_id,
+            channel_id,
+            ..
+        } => (worker_id.clone(), channel_id.clone()),
+    }
 }
 
 fn read_snapshot(path: &Path) -> Result<JournalSnapshot, JournalError> {
@@ -372,6 +552,7 @@ fn read_snapshot(path: &Path) -> Result<JournalSnapshot, JournalError> {
         Err(error) if error.kind() == ErrorKind::NotFound => {
             return Ok(JournalSnapshot {
                 events: Vec::new(),
+                fallback_tone_audit: Vec::new(),
                 heartbeat_summary: None,
                 identity: None,
                 next_sequence: 1,
@@ -383,6 +564,7 @@ fn read_snapshot(path: &Path) -> Result<JournalSnapshot, JournalError> {
     };
     file.seek(SeekFrom::Start(0)).map_err(io_error)?;
     let mut events = Vec::new();
+    let mut fallback_tone_audit = Vec::new();
     let mut offset = 0_u64;
     let mut identity: Option<(String, String)> = None;
     let mut heartbeat_summary: Option<HeartbeatSummary> = None;
@@ -502,6 +684,21 @@ fn read_snapshot(path: &Path) -> Result<JournalSnapshot, JournalError> {
                 }
                 compaction_commit = Some((commit, events.len()));
             }
+            RECORD_KIND_FALLBACK_TONE_AUDIT if version == JOURNAL_VERSION => {
+                let entry: FallbackToneJournalEntry =
+                    serde_json::from_slice(&payload).map_err(|error| {
+                        corrupt(offset, format!("invalid fallback tone audit: {error}"))
+                    })?;
+                let audit_identity = fallback_tone_audit_identity(&entry);
+                match &identity {
+                    Some(expected) if expected != &audit_identity => {
+                        return Err(corrupt(offset, "worker or channel identity changed"));
+                    }
+                    None => identity = Some(audit_identity),
+                    _ => {}
+                }
+                fallback_tone_audit.push(entry);
+            }
             _ => {
                 return Err(corrupt(
                     offset,
@@ -531,8 +728,11 @@ fn read_snapshot(path: &Path) -> Result<JournalSnapshot, JournalError> {
         .iter()
         .filter(|event| matches!(event.event, WorkerEvent::Heartbeat { .. }))
         .count();
+    fallback_tone_audit_state(&fallback_tone_audit)
+        .map_err(|reason| corrupt(offset, format!("invalid fallback tone audit: {reason}")))?;
     Ok(JournalSnapshot {
         events,
+        fallback_tone_audit,
         heartbeat_summary,
         identity,
         next_sequence,

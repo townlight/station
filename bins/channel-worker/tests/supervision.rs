@@ -14,8 +14,11 @@ use station_captions::{
 };
 use station_domain::{AlertConditionKind, AlertEventState, ChannelRuntimeState};
 use station_live::{LiveEndpoint, LiveSource, TakeoverSession, TakeoverState};
-use station_media_journal::read_events;
-use station_media_protocol::{ChannelCommand, WorkerEvent};
+use station_media_journal::{FallbackToneJournalEntry, read_events};
+use station_media_protocol::{
+    ChannelCommand, FallbackToneDeactivationReason, FallbackToneKind, WorkerEvent,
+    WorkerFallbackTone,
+};
 use station_orchestration::{ChannelController, DispatchTransition, run_until};
 use station_runtime::WorkerSupervisor;
 use station_schedule::{
@@ -277,6 +280,216 @@ fn launches_handshakes_commands_and_cleanly_stops_the_real_worker() {
     );
     let _ = std::fs::remove_file(journal);
     remove_directory(&media_root);
+}
+
+#[test]
+fn supervisor_drains_autonomous_tone_expiry_before_the_next_command_and_replay_stays_aligned() {
+    let _guard = supervision_test_guard();
+    let journal = journal_path();
+    let output = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let executable = PathBuf::from(env!("CARGO_BIN_EXE_channel-worker"));
+    let mut supervisor = WorkerSupervisor::launch_with_output_profile(
+        &executable,
+        WORKER_ID,
+        CHANNEL_ID,
+        &journal,
+        output.local_addr().unwrap(),
+        OutputProfileId::Proof360p30,
+        Duration::from_secs(30),
+    )
+    .unwrap();
+    let tone = WorkerFallbackTone {
+        activation_id: "11111111-2222-4333-8444-555555555555".into(),
+        authority_revision: 9,
+        kind: FallbackToneKind::Test,
+        frequency_hz: 1_000,
+        level_milli_dbfs: -20_000,
+        duration_ms: 1_000,
+    };
+    let activated = supervisor
+        .command(
+            "activate-short-tone",
+            ChannelCommand::ActivateFallbackTone { tone: tone.clone() },
+            Duration::from_secs(2),
+        )
+        .unwrap();
+    assert_eq!(activated.sequence, 2);
+
+    // Leave the pipe unread past expiry: it must not offset the next command.
+    thread::sleep(Duration::from_millis(1_300));
+    let heartbeat = supervisor
+        .command(
+            "ping-after-expiry",
+            ChannelCommand::Ping,
+            Duration::from_secs(2),
+        )
+        .unwrap();
+    assert_eq!(heartbeat.sequence, 4);
+    assert!(matches!(heartbeat.event, WorkerEvent::Heartbeat { .. }));
+    let lifecycle = supervisor.take_lifecycle_events();
+    assert_eq!(lifecycle.len(), 1);
+    assert!(matches!(
+        &lifecycle[0].event,
+        WorkerEvent::FallbackToneDeactivated {
+            activation_id,
+            authority_revision: 9,
+            deactivation: Some(deactivation),
+        } if activation_id == &tone.activation_id
+            && deactivation.reason == FallbackToneDeactivationReason::Expired
+    ));
+    assert_eq!(lifecycle[0].sequence, 3);
+
+    let stopped = supervisor
+        .shutdown("shutdown-after-expiry", Duration::from_secs(3))
+        .unwrap();
+    assert_eq!(stopped.sequence, 5);
+    let restarted = WorkerSupervisor::launch_with_output_profile(
+        &executable,
+        WORKER_ID,
+        CHANNEL_ID,
+        &journal,
+        output.local_addr().unwrap(),
+        OutputProfileId::Proof360p30,
+        Duration::from_secs(30),
+    )
+    .unwrap();
+    assert_eq!(restarted.ready().sequence, 6);
+    let restart_stopped = restarted
+        .shutdown("restart-shutdown", Duration::from_secs(3))
+        .unwrap();
+    assert_eq!(restart_stopped.sequence, 7);
+    assert_eq!(
+        read_events(&journal)
+            .unwrap()
+            .iter()
+            .map(|event| event.sequence)
+            .collect::<Vec<_>>(),
+        vec![1, 2, 3, 4, 5, 6, 7]
+    );
+    let _ = fs::remove_file(journal);
+}
+
+#[test]
+fn restart_reconciles_a_crash_active_tone_before_reactivation() {
+    let _guard = supervision_test_guard();
+    let journal = journal_path();
+    let output = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let executable = PathBuf::from(env!("CARGO_BIN_EXE_channel-worker"));
+    let tone = WorkerFallbackTone {
+        activation_id: "33333333-4444-4333-8444-555555555555".into(),
+        authority_revision: 10,
+        kind: FallbackToneKind::Test,
+        frequency_hz: 1_000,
+        level_milli_dbfs: -20_000,
+        duration_ms: 10_000,
+    };
+    let mut supervisor = WorkerSupervisor::launch_with_output_profile(
+        &executable,
+        WORKER_ID,
+        CHANNEL_ID,
+        &journal,
+        output.local_addr().unwrap(),
+        OutputProfileId::Proof360p30,
+        Duration::from_secs(30),
+    )
+    .unwrap();
+    let activated = supervisor
+        .command(
+            "activate-before-crash",
+            ChannelCommand::ActivateFallbackTone { tone: tone.clone() },
+            Duration::from_secs(2),
+        )
+        .unwrap();
+    assert_eq!(activated.sequence, 2);
+
+    // Simulate a worker crash after the activation audit/event but before its
+    // deactivation. The replacement must close the durable active state before
+    // it reports Ready, then permit a fresh activation with the same identity.
+    supervisor.force_terminate().unwrap();
+    drop(supervisor);
+
+    let mut restarted = WorkerSupervisor::launch_with_output_profile(
+        &executable,
+        WORKER_ID,
+        CHANNEL_ID,
+        &journal,
+        output.local_addr().unwrap(),
+        OutputProfileId::Proof360p30,
+        Duration::from_secs(30),
+    )
+    .unwrap();
+    assert_eq!(restarted.ready().sequence, 4);
+    let recovery = restarted.take_lifecycle_events();
+    assert_eq!(recovery.len(), 1);
+    assert!(matches!(
+        &recovery[0].event,
+        WorkerEvent::FallbackToneDeactivated {
+            activation_id,
+            authority_revision: 10,
+            deactivation: Some(deactivation),
+        } if activation_id == &tone.activation_id
+            && deactivation.tone == tone
+            && deactivation.reason == FallbackToneDeactivationReason::Recovery
+    ));
+    assert_eq!(recovery[0].sequence, 3);
+
+    let reactivated = restarted
+        .command(
+            "reactivate-after-recovery",
+            ChannelCommand::ActivateFallbackTone { tone: tone.clone() },
+            Duration::from_secs(2),
+        )
+        .unwrap();
+    assert_eq!(reactivated.sequence, 5);
+    let deactivated = restarted
+        .command(
+            "deactivate-after-recovery",
+            ChannelCommand::DeactivateFallbackTone {
+                activation_id: tone.activation_id.clone(),
+                authority_revision: tone.authority_revision,
+            },
+            Duration::from_secs(2),
+        )
+        .unwrap();
+    assert_eq!(deactivated.sequence, 6);
+    assert!(matches!(
+        deactivated.event,
+        WorkerEvent::FallbackToneDeactivated {
+            deactivation: Some(deactivation),
+            ..
+        } if deactivation.reason == FallbackToneDeactivationReason::Explicit
+    ));
+    let stopped = restarted
+        .shutdown("shutdown-after-recovery", Duration::from_secs(2))
+        .unwrap();
+    assert_eq!(stopped.sequence, 7);
+
+    let events = read_events(&journal).unwrap();
+    assert_eq!(
+        events
+            .iter()
+            .map(|event| event.sequence)
+            .collect::<Vec<_>>(),
+        (1..=7).collect::<Vec<_>>()
+    );
+    let inspection = station_media_journal::inspect_journal(&journal).unwrap();
+    assert!(inspection.fallback_tone_audit.iter().any(|entry| matches!(
+        entry,
+        FallbackToneJournalEntry::Deactivated {
+            tone: recorded_tone,
+            reason: FallbackToneDeactivationReason::Recovery,
+            ..
+        } if recorded_tone == &tone
+    )));
+    assert!(inspection.fallback_tone_audit.iter().any(|entry| matches!(
+        entry,
+        FallbackToneJournalEntry::Deactivated {
+            tone: recorded_tone,
+            reason: FallbackToneDeactivationReason::Explicit,
+            ..
+        } if recorded_tone == &tone
+    )));
+    let _ = fs::remove_file(journal);
 }
 
 #[test]

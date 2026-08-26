@@ -5237,7 +5237,7 @@ mod tests {
             decode_command_frame(&encode_command_frame(&dispatch).unwrap()).unwrap(),
             dispatch
         );
-        assert_eq!(dispatch.version.major, 9);
+        assert_eq!(dispatch.version.major, 11);
 
         let journal = root
             .join("channel-journals")
@@ -5292,7 +5292,7 @@ mod tests {
         );
         assert_eq!(facts[0].report_id, REPORT_ID);
         assert_eq!(facts[0].asset_sha256, ASSET_ID);
-        assert_eq!(PROTOCOL_VERSION.major, 9);
+        assert_eq!(PROTOCOL_VERSION.major, 11);
 
         super::replay_scheduled_take_journal(&store, &journal, CHANNEL_ID).unwrap();
         assert_eq!(

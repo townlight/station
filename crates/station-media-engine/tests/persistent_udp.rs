@@ -21,8 +21,9 @@ use station_media_engine::{
     PersistentPlayout, SourceRole, TransportOutput,
 };
 use station_media_protocol::{
-    CaptionCue, CgImageFormat, CgOverlay, CgOverlayContent, CgRect, CgSnapshot, LoudnessTarget,
-    WorkerCaptionMode, WorkerCaptionPolicy, WorkerFallbackSlate,
+    CaptionCue, CgImageFormat, CgOverlay, CgOverlayContent, CgRect, CgSnapshot, FallbackToneKind,
+    LoudnessTarget, WorkerCaptionMode, WorkerCaptionPolicy, WorkerFallbackSlate,
+    WorkerFallbackTone,
 };
 use station_schedule::OutputProfileId;
 
@@ -74,6 +75,139 @@ fn fans_one_persistent_transport_out_to_two_independent_udp_sinks() {
         assert!(truth.audio_pts_samples >= 3);
     }
     playout.stop().unwrap();
+}
+
+#[test]
+fn fallback_tone_reuses_the_running_fallback_audio_branch() {
+    let _guard = persistent_graph_test_guard();
+    let receiver = UdpSocket::bind("127.0.0.1:0").unwrap();
+    receiver
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    let mut playout = PersistentPlayout::start_udp_fanout_with_profile(
+        &[receiver.local_addr().unwrap()],
+        OutputProfileId::Proof360p30,
+    )
+    .expect("persistent fallback graph starts");
+    let before = playout.output_bytes_sent().unwrap()[0];
+    playout
+        .activate_fallback_tone(&WorkerFallbackTone {
+            activation_id: "1c63ef7e-6e4b-4fa6-b5d8-c15e2b735c05".into(),
+            authority_revision: 1,
+            kind: FallbackToneKind::Test,
+            frequency_hz: 1_000,
+            level_milli_dbfs: -20_000,
+            duration_ms: 1_000,
+        })
+        .expect("tone changes only the existing fallback source");
+    std::thread::sleep(Duration::from_millis(100));
+    assert!(playout.output_bytes_sent().unwrap()[0] > before);
+    playout.deactivate_fallback_tone();
+    assert_eq!(playout.active_source().unwrap(), SourceRole::Fallback);
+    playout.stop().unwrap();
+}
+
+#[test]
+fn decoded_bounded_fallback_tone_has_its_requested_frequency_and_stays_silent_after_a_source_round_trip()
+ {
+    let _guard = persistent_graph_test_guard();
+    let root = test_root("fallback-tone-audio-proof");
+    fs::create_dir_all(&root).unwrap();
+    let source = root.join("program.ts");
+    generate_fixture(&source, "smpte");
+    let asset = ingest_media(&source, root.join("library")).unwrap();
+    let receiver = UdpSocket::bind("127.0.0.1:0").unwrap();
+    receiver
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    let tone_capture_path = root.join("tone.ts");
+    let rejected_capture_path = root.join("rejected-tone.ts");
+    let silent_capture_path = root.join("silent-after-transition.ts");
+    let mut playout = PersistentPlayout::start_udp_with_profile(
+        receiver.local_addr().unwrap(),
+        OutputProfileId::Proof360p30,
+    )
+    .unwrap();
+
+    assert!(
+        playout
+            .activate_fallback_tone(&WorkerFallbackTone {
+                activation_id: "1c63ef7e-6e4b-4fa6-b5d8-c15e2b735c05".into(),
+                authority_revision: 7,
+                kind: FallbackToneKind::Test,
+                frequency_hz: 1_501,
+                level_milli_dbfs: -12_000,
+                duration_ms: 1_000,
+            })
+            .is_err()
+    );
+    std::thread::sleep(Duration::from_millis(350));
+    clear_udp_backlog(&receiver);
+    fs::write(
+        &rejected_capture_path,
+        capture_transport_for(&receiver, Duration::from_secs(2)),
+    )
+    .unwrap();
+    assert!(
+        mean_absolute_sample(&decode_transport_audio(&rejected_capture_path)) < 100.0,
+        "a rejected tone leaked non-silent fallback audio before validation completed"
+    );
+
+    playout
+        .activate_fallback_tone(&WorkerFallbackTone {
+            activation_id: "1c63ef7e-6e4b-4fa6-b5d8-c15e2b735c05".into(),
+            authority_revision: 7,
+            kind: FallbackToneKind::Test,
+            frequency_hz: 1_000,
+            level_milli_dbfs: -20_000,
+            duration_ms: 1_000,
+        })
+        .expect("the bounded tone is rendered by the existing fallback branch");
+    std::thread::sleep(Duration::from_millis(350));
+    clear_udp_backlog(&receiver);
+    fs::write(
+        &tone_capture_path,
+        capture_transport_for(&receiver, Duration::from_secs(3)),
+    )
+    .unwrap();
+    let tone_samples = decode_transport_audio(&tone_capture_path);
+    let tone_mean_abs = maximum_half_second_mean_absolute_sample(&tone_samples);
+    let tone_frequency_hz = dominant_left_channel_frequency_hz(&tone_samples, 48_000);
+    assert!(
+        (900.0..=1_100.0).contains(&tone_frequency_hz),
+        "decoded fallback tone frequency was {tone_frequency_hz:.1}Hz, not the requested 1000Hz"
+    );
+    assert!(
+        (500.0..=10_000.0).contains(&tone_mean_abs),
+        "decoded fallback tone amplitude was {tone_mean_abs:.1}, outside the bounded audible range"
+    );
+
+    prepare_while_draining_output(&receiver, &mut playout, |playout| {
+        playout.load_file(&asset.stored_path)
+    })
+    .unwrap();
+    playout.select(SourceRole::Program).unwrap();
+    assert_eq!(playout.active_source().unwrap(), SourceRole::Program);
+    playout.select(SourceRole::Fallback).unwrap();
+    assert_eq!(playout.active_source().unwrap(), SourceRole::Fallback);
+    std::thread::sleep(Duration::from_millis(350));
+    clear_udp_backlog(&receiver);
+    fs::write(
+        &silent_capture_path,
+        capture_transport_for(&receiver, Duration::from_secs(2)),
+    )
+    .unwrap();
+    let silent_mean_abs = mean_absolute_sample(&decode_transport_audio(&silent_capture_path));
+    assert!(
+        // AAC transport decode retains a small codec-noise floor even for the
+        // audiotestsrc silence waveform; this is materially below the bounded
+        // tone's measured half-second amplitude.
+        silent_mean_abs < 350.0,
+        "a stale fallback tone reappeared after the source transition: decoded mean amplitude {silent_mean_abs:.1}"
+    );
+
+    playout.stop().unwrap();
+    fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
@@ -1845,6 +1979,103 @@ fn ffmpeg_udp_live_takeover_emits_audible_audio() {
         !root.exists(),
         "test media remained locked after playout stop"
     );
+}
+
+fn decode_transport_audio(capture_path: &Path) -> Vec<i16> {
+    let decoded = Command::new("ffmpeg.exe")
+        .args([
+            "-nostdin",
+            "-loglevel",
+            "error",
+            "-i",
+            capture_path.to_string_lossy().as_ref(),
+            "-map",
+            "0:a:0",
+            "-f",
+            "s16le",
+            "-acodec",
+            "pcm_s16le",
+            "-ar",
+            "48000",
+            "-ac",
+            "2",
+            "pipe:1",
+        ])
+        .output()
+        .expect("FFmpeg is required to decode the captured MPEG-TS audio proof");
+    assert!(
+        decoded.status.success(),
+        "FFmpeg failed to decode captured audio: {}",
+        String::from_utf8_lossy(&decoded.stderr)
+    );
+    decoded
+        .stdout
+        .chunks_exact(2)
+        .map(|bytes| i16::from_le_bytes([bytes[0], bytes[1]]))
+        .collect()
+}
+
+fn mean_absolute_sample(samples: &[i16]) -> f64 {
+    let (sum, count) = samples.iter().fold((0_u64, 0_u64), |(sum, count), sample| {
+        (sum + u64::from(sample.unsigned_abs()), count + 1)
+    });
+    sum as f64 / count.max(1) as f64
+}
+
+fn maximum_half_second_mean_absolute_sample(samples: &[i16]) -> f64 {
+    // PCM is stereo at 48 kHz; use a short window so mux-boundary silence
+    // cannot understate the amplitude of an otherwise continuous tone.
+    samples
+        .chunks(48_000)
+        .map(mean_absolute_sample)
+        .max_by(f64::total_cmp)
+        .unwrap_or(0.0)
+}
+
+fn dominant_left_channel_frequency_hz(samples: &[i16], sample_rate_hz: u32) -> f64 {
+    let left = samples.iter().step_by(2).copied().collect::<Vec<_>>();
+    // Transport capture begins at an arbitrary mux point. Select the loudest
+    // one-second window first so AAC silence/noise before or after the tone
+    // cannot dilute a zero-crossing measurement.
+    let window_frames = sample_rate_hz as usize;
+    let (window_start, window) = if left.len() <= window_frames {
+        (0, left.as_slice())
+    } else {
+        let mut best = (0_usize, 0_u64);
+        for start in (0..=left.len() - window_frames).step_by(window_frames / 4) {
+            let energy = left[start..start + window_frames]
+                .iter()
+                .map(|sample| u64::from(sample.unsigned_abs()))
+                .sum();
+            if energy > best.1 {
+                best = (start, energy);
+            }
+        }
+        (best.0, &left[best.0..best.0 + window_frames])
+    };
+    let (frequency_hz, _) = (440_u16..=1_500_u16)
+        .step_by(10)
+        .map(|frequency_hz| {
+            let angular =
+                2.0 * std::f64::consts::PI * f64::from(frequency_hz) / f64::from(sample_rate_hz);
+            let (real, imaginary) = window.iter().enumerate().fold(
+                (0.0_f64, 0.0_f64),
+                |(real, imaginary), (index, sample)| {
+                    let phase = angular * index as f64;
+                    (
+                        real + f64::from(*sample) * phase.cos(),
+                        imaginary + f64::from(*sample) * phase.sin(),
+                    )
+                },
+            );
+            (frequency_hz, real.mul_add(real, imaginary * imaginary))
+        })
+        .max_by(|(_, left_power), (_, right_power)| left_power.total_cmp(right_power))
+        .expect("the safe fallback frequency range is nonempty");
+    eprintln!(
+        "fallback tone spectrum window begins at frame {window_start}, dominant frequency {frequency_hz}Hz"
+    );
+    f64::from(frequency_hz)
 }
 
 fn assert_sustained_audible_audio(

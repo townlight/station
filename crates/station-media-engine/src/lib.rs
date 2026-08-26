@@ -20,6 +20,7 @@ use station_media_protocol::{
     MAX_CAPTION_DURATION_MS, MAX_CAPTION_START_AFTER_MS, MAX_CAPTION_TEXT_BYTES, MAX_CG_SLOTS,
     MAX_CG_TEXT_BYTES, MAX_OUTPUT_PROOF_BYTES, MAX_OUTPUT_PROOF_DURATION_MS,
     MIN_OUTPUT_PROOF_DURATION_MS, WorkerCaptionMode, WorkerCaptionPolicy, WorkerFallbackSlate,
+    WorkerFallbackTone,
 };
 use station_schedule::{OutputProfile, OutputProfileId};
 
@@ -288,6 +289,7 @@ pub struct PersistentPlayout {
     video_fallback_pad: gst::Pad,
     video_program_pad: gst::Pad,
     audio_selector: gst::Element,
+    fallback_audio: gst::Element,
     audio_fallback_pad: gst::Pad,
     audio_program_pad: gst::Pad,
     output_counters: Vec<OutputCounter>,
@@ -1143,6 +1145,7 @@ impl PersistentPlayout {
             video_fallback_pad: fallback_pad,
             video_program_pad: program_pad,
             audio_selector,
+            fallback_audio,
             audio_fallback_pad,
             audio_program_pad,
             output_counters,
@@ -1624,6 +1627,33 @@ impl PersistentPlayout {
         self.cg_revision.as_ref()
     }
 
+    /// Alters only the already-running fallback audio source.  It never adds a
+    /// source or rebuilds an encoder, selector, mux, or output branch.
+    pub fn activate_fallback_tone(&mut self, tone: &WorkerFallbackTone) -> Result<(), EngineError> {
+        tone.validate().map_err(EngineError::State)?;
+        let amplitude = 10_f64.powf(f64::from(tone.level_milli_dbfs) / 20_000.0);
+        if !amplitude.is_finite() || !(0.0..=1.0).contains(&amplitude) {
+            return Err(EngineError::State(
+                "fallback tone level is not renderable".into(),
+            ));
+        }
+        // The source starts silent. Commit the validated safe level and
+        // frequency before exposing the sine wave so a rejected/bad level
+        // cannot leak a full-scale buffer.
+        self.fallback_audio.set_property("volume", amplitude);
+        self.fallback_audio
+            .set_property("freq", f64::from(tone.frequency_hz));
+        self.fallback_audio.set_property_from_str("wave", "sine");
+        Ok(())
+    }
+
+    /// Restores the fallback audio branch to silence without changing the
+    /// current video/program/live selection.
+    pub fn deactivate_fallback_tone(&mut self) {
+        self.fallback_audio.set_property_from_str("wave", "silence");
+        self.fallback_audio.set_property("volume", 0.0_f64);
+    }
+
     pub fn active_source(&self) -> Result<SourceRole, EngineError> {
         let video = active_role(
             &self.video_selector,
@@ -1645,6 +1675,13 @@ impl PersistentPlayout {
     }
 
     pub fn select(&mut self, role: SourceRole) -> Result<(), EngineError> {
+        // Do not silence the physical fallback tone until the requested source
+        // transition is confirmed. In particular, taking a live input can
+        // fail after validation; clearing it before the selector settles would
+        // leave the channel silent while the caller still records an active
+        // fallback tone. Once a non-fallback source is confirmed, clear the
+        // running fallback branch so a later return to fallback is silent
+        // until a new activation explicitly enables it.
         if role == SourceRole::Program
             && self
                 .file_program
@@ -1674,6 +1711,9 @@ impl PersistentPlayout {
         if let Err(error) = self.wait_for_source(role, Duration::from_secs(2)) {
             self.restore_active_pads(previous_video, previous_audio);
             return Err(error);
+        }
+        if role != SourceRole::Fallback {
+            self.deactivate_fallback_tone();
         }
         Ok(())
     }

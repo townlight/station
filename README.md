@@ -12,7 +12,10 @@ requires an authenticated Setup Admin and accepts only a managed, currently veri
 its expected revision. The server owns actor, time, revision, and audit identity. Protocol v5 sends
 only the content digest and format to the worker, which rehashes and decodes the exact image before
 reporting Ready. Commissioning consumes the same authority plus green current runtime; EAS forced
-slate and tones remain separate unfinished S11 work.
+slate and externally verified EAS operation remain separate unfinished S11 work. Protocol v11 also
+contains a worker-only finite fallback-audio tone primitive: it can alter only the already-running
+fallback audio branch, accepts bounded frequency/level/duration values, and is not an operator
+authority, an FCC/EAS implementation, or proof that any external receiver transmitted a tone.
 
 The persistent worker is now caption-transport capable. Protocol v6 introduced one bounded typed
 cue; protocol v7 adds the durable stopped-channel caption policy to bootstrap before Ready; and

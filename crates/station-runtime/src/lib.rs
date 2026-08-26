@@ -1,3 +1,4 @@
+use std::collections::VecDeque;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -17,6 +18,7 @@ use station_windows_ipc::{
 
 static PIPE_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 const FORCE_TERMINATE_TIMEOUT: Duration = Duration::from_secs(3);
+const MAX_PENDING_LIFECYCLE_EVENTS: usize = 64;
 
 #[derive(Debug)]
 pub enum SupervisorError {
@@ -44,6 +46,7 @@ pub enum SupervisorError {
     AlreadyStopped,
     ProcessExit(Option<i32>),
     ProcessExitTimedOut,
+    LifecycleEventOverflow,
 }
 
 pub struct WorkerSupervisor {
@@ -54,6 +57,7 @@ pub struct WorkerSupervisor {
     channel_id: String,
     last_sequence: u64,
     ready: WorkerEventEnvelope,
+    pending_lifecycle_events: VecDeque<WorkerEventEnvelope>,
 }
 
 impl WorkerSupervisor {
@@ -294,29 +298,67 @@ impl WorkerSupervisor {
                 SupervisorError::Ipc(error),
             ));
         }
-        let ready = match read_event(&mut pipe, timeout.saturating_sub(started.elapsed())) {
-            Ok(event) => event,
-            Err(error) => {
+        let mut pending_lifecycle_events = VecDeque::new();
+        let mut initial_sequence: Option<u64> = None;
+        let ready = loop {
+            let event = match read_event(&mut pipe, timeout.saturating_sub(started.elapsed())) {
+                Ok(event) => event,
+                Err(error) => {
+                    return Err(abandon_launch(child, containment, error));
+                }
+            };
+            if let Err(error) = validate_identity(&event, worker_id, channel_id) {
                 return Err(abandon_launch(child, containment, error));
             }
+            if event.sequence == 0 {
+                return Err(abandon_launch(
+                    child,
+                    containment,
+                    SupervisorError::InvalidInitialSequence,
+                ));
+            }
+            if let Some(previous) = initial_sequence {
+                let expected = match previous.checked_add(1) {
+                    Some(expected) => expected,
+                    None => {
+                        return Err(abandon_launch(
+                            child,
+                            containment,
+                            SupervisorError::InvalidInitialSequence,
+                        ));
+                    }
+                };
+                if event.sequence != expected {
+                    return Err(abandon_launch(
+                        child,
+                        containment,
+                        SupervisorError::WrongSequence {
+                            expected,
+                            actual: event.sequence,
+                        },
+                    ));
+                }
+            }
+            initial_sequence = Some(event.sequence);
+            if matches!(event.event, WorkerEvent::Ready { .. }) {
+                break event;
+            }
+            if !is_recovery_lifecycle_event(&event) {
+                return Err(abandon_launch(
+                    child,
+                    containment,
+                    SupervisorError::UnexpectedInitialEvent,
+                ));
+            }
+            if pending_lifecycle_events.len() == MAX_PENDING_LIFECYCLE_EVENTS {
+                return Err(abandon_launch(
+                    child,
+                    containment,
+                    SupervisorError::LifecycleEventOverflow,
+                ));
+            }
+            pending_lifecycle_events.push_back(event);
         };
-        if let Err(error) = validate_identity(&ready, worker_id, channel_id) {
-            return Err(abandon_launch(child, containment, error));
-        }
-        if ready.sequence == 0 {
-            return Err(abandon_launch(
-                child,
-                containment,
-                SupervisorError::InvalidInitialSequence,
-            ));
-        }
-        if !matches!(ready.event, WorkerEvent::Ready { .. }) {
-            return Err(abandon_launch(
-                child,
-                containment,
-                SupervisorError::UnexpectedInitialEvent,
-            ));
-        }
 
         Ok(Self {
             child: Some(child),
@@ -326,11 +368,19 @@ impl WorkerSupervisor {
             channel_id: channel_id.to_string(),
             last_sequence: ready.sequence,
             ready,
+            pending_lifecycle_events,
         })
     }
 
     pub fn ready(&self) -> &WorkerEventEnvelope {
         &self.ready
+    }
+
+    /// Returns lifecycle changes that occurred without a command.  These are
+    /// sequenced and durably journaled just like command acknowledgements, but
+    /// must never be mistaken for a reply to a later command.
+    pub fn take_lifecycle_events(&mut self) -> Vec<WorkerEventEnvelope> {
+        self.pending_lifecycle_events.drain(..).collect()
     }
 
     pub fn ensure_running(&mut self) -> Result<(), SupervisorError> {
@@ -372,6 +422,8 @@ impl WorkerSupervisor {
         if self.child.is_none() {
             return Err(SupervisorError::AlreadyStopped);
         }
+        let started = Instant::now();
+        self.drain_unsolicited_events()?;
         let expected_sequence = self.last_sequence + 1;
         let envelope = CommandEnvelope {
             version: PROTOCOL_VERSION,
@@ -381,21 +433,78 @@ impl WorkerSupervisor {
             command,
         };
         let frame = encode_command_frame(&envelope).map_err(SupervisorError::Protocol)?;
-        let started = Instant::now();
         self.pipe
-            .write_all_timeout(&frame, timeout)
+            .write_all_timeout(&frame, timeout.saturating_sub(started.elapsed()))
             .map_err(SupervisorError::Ipc)?;
 
-        let event = read_event(&mut self.pipe, timeout.saturating_sub(started.elapsed()))?;
-        validate_identity(&event, &self.worker_id, &self.channel_id)?;
+        loop {
+            let event = read_event(&mut self.pipe, timeout.saturating_sub(started.elapsed()))?;
+            self.accept_sequenced_event(&event)?;
+            if is_unsolicited_lifecycle_event(&event) {
+                self.queue_lifecycle_event(event)?;
+                continue;
+            }
+            // A command acknowledgement must be the next non-lifecycle event
+            // after its sequence was assigned.  Lifecycle events advance the
+            // cursor but cannot be returned as a command response.
+            if event.sequence < expected_sequence {
+                return Err(SupervisorError::WrongSequence {
+                    expected: expected_sequence,
+                    actual: event.sequence,
+                });
+            }
+            return Ok(event);
+        }
+    }
+
+    fn drain_unsolicited_events(&mut self) -> Result<(), SupervisorError> {
+        while let Some(event) = read_event_if_ready(&mut self.pipe)? {
+            // Do not advance the durable cursor until this frame has been
+            // proven to be an unsolicited lifecycle event.  An unexpected
+            // command acknowledgement already waiting in the pipe is a
+            // terminal synchronization fault, not a consumed event that can
+            // be silently folded into the next command's sequence.
+            self.validate_sequenced_event(&event)?;
+            if !is_unsolicited_lifecycle_event(&event) {
+                return Err(SupervisorError::WrongSequence {
+                    expected: self.last_sequence + 1,
+                    actual: event.sequence,
+                });
+            }
+            let sequence = event.sequence;
+            self.queue_lifecycle_event(event)?;
+            self.last_sequence = sequence;
+        }
+        Ok(())
+    }
+
+    fn validate_sequenced_event(&self, event: &WorkerEventEnvelope) -> Result<(), SupervisorError> {
+        validate_identity(event, &self.worker_id, &self.channel_id)?;
+        let expected_sequence = self.last_sequence + 1;
         if event.sequence != expected_sequence {
             return Err(SupervisorError::WrongSequence {
                 expected: expected_sequence,
                 actual: event.sequence,
             });
         }
+        Ok(())
+    }
+
+    fn accept_sequenced_event(
+        &mut self,
+        event: &WorkerEventEnvelope,
+    ) -> Result<(), SupervisorError> {
+        self.validate_sequenced_event(event)?;
         self.last_sequence = event.sequence;
-        Ok(event)
+        Ok(())
+    }
+
+    fn queue_lifecycle_event(&mut self, event: WorkerEventEnvelope) -> Result<(), SupervisorError> {
+        if self.pending_lifecycle_events.len() == MAX_PENDING_LIFECYCLE_EVENTS {
+            return Err(SupervisorError::LifecycleEventOverflow);
+        }
+        self.pending_lifecycle_events.push_back(event);
+        Ok(())
     }
 
     pub fn shutdown(
@@ -485,6 +594,59 @@ fn read_event(
     pipe.read_exact_timeout(&mut frame[4..], timeout.saturating_sub(started.elapsed()))
         .map_err(SupervisorError::Ipc)?;
     decode_event_frame(&frame).map_err(SupervisorError::Protocol)
+}
+
+fn read_event_if_ready(
+    pipe: &mut PipeStream,
+) -> Result<Option<WorkerEventEnvelope>, SupervisorError> {
+    let mut length = [0_u8; 4];
+    match pipe.peek_exact_timeout(&mut length, Duration::ZERO) {
+        Ok(()) => {}
+        Err(IpcError::TimedOut { .. }) => return Ok(None),
+        Err(error) => return Err(SupervisorError::Ipc(error)),
+    }
+    let payload_length = u32::from_le_bytes(length) as usize;
+    if payload_length > MAX_FRAME_BYTES {
+        return Err(SupervisorError::Protocol(ProtocolError::FrameTooLarge(
+            payload_length,
+        )));
+    }
+    let mut frame = vec![0_u8; 4 + payload_length];
+    match pipe.peek_exact_timeout(&mut frame, Duration::ZERO) {
+        Ok(()) => {}
+        Err(IpcError::TimedOut { .. }) => return Ok(None),
+        Err(error) => return Err(SupervisorError::Ipc(error)),
+    }
+    pipe.read_exact_timeout(&mut frame, Duration::ZERO)
+        .map_err(SupervisorError::Ipc)?;
+    decode_event_frame(&frame)
+        .map(Some)
+        .map_err(SupervisorError::Protocol)
+}
+
+fn is_unsolicited_lifecycle_event(event: &WorkerEventEnvelope) -> bool {
+    matches!(
+        &event.event,
+        WorkerEvent::FallbackToneDeactivated {
+            deactivation: Some(deactivation),
+            ..
+        } if matches!(
+            deactivation.reason,
+            station_media_protocol::FallbackToneDeactivationReason::Expired
+                | station_media_protocol::FallbackToneDeactivationReason::Shutdown
+                | station_media_protocol::FallbackToneDeactivationReason::Recovery
+        )
+    )
+}
+
+fn is_recovery_lifecycle_event(event: &WorkerEventEnvelope) -> bool {
+    matches!(
+        &event.event,
+        WorkerEvent::FallbackToneDeactivated {
+            deactivation: Some(deactivation),
+            ..
+        } if deactivation.reason == station_media_protocol::FallbackToneDeactivationReason::Recovery
+    )
 }
 
 fn validate_identity(
@@ -748,6 +910,7 @@ mod tests {
                 sequence: 1,
                 event: WorkerEvent::Ready { graph_revision: 1 },
             },
+            pending_lifecycle_events: VecDeque::new(),
         };
         let started = Instant::now();
 
@@ -822,6 +985,7 @@ mod tests {
                 sequence: 1,
                 event: WorkerEvent::Ready { graph_revision: 1 },
             },
+            pending_lifecycle_events: VecDeque::new(),
         };
 
         assert!(matches!(

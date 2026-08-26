@@ -105,6 +105,32 @@ fn bounds_the_wait_for_worker_bytes() {
 }
 
 #[test]
+fn peeking_a_complete_frame_prefix_does_not_consume_it() {
+    let server = PipeServer::bind(&unique_suffix("peek-prefix")).unwrap();
+    let name = server.name().to_string();
+    let client = thread::spawn(move || {
+        let mut stream = PipeStream::connect(&name).unwrap();
+        stream.write_all(b"frame").unwrap();
+        stream.flush().unwrap();
+        thread::sleep(Duration::from_millis(100));
+    });
+    let mut stream = server.accept_timeout(Duration::from_secs(1)).unwrap();
+
+    let mut prefix = [0_u8; 4];
+    stream
+        .peek_exact_timeout(&mut prefix, Duration::from_secs(1))
+        .unwrap();
+    assert_eq!(&prefix, b"fram");
+
+    let mut frame = [0_u8; 5];
+    stream
+        .read_exact_timeout(&mut frame, Duration::from_secs(1))
+        .unwrap();
+    assert_eq!(&frame, b"frame");
+    client.join().unwrap();
+}
+
+#[test]
 fn bounds_an_exact_read_when_the_peer_stops_after_a_partial_frame() {
     let server = PipeServer::bind(&unique_suffix("partial-read-timeout")).unwrap();
     let name = server.name().to_string();

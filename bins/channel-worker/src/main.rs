@@ -1,22 +1,22 @@
 use std::collections::HashMap;
-use std::io::{ErrorKind, Read, Write};
+use std::io::{ErrorKind, Read};
 use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use station_media_engine::{
     ConfiguredTransportOutput, MpegTsMuxContract, OutputCaptureRequest, OutputCaptureStatus,
     PersistentPlayout, SourceRole,
 };
-use station_media_journal::JournalWriter;
+use station_media_journal::{FallbackToneJournalEntry, JournalWriter};
 use station_media_protocol::{
-    ChannelCommand, CommandEnvelope, LiveArmToken, LiveReturnTarget, MAX_FRAME_BYTES,
-    OutputTransportObservation, PROTOCOL_VERSION, WorkerBootstrapEnvelope, WorkerEvent,
-    WorkerEventEnvelope, WorkerOutputConfiguration, decode_bootstrap_frame, decode_command_frame,
-    encode_event_frame,
+    ChannelCommand, CommandEnvelope, FallbackToneDeactivationReason, LiveArmToken,
+    LiveReturnTarget, MAX_FRAME_BYTES, OutputTransportObservation, PROTOCOL_VERSION,
+    WorkerBootstrapEnvelope, WorkerEvent, WorkerEventEnvelope, WorkerFallbackTone,
+    WorkerOutputConfiguration, decode_bootstrap_frame, decode_command_frame, encode_event_frame,
 };
 use station_schedule::OutputProfileId;
-use station_windows_ipc::PipeStream;
+use station_windows_ipc::{IpcError, PipeStream};
 
 struct WorkerArguments {
     worker_id: String,
@@ -54,6 +54,37 @@ enum LiveBufferStatus {
 
 const MAX_CONSECUTIVE_LIVE_STALLS: u8 = 2;
 const MAX_LIVE_STALL_MILLISECONDS: u64 = 2_000;
+
+struct ActiveFallbackTone {
+    tone: WorkerFallbackTone,
+    expires_at_monotonic_ms: u64,
+}
+
+enum CommandFramePoll {
+    Pending,
+    Frame(Vec<u8>),
+    Closed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ConsumedFrameDispatchOrder {
+    Dispatch,
+    ExpiryThenDispatch,
+}
+
+fn consumed_frame_dispatch_order(
+    now_monotonic_ms: u64,
+    expires_at_monotonic_ms: Option<u64>,
+) -> ConsumedFrameDispatchOrder {
+    if expires_at_monotonic_ms.is_some_and(|expires_at| now_monotonic_ms >= expires_at) {
+        ConsumedFrameDispatchOrder::ExpiryThenDispatch
+    } else {
+        ConsumedFrameDispatchOrder::Dispatch
+    }
+}
+
+const CONTROL_POLL_INTERVAL: Duration = Duration::from_millis(10);
+const EVENT_WRITE_TIMEOUT: Duration = Duration::from_secs(2);
 
 impl LiveState {
     fn is_on_air(&self) -> bool {
@@ -283,6 +314,34 @@ fn main() {
             "at least one output is required",
         );
     }
+    let recovered_fallback_tones =
+        journal
+            .recover_active_fallback_tones()
+            .unwrap_or_else(|error| {
+                fatal(
+                    7,
+                    "reconcile an active fallback tone",
+                    &format!("{error:?}"),
+                )
+            });
+    for (tone, recovered_at_monotonic_ms) in &recovered_fallback_tones {
+        record_and_emit(
+            &mut journal,
+            &mut pipe,
+            &worker_id,
+            &channel_id,
+            WorkerEvent::FallbackToneDeactivated {
+                activation_id: tone.activation_id.clone(),
+                authority_revision: tone.authority_revision,
+                deactivation: Some(station_media_protocol::WorkerFallbackToneDeactivation {
+                    tone: tone.clone(),
+                    reason: FallbackToneDeactivationReason::Recovery,
+                    deactivated_at_monotonic_ms: *recovered_at_monotonic_ms,
+                }),
+            },
+        )
+        .unwrap_or_else(|error| fatal(7, "record and emit fallback tone recovery", &error));
+    }
     let mut media = Some(
         PersistentPlayout::start_configured_outputs_with_profile_roots_and_authorities(
             &outputs,
@@ -308,42 +367,195 @@ fn main() {
     let worker_instance_id = format!("{worker_id}-{}", std::process::id());
     let mut graph_revision = 1_u64;
     let mut proof_graph_revisions = HashMap::new();
+    let mut fallback_tone: Option<ActiveFallbackTone> = None;
 
     loop {
-        let frame = match read_command_frame(&mut pipe) {
-            Ok(Some(frame)) => frame,
-            Ok(None) => break,
-            Err(error) => fatal(5, "read a command frame", &error),
-        };
-        let command = decode_command_frame(&frame)
-            .unwrap_or_else(|error| fatal(6, "decode a command frame", &format!("{error:?}")));
-        let (event, should_stop) = decide_event(
-            &command,
+        let now = started.elapsed().as_millis() as u64;
+        if let Some(event) = expire_fallback_tone_if_due(
+            &mut journal,
+            &worker_id,
             &channel_id,
-            journal.next_sequence(),
-            started.elapsed().as_millis() as u64,
             media
                 .as_mut()
                 .expect("a running worker owns its media graph"),
-            &mut loaded_asset,
-            &mut live_state,
-            &bootstrap,
-            &worker_instance_id,
-            &worker_boot_id,
-            &mut graph_revision,
-            &mut proof_graph_revisions,
-        );
-        if should_stop {
-            media
-                .take()
-                .expect("a running worker owns its media graph")
-                .stop()
-                .unwrap_or_else(|error| fatal(9, "stop its media graph", &format!("{error:?}")));
-        }
-        record_and_emit(&mut journal, &mut pipe, &worker_id, &channel_id, event)
-            .unwrap_or_else(|error| fatal(7, "record and emit an event", &error));
-        if should_stop {
-            break;
+            &mut fallback_tone,
+            now,
+        )
+        .unwrap_or_else(|error| fatal(7, "record fallback tone expiry", &error))
+        {
+            record_and_emit(&mut journal, &mut pipe, &worker_id, &channel_id, event)
+                .unwrap_or_else(|error| fatal(7, "record and emit fallback tone expiry", &error));
+            continue;
+        };
+        let poll_timeout = fallback_tone
+            .as_ref()
+            .map(|active| {
+                Duration::from_millis(active.expires_at_monotonic_ms.saturating_sub(now))
+                    .min(CONTROL_POLL_INTERVAL)
+            })
+            .unwrap_or(CONTROL_POLL_INTERVAL);
+        let frame = match read_command_frame_timeout(&mut pipe, poll_timeout) {
+            Ok(CommandFramePoll::Pending) => continue,
+            Ok(CommandFramePoll::Closed) => break,
+            Ok(CommandFramePoll::Frame(frame)) => frame,
+            Err(error) => fatal(5, "read a command frame", &error),
+        };
+        {
+            // A complete frame can arrive at the same deadline boundary.
+            // Recheck before dispatching it so expiry always wins safely.  The
+            // frame is already consumed, though: once read_command_frame_timeout
+            // returns Frame it must be decoded and dispatched exactly once.
+            // Emitting expiry first is the ordering decision; dropping this
+            // frame would strand the supervisor waiting for an acknowledgement.
+            let now = started.elapsed().as_millis() as u64;
+            if matches!(
+                consumed_frame_dispatch_order(
+                    now,
+                    fallback_tone
+                        .as_ref()
+                        .map(|active| active.expires_at_monotonic_ms),
+                ),
+                ConsumedFrameDispatchOrder::ExpiryThenDispatch
+            ) && let Some(event) = expire_fallback_tone_if_due(
+                &mut journal,
+                &worker_id,
+                &channel_id,
+                media
+                    .as_mut()
+                    .expect("a running worker owns its media graph"),
+                &mut fallback_tone,
+                now,
+            )
+            .unwrap_or_else(|error| fatal(7, "record fallback tone expiry", &error))
+            {
+                record_and_emit(&mut journal, &mut pipe, &worker_id, &channel_id, event)
+                    .unwrap_or_else(|error| {
+                        fatal(7, "record and emit fallback tone expiry", &error)
+                    });
+            }
+            let command = decode_command_frame(&frame)
+                .unwrap_or_else(|error| fatal(6, "decode a command frame", &format!("{error:?}")));
+            let prior_tone = fallback_tone.as_ref().map(|active| active.tone.clone());
+            let (event, should_stop) = decide_event(
+                &command,
+                &channel_id,
+                journal.next_sequence(),
+                started.elapsed().as_millis() as u64,
+                media
+                    .as_mut()
+                    .expect("a running worker owns its media graph"),
+                &mut loaded_asset,
+                &mut live_state,
+                &bootstrap,
+                &worker_instance_id,
+                &worker_boot_id,
+                &mut graph_revision,
+                &mut proof_graph_revisions,
+                &mut fallback_tone,
+            );
+            let now = started.elapsed().as_millis() as u64;
+            if let WorkerEvent::FallbackToneActivated {
+                tone: Some(tone),
+                activated_at_monotonic_ms: Some(activated_at_monotonic_ms),
+                ..
+            } = &event
+            {
+                append_tone_activation_audit(
+                    &mut journal,
+                    &worker_id,
+                    &channel_id,
+                    tone,
+                    *activated_at_monotonic_ms,
+                )
+                .unwrap_or_else(|error| fatal(7, "record fallback tone activation", &error));
+            }
+            if let Some(tone) = prior_tone {
+                let reason = match &event {
+                    WorkerEvent::FallbackToneDeactivated { .. } => {
+                        Some(FallbackToneDeactivationReason::Explicit)
+                    }
+                    _ if media
+                        .as_ref()
+                        .expect("a running worker owns its media graph")
+                        .active_source()
+                        .ok()
+                        .is_some_and(|source| source != SourceRole::Fallback) =>
+                    {
+                        Some(FallbackToneDeactivationReason::SourceTransition)
+                    }
+                    _ => None,
+                };
+                if let Some(reason) = reason {
+                    // select() deliberately leaves the tone audible until its
+                    // replacement source is proven live.  This is the one
+                    // authoritative point where a successful source
+                    // transition clears and audits that physical tone.
+                    media
+                        .as_mut()
+                        .expect("a running worker owns its media graph")
+                        .deactivate_fallback_tone();
+                    append_tone_deactivation_audit(
+                        &mut journal,
+                        &worker_id,
+                        &channel_id,
+                        &tone,
+                        reason,
+                        now,
+                    )
+                    .unwrap_or_else(|error| fatal(7, "record fallback tone deactivation", &error));
+                    fallback_tone = None;
+                }
+            }
+            if should_stop {
+                if let Some(active) = fallback_tone.take() {
+                    let tone = active.tone;
+                    media
+                        .as_mut()
+                        .expect("a running worker owns its media graph")
+                        .deactivate_fallback_tone();
+                    append_tone_deactivation_audit(
+                        &mut journal,
+                        &worker_id,
+                        &channel_id,
+                        &tone,
+                        FallbackToneDeactivationReason::Shutdown,
+                        now,
+                    )
+                    .unwrap_or_else(|error| fatal(7, "record fallback tone shutdown", &error));
+                    record_and_emit(
+                        &mut journal,
+                        &mut pipe,
+                        &worker_id,
+                        &channel_id,
+                        WorkerEvent::FallbackToneDeactivated {
+                            activation_id: tone.activation_id.clone(),
+                            authority_revision: tone.authority_revision,
+                            deactivation: Some(
+                                station_media_protocol::WorkerFallbackToneDeactivation {
+                                    tone,
+                                    reason: FallbackToneDeactivationReason::Shutdown,
+                                    deactivated_at_monotonic_ms: now,
+                                },
+                            ),
+                        },
+                    )
+                    .unwrap_or_else(|error| {
+                        fatal(7, "record and emit fallback tone shutdown", &error)
+                    });
+                }
+                media
+                    .take()
+                    .expect("a running worker owns its media graph")
+                    .stop()
+                    .unwrap_or_else(|error| {
+                        fatal(9, "stop its media graph", &format!("{error:?}"))
+                    });
+            }
+            record_and_emit(&mut journal, &mut pipe, &worker_id, &channel_id, event)
+                .unwrap_or_else(|error| fatal(7, "record and emit an event", &error));
+            if should_stop {
+                break;
+            }
         }
     }
 
@@ -457,6 +669,218 @@ fn read_command_frame(input: &mut impl Read) -> Result<Option<Vec<u8>>, String> 
     Ok(Some(frame))
 }
 
+fn read_command_frame_timeout(
+    pipe: &mut PipeStream,
+    timeout: Duration,
+) -> Result<CommandFramePoll, String> {
+    let started = Instant::now();
+    let mut length = [0_u8; 4];
+    match pipe.peek_exact_timeout(&mut length, timeout) {
+        Ok(()) => {}
+        Err(IpcError::TimedOut { .. }) => return Ok(CommandFramePoll::Pending),
+        Err(IpcError::Closed) => return Ok(CommandFramePoll::Closed),
+        Err(error) => return Err(format!("{error:?}")),
+    }
+    let payload_length = u32::from_le_bytes(length) as usize;
+    if payload_length > MAX_FRAME_BYTES {
+        return Err(format!("command frame is too large: {payload_length}"));
+    }
+    let mut frame = Vec::with_capacity(4 + payload_length);
+    frame.extend_from_slice(&length);
+    frame.resize(4 + payload_length, 0);
+    match pipe.read_exact_timeout(&mut frame, timeout.saturating_sub(started.elapsed())) {
+        Ok(()) => Ok(CommandFramePoll::Frame(frame)),
+        Err(IpcError::TimedOut { .. }) => Ok(CommandFramePoll::Pending),
+        Err(IpcError::Closed) => Ok(CommandFramePoll::Closed),
+        Err(error) => Err(format!("{error:?}")),
+    }
+}
+
+fn activate_fallback_tone(
+    command: &CommandEnvelope,
+    media: &mut PersistentPlayout,
+    active: &mut Option<ActiveFallbackTone>,
+    tone: &WorkerFallbackTone,
+    monotonic_milliseconds: u64,
+) -> (WorkerEvent, bool) {
+    if media.active_source().ok() != Some(SourceRole::Fallback) {
+        return (
+            rejection(
+                command,
+                "fallback_not_selected",
+                "Fallback tones may be activated only while the channel is on fallback.",
+            ),
+            false,
+        );
+    }
+    if active.is_some() {
+        return (
+            rejection(
+                command,
+                "fallback_tone_active",
+                "A fallback tone is already active; explicitly deactivate it before another activation.",
+            ),
+            false,
+        );
+    }
+    match media.activate_fallback_tone(tone) {
+        Ok(()) => {
+            let Some(expires_at_monotonic_ms) =
+                monotonic_milliseconds.checked_add(tone.duration_ms)
+            else {
+                media.deactivate_fallback_tone();
+                return (
+                    rejection(
+                        command,
+                        "fallback_tone_expiry_invalid",
+                        "The fallback tone expiry overflowed.",
+                    ),
+                    false,
+                );
+            };
+            *active = Some(ActiveFallbackTone {
+                tone: tone.clone(),
+                expires_at_monotonic_ms,
+            });
+            (
+                WorkerEvent::FallbackToneActivated {
+                    activation_id: tone.activation_id.clone(),
+                    authority_revision: tone.authority_revision,
+                    duration_ms: tone.duration_ms,
+                    tone: Some(tone.clone()),
+                    activated_at_monotonic_ms: Some(monotonic_milliseconds),
+                },
+                false,
+            )
+        }
+        Err(error) => (
+            rejection(
+                command,
+                "fallback_tone_activation_failed",
+                &format!("The fallback tone could not be activated: {error:?}"),
+            ),
+            false,
+        ),
+    }
+}
+
+fn deactivate_fallback_tone(
+    command: &CommandEnvelope,
+    media: &mut PersistentPlayout,
+    active: &mut Option<ActiveFallbackTone>,
+    activation_id: &str,
+    authority_revision: u64,
+    monotonic_milliseconds: u64,
+) -> (WorkerEvent, bool) {
+    let Some(current) = active.as_ref() else {
+        return (
+            rejection(
+                command,
+                "fallback_tone_inactive",
+                "No fallback tone is active.",
+            ),
+            false,
+        );
+    };
+    if current.tone.activation_id != activation_id
+        || current.tone.authority_revision != authority_revision
+    {
+        return (
+            rejection(
+                command,
+                "fallback_tone_authority_mismatch",
+                "The fallback tone activation identity or authority revision is stale.",
+            ),
+            false,
+        );
+    }
+    let tone = current.tone.clone();
+    media.deactivate_fallback_tone();
+    *active = None;
+    (
+        WorkerEvent::FallbackToneDeactivated {
+            activation_id: activation_id.into(),
+            authority_revision,
+            deactivation: Some(station_media_protocol::WorkerFallbackToneDeactivation {
+                tone,
+                reason: FallbackToneDeactivationReason::Explicit,
+                deactivated_at_monotonic_ms: monotonic_milliseconds,
+            }),
+        },
+        false,
+    )
+}
+
+fn append_tone_activation_audit(
+    journal: &mut JournalWriter,
+    worker_id: &str,
+    channel_id: &str,
+    tone: &WorkerFallbackTone,
+    activated_at_monotonic_ms: u64,
+) -> Result<(), String> {
+    journal
+        .append_fallback_tone_audit(&FallbackToneJournalEntry::Activated {
+            worker_id: worker_id.into(),
+            channel_id: channel_id.into(),
+            tone: tone.clone(),
+            activated_at_monotonic_ms,
+        })
+        .map_err(|error| format!("{error:?}"))
+}
+
+fn append_tone_deactivation_audit(
+    journal: &mut JournalWriter,
+    worker_id: &str,
+    channel_id: &str,
+    tone: &WorkerFallbackTone,
+    reason: FallbackToneDeactivationReason,
+    deactivated_at_monotonic_ms: u64,
+) -> Result<(), String> {
+    journal
+        .append_fallback_tone_audit(&FallbackToneJournalEntry::Deactivated {
+            worker_id: worker_id.into(),
+            channel_id: channel_id.into(),
+            tone: tone.clone(),
+            reason,
+            deactivated_at_monotonic_ms,
+        })
+        .map_err(|error| format!("{error:?}"))
+}
+
+fn expire_fallback_tone_if_due(
+    journal: &mut JournalWriter,
+    worker_id: &str,
+    channel_id: &str,
+    media: &mut PersistentPlayout,
+    active: &mut Option<ActiveFallbackTone>,
+    monotonic_milliseconds: u64,
+) -> Result<Option<WorkerEvent>, String> {
+    let Some(tone) = active.as_ref().and_then(|active| {
+        (monotonic_milliseconds >= active.expires_at_monotonic_ms).then(|| active.tone.clone())
+    }) else {
+        return Ok(None);
+    };
+    media.deactivate_fallback_tone();
+    append_tone_deactivation_audit(
+        journal,
+        worker_id,
+        channel_id,
+        &tone,
+        FallbackToneDeactivationReason::Expired,
+        monotonic_milliseconds,
+    )?;
+    *active = None;
+    Ok(Some(WorkerEvent::FallbackToneDeactivated {
+        activation_id: tone.activation_id.clone(),
+        authority_revision: tone.authority_revision,
+        deactivation: Some(station_media_protocol::WorkerFallbackToneDeactivation {
+            tone,
+            reason: FallbackToneDeactivationReason::Expired,
+            deactivated_at_monotonic_ms: monotonic_milliseconds,
+        }),
+    }))
+}
+
 #[allow(clippy::too_many_arguments)]
 fn decide_event(
     command: &CommandEnvelope,
@@ -471,6 +895,7 @@ fn decide_event(
     worker_boot_id: &str,
     graph_revision: &mut u64,
     proof_graph_revisions: &mut HashMap<String, u64>,
+    fallback_tone: &mut Option<ActiveFallbackTone>,
 ) -> (WorkerEvent, bool) {
     if command.channel_id != channel_id {
         return (
@@ -629,6 +1054,20 @@ fn decide_event(
                 false,
             ),
         },
+        ChannelCommand::ActivateFallbackTone { tone } => {
+            activate_fallback_tone(command, media, fallback_tone, tone, monotonic_milliseconds)
+        }
+        ChannelCommand::DeactivateFallbackTone {
+            activation_id,
+            authority_revision,
+        } => deactivate_fallback_tone(
+            command,
+            media,
+            fallback_tone,
+            activation_id,
+            *authority_revision,
+            monotonic_milliseconds,
+        ),
         ChannelCommand::LoadAsset {
             asset_id,
             media_path,
@@ -1277,7 +1716,7 @@ fn rejection(command: &CommandEnvelope, code: &str, message: &str) -> WorkerEven
 
 fn record_and_emit(
     journal: &mut JournalWriter,
-    output: &mut impl Write,
+    output: &mut PipeStream,
     worker_id: &str,
     channel_id: &str,
     event: WorkerEvent,
@@ -1294,9 +1733,8 @@ fn record_and_emit(
         .map_err(|error| format!("{error:?}"))?;
     let frame = encode_event_frame(&envelope).map_err(|error| format!("{error:?}"))?;
     output
-        .write_all(&frame)
-        .map_err(|error| error.to_string())?;
-    output.flush().map_err(|error| error.to_string())
+        .write_all_timeout(&frame, EVENT_WRITE_TIMEOUT)
+        .map_err(|error| format!("{error:?}"))
 }
 
 fn incomplete_frame(error: std::io::Error, field: &str) -> String {
@@ -1440,6 +1878,19 @@ mod tests {
             health.observe((8, 10), 1_500),
             LiveBufferStatus::Advanced
         ));
+    }
+
+    #[test]
+    fn consumed_frame_at_expiry_orders_lifecycle_before_one_dispatch() {
+        let order = consumed_frame_dispatch_order(1_000, Some(1_000));
+        assert_eq!(order, ConsumedFrameDispatchOrder::ExpiryThenDispatch);
+
+        let mut actions = Vec::new();
+        if order == ConsumedFrameDispatchOrder::ExpiryThenDispatch {
+            actions.push("expiry");
+        }
+        actions.push("dispatch");
+        assert_eq!(actions, ["expiry", "dispatch"]);
     }
 
     #[test]

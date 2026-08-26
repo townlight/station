@@ -28,6 +28,8 @@ const SECURITY_IDENTIFICATION: Dword = 0x0001_0000;
 const SECURITY_DESCRIPTOR_REVISION: Dword = 1;
 const ERROR_PIPE_BUSY: Dword = 231;
 const ERROR_NO_DATA: Dword = 232;
+const ERROR_PIPE_NOT_CONNECTED: Dword = 233;
+const ERROR_BROKEN_PIPE: Dword = 109;
 const ERROR_PIPE_CONNECTED: Dword = 535;
 const ERROR_PIPE_LISTENING: Dword = 536;
 const PIPE_BUFFER_BYTES: Dword = 65_540;
@@ -225,6 +227,7 @@ unsafe extern "system" {
 pub enum IpcError {
     InvalidName,
     InvalidByteCount,
+    Closed,
     TimedOut { operation: &'static str },
     Os { operation: &'static str, code: u32 },
 }
@@ -870,6 +873,14 @@ impl PipeStream {
                 )
             } == 0
             {
+                // SAFETY: `GetLastError` reads the calling thread's error value.
+                let code = unsafe { GetLastError() };
+                if matches!(
+                    code,
+                    ERROR_BROKEN_PIPE | ERROR_PIPE_NOT_CONNECTED | ERROR_NO_DATA
+                ) {
+                    return Err(IpcError::Closed);
+                }
                 return Err(last_error("PeekNamedPipe"));
             }
             if available >= minimum {
@@ -882,6 +893,47 @@ impl PipeStream {
             }
             std::thread::sleep(Duration::from_millis(2));
         }
+    }
+
+    /// Peeks an exact prefix without consuming it under a wall-clock deadline.
+    /// This allows a single duplex pipe owner to discover a full frame before
+    /// doing the corresponding bounded read, so a partial frame cannot strand
+    /// the command loop or invalidate an autonomous safety deadline.
+    pub fn peek_exact_timeout(&self, buffer: &mut [u8], timeout: Duration) -> Result<(), IpcError> {
+        if buffer.is_empty() {
+            return Ok(());
+        }
+        self.wait_for_bytes(buffer.len(), timeout)?;
+        let mut copied = 0;
+        // SAFETY: the connected pipe remains owned by `self`; `buffer` is a
+        // valid writable target for exactly its declared byte length.
+        if unsafe {
+            PeekNamedPipe(
+                self.file.as_raw_handle() as Handle,
+                buffer.as_mut_ptr().cast(),
+                Dword::try_from(buffer.len()).map_err(|_| IpcError::InvalidByteCount)?,
+                &mut copied,
+                ptr::null_mut(),
+                ptr::null_mut(),
+            )
+        } == 0
+        {
+            // SAFETY: `GetLastError` reads the calling thread's error value.
+            let code = unsafe { GetLastError() };
+            if matches!(
+                code,
+                ERROR_BROKEN_PIPE | ERROR_PIPE_NOT_CONNECTED | ERROR_NO_DATA
+            ) {
+                return Err(IpcError::Closed);
+            }
+            return Err(last_error("PeekNamedPipe"));
+        }
+        if copied != buffer.len() as Dword {
+            return Err(IpcError::TimedOut {
+                operation: "PeekNamedPipe",
+            });
+        }
+        Ok(())
     }
 
     /// Reads an exact byte count under a wall-clock deadline.
