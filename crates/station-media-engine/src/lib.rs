@@ -1675,10 +1675,13 @@ impl PersistentPlayout {
     }
 
     pub fn select(&mut self, role: SourceRole) -> Result<(), EngineError> {
-        // Do not silence the physical fallback tone until the caller has a
-        // confirmed source transition.  In particular, taking a live input
-        // can fail after validation; clearing it here would leave the channel
-        // silent while the worker still records an active fallback tone.
+        // Do not silence the physical fallback tone until the requested source
+        // transition is confirmed. In particular, taking a live input can
+        // fail after validation; clearing it before the selector settles would
+        // leave the channel silent while the caller still records an active
+        // fallback tone. Once a non-fallback source is confirmed, clear the
+        // running fallback branch so a later return to fallback is silent
+        // until a new activation explicitly enables it.
         if role == SourceRole::Program
             && self
                 .file_program
@@ -1708,6 +1711,9 @@ impl PersistentPlayout {
         if let Err(error) = self.wait_for_source(role, Duration::from_secs(2)) {
             self.restore_active_pads(previous_video, previous_audio);
             return Err(error);
+        }
+        if role != SourceRole::Fallback {
+            self.deactivate_fallback_tone();
         }
         Ok(())
     }
