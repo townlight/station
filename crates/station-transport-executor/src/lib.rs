@@ -575,6 +575,7 @@ fn is_sha256(value: &str) -> bool {
     value.len() == 64 && value.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
+#[cfg(test)]
 fn validate_tstables_json(output: &[u8], service_id: u64, pmt_pid: u64) -> Result<(), String> {
     if output.is_empty() || output.len() > MAX_PROCESS_OUTPUT_BYTES {
         return Err("TSDuck tables output is missing or oversized".into());
