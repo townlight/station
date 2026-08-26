@@ -205,7 +205,7 @@ impl StationStore {
         channel_id: &str,
     ) -> Result<Option<AsRunProjectionRuntime>, String> {
         let statement = self.prepare(
-            "SELECT channel_id,projection_json,checkpoint_sequence,checkpoint_hash,updated_at_utc_ms FROM asrun_epg_projection_state WHERE channel_id=?1",
+            "SELECT channel_id,station_timezone,projection_json,checkpoint_sequence,checkpoint_hash,updated_at_utc_ms FROM asrun_epg_projection_state WHERE channel_id=?1",
         )?;
         bind_text(
             self.database,
@@ -216,14 +216,16 @@ impl StationStore {
         match unsafe { sqlite3_step(statement.raw) } {
             SQLITE_ROW => {
                 let row_channel = column_text(statement.raw, 0)?;
-                let json = column_text(statement.raw, 1)?;
-                let checkpoint_sequence = unsafe { sqlite3_column_int64(statement.raw, 2) };
-                let checkpoint_hash = column_text(statement.raw, 3)?;
-                let updated_at = unsafe { sqlite3_column_int64(statement.raw, 4) };
+                let row_timezone = column_text(statement.raw, 1)?;
+                let json = column_text(statement.raw, 2)?;
+                let checkpoint_sequence = unsafe { sqlite3_column_int64(statement.raw, 3) };
+                let checkpoint_hash = column_text(statement.raw, 4)?;
+                let updated_at = unsafe { sqlite3_column_int64(statement.raw, 5) };
                 let p: AsRunProjectionRuntime = serde_json::from_str(&json)
                     .map_err(|_| "stored as-run projection is corrupt")?;
                 if row_channel != channel_id
                     || p.channel_id != row_channel
+                    || p.station_timezone != row_timezone
                     || checkpoint_sequence < 1
                     || p.checkpoint.journal_sequence != checkpoint_sequence as u64
                     || p.checkpoint.journal_hash != checkpoint_hash
@@ -355,6 +357,7 @@ fn validate_projection(p: &AsRunProjectionRuntime, now: i64) -> Result<(), Strin
             || !sha(&e.journal_hash)
             || e.started_at_unix_ms < 0
             || e.ended_at_unix_ms <= e.started_at_unix_ms
+            || e.ended_at_unix_ms > now
             || e.unavailable_reason.as_deref().is_some_and(|value| {
                 value.is_empty() || value.len() > 512 || value.chars().any(char::is_control)
             })
@@ -372,6 +375,17 @@ fn validate_projection(p: &AsRunProjectionRuntime, now: i64) -> Result<(), Strin
         {
             return Err("non-program as-run entry carries program authority".into());
         }
+        if matches!(e.state, station_reporting::runtime::AsRunState::Program)
+            && (e.content_id.is_none()
+                || e.franchise_id.is_none()
+                || e.category.is_none()
+                || e.title.is_none()
+                || e.catalog_revision.is_none()
+                || e.schedule_revision.is_none())
+            && e.unavailable_reason.as_deref().is_none_or(str::is_empty)
+        {
+            return Err("program as-run entry lacks metadata and an unavailable reason".into());
+        }
         if let Some(x) = prior
             && (e.journal_sequence != x.journal_sequence + 1
                 || e.started_at_unix_ms != x.ended_at_unix_ms)
@@ -387,8 +401,12 @@ fn is_uuid(v: &str) -> bool {
         && v.as_bytes().iter().enumerate().all(|(i, b)| {
             if matches!(i, 8 | 13 | 18 | 23) {
                 *b == b'-'
+            } else if i == 14 {
+                *b == b'4'
+            } else if i == 19 {
+                matches!(*b, b'8' | b'9' | b'a' | b'b')
             } else {
-                b.is_ascii_hexdigit()
+                b.is_ascii_digit() || matches!(*b, b'a'..=b'f')
             }
         })
 }

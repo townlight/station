@@ -2,18 +2,18 @@ use station_reporting::runtime::{
     AsRunState, JournalTake, ProjectionInput, ReportingRuntime, render_csv, render_xmltv,
 };
 
-const CHANNEL: &str = "00000000-0000-0000-0000-000000000001";
+const CHANNEL: &str = "00000000-0000-4000-8000-000000000001";
 
 fn take(sequence: u64, start: i64, end: i64, state: AsRunState) -> JournalTake {
     JournalTake {
-        journal_id: "00000000-0000-0000-0000-000000000010".into(),
+        journal_id: "00000000-0000-4000-8000-000000000010".into(),
         journal_sequence: sequence,
         channel_id: CHANNEL.into(),
         started_at_unix_ms: start,
         ended_at_unix_ms: end,
         state,
-        content_id: Some("00000000-0000-0000-0000-000000000020".into()),
-        franchise_id: Some("00000000-0000-0000-0000-000000000030".into()),
+        content_id: Some("00000000-0000-4000-8000-000000000020".into()),
+        franchise_id: Some("00000000-0000-4000-8000-000000000030".into()),
         category: Some("program".into()),
         title: Some("Council & Budget".into()),
         catalog_revision: Some(7),

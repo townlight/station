@@ -6,13 +6,12 @@
 //! report and media-offset facts) plus configured journal identity.
 use super::StationStore;
 use sha2::{Digest, Sha256};
-use station_media_journal::read_events;
+use station_media_journal::inspect_journal_bounded;
 use station_media_protocol::{WorkerEvent, encode_event_frame};
 use station_reporting::runtime::{
     AsRunProjectionRuntime, AsRunState, JournalTake, ProjectionInput, ReportingRuntime,
 };
 use std::path::Path;
-const MAX_JOURNAL_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_JOURNAL_EVENTS: usize = 10_000;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AsRunJournalAdapterError {
@@ -45,28 +44,19 @@ pub fn project_durable_journal(
             "journal projection scope is invalid or extends beyond now".into(),
         ));
     };
-    let path = journal_path.as_ref();
-    if std::fs::metadata(path)
-        .map_err(|e| AsRunJournalAdapterError::Journal(e.to_string()))?
-        .len()
-        > MAX_JOURNAL_BYTES
-    {
-        return Err(AsRunJournalAdapterError::Journal(
-            "journal exceeds bounded adapter read size".into(),
-        ));
-    };
-    let events =
-        read_events(path).map_err(|e| AsRunJournalAdapterError::Journal(format!("{e:?}")))?;
-    if events.len() > MAX_JOURNAL_EVENTS {
-        return Err(AsRunJournalAdapterError::Journal(
-            "journal exceeds bounded adapter event count".into(),
-        ));
-    };
-    if events.iter().any(|e| e.channel_id != channel_id) {
+    let inspection = inspect_journal_bounded(journal_path, MAX_JOURNAL_EVENTS)
+        .map_err(|e| AsRunJournalAdapterError::Journal(format!("{e:?}")))?;
+    let source_journal_id = inspection.worker_id.ok_or_else(|| {
+        AsRunJournalAdapterError::Journal(
+            "durable journal has no authoritative worker identity".into(),
+        )
+    })?;
+    if !uuid(&source_journal_id) || inspection.channel_id.as_deref() != Some(channel_id) {
         return Err(AsRunJournalAdapterError::Journal(
             "journal channel identity does not match the requested channel".into(),
         ));
-    };
+    }
+    let events = inspection.retained_events;
     let mut scheduled = Vec::new();
     for envelope in events {
         if let WorkerEvent::ScheduledAssetOnAir {
@@ -77,16 +67,25 @@ pub fn project_durable_journal(
             ..
         } = &envelope.event
             && *actual_on_air_at_unix_ms >= starts_at_unix_ms
-            && *actual_on_air_at_unix_ms < ends_at_unix_ms
+            && *actual_on_air_at_unix_ms >= starts_at_unix_ms
         {
             scheduled.push((
                 schedule_item_id.clone(),
                 *schedule_item_revision,
                 asset_id.clone(),
                 *actual_on_air_at_unix_ms,
-                frame_hash(journal_id, &envelope)?,
+                frame_hash(&source_journal_id, &envelope)?,
             ));
         }
+    }
+    scheduled.sort_by_key(|entry| entry.3);
+    let lookahead = scheduled
+        .iter()
+        .find(|entry| entry.3 >= ends_at_unix_ms)
+        .cloned();
+    scheduled.retain(|entry| entry.3 < ends_at_unix_ms);
+    if let Some(next) = lookahead {
+        scheduled.push(next);
     }
     if scheduled.len() < 2 {
         return Err(AsRunJournalAdapterError::Journal(
@@ -103,7 +102,7 @@ pub fn project_durable_journal(
                 "scheduled as-run journal timestamps are nonmonotonic or future".into(),
             ));
         };
-        takes.push(JournalTake{journal_id:journal_id.into(),journal_sequence:(index+1)as u64,channel_id:channel_id.into(),started_at_unix_ms:*start,ended_at_unix_ms:end,state:AsRunState::Program,content_id:Some(asset.clone()),franchise_id:None,category:None,title:None,catalog_revision:None,schedule_revision:None,journal_hash:hash.clone(),unavailable_reason:Some(format!("Exact immutable schedule/catalog snapshot authority is unavailable for journal item {item} revision {revision}; no mutable current-row substitution was used."))});
+        takes.push(JournalTake{journal_id:source_journal_id.clone(),journal_sequence:(index+1)as u64,channel_id:channel_id.into(),started_at_unix_ms:*start,ended_at_unix_ms:end,state:AsRunState::Program,content_id:Some(asset.clone()),franchise_id:None,category:None,title:None,catalog_revision:None,schedule_revision:None,journal_hash:hash.clone(),unavailable_reason:Some(format!("Exact immutable schedule/catalog snapshot authority is unavailable for journal item {item} revision {revision}; no mutable current-row substitution was used."))});
     }
     let mut runtime = ReportingRuntime::new();
     let projection = runtime
@@ -136,8 +135,12 @@ fn uuid(v: &str) -> bool {
         && v.as_bytes().iter().enumerate().all(|(i, b)| {
             if matches!(i, 8 | 13 | 18 | 23) {
                 *b == b'-'
+            } else if i == 14 {
+                *b == b'4'
+            } else if i == 19 {
+                matches!(*b, b'8' | b'9' | b'a' | b'b')
             } else {
-                b.is_ascii_hexdigit()
+                b.is_ascii_digit() || matches!(*b, b'a'..=b'f')
             }
         })
 }

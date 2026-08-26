@@ -13193,14 +13193,14 @@ mod tests {
         ));
         let api = Api::open(&path).unwrap();
         let take = station_reporting::runtime::JournalTake {
-            journal_id: "00000000-0000-0000-0000-000000000002".into(),
+            journal_id: "00000000-0000-4000-8000-000000000002".into(),
             journal_sequence: 1,
-            channel_id: "00000000-0000-0000-0000-000000000001".into(),
+            channel_id: "00000000-0000-4000-8000-000000000001".into(),
             started_at_unix_ms: 1_700_000_000_000,
             ended_at_unix_ms: 1_700_000_060_000,
             state: station_reporting::runtime::AsRunState::Program,
-            content_id: Some("00000000-0000-0000-0000-000000000003".into()),
-            franchise_id: Some("00000000-0000-0000-0000-000000000004".into()),
+            content_id: Some("00000000-0000-4000-8000-000000000003".into()),
+            franchise_id: Some("00000000-0000-4000-8000-000000000004".into()),
             category: Some("program".into()),
             title: Some("=Council <Meeting>".into()),
             catalog_revision: Some(1),
@@ -13211,7 +13211,7 @@ mod tests {
         let projection = station_reporting::runtime::ReportingRuntime::new()
             .project(
                 station_reporting::runtime::ProjectionInput::new(
-                    "00000000-0000-0000-0000-000000000001",
+                    "00000000-0000-4000-8000-000000000001",
                     "America/Denver",
                     vec![take],
                 )
@@ -13221,7 +13221,7 @@ mod tests {
         api.storage
             .persist_asrun_projection(&projection, 1_700_000_060_000)
             .unwrap();
-        let page = "/api/v1/reporting/as-run/00000000-0000-0000-0000-000000000001?offset=0&limit=1";
+        let page = "/api/v1/reporting/as-run/00000000-0000-4000-8000-000000000001?offset=0&limit=1";
         assert_eq!(api.handle_in_process("GET", page, None).status, 403);
         let actor = test_actor(station_auth::OperatorRole::SetupAdmin);
         assert_eq!(
@@ -13231,7 +13231,7 @@ mod tests {
         assert_eq!(
             api.handle_authenticated(
                 "GET",
-                "/api/v1/reporting/as-run/00000000-0000-0000-0000-000000000001?offset=0&limit=201",
+                "/api/v1/reporting/as-run/00000000-0000-4000-8000-000000000001?offset=0&limit=201",
                 None,
                 &actor
             )
@@ -13240,7 +13240,7 @@ mod tests {
         );
         let csv = api.handle_authenticated(
             "GET",
-            "/api/v1/reporting/as-run/00000000-0000-0000-0000-000000000001/export.csv",
+            "/api/v1/reporting/as-run/00000000-0000-4000-8000-000000000001/export.csv",
             None,
             &actor,
         );
@@ -13248,7 +13248,7 @@ mod tests {
         assert!(String::from_utf8(csv.body).unwrap().contains("'=Council"));
         let xml = api.handle_authenticated(
             "GET",
-            "/api/v1/reporting/as-run/00000000-0000-0000-0000-000000000001/export.xmltv",
+            "/api/v1/reporting/as-run/00000000-0000-4000-8000-000000000001/export.xmltv",
             None,
             &actor,
         );

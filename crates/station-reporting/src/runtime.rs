@@ -337,7 +337,9 @@ fn event_id(t: &JournalTake) -> String {
     h.update(t.journal_id.as_bytes());
     h.update(t.journal_sequence.to_le_bytes());
     h.update(t.journal_hash.as_bytes());
-    let d = h.finalize();
+    let mut d = h.finalize();
+    d[6] = (d[6] & 0x0f) | 0x40;
+    d[8] = (d[8] & 0x3f) | 0x80;
     format!(
         "{:08x}-{:04x}-{:04x}-{:04x}-{:012x}",
         u32::from_be_bytes(d[0..4].try_into().unwrap()),
@@ -352,8 +354,12 @@ fn uuid(v: &str) -> bool {
         && v.as_bytes().iter().enumerate().all(|(i, b)| {
             if matches!(i, 8 | 13 | 18 | 23) {
                 *b == b'-'
+            } else if i == 14 {
+                *b == b'4'
+            } else if i == 19 {
+                matches!(*b, b'8' | b'9' | b'a' | b'b')
             } else {
-                b.is_ascii_hexdigit()
+                b.is_ascii_digit() || matches!(*b, b'a'..=b'f')
             }
         })
 }

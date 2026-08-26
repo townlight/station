@@ -93,6 +93,11 @@ pub enum JournalError {
         actual: u64,
     },
     Protocol(ProtocolError),
+    /// A caller-owned bounded reader reached its event cap before allocating an
+    /// unbounded replay vector.
+    EventLimitExceeded {
+        limit: usize,
+    },
 }
 
 pub struct JournalWriter {
@@ -348,8 +353,29 @@ pub fn read_events(path: impl AsRef<Path>) -> Result<Vec<WorkerEventEnvelope>, J
     Ok(read_snapshot(path.as_ref())?.events)
 }
 
+/// Reads a CRC-validated journal while refusing to allocate more than `limit`
+/// retained event envelopes. Frame allocation remains bounded by the protocol's
+/// fixed maximum, so callers do not need a racy file-size precheck.
+pub fn read_events_bounded(
+    path: impl AsRef<Path>,
+    limit: usize,
+) -> Result<Vec<WorkerEventEnvelope>, JournalError> {
+    Ok(read_snapshot_bounded(path.as_ref(), limit)?.events)
+}
+
 pub fn inspect_journal(path: impl AsRef<Path>) -> Result<JournalInspection, JournalError> {
     let snapshot = read_snapshot(path.as_ref())?;
+    inspection_from_snapshot(snapshot)
+}
+
+pub fn inspect_journal_bounded(
+    path: impl AsRef<Path>,
+    limit: usize,
+) -> Result<JournalInspection, JournalError> {
+    inspection_from_snapshot(read_snapshot_bounded(path.as_ref(), limit)?)
+}
+
+fn inspection_from_snapshot(snapshot: JournalSnapshot) -> Result<JournalInspection, JournalError> {
     let (worker_id, channel_id) = snapshot
         .identity
         .map_or((None, None), |(worker_id, channel_id)| {
@@ -367,6 +393,10 @@ pub fn inspect_journal(path: impl AsRef<Path>) -> Result<JournalInspection, Jour
 }
 
 fn read_snapshot(path: &Path) -> Result<JournalSnapshot, JournalError> {
+    read_snapshot_bounded(path, usize::MAX)
+}
+
+fn read_snapshot_bounded(path: &Path, event_limit: usize) -> Result<JournalSnapshot, JournalError> {
     let mut file = match File::open(path) {
         Ok(file) => file,
         Err(error) if error.kind() == ErrorKind::NotFound => {
@@ -456,6 +486,9 @@ fn read_snapshot(path: &Path) -> Result<JournalSnapshot, JournalError> {
                     });
                 }
                 saw_event = true;
+                if events.len() >= event_limit {
+                    return Err(JournalError::EventLimitExceeded { limit: event_limit });
+                }
                 events.push(event);
             }
             RECORD_KIND_HEARTBEAT_SUMMARY if version == JOURNAL_VERSION => {
