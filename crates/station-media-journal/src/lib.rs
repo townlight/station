@@ -523,11 +523,21 @@ fn publish_generation_manifest(
     worker_id: &str,
     channel_id: &str,
     sealed: &JournalCursor,
+    active: &VerifiedEmptyRegularFile,
 ) -> Result<(), JournalError> {
     let data_path = generation_path(root, generation);
     let data = File::open(&data_path).map_err(io_error)?;
     let active_path = active_segment_path(root, generation);
-    let active = File::open(&active_path).map_err(io_error)?;
+    if active.path != active_path
+        || active.file.metadata().map_err(io_error)?.len() != 0
+        || file_sha256_file(&active.file)? != empty_file_sha256()
+        || journal_file_identity(&active.file)? != active.identity
+    {
+        return Err(corrupt(
+            0,
+            "journal active segment changed before manifest publication",
+        ));
+    }
     if sealed.generation != 0
         || sealed.byte_offset == 0
         || sealed.raw_sequence == 0
@@ -549,7 +559,9 @@ fn publish_generation_manifest(
         worker_id: worker_id.into(),
         channel_id: channel_id.into(),
         sealed_file_identity: journal_file_identity(&data)?,
-        active_file_identity: journal_file_identity(&active)?,
+        // Retain the zero-share proof handle until the atomic replacement
+        // below succeeds. Never re-open the active pathname here.
+        active_file_identity: active.identity.clone(),
         sealed_byte_offset: sealed.byte_offset,
         sealed_raw_sequence: sealed.raw_sequence,
         sealed_prefix_hash: sealed.prefix_hash.clone(),
@@ -563,21 +575,36 @@ fn publish_generation_manifest(
         // regenerating this byte-for-byte derived manifest.
         std::fs::remove_file(&temporary).map_err(io_error)?;
     }
-    let mut output = OpenOptions::new()
-        .create_new(true)
-        .write(true)
-        .open(&temporary)
-        .map_err(io_error)?;
-    serde_json::to_writer(&mut output, &manifest).map_err(|error| {
+    let manifest_bytes = serde_json::to_vec(&manifest).map_err(|error| {
         corrupt(
             0,
             format!("could not encode journal generation manifest: {error}"),
         )
     })?;
+    let mut options = OpenOptions::new();
+    options.create_new(true).write(true);
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::Storage::FileSystem::{FILE_SHARE_DELETE, FILE_SHARE_READ};
+
+        // DELETE access is required for FileRenameInfo below. Share only
+        // reads and deletion: the exact writable handle remains the sole
+        // writer from manifest bytes through its handle-based rename.
+        const DELETE_ACCESS: u32 = 0x0001_0000;
+        const GENERIC_WRITE: u32 = 0x4000_0000;
+        options.access_mode(GENERIC_WRITE | DELETE_ACCESS);
+        options.share_mode(FILE_SHARE_READ | FILE_SHARE_DELETE);
+    }
+    let mut output = options.open(&temporary).map_err(io_error)?;
+    output.write_all(&manifest_bytes).map_err(io_error)?;
     output.flush().map_err(io_error)?;
     output.sync_all().map_err(io_error)?;
-    drop(output);
-    replace_file(&temporary, &generation_manifest_path(root)).map_err(io_error)
+    replace_manifest_from_exact_handle(
+        &output,
+        &temporary,
+        &generation_manifest_path(root),
+        &manifest_bytes,
+    )
 }
 
 fn file_sha256(path: &Path) -> Result<String, JournalError> {
@@ -658,6 +685,11 @@ fn write_generation_publication_intent(
     output.flush().map_err(io_error)?;
     output.sync_all().map_err(io_error)?;
     drop(output);
+    // The publication sidecar itself is never authority. Its candidate is
+    // re-proven from the final generation pathname (hash, identity, sequence
+    // coverage, and source) before any manifest can be emitted, including on
+    // crash recovery. Therefore this ordinary durable rename cannot advance
+    // journal authority if its temp pathname is replaced.
     promote_generation(&temporary, &published).map_err(io_error)
 }
 
@@ -1042,8 +1074,13 @@ impl JournalWriter {
             // anchor rather than resume their legacy byte cursor.
             let generation = location.generation;
             let sealed = prove_sealed_generation(&location.data_path, worker_id, channel_id)?;
-            create_empty_active_segment(&root_path, generation)?;
-            publish_generation_manifest(&root_path, generation, worker_id, channel_id, &sealed)?;
+            let active = create_empty_active_segment(&root_path, generation)?;
+            publish_generation_manifest(
+                &root_path, generation, worker_id, channel_id, &sealed, &active,
+            )?;
+            // The manifest is now durable. Release the zero-share proof
+            // before resolving the newly published active append segment.
+            drop(active);
             location = resolve_journal_location(&root_path)?;
             snapshot = read_snapshot(&root_path)?;
         }
@@ -1424,7 +1461,21 @@ fn is_reparse_point(_metadata: &std::fs::Metadata) -> bool {
     false
 }
 
-fn validate_empty_regular_file(path: &Path, description: &str) -> Result<(), JournalError> {
+/// A zero-share handle is the proof token for an empty active segment.  The
+/// handle's FileId binds the object we examined, and Windows refuses a second
+/// writer or a delete/rename while it lives.  We intentionally retain it from
+/// the final post-rename proof through manifest publication.
+struct VerifiedEmptyRegularFile {
+    path: PathBuf,
+    file: File,
+    identity: String,
+}
+
+fn open_verified_empty_regular_file(
+    path: &Path,
+    description: &str,
+    expected_identity: Option<&str>,
+) -> Result<VerifiedEmptyRegularFile, JournalError> {
     let metadata = std::fs::symlink_metadata(path).map_err(io_error)?;
     if !metadata.is_file() || metadata.file_type().is_symlink() || is_reparse_point(&metadata) {
         return Err(corrupt(
@@ -1432,11 +1483,14 @@ fn validate_empty_regular_file(path: &Path, description: &str) -> Result<(), Jou
             format!("{description} is not a regular non-reparse file"),
         ));
     }
-    let file = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open(path)
-        .map_err(io_error)?;
+    let mut options = OpenOptions::new();
+    options.read(true).write(true);
+    #[cfg(windows)]
+    // This is a real cross-process exclusion, not a metadata assertion: no
+    // process can write, delete, or rename the file object while its exact
+    // contents and FileId are authenticated for authority publication.
+    options.share_mode(0);
+    let file = options.open(path).map_err(io_error)?;
     let opened_metadata = file.metadata().map_err(io_error)?;
     if !opened_metadata.is_file() || is_reparse_point(&opened_metadata) {
         return Err(corrupt(
@@ -1448,41 +1502,141 @@ fn validate_empty_regular_file(path: &Path, description: &str) -> Result<(), Jou
         return Err(corrupt(0, format!("{description} is not exactly empty")));
     }
     let identity = journal_file_identity(&file)?;
+    if expected_identity.is_some_and(|expected| expected != identity) {
+        return Err(corrupt(
+            0,
+            format!("{description} changed before manifest publication"),
+        ));
+    }
     file.sync_all().map_err(io_error)?;
-    drop(file);
 
-    // Re-open by the exact expected path after syncing and before promotion,
-    // so a path replacement cannot turn an authenticated empty temp into the
-    // object selected by the next rename.
+    // The zero-share handle excludes replacement after it opened. Check the
+    // name while that exclusion is live as well, so an indirection that raced
+    // just before open cannot make a regular target look like a valid active
+    // segment. The retained handle, not this pathname metadata, is what is
+    // carried into the manifest proof.
     let metadata = std::fs::symlink_metadata(path).map_err(io_error)?;
     if !metadata.is_file() || metadata.file_type().is_symlink() || is_reparse_point(&metadata) {
         return Err(corrupt(
             0,
-            format!("{description} changed before promotion"),
+            format!("{description} changed before manifest publication"),
         ));
     }
-    let reopened = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open(path)
-        .map_err(io_error)?;
-    if reopened.metadata().map_err(io_error)?.len() != 0
-        || file_sha256_file(&reopened)? != empty_file_sha256()
-        || journal_file_identity(&reopened)? != identity
-    {
-        return Err(corrupt(
-            0,
-            format!("{description} changed before promotion"),
-        ));
-    }
-    Ok(())
+    Ok(VerifiedEmptyRegularFile {
+        path: path.to_path_buf(),
+        file,
+        identity,
+    })
 }
 
 fn empty_file_sha256() -> String {
     format!("{:x}", Sha256::digest([]))
 }
 
-fn create_empty_active_segment(root: &Path, generation: u64) -> Result<PathBuf, JournalError> {
+/// Deterministic test seam for the otherwise tiny validation-to-rename race.
+/// Production builds have no hook and never execute a path replacement here.
+#[cfg(test)]
+fn active_temp_promotion_replacement()
+-> &'static std::sync::Mutex<std::collections::HashMap<PathBuf, PathBuf>> {
+    use std::sync::{Mutex, OnceLock};
+
+    static REPLACEMENTS: OnceLock<Mutex<std::collections::HashMap<PathBuf, PathBuf>>> =
+        OnceLock::new();
+    REPLACEMENTS.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
+}
+
+#[cfg(test)]
+fn replace_active_temp_at_promotion_boundary(path: &Path) {
+    let mut replacements = active_temp_promotion_replacement()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let Some(source) = replacements.remove(path) else {
+        return;
+    };
+    std::fs::remove_file(path).expect("test active temp exists before replacement");
+    std::fs::rename(source, path).expect("test active temp replacement succeeds");
+}
+
+#[cfg(test)]
+fn schedule_active_temp_replacement(path: PathBuf, replacement: PathBuf) {
+    let mut scheduled = active_temp_promotion_replacement()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    assert!(
+        scheduled.insert(path, replacement).is_none(),
+        "one active temp replacement is already scheduled for this path"
+    );
+}
+
+#[cfg(not(test))]
+fn replace_active_temp_at_promotion_boundary(_path: &Path) {}
+
+/// Test-only seam for proving that the manifest rename uses its retained file
+/// handle rather than resolving the temporary pathname a second time.
+#[cfg(test)]
+fn manifest_temp_promotion_replacement()
+-> &'static std::sync::Mutex<std::collections::HashMap<PathBuf, PathBuf>> {
+    use std::sync::{Mutex, OnceLock};
+
+    static REPLACEMENTS: OnceLock<Mutex<std::collections::HashMap<PathBuf, PathBuf>>> =
+        OnceLock::new();
+    REPLACEMENTS.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
+}
+
+#[cfg(test)]
+fn replace_manifest_temp_at_promotion_boundary(path: &Path) {
+    let mut replacements = manifest_temp_promotion_replacement()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let Some(source) = replacements.remove(path) else {
+        return;
+    };
+    // Keep the retained file object linked under a different name. Windows
+    // cannot rename a delete-pending file by handle, whereas a true pathname
+    // substitution moves the exact authenticated object aside before placing
+    // attacker-controlled bytes at the old temp name.
+    let retained = path.with_extension("manifest-temp-retained-handle");
+    std::fs::rename(path, retained).expect("test manifest temp can be displaced");
+    std::fs::rename(source, path).expect("test manifest temp replacement succeeds");
+}
+
+#[cfg(test)]
+fn schedule_manifest_temp_replacement(path: PathBuf, replacement: PathBuf) {
+    let mut scheduled = manifest_temp_promotion_replacement()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    assert!(
+        scheduled.insert(path, replacement).is_none(),
+        "one manifest temp replacement is already scheduled for this path"
+    );
+}
+
+#[cfg(not(test))]
+fn replace_manifest_temp_at_promotion_boundary(_path: &Path) {}
+
+fn promote_verified_empty_active_segment(
+    temporary: &Path,
+    active: &Path,
+) -> Result<VerifiedEmptyRegularFile, JournalError> {
+    // Windows cannot rename a source while an exclusive proof handle is
+    // retained. Authenticate the temp, release only that source handle for
+    // the write-through move, then prove the final name against the exact
+    // FileId before it can be used as manifest authority. This closes the
+    // validation-to-promotion pathname race without weakening write/delete
+    // exclusion during either proof.
+    let temporary_proof =
+        open_verified_empty_regular_file(temporary, "journal active segment temporary", None)?;
+    let expected_identity = temporary_proof.identity.clone();
+    drop(temporary_proof);
+    replace_active_temp_at_promotion_boundary(temporary);
+    promote_generation(temporary, active).map_err(io_error)?;
+    open_verified_empty_regular_file(active, "journal active segment", Some(&expected_identity))
+}
+
+fn create_empty_active_segment(
+    root: &Path,
+    generation: u64,
+) -> Result<VerifiedEmptyRegularFile, JournalError> {
     let active = active_segment_path(root, generation);
     if active.try_exists().map_err(io_error)? {
         return Err(corrupt(0, "journal active segment already exists"));
@@ -1494,9 +1648,7 @@ fn create_empty_active_segment(root: &Path, generation: u64) -> Result<PathBuf, 
         // and the intent/sealed proof was already validated by the caller.
         // Promote only an exact, synced empty regular file; nonempty, reparse,
         // or swapped artifacts remain fail-closed and are never overwritten.
-        validate_empty_regular_file(&temporary, "journal active segment temporary")?;
-        promote_generation(&temporary, &active).map_err(io_error)?;
-        return Ok(active);
+        return promote_verified_empty_active_segment(&temporary, &active);
     }
     let file = OpenOptions::new()
         .create_new(true)
@@ -1505,9 +1657,7 @@ fn create_empty_active_segment(root: &Path, generation: u64) -> Result<PathBuf, 
         .map_err(io_error)?;
     file.sync_all().map_err(io_error)?;
     drop(file);
-    validate_empty_regular_file(&temporary, "journal active segment temporary")?;
-    promote_generation(&temporary, &active).map_err(io_error)?;
-    Ok(active)
+    promote_verified_empty_active_segment(&temporary, &active)
 }
 
 fn prove_sealed_generation(
@@ -3992,10 +4142,11 @@ fn recover_compaction_temp(
     replace_file(&temporary, path).map_err(io_error)
 }
 
-/// Completes the intent sidecar's own fsync-before-rename boundary. Unlike a
-/// manifest temp, an intent is needed to establish authority for the pending
-/// candidate, so only promote it after the exact source and candidate are
-/// fully authenticated. A missing or ambiguous candidate is fail-closed.
+/// Completes the intent sidecar's own fsync-before-rename boundary. An intent
+/// carries recovery provenance but is not journal authority: the final
+/// candidate is independently re-proven against it before the sole authority
+/// operation (manifest publication). A missing or ambiguous candidate is
+/// fail-closed.
 fn recover_generation_publication_temp(
     root: &Path,
     location: &JournalLocation,
@@ -4042,16 +4193,10 @@ fn recover_generation_publication_temp(
     .map_err(io_error)
 }
 
-fn validate_empty_active_segment(path: &Path) -> Result<(), JournalError> {
-    validate_empty_regular_file(path, "orphan journal active segment")?;
-    let snapshot = read_snapshot_bounded_direct(path, usize::MAX)?;
-    if !snapshot.events.is_empty() || snapshot.identity.is_some() {
-        return Err(corrupt(
-            0,
-            "orphan journal active segment is not empty before manifest publication",
-        ));
-    }
-    Ok(())
+fn open_verified_empty_active_segment(
+    path: &Path,
+) -> Result<VerifiedEmptyRegularFile, JournalError> {
+    open_verified_empty_regular_file(path, "orphan journal active segment", None)
 }
 
 fn validate_generation_publication_candidate(
@@ -4115,20 +4260,27 @@ fn complete_generation_publication(
     let sealed = validate_generation_publication_candidate(
         root, location, intent, &candidate, worker_id, channel_id,
     )?;
-    let active = active_segment_path(root, intent.generation);
-    if active.try_exists().map_err(io_error)? {
-        validate_empty_active_segment(&active)?;
+    let active_path = active_segment_path(root, intent.generation);
+    let active = if active_path.try_exists().map_err(io_error)? {
+        open_verified_empty_active_segment(&active_path)?
     } else {
-        create_empty_active_segment(root, intent.generation)?;
-    }
+        create_empty_active_segment(root, intent.generation)?
+    };
     // The active segment is durable before the manifest references it. The
     // manifest remains the sole authority publication point.
-    publish_generation_manifest(root, intent.generation, worker_id, channel_id, &sealed)?;
+    publish_generation_manifest(
+        root,
+        intent.generation,
+        worker_id,
+        channel_id,
+        &sealed,
+        &active,
+    )?;
     // The manifest is now durable authority. An intent-cleanup sharing error
     // must not leave this live writer appending to the old generation; restart
     // recovery will authenticate and retire the harmless published intent.
     let _ = remove_generation_publication_intent(root, intent.generation);
-    Ok(active)
+    Ok(active_path)
 }
 
 /// Compatibility recovery for the pre-intent layout. Its old manifest could
@@ -4252,15 +4404,16 @@ fn recover_orphan_generation(
         if !active.try_exists().map_err(io_error)? {
             return Ok(());
         }
-        let active_snapshot = read_snapshot_bounded_direct(&active, usize::MAX)?;
-        if !active_snapshot.events.is_empty() || active_snapshot.identity.is_some() {
-            return Err(corrupt(
-                0,
-                "legacy generation orphan has a non-empty active segment",
-            ));
-        }
+        let active = open_verified_empty_active_segment(&active)?;
         let sealed = prove_sealed_generation(&location.data_path, worker_id, channel_id)?;
-        publish_generation_manifest(root, location.generation, worker_id, channel_id, &sealed)?;
+        publish_generation_manifest(
+            root,
+            location.generation,
+            worker_id,
+            channel_id,
+            &sealed,
+            &active,
+        )?;
         return Ok(());
     }
 
@@ -4346,7 +4499,8 @@ fn recover_orphan_generation(
         // discard a proven-empty active-only artifact if one exists, then
         // promote exactly those bytes.
         if active_exists {
-            validate_empty_active_segment(&active)?;
+            let active_proof = open_verified_empty_active_segment(&active)?;
+            drop(active_proof);
             std::fs::remove_file(&active).map_err(io_error)?;
         }
         let _ = validate_generation_publication_candidate(
@@ -4382,7 +4536,8 @@ fn recover_orphan_generation(
                 "active-only journal generation does not have exact provenance",
             ));
         }
-        validate_empty_active_segment(&active)?;
+        let active_proof = open_verified_empty_active_segment(&active)?;
+        drop(active_proof);
         std::fs::remove_file(&active).map_err(io_error)?;
         remove_generation_publication_intent(root, candidate_generation)?;
         return Ok(());
@@ -4432,6 +4587,107 @@ fn replace_file(source: &Path, destination: &Path) -> std::io::Result<()> {
         std::fs::remove_file(destination)?;
     }
     std::fs::rename(source, destination)
+}
+
+/// Atomically replaces the manifest using the exact file object that was
+/// fsynced and authenticated above. A pathname `MoveFileEx` here would reopen
+/// a brief source-substitution window after the manifest temp was validated.
+#[cfg(windows)]
+fn replace_manifest_from_exact_handle(
+    file: &File,
+    temporary: &Path,
+    destination: &Path,
+    expected_bytes: &[u8],
+) -> Result<(), JournalError> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_RENAME_INFO, FileRenameInfo, SetFileInformationByHandle,
+    };
+
+    replace_manifest_temp_at_promotion_boundary(temporary);
+    let destination = if destination.is_absolute() {
+        destination.to_path_buf()
+    } else {
+        std::env::current_dir().map_err(io_error)?.join(destination)
+    };
+    let name = destination.as_os_str().encode_wide().collect::<Vec<_>>();
+    let header_bytes = std::mem::offset_of!(FILE_RENAME_INFO, FileName);
+    let info_bytes = header_bytes
+        .checked_add(
+            name.len()
+                .checked_mul(std::mem::size_of::<u16>())
+                .ok_or_else(|| corrupt(0, "journal generation manifest path is too long"))?,
+        )
+        .ok_or_else(|| corrupt(0, "journal generation manifest path is too long"))?;
+    let info_length = u32::try_from(info_bytes)
+        .map_err(|_| corrupt(0, "journal generation manifest path is too long"))?;
+    let words = info_bytes
+        .checked_add(std::mem::size_of::<usize>() - 1)
+        .ok_or_else(|| corrupt(0, "journal generation manifest path is too long"))?
+        / std::mem::size_of::<usize>();
+    // `FILE_RENAME_INFO` contains pointer-sized fields; keep its flexible
+    // buffer suitably aligned instead of casting a byte-aligned allocation.
+    let mut info = vec![0_usize; words];
+    let rename = info.as_mut_ptr().cast::<FILE_RENAME_INFO>();
+    // SAFETY: `info` is exactly the FILE_RENAME_INFO prefix plus the UTF-16
+    // filename payload. The handle was opened with DELETE access, and the
+    // destination is an absolute, non-NUL UTF-16 path.
+    let status = unsafe {
+        (*rename).Anonymous.ReplaceIfExists = true;
+        (*rename).RootDirectory = std::ptr::null_mut();
+        (*rename).FileNameLength = u32::try_from(name.len() * std::mem::size_of::<u16>())
+            .expect("bounded manifest path length fits u32");
+        std::ptr::copy_nonoverlapping(name.as_ptr(), (*rename).FileName.as_mut_ptr(), name.len());
+        SetFileInformationByHandle(
+            file.as_raw_handle(),
+            FileRenameInfo,
+            rename.cast(),
+            info_length,
+        )
+    };
+    if status == 0 {
+        return Err(io_error(std::io::Error::last_os_error()));
+    }
+    // Flush the same handle after the rename, preserving the old
+    // MoveFileEx(MOVEFILE_WRITE_THROUGH) durability boundary before readers
+    // can treat the new manifest name as authority.
+    file.sync_all().map_err(io_error)?;
+    let metadata = std::fs::symlink_metadata(&destination).map_err(io_error)?;
+    if !metadata.is_file() || metadata.file_type().is_symlink() || is_reparse_point(&metadata) {
+        return Err(corrupt(
+            0,
+            "published journal generation manifest is not a regular non-reparse file",
+        ));
+    }
+    let published = File::open(&destination).map_err(io_error)?;
+    if journal_file_identity(&published)? != journal_file_identity(file)?
+        || file_sha256_file(&published)? != format!("{:x}", Sha256::digest(expected_bytes))
+    {
+        return Err(corrupt(
+            0,
+            "published journal generation manifest changed during promotion",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn replace_manifest_from_exact_handle(
+    file: &File,
+    temporary: &Path,
+    destination: &Path,
+    expected_bytes: &[u8],
+) -> Result<(), JournalError> {
+    let _ = file;
+    replace_manifest_temp_at_promotion_boundary(temporary);
+    replace_file(temporary, destination).map_err(io_error)?;
+    if std::fs::read(destination).map_err(io_error)? != expected_bytes {
+        return Err(corrupt(
+            0,
+            "published journal generation manifest changed during promotion",
+        ));
+    }
+    Ok(())
 }
 
 fn read_exact_record(
@@ -5006,6 +5262,78 @@ mod tests {
     }
 
     #[test]
+    fn writer_rejects_active_temp_swapped_after_validation_before_manifest_publication() {
+        let path = test_path();
+        let mut writer = JournalWriter::open(&path, WORKER_ID, CHANNEL_ID).unwrap();
+        writer
+            .append(&event(
+                1,
+                WorkerEvent::Heartbeat {
+                    monotonic_milliseconds: 5_000,
+                    outputs: Vec::new(),
+                },
+            ))
+            .unwrap();
+        writer
+            .append(&event(2, WorkerEvent::Ready { graph_revision: 1 }))
+            .unwrap();
+        drop(writer);
+
+        let (generation, _, _) = stage_generation_publication(&path);
+        let active_temp = active_segment_temp_path(&path, generation);
+        let active_temp_file = File::create(&active_temp).unwrap();
+        active_temp_file.sync_all().unwrap();
+        drop(active_temp_file);
+        // This is a CRC-valid journal, not merely garbage. Before the fix the
+        // path-only temp check accepted the empty file, then renamed these
+        // bytes into the active authority and wrote a manifest for them.
+        let replacement = path.with_extension("active-temp-swap-journal");
+        std::fs::copy(&path, &replacement).unwrap();
+        schedule_active_temp_replacement(active_temp.clone(), replacement);
+
+        assert!(matches!(
+            JournalWriter::open(&path, WORKER_ID, CHANNEL_ID),
+            Err(JournalError::Corrupt { reason, .. }) if reason.contains("not exactly empty")
+                || reason.contains("changed before manifest publication")
+        ));
+        assert!(!generation_manifest_path(&path).exists());
+        assert!(generation_publication_path(&path, generation).exists());
+    }
+
+    #[test]
+    fn writer_rejects_an_empty_active_temp_replacement_with_a_different_file_id() {
+        let path = test_path();
+        let mut writer = JournalWriter::open(&path, WORKER_ID, CHANNEL_ID).unwrap();
+        writer
+            .append(&event(
+                1,
+                WorkerEvent::Heartbeat {
+                    monotonic_milliseconds: 5_000,
+                    outputs: Vec::new(),
+                },
+            ))
+            .unwrap();
+        writer
+            .append(&event(2, WorkerEvent::Ready { graph_revision: 1 }))
+            .unwrap();
+        drop(writer);
+
+        let (generation, _, _) = stage_generation_publication(&path);
+        let active_temp = active_segment_temp_path(&path, generation);
+        File::create(&active_temp).unwrap().sync_all().unwrap();
+        let replacement = path.with_extension("active-temp-swap-empty");
+        File::create(&replacement).unwrap().sync_all().unwrap();
+        schedule_active_temp_replacement(active_temp, replacement);
+
+        assert!(matches!(
+            JournalWriter::open(&path, WORKER_ID, CHANNEL_ID),
+            Err(JournalError::Corrupt { reason, .. })
+                if reason.contains("changed before manifest publication")
+        ));
+        assert!(!generation_manifest_path(&path).exists());
+    }
+
+    #[test]
     fn writer_rejects_a_nonempty_active_temp_without_publishing_it() {
         let path = test_path();
         let mut writer = JournalWriter::open(&path, WORKER_ID, CHANNEL_ID).unwrap();
@@ -5174,6 +5502,55 @@ mod tests {
     }
 
     #[test]
+    fn writer_publishes_manifest_from_the_retained_temp_handle_after_a_path_swap() {
+        let path = test_path();
+        let mut writer = JournalWriter::open(&path, WORKER_ID, CHANNEL_ID).unwrap();
+        writer
+            .append(&event(
+                1,
+                WorkerEvent::Heartbeat {
+                    monotonic_milliseconds: 5_000,
+                    outputs: Vec::new(),
+                },
+            ))
+            .unwrap();
+        writer
+            .append(&event(2, WorkerEvent::Ready { graph_revision: 1 }))
+            .unwrap();
+        drop(writer);
+
+        let (generation, _, _) = stage_generation_publication(&path);
+        let active = create_empty_active_segment(&path, generation).unwrap();
+        let sealed =
+            prove_sealed_generation(&generation_path(&path, generation), WORKER_ID, CHANNEL_ID)
+                .unwrap();
+        let temporary = generation_manifest_temp_path(&path);
+        let replacement = path.with_extension("manifest-temp-swap");
+        let mut replacement_file = File::create(&replacement).unwrap();
+        replacement_file
+            .write_all(b"untrusted manifest replacement")
+            .unwrap();
+        replacement_file.sync_all().unwrap();
+        drop(replacement_file);
+        schedule_manifest_temp_replacement(temporary.clone(), replacement);
+
+        publish_generation_manifest(&path, generation, WORKER_ID, CHANNEL_ID, &sealed, &active)
+            .unwrap();
+        drop(active);
+
+        let manifest_bytes = std::fs::read(generation_manifest_path(&path)).unwrap();
+        assert_ne!(manifest_bytes, b"untrusted manifest replacement");
+        let location = resolve_journal_location(&path).unwrap();
+        assert_eq!(location.generation, generation);
+        // The substituted pathname remains an untrusted temp. It never became
+        // authority; the next attempted publication discards it explicitly.
+        assert_eq!(
+            std::fs::read(temporary).unwrap(),
+            b"untrusted manifest replacement"
+        );
+    }
+
+    #[test]
     fn writer_discards_a_proven_active_only_generation_without_fabricating_authority() {
         let path = test_path();
         let mut writer = JournalWriter::open(&path, WORKER_ID, CHANNEL_ID).unwrap();
@@ -5259,11 +5636,13 @@ mod tests {
         drop(writer);
 
         let (generation, _, current) = stage_generation_publication(&path);
-        create_empty_active_segment(&path, generation).unwrap();
+        let active = create_empty_active_segment(&path, generation).unwrap();
         let sealed =
             prove_sealed_generation(&generation_path(&path, generation), WORKER_ID, CHANNEL_ID)
                 .unwrap();
-        publish_generation_manifest(&path, generation, WORKER_ID, CHANNEL_ID, &sealed).unwrap();
+        publish_generation_manifest(&path, generation, WORKER_ID, CHANNEL_ID, &sealed, &active)
+            .unwrap();
+        drop(active);
 
         let recovered = JournalWriter::open(&path, WORKER_ID, CHANNEL_ID).unwrap();
         assert_eq!(recovered.generation, generation);
