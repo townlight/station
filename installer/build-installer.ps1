@@ -24,6 +24,10 @@ if ([string]::IsNullOrWhiteSpace($env:LOCALAPPDATA) -or [string]::IsNullOrWhiteS
     -not ([string]$env:USERPROFILE).Equals($trustedUserProfile, [StringComparison]::OrdinalIgnoreCase)) {
     throw 'LOCALAPPDATA or USERPROFILE environment drifted from the trusted Windows known-folder values.'
 }
+if (-not [string]::IsNullOrWhiteSpace($env:RUSTUP_HOME) -or
+    -not [string]::IsNullOrWhiteSpace($env:RUSTUP_TOOLCHAIN)) {
+    throw 'RUSTUP_HOME or RUSTUP_TOOLCHAIN environment drifted from the direct pinned toolchain boundary.'
+}
 
 $expectedGStreamerInstallerPath = Join-Path $trustedLocalAppData 'Temp\TownLightStation-Toolchain-20260820\gstreamer-1.0-msvc-x86_64-1.28.6.exe'
 $expectedCaptionDecoderArchivePath = Join-Path $trustedLocalAppData 'Temp\TownLightStation-Toolchain-20260825\ffmpeg-n9.0.1-6-g9d4ca21220-win64-lgpl-9.0.zip'
@@ -45,13 +49,14 @@ $captionDecoderArchiveRoot = 'ffmpeg-n9.0.1-6-g9d4ca21220-win64-lgpl-9.0'
 $expectedInnoHash = '0a8757031b33777e4c9cbffee40f11a5062b36d25cbe144c1db73b6102b80ad7'
 $expectedInnoSize = 1456272
 $expectedInnoSignerThumbprint = 'E0AB19C8D38CBF9C44709925122A7A02F8C70CB7'
-$expectedCargoPath = Join-Path $trustedUserProfile '.cargo\bin\cargo.exe'
-$expectedRustcPath = Join-Path $trustedUserProfile '.cargo\bin\rustc.exe'
 $expectedCargoVersion = '1.97.1'
 $expectedCargoCommit = 'c980f4866141969fab6254a680546a277789d6f0'
 $expectedRustcVersion = '1.97.1'
 $expectedRustcCommit = '8bab26f4f68e0e26f0bb7960be334d5b520ea452'
 $expectedRustToolchain = '1.97.1-x86_64-pc-windows-msvc'
+$expectedRustToolchainRoot = Join-Path $trustedUserProfile ".rustup\toolchains\$expectedRustToolchain"
+$expectedCargoPath = Join-Path $expectedRustToolchainRoot 'bin\cargo.exe'
+$expectedRustcPath = Join-Path $expectedRustToolchainRoot 'bin\rustc.exe'
 $expectedGStreamerRoot = Join-Path $trustedLocalAppData 'Programs\gstreamer\1.0\msvc_x86_64'
 $expectedGStreamerVersion = '1.28.6'
 $expectedMsvcRoot = 'C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.44.35207'
@@ -194,17 +199,17 @@ function Get-RustIdentity([string]$Path, [string]$Kind, [string]$ExpectedVersion
     }
     $release = [string]$namedFields['release']
     $commit = [string]$namedFields['commit-hash']
-    $host = [string]$namedFields['host']
+    $toolHost = [string]$namedFields['host']
     if ($firstLine -notmatch "^$Kind\s+$([regex]::Escape($release))\s+\([0-9a-f]{9,40}(\s|\))" -or
         $release -cne $ExpectedVersion -or $commit -cnotmatch '^[0-9a-f]{40}$' -or
-        $commit -cne $ExpectedCommit -or $host -cne 'x86_64-pc-windows-msvc') {
+        $commit -cne $ExpectedCommit -or $toolHost -cne 'x86_64-pc-windows-msvc') {
         throw "$Kind toolchain identity mismatch; expected named release $ExpectedVersion, full commit $ExpectedCommit, and host x86_64-pc-windows-msvc. Got '$firstLine'."
     }
     [ordered]@{
         path = $canonical
         version = $release
         commit = $commit
-        host = $host
+        host = $toolHost
         executable = Get-FileIdentity $canonical
     }
 }
@@ -318,7 +323,6 @@ $priorInclude = $env:INCLUDE
 $priorLib = $env:LIB
 $priorCargoHttpCheckRevoke = $env:CARGO_HTTP_CHECK_REVOKE
 $priorRustc = $env:RUSTC
-$priorRustupToolchain = $env:RUSTUP_TOOLCHAIN
 $buildMutex = [Threading.Mutex]::new($false, 'Global\TownLightStation.InstallerBuild.v1')
 $buildMutexHeld = $false
 try {
@@ -370,7 +374,6 @@ try {
     [Environment]::SetEnvironmentVariable('TOWNLIGHT_CARGO_EXECUTABLE', $expectedCargoPath, 'Process')
     [Environment]::SetEnvironmentVariable('TOWNLIGHT_GSTREAMER_ROOT', $expectedGStreamerRoot, 'Process')
     $env:RUSTC = $expectedRustcPath
-    $env:RUSTUP_TOOLCHAIN = $expectedRustToolchain
     $innoIdentity = Get-InnoIdentity $InnoCompiler
     $rustIdentity = Get-RustIdentity $expectedRustcPath 'rustc' $expectedRustcVersion $expectedRustcCommit
     $cargoIdentity = Get-RustIdentity $expectedCargoPath 'cargo' $expectedCargoVersion $expectedCargoCommit
@@ -492,7 +495,6 @@ finally {
     $env:LIB = $priorLib
     $env:CARGO_HTTP_CHECK_REVOKE = $priorCargoHttpCheckRevoke
     $env:RUSTC = $priorRustc
-    $env:RUSTUP_TOOLCHAIN = $priorRustupToolchain
     if ($captionStageOwned) {
         $stageItem = Get-Item -LiteralPath $captionDecoderStage -Force -ErrorAction SilentlyContinue
         if ($null -ne $stageItem -and ($stageItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -eq 0) {

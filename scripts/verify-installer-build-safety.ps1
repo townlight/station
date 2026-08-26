@@ -36,6 +36,13 @@ Assert-Contract ($build -match '\$expectedInnoHash\s*=\s*\x27[0-9a-f]{64}\x27' -
 Assert-Contract ($build -match 'Get-RustIdentity' -and $build -match 'Get-MsvcIdentity' -and
     $build -match 'Get-GStreamerIdentity' -and $build -match 'expectedCargoCommit' -and
     $build -match 'expectedWindowsSdkVersion') 'native toolchain identities must be explicit and recorded.'
+Assert-Contract ($build -notmatch '\$host\s*=' -and $build -match '\$toolHost\s*=') `
+    "Rust identity parsing must not assign PowerShell's read-only Host automatic variable."
+Assert-Contract ($build -match '\.rustup\\toolchains\\' -and
+    $build -match '\$expectedRustToolchainRoot' -and
+    $build -match 'RUSTUP_HOME or RUSTUP_TOOLCHAIN environment drifted' -and
+    $build -notmatch '\$env:RUSTUP_TOOLCHAIN\s*=') `
+    'release Cargo and rustc must bind direct pinned toolchain binaries without Rustup proxy or environment drift.'
 Assert-Contract ($build -match 'Get-TrustedKnownFolder' -and
     $build -match 'LOCALAPPDATA or USERPROFILE environment drifted' -and
     $build -match '\$env:RUSTC\s*=\s*\$expectedRustcPath' -and
@@ -94,6 +101,33 @@ finally {
     if ($null -ne $probeFixture -and ($probeFixture.Attributes -band [IO.FileAttributes]::ReparsePoint) -eq 0) {
         Remove-Item -LiteralPath $probeFixtureRoot -Force -Recurse -ErrorAction Stop
     }
+}
+$rustIdentityStart = $build.IndexOf('function Get-RustIdentity', [StringComparison]::Ordinal)
+$rustIdentityEnd = $build.IndexOf('function Get-MsvcIdentity', [StringComparison]::Ordinal)
+Assert-Contract ($rustIdentityStart -ge 0 -and $rustIdentityEnd -gt $rustIdentityStart) `
+    'Rust identity parser must remain independently runnable as a fixture boundary.'
+$rustFixtureRoot = Join-Path ([IO.Path]::GetTempPath()) ("townlight-rust-identity-$([guid]::NewGuid().ToString('N'))")
+try {
+    New-Item -ItemType Directory -Path $rustFixtureRoot -ErrorAction Stop | Out-Null
+    $fakeCargo = Join-Path $rustFixtureRoot 'cargo.ps1'
+    [IO.File]::WriteAllText($fakeCargo, "exit 0`r`n", [Text.UTF8Encoding]::new($false))
+    function Get-CanonicalPath([string]$Path) { return (Resolve-Path -LiteralPath $Path -ErrorAction Stop).Path }
+    function Assert-CanonicalPath([string]$Actual, [string]$Expected, [string]$Label) {
+        if ($Actual -cne $Expected) { throw "$Label fixture path mismatch" }
+    }
+    function Get-FileIdentity([string]$Path) { [ordered]@{ path = $Path } }
+    function Invoke-CargoWrapperCapture([string[]]$Arguments) {
+        [pscustomobject]@{ standard_output = "cargo 1.97.1 (c980f4866141969fab6254a680546a277789d6f0 2026-01-01)`nrelease: 1.97.1`ncommit-hash: c980f4866141969fab6254a680546a277789d6f0`nhost: x86_64-pc-windows-msvc"; standard_error = ''; exit_code = 0 }
+    }
+    $expectedCargoPath = $fakeCargo
+    $expectedRustcPath = $fakeCargo
+    . ([scriptblock]::Create($build.Substring($rustIdentityStart, $rustIdentityEnd - $rustIdentityStart)))
+    $rustIdentity = Get-RustIdentity $fakeCargo 'cargo' '1.97.1' 'c980f4866141969fab6254a680546a277789d6f0'
+    Assert-Contract ($rustIdentity.version -ceq '1.97.1' -and $rustIdentity.commit -ceq 'c980f4866141969fab6254a680546a277789d6f0' -and $rustIdentity.host -ceq 'x86_64-pc-windows-msvc') `
+        'realistic named Cargo release, full commit-hash, and host output must parse without touching automatic variables.'
+}
+finally {
+    if (Test-Path -LiteralPath $rustFixtureRoot -PathType Container) { Remove-Item -LiteralPath $rustFixtureRoot -Recurse -Force -ErrorAction SilentlyContinue }
 }
 Assert-Contract ($build.IndexOf('$trustedLocalAppData = Get-TrustedKnownFolder', [StringComparison]::Ordinal) -ge 0 -and
     $build.IndexOf('$trustedLocalAppData = Get-TrustedKnownFolder', [StringComparison]::Ordinal) -lt
