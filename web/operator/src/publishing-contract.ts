@@ -35,7 +35,6 @@ export interface PublishAccountDraft {
   kind: PublishTargetKind;
   label: string;
   enabled: boolean;
-  credentialConfigured: boolean;
 }
 
 export interface PublishTargetDraft {
@@ -50,7 +49,6 @@ export interface PublishAccountMutation {
   kind: PublishTargetKind;
   label: string;
   enabled: boolean;
-  credential_configured: boolean;
   expected_revision: number | null;
 }
 
@@ -95,7 +93,6 @@ export function publishAccountMutation(draft: PublishAccountDraft, expectedRevis
     kind: draft.kind,
     label: draft.label.trim(),
     enabled: draft.enabled,
-    credential_configured: draft.credentialConfigured,
     expected_revision: expectedRevision,
   };
 }

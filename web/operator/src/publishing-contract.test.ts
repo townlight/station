@@ -13,10 +13,10 @@ import {
 } from "./publishing-contract.ts";
 
 test("publishing account mutations reject unbounded or blank browser fields", () => {
-  assert.match(publishingAccountMutationReason({ kind: "portal", label: "", enabled: true, credentialConfigured: false }, null) ?? "", /label/i);
-  assert.match(publishingAccountMutationReason({ kind: "portal", label: "x".repeat(201), enabled: true, credentialConfigured: false }, null) ?? "", /label/i);
-  assert.match(publishingAccountMutationReason({ kind: "portal", label: "Portal", enabled: true, credentialConfigured: false }, 0) ?? "", /revision/i);
-  assert.equal(publishingAccountMutationReason({ kind: "portal", label: "Portal", enabled: true, credentialConfigured: false }, null), null);
+  assert.match(publishingAccountMutationReason({ kind: "portal", label: "", enabled: true }, null) ?? "", /label/i);
+  assert.match(publishingAccountMutationReason({ kind: "portal", label: "x".repeat(201), enabled: true }, null) ?? "", /label/i);
+  assert.match(publishingAccountMutationReason({ kind: "portal", label: "Portal", enabled: true }, 0) ?? "", /revision/i);
+  assert.equal(publishingAccountMutationReason({ kind: "portal", label: "Portal", enabled: true }, null), null);
 });
 
 test("target mutations require a bounded account, authoritative hash, and exact CAS revision", () => {
@@ -28,9 +28,9 @@ test("target mutations require a bounded account, authoritative hash, and exact 
 });
 
 test("browser mutation DTOs omit secrets, trusted evidence, identities, and attribution", () => {
-  const account = publishAccountMutation({ kind: "portal", label: " Portal ", enabled: true, credentialConfigured: true }, 2);
-  assert.deepEqual(account, { kind: "portal", label: "Portal", enabled: true, credential_configured: true, expected_revision: 2 });
-  assert.deepEqual(Object.keys(account).sort(), ["credential_configured", "enabled", "expected_revision", "kind", "label"]);
+  const account = publishAccountMutation({ kind: "portal", label: " Portal ", enabled: true }, 2);
+  assert.deepEqual(account, { kind: "portal", label: "Portal", enabled: true, expected_revision: 2 });
+  assert.deepEqual(Object.keys(account).sort(), ["enabled", "expected_revision", "kind", "label"]);
   const target = publishTargetMutation({ accountId: "11111111-1111-4111-8111-111111111111", kind: "portal", label: " Portal target ", enabled: true, configurationHash: "a".repeat(64) }, null);
   assert.deepEqual(Object.keys(target).sort(), ["account_id", "configuration_hash", "enabled", "expected_revision", "kind", "label"]);
   assert.equal("evidence" in target || "secret" in target || "credential" in target, false);

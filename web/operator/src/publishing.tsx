@@ -23,7 +23,7 @@ interface OperatorSession { session: { roles: string[] } }
 interface AccountHistory { account: PublishTargetAccount; changed_by: string; occurred_at_unix_ms: number }
 interface TargetHistory { target: PublishTargetProfile; changed_by: string; occurred_at_unix_ms: number }
 
-const EMPTY_ACCOUNT: PublishAccountDraft = { kind: "portal", label: "", enabled: true, credentialConfigured: false };
+const EMPTY_ACCOUNT: PublishAccountDraft = { kind: "portal", label: "", enabled: true };
 const EMPTY_TARGET: PublishTargetDraft = { accountId: "", kind: "portal", label: "", enabled: true, configurationHash: "" };
 
 function time(value: number): string { return new Date(value).toLocaleString(); }
@@ -48,6 +48,8 @@ export function PublishingPanel() {
   const [targetEditor, setTargetEditor] = useState<PublishTargetProfile | "new" | null>(null);
   const [accountDraft, setAccountDraft] = useState<PublishAccountDraft>(EMPTY_ACCOUNT);
   const [targetDraft, setTargetDraft] = useState<PublishTargetDraft>(EMPTY_TARGET);
+  const [credentialAccount, setCredentialAccount] = useState<PublishTargetAccount | null>(null);
+  const [credential, setCredential] = useState("");
   const publishingLoad = useRef(new LatestPublishingAuthorityLoad());
   const hasLoadedAuthority = useRef(false);
   const [authorityCurrent, setAuthorityCurrent] = useState(false);
@@ -97,7 +99,7 @@ export function PublishingPanel() {
   function beginAccount(account: PublishTargetAccount | null) {
     setTargetEditor(null); setAccountEditor(account ?? "new"); setError(null); setNotice(null);
     setAccountDraft(account ? {
-      kind: account.kind, label: account.label, enabled: account.enabled, credentialConfigured: account.credential_configured,
+      kind: account.kind, label: account.label, enabled: account.enabled,
     } : EMPTY_ACCOUNT);
   }
 
@@ -145,6 +147,37 @@ export function PublishingPanel() {
     } finally { setSaving(false); }
   }
 
+  async function saveCredential(event: FormEvent) {
+    event.preventDefault();
+    if (!credentialAccount || credential.length < 8 || credential.length > 16384 || !canWrite) return;
+    setSaving(true); setError(null); setNotice(null);
+    try {
+      await apiRequest(`/api/v1/publishing/accounts/${encodeURIComponent(credentialAccount.account_id)}/credential`, {
+        method: "PUT",
+        body: JSON.stringify({ expected_account_revision: credentialAccount.revision, credential }),
+      });
+      setCredential(""); setCredentialAccount(null);
+      setNotice("Publishing credential stored with Windows machine protection. Its value cannot be read back.");
+      await load();
+    } catch (problem) {
+      setError(problem instanceof Error ? problem.message : "The publishing credential could not be stored.");
+    } finally { setSaving(false); }
+  }
+
+  async function deleteCredential(account: PublishTargetAccount) {
+    setSaving(true); setError(null); setNotice(null);
+    try {
+      await apiRequest(`/api/v1/publishing/accounts/${encodeURIComponent(account.account_id)}/credential`, {
+        method: "DELETE",
+        body: JSON.stringify({ expected_account_revision: account.revision }),
+      });
+      setNotice("Publishing credential deleted. Existing execution evidence cannot authorize new work.");
+      await load();
+    } catch (problem) {
+      setError(problem instanceof Error ? problem.message : "The publishing credential could not be deleted.");
+    } finally { setSaving(false); }
+  }
+
   const accountById = useMemo(() => new Map(accounts.map((account) => [account.account_id, account])), [accounts]);
   const canWrite = setupAdmin && authorityCurrent && !refreshing;
   const accountBlock = publishingAccountMutationReason(accountDraft, accountEditor && accountEditor !== "new" ? accountEditor.revision : null);
@@ -169,7 +202,8 @@ export function PublishingPanel() {
     </section>
     <div className="publishing-layout">
       <section className="panel"><div className="panel-head"><div><p className="eyebrow">Redacted account authority</p><h2>Accounts</h2></div><div className="panel-actions"><span className="count">{accounts.length}</span>{setupAdmin && <button className="secondary" onClick={() => beginAccount(null)} disabled={saving || accountEditor !== null || !canWrite}>Add account</button>}</div></div>
-        {!accounts.length ? <div className="publishing-empty"><strong>No publishing accounts configured</strong><p>Create a bounded account record before linking a target. Credential material is never entered or displayed here.</p>{setupAdmin && <button className="primary" onClick={() => beginAccount(null)} disabled={!canWrite}>Create account</button>}</div> : <div className="publishing-record-list">{accounts.map((account) => <article className="publishing-record" key={account.account_id}><div className="publishing-record-head"><div><strong>{account.label}</strong><small>{publishingKindLabel(account.kind)} · revision {account.revision}</small></div><span className={`status ${account.enabled ? "pass" : "unknown"}`}>{account.enabled ? "enabled" : "disabled"}</span></div><dl><div><dt>Credential</dt><dd>{account.credential_configured ? "Configured (secret redacted)" : "Not configured"}</dd></div><div><dt>Account identity</dt><dd><code>{account.account_id}</code></dd></div></dl>{setupAdmin && <button className="text-button" onClick={() => beginAccount(account)} disabled={saving || !canWrite}>Edit account</button>}<History title="Account history" entries={accountHistory[account.account_id] ?? []} render={(entry) => <>{entry.account.label} · revision {entry.account.revision} · {entry.account.enabled ? "enabled" : "disabled"} · credential {entry.account.credential_configured ? "configured" : "not configured"}</>} /></article>)}</div>}
+        {!accounts.length ? <div className="publishing-empty"><strong>No publishing accounts configured</strong><p>Create a bounded account record before linking a target.</p>{setupAdmin && <button className="primary" onClick={() => beginAccount(null)} disabled={!canWrite}>Create account</button>}</div> : <div className="publishing-record-list">{accounts.map((account) => <article className="publishing-record" key={account.account_id}><div className="publishing-record-head"><div><strong>{account.label}</strong><small>{publishingKindLabel(account.kind)} · revision {account.revision}</small></div><span className={`status ${account.enabled ? "pass" : "unknown"}`}>{account.enabled ? "enabled" : "disabled"}</span></div><dl><div><dt>Credential</dt><dd>{account.credential_configured ? "Configured (secret redacted)" : "Not configured"}</dd></div><div><dt>Account identity</dt><dd><code>{account.account_id}</code></dd></div></dl>{setupAdmin && <><button className="text-button" onClick={() => beginAccount(account)} disabled={saving || !canWrite}>Edit account</button><button className="text-button" onClick={() => { setCredential(""); setCredentialAccount(account); }} disabled={saving || !canWrite}>{account.credential_configured ? "Rotate credential" : "Provision credential"}</button>{account.credential_configured && <button className="text-button" onClick={() => void deleteCredential(account)} disabled={saving || !canWrite}>Delete credential</button>}</>}<History title="Account history" entries={accountHistory[account.account_id] ?? []} render={(entry) => <>{entry.account.label} · revision {entry.account.revision} · {entry.account.enabled ? "enabled" : "disabled"}</>} /></article>)}</div>}
+        {credentialAccount && <form className="publishing-editor" onSubmit={saveCredential}><div className="panel-head"><div><p className="eyebrow">Write-only secret</p><h3>{credentialAccount.credential_configured ? "Rotate" : "Provision"} {credentialAccount.label} credential</h3></div><button type="button" className="text-button" onClick={() => { setCredential(""); setCredentialAccount(null); }}>Cancel</button></div><label>Provider credential<textarea required minLength={8} maxLength={16384} value={credential} onChange={(event) => setCredential(event.target.value)} autoComplete="off" spellCheck={false} /></label><p className="publishing-nonclaim">The browser sends this once over the authenticated local API. It is Windows-protected and can never be displayed again.</p><button className="primary" disabled={saving || credential.length < 8}>{saving ? "Protecting…" : "Store credential"}</button></form>}
         {accountEditor && <AccountEditor editor={accountEditor} draft={accountDraft} blocked={accountBlock} saving={saving} onDraft={setAccountDraft} onCancel={() => setAccountEditor(null)} onSave={saveAccount} />}
       </section>
       <section className="panel"><div className="panel-head"><div><p className="eyebrow">Redacted target authority</p><h2>Targets</h2></div><div className="panel-actions"><span className="count">{targets.length}</span>{setupAdmin && <button className="secondary" onClick={() => beginTarget(null)} disabled={saving || targetEditor !== null || !accounts.length || !canWrite}>Add target</button>}</div></div>
@@ -185,7 +219,7 @@ function History<T extends { changed_by: string; occurred_at_unix_ms: number }>(
 }
 
 function AccountEditor({ editor, draft, blocked, saving, onDraft, onCancel, onSave }: { editor: PublishTargetAccount | "new"; draft: PublishAccountDraft; blocked: string | null; saving: boolean; onDraft: (value: PublishAccountDraft) => void; onCancel: () => void; onSave: (event: FormEvent) => void }) {
-  return <form className="publishing-editor" onSubmit={onSave}><div className="panel-head"><div><p className="eyebrow">{editor === "new" ? "New account" : `Revision ${editor.revision} → ${editor.revision + 1}`}</p><h3>{editor === "new" ? "Create publishing account" : "Edit publishing account"}</h3></div><button type="button" className="text-button" onClick={onCancel}>Cancel</button></div><label>Account label<input required maxLength={200} value={draft.label} onChange={(event) => onDraft({ ...draft, label: event.target.value })} placeholder="County public information portal" /></label><label>Target kind<select value={draft.kind} onChange={(event) => onDraft({ ...draft, kind: event.target.value as PublishAccountDraft["kind"] })}>{PUBLISH_TARGET_KINDS.map((kind) => <option key={kind} value={kind}>{publishingKindLabel(kind)}</option>)}</select></label><label className="publishing-checkbox"><input type="checkbox" checked={draft.enabled} onChange={(event) => onDraft({ ...draft, enabled: event.target.checked })} /> Enable this account</label><label className="publishing-checkbox"><input type="checkbox" checked={draft.credentialConfigured} onChange={(event) => onDraft({ ...draft, credentialConfigured: event.target.checked })} /> Credential configured (presence only; no secret is entered here)</label>{blocked && <div className="headend-warning" role="status">{blocked}</div>}<button className="primary" disabled={saving || Boolean(blocked)}>{saving ? "Saving…" : editor === "new" ? "Create account" : "Save account revision"}</button></form>;
+  return <form className="publishing-editor" onSubmit={onSave}><div className="panel-head"><div><p className="eyebrow">{editor === "new" ? "New account" : `Revision ${editor.revision} → ${editor.revision + 1}`}</p><h3>{editor === "new" ? "Create publishing account" : "Edit publishing account"}</h3></div><button type="button" className="text-button" onClick={onCancel}>Cancel</button></div><label>Account label<input required maxLength={200} value={draft.label} onChange={(event) => onDraft({ ...draft, label: event.target.value })} placeholder="County public information portal" /></label><label>Target kind<select value={draft.kind} onChange={(event) => onDraft({ ...draft, kind: event.target.value as PublishAccountDraft["kind"] })}>{PUBLISH_TARGET_KINDS.map((kind) => <option key={kind} value={kind}>{publishingKindLabel(kind)}</option>)}</select></label><label className="publishing-checkbox"><input type="checkbox" checked={draft.enabled} onChange={(event) => onDraft({ ...draft, enabled: event.target.checked })} /> Enable this account</label><p className="publishing-nonclaim">Credential presence is derived from the protected station secret authority and cannot be set here.</p>{blocked && <div className="headend-warning" role="status">{blocked}</div>}<button className="primary" disabled={saving || Boolean(blocked)}>{saving ? "Saving…" : editor === "new" ? "Create account" : "Save account revision"}</button></form>;
 }
 
 function TargetEditor({ editor, draft, accounts, blocked, saving, onDraft, onCancel, onSave }: { editor: PublishTargetProfile | "new"; draft: PublishTargetDraft; accounts: PublishTargetAccount[]; blocked: string | null; saving: boolean; onDraft: (value: PublishTargetDraft) => void; onCancel: () => void; onSave: (event: FormEvent) => void }) {

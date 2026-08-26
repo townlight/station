@@ -93,6 +93,50 @@ pub struct PublishConnectionTestEvidence {
     pub detail: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum PublishExecutionTargetConfig {
+    Portal { endpoint: String },
+    InternetArchive { item_identifier: String },
+    LocalNas { managed_root: String },
+    YouTubeLive { channel_id: String },
+}
+
+impl PublishExecutionTargetConfig {
+    pub fn kind(&self) -> PublishTargetKind {
+        match self {
+            Self::Portal { .. } => PublishTargetKind::Portal,
+            Self::InternetArchive { .. } => PublishTargetKind::InternetArchive,
+            Self::LocalNas { .. } => PublishTargetKind::LocalNas,
+            Self::YouTubeLive { .. } => PublishTargetKind::YouTubeLive,
+        }
+    }
+
+    pub fn validate(&self) -> Result<(), String> {
+        match self {
+            Self::Portal { endpoint } => validate_https_endpoint(endpoint),
+            Self::InternetArchive { item_identifier } => {
+                validate_slug(item_identifier, 100, "Internet Archive item identifier")
+            }
+            Self::LocalNas { managed_root } => {
+                validate_visible(managed_root, 500, "managed NAS root")?;
+                if !managed_root.starts_with("\\\\")
+                    || managed_root.contains("..")
+                    || managed_root.contains('/')
+                {
+                    return Err(
+                        "managed NAS root must be an absolute UNC path without traversal".into(),
+                    );
+                }
+                Ok(())
+            }
+            Self::YouTubeLive { channel_id } => {
+                validate_slug(channel_id, 100, "YouTube channel identity")
+            }
+        }
+    }
+}
+
 /// Durable provider truth advances one explicit stage at a time. A later stage
 /// never implies audience reach, playback, or retention beyond the provider's
 /// exact acknowledgement.
@@ -534,4 +578,31 @@ fn is_source_commit(value: &str) -> bool {
         && value
             .bytes()
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+fn validate_https_endpoint(value: &str) -> Result<(), String> {
+    validate_visible(value, 500, "publishing HTTPS endpoint")?;
+    let Some(authority) = value.strip_prefix("https://") else {
+        return Err("publishing provider endpoint must use HTTPS".into());
+    };
+    if authority.is_empty()
+        || authority.contains('@')
+        || authority.contains('?')
+        || authority.contains('#')
+        || authority.ends_with('/')
+    {
+        return Err("publishing provider endpoint contains unsafe authority or URL data".into());
+    }
+    Ok(())
+}
+
+fn validate_slug(value: &str, maximum: usize, field: &str) -> Result<(), String> {
+    validate_visible(value, maximum, field)?;
+    if value
+        .bytes()
+        .any(|byte| !(byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_')))
+    {
+        return Err(format!("{field} contains unsupported characters"));
+    }
+    Ok(())
 }

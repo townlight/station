@@ -1,8 +1,9 @@
 use station_publishing::{
     ConnectionTestOutcome, PublishCandidateIdentity, PublishConnectionTestEvidence,
-    PublishExecutionReceipt, PublishExecutionStage, PublishTargetAccount, PublishTargetKind,
-    PublishTargetProfile, PublishTargetStatus, RequiredTierStatus, derive_publication_readiness,
-    derive_publish_target_status, validate_receipt_successor,
+    PublishExecutionReceipt, PublishExecutionStage, PublishExecutionTargetConfig,
+    PublishTargetAccount, PublishTargetKind, PublishTargetProfile, PublishTargetStatus,
+    RequiredTierStatus, derive_publication_readiness, derive_publish_target_status,
+    validate_receipt_successor,
 };
 
 const ACCOUNT_ID: &str = "8b626c01-bdf8-419a-8a2e-b0a7caa1ff7e";
@@ -383,4 +384,36 @@ fn execution_receipts_advance_only_the_same_exact_binding() {
 
     next.target_revision += 1;
     assert!(validate_receipt_successor(&prior, &next).is_err());
+}
+
+#[test]
+fn executable_targets_are_typed_and_reject_secret_bearing_or_escaping_locations() {
+    assert!(
+        PublishExecutionTargetConfig::Portal {
+            endpoint: "https://portal.example.test/api/v1/media".into(),
+        }
+        .validate()
+        .is_ok()
+    );
+    assert!(
+        PublishExecutionTargetConfig::Portal {
+            endpoint: "https://user:secret@portal.example.test/upload".into(),
+        }
+        .validate()
+        .is_err()
+    );
+    assert!(
+        PublishExecutionTargetConfig::LocalNas {
+            managed_root: r"\\station-nas\TownLight".into(),
+        }
+        .validate()
+        .is_ok()
+    );
+    assert!(
+        PublishExecutionTargetConfig::LocalNas {
+            managed_root: r"\\station-nas\TownLight\..\escape".into(),
+        }
+        .validate()
+        .is_err()
+    );
 }
