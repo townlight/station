@@ -215,10 +215,10 @@ pub fn project_durable_journal(
         path,
         source_cursor.as_ref(),
         MAX_INCREMENTAL_JOURNAL_EVENTS,
-        // Reporting runs once per minute, outside the control loop. Verify
-        // every durable prefix here so an in-place valid rewrite before the
-        // cursor cannot hide behind a still-valid suffix.
-        source_cursor.is_some(),
+        // Reporting runs once per minute, outside the control loop. Every
+        // projection pass, including its first persisted cursor, establishes
+        // or extends the authenticated reader session before authority moves.
+        true,
     ) {
         Ok(read) => read,
         Err(error) if source_cursor.is_some() && compaction_recovery_allowed(&error) => {
@@ -231,7 +231,7 @@ pub fn project_durable_journal(
                         "journal replacement has no independent retained event-frame anchor".into(),
                     ));
                 }
-                read_journal_incremental(path, None, MAX_INCREMENTAL_JOURNAL_EVENTS, false)
+                read_journal_incremental(path, None, MAX_INCREMENTAL_JOURNAL_EVENTS, true)
                     .map_err(journal_error)?
             } else {
                 if anchor_sequence == 0 || !valid_frame_hash(anchor_hash) {
@@ -255,7 +255,7 @@ pub fn project_durable_journal(
                     path,
                     Some(&anchor_cursor),
                     MAX_INCREMENTAL_JOURNAL_EVENTS,
-                    false,
+                    true,
                 )
                 .map_err(journal_error)?
             }

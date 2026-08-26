@@ -4,7 +4,7 @@ use std::ptr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use station_media_journal::{JournalWriter, read_events};
+use station_media_journal::{JournalWriter, read_events, retire_incremental_reader};
 use station_media_protocol::{PROTOCOL_VERSION, WorkerEvent, WorkerEventEnvelope};
 use station_reporting::runtime::{
     ASRUN_CHECKPOINT_VERSION, AsRunState, JournalTake, ProjectionInput, ReportingRuntime,
@@ -625,6 +625,10 @@ fn restart_prefix_verification_fails_closed_on_pre_checkpoint_corruption() {
     )
     .unwrap();
     drop(store);
+
+    // Model process restart: the operating system releases a live verified
+    // reader's range lock at process exit before a hostile on-disk mutation.
+    retire_incremental_reader(&journal);
 
     let mut bytes = std::fs::read(&journal).unwrap();
     bytes[0] ^= 0x01;

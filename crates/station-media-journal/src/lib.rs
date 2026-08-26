@@ -2,9 +2,13 @@ use std::ffi::OsString;
 use std::fs::{File, OpenOptions};
 use std::io::{ErrorKind, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+#[cfg(windows)]
+use std::collections::HashMap;
+#[cfg(windows)]
+use std::sync::{Mutex, OnceLock};
 
 #[cfg(windows)]
-use std::os::windows::fs::OpenOptionsExt;
+use std::os::windows::{fs::OpenOptionsExt, io::AsRawHandle};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -26,6 +30,52 @@ const RETAIN_RAW_HEARTBEATS: usize = 256;
 const MAX_SUMMARY_OUTPUTS: usize = 64;
 const COMPACTION_LAYOUT_RETAINED_THEN_COMMIT: u8 = 1;
 const COMPACTION_LAYOUT_COMMIT_THEN_RETAINED: u8 = 2;
+
+#[cfg(windows)]
+struct VerifiedPrefixSession {
+    file: File,
+    cursor: JournalCursor,
+}
+
+#[cfg(windows)]
+fn verified_prefix_sessions() -> &'static Mutex<HashMap<PathBuf, VerifiedPrefixSession>> {
+    static SESSIONS: OnceLock<Mutex<HashMap<PathBuf, VerifiedPrefixSession>>> = OnceLock::new();
+    SESSIONS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn release_verified_prefix_session(path: &Path) {
+    #[cfg(windows)]
+    {
+        verified_prefix_sessions()
+            .lock()
+            .expect("verified prefix sessions are not poisoned")
+            .remove(path);
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = path;
+    }
+}
+
+#[cfg(test)]
+std::thread_local! {
+    static STREAM_RECORD_READS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn reset_stream_record_reads() {
+    STREAM_RECORD_READS.with(|reads| reads.set(0));
+}
+
+#[cfg(test)]
+fn stream_record_reads() -> u64 {
+    STREAM_RECORD_READS.with(std::cell::Cell::get)
+}
+
+#[cfg(all(test, windows))]
+fn forget_verified_prefix_session(path: &Path) {
+    release_verified_prefix_session(path);
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CompactedHeartbeatRange {
@@ -337,6 +387,12 @@ impl JournalWriter {
         }
 
         drop(self.file.take());
+        // A verified reporting reader locks the old bytes against mutation.
+        // Compaction replaces that whole object atomically, so retire its
+        // in-process lock immediately before the replacement. The next
+        // reporting pass sees the new file identity and performs explicit
+        // anchored recovery instead of mixing objects.
+        release_verified_prefix_session(&self.path);
         if let Err(error) = replacer(&temporary, &self.path) {
             return Err(io_error(error));
         }
@@ -414,6 +470,7 @@ fn migrate_legacy_compaction_layout(
             "legacy compaction migration did not preserve coverage",
         ));
     }
+    release_verified_prefix_session(path);
     replace_file(&temporary, path).map_err(io_error)
 }
 
@@ -490,6 +547,15 @@ pub fn read_events(path: impl AsRef<Path>) -> Result<Vec<WorkerEventEnvelope>, J
     Ok(read_snapshot(path.as_ref())?.events)
 }
 
+/// Retires this process's authenticated incremental-reader handle for a
+/// journal during graceful shutdown. A process exit releases the Windows
+/// range lock automatically; in-process restart harnesses and maintenance
+/// tools should call this before replacing or deliberately corrupting the
+/// journal object.
+pub fn retire_incremental_reader(path: impl AsRef<Path>) {
+    release_verified_prefix_session(path.as_ref());
+}
+
 /// Reads a CRC-validated journal while refusing to allocate more than `limit`
 /// retained event envelopes. Frame allocation remains bounded by the protocol's
 /// fixed maximum, so callers do not need a racy file-size precheck.
@@ -516,10 +582,13 @@ pub fn inspect_journal_bounded(
 ///
 /// The normal path seeks directly to the durable byte offset; it neither
 /// allocates nor rescans retained history. Callers that make durable output
-/// decisions must request `verify_prefix` on every pass: that authenticated
-/// scan detects an in-place valid rewrite before the cursor even when its
-/// suffix still parses. A changed file identity or a shorter file is rejected
-/// rather than guessed at; callers can use
+/// decisions must request `verify_prefix` on every pass. On Windows, the
+/// first pass after process start reconstructs and byte-range-locks the exact
+/// authenticated prefix; later passes lock and revalidate only their bounded
+/// suffix. This detects an in-place valid rewrite before the cursor even when
+/// its suffix still parses without turning every minute into a historical
+/// rescan. A changed file identity or a shorter file is rejected rather than
+/// guessed at; callers can use
 /// [`find_journal_event_cursor`] to make an explicit, validated compaction
 /// recovery from a retained transition anchor.
 pub fn read_journal_incremental(
@@ -532,17 +601,18 @@ pub fn read_journal_incremental(
         return Err(corrupt(0, "incremental event limit must be positive"));
     }
     let path = path.as_ref();
-    let metadata = std::fs::metadata(path).map_err(io_error)?;
-    let file_identity = journal_file_identity(&metadata);
-    let length = metadata.len();
+    let prior_cursor = cursor.cloned();
+    let path_metadata = std::fs::metadata(path).map_err(io_error)?;
+    let path_file_identity = journal_file_identity(&path_metadata);
+    let path_length = path_metadata.len();
     if let Some(cursor) = cursor {
-        if cursor.byte_offset > length {
+        if cursor.byte_offset > path_length {
             return Err(corrupt(
                 cursor.byte_offset,
                 "journal was truncated before the durable reader checkpoint",
             ));
         }
-        if cursor.file_identity != file_identity {
+        if cursor.file_identity != path_file_identity {
             return Err(corrupt(
                 cursor.byte_offset,
                 "journal file identity changed after the durable reader checkpoint",
@@ -554,12 +624,29 @@ pub fn read_journal_incremental(
                 "journal cursor prefix hash is invalid",
             ));
         }
-        if verify_prefix {
-            verify_journal_cursor_prefix(path, cursor)?;
-        }
     }
 
-    let mut file = File::open(path).map_err(io_error)?;
+    let mut file = match (cursor, verify_prefix) {
+        (Some(cursor), true) => verified_prefix_session_file(path, cursor)?,
+        _ => File::open(path).map_err(io_error)?,
+    };
+    let metadata = file.metadata().map_err(io_error)?;
+    let file_identity = journal_file_identity(&metadata);
+    let length = metadata.len();
+    if let Some(cursor) = cursor {
+        if cursor.byte_offset > length {
+            return Err(corrupt(
+                cursor.byte_offset,
+                "locked journal handle was truncated before the durable reader checkpoint",
+            ));
+        }
+        if cursor.file_identity != file_identity {
+            return Err(corrupt(
+                cursor.byte_offset,
+                "locked journal handle identity changed after the durable reader checkpoint",
+            ));
+        }
+    }
     let mut offset = cursor.map_or(0, |value| value.byte_offset);
     file.seek(SeekFrom::Start(offset)).map_err(io_error)?;
     let mut prefix_hash = cursor
@@ -721,6 +808,9 @@ pub fn read_journal_incremental(
         }
     }
     if let Some(cursor) = bounded_cursor {
+        if verify_prefix {
+            advance_verified_prefix_session(path, prior_cursor.as_ref(), &cursor)?;
+        }
         return Ok(IncrementalJournalRead {
             worker_id,
             channel_id,
@@ -767,6 +857,9 @@ pub fn read_journal_incremental(
             ),
         )
     });
+    if verify_prefix {
+        advance_verified_prefix_session(path, prior_cursor.as_ref(), &final_cursor)?;
+    }
     Ok(IncrementalJournalRead {
         worker_id,
         channel_id,
@@ -971,6 +1064,8 @@ struct StreamRecord {
 }
 
 fn read_stream_record(file: &mut File, offset: u64) -> Result<Option<StreamRecord>, JournalError> {
+    #[cfg(test)]
+    STREAM_RECORD_READS.with(|reads| reads.set(reads.get() + 1));
     let mut header = [0_u8; HEADER_BYTES];
     match file.read(&mut header[..1]) {
         Ok(0) => return Ok(None),
@@ -1056,6 +1151,330 @@ fn next_prefix_hash(previous: &str, record: &[u8]) -> String {
 
 fn valid_prefix_hash(value: &str) -> bool {
     value.len() == 64 && value.as_bytes().iter().all(u8::is_ascii_hexdigit)
+}
+
+/// Ensures that a production reader either holds a byte-range lock over its
+/// exact authenticated prefix or has just reconstructed and locked it. The
+/// lock lets normal appends proceed beyond the prefix while preventing a
+/// CRC-valid rewrite of already-authoritative bytes between reporting passes.
+fn ensure_verified_prefix_session(path: &Path, cursor: &JournalCursor) -> Result<(), JournalError> {
+    #[cfg(windows)]
+    {
+        {
+            let sessions = verified_prefix_sessions()
+                .lock()
+                .expect("verified prefix sessions are not poisoned");
+            if let Some(session) = sessions.get(path)
+                && session.cursor == *cursor
+            {
+                ensure_current_path_is_locked_file(path, &session.file, cursor)?;
+                return Ok(());
+            }
+        }
+        // A restart/cache miss pays one complete proof before the prefix is
+        // protected. Re-check after taking the lock to close that acquisition
+        // race; later passes only inspect their bounded suffix.
+        let file = open_prefix_lock_handle(path)?;
+        ensure_locked_file_matches_cursor(&file, cursor)?;
+        verify_journal_cursor_prefix_file(&file, cursor)?;
+        lock_file_range(&file, 0, cursor.byte_offset)?;
+        verify_journal_cursor_prefix_file(&file, cursor)?;
+        ensure_current_path_is_locked_file(path, &file, cursor)?;
+        verified_prefix_sessions()
+            .lock()
+            .expect("verified prefix sessions are not poisoned")
+            .insert(
+                path.to_path_buf(),
+                VerifiedPrefixSession {
+                    file,
+                    cursor: cursor.clone(),
+                },
+            );
+        Ok(())
+    }
+    #[cfg(not(windows))]
+    {
+        verify_journal_cursor_prefix(path, cursor)
+    }
+}
+
+/// Returns a duplicate of the exact locked object that authenticated the
+/// durable cursor. Reading this instead of reopening `path` prevents a
+/// rename-replacement race from mixing a protected prefix with an unprotected
+/// suffix from a different journal object.
+fn verified_prefix_session_file(path: &Path, cursor: &JournalCursor) -> Result<File, JournalError> {
+    #[cfg(windows)]
+    {
+        ensure_verified_prefix_session(path, cursor)?;
+        let sessions = verified_prefix_sessions()
+            .lock()
+            .expect("verified prefix sessions are not poisoned");
+        let session = sessions.get(path).ok_or_else(|| {
+            corrupt(
+                cursor.byte_offset,
+                "verified reader session disappeared before journal read",
+            )
+        })?;
+        if session.cursor != *cursor {
+            return Err(corrupt(
+                cursor.byte_offset,
+                "verified reader session does not match the durable checkpoint",
+            ));
+        }
+        ensure_current_path_is_locked_file(path, &session.file, cursor)?;
+        session.file.try_clone().map_err(io_error)
+    }
+    #[cfg(not(windows))]
+    {
+        ensure_verified_prefix_session(path, cursor)?;
+        File::open(path).map_err(io_error)
+    }
+}
+
+/// Extends a verified prefix lock only over the records consumed in this
+/// invocation, then replays that small locked suffix against the prior cursor.
+/// This preserves the prefix-chain proof without rereading an unbounded
+/// already-locked history on every reporting pass.
+fn advance_verified_prefix_session(
+    path: &Path,
+    prior: Option<&JournalCursor>,
+    cursor: &JournalCursor,
+) -> Result<(), JournalError> {
+    #[cfg(windows)]
+    {
+        let Some(prior) = prior else {
+            return ensure_verified_prefix_session(path, cursor);
+        };
+        let mut sessions = verified_prefix_sessions()
+            .lock()
+            .expect("verified prefix sessions are not poisoned");
+        let Some(session) = sessions.get_mut(path) else {
+            drop(sessions);
+            return ensure_verified_prefix_session(path, cursor);
+        };
+        if session.cursor != *prior {
+            drop(sessions);
+            return ensure_verified_prefix_session(path, cursor);
+        }
+        ensure_locked_file_matches_cursor(&session.file, cursor)?;
+        ensure_current_path_is_locked_file(path, &session.file, cursor)?;
+        if cursor.byte_offset < prior.byte_offset {
+            return Err(corrupt(
+                cursor.byte_offset,
+                "verified reader cursor moved backwards",
+            ));
+        }
+        lock_file_range(&session.file, prior.byte_offset, cursor.byte_offset)?;
+        verify_journal_cursor_suffix(&session.file, prior, cursor)?;
+        ensure_current_path_is_locked_file(path, &session.file, cursor)?;
+        session.cursor = cursor.clone();
+        Ok(())
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = prior;
+        verify_journal_cursor_prefix(path, cursor)
+    }
+}
+
+/// Verifies only the records newly protected by a verified reader lock.
+fn verify_journal_cursor_suffix(
+    locked_file: &File,
+    prior: &JournalCursor,
+    cursor: &JournalCursor,
+) -> Result<(), JournalError> {
+    if prior.byte_offset == cursor.byte_offset {
+        if prior != cursor {
+            return Err(corrupt(
+                cursor.byte_offset,
+                "verified reader cursor changed without consuming records",
+            ));
+        }
+        return Ok(());
+    }
+    let mut file = locked_file.try_clone().map_err(io_error)?;
+    file.seek(SeekFrom::Start(prior.byte_offset)).map_err(io_error)?;
+    let mut offset = prior.byte_offset;
+    let mut prefix_hash = prior.prefix_hash.clone();
+    let mut coverage = SequenceCoverage::after_raw(prior.raw_sequence, offset)?;
+    let mut worker_id = prior.worker_id.clone();
+    let mut channel_id = prior.channel_id.clone();
+    let summary_seen = prior.saw_heartbeat_summary;
+    let commit_seen = prior.saw_compaction_commit;
+    let compaction_next_sequence = prior.compaction_next_sequence;
+    let compaction_layout_version = prior.compaction_layout_version;
+    if commit_seen != (compaction_next_sequence != 0)
+        || (commit_seen && compaction_layout_version != COMPACTION_LAYOUT_COMMIT_THEN_RETAINED)
+    {
+        return Err(corrupt(offset, "verified reader compaction state is invalid"));
+    }
+    while offset < cursor.byte_offset {
+        let record = read_stream_record(&mut file, offset)?
+            .ok_or_else(|| corrupt(offset, "journal ended before verified reader cursor"))?;
+        let record_end = offset
+            .checked_add(record.total_bytes)
+            .ok_or_else(|| corrupt(offset, "journal offset overflow"))?;
+        if record_end > cursor.byte_offset {
+            return Err(corrupt(
+                cursor.byte_offset,
+                "verified reader cursor is not on a journal record boundary",
+            ));
+        }
+        prefix_hash = next_prefix_hash(&prefix_hash, &record.raw_bytes);
+        match record.kind {
+            StreamRecordKind::Event(event) => {
+                if summary_seen && !commit_seen {
+                    return Err(corrupt(
+                        offset,
+                        "retained events require a preceding compaction commit",
+                    ));
+                }
+                bind_stream_identity(
+                    &mut worker_id,
+                    &mut channel_id,
+                    (event.worker_id, event.channel_id),
+                    offset,
+                )?;
+                coverage.cover(event.sequence, event.sequence, offset)?;
+            }
+            StreamRecordKind::HeartbeatSummary(_) => {
+                return Err(corrupt(
+                    offset,
+                    "heartbeat summary cannot appear after a verified reader cursor",
+                ));
+            }
+            StreamRecordKind::CompactionCommit(_) => {
+                return Err(corrupt(
+                    offset,
+                    "compaction commit cannot appear after a verified reader cursor",
+                ));
+            }
+        }
+        offset = record_end;
+    }
+    if offset != cursor.byte_offset
+        || coverage.raw_sequence() != cursor.raw_sequence
+        || prefix_hash != cursor.prefix_hash
+        || worker_id != cursor.worker_id
+        || channel_id != cursor.channel_id
+        || summary_seen != cursor.saw_heartbeat_summary
+        || commit_seen != cursor.saw_compaction_commit
+        || compaction_next_sequence != cursor.compaction_next_sequence
+        || compaction_layout_version != cursor.compaction_layout_version
+    {
+        return Err(corrupt(
+            cursor.byte_offset,
+            "verified reader suffix integrity check failed",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn ensure_locked_file_matches_cursor(file: &File, cursor: &JournalCursor) -> Result<(), JournalError> {
+    let metadata = file.metadata().map_err(io_error)?;
+    if cursor.byte_offset > metadata.len() {
+        return Err(corrupt(
+            cursor.byte_offset,
+            "locked journal handle was truncated before the durable reader checkpoint",
+        ));
+    }
+    if journal_file_identity(&metadata) != cursor.file_identity {
+        return Err(corrupt(
+            cursor.byte_offset,
+            "locked journal handle identity changed after the durable reader checkpoint",
+        ));
+    }
+    Ok(())
+}
+
+/// A compaction can atomically replace the pathname while a reader still owns
+/// the former object. The locked object remains safe to inspect, but it must
+/// never advance authority for a path that now names another journal.
+#[cfg(windows)]
+fn ensure_current_path_is_locked_file(
+    path: &Path,
+    locked_file: &File,
+    cursor: &JournalCursor,
+) -> Result<(), JournalError> {
+    let path_metadata = std::fs::metadata(path).map_err(io_error)?;
+    let locked_metadata = locked_file.metadata().map_err(io_error)?;
+    let path_identity = journal_file_identity(&path_metadata);
+    let locked_identity = journal_file_identity(&locked_metadata);
+    if path_identity != locked_identity || locked_identity != cursor.file_identity {
+        return Err(corrupt(
+            cursor.byte_offset,
+            "journal path changed while the verified reader held its locked object",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn open_prefix_lock_handle(path: &Path) -> Result<File, JournalError> {
+    const FILE_SHARE_READ: u32 = 0x0000_0001;
+    const FILE_SHARE_WRITE: u32 = 0x0000_0002;
+    const FILE_SHARE_DELETE: u32 = 0x0000_0004;
+    let mut options = OpenOptions::new();
+    options.read(true);
+    options.share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE);
+    options.open(path).map_err(io_error)
+}
+
+#[cfg(windows)]
+#[repr(C)]
+struct PrefixLockOverlapped {
+    internal: usize,
+    internal_high: usize,
+    offset: u32,
+    offset_high: u32,
+    event: isize,
+}
+
+#[cfg(windows)]
+#[link(name = "kernel32")]
+unsafe extern "system" {
+    fn LockFileEx(
+        file: isize,
+        flags: u32,
+        reserved: u32,
+        byte_count_low: u32,
+        byte_count_high: u32,
+        overlapped: *mut PrefixLockOverlapped,
+    ) -> i32;
+}
+
+#[cfg(windows)]
+fn lock_file_range(file: &File, start: u64, end: u64) -> Result<(), JournalError> {
+    if start == end {
+        return Ok(());
+    }
+    let length = end
+        .checked_sub(start)
+        .ok_or_else(|| corrupt(start, "verified reader lock range underflow"))?;
+    let mut overlapped = PrefixLockOverlapped {
+        internal: 0,
+        internal_high: 0,
+        offset: start as u32,
+        offset_high: (start >> 32) as u32,
+        event: 0,
+    };
+    // SAFETY: the handle is valid while the session owns `file`; the stack
+    // overlapped is used synchronously with FAIL_IMMEDIATELY.
+    if unsafe {
+        LockFileEx(
+            file.as_raw_handle() as isize,
+            0x0000_0001,
+            0,
+            length as u32,
+            (length >> 32) as u32,
+            &mut overlapped,
+        )
+    } == 0
+    {
+        return Err(io_error(std::io::Error::last_os_error()));
+    }
+    Ok(())
 }
 
 fn stream_cursor(
@@ -1199,8 +1618,18 @@ fn bind_stream_identity(
     }
 }
 
+#[cfg(not(windows))]
 fn verify_journal_cursor_prefix(path: &Path, cursor: &JournalCursor) -> Result<(), JournalError> {
-    let mut file = File::open(path).map_err(io_error)?;
+    let file = File::open(path).map_err(io_error)?;
+    verify_journal_cursor_prefix_file(&file, cursor)
+}
+
+fn verify_journal_cursor_prefix_file(
+    verified_file: &File,
+    cursor: &JournalCursor,
+) -> Result<(), JournalError> {
+    let mut file = verified_file.try_clone().map_err(io_error)?;
+    file.seek(SeekFrom::Start(0)).map_err(io_error)?;
     let mut offset = 0_u64;
     let mut coverage = SequenceCoverage::new();
     let mut prefix_hash = initial_prefix_hash();
@@ -2237,10 +2666,20 @@ mod tests {
         write_compacted_fixture(&path, &retained, 10_002, &[]);
         let file_length = std::fs::metadata(&path).unwrap().len();
 
-        let mut batch = read_journal_incremental(&path, None, 32, false).unwrap();
+        reset_stream_record_reads();
+        let mut batch = read_journal_incremental(&path, None, 32, true).unwrap();
+        let first_pass_reads = stream_record_reads();
         assert_eq!(batch.events.len(), 32);
         assert_eq!(batch.events[0].sequence, 2);
         assert_eq!(batch.cursor.raw_sequence, 33);
+        assert!(
+            first_pass_reads > 0,
+            "production verification must account for physical journal records"
+        );
+        assert!(
+            first_pass_reads <= 160,
+            "the initial production pass may establish an authenticated prefix, but must stay bounded: {first_pass_reads} records"
+        );
         assert!(batch.cursor.saw_compaction_commit);
         assert_eq!(
             batch.cursor.compaction_layout_version,
@@ -2252,8 +2691,16 @@ mod tests {
         );
 
         let mut expected = 34_u64;
+        let mut total_reads = first_pass_reads;
         loop {
-            let next = read_journal_incremental(&path, Some(&batch.cursor), 32, false).unwrap();
+            let reads_before = stream_record_reads();
+            let next = read_journal_incremental(&path, Some(&batch.cursor), 32, true).unwrap();
+            let pass_reads = stream_record_reads() - reads_before;
+            assert!(
+                pass_reads <= 80,
+                "a production batch may read its bounded suffix twice, not replay history: {pass_reads} records"
+            );
+            total_reads += pass_reads;
             for event in &next.events {
                 assert_eq!(event.sequence, expected);
                 expected += 1;
@@ -2265,6 +2712,200 @@ mod tests {
         }
         assert_eq!(expected, 10_002);
         assert_eq!(batch.cursor.raw_sequence, 10_001);
+        assert!(
+            total_reads <= retained.len() as u64 * 4 + 200,
+            "production catch-up must be O(N), not prefix-rescan quadratic: {total_reads} records for {} retained events",
+            retained.len()
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn production_verified_reader_does_not_replay_a_locked_prefix_on_idle_or_append() {
+        let path = test_path();
+        let mut file = File::create(&path).unwrap();
+        for envelope in [
+            event(1, WorkerEvent::Ready { graph_revision: 1 }),
+            event(2, WorkerEvent::ShutdownComplete),
+        ] {
+            write_record(
+                &mut file,
+                RECORD_KIND_EVENT,
+                &encode_event_frame(&envelope).unwrap(),
+            )
+            .unwrap();
+        }
+        file.sync_all().unwrap();
+        drop(file);
+
+        let initial = read_journal_incremental(&path, None, 8, true).unwrap();
+        assert_eq!(initial.events.len(), 2);
+
+        reset_stream_record_reads();
+        let idle = read_journal_incremental(&path, Some(&initial.cursor), 8, true).unwrap();
+        assert!(idle.events.is_empty());
+        assert_eq!(idle.cursor, initial.cursor);
+        let idle_reads = stream_record_reads();
+        assert!(
+            (1..=2).contains(&idle_reads),
+            "an idle production pass must not rescan its authenticated prefix"
+        );
+
+        let mut file = OpenOptions::new().append(true).open(&path).unwrap();
+        write_record(
+            &mut file,
+            RECORD_KIND_EVENT,
+            &encode_event_frame(&event(3, WorkerEvent::Ready { graph_revision: 2 })).unwrap(),
+        )
+        .unwrap();
+        file.sync_all().unwrap();
+        drop(file);
+
+        reset_stream_record_reads();
+        let appended = read_journal_incremental(&path, Some(&initial.cursor), 8, true).unwrap();
+        assert_eq!(
+            appended.events.iter().map(|event| event.sequence).collect::<Vec<_>>(),
+            vec![3]
+        );
+        let append_reads = stream_record_reads();
+        assert!(
+            (2..=4).contains(&append_reads),
+            "an append pass must inspect only the new suffix"
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn production_verified_reader_rejects_a_crc_valid_pre_cursor_rewrite_after_restart() {
+        let path = test_path();
+        let first = event(1, WorkerEvent::Ready { graph_revision: 1 });
+        let second = event(2, WorkerEvent::ShutdownComplete);
+        let mut file = File::create(&path).unwrap();
+        for envelope in [&first, &second] {
+            write_record(
+                &mut file,
+                RECORD_KIND_EVENT,
+                &encode_event_frame(envelope).unwrap(),
+            )
+            .unwrap();
+        }
+        file.sync_all().unwrap();
+        drop(file);
+
+        // This is the actual authority mode: the live reader locks the
+        // authenticated prefix. Drop only the in-process handle to model a
+        // process restart, when the next authority pass must rebuild that
+        // proof before it can advance the persisted checkpoint.
+        let checkpoint = read_journal_incremental(&path, None, 1, true)
+            .unwrap()
+            .cursor;
+        forget_verified_prefix_session(&path);
+
+        let mut file = File::create(&path).unwrap();
+        write_record(
+            &mut file,
+            RECORD_KIND_EVENT,
+            &encode_event_frame(&event(1, WorkerEvent::Ready { graph_revision: 9 })).unwrap(),
+        )
+        .unwrap();
+        write_record(
+            &mut file,
+            RECORD_KIND_EVENT,
+            &encode_event_frame(&second).unwrap(),
+        )
+        .unwrap();
+        file.sync_all().unwrap();
+        drop(file);
+
+        reset_stream_record_reads();
+        let result = read_journal_incremental(&path, Some(&checkpoint), 8, true);
+        assert!(matches!(
+            &result,
+            Err(JournalError::Corrupt { reason, .. }) if reason.contains("prefix integrity")
+        ), "expected authenticated pre-cursor rewrite rejection, got {result:?}");
+        assert!(
+            stream_record_reads() > 0,
+            "the restarted authority must authenticate the persisted prefix before state advance"
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn verified_prefix_lock_blocks_mutation_allows_append_and_rejects_path_swap() {
+        let path = test_path();
+        let mut file = File::create(&path).unwrap();
+        for envelope in [
+            event(1, WorkerEvent::Ready { graph_revision: 1 }),
+            event(2, WorkerEvent::ShutdownComplete),
+        ] {
+            write_record(
+                &mut file,
+                RECORD_KIND_EVENT,
+                &encode_event_frame(&envelope).unwrap(),
+            )
+            .unwrap();
+        }
+        file.sync_all().unwrap();
+        drop(file);
+
+        let checkpoint = read_journal_incremental(&path, None, 1, true)
+            .unwrap()
+            .cursor;
+
+        // LockFileEx must reject a second writer's direct in-range mutation,
+        // while leaving the unprotected suffix available to the journal's
+        // normal append-only writer.
+        let mut mutator = OpenOptions::new().write(true).open(&path).unwrap();
+        mutator.seek(SeekFrom::Start(0)).unwrap();
+        assert!(
+            mutator.write_all(b"X").is_err(),
+            "the verified prefix lock must deny writes into authoritative bytes"
+        );
+        drop(mutator);
+
+        let mut appender = OpenOptions::new().append(true).open(&path).unwrap();
+        write_record(
+            &mut appender,
+            RECORD_KIND_EVENT,
+            &encode_event_frame(&event(3, WorkerEvent::Ready { graph_revision: 2 })).unwrap(),
+        )
+        .unwrap();
+        appender.sync_all().unwrap();
+        drop(appender);
+
+        // Windows refuses an atomic replace while the reader owns a locked
+        // prefix. The regular writer explicitly retires that in-process lock
+        // immediately before compaction replacement; a stale checkpoint must
+        // then fail at the next reader boundary rather than bind the new path.
+        let replacement = test_path();
+        let mut file = File::create(&replacement).unwrap();
+        for envelope in [
+            event(1, WorkerEvent::Ready { graph_revision: 1 }),
+            event(2, WorkerEvent::ShutdownComplete),
+            event(3, WorkerEvent::Ready { graph_revision: 2 }),
+        ] {
+            write_record(
+                &mut file,
+                RECORD_KIND_EVENT,
+                &encode_event_frame(&envelope).unwrap(),
+            )
+            .unwrap();
+        }
+        file.sync_all().unwrap();
+        drop(file);
+        assert!(
+            replace_file(&replacement, &path).is_err(),
+            "a live verified prefix lock must prevent a replacement swap"
+        );
+        forget_verified_prefix_session(&path);
+        replace_file(&replacement, &path).unwrap();
+
+        assert!(matches!(
+            read_journal_incremental(&path, Some(&checkpoint), 8, true),
+            Err(JournalError::Corrupt { reason, .. }) if reason.contains("identity changed")
+        ));
         let _ = std::fs::remove_file(path);
     }
 
