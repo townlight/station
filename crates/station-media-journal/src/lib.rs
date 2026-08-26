@@ -1440,10 +1440,27 @@ impl JournalWriter {
         // observe the same next sequence and append independently.
         let mut ownership = acquire_writer_ownership(&root_path)?;
         recover_compaction_temp(&root_path, worker_id, channel_id)?;
-        recover_orphan_generation(&root_path, worker_id, channel_id)?;
-        let mut location = resolve_journal_location_strict(&root_path)?;
-        let mut snapshot = read_snapshot_strict(&root_path)?;
-        let mut published_manifest_authority = None;
+        // If recovery itself publishes a manifest, retain that exact
+        // FileRenameInfo source handle through writer activation. Reopening
+        // by pathname here would recreate a publication-to-reopen gap.
+        let mut published_manifest_authority =
+            recover_orphan_generation(&root_path, worker_id, channel_id)?;
+        let (mut location, mut snapshot) =
+            if let Some(authority) = published_manifest_authority.as_ref() {
+                mirror_manifest_authority_for_resolution(&root_path, authority)?;
+                let resolved = (|| {
+                    let location = resolve_journal_location_strict(&root_path)?;
+                    let snapshot = read_snapshot_strict(&root_path)?;
+                    Ok::<_, JournalError>((location, snapshot))
+                })();
+                clear_mirrored_manifest_authority(&root_path);
+                resolved?
+            } else {
+                (
+                    resolve_journal_location_strict(&root_path)?,
+                    read_snapshot_strict(&root_path)?,
+                )
+            };
         if snapshot
             .identity
             .as_ref()
@@ -1565,6 +1582,31 @@ impl JournalWriter {
         self.next_sequence
     }
 
+    /// Durably invalidate the writer sidecar before this writer releases an
+    /// authority handle. A shared reporter treats an absent record as a
+    /// fail-closed handoff, never as permission to continue with stale proof.
+    fn clear_writer_manifest_authority_record(&mut self) -> Result<(), JournalError> {
+        #[cfg(windows)]
+        {
+            let ownership = self.ownership.as_mut().ok_or_else(|| {
+                JournalError::Io("journal writer ownership is unavailable".into())
+            })?;
+            record_writer_manifest_authority(ownership, None)?;
+        }
+        Ok(())
+    }
+
+    /// A failure after the old manifest authority has been released cannot
+    /// leave an append-capable writer with an unauthenticated sidecar state.
+    /// Closing ownership forces restart recovery to re-prove the published or
+    /// orphaned generation before any later append.
+    fn retire_after_authority_release_failure(&mut self) {
+        let _ = self.clear_writer_manifest_authority_record();
+        self.file.take();
+        self.manifest_authority.take();
+        self.ownership.take();
+    }
+
     pub fn append(&mut self, event: &WorkerEventEnvelope) -> Result<(), JournalError> {
         if event.worker_id != self.worker_id || event.channel_id != self.channel_id {
             return Err(JournalError::WrongIdentity);
@@ -1621,7 +1663,8 @@ impl JournalWriter {
         let (location, snapshot) = if let Some(authority) = self.manifest_authority.as_ref() {
             mirror_manifest_authority_for_resolution(&self.root_path, authority)?;
             let resolved = (|| {
-                recover_orphan_generation(&self.root_path, &self.worker_id, &self.channel_id)?;
+                let _ =
+                    recover_orphan_generation(&self.root_path, &self.worker_id, &self.channel_id)?;
                 let location = resolve_journal_location_strict(&self.root_path)?;
                 let snapshot = read_snapshot_strict(&self.root_path)?;
                 Ok::<_, JournalError>((location, snapshot))
@@ -1629,7 +1672,7 @@ impl JournalWriter {
             clear_mirrored_manifest_authority(&self.root_path);
             resolved?
         } else {
-            recover_orphan_generation(&self.root_path, &self.worker_id, &self.channel_id)?;
+            let _ = recover_orphan_generation(&self.root_path, &self.worker_id, &self.channel_id)?;
             let location = resolve_journal_location_strict(&self.root_path)?;
             let snapshot = read_snapshot_strict(&self.root_path)?;
             (location, snapshot)
@@ -1749,38 +1792,57 @@ impl JournalWriter {
         }
         // The manifest is the sole authority publication point. The durable
         // intent makes each preceding rename recoverable after a crash.
-        // Release this writer's no-delete handle only after the reader lease
-        // check immediately above. A live reporter keeps that lease from its
-        // first manifest proof through projection acknowledgement.
+        // First durably invalidate the old sidecar, then release the old
+        // no-delete handle. A reporter that interleaves here fails closed
+        // rather than validating a stale sidecar against a mutable pathname.
+        if let Err(error) = self.clear_writer_manifest_authority_record() {
+            self.retire_after_authority_release_failure();
+            return Err(error);
+        }
         drop(self.manifest_authority.take());
-        let (next_active, manifest_authority) = complete_generation_publication(
+        if let Err(error) = fail_after_manifest_authority_release(&self.root_path) {
+            self.retire_after_authority_release_failure();
+            return Err(error);
+        }
+        let (next_active, manifest_authority) = match complete_generation_publication(
             &self.root_path,
             &location,
             &intent,
             &self.worker_id,
             &self.channel_id,
-        )?;
+        ) {
+            Ok(published) => published,
+            Err(error) => {
+                self.retire_after_authority_release_failure();
+                return Err(error);
+            }
+        };
         let previous_generation = self.generation;
         let previous_path = self.path.clone();
-        self.file.take();
-        self.file = Some(
-            OpenOptions::new()
-                .append(true)
-                .open(&next_active)
-                .map_err(io_error)?,
-        );
-        self.path = next_active;
-        self.generation = next_generation;
         self.manifest_authority = Some(manifest_authority);
         #[cfg(windows)]
-        record_writer_manifest_authority(
+        if let Err(error) = record_writer_manifest_authority(
             self.ownership.as_mut().ok_or_else(|| {
                 JournalError::Io(
                     "journal writer ownership is unavailable during publication".into(),
                 )
             })?,
             self.manifest_authority.as_ref(),
-        )?;
+        ) {
+            self.retire_after_authority_release_failure();
+            return Err(error);
+        }
+        let next_file = match OpenOptions::new().append(true).open(&next_active) {
+            Ok(file) => file,
+            Err(error) => {
+                self.retire_after_authority_release_failure();
+                return Err(io_error(error));
+            }
+        };
+        self.file.take();
+        self.file = Some(next_file);
+        self.path = next_active;
+        self.generation = next_generation;
         self.raw_heartbeat_count = compacted.raw_heartbeat_count;
         // A reporter may acquire its lease in the tiny interval before the
         // manifest switch. Retire old objects only after a subsequent lease
@@ -2073,6 +2135,106 @@ fn schedule_manifest_temp_replacement(path: PathBuf, replacement: PathBuf) {
 #[cfg(not(test))]
 fn replace_manifest_temp_at_promotion_boundary(_path: &Path) {}
 
+/// Deterministic seam for the critical retirement interleaving: a reporter
+/// has already completed its read/initial verification and attempts the
+/// acknowledgement proof after the writer invalidates its sidecar but before
+/// the writer releases the manifest authority handle.
+#[cfg(test)]
+fn writer_authority_retirement_interleavings()
+-> &'static std::sync::Mutex<std::collections::HashMap<PathBuf, JournalCursor>> {
+    use std::sync::{Mutex, OnceLock};
+
+    static INTERLEAVINGS: OnceLock<Mutex<std::collections::HashMap<PathBuf, JournalCursor>>> =
+        OnceLock::new();
+    INTERLEAVINGS.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
+}
+
+#[cfg(test)]
+fn schedule_writer_authority_retirement_interleaving(path: PathBuf, cursor: JournalCursor) {
+    let previous = writer_authority_retirement_interleavings()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .insert(path, cursor);
+    assert!(
+        previous.is_none(),
+        "one writer retirement interleaving is pending"
+    );
+}
+
+#[cfg(test)]
+fn observe_writer_authority_retirement_interleaving(path: &Path) {
+    let cursor = writer_authority_retirement_interleavings()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .remove(path);
+    if let Some(cursor) = cursor {
+        #[cfg(windows)]
+        if let Some((manifest_hash, manifest_identity, _)) =
+            retained_manifest_authority_binding(path)
+        {
+            assert!(
+                !writer_owns_matching_manifest_authority(
+                    path,
+                    Some(&manifest_hash),
+                    Some(&manifest_identity),
+                )
+                .unwrap(),
+                "the sidecar was not invalidated before authority release"
+            );
+        }
+        assert!(
+            verify_incremental_reader_authority(path, &cursor).is_err(),
+            "the acknowledgement proof advanced through a retired writer handoff"
+        );
+    }
+}
+
+#[cfg(not(test))]
+fn observe_writer_authority_retirement_interleaving(_path: &Path) {}
+
+/// Fault injection for a failure after the old authority is deliberately
+/// released but before the new manifest is published. The writer must become
+/// terminal so restart recovery, not a later append, re-establishes trust.
+#[cfg(test)]
+fn post_authority_release_failures() -> &'static std::sync::Mutex<std::collections::HashSet<PathBuf>>
+{
+    use std::sync::{Mutex, OnceLock};
+
+    static FAILURES: OnceLock<Mutex<std::collections::HashSet<PathBuf>>> = OnceLock::new();
+    FAILURES.get_or_init(|| Mutex::new(std::collections::HashSet::new()))
+}
+
+#[cfg(test)]
+fn schedule_post_authority_release_failure(path: PathBuf) {
+    assert!(
+        post_authority_release_failures()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(path),
+        "one post-authority-release failure is already scheduled"
+    );
+}
+
+#[cfg(test)]
+fn fail_after_manifest_authority_release(path: &Path) -> Result<(), JournalError> {
+    if post_authority_release_failures()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .remove(path)
+    {
+        return Err(corrupt(
+            0,
+            "injected failure after journal manifest authority release",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(not(test))]
+fn fail_after_manifest_authority_release(_path: &Path) -> Result<(), JournalError> {
+    Ok(())
+}
+
 #[cfg(test)]
 fn manifest_authority_replacement_attempts()
 -> &'static std::sync::Mutex<std::collections::HashMap<PathBuf, Vec<PathBuf>>> {
@@ -2240,9 +2402,22 @@ impl Drop for JournalWriter {
         // separate, so publication can switch generations without releasing
         // writer authority; it is released only when this writer retires.
         self.file.take();
-        // Retire the manifest authority before its writer-status sidecar.
-        // A reporter never mistakes a live sidecar record for authority after
-        // the corresponding no-delete handle has been released.
+        // Persist an empty sidecar before retiring the corresponding
+        // no-delete authority. A shared reporter can therefore never observe
+        // the old record after its handle is gone.
+        if self.clear_writer_manifest_authority_record().is_err() {
+            // We cannot report a Drop failure. Keep both durable authorities
+            // alive in this process rather than opening a stale-sidecar gap;
+            // normal process exit releases them together.
+            if let Some(authority) = self.manifest_authority.take() {
+                std::mem::forget(authority);
+            }
+            if let Some(ownership) = self.ownership.take() {
+                std::mem::forget(ownership);
+            }
+            return;
+        }
+        observe_writer_authority_retirement_interleaving(&self.root_path);
         self.manifest_authority.take();
         self.ownership.take();
     }
@@ -5091,7 +5266,7 @@ fn recover_orphan_generation(
     root: &Path,
     worker_id: &str,
     channel_id: &str,
-) -> Result<(), JournalError> {
+) -> Result<Option<ManifestAuthorityHandle>, JournalError> {
     let location = resolve_journal_location_strict(root)?;
     recover_generation_publication_temp(root, &location, worker_id, channel_id)?;
     reject_ambiguous_generation_artifacts(root, location.generation)?;
@@ -5128,11 +5303,11 @@ fn recover_orphan_generation(
     if location.legacy_manifest.is_some() {
         let active = active_segment_path(root, location.generation);
         if !active.try_exists().map_err(io_error)? {
-            return Ok(());
+            return Ok(None);
         }
         let active = open_verified_empty_active_segment(&active)?;
         let sealed = prove_sealed_generation(&location.data_path, worker_id, channel_id)?;
-        publish_generation_manifest(
+        let authority = publish_generation_manifest(
             root,
             location.generation,
             worker_id,
@@ -5140,7 +5315,7 @@ fn recover_orphan_generation(
             &sealed,
             &active,
         )?;
-        return Ok(());
+        return Ok(Some(authority));
     }
 
     let candidate_generation = location
@@ -5158,7 +5333,7 @@ fn recover_orphan_generation(
         // A private compact temp may survive an ordinary in-process rename
         // failure or a crash before the durable intent. It carries no
         // publication authority and is intentionally ignored (not promoted).
-        return Ok(());
+        return Ok(None);
     }
 
     // A legacy pre-intent binary could leave both final files just before the
@@ -5189,7 +5364,7 @@ fn recover_orphan_generation(
             // It has no active half and no intent, so it is never authority;
             // retain the validated root rather than trying to promote or
             // fabricate the stale candidate.
-            return Ok(());
+            return Ok(None);
         }
         None if !candidate_exists
             && active_exists
@@ -5197,7 +5372,7 @@ fn recover_orphan_generation(
             && location.manifest.is_none() =>
         {
             merge_verified_legacy_active_suffix(root, &active, worker_id, channel_id)?;
-            return Ok(());
+            return Ok(None);
         }
         None => {
             return Err(corrupt(
@@ -5215,8 +5390,9 @@ fn recover_orphan_generation(
     }
 
     if candidate_exists {
-        let _ = complete_generation_publication(root, &location, &intent, worker_id, channel_id)?;
-        return Ok(());
+        let (_, authority) =
+            complete_generation_publication(root, &location, &intent, worker_id, channel_id)?;
+        return Ok(Some(authority));
     }
 
     if temporary_exists {
@@ -5233,8 +5409,9 @@ fn recover_orphan_generation(
             root, &location, &intent, &temporary, worker_id, channel_id,
         )?;
         promote_generation(&temporary, &candidate).map_err(io_error)?;
-        let _ = complete_generation_publication(root, &location, &intent, worker_id, channel_id)?;
-        return Ok(());
+        let (_, authority) =
+            complete_generation_publication(root, &location, &intent, worker_id, channel_id)?;
+        return Ok(Some(authority));
     }
 
     if active_exists {
@@ -5266,7 +5443,7 @@ fn recover_orphan_generation(
         drop(active_proof);
         std::fs::remove_file(&active).map_err(io_error)?;
         remove_generation_publication_intent(root, candidate_generation)?;
-        return Ok(());
+        return Ok(None);
     }
 
     Err(corrupt(
@@ -5542,6 +5719,57 @@ mod tests {
         drop(reopened);
         let _ = std::fs::remove_file(path);
         let _ = std::fs::remove_file(temporary);
+    }
+
+    #[test]
+    fn post_authority_release_failure_retires_writer_until_restart_recovery() {
+        let path = test_path();
+        let mut writer = JournalWriter::open(&path, WORKER_ID, CHANNEL_ID).unwrap();
+        writer
+            .append(&event(1, WorkerEvent::Ready { graph_revision: 1 }))
+            .unwrap();
+        for sequence in 2..=513 {
+            writer
+                .append(&event(
+                    sequence,
+                    WorkerEvent::Heartbeat {
+                        monotonic_milliseconds: sequence * 5_000,
+                        outputs: Vec::new(),
+                    },
+                ))
+                .unwrap();
+        }
+
+        schedule_post_authority_release_failure(path.clone());
+        assert!(matches!(
+            writer.append(&event(
+                514,
+                WorkerEvent::Heartbeat {
+                    monotonic_milliseconds: 514 * 5_000,
+                    outputs: Vec::new(),
+                },
+            )),
+            Err(JournalError::Corrupt { reason, .. })
+                if reason.contains("injected failure after journal manifest authority release")
+        ));
+        assert!(writer.file.is_none());
+        assert!(writer.ownership.is_none());
+        assert!(writer.manifest_authority.is_none());
+        assert!(matches!(
+            writer.append(&event(515, WorkerEvent::ShutdownComplete)),
+            Err(JournalError::Io(reason)) if reason.contains("unavailable")
+        ));
+        drop(writer);
+
+        // Restart is the sole recovery route after release: it authenticates
+        // the intent/candidate pair and publishes a contiguous generation
+        // before accepting any new append.
+        let mut recovered = JournalWriter::open(&path, WORKER_ID, CHANNEL_ID).unwrap();
+        assert_eq!(recovered.next_sequence(), 515);
+        recovered
+            .append(&event(515, WorkerEvent::ShutdownComplete))
+            .unwrap();
+        drop(recovered);
     }
 
     #[test]
@@ -6365,16 +6593,11 @@ mod tests {
         // again at the persistence boundary rather than trusting the initial
         // sharing violation alone.
         verify_incremental_reader_authority(&path, &report.cursor).unwrap();
+        schedule_writer_authority_retirement_interleaving(path.clone(), report.cursor.clone());
         drop(writer);
-        assert!(matches!(
-            verify_incremental_reader_authority(&path, &report.cursor),
-            Err(JournalError::Corrupt { reason, .. })
-                if reason.contains("live writer manifest authority retired")
-        ));
-        // The reporter fails before acknowledgement when the source writer
-        // retires. A retained strict reader authority may still deny a raw
-        // replacement at this point, which is stronger than the shared
-        // fallback contract and intentionally needs no special case here.
+        // The scheduled interleaving attempted the acknowledgement proof
+        // after sidecar invalidation and before authority release. It must
+        // fail before persistence, not after a mutable-path window opens.
         acknowledge_incremental_reader(&path);
     }
 
