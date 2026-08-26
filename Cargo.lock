@@ -2045,6 +2045,7 @@ dependencies = [
  "station-cg",
  "station-domain",
  "station-live",
+ "station-maintenance",
  "station-media-lifecycle",
  "station-metadata",
  "station-publishing",

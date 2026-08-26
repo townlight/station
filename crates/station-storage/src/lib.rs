@@ -810,6 +810,11 @@ pub struct TransportProofJob {
     pub target_revision: u64,
     pub candidate_version: String,
     pub source_commit: String,
+    /// Exact active-slot generation that authorized the queue entry. `None`
+    /// represents a pre-generation migrated row and is deliberately
+    /// non-executable; only the test seeder may construct such historical
+    /// evidence.
+    pub install_generation: Option<u64>,
     pub configuration_hash: String,
     pub requested_by: String,
     pub created_at_unix_ms: i64,
@@ -835,6 +840,23 @@ impl TransportProofJob {
         }
         Ok(())
     }
+
+    fn validate_for_enqueue(&self) -> Result<(), String> {
+        self.validate()?;
+        if self.install_generation.is_none() {
+            return Err("transport proof job lacks a verified install generation".into());
+        }
+        Ok(())
+    }
+}
+
+fn verified_install_authority_matches(
+    authority: &station_maintenance::VerifiedInstallAuthority,
+    job: &TransportProofJob,
+) -> bool {
+    job.install_generation == Some(authority.install_generation())
+        && job.candidate_version == authority.version()
+        && job.source_commit == authority.source_commit()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1650,7 +1672,8 @@ impl StationStore {
                analyzer_output_sha256 TEXT NOT NULL DEFAULT '',\
                completed_at_unix_ms INTEGER NOT NULL DEFAULT -1 CHECK (completed_at_unix_ms >= -1),\
                failed_at_unix_ms INTEGER NOT NULL DEFAULT -1 CHECK (failed_at_unix_ms >= -1),\
-               failure_detail TEXT NOT NULL DEFAULT ''\
+               failure_detail TEXT NOT NULL DEFAULT '',\
+               install_generation INTEGER NOT NULL DEFAULT -1 CHECK (install_generation >= -1)\
              );\
              CREATE UNIQUE INDEX IF NOT EXISTS transport_proof_jobs_active_sink \
                ON transport_proof_jobs(channel_id, sink_id) WHERE state NOT IN ('completed','failed');\
@@ -1691,12 +1714,16 @@ impl StationStore {
         let analysis_needs_revision = analysis_exists
             && !self.sqlite_table_has_column("transport_analysis_receipts", "target_revision")?;
         let target_configs_exist = self.sqlite_table_exists("transport_target_configs")?;
+        let jobs_exist = self.sqlite_table_exists("transport_proof_jobs")?;
+        let jobs_need_install_generation = jobs_exist
+            && !self.sqlite_table_has_column("transport_proof_jobs", "install_generation")?;
         let migrated_configs = if target_configs_exist {
             self.legacy_transport_target_config_rewrites()?
         } else {
             Vec::new()
         };
-        if !analysis_needs_revision && migrated_configs.is_empty() {
+        if !analysis_needs_revision && migrated_configs.is_empty() && !jobs_need_install_generation
+        {
             return Ok(());
         }
 
@@ -1789,6 +1816,15 @@ impl StationStore {
                 self.execute("DROP TABLE transport_analysis_receipts")?;
                 self.execute(
                     "ALTER TABLE transport_analysis_receipts_replacement RENAME TO transport_analysis_receipts",
+                )?;
+            }
+            if jobs_need_install_generation {
+                // Existing queued rows predate active-slot-generation binding.
+                // Keep them auditable/readable but mark them unbound (`-1`),
+                // which prevents claim or completion rather than allowing an
+                // accidental match to generation zero.
+                self.execute(
+                    "ALTER TABLE transport_proof_jobs ADD COLUMN install_generation INTEGER NOT NULL DEFAULT -1 CHECK (install_generation >= -1)",
                 )?;
             }
             Ok(())
@@ -11070,14 +11106,28 @@ impl StationStore {
         }
     }
 
-    /// Persist a server-derived request binding.  The compare against the
-    /// currently stored target and configuration occurs under the same
-    /// `BEGIN IMMEDIATE` transaction as the insert, so a target edit cannot
-    /// race an accepted queue entry.
-    pub fn create_transport_proof_job(&self, job: &TransportProofJob) -> Result<bool, String> {
-        job.validate()?;
+    /// Persist a server-derived queue binding only after the caller has
+    /// re-read the manifest-verified active installation.  The candidate,
+    /// target, and configuration comparisons occur while this transaction is
+    /// open, so an accepted job cannot be created from a stale authority
+    /// snapshot.
+    pub fn enqueue_transport_proof_job<F>(
+        &self,
+        job: &TransportProofJob,
+        verify_installed_candidate: F,
+    ) -> Result<bool, String>
+    where
+        F: FnOnce() -> Result<station_maintenance::VerifiedInstallAuthority, String>,
+    {
+        job.validate_for_enqueue()?;
         self.execute("BEGIN IMMEDIATE")?;
         let outcome = (|| {
+            let installed = verify_installed_candidate()?;
+            if !verified_install_authority_matches(&installed, job) {
+                return Err(
+                    "transport proof enqueue candidate is no longer the installed authority".into(),
+                );
+            }
             let target = self
                 .read_transport_target_config(&job.channel_id, &job.sink_id)?
                 .ok_or_else(|| "transport proof target is not configured".to_string())?;
@@ -11090,7 +11140,7 @@ impl StationStore {
                 return Err("transport proof configuration binding is stale".into());
             }
             let statement = self.prepare(
-                "INSERT OR IGNORE INTO transport_proof_jobs(job_id, channel_id, sink_id, target_id, target_revision, candidate_version, source_commit, configuration_hash, requested_by, max_capture_bytes, state, created_at_unix_ms, updated_at_unix_ms, lease_expires_at_unix_ms, capture_relative_path, capture_bytes, capture_sha256, capture_started_at_unix_ms, capture_ended_at_unix_ms, analyzer_output_sha256, completed_at_unix_ms, failed_at_unix_ms, failure_detail) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,'pending',?11,?11,-1,'',-1,'',-1,-1,'',-1,-1,'')",
+                "INSERT OR IGNORE INTO transport_proof_jobs(job_id, channel_id, sink_id, target_id, target_revision, candidate_version, source_commit, configuration_hash, requested_by, max_capture_bytes, state, created_at_unix_ms, updated_at_unix_ms, lease_expires_at_unix_ms, capture_relative_path, capture_bytes, capture_sha256, capture_started_at_unix_ms, capture_ended_at_unix_ms, analyzer_output_sha256, completed_at_unix_ms, failed_at_unix_ms, failure_detail, install_generation) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,'pending',?11,?11,-1,'',-1,'',-1,-1,'',-1,-1,'',?12)",
             )?;
             for (index, value, field) in [
                 (1, job.job_id.as_str(), "transport proof job identity"),
@@ -11138,6 +11188,102 @@ impl StationStore {
                 checked_i64(job.max_capture_bytes, "transport capture limit")?,
             )?;
             bind_i64(self.database, statement.raw, 11, job.created_at_unix_ms)?;
+            bind_i64(
+                self.database,
+                statement.raw,
+                12,
+                checked_i64(
+                    job.install_generation
+                        .ok_or("transport proof install generation is missing")?,
+                    "transport proof install generation",
+                )?,
+            )?;
+            expect_done(self.database, statement.raw)?;
+            Ok(self.changes() == 1)
+        })();
+        self.finish_value_transaction(outcome)
+    }
+
+    /// Deliberately test-only seeding seam. Production code must use
+    /// `enqueue_transport_proof_job` so installed-candidate authority is
+    /// revalidated under its queue transaction.
+    #[cfg(test)]
+    pub fn seed_transport_proof_job_for_test(
+        &self,
+        job: &TransportProofJob,
+    ) -> Result<bool, String> {
+        job.validate()?;
+        self.execute("BEGIN IMMEDIATE")?;
+        let outcome = (|| {
+            let target = self
+                .read_transport_target_config(&job.channel_id, &job.sink_id)?
+                .ok_or_else(|| "transport proof target is not configured".to_string())?;
+            if target.target_id != job.target_id || target.revision != job.target_revision {
+                return Err("transport proof target binding is stale".into());
+            }
+            if self.current_channel_output_configuration_hash(&job.channel_id)?
+                != job.configuration_hash
+            {
+                return Err("transport proof configuration binding is stale".into());
+            }
+            let statement = self.prepare(
+                "INSERT OR IGNORE INTO transport_proof_jobs(job_id, channel_id, sink_id, target_id, target_revision, candidate_version, source_commit, configuration_hash, requested_by, max_capture_bytes, state, created_at_unix_ms, updated_at_unix_ms, lease_expires_at_unix_ms, capture_relative_path, capture_bytes, capture_sha256, capture_started_at_unix_ms, capture_ended_at_unix_ms, analyzer_output_sha256, completed_at_unix_ms, failed_at_unix_ms, failure_detail, install_generation) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,'pending',?11,?11,-1,'',-1,'',-1,-1,'',-1,-1,'',?12)",
+            )?;
+            for (index, value, field) in [
+                (1, job.job_id.as_str(), "transport proof job identity"),
+                (
+                    2,
+                    job.channel_id.as_str(),
+                    "transport proof channel identity",
+                ),
+                (3, job.sink_id.as_str(), "transport proof sink identity"),
+                (4, job.target_id.as_str(), "transport proof target identity"),
+                (
+                    6,
+                    job.candidate_version.as_str(),
+                    "transport proof candidate",
+                ),
+                (
+                    7,
+                    job.source_commit.as_str(),
+                    "transport proof source commit",
+                ),
+                (
+                    8,
+                    job.configuration_hash.as_str(),
+                    "transport proof configuration hash",
+                ),
+                (9, job.requested_by.as_str(), "transport proof requester"),
+            ] {
+                bind_text(
+                    self.database,
+                    statement.raw,
+                    index,
+                    &c_string(value, field)?,
+                )?;
+            }
+            bind_i64(
+                self.database,
+                statement.raw,
+                5,
+                checked_i64(job.target_revision, "target revision")?,
+            )?;
+            bind_i64(
+                self.database,
+                statement.raw,
+                10,
+                checked_i64(job.max_capture_bytes, "transport capture limit")?,
+            )?;
+            bind_i64(self.database, statement.raw, 11, job.created_at_unix_ms)?;
+            bind_i64(
+                self.database,
+                statement.raw,
+                12,
+                job.install_generation
+                    .map(|generation| checked_i64(generation, "transport proof install generation"))
+                    .transpose()?
+                    .unwrap_or(-1),
+            )?;
             expect_done(self.database, statement.raw)?;
             Ok(self.changes() == 1)
         })();
@@ -11150,7 +11296,7 @@ impl StationStore {
     ) -> Result<Option<TransportProofJobRecord>, String> {
         validate_transport_proof_job_id(job_id)?;
         let statement = self.prepare(
-            "SELECT job_id,channel_id,sink_id,target_id,target_revision,candidate_version,source_commit,configuration_hash,requested_by,max_capture_bytes,state,created_at_unix_ms,updated_at_unix_ms,lease_expires_at_unix_ms,capture_relative_path,capture_bytes,capture_sha256,capture_started_at_unix_ms,capture_ended_at_unix_ms,analyzer_output_sha256,completed_at_unix_ms,failed_at_unix_ms,failure_detail FROM transport_proof_jobs WHERE job_id=?1",
+            "SELECT job_id,channel_id,sink_id,target_id,target_revision,candidate_version,source_commit,configuration_hash,requested_by,max_capture_bytes,state,created_at_unix_ms,updated_at_unix_ms,lease_expires_at_unix_ms,capture_relative_path,capture_bytes,capture_sha256,capture_started_at_unix_ms,capture_ended_at_unix_ms,analyzer_output_sha256,completed_at_unix_ms,failed_at_unix_ms,failure_detail,install_generation FROM transport_proof_jobs WHERE job_id=?1",
         )?;
         bind_text(
             self.database,
@@ -11283,8 +11429,51 @@ impl StationStore {
         self.finish_value_transaction(outcome)
     }
 
+    /// Renew the active analyzer lease. This is a strict compare-and-set: a
+    /// controller that has paused past expiry cannot reclaim a job another
+    /// controller may already have recovered.
+    pub fn renew_transport_proof_analysis_lease(
+        &self,
+        job_id: &str,
+        now_unix_ms: i64,
+        lease_duration_ms: i64,
+    ) -> Result<TransportProofJobRecord, String> {
+        validate_transport_proof_job_id(job_id)?;
+        validate_transport_proof_lease(now_unix_ms, lease_duration_ms)?;
+        let lease_expires_at = now_unix_ms
+            .checked_add(lease_duration_ms)
+            .ok_or_else(|| "transport proof lease time overflowed".to_string())?;
+        self.execute("BEGIN IMMEDIATE")?;
+        let outcome = (|| {
+            let statement = self.prepare(
+                "UPDATE transport_proof_jobs SET updated_at_unix_ms=?1,lease_expires_at_unix_ms=?2 WHERE job_id=?3 AND state='analyzing' AND lease_expires_at_unix_ms>?1",
+            )?;
+            bind_i64(self.database, statement.raw, 1, now_unix_ms)?;
+            bind_i64(self.database, statement.raw, 2, lease_expires_at)?;
+            bind_text(
+                self.database,
+                statement.raw,
+                3,
+                &c_string(job_id, "transport proof job identity")?,
+            )?;
+            expect_done(self.database, statement.raw)?;
+            if self.changes() != 1 {
+                return Err(
+                    "transport proof analysis lease renewal compare-and-set failed or lease expired"
+                        .into(),
+                );
+            }
+            self.read_transport_proof_job(job_id)?
+                .ok_or_else(|| "transport proof job disappeared".to_string())
+        })();
+        self.finish_value_transaction(outcome)
+    }
+
+    /// Test-only state advancement for queue state-machine tests. Production
+    /// completion has no shortcut: it must append the exact receipt through
+    /// `complete_transport_proof_job_with_analysis`.
     #[cfg(test)]
-    fn complete_transport_proof_job(
+    fn complete_transport_proof_job_for_test(
         &self,
         job_id: &str,
         analyzer_output_sha256: &str,
@@ -11332,7 +11521,7 @@ impl StationStore {
         verify_installed_candidate: F,
     ) -> Result<TransportProofJobRecord, String>
     where
-        F: FnOnce() -> Result<(String, String), String>,
+        F: FnOnce() -> Result<station_maintenance::VerifiedInstallAuthority, String>,
     {
         validate_transport_proof_job_id(job_id)?;
         receipt.validate_fresh_at(now_unix_ms)?;
@@ -11341,10 +11530,8 @@ impl StationStore {
             let current = self
                 .read_transport_proof_job(job_id)?
                 .ok_or_else(|| "transport proof job does not exist".to_string())?;
-            let (candidate_version, source_commit) = verify_installed_candidate()?;
-            if candidate_version != current.job.candidate_version
-                || source_commit != current.job.source_commit
-            {
+            let candidate = verify_installed_candidate()?;
+            if !verified_install_authority_matches(&candidate, &current.job) {
                 return Err(
                     "transport proof completion candidate is no longer the installed authority"
                         .into(),
@@ -11481,7 +11668,11 @@ impl StationStore {
         self.finish_value_transaction(outcome)
     }
 
-    pub fn append_transport_analysis_receipt(
+    /// Deliberately test-only seeding seam. Production analysis is appended
+    /// exclusively by `complete_transport_proof_job_with_analysis`, which
+    /// binds the receipt to a leased capture and verified install generation.
+    #[cfg(test)]
+    pub fn seed_transport_analysis_receipt_for_test(
         &self,
         receipt: &TransportAnalysisReceipt,
         now_unix_ms: i64,
@@ -11941,6 +12132,11 @@ impl StationStore {
     }
 
     fn validate_transport_proof_job_current(&self, job: &TransportProofJob) -> Result<(), String> {
+        if job.install_generation.is_none() {
+            return Err(
+                "transport proof job predates verified install-generation authority".into(),
+            );
+        }
         let target = self
             .read_transport_target_config(&job.channel_id, &job.sink_id)?
             .ok_or_else(|| "transport proof target is not configured".to_string())?;
@@ -16563,6 +16759,16 @@ fn read_transport_proof_job_row(
         target_revision: column_u64(statement, 4, "transport proof target revision")?,
         candidate_version: column_text(statement, 5)?,
         source_commit: column_text(statement, 6)?,
+        install_generation: optional_nonnegative_i64(
+            statement,
+            23,
+            "transport proof install generation",
+        )?
+        .map(|generation| {
+            u64::try_from(generation)
+                .map_err(|_| "transport proof install generation is invalid".to_string())
+        })
+        .transpose()?,
         configuration_hash: column_text(statement, 7)?,
         requested_by: column_text(statement, 8)?,
         max_capture_bytes: column_u64(statement, 9, "transport proof capture limit")?,
@@ -21696,7 +21902,7 @@ mod tests {
             detail: "analysis passed".into(),
         };
         store
-            .append_transport_analysis_receipt(&analysis, 2)
+            .seed_transport_analysis_receipt_for_test(&analysis, 2)
             .unwrap();
         assert_eq!(
             store
@@ -21765,7 +21971,7 @@ mod tests {
         same_millisecond_failure.proof_id = "000-analysis-failure".into();
         same_millisecond_failure.outcome = ProofOutcome::Fail;
         store
-            .append_transport_analysis_receipt(&same_millisecond_failure, 2)
+            .seed_transport_analysis_receipt_for_test(&same_millisecond_failure, 2)
             .unwrap();
         let blocked = store
             .read_current_cable_transport_validation(
@@ -21789,7 +21995,7 @@ mod tests {
         future_failure.captured_at_unix_ms = 3;
         future_failure.recorded_at_unix_ms = 3;
         store
-            .append_transport_analysis_receipt(&future_failure, 3)
+            .seed_transport_analysis_receipt_for_test(&future_failure, 3)
             .unwrap();
         let blocked = store
             .read_current_cable_transport_validation(
@@ -21852,7 +22058,7 @@ mod tests {
         expired_analysis.proof_id = "analysis-expired".into();
         assert!(
             store
-                .append_transport_analysis_receipt(
+                .seed_transport_analysis_receipt_for_test(
                     &expired_analysis,
                     station_transport_proof::TRANSPORT_PROOF_FRESHNESS_MS + 4,
                 )
@@ -21924,6 +22130,7 @@ mod tests {
             target_revision: 1,
             candidate_version: "0.1.0".into(),
             source_commit: "a".repeat(40),
+            install_generation: Some(1),
             configuration_hash: store
                 .current_channel_output_configuration_hash(channel_id)
                 .unwrap(),
@@ -21931,10 +22138,10 @@ mod tests {
             created_at_unix_ms: 10,
             max_capture_bytes: 1_073_741_824,
         };
-        assert!(store.create_transport_proof_job(&job).unwrap());
-        assert!(!store.create_transport_proof_job(&job).unwrap());
+        assert!(store.seed_transport_proof_job_for_test(&job).unwrap());
+        assert!(!store.seed_transport_proof_job_for_test(&job).unwrap());
         let claimed = store
-            .claim_next_transport_proof_job(20, 60_000)
+            .claim_next_transport_proof_job(20, 1_200_000)
             .unwrap()
             .unwrap();
         assert_eq!(claimed.state, TransportProofJobState::Claimed);
@@ -21948,12 +22155,16 @@ mod tests {
             ended_at_unix_ms: 600_100,
         };
         let analyzing = store
-            .begin_transport_proof_analysis(&job.job_id, &capture, 30, 60_000)
+            .begin_transport_proof_analysis(&job.job_id, &capture, 600_101, 1_200_000)
             .unwrap();
         assert_eq!(analyzing.capture.as_ref(), Some(&capture));
         assert_eq!(analyzing.state, TransportProofJobState::Analyzing);
+        let renewed = store
+            .renew_transport_proof_analysis_lease(&job.job_id, 600_102, 1_200_000)
+            .unwrap();
+        assert_eq!(renewed.lease_expires_at_unix_ms, Some(1_800_102));
         let completed = store
-            .complete_transport_proof_job(&job.job_id, &"c".repeat(64), 40)
+            .complete_transport_proof_job_for_test(&job.job_id, &"c".repeat(64), 600_103)
             .unwrap();
         assert_eq!(completed.state, TransportProofJobState::Completed);
         assert_eq!(
@@ -21971,10 +22182,28 @@ mod tests {
         assert!(
             TransportProofCaptureFacts {
                 artifact_relative_path: "../escape.ts".into(),
-                ..capture
+                ..capture.clone()
             }
             .validate(job.max_capture_bytes)
             .is_err()
+        );
+        let expired = TransportProofJob {
+            job_id: "55555555-6666-4777-8888-999999999999".into(),
+            created_at_unix_ms: 50,
+            ..job.clone()
+        };
+        assert!(store.seed_transport_proof_job_for_test(&expired).unwrap());
+        store
+            .claim_next_transport_proof_job(51, 1_000)
+            .unwrap()
+            .unwrap();
+        store
+            .begin_transport_proof_analysis(&expired.job_id, &capture, 52, 1_000)
+            .unwrap();
+        assert!(
+            store
+                .renew_transport_proof_analysis_lease(&expired.job_id, 1_052, 1_000)
+                .is_err()
         );
         let mut revised = store
             .read_transport_target_config(channel_id, sink_id)
@@ -21989,7 +22218,8 @@ mod tests {
             job_id: "44444444-5555-4666-8777-888888888888".into(),
             ..job
         };
-        assert!(store.create_transport_proof_job(&stale).is_err());
+        assert!(store.seed_transport_proof_job_for_test(&stale).is_err());
+
         drop(store);
         for candidate in [
             database.clone(),

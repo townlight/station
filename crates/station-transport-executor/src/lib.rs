@@ -39,6 +39,7 @@ const MAX_ANALYSIS_ERRORS: u64 = 0;
 const MAX_CAPTURE_ELAPSED_MS: u64 = MAX_PROOF_DURATION_MS + 5_000;
 const CLAIM_LEASE_MS: i64 = 1_900_000;
 const ANALYSIS_LEASE_MS: i64 = 1_200_000;
+const ANALYSIS_LEASE_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(30);
 const MAX_QUARANTINE_ENTRIES: usize = 8;
 const MAX_QUARANTINE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 const QUARANTINE_MAX_AGE: Duration = Duration::from_secs(24 * 60 * 60);
@@ -304,13 +305,22 @@ fn execute_claimed_transport_job(
             .ok_or("transport capture clock ordering is invalid")?,
     )
     .map_err(|_| "transport capture duration is invalid")?;
-    let findings = executor.analyze_capture(&CaptureRequest {
-        artifact_path: analysis_input.clone(),
-        duration_ms: measured_duration_ms,
-        ..capture
-    })?;
+    let mut analysis_lease = AnalysisLeaseHeartbeat::new(store, &analyzing.job.job_id, ended);
+    let findings = executor.analyze_capture_with_heartbeat(
+        &CaptureRequest {
+            artifact_path: analysis_input.clone(),
+            duration_ms: measured_duration_ms,
+            ..capture
+        },
+        &mut || analysis_lease.renew_if_due(),
+    )?;
+    // Renew immediately before and after removing the analyzer input. A slow
+    // filesystem teardown cannot turn a still-running controller into an
+    // expired lease that a second controller may recover.
+    analysis_lease.renew_now()?;
     fs::remove_file(&analysis_input)
         .map_err(|_| "transport analysis input could not be removed")?;
+    analysis_lease.renew_now()?;
     let recorded_at_unix_ms = unix_time_millis()?;
     let receipt = TransportAnalysisReceipt {
         proof_id: analyzing.job.job_id.clone(),
@@ -334,21 +344,63 @@ fn execute_claimed_transport_job(
         detail: "Bounded TSDuck transport analysis passed.".into(),
     };
     // The closure is executed by storage after BEGIN IMMEDIATE, alongside its
-    // current target/configuration revalidation. A long-running capture can
-    // therefore never complete against a replacement installed candidate.
+    // current target/configuration revalidation. The shared installation fence
+    // remains held through that transaction, so activation cannot replace the
+    // active-slot receipt after this verified read and before the durable
+    // completion decision.
+    let _install_authority_fence =
+        station_maintenance::acquire_install_authority_fence(data_directory)?;
     store.complete_transport_proof_job_with_analysis(
         &analyzing.job.job_id,
         &receipt,
         recorded_at_unix_ms,
-        || {
-            let current = station_maintenance::read_verified_candidate_identity(
-                data_directory,
-                application_root,
-            )?;
-            Ok((current.version, current.source_commit))
-        },
+        || station_maintenance::read_verified_install_authority(data_directory, application_root),
     )?;
     Ok(())
+}
+
+struct AnalysisLeaseHeartbeat<'a> {
+    store: &'a StationStore,
+    job_id: &'a str,
+    last_renewed_at_unix_ms: i64,
+}
+
+impl<'a> AnalysisLeaseHeartbeat<'a> {
+    fn new(store: &'a StationStore, job_id: &'a str, started_at_unix_ms: i64) -> Self {
+        Self {
+            store,
+            job_id,
+            last_renewed_at_unix_ms: started_at_unix_ms,
+        }
+    }
+
+    fn renew_if_due(&mut self) -> Result<(), String> {
+        let now = unix_time_millis()?;
+        let elapsed = now
+            .checked_sub(self.last_renewed_at_unix_ms)
+            .ok_or("transport proof analysis clock moved backwards")?;
+        if elapsed
+            >= i64::try_from(ANALYSIS_LEASE_HEARTBEAT_INTERVAL.as_millis())
+                .expect("analysis heartbeat interval fits i64")
+        {
+            self.renew_at(now)?;
+        }
+        Ok(())
+    }
+
+    fn renew_now(&mut self) -> Result<(), String> {
+        self.renew_at(unix_time_millis()?)
+    }
+
+    fn renew_at(&mut self, now_unix_ms: i64) -> Result<(), String> {
+        self.store.renew_transport_proof_analysis_lease(
+            self.job_id,
+            now_unix_ms,
+            ANALYSIS_LEASE_MS,
+        )?;
+        self.last_renewed_at_unix_ms = now_unix_ms;
+        Ok(())
+    }
 }
 
 fn ensure_current_candidate(
@@ -357,8 +409,11 @@ fn ensure_current_candidate(
     job: &station_storage::TransportProofJob,
 ) -> Result<(), String> {
     let candidate =
-        station_maintenance::read_verified_candidate_identity(data_directory, application_root)?;
-    if candidate.version != job.candidate_version || candidate.source_commit != job.source_commit {
+        station_maintenance::read_verified_install_authority(data_directory, application_root)?;
+    if candidate.version() != job.candidate_version
+        || candidate.source_commit() != job.source_commit
+        || job.install_generation != Some(candidate.install_generation())
+    {
         return Err("transport proof candidate changed after request".into());
     }
     Ok(())
@@ -511,6 +566,23 @@ trait ProcessRunner: sealed::Process + Send + Sync {
         argv: &[String],
         timeout: Duration,
     ) -> Result<ProcessResult, String>;
+
+    /// The default keeps deterministic fake runners honest: a caller gets a
+    /// renewal before and after every process operation. The real runner
+    /// overrides this to renew continuously while a child and its pipe
+    /// teardown are in flight.
+    fn run_with_heartbeat(
+        &self,
+        executable: &Path,
+        argv: &[String],
+        timeout: Duration,
+        heartbeat: &mut dyn FnMut() -> Result<(), String>,
+    ) -> Result<ProcessResult, String> {
+        heartbeat()?;
+        let result = self.run(executable, argv, timeout);
+        heartbeat()?;
+        result
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -530,6 +602,17 @@ impl ProcessRunner for RealProcessRunner {
         argv: &[String],
         timeout: Duration,
     ) -> Result<ProcessResult, String> {
+        self.run_with_heartbeat(executable, argv, timeout, &mut || Ok(()))
+    }
+
+    fn run_with_heartbeat(
+        &self,
+        executable: &Path,
+        argv: &[String],
+        timeout: Duration,
+        heartbeat: &mut dyn FnMut() -> Result<(), String>,
+    ) -> Result<ProcessResult, String> {
+        heartbeat()?;
         let job = WindowsProcessTree::new()?;
         let mut child = Command::new(executable)
             .args(argv)
@@ -557,23 +640,38 @@ impl ProcessRunner for RealProcessRunner {
         let stdout_drain = std::thread::spawn(move || drain_stdout(stdout));
         let stderr_drain = std::thread::spawn(move || drain_stderr(stderr));
         let started = Instant::now();
+        let mut last_heartbeat = Instant::now();
         loop {
+            if last_heartbeat.elapsed() >= ANALYSIS_LEASE_HEARTBEAT_INTERVAL {
+                if let Err(error) = heartbeat() {
+                    job.terminate();
+                    let _ = child.wait();
+                    let _ = stdout_drain.join();
+                    let _ = stderr_drain.join();
+                    return Err(error);
+                }
+                last_heartbeat = Instant::now();
+            }
             if let Some(status) = child
                 .try_wait()
                 .map_err(|_| "TSDuck process status could not be read")?
             {
+                heartbeat()?;
                 let output = join_drain(stdout_drain, "stdout")?;
                 join_drain(stderr_drain, "stderr")?;
+                heartbeat()?;
                 return Ok(ProcessResult {
                     status_success: status.success(),
                     output,
                 });
             }
             if started.elapsed() >= timeout {
+                heartbeat()?;
                 job.terminate();
                 let _ = child.wait();
                 let _ = stdout_drain.join();
                 let _ = stderr_drain.join();
+                heartbeat()?;
                 return Err("TSDuck process exceeded its deadline".into());
             }
             std::thread::sleep(Duration::from_millis(10));
@@ -600,7 +698,16 @@ struct TsdDuckTransportExecutor<R> {
     pub runner: R,
 }
 impl<R: ProcessRunner> TsdDuckTransportExecutor<R> {
+    #[cfg(test)]
     fn analyze_capture(&self, capture: &CaptureRequest) -> Result<TransportFindings, String> {
+        self.analyze_capture_with_heartbeat(capture, &mut || Ok(()))
+    }
+
+    fn analyze_capture_with_heartbeat(
+        &self,
+        capture: &CaptureRequest,
+        heartbeat: &mut dyn FnMut() -> Result<(), String>,
+    ) -> Result<TransportFindings, String> {
         capture.validate()?;
         let (_, analyzer, tables) = self.runtime.verify()?;
         let bytes = bounded_capture(&capture.artifact_path, capture.max_bytes)?;
@@ -610,9 +717,12 @@ impl<R: ProcessRunner> TsdDuckTransportExecutor<R> {
             "--error-analysis".into(),
             capture.artifact_path.to_string_lossy().into_owned(),
         ];
-        let result =
-            self.runner
-                .run(&analyzer, &argv, Duration::from_millis(capture.duration_ms))?;
+        let result = self.runner.run_with_heartbeat(
+            &analyzer,
+            &argv,
+            Duration::from_millis(capture.duration_ms),
+            heartbeat,
+        )?;
         if !result.status_success {
             return Err("TSDuck analysis process failed".into());
         }
@@ -627,17 +737,20 @@ impl<R: ProcessRunner> TsdDuckTransportExecutor<R> {
             tables_output.to_string_lossy().into_owned(),
             capture.artifact_path.to_string_lossy().into_owned(),
         ];
-        let tables_result = self.runner.run(
+        let tables_result = self.runner.run_with_heartbeat(
             &tables,
             &tables_argv,
             Duration::from_millis(capture.duration_ms),
+            heartbeat,
         )?;
         if !tables_result.status_success {
             return Err("TSDuck tables process failed".into());
         }
+        heartbeat()?;
         let tables_bytes = bounded_capture(&tables_output, MAX_PROCESS_OUTPUT_BYTES as u64)?;
         let validation = validate_tstables_json(&tables_bytes, &findings);
         let _ = fs::remove_file(&tables_output);
+        heartbeat()?;
         validation?;
         findings.tables_output_sha256 = sha256(&tables_bytes);
         Ok(findings)
@@ -1435,6 +1548,42 @@ mod tests {
             ))
         );
         assert!(!capture.with_extension("tables.json").exists());
+    }
+
+    #[test]
+    fn analyzer_heartbeats_before_and_after_each_bounded_process_and_teardown() {
+        let root = root();
+        let capture = root.join("capture.ts");
+        fs::write(
+            &capture,
+            include_bytes!("../tests/fixtures/tsduck-3.44-h264-aac.ts"),
+        )
+        .unwrap();
+        let executor = TsdDuckTransportExecutor {
+            runtime: runtime(&root),
+            runner: RetainedFixtureRunner,
+        };
+        let mut heartbeats = 0_u32;
+        executor
+            .analyze_capture_with_heartbeat(
+                &CaptureRequest {
+                    udp_host: "127.0.0.1".into(),
+                    udp_port: 5000,
+                    duration_ms: 2_000,
+                    max_bytes: 100_000,
+                    artifact_path: capture,
+                },
+                &mut || {
+                    heartbeats += 1;
+                    Ok(())
+                },
+            )
+            .unwrap();
+        assert!(
+            heartbeats >= 6,
+            "both analyzers and table-file teardown renew"
+        );
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

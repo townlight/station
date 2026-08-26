@@ -13,6 +13,10 @@ use std::time::Duration;
 use windows_sys::Win32::Storage::FileSystem::{
     MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
 };
+use windows_sys::Win32::{
+    Foundation::{CloseHandle, HANDLE, WAIT_ABANDONED, WAIT_OBJECT_0},
+    System::Threading::{CreateMutexW, ReleaseMutex, WaitForSingleObject},
+};
 
 pub const ACTIVE_SLOT_SCHEMA_VERSION: u32 = 1;
 pub const MAINTENANCE_SCHEMA_VERSION: u32 = 1;
@@ -50,6 +54,69 @@ const REQUIRED_TSDUCK_RUNTIME_FILES: [&str; 7] = [
     "bin/tsduck.dll",
     "bin/tscore.dll",
 ];
+const INSTALL_AUTHORITY_FENCE_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Cross-process fence shared by activation and evidence writers.  The active
+/// slot and install receipt live outside SQLite, so a SQLite transaction alone
+/// cannot prevent an installer from replacing their authority between a read
+/// and a receipt commit.  Every participating process holds this named mutex
+/// over its verified-candidate read and durable decision.
+pub struct InstallAuthorityFence {
+    handle: HANDLE,
+}
+
+impl Drop for InstallAuthorityFence {
+    fn drop(&mut self) {
+        unsafe {
+            ReleaseMutex(self.handle);
+            CloseHandle(self.handle);
+        }
+    }
+}
+
+/// Acquire the station-specific install authority fence.  The namespace is
+/// deterministic from the canonical data directory, so an updater service and
+/// stationd instance for the same station contend on one OS-owned object.
+pub fn acquire_install_authority_fence(
+    data_directory: &Path,
+) -> Result<InstallAuthorityFence, String> {
+    acquire_install_authority_fence_for(data_directory, INSTALL_AUTHORITY_FENCE_TIMEOUT)
+}
+
+fn acquire_install_authority_fence_for(
+    data_directory: &Path,
+    timeout: Duration,
+) -> Result<InstallAuthorityFence, String> {
+    if !data_directory.is_absolute() || !data_directory.is_dir() {
+        return Err("installation authority data directory is invalid".into());
+    }
+    let canonical = std::fs::canonicalize(data_directory)
+        .map_err(|_| "installation authority data directory is unavailable")?;
+    let digest = sha256_lowercase(canonical.to_string_lossy().as_bytes());
+    // The updater may run as a service while a diagnostic/once invocation runs
+    // in an interactive session. `Global` is therefore required; `Local`
+    // would create independent per-session locks and reopen the replacement
+    // race. Failure to create the global fence is fail-closed.
+    let name = format!("Global\\TownLightStation.InstallAuthority.{digest}");
+    let mut wide: Vec<u16> = name.encode_utf16().collect();
+    wide.push(0);
+    let handle = unsafe { CreateMutexW(std::ptr::null(), 0, wide.as_ptr()) };
+    if handle.is_null() {
+        return Err("installation authority fence could not be created".into());
+    }
+    let wait_ms = timeout.as_millis().min(u128::from(u32::MAX)) as u32;
+    match unsafe { WaitForSingleObject(handle, wait_ms) } {
+        WAIT_OBJECT_0 => Ok(InstallAuthorityFence { handle }),
+        WAIT_ABANDONED => {
+            unsafe { CloseHandle(handle) };
+            Err("installation authority fence was abandoned; recover the interrupted update before writing evidence".into())
+        }
+        _ => {
+            unsafe { CloseHandle(handle) };
+            Err("installation authority fence is busy".into())
+        }
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -410,6 +477,10 @@ pub fn activate_prepared_slot(
         previous: Some(current.active),
     };
     let commit_result = (|| {
+        // Hold the same fence used by stationd while it rechecks a candidate
+        // and commits evidence. This serializes the active-slot/receipt swap
+        // with the SQLite decision that names an install generation.
+        let authority_fence = acquire_install_authority_fence(data_directory)?;
         // The first proof runs the candidate against the old receipts. Stop it
         // again before changing candidate authority so no running stationd can
         // append evidence across the receipt-generation boundary.
@@ -424,6 +495,7 @@ pub fn activate_prepared_slot(
         receipt.validate()?;
         write_json_atomic(&active_path, &receipt, "active-slot receipt")?;
         write_install_identity(data_directory, &receipt.active, now_unix_ms)?;
+        drop(authority_fence);
         host.start_station()?;
         host.prove_station(&receipt.active, Duration::from_secs(60))?;
         advance(
@@ -1446,8 +1518,35 @@ pub struct VerifiedCandidateIdentity {
     pub product: String,
     pub version: String,
     pub source_commit: String,
+    /// Monotonically advances whenever a verified active slot is activated.
+    /// Version and commit alone cannot distinguish a rollback/re-activation of
+    /// the same build from the installation instance that authorized a job.
+    pub install_generation: u64,
     pub media_runtime_sha256: String,
     pub runtime_manifest_sha256: String,
+}
+
+/// Opaque capability returned only after a complete manifest/runtime/active
+/// slot verification.  Evidence writers use this rather than accepting caller
+/// supplied version/commit/generation tuples, which prevents a production
+/// caller from forging install authority by assembling matching strings.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerifiedInstallAuthority {
+    identity: VerifiedCandidateIdentity,
+}
+
+impl VerifiedInstallAuthority {
+    pub fn version(&self) -> &str {
+        &self.identity.version
+    }
+
+    pub fn source_commit(&self) -> &str {
+        &self.identity.source_commit
+    }
+
+    pub fn install_generation(&self) -> u64 {
+        self.identity.install_generation
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -1596,8 +1695,21 @@ pub fn read_verified_candidate_identity(
         product: install.product,
         version: install.version,
         source_commit: install.source_commit,
+        install_generation: active.generation,
         media_runtime_sha256: install.media_runtime_sha256.to_ascii_lowercase(),
         runtime_manifest_sha256: install.runtime_manifest_sha256,
+    })
+}
+
+/// Read the verified installed candidate as an unforgeable cross-crate
+/// authority capability. Callers must also hold `InstallAuthorityFence` while
+/// carrying this value into a durable queue or evidence decision.
+pub fn read_verified_install_authority(
+    data_directory: &Path,
+    application_root: &Path,
+) -> Result<VerifiedInstallAuthority, String> {
+    Ok(VerifiedInstallAuthority {
+        identity: read_verified_candidate_identity(data_directory, application_root)?,
     })
 }
 
@@ -2245,6 +2357,24 @@ mod tests {
             .expect("system clock is before Unix epoch")
             .as_nanos();
         std::env::temp_dir().join(format!("townlight-maintenance-{name}-{nonce}"))
+    }
+
+    #[test]
+    fn install_authority_fence_blocks_a_concurrent_active_slot_replacement() {
+        let root = root("install-authority-fence");
+        let data = root.join("data");
+        std::fs::create_dir_all(&data).unwrap();
+        let fence = acquire_install_authority_fence_for(&data, Duration::from_secs(1)).unwrap();
+        let contender_data = data.clone();
+        let blocked = std::thread::spawn(move || {
+            acquire_install_authority_fence_for(&contender_data, Duration::from_millis(25)).is_err()
+        })
+        .join()
+        .unwrap();
+        assert!(blocked, "activation/evidence fence must serialize writers");
+        drop(fence);
+        acquire_install_authority_fence_for(&data, Duration::from_millis(25)).unwrap();
+        remove_tree(&root).unwrap();
     }
 
     #[test]

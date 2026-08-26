@@ -44,7 +44,10 @@ use station_domain::{
     validate_alert_channel_target,
 };
 use station_live::{LiveSource, LiveSourceWriteError, TakeoverSession, TakeoverState};
-use station_maintenance::read_verified_candidate_identity;
+use station_maintenance::{
+    acquire_install_authority_fence, read_verified_candidate_identity,
+    read_verified_install_authority,
+};
 use station_media_lifecycle::{
     AssetLoudnessAnalysis, AssetReadinessView, IngestJobStatus, IngestSourceKind,
     LoudnessGateStatus, MediaIngestJob, MissingMediaAlert, ReadinessDashboard, ReadinessState,
@@ -1732,6 +1735,9 @@ impl ApiResponse {
     }
 }
 
+#[cfg(test)]
+type CommissioningAfterChannelReadHook = Arc<dyn Fn(&StationStore) + Send + Sync + 'static>;
+
 pub struct Api {
     storage: StationStore,
     database_path: PathBuf,
@@ -1741,8 +1747,7 @@ pub struct Api {
     orchestration_health: Arc<OrchestrationHealth>,
     source_evidence_authority: Arc<StationSourceEvidenceAuthority>,
     #[cfg(test)]
-    commissioning_after_channel_read_hook:
-        Option<Arc<dyn Fn(&StationStore) + Send + Sync + 'static>>,
+    commissioning_after_channel_read_hook: Option<CommissioningAfterChannelReadHook>,
 }
 
 /// Complete receipt-backed input for one server-owned S19 materialization.
@@ -6490,7 +6495,17 @@ impl Api {
                 );
             }
         };
-        let candidate = match read_verified_candidate_identity(
+        let _install_authority_fence = match acquire_install_authority_fence(data_directory) {
+            Ok(fence) => fence,
+            Err(_) => {
+                return error_response(
+                    409,
+                    "candidate_authority_busy",
+                    "Candidate activation is in progress; wait for it to finish before requesting transport proof.",
+                );
+            }
+        };
+        let candidate = match read_verified_install_authority(
             data_directory,
             &self.application_directory,
         ) {
@@ -6524,14 +6539,17 @@ impl Api {
             sink_id: sink.sink_id.clone(),
             target_id: target.target_id,
             target_revision: target.revision,
-            candidate_version: candidate.version,
-            source_commit: candidate.source_commit,
+            candidate_version: candidate.version().into(),
+            source_commit: candidate.source_commit().into(),
+            install_generation: Some(candidate.install_generation()),
             configuration_hash,
             requested_by: actor.account_id().as_str().into(),
             created_at_unix_ms: now,
             max_capture_bytes: station_transport_proof::MAX_PROOF_CAPTURE_BYTES,
         };
-        match self.storage.create_transport_proof_job(&job) {
+        match self.storage.enqueue_transport_proof_job(&job, || {
+            read_verified_install_authority(data_directory, &self.application_directory)
+        }) {
             Ok(true) => json_response(
                 202,
                 serde_json::to_vec(&transport_proof_job_response(
@@ -19889,13 +19907,8 @@ mod tests {
         ));
         let application = database.with_extension("application");
         std::fs::create_dir_all(&application).unwrap();
-        let probe = station_box_probe();
-        let candidate_version = probe.product_version.clone();
-        let source_commit = probe
-            .source_commit
-            .clone()
-            .expect("verified test candidate");
-        let mut api = Api::open_with_station_box_probe(&database, &application, probe).unwrap();
+        let mut api =
+            Api::open_with_station_box_probe(&database, &application, station_box_probe()).unwrap();
         let channel_id = "11111111-2222-4333-8444-555555555555";
         let sink_a = "22222222-3333-4444-8555-666666666666";
         let sink_b = "33333333-4444-4555-8666-777777777777";
@@ -19914,14 +19927,10 @@ mod tests {
                 enabled: true,
             })
             .unwrap();
-        let now = system_time_millis().unwrap();
         let hook_fired = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let hook_observed = Arc::clone(&hook_fired);
         let hook_channel_id = channel_id.to_string();
-        let hook_sink_a = sink_a.to_string();
         let hook_sink_b = sink_b.to_string();
-        let hook_candidate_version = candidate_version.clone();
-        let hook_source_commit = source_commit.clone();
         api.commissioning_after_channel_read_hook = Some(Arc::new(move |storage| {
             if hook_observed.swap(true, std::sync::atomic::Ordering::SeqCst) {
                 return;
@@ -19942,91 +19951,6 @@ mod tests {
                     ],
                     enabled: true,
                 })
-                .unwrap();
-            let target = TargetDeviceConfig {
-                target_id: "target-a".into(),
-                label: "Target A".into(),
-                protocol: TargetProtocol::HttpsApi,
-                host: "receiver-a.example.test".into(),
-                port: 443,
-                credential_configured: true,
-                revision: 1,
-                created_at_unix_ms: now,
-                updated_at_unix_ms: now,
-                updated_by: "setup-admin".into(),
-            };
-            storage
-                .write_transport_target_config(&hook_channel_id, &hook_sink_a, None, &target)
-                .unwrap();
-            let configuration_hash = storage
-                .current_channel_output_configuration_hash(&hook_channel_id)
-                .unwrap();
-            storage
-                .append_transport_analysis_receipt(
-                    &station_storage::TransportAnalysisReceipt {
-                        proof_id: "analysis-a".into(),
-                        channel_id: hook_channel_id.clone(),
-                        sink_id: hook_sink_a.clone(),
-                        target_id: target.target_id.clone(),
-                        target_revision: 1,
-                        candidate_version: hook_candidate_version.clone(),
-                        source_commit: hook_source_commit.clone(),
-                        configuration_hash: configuration_hash.clone(),
-                        analyzer_id: "test-analyzer".into(),
-                        analyzer_version: "1".into(),
-                        analyzer_sha256: "a".repeat(64),
-                        capture_bytes: 1880,
-                        capture_sha256: "c".repeat(64),
-                        outcome: station_storage::ProofOutcome::Pass,
-                        findings: station_storage::TransportFindings {
-                            packet_size_bytes: 188,
-                            packet_count: 10,
-                            capture_duration_ms: 1_000,
-                            bitrate_bps: 1_000_000,
-                            pat_program_count: 1,
-                            pmt_stream_count: 1,
-                            continuity_errors: 0,
-                            pcr_errors: 0,
-                            analyzer_output_sha256: "b".repeat(64),
-                            tables_output_sha256: "d".repeat(64),
-                            service_id: 1,
-                            pmt_pid: 4096,
-                            pcr_pid: 256,
-                            video_pid: 256,
-                            audio_pid: 257,
-                        },
-                        captured_at_unix_ms: now,
-                        recorded_at_unix_ms: now,
-                        recorded_by: "worker".into(),
-                        detail: "A passed".into(),
-                    },
-                    now,
-                )
-                .unwrap();
-            storage
-                .append_target_device_reachability_receipt(
-                    &station_storage::TargetDeviceReachabilityReceipt {
-                        proof_id: "reach-a".into(),
-                        channel_id: hook_channel_id.clone(),
-                        sink_id: hook_sink_a.clone(),
-                        target_id: target.target_id,
-                        target_revision: 1,
-                        candidate_version: hook_candidate_version.clone(),
-                        source_commit: hook_source_commit.clone(),
-                        configuration_hash,
-                        adapter_id: "test-adapter".into(),
-                        adapter_version: "1".into(),
-                        auth_method: "challenge".into(),
-                        outcome: station_storage::ProofOutcome::Pass,
-                        response_identity_sha256: "c".repeat(64),
-                        latency_ms: 1,
-                        observed_at_unix_ms: now,
-                        recorded_at_unix_ms: now,
-                        recorded_by: "worker".into(),
-                        detail: "A reached".into(),
-                    },
-                    now,
-                )
                 .unwrap();
         }));
 
