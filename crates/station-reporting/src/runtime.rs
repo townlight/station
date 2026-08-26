@@ -250,6 +250,8 @@ pub struct ProjectionCheckpoint {
     pub reader_saw_compaction_commit: bool,
     #[serde(default)]
     pub reader_compaction_next_sequence: u64,
+    #[serde(default)]
+    pub reader_compaction_layout_version: u8,
     /// Exact durable event-frame anchor retained independently of the reader
     /// prefix chain. It is normally the open scheduled transition, so a day
     /// rollover with no closed rows can still recover across heartbeat
@@ -358,6 +360,7 @@ impl ReportingRuntime {
                 reader_saw_heartbeat_summary: false,
                 reader_saw_compaction_commit: false,
                 reader_compaction_next_sequence: 0,
+                reader_compaction_layout_version: 0,
                 source_anchor_sequence: 0,
                 source_anchor_frame_hash: String::new(),
                 pending_start: None,

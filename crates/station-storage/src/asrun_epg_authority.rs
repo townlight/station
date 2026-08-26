@@ -717,7 +717,8 @@ fn validate_projection(p: &AsRunProjectionRuntime, now: i64) -> Result<(), Strin
                 || p.checkpoint.reader_raw_sequence != 0
                 || p.checkpoint.reader_saw_heartbeat_summary
                 || p.checkpoint.reader_saw_compaction_commit
-                || p.checkpoint.reader_compaction_next_sequence != 0))
+                || p.checkpoint.reader_compaction_next_sequence != 0
+                || p.checkpoint.reader_compaction_layout_version != 0))
         || (v2
             && p.checkpoint.reader_byte_offset > 0
             && (p.checkpoint.reader_raw_sequence == 0
@@ -727,6 +728,10 @@ fn validate_projection(p: &AsRunProjectionRuntime, now: i64) -> Result<(), Strin
                 || p.checkpoint.reader_channel_id != p.channel_id
                 || (p.checkpoint.reader_saw_compaction_commit
                     != (p.checkpoint.reader_compaction_next_sequence != 0))
+                || (p.checkpoint.reader_compaction_layout_version != 0
+                    && p.checkpoint.reader_compaction_layout_version != 2)
+                || (!p.checkpoint.reader_saw_compaction_commit
+                    && p.checkpoint.reader_compaction_layout_version != 0)
                 || (p.checkpoint.reader_saw_heartbeat_summary
                     && !p.checkpoint.reader_saw_compaction_commit)))
         || (v2

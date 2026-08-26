@@ -206,6 +206,7 @@ pub fn project_durable_journal(
                 saw_heartbeat_summary: checkpoint.reader_saw_heartbeat_summary,
                 saw_compaction_commit: checkpoint.reader_saw_compaction_commit,
                 compaction_next_sequence: checkpoint.reader_compaction_next_sequence,
+                compaction_layout_version: checkpoint.reader_compaction_layout_version,
             })
         })
     };
@@ -333,6 +334,7 @@ pub fn project_durable_journal(
         reader_saw_heartbeat_summary: read.cursor.saw_heartbeat_summary,
         reader_saw_compaction_commit: read.cursor.saw_compaction_commit,
         reader_compaction_next_sequence: read.cursor.compaction_next_sequence,
+        reader_compaction_layout_version: read.cursor.compaction_layout_version,
         source_anchor_sequence: pending
             .as_ref()
             .map_or(committed_sequence, |open| open.journal_sequence),
@@ -630,7 +632,8 @@ fn next_projection_revision(
         || prior.reader_channel_id != cursor.channel_id.as_deref().unwrap_or_default()
         || prior.reader_saw_heartbeat_summary != cursor.saw_heartbeat_summary
         || prior.reader_saw_compaction_commit != cursor.saw_compaction_commit
-        || prior.reader_compaction_next_sequence != cursor.compaction_next_sequence;
+        || prior.reader_compaction_next_sequence != cursor.compaction_next_sequence
+        || prior.reader_compaction_layout_version != cursor.compaction_layout_version;
     if !continues_window || legacy_checkpoint || reader_changed {
         return prior.projection_revision.checked_add(1).ok_or_else(|| {
             AsRunJournalAdapterError::Journal(
@@ -720,6 +723,7 @@ fn legacy_checkpoint_v2_baseline(
     checkpoint.reader_saw_heartbeat_summary = cursor.saw_heartbeat_summary;
     checkpoint.reader_saw_compaction_commit = cursor.saw_compaction_commit;
     checkpoint.reader_compaction_next_sequence = cursor.compaction_next_sequence;
+    checkpoint.reader_compaction_layout_version = cursor.compaction_layout_version;
     checkpoint.pending_is_uncovered = pending.is_some() && legacy.pending_is_uncovered;
     checkpoint.pending_start = pending;
     if let Some(open) = &checkpoint.pending_start {
