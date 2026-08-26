@@ -31,9 +31,11 @@ function Assert-TownLightInstalledPrivateRuntime {
         [StringComparer]::OrdinalIgnoreCase)
     foreach ($file in $manifestFiles) {
         $propertyNames = @($file.PSObject.Properties.Name)
+        $sizeBytes = if ($propertyNames -contains 'size_bytes') { $file.size_bytes } else { $null }
         if ($propertyNames -notcontains 'path' -or $propertyNames -notcontains 'size_bytes' -or
             $propertyNames -notcontains 'sha256' -or $file.path -isnot [string] -or
-            $file.size_bytes -isnot [int64] -or $file.sha256 -isnot [string]) {
+            ($sizeBytes -isnot [int32] -and $sizeBytes -isnot [int64]) -or
+            $file.sha256 -isnot [string]) {
             throw 'TownLight private runtime verification failed: runtime_manifest_file_invalid'
         }
         $relative = [string]$file.path
@@ -41,7 +43,7 @@ function Assert-TownLightInstalledPrivateRuntime {
         if ([string]::IsNullOrWhiteSpace($relative) -or $relative.Length -gt 1024 -or
             $relative.Contains('\') -or $relative.Contains(':') -or $relative.StartsWith('/') -or
             $relative.EndsWith('/') -or $segments -contains '' -or $segments -contains '.' -or
-            $segments -contains '..' -or [int64]$file.size_bytes -lt 0 -or
+            $segments -contains '..' -or [int64]$sizeBytes -lt 0 -or
             [string]$file.sha256 -cnotmatch '^[0-9a-f]{64}$' -or
             $expectedRuntimeFiles.ContainsKey($relative)) {
             throw 'TownLight private runtime verification failed: runtime_manifest_file_invalid'

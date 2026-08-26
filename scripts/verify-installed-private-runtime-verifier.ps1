@@ -24,6 +24,8 @@ Assert-Contract ($helperSource -match 'pendingDirectories\.Push' -and
     $helperSource.IndexOf('ReparsePoint', [StringComparison]::Ordinal) -lt
         $helperSource.LastIndexOf('pendingDirectories.Push', [StringComparison]::Ordinal)) `
     'the verifier must reject a child reparse point before pushing a directory for descent.'
+Assert-Contract ($helperSource -match '\[int32\]' -and $helperSource -match '\[int64\]') `
+    'the verifier must explicitly accept only safe integral Int32 or Int64 manifest sizes.'
 foreach ($caller in @($installerVerifierPath, $proofPath)) {
     $callerSource = Get-Content -LiteralPath $caller -Raw
     Assert-Contract ($callerSource -match 'installed-private-runtime-verifier\.ps1' -and
@@ -59,6 +61,14 @@ try {
     $verified = Assert-TownLightInstalledPrivateRuntime -RuntimeRoot $runtimeRoot -RuntimeManifest $manifest
     Assert-Contract ($verified.file_count -eq 2) 'the exact safe fixture must pass with both files verified.'
 
+    $jsonManifest = ($manifest | ConvertTo-Json -Depth 4) | ConvertFrom-Json
+    $jsonSize = $jsonManifest.files[0].size_bytes
+    Assert-Contract ($jsonSize -is [int32] -or $jsonSize -is [int64]) `
+        'the current PowerShell JSON reader must materialize a small manifest size as a safe integral type.'
+    $jsonVerified = Assert-TownLightInstalledPrivateRuntime -RuntimeRoot $runtimeRoot -RuntimeManifest $jsonManifest
+    Assert-Contract ($jsonVerified.file_count -eq 2) `
+        'a ConvertFrom-Json runtime manifest must verify with its exact Int32 or Int64 file sizes.'
+
     $typedFailure = $null
     $badTypedManifest = [pscustomobject]@{ files = @([pscustomobject]@{
                 path = 'two.dat'; size_bytes = '3'; sha256 = $manifest.files[1].sha256
@@ -67,6 +77,17 @@ try {
     catch { $typedFailure = $_.Exception.Message }
     Assert-Contract ($typedFailure -match 'runtime_manifest_file_invalid') `
         'string-coerced manifest sizes must fail before filesystem comparison.'
+
+    foreach ($invalidSize in @([double]3, [decimal]3, $true, -1, [uint64]::MaxValue)) {
+        $invalidFailure = $null
+        $invalidManifest = [pscustomobject]@{ files = @([pscustomobject]@{
+                    path = 'two.dat'; size_bytes = $invalidSize; sha256 = $manifest.files[1].sha256
+                }) }
+        try { Assert-TownLightInstalledPrivateRuntime -RuntimeRoot $runtimeRoot -RuntimeManifest $invalidManifest | Out-Null }
+        catch { $invalidFailure = $_.Exception.Message }
+        Assert-Contract ($invalidFailure -match 'runtime_manifest_file_invalid') `
+            "manifest size type '$($invalidSize.GetType().FullName)' must fail before filesystem comparison."
+    }
 
     $outsideDirectory = Join-Path $temporaryRoot 'owned-link-target'
     New-Item -ItemType Directory -Path $outsideDirectory | Out-Null
@@ -81,7 +102,10 @@ try {
         $reparseFixture = 'passed'
     }
     catch {
-        if ($_.Exception.InnerException -is [UnauthorizedAccessException] -or
+        if ($_.Exception -is [MissingMethodException] -or
+            $_.Exception.Message -match 'CreateSymbolicLink|does not contain a method named' ) {
+            $reparseFixture = 'skipped-no-link-api'
+        } elseif ($_.Exception.InnerException -is [UnauthorizedAccessException] -or
             $_.Exception.Message -match '(?i)required privilege|not held by the client|access.*denied') {
             $reparseFixture = 'skipped-no-link-privilege'
         } elseif ($_.Exception.InnerException -is [PlatformNotSupportedException]) {

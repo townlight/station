@@ -70,6 +70,32 @@ try {
         throw 'ASSERTION FAILED: a canonical manifest and exact sibling installer must validate as one candidate pair.'
     }
 
+    $sizeCases = @(
+        [pscustomobject]@{ label = 'Int32'; value = [int32]4; accepted = $true }
+        [pscustomobject]@{ label = 'Int64'; value = [int64]4; accepted = $true }
+        [pscustomobject]@{ label = 'byte'; value = [byte]4; accepted = $false }
+        [pscustomobject]@{ label = 'Int16'; value = [int16]4; accepted = $false }
+        [pscustomobject]@{ label = 'UInt16'; value = [uint16]4; accepted = $false }
+        [pscustomobject]@{ label = 'UInt32'; value = [uint32]4; accepted = $false }
+        [pscustomobject]@{ label = 'UInt64'; value = [uint64]4; accepted = $false }
+        [pscustomobject]@{ label = 'Decimal'; value = [decimal]4; accepted = $false }
+        [pscustomobject]@{ label = 'Double'; value = [double]4; accepted = $false }
+        [pscustomobject]@{ label = 'Boolean'; value = $true; accepted = $false }
+        [pscustomobject]@{ label = 'String'; value = '4'; accepted = $false }
+        [pscustomobject]@{ label = 'Null'; value = $null; accepted = $false }
+        [pscustomobject]@{ label = 'NegativeInt32'; value = [int32]-1; accepted = $false }
+        [pscustomobject]@{ label = 'NegativeInt64'; value = [int64]-1; accepted = $false }
+        [pscustomobject]@{ label = 'Int64Max'; value = [int64]::MaxValue; accepted = $true }
+    )
+    foreach ($sizeCase in $sizeCases) {
+        $accepted = $true
+        try { Assert-TownLightCandidateSizeProperty -Object ([pscustomobject]@{ size_bytes = $sizeCase.value }) -Name 'size_bytes' -Code 'fixture_size_type' }
+        catch { $accepted = $false }
+        if ($accepted -ne $sizeCase.accepted) {
+            throw "ASSERTION FAILED: size type $($sizeCase.label) acceptance was unexpected."
+        }
+    }
+
     $manifest.installer = 'wrong-name.exe'
     [IO.File]::WriteAllText($manifestPath, ($manifest | ConvertTo-Json -Depth 8), [Text.UTF8Encoding]::new($false))
     $rejectedName = $false
@@ -167,7 +193,7 @@ try {
         throw 'ASSERTION FAILED: an unsigned identity with signer metadata must fail signature coherence validation.'
     }
 
-    Write-Output 'Candidate-pair verifier fixture harness passed (12 assertions).'
+    Write-Output 'Candidate-pair verifier fixture harness passed (size-type matrix + 12 hostile assertions).'
 }
 finally {
     if (Test-Path -LiteralPath $fixtureRoot -PathType Container) {

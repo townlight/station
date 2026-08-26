@@ -291,11 +291,11 @@ function Assert-TownLightCandidateSizeProperty {
         [Parameter(Mandatory = $true)][string]$Code
     )
     $property = $Object.PSObject.Properties[$Name]
-    if ($null -eq $property -or $property.Value -isnot [ValueType] -or
-        $property.Value -isnot [byte] -and $property.Value -isnot [int16] -and
-        $property.Value -isnot [int32] -and $property.Value -isnot [int64] -and
-        $property.Value -isnot [uint16] -and $property.Value -isnot [uint32] -and
-        $property.Value -isnot [uint64] -or [int64]$property.Value -lt 0) {
+    if ($null -eq $property -or $null -eq $property.Value) {
+        throw "candidate_pair_${Code}"
+    }
+    $valueType = $property.Value.GetType()
+    if (($valueType -ne [int32] -and $valueType -ne [int64]) -or [int64]$property.Value -lt 0) {
         throw "candidate_pair_${Code}"
     }
 }
@@ -405,14 +405,7 @@ function Get-TownLightCandidateIdentity {
         Assert-TownLightCandidateString -Manifest $manifest -Name $name -Pattern '^[0-9a-f]{64}$' -Code "${name}_invalid" | Out-Null
     }
     foreach ($name in @('caption_decoder_size_bytes', 'caption_decoder_license_size_bytes')) {
-        $property = $manifest.PSObject.Properties[$name]
-        if ($null -eq $property -or $property.Value -isnot [ValueType] -or
-            $property.Value -isnot [byte] -and $property.Value -isnot [int16] -and
-            $property.Value -isnot [int32] -and $property.Value -isnot [int64] -and
-            $property.Value -isnot [uint16] -and $property.Value -isnot [uint32] -and
-            $property.Value -isnot [uint64] -or [int64]$property.Value -lt 0) {
-            throw "candidate_pair_${name}_invalid"
-        }
+        Assert-TownLightCandidateSizeProperty -Object $manifest -Name $name -Code "${name}_invalid"
     }
     $toolchain = $manifest.PSObject.Properties['build_toolchain']
     if ($null -eq $toolchain -or $toolchain.Value -is [array] -or $toolchain.Value -isnot [pscustomobject]) {
