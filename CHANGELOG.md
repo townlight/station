@@ -13,6 +13,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   explicit unavailable states, and renders escaped UTC CSV/XMLTV without asserting
   export delivery or field proof.
 
+- Added single-writer SQLite persistence for a bounded as-run projection checkpoint
+  and append-only immutable projection evidence. Exact replay is durable and
+  idempotent across restart; conflicting evidence and checkpoint rollback fail closed.
+
 - The operator console now includes a Publishing authority workspace. Enabled Setup Admins can
   create and revise bounded account and target records with the server's exact compare-and-swap
   revision, while permitted readers can inspect redacted current records, bounded immutable

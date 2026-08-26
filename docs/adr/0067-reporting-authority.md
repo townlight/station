@@ -56,6 +56,15 @@ produce enriched takes. The persistent SQLite adapter, catalog/schedule join,
 authenticated API/RBAC boundary, operator page, and delivery workflow remain
 required before S23 can be claimed as operational.
 
+`station-storage` now owns the corresponding backward-compatible SQLite schema:
+one current bounded projection/checkpoint row per channel and immutable,
+append-only per-event projection evidence. Projection persistence uses the existing
+single writer with `BEGIN IMMEDIATE`; identical replay is idempotent, conflicting
+reuse of an immutable event identity fails closed, and a persisted checkpoint cannot
+move backwards. Reopening the database reads and validates the saved projection.
+This persistence boundary accepts only a trusted in-process projection; it is not an
+HTTP ingestion route and therefore does not let a browser assert aired facts.
+
 This crate has no journal adapter, UTC timing derivation, content/franchise/category
 enrichment, evidence authenticator, worker-journal reader/writer, persistence, API,
 UI, catalog metadata join, EPG feed renderer, filesystem/network export delivery,
