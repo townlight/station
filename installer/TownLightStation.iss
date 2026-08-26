@@ -118,7 +118,7 @@ Source: "{#ChannelWorkerPath}"; DestName: "channel-worker.exe"; Flags: dontcopy 
 Source: "{#StationUpdaterPath}"; DestName: "station-updater.exe"; Flags: dontcopy noencryption
 Source: "{#CaptionDecoderPath}"; DestName: "caption-decoder-ffmpeg.exe"; Flags: dontcopy noencryption
 Source: "{#CaptionDecoderLicensePath}"; DestName: "caption-decoder-LICENSE.txt"; Flags: dontcopy noencryption
-Source: "{#TSDuckRuntimeArchive}"; DestName: "tsduck-runtime.zip"; Flags: dontcopy noencryption
+Source: "{#TSDuckRuntimeArchive}"; DestName: "{#TSDuckArchiveName}"; Flags: dontcopy noencryption
 Source: "..\scripts\tsduck-runtime.ps1"; DestName: "tsduck-runtime.ps1"; Flags: dontcopy noencryption
 Source: "..\THIRD-PARTY-NOTICES.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\LICENSE"; DestDir: "{app}"; Flags: ignoreversion
@@ -599,12 +599,12 @@ begin
   TSDuckStagingRoot := RuntimeParent + '\.tsduck-staging';
   if DirExists(TSDuckStagingRoot) or FileExists(TSDuckStagingRoot) then
     RaiseException('The private TSDuck runtime staging root already exists before clean extraction.');
-  ExtractTemporaryFile('tsduck-runtime.zip');
+  ExtractTemporaryFile(TSDuckArchiveNameValue);
   ExtractTemporaryFile('tsduck-runtime.ps1');
   Parameters := '-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "' +
     '$ErrorActionPreference=''Stop''; . ''' +
     ExpandConstant('{tmp}\tsduck-runtime.ps1') + '''; Expand-TownLightTSDuckRuntime -ArchivePath ''' +
-    ExpandConstant('{tmp}\tsduck-runtime.zip') + ''' -DestinationPath ''' +
+    ExpandConstant('{tmp}\' + TSDuckArchiveNameValue) + ''' -DestinationPath ''' +
     TSDuckStagingRoot + ''' | Out-Null"';
   if (not Exec(ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe'),
     Parameters, '', SW_HIDE, ewWaitUntilTerminated, ResultCode)) or

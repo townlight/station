@@ -267,6 +267,32 @@ fn rejects_a_tampered_tsduck_runtime_file() {
     );
 }
 
+#[cfg(windows)]
+#[test]
+fn rejects_a_reparse_ancestor_above_the_tsduck_runtime() {
+    use std::os::windows::fs::symlink_dir;
+
+    let fixture = fixture();
+    let alias = fixture.root.join("application-alias");
+    if let Err(error) = symlink_dir(&fixture.application, &alias) {
+        if error.raw_os_error() != Some(1314) {
+            panic!("could not create runtime ancestor symlink fixture: {error}");
+        }
+        let status = std::process::Command::new("cmd.exe")
+            .args(["/d", "/c", "mklink", "/J"])
+            .arg(&alias)
+            .arg(&fixture.application)
+            .status()
+            .expect("could not launch the junction fixture command");
+        assert!(status.success(), "could not create junction fixture");
+    }
+    let error = read_verified_candidate_identity(&fixture.data, &alias).unwrap_err();
+    assert!(
+        error.contains("reparse") || error.contains("symlink"),
+        "unexpected error: {error}"
+    );
+}
+
 #[test]
 fn rejects_a_missing_installed_runtime_file() {
     let fixture = fixture();

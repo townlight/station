@@ -1678,6 +1678,7 @@ fn verify_installed_runtime(
 }
 
 fn enumerate_runtime_files(runtime_root: &Path) -> Result<Vec<(String, PathBuf, u64)>, String> {
+    reject_reparse_path_chain(runtime_root)?;
     let metadata = std::fs::symlink_metadata(runtime_root)
         .map_err(|error| format!("could not inspect installed runtime root: {error}"))?;
     if !metadata.is_dir() || metadata.file_type().is_symlink() || is_reparse_point(&metadata) {
@@ -1737,6 +1738,25 @@ fn enumerate_runtime_files(runtime_root: &Path) -> Result<Vec<(String, PathBuf, 
     }
     files.sort_by(|left, right| left.0.cmp(&right.0));
     Ok(files)
+}
+
+fn reject_reparse_path_chain(path: &Path) -> Result<(), String> {
+    if !path.is_absolute() {
+        return Err("installed runtime root must be absolute".into());
+    }
+    let mut ancestors = path
+        .ancestors()
+        .filter(|ancestor| !ancestor.as_os_str().is_empty())
+        .collect::<Vec<_>>();
+    ancestors.reverse();
+    for ancestor in ancestors {
+        let metadata = std::fs::symlink_metadata(ancestor)
+            .map_err(|error| format!("could not inspect installed runtime path chain: {error}"))?;
+        if metadata.file_type().is_symlink() || is_reparse_point(&metadata) {
+            return Err("installed runtime path chain contains a symlink or reparse point".into());
+        }
+    }
+    Ok(())
 }
 
 fn validate_runtime_relative_path(path: &str) -> Result<(), String> {
