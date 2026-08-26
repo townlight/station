@@ -35,7 +35,8 @@ impl StationStore {
           CREATE TRIGGER IF NOT EXISTS asrun_epg_evidence_no_delete BEFORE DELETE ON asrun_epg_projection_evidence BEGIN SELECT RAISE(ABORT,'as-run evidence is append-only'); END;
           CREATE TABLE IF NOT EXISTS asrun_epg_access_audit (audit_id INTEGER PRIMARY KEY AUTOINCREMENT,channel_id TEXT NOT NULL CHECK(length(channel_id)=36),actor_id TEXT NOT NULL CHECK(length(actor_id)=36),action TEXT NOT NULL CHECK(action IN ('read','export_csv','export_xmltv')),occurred_at_utc_ms INTEGER NOT NULL CHECK(occurred_at_utc_ms>=0));
           CREATE TRIGGER IF NOT EXISTS asrun_epg_access_audit_no_update BEFORE UPDATE ON asrun_epg_access_audit BEGIN SELECT RAISE(ABORT,'as-run access audit is append-only'); END;
-          CREATE TRIGGER IF NOT EXISTS asrun_epg_access_audit_no_delete BEFORE DELETE ON asrun_epg_access_audit BEGIN SELECT RAISE(ABORT,'as-run access audit is append-only'); END;")
+          CREATE TRIGGER IF NOT EXISTS asrun_epg_access_audit_no_delete BEFORE DELETE ON asrun_epg_access_audit BEGIN SELECT RAISE(ABORT,'as-run access audit is append-only'); END;
+          CREATE TABLE IF NOT EXISTS asrun_epg_projection_failure (channel_id TEXT PRIMARY KEY CHECK(length(channel_id)=36), detail TEXT NOT NULL CHECK(length(detail) BETWEEN 1 AND 512), first_observed_at_utc_ms INTEGER NOT NULL CHECK(first_observed_at_utc_ms>=0), last_observed_at_utc_ms INTEGER NOT NULL CHECK(last_observed_at_utc_ms>=0), occurrence_count INTEGER NOT NULL CHECK(occurrence_count>=1));")
     }
 
     /// Transactionally persists a server-derived projection. Retried journal replay is
@@ -281,6 +282,56 @@ impl StationStore {
             Err(sqlite_error(self.database))
         }
     }
+    /// Durable, server-only recovery state for the non-timing-critical projector.
+    pub fn record_asrun_projection_failure(
+        &self,
+        channel_id: &str,
+        detail: &str,
+        now: i64,
+    ) -> Result<(), String> {
+        if !is_uuid(channel_id)
+            || detail.is_empty()
+            || detail.len() > 512
+            || detail.chars().any(char::is_control)
+            || now < 0
+        {
+            return Err("as-run projection failure is invalid".into());
+        }
+        let statement=self.prepare("INSERT INTO asrun_epg_projection_failure(channel_id,detail,first_observed_at_utc_ms,last_observed_at_utc_ms,occurrence_count) VALUES(?1,?2,?3,?3,1) ON CONFLICT(channel_id) DO UPDATE SET detail=excluded.detail,last_observed_at_utc_ms=excluded.last_observed_at_utc_ms,occurrence_count=asrun_epg_projection_failure.occurrence_count+1")?;
+        bind_text(
+            self.database,
+            statement.raw,
+            1,
+            &c_string(channel_id, "channel")?,
+        )?;
+        bind_text(
+            self.database,
+            statement.raw,
+            2,
+            &c_string(detail, "as-run projection failure")?,
+        )?;
+        bind_i64(self.database, statement.raw, 3, now)?;
+        if unsafe { sqlite3_step(statement.raw) } == SQLITE_DONE {
+            Ok(())
+        } else {
+            Err(sqlite_error(self.database))
+        }
+    }
+    pub fn resolve_asrun_projection_failure(&self, channel_id: &str) -> Result<(), String> {
+        let statement =
+            self.prepare("DELETE FROM asrun_epg_projection_failure WHERE channel_id=?1")?;
+        bind_text(
+            self.database,
+            statement.raw,
+            1,
+            &c_string(channel_id, "channel")?,
+        )?;
+        if unsafe { sqlite3_step(statement.raw) } == SQLITE_DONE {
+            Ok(())
+        } else {
+            Err(sqlite_error(self.database))
+        }
+    }
     fn read_asrun_evidence(
         &self,
         event_id: &str,
@@ -344,6 +395,11 @@ fn validate_projection(p: &AsRunProjectionRuntime, now: i64) -> Result<(), Strin
         || p.checkpoint.journal_sequence != p.entries.last().unwrap().journal_sequence
         || p.checkpoint.journal_hash != p.entries.last().unwrap().journal_hash
         || now < 0
+        || !p
+            .checkpoint
+            .journal_id
+            .strip_prefix("station-worker-")
+            .is_some_and(is_uuid)
     {
         return Err("as-run projection is invalid".into());
     }

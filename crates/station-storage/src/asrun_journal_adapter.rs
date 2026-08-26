@@ -27,15 +27,15 @@ pub enum AsRunJournalAdapterError {
 pub fn project_durable_journal(
     store: &StationStore,
     journal_path: impl AsRef<Path>,
-    journal_id: &str,
+    expected_worker_id: &str,
     channel_id: &str,
     station_timezone: &str,
     starts_at_unix_ms: i64,
     ends_at_unix_ms: i64,
     now_utc_ms: i64,
 ) -> Result<AsRunProjectionRuntime, AsRunJournalAdapterError> {
-    if !uuid(journal_id)
-        || !uuid(channel_id)
+    if !uuid(channel_id)
+        || expected_worker_id != format!("station-worker-{channel_id}")
         || starts_at_unix_ms < 0
         || ends_at_unix_ms <= starts_at_unix_ms
         || ends_at_unix_ms > now_utc_ms
@@ -51,13 +51,16 @@ pub fn project_durable_journal(
             "durable journal has no authoritative worker identity".into(),
         )
     })?;
-    if !uuid(&source_journal_id) || inspection.channel_id.as_deref() != Some(channel_id) {
+    if source_journal_id != expected_worker_id
+        || inspection.channel_id.as_deref() != Some(channel_id)
+    {
         return Err(AsRunJournalAdapterError::Journal(
             "journal channel identity does not match the requested channel".into(),
         ));
     }
     let events = inspection.retained_events;
     let mut scheduled = Vec::new();
+    let mut untimed_transitions = Vec::new();
     for envelope in events {
         if let WorkerEvent::ScheduledAssetOnAir {
             schedule_item_id,
@@ -66,7 +69,6 @@ pub fn project_durable_journal(
             actual_on_air_at_unix_ms,
             ..
         } = &envelope.event
-            && *actual_on_air_at_unix_ms >= starts_at_unix_ms
             && *actual_on_air_at_unix_ms >= starts_at_unix_ms
         {
             scheduled.push((
@@ -77,6 +79,18 @@ pub fn project_durable_journal(
                 *actual_on_air_at_unix_ms,
                 frame_hash(&source_journal_id, &envelope)?,
             ));
+        }
+        if matches!(
+            envelope.event,
+            WorkerEvent::OnAirChanged { .. }
+                | WorkerEvent::LiveOnAir { .. }
+                | WorkerEvent::LiveReturned { .. }
+                | WorkerEvent::CgApplied { .. }
+                | WorkerEvent::CgCleared
+                | WorkerEvent::CaptionCueAccepted { .. }
+                | WorkerEvent::CaptionCuesCleared
+        ) {
+            untimed_transitions.push(envelope.sequence);
         }
     }
     scheduled.sort_by_key(|entry| entry.4);
@@ -98,6 +112,15 @@ pub fn project_durable_journal(
         scheduled.iter().enumerate().take(scheduled.len() - 1)
     {
         let end = scheduled[index + 1].4;
+        let next_source_sequence = scheduled[index + 1].0;
+        if untimed_transitions
+            .iter()
+            .any(|sequence| *sequence > *source_sequence && *sequence < next_source_sequence)
+        {
+            return Err(AsRunJournalAdapterError::Journal(
+                "an untimed live, fallback, CG, or caption transition prevents an exact as-run interval; no airtime was fabricated".into(),
+            ));
+        }
         if *start < 0 || end <= *start || end > now_utc_ms {
             return Err(AsRunJournalAdapterError::Journal(
                 "scheduled as-run journal timestamps are nonmonotonic or future".into(),

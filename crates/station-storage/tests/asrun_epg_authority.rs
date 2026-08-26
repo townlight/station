@@ -22,7 +22,7 @@ fn database() -> std::path::PathBuf {
 }
 fn projection() -> station_reporting::runtime::AsRunProjectionRuntime {
     let take = JournalTake {
-        journal_id: "00000000-0000-4000-8000-000000000002".into(),
+        journal_id: "station-worker-00000000-0000-4000-8000-000000000001".into(),
         journal_sequence: 1,
         channel_id: CHANNEL.into(),
         started_at_unix_ms: 1_700_000_000_000,
@@ -76,11 +76,11 @@ fn durable_journal_adapter_replays_and_keeps_missing_authority_explicit() {
     let path = database();
     let journal = path.with_extension("tlj");
     let mut writer =
-        JournalWriter::open(&journal, "00000000-0000-4000-8000-000000000010", CHANNEL).unwrap();
+        JournalWriter::open(&journal, &format!("station-worker-{CHANNEL}"), CHANNEL).unwrap();
     writer
         .append(&WorkerEventEnvelope {
             version: PROTOCOL_VERSION,
-            worker_id: "00000000-0000-4000-8000-000000000010".into(),
+            worker_id: format!("station-worker-{CHANNEL}"),
             channel_id: CHANNEL.into(),
             sequence: 1,
             event: WorkerEvent::ScheduledAssetOnAir {
@@ -97,7 +97,7 @@ fn durable_journal_adapter_replays_and_keeps_missing_authority_explicit() {
     writer
         .append(&WorkerEventEnvelope {
             version: PROTOCOL_VERSION,
-            worker_id: "00000000-0000-4000-8000-000000000010".into(),
+            worker_id: format!("station-worker-{CHANNEL}"),
             channel_id: CHANNEL.into(),
             sequence: 2,
             event: WorkerEvent::ScheduledAssetOnAir {
@@ -119,7 +119,7 @@ fn durable_journal_adapter_replays_and_keeps_missing_authority_explicit() {
     let first = project_durable_journal(
         &store,
         &journal,
-        "00000000-0000-4000-8000-000000000040",
+        &format!("station-worker-{CHANNEL}"),
         CHANNEL,
         "America/Denver",
         1_700_000_000_000,
@@ -139,7 +139,7 @@ fn durable_journal_adapter_replays_and_keeps_missing_authority_explicit() {
     let second = project_durable_journal(
         &store,
         &journal,
-        "00000000-0000-4000-8000-000000000040",
+        &format!("station-worker-{CHANNEL}"),
         CHANNEL,
         "America/Denver",
         1_700_000_000_000,

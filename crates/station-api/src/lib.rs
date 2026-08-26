@@ -13191,7 +13191,7 @@ mod tests {
         ));
         let api = Api::open(&path).unwrap();
         let take = station_reporting::runtime::JournalTake {
-            journal_id: "00000000-0000-4000-8000-000000000002".into(),
+            journal_id: "station-worker-00000000-0000-4000-8000-000000000001".into(),
             journal_sequence: 1,
             channel_id: "00000000-0000-4000-8000-000000000001".into(),
             started_at_unix_ms: 1_700_000_000_000,

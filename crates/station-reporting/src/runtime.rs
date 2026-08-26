@@ -111,7 +111,7 @@ impl ProjectionInput {
         }
         let mut previous: Option<&JournalTake> = None;
         for take in &self.takes {
-            if !uuid(&take.journal_id)
+            if !worker_identity(&take.journal_id)
                 || !uuid(&take.channel_id)
                 || take.channel_id != self.channel_id
                 || take.journal_sequence == 0
@@ -362,6 +362,9 @@ fn uuid(v: &str) -> bool {
                 b.is_ascii_digit() || matches!(*b, b'a'..=b'f')
             }
         })
+}
+fn worker_identity(v: &str) -> bool {
+    v.strip_prefix("station-worker-").is_some_and(uuid)
 }
 fn sha256(v: &str) -> bool {
     v.len() == 64 && v.as_bytes().iter().all(u8::is_ascii_hexdigit)

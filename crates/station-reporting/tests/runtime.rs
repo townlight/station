@@ -6,7 +6,7 @@ const CHANNEL: &str = "00000000-0000-4000-8000-000000000001";
 
 fn take(sequence: u64, start: i64, end: i64, state: AsRunState) -> JournalTake {
     JournalTake {
-        journal_id: "00000000-0000-4000-8000-000000000010".into(),
+        journal_id: "station-worker-00000000-0000-4000-8000-000000000001".into(),
         journal_sequence: sequence,
         channel_id: CHANNEL.into(),
         started_at_unix_ms: start,

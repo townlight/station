@@ -59,6 +59,7 @@ const MEDIA_TEARDOWN_TIMEOUT: Duration = Duration::from_secs(30);
 const CG_EXPIRER_OPERATOR_ID: &str = "stationd-cg-expirer";
 const CG_SYNC_INTERVAL_MS: i64 = 1_000;
 const MAX_CAPTION_CUES_PER_TICK: usize = 64;
+const ASRUN_PROJECTION_INTERVAL_MS: i64 = 60_000;
 
 #[derive(Debug, PartialEq, Eq)]
 struct CaptionDispatchPlan {
@@ -3746,6 +3747,7 @@ where
     let mut cg_states: HashMap<String, CgSnapshotState> = HashMap::new();
     let mut restart_attempts: HashMap<String, u32> = HashMap::new();
     let mut restart_after: HashMap<String, i64> = HashMap::new();
+    let mut next_asrun_projection_after: HashMap<String, i64> = HashMap::new();
     while !stop.load(Ordering::Acquire) {
         let now = system_time_millis()?;
         let store = StationStore::open(database_path).map_err(OrchestrationError::Storage)?;
@@ -3929,18 +3931,41 @@ where
         if let Some(profile) = store.read_profile().map_err(OrchestrationError::Storage)? {
             let day_start = dispatch_now - dispatch_now.rem_euclid(86_400_000);
             for channel in channels.iter().filter(|channel| channel.enabled) {
+                if next_asrun_projection_after
+                    .get(&channel.channel_id)
+                    .is_some_and(|after| dispatch_now < *after)
+                {
+                    continue;
+                }
+                next_asrun_projection_after.insert(
+                    channel.channel_id.clone(),
+                    dispatch_now.saturating_add(ASRUN_PROJECTION_INTERVAL_MS),
+                );
                 let journal = journal_root.join(format!("{}.tlj", channel.channel_id));
                 if journal.is_file() {
-                    let _ = project_durable_journal(
+                    match project_durable_journal(
                         &store,
                         &journal,
-                        &channel.channel_id,
+                        &format!("station-worker-{}", channel.channel_id),
                         &channel.channel_id,
                         &profile.profile.timezone,
                         day_start,
                         dispatch_now,
                         dispatch_now,
-                    );
+                    ) {
+                        Ok(_) => {
+                            let _ = store.resolve_asrun_projection_failure(&channel.channel_id);
+                        }
+                        Err(error) => {
+                            let detail =
+                                format!("as-run projection is pending recovery: {error:?}");
+                            let _ = store.record_asrun_projection_failure(
+                                &channel.channel_id,
+                                &detail,
+                                dispatch_now,
+                            );
+                        }
+                    }
                 }
             }
         }
