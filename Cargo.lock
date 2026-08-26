@@ -1867,6 +1867,9 @@ dependencies = [
 [[package]]
 name = "station-materialization-control"
 version = "0.1.0"
+dependencies = [
+ "station-domain",
+]
 
 [[package]]
 name = "station-media-assets"

@@ -40,6 +40,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'candidate-pair-verifier.ps1')
 . (Join-Path $PSScriptRoot 'installed-proof-api.ps1')
 $apiSession = New-TownLightProofSession -BaseUri $BaseUri -Credential $Credential
 
@@ -199,7 +200,6 @@ function Measure-HeadendUdp {
 function Assert-InstalledIdentity {
     param([string]$ManifestPath)
     $manifestResolved = Resolve-Path -LiteralPath $ManifestPath -ErrorAction Stop
-    $manifest = Get-Content -LiteralPath $manifestResolved.Path -Raw | ConvertFrom-Json
     $dataPath = Join-Path $env:ProgramData 'TownLight Station'
     $receiptPath = Join-Path $dataPath 'install-receipt.json'
     $activePath = Join-Path $dataPath 'active-slot.json'
@@ -209,6 +209,8 @@ function Assert-InstalledIdentity {
     }
     $receipt = Get-Content -LiteralPath $receiptPath -Raw | ConvertFrom-Json
     $active = Get-Content -LiteralPath $activePath -Raw | ConvertFrom-Json
+    $candidatePair = Get-TownLightCandidateIdentity -ManifestPath $manifestResolved.Path -ExpectedSourceCommit $receipt.source_commit
+    $manifest = $candidatePair.manifest
     if ($manifest.product -ne 'TownLight Station' -or $receipt.product -ne 'TownLight Station') {
         throw 'The candidate manifest or installation receipt has the wrong product identity.'
     }

@@ -91,9 +91,11 @@ use station_storage::{
     OutputLoudnessProofJobRecord, OutputLoudnessProofJobState, ProfileWriteError,
     ReceiverAcceptanceOutcome, ReceiverEvidenceMethod, ReferenceStationTierWrite,
     ReferenceStationTierWriteError, ScheduleAutomationWriteError, ScheduleItemWrite,
-    ScheduleMaterializationApplyOutcome, ScheduleMaterializationOutcome,
-    ScheduleMaterializationOutcomeRecord, ScheduleMaterializationPlanRecord,
-    ScheduleMaterializationRun, ScheduleMaterializationWriteError, StationStore,
+    ScheduleMaterializationApplyOutcome, ScheduleMaterializationHistoryCursor,
+    ScheduleMaterializationHistoryEntry, ScheduleMaterializationHistoryReadError,
+    ScheduleMaterializationOutcome, ScheduleMaterializationOutcomeRecord,
+    ScheduleMaterializationPlanRecord, ScheduleMaterializationRun,
+    ScheduleMaterializationRunOrigin, ScheduleMaterializationWriteError, StationStore,
     StoredSinkLoudnessProof,
 };
 use station_update::UpdateCheckTrigger;
@@ -926,6 +928,81 @@ struct ScheduleMaterializationResponse<'a> {
     occurred_at_unix_ms: i64,
     plans: Vec<ScheduleMaterializationPlanResponse<'a>>,
     outcomes: Vec<ScheduleMaterializationOutcomeRecordResponse<'a>>,
+}
+
+/// Bounded durable materialization history. It deliberately excludes
+/// per-boot evidence receipts, HMAC-derived material, retry internals, and any
+/// commit, dispatch, or alert-binding claim: none is durable run history.
+#[derive(Debug, Serialize)]
+struct ScheduleMaterializationHistoryResponse<'a> {
+    entries: Vec<ScheduleMaterializationHistoryEntryResponse<'a>>,
+    next_cursor: Option<ScheduleMaterializationHistoryCursorResponse>,
+}
+
+#[derive(Debug, Serialize)]
+struct ScheduleMaterializationHistoryCursorResponse {
+    occurred_at_unix_ms: i64,
+    run_id: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum ScheduleMaterializationHistoryOriginResponse {
+    Automatic,
+    Operator,
+}
+
+#[derive(Debug, Serialize)]
+struct ScheduleMaterializationHistoryEntryResponse<'a> {
+    run_id: &'a str,
+    channel_id: &'a str,
+    origin: ScheduleMaterializationHistoryOriginResponse,
+    actor_id: &'a str,
+    request_sha256: &'a str,
+    result_sha256: &'a str,
+    window: MaterializationWindowResponse,
+    observed_at_utc_ms: i64,
+    occurred_at_unix_ms: i64,
+    checkpoint_utc_day: i64,
+    plans: Vec<ScheduleMaterializationHistoryPlanResponse<'a>>,
+    outcomes: Vec<ScheduleMaterializationHistoryOutcomeResponse<'a>>,
+    generated_drafts: Vec<ScheduleMaterializationGeneratedDraftResponse<'a>>,
+}
+
+#[derive(Debug, Serialize)]
+struct ScheduleMaterializationHistoryPlanResponse<'a> {
+    ordinal: u32,
+    rule_id: &'a str,
+    rule_revision: u64,
+    channel_id: &'a str,
+    saved_search_id: &'a str,
+    saved_search_revision: u64,
+    block_id: &'a str,
+    block_revision: u64,
+    window: MaterializationWindowResponse,
+}
+
+#[derive(Debug, Serialize)]
+struct ScheduleMaterializationHistoryOutcomeResponse<'a> {
+    ordinal: u32,
+    rule_id: &'a str,
+    rule_revision: u64,
+    channel_id: &'a str,
+    saved_search_id: &'a str,
+    saved_search_revision: u64,
+    block_id: &'a str,
+    block_revision: u64,
+    plan_window: MaterializationWindowResponse,
+    materialization_id: Option<&'a str>,
+    compiled_outcome: ScheduleMaterializationOutcomeResponse<'a>,
+    outcome: ScheduleMaterializationOutcomeResponse<'a>,
+}
+
+#[derive(Debug, Serialize)]
+struct ScheduleMaterializationGeneratedDraftResponse<'a> {
+    occurrence_id: &'a str,
+    schedule_item_id: &'a str,
+    current_schedule: &'a ScheduleItem,
 }
 
 /// The browser proposes only mutable editorial text and CAS intent. Asset
@@ -1810,9 +1887,17 @@ impl Api {
             ("GET", path) if recurring_rule_list_path(path).is_some() => {
                 self.list_recurring_rules(path, actor)
             }
+            ("GET", path) if schedule_materialization_history_path(path).is_some() => {
+                self.list_schedule_materialization_history(path, body, actor)
+            }
             ("POST", path) if schedule_materialization_path(path).is_some() => {
                 self.materialize_scheduled_channel(path, body, actor)
             }
+            (_, path) if is_schedule_materialization_endpoint_shape(path) => error_response(
+                405,
+                "method_not_allowed",
+                "Schedule materialization supports POST, and materialization history supports GET.",
+            ),
             ("GET" | "PUT" | "POST", path) if path.starts_with("/api/v1/scheduling/") => {
                 error_response(
                     400,
@@ -3086,6 +3171,59 @@ impl Api {
                 )
             }
             Err(error) => schedule_materialization_write_error_response(error),
+        }
+    }
+
+    fn list_schedule_materialization_history(
+        &self,
+        path: &str,
+        body: Option<&[u8]>,
+        actor: Option<&OperatorAccount>,
+    ) -> ApiResponse {
+        if !is_scheduling_reader(actor) {
+            return scheduling_reader_required();
+        }
+        let Some((channel_id, limit, cursor)) = schedule_materialization_history_path(path) else {
+            return scheduling_invalid_path();
+        };
+        if body.is_some_and(|body| !body.is_empty()) {
+            return error_response(
+                400,
+                "unexpected_body",
+                "Schedule materialization history does not accept a request body.",
+            );
+        }
+        if cursor
+            .as_ref()
+            .is_some_and(|cursor| cursor.occurred_at_unix_ms <= 0)
+        {
+            return error_response(
+                422,
+                "invalid_materialization_history_cursor",
+                "The materialization history cursor is outside the durable timestamp range.",
+            );
+        }
+        match self.scheduling_channel_exists(channel_id) {
+            Ok(true) => {}
+            Ok(false) => return scheduling_not_found("channel"),
+            Err(_) => {
+                return error_response(
+                    500,
+                    "storage_error",
+                    "Schedule materialization history could not validate the channel authority.",
+                );
+            }
+        }
+        match self
+            .storage
+            .list_schedule_materialization_history(channel_id, limit, cursor.as_ref())
+        {
+            Ok(page) => schedule_materialization_history_success_response(
+                channel_id,
+                page.entries,
+                page.next_cursor,
+            ),
+            Err(error) => schedule_materialization_history_read_error_response(error),
         }
     }
 
@@ -8897,6 +9035,108 @@ fn schedule_materialization_success_response(
     )
 }
 
+fn schedule_materialization_history_success_response(
+    channel_id: &str,
+    entries: Vec<ScheduleMaterializationHistoryEntry>,
+    next_cursor: Option<ScheduleMaterializationHistoryCursor>,
+) -> ApiResponse {
+    let response = ScheduleMaterializationHistoryResponse {
+        entries: entries
+            .iter()
+            .map(|entry| schedule_materialization_history_entry_response(channel_id, entry))
+            .collect(),
+        next_cursor: next_cursor.map(|cursor| ScheduleMaterializationHistoryCursorResponse {
+            occurred_at_unix_ms: cursor.occurred_at_unix_ms,
+            run_id: cursor.run_id,
+        }),
+    };
+    json_response(
+        200,
+        serde_json::to_vec(&response)
+            .expect("serializing materialization history response cannot fail"),
+    )
+}
+
+fn schedule_materialization_history_entry_response<'a>(
+    channel_id: &'a str,
+    entry: &'a ScheduleMaterializationHistoryEntry,
+) -> ScheduleMaterializationHistoryEntryResponse<'a> {
+    let run = &entry.run;
+    ScheduleMaterializationHistoryEntryResponse {
+        run_id: &run.run_id,
+        channel_id,
+        origin: match entry.origin {
+            ScheduleMaterializationRunOrigin::Automatic => {
+                ScheduleMaterializationHistoryOriginResponse::Automatic
+            }
+            ScheduleMaterializationRunOrigin::Operator => {
+                ScheduleMaterializationHistoryOriginResponse::Operator
+            }
+        },
+        actor_id: &run.changed_by,
+        request_sha256: &run.request_sha256,
+        result_sha256: &run.result_sha256,
+        window: materialization_window_response(&run.window),
+        observed_at_utc_ms: run.observed_at_utc_ms,
+        occurred_at_unix_ms: run.occurred_at_unix_ms,
+        checkpoint_utc_day: run.occurred_at_unix_ms / 86_400_000,
+        plans: run
+            .plans
+            .iter()
+            .map(schedule_materialization_history_plan_response)
+            .collect(),
+        outcomes: run
+            .outcomes
+            .iter()
+            .map(schedule_materialization_history_outcome_response)
+            .collect(),
+        generated_drafts: entry
+            .generated_drafts
+            .iter()
+            .map(|draft| ScheduleMaterializationGeneratedDraftResponse {
+                occurrence_id: &draft.occurrence_id,
+                schedule_item_id: &draft.schedule_item_id,
+                current_schedule: &draft.current_schedule,
+            })
+            .collect(),
+    }
+}
+
+fn schedule_materialization_history_plan_response(
+    plan: &ScheduleMaterializationPlanRecord,
+) -> ScheduleMaterializationHistoryPlanResponse<'_> {
+    ScheduleMaterializationHistoryPlanResponse {
+        ordinal: plan.ordinal,
+        rule_id: &plan.rule_id,
+        rule_revision: plan.rule_revision,
+        channel_id: &plan.channel_id,
+        saved_search_id: &plan.saved_search_id,
+        saved_search_revision: plan.saved_search_revision,
+        block_id: &plan.block_id,
+        block_revision: plan.block_revision,
+        window: materialization_window_response(&plan.window),
+    }
+}
+
+fn schedule_materialization_history_outcome_response(
+    record: &ScheduleMaterializationOutcomeRecord,
+) -> ScheduleMaterializationHistoryOutcomeResponse<'_> {
+    ScheduleMaterializationHistoryOutcomeResponse {
+        ordinal: record.ordinal,
+        rule_id: &record.rule_id,
+        rule_revision: record.rule_revision,
+        channel_id: &record.channel_id,
+        saved_search_id: &record.saved_search_id,
+        saved_search_revision: record.saved_search_revision,
+        block_id: &record.block_id,
+        block_revision: record.block_revision,
+        plan_window: materialization_window_response(&record.plan_window),
+        materialization_id: record.materialization_id.as_deref(),
+        compiled_outcome: schedule_materialization_outcome_response(&record.compiled_outcome),
+        outcome: schedule_materialization_outcome_response(&record.outcome),
+    }
+}
+
 fn materialization_window_response(
     window: &MaterializationWindow,
 ) -> MaterializationWindowResponse {
@@ -9099,6 +9339,33 @@ fn schedule_materialization_write_error_response(
             500,
             "storage_error",
             "Schedule materialization could not be completed.",
+        ),
+    }
+}
+
+fn schedule_materialization_history_read_error_response(
+    error: ScheduleMaterializationHistoryReadError,
+) -> ApiResponse {
+    match error {
+        ScheduleMaterializationHistoryReadError::Invalid(_) => error_response(
+            422,
+            "materialization_history_invalid",
+            "The materialization history request is not valid for the station authority.",
+        ),
+        ScheduleMaterializationHistoryReadError::Capacity => error_response(
+            422,
+            "materialization_history_capacity_exceeded",
+            "Schedule materialization history exceeded its bounded station capacity.",
+        ),
+        ScheduleMaterializationHistoryReadError::Integrity(_) => error_response(
+            500,
+            "materialization_integrity_error",
+            "Schedule materialization history encountered an integrity contradiction.",
+        ),
+        ScheduleMaterializationHistoryReadError::Storage(_) => error_response(
+            500,
+            "storage_error",
+            "Schedule materialization history could not be read safely.",
         ),
     }
 }
@@ -9438,6 +9705,55 @@ fn recurring_rule_list_path(path: &str) -> Option<(&str, usize)> {
 fn schedule_materialization_path(path: &str) -> Option<&str> {
     path_identity(path, "/api/v1/scheduling/channels/", "/materializations")
         .filter(|identity| is_canonical_api_uuid(identity))
+}
+
+/// Recognizes only the two complete schedule-materialization endpoint shapes.
+/// This keeps wrong-method responses distinct from malformed-path responses
+/// without relaxing either endpoint's exact path and query grammar.
+fn is_schedule_materialization_endpoint_shape(path: &str) -> bool {
+    schedule_materialization_path(path).is_some()
+        || schedule_materialization_history_path(path).is_some()
+}
+
+/// Accept exactly the documented keyset grammar.  A partial cursor, unknown
+/// member, duplicate, or reordered pair is an invalid path instead of a
+/// best-effort query: history pagination cannot safely guess caller intent.
+fn schedule_materialization_history_path(
+    path: &str,
+) -> Option<(&str, usize, Option<ScheduleMaterializationHistoryCursor>)> {
+    let remainder = path.strip_prefix("/api/v1/scheduling/channels/")?;
+    let (channel_id, query) = remainder.split_once("/materializations/history?")?;
+    if !is_canonical_api_uuid(channel_id) {
+        return None;
+    }
+    let mut pairs = query.split('&');
+    let limit = pairs
+        .next()?
+        .strip_prefix("limit=")?
+        .parse::<usize>()
+        .ok()?;
+    if !(1..=128).contains(&limit) {
+        return None;
+    }
+    let Some(first_cursor_pair) = pairs.next() else {
+        return Some((channel_id, limit, None));
+    };
+    let occurred_at_unix_ms = first_cursor_pair
+        .strip_prefix("before_occurred_at_unix_ms=")?
+        .parse::<i64>()
+        .ok()?;
+    let run_id = pairs.next()?.strip_prefix("before_run_id=")?;
+    if pairs.next().is_some() || !is_canonical_api_uuid(run_id) {
+        return None;
+    }
+    Some((
+        channel_id,
+        limit,
+        Some(ScheduleMaterializationHistoryCursor {
+            occurred_at_unix_ms,
+            run_id: run_id.into(),
+        }),
+    ))
 }
 
 fn scheduling_history_path<'a>(path: &'a str, prefix: &str) -> Option<(&'a str, usize)> {
@@ -16485,6 +16801,452 @@ mod tests {
     }
 
     #[test]
+    fn schedule_materialization_history_requires_a_bounded_authenticated_reader_contract() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let database =
+            std::env::temp_dir().join(format!("townlight-materialization-history-api-{nonce}.db"));
+        let api = Api::open(&database).unwrap();
+        let channel_id = "11111111-2222-4333-8444-555555555555";
+        api.storage
+            .put_channel(&ChannelConfiguration {
+                channel_id: channel_id.into(),
+                display_name: "Materialization history proof".into(),
+                output_profile: station_schedule::OutputProfileId::Proof360p30,
+                output_sinks: vec![station_schedule::OutputSinkConfiguration::required_udp(
+                    "22222222-3333-4444-8555-666666666666",
+                    "Proof output",
+                    "127.0.0.1:5500",
+                    -16.0,
+                )],
+                enabled: true,
+            })
+            .unwrap();
+        let support = test_actor(station_auth::OperatorRole::SupportAdmin);
+        let meeting = test_actor(station_auth::OperatorRole::MeetingOperator);
+        let setup = test_actor(station_auth::OperatorRole::SetupAdmin);
+        let records = test_actor(station_auth::OperatorRole::RecordsClerk);
+        let disabled = disabled_test_actor(station_auth::OperatorRole::SetupAdmin);
+        let path =
+            format!("/api/v1/scheduling/channels/{channel_id}/materializations/history?limit=1");
+
+        assert_eq!(api.handle_in_process("GET", &path, None).status, 403);
+        for rejected in [&records, &disabled] {
+            assert_eq!(
+                api.handle_authenticated("GET", &path, None, rejected)
+                    .status,
+                403
+            );
+        }
+        for reader in [&support, &meeting, &setup] {
+            let response = api.handle_authenticated("GET", &path, None, reader);
+            assert_eq!(
+                response.status,
+                200,
+                "{}",
+                String::from_utf8_lossy(&response.body)
+            );
+            let json: serde_json::Value = serde_json::from_slice(&response.body).unwrap();
+            assert_eq!(json["entries"], serde_json::json!([]));
+            assert!(json["next_cursor"].is_null());
+        }
+
+        assert_eq!(
+            api.handle_authenticated("GET", &path, Some(br#"{}"#), &support)
+                .status,
+            400
+        );
+        for method in ["POST", "PUT", "DELETE"] {
+            let response = api.handle_authenticated(method, &path, None, &support);
+            assert_eq!(response.status, 405, "{method}");
+            assert_eq!(
+                serde_json::from_slice::<serde_json::Value>(&response.body).unwrap()["error"]["code"],
+                "method_not_allowed"
+            );
+        }
+        assert_eq!(
+            api.handle_authenticated(
+                "POST",
+                &format!(
+                    "/api/v1/scheduling/channels/{channel_id}/materializations/history?limit=0"
+                ),
+                None,
+                &support,
+            )
+            .status,
+            400,
+            "invalid history grammar must not become a recognized endpoint"
+        );
+        for malformed in [
+            format!("/api/v1/scheduling/channels/{channel_id}/materializations/history?limit=0"),
+            format!("/api/v1/scheduling/channels/{channel_id}/materializations/history?limit=129"),
+            format!(
+                "/api/v1/scheduling/channels/{channel_id}/materializations/history?limit=1&before_run_id=aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
+            ),
+            format!(
+                "/api/v1/scheduling/channels/{channel_id}/materializations/history?limit=1&before_occurred_at_unix_ms=1"
+            ),
+            format!(
+                "/api/v1/scheduling/channels/{channel_id}/materializations/history?limit=1&before_occurred_at_unix_ms=1&before_run_id=not-a-uuid"
+            ),
+            format!(
+                "/api/v1/scheduling/channels/{channel_id}/materializations/history?limit=1&before_run_id=aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee&before_occurred_at_unix_ms=1"
+            ),
+            format!(
+                "/api/v1/scheduling/channels/{channel_id}/materializations/history?limit=1&limit=1"
+            ),
+            format!(
+                "/api/v1/scheduling/channels/{channel_id}/materializations/history?limit=1&unexpected=1"
+            ),
+        ] {
+            let response = api.handle_authenticated("GET", &malformed, None, &support);
+            assert_eq!(response.status, 400, "{malformed}");
+            assert_eq!(
+                serde_json::from_slice::<serde_json::Value>(&response.body).unwrap()["error"]["code"],
+                "invalid_path"
+            );
+        }
+        let invalid_cursor = format!(
+            "/api/v1/scheduling/channels/{channel_id}/materializations/history?limit=1&before_occurred_at_unix_ms=-1&before_run_id=aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
+        );
+        let invalid_cursor = api.handle_authenticated("GET", &invalid_cursor, None, &support);
+        assert_eq!(invalid_cursor.status, 422);
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&invalid_cursor.body).unwrap()["error"]["code"],
+            "invalid_materialization_history_cursor"
+        );
+        let zero_cursor = format!(
+            "/api/v1/scheduling/channels/{channel_id}/materializations/history?limit=1&before_occurred_at_unix_ms=0&before_run_id=aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
+        );
+        let zero_cursor = api.handle_authenticated("GET", &zero_cursor, None, &support);
+        assert_eq!(zero_cursor.status, 422);
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&zero_cursor.body).unwrap()["error"]["code"],
+            "invalid_materialization_history_cursor"
+        );
+
+        let missing = api.handle_authenticated(
+            "GET",
+            "/api/v1/scheduling/channels/aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee/materializations/history?limit=1",
+            None,
+            &support,
+        );
+        assert_eq!(missing.status, 404);
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&missing.body).unwrap()["error"]["code"],
+            "channel_not_found"
+        );
+
+        drop(api);
+        let _ = std::fs::remove_file(database);
+    }
+
+    #[test]
+    fn schedule_materialization_history_is_channel_scoped_cursor_stable_and_redacted() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let database = std::env::temp_dir().join(format!(
+            "townlight-materialization-history-projection-api-{nonce}.db"
+        ));
+        let api = Api::open(&database).unwrap();
+        let operator = test_actor_with_account(
+            "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+            "materialization.history.operator",
+            station_auth::OperatorRole::MeetingOperator,
+        );
+        let reader = test_actor(station_auth::OperatorRole::SupportAdmin);
+        let (search, block, rule) = source_evidence_authorities();
+        let second_channel_id = "11111111-2222-4333-8444-555555555555";
+        let second_block_id = "22222222-3333-4444-8555-666666666666";
+        let second_rule_id = "33333333-4444-4555-8666-777777777777";
+        let mut second_block = block.clone();
+        second_block.block_id = second_block_id.into();
+        second_block.channel_id = second_channel_id.into();
+        second_block.allow_rule_ids = vec![second_rule_id.into()];
+        let mut second_rule = rule.clone();
+        second_rule.rule_id = second_rule_id.into();
+        second_rule.channel_id = second_channel_id.into();
+        second_rule.block_id = second_block_id.into();
+
+        for (channel_id, display_name, sink_id, destination) in [
+            (
+                rule.channel_id.as_str(),
+                "Operator history",
+                "22222222-3333-4444-8555-666666666666",
+                "127.0.0.1:5500",
+            ),
+            (
+                second_channel_id,
+                "Automatic history",
+                "33333333-4444-4555-8666-777777777777",
+                "127.0.0.1:5501",
+            ),
+        ] {
+            api.storage
+                .put_channel(&ChannelConfiguration {
+                    channel_id: channel_id.into(),
+                    display_name: display_name.into(),
+                    output_profile: station_schedule::OutputProfileId::Proof360p30,
+                    output_sinks: vec![station_schedule::OutputSinkConfiguration::required_udp(
+                        sink_id,
+                        "History proof output",
+                        destination,
+                        -16.0,
+                    )],
+                    enabled: true,
+                })
+                .unwrap();
+        }
+        seed_source_evidence_authorities(&api, &search, &block, &rule);
+        api.storage
+            .write_daypart_block(&second_block, None, &search.owner_operator_id, 4)
+            .unwrap();
+        api.storage
+            .write_recurring_rule(&second_rule, None, &search.owner_operator_id, 5)
+            .unwrap();
+
+        let first_asset = "a".repeat(64);
+        let first_catalog_path = format!("/api/v1/catalog/assets/{first_asset}");
+        put_catalog_test_media(&api, &first_asset, AssetReadiness::Ready);
+        let first_create = api.handle_authenticated(
+            "PUT",
+            &first_catalog_path,
+            Some(
+                &serde_json::to_vec(&serde_json::json!({
+                    "title": "City Council regular meeting",
+                    "meeting_body": "Council",
+                    "expected_revision": null
+                }))
+                .unwrap(),
+            ),
+            &operator,
+        );
+        assert_eq!(first_create.status, 201);
+        assert_eq!(
+            api.handle_authenticated(
+                "POST",
+                &format!("{first_catalog_path}/publish"),
+                Some(&serde_json::to_vec(&serde_json::json!({"expected_revision": 1})).unwrap()),
+                &operator,
+            )
+            .status,
+            200
+        );
+
+        let operator_materialization_path = format!(
+            "/api/v1/scheduling/channels/{}/materializations",
+            rule.channel_id
+        );
+        let first_operator_run =
+            api.handle_authenticated("POST", &operator_materialization_path, Some(&[]), &operator);
+        assert_eq!(
+            first_operator_run.status,
+            201,
+            "{}",
+            String::from_utf8_lossy(&first_operator_run.body)
+        );
+        let first_operator_run: serde_json::Value =
+            serde_json::from_slice(&first_operator_run.body).unwrap();
+
+        let second_asset = "b".repeat(64);
+        let second_catalog_path = format!("/api/v1/catalog/assets/{second_asset}");
+        put_catalog_test_media(&api, &second_asset, AssetReadiness::Ready);
+        assert_eq!(
+            api.handle_authenticated(
+                "PUT",
+                &second_catalog_path,
+                Some(
+                    &serde_json::to_vec(&serde_json::json!({
+                        "title": "City Council special meeting",
+                        "meeting_body": "Council",
+                        "expected_revision": null
+                    }))
+                    .unwrap(),
+                ),
+                &operator,
+            )
+            .status,
+            201
+        );
+        assert_eq!(
+            api.handle_authenticated(
+                "POST",
+                &format!("{second_catalog_path}/publish"),
+                Some(&serde_json::to_vec(&serde_json::json!({"expected_revision": 1})).unwrap()),
+                &operator,
+            )
+            .status,
+            200
+        );
+        let second_operator_run =
+            api.handle_authenticated("POST", &operator_materialization_path, None, &operator);
+        assert_eq!(
+            second_operator_run.status,
+            201,
+            "{}",
+            String::from_utf8_lossy(&second_operator_run.body)
+        );
+        let second_operator_run: serde_json::Value =
+            serde_json::from_slice(&second_operator_run.body).unwrap();
+        assert_ne!(first_operator_run["run_id"], second_operator_run["run_id"]);
+
+        let automatic = api
+            .storage
+            .materialize_scheduled_channel(
+                second_channel_id,
+                station_domain::AUTOMATIC_SCHEDULE_MATERIALIZATION_ACTOR_ID,
+                api.source_evidence_authority.as_ref(),
+            )
+            .unwrap();
+        let automatic_run_id = match automatic {
+            ScheduleMaterializationApplyOutcome::Applied(run) => run.run_id,
+            ScheduleMaterializationApplyOutcome::AlreadyApplied(run) => run.run_id,
+        };
+
+        let history_path = format!(
+            "/api/v1/scheduling/channels/{}/materializations/history?limit=1",
+            rule.channel_id
+        );
+        let first_page = api.handle_authenticated("GET", &history_path, None, &reader);
+        assert_eq!(
+            first_page.status,
+            200,
+            "{}",
+            String::from_utf8_lossy(&first_page.body)
+        );
+        let first_page: serde_json::Value = serde_json::from_slice(&first_page.body).unwrap();
+        assert_eq!(first_page["entries"].as_array().unwrap().len(), 1);
+        let first_entry = &first_page["entries"][0];
+        assert_eq!(first_entry["channel_id"], rule.channel_id);
+        assert_eq!(first_entry["origin"], "operator");
+        assert_eq!(first_entry["actor_id"], operator.account_id().as_str());
+        assert_eq!(first_entry["request_sha256"].as_str().unwrap().len(), 64);
+        assert_eq!(first_entry["result_sha256"].as_str().unwrap().len(), 64);
+        assert_eq!(
+            first_entry["checkpoint_utc_day"],
+            first_entry["occurred_at_unix_ms"].as_i64().unwrap() / 86_400_000
+        );
+        assert!(first_entry["plans"].as_array().unwrap().iter().all(|plan| {
+            plan["channel_id"] == rule.channel_id
+                && plan.get("candidate_receipt_sha256").is_none()
+                && plan.get("prior_receipt_sha256").is_none()
+                && plan.get("source_authority_sha256").is_none()
+        }));
+        assert!(
+            first_entry["outcomes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|outcome| {
+                    outcome["channel_id"] == rule.channel_id
+                        && outcome.get("source_authority_sha256").is_none()
+                        && outcome.get("candidate_projection_sha256").is_none()
+                        && outcome.get("prior_airings_sha256").is_none()
+                })
+        );
+        assert!(first_entry.get("batch_sha256").is_none());
+        assert!(first_entry.get("alert_binding").is_none());
+        assert!(first_entry.get("retry_state").is_none());
+        assert!(first_entry.get("apply_disposition").is_none());
+        assert!(first_entry.get("source_commit").is_none());
+        let cursor = first_page["next_cursor"].as_object().unwrap();
+        let cursor_path = format!(
+            "{history_path}&before_occurred_at_unix_ms={}&before_run_id={}",
+            cursor["occurred_at_unix_ms"].as_i64().unwrap(),
+            cursor["run_id"].as_str().unwrap()
+        );
+        let second_page = api.handle_authenticated("GET", &cursor_path, None, &reader);
+        assert_eq!(second_page.status, 200);
+        let second_page: serde_json::Value = serde_json::from_slice(&second_page.body).unwrap();
+        assert_eq!(second_page["entries"].as_array().unwrap().len(), 1);
+        assert!(second_page["next_cursor"].is_null());
+        let returned_run_ids = [
+            first_page["entries"][0]["run_id"].as_str().unwrap(),
+            second_page["entries"][0]["run_id"].as_str().unwrap(),
+        ]
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+        assert_eq!(returned_run_ids.len(), 2);
+        assert!(returned_run_ids.contains(first_operator_run["run_id"].as_str().unwrap()));
+        assert!(returned_run_ids.contains(second_operator_run["run_id"].as_str().unwrap()));
+        let all_entries = first_page["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .chain(second_page["entries"].as_array().unwrap());
+        assert!(
+            all_entries
+                .flat_map(|entry| entry["generated_drafts"].as_array().unwrap())
+                .any(|draft| {
+                    draft["occurrence_id"].is_string()
+                        && draft["schedule_item_id"].is_string()
+                        && draft["current_schedule"]["channel_id"] == rule.channel_id
+                        && draft["current_schedule"]["state"] == "draft"
+                })
+        );
+
+        let automatic_path = format!(
+            "/api/v1/scheduling/channels/{second_channel_id}/materializations/history?limit=1"
+        );
+        let automatic_page = api.handle_authenticated("GET", &automatic_path, None, &reader);
+        assert_eq!(automatic_page.status, 200);
+        let automatic_page: serde_json::Value =
+            serde_json::from_slice(&automatic_page.body).unwrap();
+        assert_eq!(automatic_page["entries"].as_array().unwrap().len(), 1);
+        assert_eq!(automatic_page["entries"][0]["run_id"], automatic_run_id);
+        assert_eq!(
+            automatic_page["entries"][0]["channel_id"],
+            second_channel_id
+        );
+        assert_eq!(automatic_page["entries"][0]["origin"], "automatic");
+        assert_eq!(
+            automatic_page["entries"][0]["actor_id"],
+            station_domain::AUTOMATIC_SCHEDULE_MATERIALIZATION_ACTOR_ID
+        );
+
+        drop(api);
+        let _ = std::fs::remove_file(database);
+    }
+
+    #[test]
+    fn schedule_materialization_history_read_errors_are_typed_and_redacted() {
+        for (error, status, code) in [
+            (
+                ScheduleMaterializationHistoryReadError::Invalid("private invalid detail".into()),
+                422,
+                "materialization_history_invalid",
+            ),
+            (
+                ScheduleMaterializationHistoryReadError::Capacity,
+                422,
+                "materialization_history_capacity_exceeded",
+            ),
+            (
+                ScheduleMaterializationHistoryReadError::Integrity(
+                    "private integrity detail".into(),
+                ),
+                500,
+                "materialization_integrity_error",
+            ),
+            (
+                ScheduleMaterializationHistoryReadError::Storage("private storage detail".into()),
+                500,
+                "storage_error",
+            ),
+        ] {
+            let response = schedule_materialization_history_read_error_response(error);
+            assert_eq!(response.status, status);
+            let body: serde_json::Value = serde_json::from_slice(&response.body).unwrap();
+            assert_eq!(body["error"]["code"], code);
+            assert!(!String::from_utf8_lossy(&response.body).contains("private"));
+        }
+    }
+
+    #[test]
     fn schedule_materialization_post_rejects_browser_authority_and_retries_exactly() {
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -16544,10 +17306,11 @@ mod tests {
                 "invalid_path"
             );
         }
+        let wrong_method = api.handle_authenticated("GET", &path, None, &operator);
+        assert_eq!(wrong_method.status, 405);
         assert_eq!(
-            api.handle_authenticated("GET", &path, None, &operator)
-                .status,
-            400
+            serde_json::from_slice::<serde_json::Value>(&wrong_method.body).unwrap()["error"]["code"],
+            "method_not_allowed"
         );
         assert_eq!(
             api.handle_authenticated("DELETE", &path, None, &operator)

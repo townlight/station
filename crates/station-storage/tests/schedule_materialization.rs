@@ -267,3 +267,49 @@ fn proposed_occurrence_atomically_creates_one_deterministic_draft_and_history() 
     drop(store);
     cleanup(&path);
 }
+
+#[test]
+fn channel_history_returns_the_fully_validated_run_and_current_generated_draft() {
+    let path = temporary_database("history-page");
+    let store = StationStore::open(&path).unwrap();
+    seed_authorities(&store);
+    publish_council_asset(&store);
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+    let authority = TestAuthority {
+        now,
+        sequence: AtomicU64::new(0),
+    };
+    let starts_at_utc_ms = future_midnight(now);
+    let run = store
+        .materialize_schedule_batch_with_explicit_window(
+            CHANNEL,
+            &MaterializationWindow {
+                starts_at_utc_ms,
+                ends_at_utc_ms: starts_at_utc_ms + 2 * 3_600_000,
+            },
+            OWNER,
+            &authority,
+        )
+        .unwrap();
+    let ScheduleMaterializationApplyOutcome::Applied(run) = run else {
+        panic!("fixture materialization must apply");
+    };
+
+    let page = store
+        .list_schedule_materialization_history(CHANNEL, 1, None)
+        .unwrap();
+
+    assert_eq!(page.entries.len(), 1);
+    assert_eq!(page.entries[0].run.run_id, run.run_id);
+    assert_eq!(page.entries[0].generated_drafts.len(), 1);
+    assert_eq!(
+        page.entries[0].generated_drafts[0].current_schedule.state,
+        ScheduleState::Draft
+    );
+    assert_eq!(page.next_cursor, None);
+    drop(store);
+    cleanup(&path);
+}

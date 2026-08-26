@@ -37,12 +37,12 @@ use station_cg::{
     built_in_template, inspect_cg_image, managed_cg_image_path,
 };
 use station_domain::{
-    AlertChannel, AlertChannelKind, AlertConditionKind, AlertDelivery, AlertDeliveryPayload,
-    AlertDeliveryState, AlertEvent, AlertEventState, AlertNotificationKind, AlertRule,
-    AlertSeverity, ChannelRuntimeObservation, ChannelRuntimeState, SelfTestKind, SelfTestSchedule,
-    SelfTestStatus, SelfTestTrigger, StationProfile, StationProfileDocument, SystemResourceSample,
-    SystemSelfTest, redact_alert_channel_target, validate_alert_channel_target,
-    validate_secure_url,
+    AUTOMATIC_SCHEDULE_MATERIALIZATION_ACTOR_ID, AlertChannel, AlertChannelKind,
+    AlertConditionKind, AlertDelivery, AlertDeliveryPayload, AlertDeliveryState, AlertEvent,
+    AlertEventState, AlertNotificationKind, AlertRule, AlertSeverity, ChannelRuntimeObservation,
+    ChannelRuntimeState, SelfTestKind, SelfTestSchedule, SelfTestStatus, SelfTestTrigger,
+    StationProfile, StationProfileDocument, SystemResourceSample, SystemSelfTest,
+    redact_alert_channel_target, validate_alert_channel_target, validate_secure_url,
 };
 use station_live::{
     LiveSource, LiveSourceWriteError, TakeoverAuditEvent, TakeoverSession, TakeoverState,
@@ -97,10 +97,14 @@ pub use materialization_evidence::MaterializationEvidenceSnapshot;
 mod schedule_materialization;
 pub use schedule_materialization::{
     AutomaticMaterializationChannelCheckpoint, ExistingScheduleSnapshot,
-    ScheduleMaterializationApplyOutcome, ScheduleMaterializationFailureClass,
+    MAX_SCHEDULE_MATERIALIZATION_HISTORY_PAGE_SIZE, ScheduleMaterializationApplyOutcome,
+    ScheduleMaterializationFailureClass, ScheduleMaterializationGeneratedDraft,
+    ScheduleMaterializationHistoryCursor, ScheduleMaterializationHistoryEntry,
+    ScheduleMaterializationHistoryPage, ScheduleMaterializationHistoryReadError,
     ScheduleMaterializationOutcome, ScheduleMaterializationOutcomeRecord,
     ScheduleMaterializationPlanRecord, ScheduleMaterializationRun,
-    ScheduleMaterializationSourceSnapshot, ScheduleMaterializationWriteError,
+    ScheduleMaterializationRunOrigin, ScheduleMaterializationSourceSnapshot,
+    ScheduleMaterializationWriteError,
 };
 
 const SQLITE_OK: c_int = 0;
@@ -1521,7 +1525,46 @@ impl StationStore {
              CREATE TRIGGER IF NOT EXISTS operator_auth_audit_no_delete \
                BEFORE DELETE ON operator_auth_audit \
                BEGIN SELECT RAISE(ABORT, 'operator auth audit is append-only'); END;",
-        )
+        )?;
+        self.execute(&format!(
+            "CREATE TRIGGER IF NOT EXISTS operator_accounts_no_reserved_materialization_actor_insert \
+             BEFORE INSERT ON operator_accounts \
+             WHEN NEW.account_id='{AUTOMATIC_SCHEDULE_MATERIALIZATION_ACTOR_ID}' \
+             BEGIN SELECT RAISE(ABORT, 'automatic materialization actor is reserved'); END;\
+             CREATE TRIGGER IF NOT EXISTS operator_accounts_no_reserved_materialization_actor_update \
+             BEFORE UPDATE OF account_id ON operator_accounts \
+             WHEN NEW.account_id='{AUTOMATIC_SCHEDULE_MATERIALIZATION_ACTOR_ID}' \
+             BEGIN SELECT RAISE(ABORT, 'automatic materialization actor is reserved'); END;"
+        ))?;
+        self.reject_reserved_operator_account_identity()
+    }
+
+    fn reject_reserved_operator_account_identity(&self) -> Result<(), String> {
+        let statement =
+            self.prepare("SELECT EXISTS(SELECT 1 FROM operator_accounts WHERE account_id=?1)")?;
+        let account_id = c_string(
+            AUTOMATIC_SCHEDULE_MATERIALIZATION_ACTOR_ID,
+            "reserved automatic materialization actor",
+        )?;
+        bind_text(self.database, statement.raw, 1, &account_id)?;
+        match unsafe { sqlite3_step(statement.raw) } {
+            SQLITE_ROW if unsafe { sqlite3_column_int64(statement.raw, 0) } == 0 => Ok(()),
+            SQLITE_ROW => {
+                Err("operator account identity is reserved for automatic materialization".into())
+            }
+            _ => Err(sqlite_error(self.database)),
+        }
+    }
+
+    fn ensure_operator_account_identity_is_not_reserved(
+        account: &OperatorAccount,
+    ) -> Result<(), String> {
+        if account.account_id().as_str() == AUTOMATIC_SCHEDULE_MATERIALIZATION_ACTOR_ID {
+            return Err(
+                "operator account identity is reserved for automatic materialization".into(),
+            );
+        }
+        Ok(())
     }
 
     pub fn read_operator_login(
@@ -1769,6 +1812,7 @@ impl StationStore {
         installation: &OperatorBootstrapInstallation,
         occurred_at_unix_ms: i64,
     ) -> Result<bool, String> {
+        Self::ensure_operator_account_identity_is_not_reserved(&installation.account)?;
         if occurred_at_unix_ms < 0
             || !installation
                 .account
@@ -1831,6 +1875,7 @@ impl StationStore {
     }
 
     pub fn insert_operator_account(&self, account: &OperatorAccount) -> Result<(), String> {
+        Self::ensure_operator_account_identity_is_not_reserved(account)?;
         self.execute("BEGIN IMMEDIATE")?;
         let outcome = (|| {
             self.insert_operator_account_rows(account)?;
@@ -2164,6 +2209,7 @@ impl StationStore {
     }
 
     fn insert_operator_account_rows(&self, account: &OperatorAccount) -> Result<(), String> {
+        Self::ensure_operator_account_identity_is_not_reserved(account)?;
         let statement = self.prepare(
             "INSERT INTO operator_accounts(account_id,username,display_name,password_phc,credential_version,enabled,\
              failed_attempts,first_failure_at_unix_ms,locked_until_unix_ms,created_at_unix_ms,updated_at_unix_ms) \
@@ -18325,6 +18371,51 @@ mod tests {
             210,
         )
         .unwrap()
+    }
+
+    #[test]
+    fn automatic_materialization_actor_is_reserved_from_operator_creation_and_existing_migration() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let database = std::env::temp_dir().join(format!("townlight-reserved-actor-{nonce}.db"));
+        let store = StationStore::open(&database).unwrap();
+        let reserved = OperatorAccount::new(
+            AccountId::try_from(AUTOMATIC_SCHEDULE_MATERIALIZATION_ACTOR_ID).unwrap(),
+            OperatorUsername::try_from("system.actor").unwrap(),
+            OperatorDisplayName::try_from("System Actor").unwrap(),
+            test_password_phc(),
+            BTreeSet::from([OperatorRole::SetupAdmin]),
+            CredentialVersion::new(1).unwrap(),
+            true,
+            10,
+            10,
+        )
+        .unwrap();
+        assert!(store.insert_operator_account(&reserved).is_err());
+        assert!(!store.has_operator_accounts().unwrap());
+
+        store
+            .execute(
+                "DROP TRIGGER operator_accounts_no_reserved_materialization_actor_insert;\
+                 DROP TRIGGER operator_accounts_no_reserved_materialization_actor_update;\
+                 INSERT INTO operator_accounts(account_id,username,display_name,password_phc,credential_version,enabled,created_at_unix_ms,updated_at_unix_ms) \
+                 VALUES('00000000-0000-4000-8000-000000000022','old.system','Old System','x',1,1,1,1)",
+            )
+            .unwrap();
+        drop(store);
+        assert!(
+            StationStore::open(&database).is_err(),
+            "an existing database with a reserved operator identity must fail migration"
+        );
+        for candidate in [
+            database.clone(),
+            PathBuf::from(format!("{}-wal", database.display())),
+            PathBuf::from(format!("{}-shm", database.display())),
+        ] {
+            let _ = std::fs::remove_file(candidate);
+        }
     }
 
     #[test]

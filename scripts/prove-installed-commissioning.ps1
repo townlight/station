@@ -30,6 +30,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'candidate-pair-verifier.ps1')
 . (Join-Path $PSScriptRoot 'installed-proof-api.ps1')
 $apiSession = New-TownLightProofSession -BaseUri $BaseUri -Credential $Credential
 
@@ -171,7 +172,8 @@ try {
     }
     $receipt = Get-Content -LiteralPath $receiptPath -Raw | ConvertFrom-Json
     $manifestPath = Resolve-Path -LiteralPath $CandidateManifestPath -ErrorAction Stop
-    $manifest = Get-Content -LiteralPath $manifestPath.Path -Raw | ConvertFrom-Json
+    $candidatePair = Get-TownLightCandidateIdentity -ManifestPath $manifestPath.Path -ExpectedSourceCommit $receipt.source_commit
+    $manifest = $candidatePair.manifest
     if ($ExpectedSourceCommit -and $receipt.source_commit -ne $ExpectedSourceCommit) {
         throw "Installed source identity does not match ExpectedSourceCommit."
     }

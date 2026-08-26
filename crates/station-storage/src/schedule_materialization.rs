@@ -1,7 +1,11 @@
 use std::collections::{BTreeMap, BTreeSet};
 
+#[cfg(test)]
+use std::cell::Cell;
+
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use station_domain::AUTOMATIC_SCHEDULE_MATERIALIZATION_ACTOR_ID;
 use station_schedule::{ScheduleItem, ScheduleState};
 use station_schedule_automation::{
     ArbitratedMaterializationBatch, ArbitrationPrecedence, AuthenticatedCandidateProjection,
@@ -21,10 +25,22 @@ const MAX_AUTOMATION_DRAFTS_PER_CHANNEL: usize = 4_096;
 const MAX_AUTOMATIC_MATERIALIZATION_CHANNELS: usize = 256;
 const MAX_AUTOMATIC_RECURRING_RULE_SCAN: usize =
     MAX_AUTOMATIC_MATERIALIZATION_CHANNELS * MAX_BATCH_REQUESTS;
-const MATERIALIZATION_ACTOR_MAX: usize = 200;
+/// The public run-history read boundary accepts at most this many runs at a
+/// time. The page is deliberately keyset-paginated rather than offset based so
+/// concurrent newer runs cannot make an operator skip or duplicate evidence.
+pub const MAX_SCHEDULE_MATERIALIZATION_HISTORY_PAGE_SIZE: usize = 128;
+const MAX_SCHEDULE_MATERIALIZATION_HISTORY_OUTCOMES: usize = MAX_BATCH_OUTCOMES;
+const MAX_SCHEDULE_MATERIALIZATION_HISTORY_DRAFTS: usize = MAX_BATCH_OUTCOMES;
 const MATERIALIZATION_RECEIPT_LIFETIME_MS: i64 = 60_000;
 const UTC_MINUTE_MS: i64 = 60_000;
 const UTC_DAY_MS: i64 = 86_400_000;
+
+#[cfg(test)]
+thread_local! {
+    /// Test-only instrumentation. A thread-local counter keeps unrelated
+    /// parallel test cases from masking an accidental per-Draft full-run read.
+    static MATERIALIZATION_RUN_FULL_READS: Cell<usize> = const { Cell::new(0) };
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScheduleMaterializationSourceSnapshot {
@@ -149,6 +165,93 @@ pub struct ScheduleMaterializationRun {
 pub struct AutomaticMaterializationChannelCheckpoint {
     pub channel_id: String,
     pub latest_run: Option<ScheduleMaterializationRun>,
+}
+
+/// An exclusive keyset cursor for channel-scoped materialization-run history.
+/// Entries are ordered descending by `(occurred_at_unix_ms, run_id)`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScheduleMaterializationHistoryCursor {
+    pub occurred_at_unix_ms: i64,
+    pub run_id: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScheduleMaterializationRunOrigin {
+    /// The immutable actor is the reserved domain-owned supervisor identity.
+    /// Operator-account creation and migration reject that identity, making this
+    /// comparison the stable automatic-vs-operator trust boundary rather than a
+    /// caller-supplied label.
+    Automatic,
+    /// Every other valid immutable attribution is an operator-originated run.
+    Operator,
+}
+
+/// A Draft created by the selected run. `current_schedule` is intentionally
+/// current (rather than a historical snapshot): the immutable provenance is
+/// verified against the run while the operator can see the Draft's present
+/// revision and state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScheduleMaterializationGeneratedDraft {
+    pub occurrence_id: String,
+    pub schedule_item_id: String,
+    pub current_schedule: ScheduleItem,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScheduleMaterializationHistoryEntry {
+    pub run: ScheduleMaterializationRun,
+    pub origin: ScheduleMaterializationRunOrigin,
+    pub generated_drafts: Vec<ScheduleMaterializationGeneratedDraft>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScheduleMaterializationHistoryPage {
+    pub entries: Vec<ScheduleMaterializationHistoryEntry>,
+    pub next_cursor: Option<ScheduleMaterializationHistoryCursor>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ScheduleMaterializationHistoryReadError {
+    Invalid(String),
+    Capacity,
+    Integrity(String),
+    Storage(String),
+}
+
+/// Internal result for the immutable run verifier. Persisted contradictions
+/// must remain distinct from SQLite failures so the public history boundary
+/// does not misreport a damaged station database as an integrity finding.
+#[derive(Debug)]
+enum VerifiedMaterializationRunReadError {
+    Integrity(String),
+    Storage(String),
+}
+
+impl From<String> for VerifiedMaterializationRunReadError {
+    fn from(error: String) -> Self {
+        Self::Integrity(error)
+    }
+}
+
+impl From<&str> for VerifiedMaterializationRunReadError {
+    fn from(error: &str) -> Self {
+        Self::Integrity(error.into())
+    }
+}
+
+impl VerifiedMaterializationRunReadError {
+    fn into_string(self) -> String {
+        match self {
+            Self::Integrity(error) | Self::Storage(error) => error,
+        }
+    }
+
+    fn into_history_error(self) -> ScheduleMaterializationHistoryReadError {
+        match self {
+            Self::Integrity(error) => ScheduleMaterializationHistoryReadError::Integrity(error),
+            Self::Storage(error) => ScheduleMaterializationHistoryReadError::Storage(error),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -372,7 +475,69 @@ impl StationStore {
              CREATE TRIGGER IF NOT EXISTS schedule_materialization_run_channels_no_delete BEFORE DELETE ON schedule_materialization_run_channels BEGIN SELECT RAISE(ABORT, 'materialization run channel bindings are append-only'); END;\
              CREATE TRIGGER IF NOT EXISTS schedule_materialization_drafts_no_update BEFORE UPDATE ON schedule_materialization_drafts BEGIN SELECT RAISE(ABORT, 'materialization draft provenance is append-only'); END;\
              CREATE TRIGGER IF NOT EXISTS schedule_materialization_drafts_no_delete BEFORE DELETE ON schedule_materialization_drafts BEGIN SELECT RAISE(ABORT, 'materialization draft provenance is append-only'); END;",
-        )
+        )?;
+        self.audit_materialization_run_channel_bindings()
+    }
+
+    /// Backfill can derive a historical binding only when its plan authority is
+    /// complete and single-channel. Any older run for which that is not true is
+    /// unsafe to hide from channel history, so opening the station fails closed
+    /// instead of serving a page that silently falls back to an older run.
+    fn audit_materialization_run_channel_bindings(&self) -> Result<(), String> {
+        let statement = self.prepare(
+            "SELECT r.run_id,r.occurred_at_unix_ms,r.plan_count,b.channel_id,b.occurred_at_unix_ms, \
+                    COUNT(DISTINCT b.run_id),COUNT(p.run_id),MIN(p.channel_id),MAX(p.channel_id) \
+             FROM schedule_materialization_runs r \
+             LEFT JOIN schedule_materialization_run_channels b ON b.run_id=r.run_id \
+             LEFT JOIN schedule_materialization_plans p ON p.run_id=r.run_id \
+             GROUP BY r.run_id,r.occurred_at_unix_ms,b.channel_id,b.occurred_at_unix_ms \
+             ORDER BY r.run_id",
+        )?;
+        loop {
+            match unsafe { sqlite3_step(statement.raw) } {
+                SQLITE_ROW => {
+                    let run_id = column_text(statement.raw, 0)?;
+                    let occurred_at_unix_ms = unsafe { sqlite3_column_int64(statement.raw, 1) };
+                    let expected_plan_count = unsafe { sqlite3_column_int64(statement.raw, 2) };
+                    let binding_channel_id = column_text(statement.raw, 3)?;
+                    let binding_occurred_at_unix_ms =
+                        unsafe { sqlite3_column_int64(statement.raw, 4) };
+                    let binding_count = unsafe { sqlite3_column_int64(statement.raw, 5) };
+                    let plan_count = unsafe { sqlite3_column_int64(statement.raw, 6) };
+                    let minimum_plan_channel = if plan_count == 0 {
+                        None
+                    } else {
+                        Some(column_text(statement.raw, 7)?)
+                    };
+                    let maximum_plan_channel = if plan_count == 0 {
+                        None
+                    } else {
+                        Some(column_text(statement.raw, 8)?)
+                    };
+                    if !is_canonical_uuid(&run_id)
+                        || occurred_at_unix_ms <= 0
+                        || expected_plan_count < 0
+                        || plan_count != expected_plan_count
+                        || binding_count != 1
+                        || !is_canonical_uuid(&binding_channel_id)
+                        || binding_occurred_at_unix_ms != occurred_at_unix_ms
+                        || minimum_plan_channel
+                            .as_deref()
+                            .is_some_and(|channel| channel != binding_channel_id)
+                        || maximum_plan_channel
+                            .as_deref()
+                            .is_some_and(|channel| channel != binding_channel_id)
+                    {
+                        return Err(
+                            "materialization run channel binding migration is incomplete or contradictory"
+                                .into(),
+                        );
+                    }
+                }
+                SQLITE_DONE => return Ok(()),
+                _ => return Err(sqlite_error(self.database)),
+            }
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -385,7 +550,7 @@ impl StationStore {
         changed_by: &str,
         authority: &impl SourceEvidenceAuthority,
     ) -> Result<ScheduleMaterializationApplyOutcome, ScheduleMaterializationWriteError> {
-        if !is_canonical_uuid(channel_id) || !secret_field(changed_by, MATERIALIZATION_ACTOR_MAX) {
+        if !is_canonical_uuid(channel_id) || !is_canonical_uuid(changed_by) {
             return Err(ScheduleMaterializationWriteError::Invalid(
                 "materialization request or attribution is invalid or unbounded".into(),
             ));
@@ -407,7 +572,7 @@ impl StationStore {
         changed_by: &str,
         authority: &impl SourceEvidenceAuthority,
     ) -> Result<ScheduleMaterializationApplyOutcome, ScheduleMaterializationWriteError> {
-        if !is_canonical_uuid(channel_id) || !secret_field(changed_by, MATERIALIZATION_ACTOR_MAX) {
+        if !is_canonical_uuid(channel_id) || !is_canonical_uuid(changed_by) {
             return Err(ScheduleMaterializationWriteError::Invalid(
                 "materialization request or attribution is invalid or unbounded".into(),
             ));
@@ -533,6 +698,433 @@ impl StationStore {
             .ok_or_else(|| "automatic materialization checkpoint read produced no result".into())
     }
 
+    /// Reads a bounded, channel-scoped page of durable materialization runs.
+    ///
+    /// This is an evidence boundary, not a best-effort activity feed. One
+    /// deferred SQLite snapshot supplies the page and every selected run is
+    /// re-read through the full immutable-run verifier. A malformed newest row,
+    /// channel binding, or Draft provenance record therefore fails the request;
+    /// it is never skipped in favor of an older row or represented by a partial
+    /// page.
+    pub fn list_schedule_materialization_history(
+        &self,
+        channel_id: &str,
+        limit: usize,
+        cursor: Option<&ScheduleMaterializationHistoryCursor>,
+    ) -> Result<ScheduleMaterializationHistoryPage, ScheduleMaterializationHistoryReadError> {
+        if !is_canonical_uuid(channel_id) {
+            return Err(ScheduleMaterializationHistoryReadError::Invalid(
+                "materialization history channel identity is invalid".into(),
+            ));
+        }
+        if !(1..=MAX_SCHEDULE_MATERIALIZATION_HISTORY_PAGE_SIZE).contains(&limit) {
+            return Err(ScheduleMaterializationHistoryReadError::Invalid(
+                "materialization history page limit is invalid or unbounded".into(),
+            ));
+        }
+        if let Some(cursor) = cursor
+            && (cursor.occurred_at_unix_ms <= 0 || !is_canonical_uuid(&cursor.run_id))
+        {
+            return Err(ScheduleMaterializationHistoryReadError::Invalid(
+                "materialization history cursor is invalid".into(),
+            ));
+        }
+
+        self.execute("BEGIN DEFERRED")
+            .map_err(ScheduleMaterializationHistoryReadError::Storage)?;
+        let outcome = (|| {
+            let selected =
+                self.list_materialization_history_bindings_locked(channel_id, limit, cursor)?;
+            let has_next = selected.len() > limit;
+            let mut entries = Vec::with_capacity(selected.len().min(limit));
+            let mut total_outcomes = 0_usize;
+            let mut total_drafts = 0_usize;
+
+            for (index, binding) in selected.into_iter().enumerate() {
+                let entry = self.read_materialization_history_entry_locked(channel_id, &binding)?;
+                if index >= limit {
+                    // The limit+1 probe is also fully verified before issuing a
+                    // cursor. Otherwise a corrupted immediate-next row could be
+                    // silently hidden behind an apparently valid current page.
+                    continue;
+                }
+                extend_materialization_history_aggregate(
+                    &mut total_outcomes,
+                    &mut total_drafts,
+                    entry.run.outcomes.len(),
+                    entry.generated_drafts.len(),
+                )?;
+                entries.push(entry);
+            }
+
+            let next_cursor = has_next.then(|| entries.last()).flatten().map(|entry| {
+                ScheduleMaterializationHistoryCursor {
+                    occurred_at_unix_ms: entry.run.occurred_at_unix_ms,
+                    run_id: entry.run.run_id.clone(),
+                }
+            });
+            Ok(ScheduleMaterializationHistoryPage {
+                entries,
+                next_cursor,
+            })
+        })();
+        finish_materialization_history_transaction(self, outcome)
+    }
+
+    fn list_materialization_history_bindings_locked(
+        &self,
+        channel_id: &str,
+        limit: usize,
+        cursor: Option<&ScheduleMaterializationHistoryCursor>,
+    ) -> Result<Vec<ScheduleMaterializationHistoryCursor>, ScheduleMaterializationHistoryReadError>
+    {
+        let fetch_limit = i64::try_from(
+            limit
+                .checked_add(1)
+                .ok_or(ScheduleMaterializationHistoryReadError::Capacity)?,
+        )
+        .map_err(|_| ScheduleMaterializationHistoryReadError::Capacity)?;
+        let channel = c_string(channel_id, "materialization history channel")
+            .map_err(ScheduleMaterializationHistoryReadError::Storage)?;
+        let statement = match cursor {
+            Some(_) => self
+                .prepare(
+                    "SELECT DISTINCT r.run_id,r.occurred_at_unix_ms \
+                 FROM schedule_materialization_runs r \
+                 LEFT JOIN schedule_materialization_run_channels b ON b.run_id=r.run_id \
+                 LEFT JOIN schedule_materialization_plans p ON p.run_id=r.run_id \
+                 WHERE (b.channel_id=?1 OR p.channel_id=?1) \
+                   AND (r.occurred_at_unix_ms<?2 \
+                     OR (r.occurred_at_unix_ms=?2 AND r.run_id<?3)) \
+                 ORDER BY r.occurred_at_unix_ms DESC,r.run_id DESC LIMIT ?4",
+                )
+                .map_err(ScheduleMaterializationHistoryReadError::Storage)?,
+            None => self
+                .prepare(
+                    "SELECT DISTINCT r.run_id,r.occurred_at_unix_ms \
+                 FROM schedule_materialization_runs r \
+                 LEFT JOIN schedule_materialization_run_channels b ON b.run_id=r.run_id \
+                 LEFT JOIN schedule_materialization_plans p ON p.run_id=r.run_id \
+                 WHERE b.channel_id=?1 OR p.channel_id=?1 \
+                 ORDER BY r.occurred_at_unix_ms DESC,r.run_id DESC LIMIT ?2",
+                )
+                .map_err(ScheduleMaterializationHistoryReadError::Storage)?,
+        };
+        bind_text(self.database, statement.raw, 1, &channel)
+            .map_err(ScheduleMaterializationHistoryReadError::Storage)?;
+        match cursor {
+            Some(cursor) => {
+                bind_i64(self.database, statement.raw, 2, cursor.occurred_at_unix_ms)
+                    .map_err(ScheduleMaterializationHistoryReadError::Storage)?;
+                let run_id = c_string(&cursor.run_id, "materialization history cursor run")
+                    .map_err(ScheduleMaterializationHistoryReadError::Storage)?;
+                bind_text(self.database, statement.raw, 3, &run_id)
+                    .map_err(ScheduleMaterializationHistoryReadError::Storage)?;
+                bind_i64(self.database, statement.raw, 4, fetch_limit)
+                    .map_err(ScheduleMaterializationHistoryReadError::Storage)?;
+            }
+            None => bind_i64(self.database, statement.raw, 2, fetch_limit)
+                .map_err(ScheduleMaterializationHistoryReadError::Storage)?,
+        }
+
+        let mut selected = Vec::with_capacity(limit.saturating_add(1));
+        loop {
+            match unsafe { sqlite3_step(statement.raw) } {
+                SQLITE_ROW => selected.push(ScheduleMaterializationHistoryCursor {
+                    run_id: column_text(statement.raw, 0)
+                        .map_err(ScheduleMaterializationHistoryReadError::Integrity)?,
+                    occurred_at_unix_ms: unsafe { sqlite3_column_int64(statement.raw, 1) },
+                }),
+                SQLITE_DONE => break,
+                _ => {
+                    return Err(ScheduleMaterializationHistoryReadError::Storage(
+                        sqlite_error(self.database),
+                    ));
+                }
+            }
+        }
+        if selected.len() > limit.saturating_add(1) {
+            return Err(ScheduleMaterializationHistoryReadError::Capacity);
+        }
+        Ok(selected)
+    }
+
+    fn read_materialization_history_entry_locked(
+        &self,
+        channel_id: &str,
+        binding: &ScheduleMaterializationHistoryCursor,
+    ) -> Result<ScheduleMaterializationHistoryEntry, ScheduleMaterializationHistoryReadError> {
+        if binding.occurred_at_unix_ms < 0 || !is_canonical_uuid(&binding.run_id) {
+            return Err(ScheduleMaterializationHistoryReadError::Integrity(
+                "materialization history row is malformed".into(),
+            ));
+        }
+        self.validate_materialization_history_binding_locked(channel_id, binding)?;
+        let run = self
+            .read_schedule_materialization_run_verified(&binding.run_id)
+            .map_err(VerifiedMaterializationRunReadError::into_history_error)?
+            .ok_or_else(|| {
+                ScheduleMaterializationHistoryReadError::Integrity(
+                    "materialization history run disappeared".into(),
+                )
+            })?;
+        if run.occurred_at_unix_ms != binding.occurred_at_unix_ms
+            || run.plans.iter().any(|plan| plan.channel_id != channel_id)
+            || run
+                .outcomes
+                .iter()
+                .any(|outcome| outcome.channel_id != channel_id)
+        {
+            return Err(ScheduleMaterializationHistoryReadError::Integrity(
+                "materialization history run contradicts its channel binding".into(),
+            ));
+        }
+        let generated_drafts = self.read_materialization_history_drafts_locked(channel_id, &run)?;
+        let origin = if run.changed_by == AUTOMATIC_SCHEDULE_MATERIALIZATION_ACTOR_ID {
+            ScheduleMaterializationRunOrigin::Automatic
+        } else {
+            ScheduleMaterializationRunOrigin::Operator
+        };
+        Ok(ScheduleMaterializationHistoryEntry {
+            run,
+            origin,
+            generated_drafts,
+        })
+    }
+
+    fn validate_materialization_history_binding_locked(
+        &self,
+        channel_id: &str,
+        binding: &ScheduleMaterializationHistoryCursor,
+    ) -> Result<(), ScheduleMaterializationHistoryReadError> {
+        let statement = self
+            .prepare(
+                "SELECT channel_id,occurred_at_unix_ms \
+             FROM schedule_materialization_run_channels WHERE run_id=?1",
+            )
+            .map_err(ScheduleMaterializationHistoryReadError::Storage)?;
+        let run_id = c_string(&binding.run_id, "materialization history run")
+            .map_err(ScheduleMaterializationHistoryReadError::Storage)?;
+        bind_text(self.database, statement.raw, 1, &run_id)
+            .map_err(ScheduleMaterializationHistoryReadError::Storage)?;
+        let status = unsafe { sqlite3_step(statement.raw) };
+        if status == SQLITE_DONE {
+            return Err(ScheduleMaterializationHistoryReadError::Integrity(
+                "materialization history channel binding disappeared".into(),
+            ));
+        }
+        if status != SQLITE_ROW {
+            return Err(ScheduleMaterializationHistoryReadError::Storage(
+                sqlite_error(self.database),
+            ));
+        }
+        let bound_channel = column_text(statement.raw, 0)
+            .map_err(ScheduleMaterializationHistoryReadError::Integrity)?;
+        let bound_occurred_at_unix_ms = unsafe { sqlite3_column_int64(statement.raw, 1) };
+        if bound_channel != channel_id || bound_occurred_at_unix_ms != binding.occurred_at_unix_ms {
+            return Err(ScheduleMaterializationHistoryReadError::Integrity(
+                "materialization history channel binding is contradictory".into(),
+            ));
+        }
+        match unsafe { sqlite3_step(statement.raw) } {
+            SQLITE_DONE => Ok(()),
+            SQLITE_ROW => Err(ScheduleMaterializationHistoryReadError::Integrity(
+                "materialization history run has duplicate channel bindings".into(),
+            )),
+            _ => Err(ScheduleMaterializationHistoryReadError::Storage(
+                sqlite_error(self.database),
+            )),
+        }
+    }
+
+    fn read_materialization_history_drafts_locked(
+        &self,
+        channel_id: &str,
+        run: &ScheduleMaterializationRun,
+    ) -> Result<Vec<ScheduleMaterializationGeneratedDraft>, ScheduleMaterializationHistoryReadError>
+    {
+        let expected = run
+            .outcomes
+            .iter()
+            .filter_map(|record| match &record.outcome {
+                ScheduleMaterializationOutcome::Proposed {
+                    occurrence_id,
+                    schedule_item_id,
+                    ..
+                } => Some((schedule_item_id.as_str(), occurrence_id.as_str())),
+                _ => None,
+            })
+            .collect::<BTreeMap<_, _>>();
+        let expected_count = run
+            .outcomes
+            .iter()
+            .filter(|record| {
+                matches!(
+                    &record.outcome,
+                    ScheduleMaterializationOutcome::Proposed { .. }
+                )
+            })
+            .count();
+        if expected.len() != expected_count || expected.len() > MAX_BATCH_OUTCOMES {
+            return Err(ScheduleMaterializationHistoryReadError::Integrity(
+                "materialization history run has duplicate or excessive Draft authority".into(),
+            ));
+        }
+
+        let statement = self
+            .prepare(
+                "SELECT schedule_item_id FROM schedule_materialization_drafts \
+             WHERE run_id=?1 ORDER BY schedule_item_id LIMIT ?2",
+            )
+            .map_err(ScheduleMaterializationHistoryReadError::Storage)?;
+        let run_id = c_string(&run.run_id, "materialization history Draft run")
+            .map_err(ScheduleMaterializationHistoryReadError::Storage)?;
+        bind_text(self.database, statement.raw, 1, &run_id)
+            .map_err(ScheduleMaterializationHistoryReadError::Storage)?;
+        bind_i64(
+            self.database,
+            statement.raw,
+            2,
+            i64::try_from(MAX_BATCH_OUTCOMES + 1)
+                .map_err(|_| ScheduleMaterializationHistoryReadError::Capacity)?,
+        )
+        .map_err(ScheduleMaterializationHistoryReadError::Storage)?;
+        let mut stored_item_ids = Vec::new();
+        loop {
+            match unsafe { sqlite3_step(statement.raw) } {
+                SQLITE_ROW => stored_item_ids.push(
+                    column_text(statement.raw, 0)
+                        .map_err(ScheduleMaterializationHistoryReadError::Integrity)?,
+                ),
+                SQLITE_DONE => break,
+                _ => {
+                    return Err(ScheduleMaterializationHistoryReadError::Storage(
+                        sqlite_error(self.database),
+                    ));
+                }
+            }
+        }
+        if stored_item_ids.len() > MAX_BATCH_OUTCOMES || stored_item_ids.len() != expected.len() {
+            return Err(ScheduleMaterializationHistoryReadError::Integrity(
+                "materialization history Draft provenance is incomplete or excessive".into(),
+            ));
+        }
+
+        let mut generated_drafts = Vec::with_capacity(stored_item_ids.len());
+        for schedule_item_id in stored_item_ids {
+            let expected_occurrence_id =
+                expected.get(schedule_item_id.as_str()).ok_or_else(|| {
+                    ScheduleMaterializationHistoryReadError::Integrity(
+                        "materialization history Draft provenance has no proposed outcome".into(),
+                    )
+                })?;
+            let origin = self
+                .read_materialization_origin_for_verified_run(&schedule_item_id, run)
+                .map_err(materialization_write_error_into_history)?
+                .ok_or_else(|| {
+                    ScheduleMaterializationHistoryReadError::Integrity(
+                        "materialization history Draft provenance disappeared".into(),
+                    )
+                })?;
+            if origin.run_id != run.run_id
+                || origin.channel_id != channel_id
+                || origin.schedule_item_id != schedule_item_id
+                || origin.occurrence_id != *expected_occurrence_id
+            {
+                return Err(ScheduleMaterializationHistoryReadError::Integrity(
+                    "materialization history Draft provenance contradicts its run".into(),
+                ));
+            }
+            let current_schedule = self
+                .read_schedule_item_for_materialization_history_locked(&schedule_item_id)?
+                .ok_or_else(|| {
+                    ScheduleMaterializationHistoryReadError::Integrity(
+                        "materialization history Draft current schedule disappeared".into(),
+                    )
+                })?;
+            if current_schedule.item_id != schedule_item_id
+                || current_schedule.channel_id != channel_id
+            {
+                return Err(ScheduleMaterializationHistoryReadError::Integrity(
+                    "materialization history Draft current schedule linkage is invalid".into(),
+                ));
+            }
+            generated_drafts.push(ScheduleMaterializationGeneratedDraft {
+                occurrence_id: origin.occurrence_id,
+                schedule_item_id,
+                current_schedule,
+            });
+        }
+        Ok(generated_drafts)
+    }
+
+    /// Repeats the authoritative current-row/history consistency read with
+    /// typed SQLite failures. The public schedule reader intentionally predates
+    /// typed read errors and returns a String; history must not collapse an I/O
+    /// or prepare/step error into a persisted-integrity response.
+    fn read_schedule_item_for_materialization_history_locked(
+        &self,
+        schedule_item_id: &str,
+    ) -> Result<Option<ScheduleItem>, ScheduleMaterializationHistoryReadError> {
+        let statement = self
+            .prepare(
+                "SELECT item_id, revision, channel_id, asset_id, title, starts_at_unix_ms, duration_ms, state \
+                 FROM schedule_items WHERE item_id=?1",
+            )
+            .map_err(ScheduleMaterializationHistoryReadError::Storage)?;
+        let item_id = c_string(
+            schedule_item_id,
+            "materialization history Draft schedule identity",
+        )
+        .map_err(ScheduleMaterializationHistoryReadError::Integrity)?;
+        bind_text(self.database, statement.raw, 1, &item_id)
+            .map_err(ScheduleMaterializationHistoryReadError::Storage)?;
+        let current = match unsafe { sqlite3_step(statement.raw) } {
+            SQLITE_ROW => Some(
+                read_schedule_item_row(statement.raw)
+                    .map_err(ScheduleMaterializationHistoryReadError::Integrity)?,
+            ),
+            SQLITE_DONE => None,
+            _ => {
+                return Err(ScheduleMaterializationHistoryReadError::Storage(
+                    sqlite_error(self.database),
+                ));
+            }
+        };
+        drop(statement);
+        let Some(current) = current else {
+            return Ok(None);
+        };
+
+        let history = self
+            .prepare(
+                "SELECT item_id, revision, record_json, changed_by, occurred_at_unix_ms \
+                 FROM schedule_item_history WHERE item_id=?1 ORDER BY revision DESC LIMIT 1",
+            )
+            .map_err(ScheduleMaterializationHistoryReadError::Storage)?;
+        bind_text(self.database, history.raw, 1, &item_id)
+            .map_err(ScheduleMaterializationHistoryReadError::Storage)?;
+        match unsafe { sqlite3_step(history.raw) } {
+            SQLITE_ROW => {
+                let latest = read_schedule_item_history_row(history.raw)
+                    .map_err(ScheduleMaterializationHistoryReadError::Integrity)?;
+                if latest.item != current {
+                    return Err(ScheduleMaterializationHistoryReadError::Integrity(
+                        "materialization history Draft current row and latest history disagree"
+                            .into(),
+                    ));
+                }
+            }
+            SQLITE_DONE => {}
+            _ => {
+                return Err(ScheduleMaterializationHistoryReadError::Storage(
+                    sqlite_error(self.database),
+                ));
+            }
+        }
+        Ok(Some(current))
+    }
+
     fn read_materialization_channel_enabled_locked(
         &self,
         channel_id: &str,
@@ -600,6 +1192,11 @@ impl StationStore {
         changed_by: &str,
         authority: &impl SourceEvidenceAuthority,
     ) -> Result<ScheduleMaterializationApplyOutcome, ScheduleMaterializationWriteError> {
+        if !is_canonical_uuid(channel_id) || !is_canonical_uuid(changed_by) {
+            return Err(ScheduleMaterializationWriteError::Invalid(
+                "materialization request or attribution is invalid or unbounded".into(),
+            ));
+        }
         let now_utc_ms =
             station_clock_utc_ms().map_err(ScheduleMaterializationWriteError::Storage)?;
         if let Some(window) = explicit_window
@@ -1327,6 +1924,11 @@ impl StationStore {
         outcome_count: usize,
         plan_count: usize,
     ) -> Result<(), ScheduleMaterializationWriteError> {
+        if !is_canonical_uuid(changed_by) {
+            return Err(ScheduleMaterializationWriteError::Invalid(
+                "materialization attribution must be a canonical UUID".into(),
+            ));
+        }
         let statement = self.prepare(
             "INSERT INTO schedule_materialization_runs(run_id,request_sha256,result_sha256,window_starts_at_utc_ms,window_ends_at_utc_ms,observed_at_utc_ms,changed_by,occurred_at_unix_ms,plan_count,outcome_count) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
         ).map_err(ScheduleMaterializationWriteError::Storage)?;
@@ -1629,55 +2231,141 @@ impl StationStore {
         &self,
         schedule_item_id: &str,
     ) -> Result<Option<ScheduleMaterializationOrigin>, ScheduleMaterializationWriteError> {
+        let origin = self.read_materialization_origin_indexed(schedule_item_id)?;
+        let Some(origin) = origin else {
+            return Ok(None);
+        };
+        let creator = self
+            .read_schedule_materialization_run(&origin.run_id)
+            .map_err(ScheduleMaterializationWriteError::Storage)?
+            .ok_or_else(|| {
+                ScheduleMaterializationWriteError::Collision(
+                    "materialization origin creator run is missing".into(),
+                )
+            })?;
+        Self::validate_materialization_origin_creator(&origin, &creator)?;
+        Ok(Some(origin))
+    }
+
+    fn read_materialization_origin_for_verified_run(
+        &self,
+        schedule_item_id: &str,
+        creator: &ScheduleMaterializationRun,
+    ) -> Result<Option<ScheduleMaterializationOrigin>, ScheduleMaterializationWriteError> {
+        let origin = self.read_materialization_origin_indexed(schedule_item_id)?;
+        let Some(origin) = origin else {
+            return Ok(None);
+        };
+        if origin.run_id != creator.run_id {
+            return Err(ScheduleMaterializationWriteError::Collision(
+                "materialization origin belongs to a different creator run".into(),
+            ));
+        }
+        Self::validate_materialization_origin_creator(&origin, creator)?;
+        Ok(Some(origin))
+    }
+
+    fn validate_materialization_origin_creator(
+        origin: &ScheduleMaterializationOrigin,
+        creator: &ScheduleMaterializationRun,
+    ) -> Result<(), ScheduleMaterializationWriteError> {
+        let creator_matches = creator.outcomes.iter().any(|record| {
+            record.rule_id == origin.rule_id
+                && record.rule_revision == origin.rule_revision
+                && record.channel_id == origin.channel_id
+                && record.saved_search_id == origin.saved_search_id
+                && record.saved_search_revision == origin.saved_search_revision
+                && record.block_id == origin.block_id
+                && record.block_revision == origin.block_revision
+                && record.plan_window == origin.plan_window
+                && record.materialization_id.as_deref() == Some(origin.materialization_id.as_str())
+                && record.source_authority_sha256 == origin.source_authority_sha256
+                && record.source_input_sha256 == origin.source_input_sha256
+                && record.candidate_projection_sha256 == origin.candidate_projection_sha256
+                && record.prior_airings_sha256 == origin.prior_airings_sha256
+                && record.prior_airings_coverage == origin.prior_airings_coverage
+                && record.scope_sha256 == origin.scope_sha256
+                && origin.original_schedule.revision == 1
+                && origin.original_schedule.state == "draft"
+                && matches!(
+                    &record.outcome,
+                    ScheduleMaterializationOutcome::Proposed {
+                        occurrence_id,
+                        schedule_item_id,
+                        asset_sha256,
+                        asset_title,
+                        starts_at_utc_ms,
+                        ends_at_utc_ms,
+                    } if occurrence_id == &origin.occurrence_id
+                        && schedule_item_id == &origin.schedule_item_id
+                        && asset_sha256 == &origin.original_schedule.asset_sha256
+                        && asset_title == &origin.original_schedule.title
+                        && *starts_at_utc_ms == origin.original_schedule.starts_at_utc_ms
+                        && ends_at_utc_ms.checked_sub(*starts_at_utc_ms)
+                            == i64::try_from(origin.original_schedule.duration_ms).ok()
+                )
+        });
+        if !creator_matches {
+            return Err(ScheduleMaterializationWriteError::Collision(
+                "materialization origin does not match its creator outcome".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn read_materialization_origin_indexed(
+        &self,
+        schedule_item_id: &str,
+    ) -> Result<Option<ScheduleMaterializationOrigin>, ScheduleMaterializationWriteError> {
         let statement = self.prepare(
             "SELECT occurrence_id,run_id,channel_id,saved_search_id,saved_search_revision,rule_id,rule_revision,block_id,block_revision,plan_starts_at_utc_ms,plan_ends_at_utc_ms,materialization_id,source_authority_sha256,source_input_sha256,candidate_projection_sha256,prior_airings_sha256,prior_coverage_starts_at_utc_ms,prior_coverage_ends_at_utc_ms,scope_sha256,original_revision,original_asset_sha256,original_title,original_starts_at_utc_ms,original_duration_ms,original_state,record_json FROM schedule_materialization_drafts WHERE schedule_item_id=?1",
         ).map_err(ScheduleMaterializationWriteError::Storage)?;
         let id = c_string(schedule_item_id, "materialization origin schedule identity")
-            .map_err(ScheduleMaterializationWriteError::Storage)?;
+            .map_err(ScheduleMaterializationWriteError::Invalid)?;
         bind_text(self.database, statement.raw, 1, &id)
             .map_err(ScheduleMaterializationWriteError::Storage)?;
         match unsafe { sqlite3_step(statement.raw) } {
             SQLITE_DONE => Ok(None),
             SQLITE_ROW => {
                 let record_json = column_text(statement.raw, 25)
-                    .map_err(ScheduleMaterializationWriteError::Storage)?;
+                    .map_err(ScheduleMaterializationWriteError::Collision)?;
                 let origin: ScheduleMaterializationOrigin = serde_json::from_str(&record_json)
                     .map_err(|error| {
-                        ScheduleMaterializationWriteError::Storage(format!(
+                        ScheduleMaterializationWriteError::Collision(format!(
                             "deserialize materialization origin: {error}"
                         ))
                     })?;
                 let indexed_saved_revision =
                     u64::try_from(unsafe { sqlite3_column_int64(statement.raw, 4) }).map_err(
                         |_| {
-                            ScheduleMaterializationWriteError::Storage(
+                            ScheduleMaterializationWriteError::Collision(
                                 "materialization origin saved-search revision is invalid".into(),
                             )
                         },
                     )?;
                 if origin.occurrence_id
                     != column_text(statement.raw, 0)
-                        .map_err(ScheduleMaterializationWriteError::Storage)?
+                        .map_err(ScheduleMaterializationWriteError::Collision)?
                     || origin.schedule_item_id != schedule_item_id
                     || origin.run_id
                         != column_text(statement.raw, 1)
-                            .map_err(ScheduleMaterializationWriteError::Storage)?
+                            .map_err(ScheduleMaterializationWriteError::Collision)?
                     || origin.channel_id
                         != column_text(statement.raw, 2)
-                            .map_err(ScheduleMaterializationWriteError::Storage)?
+                            .map_err(ScheduleMaterializationWriteError::Collision)?
                     || origin.saved_search_id
                         != column_text(statement.raw, 3)
-                            .map_err(ScheduleMaterializationWriteError::Storage)?
+                            .map_err(ScheduleMaterializationWriteError::Collision)?
                     || origin.saved_search_revision != indexed_saved_revision
                     || origin.rule_id
                         != column_text(statement.raw, 5)
-                            .map_err(ScheduleMaterializationWriteError::Storage)?
+                            .map_err(ScheduleMaterializationWriteError::Collision)?
                     || origin.rule_revision
                         != u64::try_from(unsafe { sqlite3_column_int64(statement.raw, 6) })
                             .unwrap_or(0)
                     || origin.block_id
                         != column_text(statement.raw, 7)
-                            .map_err(ScheduleMaterializationWriteError::Storage)?
+                            .map_err(ScheduleMaterializationWriteError::Collision)?
                     || origin.block_revision
                         != u64::try_from(unsafe { sqlite3_column_int64(statement.raw, 8) })
                             .unwrap_or(0)
@@ -1687,35 +2375,35 @@ impl StationStore {
                         != unsafe { sqlite3_column_int64(statement.raw, 10) }
                     || origin.materialization_id
                         != column_text(statement.raw, 11)
-                            .map_err(ScheduleMaterializationWriteError::Storage)?
+                            .map_err(ScheduleMaterializationWriteError::Collision)?
                     || origin.source_authority_sha256
                         != column_text(statement.raw, 12)
-                            .map_err(ScheduleMaterializationWriteError::Storage)?
+                            .map_err(ScheduleMaterializationWriteError::Collision)?
                     || origin.source_input_sha256
                         != column_text(statement.raw, 13)
-                            .map_err(ScheduleMaterializationWriteError::Storage)?
+                            .map_err(ScheduleMaterializationWriteError::Collision)?
                     || origin.candidate_projection_sha256
                         != column_text(statement.raw, 14)
-                            .map_err(ScheduleMaterializationWriteError::Storage)?
+                            .map_err(ScheduleMaterializationWriteError::Collision)?
                     || origin.prior_airings_sha256
                         != column_text(statement.raw, 15)
-                            .map_err(ScheduleMaterializationWriteError::Storage)?
+                            .map_err(ScheduleMaterializationWriteError::Collision)?
                     || origin.prior_airings_coverage.starts_at_utc_ms
                         != unsafe { sqlite3_column_int64(statement.raw, 16) }
                     || origin.prior_airings_coverage.ends_at_utc_ms
                         != unsafe { sqlite3_column_int64(statement.raw, 17) }
                     || origin.scope_sha256
                         != column_text(statement.raw, 18)
-                            .map_err(ScheduleMaterializationWriteError::Storage)?
+                            .map_err(ScheduleMaterializationWriteError::Collision)?
                     || origin.original_schedule.revision
                         != u64::try_from(unsafe { sqlite3_column_int64(statement.raw, 19) })
                             .unwrap_or(0)
                     || origin.original_schedule.asset_sha256
                         != column_text(statement.raw, 20)
-                            .map_err(ScheduleMaterializationWriteError::Storage)?
+                            .map_err(ScheduleMaterializationWriteError::Collision)?
                     || origin.original_schedule.title
                         != column_text(statement.raw, 21)
-                            .map_err(ScheduleMaterializationWriteError::Storage)?
+                            .map_err(ScheduleMaterializationWriteError::Collision)?
                     || origin.original_schedule.starts_at_utc_ms
                         != unsafe { sqlite3_column_int64(statement.raw, 22) }
                     || origin.original_schedule.duration_ms
@@ -1723,63 +2411,13 @@ impl StationStore {
                             .unwrap_or(0)
                     || origin.original_schedule.state
                         != column_text(statement.raw, 24)
-                            .map_err(ScheduleMaterializationWriteError::Storage)?
+                            .map_err(ScheduleMaterializationWriteError::Collision)?
                     || origin.original_schedule.schedule_item_id != schedule_item_id
                     || origin.original_schedule.channel_id != origin.channel_id
                     || schedule_item_id_for_occurrence(&origin.occurrence_id) != schedule_item_id
                 {
                     return Err(ScheduleMaterializationWriteError::Collision(
                         "materialization origin index and immutable record disagree".into(),
-                    ));
-                }
-                let creator = self
-                    .read_schedule_materialization_run(&origin.run_id)
-                    .map_err(ScheduleMaterializationWriteError::Storage)?
-                    .ok_or_else(|| {
-                        ScheduleMaterializationWriteError::Collision(
-                            "materialization origin creator run is missing".into(),
-                        )
-                    })?;
-                let creator_matches = creator.outcomes.iter().any(|record| {
-                    record.rule_id == origin.rule_id
-                        && record.rule_revision == origin.rule_revision
-                        && record.channel_id == origin.channel_id
-                        && record.saved_search_id == origin.saved_search_id
-                        && record.saved_search_revision == origin.saved_search_revision
-                        && record.block_id == origin.block_id
-                        && record.block_revision == origin.block_revision
-                        && record.plan_window == origin.plan_window
-                        && record.materialization_id.as_deref()
-                            == Some(origin.materialization_id.as_str())
-                        && record.source_authority_sha256 == origin.source_authority_sha256
-                        && record.source_input_sha256 == origin.source_input_sha256
-                        && record.candidate_projection_sha256 == origin.candidate_projection_sha256
-                        && record.prior_airings_sha256 == origin.prior_airings_sha256
-                        && record.prior_airings_coverage == origin.prior_airings_coverage
-                        && record.scope_sha256 == origin.scope_sha256
-                        && origin.original_schedule.revision == 1
-                        && origin.original_schedule.state == "draft"
-                        && matches!(
-                            &record.outcome,
-                            ScheduleMaterializationOutcome::Proposed {
-                                occurrence_id,
-                                schedule_item_id,
-                                asset_sha256,
-                                asset_title,
-                                starts_at_utc_ms,
-                                ends_at_utc_ms,
-                            } if occurrence_id == &origin.occurrence_id
-                                && schedule_item_id == &origin.schedule_item_id
-                                && asset_sha256 == &origin.original_schedule.asset_sha256
-                                && asset_title == &origin.original_schedule.title
-                                && *starts_at_utc_ms == origin.original_schedule.starts_at_utc_ms
-                                && ends_at_utc_ms.checked_sub(*starts_at_utc_ms)
-                                    == i64::try_from(origin.original_schedule.duration_ms).ok()
-                        )
-                });
-                if !creator_matches {
-                    return Err(ScheduleMaterializationWriteError::Collision(
-                        "materialization origin does not match its creator outcome".into(),
                     ));
                 }
                 Ok(Some(origin))
@@ -1794,20 +2432,37 @@ impl StationStore {
         &self,
         run_id: &str,
     ) -> Result<Option<ScheduleMaterializationRun>, String> {
+        self.read_schedule_materialization_run_verified(run_id)
+            .map_err(VerifiedMaterializationRunReadError::into_string)
+    }
+
+    /// The same complete immutable-run verifier used by the public reader,
+    /// with SQLite faults retained separately for history's typed API error
+    /// contract.
+    fn read_schedule_materialization_run_verified(
+        &self,
+        run_id: &str,
+    ) -> Result<Option<ScheduleMaterializationRun>, VerifiedMaterializationRunReadError> {
+        #[cfg(test)]
+        MATERIALIZATION_RUN_FULL_READS.with(|reads| reads.set(reads.get() + 1));
         if !is_canonical_uuid(run_id) {
             return Err("materialization run identity is invalid".into());
         }
         let statement = self.prepare(
             "SELECT run_id,request_sha256,result_sha256,window_starts_at_utc_ms,window_ends_at_utc_ms,observed_at_utc_ms,changed_by,occurred_at_unix_ms,plan_count,outcome_count FROM schedule_materialization_runs WHERE run_id=?1",
-        )?;
+        )
+        .map_err(VerifiedMaterializationRunReadError::Storage)?;
         let id = c_string(run_id, "materialization run identity")?;
-        bind_text(self.database, statement.raw, 1, &id)?;
+        bind_text(self.database, statement.raw, 1, &id)
+            .map_err(VerifiedMaterializationRunReadError::Storage)?;
         let status = unsafe { sqlite3_step(statement.raw) };
         if status == SQLITE_DONE {
             return Ok(None);
         }
         if status != SQLITE_ROW {
-            return Err(sqlite_error(self.database));
+            return Err(VerifiedMaterializationRunReadError::Storage(sqlite_error(
+                self.database,
+            )));
         }
         let stored_run_id = column_text(statement.raw, 0)?;
         let request_sha256 = column_text(statement.raw, 1)?;
@@ -1827,8 +2482,10 @@ impl StationStore {
 
         let plans_statement = self.prepare(
             "SELECT ordinal,rule_id,channel_id,record_json FROM schedule_materialization_plans WHERE run_id=?1 ORDER BY ordinal LIMIT 65",
-        )?;
-        bind_text(self.database, plans_statement.raw, 1, &id)?;
+        )
+        .map_err(VerifiedMaterializationRunReadError::Storage)?;
+        bind_text(self.database, plans_statement.raw, 1, &id)
+            .map_err(VerifiedMaterializationRunReadError::Storage)?;
         let mut plans = Vec::new();
         loop {
             match unsafe { sqlite3_step(plans_statement.raw) } {
@@ -1853,14 +2510,20 @@ impl StationStore {
                     plans.push(record);
                 }
                 SQLITE_DONE => break,
-                _ => return Err(sqlite_error(self.database)),
+                _ => {
+                    return Err(VerifiedMaterializationRunReadError::Storage(sqlite_error(
+                        self.database,
+                    )));
+                }
             }
         }
 
         let outcomes_statement = self.prepare(
             "SELECT ordinal,rule_id,channel_id,record_json FROM schedule_materialization_outcomes WHERE run_id=?1 ORDER BY ordinal LIMIT 4097",
-        )?;
-        bind_text(self.database, outcomes_statement.raw, 1, &id)?;
+        )
+        .map_err(VerifiedMaterializationRunReadError::Storage)?;
+        bind_text(self.database, outcomes_statement.raw, 1, &id)
+            .map_err(VerifiedMaterializationRunReadError::Storage)?;
         let mut outcomes = Vec::new();
         loop {
             match unsafe { sqlite3_step(outcomes_statement.raw) } {
@@ -1885,7 +2548,11 @@ impl StationStore {
                     outcomes.push(record);
                 }
                 SQLITE_DONE => break,
-                _ => return Err(sqlite_error(self.database)),
+                _ => {
+                    return Err(VerifiedMaterializationRunReadError::Storage(sqlite_error(
+                        self.database,
+                    )));
+                }
             }
         }
         if stored_run_id != run_id
@@ -1896,7 +2563,7 @@ impl StationStore {
             || plans.len() > MAX_BATCH_REQUESTS
             || outcomes.len() != outcome_count
             || outcomes.len() > MAX_BATCH_OUTCOMES
-            || !secret_field(&changed_by, MATERIALIZATION_ACTOR_MAX)
+            || !is_canonical_uuid(&changed_by)
             || observed_at_utc_ms < 0
             || occurred_at_unix_ms <= 0
         {
@@ -2268,14 +2935,15 @@ fn validate_materialization_outcome_record(
     {
         return Err("materialization outcome record is invalid".into());
     }
-    validate_materialization_outcome(&record.compiled_outcome, window, true)?;
-    validate_materialization_outcome(&record.outcome, window, false)
+    validate_materialization_outcome(&record.compiled_outcome, window, true, &record.channel_id)?;
+    validate_materialization_outcome(&record.outcome, window, false, &record.channel_id)
 }
 
 fn validate_materialization_outcome(
     outcome: &ScheduleMaterializationOutcome,
     window: &MaterializationWindow,
     compiled: bool,
+    record_channel_id: &str,
 ) -> Result<(), String> {
     let validate_time = |time: i64| {
         (time >= window.starts_at_utc_ms && time < window.ends_at_utc_ms)
@@ -2345,7 +3013,9 @@ fn validate_materialization_outcome(
             occurrence_id,
             schedule_item_id,
             existing,
-        } => validate_existing_outcome(occurrence_id, schedule_item_id, existing)?,
+        } => {
+            validate_existing_outcome(occurrence_id, schedule_item_id, existing, record_channel_id)?
+        }
         ScheduleMaterializationOutcome::SuppressedByExistingSchedule {
             occurrence_id,
             schedule_item_id,
@@ -2358,7 +3028,12 @@ fn validate_materialization_outcome(
             ) {
                 return Err("materialization overlap owner is invalid".into());
             }
-            validate_existing_outcome(occurrence_id, schedule_item_id, existing)?;
+            validate_existing_outcome(
+                occurrence_id,
+                schedule_item_id,
+                existing,
+                record_channel_id,
+            )?;
         }
     }
     if compiled
@@ -2381,12 +3056,15 @@ fn validate_existing_outcome(
     occurrence_id: &str,
     schedule_item_id: &str,
     existing: &ExistingScheduleSnapshot,
+    record_channel_id: &str,
 ) -> Result<(), String> {
     if !is_sha256_identity(occurrence_id)
         || schedule_item_id_for_occurrence(occurrence_id) != schedule_item_id
         || !is_canonical_uuid(&existing.schedule_item_id)
+        || existing.schedule_item_id != schedule_item_id
         || existing.revision == 0
         || !is_canonical_uuid(&existing.channel_id)
+        || existing.channel_id != record_channel_id
         || !is_sha256_identity(&existing.asset_sha256)
         || existing.title.trim().is_empty()
         || existing.title.len() > 240
@@ -2541,9 +3219,247 @@ fn finish_materialization_transaction<T>(
     }
 }
 
+fn finish_materialization_history_transaction<T>(
+    store: &StationStore,
+    outcome: Result<T, ScheduleMaterializationHistoryReadError>,
+) -> Result<T, ScheduleMaterializationHistoryReadError> {
+    match outcome {
+        Ok(value) => match store.execute("COMMIT") {
+            Ok(()) => Ok(value),
+            Err(error) => {
+                let _ = store.execute("ROLLBACK");
+                Err(ScheduleMaterializationHistoryReadError::Storage(error))
+            }
+        },
+        Err(error) => {
+            let _ = store.execute("ROLLBACK");
+            Err(error)
+        }
+    }
+}
+
+fn materialization_write_error_into_history(
+    error: ScheduleMaterializationWriteError,
+) -> ScheduleMaterializationHistoryReadError {
+    match error {
+        ScheduleMaterializationWriteError::Storage(error) => {
+            ScheduleMaterializationHistoryReadError::Storage(error)
+        }
+        ScheduleMaterializationWriteError::Capacity => {
+            ScheduleMaterializationHistoryReadError::Capacity
+        }
+        ScheduleMaterializationWriteError::Invalid(error)
+        | ScheduleMaterializationWriteError::StaleAuthority(error)
+        | ScheduleMaterializationWriteError::Collision(error) => {
+            ScheduleMaterializationHistoryReadError::Integrity(format!(
+                "materialization history Draft provenance: {error}"
+            ))
+        }
+    }
+}
+
+fn extend_materialization_history_aggregate(
+    total_outcomes: &mut usize,
+    total_drafts: &mut usize,
+    outcomes: usize,
+    drafts: usize,
+) -> Result<(), ScheduleMaterializationHistoryReadError> {
+    *total_outcomes = total_outcomes
+        .checked_add(outcomes)
+        .ok_or(ScheduleMaterializationHistoryReadError::Capacity)?;
+    *total_drafts = total_drafts
+        .checked_add(drafts)
+        .ok_or(ScheduleMaterializationHistoryReadError::Capacity)?;
+    if *total_outcomes > MAX_SCHEDULE_MATERIALIZATION_HISTORY_OUTCOMES
+        || *total_drafts > MAX_SCHEDULE_MATERIALIZATION_HISTORY_DRAFTS
+    {
+        return Err(ScheduleMaterializationHistoryReadError::Capacity);
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    use station_catalog::{CatalogAssetRecord, CatalogEditorialState};
+    use station_schedule::{AssetReadiness, MediaAsset};
+    use station_schedule_automation::{
+        AssetPickStrategy, AssetPredicate, LocalDate, RecurrenceTimeZone, SavedSearchOrder,
+        SavedSearchQuery, SourceEvidenceReceipt, SourceEvidenceVerifier,
+    };
+
     use super::*;
+
+    const HISTORY_TEST_CHANNEL: &str = "11111111-1111-4111-8111-111111111111";
+    const HISTORY_TEST_OWNER: &str = "22222222-2222-4222-8222-222222222222";
+    const HISTORY_TEST_SEARCH: &str = "33333333-3333-4333-8333-333333333333";
+    const HISTORY_TEST_BLOCK: &str = "44444444-4444-4444-8444-444444444444";
+    const HISTORY_TEST_RULE: &str = "55555555-5555-4555-8555-555555555555";
+    const HISTORY_TEST_ASSET: &str =
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+    struct HistoryTestAuthority {
+        now: i64,
+        sequence: AtomicU64,
+    }
+
+    impl SourceEvidenceVerifier for HistoryTestAuthority {
+        fn verify(
+            &self,
+            _kind: SourceEvidenceKind,
+            receipt: &SourceEvidenceReceipt,
+            scope_sha256: &str,
+            payload_sha256: &str,
+            observed_at_utc_ms: i64,
+        ) -> Result<(), String> {
+            if observed_at_utc_ms != self.now
+                || receipt.scope_sha256 != scope_sha256
+                || receipt.attestation_sha256 != payload_sha256
+            {
+                return Err("history test source evidence did not authenticate".into());
+            }
+            Ok(())
+        }
+    }
+
+    impl SourceEvidenceAuthority for HistoryTestAuthority {
+        fn observed_at_utc_ms(&self) -> Result<i64, String> {
+            Ok(self.now)
+        }
+
+        fn issue_source_evidence(
+            &self,
+            _kind: SourceEvidenceKind,
+            scope_sha256: &str,
+            payload_sha256: &str,
+            lifetime_ms: i64,
+        ) -> Result<SourceEvidenceReceipt, String> {
+            let sequence = self.sequence.fetch_add(1, Ordering::Relaxed);
+            Ok(SourceEvidenceReceipt {
+                issuer_id: "66666666-6666-4666-8666-666666666666".into(),
+                receipt_id: format!("77777777-7777-4777-8777-{sequence:012}"),
+                issued_at_utc_ms: self.now,
+                expires_at_utc_ms: self.now + lifetime_ms,
+                scope_sha256: scope_sha256.into(),
+                attestation_sha256: payload_sha256.into(),
+            })
+        }
+    }
+
+    fn history_test_database() -> std::path::PathBuf {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time is after Unix epoch")
+            .as_nanos();
+        std::env::temp_dir().join(format!("townlight-history-origin-read-{nonce}.db"))
+    }
+
+    fn cleanup_history_test_database(path: &std::path::Path) {
+        for candidate in [
+            path.to_path_buf(),
+            std::path::PathBuf::from(format!("{}-wal", path.display())),
+            std::path::PathBuf::from(format!("{}-shm", path.display())),
+        ] {
+            let _ = std::fs::remove_file(candidate);
+        }
+    }
+
+    fn seed_history_origin_read_fixture(store: &StationStore) {
+        let search = SavedSearch {
+            search_id: HISTORY_TEST_SEARCH.into(),
+            name: "Council programs".into(),
+            owner_operator_id: HISTORY_TEST_OWNER.into(),
+            created_at_utc_ms: 1,
+            query: SavedSearchQuery {
+                all_of: vec![AssetPredicate::TitleContains("Council".into())],
+                any_of: vec![],
+                order_by: SavedSearchOrder::TitleAscending,
+                limit: 8,
+            },
+            revision: 1,
+        };
+        let block = DaypartBlock {
+            block_id: HISTORY_TEST_BLOCK.into(),
+            channel_id: HISTORY_TEST_CHANNEL.into(),
+            label: "Full day".into(),
+            starts_local_minute: 0,
+            ends_local_minute: 1_440,
+            weekday_mask: 0b0111_1111,
+            season_starts_on: None,
+            season_ends_on: None,
+            allow_rule_ids: vec![HISTORY_TEST_RULE.into()],
+            revision: 1,
+        };
+        let rule = RecurringRule {
+            rule_id: HISTORY_TEST_RULE.into(),
+            channel_id: HISTORY_TEST_CHANNEL.into(),
+            saved_search_id: HISTORY_TEST_SEARCH.into(),
+            saved_search_revision: 1,
+            pick_strategy: AssetPickStrategy::Top,
+            rolling_window_days: 60,
+            avoid_repeat_within_days: None,
+            enabled: true,
+            priority: 0,
+            block_id: HISTORY_TEST_BLOCK.into(),
+            block_revision: 1,
+            weekday_mask: 0b0111_1111,
+            interval_weeks: 1,
+            anchor_date: LocalDate {
+                year: 2099,
+                month: 1,
+                day: 1,
+            },
+            timezone: RecurrenceTimeZone::Utc,
+            local_start_minute: 0,
+            duration_minutes: 60,
+            revision: 1,
+        };
+        store
+            .write_saved_search(&search, None, HISTORY_TEST_OWNER, 1)
+            .expect("write history test saved search");
+        store
+            .write_daypart_block(&block, None, HISTORY_TEST_OWNER, 2)
+            .expect("write history test daypart block");
+        store
+            .write_recurring_rule(&rule, None, HISTORY_TEST_OWNER, 3)
+            .expect("write history test recurring rule");
+        store
+            .put_media_asset(&MediaAsset {
+                asset_id: HISTORY_TEST_ASSET.into(),
+                media_path: "C:\\station\\history-origin-read.ts".into(),
+                duration_ms: 3_600_000,
+                readiness: AssetReadiness::Ready,
+            })
+            .expect("write history test media asset");
+        let draft = CatalogAssetRecord {
+            asset_sha256: HISTORY_TEST_ASSET.into(),
+            title: "Council meeting".into(),
+            meeting_body: Some("City Council".into()),
+            editorial_state: CatalogEditorialState::Draft,
+            published_at_utc_ms: None,
+            revision: 1,
+        };
+        store
+            .write_catalog_asset(HISTORY_TEST_ASSET, &draft, None, HISTORY_TEST_OWNER, 4)
+            .expect("write history test catalog draft");
+        let published = CatalogAssetRecord {
+            editorial_state: CatalogEditorialState::Published,
+            published_at_utc_ms: Some(5),
+            revision: 2,
+            ..draft
+        };
+        store
+            .write_catalog_asset(
+                HISTORY_TEST_ASSET,
+                &published,
+                Some(1),
+                HISTORY_TEST_OWNER,
+                5,
+            )
+            .expect("write history test published catalog asset");
+    }
 
     #[test]
     fn derived_materialization_window_starts_at_second_upcoming_minute() {
@@ -2574,5 +3490,146 @@ mod tests {
             materialization_window_for_days(i64::MAX - UTC_DAY_MS, 2),
             Err(ScheduleMaterializationWriteError::Invalid(_))
         ));
+    }
+
+    #[test]
+    fn history_aggregate_cap_rejects_excess_and_integer_overflow() {
+        let mut outcomes = MAX_SCHEDULE_MATERIALIZATION_HISTORY_OUTCOMES - 1;
+        let mut drafts = MAX_SCHEDULE_MATERIALIZATION_HISTORY_DRAFTS - 1;
+        assert!(matches!(
+            extend_materialization_history_aggregate(&mut outcomes, &mut drafts, 2, 0),
+            Err(ScheduleMaterializationHistoryReadError::Capacity)
+        ));
+        let mut outcomes = usize::MAX;
+        let mut drafts = 0;
+        assert!(matches!(
+            extend_materialization_history_aggregate(&mut outcomes, &mut drafts, 1, 0),
+            Err(ScheduleMaterializationHistoryReadError::Capacity)
+        ));
+    }
+
+    #[test]
+    fn history_reads_a_maximum_all_proposed_run_once_not_once_per_draft() {
+        let path = history_test_database();
+        let store = StationStore::open(&path).expect("open history test database");
+        seed_history_origin_read_fixture(&store);
+        let now = i64::try_from(
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("system time is after Unix epoch")
+                .as_millis(),
+        )
+        .expect("current milliseconds fit signed integer");
+        let authority = HistoryTestAuthority {
+            now,
+            sequence: AtomicU64::new(0),
+        };
+        let run = store
+            .materialize_schedule_batch_with_explicit_window(
+                HISTORY_TEST_CHANNEL,
+                &MaterializationWindow {
+                    starts_at_utc_ms: 4_070_908_800_000,
+                    ends_at_utc_ms: 4_070_908_800_000 + 60 * UTC_DAY_MS,
+                },
+                HISTORY_TEST_OWNER,
+                &authority,
+            )
+            .expect("materialize maximum rolling window");
+        let ScheduleMaterializationApplyOutcome::Applied(run) = run else {
+            panic!("fixture materialization must create a fresh run");
+        };
+        assert_eq!(run.outcomes.len(), 60);
+        assert!(run.outcomes.iter().all(|record| matches!(
+            record.outcome,
+            ScheduleMaterializationOutcome::Proposed { .. }
+        )));
+
+        MATERIALIZATION_RUN_FULL_READS.with(|reads| reads.set(0));
+        let page = store
+            .list_schedule_materialization_history(HISTORY_TEST_CHANNEL, 1, None)
+            .expect("read maximum all-Proposed history run");
+        assert_eq!(page.entries.len(), 1);
+        assert_eq!(page.entries[0].run.run_id, run.run_id);
+        assert_eq!(page.entries[0].generated_drafts.len(), 60);
+        MATERIALIZATION_RUN_FULL_READS.with(|reads| {
+            assert_eq!(
+                reads.get(),
+                1,
+                "history must validate the already reconstructed creator run instead of rereading it for every Draft"
+            );
+        });
+
+        drop(store);
+        cleanup_history_test_database(&path);
+    }
+
+    #[test]
+    fn existing_outcomes_bind_the_nested_schedule_identity_and_channel_to_the_record() {
+        let occurrence_id = "a".repeat(64);
+        let schedule_item_id = schedule_item_id_for_occurrence(&occurrence_id);
+        let channel_id = "11111111-1111-4111-8111-111111111111".to_string();
+        let existing = ExistingScheduleSnapshot {
+            schedule_item_id: schedule_item_id.clone(),
+            revision: 1,
+            channel_id: channel_id.clone(),
+            asset_sha256: "b".repeat(64),
+            title: "Existing schedule row".into(),
+            starts_at_utc_ms: 0,
+            duration_ms: 1_000,
+            state: "draft".into(),
+        };
+        let mut record = ScheduleMaterializationOutcomeRecord {
+            ordinal: 0,
+            rule_id: "22222222-2222-4222-8222-222222222222".into(),
+            rule_revision: 1,
+            channel_id: channel_id.clone(),
+            saved_search_id: "33333333-3333-4333-8333-333333333333".into(),
+            saved_search_revision: 1,
+            block_id: "44444444-4444-4444-8444-444444444444".into(),
+            block_revision: 1,
+            plan_window: MaterializationWindow {
+                starts_at_utc_ms: 0,
+                ends_at_utc_ms: 1_000,
+            },
+            materialization_id: None,
+            source_authority_sha256: "c".repeat(64),
+            candidate_projection_sha256: "d".repeat(64),
+            prior_airings_sha256: "e".repeat(64),
+            prior_airings_coverage: MaterializationWindow {
+                starts_at_utc_ms: 0,
+                ends_at_utc_ms: 1_000,
+            },
+            scope_sha256: "f".repeat(64),
+            source_input_sha256: "0".repeat(64),
+            compiled_outcome: ScheduleMaterializationOutcome::NoMatch {
+                starts_at_utc_ms: 0,
+            },
+            outcome: ScheduleMaterializationOutcome::ExistingAutomationDraftChanged {
+                occurrence_id: occurrence_id.clone(),
+                schedule_item_id: schedule_item_id.clone(),
+                existing: existing.clone(),
+            },
+        };
+        assert!(validate_materialization_outcome_record(&record, &record.plan_window).is_ok());
+
+        {
+            let ScheduleMaterializationOutcome::ExistingAutomationDraftChanged { existing, .. } =
+                &mut record.outcome
+            else {
+                panic!("fixture must remain existing-bearing");
+            };
+            existing.channel_id = "99999999-9999-4999-8999-999999999999".into();
+        }
+        assert!(validate_materialization_outcome_record(&record, &record.plan_window).is_err());
+        {
+            let ScheduleMaterializationOutcome::ExistingAutomationDraftChanged { existing, .. } =
+                &mut record.outcome
+            else {
+                panic!("fixture must remain existing-bearing");
+            };
+            existing.channel_id = channel_id;
+            existing.schedule_item_id = "88888888-8888-4888-8888-888888888888".into();
+        }
+        assert!(validate_materialization_outcome_record(&record, &record.plan_window).is_err());
     }
 }

@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-pub const SYSTEM_ACTOR_ID: &str = "00000000-0000-4000-8000-000000000022";
+pub use station_domain::AUTOMATIC_SCHEDULE_MATERIALIZATION_ACTOR_ID as SYSTEM_ACTOR_ID;
 pub const UTC_DAY_MS: i64 = 86_400_000;
 pub const MAX_CHANNELS: usize = 256;
 pub const MAX_WORK_INTERVAL: Duration = Duration::from_secs(60);

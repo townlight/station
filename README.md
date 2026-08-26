@@ -92,13 +92,13 @@ needed; the runner never accepts a DLL found only through ambient `PATH`.
 
 ## Installer
 
-`installer\build-installer.ps1` reproducibly restores and builds the operator console, then builds one elevated x64 setup executable in `dist`. It accepts only the pinned official GStreamer 1.28.6 runtime hash and the pinned BtbN LGPL FFmpeg archive/executable/license hashes, embeds `stationd` (including the console), `channel-worker`, both private runtimes, notices, and an immutable source commit, and refuses a dirty release worktree. `-AllowDirty` exists only for local packaging tests.
+`installer\build-installer.ps1` reproducibly restores and builds the operator console, then builds one elevated x64 setup executable in `dist`. It accepts only the pinned official GStreamer 1.28.6 runtime hash and the pinned BtbN LGPL FFmpeg archive/executable/license hashes, embeds `stationd` (including the console), `channel-worker`, both private runtimes, notices, and an immutable source commit, and refuses a dirty release worktree. Trusted Windows known folders are resolved independently of environment variables (and environment drift is rejected); the build forces the pinned Rust compiler and routes every Cargo invocation, including the Cargo identity probe, through `scripts\invoke-cargo.ps1`. The exact named Rust/Cargo release, full commit, host, executable identity, MSVC/SDK, GStreamer compile root, and Authenticode-signed Inno compiler identities are checked and recorded in the candidate manifest. A machine-global build mutex covers exact stale-candidate cleanup through a staged-installer rehash, manifest-last publication, and a final consumer rehash; a publication failure removes only the two exact candidate names. `-AllowDirty` exists only for local packaging tests.
 
 Installation is health-gated before Inno Setup commits the product registration: the installer stages immutable binaries, installs the private runtime, registers an immediate automatic LocalSystem service with restart recovery, starts it, receives the local readiness response, and writes a candidate receipt. Immediate startup is deliberate: a station must begin channel recovery during boot rather than wait for Windows' delayed-start window. Any failure before formal installation removes the staged service, runtime, and binaries and returns nonzero. Uninstall removes application/runtime files and the service but deliberately preserves station data beneath `%ProgramData%\TownLight Station`.
 
 The full setup executable is deliberately **clean-install/reinstall only**. Before `ssInstall`, it refuses to run when the TownLight application directory, either TownLight service, or this AppId's 64-bit uninstall registration exists, so it cannot overwrite a working installation and later attempt a speculative rollback. It then atomically claims an empty application directory, stages files with no-overwrite copies, and refuses a pre-existing private runtime. Use the installed signed maintenance updater for in-place `.tlu` upgrades. A reinstall after proper uninstall remains supported: Inno removes its uninstall registration while preserved ProgramData, the database, receipts, and manifests alone do not trigger the rejection.
 
-Run `installer\verify-installed.ps1` after installation to compare installed hashes and receipts with the candidate manifest and to prove the service, health endpoint, and required media factories. Development candidates are not code-signed; a trusted Windows signing identity and timestamp are mandatory release gates before external distribution.
+Run `installer\verify-installed.ps1` after installation to rehash the manifest-named candidate installer, compare installed hashes and receipts with that authenticated candidate, and prove the exact canonical service command lines, health endpoint, and required media factories. It resolves the native x64 Program Files known folder, so the expected service paths remain correct even under 32-bit PowerShell. Development candidates are not code-signed; a trusted Windows signing identity and timestamp are mandatory release gates before external distribution.
 
 The exact commissioning candidate `8e9a27d3286815e0b34a0fad961cb2e5dc9a5a84` passed post-install hash/service verification and the complete installed commissioning harness, including decoded CG apply/change/clear, canonical media admission, all four acknowledged dispatch states, service restart, and green recovery. See the [installed commissioning proof](docs/proof/2026-08-21-installed-commissioning.md).
 
@@ -194,8 +194,8 @@ fence, regardless of apparent age or state. See
 
 The clean-machine installer gate is `scripts/prove-clean-install-in-owned-sandbox.ps1`. It requires
 one clean source commit and an exact matching candidate manifest, then performs the atomic ownership
-check and launch through the guard. The guest receives only read-only candidate, verifier, and
-harness mappings; its sole host-writable boundary is
+check and launch through the guard. The guest receives only read-only candidate, verifier, shared
+candidate-verifier, and harness mappings; its sole host-writable boundary is
 `%ProgramData%\TownLight Station\SandboxEvidence`. The guest shuts itself down after atomically
 publishing evidence. A host timeout never terminates or adopts the shared Sandbox.
 

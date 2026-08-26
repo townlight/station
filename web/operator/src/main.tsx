@@ -12,7 +12,7 @@ import { MetadataPanel } from "./metadata";
 import { CatalogAssetEditor } from "./catalog-editor";
 import { ScheduledRecordingsPanel } from "./recordings";
 import { ScheduleMaterializationCard } from "./schedule-materialization";
-import { channelSchedulePath } from "./schedule-materialization-contract";
+import { channelSchedulePath, shouldApplyMaterializationChannel } from "./schedule-materialization-contract";
 import {
   HeadendProfile,
   HeadendReadiness,
@@ -714,9 +714,15 @@ function Schedule({ dashboard, channels }: { dashboard: Dashboard | null; channe
   const [scheduleLoading, setScheduleLoading] = useState(false);
   const [scheduleError, setScheduleError] = useState<string | null>(null);
   const scheduleRequest = useRef(0);
+  const activeScheduleChannel = useRef(channelId);
+  if (!shouldApplyMaterializationChannel(activeScheduleChannel.current, channelId)) {
+    activeScheduleChannel.current = channelId;
+    scheduleRequest.current += 1;
+  }
 
   const loadSchedule = useCallback(async (selectedChannelId: string) => {
     const requestId = ++scheduleRequest.current;
+    if (!shouldApplyMaterializationChannel(selectedChannelId, activeScheduleChannel.current)) return;
     if (!selectedChannelId) {
       setScheduleItems([]);
       setScheduleError(null);
@@ -726,7 +732,7 @@ function Schedule({ dashboard, channels }: { dashboard: Dashboard | null; channe
     setScheduleLoading(true);
     try {
       const next = await request<ScheduleItem[]>(channelSchedulePath(selectedChannelId));
-      if (requestId !== scheduleRequest.current) return;
+      if (requestId !== scheduleRequest.current || !shouldApplyMaterializationChannel(selectedChannelId, activeScheduleChannel.current)) return;
       setScheduleItems(
         next
           .filter((scheduleItem) => scheduleItem.channel_id === selectedChannelId)
@@ -734,15 +740,20 @@ function Schedule({ dashboard, channels }: { dashboard: Dashboard | null; channe
       );
       setScheduleError(null);
     } catch (problem) {
-      if (requestId === scheduleRequest.current) {
+      if (requestId === scheduleRequest.current && shouldApplyMaterializationChannel(selectedChannelId, activeScheduleChannel.current)) {
         setScheduleItems([]);
         const message = problem instanceof Error ? problem.message.trim() : "";
         setScheduleError((message || "The channel schedule could not be read.").slice(0, 500));
       }
     } finally {
-      if (requestId === scheduleRequest.current) setScheduleLoading(false);
+      if (requestId === scheduleRequest.current && shouldApplyMaterializationChannel(selectedChannelId, activeScheduleChannel.current)) setScheduleLoading(false);
     }
   }, []);
+
+  const refreshCurrentSchedule = useCallback(async (requestedChannelId: string) => {
+    if (!shouldApplyMaterializationChannel(requestedChannelId, activeScheduleChannel.current)) return;
+    await loadSchedule(requestedChannelId);
+  }, [loadSchedule]);
 
   useEffect(() => {
     if (!channels.some((channel) => channel.channel_id === channelId)) {
@@ -817,7 +828,7 @@ function Schedule({ dashboard, channels }: { dashboard: Dashboard | null; channe
     <header className="page-header"><div><p className="eyebrow">Commit to air</p><h1>Schedule a program</h1><p>Generate recurring Drafts, then review and commit exact items through the station write lock.</p></div></header>
     {!channels.length ? <section className="panel"><Empty title="Schedule prerequisites are missing" detail="Configure a channel before scheduling." action="Channel required" onAction={() => undefined} /></section> : <>
       <section className="panel schedule-channel-scope"><label>Schedule channel<select required value={channelId} onChange={(event) => setChannelId(event.target.value)}>{channels.map((channel) => <option key={channel.channel_id} value={channel.channel_id}>{channel.display_name}</option>)}</select><small>Recurring generation and the schedule list below are scoped to this output channel.</small></label></section>
-      <ScheduleMaterializationCard channelId={channelId} channelName={selectedChannel?.display_name ?? channelId} onApplied={() => loadSchedule(channelId)} />
+      <ScheduleMaterializationCard channelId={channelId} channelName={selectedChannel?.display_name ?? channelId} channelEnabled={selectedChannel?.enabled ?? false} onApplied={refreshCurrentSchedule} />
       <section className="panel channel-schedule-list" aria-labelledby="channel-schedule-title">
         <div className="panel-head"><div><p className="eyebrow">Current channel authority</p><h2 id="channel-schedule-title">Schedule items</h2></div><div className="button-row"><span className="count">{scheduleItems.length}</span><button type="button" className="text-button" disabled={scheduleLoading} onClick={() => void loadSchedule(channelId)}>{scheduleLoading ? "Refreshing…" : "Refresh schedule"}</button></div></div>
         {scheduleError && <div className="error-box" role="alert">{scheduleError}</div>}

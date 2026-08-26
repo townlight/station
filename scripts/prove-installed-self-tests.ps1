@@ -7,6 +7,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'candidate-pair-verifier.ps1')
 . (Join-Path $PSScriptRoot 'installed-proof-api.ps1')
 $apiSession = New-TownLightProofSession -BaseUri $BaseUrl -Credential $Credential
 
@@ -32,8 +33,8 @@ $alertChannelId = '8fce373f-7461-42cb-80c1-d6ef56395454'
 $signingSecret = 'installed-self-test-signing-key'
 $target = "http://127.0.0.1:$WebhookPort/self-test"
 
-$manifestDocument = Get-Content -LiteralPath $Manifest -Raw | ConvertFrom-Json
 $receipt = Get-Content -LiteralPath $receiptPath -Raw | ConvertFrom-Json
+$manifestDocument = (Get-TownLightCandidateIdentity -ManifestPath $Manifest -ExpectedSourceCommit $receipt.source_commit).manifest
 if ($receipt.source_commit -ne $manifestDocument.source_commit) {
     throw 'The installed receipt does not identify the candidate under proof.'
 }

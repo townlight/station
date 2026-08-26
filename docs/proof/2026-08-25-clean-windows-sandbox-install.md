@@ -9,7 +9,7 @@ The candidate was produced from a clean worktree by `installer/build-installer.p
 private GStreamer and LGPL FFmpeg inputs.
 
 The proof ran in a fresh Windows Sandbox through the shared-machine ownership guard. The guest was
-given only separate read-only candidate, installed-verifier, and harness mappings. Its only
+given only separate read-only candidate, installed-verifier, shared candidate-verifier, and harness mappings. Its only
 host-writable path was `%ProgramData%\TownLight Station\SandboxEvidence`. Networking, clipboard,
 audio/video input, GPU, and printer redirection were disabled. The host harness did not terminate,
 adopt, or clean any Sandbox process; the guest published its result atomically and shut itself down.

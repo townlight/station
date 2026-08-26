@@ -1,6 +1,7 @@
 param()
 
 $ErrorActionPreference = 'Stop'
+. 'C:\TownLightShared\candidate-pair-verifier.ps1'
 $candidateRoot = 'C:\TownLightCandidate'
 $evidenceRoot = 'C:\TownLightEvidence'
 $manifestPath = Join-Path $candidateRoot 'candidate-manifest.json'
@@ -30,13 +31,9 @@ try {
             throw "Clean-install guest input is missing: $required"
         }
     }
-    $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
-    $installerHash = (Get-FileHash -LiteralPath $installerPath -Algorithm SHA256).Hash.ToLowerInvariant()
-    if ($manifest.product -ne 'TownLight Station' -or
-        $manifest.source_commit -notmatch '^[0-9a-f]{40}$' -or
-        $installerHash -ne $manifest.installer_sha256) {
-        throw 'Clean-install candidate manifest does not authenticate the exact installer.'
-    }
+    $candidate = Get-TownLightCandidateIdentity -ManifestPath $manifestPath
+    $manifest = $candidate.manifest
+    $installerHash = $candidate.installer_sha256
     $result.source_commit = $manifest.source_commit
     $result.installer_sha256 = $installerHash
 
@@ -52,7 +49,7 @@ try {
         throw "Clean-install candidate returned exit code $($installer.ExitCode)."
     }
 
-    $verificationText = & $verifierPath -Manifest $manifestPath | Out-String
+    $verificationText = & $verifierPath -Manifest $manifestPath -SharedScriptsRoot 'C:\TownLightShared' | Out-String
     if ($LASTEXITCODE -ne 0) {
         throw 'Installed verification returned nonzero.'
     }

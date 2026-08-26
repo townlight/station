@@ -24,6 +24,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'candidate-pair-verifier.ps1')
 . (Join-Path $PSScriptRoot 'installed-proof-api.ps1')
 $apiSession = New-TownLightProofSession -BaseUri $BaseUri -Credential $Credential
 
@@ -338,10 +339,11 @@ try {
     if (-not $mutexHeld) { throw 'Another installed schedule catch-up proof is already running.' }
     New-Item -ItemType Directory -Path $captureRoot -Force | Out-Null
 
-    $manifestPath = Resolve-Path -LiteralPath $Manifest -ErrorAction Stop
-    $manifestDocument = Get-Content -LiteralPath $manifestPath.Path -Raw | ConvertFrom-Json
     $receiptPath = Join-Path $env:ProgramData 'TownLight Station\install-receipt.json'
     $receipt = Get-Content -LiteralPath $receiptPath -Raw | ConvertFrom-Json
+    $manifestPath = Resolve-Path -LiteralPath $Manifest -ErrorAction Stop
+    $candidatePair = Get-TownLightCandidateIdentity -ManifestPath $manifestPath.Path -ExpectedSourceCommit $receipt.source_commit
+    $manifestDocument = $candidatePair.manifest
     $applicationPath = Join-Path $env:ProgramFiles 'TownLight Station'
     $stationdHash = (Get-FileHash -LiteralPath (Join-Path $applicationPath 'stationd.exe') -Algorithm SHA256).Hash
     $workerHash = (Get-FileHash -LiteralPath (Join-Path $applicationPath 'channel-worker.exe') -Algorithm SHA256).Hash

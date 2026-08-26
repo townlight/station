@@ -4,6 +4,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'candidate-pair-verifier.ps1')
 $repository = Split-Path $PSScriptRoot -Parent
 $configuration = Join-Path $repository 'harness\windows-sandbox\configs\caption-proof.wsb'
 $evidenceRoot = Join-Path $env:ProgramData 'TownLight Station\SandboxEvidence'
@@ -29,16 +30,14 @@ if ($fixture.Length -ne $fixtureSize -or $observedFixtureHash -ne $fixtureSha256
     throw 'Owned caption proof fixture does not match the exact retained TownLight media input.'
 }
 
-$manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
 $head = (& git -C $repository rev-parse HEAD).Trim()
 $dirty = & git -C $repository status --porcelain
 if ($LASTEXITCODE -ne 0 -or $head -notmatch '^[0-9a-f]{40}$' -or $dirty) {
     throw 'Owned caption proof requires one clean immutable source commit.'
 }
-$installerHash = (Get-FileHash -LiteralPath $installerPath -Algorithm SHA256).Hash.ToLowerInvariant()
-if ($manifest.source_commit -ne $head -or $manifest.installer_sha256 -ne $installerHash) {
-    throw 'Owned caption proof candidate does not match the exact clean source commit.'
-}
+$candidate = Get-TownLightCandidateIdentity -ManifestPath $manifestPath -ExpectedSourceCommit $head
+$manifest = $candidate.manifest
+$installerHash = $candidate.installer_sha256
 
 [void][IO.Directory]::CreateDirectory($evidenceRoot)
 $existing = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)

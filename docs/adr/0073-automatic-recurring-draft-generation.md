@@ -71,14 +71,39 @@ Failure to persist or route this required alert is a fatal controller error.
 Stationd requests global stop and emits only its bounded generic supervisor
 receipt rather than silently continuing without durable operator evidence.
 
+## Materialization history
+
+Enabled Setup Admin, Meeting Operator, and Support Admin accounts can inspect a
+bounded, newest-first history for one channel. Storage performs the read in one
+deferred transaction with an exclusive `(occurred_at_unix_ms, run_id)` keyset
+cursor. The cursor timestamp is strictly greater than zero and its run ID is
+canonical; zero and negative timestamps are invalid. Storage validates every
+selected run, plan, outcome, Draft origin, and current schedule binding before
+returning any page. A corrupt newest row, missing or duplicate run-to-channel
+binding, cross-channel nested record, oversized aggregate, or storage failure
+fails the page closed; the reader never skips bad authority and falls back to
+older records.
+
+The API exposes only the immutable run identity, server-attributed origin and
+actor, request/result digests, UTC window and observation times, redacted plans
+and outcomes, and generated Draft/current-schedule facts. It never exposes the
+source-evidence receipts, HMAC material, alert-delivery state, or internal retry
+state. Every persisted materialization actor is a canonical UUID. Automatic
+origin is derived only at this trusted storage boundary from the reserved,
+non-login automatic actor identity; operator-account creation, database open,
+and migration auditing prevent that identity from being assigned to a person.
+The operator console preserves this distinction, uses the server cursor, and
+rejects late or cross-channel responses.
+
 ## Boundaries and non-claims
 
 This decision provides once-per-UTC-day automatic invocation for eligible
 channels, restart-stable durable checkpointing, per-channel retry isolation,
 supervised shutdown, the transactional `ScheduleNoMatch` Warning, and a
 durable typed `ScheduleMaterializationFailure` Warning for channel-local
-automatic attempts. It does not rerun a channel later in the same UTC day when
-an operator edits a rule, search, block, or catalog record. It does not provide
-preview or simulation, automatic commit or dispatch, filler insertion, a
-materialization-run read/list/history operator surface, installed-candidate
-proof, or one- and three-station field proof.
+automatic attempts. It also provides the bounded authenticated
+materialization-run history API and operator surface described above. It does
+not rerun a channel later in the same UTC day when an operator edits a rule,
+search, block, or catalog record. It does not provide preview or simulation,
+automatic commit or dispatch, filler insertion, durable failed-attempt/retry
+history, installed-candidate proof, or one- and three-station field proof.

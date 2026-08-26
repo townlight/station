@@ -8,8 +8,8 @@ use serde_json::to_string;
 use sha2::{Digest, Sha256};
 use station_catalog::{CatalogAssetRecord, CatalogEditorialState};
 use station_domain::{
-    AlertChannel, AlertChannelKind, AlertConditionKind, AlertEventState,
-    redact_alert_channel_target,
+    AUTOMATIC_SCHEDULE_MATERIALIZATION_ACTOR_ID, AlertChannel, AlertChannelKind,
+    AlertConditionKind, AlertEventState, redact_alert_channel_target,
 };
 use station_schedule::{
     AssetReadiness, ChannelConfiguration, MediaAsset, OutputProfileId, OutputSinkConfiguration,
@@ -22,8 +22,10 @@ use station_schedule_automation::{
 };
 use station_storage::{
     AlertChannelSecret, ScheduleItemWrite, ScheduleMaterializationApplyOutcome,
-    ScheduleMaterializationFailureClass, ScheduleMaterializationOutcome,
-    ScheduleMaterializationRun, ScheduleMaterializationWriteError, StationStore,
+    ScheduleMaterializationFailureClass, ScheduleMaterializationHistoryCursor,
+    ScheduleMaterializationHistoryReadError, ScheduleMaterializationOutcome,
+    ScheduleMaterializationRun, ScheduleMaterializationRunOrigin,
+    ScheduleMaterializationWriteError, StationStore,
 };
 
 const CHANNEL: &str = "11111111-1111-4111-8111-111111111111";
@@ -369,8 +371,28 @@ fn run_once(
     authority: &TestEvidenceAuthority,
 ) -> ScheduleMaterializationApplyOutcome {
     store
-        .materialize_schedule_batch_with_explicit_window(CHANNEL, &window(), "operator", authority)
+        .materialize_schedule_batch_with_explicit_window(CHANNEL, &window(), OWNER, authority)
         .unwrap()
+}
+
+fn run_window(
+    store: &StationStore,
+    authority: &TestEvidenceAuthority,
+    starts_at_utc_ms: i64,
+    actor: &str,
+) -> ScheduleMaterializationRun {
+    let outcome = store
+        .materialize_schedule_batch_with_explicit_window(
+            CHANNEL,
+            &MaterializationWindow {
+                starts_at_utc_ms,
+                ends_at_utc_ms: starts_at_utc_ms + DAY_MS,
+            },
+            actor,
+            authority,
+        )
+        .unwrap();
+    run_from(&outcome).clone()
 }
 
 fn run_from(outcome: &ScheduleMaterializationApplyOutcome) -> &ScheduleMaterializationRun {
@@ -760,7 +782,7 @@ fn tampered_origin_identity_fails_and_rolls_back_the_new_batch() {
     revise_catalog_title(&store);
 
     let error = store
-        .materialize_schedule_batch_with_explicit_window(CHANNEL, &window(), "operator", &authority)
+        .materialize_schedule_batch_with_explicit_window(CHANNEL, &window(), OWNER, &authority)
         .unwrap_err();
 
     assert!(matches!(
@@ -807,7 +829,7 @@ fn manual_occupation_of_deterministic_uuid_fails_and_rolls_back_the_new_batch() 
     revise_catalog_title(&store);
 
     let error = store
-        .materialize_schedule_batch_with_explicit_window(CHANNEL, &window(), "operator", &authority)
+        .materialize_schedule_batch_with_explicit_window(CHANNEL, &window(), OWNER, &authority)
         .unwrap_err();
 
     assert!(matches!(
@@ -1207,12 +1229,7 @@ fn multiple_no_match_slots_are_aggregated_into_one_alert_observation() {
     };
 
     let applied = store
-        .materialize_schedule_batch_with_explicit_window(
-            CHANNEL,
-            &long_window,
-            "operator",
-            &authority,
-        )
+        .materialize_schedule_batch_with_explicit_window(CHANNEL, &long_window, OWNER, &authority)
         .unwrap();
 
     let no_match_count = run_from(&applied)
@@ -1252,7 +1269,7 @@ fn no_match_alert_routing_failure_rolls_back_the_complete_materialization() {
     let authority = TestEvidenceAuthority::new();
 
     let error = store
-        .materialize_schedule_batch_with_explicit_window(CHANNEL, &window(), "operator", &authority)
+        .materialize_schedule_batch_with_explicit_window(CHANNEL, &window(), OWNER, &authority)
         .unwrap_err();
 
     assert!(matches!(
@@ -1293,7 +1310,7 @@ fn resolution_outbox_failure_rolls_back_the_new_run_and_keeps_no_match_firing() 
     );
 
     let error = store
-        .materialize_schedule_batch_with_explicit_window(CHANNEL, &window(), "operator", &authority)
+        .materialize_schedule_batch_with_explicit_window(CHANNEL, &window(), OWNER, &authority)
         .unwrap_err();
 
     assert!(matches!(
@@ -1339,7 +1356,11 @@ fn production_materialization_rechecks_enabled_channel_inside_its_write_transact
     let authority = TestEvidenceAuthority::at(current_utc_ms());
 
     let error = store
-        .materialize_scheduled_channel(CHANNEL, "automatic-worker", &authority)
+        .materialize_scheduled_channel(
+            CHANNEL,
+            AUTOMATIC_SCHEDULE_MATERIALIZATION_ACTOR_ID,
+            &authority,
+        )
         .unwrap_err();
 
     assert!(matches!(
@@ -1424,7 +1445,7 @@ fn automatic_checkpoint_list_includes_a_manual_run_and_survives_reopen() {
     assert!(empty[0].latest_run.is_none());
     let authority = TestEvidenceAuthority::at(current_utc_ms());
     let manual = store
-        .materialize_scheduled_channel(CHANNEL, "manual-operator", &authority)
+        .materialize_scheduled_channel(CHANNEL, OWNER, &authority)
         .unwrap();
     let run_id = run_from(&manual).run_id.clone();
 
@@ -1452,15 +1473,11 @@ fn corrupt_newest_checkpoint_fails_instead_of_falling_back_to_an_older_run() {
     seed_authority(&store, 1);
     let now = current_utc_ms();
     let first = store
-        .materialize_scheduled_channel(CHANNEL, "manual-operator", &TestEvidenceAuthority::at(now))
+        .materialize_scheduled_channel(CHANNEL, OWNER, &TestEvidenceAuthority::at(now))
         .unwrap();
     publish_candidate(&store, &database);
     let second = store
-        .materialize_scheduled_channel(
-            CHANNEL,
-            "manual-operator",
-            &TestEvidenceAuthority::at(now + 1),
-        )
+        .materialize_scheduled_channel(CHANNEL, OWNER, &TestEvidenceAuthority::at(now + 1))
         .unwrap();
     assert_ne!(run_from(&first).run_id, run_from(&second).run_id);
     let newest_run_id = run_from(&second).run_id.clone();
@@ -1491,15 +1508,11 @@ fn rebound_newest_checkpoint_binding_fails_instead_of_falling_back() {
     seed_authority(&store, 1);
     let now = current_utc_ms();
     let first = store
-        .materialize_scheduled_channel(CHANNEL, "manual-operator", &TestEvidenceAuthority::at(now))
+        .materialize_scheduled_channel(CHANNEL, OWNER, &TestEvidenceAuthority::at(now))
         .unwrap();
     publish_candidate(&store, &database);
     let second = store
-        .materialize_scheduled_channel(
-            CHANNEL,
-            "manual-operator",
-            &TestEvidenceAuthority::at(now + 1),
-        )
+        .materialize_scheduled_channel(CHANNEL, OWNER, &TestEvidenceAuthority::at(now + 1))
         .unwrap();
     assert_ne!(run_from(&first).run_id, run_from(&second).run_id);
     let newest_run_id = run_from(&second).run_id.clone();
@@ -1528,15 +1541,11 @@ fn deleted_newest_checkpoint_binding_fails_instead_of_falling_back() {
     seed_authority(&store, 1);
     let now = current_utc_ms();
     let first = store
-        .materialize_scheduled_channel(CHANNEL, "manual-operator", &TestEvidenceAuthority::at(now))
+        .materialize_scheduled_channel(CHANNEL, OWNER, &TestEvidenceAuthority::at(now))
         .unwrap();
     publish_candidate(&store, &database);
     let second = store
-        .materialize_scheduled_channel(
-            CHANNEL,
-            "manual-operator",
-            &TestEvidenceAuthority::at(now + 1),
-        )
+        .materialize_scheduled_channel(CHANNEL, OWNER, &TestEvidenceAuthority::at(now + 1))
         .unwrap();
     assert_ne!(run_from(&first).run_id, run_from(&second).run_id);
     let newest_run_id = run_from(&second).run_id.clone();
@@ -1561,11 +1570,7 @@ fn tampered_newest_checkpoint_binding_time_fails_closed() {
     seed_channel(&store, true);
     seed_authority(&store, 1);
     let run = store
-        .materialize_scheduled_channel(
-            CHANNEL,
-            "manual-operator",
-            &TestEvidenceAuthority::at(current_utc_ms()),
-        )
+        .materialize_scheduled_channel(CHANNEL, OWNER, &TestEvidenceAuthority::at(current_utc_ms()))
         .unwrap();
     let run_id = run_from(&run).run_id.clone();
     let sql = format!(
@@ -1590,4 +1595,355 @@ fn current_utc_ms() -> i64 {
             .as_millis(),
     )
     .unwrap()
+}
+
+#[test]
+fn materialization_history_uses_exclusive_keyset_pagination_for_timestamp_ties() {
+    let database = temporary_database("history-keyset-ties");
+    let store = seed_materializable(&database);
+    let authority = TestEvidenceAuthority::new();
+    let runs = [0_i64, 1, 2]
+        .into_iter()
+        .map(|day| run_window(&store, &authority, WINDOW_START + day * DAY_MS, OWNER))
+        .collect::<Vec<_>>();
+    let mut expected = runs
+        .iter()
+        .map(|run| (run.occurred_at_unix_ms, run.run_id.clone()))
+        .collect::<Vec<_>>();
+    expected.sort_by(|left, right| right.cmp(left));
+
+    let first = store
+        .list_schedule_materialization_history(CHANNEL, 1, None)
+        .unwrap();
+    let second = store
+        .list_schedule_materialization_history(CHANNEL, 1, first.next_cursor.as_ref())
+        .unwrap();
+    let third = store
+        .list_schedule_materialization_history(CHANNEL, 1, second.next_cursor.as_ref())
+        .unwrap();
+    let actual = [&first, &second, &third]
+        .into_iter()
+        .map(|page| {
+            assert_eq!(page.entries.len(), 1);
+            (
+                page.entries[0].run.occurred_at_unix_ms,
+                page.entries[0].run.run_id.clone(),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(actual, expected);
+    assert_eq!(third.next_cursor, None);
+}
+
+#[test]
+fn materialization_history_rejects_invalid_limits_and_cursors() {
+    let database = temporary_database("history-limits");
+    let store = seed_materializable(&database);
+    assert!(matches!(
+        store.list_schedule_materialization_history(CHANNEL, 0, None),
+        Err(ScheduleMaterializationHistoryReadError::Invalid(_))
+    ));
+    assert!(matches!(
+        store.list_schedule_materialization_history(CHANNEL, 129, None),
+        Err(ScheduleMaterializationHistoryReadError::Invalid(_))
+    ));
+    assert!(matches!(
+        store.list_schedule_materialization_history(
+            CHANNEL,
+            1,
+            Some(&ScheduleMaterializationHistoryCursor {
+                occurred_at_unix_ms: -1,
+                run_id: "11111111-1111-4111-8111-111111111111".into(),
+            }),
+        ),
+        Err(ScheduleMaterializationHistoryReadError::Invalid(_))
+    ));
+    assert!(matches!(
+        store.list_schedule_materialization_history(
+            CHANNEL,
+            1,
+            Some(&ScheduleMaterializationHistoryCursor {
+                occurred_at_unix_ms: 0,
+                run_id: "11111111-1111-4111-8111-111111111111".into(),
+            }),
+        ),
+        Err(ScheduleMaterializationHistoryReadError::Invalid(_))
+    ));
+}
+
+#[test]
+fn materialization_requires_canonical_actor_and_accepts_the_reserved_automatic_actor() {
+    let database = temporary_database("canonical-materialization-actor");
+    let store = seed_materializable(&database);
+    let authority = TestEvidenceAuthority::new();
+
+    assert!(matches!(
+        store.materialize_schedule_batch_with_explicit_window(
+            CHANNEL,
+            &window(),
+            "manual-operator",
+            &authority,
+        ),
+        Err(ScheduleMaterializationWriteError::Invalid(_))
+    ));
+    seed_channel(&store, true);
+    assert!(matches!(
+        store.materialize_scheduled_channel(
+            CHANNEL,
+            "manual-operator",
+            &TestEvidenceAuthority::at(current_utc_ms()),
+        ),
+        Err(ScheduleMaterializationWriteError::Invalid(_))
+    ));
+
+    let automatic = store
+        .materialize_schedule_batch_with_explicit_window(
+            CHANNEL,
+            &window(),
+            AUTOMATIC_SCHEDULE_MATERIALIZATION_ACTOR_ID,
+            &authority,
+        )
+        .unwrap();
+    assert_eq!(
+        run_from(&automatic).changed_by,
+        AUTOMATIC_SCHEDULE_MATERIALIZATION_ACTOR_ID
+    );
+}
+
+#[test]
+fn durable_materialization_run_reader_rejects_a_noncanonical_actor() {
+    let database = temporary_database("noncanonical-durable-materialization-actor");
+    let store = seed_materializable(&database);
+    let run = run_once(&store, &TestEvidenceAuthority::new());
+    let run_id = run_from(&run).run_id.clone();
+    let sql = format!(
+        "DROP TRIGGER schedule_materialization_runs_no_update;\
+         UPDATE schedule_materialization_runs SET changed_by='manual-operator' WHERE run_id='{run_id}'"
+    );
+    assert_eq!(raw_sql_status(&database, &sql), SQLITE_OK);
+
+    assert!(store.read_schedule_materialization_run(&run_id).is_err());
+    assert!(matches!(
+        store.list_schedule_materialization_history(CHANNEL, 1, None),
+        Err(ScheduleMaterializationHistoryReadError::Integrity(_))
+    ));
+}
+
+#[test]
+fn materialization_history_preserves_a_forced_sqlite_failure_as_storage() {
+    let database = temporary_database("history-storage-error");
+    let store = seed_materializable(&database);
+    assert_eq!(
+        raw_sql_status(&database, "DROP TABLE schedule_materialization_plans"),
+        SQLITE_OK
+    );
+    assert!(matches!(
+        store.list_schedule_materialization_history(CHANNEL, 1, None),
+        Err(ScheduleMaterializationHistoryReadError::Storage(_))
+    ));
+}
+
+#[test]
+fn materialization_history_preserves_nested_sqlite_failures_as_storage() {
+    for (suffix, table) in [
+        ("full-run", "schedule_materialization_outcomes"),
+        ("draft-origin", "schedule_materialization_drafts"),
+        ("current-schedule", "schedule_items"),
+    ] {
+        let database = temporary_database(&format!("history-storage-error-{suffix}"));
+        let store = seed_materializable(&database);
+        run_once(&store, &TestEvidenceAuthority::new());
+        assert_eq!(
+            raw_sql_status(&database, &format!("DROP TABLE {table}")),
+            SQLITE_OK
+        );
+        assert!(matches!(
+            store.list_schedule_materialization_history(CHANNEL, 1, None),
+            Err(ScheduleMaterializationHistoryReadError::Storage(_))
+        ));
+    }
+}
+
+#[test]
+fn materialization_history_exposes_manual_and_reserved_automatic_origin_truthfully() {
+    let database = temporary_database("history-origins");
+    let store = seed_materializable(&database);
+    let authority = TestEvidenceAuthority::new();
+    let manual = run_window(&store, &authority, WINDOW_START, OWNER);
+    let automatic = run_window(
+        &store,
+        &authority,
+        WINDOW_START + DAY_MS,
+        AUTOMATIC_SCHEDULE_MATERIALIZATION_ACTOR_ID,
+    );
+
+    let page = store
+        .list_schedule_materialization_history(CHANNEL, 2, None)
+        .unwrap();
+    let manual_entry = page
+        .entries
+        .iter()
+        .find(|entry| entry.run.run_id == manual.run_id)
+        .unwrap();
+    assert_eq!(
+        manual_entry.origin,
+        ScheduleMaterializationRunOrigin::Operator
+    );
+    assert_eq!(manual_entry.run.changed_by, OWNER);
+    let automatic_entry = page
+        .entries
+        .iter()
+        .find(|entry| entry.run.run_id == automatic.run_id)
+        .unwrap();
+    assert_eq!(
+        automatic_entry.origin,
+        ScheduleMaterializationRunOrigin::Automatic
+    );
+    assert_eq!(
+        automatic_entry.run.changed_by,
+        AUTOMATIC_SCHEDULE_MATERIALIZATION_ACTOR_ID
+    );
+}
+
+#[test]
+fn materialization_history_fails_closed_for_rebound_channel_binding_and_does_not_leak() {
+    let database = temporary_database("history-rebound-channel");
+    let store = seed_materializable(&database);
+    let run = run_once(&store, &TestEvidenceAuthority::new());
+    let run_id = run_from(&run).run_id.clone();
+    let other_channel = "99999999-0000-4000-8000-999999999999";
+    assert!(
+        store
+            .list_schedule_materialization_history(other_channel, 1, None)
+            .unwrap()
+            .entries
+            .is_empty()
+    );
+    let sql = format!(
+        "DROP TRIGGER schedule_materialization_run_channels_no_update;\
+         UPDATE schedule_materialization_run_channels SET channel_id='{other_channel}' \
+         WHERE run_id='{run_id}'"
+    );
+    assert_eq!(raw_sql_status(&database, &sql), SQLITE_OK);
+
+    assert!(matches!(
+        store.list_schedule_materialization_history(other_channel, 1, None),
+        Err(ScheduleMaterializationHistoryReadError::Integrity(_))
+    ));
+}
+
+#[test]
+fn materialization_history_does_not_skip_a_run_with_a_deleted_channel_binding() {
+    let database = temporary_database("history-deleted-binding");
+    let store = seed_materializable(&database);
+    let run = run_once(&store, &TestEvidenceAuthority::new());
+    let run_id = run_from(&run).run_id.clone();
+    let sql = format!(
+        "DROP TRIGGER schedule_materialization_run_channels_no_delete;\
+         DELETE FROM schedule_materialization_run_channels WHERE run_id='{run_id}'"
+    );
+    assert_eq!(raw_sql_status(&database, &sql), SQLITE_OK);
+
+    assert!(matches!(
+        store.list_schedule_materialization_history(CHANNEL, 1, None),
+        Err(ScheduleMaterializationHistoryReadError::Integrity(_))
+    ));
+}
+
+#[test]
+fn opening_fails_when_a_legacy_run_is_unbound_or_its_plan_count_is_incomplete() {
+    let database = temporary_database("history-open-audit-unbound");
+    let store = seed_materializable(&database);
+    let run = run_once(&store, &TestEvidenceAuthority::new());
+    let run_id = run_from(&run).run_id.clone();
+    let sql = format!(
+        "DROP TRIGGER schedule_materialization_run_channels_no_delete;\
+         DROP TRIGGER schedule_materialization_plans_no_delete;\
+         DELETE FROM schedule_materialization_run_channels WHERE run_id='{run_id}';\
+         DELETE FROM schedule_materialization_plans WHERE run_id='{run_id}'"
+    );
+    assert_eq!(raw_sql_status(&database, &sql), SQLITE_OK);
+    drop(store);
+    assert!(
+        StationStore::open(&database).is_err(),
+        "a run with neither binding nor plan evidence must not disappear from history"
+    );
+
+    let database = temporary_database("history-open-audit-plan-count");
+    let store = seed_materializable(&database);
+    let run = run_once(&store, &TestEvidenceAuthority::new());
+    let run_id = run_from(&run).run_id.clone();
+    let sql = format!(
+        "DROP TRIGGER schedule_materialization_run_channels_no_delete;\
+         DROP TRIGGER schedule_materialization_runs_no_update;\
+         DELETE FROM schedule_materialization_run_channels WHERE run_id='{run_id}';\
+         UPDATE schedule_materialization_runs SET plan_count=2 WHERE run_id='{run_id}'"
+    );
+    assert_eq!(raw_sql_status(&database, &sql), SQLITE_OK);
+    drop(store);
+    assert!(
+        StationStore::open(&database).is_err(),
+        "an incomplete legacy plan count must not receive a guessed channel binding"
+    );
+}
+
+#[test]
+fn materialization_history_never_skips_a_corrupt_newest_run() {
+    let database = temporary_database("history-corrupt-run");
+    let store = seed_materializable(&database);
+    let authority = TestEvidenceAuthority::new();
+    let older = run_window(&store, &authority, WINDOW_START, OWNER);
+    let newest = run_window(&store, &authority, WINDOW_START + DAY_MS, OWNER);
+    let sql = format!(
+        "DROP TRIGGER schedule_materialization_plans_no_update;\
+         UPDATE schedule_materialization_plans SET record_json='{{}}' \
+         WHERE run_id='{}'",
+        newest.run_id
+    );
+    assert_eq!(raw_sql_status(&database, &sql), SQLITE_OK);
+
+    assert!(matches!(
+        store.list_schedule_materialization_history(CHANNEL, 1, None),
+        Err(ScheduleMaterializationHistoryReadError::Integrity(_))
+    ));
+    assert!(
+        store
+            .read_schedule_materialization_run(&older.run_id)
+            .unwrap()
+            .is_some()
+    );
+}
+
+#[test]
+fn materialization_history_rejects_corrupt_draft_origin_and_current_schedule_linkage() {
+    let database = temporary_database("history-draft-integrity");
+    let store = seed_materializable(&database);
+    let first = run_once(&store, &TestEvidenceAuthority::new());
+    let first_run = run_from(&first);
+    let (_, first_item_id) = proposed_item(first_run);
+    let origin_sql = format!(
+        "DROP TRIGGER schedule_materialization_drafts_no_update;\
+         UPDATE schedule_materialization_drafts SET record_json='{{}}' \
+         WHERE schedule_item_id='{first_item_id}'"
+    );
+    assert_eq!(raw_sql_status(&database, &origin_sql), SQLITE_OK);
+    assert!(matches!(
+        store.list_schedule_materialization_history(CHANNEL, 1, None),
+        Err(ScheduleMaterializationHistoryReadError::Integrity(_))
+    ));
+    drop(store);
+
+    let database = temporary_database("history-current-linkage");
+    let store = seed_materializable(&database);
+    let run = run_once(&store, &TestEvidenceAuthority::new());
+    let (_, item_id) = proposed_item(run_from(&run));
+    let linkage_sql = format!(
+        "UPDATE schedule_items SET channel_id='99999999-0000-4000-8000-999999999999' \
+         WHERE item_id='{item_id}'"
+    );
+    assert_eq!(raw_sql_status(&database, &linkage_sql), SQLITE_OK);
+    assert!(matches!(
+        store.list_schedule_materialization_history(CHANNEL, 1, None),
+        Err(ScheduleMaterializationHistoryReadError::Integrity(_))
+    ));
 }

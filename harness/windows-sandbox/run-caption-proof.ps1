@@ -1,6 +1,7 @@
 param()
 
 $ErrorActionPreference = 'Stop'
+. 'C:\TownLightShared\candidate-pair-verifier.ps1'
 
 $candidateRoot = 'C:\TownLightCandidate'
 $evidenceRoot = 'C:\TownLightEvidence'
@@ -242,8 +243,9 @@ try {
             throw "Caption-proof guest input is missing: $required"
         }
     }
-    $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
-    $installerHash = (Get-FileHash -LiteralPath $installerPath -Algorithm SHA256).Hash.ToLowerInvariant()
+    $candidate = Get-TownLightCandidateIdentity -ManifestPath $manifestPath
+    $manifest = $candidate.manifest
+    $installerHash = $candidate.installer_sha256
     $observedFixtureHash = (Get-FileHash -LiteralPath $inputPath -Algorithm SHA256).Hash.ToLowerInvariant()
     if ($manifest.product -ne 'TownLight Station' -or
         $manifest.source_commit -notmatch '^[0-9a-f]{40}$' -or
@@ -261,7 +263,7 @@ try {
     if ($installer.ExitCode -ne 0) {
         throw "Caption-proof candidate returned installer exit code $($installer.ExitCode)."
     }
-    $verification = (& $verifierPath -Manifest $manifestPath | Out-String) | ConvertFrom-Json
+    $verification = (& $verifierPath -Manifest $manifestPath -SharedScriptsRoot 'C:\TownLightShared' | Out-String) | ConvertFrom-Json
     if ($verification.source_commit -ne $manifest.source_commit -or
         $verification.caption_decoder_sha256 -ne $manifest.caption_decoder_sha256 -or
         $verification.health -ne 'ready') {

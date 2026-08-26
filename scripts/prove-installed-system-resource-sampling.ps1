@@ -7,6 +7,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'candidate-pair-verifier.ps1')
 . (Join-Path $PSScriptRoot 'installed-proof-api.ps1')
 $apiSession = New-TownLightProofSession -BaseUri $BaseUrl -Credential $Credential
 
@@ -29,8 +30,8 @@ $dataDirectory = Join-Path $env:ProgramData 'TownLight Station'
 $backupDirectory = Join-Path $dataDirectory 'backups'
 $receiptPath = Join-Path $dataDirectory 'install-receipt.json'
 
-$manifestDocument = Get-Content -LiteralPath $Manifest -Raw | ConvertFrom-Json
 $receipt = Get-Content -LiteralPath $receiptPath -Raw | ConvertFrom-Json
+$manifestDocument = (Get-TownLightCandidateIdentity -ManifestPath $Manifest -ExpectedSourceCommit $receipt.source_commit).manifest
 if ($receipt.source_commit -ne $manifestDocument.source_commit) {
     throw 'The installed receipt does not identify the candidate under proof.'
 }

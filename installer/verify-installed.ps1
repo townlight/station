@@ -1,18 +1,96 @@
 param(
-    [string]$Manifest = (Join-Path (Split-Path $PSScriptRoot -Parent) 'dist\candidate-manifest.json')
+    [string]$Manifest = (Join-Path (Split-Path $PSScriptRoot -Parent) 'dist\candidate-manifest.json'),
+    [string]$SharedScriptsRoot = ''
 )
 
 $ErrorActionPreference = 'Stop'
-$application = Join-Path $env:ProgramFiles 'TownLight Station'
-$data = Join-Path $env:ProgramData 'TownLight Station'
+
+function Get-TrustedKnownFolder([string]$Name) {
+    $knownPath = switch ($Name) {
+        'CommonApplicationData' { [Environment]::GetFolderPath([Environment+SpecialFolder]::CommonApplicationData) }
+        'ProgramFilesX64' {
+            $registry64 = [Microsoft.Win32.RegistryKey]::OpenBaseKey(
+                [Microsoft.Win32.RegistryHive]::LocalMachine,
+                [Microsoft.Win32.RegistryView]::Registry64)
+            try {
+                $currentVersion = $registry64.OpenSubKey('SOFTWARE\Microsoft\Windows\CurrentVersion', $false)
+                try { if ($null -ne $currentVersion) { [string]$currentVersion.GetValue('ProgramW6432Dir', $null) } }
+                finally { if ($null -ne $currentVersion) { $currentVersion.Dispose() } }
+            }
+            finally { $registry64.Dispose() }
+        }
+        default { throw "Unsupported Windows known folder: $Name" }
+    }
+    if ([string]::IsNullOrWhiteSpace($knownPath)) { throw "Could not resolve trusted Windows known folder: $Name" }
+    return [IO.Path]::GetFullPath($knownPath).TrimEnd('\')
+}
+
+function Resolve-TownLightSharedRoot([string]$RequestedRoot) {
+    $repositoryScripts = [IO.Path]::GetFullPath((Join-Path (Split-Path $PSScriptRoot -Parent) 'scripts')).TrimEnd('\')
+    $expectedRoot = if ([string]::IsNullOrWhiteSpace($RequestedRoot)) { $repositoryScripts } else { [IO.Path]::GetFullPath($RequestedRoot).TrimEnd('\') }
+    $allowedRoots = @($repositoryScripts, 'C:\TownLightShared')
+    if (-not (@($allowedRoots | Where-Object { [string]::Equals($_, $expectedRoot, [StringComparison]::OrdinalIgnoreCase) }).Count -eq 1)) {
+        throw "TownLight shared helper root is not an allowed canonical root: $RequestedRoot"
+    }
+    try { $rootItem = Get-Item -LiteralPath $expectedRoot -Force -ErrorAction Stop }
+    catch { throw "TownLight shared helper root is missing: $expectedRoot" }
+    if (-not $rootItem.PSIsContainer -or ($rootItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or
+        -not [string]::Equals($rootItem.FullName.TrimEnd('\'), $expectedRoot, [StringComparison]::OrdinalIgnoreCase)) {
+        throw "TownLight shared helper root drifted or is a reparse point: $expectedRoot"
+    }
+    $parent = $rootItem.Parent
+    while ($null -ne $parent) {
+        if (($parent.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw "TownLight shared helper root parent is a reparse point: $($parent.FullName)"
+        }
+        $next = $parent.Parent
+        if ($null -eq $next -or $next.FullName -ieq $parent.FullName) { break }
+        $parent = $next
+    }
+    return $rootItem.FullName.TrimEnd('\')
+}
+
+function Resolve-TownLightSharedScript([string]$Name, [string]$Root) {
+    if ([string]::IsNullOrWhiteSpace($Name) -or -not [string]::Equals([IO.Path]::GetFileName($Name), $Name, [StringComparison]::Ordinal)) {
+        throw 'TownLight shared script name is invalid.'
+    }
+    $path = Join-Path $Root $Name
+    try { $item = Get-Item -LiteralPath $path -Force -ErrorAction Stop }
+    catch { throw "TownLight shared script is missing: $path" }
+    if ($item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or
+        -not [string]::Equals($item.Directory.FullName.TrimEnd('\'), $Root.TrimEnd('\'), [StringComparison]::OrdinalIgnoreCase) -or
+        -not [string]::Equals([IO.Path]::GetFileName($item.Name), $Name, [StringComparison]::Ordinal)) {
+        throw "TownLight shared script drifted or is not a regular non-reparse file: $path"
+    }
+    return $item.FullName
+}
+
+$sharedScriptsRoot = Resolve-TownLightSharedRoot $SharedScriptsRoot
+. (Resolve-TownLightSharedScript 'candidate-pair-verifier.ps1' $sharedScriptsRoot)
+. (Resolve-TownLightSharedScript 'installed-private-runtime-verifier.ps1' $sharedScriptsRoot)
+$programFiles = Get-TrustedKnownFolder 'ProgramFilesX64'
+$commonApplicationData = Get-TrustedKnownFolder 'CommonApplicationData'
+$application = Join-Path $programFiles 'TownLight Station'
+$data = Join-Path $commonApplicationData 'TownLight Station'
 $runtime = Join-Path $application 'runtime\gstreamer'
 $captionDecoder = Join-Path $application 'runtime\caption-decoder\ffmpeg.exe'
 $captionDecoderLicense = Join-Path $application 'runtime\caption-decoder\LICENSE.txt'
-$manifestDocument = Get-Content -LiteralPath $Manifest -Raw | ConvertFrom-Json
+$candidatePair = Get-TownLightCandidateIdentity -ManifestPath $Manifest
+$manifestItem = Get-Item -LiteralPath $candidatePair.manifest_path -Force -ErrorAction Stop
+$manifestDocument = $candidatePair.manifest
+$candidateInstaller = $candidatePair.installer_path
+$candidateInstallerItem = Get-Item -LiteralPath $candidateInstaller -Force -ErrorAction Stop
+$candidateInstallerHash = (Get-FileHash -LiteralPath $candidateInstaller -Algorithm SHA256).Hash.ToLowerInvariant()
+if ($candidateInstallerHash -cne [string]$candidatePair.installer_sha256) {
+    throw 'Candidate installer changed after candidate-pair validation.'
+}
 $receipt = Get-Content -LiteralPath (Join-Path $data 'install-receipt.json') -Raw | ConvertFrom-Json
 $activeReceipt = Get-Content -LiteralPath (Join-Path $data 'active-slot.json') -Raw | ConvertFrom-Json
 $runtimeManifestPath = Join-Path $data 'runtime-manifest.json'
 $runtimeManifest = Get-Content -LiteralPath $runtimeManifestPath -Raw | ConvertFrom-Json
+
+$expectedStationPath = '"' + (Join-Path $application 'stationd.exe') + '" service --database "' + (Join-Path $data 'station.db') + '" --address 127.0.0.1:4070'
+$expectedUpdaterPath = '"' + (Join-Path $application 'station-updater.exe') + '" service --database "' + (Join-Path $data 'station.db') + '" --application-root "' + $application + '"'
 
 $service = Get-CimInstance Win32_Service -Filter "Name='TownLightStation'"
 if (-not $service -or $service.State -ne 'Running' -or $service.StartMode -ne 'Auto') {
@@ -21,7 +99,7 @@ if (-not $service -or $service.State -ne 'Running' -or $service.StartMode -ne 'A
 if ($service.StartName -ne 'LocalSystem') {
     throw "Unexpected service account: $($service.StartName)"
 }
-if ($service.PathName -notlike '"*\TownLight Station\stationd.exe" service --database *') {
+if (-not ([string]$service.PathName).Equals($expectedStationPath, [StringComparison]::OrdinalIgnoreCase)) {
     throw "Unexpected service command line: $($service.PathName)"
 }
 
@@ -32,7 +110,7 @@ if (-not $updaterService -or $updaterService.State -ne 'Running' -or $updaterSer
 if ($updaterService.StartName -ne 'LocalSystem') {
     throw "Unexpected updater service account: $($updaterService.StartName)"
 }
-if ($updaterService.PathName -notlike '"*\TownLight Station\station-updater.exe" service --database * --application-root *') {
+if (-not ([string]$updaterService.PathName).Equals($expectedUpdaterPath, [StringComparison]::OrdinalIgnoreCase)) {
     throw "Unexpected updater service command line: $($updaterService.PathName)"
 }
 
@@ -53,9 +131,9 @@ if ($health.database -ne 'ready' -or
     throw "Installed health contract failed: $healthDocument"
 }
 
-$stationdHash = (Get-FileHash -LiteralPath (Join-Path $application 'stationd.exe') -Algorithm SHA256).Hash
-$workerHash = (Get-FileHash -LiteralPath (Join-Path $application 'channel-worker.exe') -Algorithm SHA256).Hash
-$updaterHash = (Get-FileHash -LiteralPath (Join-Path $application 'station-updater.exe') -Algorithm SHA256).Hash
+$stationdHash = (Get-FileHash -LiteralPath (Join-Path $application 'stationd.exe') -Algorithm SHA256).Hash.ToLowerInvariant()
+$workerHash = (Get-FileHash -LiteralPath (Join-Path $application 'channel-worker.exe') -Algorithm SHA256).Hash.ToLowerInvariant()
+$updaterHash = (Get-FileHash -LiteralPath (Join-Path $application 'station-updater.exe') -Algorithm SHA256).Hash.ToLowerInvariant()
 $captionDecoderHash = (Get-FileHash -LiteralPath $captionDecoder -Algorithm SHA256).Hash.ToLowerInvariant()
 $captionDecoderLicenseHash = (Get-FileHash -LiteralPath $captionDecoderLicense -Algorithm SHA256).Hash.ToLowerInvariant()
 if ($stationdHash -ne $manifestDocument.stationd_sha256) {
@@ -100,43 +178,8 @@ if ($runtimeManifest.schema_version -ne 1 -or
     throw 'The installed runtime manifest identity does not match the candidate.'
 }
 
-$reparseEntries = @(Get-ChildItem -LiteralPath $runtime -Force -Recurse | Where-Object {
-    ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0
-})
-if ($reparseEntries.Count -ne 0) {
-    throw 'The installed runtime contains a reparse-point entry.'
-}
-$expectedRuntimeFiles = [Collections.Generic.Dictionary[string,object]]::new(
-    [StringComparer]::OrdinalIgnoreCase)
-foreach ($file in @($runtimeManifest.files)) {
-    $relative = [string]$file.path
-    if ([string]::IsNullOrWhiteSpace($relative) -or
-        $relative.Contains('\') -or
-        $relative.StartsWith('/') -or
-        $relative.Split('/') -contains '..' -or
-        $expectedRuntimeFiles.ContainsKey($relative)) {
-        throw 'The installed runtime manifest contains an unsafe or duplicate path.'
-    }
-    $expectedRuntimeFiles.Add($relative, $file)
-}
-$runtimePrefix = $runtime.TrimEnd('\') + '\'
-$actualRuntimeFiles = @(Get-ChildItem -LiteralPath $runtime -File -Force -Recurse)
-if ($actualRuntimeFiles.Count -ne $expectedRuntimeFiles.Count) {
-    throw 'The installed runtime file set does not match its manifest.'
-}
-foreach ($actual in $actualRuntimeFiles) {
-    if (-not $actual.FullName.StartsWith($runtimePrefix, [StringComparison]::OrdinalIgnoreCase)) {
-        throw 'The installed runtime file escaped its managed root.'
-    }
-    $relative = $actual.FullName.Substring($runtimePrefix.Length).Replace('\', '/')
-    $specification = $null
-    if (-not $expectedRuntimeFiles.TryGetValue($relative, [ref]$specification) -or
-        $actual.Length -ne [int64]$specification.size_bytes -or
-        (Get-FileHash -LiteralPath $actual.FullName -Algorithm SHA256).Hash.ToLowerInvariant() -ne
-            ([string]$specification.sha256).ToLowerInvariant()) {
-        throw "Installed runtime file does not match its manifest: $relative"
-    }
-}
+$runtimeVerification = Assert-TownLightInstalledPrivateRuntime `
+    -RuntimeRoot $runtime -RuntimeManifest $runtimeManifest
 if ($activeReceipt.active.relative_directory -ne '.' -or
     $activeReceipt.active.package_manifest.source_commit -ne $manifestDocument.source_commit -or
     $activeReceipt.active.package_manifest.version -ne $manifestDocument.version -or
@@ -196,6 +239,7 @@ if ($LASTEXITCODE -ne 0) {
     updater_service_account = $updaterService.StartName
     health = 'ready'
     source_commit = $receipt.source_commit
+    candidate_installer_sha256 = $candidateInstallerHash
     stationd_sha256 = $stationdHash
     channel_worker_sha256 = $workerHash
     station_updater_sha256 = $updaterHash

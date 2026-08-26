@@ -323,3 +323,38 @@ form { display:grid; gap:16px; margin-top:20px; }label { display:grid; gap:7px; 
 .schedule-item-list strong { color:var(--ink); font-size:11px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .schedule-item-list span,.schedule-item-list code { color:var(--muted); font-size:9px; overflow-wrap:anywhere; }
 @media (max-width:620px) { .schedule-materialization-card>.primary { width:100%; }.schedule-materialization-result-head { align-items:flex-start; flex-direction:column; }.schedule-materialization-result dl>div { grid-template-columns:1fr; gap:4px; } }
+
+.schedule-materialization-history { display:grid; gap:11px; margin-top:2px; padding-top:15px; border-top:1px solid #dce9df; }
+.schedule-materialization-history-head { display:flex; align-items:flex-start; justify-content:space-between; gap:14px; }
+.schedule-materialization-history-head>div { display:grid; gap:4px; min-width:0; }
+.schedule-materialization-history h3 { margin:0; color:var(--ink); font-size:14px; }
+.schedule-materialization-history-head .muted { max-width:700px; margin:0; font-size:10px; line-height:1.45; }
+.schedule-history-state { display:grid; gap:4px; padding:16px 3px; color:var(--muted); font-size:11px; }
+.schedule-history-state strong { color:var(--ink); }
+.schedule-history-progress { color:var(--muted); font-size:9px; }
+.schedule-history-list { display:grid; gap:8px; }
+.schedule-history-record { border:1px solid #dce5de; border-radius:11px; background:#fbfcfa; overflow:hidden; }
+.schedule-history-record[open] { border-color:#b8d2bf; background:#f8fbf8; }
+.schedule-history-record>summary { display:flex; align-items:center; justify-content:space-between; gap:12px; padding:11px 13px; cursor:pointer; list-style:none; }
+.schedule-history-record>summary::-webkit-details-marker { display:none; }
+.schedule-history-record>summary::before { content:"+"; display:grid; place-items:center; flex:0 0 19px; width:19px; height:19px; border:1px solid #b9cdbd; border-radius:50%; color:var(--green); font-size:13px; line-height:1; }
+.schedule-history-record[open]>summary::before { content:"−"; }
+.schedule-history-record-title { display:grid; flex:1; gap:4px; min-width:0; }
+.schedule-history-record-title strong { color:var(--ink); font-size:11px; }
+.schedule-history-record-title small { color:var(--muted); font-size:9px; }
+.schedule-history-record-body { display:grid; gap:13px; padding:0 13px 13px 45px; }
+.schedule-history-record-body dl { display:grid; margin:0; }
+.schedule-history-record-body dl>div { display:grid; grid-template-columns:125px minmax(0,1fr); gap:12px; padding:7px 0; border-top:1px solid #e5eee7; }
+.schedule-history-record-body dt { color:var(--muted); font-size:9px; }
+.schedule-history-record-body dd { margin:0; color:var(--ink); font-size:10px; overflow-wrap:anywhere; }
+.schedule-history-record-body code { font-size:9px; }
+.schedule-history-subsection { display:grid; gap:6px; }
+.schedule-history-subsection>strong { color:var(--ink); font-size:10px; }
+.schedule-history-not-recorded { color:var(--muted); font-size:10px; font-style:italic; }
+.schedule-history-outcomes,.schedule-history-drafts { display:grid; gap:5px; }
+.schedule-history-outcomes>div,.schedule-history-drafts>div { display:flex; align-items:baseline; justify-content:space-between; gap:12px; padding:7px 9px; border-radius:8px; background:#edf5ef; font-size:9px; }
+.schedule-history-outcomes span,.schedule-history-drafts code { min-width:0; color:var(--ink); overflow-wrap:anywhere; }
+.schedule-history-outcomes small,.schedule-history-drafts span { color:var(--muted); text-transform:capitalize; }
+.schedule-materialization-history .error-box { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
+.schedule-materialization-history .error-box .text-button { margin-left:auto; }
+@media (max-width:620px) { .schedule-materialization-history-head { flex-direction:column; }.schedule-materialization-history-head .text-button { align-self:flex-start; }.schedule-history-record>summary { align-items:flex-start; }.schedule-history-record-body { padding-left:13px; }.schedule-history-record-body dl>div { grid-template-columns:1fr; gap:4px; } }

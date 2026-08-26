@@ -1,6 +1,13 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
+/// Reserved, non-human attribution for the station-owned recurring-schedule
+/// materialization supervisor. This identity is deliberately owned by the
+/// dependency-leaf domain crate so persistence, the controller, and operator
+/// boundaries share exactly one authoritative value without a crate cycle.
+pub const AUTOMATIC_SCHEDULE_MATERIALIZATION_ACTOR_ID: &str =
+    "00000000-0000-4000-8000-000000000022";
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StationProfile {
     pub station_id: String,

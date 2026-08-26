@@ -315,7 +315,7 @@ fn enabled_mixed_horizons_share_one_atomic_union_run_but_keep_exact_plan_windows
     let authority = TestEvidenceAuthority::new();
 
     let outcome = store
-        .materialize_scheduled_channel(CHANNEL, "operator", &authority)
+        .materialize_scheduled_channel(CHANNEL, OWNER, &authority)
         .unwrap();
     assert!(matches!(
         outcome,
@@ -380,7 +380,7 @@ fn disabled_short_horizon_does_not_constrain_the_enabled_sixty_day_rule() {
     let authority = TestEvidenceAuthority::new();
 
     let outcome = store
-        .materialize_scheduled_channel(CHANNEL, "operator", &authority)
+        .materialize_scheduled_channel(CHANNEL, OWNER, &authority)
         .unwrap();
     let run = run_from(&outcome);
     assert_eq!(run.window, expected_window(60));
@@ -400,7 +400,7 @@ fn cross_window_arbitration_never_admits_duplicate_or_overlapping_drafts() {
     let authority = TestEvidenceAuthority::new();
 
     let outcome = store
-        .materialize_scheduled_channel(CHANNEL, "operator", &authority)
+        .materialize_scheduled_channel(CHANNEL, OWNER, &authority)
         .unwrap();
     let run = run_from(&outcome);
     let short_end = expected_window(14).ends_at_utc_ms;
@@ -461,10 +461,10 @@ fn same_server_minute_retry_reuses_the_derived_window_and_run() {
     let authority = TestEvidenceAuthority::new();
 
     let first = store
-        .materialize_scheduled_channel(CHANNEL, "operator", &authority)
+        .materialize_scheduled_channel(CHANNEL, OWNER, &authority)
         .unwrap();
     let second = store
-        .materialize_scheduled_channel(CHANNEL, "operator", &authority)
+        .materialize_scheduled_channel(CHANNEL, OWNER, &authority)
         .unwrap();
 
     assert!(matches!(
