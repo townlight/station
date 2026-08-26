@@ -3,6 +3,10 @@
 body { margin:0; min-width:320px; min-height:100vh; overflow-x:hidden; background:radial-gradient(circle at 80% 0%,#e4eee8 0,transparent 28rem),#f3f5f1; }
 button,input,select { font:inherit; }
 button { cursor:pointer; }
+.skip-link { position:fixed; top:8px; left:8px; z-index:100; padding:10px 14px; border-radius:9px; background:#fff; color:var(--green-dark); font-weight:800; transform:translateY(-160%); }
+.skip-link:focus { transform:translateY(0); }
+button:focus-visible,a:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-visible,summary:focus-visible { outline:3px solid #78a988; outline-offset:3px; }
+.workspace:focus { outline:none; }
 .app-shell { min-height:100vh; }
 .sidebar { position:fixed; inset:0 auto 0 0; width:238px; padding:28px 18px 20px; display:flex; flex-direction:column; background:#071716; color:#eef8f2; z-index:10; }
 .brand-lockup { display:flex; align-items:center; gap:12px; padding:0 10px 32px; }
@@ -374,3 +378,12 @@ form { display:grid; gap:16px; margin-top:20px; }label { display:grid; gap:7px; 
 @media (max-width:900px) { .publishing-layout { grid-template-columns:1fr; } }
 @media (max-width:620px) { .publishing-record dl>div { grid-template-columns:1fr; gap:4px; }.publishing-record-head { flex-direction:column; }.publishing-readiness .panel-head { align-items:flex-start; flex-direction:column; }.panel-actions { width:100%; justify-content:space-between; } }
 .commission-contract-error { gap:7px; }.commission-mismatch-check { display:grid; gap:4px; padding:9px; border:1px solid #dfb1aa; border-radius:8px; background:#fff9f7; }.commission-mismatch-check>div { display:flex; justify-content:space-between; align-items:center; gap:8px; }.commission-mismatch-check p,.commission-mismatch-check small { color:#704b46; font-size:9px; line-height:1.4; }
+@media (max-width:760px) { .mobile-nav button { min-height:56px; color:#93aaa4; justify-content:center; } }
+.metric p,.data-row small,.job-row small,label small,.asset-copy code,.runtime-card>small,.alert-card>small { color:var(--muted); }
+:root { --amber:#8a5a0d; }
+.pill-active { color:#5d643f; }
+.safe-yellow .safe-indicator { color:#76500f; }
+.cg-state-pill { color:#56645f; }
+.cg-timeline code { color:#4f6c62; }
+.commission-wizard-rail button>span { color:#4a6158; }
+.commission-blocked .commission-check-mark { color:#91332f; }
