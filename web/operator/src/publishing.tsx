@@ -1,10 +1,11 @@
-import { FormEvent, ReactNode, useCallback, useEffect, useMemo, useState } from "react";
+import { FormEvent, ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { apiRequest } from "./api-client";
 import type { AuthoritativeCommissioningReport } from "./commissioning-contract";
 import {
   PUBLISH_TARGET_KINDS,
   publishAccountMutation,
   publishTargetMutation,
+  LatestPublishingAuthorityLoad,
   publishingAccountMutationReason,
   publishingHistoryPath,
   publishingKindLabel,
@@ -47,9 +48,16 @@ export function PublishingPanel() {
   const [targetEditor, setTargetEditor] = useState<PublishTargetProfile | "new" | null>(null);
   const [accountDraft, setAccountDraft] = useState<PublishAccountDraft>(EMPTY_ACCOUNT);
   const [targetDraft, setTargetDraft] = useState<PublishTargetDraft>(EMPTY_TARGET);
+  const publishingLoad = useRef(new LatestPublishingAuthorityLoad());
+  const hasLoadedAuthority = useRef(false);
+  const [authorityCurrent, setAuthorityCurrent] = useState(false);
 
   const load = useCallback(async () => {
+    const request = publishingLoad.current.begin();
     setRefreshing(true);
+    setAuthorityCurrent(false);
+    setAccountEditor(null);
+    setTargetEditor(null);
     try {
       const [nextAccounts, nextTargets, session, report] = await Promise.all([
         apiRequest<PublishTargetAccount[]>("/api/v1/publishing/accounts"),
@@ -57,26 +65,34 @@ export function PublishingPanel() {
         apiRequest<OperatorSession>("/api/v1/auth/session"),
         apiRequest<AuthoritativeCommissioningReport>("/api/v1/commissioning/report"),
       ]);
+      if (!publishingLoad.current.accepts(request)) return;
       const [accountHistories, targetHistories] = await Promise.all([
         Promise.all(nextAccounts.map(async (account) => [account.account_id, await apiRequest<AccountHistory[]>(publishingHistoryPath("accounts", account.account_id))] as const)),
         Promise.all(nextTargets.map(async (target) => [target.target_id, await apiRequest<TargetHistory[]>(publishingHistoryPath("targets", target.target_id))] as const)),
       ]);
+      if (!publishingLoad.current.accepts(request)) return;
       setAccounts(nextAccounts);
       setTargets(nextTargets);
       setAccountHistory(Object.fromEntries(accountHistories));
       setTargetHistory(Object.fromEntries(targetHistories));
       setReadiness(report.checks.find((check) => check.id === "publish_targets") as PublicationReadinessCheck | undefined ?? null);
       setSetupAdmin(session.session.roles.includes("setup_admin"));
+      setAuthorityCurrent(true);
+      hasLoadedAuthority.current = true;
       setError(null); setHistoryError(null);
     } catch (problem) {
+      if (!publishingLoad.current.accepts(request)) return;
       setError(problem instanceof Error ? problem.message : "Publishing authority could not be read.");
-      if (accounts.length || targets.length) setHistoryError("The shown publishing authority may be stale. Refresh before editing.");
+      if (hasLoadedAuthority.current) setHistoryError("The shown publishing authority may be stale. Refresh before editing.");
     } finally {
-      setLoading(false); setRefreshing(false);
+      if (publishingLoad.current.accepts(request)) { setLoading(false); setRefreshing(false); }
     }
-  }, [accounts.length, targets.length]);
+  }, []);
 
-  useEffect(() => { void load(); }, [load]);
+  useEffect(() => {
+    void load();
+    return () => publishingLoad.current.invalidate();
+  }, [load]);
 
   function beginAccount(account: PublishTargetAccount | null) {
     setTargetEditor(null); setAccountEditor(account ?? "new"); setError(null); setNotice(null);
@@ -97,7 +113,7 @@ export function PublishingPanel() {
     event.preventDefault();
     const existing = accountEditor !== "new" ? accountEditor : null;
     const blocked = publishingAccountMutationReason(accountDraft, existing?.revision ?? null);
-    if (blocked || !setupAdmin) { setError(blocked ?? "Setup Admin is required to change publishing authority."); return; }
+    if (blocked || !setupAdmin || !authorityCurrent) { setError(blocked ?? "Refresh current publishing authority before saving."); return; }
     setSaving(true); setError(null); setNotice(null);
     try {
       const accountId = existing?.account_id ?? crypto.randomUUID();
@@ -115,7 +131,7 @@ export function PublishingPanel() {
     event.preventDefault();
     const existing = targetEditor !== "new" ? targetEditor : null;
     const blocked = publishingTargetMutationReason(targetDraft, existing?.revision ?? null);
-    if (blocked || !setupAdmin) { setError(blocked ?? "Setup Admin is required to change publishing authority."); return; }
+    if (blocked || !setupAdmin || !authorityCurrent) { setError(blocked ?? "Refresh current publishing authority before saving."); return; }
     setSaving(true); setError(null); setNotice(null);
     try {
       const targetId = existing?.target_id ?? crypto.randomUUID();
@@ -130,6 +146,7 @@ export function PublishingPanel() {
   }
 
   const accountById = useMemo(() => new Map(accounts.map((account) => [account.account_id, account])), [accounts]);
+  const canWrite = setupAdmin && authorityCurrent && !refreshing;
   const accountBlock = publishingAccountMutationReason(accountDraft, accountEditor && accountEditor !== "new" ? accountEditor.revision : null);
   const targetBlock = publishingTargetMutationReason(targetDraft, targetEditor && targetEditor !== "new" ? targetEditor.revision : null);
 
@@ -144,18 +161,19 @@ export function PublishingPanel() {
     {historyError && <div className="headend-warning" role="status">{historyError}</div>}
     {notice && <div className="notice" role="status">{notice}</div>}
     {!setupAdmin && !error && <div className="headend-warning" role="status">Read-only view. An enabled Setup Admin account is required to create or revise publishing authority.</div>}
+    {setupAdmin && !authorityCurrent && !error && <div className="headend-warning" role="status">Publishing authority is refreshing. Editing stays disabled until the newest server response and history are current.</div>}
     <section className="panel publishing-readiness" aria-label="Server publication readiness">
       <div className="panel-head"><div><p className="eyebrow">Authoritative commissioning state</p><h2>Connection readiness</h2></div>{readiness && <span className={`status ${statusClass(readiness.status)}`}>{publishingReadinessLabel(readiness.status)}</span>}</div>
       {readiness ? <><p>{readiness.detail}</p><small>{readiness.evidence || "No trusted connection authority detail was reported."}</small></> : <div className="publishing-empty"><strong>Readiness is unavailable</strong><p>The server did not return its Required publish targets commissioning check. This browser will not infer readiness.</p></div>}
       <p className="publishing-nonclaim">A current connection test verifies only the configured target connection authority for the installed candidate. It does not claim a published item, successful delivery, a receiver accepting content, or audience reach.</p>
     </section>
     <div className="publishing-layout">
-      <section className="panel"><div className="panel-head"><div><p className="eyebrow">Redacted account authority</p><h2>Accounts</h2></div><div className="panel-actions"><span className="count">{accounts.length}</span>{setupAdmin && <button className="secondary" onClick={() => beginAccount(null)} disabled={saving || accountEditor !== null}>Add account</button>}</div></div>
-        {!accounts.length ? <div className="publishing-empty"><strong>No publishing accounts configured</strong><p>Create a bounded account record before linking a target. Credential material is never entered or displayed here.</p>{setupAdmin && <button className="primary" onClick={() => beginAccount(null)}>Create account</button>}</div> : <div className="publishing-record-list">{accounts.map((account) => <article className="publishing-record" key={account.account_id}><div className="publishing-record-head"><div><strong>{account.label}</strong><small>{publishingKindLabel(account.kind)} · revision {account.revision}</small></div><span className={`status ${account.enabled ? "pass" : "unknown"}`}>{account.enabled ? "enabled" : "disabled"}</span></div><dl><div><dt>Credential</dt><dd>{account.credential_configured ? "Configured (secret redacted)" : "Not configured"}</dd></div><div><dt>Account identity</dt><dd><code>{account.account_id}</code></dd></div></dl>{setupAdmin && <button className="text-button" onClick={() => beginAccount(account)} disabled={saving}>Edit account</button>}<History title="Account history" entries={accountHistory[account.account_id] ?? []} render={(entry) => <>{entry.account.label} · revision {entry.account.revision} · {entry.account.enabled ? "enabled" : "disabled"} · credential {entry.account.credential_configured ? "configured" : "not configured"}</>} /></article>)}</div>}
+      <section className="panel"><div className="panel-head"><div><p className="eyebrow">Redacted account authority</p><h2>Accounts</h2></div><div className="panel-actions"><span className="count">{accounts.length}</span>{setupAdmin && <button className="secondary" onClick={() => beginAccount(null)} disabled={saving || accountEditor !== null || !canWrite}>Add account</button>}</div></div>
+        {!accounts.length ? <div className="publishing-empty"><strong>No publishing accounts configured</strong><p>Create a bounded account record before linking a target. Credential material is never entered or displayed here.</p>{setupAdmin && <button className="primary" onClick={() => beginAccount(null)} disabled={!canWrite}>Create account</button>}</div> : <div className="publishing-record-list">{accounts.map((account) => <article className="publishing-record" key={account.account_id}><div className="publishing-record-head"><div><strong>{account.label}</strong><small>{publishingKindLabel(account.kind)} · revision {account.revision}</small></div><span className={`status ${account.enabled ? "pass" : "unknown"}`}>{account.enabled ? "enabled" : "disabled"}</span></div><dl><div><dt>Credential</dt><dd>{account.credential_configured ? "Configured (secret redacted)" : "Not configured"}</dd></div><div><dt>Account identity</dt><dd><code>{account.account_id}</code></dd></div></dl>{setupAdmin && <button className="text-button" onClick={() => beginAccount(account)} disabled={saving || !canWrite}>Edit account</button>}<History title="Account history" entries={accountHistory[account.account_id] ?? []} render={(entry) => <>{entry.account.label} · revision {entry.account.revision} · {entry.account.enabled ? "enabled" : "disabled"} · credential {entry.account.credential_configured ? "configured" : "not configured"}</>} /></article>)}</div>}
         {accountEditor && <AccountEditor editor={accountEditor} draft={accountDraft} blocked={accountBlock} saving={saving} onDraft={setAccountDraft} onCancel={() => setAccountEditor(null)} onSave={saveAccount} />}
       </section>
-      <section className="panel"><div className="panel-head"><div><p className="eyebrow">Redacted target authority</p><h2>Targets</h2></div><div className="panel-actions"><span className="count">{targets.length}</span>{setupAdmin && <button className="secondary" onClick={() => beginTarget(null)} disabled={saving || targetEditor !== null || !accounts.length}>Add target</button>}</div></div>
-        {!targets.length ? <div className="publishing-empty"><strong>No publishing targets configured</strong><p>Targets remain intentionally inert until a trusted, current connection test is recorded outside this browser.</p>{setupAdmin && accounts.length > 0 && <button className="primary" onClick={() => beginTarget(null)}>Create target</button>}</div> : <div className="publishing-record-list">{targets.map((target) => { const account = accountById.get(target.account_id); return <article className="publishing-record" key={target.target_id}><div className="publishing-record-head"><div><strong>{target.label}</strong><small>{publishingKindLabel(target.kind)} · revision {target.revision}</small></div><span className={`status ${target.enabled ? "pass" : "unknown"}`}>{target.enabled ? "enabled" : "disabled"}</span></div><dl><div><dt>Linked account</dt><dd>{account?.label ?? "Missing account"}</dd></div><div><dt>Configuration fingerprint</dt><dd><code>{redactConfigurationHash(target.configuration_hash)}</code></dd></div><div><dt>Target identity</dt><dd><code>{target.target_id}</code></dd></div></dl>{setupAdmin && <button className="text-button" onClick={() => beginTarget(target)} disabled={saving}>Edit target</button>}<History title="Target history" entries={targetHistory[target.target_id] ?? []} render={(entry) => <>{entry.target.label} · revision {entry.target.revision} · {entry.target.enabled ? "enabled" : "disabled"} · configuration {redactConfigurationHash(entry.target.configuration_hash)}</>} /></article>; })}</div>}
+      <section className="panel"><div className="panel-head"><div><p className="eyebrow">Redacted target authority</p><h2>Targets</h2></div><div className="panel-actions"><span className="count">{targets.length}</span>{setupAdmin && <button className="secondary" onClick={() => beginTarget(null)} disabled={saving || targetEditor !== null || !accounts.length || !canWrite}>Add target</button>}</div></div>
+        {!targets.length ? <div className="publishing-empty"><strong>No publishing targets configured</strong><p>Targets remain intentionally inert until a trusted, current connection test is recorded outside this browser.</p>{setupAdmin && accounts.length > 0 && <button className="primary" onClick={() => beginTarget(null)} disabled={!canWrite}>Create target</button>}</div> : <div className="publishing-record-list">{targets.map((target) => { const account = accountById.get(target.account_id); return <article className="publishing-record" key={target.target_id}><div className="publishing-record-head"><div><strong>{target.label}</strong><small>{publishingKindLabel(target.kind)} · revision {target.revision}</small></div><span className={`status ${target.enabled ? "pass" : "unknown"}`}>{target.enabled ? "enabled" : "disabled"}</span></div><dl><div><dt>Linked account</dt><dd>{account?.label ?? "Missing account"}</dd></div><div><dt>Configuration fingerprint</dt><dd><code>{redactConfigurationHash(target.configuration_hash)}</code></dd></div><div><dt>Target identity</dt><dd><code>{target.target_id}</code></dd></div></dl>{setupAdmin && <button className="text-button" onClick={() => beginTarget(target)} disabled={saving || !canWrite}>Edit target</button>}<History title="Target history" entries={targetHistory[target.target_id] ?? []} render={(entry) => <>{entry.target.label} · revision {entry.target.revision} · {entry.target.enabled ? "enabled" : "disabled"} · configuration {redactConfigurationHash(entry.target.configuration_hash)}</>} /></article>; })}</div>}
         {targetEditor && <TargetEditor editor={targetEditor} draft={targetDraft} accounts={accounts} blocked={targetBlock} saving={saving} onDraft={setTargetDraft} onCancel={() => setTargetEditor(null)} onSave={saveTarget} />}
       </section>
     </div>

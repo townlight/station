@@ -142,3 +142,20 @@ export function redactConfigurationHash(value: string): string {
 export function publishingHistoryPath(kind: "accounts" | "targets", id: string): string {
   return `/api/v1/publishing/${kind}/${encodeURIComponent(id)}/history?limit=20`;
 }
+
+export class LatestPublishingAuthorityLoad {
+  private latestRequest = 0;
+
+  begin(): number {
+    this.latestRequest += 1;
+    return this.latestRequest;
+  }
+
+  accepts(request: number): boolean {
+    return request === this.latestRequest;
+  }
+
+  invalidate(): void {
+    this.latestRequest += 1;
+  }
+}

@@ -9,6 +9,7 @@ import {
   publishingReadinessLabel,
   publishingTargetMutationReason,
   redactConfigurationHash,
+  LatestPublishingAuthorityLoad,
 } from "./publishing-contract.ts";
 
 test("publishing account mutations reject unbounded or blank browser fields", () => {
@@ -41,4 +42,15 @@ test("readiness labels and history paths avoid delivery and audience claims", ()
   assert.equal(publishingHistoryPath("targets", "a/b?c"), "/api/v1/publishing/targets/a%2Fb%3Fc/history?limit=20");
   assert.equal(redactConfigurationHash("a".repeat(64)), "aaaaaaaaaa…aaaaaa");
   assert.equal(redactConfigurationHash("not-a-hash"), "Not recorded");
+});
+
+test("only the newest overlapping publishing authority response may update operator state", () => {
+  const load = new LatestPublishingAuthorityLoad();
+  const first = load.begin();
+  const second = load.begin();
+  assert.notEqual(first, second);
+  assert.equal(load.accepts(first), false);
+  assert.equal(load.accepts(second), true);
+  load.invalidate();
+  assert.equal(load.accepts(second), false);
 });
