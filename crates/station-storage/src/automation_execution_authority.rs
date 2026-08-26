@@ -68,7 +68,18 @@ impl StationStore {
                BEGIN SELECT RAISE(ABORT, 'automation execution receipts are append-only'); END;\
              CREATE TRIGGER IF NOT EXISTS automation_execution_receipts_no_delete \
                BEFORE DELETE ON automation_execution_receipts \
-               BEGIN SELECT RAISE(ABORT, 'automation execution receipts are append-only'); END;",
+               BEGIN SELECT RAISE(ABORT, 'automation execution receipts are append-only'); END;\
+             CREATE TRIGGER IF NOT EXISTS automation_execution_jobs_binding_immutable \
+               BEFORE UPDATE OF job_id,feature,policy_id,policy_revision,adapter_id,adapter_revision,configuration_hash,candidate_version,source_commit,input_sha256,input_bytes,created_at_unix_ms,request_json \
+               ON automation_execution_jobs \
+               BEGIN SELECT RAISE(ABORT, 'automation execution job binding is immutable'); END;\
+             CREATE TRIGGER IF NOT EXISTS automation_execution_jobs_terminal_immutable \
+               BEFORE UPDATE ON automation_execution_jobs \
+               WHEN OLD.state IN ('completed','failed') \
+               BEGIN SELECT RAISE(ABORT, 'terminal automation execution jobs are immutable'); END;\
+             CREATE TRIGGER IF NOT EXISTS automation_execution_jobs_no_delete \
+               BEFORE DELETE ON automation_execution_jobs \
+               BEGIN SELECT RAISE(ABORT, 'automation execution jobs are durable history'); END;",
         )
     }
 
@@ -494,10 +505,22 @@ impl StationStore {
         {
             return Err("automation execution job row and request disagree".into());
         }
+        let durable_receipt = self.read_automation_execution_receipt_for_job(&request)?;
         let receipt = if receipt_id.is_empty() {
+            if durable_receipt.is_some() {
+                return Err(
+                    "automation execution receipt is orphaned from its durable job pointer".into(),
+                );
+            }
             None
         } else {
-            Some(self.read_automation_execution_receipt(&receipt_id, &request)?)
+            let receipt = durable_receipt.ok_or_else(|| {
+                "automation execution job references a missing receipt".to_string()
+            })?;
+            if receipt.receipt_id != receipt_id {
+                return Err("automation execution job and receipt identities disagree".into());
+            }
+            Some(receipt)
         };
         let record = AutomationExecutionJobRecord {
             request,
@@ -514,15 +537,14 @@ impl StationStore {
         Ok(record)
     }
 
-    fn read_automation_execution_receipt(
+    fn read_automation_execution_receipt_for_job(
         &self,
-        receipt_id: &str,
         request: &AutomationExecutionRequest,
-    ) -> Result<AutomationExecutionReceipt, String> {
+    ) -> Result<Option<AutomationExecutionReceipt>, String> {
         let statement = self.prepare(
-            "SELECT receipt_id,job_id,output_sha256,output_bytes,completed_at_unix_ms,record_json FROM automation_execution_receipts WHERE receipt_id=?1",
+            "SELECT receipt_id,job_id,output_sha256,output_bytes,completed_at_unix_ms,record_json FROM automation_execution_receipts WHERE job_id=?1",
         )?;
-        let identity = c_string(receipt_id, "automation execution receipt identity")?;
+        let identity = c_string(&request.job_id, "automation execution job identity")?;
         bind_text(self.database, statement.raw, 1, &identity)?;
         match unsafe { sqlite3_step(statement.raw) } {
             SQLITE_ROW => {
@@ -543,9 +565,9 @@ impl StationStore {
                 {
                     return Err("automation execution receipt row and record disagree".into());
                 }
-                Ok(receipt)
+                Ok(Some(receipt))
             }
-            SQLITE_DONE => Err("automation execution job references a missing receipt".into()),
+            SQLITE_DONE => Ok(None),
             _ => Err(sqlite_error(self.database)),
         }
     }

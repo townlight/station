@@ -1,4 +1,6 @@
-use std::path::PathBuf;
+use std::ffi::{CString, c_char, c_int, c_void};
+use std::path::{Path, PathBuf};
+use std::ptr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -22,6 +24,56 @@ const RUNTIME_SHA: &str = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee
 const MODEL_SHA: &str = "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
 const COMMIT: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 static DATABASE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+const SQLITE_OK: c_int = 0;
+const SQLITE_OPEN_READWRITE: c_int = 2;
+
+#[link(name = "winsqlite3")]
+unsafe extern "C" {
+    fn sqlite3_open_v2(
+        filename: *const c_char,
+        database: *mut *mut c_void,
+        flags: c_int,
+        virtual_file_system: *const c_char,
+    ) -> c_int;
+    fn sqlite3_exec(
+        database: *mut c_void,
+        sql: *const c_char,
+        callback: *mut c_void,
+        callback_argument: *mut c_void,
+        error_message: *mut *mut c_char,
+    ) -> c_int;
+    fn sqlite3_close(database: *mut c_void) -> c_int;
+}
+
+fn raw_sql_status(database_path: &Path, sql: &str) -> c_int {
+    let filename = CString::new(database_path.to_string_lossy().as_bytes()).unwrap();
+    let sql = CString::new(sql).unwrap();
+    let mut database = ptr::null_mut();
+    // SAFETY: inputs are live C strings and the opened handle is closed below.
+    let open = unsafe {
+        sqlite3_open_v2(
+            filename.as_ptr(),
+            &mut database,
+            SQLITE_OPEN_READWRITE,
+            ptr::null(),
+        )
+    };
+    assert_eq!(open, SQLITE_OK);
+    // SAFETY: the handle and SQL string are live, and no callback is used.
+    let status = unsafe {
+        sqlite3_exec(
+            database,
+            sql.as_ptr(),
+            ptr::null_mut(),
+            ptr::null_mut(),
+            ptr::null_mut(),
+        )
+    };
+    // SAFETY: this handle was opened above and has not yet been closed.
+    assert_eq!(unsafe { sqlite3_close(database) }, SQLITE_OK);
+    status
+}
 
 fn temporary_database(name: &str) -> PathBuf {
     let nonce = SystemTime::now()
@@ -349,5 +401,92 @@ fn live_owner_can_renew_but_expired_or_wrong_owner_cannot() {
     );
 
     drop(store);
+    let _ = std::fs::remove_file(database);
+}
+
+#[test]
+fn durable_job_bindings_and_terminal_rows_are_immutable() {
+    let (database, store) = configured_store("automation-execution-job-immutability");
+    store
+        .enqueue_automation_execution_job(&request(), &candidate(), 100)
+        .unwrap();
+
+    drop(store);
+    assert_ne!(
+        raw_sql_status(
+            &database,
+            "UPDATE automation_execution_jobs SET input_sha256='eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee'"
+        ),
+        SQLITE_OK,
+        "durable request bindings must be immutable"
+    );
+
+    let store = StationStore::open(&database).unwrap();
+    store
+        .claim_automation_execution_job(JOB_ID, "automation-worker-1", &candidate(), 150, 1_000)
+        .unwrap();
+    store
+        .complete_automation_execution_job(
+            JOB_ID,
+            "automation-worker-1",
+            &receipt(),
+            &candidate(),
+            350,
+        )
+        .unwrap();
+    drop(store);
+
+    assert_ne!(
+        raw_sql_status(
+            &database,
+            "UPDATE automation_execution_jobs SET state='failed',receipt_id='',last_failure_code='tampered'"
+        ),
+        SQLITE_OK,
+        "terminal job rows must be immutable"
+    );
+    assert_ne!(
+        raw_sql_status(&database, "DELETE FROM automation_execution_jobs"),
+        SQLITE_OK,
+        "durable job history must not be deletable"
+    );
+
+    let _ = std::fs::remove_file(database);
+}
+
+#[test]
+fn read_fails_closed_when_a_receipt_is_orphaned_from_its_job_row() {
+    let (database, store) = configured_store("automation-execution-orphan-receipt");
+    store
+        .enqueue_automation_execution_job(&request(), &candidate(), 100)
+        .unwrap();
+    store
+        .claim_automation_execution_job(JOB_ID, "automation-worker-1", &candidate(), 150, 1_000)
+        .unwrap();
+    store
+        .complete_automation_execution_job(
+            JOB_ID,
+            "automation-worker-1",
+            &receipt(),
+            &candidate(),
+            350,
+        )
+        .unwrap();
+    drop(store);
+
+    assert_eq!(
+        raw_sql_status(
+            &database,
+            "DROP TRIGGER automation_execution_jobs_terminal_immutable;\
+             UPDATE automation_execution_jobs SET state='pending',receipt_id='',completed_at_unix_ms=-1"
+        ),
+        SQLITE_OK
+    );
+    let reopened = StationStore::open(&database).unwrap();
+    assert!(
+        reopened.read_automation_execution_job(JOB_ID).is_err(),
+        "a receipt must remain discoverable by job identity even if its pointer is corrupted"
+    );
+
+    drop(reopened);
     let _ = std::fs::remove_file(database);
 }
