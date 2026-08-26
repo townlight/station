@@ -19,6 +19,7 @@ pub const MAINTENANCE_SCHEMA_VERSION: u32 = 1;
 pub const ACTIVE_SLOT_RECEIPT_NAME: &str = "active-slot.json";
 pub const INSTALL_RECEIPT_NAME: &str = "install-receipt.json";
 pub const INSTALLED_RUNTIME_MANIFEST_NAME: &str = "runtime-manifest.json";
+pub const TSDUCK_RUNTIME_MANIFEST_NAME: &str = "tsduck-runtime-manifest.json";
 pub const INSTALLED_RUNTIME_MANIFEST_SCHEMA_VERSION: u32 = 1;
 pub const TRANSACTION_DIRECTORY_NAME: &str = "maintenance-transactions";
 pub const REQUEST_DIRECTORY_NAME: &str = "maintenance-requests";
@@ -35,6 +36,19 @@ const MAX_RUNTIME_TOTAL_BYTES: u64 = 1024 * 1024 * 1024;
 const MAX_JOURNAL_SNAPSHOT_ENTRIES: usize = 10_000;
 const MAX_JOURNAL_SNAPSHOT_PATH_BYTES: usize = 512;
 const MAX_JOURNAL_SNAPSHOT_PATH_DEPTH: usize = 32;
+const TSDUCK_VERSION: &str = "3.44-4676";
+const TSDUCK_SOURCE_URL: &str = "https://github.com/tsduck/tsduck/releases/download/v3.44-4676/TSDuck-Win64-3.44-4676-Portable.zip";
+const TSDUCK_ARCHIVE_NAME: &str = "TSDuck-Win64-3.44-4676-Portable.zip";
+const TSDUCK_ARCHIVE_SHA256: &str =
+    "b0ca0f963fcd77488b8c32d6f9d85030daa891ed753c36e57bbb458807a44eb1";
+const REQUIRED_TSDUCK_RUNTIME_FILES: [&str; 6] = [
+    "LICENSE.txt",
+    "OTHERS.txt",
+    "bin/tsp.exe",
+    "bin/tsanalyze.exe",
+    "bin/tsduck.dll",
+    "bin/tscore.dll",
+];
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -1443,6 +1457,16 @@ struct InstallReceiptIdentity {
     media_runtime_sha256: String,
     runtime_manifest_sha256: String,
     #[serde(default)]
+    tsduck_version: Option<String>,
+    #[serde(default)]
+    tsduck_source_url: Option<String>,
+    #[serde(default)]
+    tsduck_archive_name: Option<String>,
+    #[serde(default)]
+    tsduck_runtime_sha256: Option<String>,
+    #[serde(default)]
+    tsduck_runtime_manifest_sha256: Option<String>,
+    #[serde(default)]
     installed_at_unix_ms: Option<i64>,
     #[serde(default)]
     health_uri: Option<String>,
@@ -1472,6 +1496,30 @@ pub fn read_verified_candidate_identity(
     if !is_sha256_lowercase(&install.runtime_manifest_sha256) {
         return Err("installation receipt runtime manifest SHA-256 is invalid".into());
     }
+    let tsduck_identity = match (
+        install.tsduck_version.as_deref(),
+        install.tsduck_source_url.as_deref(),
+        install.tsduck_archive_name.as_deref(),
+        install.tsduck_runtime_sha256.as_deref(),
+        install.tsduck_runtime_manifest_sha256.as_deref(),
+    ) {
+        (
+            Some(version),
+            Some(source_url),
+            Some(archive_name),
+            Some(runtime_sha256),
+            Some(manifest_sha256),
+        ) if version == TSDUCK_VERSION
+            && source_url == TSDUCK_SOURCE_URL
+            && archive_name == TSDUCK_ARCHIVE_NAME
+            && runtime_sha256 == TSDUCK_ARCHIVE_SHA256
+            && is_sha256_lowercase(manifest_sha256) =>
+        {
+            Some(manifest_sha256)
+        }
+        (None, None, None, None, None) => None,
+        _ => return Err("installation receipt TSDuck identity is invalid".into()),
+    };
 
     let active = read_active_slot_receipt(&data_directory.join(ACTIVE_SLOT_RECEIPT_NAME))?;
     let manifest = &active.active.package_manifest;
@@ -1509,6 +1557,40 @@ pub fn read_verified_candidate_identity(
         &application_root.join("runtime").join("gstreamer"),
         &runtime_manifest,
     )?;
+    if let Some(tsduck_manifest_sha256) = tsduck_identity {
+        let tsduck_runtime_manifest_bytes = read_bounded_file(
+            &data_directory.join(TSDUCK_RUNTIME_MANIFEST_NAME),
+            MAX_RUNTIME_MANIFEST_BYTES,
+            "installed TSDuck runtime manifest",
+        )?;
+        if sha256_lowercase(&tsduck_runtime_manifest_bytes) != tsduck_manifest_sha256 {
+            return Err(
+                "installation receipt TSDuck runtime manifest SHA-256 does not match the manifest"
+                    .into(),
+            );
+        }
+        let tsduck_runtime_manifest: InstalledRuntimeManifest =
+            serde_json::from_slice(&tsduck_runtime_manifest_bytes).map_err(|error| {
+                format!("installed TSDuck runtime manifest is invalid: {error}")
+            })?;
+        tsduck_runtime_manifest.validate()?;
+        if tsduck_runtime_manifest.product != install.product
+            || tsduck_runtime_manifest.runtime_package_sha256 != TSDUCK_ARCHIVE_SHA256
+            || REQUIRED_TSDUCK_RUNTIME_FILES.iter().any(|required| {
+                !tsduck_runtime_manifest
+                    .files
+                    .iter()
+                    .any(|file| file.path == *required)
+            })
+        {
+            return Err("installation and TSDuck runtime manifest identities do not agree".into());
+        }
+        verify_installed_runtime(
+            &application_root.join("runtime").join("tsduck"),
+            &tsduck_runtime_manifest,
+        )
+        .map_err(|error| format!("TSDuck runtime verification failed: {error}"))?;
+    }
     Ok(VerifiedCandidateIdentity {
         product: install.product,
         version: install.version,
@@ -1746,6 +1828,16 @@ fn write_install_identity(
         media_runtime_sha256: Option<String>,
         #[serde(default)]
         runtime_manifest_sha256: Option<String>,
+        #[serde(default)]
+        tsduck_version: Option<String>,
+        #[serde(default)]
+        tsduck_source_url: Option<String>,
+        #[serde(default)]
+        tsduck_archive_name: Option<String>,
+        #[serde(default)]
+        tsduck_runtime_sha256: Option<String>,
+        #[serde(default)]
+        tsduck_runtime_manifest_sha256: Option<String>,
     }
     #[derive(Serialize)]
     struct InstallIdentity<'a> {
@@ -1757,21 +1849,64 @@ fn write_install_identity(
         media_runtime_sha256: Option<&'a str>,
         #[serde(skip_serializing_if = "Option::is_none")]
         runtime_manifest_sha256: Option<&'a str>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        tsduck_version: Option<&'a str>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        tsduck_source_url: Option<&'a str>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        tsduck_archive_name: Option<&'a str>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        tsduck_runtime_sha256: Option<&'a str>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        tsduck_runtime_manifest_sha256: Option<&'a str>,
         health_uri: &'static str,
     }
     let previous_path = data_directory.join(INSTALL_RECEIPT_NAME);
     let previous = read_bounded_file(&previous_path, 64 * 1024, "installation receipt")
         .ok()
-        .and_then(|bytes| serde_json::from_slice::<PreviousInstallIdentity>(&bytes).ok())
-        .and_then(|identity| identity.media_runtime_sha256)
+        .and_then(|bytes| serde_json::from_slice::<PreviousInstallIdentity>(&bytes).ok());
+    let previous_runtime = previous
+        .as_ref()
+        .and_then(|identity| identity.media_runtime_sha256.as_ref())
         .filter(|hash| is_sha256(hash))
         .map(|hash| hash.to_ascii_lowercase());
-    let previous_manifest = read_bounded_file(&previous_path, 64 * 1024, "installation receipt")
-        .ok()
-        .and_then(|bytes| serde_json::from_slice::<PreviousInstallIdentity>(&bytes).ok())
-        .and_then(|identity| identity.runtime_manifest_sha256)
+    let previous_manifest = previous
+        .as_ref()
+        .and_then(|identity| identity.runtime_manifest_sha256.as_ref())
         .filter(|hash| is_sha256_lowercase(hash))
         .map(|hash| hash.to_ascii_lowercase());
+    let previous_tsduck = match previous.as_ref().map(|identity| {
+        (
+            identity.tsduck_version.as_deref(),
+            identity.tsduck_source_url.as_deref(),
+            identity.tsduck_archive_name.as_deref(),
+            identity.tsduck_runtime_sha256.as_deref(),
+            identity.tsduck_runtime_manifest_sha256.as_deref(),
+        )
+    }) {
+        None | Some((None, None, None, None, None)) => None,
+        Some((
+            Some(version),
+            Some(source_url),
+            Some(archive_name),
+            Some(runtime_sha256),
+            Some(manifest_sha256),
+        )) if version == TSDUCK_VERSION
+            && source_url == TSDUCK_SOURCE_URL
+            && archive_name == TSDUCK_ARCHIVE_NAME
+            && runtime_sha256 == TSDUCK_ARCHIVE_SHA256
+            && is_sha256_lowercase(manifest_sha256) =>
+        {
+            Some((
+                version,
+                source_url,
+                archive_name,
+                runtime_sha256,
+                manifest_sha256,
+            ))
+        }
+        _ => return Err("existing installation receipt TSDuck identity is invalid".into()),
+    };
     write_json_atomic(
         &previous_path,
         &InstallIdentity {
@@ -1779,8 +1914,13 @@ fn write_install_identity(
             version: &application.package_manifest.version,
             source_commit: &application.package_manifest.source_commit,
             installed_at_unix_ms: now_unix_ms,
-            media_runtime_sha256: previous.as_deref(),
+            media_runtime_sha256: previous_runtime.as_deref(),
             runtime_manifest_sha256: previous_manifest.as_deref(),
+            tsduck_version: previous_tsduck.map(|identity| identity.0),
+            tsduck_source_url: previous_tsduck.map(|identity| identity.1),
+            tsduck_archive_name: previous_tsduck.map(|identity| identity.2),
+            tsduck_runtime_sha256: previous_tsduck.map(|identity| identity.3),
+            tsduck_runtime_manifest_sha256: previous_tsduck.map(|identity| identity.4),
             health_uri: "http://127.0.0.1:4070/health",
         },
         "installation receipt",

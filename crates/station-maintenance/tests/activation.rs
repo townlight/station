@@ -3,8 +3,8 @@ use station_maintenance::{
     ACTIVE_SLOT_RECEIPT_NAME, ACTIVE_SLOT_SCHEMA_VERSION, ActiveApplication, ActiveSlotReceipt,
     INSTALL_RECEIPT_NAME, INSTALLED_RUNTIME_MANIFEST_NAME, MAINTENANCE_SCHEMA_VERSION,
     MaintenanceHost, MaintenancePhase, MaintenanceRequest, TRANSACTION_DIRECTORY_NAME,
-    activate_prepared_slot, latest_maintenance_transaction, read_active_slot_receipt,
-    read_verified_candidate_identity, recover_incomplete_transaction,
+    TSDUCK_RUNTIME_MANIFEST_NAME, activate_prepared_slot, latest_maintenance_transaction,
+    read_active_slot_receipt, read_verified_candidate_identity, recover_incomplete_transaction,
     write_installed_runtime_manifest,
 };
 use station_update::{
@@ -17,6 +17,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 const NOW: i64 = 1_800_000_000_000;
 const CURRENT_COMMIT: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const CANDIDATE_COMMIT: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+const TSDUCK_RUNTIME_SHA256: &str =
+    "b0ca0f963fcd77488b8c32d6f9d85030daa891ed753c36e57bbb458807a44eb1";
 
 #[derive(Default)]
 struct FakeHost {
@@ -133,6 +135,15 @@ fn commits_only_after_candidate_proof_and_records_the_previous_application() {
             .unwrap();
     assert_eq!(install["version"], "0.2.0");
     assert_eq!(install["media_runtime_sha256"], "c".repeat(64));
+    assert_eq!(install["tsduck_version"], "3.44-4676");
+    assert_eq!(install["tsduck_runtime_sha256"], TSDUCK_RUNTIME_SHA256);
+    assert_eq!(
+        install["tsduck_runtime_manifest_sha256"],
+        format!(
+            "{:x}",
+            Sha256::digest(std::fs::read(fixture.data.join(TSDUCK_RUNTIME_MANIFEST_NAME)).unwrap())
+        )
+    );
     assert_eq!(
         install["runtime_manifest_sha256"],
         format!(
@@ -582,10 +593,31 @@ fn fixture() -> Fixture {
     let runtime = application.join("runtime").join("gstreamer");
     std::fs::create_dir_all(runtime.join("bin")).unwrap();
     std::fs::write(runtime.join("bin").join("gstreamer.dll"), b"runtime").unwrap();
+    let tsduck_runtime = application.join("runtime").join("tsduck");
+    for (path, bytes) in [
+        ("LICENSE.txt", b"BSD-2-Clause".as_slice()),
+        ("OTHERS.txt", b"third-party notices".as_slice()),
+        ("bin/tsp.exe", b"tsp".as_slice()),
+        ("bin/tsanalyze.exe", b"tsanalyze".as_slice()),
+        ("bin/tsduck.dll", b"tsduck".as_slice()),
+        ("bin/tscore.dll", b"tscore".as_slice()),
+    ] {
+        let destination = tsduck_runtime.join(path);
+        std::fs::create_dir_all(destination.parent().unwrap()).unwrap();
+        std::fs::write(destination, bytes).unwrap();
+    }
     std::fs::create_dir_all(data.join("channel-journals").join("empty")).unwrap();
     std::fs::write(
         data.join("channel-journals").join("channel-a.tlj"),
         legacy_v1_journal(520),
+    )
+    .unwrap();
+    let tsduck_runtime_manifest_sha256 = write_installed_runtime_manifest(
+        &tsduck_runtime,
+        &data.join(TSDUCK_RUNTIME_MANIFEST_NAME),
+        "0.1.0",
+        CURRENT_COMMIT,
+        TSDUCK_RUNTIME_SHA256,
     )
     .unwrap();
     let database = data.join("station.db");
@@ -619,8 +651,8 @@ fn fixture() -> Fixture {
     std::fs::write(
         data.join(INSTALL_RECEIPT_NAME),
         format!(
-            "{{\"product\":\"TownLight Station\",\"version\":\"0.1.0\",\"source_commit\":\"{CURRENT_COMMIT}\",\"media_runtime_sha256\":\"{}\",\"runtime_manifest_sha256\":\"{runtime_manifest_sha256}\"}}",
-            "C".repeat(64)
+            "{{\"product\":\"TownLight Station\",\"version\":\"0.1.0\",\"source_commit\":\"{CURRENT_COMMIT}\",\"media_runtime_sha256\":\"{}\",\"runtime_manifest_sha256\":\"{runtime_manifest_sha256}\",\"tsduck_version\":\"3.44-4676\",\"tsduck_source_url\":\"https://github.com/tsduck/tsduck/releases/download/v3.44-4676/TSDuck-Win64-3.44-4676-Portable.zip\",\"tsduck_archive_name\":\"TSDuck-Win64-3.44-4676-Portable.zip\",\"tsduck_runtime_sha256\":\"{TSDUCK_RUNTIME_SHA256}\",\"tsduck_runtime_manifest_sha256\":\"{tsduck_runtime_manifest_sha256}\"}}",
+            "C".repeat(64),
         ),
     )
     .unwrap();

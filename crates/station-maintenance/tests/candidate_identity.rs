@@ -11,6 +11,8 @@ const VERSION: &str = "0.2.0";
 const COMMIT: &str = "0123456789abcdef0123456789abcdef01234567";
 const RUNTIME_SHA256: &str = "abcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcd";
 const RUNTIME_PACKAGE_SHA256: &str = RUNTIME_SHA256;
+const TSDUCK_RUNTIME_SHA256: &str =
+    "b0ca0f963fcd77488b8c32d6f9d85030daa891ed753c36e57bbb458807a44eb1";
 static FIXTURE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 struct Fixture {
@@ -18,6 +20,7 @@ struct Fixture {
     data: PathBuf,
     application: PathBuf,
     runtime: PathBuf,
+    tsduck_runtime: PathBuf,
 }
 
 impl Drop for Fixture {
@@ -39,6 +42,7 @@ fn fixture() -> Fixture {
     let data = root.join("data");
     let application = root.join("application");
     let runtime = application.join("runtime").join("gstreamer");
+    let tsduck_runtime = application.join("runtime").join("tsduck");
     std::fs::create_dir_all(&data).unwrap();
     std::fs::create_dir_all(&application).unwrap();
     std::fs::create_dir_all(runtime.join("bin")).unwrap();
@@ -58,6 +62,18 @@ fn fixture() -> Fixture {
         b"runtime plugin",
     )
     .unwrap();
+    for (path, bytes) in [
+        ("LICENSE.txt", b"BSD-2-Clause".as_slice()),
+        ("OTHERS.txt", b"third-party notices".as_slice()),
+        ("bin/tsp.exe", b"tsp".as_slice()),
+        ("bin/tsanalyze.exe", b"tsanalyze".as_slice()),
+        ("bin/tsduck.dll", b"tsduck".as_slice()),
+        ("bin/tscore.dll", b"tscore".as_slice()),
+    ] {
+        let destination = tsduck_runtime.join(path);
+        std::fs::create_dir_all(destination.parent().unwrap()).unwrap();
+        std::fs::write(destination, bytes).unwrap();
+    }
     std::fs::write(
         runtime
             .join("lib")
@@ -67,6 +83,14 @@ fn fixture() -> Fixture {
             .join("apps")
             .join("empty.py"),
         b"",
+    )
+    .unwrap();
+    let tsduck_runtime_manifest_sha256 = write_installed_runtime_manifest(
+        &tsduck_runtime,
+        &data.join("tsduck-runtime-manifest.json"),
+        VERSION,
+        COMMIT,
+        TSDUCK_RUNTIME_SHA256,
     )
     .unwrap();
 
@@ -125,6 +149,11 @@ fn fixture() -> Fixture {
             "source_commit": COMMIT,
             "media_runtime_sha256": RUNTIME_SHA256,
             "runtime_manifest_sha256": runtime_manifest_sha256,
+            "tsduck_version": "3.44-4676",
+            "tsduck_source_url": "https://github.com/tsduck/tsduck/releases/download/v3.44-4676/TSDuck-Win64-3.44-4676-Portable.zip",
+            "tsduck_archive_name": "TSDuck-Win64-3.44-4676-Portable.zip",
+            "tsduck_runtime_sha256": TSDUCK_RUNTIME_SHA256,
+            "tsduck_runtime_manifest_sha256": tsduck_runtime_manifest_sha256,
             "installed_at_unix_ms": 1,
             "health_uri": "http://127.0.0.1:4070/health",
         })
@@ -136,6 +165,7 @@ fn fixture() -> Fixture {
         data,
         application,
         runtime,
+        tsduck_runtime,
     }
 }
 
@@ -147,6 +177,27 @@ fn returns_the_verified_active_candidate_and_approved_runtime_identity() {
     assert_eq!(identity.version, VERSION);
     assert_eq!(identity.source_commit, COMMIT);
     assert_eq!(identity.media_runtime_sha256, RUNTIME_SHA256);
+}
+
+#[test]
+fn accepts_a_legacy_candidate_that_has_no_tsduck_runtime_lane() {
+    let fixture = fixture();
+    let path = fixture.data.join("install-receipt.json");
+    let mut receipt: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    for field in [
+        "tsduck_version",
+        "tsduck_source_url",
+        "tsduck_archive_name",
+        "tsduck_runtime_sha256",
+        "tsduck_runtime_manifest_sha256",
+    ] {
+        receipt.as_object_mut().unwrap().remove(field);
+    }
+    std::fs::write(path, receipt.to_string()).unwrap();
+    std::fs::remove_file(fixture.data.join("tsduck-runtime-manifest.json")).unwrap();
+    std::fs::remove_dir_all(&fixture.tsduck_runtime).unwrap();
+    assert!(read_verified_candidate_identity(&fixture.data, &fixture.application).is_ok());
 }
 
 #[test]
@@ -199,6 +250,21 @@ fn rejects_a_tampered_installed_runtime_file() {
     .unwrap();
     let error = read_verified_candidate_identity(&fixture.data, &fixture.application).unwrap_err();
     assert!(error.contains("runtime"), "unexpected error: {error}");
+}
+
+#[test]
+fn rejects_a_tampered_tsduck_runtime_file() {
+    let fixture = fixture();
+    std::fs::write(
+        fixture.tsduck_runtime.join("bin").join("tsp.exe"),
+        b"tampered",
+    )
+    .unwrap();
+    let error = read_verified_candidate_identity(&fixture.data, &fixture.application).unwrap_err();
+    assert!(
+        error.contains("TSDuck") || error.contains("tsduck"),
+        "unexpected error: {error}"
+    );
 }
 
 #[test]

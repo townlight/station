@@ -409,7 +409,10 @@ function Get-TownLightCandidateIdentity {
     Assert-TownLightCandidateString -Manifest $manifest -Name 'tsduck_version' -Pattern '^3\.44-4676$' -Code 'tsduck_version_invalid' | Out-Null
     Assert-TownLightCandidateString -Manifest $manifest -Name 'tsduck_source_url' -Pattern '^https://github\.com/tsduck/tsduck/releases/download/v3\.44-4676/TSDuck-Win64-3\.44-4676-Portable\.zip$' -Code 'tsduck_source_url_invalid' | Out-Null
     Assert-TownLightCandidateString -Manifest $manifest -Name 'tsduck_archive_name' -Pattern '^TSDuck-Win64-3\.44-4676-Portable\.zip$' -Code 'tsduck_archive_name_invalid' | Out-Null
-    Assert-TownLightCandidateString -Manifest $manifest -Name 'tsduck_runtime_sha256' -Pattern '^[0-9a-f]{64}$' -Code 'tsduck_runtime_sha256_invalid' | Out-Null
+    $tsduckRuntimeHash = Assert-TownLightCandidateString -Manifest $manifest -Name 'tsduck_runtime_sha256' -Pattern '^[0-9a-f]{64}$' -Code 'tsduck_runtime_sha256_invalid'
+    if ($tsduckRuntimeHash -cne 'b0ca0f963fcd77488b8c32d6f9d85030daa891ed753c36e57bbb458807a44eb1') {
+        throw 'candidate_pair_tsduck_runtime_sha256_invalid'
+    }
     foreach ($name in @('caption_decoder_size_bytes', 'caption_decoder_license_size_bytes')) {
         Assert-TownLightCandidateSizeProperty -Object $manifest -Name $name -Code "${name}_invalid"
     }

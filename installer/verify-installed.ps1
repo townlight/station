@@ -190,8 +190,6 @@ if ($receipt.tsduck_version -cne [string]$manifestDocument.tsduck_version -or
 }
 if ($tsduckRuntimeManifest.schema_version -ne 1 -or
     $tsduckRuntimeManifest.product -ne 'TownLight Station' -or
-    $tsduckRuntimeManifest.version -ne $manifestDocument.version -or
-    $tsduckRuntimeManifest.source_commit -ne $manifestDocument.source_commit -or
     $tsduckRuntimeManifest.runtime_package_sha256 -ne $manifestDocument.tsduck_runtime_sha256) {
     throw 'The installed TSDuck runtime manifest identity does not match the candidate.'
 }

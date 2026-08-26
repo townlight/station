@@ -119,6 +119,7 @@ Source: "{#StationUpdaterPath}"; DestName: "station-updater.exe"; Flags: dontcop
 Source: "{#CaptionDecoderPath}"; DestName: "caption-decoder-ffmpeg.exe"; Flags: dontcopy noencryption
 Source: "{#CaptionDecoderLicensePath}"; DestName: "caption-decoder-LICENSE.txt"; Flags: dontcopy noencryption
 Source: "{#TSDuckRuntimeArchive}"; DestName: "tsduck-runtime.zip"; Flags: dontcopy noencryption
+Source: "..\scripts\tsduck-runtime.ps1"; DestName: "tsduck-runtime.ps1"; Flags: dontcopy noencryption
 Source: "..\THIRD-PARTY-NOTICES.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\LICENSE"; DestDir: "{app}"; Flags: ignoreversion
 
@@ -570,6 +571,7 @@ var
   RuntimeInstaller: String;
   RuntimeRoot: String;
   TSDuckRoot: String;
+  TSDuckStagingRoot: String;
   RuntimeParent: String;
   Parameters: String;
 begin
@@ -594,16 +596,25 @@ begin
   RuntimeParent := ExpandConstant('{app}\runtime');
   if DirExists(TSDuckRoot) or FileExists(TSDuckRoot) then
     RaiseException('The private TSDuck runtime root already exists before clean extraction.');
+  TSDuckStagingRoot := RuntimeParent + '\.tsduck-staging';
+  if DirExists(TSDuckStagingRoot) or FileExists(TSDuckStagingRoot) then
+    RaiseException('The private TSDuck runtime staging root already exists before clean extraction.');
   ExtractTemporaryFile('tsduck-runtime.zip');
+  ExtractTemporaryFile('tsduck-runtime.ps1');
   Parameters := '-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "' +
-    '$ErrorActionPreference=''Stop''; Expand-Archive -LiteralPath ''' +
+    '$ErrorActionPreference=''Stop''; . ''' +
+    ExpandConstant('{tmp}\tsduck-runtime.ps1') + '''; Expand-TownLightTSDuckRuntime -ArchivePath ''' +
     ExpandConstant('{tmp}\tsduck-runtime.zip') + ''' -DestinationPath ''' +
-    RuntimeParent + ''' -Force"';
+    TSDuckStagingRoot + ''' | Out-Null"';
   if (not Exec(ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe'),
     Parameters, '', SW_HIDE, ewWaitUntilTerminated, ResultCode)) or
     (ResultCode <> 0) then
     RaiseException('The bundled TSDuck runtime could not be extracted (exit ' +
       IntToStr(ResultCode) + ').');
+  if not RenameFile(TSDuckStagingRoot + '\TSDuck', TSDuckRoot) then
+    RaiseException('The bundled TSDuck runtime could not be promoted from its validated staging directory.');
+  if DirExists(TSDuckStagingRoot) and (not RemoveDir(TSDuckStagingRoot)) then
+    RaiseException('The validated TSDuck staging directory could not be removed.');
   if not TSDuckRuntimeIsComplete(TSDuckRoot) then
     RaiseException('The bundled TSDuck runtime did not contain every required analyzer payload.');
 end;
