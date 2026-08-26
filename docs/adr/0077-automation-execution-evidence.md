@@ -27,7 +27,12 @@ lease, and an expired claim can be reclaimed without letting its old owner compl
 rechecks current policy, adapter, configuration, candidate, and connection-test authority inside the
 same immediate transaction that appends the immutable receipt and marks the job complete. Indexed
 identity, revision, candidate, input, output, size, and time columns are checked against the stored
-JSON on every read; receipt rows reject update and delete.
+JSON on every read. Request-binding columns cannot be updated, terminal job rows and receipt rows
+reject update or delete, and reads discover receipts by durable job identity so a corrupted receipt
+pointer cannot hide terminal evidence. Only the live exact lease owner can record an attempt failure.
+A retryable failure returns the job to Pending until the bounded attempt ceiling; a nonretryable
+failure or exhausted ceiling produces an immutable Failed terminal row with a bounded categorical
+failure code and no receipt.
 
 ## Boundaries and non-claims
 
