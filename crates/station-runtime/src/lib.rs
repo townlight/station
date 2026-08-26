@@ -421,22 +421,26 @@ impl WorkerSupervisor {
 
     fn drain_unsolicited_events(&mut self) -> Result<(), SupervisorError> {
         while let Some(event) = read_event_if_ready(&mut self.pipe)? {
-            self.accept_sequenced_event(&event)?;
+            // Do not advance the durable cursor until this frame has been
+            // proven to be an unsolicited lifecycle event.  An unexpected
+            // command acknowledgement already waiting in the pipe is a
+            // terminal synchronization fault, not a consumed event that can
+            // be silently folded into the next command's sequence.
+            self.validate_sequenced_event(&event)?;
             if !is_unsolicited_lifecycle_event(&event) {
                 return Err(SupervisorError::WrongSequence {
                     expected: self.last_sequence + 1,
                     actual: event.sequence,
                 });
             }
+            let sequence = event.sequence;
             self.queue_lifecycle_event(event)?;
+            self.last_sequence = sequence;
         }
         Ok(())
     }
 
-    fn accept_sequenced_event(
-        &mut self,
-        event: &WorkerEventEnvelope,
-    ) -> Result<(), SupervisorError> {
+    fn validate_sequenced_event(&self, event: &WorkerEventEnvelope) -> Result<(), SupervisorError> {
         validate_identity(event, &self.worker_id, &self.channel_id)?;
         let expected_sequence = self.last_sequence + 1;
         if event.sequence != expected_sequence {
@@ -445,6 +449,14 @@ impl WorkerSupervisor {
                 actual: event.sequence,
             });
         }
+        Ok(())
+    }
+
+    fn accept_sequenced_event(
+        &mut self,
+        event: &WorkerEventEnvelope,
+    ) -> Result<(), SupervisorError> {
+        self.validate_sequenced_event(event)?;
         self.last_sequence = event.sequence;
         Ok(())
     }

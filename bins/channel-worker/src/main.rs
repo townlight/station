@@ -357,7 +357,11 @@ fn main() {
         };
         {
             // A complete frame can arrive at the same deadline boundary.
-            // Recheck before dispatching it so expiry always wins safely.
+            // Recheck before dispatching it so expiry always wins safely.  The
+            // frame is already consumed, though: once read_command_frame_timeout
+            // returns Frame it must be decoded and dispatched exactly once.
+            // Emitting expiry first is the ordering decision; dropping this
+            // frame would strand the supervisor waiting for an acknowledgement.
             let now = started.elapsed().as_millis() as u64;
             if let Some(event) = expire_fallback_tone_if_due(
                 &mut journal,
@@ -375,7 +379,6 @@ fn main() {
                     .unwrap_or_else(|error| {
                         fatal(7, "record and emit fallback tone expiry", &error)
                     });
-                continue;
             }
             let command = decode_command_frame(&frame)
                 .unwrap_or_else(|error| fatal(6, "decode a command frame", &format!("{error:?}")));

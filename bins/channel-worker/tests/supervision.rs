@@ -370,6 +370,85 @@ fn supervisor_drains_autonomous_tone_expiry_before_the_next_command_and_replay_s
 }
 
 #[test]
+fn supervisor_keeps_a_command_frame_synchronized_when_expiry_crosses_dispatch() {
+    let _guard = supervision_test_guard();
+    let journal = journal_path();
+    let output = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let executable = PathBuf::from(env!("CARGO_BIN_EXE_channel-worker"));
+    let mut supervisor = WorkerSupervisor::launch_with_output_profile(
+        &executable,
+        WORKER_ID,
+        CHANNEL_ID,
+        &journal,
+        output.local_addr().unwrap(),
+        OutputProfileId::Proof360p30,
+        Duration::from_secs(30),
+    )
+    .unwrap();
+    let tone = WorkerFallbackTone {
+        activation_id: "33333333-4444-4333-8444-555555555555".into(),
+        authority_revision: 10,
+        kind: FallbackToneKind::Test,
+        frequency_hz: 1_000,
+        level_milli_dbfs: -20_000,
+        duration_ms: 100,
+    };
+    let activated = supervisor
+        .command(
+            "activate-dispatch-race",
+            ChannelCommand::ActivateFallbackTone { tone },
+            Duration::from_secs(2),
+        )
+        .unwrap();
+    assert_eq!(activated.sequence, 2);
+
+    // Publish the next command immediately before the worker's finite tone
+    // deadline. Depending on the scheduler, expiry can be observed before
+    // this command, between its pipe read and dispatch, or after its reply.
+    // Every ordering must still return a response; once a complete frame has
+    // been consumed it cannot be discarded by the expiry path.
+    thread::sleep(Duration::from_millis(98));
+    let response = supervisor
+        .command(
+            "ping-across-expiry",
+            ChannelCommand::Ping,
+            Duration::from_secs(2),
+        )
+        .unwrap();
+    assert!(
+        matches!(response.event, WorkerEvent::Heartbeat { .. })
+            || matches!(
+                response.event,
+                WorkerEvent::CommandRejected { code, .. } if code == "sequence_conflict"
+            ),
+        "the command must yield its own acknowledgement or a sequenced rejection"
+    );
+    let lifecycle = supervisor.take_lifecycle_events();
+    assert!(
+        lifecycle.iter().all(|event| matches!(
+            &event.event,
+            WorkerEvent::FallbackToneDeactivated {
+                deactivation: Some(deactivation),
+                ..
+            } if deactivation.reason == FallbackToneDeactivationReason::Expired
+        )),
+        "only autonomous expiry may be interposed"
+    );
+
+    let stopped = supervisor
+        .shutdown("shutdown-after-dispatch-race", Duration::from_secs(2))
+        .unwrap();
+    assert!(matches!(stopped.event, WorkerEvent::ShutdownComplete));
+    let sequences = read_events(&journal)
+        .unwrap()
+        .into_iter()
+        .map(|event| event.sequence)
+        .collect::<Vec<_>>();
+    assert_eq!(sequences, (1..=sequences.len() as u64).collect::<Vec<_>>());
+    let _ = fs::remove_file(journal);
+}
+
+#[test]
 fn committed_schedule_is_loaded_aired_and_completed_only_after_worker_acknowledgments() {
     let _guard = supervision_test_guard();
     let journal = journal_path();
