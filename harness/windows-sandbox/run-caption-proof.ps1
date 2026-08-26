@@ -424,6 +424,7 @@ try {
     $startsAt = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() + 12000
     Invoke-Api 'Put' '/schedule/items' ([ordered]@{
         item_id = $scheduleItemId
+        revision = 1
         channel_id = $channelId
         asset_id = $assetId
         title = 'Installed caption proof program'
