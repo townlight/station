@@ -4,6 +4,7 @@ import { readFileSync } from "node:fs";
 import { test } from "node:test";
 
 const shell = readFileSync(new URL("./main.tsx", import.meta.url), "utf8");
+const cg = readFileSync(new URL("./cg.tsx", import.meta.url), "utf8");
 const styles = readFileSync(new URL("./styles.css", import.meta.url), "utf8");
 
 test("station shell exposes current-page semantics and moves focus with routed content", () => {
@@ -25,4 +26,13 @@ test("keyboard focus and mobile navigation targets remain visible and operable",
   assert.match(styles, /\.cg-timeline code \{ color:#4f6c62; \}/);
   assert.match(styles, /\.commission-wizard-rail button>span \{ color:#4a6158; \}/);
   assert.match(styles, /\.commission-blocked \.commission-check-mark \{ color:#91332f; \}/);
+});
+
+test("S20 keeps dense CG controls reflowable and contrast-safe", () => {
+  assert.match(cg, /className="page-header cg-operator-header"/);
+  assert.match(styles, /\.cg-operator-header \.header-actions \{ display:grid; grid-template-columns:repeat\(2,minmax\(0,1fr\)\)/);
+  assert.match(styles, /\.cg-operator-header \.cg-channel-picker select \{ min-width:0; \}/);
+  assert.match(styles, /\.metric strong small \{ color:#5d746b; \}/);
+  assert.match(styles, /\.cg-url \{ color:#4f6c62; \}/);
+  assert.match(styles, /\.commission-evidence>div>span,\.stationbox-dimensions small \{ color:#4f6c62; \}/);
 });
