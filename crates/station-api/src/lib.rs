@@ -2556,7 +2556,7 @@ impl Api {
                 "Reading as-run authority requires an enabled Setup Admin or Meeting Operator account.",
             );
         }
-        let Some((channel_id, offset, limit)) = asrun_page_path(path) else {
+        let Some((channel_id, cursor, limit)) = asrun_page_path(path) else {
             return error_response(
                 400,
                 "invalid_path",
@@ -2576,7 +2576,7 @@ impl Api {
         };
         match self
             .storage
-            .page_asrun_projection(channel_id, offset, limit)
+            .page_asrun_projection(channel_id, cursor, limit)
         {
             Ok(Some(page)) => {
                 let body = serde_json::to_vec(&page).expect("serializing as-run page cannot fail");
@@ -10642,27 +10642,35 @@ fn path_identity<'a>(path: &'a str, prefix: &str, suffix: &str) -> Option<&'a st
         .then_some(identity)
 }
 
-/// The reporting read surface accepts exactly two unsigned decimal parameters,
-/// avoiding permissive query parsing or browser-controlled authority fields.
-fn asrun_page_path(path: &str) -> Option<(&str, usize, usize)> {
+/// The reporting read surface accepts a bounded page size and an optional
+/// opaque continuation token. The token is validated by storage against the
+/// current channel/window/checkpoint projection revision.
+fn asrun_page_path(path: &str) -> Option<(&str, Option<&str>, usize)> {
     let rest = path.strip_prefix("/api/v1/reporting/as-run/")?;
     let (channel_id, query) = rest.split_once('?')?;
     if !is_canonical_api_uuid(channel_id) {
         return None;
     }
-    let mut offset = None;
+    let mut cursor = None;
     let mut limit = None;
     for part in query.split('&') {
         let (key, value) = part.split_once('=')?;
         match key {
-            "offset" if offset.is_none() => offset = value.parse::<usize>().ok(),
+            "cursor" if cursor.is_none()
+                && !value.is_empty()
+                && value
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_')) =>
+            {
+                cursor = Some(value)
+            }
             "limit" if limit.is_none() => limit = value.parse::<usize>().ok(),
             _ => return None,
         }
     }
-    let (offset, limit) = (offset?, limit?);
+    let limit = limit?;
     (limit > 0 && limit <= station_storage::MAX_ASRUN_EPG_PAGE_SIZE)
-        .then_some((channel_id, offset, limit))
+        .then_some((channel_id, cursor, limit))
 }
 fn asrun_export_path(path: &str) -> Option<(&str, &'static str)> {
     for (suffix, format) in [("/export.csv", "csv"), ("/export.xmltv", "xmltv")] {
@@ -13224,7 +13232,7 @@ mod tests {
         api.storage
             .persist_asrun_projection(&projection, 1_700_000_060_000)
             .unwrap();
-        let page = "/api/v1/reporting/as-run/00000000-0000-4000-8000-000000000001?offset=0&limit=1";
+        let page = "/api/v1/reporting/as-run/00000000-0000-4000-8000-000000000001?limit=1";
         assert_eq!(api.handle_in_process("GET", page, None).status, 403);
         let actor = test_actor(station_auth::OperatorRole::SetupAdmin);
         let page_response = api.handle_authenticated("GET", page, None, &actor);
@@ -13232,10 +13240,11 @@ mod tests {
         let page_body = String::from_utf8(page_response.body).unwrap();
         assert!(page_body.contains("\"projection_window\""));
         assert!(page_body.contains("\"source_journal_id\""));
+        assert!(page_body.contains("\"next_cursor\""));
         assert_eq!(
             api.handle_authenticated(
                 "GET",
-                "/api/v1/reporting/as-run/00000000-0000-4000-8000-000000000001?offset=0&limit=201",
+                "/api/v1/reporting/as-run/00000000-0000-4000-8000-000000000001?limit=201",
                 None,
                 &actor
             )

@@ -1,5 +1,6 @@
 //! Durable single-writer persistence for already authenticated reporting projections.
 use super::*;
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use station_reporting::runtime::{AsRunProjectionRuntime, ProjectedEntry, ProjectionWindow};
 
 pub const MAX_ASRUN_EPG_PAGE_SIZE: usize = 200;
@@ -20,7 +21,9 @@ pub struct AsRunProjectionPage {
     pub source_file_identity: String,
     pub source_raw_sequence: u64,
     pub entries: Vec<ProjectedEntry>,
-    pub next_offset: Option<usize>,
+    /// Opaque, projection-bound continuation token. It becomes invalid if
+    /// the channel's day window or durable source/checkpoint revision changes.
+    pub next_cursor: Option<String>,
     pub checkpoint_sequence: u64,
 }
 
@@ -181,7 +184,7 @@ impl StationStore {
     pub fn page_asrun_projection(
         &self,
         channel_id: &str,
-        offset: usize,
+        cursor: Option<&str>,
         limit: usize,
     ) -> Result<Option<AsRunProjectionPage>, String> {
         if !is_uuid(channel_id) || limit == 0 || limit > MAX_ASRUN_EPG_PAGE_SIZE {
@@ -190,13 +193,17 @@ impl StationStore {
         let Some(projection) = self.read_asrun_projection(channel_id)? else {
             return Ok(None);
         };
-        if offset > projection.entries.len() {
-            return Err("as-run page offset is invalid".into());
-        }
+        let offset = match cursor {
+            Some(cursor) => decode_page_cursor(cursor, &projection)?,
+            None => 0,
+        };
         let end = offset
             .checked_add(limit)
-            .ok_or("as-run page offset overflows")?
+            .ok_or("as-run page cursor overflows")?
             .min(projection.entries.len());
+        let next_cursor = (end < projection.entries.len())
+            .then(|| encode_page_cursor(end, &projection))
+            .transpose()?;
         Ok(Some(AsRunProjectionPage {
             channel_id: projection.channel_id,
             station_timezone: projection.station_timezone,
@@ -205,7 +212,7 @@ impl StationStore {
             source_file_identity: projection.checkpoint.reader_file_identity,
             source_raw_sequence: projection.checkpoint.reader_raw_sequence,
             entries: projection.entries[offset..end].to_vec(),
-            next_offset: (end < projection.entries.len()).then_some(end),
+            next_cursor,
             checkpoint_sequence: projection.checkpoint.journal_sequence,
         }))
     }
@@ -509,6 +516,51 @@ impl StationStore {
         Ok(())
     }
 }
+
+const PAGE_CURSOR_VERSION: u8 = 1;
+const PAGE_CURSOR_BYTES: usize = 1 + 8 + 32;
+
+fn encode_page_cursor(
+    next_offset: usize,
+    projection: &AsRunProjectionRuntime,
+) -> Result<String, String> {
+    let next_offset = u64::try_from(next_offset).map_err(|_| "as-run page cursor overflows")?;
+    let mut payload = Vec::with_capacity(PAGE_CURSOR_BYTES);
+    payload.push(PAGE_CURSOR_VERSION);
+    payload.extend_from_slice(&next_offset.to_be_bytes());
+    payload.extend_from_slice(&projection_page_binding(projection)?);
+    Ok(URL_SAFE_NO_PAD.encode(payload))
+}
+
+fn decode_page_cursor(cursor: &str, projection: &AsRunProjectionRuntime) -> Result<usize, String> {
+    if cursor.len() > 128 || !cursor.bytes().all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_')) {
+        return Err("as-run page cursor is invalid".into());
+    }
+    let payload = URL_SAFE_NO_PAD
+        .decode(cursor)
+        .map_err(|_| "as-run page cursor is invalid")?;
+    if payload.len() != PAGE_CURSOR_BYTES || payload[0] != PAGE_CURSOR_VERSION {
+        return Err("as-run page cursor is invalid".into());
+    }
+    let offset = u64::from_be_bytes(
+        payload[1..9]
+            .try_into()
+            .expect("fixed-size page cursor offset"),
+    );
+    let offset = usize::try_from(offset).map_err(|_| "as-run page cursor is invalid")?;
+    if offset > projection.entries.len() || payload[9..] != projection_page_binding(projection)? {
+        return Err("as-run page cursor no longer matches the current projection".into());
+    }
+    Ok(offset)
+}
+
+fn projection_page_binding(projection: &AsRunProjectionRuntime) -> Result<[u8; 32], String> {
+    let encoded = serde_json::to_vec(projection).map_err(|error| error.to_string())?;
+    let mut hash = Sha256::new();
+    hash.update(b"townlight-asrun-page-cursor-v1\0");
+    hash.update(&encoded);
+    Ok(hash.finalize().into())
+}
 fn validate_projection(p: &AsRunProjectionRuntime, now: i64) -> Result<(), String> {
     if !is_uuid(&p.channel_id)
         || jiff::tz::TimeZone::get(&p.station_timezone).is_err()
@@ -525,25 +577,27 @@ fn validate_projection(p: &AsRunProjectionRuntime, now: i64) -> Result<(), Strin
     {
         return Err("as-run projection is invalid".into());
     }
-    let legacy_materialized_sequence = if p.checkpoint.materialized_sequence == 0 {
-        p.checkpoint.journal_sequence
-    } else {
-        p.checkpoint.materialized_sequence
-    };
-    let legacy_materialized_hash = if p.checkpoint.materialized_hash.is_empty() {
-        &p.checkpoint.journal_hash
-    } else {
-        &p.checkpoint.materialized_hash
-    };
-    if !sha(legacy_materialized_hash)
+    if (p.entries.is_empty()
+        && (p.checkpoint.materialized_sequence != 0
+            || !p.checkpoint.materialized_hash.is_empty()))
+        || (!p.entries.is_empty()
+            && (p.checkpoint.materialized_sequence == 0
+                || !sha(&p.checkpoint.materialized_hash)))
         || (p.checkpoint.reader_byte_offset == 0
             && (!p.checkpoint.reader_prefix_hash.is_empty()
                 || !p.checkpoint.reader_file_identity.is_empty()
-                || p.checkpoint.reader_raw_sequence != 0))
+                || p.checkpoint.reader_raw_sequence != 0
+                || p.checkpoint.reader_saw_heartbeat_summary
+                || p.checkpoint.reader_saw_compaction_commit))
         || (p.checkpoint.reader_byte_offset > 0
             && (p.checkpoint.reader_raw_sequence == 0
                 || !sha(&p.checkpoint.reader_prefix_hash)
                 || p.checkpoint.reader_file_identity.trim().is_empty()))
+        || ((p.checkpoint.source_anchor_sequence == 0)
+            != p.checkpoint.source_anchor_frame_hash.is_empty())
+        || (p.checkpoint.source_anchor_sequence > 0
+            && (!sha(&p.checkpoint.source_anchor_frame_hash)
+                || p.checkpoint.source_anchor_sequence > p.checkpoint.reader_raw_sequence))
     {
         return Err("as-run reader checkpoint is invalid".into());
     }
@@ -576,6 +630,12 @@ fn validate_projection(p: &AsRunProjectionRuntime, now: i64) -> Result<(), Strin
             || pending.schedule_item_revision == 0)
     {
         return Err("as-run pending transition is invalid".into());
+    }
+    if let Some(pending) = &p.checkpoint.pending_start
+        && (p.checkpoint.source_anchor_sequence != pending.journal_sequence
+            || p.checkpoint.source_anchor_frame_hash != pending.journal_hash)
+    {
+        return Err("as-run pending transition is not bound to the durable event anchor".into());
     }
     let bytes = serde_json::to_vec(p).map_err(|e| e.to_string())?;
     if bytes.len() > MAX_PROJECTION_BYTES {
@@ -625,8 +685,8 @@ fn validate_projection(p: &AsRunProjectionRuntime, now: i64) -> Result<(), Strin
         prior = Some(e)
     }
     if let Some(last) = p.entries.last()
-        && (legacy_materialized_sequence != last.journal_sequence
-            || legacy_materialized_hash != &last.journal_hash)
+        && (p.checkpoint.materialized_sequence != last.journal_sequence
+            || p.checkpoint.materialized_hash != last.journal_hash)
     {
         return Err("as-run materialized checkpoint does not bind the projection output".into());
     }

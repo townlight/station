@@ -152,6 +152,8 @@ pub fn project_durable_journal(
             raw_sequence: checkpoint.reader_raw_sequence,
             prefix_hash: checkpoint.reader_prefix_hash.clone(),
             file_identity: checkpoint.reader_file_identity.clone(),
+            saw_heartbeat_summary: checkpoint.reader_saw_heartbeat_summary,
+            saw_compaction_commit: checkpoint.reader_saw_compaction_commit,
         })
     });
     let path = journal_path.as_ref();
@@ -164,19 +166,31 @@ pub fn project_durable_journal(
         Ok(read) => read,
         Err(error) if source_cursor.is_some() && compaction_recovery_allowed(&error) => {
             let checkpoint = prior.expect("cursor requires projection checkpoint");
-            let anchor_sequence = materialized_sequence(checkpoint);
-            if anchor_sequence == 0 {
+            let anchor_sequence = checkpoint.source_anchor_sequence;
+            let anchor_hash = &checkpoint.source_anchor_frame_hash;
+            if anchor_sequence == 0 && anchor_hash.is_empty() {
+                if checkpoint.pending_start.is_some() || materialized_sequence(checkpoint) != 0 {
+                    return Err(AsRunJournalAdapterError::Journal(
+                        "journal replacement has no independent retained event-frame anchor"
+                            .into(),
+                    ));
+                }
                 read_journal_incremental(path, None, MAX_INCREMENTAL_JOURNAL_EVENTS, false)
                     .map_err(journal_error)?
             } else {
+                if anchor_sequence == 0 || !valid_frame_hash(anchor_hash) {
+                    return Err(AsRunJournalAdapterError::Journal(
+                        "journal replacement has an invalid retained event-frame anchor".into(),
+                    ));
+                }
                 let (anchor, anchor_cursor) =
                     find_journal_event_cursor(path, anchor_sequence).map_err(journal_error)?;
                 if anchor.worker_id != expected_worker_id
                     || anchor.channel_id != channel_id
-                    || frame_hash(expected_worker_id, &anchor)? != materialized_hash(checkpoint)
+                    || frame_hash(expected_worker_id, &anchor)? != *anchor_hash
                 {
                     return Err(AsRunJournalAdapterError::Journal(
-                        "journal replacement does not retain the materialized transition anchor"
+                        "journal replacement does not retain the durable event-frame anchor"
                             .into(),
                     ));
                 }
@@ -248,11 +262,19 @@ pub fn project_durable_journal(
         journal_sequence: read.cursor.raw_sequence,
         journal_hash: read.cursor.prefix_hash.clone(),
         materialized_sequence: committed_sequence,
-        materialized_hash: committed_hash,
+        materialized_hash: committed_hash.clone(),
         reader_byte_offset: read.cursor.byte_offset,
         reader_raw_sequence: read.cursor.raw_sequence,
         reader_prefix_hash: read.cursor.prefix_hash,
         reader_file_identity: read.cursor.file_identity,
+        reader_saw_heartbeat_summary: read.cursor.saw_heartbeat_summary,
+        reader_saw_compaction_commit: read.cursor.saw_compaction_commit,
+        source_anchor_sequence: pending
+            .as_ref()
+            .map_or(committed_sequence, |open| open.journal_sequence),
+        source_anchor_frame_hash: pending
+            .as_ref()
+            .map_or_else(|| committed_hash.clone(), |open| open.journal_hash.clone()),
         pending_start: pending,
         pending_is_uncovered,
     };
@@ -376,7 +398,7 @@ fn closed_take(
             schedule_revision: None,
             journal_hash: open.journal_hash.clone(),
             unavailable_reason: Some(
-                "Untimed live, fallback, CG, or caption transition leaves this interval uncovered; no program airtime was fabricated.".into(),
+                "Untimed base-source transition leaves this interval uncovered; no program airtime was fabricated.".into(),
             ),
         };
     }
@@ -436,27 +458,19 @@ fn is_untimed_transition(event: &WorkerEvent) -> bool {
         WorkerEvent::OnAirChanged { .. }
             | WorkerEvent::LiveOnAir { .. }
             | WorkerEvent::LiveReturned { .. }
-            | WorkerEvent::CgApplied { .. }
-            | WorkerEvent::CgCleared
-            | WorkerEvent::CaptionCueAccepted { .. }
-            | WorkerEvent::CaptionCuesCleared
     )
 }
 
 fn materialized_sequence(checkpoint: &ProjectionCheckpoint) -> u64 {
-    if checkpoint.materialized_sequence == 0 {
-        checkpoint.journal_sequence
-    } else {
-        checkpoint.materialized_sequence
-    }
+    checkpoint.materialized_sequence
 }
 
 fn materialized_hash(checkpoint: &ProjectionCheckpoint) -> String {
-    if checkpoint.materialized_hash.is_empty() {
-        checkpoint.journal_hash.clone()
-    } else {
-        checkpoint.materialized_hash.clone()
-    }
+    checkpoint.materialized_hash.clone()
+}
+
+fn valid_frame_hash(value: &str) -> bool {
+    value.len() == 64 && value.as_bytes().iter().all(u8::is_ascii_hexdigit)
 }
 
 fn compaction_recovery_allowed(error: &JournalError) -> bool {

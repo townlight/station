@@ -2035,6 +2035,7 @@ dependencies = [
 name = "station-storage"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "image",
  "jiff",
  "serde",
