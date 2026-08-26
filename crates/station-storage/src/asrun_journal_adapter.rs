@@ -6,7 +6,7 @@ use jiff::{Timestamp, civil::DateTime, tz::TimeZone};
 use sha2::{Digest, Sha256};
 use station_media_journal::{
     JournalCursor, JournalError, acknowledge_incremental_reader, find_journal_event_cursor,
-    read_journal_incremental, verify_incremental_reader_authority,
+    read_journal_incremental, retire_incremental_reader, verify_incremental_reader_authority,
 };
 use station_media_protocol::{WorkerEvent, WorkerEventEnvelope, encode_event_frame};
 use station_reporting::runtime::{
@@ -17,6 +17,105 @@ use station_reporting::runtime::{
 use std::path::Path;
 
 const MAX_INCREMENTAL_JOURNAL_EVENTS: usize = 2_048;
+
+#[cfg(all(test, windows))]
+struct ProjectionPersistInterleaving {
+    verified: std::sync::mpsc::Sender<()>,
+    resume: std::sync::mpsc::Receiver<()>,
+}
+
+/// Deterministic test seam at the exact durable-output boundary. The hook
+/// runs only after the reader's final manifest authority proof, so a test can
+/// hold writer retirement while the real SQLite persistence attempt is about
+/// to fail.
+#[cfg(all(test, windows))]
+fn projection_persist_interleavings() -> &'static std::sync::Mutex<
+    std::collections::HashMap<std::path::PathBuf, ProjectionPersistInterleaving>,
+> {
+    use std::sync::{Mutex, OnceLock};
+
+    static INTERLEAVINGS: OnceLock<
+        Mutex<std::collections::HashMap<std::path::PathBuf, ProjectionPersistInterleaving>>,
+    > = OnceLock::new();
+    INTERLEAVINGS.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
+}
+
+#[cfg(all(test, windows))]
+fn schedule_projection_persist_boundary(
+    path: std::path::PathBuf,
+    verified: std::sync::mpsc::Sender<()>,
+    resume: std::sync::mpsc::Receiver<()>,
+) {
+    let prior = projection_persist_interleavings()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .insert(path, ProjectionPersistInterleaving { verified, resume });
+    assert!(
+        prior.is_none(),
+        "one projection persist boundary is already scheduled"
+    );
+}
+
+#[cfg(all(test, windows))]
+fn observe_projection_persist_boundary(path: &Path) {
+    let interleaving = projection_persist_interleavings()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .remove(path);
+    let Some(interleaving) = interleaving else {
+        return;
+    };
+    interleaving
+        .verified
+        .send(())
+        .expect("projection persistence test still waits at the authority boundary");
+    interleaving
+        .resume
+        .recv()
+        .expect("projection persistence test resumes the authority boundary");
+}
+
+#[cfg(not(all(test, windows)))]
+fn observe_projection_persist_boundary(_path: &Path) {}
+
+/// Owns the journal reader lease for exactly one projection transaction.
+///
+/// A successful incremental read may retain a cross-process lease and, when
+/// it had to share a live writer's DELETE-bearing manifest handle, the writer
+/// retains its no-delete authority until this lease is released. Every error
+/// after a read must therefore retire the session rather than strand the
+/// writer in its graceful-retirement wait. Successful persistence explicitly
+/// acknowledges before this guard is disarmed.
+struct IncrementalReaderTransaction<'a> {
+    journal_path: &'a Path,
+    armed: bool,
+}
+
+impl<'a> IncrementalReaderTransaction<'a> {
+    fn new(journal_path: &'a Path) -> Self {
+        Self {
+            journal_path,
+            armed: true,
+        }
+    }
+
+    fn acknowledge(&mut self) {
+        acknowledge_incremental_reader(self.journal_path);
+        self.armed = false;
+    }
+}
+
+impl Drop for IncrementalReaderTransaction<'_> {
+    fn drop(&mut self) {
+        if self.armed {
+            // An error cannot advance the projection/checkpoint pair. Drop
+            // every retained handle and the cross-process lease so a writer
+            // can either continue or retire without an unbounded wait. A
+            // later reporting pass pays a fresh authenticated proof.
+            retire_incremental_reader(self.journal_path);
+        }
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AsRunJournalAdapterError {
@@ -218,6 +317,11 @@ pub fn project_durable_journal(
         })
     };
     let path = journal_path.as_ref();
+    // From this point a failed read/recovery, projection validation, durable
+    // authority proof, or SQLite write must retire any lease that the reader
+    // acquired. This keeps a live writer's no-delete manifest authority from
+    // being held indefinitely by a failed reporter transaction.
+    let mut reader_transaction = IncrementalReaderTransaction::new(path);
     let read = match read_journal_incremental(
         path,
         source_cursor.as_ref(),
@@ -372,13 +476,14 @@ pub fn project_durable_journal(
     // transaction, so a writer exit or manifest handoff cannot be
     // acknowledged as projection authority.
     verify_incremental_reader_authority(path, &acknowledgement_cursor).map_err(journal_error)?;
+    observe_projection_persist_boundary(path);
     store
         .persist_asrun_projection(&projection, now_utc_ms)
         .map_err(|error| AsRunJournalAdapterError::Storage(format!("{error:?}")))?;
     // This is the projection transaction's acknowledgment boundary. Releasing
     // the cross-process reader lease now lets the worker compact only after
     // the cursor/output pair is durable.
-    acknowledge_incremental_reader(path);
+    reader_transaction.acknowledge();
     Ok(projection)
 }
 
@@ -814,4 +919,156 @@ fn uuid(value: &str) -> bool {
                 byte.is_ascii_digit() || matches!(*byte, b'a'..=b'f')
             }
         })
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+    use super::*;
+    use station_media_journal::JournalWriter;
+    use station_media_protocol::PROTOCOL_VERSION;
+    use std::{
+        ffi::OsString,
+        path::PathBuf,
+        sync::{
+            atomic::{AtomicU64, Ordering},
+            mpsc,
+        },
+        thread,
+        time::{Duration, SystemTime, UNIX_EPOCH},
+    };
+
+    const CHANNEL: &str = "00000000-0000-4000-8000-000000000001";
+    static NEXT_TEST_PATH: AtomicU64 = AtomicU64::new(0);
+
+    fn test_path(extension: &str) -> PathBuf {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time is after Unix epoch")
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "asrun-txn-{nonce}-{}.{}",
+            NEXT_TEST_PATH.fetch_add(1, Ordering::Relaxed),
+            extension
+        ))
+    }
+
+    fn sidecar_path(root: &Path, suffix: &str) -> PathBuf {
+        let mut sidecar: OsString = root.as_os_str().to_owned();
+        sidecar.push(suffix);
+        sidecar.into()
+    }
+
+    fn heartbeat(sequence: u64) -> WorkerEventEnvelope {
+        WorkerEventEnvelope {
+            version: PROTOCOL_VERSION,
+            worker_id: format!("station-worker-{CHANNEL}"),
+            channel_id: CHANNEL.into(),
+            sequence,
+            event: WorkerEvent::Heartbeat {
+                monotonic_milliseconds: sequence * 5_000,
+                outputs: Vec::new(),
+            },
+        }
+    }
+
+    #[test]
+    fn persistence_failure_aborts_reader_lease_before_writer_releases_authority() {
+        let database = test_path("db");
+        let journal = database.with_extension("tlj");
+        let mut writer =
+            JournalWriter::open(&journal, &format!("station-worker-{CHANNEL}"), CHANNEL).unwrap();
+        writer
+            .append(&WorkerEventEnvelope {
+                version: PROTOCOL_VERSION,
+                worker_id: format!("station-worker-{CHANNEL}"),
+                channel_id: CHANNEL.into(),
+                sequence: 1,
+                event: WorkerEvent::Ready { graph_revision: 1 },
+            })
+            .unwrap();
+        for sequence in 2..=514 {
+            writer.append(&heartbeat(sequence)).unwrap();
+        }
+        let manifest = sidecar_path(&journal, ".generation-manifest");
+        assert!(
+            manifest.exists(),
+            "heartbeat compaction published a manifest"
+        );
+
+        // Use the real persistence method's final state write as the failure
+        // source. The pause below is after successful authority verification,
+        // so the trigger can only fire after the reporter has the lease.
+        let setup = StationStore::open(&database).unwrap();
+        setup
+            .execute(
+                "CREATE TRIGGER reject_test_projection_state \
+                 BEFORE INSERT ON asrun_epg_projection_state \
+                 BEGIN SELECT RAISE(ABORT, 'injected projection persistence failure'); END",
+            )
+            .unwrap();
+        drop(setup);
+
+        let (verified_tx, verified_rx) = mpsc::channel();
+        let (resume_tx, resume_rx) = mpsc::channel();
+        schedule_projection_persist_boundary(journal.clone(), verified_tx, resume_rx);
+        let reporter_database = database.clone();
+        let reporter_journal = journal.clone();
+        let reporter = thread::spawn(move || {
+            let store = StationStore::open(&reporter_database).unwrap();
+            project_durable_journal(
+                &store,
+                &reporter_journal,
+                &format!("station-worker-{CHANNEL}"),
+                CHANNEL,
+                "America/Denver",
+                1_700_000_000_000,
+                true,
+            )
+        });
+        verified_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("reporter passed final authority verification");
+
+        let replacement = test_path("manifest-replacement");
+        std::fs::write(&replacement, b"untrusted manifest replacement").unwrap();
+        let (retired_tx, retired_rx) = mpsc::channel();
+        let retiring = thread::spawn(move || {
+            drop(writer);
+            let _ = retired_tx.send(());
+        });
+        assert!(
+            retired_rx.recv_timeout(Duration::from_millis(100)).is_err(),
+            "writer retired before the verified reader transaction aborted"
+        );
+        assert!(
+            std::fs::rename(&replacement, &manifest).is_err(),
+            "writer released no-delete manifest authority before failed persistence aborted"
+        );
+
+        resume_tx
+            .send(())
+            .expect("reporter remains paused at persistence boundary");
+        assert!(matches!(
+            reporter.join().expect("reporter thread joins"),
+            Err(AsRunJournalAdapterError::Storage(error))
+                if error.contains("injected projection persistence failure")
+        ));
+        retired_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("failed projection abort released the writer retirement wait");
+        retiring.join().expect("writer retirement thread joins");
+
+        for path in [
+            database.clone(),
+            journal.clone(),
+            manifest,
+            sidecar_path(&journal, ".generation-1"),
+            sidecar_path(&journal, ".active-1"),
+            sidecar_path(&journal, ".reader-lease"),
+            sidecar_path(&journal, ".writer-lock"),
+            replacement,
+        ] {
+            let _ = std::fs::remove_file(path);
+        }
+    }
 }
