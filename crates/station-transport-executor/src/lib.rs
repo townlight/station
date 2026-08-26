@@ -7,6 +7,7 @@
 use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::os::windows::fs::MetadataExt;
+use std::os::windows::fs::OpenOptionsExt;
 use std::os::windows::io::AsRawHandle;
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStderr, ChildStdout, Command, Stdio};
@@ -23,6 +24,7 @@ use station_storage::{
 };
 use station_transport_proof::{MAX_PROOF_CAPTURE_BYTES, MAX_PROOF_DURATION_MS, TargetProtocol};
 use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE};
+use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT;
 use windows_sys::Win32::System::JobObjects::{
     AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
     JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
@@ -42,6 +44,9 @@ const MAX_QUARANTINE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 const QUARANTINE_MAX_AGE: Duration = Duration::from_secs(24 * 60 * 60);
 const TSDUCK_ANALYZER_ID: &str = "tsduck-tsanalyze";
 const RECEIVER_ADAPTER_ID: &str = "townlight-https-receiver-v1";
+
+#[cfg(test)]
+static FORCE_JOB_ASSIGN_FAILURE: AtomicBool = AtomicBool::new(false);
 
 /// A capture namespace exclusively owned by stationd.  It rejects reparse
 /// points from its root through the per-job directory and exposes no API for a
@@ -533,7 +538,14 @@ impl ProcessRunner for RealProcessRunner {
             .stderr(Stdio::piped())
             .spawn()
             .map_err(|_| "TSDuck process could not be spawned")?;
-        job.assign(&child)?;
+        if let Err(error) = job.assign(&child) {
+            // The child is not in the job when assignment itself fails, so a
+            // JobObject termination would not reach it.  Reap it explicitly
+            // before returning; this is the non-suspended spawn fallback.
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(error);
+        }
         let stdout = child
             .stdout
             .take()
@@ -969,9 +981,12 @@ impl WindowsProcessTree {
     }
 
     fn assign(&self, child: &Child) -> Result<(), String> {
+        #[cfg(test)]
+        if FORCE_JOB_ASSIGN_FAILURE.load(Ordering::Acquire) {
+            return Err("TSDuck process could not be contained in its job object".into());
+        }
         let process = child.as_raw_handle() as HANDLE;
         if unsafe { AssignProcessToJobObject(self.0, process) } == 0 {
-            self.terminate();
             return Err("TSDuck process could not be contained in its job object".into());
         }
         Ok(())
@@ -1018,22 +1033,42 @@ fn join_drain(
         .map_err(|_| format!("TSDuck {stream} output exceeded its bound or could not be read"))
 }
 fn bounded_capture(path: &Path, max: u64) -> Result<Vec<u8>, String> {
-    let meta = fs::metadata(path).map_err(|_| "TSDuck capture artifact is unavailable")?;
+    let file = open_private_capture_no_follow(path)?;
+    let meta = file
+        .metadata()
+        .map_err(|_| "TSDuck capture artifact is unavailable")?;
     if !meta.is_file() || meta.len() == 0 || meta.len() > max {
         return Err("TSDuck capture artifact is empty or exceeds its bound".into());
     }
     let mut out = Vec::with_capacity(
         usize::try_from(meta.len()).map_err(|_| "capture size cannot fit memory")?,
     );
-    File::open(path)
-        .map_err(|_| "TSDuck capture artifact cannot be opened")?
-        .take(max + 1)
+    file.take(max + 1)
         .read_to_end(&mut out)
         .map_err(|_| "TSDuck capture artifact cannot be read")?;
     if out.len() as u64 != meta.len() {
         return Err("TSDuck capture artifact changed while being analyzed".into());
     }
     Ok(out)
+}
+
+/// Opens the leaf through a Windows no-follow handle.  `FILE_FLAG_OPEN_REPARSE_POINT`
+/// prevents the open from traversing a substituted leaf; checking attributes on
+/// that same handle closes the inspect-then-open race for evidence files.
+fn open_private_capture_no_follow(path: &Path) -> Result<File, String> {
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .share_mode(0)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)
+        .map_err(|_| "TSDuck capture artifact cannot be opened")?;
+    let metadata = file
+        .metadata()
+        .map_err(|_| "TSDuck capture artifact cannot be inspected")?;
+    if metadata.file_attributes() & 0x0400 != 0 || !metadata.is_file() {
+        return Err("TSDuck capture artifact is a reparse point or not a file".into());
+    }
+    Ok(file)
 }
 
 fn ensure_non_reparse_ancestry(path: &Path) -> Result<(), String> {
@@ -1400,6 +1435,15 @@ mod tests {
             ))
         );
         assert!(!capture.with_extension("tables.json").exists());
+    }
+
+    #[test]
+    fn assignment_failure_explicitly_reaps_the_uncontained_child() {
+        FORCE_JOB_ASSIGN_FAILURE.store(true, Ordering::Release);
+        let executable = std::env::current_exe().unwrap();
+        let result = RealProcessRunner.run(&executable, &["--help".into()], Duration::from_secs(1));
+        FORCE_JOB_ASSIGN_FAILURE.store(false, Ordering::Release);
+        assert!(result.is_err());
     }
 
     #[test]
