@@ -7858,8 +7858,7 @@ impl StationStore {
         channel_id: &str,
     ) -> Result<Option<CaptionCueMissResolutionFence>, String> {
         self.validate_caption_cue_miss_evidence_correspondence()?;
-        Ok(self
-            .read_firing_alert(AlertConditionKind::CaptionCueMissed, channel_id)?
+        self.read_firing_alert(AlertConditionKind::CaptionCueMissed, channel_id)?
             .map(|event| {
                 Ok::<_, String>(CaptionCueMissResolutionFence {
                     event_id: event.event_id,
@@ -7870,7 +7869,7 @@ impl StationStore {
                     occurrence_count: event.occurrence_count,
                 })
             })
-            .transpose()?)
+            .transpose()
     }
 
     pub fn resolve_caption_cue_miss_if_unchanged(
