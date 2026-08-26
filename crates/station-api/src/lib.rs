@@ -87,21 +87,21 @@ use station_source_evidence::{
     CanonicalProjectionSha256, EvidenceScopeSha256, StationSourceEvidenceAuthority,
 };
 use station_storage::{
-    AlertChannelSecret, AssetMetadataWriteError, CaptionPolicyWriteError, CatalogAssetWriteError,
-    CgSnapshotReadError, CgWriteError, ChannelCaptionMode, ChannelCaptionPolicy,
-    ChannelCaptionPolicyAuditEvent, ChannelFallbackSlate, ChannelFallbackSlateAuditEvent,
-    ChannelWriteError, CommissioningSupportBundleReceipt, CommitWriteError,
-    CustomMetadataSchemaWriteError, ExistingScheduleSnapshot, ExternalReceiverAcceptanceReceipt,
-    FallbackSlateWriteError, HeadendProfileWriteError, OutputLoudnessProofJob,
-    OutputLoudnessProofJobRecord, OutputLoudnessProofJobState, ProfileWriteError,
-    PublishingAuthorityWriteError, ReceiverAcceptanceOutcome, ReceiverEvidenceMethod,
-    ReferenceStationTierWrite, ReferenceStationTierWriteError, ScheduleAutomationWriteError,
-    ScheduleItemWrite, ScheduleMaterializationApplyOutcome, ScheduleMaterializationHistoryCursor,
-    ScheduleMaterializationHistoryEntry, ScheduleMaterializationHistoryReadError,
-    ScheduleMaterializationOutcome, ScheduleMaterializationOutcomeRecord,
-    ScheduleMaterializationPlanRecord, ScheduleMaterializationRun,
-    ScheduleMaterializationRunOrigin, ScheduleMaterializationWriteError, StationStore,
-    StoredSinkLoudnessProof,
+    AlertChannelSecret, AssetMetadataWriteError, CableTransportValidationSnapshot,
+    CaptionPolicyWriteError, CatalogAssetWriteError, CgSnapshotReadError, CgWriteError,
+    ChannelCaptionMode, ChannelCaptionPolicy, ChannelCaptionPolicyAuditEvent, ChannelFallbackSlate,
+    ChannelFallbackSlateAuditEvent, ChannelWriteError, CommissioningSupportBundleReceipt,
+    CommitWriteError, CustomMetadataSchemaWriteError, ExistingScheduleSnapshot,
+    ExternalReceiverAcceptanceReceipt, FallbackSlateWriteError, HeadendProfileWriteError,
+    OutputLoudnessProofJob, OutputLoudnessProofJobRecord, OutputLoudnessProofJobState,
+    ProfileWriteError, PublishingAuthorityWriteError, ReceiverAcceptanceOutcome,
+    ReceiverEvidenceMethod, ReferenceStationTierWrite, ReferenceStationTierWriteError,
+    ScheduleAutomationWriteError, ScheduleItemWrite, ScheduleMaterializationApplyOutcome,
+    ScheduleMaterializationHistoryCursor, ScheduleMaterializationHistoryEntry,
+    ScheduleMaterializationHistoryReadError, ScheduleMaterializationOutcome,
+    ScheduleMaterializationOutcomeRecord, ScheduleMaterializationPlanRecord,
+    ScheduleMaterializationRun, ScheduleMaterializationRunOrigin,
+    ScheduleMaterializationWriteError, StationStore, StoredSinkLoudnessProof,
 };
 use station_transport_proof::{CableTransportValidation, TargetDeviceConfig, TargetProtocol};
 use station_update::UpdateCheckTrigger;
@@ -316,6 +316,45 @@ fn commissioning_check(
         evidence: evidence.into(),
         boundary,
     }
+}
+
+fn aggregate_cable_transport_snapshot(
+    validations: &[CableTransportValidationSnapshot],
+) -> (bool, Vec<String>) {
+    if validations.is_empty() {
+        return (
+            false,
+            vec![
+                "No enabled required transport sink is present in the authoritative snapshot."
+                    .into(),
+            ],
+        );
+    }
+    let mut details = Vec::with_capacity(validations.len());
+    let mut passes = true;
+    for snapshot in validations {
+        match snapshot.validation.as_ref() {
+            Some(validation) if validation.outcome.is_some() => details.push(format!(
+                "{} / {} has current analysis and target reachability proof",
+                snapshot.channel_id, snapshot.sink_id
+            )),
+            Some(validation) => {
+                passes = false;
+                details.push(format!(
+                    "{} / {} remains blocked: {}",
+                    snapshot.channel_id, snapshot.sink_id, validation.detail
+                ));
+            }
+            None => {
+                passes = false;
+                details.push(format!(
+                    "{} / {} has no configured target device",
+                    snapshot.channel_id, snapshot.sink_id
+                ));
+            }
+        }
+    }
+    (passes, details)
 }
 
 fn headend_receiver_verified(headend: &station_readiness::HeadendReadiness) -> bool {
@@ -7845,9 +7884,11 @@ impl Api {
             "current StationBox capability, named sink contract, and worker heartbeat authority",
             CommissioningBoundary::LocalAuthority,
         ));
-        let mut cable_transport_pass = !enabled.is_empty();
-        let mut cable_transport_detail = Vec::new();
-        if let Some((candidate_version, source_commit)) = receiver_candidate {
+        let (cable_transport_pass, cable_transport_detail) = if let Some((
+            candidate_version,
+            source_commit,
+        )) = receiver_candidate
+        {
             let validations = match self.storage.read_current_cable_transport_validations(
                 candidate_version,
                 source_commit,
@@ -7856,58 +7897,11 @@ impl Api {
                 Ok(validations) => validations,
                 Err(message) => return error_response(500, "storage_error", &message),
             };
-            for channel in &enabled {
-                let sinks = channel
-                    .output_sinks
-                    .iter()
-                    .filter(|sink| sink.enabled && sink.required)
-                    .collect::<Vec<_>>();
-                if sinks.is_empty() {
-                    cable_transport_pass = false;
-                    cable_transport_detail.push(format!(
-                        "{} has no enabled required transport sink",
-                        channel.channel_id
-                    ));
-                    continue;
-                }
-                for sink in sinks {
-                    match validations
-                        .iter()
-                        .find(|value| {
-                            value.channel_id == channel.channel_id && value.sink_id == sink.sink_id
-                        })
-                        .and_then(|value| value.validation.as_ref())
-                    {
-                        Some(validation) if validation.outcome.is_some() => {
-                            cable_transport_detail.push(format!(
-                                "{} / {} has current analysis and target reachability proof",
-                                channel.channel_id, sink.sink_id
-                            ));
-                        }
-                        Some(validation) => {
-                            cable_transport_pass = false;
-                            cable_transport_detail.push(format!(
-                                "{} / {} remains blocked: {}",
-                                channel.channel_id, sink.sink_id, validation.detail
-                            ));
-                        }
-                        None => {
-                            cable_transport_pass = false;
-                            cable_transport_detail.push(format!(
-                                "{} / {} has no configured target device",
-                                channel.channel_id, sink.sink_id
-                            ));
-                        }
-                    }
-                }
-            }
+            aggregate_cable_transport_snapshot(&validations)
         } else {
-            cable_transport_pass = false;
-            cable_transport_detail.push(
-                "The installed candidate identity is unavailable, so transport evidence cannot be bound."
-                    .into(),
-            );
-        }
+            let detail = "The installed candidate identity is unavailable, so transport evidence cannot be bound.";
+            (false, vec![detail.into()])
+        };
         checks.push(commissioning_check(
             "cable_transport_validation",
             "Cable transport analysis and device reachability",
@@ -19587,6 +19581,168 @@ mod tests {
         );
 
         drop(api);
+        let _ = std::fs::remove_file(database);
+    }
+
+    #[test]
+    fn commissioning_transport_uses_the_authoritative_sink_snapshot_after_a_stale_channel_read() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let database = std::env::temp_dir().join(format!(
+            "townlight-commissioning-transport-snapshot-{}-{nonce}.db",
+            std::process::id()
+        ));
+        let application = database.with_extension("application");
+        std::fs::create_dir_all(&application).unwrap();
+        let probe = station_box_probe();
+        let candidate_version = probe.product_version.clone();
+        let source_commit = probe
+            .source_commit
+            .clone()
+            .expect("verified test candidate");
+        let api = Api::open_with_station_box_probe(&database, &application, probe).unwrap();
+        let channel_id = "11111111-2222-4333-8444-555555555555";
+        let sink_a = "22222222-3333-4444-8555-666666666666";
+        let sink_b = "33333333-4444-4555-8666-777777777777";
+        let sink_a_config = station_schedule::OutputSinkConfiguration::required_udp(
+            sink_a,
+            "Sink A",
+            "127.0.0.1:5500",
+            -16.0,
+        );
+        api.storage
+            .put_channel(&ChannelConfiguration {
+                channel_id: channel_id.into(),
+                display_name: "Commissioning transport snapshot".into(),
+                output_profile: station_schedule::OutputProfileId::Proof360p30,
+                output_sinks: vec![sink_a_config.clone()],
+                enabled: true,
+            })
+            .unwrap();
+        // This is the stale view a report could have read before a concurrent
+        // Setup Admin added B. Aggregation must not use it.
+        let stale_channels = api.storage.list_channels().unwrap();
+        assert_eq!(stale_channels[0].output_sinks.len(), 1);
+        api.storage
+            .put_channel(&ChannelConfiguration {
+                channel_id: channel_id.into(),
+                display_name: "Commissioning transport snapshot".into(),
+                output_profile: station_schedule::OutputProfileId::Proof360p30,
+                output_sinks: vec![
+                    sink_a_config,
+                    station_schedule::OutputSinkConfiguration::required_udp(
+                        sink_b,
+                        "Sink B",
+                        "127.0.0.1:5501",
+                        -16.0,
+                    ),
+                ],
+                enabled: true,
+            })
+            .unwrap();
+        let now = system_time_millis().unwrap();
+        let target = TargetDeviceConfig {
+            target_id: "target-a".into(),
+            label: "Target A".into(),
+            protocol: TargetProtocol::HttpsApi,
+            host: "receiver-a.example.test".into(),
+            port: 443,
+            credential_configured: true,
+            revision: 1,
+            created_at_unix_ms: now,
+            updated_at_unix_ms: now,
+            updated_by: "setup-admin".into(),
+        };
+        api.storage
+            .write_transport_target_config(channel_id, sink_a, None, &target)
+            .unwrap();
+        let configuration_hash = api
+            .storage
+            .current_channel_output_configuration_hash(channel_id)
+            .unwrap();
+        api.storage
+            .append_transport_analysis_receipt(
+                &station_storage::TransportAnalysisReceipt {
+                    proof_id: "analysis-a".into(),
+                    channel_id: channel_id.into(),
+                    sink_id: sink_a.into(),
+                    target_id: target.target_id.clone(),
+                    target_revision: 1,
+                    candidate_version: candidate_version.clone(),
+                    source_commit: source_commit.clone(),
+                    configuration_hash: configuration_hash.clone(),
+                    analyzer_id: "test-analyzer".into(),
+                    analyzer_version: "1".into(),
+                    analyzer_sha256: "a".repeat(64),
+                    outcome: station_storage::ProofOutcome::Pass,
+                    findings: station_storage::TransportFindings {
+                        packet_size_bytes: 188,
+                        packet_count: 10,
+                        capture_duration_ms: 1_000,
+                        bitrate_bps: 1_000_000,
+                        pat_program_count: 1,
+                        pmt_stream_count: 1,
+                        continuity_errors: 0,
+                        pcr_errors: 0,
+                        analyzer_output_sha256: "b".repeat(64),
+                    },
+                    captured_at_unix_ms: now,
+                    recorded_at_unix_ms: now,
+                    recorded_by: "worker".into(),
+                    detail: "A passed".into(),
+                },
+                now,
+            )
+            .unwrap();
+        api.storage
+            .append_target_device_reachability_receipt(
+                &station_storage::TargetDeviceReachabilityReceipt {
+                    proof_id: "reach-a".into(),
+                    channel_id: channel_id.into(),
+                    sink_id: sink_a.into(),
+                    target_id: target.target_id,
+                    target_revision: 1,
+                    candidate_version: candidate_version.clone(),
+                    source_commit: source_commit.clone(),
+                    configuration_hash,
+                    adapter_id: "test-adapter".into(),
+                    adapter_version: "1".into(),
+                    auth_method: "challenge".into(),
+                    outcome: station_storage::ProofOutcome::Pass,
+                    response_identity_sha256: "c".repeat(64),
+                    latency_ms: 1,
+                    observed_at_unix_ms: now,
+                    recorded_at_unix_ms: now,
+                    recorded_by: "worker".into(),
+                    detail: "A reached".into(),
+                },
+                now,
+            )
+            .unwrap();
+        let snapshot = api
+            .storage
+            .read_current_cable_transport_validations(&candidate_version, &source_commit, now)
+            .unwrap();
+        assert_eq!(snapshot.len(), 2);
+        let (passes, detail) = aggregate_cable_transport_snapshot(&snapshot);
+        assert!(!passes, "a newly required B must block A-only proof");
+        assert!(detail.iter().any(|line| line.contains(sink_b)));
+
+        let report = api.handle_in_process("GET", "/api/v1/commissioning/report", None);
+        let report: serde_json::Value = serde_json::from_slice(&report.body).unwrap();
+        let cable = report["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|check| check["id"] == "cable_transport_validation")
+            .unwrap();
+        assert_eq!(cable["status"], "blocked");
+        assert!(cable["detail"].as_str().unwrap().contains(sink_b));
+
+        drop(api);
+        std::fs::remove_dir_all(application).unwrap();
         let _ = std::fs::remove_file(database);
     }
 }

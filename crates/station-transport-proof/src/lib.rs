@@ -384,15 +384,32 @@ fn sha256(value: &str) -> bool {
 }
 
 fn validate_host(value: &str) -> Result<(), String> {
-    if value.is_empty()
-        || value.len() > MAX_HOST
-        || value.trim() != value
-        || value.starts_with(['.', '-'])
-        || value.ends_with(['.', '-'])
-        || value
-            .bytes()
-            .any(|byte| !(byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-')))
+    if value.is_empty() || value.len() > MAX_HOST || value.trim() != value {
+        return Err("target host must be a normalized DNS name or IPv4 address".into());
+    }
+    let labels = value.split('.').collect::<Vec<_>>();
+    if labels
+        .iter()
+        .all(|label| !label.is_empty() && label.bytes().all(|byte| byte.is_ascii_digit()))
     {
+        if labels.len() != 4
+            || labels.iter().any(|label| {
+                (label.len() > 1 && label.starts_with('0')) || label.parse::<u8>().is_err()
+            })
+        {
+            return Err("target host must be a normalized DNS name or IPv4 address".into());
+        }
+        return Ok(());
+    }
+    if labels.iter().any(|label| {
+        label.is_empty()
+            || label.len() > 63
+            || label.starts_with('-')
+            || label.ends_with('-')
+            || label
+                .bytes()
+                .any(|byte| !(byte.is_ascii_alphanumeric() || byte == b'-'))
+    }) {
         return Err("target host must be a normalized DNS name or IPv4 address".into());
     }
     Ok(())
@@ -665,6 +682,31 @@ mod tests {
     fn target_endpoint_rejects_path_token_leakage() {
         let mut target = target();
         target.host = "receiver.example.test/api/token/secret".into();
+        assert!(target.validate().is_err());
+    }
+
+    #[test]
+    fn target_host_requires_valid_ipv4_or_dns_labels() {
+        for invalid in [
+            "999.999.999.999",
+            "192.168.1.256",
+            "receiver..example.test",
+            "-receiver.example.test",
+            "receiver-.example.test",
+            "receiver.-example.test",
+            "receiver.example-.test",
+        ] {
+            let mut target = target();
+            target.host = invalid.into();
+            assert!(target.validate().is_err(), "{invalid}");
+        }
+        for valid in ["192.168.1.1", "receiver-1.example.test"] {
+            let mut target = target();
+            target.host = valid.into();
+            assert!(target.validate().is_ok(), "{valid}");
+        }
+        let mut target = target();
+        target.host = format!("{}.example.test", "a".repeat(64));
         assert!(target.validate().is_err());
     }
 
