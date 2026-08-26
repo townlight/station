@@ -96,10 +96,28 @@ pub struct PublishConnectionTestEvidence {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum PublishExecutionTargetConfig {
-    Portal { endpoint: String },
-    InternetArchive { item_identifier: String },
-    LocalNas { managed_root: String },
-    YouTubeLive { channel_id: String },
+    Portal {
+        endpoint: String,
+    },
+    InternetArchive {
+        item_identifier: String,
+    },
+    LocalNas {
+        managed_root: String,
+    },
+    YouTubeLive {
+        channel_id: String,
+        broadcast_id: String,
+        stream_id: String,
+        privacy_status: YouTubePrivacyStatus,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum YouTubePrivacyStatus {
+    Public,
+    Unlisted,
 }
 
 impl PublishExecutionTargetConfig {
@@ -130,8 +148,15 @@ impl PublishExecutionTargetConfig {
                 }
                 Ok(())
             }
-            Self::YouTubeLive { channel_id } => {
-                validate_slug(channel_id, 100, "YouTube channel identity")
+            Self::YouTubeLive {
+                channel_id,
+                broadcast_id,
+                stream_id,
+                ..
+            } => {
+                validate_slug(channel_id, 100, "YouTube channel identity")?;
+                validate_slug(broadcast_id, 100, "YouTube broadcast identity")?;
+                validate_slug(stream_id, 100, "YouTube stream identity")
             }
         }
     }

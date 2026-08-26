@@ -17596,7 +17596,9 @@ mod tests {
                     "kind": "local_nas", "managed_root": r"\\station-nas\archive"
                 }),
                 station_publishing::PublishTargetKind::YouTubeLive => serde_json::json!({
-                    "kind": "you_tube_live", "channel_id": "townlight-channel"
+                    "kind": "you_tube_live", "channel_id": "townlight-channel",
+                    "broadcast_id": "townlight-broadcast", "stream_id": "townlight-stream",
+                    "privacy_status": "public"
                 }),
                 _ => unreachable!("required publishing test target"),
             };

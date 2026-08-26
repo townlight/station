@@ -1,7 +1,7 @@
 use super::*;
 use station_publishing::{
     PublishCandidateIdentity, PublishExecutionReceipt, PublishExecutionStage,
-    PublishExecutionTargetConfig, PublishTargetKind, PublishTargetProfile,
+    PublishExecutionTargetConfig, PublishTargetKind, PublishTargetProfile, YouTubePrivacyStatus,
     validate_receipt_successor,
 };
 use std::fs::{self, File, OpenOptions};
@@ -1012,9 +1012,18 @@ impl PublishProviderAdapter for SystemPublishProviderAdapter {
                     "Internet Archive accepted the exact bounded object delivery.",
                 )?
             }
-            PublishExecutionTargetConfig::YouTubeLive { channel_id } => {
-                youtube_capability_probe(channel_id, credential)?
-            }
+            PublishExecutionTargetConfig::YouTubeLive {
+                channel_id,
+                broadcast_id,
+                stream_id,
+                privacy_status,
+            } => youtube_live_binding_probe(
+                channel_id,
+                broadcast_id,
+                stream_id,
+                *privacy_status,
+                credential,
+            )?,
         };
         heartbeat()?;
         Ok(vec![attempted, terminal])
@@ -1063,45 +1072,163 @@ fn http_provider_delivery(
     })
 }
 
-fn youtube_capability_probe(
+fn youtube_live_binding_probe(
     channel_id: &str,
+    broadcast_id: &str,
+    stream_id: &str,
+    privacy_status: YouTubePrivacyStatus,
     credential: &[u8],
 ) -> Result<ProviderStageEvidence, String> {
-    let authorization = std::str::from_utf8(credential)
-        .map_err(|_| "YouTube credential is not valid header material")?;
-    let endpoint =
-        format!("https://www.googleapis.com/youtube/v3/channels?part=status&id={channel_id}");
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct YouTubeCredential {
+        client_id: String,
+        client_secret: String,
+        refresh_token: String,
+    }
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct TokenResponse {
+        access_token: String,
+        expires_in: u64,
+        token_type: String,
+        scope: Option<String>,
+    }
+    let credential: YouTubeCredential = serde_json::from_slice(credential)
+        .map_err(|_| "YouTube credential authority is malformed")?;
+    for value in [
+        &credential.client_id,
+        &credential.client_secret,
+        &credential.refresh_token,
+    ] {
+        if value.is_empty() || value.len() > 4096 || value.chars().any(char::is_control) {
+            return Err("YouTube credential authority is invalid or unbounded".into());
+        }
+    }
     let agent: ureq::Agent = ureq::Agent::config_builder()
         .timeout_global(Some(Duration::from_secs(30)))
         .max_redirects(0)
         .max_redirects_will_error(true)
         .build()
         .into();
-    let mut response = agent
-        .get(&endpoint)
+    let token_body = format!(
+        "client_id={}&client_secret={}&refresh_token={}&grant_type=refresh_token",
+        form_component(&credential.client_id),
+        form_component(&credential.client_secret),
+        form_component(&credential.refresh_token),
+    );
+    let token_bytes = bounded_http_response(
+        agent
+            .post("https://oauth2.googleapis.com/token")
+            .header("Content-Type", "application/x-www-form-urlencoded")
+            .send(token_body.as_bytes())
+            .map_err(|_| "YouTube OAuth refresh failed")?,
+        "YouTube OAuth response",
+    )?;
+    let token: TokenResponse =
+        serde_json::from_slice(&token_bytes).map_err(|_| "YouTube OAuth response was malformed")?;
+    if token.token_type != "Bearer"
+        || token.access_token.is_empty()
+        || token.access_token.len() > 4096
+        || token.access_token.chars().any(char::is_control)
+        || !(60..=86_400).contains(&token.expires_in)
+    {
+        return Err("YouTube OAuth response was invalid or unbounded".into());
+    }
+    let _scope = token.scope;
+    let authorization = format!("Bearer {}", token.access_token);
+    let broadcast_endpoint = format!(
+        "https://www.googleapis.com/youtube/v3/liveBroadcasts?part=snippet,status,contentDetails&id={broadcast_id}"
+    );
+    let broadcast_bytes = youtube_get(&agent, &broadcast_endpoint, &authorization)?;
+    let broadcast: serde_json::Value = serde_json::from_slice(&broadcast_bytes)
+        .map_err(|_| "YouTube broadcast response was malformed")?;
+    let privacy = match privacy_status {
+        YouTubePrivacyStatus::Public => "public",
+        YouTubePrivacyStatus::Unlisted => "unlisted",
+    };
+    let broadcast_exact = broadcast["items"].as_array().is_some_and(|items| {
+        items.len() == 1
+            && items[0]["id"].as_str() == Some(broadcast_id)
+            && items[0]["snippet"]["channelId"].as_str() == Some(channel_id)
+            && items[0]["contentDetails"]["boundStreamId"].as_str() == Some(stream_id)
+            && items[0]["status"]["privacyStatus"].as_str() == Some(privacy)
+    });
+    if !broadcast_exact {
+        return Err(
+            "YouTube broadcast is not the exact configured channel, stream, or privacy binding"
+                .into(),
+        );
+    }
+    let stream_endpoint = format!(
+        "https://www.googleapis.com/youtube/v3/liveStreams?part=snippet,cdn,status&id={stream_id}"
+    );
+    let stream_bytes = youtube_get(&agent, &stream_endpoint, &authorization)?;
+    let stream: serde_json::Value = serde_json::from_slice(&stream_bytes)
+        .map_err(|_| "YouTube stream response was malformed")?;
+    let stream_exact = stream["items"].as_array().is_some_and(|items| {
+        items.len() == 1
+            && items[0]["id"].as_str() == Some(stream_id)
+            && items[0]["snippet"]["channelId"].as_str() == Some(channel_id)
+            && items[0]["cdn"]["ingestionType"].as_str() == Some("rtmp")
+            && matches!(
+                items[0]["status"]["streamStatus"].as_str(),
+                Some("ready" | "active")
+            )
+    });
+    if !stream_exact {
+        return Err("YouTube stream is not the exact configured RTMP-capable binding".into());
+    }
+    let mut evidence = broadcast_bytes;
+    evidence.extend_from_slice(&stream_bytes);
+    Ok(ProviderStageEvidence {
+        stage: PublishExecutionStage::ExternallyVerified,
+        digest: format!("{:x}", Sha256::digest(&evidence)),
+        detail: "YouTube authenticated and verified the exact broadcast, stream, channel, privacy, and RTMP-capable binding; media has not yet been published and no audience reach is claimed.".into(),
+    })
+}
+
+fn youtube_get(
+    agent: &ureq::Agent,
+    endpoint: &str,
+    authorization: &str,
+) -> Result<Vec<u8>, String> {
+    let response = agent
+        .get(endpoint)
         .header("Authorization", authorization)
         .call()
-        .map_err(|_| "authenticated YouTube capability request failed")?;
+        .map_err(|_| "authenticated YouTube live-resource request failed")?;
+    bounded_http_response(response, "YouTube live-resource response")
+}
+
+fn bounded_http_response(
+    mut response: ureq::http::Response<ureq::Body>,
+    label: &str,
+) -> Result<Vec<u8>, String> {
     let mut body = Vec::new();
     response
         .body_mut()
         .as_reader()
         .take((MAX_PROVIDER_RESPONSE_BYTES + 1) as u64)
         .read_to_end(&mut body)
-        .map_err(|_| "YouTube capability response could not be read")?;
-    let value: serde_json::Value =
-        serde_json::from_slice(&body).map_err(|_| "YouTube capability response was malformed")?;
-    let exact_channel = value["items"]
-        .as_array()
-        .is_some_and(|items| items.len() == 1 && items[0]["id"].as_str() == Some(channel_id));
-    if !exact_channel {
-        return Err("YouTube did not verify the exact configured channel".into());
+        .map_err(|_| format!("{label} could not be read"))?;
+    if body.is_empty() || body.len() > MAX_PROVIDER_RESPONSE_BYTES {
+        return Err(format!("{label} is empty or oversized"));
     }
-    Ok(ProviderStageEvidence {
-        stage: PublishExecutionStage::ExternallyVerified,
-        digest: format!("{:x}", Sha256::digest(&body)),
-        detail: "YouTube authenticated and verified the exact configured channel capability; no audience reach is claimed.".into(),
-    })
+    Ok(body)
+}
+
+fn form_component(value: &str) -> String {
+    let mut encoded = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~') {
+            encoded.push(char::from(byte));
+        } else {
+            encoded.push('%');
+            encoded.push_str(&format!("{byte:02X}"));
+        }
+    }
+    encoded
 }
 
 fn deliver_to_nas(
