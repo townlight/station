@@ -41,11 +41,12 @@ const TSDUCK_SOURCE_URL: &str = "https://github.com/tsduck/tsduck/releases/downl
 const TSDUCK_ARCHIVE_NAME: &str = "TSDuck-Win64-3.44-4676-Portable.zip";
 const TSDUCK_ARCHIVE_SHA256: &str =
     "b0ca0f963fcd77488b8c32d6f9d85030daa891ed753c36e57bbb458807a44eb1";
-const REQUIRED_TSDUCK_RUNTIME_FILES: [&str; 6] = [
+const REQUIRED_TSDUCK_RUNTIME_FILES: [&str; 7] = [
     "LICENSE.txt",
     "OTHERS.txt",
     "bin/tsp.exe",
     "bin/tsanalyze.exe",
+    "bin/tstables.exe",
     "bin/tsduck.dll",
     "bin/tscore.dll",
 ];
@@ -1610,6 +1611,7 @@ pub struct VerifiedTsdDuckRuntime {
     pub version: String,
     pub tsp_sha256: String,
     pub tsanalyze_sha256: String,
+    pub tstables_sha256: String,
 }
 
 pub fn read_verified_tsduck_runtime(
@@ -1641,6 +1643,7 @@ pub fn read_verified_tsduck_runtime(
         version: TSDUCK_VERSION.into(),
         tsp_sha256: find("bin/tsp.exe")?,
         tsanalyze_sha256: find("bin/tsanalyze.exe")?,
+        tstables_sha256: find("bin/tstables.exe")?,
     })
 }
 

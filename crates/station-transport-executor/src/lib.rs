@@ -45,10 +45,12 @@ pub struct ManagedCaptureRoot {
 
 impl ManagedCaptureRoot {
     pub fn open(root: impl AsRef<Path>) -> Result<Self, String> {
-        fs::create_dir_all(root.as_ref())
-            .map_err(|_| "transport artifact root could not be created")?;
-        let root = fs::canonicalize(root.as_ref())
-            .map_err(|_| "transport artifact root could not be resolved")?;
+        let root = root.as_ref();
+        if !root.is_absolute() {
+            return Err("transport artifact root must be absolute".into());
+        }
+        create_non_reparse_directory_chain(root)?;
+        let root = root.to_path_buf();
         ensure_non_reparse_ancestry(&root)?;
         Ok(Self { root })
     }
@@ -59,9 +61,18 @@ impl ManagedCaptureRoot {
         }
         ensure_non_reparse_ancestry(&self.root)?;
         let job = self.root.join(job_id);
-        fs::create_dir(&job).map_err(
-            |_| "transport capture job directory already exists or could not be created",
-        )?;
+        if job.exists() {
+            ensure_non_reparse_ancestry(&job)?;
+            let nonce = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_err(|_| "transport artifact clock is unavailable")?
+                .as_nanos();
+            let quarantine = self.root.join(format!("{job_id}.quarantine-{nonce}"));
+            fs::rename(&job, &quarantine)
+                .map_err(|_| "stale transport capture could not be quarantined")?;
+            ensure_non_reparse_ancestry(&quarantine)?;
+        }
+        fs::create_dir(&job).map_err(|_| "transport capture job directory could not be created")?;
         ensure_non_reparse_ancestry(&job)?;
         Ok(job.join("capture.partial.ts"))
     }
@@ -199,10 +210,30 @@ fn execute_claimed_transport_job(
     {
         return Err("sealed transport capture hash changed during analysis".into());
     }
-    store.complete_transport_proof_job(
+    let recorded_at_unix_ms = unix_time_millis()?;
+    let receipt = TransportAnalysisReceipt {
+        proof_id: analyzing.job.job_id.clone(),
+        channel_id: analyzing.job.channel_id.clone(),
+        sink_id: analyzing.job.sink_id.clone(),
+        target_id: analyzing.job.target_id.clone(),
+        target_revision: analyzing.job.target_revision,
+        candidate_version: analyzing.job.candidate_version.clone(),
+        source_commit: analyzing.job.source_commit.clone(),
+        configuration_hash: analyzing.job.configuration_hash.clone(),
+        analyzer_id: TSDUCK_ANALYZER_ID.into(),
+        analyzer_version: executor.runtime.version.clone(),
+        analyzer_sha256: executor.runtime.tsanalyze_sha256.clone(),
+        outcome: ProofOutcome::Pass,
+        findings,
+        captured_at_unix_ms: ended,
+        recorded_at_unix_ms,
+        recorded_by: "stationd-transport-proof-controller".into(),
+        detail: "Bounded TSDuck transport analysis passed.".into(),
+    };
+    store.complete_transport_proof_job_with_analysis(
         &analyzing.job.job_id,
-        &findings.analyzer_output_sha256,
-        unix_time_millis()?,
+        &receipt,
+        recorded_at_unix_ms,
     )?;
     Ok(())
 }
@@ -267,6 +298,7 @@ pub struct AttestedTsdDuckRuntime {
     version: String,
     tsp_sha256: String,
     tsanalyze_sha256: String,
+    tstables_sha256: String,
 }
 
 impl AttestedTsdDuckRuntime {
@@ -283,13 +315,15 @@ impl AttestedTsdDuckRuntime {
             version: runtime.version,
             tsp_sha256: runtime.tsp_sha256,
             tsanalyze_sha256: runtime.tsanalyze_sha256,
+            tstables_sha256: runtime.tstables_sha256,
         })
     }
 
-    pub fn verify(&self) -> Result<(PathBuf, PathBuf), String> {
+    pub fn verify(&self) -> Result<(PathBuf, PathBuf, PathBuf), String> {
         if self.version.is_empty()
             || !is_sha256(&self.tsp_sha256)
             || !is_sha256(&self.tsanalyze_sha256)
+            || !is_sha256(&self.tstables_sha256)
         {
             return Err("attested TSDuck runtime identity is invalid".into());
         }
@@ -297,16 +331,19 @@ impl AttestedTsdDuckRuntime {
             .map_err(|_| "attested TSDuck runtime root is unavailable")?;
         let tsp = root.join("bin").join("tsp.exe");
         let analyzer = root.join("bin").join("tsanalyze.exe");
+        let tables = root.join("bin").join("tstables.exe");
         if !tsp.is_file()
             || !analyzer.is_file()
+            || !tables.is_file()
             || hash_file(&tsp)? != self.tsp_sha256
             || hash_file(&analyzer)? != self.tsanalyze_sha256
+            || hash_file(&tables)? != self.tstables_sha256
         {
             return Err(
                 "attested TSDuck runtime executable identity changed or is incomplete".into(),
             );
         }
-        Ok((tsp, analyzer))
+        Ok((tsp, analyzer, tables))
     }
 }
 
@@ -432,7 +469,7 @@ pub struct TsdDuckTransportExecutor<R> {
 impl<R: ProcessRunner> TsdDuckTransportExecutor<R> {
     pub fn analyze_capture(&self, capture: &CaptureRequest) -> Result<TransportFindings, String> {
         capture.validate()?;
-        let (_, analyzer) = self.runtime.verify()?;
+        let (_, analyzer, tables) = self.runtime.verify()?;
         let bytes = bounded_capture(&capture.artifact_path, capture.max_bytes)?;
         let argv = vec![
             "--json".into(),
@@ -446,7 +483,31 @@ impl<R: ProcessRunner> TsdDuckTransportExecutor<R> {
         if !result.status_success {
             return Err("TSDuck analysis process failed".into());
         }
-        parse_tsanalyze_json(&result.output, bytes.len() as u64, capture.duration_ms)
+        let findings =
+            parse_tsanalyze_json(&result.output, bytes.len() as u64, capture.duration_ms)?;
+        let (service_id, pmt_pid) = tsanalyze_service_binding(&result.output)?;
+        let tables_output = capture.artifact_path.with_extension("tables.json");
+        if tables_output.exists() {
+            return Err("TSDuck tables output path already exists".into());
+        }
+        let tables_argv = vec![
+            "--json-output".into(),
+            tables_output.to_string_lossy().into_owned(),
+            capture.artifact_path.to_string_lossy().into_owned(),
+        ];
+        let tables_result = self.runner.run(
+            &tables,
+            &tables_argv,
+            Duration::from_millis(capture.duration_ms),
+        )?;
+        if !tables_result.status_success {
+            return Err("TSDuck tables process failed".into());
+        }
+        let tables_bytes = bounded_capture(&tables_output, MAX_PROCESS_OUTPUT_BYTES as u64)?;
+        let validation = validate_tstables_json(&tables_bytes, service_id, pmt_pid);
+        let _ = fs::remove_file(&tables_output);
+        validation?;
+        Ok(findings)
     }
 
     pub fn capture_argv(&self, capture: &CaptureRequest) -> Result<Vec<String>, String> {
@@ -481,7 +542,7 @@ impl<R: ProcessRunner> TsdDuckTransportExecutor<R> {
         if capture.artifact_path.exists() {
             return Err("transport capture artifact already exists".into());
         }
-        let (tsp, _) = self.runtime.verify()?;
+        let (tsp, _, _) = self.runtime.verify()?;
         let argv = self.capture_argv(capture)?;
         let result = self.runner.run(
             &tsp,
@@ -504,7 +565,7 @@ impl<R: ProcessRunner> TsdDuckTransportExecutor<R> {
         binding.validate()?;
         target.validate()?;
         let findings = self.analyze_capture(capture)?;
-        let (_, analyzer) = self.runtime.verify()?;
+        let (_, analyzer, _) = self.runtime.verify()?;
         let receipt = TransportAnalysisReceipt {
             proof_id: binding.proof_id.clone(),
             channel_id: binding.channel_id.clone(),
@@ -627,6 +688,32 @@ fn parse_tsanalyze_json(
         return Err("TSDuck analysis packet count does not match the bounded capture".into());
     }
     Ok(findings)
+}
+
+fn tsanalyze_service_binding(output: &[u8]) -> Result<(u64, u64), String> {
+    let json_start = output
+        .iter()
+        .position(|byte| *byte == b'{')
+        .ok_or("TSDuck analysis JSON report is missing")?;
+    let report: serde_json::Value = serde_json::from_slice(&output[json_start..])
+        .map_err(|_| "TSDuck analysis output is malformed")?;
+    let services = report["services"]
+        .as_array()
+        .ok_or("TSDuck service report is missing")?;
+    if services.len() != 1 {
+        return Err("TSDuck analysis must identify exactly one service".into());
+    }
+    let service = &services[0];
+    let service_id = service["id"]
+        .as_u64()
+        .ok_or("TSDuck service identifier is missing")?;
+    let pmt_pid = service["pmt-pid"]
+        .as_u64()
+        .ok_or("TSDuck PMT PID is missing")?;
+    if service_id == 0 || pmt_pid == 0 {
+        return Err("TSDuck service binding is invalid".into());
+    }
+    Ok((service_id, pmt_pid))
 }
 
 /// Receiver contract deliberately supports only the authenticated HTTPS API profile.
@@ -852,6 +939,46 @@ fn ensure_non_reparse_ancestry(path: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// Creates each missing component only after inspecting its original parent
+/// path.  Deliberately never canonicalizes first: canonicalization follows a
+/// junction and would validate a path outside the service-owned namespace.
+fn create_non_reparse_directory_chain(path: &Path) -> Result<(), String> {
+    let mut current = PathBuf::new();
+    for component in path.components() {
+        current.push(component.as_os_str());
+        match fs::symlink_metadata(&current) {
+            Ok(metadata) => {
+                if metadata.file_attributes() & 0x0400 != 0 || !metadata.is_dir() {
+                    return Err(
+                        "transport artifact root contains a reparse point or non-directory".into(),
+                    );
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                let parent = current
+                    .parent()
+                    .ok_or("transport artifact root has no parent")?;
+                let parent_metadata = fs::symlink_metadata(parent)
+                    .map_err(|_| "transport artifact root parent is unavailable")?;
+                if parent_metadata.file_attributes() & 0x0400 != 0 || !parent_metadata.is_dir() {
+                    return Err(
+                        "transport artifact root parent is a reparse point or non-directory".into(),
+                    );
+                }
+                fs::create_dir(&current)
+                    .map_err(|_| "transport artifact root could not be created")?;
+                let created = fs::symlink_metadata(&current)
+                    .map_err(|_| "transport artifact root disappeared after creation")?;
+                if created.file_attributes() & 0x0400 != 0 || !created.is_dir() {
+                    return Err("transport artifact root changed after creation".into());
+                }
+            }
+            Err(_) => return Err("transport artifact root could not be inspected".into()),
+        }
+    }
+    Ok(())
+}
+
 fn is_canonical_uuid(value: &str) -> bool {
     value.len() == 36
         && value.bytes().enumerate().all(|(index, byte)| {
@@ -881,7 +1008,6 @@ fn is_sha256(value: &str) -> bool {
     value.len() == 64 && value.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
-#[cfg(test)]
 fn validate_tstables_json(output: &[u8], service_id: u64, pmt_pid: u64) -> Result<(), String> {
     if output.is_empty() || output.len() > MAX_PROCESS_OUTPUT_BYTES {
         return Err("TSDuck tables output is missing or oversized".into());
@@ -927,6 +1053,7 @@ mod tests {
         fs::create_dir_all(root.join("bin")).unwrap();
         fs::write(root.join("bin/tsp.exe"), b"tsp").unwrap();
         fs::write(root.join("bin/tsanalyze.exe"), b"analyzer").unwrap();
+        fs::write(root.join("bin/tstables.exe"), b"tables").unwrap();
         root
     }
     fn runtime(root: &Path) -> AttestedTsdDuckRuntime {
@@ -935,6 +1062,7 @@ mod tests {
             version: "3.44-4676".into(),
             tsp_sha256: hash_file(&root.join("bin/tsp.exe")).unwrap(),
             tsanalyze_sha256: hash_file(&root.join("bin/tsanalyze.exe")).unwrap(),
+            tstables_sha256: hash_file(&root.join("bin/tstables.exe")).unwrap(),
         }
     }
     #[test]
@@ -1083,7 +1211,15 @@ mod tests {
         assert_eq!(facts.artifact_relative_path, format!("{job_id}/capture.ts"));
         assert_eq!(facts.capture_bytes, 188);
         assert_eq!(facts.capture_sha256, sha256(&bytes));
-        assert!(managed.begin_job(job_id).is_err());
+        let retry = managed.begin_job(job_id).unwrap();
+        assert!(retry.ends_with("capture.partial.ts"));
+        assert!(fs::read_dir(root.join("artifacts")).unwrap().any(|entry| {
+            entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with(&format!("{job_id}.quarantine-"))
+        }));
         fs::remove_dir_all(root).unwrap();
     }
 }

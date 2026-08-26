@@ -741,6 +741,20 @@ struct TransportProofJobResponse {
     created_at_unix_ms: i64,
     updated_at_unix_ms: i64,
     lease_expires_at_unix_ms: Option<i64>,
+    capture: Option<TransportProofCaptureResponse>,
+    analyzer_output_sha256: Option<String>,
+    completed_at_unix_ms: Option<i64>,
+    failed_at_unix_ms: Option<i64>,
+    failure_detail: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct TransportProofCaptureResponse {
+    artifact_relative_path: String,
+    capture_bytes: u64,
+    capture_sha256: String,
+    started_at_unix_ms: i64,
+    ended_at_unix_ms: i64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -6446,18 +6460,14 @@ impl Api {
             .filter(|sink| {
                 sink.enabled
                     && sink.required
-                    && matches!(
-                        sink.kind,
-                        station_schedule::OutputSinkKind::UdpTs
-                            | station_schedule::OutputSinkKind::Srt
-                    )
+                    && sink.kind == station_schedule::OutputSinkKind::UdpTs
             })
             .collect::<Vec<_>>();
         let [sink] = sinks.as_slice() else {
             return error_response(
                 409,
                 "transport_sink_ambiguous",
-                "Transport proof requires exactly one enabled required UDP or SRT sink.",
+                "Transport proof currently requires exactly one enabled required UDP transport-stream sink.",
             );
         };
         let target = match self
@@ -11505,6 +11515,17 @@ fn transport_proof_job_response(record: TransportProofJobRecord) -> TransportPro
         created_at_unix_ms: job.created_at_unix_ms,
         updated_at_unix_ms: record.updated_at_unix_ms,
         lease_expires_at_unix_ms: record.lease_expires_at_unix_ms,
+        capture: record.capture.map(|capture| TransportProofCaptureResponse {
+            artifact_relative_path: capture.artifact_relative_path,
+            capture_bytes: capture.capture_bytes,
+            capture_sha256: capture.capture_sha256,
+            started_at_unix_ms: capture.started_at_unix_ms,
+            ended_at_unix_ms: capture.ended_at_unix_ms,
+        }),
+        analyzer_output_sha256: record.analyzer_output_sha256,
+        completed_at_unix_ms: record.completed_at_unix_ms,
+        failed_at_unix_ms: record.failed_at_unix_ms,
+        failure_detail: record.failure_detail,
     }
 }
 

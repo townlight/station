@@ -11283,7 +11283,8 @@ impl StationStore {
         self.finish_value_transaction(outcome)
     }
 
-    pub fn complete_transport_proof_job(
+    #[cfg(test)]
+    fn complete_transport_proof_job(
         &self,
         job_id: &str,
         analyzer_output_sha256: &str,
@@ -11313,6 +11314,98 @@ impl StationStore {
             if self.changes() != 1 {
                 return Err(
                     "transport proof completion compare-and-set failed or lease expired".into(),
+                );
+            }
+            self.read_transport_proof_job(job_id)?
+                .ok_or_else(|| "transport proof job disappeared".to_string())
+        })();
+        self.finish_value_transaction(outcome)
+    }
+
+    /// The only successful terminal transition: append the exact current
+    /// analysis receipt and mark the queue job completed in one transaction.
+    pub fn complete_transport_proof_job_with_analysis(
+        &self,
+        job_id: &str,
+        receipt: &TransportAnalysisReceipt,
+        now_unix_ms: i64,
+    ) -> Result<TransportProofJobRecord, String> {
+        validate_transport_proof_job_id(job_id)?;
+        receipt.validate_fresh_at(now_unix_ms)?;
+        self.execute("BEGIN IMMEDIATE")?;
+        let outcome = (|| {
+            let current = self
+                .read_transport_proof_job(job_id)?
+                .ok_or_else(|| "transport proof job does not exist".to_string())?;
+            self.validate_transport_proof_job_current(&current.job)?;
+            if current.state != TransportProofJobState::Analyzing
+                || current.capture.is_none()
+                || receipt.proof_id != current.job.job_id
+                || receipt.channel_id != current.job.channel_id
+                || receipt.sink_id != current.job.sink_id
+                || receipt.target_id != current.job.target_id
+                || receipt.target_revision != current.job.target_revision
+                || receipt.candidate_version != current.job.candidate_version
+                || receipt.source_commit != current.job.source_commit
+                || receipt.configuration_hash != current.job.configuration_hash
+                || receipt.outcome != ProofOutcome::Pass
+                || receipt.findings.analyzer_output_sha256.is_empty()
+            {
+                return Err(
+                    "transport proof completion receipt does not match its claimed job".into(),
+                );
+            }
+            let record = serde_json::to_string(receipt)
+                .map_err(|_| "serialize transport analysis receipt failed")?;
+            let insert = self.prepare("INSERT INTO transport_analysis_receipts(proof_id,channel_id,sink_id,target_id,target_revision,candidate_version,source_commit,configuration_hash,outcome,captured_at_unix_ms,recorded_at_unix_ms,record_json) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,'pass',?9,?10,?11)")?;
+            for (index, value, field) in [
+                (1, receipt.proof_id.as_str(), "proof id"),
+                (2, receipt.channel_id.as_str(), "channel id"),
+                (3, receipt.sink_id.as_str(), "sink id"),
+                (4, receipt.target_id.as_str(), "target id"),
+                (6, receipt.candidate_version.as_str(), "candidate"),
+                (7, receipt.source_commit.as_str(), "source commit"),
+                (8, receipt.configuration_hash.as_str(), "configuration hash"),
+            ] {
+                bind_text(self.database, insert.raw, index, &c_string(value, field)?)?;
+            }
+            bind_i64(
+                self.database,
+                insert.raw,
+                5,
+                checked_i64(receipt.target_revision, "target revision")?,
+            )?;
+            bind_i64(self.database, insert.raw, 9, receipt.captured_at_unix_ms)?;
+            bind_i64(self.database, insert.raw, 10, receipt.recorded_at_unix_ms)?;
+            bind_text(
+                self.database,
+                insert.raw,
+                11,
+                &c_string(&record, "transport analysis receipt")?,
+            )?;
+            expect_done(self.database, insert.raw)?;
+            let update = self.prepare("UPDATE transport_proof_jobs SET state='completed',updated_at_unix_ms=?1,lease_expires_at_unix_ms=-1,analyzer_output_sha256=?2,completed_at_unix_ms=?1 WHERE job_id=?3 AND state='analyzing' AND lease_expires_at_unix_ms>?1")?;
+            bind_i64(self.database, update.raw, 1, now_unix_ms)?;
+            bind_text(
+                self.database,
+                update.raw,
+                2,
+                &c_string(
+                    &receipt.findings.analyzer_output_sha256,
+                    "analyzer output hash",
+                )?,
+            )?;
+            bind_text(
+                self.database,
+                update.raw,
+                3,
+                &c_string(job_id, "transport proof job identity")?,
+            )?;
+            expect_done(self.database, update.raw)?;
+            if self.changes() != 1 {
+                return Err(
+                    "transport proof receipt completion compare-and-set failed or lease expired"
+                        .into(),
                 );
             }
             self.read_transport_proof_job(job_id)?
@@ -11699,15 +11792,17 @@ impl StationStore {
             &config_hash,
         )?;
         Ok(Some(CableTransportValidation::derive(
-            channel_id,
-            sink_id,
-            &target,
-            candidate_version,
-            source_commit,
-            &config_hash,
-            now_unix_ms,
-            analysis,
-            reachability,
+            station_transport_proof::CableTransportValidationInput {
+                channel_id,
+                sink_id,
+                target: &target,
+                candidate_version,
+                source_commit,
+                configuration_hash: &config_hash,
+                now_unix_ms,
+                analysis,
+                reachability,
+            },
         )?))
     }
 

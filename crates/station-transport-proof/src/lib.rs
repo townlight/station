@@ -133,19 +133,19 @@ pub struct TransportAnalysisReceipt {
 
 impl TransportAnalysisReceipt {
     pub fn validate(&self) -> Result<(), String> {
-        validate_common_binding(
-            &self.proof_id,
-            &self.channel_id,
-            &self.sink_id,
-            &self.target_id,
-            &self.candidate_version,
-            &self.source_commit,
-            &self.configuration_hash,
-            self.captured_at_unix_ms,
-            self.recorded_at_unix_ms,
-            &self.recorded_by,
-            &self.detail,
-        )?;
+        validate_common_binding(CommonBinding {
+            proof_id: &self.proof_id,
+            channel_id: &self.channel_id,
+            sink_id: &self.sink_id,
+            target_id: &self.target_id,
+            candidate_version: &self.candidate_version,
+            source_commit: &self.source_commit,
+            configuration_hash: &self.configuration_hash,
+            observed_at_unix_ms: self.captured_at_unix_ms,
+            recorded_at_unix_ms: self.recorded_at_unix_ms,
+            recorded_by: &self.recorded_by,
+            detail: &self.detail,
+        })?;
         bounded_token(&self.analyzer_id, 100, "analyzer id")?;
         bounded_text(&self.analyzer_version, 100, "analyzer version")?;
         if !sha256(&self.analyzer_sha256) {
@@ -202,19 +202,19 @@ pub struct TargetDeviceReachabilityReceipt {
 
 impl TargetDeviceReachabilityReceipt {
     pub fn validate(&self) -> Result<(), String> {
-        validate_common_binding(
-            &self.proof_id,
-            &self.channel_id,
-            &self.sink_id,
-            &self.target_id,
-            &self.candidate_version,
-            &self.source_commit,
-            &self.configuration_hash,
-            self.observed_at_unix_ms,
-            self.recorded_at_unix_ms,
-            &self.recorded_by,
-            &self.detail,
-        )?;
+        validate_common_binding(CommonBinding {
+            proof_id: &self.proof_id,
+            channel_id: &self.channel_id,
+            sink_id: &self.sink_id,
+            target_id: &self.target_id,
+            candidate_version: &self.candidate_version,
+            source_commit: &self.source_commit,
+            configuration_hash: &self.configuration_hash,
+            observed_at_unix_ms: self.observed_at_unix_ms,
+            recorded_at_unix_ms: self.recorded_at_unix_ms,
+            recorded_by: &self.recorded_by,
+            detail: &self.detail,
+        })?;
         bounded_token(&self.adapter_id, 100, "adapter id")?;
         bounded_text(&self.adapter_version, 100, "adapter version")?;
         bounded_token(&self.auth_method, 100, "authentication method")?;
@@ -251,18 +251,31 @@ pub struct CableTransportValidation {
     pub detail: String,
 }
 
+pub struct CableTransportValidationInput<'a> {
+    pub channel_id: &'a str,
+    pub sink_id: &'a str,
+    pub target: &'a TargetDeviceConfig,
+    pub candidate_version: &'a str,
+    pub source_commit: &'a str,
+    pub configuration_hash: &'a str,
+    pub now_unix_ms: i64,
+    pub analysis: Option<TransportAnalysisReceipt>,
+    pub reachability: Option<TargetDeviceReachabilityReceipt>,
+}
+
 impl CableTransportValidation {
-    pub fn derive(
-        channel_id: &str,
-        sink_id: &str,
-        target: &TargetDeviceConfig,
-        candidate_version: &str,
-        source_commit: &str,
-        configuration_hash: &str,
-        now_unix_ms: i64,
-        analysis: Option<TransportAnalysisReceipt>,
-        reachability: Option<TargetDeviceReachabilityReceipt>,
-    ) -> Result<Self, String> {
+    pub fn derive(input: CableTransportValidationInput<'_>) -> Result<Self, String> {
+        let CableTransportValidationInput {
+            channel_id,
+            sink_id,
+            target,
+            candidate_version,
+            source_commit,
+            configuration_hash,
+            now_unix_ms,
+            analysis,
+            reachability,
+        } = input;
         target.validate()?;
         bounded_token(channel_id, 100, "channel id")?;
         bounded_token(sink_id, 100, "sink id")?;
@@ -317,19 +330,34 @@ impl CableTransportValidation {
     }
 }
 
-fn validate_common_binding(
-    proof_id: &str,
-    channel_id: &str,
-    sink_id: &str,
-    target_id: &str,
-    candidate_version: &str,
-    source_commit: &str,
-    configuration_hash: &str,
+struct CommonBinding<'a> {
+    proof_id: &'a str,
+    channel_id: &'a str,
+    sink_id: &'a str,
+    target_id: &'a str,
+    candidate_version: &'a str,
+    source_commit: &'a str,
+    configuration_hash: &'a str,
     observed_at_unix_ms: i64,
     recorded_at_unix_ms: i64,
-    recorded_by: &str,
-    detail: &str,
-) -> Result<(), String> {
+    recorded_by: &'a str,
+    detail: &'a str,
+}
+
+fn validate_common_binding(binding: CommonBinding<'_>) -> Result<(), String> {
+    let CommonBinding {
+        proof_id,
+        channel_id,
+        sink_id,
+        target_id,
+        candidate_version,
+        source_commit,
+        configuration_hash,
+        observed_at_unix_ms,
+        recorded_at_unix_ms,
+        recorded_by,
+        detail,
+    } = binding;
     for (value, field) in [
         (proof_id, "proof id"),
         (channel_id, "channel id"),
@@ -422,7 +450,7 @@ fn validate_freshness(
     let age = now_unix_ms
         .checked_sub(recorded_at_unix_ms)
         .ok_or_else(|| format!("{authority} time is outside the supported range"))?;
-    if age < 0 || age > TRANSPORT_PROOF_FRESHNESS_MS {
+    if !(0..=TRANSPORT_PROOF_FRESHNESS_MS).contains(&age) {
         return Err(format!("{authority} evidence is future-dated or expired"));
     }
     Ok(())
@@ -552,34 +580,34 @@ mod tests {
         }
     }
 
+    fn derive_validation(
+        target: &TargetDeviceConfig,
+        candidate_version: &str,
+        now_unix_ms: i64,
+        analysis: Option<TransportAnalysisReceipt>,
+        reachability: Option<TargetDeviceReachabilityReceipt>,
+    ) -> Result<CableTransportValidation, String> {
+        CableTransportValidation::derive(CableTransportValidationInput {
+            channel_id: "channel-1",
+            sink_id: "sink-1",
+            target,
+            candidate_version,
+            source_commit: &"a".repeat(40),
+            configuration_hash: &"b".repeat(64),
+            now_unix_ms,
+            analysis,
+            reachability,
+        })
+    }
+
     #[test]
     fn composite_requires_both_current_proofs() {
         let t = target();
-        let blocked = CableTransportValidation::derive(
-            "channel-1",
-            "sink-1",
-            &t,
-            "0.1.0",
-            &"a".repeat(40),
-            &"b".repeat(64),
-            2,
-            Some(analysis()),
-            None,
-        )
-        .expect("valid composite");
+        let blocked =
+            derive_validation(&t, "0.1.0", 2, Some(analysis()), None).expect("valid composite");
         assert_eq!(blocked.outcome, None);
-        let pass = CableTransportValidation::derive(
-            "channel-1",
-            "sink-1",
-            &t,
-            "0.1.0",
-            &"a".repeat(40),
-            &"b".repeat(64),
-            2,
-            Some(analysis()),
-            Some(reachability()),
-        )
-        .expect("valid composite");
+        let pass = derive_validation(&t, "0.1.0", 2, Some(analysis()), Some(reachability()))
+            .expect("valid composite");
         assert_eq!(pass.outcome, Some(ProofOutcome::Pass));
     }
 
@@ -589,36 +617,16 @@ mod tests {
         let mut r = reachability();
         r.target_revision = 2;
         assert_eq!(
-            CableTransportValidation::derive(
-                "channel-1",
-                "sink-1",
-                &t,
-                "0.1.0",
-                &"a".repeat(40),
-                &"b".repeat(64),
-                2,
-                Some(analysis()),
-                Some(r)
-            )
-            .expect("valid composite")
-            .outcome,
+            derive_validation(&t, "0.1.0", 2, Some(analysis()), Some(r))
+                .expect("valid composite")
+                .outcome,
             None
         );
         t.revision = 2;
         assert_eq!(
-            CableTransportValidation::derive(
-                "channel-1",
-                "sink-1",
-                &t,
-                "0.2.0",
-                &"a".repeat(40),
-                &"b".repeat(64),
-                2,
-                Some(analysis()),
-                None
-            )
-            .expect("valid composite")
-            .outcome,
+            derive_validation(&t, "0.2.0", 2, Some(analysis()), None)
+                .expect("valid composite")
+                .outcome,
             None
         );
     }
@@ -734,13 +742,9 @@ mod tests {
 
     #[test]
     fn expired_evidence_cannot_pass_the_composite() {
-        let validation = CableTransportValidation::derive(
-            "channel-1",
-            "sink-1",
+        let validation = derive_validation(
             &target(),
             "0.1.0",
-            &"a".repeat(40),
-            &"b".repeat(64),
             TRANSPORT_PROOF_FRESHNESS_MS + 3,
             Some(analysis()),
             Some(reachability()),
