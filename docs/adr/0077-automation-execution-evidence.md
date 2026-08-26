@@ -4,7 +4,7 @@
 
 TownLight records model execution separately from connection-test authority. An execution request
 binds one server-owned job to the exact current feature policy, operator-selected adapter, policy and
-adapter revisions, configuration hash, installed candidate, input artifact digest and size, and
+adapter revisions, configuration hash, verified active-slot install generation, input artifact digest and size, and
 request time. Captions accept a media artifact; summaries accept a text-bearing artifact; translation
 accepts a language-bound text artifact plus a distinct requested target language.
 
@@ -22,8 +22,10 @@ it possible for later storage and controller code to preserve exact execution pr
 turning a connection test into an execution claim.
 
 The single SQLite writer persists exact execution requests as idempotent jobs. Enqueue requires a
-current passing connection test. Claim and renewal use a bounded worker identity, attempt count, and
-lease, and an expired claim can be reclaimed without letting its old owner complete. Completion
+current passing connection test. Claim and renewal require opaque verified-install authority and use
+a bounded worker identity, random per-attempt claim identity, claim start time, attempt count, and
+lease. An expired claim can be reclaimed without letting its old owner or its receipt complete.
+Completion
 rechecks current policy, adapter, configuration, candidate, and connection-test authority inside the
 same immediate transaction that appends the immutable receipt and marks the job complete. Indexed
 identity, revision, candidate, input, output, size, and time columns are checked against the stored
@@ -34,9 +36,15 @@ A retryable failure returns the job to Pending until the bounded attempt ceiling
 failure or exhausted ceiling produces an immutable Failed terminal row with a bounded categorical
 failure code and no receipt.
 
+FIFO recovery terminalizes stale current-authority bindings as `authority_changed` and an expired
+tenth attempt as `attempt_limit_exhausted`, then continues to later current work in the same bounded
+transaction. Receipt validation requires the exact live claim identity and an execution interval
+beginning no earlier than that claim. Reads validate bounded failure codes and discover receipts by
+job identity even when a corrupted parent pointer or parent row tries to hide them.
+
 ## Boundaries and non-claims
 
-This slice does not store credentials, open an artifact, run a local model, call a cloud provider,
+This slice does not yet acquire the required `InstallAuthorityFence`, store credentials, open an artifact, run a local model, call a cloud provider,
 assess semantic quality, write an output artifact, expose an HTTP route, supervise a controller, or
 prove an installed-machine execution. A durable receipt is exact evidence accepted from a future
 trusted executor, not source proof that such an executor exists. Later adapters must hash input and

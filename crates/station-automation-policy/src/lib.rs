@@ -174,6 +174,7 @@ pub struct AutomationExecutionRequest {
     pub adapter_revision: u64,
     pub configuration_hash: String,
     pub candidate: AutomationCandidateIdentity,
+    pub install_generation: u64,
     pub input: AutomationInputArtifact,
     pub requested_output_language: Option<String>,
     pub requested_at_unix_ms: i64,
@@ -191,6 +192,8 @@ pub struct AutomationExecutionReceipt {
     pub adapter_revision: u64,
     pub configuration_hash: String,
     pub candidate: AutomationCandidateIdentity,
+    pub install_generation: u64,
+    pub claim_id: String,
     pub engine: AutomationExecutionEngine,
     pub input: AutomationInputArtifact,
     pub output: AutomationOutputArtifact,
@@ -233,6 +236,7 @@ impl AutomationExecutionRequest {
         if self.requested_at_unix_ms < 0
             || self.policy_revision == 0
             || self.adapter_revision == 0
+            || self.install_generation == 0
             || !is_sha256(&self.configuration_hash)
         {
             return Err("automation execution request shape is invalid".into());
@@ -311,6 +315,7 @@ impl AutomationExecutionReceipt {
     ) -> Result<(), String> {
         request.validate_shape()?;
         validate_uuid(&self.receipt_id, "automation execution receipt identity")?;
+        validate_uuid(&self.claim_id, "automation execution claim identity")?;
         self.input.validate()?;
         self.output.validate()?;
         if self.job_id != request.job_id
@@ -321,6 +326,7 @@ impl AutomationExecutionReceipt {
             || self.adapter_revision != request.adapter_revision
             || self.configuration_hash != request.configuration_hash
             || self.candidate != request.candidate
+            || self.install_generation != request.install_generation
             || self.input != request.input
             || self.started_at_unix_ms < request.requested_at_unix_ms
             || self.completed_at_unix_ms < self.started_at_unix_ms

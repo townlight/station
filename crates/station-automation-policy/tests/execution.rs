@@ -55,6 +55,7 @@ fn request(feature: AutomationFeature) -> AutomationExecutionRequest {
         adapter_revision: 5,
         configuration_hash: CONFIG_SHA.into(),
         candidate: candidate(),
+        install_generation: 7,
         input: AutomationInputArtifact {
             kind: AutomationInputKind::Transcript,
             artifact_sha256: INPUT_SHA.into(),
@@ -78,6 +79,8 @@ fn summary_receipt() -> AutomationExecutionReceipt {
         adapter_revision: 5,
         configuration_hash: CONFIG_SHA.into(),
         candidate: candidate(),
+        install_generation: 7,
+        claim_id: "77777777-2222-4333-8444-555555555555".into(),
         engine: AutomationExecutionEngine::Local {
             executable_sha256: RUNTIME_SHA.into(),
             model_artifact_sha256: MODEL_SHA.into(),
@@ -267,6 +270,29 @@ fn caption_execution_requires_exact_media_input() {
                 &adapter(AutomationFeature::Captions, AdapterLocation::Local),
                 &candidate(),
             )
+            .is_err()
+    );
+}
+
+#[test]
+fn execution_receipt_binds_install_generation_and_claim_identity() {
+    let request = request(AutomationFeature::Summaries);
+    let policy = policy(AutomationFeature::Summaries);
+    let adapter = adapter(AutomationFeature::Summaries, AdapterLocation::Local);
+
+    let mut wrong_generation = summary_receipt();
+    wrong_generation.install_generation += 1;
+    assert!(
+        wrong_generation
+            .validate_against(&request, &policy, &adapter, &candidate())
+            .is_err()
+    );
+
+    let mut invalid_claim = summary_receipt();
+    invalid_claim.claim_id = "caller-selected-text".into();
+    assert!(
+        invalid_claim
+            .validate_against(&request, &policy, &adapter, &candidate())
             .is_err()
     );
 }

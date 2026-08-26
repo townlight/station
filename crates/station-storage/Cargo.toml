@@ -35,3 +35,4 @@ windows-sys.workspace = true
 [dev-dependencies]
 image.workspace = true
 station-metadata.workspace = true
+station-maintenance = { workspace = true, features = ["test-support"] }

@@ -1751,6 +1751,30 @@ impl VerifiedInstallAuthority {
     }
 }
 
+#[cfg(feature = "test-support")]
+#[doc(hidden)]
+pub fn verified_install_authority_for_test(
+    version: &str,
+    source_commit: &str,
+    install_generation: u64,
+) -> Result<VerifiedInstallAuthority, String> {
+    semver::Version::parse(version)
+        .map_err(|_| "test install authority version is invalid".to_string())?;
+    if !is_commit_hash_lowercase(source_commit) || install_generation == 0 {
+        return Err("test install authority identity is invalid".into());
+    }
+    Ok(VerifiedInstallAuthority {
+        identity: VerifiedCandidateIdentity {
+            product: "TownLight Station".into(),
+            version: version.into(),
+            source_commit: source_commit.into(),
+            install_generation,
+            media_runtime_sha256: "a".repeat(64),
+            runtime_manifest_sha256: "b".repeat(64),
+        },
+    })
+}
+
 #[derive(Debug, Deserialize)]
 struct InstallReceiptIdentity {
     product: String,

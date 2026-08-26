@@ -1,5 +1,6 @@
 use super::*;
 use station_automation_policy::{AutomationExecutionReceipt, AutomationExecutionRequest};
+use station_maintenance::VerifiedInstallAuthority;
 
 const MAX_AUTOMATION_EXECUTION_ATTEMPTS: u32 = 10;
 const MAX_AUTOMATION_EXECUTION_LEASE_MS: i64 = 900_000;
@@ -19,6 +20,8 @@ pub struct AutomationExecutionJobRecord {
     pub attempt_count: u32,
     pub lease_owner: Option<String>,
     pub lease_expires_at_unix_ms: Option<i64>,
+    pub claim_id: Option<String>,
+    pub claimed_at_unix_ms: Option<i64>,
     pub receipt: Option<AutomationExecutionReceipt>,
     pub last_failure_code: Option<String>,
     pub created_at_unix_ms: i64,
@@ -38,12 +41,15 @@ impl StationStore {
                configuration_hash TEXT NOT NULL CHECK (length(configuration_hash)=64),\
                candidate_version TEXT NOT NULL,\
                source_commit TEXT NOT NULL CHECK (length(source_commit)=40),\
+               install_generation INTEGER NOT NULL CHECK (install_generation >= 1),\
                input_sha256 TEXT NOT NULL CHECK (length(input_sha256)=64),\
                input_bytes INTEGER NOT NULL CHECK (input_bytes >= 1),\
                state TEXT NOT NULL CHECK (state IN ('pending','claimed','completed','failed')),\
                attempt_count INTEGER NOT NULL CHECK (attempt_count BETWEEN 0 AND 10),\
                lease_owner TEXT NOT NULL,\
                lease_expires_at_unix_ms INTEGER NOT NULL CHECK (lease_expires_at_unix_ms >= -1),\
+               claim_id TEXT NOT NULL,\
+               claimed_at_unix_ms INTEGER NOT NULL CHECK (claimed_at_unix_ms >= -1),\
                receipt_id TEXT NOT NULL,\
                last_failure_code TEXT NOT NULL,\
                created_at_unix_ms INTEGER NOT NULL CHECK (created_at_unix_ms >= 0),\
@@ -57,6 +63,8 @@ impl StationStore {
              CREATE TABLE IF NOT EXISTS automation_execution_receipts (\
                receipt_id TEXT PRIMARY KEY,\
                job_id TEXT NOT NULL UNIQUE,\
+               install_generation INTEGER NOT NULL CHECK (install_generation >= 1),\
+               claim_id TEXT NOT NULL,\
                output_sha256 TEXT NOT NULL CHECK (length(output_sha256)=64),\
                output_bytes INTEGER NOT NULL CHECK (output_bytes >= 1),\
                completed_at_unix_ms INTEGER NOT NULL CHECK (completed_at_unix_ms >= 0),\
@@ -70,7 +78,7 @@ impl StationStore {
                BEFORE DELETE ON automation_execution_receipts \
                BEGIN SELECT RAISE(ABORT, 'automation execution receipts are append-only'); END;\
              CREATE TRIGGER IF NOT EXISTS automation_execution_jobs_binding_immutable \
-               BEFORE UPDATE OF job_id,feature,policy_id,policy_revision,adapter_id,adapter_revision,configuration_hash,candidate_version,source_commit,input_sha256,input_bytes,created_at_unix_ms,request_json \
+               BEFORE UPDATE OF job_id,feature,policy_id,policy_revision,adapter_id,adapter_revision,configuration_hash,candidate_version,source_commit,install_generation,input_sha256,input_bytes,created_at_unix_ms,request_json \
                ON automation_execution_jobs \
                BEGIN SELECT RAISE(ABORT, 'automation execution job binding is immutable'); END;\
              CREATE TRIGGER IF NOT EXISTS automation_execution_jobs_terminal_immutable \
@@ -86,11 +94,11 @@ impl StationStore {
     pub fn enqueue_automation_execution_job(
         &self,
         request: &AutomationExecutionRequest,
-        current_candidate: &AutomationCandidateIdentity,
+        install_authority: &VerifiedInstallAuthority,
         now_unix_ms: i64,
     ) -> Result<AutomationExecutionJobRecord, String> {
         request.validate_shape()?;
-        current_candidate.validate()?;
+        validate_execution_install_authority(request, install_authority)?;
         if now_unix_ms < 0 || request.requested_at_unix_ms != now_unix_ms {
             return Err("automation execution request time is not server-current".into());
         }
@@ -104,14 +112,14 @@ impl StationStore {
             }
             self.validate_automation_execution_request_current(
                 request,
-                current_candidate,
+                install_authority,
                 now_unix_ms,
             )?;
             let request_json = serde_json::to_string(request)
                 .map_err(|error| format!("serialize automation execution request: {error}"))?;
             let statement = self.prepare(
-                "INSERT INTO automation_execution_jobs(job_id,feature,policy_id,policy_revision,adapter_id,adapter_revision,configuration_hash,candidate_version,source_commit,input_sha256,input_bytes,state,attempt_count,lease_owner,lease_expires_at_unix_ms,receipt_id,last_failure_code,created_at_unix_ms,completed_at_unix_ms,request_json) \
-                 VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,'pending',0,'',-1,'','',?12,-1,?13)",
+                "INSERT INTO automation_execution_jobs(job_id,feature,policy_id,policy_revision,adapter_id,adapter_revision,configuration_hash,candidate_version,source_commit,install_generation,input_sha256,input_bytes,state,attempt_count,lease_owner,lease_expires_at_unix_ms,claim_id,claimed_at_unix_ms,receipt_id,last_failure_code,created_at_unix_ms,completed_at_unix_ms,request_json) \
+                 VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,'pending',0,'',-1,'',-1,'','',?13,-1,?14)",
             )?;
             let values = [
                 c_string(&request.job_id, "automation execution job identity")?,
@@ -164,15 +172,24 @@ impl StationStore {
             bind_text(self.database, statement.raw, 7, &values[4])?;
             bind_text(self.database, statement.raw, 8, &values[5])?;
             bind_text(self.database, statement.raw, 9, &values[6])?;
-            bind_text(self.database, statement.raw, 10, &values[7])?;
             bind_i64(
                 self.database,
                 statement.raw,
-                11,
+                10,
+                checked_i64(
+                    request.install_generation,
+                    "automation execution install generation",
+                )?,
+            )?;
+            bind_text(self.database, statement.raw, 11, &values[7])?;
+            bind_i64(
+                self.database,
+                statement.raw,
+                12,
                 checked_i64(request.input.bytes, "automation execution input bytes")?,
             )?;
-            bind_i64(self.database, statement.raw, 12, now_unix_ms)?;
-            bind_text(self.database, statement.raw, 13, &values[8])?;
+            bind_i64(self.database, statement.raw, 13, now_unix_ms)?;
+            bind_text(self.database, statement.raw, 14, &values[8])?;
             expect_done(self.database, statement.raw)?;
             self.read_automation_execution_job(&request.job_id)?
                 .ok_or_else(|| "automation execution job disappeared after enqueue".into())
@@ -188,14 +205,20 @@ impl StationStore {
             return Err("automation execution job identity is invalid".into());
         }
         let statement = self.prepare(
-            "SELECT job_id,feature,policy_id,policy_revision,adapter_id,adapter_revision,configuration_hash,candidate_version,source_commit,input_sha256,input_bytes,state,attempt_count,lease_owner,lease_expires_at_unix_ms,receipt_id,last_failure_code,created_at_unix_ms,completed_at_unix_ms,request_json \
+            "SELECT job_id,feature,policy_id,policy_revision,adapter_id,adapter_revision,configuration_hash,candidate_version,source_commit,install_generation,input_sha256,input_bytes,state,attempt_count,lease_owner,lease_expires_at_unix_ms,claim_id,claimed_at_unix_ms,receipt_id,last_failure_code,created_at_unix_ms,completed_at_unix_ms,request_json \
              FROM automation_execution_jobs WHERE job_id=?1",
         )?;
         let identity = c_string(job_id, "automation execution job identity")?;
         bind_text(self.database, statement.raw, 1, &identity)?;
         match unsafe { sqlite3_step(statement.raw) } {
             SQLITE_ROW => Ok(Some(self.read_automation_execution_job_row(statement.raw)?)),
-            SQLITE_DONE => Ok(None),
+            SQLITE_DONE => {
+                if self.automation_execution_receipt_exists_for_job(job_id)? {
+                    Err("automation execution receipt has no durable parent job".into())
+                } else {
+                    Ok(None)
+                }
+            }
             _ => Err(sqlite_error(self.database)),
         }
     }
@@ -204,7 +227,7 @@ impl StationStore {
         &self,
         job_id: &str,
         worker_id: &str,
-        current_candidate: &AutomationCandidateIdentity,
+        install_authority: &VerifiedInstallAuthority,
         now_unix_ms: i64,
         lease_ms: i64,
     ) -> Result<AutomationExecutionJobRecord, String> {
@@ -215,7 +238,7 @@ impl StationStore {
         {
             return Err("automation execution claim is invalid or unbounded".into());
         }
-        current_candidate.validate()?;
+        validate_verified_install_authority(install_authority)?;
         let lease_expires = now_unix_ms
             .checked_add(lease_ms)
             .ok_or_else(|| "automation execution lease overflowed".to_string())?;
@@ -223,7 +246,7 @@ impl StationStore {
         let outcome = self.claim_automation_execution_job_in_transaction(
             job_id,
             worker_id,
-            current_candidate,
+            install_authority,
             now_unix_ms,
             lease_expires,
         );
@@ -233,7 +256,7 @@ impl StationStore {
     pub fn claim_next_automation_execution_job(
         &self,
         worker_id: &str,
-        current_candidate: &AutomationCandidateIdentity,
+        install_authority: &VerifiedInstallAuthority,
         now_unix_ms: i64,
         lease_ms: i64,
     ) -> Result<Option<AutomationExecutionJobRecord>, String> {
@@ -243,7 +266,7 @@ impl StationStore {
         {
             return Err("automation execution next claim is invalid or unbounded".into());
         }
-        current_candidate.validate()?;
+        validate_verified_install_authority(install_authority)?;
         let lease_expires = now_unix_ms
             .checked_add(lease_ms)
             .ok_or_else(|| "automation execution lease overflowed".to_string())?;
@@ -255,26 +278,56 @@ impl StationStore {
             )?;
             bind_i64(self.database, exhausted.raw, 1, now_unix_ms)?;
             expect_done(self.database, exhausted.raw)?;
-            let select = self.prepare(
-                "SELECT job_id FROM automation_execution_jobs \
-                 WHERE attempt_count<10 AND (state='pending' OR (state='claimed' AND lease_expires_at_unix_ms<=?1)) \
-                 ORDER BY created_at_unix_ms,job_id LIMIT 1",
-            )?;
-            bind_i64(self.database, select.raw, 1, now_unix_ms)?;
-            let job_id = match unsafe { sqlite3_step(select.raw) } {
-                SQLITE_ROW => column_text(select.raw, 0)?,
-                SQLITE_DONE => return Ok(None),
-                _ => return Err(sqlite_error(self.database)),
-            };
-            drop(select);
-            self.claim_automation_execution_job_in_transaction(
-                &job_id,
-                worker_id,
-                current_candidate,
-                now_unix_ms,
-                lease_expires,
-            )
-            .map(Some)
+            for _ in 0..256 {
+                let select = self.prepare(
+                    "SELECT job_id FROM automation_execution_jobs \
+                     WHERE attempt_count<10 AND (state='pending' OR (state='claimed' AND lease_expires_at_unix_ms<=?1)) \
+                     ORDER BY created_at_unix_ms,job_id LIMIT 1",
+                )?;
+                bind_i64(self.database, select.raw, 1, now_unix_ms)?;
+                let job_id = match unsafe { sqlite3_step(select.raw) } {
+                    SQLITE_ROW => column_text(select.raw, 0)?,
+                    SQLITE_DONE => return Ok(None),
+                    _ => return Err(sqlite_error(self.database)),
+                };
+                drop(select);
+                let current = self
+                    .read_automation_execution_job(&job_id)?
+                    .ok_or_else(|| "selected automation execution job disappeared".to_string())?;
+                if self.automation_execution_request_is_current(
+                    &current.request,
+                    install_authority,
+                    now_unix_ms,
+                )? {
+                    return self
+                        .claim_automation_execution_job_in_transaction(
+                            &job_id,
+                            worker_id,
+                            install_authority,
+                            now_unix_ms,
+                            lease_expires,
+                        )
+                        .map(Some);
+                }
+                let terminal = self.prepare(
+                    "UPDATE automation_execution_jobs SET state='failed',lease_owner='',lease_expires_at_unix_ms=-1,last_failure_code='authority_changed',completed_at_unix_ms=?1 \
+                     WHERE job_id=?2 AND (state='pending' OR (state='claimed' AND lease_expires_at_unix_ms<=?1))",
+                )?;
+                bind_i64(self.database, terminal.raw, 1, now_unix_ms)?;
+                bind_text(
+                    self.database,
+                    terminal.raw,
+                    2,
+                    &c_string(&job_id, "automation execution job identity")?,
+                )?;
+                expect_done(self.database, terminal.raw)?;
+                if self.changes() != 1 {
+                    return Err(
+                        "stale automation execution terminalization lost its write lock".into(),
+                    );
+                }
+            }
+            Ok(None)
         })();
         self.finish_automation_execution_transaction(outcome)
     }
@@ -284,13 +337,13 @@ impl StationStore {
         job_id: &str,
         worker_id: &str,
         receipt: &AutomationExecutionReceipt,
-        current_candidate: &AutomationCandidateIdentity,
+        install_authority: &VerifiedInstallAuthority,
         now_unix_ms: i64,
     ) -> Result<AutomationExecutionJobRecord, String> {
         if !is_canonical_uuid(job_id) || !secret_field(worker_id, 200) || now_unix_ms < 0 {
             return Err("automation execution completion authority is invalid".into());
         }
-        current_candidate.validate()?;
+        validate_verified_install_authority(install_authority)?;
         self.execute("BEGIN IMMEDIATE")?;
         let outcome = (|| {
             let current = self
@@ -309,18 +362,29 @@ impl StationStore {
                 self.current_automation_execution_authority(&current.request)?;
             self.validate_automation_execution_request_current(
                 &current.request,
-                current_candidate,
+                install_authority,
                 now_unix_ms,
             )?;
-            receipt.validate_against(&current.request, &policy, &adapter, current_candidate)?;
+            let current_candidate = automation_candidate_from_install(install_authority);
+            receipt.validate_against(&current.request, &policy, &adapter, &current_candidate)?;
+            if current.claim_id.as_deref() != Some(receipt.claim_id.as_str())
+                || current
+                    .claimed_at_unix_ms
+                    .is_none_or(|claimed_at| receipt.started_at_unix_ms < claimed_at)
+            {
+                return Err(
+                    "automation execution receipt predates or mismatches its live claim".into(),
+                );
+            }
             let record_json = serde_json::to_string(receipt)
                 .map_err(|error| format!("serialize automation execution receipt: {error}"))?;
             let insert = self.prepare(
-                "INSERT INTO automation_execution_receipts(receipt_id,job_id,output_sha256,output_bytes,completed_at_unix_ms,record_json) VALUES(?1,?2,?3,?4,?5,?6)",
+                "INSERT INTO automation_execution_receipts(receipt_id,job_id,install_generation,claim_id,output_sha256,output_bytes,completed_at_unix_ms,record_json) VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",
             )?;
             let values = [
                 c_string(&receipt.receipt_id, "automation execution receipt identity")?,
                 c_string(job_id, "automation execution job identity")?,
+                c_string(&receipt.claim_id, "automation execution claim identity")?,
                 c_string(
                     &receipt.output.artifact_sha256,
                     "automation execution output digest",
@@ -329,15 +393,25 @@ impl StationStore {
             ];
             bind_text(self.database, insert.raw, 1, &values[0])?;
             bind_text(self.database, insert.raw, 2, &values[1])?;
-            bind_text(self.database, insert.raw, 3, &values[2])?;
             bind_i64(
                 self.database,
                 insert.raw,
-                4,
+                3,
+                checked_i64(
+                    receipt.install_generation,
+                    "automation execution receipt install generation",
+                )?,
+            )?;
+            bind_text(self.database, insert.raw, 4, &values[2])?;
+            bind_text(self.database, insert.raw, 5, &values[3])?;
+            bind_i64(
+                self.database,
+                insert.raw,
+                6,
                 checked_i64(receipt.output.bytes, "automation execution output bytes")?,
             )?;
-            bind_i64(self.database, insert.raw, 5, receipt.completed_at_unix_ms)?;
-            bind_text(self.database, insert.raw, 6, &values[3])?;
+            bind_i64(self.database, insert.raw, 7, receipt.completed_at_unix_ms)?;
+            bind_text(self.database, insert.raw, 8, &values[4])?;
             expect_done(self.database, insert.raw)?;
 
             let update = self.prepare(
@@ -368,7 +442,7 @@ impl StationStore {
         &self,
         job_id: &str,
         worker_id: &str,
-        current_candidate: &AutomationCandidateIdentity,
+        install_authority: &VerifiedInstallAuthority,
         now_unix_ms: i64,
         lease_ms: i64,
     ) -> Result<AutomationExecutionJobRecord, String> {
@@ -379,7 +453,7 @@ impl StationStore {
         {
             return Err("automation execution lease renewal is invalid or unbounded".into());
         }
-        current_candidate.validate()?;
+        validate_verified_install_authority(install_authority)?;
         let lease_expires = now_unix_ms
             .checked_add(lease_ms)
             .ok_or_else(|| "automation execution lease overflowed".to_string())?;
@@ -398,7 +472,7 @@ impl StationStore {
             }
             self.validate_automation_execution_request_current(
                 &current.request,
-                current_candidate,
+                install_authority,
                 now_unix_ms,
             )?;
             let update = self.prepare(
@@ -461,7 +535,7 @@ impl StationStore {
                 )?
             } else {
                 self.prepare(
-                    "UPDATE automation_execution_jobs SET state='pending',lease_owner='',lease_expires_at_unix_ms=-1,last_failure_code=?1 \
+                    "UPDATE automation_execution_jobs SET state='pending',lease_owner='',lease_expires_at_unix_ms=-1,claim_id='',claimed_at_unix_ms=-1,last_failure_code=?1 \
                      WHERE job_id=?3 AND state='claimed' AND lease_owner=?4 AND lease_expires_at_unix_ms>?2",
                 )?
             };
@@ -520,7 +594,7 @@ impl StationStore {
         &self,
         job_id: &str,
         worker_id: &str,
-        current_candidate: &AutomationCandidateIdentity,
+        install_authority: &VerifiedInstallAuthority,
         now_unix_ms: i64,
         lease_expires: i64,
     ) -> Result<AutomationExecutionJobRecord, String> {
@@ -540,19 +614,23 @@ impl StationStore {
         }
         self.validate_automation_execution_request_current(
             &current.request,
-            current_candidate,
+            install_authority,
             now_unix_ms,
         )?;
+        let claim_id = generate_automation_execution_claim_id()?;
         let update = self.prepare(
-            "UPDATE automation_execution_jobs SET state='claimed',attempt_count=attempt_count+1,lease_owner=?1,lease_expires_at_unix_ms=?2,last_failure_code='' \
-             WHERE job_id=?3 AND (state='pending' OR (state='claimed' AND lease_expires_at_unix_ms<=?4))",
+            "UPDATE automation_execution_jobs SET state='claimed',attempt_count=attempt_count+1,lease_owner=?1,lease_expires_at_unix_ms=?2,claim_id=?3,claimed_at_unix_ms=?4,last_failure_code='' \
+             WHERE job_id=?5 AND (state='pending' OR (state='claimed' AND lease_expires_at_unix_ms<=?6))",
         )?;
         let worker = c_string(worker_id, "automation execution worker identity")?;
+        let claim = c_string(&claim_id, "automation execution claim identity")?;
         let job = c_string(job_id, "automation execution job identity")?;
         bind_text(self.database, update.raw, 1, &worker)?;
         bind_i64(self.database, update.raw, 2, lease_expires)?;
-        bind_text(self.database, update.raw, 3, &job)?;
+        bind_text(self.database, update.raw, 3, &claim)?;
         bind_i64(self.database, update.raw, 4, now_unix_ms)?;
+        bind_text(self.database, update.raw, 5, &job)?;
+        bind_i64(self.database, update.raw, 6, now_unix_ms)?;
         expect_done(self.database, update.raw)?;
         if self.changes() != 1 {
             return Err("automation execution claim lost its write lock".into());
@@ -563,6 +641,8 @@ impl StationStore {
         if claimed.state != AutomationExecutionJobState::Claimed
             || claimed.lease_owner.as_deref() != Some(worker_id)
             || claimed.lease_expires_at_unix_ms != Some(lease_expires)
+            || claimed.claim_id.as_deref() != Some(claim_id.as_str())
+            || claimed.claimed_at_unix_ms != Some(now_unix_ms)
         {
             return Err("automation execution claim did not acquire exact authority".into());
         }
@@ -572,26 +652,50 @@ impl StationStore {
     fn validate_automation_execution_request_current(
         &self,
         request: &AutomationExecutionRequest,
-        current_candidate: &AutomationCandidateIdentity,
+        install_authority: &VerifiedInstallAuthority,
         now_unix_ms: i64,
     ) -> Result<(), String> {
-        let (policy, adapter) = self.current_automation_execution_authority(request)?;
-        request.validate_against(&policy, &adapter, current_candidate)?;
+        if !self.automation_execution_request_is_current(request, install_authority, now_unix_ms)? {
+            return Err("automation execution request is no longer current".into());
+        }
+        Ok(())
+    }
+
+    fn automation_execution_request_is_current(
+        &self,
+        request: &AutomationExecutionRequest,
+        install_authority: &VerifiedInstallAuthority,
+        now_unix_ms: i64,
+    ) -> Result<bool, String> {
+        let policy = match self.read_automation_feature_policy(&request.policy_id)? {
+            Some(policy) => policy,
+            None => return Ok(false),
+        };
+        let adapter = match self.read_automation_adapter_descriptor(&request.adapter_id)? {
+            Some(adapter) => adapter,
+            None => return Ok(false),
+        };
+        if validate_execution_install_authority(request, install_authority).is_err() {
+            return Ok(false);
+        }
+        let current_candidate = automation_candidate_from_install(install_authority);
+        if request
+            .validate_against(&policy, &adapter, &current_candidate)
+            .is_err()
+        {
+            return Ok(false);
+        }
         let evidence = self
             .list_automation_connection_test_evidence(&request.policy_id, 1)?
             .into_iter()
             .next();
-        if derive_feature_automation_status(
+        Ok(derive_feature_automation_status(
             &policy,
             std::slice::from_ref(&adapter),
             evidence.as_ref(),
-            current_candidate,
+            &current_candidate,
             now_unix_ms,
-        ) != FeatureAutomationStatus::Passed
-        {
-            return Err("automation execution requires current passing connection evidence".into());
-        }
-        Ok(())
+        ) == FeatureAutomationStatus::Passed)
     }
 
     fn current_automation_execution_authority(
@@ -612,20 +716,23 @@ impl StationStore {
         statement: *mut SqliteStatement,
     ) -> Result<AutomationExecutionJobRecord, String> {
         let request: AutomationExecutionRequest =
-            serde_json::from_str(&column_text(statement, 19)?).map_err(|error| {
+            serde_json::from_str(&column_text(statement, 22)?).map_err(|error| {
                 format!("database returned invalid automation execution request JSON: {error}")
             })?;
         request.validate_shape()?;
-        let state = parse_automation_execution_state(&column_text(statement, 11)?)?;
-        let attempts_u64 = column_u64(statement, 12, "automation execution attempt count")?;
+        let state = parse_automation_execution_state(&column_text(statement, 12)?)?;
+        let attempts_u64 = column_u64(statement, 13, "automation execution attempt count")?;
         let attempt_count = u32::try_from(attempts_u64)
             .map_err(|_| "automation execution attempt count is invalid".to_string())?;
-        let lease_owner = column_text(statement, 13)?;
-        let lease_expires = unsafe { sqlite3_column_int64(statement, 14) };
-        let receipt_id = column_text(statement, 15)?;
-        let last_failure_code = column_text(statement, 16)?;
-        let created_at_unix_ms = unsafe { sqlite3_column_int64(statement, 17) };
-        let completed_at = unsafe { sqlite3_column_int64(statement, 18) };
+        let lease_owner = column_text(statement, 14)?;
+        let lease_expires = unsafe { sqlite3_column_int64(statement, 15) };
+        let claim_id = column_text(statement, 16)?;
+        let claimed_at = unsafe { sqlite3_column_int64(statement, 17) };
+        let receipt_id = column_text(statement, 18)?;
+        let last_failure_code =
+            bounded_automation_column_text(statement, 19, 80, "automation execution failure code")?;
+        let created_at_unix_ms = unsafe { sqlite3_column_int64(statement, 20) };
+        let completed_at = unsafe { sqlite3_column_int64(statement, 21) };
         if request.job_id != column_text(statement, 0)?
             || automation_feature_name(request.feature) != column_text(statement, 1)?
             || request.policy_id != column_text(statement, 2)?
@@ -637,10 +744,14 @@ impl StationStore {
             || request.configuration_hash != column_text(statement, 6)?
             || request.candidate.version != column_text(statement, 7)?
             || request.candidate.source_commit != column_text(statement, 8)?
-            || request.input.artifact_sha256 != column_text(statement, 9)?
-            || request.input.bytes != column_u64(statement, 10, "automation execution input bytes")?
+            || request.install_generation
+                != column_u64(statement, 9, "automation execution install generation")?
+            || request.input.artifact_sha256 != column_text(statement, 10)?
+            || request.input.bytes != column_u64(statement, 11, "automation execution input bytes")?
             || attempt_count > MAX_AUTOMATION_EXECUTION_ATTEMPTS
             || created_at_unix_ms < 0
+            || (!last_failure_code.is_empty()
+                && !valid_automation_execution_failure_code(&last_failure_code))
         {
             return Err("automation execution job row and request disagree".into());
         }
@@ -667,6 +778,8 @@ impl StationStore {
             attempt_count,
             lease_owner: (!lease_owner.is_empty()).then_some(lease_owner),
             lease_expires_at_unix_ms: (lease_expires >= 0).then_some(lease_expires),
+            claim_id: (!claim_id.is_empty()).then_some(claim_id),
+            claimed_at_unix_ms: (claimed_at >= 0).then_some(claimed_at),
             receipt,
             last_failure_code: (!last_failure_code.is_empty()).then_some(last_failure_code),
             created_at_unix_ms,
@@ -681,14 +794,14 @@ impl StationStore {
         request: &AutomationExecutionRequest,
     ) -> Result<Option<AutomationExecutionReceipt>, String> {
         let statement = self.prepare(
-            "SELECT receipt_id,job_id,output_sha256,output_bytes,completed_at_unix_ms,record_json FROM automation_execution_receipts WHERE job_id=?1",
+            "SELECT receipt_id,job_id,install_generation,claim_id,output_sha256,output_bytes,completed_at_unix_ms,record_json FROM automation_execution_receipts WHERE job_id=?1",
         )?;
         let identity = c_string(&request.job_id, "automation execution job identity")?;
         bind_text(self.database, statement.raw, 1, &identity)?;
         match unsafe { sqlite3_step(statement.raw) } {
             SQLITE_ROW => {
                 let receipt: AutomationExecutionReceipt =
-                    serde_json::from_str(&column_text(statement.raw, 5)?).map_err(|error| {
+                    serde_json::from_str(&column_text(statement.raw, 7)?).map_err(|error| {
                         format!(
                             "database returned invalid automation execution receipt JSON: {error}"
                         )
@@ -696,17 +809,36 @@ impl StationStore {
                 receipt.validate_shape_against_request(request)?;
                 if receipt.receipt_id != column_text(statement.raw, 0)?
                     || receipt.job_id != column_text(statement.raw, 1)?
-                    || receipt.output.artifact_sha256 != column_text(statement.raw, 2)?
+                    || receipt.install_generation
+                        != column_u64(
+                            statement.raw,
+                            2,
+                            "automation execution receipt install generation",
+                        )?
+                    || receipt.claim_id != column_text(statement.raw, 3)?
+                    || receipt.output.artifact_sha256 != column_text(statement.raw, 4)?
                     || receipt.output.bytes
-                        != column_u64(statement.raw, 3, "automation execution output bytes")?
+                        != column_u64(statement.raw, 5, "automation execution output bytes")?
                     || receipt.completed_at_unix_ms
-                        != unsafe { sqlite3_column_int64(statement.raw, 4) }
+                        != unsafe { sqlite3_column_int64(statement.raw, 6) }
                 {
                     return Err("automation execution receipt row and record disagree".into());
                 }
                 Ok(Some(receipt))
             }
             SQLITE_DONE => Ok(None),
+            _ => Err(sqlite_error(self.database)),
+        }
+    }
+
+    fn automation_execution_receipt_exists_for_job(&self, job_id: &str) -> Result<bool, String> {
+        let statement =
+            self.prepare("SELECT 1 FROM automation_execution_receipts WHERE job_id=?1 LIMIT 1")?;
+        let identity = c_string(job_id, "automation execution job identity")?;
+        bind_text(self.database, statement.raw, 1, &identity)?;
+        match unsafe { sqlite3_step(statement.raw) } {
+            SQLITE_ROW => Ok(true),
+            SQLITE_DONE => Ok(false),
             _ => Err(sqlite_error(self.database)),
         }
     }
@@ -729,6 +861,80 @@ fn valid_automation_execution_failure_code(value: &str) -> bool {
             .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
 }
 
+fn automation_candidate_from_install(
+    authority: &VerifiedInstallAuthority,
+) -> AutomationCandidateIdentity {
+    AutomationCandidateIdentity {
+        version: authority.version().into(),
+        source_commit: authority.source_commit().into(),
+    }
+}
+
+fn validate_verified_install_authority(authority: &VerifiedInstallAuthority) -> Result<(), String> {
+    let candidate = automation_candidate_from_install(authority);
+    candidate.validate()?;
+    if authority.install_generation() == 0 {
+        return Err("automation execution install authority has no active generation".into());
+    }
+    Ok(())
+}
+
+fn validate_execution_install_authority(
+    request: &AutomationExecutionRequest,
+    authority: &VerifiedInstallAuthority,
+) -> Result<(), String> {
+    validate_verified_install_authority(authority)?;
+    if request.candidate != automation_candidate_from_install(authority)
+        || request.install_generation != authority.install_generation()
+    {
+        return Err(
+            "automation execution request does not match verified install authority".into(),
+        );
+    }
+    Ok(())
+}
+
+fn generate_automation_execution_claim_id() -> Result<String, String> {
+    let mut bytes = [0_u8; 16];
+    getrandom::fill(&mut bytes)
+        .map_err(|_| "automation execution claim identity could not be issued".to_string())?;
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    Ok(format!(
+        "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+        bytes[0],
+        bytes[1],
+        bytes[2],
+        bytes[3],
+        bytes[4],
+        bytes[5],
+        bytes[6],
+        bytes[7],
+        bytes[8],
+        bytes[9],
+        bytes[10],
+        bytes[11],
+        bytes[12],
+        bytes[13],
+        bytes[14],
+        bytes[15],
+    ))
+}
+
+fn bounded_automation_column_text(
+    statement: *mut SqliteStatement,
+    column: c_int,
+    max_bytes: usize,
+    field: &str,
+) -> Result<String, String> {
+    // SAFETY: caller provides a live statement positioned on a row and valid column index.
+    let bytes = unsafe { sqlite3_column_bytes(statement, column) };
+    if bytes < 0 || usize::try_from(bytes).map_or(true, |bytes| bytes > max_bytes) {
+        return Err(format!("database returned unbounded {field}"));
+    }
+    column_text(statement, column)
+}
+
 fn validate_automation_execution_job_state(
     record: &AutomationExecutionJobRecord,
 ) -> Result<(), String> {
@@ -736,6 +942,8 @@ fn validate_automation_execution_job_state(
         AutomationExecutionJobState::Pending => {
             if record.lease_owner.is_some()
                 || record.lease_expires_at_unix_ms.is_some()
+                || record.claim_id.is_some()
+                || record.claimed_at_unix_ms.is_some()
                 || record.receipt.is_some()
                 || record.completed_at_unix_ms.is_some()
             {
@@ -747,6 +955,8 @@ fn validate_automation_execution_job_state(
         AutomationExecutionJobState::Claimed => {
             if record.lease_owner.is_none()
                 || record.lease_expires_at_unix_ms.is_none()
+                || record.claim_id.is_none()
+                || record.claimed_at_unix_ms.is_none()
                 || record.receipt.is_some()
                 || record.completed_at_unix_ms.is_some()
             {
@@ -756,6 +966,8 @@ fn validate_automation_execution_job_state(
         AutomationExecutionJobState::Completed => {
             if record.lease_owner.is_some()
                 || record.lease_expires_at_unix_ms.is_some()
+                || record.claim_id.is_none()
+                || record.claimed_at_unix_ms.is_none()
                 || record.receipt.is_none()
                 || record.completed_at_unix_ms.is_none()
                 || record.last_failure_code.is_some()
@@ -768,6 +980,7 @@ fn validate_automation_execution_job_state(
         AutomationExecutionJobState::Failed => {
             if record.lease_owner.is_some()
                 || record.lease_expires_at_unix_ms.is_some()
+                || record.claim_id.is_some() != record.claimed_at_unix_ms.is_some()
                 || record.receipt.is_some()
                 || record.completed_at_unix_ms.is_none()
                 || record.last_failure_code.is_none()

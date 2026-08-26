@@ -11,7 +11,8 @@ use station_automation_policy::{
     AutomationInputArtifact, AutomationInputKind, AutomationOutputArtifact, AutomationOutputFacts,
     ConnectionTestOutcome, CredentialAvailability,
 };
-use station_storage::{AutomationExecutionJobState, StationStore};
+use station_maintenance::{VerifiedInstallAuthority, verified_install_authority_for_test};
+use station_storage::{AutomationExecutionJobRecord, AutomationExecutionJobState, StationStore};
 
 const ADAPTER_ID: &str = "11111111-2222-4333-8444-555555555555";
 const POLICY_ID: &str = "22222222-2222-4333-8444-555555555555";
@@ -84,11 +85,15 @@ fn temporary_database(name: &str) -> PathBuf {
     std::env::temp_dir().join(format!("townlight-{name}-{nonce}-{sequence}.db"))
 }
 
-fn candidate() -> AutomationCandidateIdentity {
+fn candidate_identity() -> AutomationCandidateIdentity {
     AutomationCandidateIdentity {
         version: "0.1.0".into(),
         source_commit: COMMIT.into(),
     }
+}
+
+fn candidate() -> VerifiedInstallAuthority {
+    verified_install_authority_for_test("0.1.0", COMMIT, 7).unwrap()
 }
 
 fn adapter(revision: u64) -> AutomationAdapterDescriptor {
@@ -123,7 +128,8 @@ fn request() -> AutomationExecutionRequest {
         adapter_id: ADAPTER_ID.into(),
         adapter_revision: 1,
         configuration_hash: CONFIGURATION.into(),
-        candidate: candidate(),
+        candidate: candidate_identity(),
+        install_generation: 7,
         input: AutomationInputArtifact {
             kind: AutomationInputKind::Transcript,
             artifact_sha256: INPUT_SHA.into(),
@@ -146,7 +152,9 @@ fn receipt() -> AutomationExecutionReceipt {
         adapter_id: ADAPTER_ID.into(),
         adapter_revision: 1,
         configuration_hash: CONFIGURATION.into(),
-        candidate: candidate(),
+        candidate: candidate_identity(),
+        install_generation: 7,
+        claim_id: "77777777-2222-4333-8444-555555555555".into(),
         engine: AutomationExecutionEngine::Local {
             executable_sha256: RUNTIME_SHA.into(),
             model_artifact_sha256: MODEL_SHA.into(),
@@ -167,6 +175,16 @@ fn receipt() -> AutomationExecutionReceipt {
     }
 }
 
+fn receipt_for(claimed: &AutomationExecutionJobRecord) -> AutomationExecutionReceipt {
+    let mut receipt = receipt();
+    receipt.claim_id = claimed.claim_id.clone().unwrap();
+    receipt.install_generation = claimed.request.install_generation;
+    receipt.started_at_unix_ms = receipt
+        .started_at_unix_ms
+        .max(claimed.claimed_at_unix_ms.unwrap());
+    receipt
+}
+
 fn connection_evidence() -> AutomationConnectionTestEvidence {
     AutomationConnectionTestEvidence {
         evidence_id: "55555555-2222-4333-8444-555555555555".into(),
@@ -175,7 +193,7 @@ fn connection_evidence() -> AutomationConnectionTestEvidence {
         policy_revision: 1,
         adapter_revision: 1,
         configuration_hash: CONFIGURATION.into(),
-        candidate: candidate(),
+        candidate: candidate_identity(),
         outcome: ConnectionTestOutcome::Passed,
         tested_at_unix_ms: 50,
         expires_at_unix_ms: 10_000,
@@ -193,7 +211,11 @@ fn configured_store(name: &str) -> (PathBuf, StationStore) {
         .write_automation_feature_policy(&policy(1), None, "setup-admin", 20)
         .unwrap();
     store
-        .append_automation_connection_test_evidence(&connection_evidence(), &candidate(), 50)
+        .append_automation_connection_test_evidence(
+            &connection_evidence(),
+            &candidate_identity(),
+            50,
+        )
         .unwrap();
     (database, store)
 }
@@ -215,17 +237,18 @@ fn exact_job_claim_and_receipt_complete_atomically() {
     assert_eq!(claimed.attempt_count, 1);
     assert_eq!(claimed.lease_expires_at_unix_ms, Some(1_150));
 
+    let exact_receipt = receipt_for(&claimed);
     let completed = store
         .complete_automation_execution_job(
             JOB_ID,
             "automation-worker-1",
-            &receipt(),
+            &exact_receipt,
             &candidate(),
             350,
         )
         .unwrap();
     assert_eq!(completed.state, AutomationExecutionJobState::Completed);
-    assert_eq!(completed.receipt, Some(receipt()));
+    assert_eq!(completed.receipt, Some(exact_receipt.clone()));
     assert_eq!(
         store.read_automation_execution_job(JOB_ID).unwrap(),
         Some(completed)
@@ -239,7 +262,7 @@ fn exact_job_claim_and_receipt_complete_atomically() {
             .unwrap()
             .unwrap()
             .receipt,
-        Some(receipt())
+        Some(exact_receipt)
     );
     drop(reopened);
     let _ = std::fs::remove_file(database);
@@ -259,15 +282,16 @@ fn stale_authority_wrong_owner_and_expired_lease_fail_closed() {
     store
         .enqueue_automation_execution_job(&request(), &candidate(), 100)
         .unwrap();
-    store
+    let claimed = store
         .claim_automation_execution_job(JOB_ID, "automation-worker-1", &candidate(), 150, 100)
         .unwrap();
+    let exact_receipt = receipt_for(&claimed);
     assert!(
         store
             .complete_automation_execution_job(
                 JOB_ID,
                 "automation-worker-2",
-                &receipt(),
+                &exact_receipt,
                 &candidate(),
                 200,
             )
@@ -278,7 +302,7 @@ fn stale_authority_wrong_owner_and_expired_lease_fail_closed() {
             .complete_automation_execution_job(
                 JOB_ID,
                 "automation-worker-1",
-                &receipt(),
+                &exact_receipt,
                 &candidate(),
                 250,
             )
@@ -325,7 +349,7 @@ fn policy_change_after_claim_blocks_receipt_completion() {
     store
         .enqueue_automation_execution_job(&request(), &candidate(), 100)
         .unwrap();
-    store
+    let claimed = store
         .claim_automation_execution_job(JOB_ID, "automation-worker-1", &candidate(), 150, 1_000)
         .unwrap();
     store
@@ -337,7 +361,7 @@ fn policy_change_after_claim_blocks_receipt_completion() {
             .complete_automation_execution_job(
                 JOB_ID,
                 "automation-worker-1",
-                &receipt(),
+                &receipt_for(&claimed),
                 &candidate(),
                 350,
             )
@@ -422,14 +446,14 @@ fn durable_job_bindings_and_terminal_rows_are_immutable() {
     );
 
     let store = StationStore::open(&database).unwrap();
-    store
+    let claimed = store
         .claim_automation_execution_job(JOB_ID, "automation-worker-1", &candidate(), 150, 1_000)
         .unwrap();
     store
         .complete_automation_execution_job(
             JOB_ID,
             "automation-worker-1",
-            &receipt(),
+            &receipt_for(&claimed),
             &candidate(),
             350,
         )
@@ -459,14 +483,14 @@ fn read_fails_closed_when_a_receipt_is_orphaned_from_its_job_row() {
     store
         .enqueue_automation_execution_job(&request(), &candidate(), 100)
         .unwrap();
-    store
+    let claimed = store
         .claim_automation_execution_job(JOB_ID, "automation-worker-1", &candidate(), 150, 1_000)
         .unwrap();
     store
         .complete_automation_execution_job(
             JOB_ID,
             "automation-worker-1",
-            &receipt(),
+            &receipt_for(&claimed),
             &candidate(),
             350,
         )
@@ -669,5 +693,167 @@ fn expired_tenth_attempt_is_terminalized_instead_of_wedging_the_queue() {
     assert_eq!(terminal.completed_at_unix_ms, Some(340));
 
     drop(store);
+    let _ = std::fs::remove_file(database);
+}
+
+#[test]
+fn install_generation_and_live_claim_interval_are_required_for_completion() {
+    let (database, store) = configured_store("automation-execution-generation-claim");
+    let reactivated = verified_install_authority_for_test("0.1.0", COMMIT, 8).unwrap();
+    assert!(
+        store
+            .enqueue_automation_execution_job(&request(), &reactivated, 100)
+            .is_err()
+    );
+
+    store
+        .enqueue_automation_execution_job(&request(), &candidate(), 100)
+        .unwrap();
+    let first_claim = store
+        .claim_automation_execution_job(JOB_ID, "automation-worker-1", &candidate(), 150, 100)
+        .unwrap();
+    let mut predating = receipt_for(&first_claim);
+    predating.started_at_unix_ms = 149;
+    assert!(
+        store
+            .complete_automation_execution_job(
+                JOB_ID,
+                "automation-worker-1",
+                &predating,
+                &candidate(),
+                200,
+            )
+            .is_err()
+    );
+    store
+        .record_automation_execution_attempt_failure(
+            JOB_ID,
+            "automation-worker-1",
+            "adapter_timeout",
+            true,
+            200,
+        )
+        .unwrap();
+    store
+        .claim_automation_execution_job(JOB_ID, "automation-worker-2", &candidate(), 250, 1_000)
+        .unwrap();
+    assert!(
+        store
+            .complete_automation_execution_job(
+                JOB_ID,
+                "automation-worker-2",
+                &receipt_for(&first_claim),
+                &candidate(),
+                350,
+            )
+            .is_err()
+    );
+    assert!(
+        store
+            .renew_automation_execution_job_lease(
+                JOB_ID,
+                "automation-worker-2",
+                &reactivated,
+                300,
+                1_000,
+            )
+            .is_err()
+    );
+
+    drop(store);
+    let _ = std::fs::remove_file(database);
+}
+
+#[test]
+fn stale_fifo_head_is_terminalized_before_a_current_job_is_claimed() {
+    let (database, store) = configured_store("automation-execution-stale-fifo");
+    store
+        .enqueue_automation_execution_job(&request(), &candidate(), 100)
+        .unwrap();
+    store
+        .write_automation_feature_policy(&policy(2), Some(1), "setup-admin", 150)
+        .unwrap();
+    let mut evidence = connection_evidence();
+    evidence.evidence_id = "88888888-2222-4333-8444-555555555555".into();
+    evidence.policy_revision = 2;
+    evidence.tested_at_unix_ms = 160;
+    store
+        .append_automation_connection_test_evidence(&evidence, &candidate_identity(), 160)
+        .unwrap();
+    let mut current_request = request();
+    current_request.job_id = "99999999-2222-4333-8444-555555555555".into();
+    current_request.policy_revision = 2;
+    current_request.requested_at_unix_ms = 200;
+    store
+        .enqueue_automation_execution_job(&current_request, &candidate(), 200)
+        .unwrap();
+
+    let claimed = store
+        .claim_next_automation_execution_job("automation-worker-1", &candidate(), 250, 1_000)
+        .unwrap()
+        .unwrap();
+    assert_eq!(claimed.request.job_id, current_request.job_id);
+    let stale = store
+        .read_automation_execution_job(JOB_ID)
+        .unwrap()
+        .unwrap();
+    assert_eq!(stale.state, AutomationExecutionJobState::Failed);
+    assert_eq!(
+        stale.last_failure_code.as_deref(),
+        Some("authority_changed")
+    );
+
+    drop(store);
+    let _ = std::fs::remove_file(database);
+}
+
+#[test]
+fn missing_parent_receipt_and_corrupt_failure_code_fail_closed() {
+    let (database, store) = configured_store("automation-execution-storage-corruption");
+    store
+        .enqueue_automation_execution_job(&request(), &candidate(), 100)
+        .unwrap();
+    let claimed = store
+        .claim_automation_execution_job(JOB_ID, "automation-worker-1", &candidate(), 150, 1_000)
+        .unwrap();
+    store
+        .complete_automation_execution_job(
+            JOB_ID,
+            "automation-worker-1",
+            &receipt_for(&claimed),
+            &candidate(),
+            350,
+        )
+        .unwrap();
+    drop(store);
+
+    assert_eq!(
+        raw_sql_status(
+            &database,
+            "DROP TRIGGER automation_execution_jobs_no_delete;\
+             DELETE FROM automation_execution_jobs"
+        ),
+        SQLITE_OK
+    );
+    let reopened = StationStore::open(&database).unwrap();
+    assert!(reopened.read_automation_execution_job(JOB_ID).is_err());
+    drop(reopened);
+    let _ = std::fs::remove_file(&database);
+
+    let (database, store) = configured_store("automation-execution-failure-corruption");
+    store
+        .enqueue_automation_execution_job(&request(), &candidate(), 100)
+        .unwrap();
+    drop(store);
+    assert_eq!(
+        raw_sql_status(
+            &database,
+            "UPDATE automation_execution_jobs SET last_failure_code='SECRET value that is neither categorical nor safe'"
+        ),
+        SQLITE_OK
+    );
+    let reopened = StationStore::open(&database).unwrap();
+    assert!(reopened.read_automation_execution_job(JOB_ID).is_err());
+    drop(reopened);
     let _ = std::fs::remove_file(database);
 }
