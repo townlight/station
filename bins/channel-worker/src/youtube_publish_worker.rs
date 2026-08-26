@@ -169,13 +169,11 @@ fn execute(
     if !is_valid_stream_key(stream_key.as_str()) {
         return failed_result("invalid_stream_key");
     }
-    let (mut media, _directory_pins) = match open_input_media(
-        &command.managed_media_root,
-        &command.media_path,
-    ) {
-        Ok(opened) => opened,
-        Err(code) => return failed_result(code),
-    };
+    let (mut media, _directory_pins) =
+        match open_input_media(&command.managed_media_root, &command.media_path) {
+            Ok(opened) => opened,
+            Err(code) => return failed_result(code),
+        };
     let actual_media = match media_identity(&mut media) {
         Ok(identity) => identity,
         Err(code) => return failed_result(code),
@@ -211,10 +209,7 @@ fn execute(
     }
 }
 
-fn open_input_media(
-    managed_root: &str,
-    path: &str,
-) -> Result<(File, Vec<File>), &'static str> {
+fn open_input_media(managed_root: &str, path: &str) -> Result<(File, Vec<File>), &'static str> {
     let managed_root = std::path::Path::new(managed_root);
     let path = std::path::Path::new(path);
     if !managed_root.is_absolute() || !path.is_absolute() {
@@ -224,9 +219,9 @@ fn open_input_media(
         .strip_prefix(managed_root)
         .map_err(|_| "media_path_escape")?;
     if relative.as_os_str().is_empty()
-        || relative.components().any(|component| {
-            !matches!(component, std::path::Component::Normal(_))
-        })
+        || relative
+            .components()
+            .any(|component| !matches!(component, std::path::Component::Normal(_)))
     {
         return Err("media_path_escape");
     }
