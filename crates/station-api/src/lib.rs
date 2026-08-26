@@ -719,7 +719,9 @@ struct PutTransportTargetRequest {
     protocol: TargetProtocol,
     host: String,
     port: u16,
-    credential_configured: bool,
+    /// Write-only local Setup-Admin authorization. It is DPAPI-protected by
+    /// storage and is never included in responses, events, or receipts.
+    authorization: Option<String>,
     expected_revision: Option<u64>,
 }
 
@@ -6247,7 +6249,7 @@ impl Api {
             protocol: request.protocol,
             host: request.host,
             port: request.port,
-            credential_configured: request.credential_configured,
+            credential_configured: request.authorization.is_some(),
             revision: 1,
             created_at_unix_ms: now,
             updated_at_unix_ms: now,
@@ -6283,11 +6285,34 @@ impl Api {
             request.expected_revision,
             &config,
         ) {
-            Ok(stored) => json_response(
-                200,
-                serde_json::to_vec(&stored)
-                    .expect("serializing transport target configuration cannot fail"),
-            ),
+            Ok(stored) => {
+                if let Some(authorization) = request.authorization.as_deref()
+                    && let Err(message) = self.storage.store_transport_target_authorization(
+                        channel_id,
+                        &sinks[0].sink_id,
+                        &stored,
+                        authorization,
+                    )
+                {
+                    return error_response(422, "credential_provisioning_failed", &message);
+                }
+                match self
+                    .storage
+                    .read_transport_target_config(channel_id, &sinks[0].sink_id)
+                {
+                    Ok(Some(stored)) => json_response(
+                        200,
+                        serde_json::to_vec(&stored)
+                            .expect("serializing transport target configuration cannot fail"),
+                    ),
+                    Ok(None) => error_response(
+                        500,
+                        "storage_error",
+                        "Target configuration disappeared after write.",
+                    ),
+                    Err(message) => error_response(500, "storage_error", &message),
+                }
+            }
             Err(message) if message.contains("revision conflict") => {
                 error_response(409, "revision_conflict", &message)
             }
@@ -20057,7 +20082,6 @@ mod tests {
             "protocol": "https_api",
             "host": format!("receiver.example.test/api/{secret}"),
             "port": 443,
-            "credential_configured": true,
             "expected_revision": null
         }))
         .unwrap();
@@ -20078,6 +20102,93 @@ mod tests {
                 .is_none()
         );
 
+        drop(api);
+        let _ = std::fs::remove_file(database);
+    }
+
+    #[test]
+    fn setup_admin_provisions_rotates_and_removes_a_write_only_transport_authorization() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let database =
+            std::env::temp_dir().join(format!("townlight-target-credential-api-{nonce}.db"));
+        let api = Api::open(&database).unwrap();
+        let channel_id = "11111111-2222-4333-8444-555555555555";
+        let sink_id = "22222222-3333-4444-8555-666666666666";
+        api.storage
+            .put_channel(&ChannelConfiguration {
+                channel_id: channel_id.into(),
+                display_name: "Transport credential API".into(),
+                output_profile: station_schedule::OutputProfileId::Proof360p30,
+                output_sinks: vec![station_schedule::OutputSinkConfiguration::required_udp(
+                    sink_id,
+                    "Required sink",
+                    "127.0.0.1:5500",
+                    -16.0,
+                )],
+                enabled: true,
+            })
+            .unwrap();
+        let path = format!("/api/v1/channels/{channel_id}/transport-target");
+        let secret = "Bearer local-setup-admin-secret";
+        let create = serde_json::to_vec(&serde_json::json!({
+            "target_id": "target-1",
+            "label": "Headend receiver",
+            "protocol": "https_api",
+            "host": "receiver.example.test",
+            "port": 443,
+            "authorization": secret,
+            "expected_revision": null
+        }))
+        .unwrap();
+        let setup_admin = test_actor(station_auth::OperatorRole::SetupAdmin);
+        let response = api.handle_authenticated("PUT", &path, Some(&create), &setup_admin);
+        assert_eq!(
+            response.status,
+            200,
+            "{}",
+            String::from_utf8_lossy(&response.body)
+        );
+        assert!(!String::from_utf8_lossy(&response.body).contains(secret));
+        let created: serde_json::Value = serde_json::from_slice(&response.body).unwrap();
+        assert_eq!(created["credential_configured"], true);
+
+        // Supplying a fresh write-only authorization rotates the target
+        // revision. Omitting it on a later revision removes authorization;
+        // old protected material is immutable but cannot authorize the new
+        // target revision.
+        let rotation = serde_json::to_vec(&serde_json::json!({
+            "target_id": "target-1",
+            "label": "Headend receiver",
+            "protocol": "https_api",
+            "host": "receiver.example.test",
+            "port": 443,
+            "authorization": "Bearer rotated-secret",
+            "expected_revision": 1
+        }))
+        .unwrap();
+        let rotated = api.handle_authenticated("PUT", &path, Some(&rotation), &setup_admin);
+        assert_eq!(rotated.status, 200);
+        assert!(!String::from_utf8_lossy(&rotated.body).contains("rotated-secret"));
+        let remove = serde_json::to_vec(&serde_json::json!({
+            "target_id": "target-1",
+            "label": "Headend receiver",
+            "protocol": "https_api",
+            "host": "receiver.example.test",
+            "port": 443,
+            "expected_revision": 2
+        }))
+        .unwrap();
+        let removed = api.handle_authenticated("PUT", &path, Some(&remove), &setup_admin);
+        assert_eq!(removed.status, 200);
+        let removed: serde_json::Value = serde_json::from_slice(&removed.body).unwrap();
+        assert_eq!(removed["credential_configured"], false);
+        let reader = test_actor(station_auth::OperatorRole::MeetingOperator);
+        let read = api.handle_authenticated("GET", &path, None, &reader);
+        assert_eq!(read.status, 200);
+        assert!(!String::from_utf8_lossy(&read.body).contains("secret"));
         drop(api);
         let _ = std::fs::remove_file(database);
     }

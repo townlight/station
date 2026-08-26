@@ -19,6 +19,7 @@ use std::sync::{
 use std::time::{Duration, Instant};
 
 use sha2::{Digest, Sha256};
+use station_domain::{AlertConditionKind, AlertEvent, AlertEventState, AlertSeverity};
 use station_storage::{
     ProofOutcome, StationStore, TargetDeviceConfig, TargetDeviceReachabilityReceipt,
     TransportAnalysisReceipt, TransportFindings, TransportProofCaptureFacts,
@@ -351,26 +352,89 @@ pub fn run_transport_proof_queue_controller(
     application_root: &Path,
     stop: Arc<AtomicBool>,
 ) -> Result<(), String> {
+    let mut backoff = Duration::from_millis(250);
     while !stop.load(Ordering::Acquire) {
-        let now = unix_time_millis()?;
-        let store = StationStore::open(database)?;
-        store.recover_expired_transport_proof_jobs(now)?;
-        if let Some(execution) = store.claim_next_transport_proof_job(now, CLAIM_LEASE_MS)? {
-            let result =
-                execute_claimed_transport_job(&store, database, application_root, &execution);
-            if result.is_err() {
-                // Details are deliberately static: process output, targets, and
-                // credentials never enter durable evidence or error receipts.
-                let _ = store.fail_transport_proof_job(
-                    &execution,
-                    unix_time_millis().unwrap_or(now),
-                    "Transport proof execution failed before a passing receipt could be produced.",
-                );
+        match run_transport_proof_queue_iteration(database, application_root) {
+            Ok(()) => {
+                // Only a successful open, recovery, claim, and any claimed
+                // job's durable terminalization constitutes recovery. A job
+                // failure is itself durable evidence, not a dead controller.
+                resolve_transport_controller_alert(database);
+                backoff = Duration::from_millis(250);
+            }
+            Err(_) => {
+                observe_transport_controller_alert(database);
+                backoff = (backoff * 2).min(Duration::from_secs(5));
             }
         }
-        std::thread::sleep(Duration::from_millis(250));
+        std::thread::sleep(backoff);
     }
     Ok(())
+}
+
+fn run_transport_proof_queue_iteration(
+    database: &Path,
+    application_root: &Path,
+) -> Result<(), String> {
+    let now = unix_time_millis()?;
+    let store = StationStore::open(database)?;
+    store.recover_expired_transport_proof_jobs(now)?;
+    if let Some(execution) = store.claim_next_transport_proof_job(now, CLAIM_LEASE_MS)?
+        && execute_claimed_transport_job(&store, database, application_root, &execution).is_err()
+    {
+        // Details are deliberately static: process output, targets, and
+        // credentials never enter durable evidence or error receipts.
+        store.fail_transport_proof_job(
+            &execution,
+            unix_time_millis().unwrap_or(now),
+            "Transport proof execution failed before a passing receipt could be produced.",
+        )?;
+    }
+    Ok(())
+}
+
+const TRANSPORT_CONTROLLER_ALERT_RESOURCE: &str = "transport-proof-controller";
+
+fn observe_transport_controller_alert(database: &Path) {
+    let Ok(now) = unix_time_millis() else {
+        return;
+    };
+    let Ok(store) = StationStore::open(database) else {
+        return;
+    };
+    // Do not persist raw DB, process, target, or authorization errors. The
+    // typed alert tells the operator what is actionable while preserving the
+    // actual failure boundary.
+    let _ = store.observe_alert_and_route(&AlertEvent {
+        event_id: "transport-proof-controller-service-down".into(),
+        condition: AlertConditionKind::ServiceDown,
+        severity: AlertSeverity::Warning,
+        state: AlertEventState::Firing,
+        resource_ref: TRANSPORT_CONTROLLER_ALERT_RESOURCE.into(),
+        summary: "Transport proof controller needs operator attention.".into(),
+        detail: "The controller could not complete a durable queue iteration and is retrying with bounded backoff.".into(),
+        source_section: "S11".into(),
+        first_observed_at_unix_ms: now,
+        last_observed_at_unix_ms: now,
+        resolved_at_unix_ms: None,
+        occurrence_count: 1,
+        acknowledged_at_unix_ms: None,
+        acknowledged_by: None,
+    });
+}
+
+fn resolve_transport_controller_alert(database: &Path) {
+    let Ok(now) = unix_time_millis() else {
+        return;
+    };
+    let Ok(store) = StationStore::open(database) else {
+        return;
+    };
+    let _ = store.resolve_alert(
+        AlertConditionKind::ServiceDown,
+        TRANSPORT_CONTROLLER_ALERT_RESOURCE,
+        now,
+    );
 }
 
 fn execute_claimed_transport_job(
@@ -477,6 +541,30 @@ fn execute_claimed_transport_job(
         recorded_by: "stationd-transport-proof-controller".into(),
         detail: "Bounded TSDuck transport analysis passed.".into(),
     };
+    // The receiver is deliberately probed before the installation fence is
+    // acquired so a bounded network timeout never blocks an update.  Its
+    // response is only committed after the fence closes the candidate/target
+    // race and both authorities are re-read.
+    let authorization = store.read_transport_target_authorization(
+        &job.job.channel_id,
+        &job.job.sink_id,
+        &target,
+    )?;
+    let receiver = ReceiverProofExecutor {
+        adapter: HttpsReceiverAdapter::new(authorization)?,
+        adapter_version: "1".into(),
+    };
+    let receiver_binding = ProofBinding {
+        proof_id: analyzing.job.job_id.clone(),
+        channel_id: analyzing.job.channel_id.clone(),
+        sink_id: analyzing.job.sink_id.clone(),
+        candidate_version: analyzing.job.candidate_version.clone(),
+        source_commit: analyzing.job.source_commit.clone(),
+        configuration_hash: analyzing.job.configuration_hash.clone(),
+        recorded_by: "stationd-transport-proof-controller".into(),
+        now_unix_ms: recorded_at_unix_ms,
+    };
+    let reachability = receiver.probe_receipt(&receiver_binding, &target)?;
     // The closure is executed by storage after BEGIN IMMEDIATE, alongside its
     // current target/configuration revalidation. The shared installation fence
     // remains held through that transaction, so activation cannot replace the
@@ -487,6 +575,14 @@ fn execute_claimed_transport_job(
     if install_authority_fence.was_abandoned() {
         return Err("installation authority fence was abandoned; transport evidence requires update recovery".into());
     }
+    ensure_current_candidate(data_directory, application_root, &job.job)?;
+    let current_target = store
+        .read_transport_target_config(&job.job.channel_id, &job.job.sink_id)?
+        .ok_or("transport proof target is unavailable")?;
+    if current_target != target {
+        return Err("transport proof target changed during receiver verification".into());
+    }
+    store.append_target_device_reachability_receipt(&reachability, recorded_at_unix_ms)?;
     store.complete_transport_proof_job_with_analysis(
         execution,
         &receipt,
@@ -585,7 +681,7 @@ fn unix_time_millis() -> Result<i64, String> {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ProofBinding {
+pub(crate) struct ProofBinding {
     pub proof_id: String,
     pub channel_id: String,
     pub sink_id: String,
@@ -870,41 +966,43 @@ impl RealProcessRunner {
             let _ = child.wait();
             return Err(error);
         }
-        let stderr = child
-            .stderr
-            .take()
-            .ok_or("TSDuck stderr pipe was unavailable")?;
+        let stderr = child.stderr.take().ok_or_else(|| {
+            job.terminate();
+            let _ = child.wait();
+            "TSDuck stderr pipe was unavailable"
+        })?;
         let (tx, rx) = mpsc::sync_channel(1);
         let drain = std::thread::spawn(move || {
             let _ = tx.send(drain_stderr(stderr));
         });
         let started = Instant::now();
         let status = loop {
-            if let Some(status) = child
-                .try_wait()
-                .map_err(|_| "TSDuck capture status could not be read")?
-            {
-                break status;
+            match child.try_wait() {
+                Ok(Some(status)) => break status,
+                Ok(None) if started.elapsed() < timeout => {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Ok(None) => {
+                    return terminate_capture_and_collect_stderr(
+                        &job,
+                        &mut child,
+                        rx,
+                        drain,
+                        "TSDuck capture process exceeded its deadline",
+                    );
+                }
+                Err(_) => {
+                    return terminate_capture_and_collect_stderr(
+                        &job,
+                        &mut child,
+                        rx,
+                        drain,
+                        "TSDuck capture status could not be read",
+                    );
+                }
             }
-            if started.elapsed() >= timeout {
-                job.terminate();
-                let _ = child.wait();
-                return Err("TSDuck capture process exceeded its deadline".into());
-            }
-            std::thread::sleep(Duration::from_millis(10));
         };
-        let stderr_result = rx
-            .recv_timeout(POST_EXIT_DRAIN_TIMEOUT)
-            .map_err(|_| "TSDuck capture stderr drain exceeded its deadline")?;
-        if !drain.is_finished() {
-            job.terminate();
-            unsafe { CancelSynchronousIo(drain.as_raw_handle() as HANDLE) };
-            return Err("TSDuck capture stderr drain did not stop".into());
-        }
-        drain
-            .join()
-            .map_err(|_| "TSDuck capture stderr drain panicked")?;
-        stderr_result?;
+        collect_capture_stderr(&job, &mut child, rx, drain)?;
         Ok(ProcessResult {
             status_success: status.success(),
             output: Vec::new(),
@@ -1225,19 +1323,19 @@ fn parse_tsanalyze_json(
 
 /// Receiver contract deliberately supports only the authenticated HTTPS API profile.
 /// SNMP/TLS remains fail-closed until an attested implementation exists.
-pub trait AuthenticatedReceiver: sealed::Receiver + Send + Sync {
+pub(crate) trait AuthenticatedReceiver: sealed::Receiver + Send + Sync {
     fn probe(&self, target: &TargetDeviceConfig, deadline: Duration) -> Result<Vec<u8>, String>;
 }
 /// Production HTTPS adapter. The caller obtains the Authorization value from an
 /// approved secret provider; it is never copied into an error or receipt. The
 /// receiver contract has one fixed resource path, so target configuration cannot
 /// smuggle a path, query, or credential into the request.
-pub struct HttpsReceiverAdapter {
+struct HttpsReceiverAdapter {
     authorization_value: String,
 }
 impl sealed::Receiver for HttpsReceiverAdapter {}
 impl HttpsReceiverAdapter {
-    pub fn new(authorization_value: String) -> Result<Self, String> {
+    fn new(authorization_value: String) -> Result<Self, String> {
         if authorization_value.is_empty()
             || authorization_value.len() > 8_192
             || authorization_value.chars().any(char::is_control)
@@ -1283,7 +1381,7 @@ impl AuthenticatedReceiver for HttpsReceiverAdapter {
 }
 #[cfg(test)]
 #[derive(Debug, Clone)]
-pub struct FakeAuthenticatedReceiver {
+struct FakeAuthenticatedReceiver {
     pub response: Result<Vec<u8>, String>,
 }
 #[cfg(test)]
@@ -1294,17 +1392,16 @@ impl AuthenticatedReceiver for FakeAuthenticatedReceiver {
         self.response.clone()
     }
 }
-pub struct ReceiverProofExecutor<A> {
+struct ReceiverProofExecutor<A> {
     pub adapter: A,
     pub adapter_version: String,
 }
 impl<A: AuthenticatedReceiver> ReceiverProofExecutor<A> {
-    pub fn persist_reachability(
+    fn probe_receipt(
         &self,
-        store: &StationStore,
         binding: &ProofBinding,
         target: &TargetDeviceConfig,
-    ) -> Result<(), String> {
+    ) -> Result<TargetDeviceReachabilityReceipt, String> {
         binding.validate()?;
         target.validate()?;
         if target.protocol != TargetProtocol::HttpsApi || !target.credential_configured {
@@ -1315,7 +1412,7 @@ impl<A: AuthenticatedReceiver> ReceiverProofExecutor<A> {
         if response.is_empty() || response.len() > MAX_RECEIVER_RESPONSE_BYTES {
             return Err("authenticated receiver response is missing or oversized".into());
         }
-        let receipt = TargetDeviceReachabilityReceipt {
+        Ok(TargetDeviceReachabilityReceipt {
             proof_id: binding.proof_id.clone(),
             channel_id: binding.channel_id.clone(),
             sink_id: binding.sink_id.clone(),
@@ -1334,8 +1431,7 @@ impl<A: AuthenticatedReceiver> ReceiverProofExecutor<A> {
             recorded_at_unix_ms: binding.now_unix_ms,
             recorded_by: binding.recorded_by.clone(),
             detail: "Authenticated receiver reachability passed.".into(),
-        };
-        store.append_target_device_reachability_receipt(&receipt, binding.now_unix_ms)
+        })
     }
 }
 
@@ -1406,6 +1502,65 @@ fn drain_process_stream<T: Read>(stream: T) -> Result<Vec<u8>, ()> {
         return Err(());
     }
     Ok(output)
+}
+
+/// Capture has a single pipe, but it needs the same teardown promise as the
+/// analysis process: every status, timeout, receive, and drain failure kills
+/// the owned job, cancels the exact blocking read, waits only a bounded time,
+/// and joins the drain thread before returning.  Dropping a JoinHandle on an
+/// error would leave a thread (and potentially an inherited pipe) behind.
+fn collect_capture_stderr(
+    job: &WindowsProcessTree,
+    child: &mut Child,
+    rx: mpsc::Receiver<Result<Vec<u8>, String>>,
+    drain: std::thread::JoinHandle<()>,
+) -> Result<(), String> {
+    let stderr_result = rx.recv_timeout(POST_EXIT_DRAIN_TIMEOUT);
+    if stderr_result.is_err() || !drain.is_finished() {
+        job.terminate();
+        let _ = child.wait();
+        let cancelled = unsafe { CancelSynchronousIo(drain.as_raw_handle() as HANDLE) };
+        if cancelled == 0 && !drain.is_finished() {
+            return Err("TSDuck capture stderr drain cancellation failed".into());
+        }
+    }
+    let join_deadline = Instant::now() + Duration::from_secs(1);
+    while !drain.is_finished() && Instant::now() < join_deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    if !drain.is_finished() {
+        return Err("TSDuck capture stderr drain did not stop after cancellation".into());
+    }
+    drain
+        .join()
+        .map_err(|_| "TSDuck capture stderr drain panicked".to_string())?;
+    match stderr_result {
+        Ok(Ok(_)) => Ok(()),
+        Ok(Err(_)) => Err("TSDuck capture stderr could not be read".into()),
+        Err(mpsc::RecvTimeoutError::Timeout) => {
+            Err("TSDuck capture stderr drain exceeded its deadline".into())
+        }
+        Err(mpsc::RecvTimeoutError::Disconnected) => {
+            Err("TSDuck capture stderr drain thread stopped unexpectedly".into())
+        }
+    }
+}
+
+fn terminate_capture_and_collect_stderr(
+    job: &WindowsProcessTree,
+    child: &mut Child,
+    rx: mpsc::Receiver<Result<Vec<u8>, String>>,
+    drain: std::thread::JoinHandle<()>,
+    primary_error: &str,
+) -> Result<ProcessResult, String> {
+    job.terminate();
+    let _ = child.wait();
+    match collect_capture_stderr(job, child, rx, drain) {
+        Ok(()) => Err(primary_error.into()),
+        Err(cleanup) => Err(format!(
+            "{primary_error}; bounded stderr teardown failed: {cleanup}"
+        )),
+    }
 }
 
 fn collect_process_drains(
@@ -2048,10 +2203,6 @@ mod tests {
             recorded_by: "x".into(),
             now_unix_ms: 1,
         };
-        let store = StationStore::open(
-            std::env::temp_dir().join(format!("executor-test-{}.db", b.now_unix_ms)),
-        )
-        .unwrap();
         assert!(
             ReceiverProofExecutor {
                 adapter: FakeAuthenticatedReceiver {
@@ -2059,7 +2210,7 @@ mod tests {
                 },
                 adapter_version: "1".into()
             }
-            .persist_reachability(&store, &b, &target)
+            .probe_receipt(&b, &target)
             .is_err()
         );
     }
@@ -2343,6 +2494,42 @@ mod tests {
         let result = RealProcessRunner.run(&executable, &["--help".into()], Duration::from_secs(1));
         FORCE_JOB_ASSIGN_FAILURE.store(false, Ordering::Release);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn capture_timeout_terminates_and_joins_its_stderr_drain() {
+        let root = root();
+        let capture = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(root.join("capture.ts"))
+            .unwrap();
+        let command = std::env::var_os("COMSPEC")
+            .map(PathBuf::from)
+            .expect("Windows command interpreter is available");
+        // Keep stderr open well past the runner deadline. The test would hang
+        // or retain its drain thread if the timeout path merely returned.
+        let result = RealProcessRunner.run_capture_to_handle(
+            &command,
+            &["/C".into(), "ping 127.0.0.1 -n 30 1>&2".into()],
+            Duration::from_millis(20),
+            &capture,
+        );
+        assert!(
+            result
+                .as_ref()
+                .err()
+                .is_some_and(|error| error.contains("deadline")),
+            "unexpected capture result: {result:?}"
+        );
+        // A second open proves the child and its inherited output handle have
+        // been closed before this function returned.
+        drop(capture);
+        fs::OpenOptions::new()
+            .write(true)
+            .open(root.join("capture.ts"))
+            .unwrap();
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

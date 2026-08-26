@@ -67,6 +67,7 @@ fn fixture() -> Fixture {
         ("OTHERS.txt", b"third-party notices".as_slice()),
         ("bin/tsp.exe", b"tsp".as_slice()),
         ("bin/tsanalyze.exe", b"tsanalyze".as_slice()),
+        ("bin/tstables.exe", b"tstables".as_slice()),
         ("bin/tsduck.dll", b"tsduck".as_slice()),
         ("bin/tscore.dll", b"tscore".as_slice()),
     ] {

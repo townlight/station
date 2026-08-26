@@ -16,10 +16,7 @@ use std::{
     },
     time::{Instant, SystemTime},
 };
-pub use transport_executor::{
-    AuthenticatedReceiver, HttpsReceiverAdapter, ProofBinding, ReceiverProofExecutor,
-    run_transport_proof_queue_controller,
-};
+pub use transport_executor::run_transport_proof_queue_controller;
 
 use serde::de::DeserializeOwned;
 use sha2::{Digest, Sha256};
@@ -1636,6 +1633,14 @@ impl StationStore {
                record_json TEXT NOT NULL,\
                PRIMARY KEY(channel_id, sink_id, revision)\
              );\
+             CREATE TABLE IF NOT EXISTS transport_target_credentials (\
+               channel_id TEXT NOT NULL,\
+               sink_id TEXT NOT NULL,\
+               target_id TEXT NOT NULL,\
+               target_revision INTEGER NOT NULL CHECK (target_revision >= 1),\
+               protected_authorization BLOB NOT NULL,\
+               PRIMARY KEY(channel_id, sink_id, target_id, target_revision)\
+             );\
              CREATE TABLE IF NOT EXISTS transport_analysis_receipts (\
                proof_id TEXT PRIMARY KEY,\
                channel_id TEXT NOT NULL,\
@@ -1709,6 +1714,12 @@ impl StationStore {
              CREATE TRIGGER IF NOT EXISTS transport_target_configs_no_update \
                BEFORE UPDATE ON transport_target_configs \
                BEGIN SELECT RAISE(ABORT, 'transport target configurations are append-only'); END;\
+             CREATE TRIGGER IF NOT EXISTS transport_target_credentials_no_update \
+               BEFORE UPDATE ON transport_target_credentials \
+               BEGIN SELECT RAISE(ABORT, 'transport target credentials are append-only'); END;\
+             CREATE TRIGGER IF NOT EXISTS transport_target_credentials_no_delete \
+               BEFORE DELETE ON transport_target_credentials \
+               BEGIN SELECT RAISE(ABORT, 'transport target credentials are append-only'); END;\
              CREATE TRIGGER IF NOT EXISTS transport_analysis_no_update \
                BEFORE UPDATE ON transport_analysis_receipts \
                BEGIN SELECT RAISE(ABORT, 'transport analysis receipts are append-only'); END;\
@@ -11134,14 +11145,198 @@ impl StationStore {
         )?;
         match unsafe { sqlite3_step(statement.raw) } {
             SQLITE_ROW => {
-                let config: TargetDeviceConfig =
+                let mut config: TargetDeviceConfig =
                     serde_json::from_str(&column_text(statement.raw, 0)?).map_err(|error| {
                         format!("database returned invalid target configuration: {error}")
                     })?;
+                config.credential_configured = self.has_current_transport_target_authorization(
+                    channel_id,
+                    sink_id,
+                    &config.target_id,
+                    config.revision,
+                )?;
                 config.validate()?;
                 Ok(Some(config))
             }
             SQLITE_DONE => Ok(None),
+            _ => Err(sqlite_error(self.database)),
+        }
+    }
+
+    /// The receiver's authorization is DPAPI machine-protected before SQLite
+    /// sees it. Provisioning is crate-private so the browser/API can neither
+    /// read nor accidentally persist a plaintext credential.
+    pub fn store_transport_target_authorization(
+        &self,
+        channel_id: &str,
+        sink_id: &str,
+        target: &TargetDeviceConfig,
+        authorization: &str,
+    ) -> Result<(), String> {
+        target.validate()?;
+        if !target.credential_configured
+            || authorization.is_empty()
+            || authorization.len() > 8_192
+            || authorization.chars().any(char::is_control)
+        {
+            return Err("transport target authorization is invalid".into());
+        }
+        let current = self
+            .read_transport_target_config(channel_id, sink_id)?
+            .ok_or("transport target is not configured")?;
+        if current.target_id != target.target_id
+            || current.revision != target.revision
+            || current.label != target.label
+            || current.protocol != target.protocol
+            || current.host != target.host
+            || current.port != target.port
+            || current.created_at_unix_ms != target.created_at_unix_ms
+            || current.updated_at_unix_ms != target.updated_at_unix_ms
+            || current.updated_by != target.updated_by
+        {
+            return Err("transport target changed before credential provisioning".into());
+        }
+        let protected = protect_local_machine(authorization.as_bytes())?;
+        let statement = self.prepare(
+            "INSERT INTO transport_target_credentials(channel_id,sink_id,target_id,target_revision,protected_authorization) VALUES(?1,?2,?3,?4,?5)",
+        )?;
+        bind_text(
+            self.database,
+            statement.raw,
+            1,
+            &c_string(channel_id, "transport channel")?,
+        )?;
+        bind_text(
+            self.database,
+            statement.raw,
+            2,
+            &c_string(sink_id, "transport sink")?,
+        )?;
+        bind_text(
+            self.database,
+            statement.raw,
+            3,
+            &c_string(&target.target_id, "transport target")?,
+        )?;
+        bind_i64(
+            self.database,
+            statement.raw,
+            4,
+            i64::try_from(target.revision)
+                .map_err(|_| "transport target revision exceeds SQLite range".to_string())?,
+        )?;
+        bind_blob(self.database, statement.raw, 5, &protected)?;
+        expect_done(self.database, statement.raw)
+    }
+
+    /// Returns authorization only to the in-process trusted receiver
+    /// controller. It is scoped to one exact target revision and never enters
+    /// a receipt, error detail, or API response.
+    pub(crate) fn read_transport_target_authorization(
+        &self,
+        channel_id: &str,
+        sink_id: &str,
+        target: &TargetDeviceConfig,
+    ) -> Result<String, String> {
+        target.validate()?;
+        let current = self
+            .read_transport_target_config(channel_id, sink_id)?
+            .ok_or("transport target is not configured")?;
+        if current != *target || !target.credential_configured {
+            return Err("transport target authorization is not current".into());
+        }
+        let statement = self.prepare(
+            "SELECT protected_authorization FROM transport_target_credentials WHERE channel_id=?1 AND sink_id=?2 AND target_id=?3 AND target_revision=?4",
+        )?;
+        bind_text(
+            self.database,
+            statement.raw,
+            1,
+            &c_string(channel_id, "transport channel")?,
+        )?;
+        bind_text(
+            self.database,
+            statement.raw,
+            2,
+            &c_string(sink_id, "transport sink")?,
+        )?;
+        bind_text(
+            self.database,
+            statement.raw,
+            3,
+            &c_string(&target.target_id, "transport target")?,
+        )?;
+        bind_i64(
+            self.database,
+            statement.raw,
+            4,
+            i64::try_from(target.revision)
+                .map_err(|_| "transport target revision exceeds SQLite range".to_string())?,
+        )?;
+        if unsafe { sqlite3_step(statement.raw) } != SQLITE_ROW {
+            return Err("transport target authorization is unavailable".into());
+        }
+        let plaintext = unprotect_local_machine(&column_blob(statement.raw, 0)?)?;
+        let authorization = String::from_utf8(plaintext)
+            .map_err(|_| "transport target authorization is not UTF-8")?;
+        if authorization.is_empty()
+            || authorization.len() > 8_192
+            || authorization.chars().any(char::is_control)
+        {
+            return Err("transport target authorization is invalid".into());
+        }
+        Ok(authorization)
+    }
+
+    fn has_current_transport_target_authorization(
+        &self,
+        channel_id: &str,
+        sink_id: &str,
+        target_id: &str,
+        target_revision: u64,
+    ) -> Result<bool, String> {
+        let statement = self.prepare(
+            "SELECT protected_authorization FROM transport_target_credentials WHERE channel_id=?1 AND sink_id=?2 AND target_id=?3 AND target_revision=?4",
+        )?;
+        bind_text(
+            self.database,
+            statement.raw,
+            1,
+            &c_string(channel_id, "transport channel")?,
+        )?;
+        bind_text(
+            self.database,
+            statement.raw,
+            2,
+            &c_string(sink_id, "transport sink")?,
+        )?;
+        bind_text(
+            self.database,
+            statement.raw,
+            3,
+            &c_string(target_id, "transport target")?,
+        )?;
+        bind_i64(
+            self.database,
+            statement.raw,
+            4,
+            i64::try_from(target_revision)
+                .map_err(|_| "transport target revision exceeds SQLite range".to_string())?,
+        )?;
+        match unsafe { sqlite3_step(statement.raw) } {
+            SQLITE_ROW => {
+                let plaintext = unprotect_local_machine(&column_blob(statement.raw, 0)?)?;
+                let authorization = String::from_utf8(plaintext)
+                    .map_err(|_| "transport target authorization is not UTF-8")?;
+                if authorization.is_empty()
+                    || authorization.len() > 8_192
+                    || authorization.chars().any(char::is_control)
+                {
+                    return Err("transport target authorization is invalid".into());
+                }
+                Ok(true)
+            }
+            SQLITE_DONE => Ok(false),
             _ => Err(sqlite_error(self.database)),
         }
     }
@@ -11856,7 +12051,7 @@ impl StationStore {
         self.finish_value_transaction(outcome)
     }
 
-    pub fn append_target_device_reachability_receipt(
+    pub(crate) fn append_target_device_reachability_receipt(
         &self,
         receipt: &TargetDeviceReachabilityReceipt,
         now_unix_ms: i64,
@@ -21797,6 +21992,126 @@ mod tests {
         ] {
             let _ = std::fs::remove_file(candidate);
         }
+    }
+
+    #[test]
+    fn protected_transport_authorization_is_exact_revision_redacted_and_fail_closed() {
+        let nonce = SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let database = std::env::temp_dir().join(format!("townlight-target-secret-{nonce}.db"));
+        let channel_id = "11111111-2222-4333-8444-555555555555";
+        let sink_id = "22222222-3333-4444-8555-666666666666";
+        let store = StationStore::open(&database).unwrap();
+        store
+            .put_channel(&ChannelConfiguration {
+                channel_id: channel_id.into(),
+                display_name: "Protected target credential".into(),
+                output_profile: OutputProfileId::Proof360p30,
+                output_sinks: vec![OutputSinkConfiguration::required_udp(
+                    sink_id,
+                    "Required sink",
+                    "127.0.0.1:5500",
+                    -16.0,
+                )],
+                enabled: true,
+            })
+            .unwrap();
+        let target = TargetDeviceConfig {
+            target_id: "receiver-1".into(),
+            label: "Receiver".into(),
+            protocol: TargetProtocol::HttpsApi,
+            host: "receiver.example.test".into(),
+            port: 443,
+            credential_configured: true,
+            revision: 1,
+            created_at_unix_ms: 1,
+            updated_at_unix_ms: 1,
+            updated_by: "setup-admin".into(),
+        };
+        let first = store
+            .write_transport_target_config(channel_id, sink_id, None, &target)
+            .unwrap();
+        // A caller's boolean is never authority: no protected secret means
+        // the observable target is not credential-configured.
+        assert!(
+            !store
+                .read_transport_target_config(channel_id, sink_id)
+                .unwrap()
+                .unwrap()
+                .credential_configured
+        );
+        let wrong_target = TargetDeviceConfig {
+            target_id: "receiver-2".into(),
+            ..first.clone()
+        };
+        assert!(
+            store
+                .store_transport_target_authorization(
+                    channel_id,
+                    sink_id,
+                    &wrong_target,
+                    "Bearer wrong"
+                )
+                .is_err()
+        );
+        store
+            .store_transport_target_authorization(channel_id, sink_id, &first, "Bearer one")
+            .unwrap();
+        assert_eq!(
+            store
+                .read_transport_target_authorization(channel_id, sink_id, &first)
+                .unwrap(),
+            "Bearer one"
+        );
+        assert!(
+            store
+                .read_transport_target_config(channel_id, sink_id)
+                .unwrap()
+                .unwrap()
+                .credential_configured
+        );
+        let second = store
+            .write_transport_target_config(
+                channel_id,
+                sink_id,
+                Some(first.revision),
+                &TargetDeviceConfig {
+                    updated_at_unix_ms: 2,
+                    ..target
+                },
+            )
+            .unwrap();
+        assert!(
+            store
+                .read_transport_target_authorization(channel_id, sink_id, &first)
+                .is_err(),
+            "old credential must not authorize the next target revision"
+        );
+        store
+            .store_transport_target_authorization(channel_id, sink_id, &second, "Bearer two")
+            .unwrap();
+        assert_eq!(
+            store
+                .read_transport_target_authorization(channel_id, sink_id, &second)
+                .unwrap(),
+            "Bearer two"
+        );
+        store
+            .execute("DROP TRIGGER transport_target_credentials_no_update")
+            .unwrap();
+        store
+            .execute("UPDATE transport_target_credentials SET protected_authorization=x'00' WHERE target_revision=2")
+            .unwrap();
+        assert!(
+            store
+                .read_transport_target_config(channel_id, sink_id)
+                .is_err(),
+            "tampered protected credential must fail closed"
+        );
+        drop(store);
+        let _ = std::fs::remove_file(database);
     }
 
     #[test]
