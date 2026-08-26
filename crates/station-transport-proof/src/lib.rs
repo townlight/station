@@ -388,15 +388,14 @@ fn validate_host(value: &str) -> Result<(), String> {
         return Err("target host must be a normalized DNS name or IPv4 address".into());
     }
     let labels = value.split('.').collect::<Vec<_>>();
-    if labels
-        .iter()
-        .all(|label| !label.is_empty() && label.bytes().all(|byte| byte.is_ascii_digit()))
+    if labels.len() == 4
+        && labels
+            .iter()
+            .all(|label| !label.is_empty() && label.bytes().all(|byte| byte.is_ascii_digit()))
     {
-        if labels.len() != 4
-            || labels.iter().any(|label| {
-                (label.len() > 1 && label.starts_with('0')) || label.parse::<u8>().is_err()
-            })
-        {
+        if labels.iter().any(|label| {
+            (label.len() > 1 && label.starts_with('0')) || label.parse::<u8>().is_err()
+        }) {
             return Err("target host must be a normalized DNS name or IPv4 address".into());
         }
         return Ok(());
@@ -700,7 +699,13 @@ mod tests {
             target.host = invalid.into();
             assert!(target.validate().is_err(), "{invalid}");
         }
-        for valid in ["192.168.1.1", "receiver-1.example.test"] {
+        for valid in [
+            "192.168.1.1",
+            "receiver-1.example.test",
+            "123",
+            "1.2",
+            "1.2.3",
+        ] {
             let mut target = target();
             target.host = valid.into();
             assert!(target.validate().is_ok(), "{valid}");

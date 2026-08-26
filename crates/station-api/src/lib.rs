@@ -1709,6 +1709,9 @@ pub struct Api {
     station_box_cache: Arc<Mutex<Option<(Instant, StationBoxProfile)>>>,
     orchestration_health: Arc<OrchestrationHealth>,
     source_evidence_authority: Arc<StationSourceEvidenceAuthority>,
+    #[cfg(test)]
+    commissioning_after_channel_read_hook:
+        Option<Arc<dyn Fn(&StationStore) + Send + Sync + 'static>>,
 }
 
 /// Complete receipt-backed input for one server-owned S19 materialization.
@@ -1777,6 +1780,8 @@ impl Api {
             station_box_cache,
             orchestration_health,
             source_evidence_authority,
+            #[cfg(test)]
+            commissioning_after_channel_read_hook: None,
         })
     }
 
@@ -1795,6 +1800,8 @@ impl Api {
             station_box_cache: Arc::new(Mutex::new(None)),
             orchestration_health: OrchestrationHealth::ready_without_supervisor(),
             source_evidence_authority: new_source_evidence_authority()?,
+            #[cfg(test)]
+            commissioning_after_channel_read_hook: None,
         })
     }
 
@@ -7535,6 +7542,10 @@ impl Api {
             Err(message) => return error_response(500, "storage_error", &message),
         };
         let enabled: Vec<_> = channels.iter().filter(|channel| channel.enabled).collect();
+        #[cfg(test)]
+        if let Some(hook) = &self.commissioning_after_channel_read_hook {
+            hook(&self.storage);
+        }
         let safe_to_air = if enabled.is_empty() {
             None
         } else {
@@ -19602,7 +19613,7 @@ mod tests {
             .source_commit
             .clone()
             .expect("verified test candidate");
-        let api = Api::open_with_station_box_probe(&database, &application, probe).unwrap();
+        let mut api = Api::open_with_station_box_probe(&database, &application, probe).unwrap();
         let channel_id = "11111111-2222-4333-8444-555555555555";
         let sink_a = "22222222-3333-4444-8555-666666666666";
         let sink_b = "33333333-4444-4555-8666-777777777777";
@@ -19621,116 +19632,116 @@ mod tests {
                 enabled: true,
             })
             .unwrap();
-        // This is the stale view a report could have read before a concurrent
-        // Setup Admin added B. Aggregation must not use it.
-        let stale_channels = api.storage.list_channels().unwrap();
-        assert_eq!(stale_channels[0].output_sinks.len(), 1);
-        api.storage
-            .put_channel(&ChannelConfiguration {
-                channel_id: channel_id.into(),
-                display_name: "Commissioning transport snapshot".into(),
-                output_profile: station_schedule::OutputProfileId::Proof360p30,
-                output_sinks: vec![
-                    sink_a_config,
-                    station_schedule::OutputSinkConfiguration::required_udp(
-                        sink_b,
-                        "Sink B",
-                        "127.0.0.1:5501",
-                        -16.0,
-                    ),
-                ],
-                enabled: true,
-            })
-            .unwrap();
         let now = system_time_millis().unwrap();
-        let target = TargetDeviceConfig {
-            target_id: "target-a".into(),
-            label: "Target A".into(),
-            protocol: TargetProtocol::HttpsApi,
-            host: "receiver-a.example.test".into(),
-            port: 443,
-            credential_configured: true,
-            revision: 1,
-            created_at_unix_ms: now,
-            updated_at_unix_ms: now,
-            updated_by: "setup-admin".into(),
-        };
-        api.storage
-            .write_transport_target_config(channel_id, sink_a, None, &target)
-            .unwrap();
-        let configuration_hash = api
-            .storage
-            .current_channel_output_configuration_hash(channel_id)
-            .unwrap();
-        api.storage
-            .append_transport_analysis_receipt(
-                &station_storage::TransportAnalysisReceipt {
-                    proof_id: "analysis-a".into(),
-                    channel_id: channel_id.into(),
-                    sink_id: sink_a.into(),
-                    target_id: target.target_id.clone(),
-                    target_revision: 1,
-                    candidate_version: candidate_version.clone(),
-                    source_commit: source_commit.clone(),
-                    configuration_hash: configuration_hash.clone(),
-                    analyzer_id: "test-analyzer".into(),
-                    analyzer_version: "1".into(),
-                    analyzer_sha256: "a".repeat(64),
-                    outcome: station_storage::ProofOutcome::Pass,
-                    findings: station_storage::TransportFindings {
-                        packet_size_bytes: 188,
-                        packet_count: 10,
-                        capture_duration_ms: 1_000,
-                        bitrate_bps: 1_000_000,
-                        pat_program_count: 1,
-                        pmt_stream_count: 1,
-                        continuity_errors: 0,
-                        pcr_errors: 0,
-                        analyzer_output_sha256: "b".repeat(64),
+        let hook_fired = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let hook_observed = Arc::clone(&hook_fired);
+        let hook_channel_id = channel_id.to_string();
+        let hook_sink_a = sink_a.to_string();
+        let hook_sink_b = sink_b.to_string();
+        let hook_candidate_version = candidate_version.clone();
+        let hook_source_commit = source_commit.clone();
+        api.commissioning_after_channel_read_hook = Some(Arc::new(move |storage| {
+            if hook_observed.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                return;
+            }
+            storage
+                .put_channel(&ChannelConfiguration {
+                    channel_id: hook_channel_id.clone(),
+                    display_name: "Commissioning transport snapshot".into(),
+                    output_profile: station_schedule::OutputProfileId::Proof360p30,
+                    output_sinks: vec![
+                        sink_a_config.clone(),
+                        station_schedule::OutputSinkConfiguration::required_udp(
+                            &hook_sink_b,
+                            "Sink B",
+                            "127.0.0.1:5501",
+                            -16.0,
+                        ),
+                    ],
+                    enabled: true,
+                })
+                .unwrap();
+            let target = TargetDeviceConfig {
+                target_id: "target-a".into(),
+                label: "Target A".into(),
+                protocol: TargetProtocol::HttpsApi,
+                host: "receiver-a.example.test".into(),
+                port: 443,
+                credential_configured: true,
+                revision: 1,
+                created_at_unix_ms: now,
+                updated_at_unix_ms: now,
+                updated_by: "setup-admin".into(),
+            };
+            storage
+                .write_transport_target_config(&hook_channel_id, &hook_sink_a, None, &target)
+                .unwrap();
+            let configuration_hash = storage
+                .current_channel_output_configuration_hash(&hook_channel_id)
+                .unwrap();
+            storage
+                .append_transport_analysis_receipt(
+                    &station_storage::TransportAnalysisReceipt {
+                        proof_id: "analysis-a".into(),
+                        channel_id: hook_channel_id.clone(),
+                        sink_id: hook_sink_a.clone(),
+                        target_id: target.target_id.clone(),
+                        target_revision: 1,
+                        candidate_version: hook_candidate_version.clone(),
+                        source_commit: hook_source_commit.clone(),
+                        configuration_hash: configuration_hash.clone(),
+                        analyzer_id: "test-analyzer".into(),
+                        analyzer_version: "1".into(),
+                        analyzer_sha256: "a".repeat(64),
+                        outcome: station_storage::ProofOutcome::Pass,
+                        findings: station_storage::TransportFindings {
+                            packet_size_bytes: 188,
+                            packet_count: 10,
+                            capture_duration_ms: 1_000,
+                            bitrate_bps: 1_000_000,
+                            pat_program_count: 1,
+                            pmt_stream_count: 1,
+                            continuity_errors: 0,
+                            pcr_errors: 0,
+                            analyzer_output_sha256: "b".repeat(64),
+                        },
+                        captured_at_unix_ms: now,
+                        recorded_at_unix_ms: now,
+                        recorded_by: "worker".into(),
+                        detail: "A passed".into(),
                     },
-                    captured_at_unix_ms: now,
-                    recorded_at_unix_ms: now,
-                    recorded_by: "worker".into(),
-                    detail: "A passed".into(),
-                },
-                now,
-            )
-            .unwrap();
-        api.storage
-            .append_target_device_reachability_receipt(
-                &station_storage::TargetDeviceReachabilityReceipt {
-                    proof_id: "reach-a".into(),
-                    channel_id: channel_id.into(),
-                    sink_id: sink_a.into(),
-                    target_id: target.target_id,
-                    target_revision: 1,
-                    candidate_version: candidate_version.clone(),
-                    source_commit: source_commit.clone(),
-                    configuration_hash,
-                    adapter_id: "test-adapter".into(),
-                    adapter_version: "1".into(),
-                    auth_method: "challenge".into(),
-                    outcome: station_storage::ProofOutcome::Pass,
-                    response_identity_sha256: "c".repeat(64),
-                    latency_ms: 1,
-                    observed_at_unix_ms: now,
-                    recorded_at_unix_ms: now,
-                    recorded_by: "worker".into(),
-                    detail: "A reached".into(),
-                },
-                now,
-            )
-            .unwrap();
-        let snapshot = api
-            .storage
-            .read_current_cable_transport_validations(&candidate_version, &source_commit, now)
-            .unwrap();
-        assert_eq!(snapshot.len(), 2);
-        let (passes, detail) = aggregate_cable_transport_snapshot(&snapshot);
-        assert!(!passes, "a newly required B must block A-only proof");
-        assert!(detail.iter().any(|line| line.contains(sink_b)));
+                    now,
+                )
+                .unwrap();
+            storage
+                .append_target_device_reachability_receipt(
+                    &station_storage::TargetDeviceReachabilityReceipt {
+                        proof_id: "reach-a".into(),
+                        channel_id: hook_channel_id.clone(),
+                        sink_id: hook_sink_a.clone(),
+                        target_id: target.target_id,
+                        target_revision: 1,
+                        candidate_version: hook_candidate_version.clone(),
+                        source_commit: hook_source_commit.clone(),
+                        configuration_hash,
+                        adapter_id: "test-adapter".into(),
+                        adapter_version: "1".into(),
+                        auth_method: "challenge".into(),
+                        outcome: station_storage::ProofOutcome::Pass,
+                        response_identity_sha256: "c".repeat(64),
+                        latency_ms: 1,
+                        observed_at_unix_ms: now,
+                        recorded_at_unix_ms: now,
+                        recorded_by: "worker".into(),
+                        detail: "A reached".into(),
+                    },
+                    now,
+                )
+                .unwrap();
+        }));
 
         let report = api.handle_in_process("GET", "/api/v1/commissioning/report", None);
+        assert!(hook_fired.load(std::sync::atomic::Ordering::SeqCst));
         let report: serde_json::Value = serde_json::from_slice(&report.body).unwrap();
         let cable = report["checks"]
             .as_array()
