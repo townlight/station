@@ -190,7 +190,20 @@ impl TransportAnalysisReceipt {
             return Err("transport analysis target revision is invalid".into());
         }
         match self.outcome {
-            ProofOutcome::Pass => self.findings.validate(),
+            ProofOutcome::Pass => {
+                self.findings.validate()?;
+                let analyzed_bytes = u64::from(self.findings.packet_size_bytes)
+                    .checked_mul(self.findings.packet_count)
+                    .ok_or_else(|| {
+                        "transport analysis capture size overflows the supported range".to_string()
+                    })?;
+                if analyzed_bytes != self.capture_bytes {
+                    return Err(
+                        "transport analysis packet facts do not match the sealed capture".into(),
+                    );
+                }
+                Ok(())
+            }
             ProofOutcome::Fail => {
                 if !sha256(&self.findings.analyzer_output_sha256) {
                     return Err(
@@ -719,6 +732,14 @@ mod tests {
         findings.packet_size_bytes = 188;
         findings.packet_count = MAX_PROOF_CAPTURE_BYTES / 188 + 1;
         assert!(findings.validate().is_err());
+    }
+
+    #[test]
+    fn passing_receipt_binds_packet_facts_to_the_sealed_capture_size() {
+        let mut receipt = analysis();
+        receipt.capture_bytes += 188;
+
+        assert!(receipt.validate().is_err());
     }
 
     #[test]
