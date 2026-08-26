@@ -33,6 +33,7 @@ members = [
     "crates/station-runtime",
     "crates/station-readiness",
     "crates/station-transport-proof",
+    "crates/station-transport-executor",
     "crates/station-reporting",
     "crates/station-schedule",
     "crates/station-schedule-automation",
@@ -100,6 +101,7 @@ station-publishing = { path = "crates/station-publishing" }
 station-runtime = { path = "crates/station-runtime" }
 station-readiness = { path = "crates/station-readiness" }
 station-transport-proof = { path = "crates/station-transport-proof" }
+station-transport-executor = { path = "crates/station-transport-executor" }
 station-schedule = { path = "crates/station-schedule" }
 station-schedule-automation = { path = "crates/station-schedule-automation" }
 station-source-evidence = { path = "crates/station-source-evidence" }

@@ -2080,6 +2080,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "station-transport-executor"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "sha2",
+ "station-maintenance",
+ "station-storage",
+ "station-transport-proof",
+ "ureq",
+]
+
+[[package]]
 name = "station-transport-proof"
 version = "0.1.0"
 dependencies = [

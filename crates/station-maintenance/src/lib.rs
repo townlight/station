@@ -1600,6 +1600,50 @@ pub fn read_verified_candidate_identity(
     })
 }
 
+/// A runtime handle is constructed only after the full installation receipt,
+/// active slot, pinned TSDuck identity, complete manifest, file hashes, and
+/// non-reparse runtime tree have been verified by `read_verified_candidate_identity`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerifiedTsdDuckRuntime {
+    pub candidate: VerifiedCandidateIdentity,
+    pub root: PathBuf,
+    pub version: String,
+    pub tsp_sha256: String,
+    pub tsanalyze_sha256: String,
+}
+
+pub fn read_verified_tsduck_runtime(
+    data_directory: &Path,
+    application_root: &Path,
+) -> Result<VerifiedTsdDuckRuntime, String> {
+    let candidate = read_verified_candidate_identity(data_directory, application_root)?;
+    let bytes = read_bounded_file(
+        &data_directory.join(TSDUCK_RUNTIME_MANIFEST_NAME),
+        MAX_RUNTIME_MANIFEST_BYTES,
+        "installed TSDuck runtime manifest",
+    )?;
+    let manifest: InstalledRuntimeManifest = serde_json::from_slice(&bytes)
+        .map_err(|_| "installed TSDuck runtime manifest is invalid")?;
+    manifest.validate()?;
+    let find = |path: &str| {
+        manifest
+            .files
+            .iter()
+            .find(|file| file.path == path)
+            .map(|file| file.sha256.clone())
+            .ok_or_else(|| {
+                "installed TSDuck runtime manifest is missing a required executable".to_string()
+            })
+    };
+    Ok(VerifiedTsdDuckRuntime {
+        candidate,
+        root: application_root.join("runtime").join("tsduck"),
+        version: TSDUCK_VERSION.into(),
+        tsp_sha256: find("bin/tsp.exe")?,
+        tsanalyze_sha256: find("bin/tsanalyze.exe")?,
+    })
+}
+
 pub fn write_installed_runtime_manifest(
     runtime_root: &Path,
     output_path: &Path,
