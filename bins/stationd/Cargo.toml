@@ -17,5 +17,6 @@ station-readiness.workspace = true
 station-feed-fetch.workspace = true
 station-source-evidence.workspace = true
 station-storage.workspace = true
+station-transport-executor.workspace = true
 station-update-coordinator.workspace = true
 windows-service.workspace = true

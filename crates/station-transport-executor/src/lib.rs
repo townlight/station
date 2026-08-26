@@ -8,6 +8,10 @@ use std::fs::{self, File};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 use std::time::{Duration, Instant};
 
 use sha2::{Digest, Sha256};
@@ -22,6 +26,30 @@ const MAX_RECEIVER_RESPONSE_BYTES: usize = 8 * 1024;
 const MAX_ANALYSIS_ERRORS: u64 = 0;
 const TSDUCK_ANALYZER_ID: &str = "tsduck-tsanalyze";
 const RECEIVER_ADAPTER_ID: &str = "townlight-https-receiver-v1";
+
+/// Service-owned durable queue supervisor.  This deliberately performs only
+/// lease recovery until the capture/process boundary is attached: it never
+/// claims a job it cannot execute, and therefore cannot accidentally turn a
+/// queued operator request into a fabricated proof pass.
+pub fn run_transport_proof_queue_controller(
+    database: &Path,
+    stop: Arc<AtomicBool>,
+) -> Result<(), String> {
+    while !stop.load(Ordering::Acquire) {
+        let now = unix_time_millis()?;
+        StationStore::open(database)?.recover_expired_transport_proof_jobs(now)?;
+        std::thread::sleep(Duration::from_millis(250));
+    }
+    Ok(())
+}
+
+fn unix_time_millis() -> Result<i64, String> {
+    let elapsed = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|_| "system clock is before the Unix epoch")?;
+    i64::try_from(elapsed.as_millis())
+        .map_err(|_| "system clock millisecond value overflowed".into())
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProofBinding {

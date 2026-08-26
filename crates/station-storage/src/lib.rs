@@ -751,6 +751,105 @@ pub struct OutputLoudnessProofJobRecord {
     pub failure_detail: Option<String>,
 }
 
+/// The durable lifecycle owned by stationd for a transport-proof request.  A
+/// terminal record is evidence of the controller's decision, never a pass
+/// supplied by an API client.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TransportProofJobState {
+    Pending,
+    Claimed,
+    Capturing,
+    Analyzing,
+    Completed,
+    Failed,
+}
+
+/// Immutable identity of a capture after stationd has closed and hashed it.
+/// `artifact_relative_path` is intentionally relative to the service-owned
+/// artifact root; neither an API request nor a target configuration can name a
+/// filesystem path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TransportProofCaptureFacts {
+    pub artifact_relative_path: String,
+    pub capture_bytes: u64,
+    pub capture_sha256: String,
+    pub started_at_unix_ms: i64,
+    pub ended_at_unix_ms: i64,
+}
+
+impl TransportProofCaptureFacts {
+    pub fn validate(&self, max_capture_bytes: u64) -> Result<(), String> {
+        validate_artifact_relative_path(&self.artifact_relative_path)?;
+        if self.capture_bytes == 0
+            || self.capture_bytes > max_capture_bytes
+            || !is_sha256_identity(&self.capture_sha256)
+            || self.started_at_unix_ms < 0
+            || self.ended_at_unix_ms < self.started_at_unix_ms
+            || self
+                .ended_at_unix_ms
+                .checked_sub(self.started_at_unix_ms)
+                .is_none_or(|duration| duration < 600_000)
+        {
+            return Err(
+                "transport capture facts are incomplete, too short, or exceed job bounds".into(),
+            );
+        }
+        Ok(())
+    }
+}
+
+/// Server-derived request binding stored before any process is allowed to
+/// capture.  This type has no host, port, credential, runtime path, artifact
+/// path, proof outcome, or caller-selected timestamps.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TransportProofJob {
+    pub job_id: String,
+    pub channel_id: String,
+    pub sink_id: String,
+    pub target_id: String,
+    pub target_revision: u64,
+    pub candidate_version: String,
+    pub source_commit: String,
+    pub configuration_hash: String,
+    pub requested_by: String,
+    pub created_at_unix_ms: i64,
+    pub max_capture_bytes: u64,
+}
+
+impl TransportProofJob {
+    pub fn validate(&self) -> Result<(), String> {
+        if !is_canonical_uuid(&self.job_id)
+            || !is_canonical_uuid(&self.channel_id)
+            || !is_canonical_uuid(&self.sink_id)
+            || !secret_field(&self.target_id, 100)
+            || self.target_revision == 0
+            || !secret_field(&self.candidate_version, OUTPUT_LOUDNESS_MAX_CANDIDATE_TEXT)
+            || !is_source_commit_identity(&self.source_commit)
+            || !is_sha256_identity(&self.configuration_hash)
+            || !secret_field(&self.requested_by, 200)
+            || self.created_at_unix_ms < 0
+            || self.max_capture_bytes == 0
+            || self.max_capture_bytes > station_transport_proof::MAX_PROOF_CAPTURE_BYTES
+        {
+            return Err("transport proof job binding is invalid or unbounded".into());
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TransportProofJobRecord {
+    pub job: TransportProofJob,
+    pub state: TransportProofJobState,
+    pub updated_at_unix_ms: i64,
+    pub lease_expires_at_unix_ms: Option<i64>,
+    pub capture: Option<TransportProofCaptureFacts>,
+    pub analyzer_output_sha256: Option<String>,
+    pub completed_at_unix_ms: Option<i64>,
+    pub failed_at_unix_ms: Option<i64>,
+    pub failure_detail: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OperatorLoginAuthority {
     pub account: OperatorAccount,
@@ -1528,6 +1627,35 @@ impl StationStore {
                ON transport_analysis_receipts(channel_id, recorded_at_unix_ms DESC, proof_id DESC);\
              CREATE INDEX IF NOT EXISTS target_device_reachability_history \
                ON target_device_reachability_receipts(channel_id, recorded_at_unix_ms DESC, proof_id DESC);\
+             CREATE TABLE IF NOT EXISTS transport_proof_jobs (\
+               job_id TEXT PRIMARY KEY,\
+               channel_id TEXT NOT NULL,\
+               sink_id TEXT NOT NULL,\
+               target_id TEXT NOT NULL,\
+               target_revision INTEGER NOT NULL CHECK (target_revision >= 1),\
+               candidate_version TEXT NOT NULL,\
+               source_commit TEXT NOT NULL,\
+               configuration_hash TEXT NOT NULL,\
+               requested_by TEXT NOT NULL,\
+               max_capture_bytes INTEGER NOT NULL CHECK (max_capture_bytes BETWEEN 1 AND 1073741824),\
+               state TEXT NOT NULL CHECK (state IN ('pending','claimed','capturing','analyzing','completed','failed')),\
+               created_at_unix_ms INTEGER NOT NULL CHECK (created_at_unix_ms >= 0),\
+               updated_at_unix_ms INTEGER NOT NULL CHECK (updated_at_unix_ms >= created_at_unix_ms),\
+               lease_expires_at_unix_ms INTEGER NOT NULL DEFAULT -1 CHECK (lease_expires_at_unix_ms >= -1),\
+               capture_relative_path TEXT NOT NULL DEFAULT '',\
+               capture_bytes INTEGER NOT NULL DEFAULT -1 CHECK (capture_bytes >= -1),\
+               capture_sha256 TEXT NOT NULL DEFAULT '',\
+               capture_started_at_unix_ms INTEGER NOT NULL DEFAULT -1 CHECK (capture_started_at_unix_ms >= -1),\
+               capture_ended_at_unix_ms INTEGER NOT NULL DEFAULT -1 CHECK (capture_ended_at_unix_ms >= -1),\
+               analyzer_output_sha256 TEXT NOT NULL DEFAULT '',\
+               completed_at_unix_ms INTEGER NOT NULL DEFAULT -1 CHECK (completed_at_unix_ms >= -1),\
+               failed_at_unix_ms INTEGER NOT NULL DEFAULT -1 CHECK (failed_at_unix_ms >= -1),\
+               failure_detail TEXT NOT NULL DEFAULT ''\
+             );\
+             CREATE UNIQUE INDEX IF NOT EXISTS transport_proof_jobs_active_sink \
+               ON transport_proof_jobs(channel_id, sink_id) WHERE state NOT IN ('completed','failed');\
+             CREATE INDEX IF NOT EXISTS transport_proof_jobs_state_time \
+               ON transport_proof_jobs(state, created_at_unix_ms, job_id);\
              CREATE TRIGGER IF NOT EXISTS transport_target_configs_no_delete \
                BEFORE DELETE ON transport_target_configs \
                BEGIN SELECT RAISE(ABORT, 'transport target configurations are not deletable'); END;\
@@ -10942,6 +11070,257 @@ impl StationStore {
         }
     }
 
+    /// Persist a server-derived request binding.  The compare against the
+    /// currently stored target and configuration occurs under the same
+    /// `BEGIN IMMEDIATE` transaction as the insert, so a target edit cannot
+    /// race an accepted queue entry.
+    pub fn create_transport_proof_job(&self, job: &TransportProofJob) -> Result<bool, String> {
+        job.validate()?;
+        self.execute("BEGIN IMMEDIATE")?;
+        let outcome = (|| {
+            let target = self
+                .read_transport_target_config(&job.channel_id, &job.sink_id)?
+                .ok_or_else(|| "transport proof target is not configured".to_string())?;
+            if target.target_id != job.target_id || target.revision != job.target_revision {
+                return Err("transport proof target binding is stale".into());
+            }
+            if self.current_channel_output_configuration_hash(&job.channel_id)?
+                != job.configuration_hash
+            {
+                return Err("transport proof configuration binding is stale".into());
+            }
+            let statement = self.prepare(
+                "INSERT OR IGNORE INTO transport_proof_jobs(job_id, channel_id, sink_id, target_id, target_revision, candidate_version, source_commit, configuration_hash, requested_by, max_capture_bytes, state, created_at_unix_ms, updated_at_unix_ms, lease_expires_at_unix_ms, capture_relative_path, capture_bytes, capture_sha256, capture_started_at_unix_ms, capture_ended_at_unix_ms, analyzer_output_sha256, completed_at_unix_ms, failed_at_unix_ms, failure_detail) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,'pending',?11,?11,-1,'',-1,'',-1,-1,'',-1,-1,'')",
+            )?;
+            for (index, value, field) in [
+                (1, job.job_id.as_str(), "transport proof job identity"),
+                (
+                    2,
+                    job.channel_id.as_str(),
+                    "transport proof channel identity",
+                ),
+                (3, job.sink_id.as_str(), "transport proof sink identity"),
+                (4, job.target_id.as_str(), "transport proof target identity"),
+                (
+                    6,
+                    job.candidate_version.as_str(),
+                    "transport proof candidate",
+                ),
+                (
+                    7,
+                    job.source_commit.as_str(),
+                    "transport proof source commit",
+                ),
+                (
+                    8,
+                    job.configuration_hash.as_str(),
+                    "transport proof configuration hash",
+                ),
+                (9, job.requested_by.as_str(), "transport proof requester"),
+            ] {
+                bind_text(
+                    self.database,
+                    statement.raw,
+                    index,
+                    &c_string(value, field)?,
+                )?;
+            }
+            bind_i64(
+                self.database,
+                statement.raw,
+                5,
+                checked_i64(job.target_revision, "target revision")?,
+            )?;
+            bind_i64(
+                self.database,
+                statement.raw,
+                10,
+                checked_i64(job.max_capture_bytes, "transport capture limit")?,
+            )?;
+            bind_i64(self.database, statement.raw, 11, job.created_at_unix_ms)?;
+            expect_done(self.database, statement.raw)?;
+            Ok(self.changes() == 1)
+        })();
+        self.finish_value_transaction(outcome)
+    }
+
+    pub fn read_transport_proof_job(
+        &self,
+        job_id: &str,
+    ) -> Result<Option<TransportProofJobRecord>, String> {
+        validate_transport_proof_job_id(job_id)?;
+        let statement = self.prepare(
+            "SELECT job_id,channel_id,sink_id,target_id,target_revision,candidate_version,source_commit,configuration_hash,requested_by,max_capture_bytes,state,created_at_unix_ms,updated_at_unix_ms,lease_expires_at_unix_ms,capture_relative_path,capture_bytes,capture_sha256,capture_started_at_unix_ms,capture_ended_at_unix_ms,analyzer_output_sha256,completed_at_unix_ms,failed_at_unix_ms,failure_detail FROM transport_proof_jobs WHERE job_id=?1",
+        )?;
+        bind_text(
+            self.database,
+            statement.raw,
+            1,
+            &c_string(job_id, "transport proof job identity")?,
+        )?;
+        match unsafe { sqlite3_step(statement.raw) } {
+            SQLITE_ROW => Ok(Some(read_transport_proof_job_row(statement.raw)?)),
+            SQLITE_DONE => Ok(None),
+            _ => Err(sqlite_error(self.database)),
+        }
+    }
+
+    /// Atomically recovers expired leases and claims the next queued job.  The
+    /// controller receives only the stored binding; no capture endpoint or
+    /// runtime path travels through this queue boundary.
+    pub fn claim_next_transport_proof_job(
+        &self,
+        now_unix_ms: i64,
+        lease_duration_ms: i64,
+    ) -> Result<Option<TransportProofJobRecord>, String> {
+        validate_transport_proof_lease(now_unix_ms, lease_duration_ms)?;
+        let lease_expires_at = now_unix_ms
+            .checked_add(lease_duration_ms)
+            .ok_or_else(|| "transport proof lease time overflowed".to_string())?;
+        self.execute("BEGIN IMMEDIATE")?;
+        let outcome = (|| {
+            recover_expired_transport_proof_jobs_in_transaction(self, now_unix_ms)?;
+            let select = self.prepare("SELECT job_id FROM transport_proof_jobs WHERE state='pending' ORDER BY created_at_unix_ms,job_id LIMIT 1")?;
+            let job_id = match unsafe { sqlite3_step(select.raw) } {
+                SQLITE_ROW => column_text(select.raw, 0)?,
+                SQLITE_DONE => return Ok(None),
+                _ => return Err(sqlite_error(self.database)),
+            };
+            drop(select);
+            let queued = self
+                .read_transport_proof_job(&job_id)?
+                .ok_or_else(|| "selected transport proof job disappeared".to_string())?;
+            self.validate_transport_proof_job_current(&queued.job)?;
+            let update = self.prepare("UPDATE transport_proof_jobs SET state='claimed',updated_at_unix_ms=?1,lease_expires_at_unix_ms=?2 WHERE job_id=?3 AND state='pending'")?;
+            bind_i64(self.database, update.raw, 1, now_unix_ms)?;
+            bind_i64(self.database, update.raw, 2, lease_expires_at)?;
+            bind_text(
+                self.database,
+                update.raw,
+                3,
+                &c_string(&job_id, "transport proof job identity")?,
+            )?;
+            expect_done(self.database, update.raw)?;
+            if self.changes() != 1 {
+                return Err("transport proof next-job claim lost its write lock".into());
+            }
+            self.read_transport_proof_job(&job_id)
+        })();
+        self.finish_value_transaction(outcome)
+    }
+
+    /// Startup recovery used by the stationd-owned controller.  It cannot
+    /// manufacture a completion: expired work returns to `pending` and has its
+    /// untrusted partial-capture fields discarded.
+    pub fn recover_expired_transport_proof_jobs(&self, now_unix_ms: i64) -> Result<u64, String> {
+        if now_unix_ms < 0 {
+            return Err("transport proof recovery time is invalid".into());
+        }
+        self.execute("BEGIN IMMEDIATE")?;
+        let outcome = recover_expired_transport_proof_jobs_in_transaction(self, now_unix_ms);
+        self.finish_value_transaction(outcome)
+    }
+
+    /// Attach the closed capture identity exactly once, then enter analysis.
+    /// The analyzer output hash is separately persisted by completion, binding
+    /// analysis to this immutable capture rather than a reopened pathname.
+    pub fn begin_transport_proof_analysis(
+        &self,
+        job_id: &str,
+        capture: &TransportProofCaptureFacts,
+        now_unix_ms: i64,
+        lease_duration_ms: i64,
+    ) -> Result<TransportProofJobRecord, String> {
+        validate_transport_proof_job_id(job_id)?;
+        validate_transport_proof_lease(now_unix_ms, lease_duration_ms)?;
+        let lease_expires_at = now_unix_ms
+            .checked_add(lease_duration_ms)
+            .ok_or_else(|| "transport proof lease time overflowed".to_string())?;
+        self.execute("BEGIN IMMEDIATE")?;
+        let outcome = (|| {
+            let current = self
+                .read_transport_proof_job(job_id)?
+                .ok_or_else(|| "transport proof job does not exist".to_string())?;
+            capture.validate(current.job.max_capture_bytes)?;
+            let statement = self.prepare("UPDATE transport_proof_jobs SET state='analyzing',updated_at_unix_ms=?1,lease_expires_at_unix_ms=?2,capture_relative_path=?3,capture_bytes=?4,capture_sha256=?5,capture_started_at_unix_ms=?6,capture_ended_at_unix_ms=?7 WHERE job_id=?8 AND state='claimed' AND lease_expires_at_unix_ms>?1")?;
+            bind_i64(self.database, statement.raw, 1, now_unix_ms)?;
+            bind_i64(self.database, statement.raw, 2, lease_expires_at)?;
+            bind_text(
+                self.database,
+                statement.raw,
+                3,
+                &c_string(&capture.artifact_relative_path, "transport capture path")?,
+            )?;
+            bind_i64(
+                self.database,
+                statement.raw,
+                4,
+                checked_i64(capture.capture_bytes, "transport capture bytes")?,
+            )?;
+            bind_text(
+                self.database,
+                statement.raw,
+                5,
+                &c_string(&capture.capture_sha256, "transport capture hash")?,
+            )?;
+            bind_i64(self.database, statement.raw, 6, capture.started_at_unix_ms)?;
+            bind_i64(self.database, statement.raw, 7, capture.ended_at_unix_ms)?;
+            bind_text(
+                self.database,
+                statement.raw,
+                8,
+                &c_string(job_id, "transport proof job identity")?,
+            )?;
+            expect_done(self.database, statement.raw)?;
+            if self.changes() != 1 {
+                return Err(
+                    "transport proof capture attach compare-and-set failed or lease expired".into(),
+                );
+            }
+            self.read_transport_proof_job(job_id)?
+                .ok_or_else(|| "transport proof job disappeared".to_string())
+        })();
+        self.finish_value_transaction(outcome)
+    }
+
+    pub fn complete_transport_proof_job(
+        &self,
+        job_id: &str,
+        analyzer_output_sha256: &str,
+        now_unix_ms: i64,
+    ) -> Result<TransportProofJobRecord, String> {
+        validate_transport_proof_job_id(job_id)?;
+        if now_unix_ms < 0 || !is_sha256_identity(analyzer_output_sha256) {
+            return Err("transport proof completion facts are invalid".into());
+        }
+        self.execute("BEGIN IMMEDIATE")?;
+        let outcome = (|| {
+            let statement = self.prepare("UPDATE transport_proof_jobs SET state='completed',updated_at_unix_ms=?1,lease_expires_at_unix_ms=-1,analyzer_output_sha256=?2,completed_at_unix_ms=?1 WHERE job_id=?3 AND state='analyzing' AND lease_expires_at_unix_ms>?1")?;
+            bind_i64(self.database, statement.raw, 1, now_unix_ms)?;
+            bind_text(
+                self.database,
+                statement.raw,
+                2,
+                &c_string(analyzer_output_sha256, "analyzer output hash")?,
+            )?;
+            bind_text(
+                self.database,
+                statement.raw,
+                3,
+                &c_string(job_id, "transport proof job identity")?,
+            )?;
+            expect_done(self.database, statement.raw)?;
+            if self.changes() != 1 {
+                return Err(
+                    "transport proof completion compare-and-set failed or lease expired".into(),
+                );
+            }
+            self.read_transport_proof_job(job_id)?
+                .ok_or_else(|| "transport proof job disappeared".to_string())
+        })();
+        self.finish_value_transaction(outcome)
+    }
+
     pub fn append_transport_analysis_receipt(
         &self,
         receipt: &TransportAnalysisReceipt,
@@ -11395,6 +11774,22 @@ impl StationStore {
         {
             return Err(
                 "transport proof is stale or does not match current output authority".into(),
+            );
+        }
+        Ok(())
+    }
+
+    fn validate_transport_proof_job_current(&self, job: &TransportProofJob) -> Result<(), String> {
+        let target = self
+            .read_transport_target_config(&job.channel_id, &job.sink_id)?
+            .ok_or_else(|| "transport proof target is not configured".to_string())?;
+        if target.target_id != job.target_id
+            || target.revision != job.target_revision
+            || self.current_channel_output_configuration_hash(&job.channel_id)?
+                != job.configuration_hash
+        {
+            return Err(
+                "transport proof job is stale for the current target or configuration".into(),
             );
         }
         Ok(())
@@ -15982,6 +16377,111 @@ fn read_output_loudness_job_row(
     Ok(record)
 }
 
+fn read_transport_proof_job_row(
+    statement: *mut SqliteStatement,
+) -> Result<TransportProofJobRecord, String> {
+    let job = TransportProofJob {
+        job_id: column_text(statement, 0)?,
+        channel_id: column_text(statement, 1)?,
+        sink_id: column_text(statement, 2)?,
+        target_id: column_text(statement, 3)?,
+        target_revision: column_u64(statement, 4, "transport proof target revision")?,
+        candidate_version: column_text(statement, 5)?,
+        source_commit: column_text(statement, 6)?,
+        configuration_hash: column_text(statement, 7)?,
+        requested_by: column_text(statement, 8)?,
+        max_capture_bytes: column_u64(statement, 9, "transport proof capture limit")?,
+        created_at_unix_ms: unsafe { sqlite3_column_int64(statement, 11) },
+    };
+    job.validate()?;
+    let capture_path = column_text(statement, 14)?;
+    let capture_hash = column_text(statement, 16)?;
+    let capture = if capture_path.is_empty() {
+        if unsafe { sqlite3_column_int64(statement, 15) } != -1
+            || !capture_hash.is_empty()
+            || unsafe { sqlite3_column_int64(statement, 17) } != -1
+            || unsafe { sqlite3_column_int64(statement, 18) } != -1
+        {
+            return Err("database returned incomplete transport capture facts".into());
+        }
+        None
+    } else {
+        let capture = TransportProofCaptureFacts {
+            artifact_relative_path: capture_path,
+            capture_bytes: column_u64(statement, 15, "transport capture bytes")?,
+            capture_sha256: capture_hash,
+            started_at_unix_ms: optional_nonnegative_i64(statement, 17, "transport capture start")?
+                .ok_or_else(|| "database returned missing transport capture start".to_string())?,
+            ended_at_unix_ms: optional_nonnegative_i64(statement, 18, "transport capture end")?
+                .ok_or_else(|| "database returned missing transport capture end".to_string())?,
+        };
+        capture.validate(job.max_capture_bytes)?;
+        Some(capture)
+    };
+    let analyzer_output_sha256 = column_text(statement, 19)?;
+    let state = parse_transport_proof_job_state(&column_text(statement, 10)?)?;
+    let record = TransportProofJobRecord {
+        job,
+        state,
+        updated_at_unix_ms: unsafe { sqlite3_column_int64(statement, 12) },
+        lease_expires_at_unix_ms: optional_nonnegative_i64(statement, 13, "transport proof lease")?,
+        capture,
+        analyzer_output_sha256: (!analyzer_output_sha256.is_empty())
+            .then_some(analyzer_output_sha256),
+        completed_at_unix_ms: optional_nonnegative_i64(
+            statement,
+            20,
+            "transport proof completion",
+        )?,
+        failed_at_unix_ms: optional_nonnegative_i64(statement, 21, "transport proof failure")?,
+        failure_detail: {
+            let detail = column_text(statement, 22)?;
+            (!detail.is_empty()).then_some(detail)
+        },
+    };
+    if record.updated_at_unix_ms < record.job.created_at_unix_ms {
+        return Err("database returned a transport job updated before creation".into());
+    }
+    if record
+        .analyzer_output_sha256
+        .as_deref()
+        .is_some_and(|hash| !is_sha256_identity(hash))
+    {
+        return Err("database returned invalid transport analyzer output hash".into());
+    }
+    match record.state {
+        TransportProofJobState::Completed => {
+            if record.capture.is_none()
+                || record.analyzer_output_sha256.is_none()
+                || record.completed_at_unix_ms.is_none()
+                || record.lease_expires_at_unix_ms.is_some()
+            {
+                return Err("completed transport proof job is missing immutable evidence".into());
+            }
+        }
+        TransportProofJobState::Analyzing => {
+            if record.capture.is_none()
+                || record.lease_expires_at_unix_ms.is_none()
+                || record.analyzer_output_sha256.is_some()
+            {
+                return Err("analyzing transport proof job has inconsistent evidence".into());
+            }
+        }
+        TransportProofJobState::Pending
+        | TransportProofJobState::Claimed
+        | TransportProofJobState::Capturing => {
+            if record.capture.is_some()
+                || record.analyzer_output_sha256.is_some()
+                || record.completed_at_unix_ms.is_some()
+            {
+                return Err("pre-analysis transport proof job has immutable evidence".into());
+            }
+        }
+        TransportProofJobState::Failed => {}
+    }
+    Ok(record)
+}
+
 fn optional_nonnegative_i64(
     statement: *mut SqliteStatement,
     column: c_int,
@@ -16927,6 +17427,35 @@ fn parse_output_loudness_job_state(value: &str) -> Result<OutputLoudnessProofJob
     }
 }
 
+fn parse_transport_proof_job_state(value: &str) -> Result<TransportProofJobState, String> {
+    match value {
+        "pending" => Ok(TransportProofJobState::Pending),
+        "claimed" => Ok(TransportProofJobState::Claimed),
+        "capturing" => Ok(TransportProofJobState::Capturing),
+        "analyzing" => Ok(TransportProofJobState::Analyzing),
+        "completed" => Ok(TransportProofJobState::Completed),
+        "failed" => Ok(TransportProofJobState::Failed),
+        _ => Err(format!(
+            "database returned invalid transport proof job state {value}"
+        )),
+    }
+}
+
+fn validate_transport_proof_job_id(value: &str) -> Result<(), String> {
+    if is_canonical_uuid(value) {
+        Ok(())
+    } else {
+        Err("transport proof job identity must be a canonical UUID".into())
+    }
+}
+
+fn validate_transport_proof_lease(now_unix_ms: i64, lease_duration_ms: i64) -> Result<(), String> {
+    if now_unix_ms < 0 || !(1_000..=300_000).contains(&lease_duration_ms) {
+        return Err("transport proof lease request is invalid".into());
+    }
+    Ok(())
+}
+
 fn valid_output_loudness_transition(
     expected: OutputLoudnessProofJobState,
     next: OutputLoudnessProofJobState,
@@ -16967,6 +17496,18 @@ fn recover_expired_output_loudness_jobs_in_transaction(
 ) -> Result<u64, String> {
     let statement = store.prepare(
         "UPDATE output_loudness_jobs SET state='pending', updated_at_unix_ms=?1, lease_expires_at_unix_ms=-1, capture_relative_path='', capture_bytes=-1, capture_sample_duration_ms=-1, capture_sha256='' WHERE state IN ('claimed','capture_pending','analyzing') AND lease_expires_at_unix_ms<=?1",
+    )?;
+    bind_i64(store.database, statement.raw, 1, now_unix_ms)?;
+    expect_done(store.database, statement.raw)?;
+    Ok(store.changes() as u64)
+}
+
+fn recover_expired_transport_proof_jobs_in_transaction(
+    store: &StationStore,
+    now_unix_ms: i64,
+) -> Result<u64, String> {
+    let statement = store.prepare(
+        "UPDATE transport_proof_jobs SET state='pending',updated_at_unix_ms=?1,lease_expires_at_unix_ms=-1,capture_relative_path='',capture_bytes=-1,capture_sha256='',capture_started_at_unix_ms=-1,capture_ended_at_unix_ms=-1,analyzer_output_sha256='' WHERE state IN ('claimed','capturing','analyzing') AND lease_expires_at_unix_ms<=?1",
     )?;
     bind_i64(store.database, statement.raw, 1, now_unix_ms)?;
     expect_done(store.database, statement.raw)?;
@@ -21139,6 +21680,133 @@ mod tests {
                 .execute("UPDATE transport_analysis_receipts SET record_json='tampered'")
                 .is_err()
         );
+        drop(store);
+        for candidate in [
+            database.clone(),
+            PathBuf::from(format!("{}-wal", database.display())),
+            PathBuf::from(format!("{}-shm", database.display())),
+        ] {
+            let _ = std::fs::remove_file(candidate);
+        }
+    }
+
+    #[test]
+    fn transport_proof_queue_binds_current_target_and_immutable_capture_identity() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let database = std::env::temp_dir().join(format!("townlight-transport-queue-{nonce}.db"));
+        let channel_id = "11111111-2222-4333-8444-555555555555";
+        let sink_id = "22222222-3333-4444-8555-666666666666";
+        let store = StationStore::open(&database).unwrap();
+        store
+            .put_channel(&ChannelConfiguration {
+                channel_id: channel_id.into(),
+                display_name: "Transport queue".into(),
+                output_profile: OutputProfileId::Proof360p30,
+                output_sinks: vec![OutputSinkConfiguration::required_udp(
+                    sink_id,
+                    "Proof sink",
+                    "127.0.0.1:5500",
+                    -16.0,
+                )],
+                enabled: true,
+            })
+            .unwrap();
+        store
+            .write_transport_target_config(
+                channel_id,
+                sink_id,
+                None,
+                &TargetDeviceConfig {
+                    target_id: "receiver-1".into(),
+                    label: "Receiver".into(),
+                    protocol: TargetProtocol::HttpsApi,
+                    host: "receiver.example.test".into(),
+                    port: 443,
+                    credential_configured: true,
+                    revision: 1,
+                    created_at_unix_ms: 1,
+                    updated_at_unix_ms: 1,
+                    updated_by: "setup-admin".into(),
+                },
+            )
+            .unwrap();
+        let job = TransportProofJob {
+            job_id: "33333333-4444-4555-8666-777777777777".into(),
+            channel_id: channel_id.into(),
+            sink_id: sink_id.into(),
+            target_id: "receiver-1".into(),
+            target_revision: 1,
+            candidate_version: "0.1.0".into(),
+            source_commit: "a".repeat(40),
+            configuration_hash: store
+                .current_channel_output_configuration_hash(channel_id)
+                .unwrap(),
+            requested_by: "setup-admin".into(),
+            created_at_unix_ms: 10,
+            max_capture_bytes: 1_073_741_824,
+        };
+        assert!(store.create_transport_proof_job(&job).unwrap());
+        assert!(!store.create_transport_proof_job(&job).unwrap());
+        let claimed = store
+            .claim_next_transport_proof_job(20, 60_000)
+            .unwrap()
+            .unwrap();
+        assert_eq!(claimed.state, TransportProofJobState::Claimed);
+        assert_eq!(claimed.job.target_revision, 1);
+        let capture = TransportProofCaptureFacts {
+            artifact_relative_path:
+                "transport-proof/33333333-4444-4555-8666-777777777777/capture.ts".into(),
+            capture_bytes: 188 * 1_000,
+            capture_sha256: "b".repeat(64),
+            started_at_unix_ms: 100,
+            ended_at_unix_ms: 600_100,
+        };
+        let analyzing = store
+            .begin_transport_proof_analysis(&job.job_id, &capture, 30, 60_000)
+            .unwrap();
+        assert_eq!(analyzing.capture.as_ref(), Some(&capture));
+        assert_eq!(analyzing.state, TransportProofJobState::Analyzing);
+        let completed = store
+            .complete_transport_proof_job(&job.job_id, &"c".repeat(64), 40)
+            .unwrap();
+        assert_eq!(completed.state, TransportProofJobState::Completed);
+        assert_eq!(
+            completed.analyzer_output_sha256.as_deref(),
+            Some("cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc")
+        );
+        assert!(
+            TransportProofCaptureFacts {
+                ended_at_unix_ms: 600_099,
+                ..capture.clone()
+            }
+            .validate(job.max_capture_bytes)
+            .is_err()
+        );
+        assert!(
+            TransportProofCaptureFacts {
+                artifact_relative_path: "../escape.ts".into(),
+                ..capture
+            }
+            .validate(job.max_capture_bytes)
+            .is_err()
+        );
+        let mut revised = store
+            .read_transport_target_config(channel_id, sink_id)
+            .unwrap()
+            .unwrap();
+        revised.host = "replacement.example.test".into();
+        revised.updated_at_unix_ms = 50;
+        store
+            .write_transport_target_config(channel_id, sink_id, Some(1), &revised)
+            .unwrap();
+        let stale = TransportProofJob {
+            job_id: "44444444-5555-4666-8777-888888888888".into(),
+            ..job
+        };
+        assert!(store.create_transport_proof_job(&stale).is_err());
         drop(store);
         for candidate in [
             database.clone(),

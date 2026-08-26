@@ -328,6 +328,8 @@ fn run_console(config: DaemonConfig) -> Result<(), String> {
             return Err(append_cleanup_error(error, cleanup.result));
         }
     };
+    let transport_queue =
+        spawn_transport_proof_queue_controller(&config.database, Arc::clone(&stop))?;
     let ingest_database = config.database.clone();
     let ingest_library = media_library(&config.database);
     let ingest_stop = Arc::clone(&stop);
@@ -365,6 +367,11 @@ fn run_console(config: DaemonConfig) -> Result<(), String> {
         join_worker("media ingest", ingest, WORKER_SHUTDOWN_TIMEOUT),
         join_worker("operator alerting", alerting, WORKER_SHUTDOWN_TIMEOUT),
         join_worker("update monitor", updates, WORKER_SHUTDOWN_TIMEOUT),
+        join_worker(
+            "transport proof queue",
+            transport_queue,
+            WORKER_SHUTDOWN_TIMEOUT,
+        ),
         join_worker("feed fetch worker", feed_fetch, WORKER_SHUTDOWN_TIMEOUT),
         join_worker(
             "automatic materialization",
@@ -551,6 +558,8 @@ fn run_service(config: DaemonConfig) -> Result<(), String> {
             return Err(append_cleanup_error(error, cleanup.result));
         }
     };
+    let transport_queue =
+        spawn_transport_proof_queue_controller(&config.database, Arc::clone(&stop))?;
     let ingest_database = config.database.clone();
     let ingest_library = media_library(&config.database);
     let ingest_stop = Arc::clone(&stop);
@@ -603,6 +612,11 @@ fn run_service(config: DaemonConfig) -> Result<(), String> {
             join_worker("media ingest", ingest, WORKER_SHUTDOWN_TIMEOUT),
             join_worker("operator alerting", alerting, WORKER_SHUTDOWN_TIMEOUT),
             join_worker("update monitor", updates, WORKER_SHUTDOWN_TIMEOUT),
+            join_worker(
+                "transport proof queue",
+                transport_queue,
+                WORKER_SHUTDOWN_TIMEOUT,
+            ),
             join_worker("feed fetch worker", feed_fetch, WORKER_SHUTDOWN_TIMEOUT),
             join_worker(
                 "automatic materialization",
@@ -639,6 +653,11 @@ fn run_service(config: DaemonConfig) -> Result<(), String> {
         join_worker("media ingest", ingest, WORKER_SHUTDOWN_TIMEOUT),
         join_worker("operator alerting", alerting, WORKER_SHUTDOWN_TIMEOUT),
         join_worker("update monitor", updates, WORKER_SHUTDOWN_TIMEOUT),
+        join_worker(
+            "transport proof queue",
+            transport_queue,
+            WORKER_SHUTDOWN_TIMEOUT,
+        ),
         join_worker("feed fetch worker", feed_fetch, WORKER_SHUTDOWN_TIMEOUT),
         join_worker(
             "automatic materialization",
@@ -940,6 +959,19 @@ fn spawn_feed_fetch_worker(
             result
         })
         .map_err(|error| format!("could not start feed fetch worker thread: {error}"))
+}
+
+fn spawn_transport_proof_queue_controller(
+    database: &std::path::Path,
+    stop: Arc<AtomicBool>,
+) -> Result<std::thread::JoinHandle<Result<(), String>>, String> {
+    let database = database.to_path_buf();
+    std::thread::Builder::new()
+        .name("station-transport-proof-queue".into())
+        .spawn(move || {
+            station_transport_executor::run_transport_proof_queue_controller(&database, stop)
+        })
+        .map_err(|error| format!("could not start transport proof queue controller: {error}"))
 }
 
 fn initialize_database(database: &std::path::Path) -> Result<(), String> {
