@@ -107,7 +107,10 @@ fn durable_journal_adapter_replays_and_keeps_missing_authority_explicit() {
                 asset_id: "b".repeat(64),
                 media_offset_ms: 0,
                 worker_boot_id: "00000000-0000-4000-8000-000000000030".into(),
-                actual_on_air_at_unix_ms: 1_700_000_030_000,
+                // This is a bounded lookahead exactly at the window boundary:
+                // it closes the first interval but is never emitted as a row
+                // outside the requested half-open window.
+                actual_on_air_at_unix_ms: 1_700_000_060_000,
             },
         })
         .unwrap();
@@ -131,6 +134,8 @@ fn durable_journal_adapter_replays_and_keeps_missing_authority_explicit() {
             .unwrap()
             .contains("schedule")
     );
+    assert_eq!(first.entries.len(), 1);
+    assert_eq!(first.entries[0].ended_at_unix_ms, 1_700_000_060_000);
     let second = project_durable_journal(
         &store,
         &journal,

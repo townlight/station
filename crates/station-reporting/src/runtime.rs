@@ -123,7 +123,7 @@ impl ProjectionInput {
                 return Err("journal take has an invalid authority binding".into());
             }
             if let Some(prior) = previous
-                && (take.journal_sequence != prior.journal_sequence + 1
+                && (take.journal_sequence <= prior.journal_sequence
                     || take.started_at_unix_ms != prior.ended_at_unix_ms)
             {
                 return Err(

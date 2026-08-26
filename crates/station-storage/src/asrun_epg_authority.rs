@@ -387,7 +387,7 @@ fn validate_projection(p: &AsRunProjectionRuntime, now: i64) -> Result<(), Strin
             return Err("program as-run entry lacks metadata and an unavailable reason".into());
         }
         if let Some(x) = prior
-            && (e.journal_sequence != x.journal_sequence + 1
+            && (e.journal_sequence <= x.journal_sequence
                 || e.started_at_unix_ms != x.ended_at_unix_ms)
         {
             return Err("as-run projection is noncontiguous".into());

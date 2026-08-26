@@ -70,6 +70,7 @@ pub fn project_durable_journal(
             && *actual_on_air_at_unix_ms >= starts_at_unix_ms
         {
             scheduled.push((
+                envelope.sequence,
                 schedule_item_id.clone(),
                 *schedule_item_revision,
                 asset_id.clone(),
@@ -78,12 +79,12 @@ pub fn project_durable_journal(
             ));
         }
     }
-    scheduled.sort_by_key(|entry| entry.3);
+    scheduled.sort_by_key(|entry| entry.4);
     let lookahead = scheduled
         .iter()
-        .find(|entry| entry.3 >= ends_at_unix_ms)
+        .find(|entry| entry.4 >= ends_at_unix_ms)
         .cloned();
-    scheduled.retain(|entry| entry.3 < ends_at_unix_ms);
+    scheduled.retain(|entry| entry.4 < ends_at_unix_ms);
     if let Some(next) = lookahead {
         scheduled.push(next);
     }
@@ -93,16 +94,16 @@ pub fn project_durable_journal(
         ));
     };
     let mut takes = Vec::with_capacity(scheduled.len() - 1);
-    for (index, (item, revision, asset, start, hash)) in
+    for (index, (source_sequence, item, revision, asset, start, hash)) in
         scheduled.iter().enumerate().take(scheduled.len() - 1)
     {
-        let end = scheduled[index + 1].3;
+        let end = scheduled[index + 1].4;
         if *start < 0 || end <= *start || end > now_utc_ms {
             return Err(AsRunJournalAdapterError::Journal(
                 "scheduled as-run journal timestamps are nonmonotonic or future".into(),
             ));
         };
-        takes.push(JournalTake{journal_id:source_journal_id.clone(),journal_sequence:(index+1)as u64,channel_id:channel_id.into(),started_at_unix_ms:*start,ended_at_unix_ms:end,state:AsRunState::Program,content_id:Some(asset.clone()),franchise_id:None,category:None,title:None,catalog_revision:None,schedule_revision:None,journal_hash:hash.clone(),unavailable_reason:Some(format!("Exact immutable schedule/catalog snapshot authority is unavailable for journal item {item} revision {revision}; no mutable current-row substitution was used."))});
+        takes.push(JournalTake{journal_id:source_journal_id.clone(),journal_sequence:*source_sequence,channel_id:channel_id.into(),started_at_unix_ms:*start,ended_at_unix_ms:end,state:AsRunState::Program,content_id:Some(asset.clone()),franchise_id:None,category:None,title:None,catalog_revision:None,schedule_revision:None,journal_hash:hash.clone(),unavailable_reason:Some(format!("Exact immutable schedule/catalog snapshot authority is unavailable for journal item {item} revision {revision}; no mutable current-row substitution was used."))});
     }
     let mut runtime = ReportingRuntime::new();
     let projection = runtime

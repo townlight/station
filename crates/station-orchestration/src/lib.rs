@@ -48,6 +48,7 @@ use station_storage::{
     CgSnapshotReadError, CgWriteError, ChannelCaptionMode, OutputLoudnessCaptureFacts,
     OutputLoudnessProofJobRecord, OutputLoudnessProofJobState, ScheduledTakeAcknowledgement,
     ScheduledTakeAcknowledgementBinding, ScheduledTakeApplyOutcome, StationStore,
+    project_durable_journal,
 };
 
 static ALERT_SEQUENCE: AtomicU64 = AtomicU64::new(1);
@@ -3918,6 +3919,29 @@ where
                     dispatch_now,
                     caption_detail,
                 )?;
+            }
+        }
+        // Projection is service-owned and replayable. It never accepts browser
+        // facts: the authoritative enabled-channel -> journal-file mapping is
+        // the same one used by the supervised worker launcher. A journal can
+        // legitimately lack a closing lookahead, so an incomplete or corrupt
+        // reporting lane is recoverable and must not terminate on-air control.
+        if let Some(profile) = store.read_profile().map_err(OrchestrationError::Storage)? {
+            let day_start = dispatch_now - dispatch_now.rem_euclid(86_400_000);
+            for channel in channels.iter().filter(|channel| channel.enabled) {
+                let journal = journal_root.join(format!("{}.tlj", channel.channel_id));
+                if journal.is_file() {
+                    let _ = project_durable_journal(
+                        &store,
+                        &journal,
+                        &channel.channel_id,
+                        &channel.channel_id,
+                        &profile.profile.timezone,
+                        day_start,
+                        dispatch_now,
+                        dispatch_now,
+                    );
+                }
             }
         }
         on_reconciled();

@@ -68,7 +68,7 @@ HTTP ingestion route and therefore does not let a browser assert aired facts.
 The trusted journal adapter reads CRC-checked durable `ScheduledAssetOnAir`
 records. A CRC detects accidental corruption; it is not an authenticator. Its
 projection hash covers the complete canonical protocol frame plus configured journal
-identity, making channel, worker boot, report, media-offset, protocol, and event
+identity (derived from the durable worker identity, not a caller assertion), making channel, worker boot, report, media-offset, protocol, and event
 field changes visible in immutable stored evidence. Local journal ownership remains
 the trust boundary.
 
