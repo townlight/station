@@ -61,8 +61,10 @@ test("server step and order remain authoritative across phase grouping", () => {
 
 test("actions and proof boundaries stay explicit", () => {
   const legacyHeadend = { id: "headend_output_setup", label: "Headend", status: "blocked", blocking: true, detail: "Missing", evidence: "Channel authority" } as const;
+  const publishTargets = { id: "publish_targets", label: "Publish targets", status: "blocked", blocking: true, detail: "Missing", evidence: "Publishing authority" } as const;
   const external = { ...legacyHeadend, id: "external_receiver_proof" };
   assert.equal(commissioningAction(legacyHeadend), "channels");
+  assert.equal(commissioningAction(publishTargets), "publishing");
   assert.equal(isExternalCommissioningCheck(external), true);
   assert.equal(commissioningStatusLabel("unknown"), "Unknown — verification required");
   assert.equal(commissioningStatusLabel("not_verified"), "Not verified");

@@ -8,6 +8,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- The operator console now includes a Publishing authority workspace. Enabled Setup Admins can
+  create and revise bounded account and target records with the server's exact compare-and-swap
+  revision, while permitted readers can inspect redacted current records, bounded immutable
+  history, and the authoritative commissioning readiness state. The browser accepts no credential
+  secret or trusted connection-test evidence and explicitly distinguishes connection authority
+  from publication, delivery, receiver acceptance, and audience reach.
+
 - Caption egress evidence now has an append-only SQLite authority bound to the exact installed
   candidate/source commit, channel output configuration and sink, committed schedule report and
   asset, caption policy revision, caption track revision/digest, proof-owned MPEG-TS artifact hash,
