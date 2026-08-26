@@ -7848,6 +7848,14 @@ impl Api {
         let mut cable_transport_pass = !enabled.is_empty();
         let mut cable_transport_detail = Vec::new();
         if let Some((candidate_version, source_commit)) = receiver_candidate {
+            let validations = match self.storage.read_current_cable_transport_validations(
+                candidate_version,
+                source_commit,
+                generated_at_unix_ms,
+            ) {
+                Ok(validations) => validations,
+                Err(message) => return error_response(500, "storage_error", &message),
+            };
             for channel in &enabled {
                 let sinks = channel
                     .output_sinks
@@ -7863,35 +7871,32 @@ impl Api {
                     continue;
                 }
                 for sink in sinks {
-                    match self.storage.read_current_cable_transport_validation(
-                        &channel.channel_id,
-                        &sink.sink_id,
-                        candidate_version,
-                        source_commit,
-                        generated_at_unix_ms,
-                    ) {
-                        Ok(Some(validation)) if validation.outcome.is_some() => {
+                    match validations
+                        .iter()
+                        .find(|value| {
+                            value.channel_id == channel.channel_id && value.sink_id == sink.sink_id
+                        })
+                        .and_then(|value| value.validation.as_ref())
+                    {
+                        Some(validation) if validation.outcome.is_some() => {
                             cable_transport_detail.push(format!(
                                 "{} / {} has current analysis and target reachability proof",
                                 channel.channel_id, sink.sink_id
                             ));
                         }
-                        Ok(Some(validation)) => {
+                        Some(validation) => {
                             cable_transport_pass = false;
                             cable_transport_detail.push(format!(
                                 "{} / {} remains blocked: {}",
                                 channel.channel_id, sink.sink_id, validation.detail
                             ));
                         }
-                        Ok(None) => {
+                        None => {
                             cable_transport_pass = false;
                             cable_transport_detail.push(format!(
                                 "{} / {} has no configured target device",
                                 channel.channel_id, sink.sink_id
                             ));
-                        }
-                        Err(message) => {
-                            return error_response(500, "storage_error", &message);
                         }
                     }
                 }
@@ -19543,8 +19548,8 @@ mod tests {
             .put_channel(&ChannelConfiguration {
                 channel_id: channel_id.into(),
                 display_name: "Transport target API".into(),
-                output_profile: OutputProfileId::Proof360p30,
-                output_sinks: vec![OutputSinkConfiguration::required_udp(
+                output_profile: station_schedule::OutputProfileId::Proof360p30,
+                output_sinks: vec![station_schedule::OutputSinkConfiguration::required_udp(
                     "22222222-3333-4444-8555-666666666666",
                     "Required sink",
                     "127.0.0.1:5500",

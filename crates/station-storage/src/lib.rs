@@ -194,6 +194,8 @@ unsafe extern "C" {
         byte_count: c_int,
         destructor: *mut c_void,
     ) -> c_int;
+    fn sqlite3_reset(statement: *mut SqliteStatement) -> c_int;
+    fn sqlite3_clear_bindings(statement: *mut SqliteStatement) -> c_int;
     fn sqlite3_step(statement: *mut SqliteStatement) -> c_int;
     fn sqlite3_column_text(statement: *mut SqliteStatement, column: c_int) -> *const u8;
     fn sqlite3_column_blob(statement: *mut SqliteStatement, column: c_int) -> *const c_void;
@@ -361,6 +363,13 @@ pub struct TransportProofHistory {
     pub target: Option<TargetDeviceConfig>,
     pub analysis: Vec<TransportAnalysisReceipt>,
     pub reachability: Vec<TargetDeviceReachabilityReceipt>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct CableTransportValidationSnapshot {
+    pub channel_id: String,
+    pub sink_id: String,
+    pub validation: Option<CableTransportValidation>,
 }
 
 impl ExternalReceiverAcceptanceReceipt {
@@ -1472,6 +1481,8 @@ impl StationStore {
     }
 
     fn initialize_transport_proof_schema(&self) -> Result<(), String> {
+        self.migrate_transport_proof_schema()
+            .map_err(|error| format!("migrate legacy transport proof schema: {error}"))?;
         self.execute(
             "CREATE TABLE IF NOT EXISTS transport_target_configs (\
                channel_id TEXT NOT NULL,\
@@ -1536,6 +1547,181 @@ impl StationStore {
                BEFORE DELETE ON target_device_reachability_receipts \
                BEGIN SELECT RAISE(ABORT, 'target device reachability receipts are append-only'); END;",
         )
+        .map_err(|error| format!("initialize transport proof schema: {error}"))
+    }
+
+    /// Upgrade the short-lived pre-revision transport authority introduced by
+    /// 66c85ae.  A receipt from that schema cannot prove which target revision
+    /// it observed, so it is retained for audit but deliberately cannot satisfy
+    /// the new authority.  Target configuration records, on the other hand,
+    /// are converted only when their old endpoint can be represented exactly by
+    /// the structured host/port contract.  Unrepresentable (including fake)
+    /// records remain unreadable and therefore fail closed without preventing
+    /// the database from opening.
+    fn migrate_transport_proof_schema(&self) -> Result<(), String> {
+        let analysis_exists = self.sqlite_table_exists("transport_analysis_receipts")?;
+        let analysis_needs_revision = analysis_exists
+            && !self.sqlite_table_has_column("transport_analysis_receipts", "target_revision")?;
+        let target_configs_exist = self.sqlite_table_exists("transport_target_configs")?;
+        let migrated_configs = if target_configs_exist {
+            self.legacy_transport_target_config_rewrites()?
+        } else {
+            Vec::new()
+        };
+        if !analysis_needs_revision && migrated_configs.is_empty() {
+            return Ok(());
+        }
+
+        self.execute("BEGIN IMMEDIATE")?;
+        let outcome = (|| {
+            if !migrated_configs.is_empty() {
+                // The legacy trigger guards normal operation.  This one-time
+                // migration replaces only byte-for-byte representable records
+                // and restores the trigger below through schema initialization.
+                self.execute("DROP TRIGGER IF EXISTS transport_target_configs_no_update")?;
+                let statement = self.prepare(
+                    "UPDATE transport_target_configs SET record_json=?1 WHERE channel_id=?2 AND sink_id=?3 AND revision=?4",
+                )?;
+                for (channel_id, sink_id, revision, record_json) in &migrated_configs {
+                    bind_text(
+                        self.database,
+                        statement.raw,
+                        1,
+                        &c_string(record_json, "migrated transport target record")?,
+                    )?;
+                    bind_text(
+                        self.database,
+                        statement.raw,
+                        2,
+                        &c_string(channel_id, "migrated transport channel")?,
+                    )?;
+                    bind_text(
+                        self.database,
+                        statement.raw,
+                        3,
+                        &c_string(sink_id, "migrated transport sink")?,
+                    )?;
+                    bind_i64(
+                        self.database,
+                        statement.raw,
+                        4,
+                        i64::try_from(*revision).map_err(|_| {
+                            "migrated transport target revision exceeds SQLite range".to_string()
+                        })?,
+                    )?;
+                    expect_done(self.database, statement.raw)?;
+                    unsafe { sqlite3_reset(statement.raw) };
+                    unsafe { sqlite3_clear_bindings(statement.raw) };
+                }
+                self.execute(
+                    "CREATE TRIGGER IF NOT EXISTS transport_target_configs_no_update \
+                     BEFORE UPDATE ON transport_target_configs \
+                     BEGIN SELECT RAISE(ABORT, 'transport target configurations are append-only'); END;",
+                )?;
+            }
+            if analysis_needs_revision {
+                self.execute(
+                    "CREATE TABLE transport_analysis_receipts_replacement (\
+                       proof_id TEXT PRIMARY KEY,\
+                       channel_id TEXT NOT NULL,\
+                       sink_id TEXT NOT NULL,\
+                       target_id TEXT NOT NULL,\
+                       target_revision INTEGER NOT NULL CHECK (target_revision >= 1),\
+                       candidate_version TEXT NOT NULL,\
+                       source_commit TEXT NOT NULL,\
+                       configuration_hash TEXT NOT NULL,\
+                       outcome TEXT NOT NULL CHECK (outcome IN ('pass','fail')),\
+                       captured_at_unix_ms INTEGER NOT NULL CHECK (captured_at_unix_ms >= 0),\
+                       recorded_at_unix_ms INTEGER NOT NULL CHECK (recorded_at_unix_ms >= captured_at_unix_ms),\
+                       record_json TEXT NOT NULL\
+                     );",
+                )
+                .map_err(|error| format!("create transport analysis replacement: {error}"))?;
+                if !self.sqlite_table_has_column("transport_analysis_receipts", "proof_id")?
+                    || !self.sqlite_table_has_column(
+                        "transport_analysis_receipts_replacement",
+                        "proof_id",
+                    )?
+                {
+                    return Err(
+                        "transport analysis migration source or replacement is missing proof_id"
+                            .into(),
+                    );
+                }
+                self.execute(
+                    "INSERT INTO transport_analysis_receipts_replacement(proof_id,channel_id,sink_id,target_id,target_revision,candidate_version,source_commit,configuration_hash,outcome,captured_at_unix_ms,recorded_at_unix_ms,record_json) \
+                     SELECT legacy.proof_id,legacy.channel_id,legacy.sink_id,legacy.target_id,1,legacy.candidate_version,legacy.source_commit,legacy.configuration_hash,legacy.outcome,legacy.captured_at_unix_ms,legacy.recorded_at_unix_ms,legacy.record_json \
+                     FROM transport_analysis_receipts AS legacy;",
+                )
+                .map_err(|error| format!("copy legacy transport analysis receipts: {error}"))?;
+                self.execute("DROP TRIGGER IF EXISTS transport_analysis_no_update")?;
+                self.execute("DROP TRIGGER IF EXISTS transport_analysis_no_delete")?;
+                self.execute("DROP INDEX IF EXISTS transport_analysis_current")?;
+                self.execute("DROP INDEX IF EXISTS transport_analysis_history")?;
+                self.execute("DROP TABLE transport_analysis_receipts")?;
+                self.execute(
+                    "ALTER TABLE transport_analysis_receipts_replacement RENAME TO transport_analysis_receipts",
+                )?;
+            }
+            Ok(())
+        })();
+        self.finish_transaction(outcome)
+    }
+
+    fn sqlite_table_exists(&self, table: &str) -> Result<bool, String> {
+        let statement =
+            self.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1")?;
+        bind_text(
+            self.database,
+            statement.raw,
+            1,
+            &c_string(table, "SQLite table name")?,
+        )?;
+        match unsafe { sqlite3_step(statement.raw) } {
+            SQLITE_ROW => Ok(true),
+            SQLITE_DONE => Ok(false),
+            _ => Err(sqlite_error(self.database)),
+        }
+    }
+
+    fn sqlite_table_has_column(&self, table: &str, column: &str) -> Result<bool, String> {
+        if !self.sqlite_table_exists(table)? {
+            return Ok(false);
+        }
+        let statement = self.prepare(&format!("PRAGMA table_info({table})"))?;
+        loop {
+            match unsafe { sqlite3_step(statement.raw) } {
+                SQLITE_ROW if column_text(statement.raw, 1)? == column => return Ok(true),
+                SQLITE_ROW => {}
+                SQLITE_DONE => return Ok(false),
+                _ => return Err(sqlite_error(self.database)),
+            }
+        }
+    }
+
+    fn legacy_transport_target_config_rewrites(
+        &self,
+    ) -> Result<Vec<(String, String, u64, String)>, String> {
+        let statement = self.prepare(
+            "SELECT channel_id,sink_id,revision,record_json FROM transport_target_configs ORDER BY channel_id,sink_id,revision",
+        )?;
+        let mut rewrites = Vec::new();
+        loop {
+            match unsafe { sqlite3_step(statement.raw) } {
+                SQLITE_ROW => {
+                    let channel_id = column_text(statement.raw, 0)?;
+                    let sink_id = column_text(statement.raw, 1)?;
+                    let revision = u64::try_from(unsafe { sqlite3_column_int64(statement.raw, 2) })
+                        .map_err(|_| "legacy transport target revision is invalid".to_string())?;
+                    let record_json = column_text(statement.raw, 3)?;
+                    if let Some(rewritten) = migrate_legacy_transport_target_config(&record_json)? {
+                        rewrites.push((channel_id, sink_id, revision, rewritten));
+                    }
+                }
+                SQLITE_DONE => return Ok(rewrites),
+                _ => return Err(sqlite_error(self.database)),
+            }
+        }
     }
 
     fn initialize_operator_auth_schema(&self) -> Result<(), String> {
@@ -10938,7 +11124,7 @@ impl StationStore {
             .flatten();
         let mut analysis = Vec::new();
         let mut reachability = Vec::new();
-        let statement = self.prepare("SELECT record_json FROM transport_analysis_receipts WHERE channel_id=?1 AND (?2='' OR sink_id=?2) ORDER BY recorded_at_unix_ms DESC, proof_id DESC LIMIT ?3")?;
+        let statement = self.prepare("SELECT record_json FROM transport_analysis_receipts WHERE channel_id=?1 AND (?2='' OR sink_id=?2) ORDER BY recorded_at_unix_ms DESC, rowid DESC LIMIT ?3")?;
         bind_text(
             self.database,
             statement.raw,
@@ -10966,7 +11152,7 @@ impl StationStore {
                 _ => return Err(sqlite_error(self.database)),
             }
         }
-        let statement = self.prepare("SELECT record_json FROM target_device_reachability_receipts WHERE channel_id=?1 AND (?2='' OR sink_id=?2) ORDER BY recorded_at_unix_ms DESC, proof_id DESC LIMIT ?3")?;
+        let statement = self.prepare("SELECT record_json FROM target_device_reachability_receipts WHERE channel_id=?1 AND (?2='' OR sink_id=?2) ORDER BY recorded_at_unix_ms DESC, rowid DESC LIMIT ?3")?;
         bind_text(
             self.database,
             statement.raw,
@@ -11009,27 +11195,94 @@ impl StationStore {
         source_commit: &str,
         now_unix_ms: i64,
     ) -> Result<Option<CableTransportValidation>, String> {
+        self.execute("BEGIN DEFERRED")?;
+        let outcome = self.read_current_cable_transport_validation_in_snapshot(
+            channel_id,
+            sink_id,
+            candidate_version,
+            source_commit,
+            now_unix_ms,
+        );
+        self.finish_value_transaction(outcome)
+    }
+
+    /// Read every enabled required sink under one SQLite snapshot. Commissioning
+    /// uses this rather than per-sink reads that could span an authority change.
+    pub fn read_current_cable_transport_validations(
+        &self,
+        candidate_version: &str,
+        source_commit: &str,
+        now_unix_ms: i64,
+    ) -> Result<Vec<CableTransportValidationSnapshot>, String> {
+        self.execute("BEGIN DEFERRED")?;
+        let outcome = (|| {
+            let statement = self.prepare(
+                "SELECT channels.channel_id,channel_output_sinks.sink_id \
+                 FROM channels JOIN channel_output_sinks ON channel_output_sinks.channel_id=channels.channel_id \
+                 WHERE channels.enabled=1 AND channel_output_sinks.enabled=1 AND channel_output_sinks.required=1 \
+                 ORDER BY channels.channel_id,channel_output_sinks.sink_order,channel_output_sinks.sink_id",
+            )?;
+            let mut sinks = Vec::new();
+            loop {
+                match unsafe { sqlite3_step(statement.raw) } {
+                    SQLITE_ROW => sinks.push((
+                        column_text(statement.raw, 0)?,
+                        column_text(statement.raw, 1)?,
+                    )),
+                    SQLITE_DONE => break,
+                    _ => return Err(sqlite_error(self.database)),
+                }
+            }
+            drop(statement);
+            let mut validations = Vec::with_capacity(sinks.len());
+            for (channel_id, sink_id) in sinks {
+                validations.push(CableTransportValidationSnapshot {
+                    validation: self.read_current_cable_transport_validation_in_snapshot(
+                        &channel_id,
+                        &sink_id,
+                        candidate_version,
+                        source_commit,
+                        now_unix_ms,
+                    )?,
+                    channel_id,
+                    sink_id,
+                });
+            }
+            Ok(validations)
+        })();
+        self.finish_value_transaction(outcome)
+    }
+
+    fn read_current_cable_transport_validation_in_snapshot(
+        &self,
+        channel_id: &str,
+        sink_id: &str,
+        candidate_version: &str,
+        source_commit: &str,
+        now_unix_ms: i64,
+    ) -> Result<Option<CableTransportValidation>, String> {
         let Some(target) = self.read_transport_target_config(channel_id, sink_id)? else {
             return Ok(None);
         };
         let config_hash = self.current_channel_output_configuration_hash(channel_id)?;
-        let mut history = self.read_transport_proof_history(channel_id, Some(sink_id), 1_000)?;
-        let analysis = history.analysis.drain(..).find(|value| {
-            value.target_id == target.target_id
-                && value.target_revision == target.revision
-                && value.candidate_version == candidate_version
-                && value.source_commit == source_commit
-                && value.configuration_hash == config_hash
-                && value.validate_fresh_at(now_unix_ms).is_ok()
-        });
-        let reachability = history.reachability.drain(..).find(|value| {
-            value.target_id == target.target_id
-                && value.target_revision == target.revision
-                && value.candidate_version == candidate_version
-                && value.source_commit == source_commit
-                && value.configuration_hash == config_hash
-                && value.validate_fresh_at(now_unix_ms).is_ok()
-        });
+        // Pick the newest matching record before considering outcome or
+        // freshness. A later failure or future-dated record blocks older pass.
+        let analysis = self.read_newest_transport_analysis_receipt(
+            channel_id,
+            sink_id,
+            &target,
+            candidate_version,
+            source_commit,
+            &config_hash,
+        )?;
+        let reachability = self.read_newest_target_device_reachability_receipt(
+            channel_id,
+            sink_id,
+            &target,
+            candidate_version,
+            source_commit,
+            &config_hash,
+        )?;
         Ok(Some(CableTransportValidation::derive(
             channel_id,
             sink_id,
@@ -11041,6 +11294,84 @@ impl StationStore {
             analysis,
             reachability,
         )?))
+    }
+
+    fn read_newest_transport_analysis_receipt(
+        &self,
+        channel_id: &str,
+        sink_id: &str,
+        target: &TargetDeviceConfig,
+        candidate_version: &str,
+        source_commit: &str,
+        configuration_hash: &str,
+    ) -> Result<Option<TransportAnalysisReceipt>, String> {
+        let statement = self.prepare(
+            "SELECT record_json FROM transport_analysis_receipts \
+             WHERE channel_id=?1 AND sink_id=?2 AND target_id=?3 AND target_revision=?4 \
+             AND candidate_version=?5 AND source_commit=?6 AND configuration_hash=?7 \
+             ORDER BY recorded_at_unix_ms DESC,rowid DESC LIMIT 1",
+        )?;
+        bind_transport_receipt_lookup(
+            self.database,
+            statement.raw,
+            channel_id,
+            sink_id,
+            target,
+            candidate_version,
+            source_commit,
+            configuration_hash,
+        )?;
+        match unsafe { sqlite3_step(statement.raw) } {
+            SQLITE_ROW => {
+                let receipt: TransportAnalysisReceipt =
+                    serde_json::from_str(&column_text(statement.raw, 0)?).map_err(|error| {
+                        format!("database returned invalid transport analysis receipt: {error}")
+                    })?;
+                receipt.validate()?;
+                Ok(Some(receipt))
+            }
+            SQLITE_DONE => Ok(None),
+            _ => Err(sqlite_error(self.database)),
+        }
+    }
+
+    fn read_newest_target_device_reachability_receipt(
+        &self,
+        channel_id: &str,
+        sink_id: &str,
+        target: &TargetDeviceConfig,
+        candidate_version: &str,
+        source_commit: &str,
+        configuration_hash: &str,
+    ) -> Result<Option<TargetDeviceReachabilityReceipt>, String> {
+        let statement = self.prepare(
+            "SELECT record_json FROM target_device_reachability_receipts \
+             WHERE channel_id=?1 AND sink_id=?2 AND target_id=?3 AND target_revision=?4 \
+             AND candidate_version=?5 AND source_commit=?6 AND configuration_hash=?7 \
+             ORDER BY recorded_at_unix_ms DESC,rowid DESC LIMIT 1",
+        )?;
+        bind_transport_receipt_lookup(
+            self.database,
+            statement.raw,
+            channel_id,
+            sink_id,
+            target,
+            candidate_version,
+            source_commit,
+            configuration_hash,
+        )?;
+        match unsafe { sqlite3_step(statement.raw) } {
+            SQLITE_ROW => {
+                let receipt: TargetDeviceReachabilityReceipt =
+                    serde_json::from_str(&column_text(statement.raw, 0)?).map_err(|error| {
+                        format!("database returned invalid reachability receipt: {error}")
+                    })?;
+                receipt.validate()?;
+                Ok(Some(receipt))
+            }
+            SQLITE_DONE => Ok(None),
+            _ => Err(sqlite_error(self.database)),
+        }
     }
 
     fn validate_transport_proof_binding(
@@ -14566,6 +14897,94 @@ impl StationStore {
             }
         }
     }
+}
+
+fn bind_transport_receipt_lookup(
+    database: *mut Sqlite3,
+    statement: *mut SqliteStatement,
+    channel_id: &str,
+    sink_id: &str,
+    target: &TargetDeviceConfig,
+    candidate_version: &str,
+    source_commit: &str,
+    configuration_hash: &str,
+) -> Result<(), String> {
+    for (value, index, field) in [
+        (channel_id, 1, "transport channel"),
+        (sink_id, 2, "transport sink"),
+        (&target.target_id, 3, "transport target"),
+        (candidate_version, 5, "transport candidate"),
+        (source_commit, 6, "transport source commit"),
+        (configuration_hash, 7, "transport configuration hash"),
+    ] {
+        bind_text(database, statement, index, &c_string(value, field)?)?;
+    }
+    bind_i64(
+        database,
+        statement,
+        4,
+        i64::try_from(target.revision)
+            .map_err(|_| "transport target revision exceeds SQLite range".to_string())?,
+    )
+}
+
+fn migrate_legacy_transport_target_config(record_json: &str) -> Result<Option<String>, String> {
+    let mut value: serde_json::Value = match serde_json::from_str(record_json) {
+        Ok(value) => value,
+        // A corrupt legacy record must not make process startup unavailable. It
+        // stays unreadable, which is the fail-closed authority outcome.
+        Err(_) => return Ok(None),
+    };
+    let Some(record) = value.as_object_mut() else {
+        return Ok(None);
+    };
+    let Some(endpoint) = record.get("endpoint").and_then(serde_json::Value::as_str) else {
+        return Ok(None);
+    };
+    let Some(protocol) = record.get("protocol").and_then(serde_json::Value::as_str) else {
+        return Ok(None);
+    };
+    let Some((host, port)) = legacy_transport_endpoint_host_port(protocol, endpoint) else {
+        return Ok(None);
+    };
+    record.remove("endpoint");
+    record.insert("host".into(), serde_json::Value::String(host));
+    record.insert("port".into(), serde_json::Value::Number(port.into()));
+    let rewritten = serde_json::to_string(&value)
+        .map_err(|error| format!("serialize migrated transport target: {error}"))?;
+    let config: TargetDeviceConfig = match serde_json::from_str(&rewritten) {
+        Ok(config) => config,
+        Err(_) => return Ok(None),
+    };
+    if config.validate().is_err() {
+        return Ok(None);
+    }
+    Ok(Some(rewritten))
+}
+
+fn legacy_transport_endpoint_host_port(protocol: &str, endpoint: &str) -> Option<(String, u16)> {
+    let (scheme, default_port) = match protocol {
+        "https_api" => ("https://", 443),
+        "snmp_tls" => ("snmp+tls://", 10_161),
+        // `fake_authenticated_v1` was intentionally test-only. It has no
+        // production structured equivalent and must remain blocked.
+        _ => return None,
+    };
+    let authority = endpoint.strip_prefix(scheme)?;
+    if authority.is_empty()
+        || authority.contains(['/', '?', '#', '@'])
+        || authority.chars().any(char::is_whitespace)
+    {
+        return None;
+    }
+    let (host, port) = match authority.rsplit_once(':') {
+        Some((host, port)) if !host.is_empty() && !port.is_empty() => {
+            (host, port.parse::<u16>().ok()?)
+        }
+        Some(_) => return None,
+        None => (authority, default_port),
+    };
+    (port != 0).then(|| (host.to_owned(), port))
 }
 
 fn station_data_root(database_path: &Path) -> Result<PathBuf, String> {
@@ -20356,6 +20775,132 @@ mod tests {
     }
 
     #[test]
+    fn migrates_parent_transport_schema_and_fails_closed_for_unrepresentable_legacy_records() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let database =
+            std::env::temp_dir().join(format!("townlight-transport-migration-{nonce}.db"));
+        let channel_id = "11111111-2222-4333-8444-555555555555";
+        let sink_id = "22222222-3333-4444-8555-666666666666";
+        let store = StationStore::open(&database).unwrap();
+        store
+            .put_channel(&ChannelConfiguration {
+                channel_id: channel_id.into(),
+                display_name: "Legacy transport proof".into(),
+                output_profile: OutputProfileId::Proof360p30,
+                output_sinks: vec![OutputSinkConfiguration::required_udp(
+                    sink_id,
+                    "Legacy sink",
+                    "127.0.0.1:5500",
+                    -16.0,
+                )],
+                enabled: false,
+            })
+            .unwrap();
+        let legacy_target = serde_json::json!({
+            "target_id": "target-1", "label": "Legacy receiver", "protocol": "https_api",
+            "endpoint": "https://receiver.example.test:8443", "credential_configured": true,
+            "revision": 1, "created_at_unix_ms": 1, "updated_at_unix_ms": 1,
+            "updated_by": "operator"
+        });
+        let legacy_fake_target = serde_json::json!({
+            "target_id": "fake-target", "label": "Legacy fake", "protocol": "fake_authenticated_v1",
+            "endpoint": "fake://receiver", "credential_configured": true,
+            "revision": 1, "created_at_unix_ms": 1, "updated_at_unix_ms": 1,
+            "updated_by": "operator"
+        });
+        let legacy_analysis = serde_json::json!({
+            "proof_id": "legacy-analysis", "channel_id": channel_id, "sink_id": sink_id,
+            "target_id": "target-1", "candidate_version": "0.1.0", "source_commit": "a".repeat(40),
+            "configuration_hash": "b".repeat(64), "analyzer_id": "legacy-analyzer",
+            "analyzer_version": "1", "analyzer_sha256": "c".repeat(64), "outcome": "pass",
+            "findings": {"packet_size_bytes":188,"packet_count":1,"capture_duration_ms":1,
+                "bitrate_bps":1,"pat_program_count":1,"pmt_stream_count":1,"continuity_errors":0,
+                "pcr_errors":0,"analyzer_output_sha256":"d".repeat(64)},
+            "captured_at_unix_ms": 1, "recorded_at_unix_ms": 1, "recorded_by": "worker", "detail": "legacy"
+        });
+        // This is the exact parent (66c85ae) transport schema: analysis
+        // receipts do not have target_revision and target JSON has endpoint.
+        store.execute(&format!(
+            "DROP TABLE target_device_reachability_receipts;\
+             DROP TABLE transport_analysis_receipts;\
+             DROP TABLE transport_target_configs;\
+             CREATE TABLE transport_target_configs (\
+               channel_id TEXT NOT NULL,sink_id TEXT NOT NULL,target_id TEXT NOT NULL,\
+               revision INTEGER NOT NULL CHECK (revision >= 1),record_json TEXT NOT NULL,\
+               PRIMARY KEY(channel_id,sink_id,revision));\
+             CREATE TABLE transport_analysis_receipts (\
+               proof_id TEXT PRIMARY KEY,channel_id TEXT NOT NULL,sink_id TEXT NOT NULL,target_id TEXT NOT NULL,\
+               candidate_version TEXT NOT NULL,source_commit TEXT NOT NULL,configuration_hash TEXT NOT NULL,\
+               outcome TEXT NOT NULL CHECK (outcome IN ('pass','fail')),\
+               captured_at_unix_ms INTEGER NOT NULL CHECK (captured_at_unix_ms >= 0),\
+               recorded_at_unix_ms INTEGER NOT NULL CHECK (recorded_at_unix_ms >= captured_at_unix_ms),record_json TEXT NOT NULL);\
+             CREATE INDEX transport_analysis_current ON transport_analysis_receipts(channel_id,sink_id,target_id,candidate_version,source_commit,configuration_hash,recorded_at_unix_ms DESC,proof_id DESC);\
+             CREATE TABLE target_device_reachability_receipts (\
+               proof_id TEXT PRIMARY KEY,channel_id TEXT NOT NULL,sink_id TEXT NOT NULL,target_id TEXT NOT NULL,\
+               target_revision INTEGER NOT NULL CHECK (target_revision >= 1),candidate_version TEXT NOT NULL,\
+               source_commit TEXT NOT NULL,configuration_hash TEXT NOT NULL,outcome TEXT NOT NULL CHECK (outcome IN ('pass','fail')),\
+               observed_at_unix_ms INTEGER NOT NULL CHECK (observed_at_unix_ms >= 0),\
+               recorded_at_unix_ms INTEGER NOT NULL CHECK (recorded_at_unix_ms >= observed_at_unix_ms),record_json TEXT NOT NULL);\
+             CREATE INDEX target_device_reachability_current ON target_device_reachability_receipts(channel_id,sink_id,target_id,target_revision,candidate_version,source_commit,configuration_hash,recorded_at_unix_ms DESC,proof_id DESC);\
+             CREATE INDEX transport_analysis_history ON transport_analysis_receipts(channel_id,recorded_at_unix_ms DESC,proof_id DESC);\
+             CREATE INDEX target_device_reachability_history ON target_device_reachability_receipts(channel_id,recorded_at_unix_ms DESC,proof_id DESC);\
+             CREATE TRIGGER transport_target_configs_no_delete BEFORE DELETE ON transport_target_configs BEGIN SELECT RAISE(ABORT, 'transport target configurations are not deletable'); END;\
+             CREATE TRIGGER transport_target_configs_no_update BEFORE UPDATE ON transport_target_configs BEGIN SELECT RAISE(ABORT, 'transport target configurations are append-only'); END;\
+             CREATE TRIGGER transport_analysis_no_update BEFORE UPDATE ON transport_analysis_receipts BEGIN SELECT RAISE(ABORT, 'transport analysis receipts are append-only'); END;\
+             CREATE TRIGGER transport_analysis_no_delete BEFORE DELETE ON transport_analysis_receipts BEGIN SELECT RAISE(ABORT, 'transport analysis receipts are append-only'); END;\
+             CREATE TRIGGER target_device_reachability_no_update BEFORE UPDATE ON target_device_reachability_receipts BEGIN SELECT RAISE(ABORT, 'target device reachability receipts are append-only'); END;\
+             CREATE TRIGGER target_device_reachability_no_delete BEFORE DELETE ON target_device_reachability_receipts BEGIN SELECT RAISE(ABORT, 'target device reachability receipts are append-only'); END;\
+             INSERT INTO transport_target_configs VALUES('{channel_id}','{sink_id}','target-1',1,'{legacy_target}');\
+             INSERT INTO transport_target_configs VALUES('{channel_id}','fake-sink','fake-target',1,'{legacy_fake_target}');\
+             INSERT INTO transport_analysis_receipts VALUES('legacy-analysis','{channel_id}','{sink_id}','target-1','0.1.0','{}','{}','pass',1,1,'{legacy_analysis}');",
+            "a".repeat(40),
+            "b".repeat(64),
+        )).unwrap();
+        assert!(
+            store
+                .sqlite_table_has_column("transport_analysis_receipts", "proof_id")
+                .unwrap()
+        );
+        drop(store);
+
+        let migrated = StationStore::open(&database).expect("legacy data must not prevent startup");
+        assert!(
+            migrated
+                .sqlite_table_has_column("transport_analysis_receipts", "target_revision")
+                .unwrap()
+        );
+        let target = migrated
+            .read_transport_target_config(channel_id, sink_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(target.host, "receiver.example.test");
+        assert_eq!(target.port, 8443);
+        assert!(
+            migrated
+                .read_transport_target_config(channel_id, "fake-sink")
+                .is_err()
+        );
+        // A former analysis receipt is auditable but cannot be upgraded into a
+        // target-revision-bound authority fact without information it never had.
+        assert!(
+            migrated
+                .read_transport_proof_history(channel_id, Some(sink_id), 10)
+                .is_err()
+        );
+        drop(migrated);
+        for candidate in [
+            database.clone(),
+            PathBuf::from(format!("{}-wal", database.display())),
+            PathBuf::from(format!("{}-shm", database.display())),
+        ] {
+            let _ = std::fs::remove_file(candidate);
+        }
+    }
+
+    #[test]
     fn transport_proofs_require_both_current_receipts_and_target_revision() {
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -20376,7 +20921,7 @@ mod tests {
                     "127.0.0.1:5500",
                     -16.0,
                 )],
-                enabled: false,
+                enabled: true,
             })
             .unwrap();
         let target = TargetDeviceConfig {
@@ -20479,6 +21024,63 @@ mod tests {
                 .unwrap()
                 .outcome,
             Some(ProofOutcome::Pass)
+        );
+        let snapshot = store
+            .read_current_cable_transport_validations("0.1.0", &"a".repeat(40), 2)
+            .unwrap();
+        assert_eq!(snapshot.len(), 1);
+        assert_eq!(snapshot[0].channel_id, channel_id);
+        assert_eq!(snapshot[0].sink_id, sink_id);
+        assert_eq!(
+            snapshot[0].validation.as_ref().unwrap().outcome,
+            Some(ProofOutcome::Pass)
+        );
+        // The later append wins even when the caller chooses a lexically lower
+        // proof ID at the same millisecond.
+        let mut same_millisecond_failure = analysis.clone();
+        same_millisecond_failure.proof_id = "000-analysis-failure".into();
+        same_millisecond_failure.outcome = ProofOutcome::Fail;
+        store
+            .append_transport_analysis_receipt(&same_millisecond_failure, 2)
+            .unwrap();
+        let blocked = store
+            .read_current_cable_transport_validation(
+                channel_id,
+                sink_id,
+                "0.1.0",
+                &"a".repeat(40),
+                2,
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(blocked.outcome, None);
+        assert_eq!(
+            blocked.transport_analysis.unwrap().proof_id,
+            "000-analysis-failure"
+        );
+        // A latest future-dated record also blocks; selection must occur before
+        // freshness evaluation so an older pass cannot make the roll-up green.
+        let mut future_failure = same_millisecond_failure;
+        future_failure.proof_id = "future-analysis-failure".into();
+        future_failure.captured_at_unix_ms = 3;
+        future_failure.recorded_at_unix_ms = 3;
+        store
+            .append_transport_analysis_receipt(&future_failure, 3)
+            .unwrap();
+        let blocked = store
+            .read_current_cable_transport_validation(
+                channel_id,
+                sink_id,
+                "0.1.0",
+                &"a".repeat(40),
+                2,
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(blocked.outcome, None);
+        assert_eq!(
+            blocked.transport_analysis.unwrap().proof_id,
+            "future-analysis-failure"
         );
         let mut changed = target;
         changed.host = "target-2.example.test".into();

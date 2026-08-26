@@ -89,15 +89,22 @@ pub struct TransportFindings {
 
 impl TransportFindings {
     pub fn validate(&self) -> Result<(), String> {
+        let capture_bytes = u64::from(self.packet_size_bytes)
+            .checked_mul(self.packet_count)
+            .ok_or_else(|| {
+                "transport analysis capture size overflows the supported range".to_string()
+            })?;
         if self.packet_size_bytes == 0
             || self.packet_count == 0
             || self.capture_duration_ms == 0
+            || self.capture_duration_ms > MAX_PROOF_DURATION_MS
+            || capture_bytes > MAX_PROOF_CAPTURE_BYTES
             || self.bitrate_bps == 0
             || self.pat_program_count == 0
             || self.pmt_stream_count == 0
             || !sha256(&self.analyzer_output_sha256)
         {
-            return Err("transport analysis findings are incomplete or invalid".into());
+            return Err("transport analysis findings are incomplete, oversized, or invalid".into());
         }
         Ok(())
     }
@@ -628,6 +635,23 @@ mod tests {
             .expect("bounded capture");
         assert_eq!(findings.packet_size_bytes, 188);
         assert_eq!(findings.packet_count, 2);
+    }
+
+    #[test]
+    fn findings_reject_capture_duration_and_byte_count_overflows() {
+        let mut findings = analysis().findings;
+        findings.capture_duration_ms = MAX_PROOF_DURATION_MS + 1;
+        assert!(findings.validate().is_err());
+
+        let mut findings = analysis().findings;
+        findings.packet_size_bytes = u32::MAX;
+        findings.packet_count = u64::MAX;
+        assert!(findings.validate().is_err());
+
+        let mut findings = analysis().findings;
+        findings.packet_size_bytes = 188;
+        findings.packet_count = MAX_PROOF_CAPTURE_BYTES / 188 + 1;
+        assert!(findings.validate().is_err());
     }
 
     #[test]
