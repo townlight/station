@@ -35,6 +35,7 @@ const YOUTUBE_RTMPS_INGESTION_ADDRESS: &str = "rtmps://a.rtmp.youtube.com:443/li
 #[serde(deny_unknown_fields)]
 struct YoutubePublishCommand {
     schema_version: u8,
+    managed_media_root: String,
     media_path: String,
     expected_bytes: u64,
     expected_sha256: String,
@@ -168,8 +169,11 @@ fn execute(
     if !is_valid_stream_key(stream_key.as_str()) {
         return failed_result("invalid_stream_key");
     }
-    let mut media = match open_input_media(&command.media_path) {
-        Ok(media) => media,
+    let (mut media, _directory_pins) = match open_input_media(
+        &command.managed_media_root,
+        &command.media_path,
+    ) {
+        Ok(opened) => opened,
         Err(code) => return failed_result(code),
     };
     let actual_media = match media_identity(&mut media) {
@@ -207,10 +211,33 @@ fn execute(
     }
 }
 
-fn open_input_media(path: &str) -> Result<File, &'static str> {
+fn open_input_media(
+    managed_root: &str,
+    path: &str,
+) -> Result<(File, Vec<File>), &'static str> {
+    let managed_root = std::path::Path::new(managed_root);
     let path = std::path::Path::new(path);
-    if !path.is_absolute() {
+    if !managed_root.is_absolute() || !path.is_absolute() {
         return Err("invalid_media_path");
+    }
+    let relative = path
+        .strip_prefix(managed_root)
+        .map_err(|_| "media_path_escape")?;
+    if relative.as_os_str().is_empty()
+        || relative.components().any(|component| {
+            !matches!(component, std::path::Component::Normal(_))
+        })
+    {
+        return Err("media_path_escape");
+    }
+    let mut pins = Vec::new();
+    let mut directory = managed_root.to_path_buf();
+    pins.push(open_directory_no_follow(&directory)?);
+    if let Some(parent) = relative.parent() {
+        for component in parent.components() {
+            directory.push(component.as_os_str());
+            pins.push(open_directory_no_follow(&directory)?);
+        }
     }
     let metadata = std::fs::symlink_metadata(path).map_err(|_| "media_open_failed")?;
     if !metadata.is_file() || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
@@ -226,7 +253,24 @@ fn open_input_media(path: &str) -> Result<File, &'static str> {
     if !metadata.is_file() || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
         return Err("invalid_media_path");
     }
-    Ok(media)
+    Ok((media, pins))
+}
+
+fn open_directory_no_follow(path: &std::path::Path) -> Result<File, &'static str> {
+    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+    let directory = OpenOptions::new()
+        .read(true)
+        .share_mode(FILE_SHARE_READ)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)
+        .map_err(|_| "managed_media_root_unavailable")?;
+    let metadata = directory
+        .metadata()
+        .map_err(|_| "managed_media_root_unavailable")?;
+    if !metadata.is_dir() || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+        return Err("managed_media_root_unavailable");
+    }
+    Ok(directory)
 }
 
 fn media_identity(media: &mut File) -> Result<MediaIdentity, &'static str> {
@@ -601,6 +645,11 @@ mod tests {
     fn command(path: PathBuf, sha256: &str) -> YoutubePublishCommand {
         YoutubePublishCommand {
             schema_version: COMMAND_SCHEMA_VERSION,
+            managed_media_root: path
+                .parent()
+                .unwrap_or_else(|| std::path::Path::new("."))
+                .to_string_lossy()
+                .into_owned(),
             media_path: path.to_string_lossy().into_owned(),
             expected_bytes: 4,
             expected_sha256: sha256.into(),
@@ -655,6 +704,25 @@ mod tests {
     }
 
     #[test]
+    fn rejects_media_outside_the_managed_root_without_starting_pipeline() {
+        let path = temp_media();
+        let mut value = command(path.clone(), TEST_SHA256);
+        value.managed_media_root = path
+            .parent()
+            .expect("test media has a parent")
+            .join("different-managed-root")
+            .to_string_lossy()
+            .into_owned();
+        let mut pipeline = fake(Ok(()));
+
+        let result = execute(value, &mut pipeline);
+
+        assert_eq!(result.failure_code, Some("media_path_escape"));
+        assert!(!pipeline.called);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
     fn rejects_an_unsafe_stream_key_without_starting_pipeline() {
         let path = temp_media();
         let mut value = command(path.clone(), TEST_SHA256);
@@ -699,10 +767,10 @@ mod tests {
 
     #[test]
     fn command_parser_rejects_unknown_fields_and_trailing_json() {
-        let unknown = br#"{"schema_version":1,"media_path":"C:\\x.ts","expected_bytes":4,"expected_sha256":"9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08","expected_duration_ms":1000,"rtmps_ingestion_address":"rtmps://a.rtmp.youtube.com:443/live2","stream_key":"synthetic-stream-key-123","unexpected":true}"#;
+        let unknown = br#"{"schema_version":1,"managed_media_root":"C:\\media","media_path":"C:\\media\\x.ts","expected_bytes":4,"expected_sha256":"9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08","expected_duration_ms":1000,"rtmps_ingestion_address":"rtmps://a.rtmp.youtube.com:443/live2","stream_key":"synthetic-stream-key-123","unexpected":true}"#;
         assert!(matches!(decode_command(unknown), Err("invalid_command")));
 
-        let trailing = br#"{"schema_version":1,"media_path":"C:\\x.ts","expected_bytes":4,"expected_sha256":"9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08","expected_duration_ms":1000,"rtmps_ingestion_address":"rtmps://a.rtmp.youtube.com:443/live2","stream_key":"synthetic-stream-key-123"} {}"#;
+        let trailing = br#"{"schema_version":1,"managed_media_root":"C:\\media","media_path":"C:\\media\\x.ts","expected_bytes":4,"expected_sha256":"9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08","expected_duration_ms":1000,"rtmps_ingestion_address":"rtmps://a.rtmp.youtube.com:443/live2","stream_key":"synthetic-stream-key-123"} {}"#;
         assert!(matches!(decode_command(trailing), Err("invalid_command")));
     }
 
