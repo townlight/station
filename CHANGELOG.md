@@ -8,6 +8,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- Commissioning now uses the canonical 11-screen operator workflow over the server's 23 ordered
+  authority checks. Every current check is assigned exactly once; missing, unknown, or duplicated
+  authority remains visibly blocked with its evidence, and an unmapped server-selected current step
+  overrides stale browser navigation instead of falling back to a different screen. Publishing and
+  automation gaps use explicit server-owned routes to their existing setup workspaces. The displayed
+  30-minute objective is labeled as an operator target that still requires separate timed proof.
+
+- The live-audio worker process proof now waits for a bounded real UDP datagram from its generated
+  fixture before transferring the input port to the worker. This removes a fixed startup sleep that
+  could race under load while retaining the end-to-end decoded-audio amplitude assertion.
+
 - The operator console now includes a Publishing authority workspace. Enabled Setup Admins can
   create and revise bounded account and target records with the server's exact compare-and-swap
   revision, while permitted readers can inspect redacted current records, bounded immutable
