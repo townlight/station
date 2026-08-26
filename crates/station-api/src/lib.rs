@@ -6364,7 +6364,7 @@ impl Api {
         };
         let station_box = self.cached_station_box_profile().ok();
         let candidate = station_box.as_ref().and_then(|profile| {
-            profile.release.candidate_verified.then(|| {
+            profile.release.candidate_verified.then_some({
                 (
                     profile.product_version.as_str(),
                     profile.source_commit.as_deref(),
@@ -6372,29 +6372,25 @@ impl Api {
             })
         });
         let mut validations = Vec::new();
-        if let Some((candidate_version, Some(source_commit))) = candidate {
-            if let Ok(channels) = self.storage.list_channels() {
-                if let Some(channel) = channels
-                    .into_iter()
-                    .find(|value| value.channel_id == channel_id)
-                {
-                    for sink in channel
-                        .output_sinks
-                        .iter()
-                        .filter(|sink| sink.enabled && sink.required)
-                    {
-                        if let Ok(Some(validation)) =
-                            self.storage.read_current_cable_transport_validation(
-                                channel_id,
-                                &sink.sink_id,
-                                candidate_version,
-                                source_commit,
-                                now_unix_ms,
-                            )
-                        {
-                            validations.push(validation);
-                        }
-                    }
+        if let Some((candidate_version, Some(source_commit))) = candidate
+            && let Ok(channels) = self.storage.list_channels()
+            && let Some(channel) = channels
+                .into_iter()
+                .find(|value| value.channel_id == channel_id)
+        {
+            for sink in channel
+                .output_sinks
+                .iter()
+                .filter(|sink| sink.enabled && sink.required)
+            {
+                if let Ok(Some(validation)) = self.storage.read_current_cable_transport_validation(
+                    channel_id,
+                    &sink.sink_id,
+                    candidate_version,
+                    source_commit,
+                    now_unix_ms,
+                ) {
+                    validations.push(validation);
                 }
             }
         }
@@ -8023,7 +8019,7 @@ impl Api {
                         .storage
                         .list_automation_connection_test_evidence(&policy.policy_id, 1)
                     {
-                        Ok(mut records) => evidence.extend(records.drain(..)),
+                        Ok(mut records) => evidence.append(&mut records),
                         Err(message) => return error_response(500, "storage_error", &message),
                     }
                 }
@@ -19979,6 +19975,8 @@ mod tests {
                         analyzer_id: "test-analyzer".into(),
                         analyzer_version: "1".into(),
                         analyzer_sha256: "a".repeat(64),
+                        capture_bytes: 1880,
+                        capture_sha256: "c".repeat(64),
                         outcome: station_storage::ProofOutcome::Pass,
                         findings: station_storage::TransportFindings {
                             packet_size_bytes: 188,
@@ -19990,6 +19988,12 @@ mod tests {
                             continuity_errors: 0,
                             pcr_errors: 0,
                             analyzer_output_sha256: "b".repeat(64),
+                            tables_output_sha256: "d".repeat(64),
+                            service_id: 1,
+                            pmt_pid: 4096,
+                            pcr_pid: 256,
+                            video_pid: 256,
+                            audio_pid: 257,
                         },
                         captured_at_unix_ms: now,
                         recorded_at_unix_ms: now,

@@ -11324,12 +11324,16 @@ impl StationStore {
 
     /// The only successful terminal transition: append the exact current
     /// analysis receipt and mark the queue job completed in one transaction.
-    pub fn complete_transport_proof_job_with_analysis(
+    pub fn complete_transport_proof_job_with_analysis<F>(
         &self,
         job_id: &str,
         receipt: &TransportAnalysisReceipt,
         now_unix_ms: i64,
-    ) -> Result<TransportProofJobRecord, String> {
+        verify_installed_candidate: F,
+    ) -> Result<TransportProofJobRecord, String>
+    where
+        F: FnOnce() -> Result<(String, String), String>,
+    {
         validate_transport_proof_job_id(job_id)?;
         receipt.validate_fresh_at(now_unix_ms)?;
         self.execute("BEGIN IMMEDIATE")?;
@@ -11337,6 +11341,15 @@ impl StationStore {
             let current = self
                 .read_transport_proof_job(job_id)?
                 .ok_or_else(|| "transport proof job does not exist".to_string())?;
+            let (candidate_version, source_commit) = verify_installed_candidate()?;
+            if candidate_version != current.job.candidate_version
+                || source_commit != current.job.source_commit
+            {
+                return Err(
+                    "transport proof completion candidate is no longer the installed authority"
+                        .into(),
+                );
+            }
             self.validate_transport_proof_job_current(&current.job)?;
             if current.state != TransportProofJobState::Analyzing
                 || current.capture.is_none()
@@ -11353,6 +11366,24 @@ impl StationStore {
             {
                 return Err(
                     "transport proof completion receipt does not match its claimed job".into(),
+                );
+            }
+            let capture = current
+                .capture
+                .as_ref()
+                .ok_or("transport proof completion capture facts are missing")?;
+            let measured_duration = capture
+                .ended_at_unix_ms
+                .checked_sub(capture.started_at_unix_ms)
+                .ok_or("transport proof completion capture duration is invalid")?;
+            if receipt.capture_bytes != capture.capture_bytes
+                || receipt.capture_sha256 != capture.capture_sha256
+                || receipt.findings.capture_duration_ms
+                    != u64::try_from(measured_duration)
+                        .map_err(|_| "transport proof capture duration is invalid")?
+            {
+                return Err(
+                    "transport proof completion receipt does not bind the sealed capture".into(),
                 );
             }
             let record = serde_json::to_string(receipt)
@@ -11456,15 +11487,15 @@ impl StationStore {
         now_unix_ms: i64,
     ) -> Result<(), String> {
         receipt.validate_fresh_at(now_unix_ms)?;
-        self.validate_transport_proof_binding(
-            &receipt.channel_id,
-            &receipt.sink_id,
-            &receipt.target_id,
-            receipt.target_revision,
-            &receipt.candidate_version,
-            &receipt.source_commit,
-            &receipt.configuration_hash,
-        )?;
+        self.validate_transport_proof_binding(TransportProofBinding {
+            channel_id: &receipt.channel_id,
+            sink_id: &receipt.sink_id,
+            target_id: &receipt.target_id,
+            target_revision: receipt.target_revision,
+            candidate_version: &receipt.candidate_version,
+            source_commit: &receipt.source_commit,
+            configuration_hash: &receipt.configuration_hash,
+        })?;
         let record = serde_json::to_string(receipt)
             .map_err(|error| format!("serialize transport analysis receipt: {error}"))?;
         self.execute("BEGIN IMMEDIATE")?;
@@ -11537,15 +11568,15 @@ impl StationStore {
         now_unix_ms: i64,
     ) -> Result<(), String> {
         receipt.validate_fresh_at(now_unix_ms)?;
-        self.validate_transport_proof_binding(
-            &receipt.channel_id,
-            &receipt.sink_id,
-            &receipt.target_id,
-            receipt.target_revision,
-            &receipt.candidate_version,
-            &receipt.source_commit,
-            &receipt.configuration_hash,
-        )?;
+        self.validate_transport_proof_binding(TransportProofBinding {
+            channel_id: &receipt.channel_id,
+            sink_id: &receipt.sink_id,
+            target_id: &receipt.target_id,
+            target_revision: receipt.target_revision,
+            candidate_version: &receipt.candidate_version,
+            source_commit: &receipt.source_commit,
+            configuration_hash: &receipt.configuration_hash,
+        })?;
         let target = self
             .read_transport_target_config(&receipt.channel_id, &receipt.sink_id)?
             .ok_or_else(|| "target device is not configured".to_string())?;
@@ -11824,12 +11855,14 @@ impl StationStore {
         bind_transport_receipt_lookup(
             self.database,
             statement.raw,
-            channel_id,
-            sink_id,
-            target,
-            candidate_version,
-            source_commit,
-            configuration_hash,
+            TransportReceiptLookup {
+                channel_id,
+                sink_id,
+                target,
+                candidate_version,
+                source_commit,
+                configuration_hash,
+            },
         )?;
         match unsafe { sqlite3_step(statement.raw) } {
             SQLITE_ROW => {
@@ -11863,12 +11896,14 @@ impl StationStore {
         bind_transport_receipt_lookup(
             self.database,
             statement.raw,
-            channel_id,
-            sink_id,
-            target,
-            candidate_version,
-            source_commit,
-            configuration_hash,
+            TransportReceiptLookup {
+                channel_id,
+                sink_id,
+                target,
+                candidate_version,
+                source_commit,
+                configuration_hash,
+            },
         )?;
         match unsafe { sqlite3_step(statement.raw) } {
             SQLITE_ROW => {
@@ -11886,22 +11921,17 @@ impl StationStore {
 
     fn validate_transport_proof_binding(
         &self,
-        channel_id: &str,
-        sink_id: &str,
-        target_id: &str,
-        target_revision: u64,
-        candidate_version: &str,
-        source_commit: &str,
-        configuration_hash: &str,
+        binding: TransportProofBinding<'_>,
     ) -> Result<(), String> {
         let target = self
-            .read_transport_target_config(channel_id, sink_id)?
+            .read_transport_target_config(binding.channel_id, binding.sink_id)?
             .ok_or_else(|| "target device is not configured".to_string())?;
-        if target.target_id != target_id
-            || target.revision != target_revision
-            || self.current_channel_output_configuration_hash(channel_id)? != configuration_hash
-            || candidate_version.is_empty()
-            || source_commit.len() != 40
+        if target.target_id != binding.target_id
+            || target.revision != binding.target_revision
+            || self.current_channel_output_configuration_hash(binding.channel_id)?
+                != binding.configuration_hash
+            || binding.candidate_version.is_empty()
+            || binding.source_commit.len() != 40
         {
             return Err(
                 "transport proof is stale or does not match current output authority".into(),
@@ -15425,23 +15455,37 @@ impl StationStore {
     }
 }
 
+struct TransportProofBinding<'a> {
+    channel_id: &'a str,
+    sink_id: &'a str,
+    target_id: &'a str,
+    target_revision: u64,
+    candidate_version: &'a str,
+    source_commit: &'a str,
+    configuration_hash: &'a str,
+}
+
+struct TransportReceiptLookup<'a> {
+    channel_id: &'a str,
+    sink_id: &'a str,
+    target: &'a TargetDeviceConfig,
+    candidate_version: &'a str,
+    source_commit: &'a str,
+    configuration_hash: &'a str,
+}
+
 fn bind_transport_receipt_lookup(
     database: *mut Sqlite3,
     statement: *mut SqliteStatement,
-    channel_id: &str,
-    sink_id: &str,
-    target: &TargetDeviceConfig,
-    candidate_version: &str,
-    source_commit: &str,
-    configuration_hash: &str,
+    lookup: TransportReceiptLookup<'_>,
 ) -> Result<(), String> {
     for (value, index, field) in [
-        (channel_id, 1, "transport channel"),
-        (sink_id, 2, "transport sink"),
-        (&target.target_id, 3, "transport target"),
-        (candidate_version, 5, "transport candidate"),
-        (source_commit, 6, "transport source commit"),
-        (configuration_hash, 7, "transport configuration hash"),
+        (lookup.channel_id, 1, "transport channel"),
+        (lookup.sink_id, 2, "transport sink"),
+        (&lookup.target.target_id, 3, "transport target"),
+        (lookup.candidate_version, 5, "transport candidate"),
+        (lookup.source_commit, 6, "transport source commit"),
+        (lookup.configuration_hash, 7, "transport configuration hash"),
     ] {
         bind_text(database, statement, index, &c_string(value, field)?)?;
     }
@@ -15449,7 +15493,7 @@ fn bind_transport_receipt_lookup(
         database,
         statement,
         4,
-        i64::try_from(target.revision)
+        i64::try_from(lookup.target.revision)
             .map_err(|_| "transport target revision exceeds SQLite range".to_string())?,
     )
 }
@@ -21626,6 +21670,8 @@ mod tests {
             analyzer_id: "fake-analyzer".into(),
             analyzer_version: "1".into(),
             analyzer_sha256: "d".repeat(64),
+            capture_bytes: 1880,
+            capture_sha256: "e".repeat(64),
             outcome: ProofOutcome::Pass,
             findings: TransportFindings {
                 packet_size_bytes: 188,
@@ -21637,6 +21683,12 @@ mod tests {
                 continuity_errors: 0,
                 pcr_errors: 0,
                 analyzer_output_sha256: "c".repeat(64),
+                tables_output_sha256: "f".repeat(64),
+                service_id: 1,
+                pmt_pid: 4096,
+                pcr_pid: 256,
+                video_pid: 256,
+                audio_pid: 257,
             },
             captured_at_unix_ms: 2,
             recorded_at_unix_ms: 2,

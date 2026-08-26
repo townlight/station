@@ -85,6 +85,15 @@ pub struct TransportFindings {
     pub continuity_errors: u64,
     pub pcr_errors: u64,
     pub analyzer_output_sha256: String,
+    /// Digest of the bounded `tstables --json-output` artifact which was
+    /// correlated with this analyzer report.
+    pub tables_output_sha256: String,
+    /// The one coherent PAT -> service -> PMT path accepted for this proof.
+    pub service_id: u64,
+    pub pmt_pid: u64,
+    pub pcr_pid: u64,
+    pub video_pid: u64,
+    pub audio_pid: u64,
 }
 
 impl TransportFindings {
@@ -97,12 +106,33 @@ impl TransportFindings {
         if self.packet_size_bytes == 0
             || self.packet_count == 0
             || self.capture_duration_ms == 0
-            || self.capture_duration_ms > MAX_PROOF_DURATION_MS
+            // The service requests exactly the product minimum; this small
+            // allowance is only for measured process shutdown/clock tail.
+            || self.capture_duration_ms > MAX_PROOF_DURATION_MS.saturating_add(5_000)
             || capture_bytes > MAX_PROOF_CAPTURE_BYTES
             || self.bitrate_bps == 0
             || self.pat_program_count == 0
             || self.pmt_stream_count == 0
             || !sha256(&self.analyzer_output_sha256)
+            || !sha256(&self.tables_output_sha256)
+            || self.service_id == 0
+            || self.service_id > 0xffff
+            || self.pmt_pid == 0
+            || self.pcr_pid == 0
+            || self.video_pid == 0
+            || self.audio_pid == 0
+            || self.pmt_pid > 0x1fff
+            || self.pcr_pid > 0x1fff
+            || self.video_pid > 0x1fff
+            || self.audio_pid > 0x1fff
+            || self.pmt_pid == self.pcr_pid
+            || self.pmt_pid == self.video_pid
+            || self.pmt_pid == self.audio_pid
+            || self.video_pid == self.audio_pid
+            || self.pmt_pid == 0x1fff
+            || self.pcr_pid == 0x1fff
+            || self.video_pid == 0x1fff
+            || self.audio_pid == 0x1fff
         {
             return Err("transport analysis findings are incomplete, oversized, or invalid".into());
         }
@@ -123,6 +153,9 @@ pub struct TransportAnalysisReceipt {
     pub analyzer_id: String,
     pub analyzer_version: String,
     pub analyzer_sha256: String,
+    /// Exact sealed capture identity, independently persisted on the job.
+    pub capture_bytes: u64,
+    pub capture_sha256: String,
     pub outcome: ProofOutcome,
     pub findings: TransportFindings,
     pub captured_at_unix_ms: i64,
@@ -148,7 +181,11 @@ impl TransportAnalysisReceipt {
         })?;
         bounded_token(&self.analyzer_id, 100, "analyzer id")?;
         bounded_text(&self.analyzer_version, 100, "analyzer version")?;
-        if !sha256(&self.analyzer_sha256) {
+        if !sha256(&self.analyzer_sha256)
+            || self.capture_bytes == 0
+            || self.capture_bytes > MAX_PROOF_CAPTURE_BYTES
+            || !sha256(&self.capture_sha256)
+        {
             return Err("analyzer executable hash is invalid".into());
         }
         if self.target_revision == 0 {
@@ -490,6 +527,12 @@ impl TransportAnalyzer for FakeTransportAnalyzer {
             continuity_errors: 0,
             pcr_errors: 0,
             analyzer_output_sha256: format!("{output_hash:x}"),
+            tables_output_sha256: "f".repeat(64),
+            service_id: 1,
+            pmt_pid: 4096,
+            pcr_pid: 256,
+            video_pid: 256,
+            audio_pid: 257,
         })
     }
 }
@@ -546,6 +589,8 @@ mod tests {
             analyzer_id: "fake-analyzer".into(),
             analyzer_version: "1".into(),
             analyzer_sha256: "c".repeat(64),
+            capture_bytes: 188,
+            capture_sha256: "e".repeat(64),
             outcome: ProofOutcome::Pass,
             findings: FakeTransportAnalyzer
                 .analyze(&vec![0u8; 188])
