@@ -211,7 +211,7 @@ pub struct ProjectedEntry {
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProjectionCheckpoint {
-    /// Version 2 binds a sealed journal reader checkpoint to an independent
+    /// Version 3 binds a sealed journal reader checkpoint to an independent
     /// event-frame anchor. A missing value is legacy and must be migrated by
     /// the durable adapter before its byte cursor can be used.
     #[serde(default)]
@@ -245,6 +245,13 @@ pub struct ProjectionCheckpoint {
     /// manifest rollout.
     #[serde(default)]
     pub reader_generation: u64,
+    /// Exact v2 generation-manifest digest and segment selection. Without
+    /// these a checkpoint from the previous format cannot safely resume an
+    /// active append segment, even if its byte offset still exists.
+    #[serde(default)]
+    pub reader_manifest_hash: String,
+    #[serde(default)]
+    pub reader_segment_kind: u8,
     #[serde(default)]
     pub reader_worker_id: String,
     #[serde(default)]
@@ -271,7 +278,7 @@ pub struct ProjectionCheckpoint {
     pub pending_is_uncovered: bool,
 }
 
-pub const ASRUN_CHECKPOINT_VERSION: u8 = 2;
+pub const ASRUN_CHECKPOINT_VERSION: u8 = 3;
 
 /// The one authoritative, station-local calendar day represented by a
 /// persisted projection. UTC instants are half-open so the window remains
@@ -361,6 +368,8 @@ impl ReportingRuntime {
                 reader_prefix_hash: String::new(),
                 reader_file_identity: String::new(),
                 reader_generation: 0,
+                reader_manifest_hash: String::new(),
+                reader_segment_kind: 0,
                 reader_worker_id: String::new(),
                 reader_channel_id: String::new(),
                 reader_saw_heartbeat_summary: false,

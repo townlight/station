@@ -136,10 +136,11 @@ pub fn project_durable_journal(
         Vec::new()
     };
     let prior = existing.as_ref().map(|projection| &projection.checkpoint);
-    let legacy_checkpoint = prior.is_some_and(|checkpoint| checkpoint.checkpoint_version == 0);
-    // A version-zero cursor is never resumed. Establish the retained canonical
-    // frame anchor before a rollover can write anything, then use that anchor
-    // as the crash-safe v2 baseline if an old local day needs closing.
+    let legacy_checkpoint =
+        prior.is_some_and(|checkpoint| checkpoint.checkpoint_version != ASRUN_CHECKPOINT_VERSION);
+    // A checkpoint from a prior format is never resumed. Establish the
+    // retained canonical frame anchor before a rollover can write anything,
+    // then atomically persist a v3 cursor that binds the manifest/segment.
     let legacy_anchor = if legacy_checkpoint {
         let checkpoint = prior.expect("legacy projection has a checkpoint");
         Some(legacy_checkpoint_anchor(
@@ -195,21 +196,25 @@ pub fn project_durable_journal(
             .and_then(|(cursor, _)| cursor.clone())
     } else {
         prior.and_then(|checkpoint| {
-            (checkpoint.reader_byte_offset > 0).then(|| JournalCursor {
-                generation: checkpoint.reader_generation,
-                byte_offset: checkpoint.reader_byte_offset,
-                raw_sequence: checkpoint.reader_raw_sequence,
-                prefix_hash: checkpoint.reader_prefix_hash.clone(),
-                file_identity: checkpoint.reader_file_identity.clone(),
-                worker_id: (!checkpoint.reader_worker_id.is_empty())
-                    .then(|| checkpoint.reader_worker_id.clone()),
-                channel_id: (!checkpoint.reader_channel_id.is_empty())
-                    .then(|| checkpoint.reader_channel_id.clone()),
-                saw_heartbeat_summary: checkpoint.reader_saw_heartbeat_summary,
-                saw_compaction_commit: checkpoint.reader_saw_compaction_commit,
-                compaction_next_sequence: checkpoint.reader_compaction_next_sequence,
-                compaction_layout_version: checkpoint.reader_compaction_layout_version,
-            })
+            (checkpoint.reader_byte_offset > 0
+                || (checkpoint.reader_generation > 0 && checkpoint.reader_segment_kind == 1))
+                .then(|| JournalCursor {
+                    generation: checkpoint.reader_generation,
+                    manifest_hash: checkpoint.reader_manifest_hash.clone(),
+                    segment_kind: checkpoint.reader_segment_kind,
+                    byte_offset: checkpoint.reader_byte_offset,
+                    raw_sequence: checkpoint.reader_raw_sequence,
+                    prefix_hash: checkpoint.reader_prefix_hash.clone(),
+                    file_identity: checkpoint.reader_file_identity.clone(),
+                    worker_id: (!checkpoint.reader_worker_id.is_empty())
+                        .then(|| checkpoint.reader_worker_id.clone()),
+                    channel_id: (!checkpoint.reader_channel_id.is_empty())
+                        .then(|| checkpoint.reader_channel_id.clone()),
+                    saw_heartbeat_summary: checkpoint.reader_saw_heartbeat_summary,
+                    saw_compaction_commit: checkpoint.reader_saw_compaction_commit,
+                    compaction_next_sequence: checkpoint.reader_compaction_next_sequence,
+                    compaction_layout_version: checkpoint.reader_compaction_layout_version,
+                })
         })
     };
     let path = journal_path.as_ref();
@@ -286,9 +291,10 @@ pub fn project_durable_journal(
                     if next.started_at_unix_ms <= open.started_at_unix_ms
                         || next.started_at_unix_ms > now_utc_ms
                     {
-                        return Err(AsRunJournalAdapterError::Journal(
-                            "scheduled as-run journal timestamps are nonmonotonic or future".into(),
-                        ));
+                        return Err(AsRunJournalAdapterError::Journal(format!(
+                            "scheduled as-run journal timestamps are nonmonotonic or future: open={}, next={}, now={now_utc_ms}",
+                            open.started_at_unix_ms, next.started_at_unix_ms,
+                        )));
                     }
                     let start = open.started_at_unix_ms.max(window.starts_at_utc_ms);
                     let end = next.started_at_unix_ms.min(window.ends_at_utc_ms);
@@ -332,6 +338,8 @@ pub fn project_durable_journal(
         reader_prefix_hash: read.cursor.prefix_hash,
         reader_file_identity: read.cursor.file_identity,
         reader_generation: read.cursor.generation,
+        reader_manifest_hash: read.cursor.manifest_hash,
+        reader_segment_kind: read.cursor.segment_kind,
         reader_worker_id: read.cursor.worker_id.unwrap_or_default(),
         reader_channel_id: read.cursor.channel_id.unwrap_or_default(),
         reader_saw_heartbeat_summary: read.cursor.saw_heartbeat_summary,
@@ -636,6 +644,8 @@ fn next_projection_revision(
         || prior.reader_prefix_hash != cursor.prefix_hash
         || prior.reader_file_identity != cursor.file_identity
         || prior.reader_generation != cursor.generation
+        || prior.reader_manifest_hash != cursor.manifest_hash
+        || prior.reader_segment_kind != cursor.segment_kind
         || prior.reader_worker_id != cursor.worker_id.as_deref().unwrap_or_default()
         || prior.reader_channel_id != cursor.channel_id.as_deref().unwrap_or_default()
         || prior.reader_saw_heartbeat_summary != cursor.saw_heartbeat_summary
@@ -654,7 +664,7 @@ fn next_projection_revision(
 
 /// Legacy checkpoints predate a durable version marker. Their saved byte
 /// offsets are deliberately not trusted: re-establish a retained canonical
-/// frame anchor first, then persist a version-two cursor/output transaction.
+/// frame anchor first, then persist a version-three cursor/output transaction.
 /// If the historical output requires an anchor and none can be proven, this
 /// returns before any projection write so the existing state remains intact.
 fn legacy_checkpoint_anchor(
@@ -727,6 +737,8 @@ fn legacy_checkpoint_v2_baseline(
     checkpoint.reader_prefix_hash = cursor.prefix_hash.clone();
     checkpoint.reader_file_identity = cursor.file_identity.clone();
     checkpoint.reader_generation = cursor.generation;
+    checkpoint.reader_manifest_hash = cursor.manifest_hash.clone();
+    checkpoint.reader_segment_kind = cursor.segment_kind;
     checkpoint.reader_worker_id = cursor.worker_id.clone().unwrap_or_default();
     checkpoint.reader_channel_id = cursor.channel_id.clone().unwrap_or_default();
     checkpoint.reader_saw_heartbeat_summary = cursor.saw_heartbeat_summary;
@@ -756,6 +768,7 @@ fn compaction_recovery_allowed(error: &JournalError) -> bool {
             if reason.contains("truncated")
                 || reason.contains("file identity changed")
                 || reason.contains("generation changed")
+                || reason.contains("manifest changed")
                 || reason.contains("cursor compaction seal is incomplete")
     )
 }

@@ -30,11 +30,27 @@ const RETAIN_RAW_HEARTBEATS: usize = 256;
 const MAX_SUMMARY_OUTPUTS: usize = 64;
 const COMPACTION_LAYOUT_RETAINED_THEN_COMMIT: u8 = 1;
 const COMPACTION_LAYOUT_COMMIT_THEN_RETAINED: u8 = 2;
-const GENERATION_MANIFEST_VERSION: u8 = 1;
+// Version two separates an immutable compacted generation from its mutable
+// append segment. Version one selected a generation which the writer kept
+// appending to, so accepting it as an immutable object would be unsound.
+const GENERATION_MANIFEST_VERSION: u8 = 2;
+const LEGACY_GENERATION_MANIFEST_VERSION: u8 = 1;
 
 #[cfg(windows)]
 struct VerifiedPrefixSession {
+    /// The currently streaming object: legacy/sealed generation before the
+    /// hand-off, then the append-only active segment.
     file: File,
+    /// When `file` is active, retain the byte-range-locked immutable sealed
+    /// object too. This keeps an in-place rewrite of the manifest's sealed
+    /// authority from slipping through after the reader starts consuming the
+    /// active suffix, while still never locking the writer's append target.
+    sealed_file: Option<File>,
+    sealed_path: Option<PathBuf>,
+    /// Exact manifest cursor proven on this immutable generation. It remains
+    /// after the durable consumer advances a smaller batch cursor, avoiding a
+    /// second full proof during catch-up while retaining the full range lock.
+    sealed_proof: Option<JournalCursor>,
     /// The small, process-visible lease protects the validation/read/persist
     /// transaction. Unlike the file handle it is deliberately released after
     /// the projection transaction commits, so a worker may publish a new
@@ -52,6 +68,73 @@ fn verified_prefix_sessions() -> &'static Mutex<HashMap<PathBuf, VerifiedPrefixS
     SESSIONS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+#[cfg(windows)]
+fn pending_reader_leases() -> &'static Mutex<HashMap<PathBuf, File>> {
+    static LEASES: OnceLock<Mutex<HashMap<PathBuf, File>>> = OnceLock::new();
+    LEASES.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+#[cfg(windows)]
+struct EarlyReaderLease {
+    root: PathBuf,
+}
+
+#[cfg(windows)]
+impl Drop for EarlyReaderLease {
+    fn drop(&mut self) {
+        pending_reader_leases()
+            .lock()
+            .expect("pending reader leases are not poisoned")
+            .remove(&self.root);
+    }
+}
+
+fn begin_incremental_reader_lease(
+    root: &Path,
+    enabled: bool,
+) -> Result<Option<EarlyReaderLease>, JournalError> {
+    #[cfg(windows)]
+    {
+        if !enabled {
+            return Ok(None);
+        }
+        if verified_prefix_sessions()
+            .lock()
+            .expect("verified prefix sessions are not poisoned")
+            .get(root)
+            .is_some_and(|session| session.lease.is_some())
+        {
+            return Ok(None);
+        }
+        let mut pending = pending_reader_leases()
+            .lock()
+            .expect("pending reader leases are not poisoned");
+        if !pending.contains_key(root) {
+            pending.insert(root.to_path_buf(), acquire_reader_lease(root)?);
+        }
+        Ok(Some(EarlyReaderLease {
+            root: root.to_path_buf(),
+        }))
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (root, enabled);
+        Ok(None)
+    }
+}
+
+#[cfg(windows)]
+fn take_incremental_reader_lease(root: &Path) -> Result<File, JournalError> {
+    if let Some(lease) = pending_reader_leases()
+        .lock()
+        .expect("pending reader leases are not poisoned")
+        .remove(root)
+    {
+        return Ok(lease);
+    }
+    acquire_reader_lease(root)
+}
+
 fn release_verified_prefix_session(path: &Path) {
     #[cfg(windows)]
     {
@@ -60,6 +143,10 @@ fn release_verified_prefix_session(path: &Path) {
             .expect("verified prefix sessions are not poisoned")
             .remove(path);
         drop(removed);
+        pending_reader_leases()
+            .lock()
+            .expect("pending reader leases are not poisoned")
+            .remove(path);
         let lease = reader_lease_path(path);
         let _ = std::fs::remove_file(lease);
     }
@@ -84,6 +171,10 @@ pub fn acknowledge_incremental_reader(path: impl AsRef<Path>) {
             session.lease.take();
         }
         drop(sessions);
+        pending_reader_leases()
+            .lock()
+            .expect("pending reader leases are not poisoned")
+            .remove(root);
         let _ = std::fs::remove_file(reader_lease_path(root));
     }
     #[cfg(not(windows))]
@@ -123,9 +214,40 @@ fn generation_temp_path(root: &Path, generation: u64) -> PathBuf {
     path.into()
 }
 
+fn active_segment_path(root: &Path, generation: u64) -> PathBuf {
+    let mut path: OsString = root.as_os_str().to_owned();
+    path.push(format!(".active-{generation}"));
+    path.into()
+}
+
+fn active_segment_temp_path(root: &Path, generation: u64) -> PathBuf {
+    let mut path: OsString = root.as_os_str().to_owned();
+    path.push(format!(".active-{generation}.tmp"));
+    path.into()
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct JournalGenerationManifest {
+    version: u8,
+    generation: u64,
+    worker_id: String,
+    channel_id: String,
+    sealed_file_identity: String,
+    active_file_identity: String,
+    sealed_byte_offset: u64,
+    sealed_raw_sequence: u64,
+    sealed_prefix_hash: String,
+    sealed_compaction_next_sequence: u64,
+}
+
+/// The first immutable-generation rollout published this shape. It is read
+/// only long enough for a writer holding the root ownership lock to derive a
+/// fully authenticated v2 sealed proof and atomically replace the manifest.
+/// A reporter never resumes an old byte cursor against it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LegacyJournalGenerationManifest {
     version: u8,
     generation: u64,
     worker_id: String,
@@ -136,8 +258,39 @@ struct JournalGenerationManifest {
 
 #[derive(Debug, Clone)]
 struct JournalLocation {
+    /// The immutable compacted prefix selected by the manifest, or the
+    /// pre-manifest root journal during rolling upgrade.
     data_path: PathBuf,
+    /// A generation-specific append segment. It is never rewritten or
+    /// replaced; compaction seals its contents into the next `data_path`.
+    active_path: Option<PathBuf>,
     generation: u64,
+    manifest_hash: String,
+    manifest: Option<JournalGenerationManifest>,
+    legacy_manifest: Option<LegacyJournalGenerationManifest>,
+}
+
+#[derive(Clone, Copy)]
+struct JournalReadSegment<'a> {
+    root: &'a Path,
+    data_path: &'a Path,
+    generation: u64,
+    manifest_hash: &'a str,
+    segment_kind: u8,
+}
+
+struct CursorSource<'a> {
+    generation: u64,
+    manifest_hash: &'a str,
+    segment_kind: u8,
+    file_identity: &'a str,
+}
+
+fn manifest_hash(bytes: &[u8]) -> String {
+    let mut hash = Sha256::new();
+    hash.update(b"townlight.journal-generation-manifest.v1\0");
+    hash.update(bytes);
+    format!("{:x}", hash.finalize())
 }
 
 /// The root journal path is a stable rendezvous point. Once compaction has
@@ -151,19 +304,38 @@ fn resolve_journal_location(root: &Path) -> Result<JournalLocation, JournalError
         Err(error) if error.kind() == ErrorKind::NotFound => {
             return Ok(JournalLocation {
                 data_path: root.to_path_buf(),
+                active_path: None,
                 generation: 0,
+                manifest_hash: String::new(),
+                manifest: None,
+                legacy_manifest: None,
             });
         }
         Err(error) => return Err(io_error(error)),
     };
-    let manifest: JournalGenerationManifest = serde_json::from_slice(&manifest_bytes)
-        .map_err(|e| corrupt(0, format!("journal generation manifest is invalid: {e}")))?;
+    let manifest: JournalGenerationManifest = match serde_json::from_slice(&manifest_bytes) {
+        Ok(manifest) => manifest,
+        Err(v2_error) => {
+            let legacy: LegacyJournalGenerationManifest = serde_json::from_slice(&manifest_bytes)
+                .map_err(|_| {
+                corrupt(
+                    0,
+                    format!("journal generation manifest is invalid: {v2_error}"),
+                )
+            })?;
+            return resolve_legacy_generation_location(root, manifest_bytes, legacy);
+        }
+    };
     if manifest.version != GENERATION_MANIFEST_VERSION
         || manifest.generation == 0
         || manifest.worker_id.trim().is_empty()
         || manifest.channel_id.trim().is_empty()
-        || manifest.sealed_next_sequence == 0
-        || manifest.file_identity.trim().is_empty()
+        || manifest.sealed_byte_offset == 0
+        || manifest.sealed_raw_sequence == 0
+        || !valid_prefix_hash(&manifest.sealed_prefix_hash)
+        || manifest.sealed_compaction_next_sequence == 0
+        || manifest.sealed_file_identity.trim().is_empty()
+        || manifest.active_file_identity.trim().is_empty()
     {
         return Err(corrupt(0, "journal generation manifest is invalid"));
     }
@@ -174,8 +346,21 @@ fn resolve_journal_location(root: &Path) -> Result<JournalLocation, JournalError
             format!("published journal generation is unavailable: {error}"),
         )
     })?;
-    if journal_file_identity(&file)? != manifest.file_identity {
+    if journal_file_identity(&file)? != manifest.sealed_file_identity {
         return Err(corrupt(0, "published journal generation identity changed"));
+    }
+    let active_path = active_segment_path(root, manifest.generation);
+    let active = File::open(&active_path).map_err(|error| {
+        corrupt(
+            0,
+            format!("published journal active segment is unavailable: {error}"),
+        )
+    })?;
+    if journal_file_identity(&active)? != manifest.active_file_identity {
+        return Err(corrupt(
+            0,
+            "published journal active segment identity changed",
+        ));
     }
     // The writer fully validates and fsyncs the candidate before publication;
     // the manifest binds its immutable object identity and sealed boundary.
@@ -184,7 +369,48 @@ fn resolve_journal_location(root: &Path) -> Result<JournalLocation, JournalError
     // the persisted cursor against the exact handle before authority moves.
     Ok(JournalLocation {
         data_path,
+        active_path: Some(active_path),
         generation: manifest.generation,
+        manifest_hash: manifest_hash(&manifest_bytes),
+        manifest: Some(manifest),
+        legacy_manifest: None,
+    })
+}
+
+fn resolve_legacy_generation_location(
+    root: &Path,
+    manifest_bytes: Vec<u8>,
+    manifest: LegacyJournalGenerationManifest,
+) -> Result<JournalLocation, JournalError> {
+    if manifest.version != LEGACY_GENERATION_MANIFEST_VERSION
+        || manifest.generation == 0
+        || manifest.worker_id.trim().is_empty()
+        || manifest.channel_id.trim().is_empty()
+        || manifest.sealed_next_sequence == 0
+        || manifest.file_identity.trim().is_empty()
+    {
+        return Err(corrupt(0, "legacy journal generation manifest is invalid"));
+    }
+    let data_path = generation_path(root, manifest.generation);
+    let file = File::open(&data_path).map_err(|error| {
+        corrupt(
+            0,
+            format!("legacy published journal generation is unavailable: {error}"),
+        )
+    })?;
+    if journal_file_identity(&file)? != manifest.file_identity {
+        return Err(corrupt(
+            0,
+            "legacy published journal generation identity changed",
+        ));
+    }
+    Ok(JournalLocation {
+        data_path,
+        active_path: None,
+        generation: manifest.generation,
+        manifest_hash: manifest_hash(&manifest_bytes),
+        manifest: None,
+        legacy_manifest: Some(manifest),
     })
 }
 
@@ -193,17 +419,38 @@ fn publish_generation_manifest(
     generation: u64,
     worker_id: &str,
     channel_id: &str,
-    sealed_next_sequence: u64,
+    sealed: &JournalCursor,
 ) -> Result<(), JournalError> {
     let data_path = generation_path(root, generation);
     let data = File::open(&data_path).map_err(io_error)?;
+    let active_path = active_segment_path(root, generation);
+    let active = File::open(&active_path).map_err(io_error)?;
+    if sealed.generation != 0
+        || sealed.byte_offset == 0
+        || sealed.raw_sequence == 0
+        || !sealed.saw_heartbeat_summary
+        || !sealed.saw_compaction_commit
+        || sealed.compaction_next_sequence == 0
+        || sealed.compaction_layout_version != COMPACTION_LAYOUT_COMMIT_THEN_RETAINED
+        || sealed.worker_id.as_deref() != Some(worker_id)
+        || sealed.channel_id.as_deref() != Some(channel_id)
+    {
+        return Err(corrupt(
+            0,
+            "sealed generation proof does not bind its manifest",
+        ));
+    }
     let manifest = JournalGenerationManifest {
         version: GENERATION_MANIFEST_VERSION,
         generation,
         worker_id: worker_id.into(),
         channel_id: channel_id.into(),
-        file_identity: journal_file_identity(&data)?,
-        sealed_next_sequence,
+        sealed_file_identity: journal_file_identity(&data)?,
+        active_file_identity: journal_file_identity(&active)?,
+        sealed_byte_offset: sealed.byte_offset,
+        sealed_raw_sequence: sealed.raw_sequence,
+        sealed_prefix_hash: sealed.prefix_hash.clone(),
+        sealed_compaction_next_sequence: sealed.compaction_next_sequence,
     };
     let temporary = generation_manifest_temp_path(root);
     if temporary.try_exists().map_err(io_error)? {
@@ -324,6 +571,15 @@ pub struct JournalCursor {
     /// denotes the pre-manifest legacy root file during rolling upgrade.
     #[serde(default)]
     pub generation: u64,
+    /// Digest of the exact manifest that selected this generation. A cache
+    /// hit reads only that small manifest and rejects a changed binding before
+    /// reusing its authenticated prefix session.
+    #[serde(default)]
+    pub manifest_hash: String,
+    /// Zero is the immutable sealed generation (or legacy root); one is the
+    /// generation-specific append segment following that sealed prefix.
+    #[serde(default)]
+    pub segment_kind: u8,
     pub byte_offset: u64,
     pub raw_sequence: u64,
     pub prefix_hash: String,
@@ -443,14 +699,28 @@ impl JournalWriter {
         // observe the same next sequence and append independently.
         let ownership = acquire_writer_ownership(&root_path)?;
         recover_compaction_temp(&root_path, worker_id, channel_id)?;
+        recover_orphan_generation(&root_path, worker_id, channel_id)?;
         let mut location = resolve_journal_location(&root_path)?;
-        let mut snapshot = read_snapshot(&location.data_path)?;
+        let mut snapshot = read_snapshot(&root_path)?;
         if snapshot
             .identity
             .as_ref()
             .is_some_and(|identity| identity.0 != worker_id || identity.1 != channel_id)
         {
             return Err(JournalError::WrongIdentity);
+        }
+        if location.legacy_manifest.is_some() {
+            // A v1 manifest selected a file that was still appendable. The
+            // writer is the only process allowed to migrate it: authenticate
+            // its exact final prefix, create a distinct empty active segment,
+            // then atomically publish v2. Readers must re-derive a retained
+            // anchor rather than resume their legacy byte cursor.
+            let generation = location.generation;
+            let sealed = prove_sealed_generation(&location.data_path, worker_id, channel_id)?;
+            create_empty_active_segment(&root_path, generation)?;
+            publish_generation_manifest(&root_path, generation, worker_id, channel_id, &sealed)?;
+            location = resolve_journal_location(&root_path)?;
+            snapshot = read_snapshot(&root_path)?;
         }
         if snapshot.compaction_layout == Some(CompactionLayout::RetainedThenCommit)
             || (snapshot.compaction_layout == Some(CompactionLayout::CommitThenRetained)
@@ -461,26 +731,30 @@ impl JournalWriter {
             write_compacted_image(&temporary, &snapshot, worker_id, channel_id)?;
             promote_generation(&temporary, &generation_path(&root_path, generation))
                 .map_err(io_error)?;
-            publish_generation_manifest(
-                &root_path,
-                generation,
+            create_empty_active_segment(&root_path, generation)?;
+            let sealed = prove_sealed_generation(
+                &generation_path(&root_path, generation),
                 worker_id,
                 channel_id,
-                snapshot.next_sequence,
             )?;
+            publish_generation_manifest(&root_path, generation, worker_id, channel_id, &sealed)?;
             location = resolve_journal_location(&root_path)?;
-            snapshot = read_snapshot(&location.data_path)?;
+            snapshot = read_snapshot(&root_path)?;
         }
+        let append_path = location
+            .active_path
+            .clone()
+            .unwrap_or_else(|| location.data_path.clone());
         let file = OpenOptions::new()
             .create(true)
             .append(true)
-            .open(&location.data_path)
+            .open(&append_path)
             .map_err(io_error)?;
         Ok(Self {
             file: Some(file),
             ownership: Some(ownership),
             root_path,
-            path: location.data_path,
+            path: append_path,
             generation: location.generation,
             worker_id: worker_id.to_string(),
             channel_id: channel_id.to_string(),
@@ -522,6 +796,7 @@ impl JournalWriter {
                 self.compact_heartbeats()?;
             }
         }
+        self.reclaim_retired_generations()?;
         Ok(())
     }
 
@@ -541,7 +816,7 @@ impl JournalWriter {
         if reader_lease_is_active(&self.root_path)? {
             return Ok(());
         }
-        let snapshot = read_snapshot(&self.path)?;
+        let snapshot = read_snapshot(&self.root_path)?;
         let remove_count = snapshot
             .raw_heartbeat_count
             .saturating_sub(RETAIN_RAW_HEARTBEATS);
@@ -627,6 +902,8 @@ impl JournalWriter {
         if let Err(error) = replacer(&temporary, &generation_path) {
             return Err(io_error(error));
         }
+        let next_active = create_empty_active_segment(&self.root_path, next_generation)?;
+        let sealed = prove_sealed_generation(&generation_path, &self.worker_id, &self.channel_id)?;
         // The manifest is the sole publication point. A crash before this
         // atomic replacement leaves an unreachable immutable candidate; a
         // crash after it leaves a complete, validated generation.
@@ -635,25 +912,45 @@ impl JournalWriter {
             next_generation,
             &self.worker_id,
             &self.channel_id,
-            compacted.next_sequence,
+            &sealed,
         )?;
+        let previous_generation = self.generation;
         let previous_path = self.path.clone();
         self.file.take();
         self.file = Some(
             OpenOptions::new()
                 .append(true)
-                .open(&generation_path)
+                .open(&next_active)
                 .map_err(io_error)?,
         );
-        self.path = generation_path;
+        self.path = next_active;
         self.generation = next_generation;
         self.raw_heartbeat_count = compacted.raw_heartbeat_count;
-        // Publication happened only after observing no live reporter lease.
-        // Reclaiming the old name is best-effort: a stale non-reporting handle
-        // must never make the worker fatal, and a later compaction retries it.
-        // Windows readers open generations with FILE_SHARE_DELETE, so their
-        // handle remains valid while the name is retired.
-        let _ = std::fs::remove_file(previous_path);
+        // A reporter may acquire its lease in the tiny interval before the
+        // manifest switch. Retire old objects only after a subsequent lease
+        // observation says its validate/read/persist/ack transaction ended.
+        // The retry in `append` makes this eventual without making a writer
+        // fatal on an ordinary sharing race.
+        if previous_generation > 0 {
+            self.reclaim_retired_generations()?;
+        } else if !reader_lease_is_active(&self.root_path)? {
+            let _ = std::fs::remove_file(previous_path);
+        }
+        Ok(())
+    }
+
+    fn reclaim_retired_generations(&self) -> Result<(), JournalError> {
+        if self.generation == 0 || reader_lease_is_active(&self.root_path)? {
+            return Ok(());
+        }
+        for retired in 1..self.generation {
+            let _ = std::fs::remove_file(generation_path(&self.root_path, retired));
+            let _ = std::fs::remove_file(active_segment_path(&self.root_path, retired));
+        }
+        // Generation zero is the original root file. Once a manifest is
+        // authoritative it is another retired object and may be reclaimed
+        // only after the reader lease that could still name it has ended.
+        let _ = std::fs::remove_file(&self.root_path);
         Ok(())
     }
 }
@@ -725,6 +1022,59 @@ fn promote_generation(source: &Path, destination: &Path) -> std::io::Result<()> 
     std::fs::rename(source, destination)
 }
 
+fn create_empty_active_segment(root: &Path, generation: u64) -> Result<PathBuf, JournalError> {
+    let active = active_segment_path(root, generation);
+    if active.try_exists().map_err(io_error)? {
+        return Err(corrupt(0, "journal active segment already exists"));
+    }
+    let temporary = active_segment_temp_path(root, generation);
+    if temporary.try_exists().map_err(io_error)? {
+        return Err(corrupt(
+            0,
+            "journal active segment temporary already exists",
+        ));
+    }
+    let file = OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(&temporary)
+        .map_err(io_error)?;
+    file.sync_all().map_err(io_error)?;
+    drop(file);
+    promote_generation(&temporary, &active).map_err(io_error)?;
+    Ok(active)
+}
+
+fn prove_sealed_generation(
+    path: &Path,
+    worker_id: &str,
+    channel_id: &str,
+) -> Result<JournalCursor, JournalError> {
+    let proof = read_journal_incremental_single(
+        JournalReadSegment {
+            root: path,
+            data_path: path,
+            generation: 0,
+            manifest_hash: "",
+            segment_kind: 0,
+        },
+        None,
+        usize::MAX,
+        false,
+    )?
+    .cursor;
+    if proof.worker_id.as_deref() != Some(worker_id)
+        || proof.channel_id.as_deref() != Some(channel_id)
+        || !proof.saw_heartbeat_summary
+        || !proof.saw_compaction_commit
+        || proof.compaction_next_sequence == 0
+        || proof.compaction_layout_version != COMPACTION_LAYOUT_COMMIT_THEN_RETAINED
+    {
+        return Err(corrupt(0, "sealed generation proof is incomplete"));
+    }
+    Ok(proof)
+}
+
 impl Drop for JournalWriter {
     fn drop(&mut self) {
         // Close the mutable generation first. The root ownership handle is
@@ -794,8 +1144,7 @@ fn acquire_writer_ownership(_path: &Path) -> Result<JournalWriterOwnership, Jour
 }
 
 pub fn read_events(path: impl AsRef<Path>) -> Result<Vec<WorkerEventEnvelope>, JournalError> {
-    let location = resolve_journal_location(path.as_ref())?;
-    Ok(read_snapshot(&location.data_path)?.events)
+    Ok(read_snapshot(path.as_ref())?.events)
 }
 
 /// Returns the immutable generation currently selected by a stable journal
@@ -822,22 +1171,18 @@ pub fn read_events_bounded(
     path: impl AsRef<Path>,
     limit: usize,
 ) -> Result<Vec<WorkerEventEnvelope>, JournalError> {
-    let location = resolve_journal_location(path.as_ref())?;
-    Ok(read_snapshot_bounded(&location.data_path, limit)?.events)
+    Ok(read_snapshot_bounded(path.as_ref(), limit)?.events)
 }
 
 pub fn inspect_journal(path: impl AsRef<Path>) -> Result<JournalInspection, JournalError> {
-    let location = resolve_journal_location(path.as_ref())?;
-    let snapshot = read_snapshot(&location.data_path)?;
-    inspection_from_snapshot(snapshot)
+    inspection_from_snapshot(read_snapshot(path.as_ref())?)
 }
 
 pub fn inspect_journal_bounded(
     path: impl AsRef<Path>,
     limit: usize,
 ) -> Result<JournalInspection, JournalError> {
-    let location = resolve_journal_location(path.as_ref())?;
-    inspection_from_snapshot(read_snapshot_bounded(&location.data_path, limit)?)
+    inspection_from_snapshot(read_snapshot_bounded(path.as_ref(), limit)?)
 }
 
 /// Reads at most `event_limit` newly appended worker events after `cursor`.
@@ -863,18 +1208,246 @@ pub fn read_journal_incremental(
         return Err(corrupt(0, "incremental event limit must be positive"));
     }
     let root = path.as_ref();
+    // This is intentionally before the manifest/path resolution. A reporter
+    // that is reconstructing a large cache miss must already block the
+    // writer's publication/reclamation decision before it opens either
+    // generation object.
+    let _early_lease = begin_incremental_reader_lease(root, verify_prefix)?;
     let location = resolve_journal_location(root)?;
-    let path = location.data_path.as_path();
+    if location.manifest.is_none() {
+        // Legacy root and v1-manifest journals are writer-migrated rather
+        // than resumed as a durable projection authority.
+        if let Some(cursor) = cursor
+            && location.legacy_manifest.is_some()
+        {
+            return Err(corrupt(
+                cursor.byte_offset,
+                "legacy journal generation requires writer migration before resume",
+            ));
+        }
+        return read_journal_incremental_single(
+            JournalReadSegment {
+                root,
+                data_path: &location.data_path,
+                generation: location.generation,
+                manifest_hash: &location.manifest_hash,
+                segment_kind: 0,
+            },
+            cursor,
+            event_limit,
+            verify_prefix,
+        );
+    }
+    let manifest = location
+        .manifest
+        .as_ref()
+        .expect("checked manifest presence");
+    if let Some(cursor) = cursor
+        && (cursor.generation != location.generation
+            || cursor.manifest_hash != location.manifest_hash
+            || cursor.segment_kind > 1)
+    {
+        return Err(corrupt(
+            cursor.byte_offset,
+            "journal generation manifest changed after the durable reader checkpoint",
+        ));
+    }
+    if verify_prefix {
+        // Establish the immutable manifest proof before any bounded batch is
+        // eligible to become projection authority. The session records that
+        // proof so subsequent catch-up batches do not repeat the scan.
+        ensure_manifest_sealed_session(root, &location)?;
+    }
+    if cursor.is_some_and(|cursor| cursor.segment_kind == 1) {
+        let active = location
+            .active_path
+            .as_ref()
+            .expect("v2 manifest has active segment");
+        return read_journal_incremental_single(
+            JournalReadSegment {
+                root,
+                data_path: active,
+                generation: location.generation,
+                manifest_hash: &location.manifest_hash,
+                segment_kind: 1,
+            },
+            cursor,
+            event_limit,
+            verify_prefix,
+        );
+    }
+
+    let sealed = read_journal_incremental_single(
+        JournalReadSegment {
+            root,
+            data_path: &location.data_path,
+            generation: location.generation,
+            manifest_hash: &location.manifest_hash,
+            segment_kind: 0,
+        },
+        cursor,
+        event_limit,
+        verify_prefix,
+    )?;
+    if !cursor_matches_sealed_manifest(&sealed.cursor, manifest)
+        || sealed.events.len() == event_limit
+    {
+        return Ok(sealed);
+    }
+    // The sealed generation is now proven through the exact manifest
+    // boundary. Begin the append-only segment at that authenticated sequence
+    // without pretending its file bytes are part of the sealed prefix hash.
+    let active_path = location
+        .active_path
+        .as_ref()
+        .expect("v2 manifest has active segment");
+    let active_file = File::open(active_path).map_err(io_error)?;
+    let active_cursor = JournalCursor {
+        generation: location.generation,
+        manifest_hash: location.manifest_hash.clone(),
+        segment_kind: 1,
+        byte_offset: 0,
+        raw_sequence: sealed.cursor.raw_sequence,
+        prefix_hash: initial_prefix_hash(),
+        file_identity: journal_file_identity(&active_file)?,
+        worker_id: sealed.cursor.worker_id.clone(),
+        channel_id: sealed.cursor.channel_id.clone(),
+        // These describe the logical sequence boundary inherited from the
+        // sealed prefix; the byte prefix hash remains segment-local.
+        compaction_next_sequence: sealed.cursor.compaction_next_sequence,
+        compaction_layout_version: sealed.cursor.compaction_layout_version,
+        saw_heartbeat_summary: sealed.cursor.saw_heartbeat_summary,
+        saw_compaction_commit: sealed.cursor.saw_compaction_commit,
+    };
+    let active = read_journal_incremental_single(
+        JournalReadSegment {
+            root,
+            data_path: active_path,
+            generation: location.generation,
+            manifest_hash: &location.manifest_hash,
+            segment_kind: 1,
+        },
+        Some(&active_cursor),
+        event_limit - sealed.events.len(),
+        verify_prefix,
+    )?;
+    let mut events = sealed.events;
+    events.extend(active.events);
+    Ok(IncrementalJournalRead {
+        worker_id: active.worker_id.or(sealed.worker_id),
+        channel_id: active.channel_id.or(sealed.channel_id),
+        events,
+        cursor: active.cursor,
+    })
+}
+
+fn sealed_manifest_cursor(location: &JournalLocation) -> Result<JournalCursor, JournalError> {
+    let manifest = location
+        .manifest
+        .as_ref()
+        .ok_or_else(|| corrupt(0, "sealed manifest cursor requires v2 manifest"))?;
+    Ok(JournalCursor {
+        generation: location.generation,
+        manifest_hash: location.manifest_hash.clone(),
+        segment_kind: 0,
+        byte_offset: manifest.sealed_byte_offset,
+        raw_sequence: manifest.sealed_raw_sequence,
+        prefix_hash: manifest.sealed_prefix_hash.clone(),
+        file_identity: manifest.sealed_file_identity.clone(),
+        worker_id: Some(manifest.worker_id.clone()),
+        channel_id: Some(manifest.channel_id.clone()),
+        compaction_next_sequence: manifest.sealed_compaction_next_sequence,
+        compaction_layout_version: COMPACTION_LAYOUT_COMMIT_THEN_RETAINED,
+        saw_heartbeat_summary: true,
+        saw_compaction_commit: true,
+    })
+}
+
+/// A restarted active-segment reader first proves the immutable sealed object
+/// selected by the manifest. Once the process owns an active session, later
+/// cadence passes retain that proof and only parse the active suffix.
+fn ensure_manifest_sealed_session(
+    root: &Path,
+    location: &JournalLocation,
+) -> Result<(), JournalError> {
+    #[cfg(windows)]
+    {
+        let sealed = sealed_manifest_cursor(location)?;
+        if verified_prefix_sessions()
+            .lock()
+            .expect("verified prefix sessions are not poisoned")
+            .get(root)
+            .is_some_and(|session| {
+                session.generation == location.generation
+                    && session.sealed_proof.as_ref() == Some(&sealed)
+            })
+        {
+            return Ok(());
+        }
+    }
+    let cursor = sealed_manifest_cursor(location)?;
+    ensure_verified_prefix_session(root, &location.data_path, location.generation, &cursor)
+}
+
+#[cfg(windows)]
+fn sealed_proof_for_cursor(root: &Path, cursor: &JournalCursor) -> Option<JournalCursor> {
+    let location = resolve_journal_location(root).ok()?;
+    let sealed = sealed_manifest_cursor(&location).ok()?;
+    (sealed == *cursor).then_some(sealed)
+}
+
+fn cursor_matches_sealed_manifest(
+    cursor: &JournalCursor,
+    manifest: &JournalGenerationManifest,
+) -> bool {
+    cursor.segment_kind == 0
+        && cursor.byte_offset == manifest.sealed_byte_offset
+        && cursor.raw_sequence == manifest.sealed_raw_sequence
+        && cursor.prefix_hash == manifest.sealed_prefix_hash
+        && cursor.file_identity == manifest.sealed_file_identity
+        && cursor.worker_id.as_deref() == Some(&manifest.worker_id)
+        && cursor.channel_id.as_deref() == Some(&manifest.channel_id)
+        && cursor.saw_heartbeat_summary
+        && cursor.saw_compaction_commit
+        && cursor.compaction_layout_version == COMPACTION_LAYOUT_COMMIT_THEN_RETAINED
+        && cursor.compaction_next_sequence == manifest.sealed_compaction_next_sequence
+}
+
+fn read_journal_incremental_single(
+    segment: JournalReadSegment<'_>,
+    cursor: Option<&JournalCursor>,
+    event_limit: usize,
+    verify_prefix: bool,
+) -> Result<IncrementalJournalRead, JournalError> {
+    let JournalReadSegment {
+        root,
+        data_path: path,
+        generation,
+        manifest_hash: manifest_digest,
+        segment_kind,
+    } = segment;
+    if event_limit == 0 {
+        return Err(corrupt(0, "incremental event limit must be positive"));
+    }
+    if segment_kind > 1 {
+        return Err(corrupt(0, "journal segment kind is invalid"));
+    }
     let prior_cursor = cursor.cloned();
     let path_probe = File::open(path).map_err(io_error)?;
     let path_metadata = path_probe.metadata().map_err(io_error)?;
     let path_file_identity = journal_file_identity(&path_probe)?;
     let path_length = path_metadata.len();
     if let Some(cursor) = cursor {
-        if cursor.generation != location.generation {
+        if cursor.generation != generation || cursor.segment_kind != segment_kind {
             return Err(corrupt(
                 cursor.byte_offset,
-                "journal generation changed after the durable reader checkpoint",
+                "journal generation or segment changed after the durable reader checkpoint",
+            ));
+        }
+        if cursor.manifest_hash != manifest_digest {
+            return Err(corrupt(
+                cursor.byte_offset,
+                "journal manifest changed after the durable reader checkpoint",
             ));
         }
         if cursor.byte_offset > path_length {
@@ -898,9 +1471,7 @@ pub fn read_journal_incremental(
     }
 
     let mut file = match (cursor, verify_prefix) {
-        (Some(cursor), true) => {
-            verified_prefix_session_file(root, path, location.generation, cursor)?
-        }
+        (Some(cursor), true) => verified_prefix_session_file(root, path, generation, cursor)?,
         _ => File::open(path).map_err(io_error)?,
     };
     let metadata = file.metadata().map_err(io_error)?;
@@ -1014,11 +1585,15 @@ pub fn read_journal_incremental(
                     events.push(event);
                     if events.len() == event_limit {
                         bounded_cursor = Some(stream_cursor(
-                            location.generation,
+                            CursorSource {
+                                generation,
+                                manifest_hash: manifest_digest,
+                                segment_kind,
+                                file_identity: &file_identity,
+                            },
                             record_end,
                             &coverage,
                             &prefix_hash,
-                            &file_identity,
                             (&worker_id, &channel_id),
                             (
                                 summary_seen,
@@ -1086,7 +1661,7 @@ pub fn read_journal_incremental(
             advance_verified_prefix_session(
                 root,
                 path,
-                location.generation,
+                generation,
                 prior_cursor.as_ref(),
                 &cursor,
             )?;
@@ -1124,11 +1699,15 @@ pub fn read_journal_incremental(
     }
     let final_cursor = bounded_cursor.unwrap_or_else(|| {
         stream_cursor(
-            location.generation,
+            CursorSource {
+                generation,
+                manifest_hash: manifest_digest,
+                segment_kind,
+                file_identity: &file_identity,
+            },
             offset,
             &coverage,
             &prefix_hash,
-            &file_identity,
             (&worker_id, &channel_id),
             (
                 summary_seen,
@@ -1142,7 +1721,7 @@ pub fn read_journal_incremental(
         advance_verified_prefix_session(
             root,
             path,
-            location.generation,
+            generation,
             prior_cursor.as_ref(),
             &final_cursor,
         )?;
@@ -1226,11 +1805,15 @@ pub fn find_journal_event_cursor(
                 )?;
                 saw_event = true;
                 let cursor = stream_cursor(
-                    location.generation,
+                    CursorSource {
+                        generation: location.generation,
+                        manifest_hash: &location.manifest_hash,
+                        segment_kind: 0,
+                        file_identity: &file_identity,
+                    },
                     record_end,
                     &coverage,
                     &prefix_hash,
-                    &file_identity,
                     (&worker_id, &channel_id),
                     (
                         summary_seen,
@@ -1453,7 +2036,7 @@ fn ensure_verified_prefix_session(
 ) -> Result<(), JournalError> {
     #[cfg(windows)]
     {
-        {
+        let sealed_to_active = {
             let mut sessions = verified_prefix_sessions()
                 .lock()
                 .expect("verified prefix sessions are not poisoned");
@@ -1463,7 +2046,7 @@ fn ensure_verified_prefix_session(
                 && session.cursor == *cursor
             {
                 if session.lease.is_none() {
-                    session.lease = Some(acquire_reader_lease(root)?);
+                    session.lease = Some(take_incremental_reader_lease(root)?);
                 }
                 ensure_current_generation_is_locked_file(
                     root,
@@ -1472,17 +2055,75 @@ fn ensure_verified_prefix_session(
                     &session.file,
                     cursor,
                 )?;
+                ensure_retained_sealed_file(root, generation, session, cursor)?;
                 return Ok(());
             }
-            // A manifest switch can only occur after its preceding lease was
-            // acknowledged. Retire that old immutable object now; the writer
-            // may reclaim it once no reader retains a handle.
-            sessions.remove(root);
+            // The public v2 reader reaches the active segment only after its
+            // sealed manifest cursor was fully authenticated. Move that exact
+            // locked handle into the session instead of dropping it while
+            // changing the streaming object.
+            if cursor.segment_kind == 1
+                && sessions.get(root).is_some_and(|session| {
+                    session.generation == generation
+                        && session.cursor.segment_kind == 0
+                        && session.sealed_file.is_none()
+                })
+            {
+                sessions.remove(root)
+            } else {
+                // A manifest switch can only occur after its preceding lease
+                // was acknowledged. Retire stale objects now; the writer may
+                // reclaim their names while retained handles remain valid.
+                sessions.remove(root);
+                None
+            }
+        };
+        if let Some(mut sealed_session) = sealed_to_active {
+            let location = resolve_journal_location(root)?;
+            let sealed_cursor = sealed_manifest_cursor(&location)?;
+            if sealed_session.cursor != sealed_cursor
+                || location.generation != generation
+                || location.active_path.as_deref() != Some(data_path)
+            {
+                return Err(corrupt(
+                    cursor.byte_offset,
+                    "active segment transition lacks the exact sealed manifest proof",
+                ));
+            }
+            ensure_current_generation_is_locked_file(
+                root,
+                &sealed_session.data_path,
+                generation,
+                &sealed_session.file,
+                &sealed_session.cursor,
+            )?;
+            let active_file = open_prefix_lock_handle(data_path)?;
+            ensure_locked_file_matches_cursor(&active_file, cursor)?;
+            verify_segment_cursor_prefix(root, data_path, generation, &active_file, cursor)?;
+            lock_file_range(&active_file, 0, cursor.byte_offset)?;
+            verify_segment_cursor_prefix(root, data_path, generation, &active_file, cursor)?;
+            ensure_current_generation_is_locked_file(
+                root,
+                data_path,
+                generation,
+                &active_file,
+                cursor,
+            )?;
+            sealed_session.sealed_path = Some(sealed_session.data_path.clone());
+            sealed_session.sealed_file = Some(sealed_session.file);
+            sealed_session.file = active_file;
+            sealed_session.data_path = data_path.to_path_buf();
+            sealed_session.cursor = cursor.clone();
+            verified_prefix_sessions()
+                .lock()
+                .expect("verified prefix sessions are not poisoned")
+                .insert(root.to_path_buf(), sealed_session);
+            return Ok(());
         }
         // A restart/cache miss pays one complete proof before the prefix is
         // protected. Re-check after taking the lock to close that acquisition
         // race; later passes only inspect their bounded suffix.
-        let lease = acquire_reader_lease(root)?;
+        let lease = take_incremental_reader_lease(root)?;
         let file = match open_prefix_lock_handle(data_path) {
             Ok(file) => file,
             Err(error) => {
@@ -1492,9 +2133,9 @@ fn ensure_verified_prefix_session(
             }
         };
         ensure_locked_file_matches_cursor(&file, cursor)?;
-        verify_journal_cursor_prefix_file(&file, cursor)?;
+        verify_segment_cursor_prefix(root, data_path, generation, &file, cursor)?;
         lock_file_range(&file, 0, cursor.byte_offset)?;
-        verify_journal_cursor_prefix_file(&file, cursor)?;
+        verify_segment_cursor_prefix(root, data_path, generation, &file, cursor)?;
         ensure_current_generation_is_locked_file(root, data_path, generation, &file, cursor)?;
         verified_prefix_sessions()
             .lock()
@@ -1503,6 +2144,9 @@ fn ensure_verified_prefix_session(
                 root.to_path_buf(),
                 VerifiedPrefixSession {
                     file,
+                    sealed_file: None,
+                    sealed_path: None,
+                    sealed_proof: sealed_proof_for_cursor(root, cursor),
                     lease: Some(lease),
                     data_path: data_path.to_path_buf(),
                     generation,
@@ -1515,6 +2159,52 @@ fn ensure_verified_prefix_session(
     {
         verify_journal_cursor_prefix(data_path, cursor)
     }
+}
+
+/// A v2 active segment starts its byte hash at zero, but its sequence coverage
+/// starts exactly after the authenticated sealed generation. Reconstruct that
+/// tiny anchor from the current manifest before replaying the active prefix.
+#[cfg(windows)]
+fn verify_segment_cursor_prefix(
+    root: &Path,
+    data_path: &Path,
+    generation: u64,
+    file: &File,
+    cursor: &JournalCursor,
+) -> Result<(), JournalError> {
+    if cursor.segment_kind == 0 {
+        return verify_journal_cursor_prefix_file(file, cursor);
+    }
+    let current = resolve_journal_location(root)?;
+    let manifest = current
+        .manifest
+        .as_ref()
+        .ok_or_else(|| corrupt(cursor.byte_offset, "active cursor has no v2 manifest"))?;
+    if current.generation != generation
+        || current.active_path.as_deref() != Some(data_path)
+        || cursor.manifest_hash != current.manifest_hash
+    {
+        return Err(corrupt(
+            cursor.byte_offset,
+            "journal manifest changed while verifying active segment",
+        ));
+    }
+    let anchor = JournalCursor {
+        generation,
+        manifest_hash: current.manifest_hash,
+        segment_kind: 1,
+        byte_offset: 0,
+        raw_sequence: manifest.sealed_raw_sequence,
+        prefix_hash: initial_prefix_hash(),
+        file_identity: journal_file_identity(file)?,
+        worker_id: Some(manifest.worker_id.clone()),
+        channel_id: Some(manifest.channel_id.clone()),
+        compaction_next_sequence: manifest.sealed_compaction_next_sequence,
+        compaction_layout_version: COMPACTION_LAYOUT_COMMIT_THEN_RETAINED,
+        saw_heartbeat_summary: true,
+        saw_compaction_commit: true,
+    };
+    verify_journal_cursor_suffix(file, &anchor, cursor)
 }
 
 /// Returns a duplicate of the exact locked object that authenticated the
@@ -1558,6 +2248,7 @@ fn verified_prefix_session_file(
             &session.file,
             cursor,
         )?;
+        ensure_retained_sealed_file(root, generation, session, cursor)?;
         session.file.try_clone().map_err(io_error)
     }
     #[cfg(not(windows))]
@@ -1580,9 +2271,38 @@ fn advance_verified_prefix_session(
 ) -> Result<(), JournalError> {
     #[cfg(windows)]
     {
-        let Some(prior) = prior else {
+        if prior.is_none() {
+            let mut sessions = verified_prefix_sessions()
+                .lock()
+                .expect("verified prefix sessions are not poisoned");
+            if let Some(session) = sessions.get_mut(root)
+                && session.data_path == data_path
+                && session.generation == generation
+                && session.cursor.segment_kind == 0
+                && cursor.segment_kind == 0
+                && session
+                    .sealed_proof
+                    .as_ref()
+                    .is_some_and(|proof| proof.byte_offset >= cursor.byte_offset)
+            {
+                // The manifest proof already authenticated and locked this
+                // whole immutable generation. A first bounded replay from
+                // byte zero may persist an earlier cursor without discarding
+                // that proof.
+                ensure_current_generation_is_locked_file(
+                    root,
+                    data_path,
+                    generation,
+                    &session.file,
+                    session.sealed_proof.as_ref().expect("checked sealed proof"),
+                )?;
+                session.cursor = cursor.clone();
+                return Ok(());
+            }
+            drop(sessions);
             return ensure_verified_prefix_session(root, data_path, generation, cursor);
-        };
+        }
+        let prior = prior.expect("checked prior cursor");
         let mut sessions = verified_prefix_sessions()
             .lock()
             .expect("verified prefix sessions are not poisoned");
@@ -1605,6 +2325,7 @@ fn advance_verified_prefix_session(
             &session.file,
             cursor,
         )?;
+        ensure_retained_sealed_file(root, generation, session, cursor)?;
         if cursor.byte_offset < prior.byte_offset {
             return Err(corrupt(
                 cursor.byte_offset,
@@ -1620,6 +2341,7 @@ fn advance_verified_prefix_session(
             &session.file,
             cursor,
         )?;
+        ensure_retained_sealed_file(root, generation, session, cursor)?;
         session.cursor = cursor.clone();
         Ok(())
     }
@@ -1762,7 +2484,12 @@ fn ensure_current_generation_is_locked_file(
     cursor: &JournalCursor,
 ) -> Result<(), JournalError> {
     let current = resolve_journal_location(root)?;
-    if current.generation != generation || current.data_path != data_path {
+    let selected_path =
+        current.data_path == data_path || current.active_path.as_deref() == Some(data_path);
+    if current.generation != generation
+        || !selected_path
+        || cursor.manifest_hash != current.manifest_hash
+    {
         return Err(corrupt(
             cursor.byte_offset,
             "journal generation changed while the verified reader held its locked object",
@@ -1775,6 +2502,51 @@ fn ensure_current_generation_is_locked_file(
         return Err(corrupt(
             cursor.byte_offset,
             "journal path changed while the verified reader held its locked object",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn ensure_retained_sealed_file(
+    root: &Path,
+    generation: u64,
+    session: &VerifiedPrefixSession,
+    cursor: &JournalCursor,
+) -> Result<(), JournalError> {
+    let Some(sealed_file) = session.sealed_file.as_ref() else {
+        return Ok(());
+    };
+    let Some(sealed_path) = session.sealed_path.as_ref() else {
+        return Err(corrupt(
+            cursor.byte_offset,
+            "verified active session lost its sealed generation path",
+        ));
+    };
+    let location = resolve_journal_location(root)?;
+    let manifest = location.manifest.as_ref().ok_or_else(|| {
+        corrupt(
+            cursor.byte_offset,
+            "verified active session lost v2 manifest",
+        )
+    })?;
+    if location.generation != generation || location.data_path != *sealed_path {
+        return Err(corrupt(
+            cursor.byte_offset,
+            "sealed generation changed while active reader session was retained",
+        ));
+    }
+    if journal_file_identity(sealed_file)? != manifest.sealed_file_identity {
+        return Err(corrupt(
+            cursor.byte_offset,
+            "sealed generation identity changed while active reader session was retained",
+        ));
+    }
+    let reopened = File::open(sealed_path).map_err(io_error)?;
+    if journal_file_identity(&reopened)? != journal_file_identity(sealed_file)? {
+        return Err(corrupt(
+            cursor.byte_offset,
+            "sealed generation path changed while active reader session was retained",
         ));
     }
     Ok(())
@@ -1854,20 +2626,21 @@ fn lock_file_range(file: &File, start: u64, end: u64) -> Result<(), JournalError
 }
 
 fn stream_cursor(
-    generation: u64,
+    source: CursorSource<'_>,
     byte_offset: u64,
     coverage: &SequenceCoverage,
     prefix_hash: &str,
-    file_identity: &str,
     identity: (&Option<String>, &Option<String>),
     layout: (bool, bool, u64, u8),
 ) -> JournalCursor {
     JournalCursor {
-        generation,
+        generation: source.generation,
+        manifest_hash: source.manifest_hash.into(),
+        segment_kind: source.segment_kind,
         byte_offset,
         raw_sequence: coverage.raw_sequence(),
         prefix_hash: prefix_hash.into(),
-        file_identity: file_identity.into(),
+        file_identity: source.file_identity.into(),
         worker_id: identity.0.clone(),
         channel_id: identity.1.clone(),
         saw_heartbeat_summary: layout.0,
@@ -2189,12 +2962,51 @@ fn read_snapshot(path: &Path) -> Result<JournalSnapshot, JournalError> {
 
 fn read_snapshot_bounded(path: &Path, event_limit: usize) -> Result<JournalSnapshot, JournalError> {
     let location = resolve_journal_location(path)?;
-    read_snapshot_bounded_direct(&location.data_path, event_limit)
+    let Some(active_path) = location.active_path else {
+        return read_snapshot_bounded_direct(&location.data_path, event_limit);
+    };
+    let mut sealed = read_snapshot_bounded_direct(&location.data_path, usize::MAX)?;
+    let active = read_snapshot_bounded_direct_from(
+        &active_path,
+        usize::MAX,
+        location
+            .manifest
+            .as_ref()
+            .expect("active path requires v2 manifest")
+            .sealed_raw_sequence,
+    )?;
+    if active
+        .identity
+        .as_ref()
+        .is_some_and(|identity| sealed.identity.as_ref() != Some(identity))
+    {
+        return Err(corrupt(0, "journal active segment identity changed"));
+    }
+    if sealed.events.len().saturating_add(active.events.len()) > event_limit {
+        return Err(JournalError::EventLimitExceeded { limit: event_limit });
+    }
+    sealed.events.extend(active.events);
+    sealed.raw_heartbeat_count = sealed
+        .events
+        .iter()
+        .filter(|event| matches!(event.event, WorkerEvent::Heartbeat { .. }))
+        .count();
+    sealed.next_sequence =
+        sequence_after_coverage(sealed.heartbeat_summary.as_ref(), &sealed.events, 0)?;
+    Ok(sealed)
 }
 
 fn read_snapshot_bounded_direct(
     path: &Path,
     event_limit: usize,
+) -> Result<JournalSnapshot, JournalError> {
+    read_snapshot_bounded_direct_from(path, event_limit, 0)
+}
+
+fn read_snapshot_bounded_direct_from(
+    path: &Path,
+    event_limit: usize,
+    initial_raw_sequence: u64,
 ) -> Result<JournalSnapshot, JournalError> {
     let file = match File::open(path) {
         Ok(file) => file,
@@ -2213,12 +3025,13 @@ fn read_snapshot_bounded_direct(
         }
         Err(error) => return Err(io_error(error)),
     };
-    read_snapshot_bounded_file(&file, event_limit)
+    read_snapshot_bounded_file(&file, event_limit, initial_raw_sequence)
 }
 
 fn read_snapshot_bounded_file(
     file: &File,
     event_limit: usize,
+    initial_raw_sequence: u64,
 ) -> Result<JournalSnapshot, JournalError> {
     let mut file = file.try_clone().map_err(io_error)?;
     file.seek(SeekFrom::Start(0)).map_err(io_error)?;
@@ -2389,7 +3202,12 @@ fn read_snapshot_bounded_file(
     if heartbeat_summary.is_some() && compaction_commit.is_none() {
         return Err(corrupt(0, "heartbeat summary has no compaction commit"));
     }
-    let next_sequence = sequence_after_coverage(heartbeat_summary.as_ref(), &events, offset)?;
+    let next_sequence = sequence_after_coverage_from(
+        heartbeat_summary.as_ref(),
+        &events,
+        offset,
+        initial_raw_sequence,
+    )?;
     if let Some(commit) = &compaction_commit {
         // Events at or after the declared next sequence are ordinary appends
         // after the atomic compaction. Only the summary plus retained events
@@ -2399,8 +3217,12 @@ fn read_snapshot_bounded_file(
             .filter(|event| event.sequence < commit.next_sequence)
             .cloned()
             .collect();
-        let committed_next =
-            sequence_after_coverage(heartbeat_summary.as_ref(), &retained, offset)?;
+        let committed_next = sequence_after_coverage_from(
+            heartbeat_summary.as_ref(),
+            &retained,
+            offset,
+            initial_raw_sequence,
+        )?;
         if commit.next_sequence != committed_next {
             return Err(corrupt(
                 offset,
@@ -2432,6 +3254,15 @@ fn sequence_after_coverage(
     events: &[WorkerEventEnvelope],
     offset: u64,
 ) -> Result<u64, JournalError> {
+    sequence_after_coverage_from(heartbeat_summary, events, offset, 0)
+}
+
+fn sequence_after_coverage_from(
+    heartbeat_summary: Option<&HeartbeatSummary>,
+    events: &[WorkerEventEnvelope],
+    offset: u64,
+    initial_raw_sequence: u64,
+) -> Result<u64, JournalError> {
     let mut ranges = Vec::with_capacity(
         events.len() + heartbeat_summary.map_or(0, |summary| summary.ranges.len()),
     );
@@ -2445,7 +3276,7 @@ fn sequence_after_coverage(
     }
     ranges.extend(events.iter().map(|event| (event.sequence, event.sequence)));
     ranges.sort_unstable_by_key(|range| range.0);
-    let mut coverage = SequenceCoverage::new();
+    let mut coverage = SequenceCoverage::after_raw(initial_raw_sequence, offset)?;
     for (first, last) in ranges {
         coverage.cover(first, last, offset)?;
     }
@@ -2656,6 +3487,92 @@ fn recover_compaction_temp(
         return Err(JournalError::WrongIdentity);
     }
     replace_file(&temporary, path).map_err(io_error)
+}
+
+/// A completed generation can survive a power loss between its atomic rename
+/// and manifest publication. Never reuse or overwrite that name: prove the
+/// exact orphan against the currently published logical journal and either
+/// publish it atomically or stop. Ambiguous debris is evidence of an
+/// interrupted/tampered writer and is deliberately fail-closed.
+fn recover_orphan_generation(
+    root: &Path,
+    worker_id: &str,
+    channel_id: &str,
+) -> Result<(), JournalError> {
+    let location = resolve_journal_location(root)?;
+
+    // A v1 manifest's generation was still appendable. An active sidecar
+    // beside it is precisely the crash window after v2 preparation; validate
+    // and publish v2 instead of trying to append to the old object again.
+    if location.legacy_manifest.is_some() {
+        let active = active_segment_path(root, location.generation);
+        if !active.try_exists().map_err(io_error)? {
+            return Ok(());
+        }
+        let active_snapshot = read_snapshot_bounded_direct(&active, usize::MAX)?;
+        if !active_snapshot.events.is_empty() || active_snapshot.identity.is_some() {
+            return Err(corrupt(
+                0,
+                "legacy generation orphan has a non-empty active segment",
+            ));
+        }
+        let sealed = prove_sealed_generation(&location.data_path, worker_id, channel_id)?;
+        publish_generation_manifest(root, location.generation, worker_id, channel_id, &sealed)?;
+        return Ok(());
+    }
+
+    let candidate_generation = location
+        .generation
+        .checked_add(1)
+        .ok_or_else(|| corrupt(0, "journal generation exhausted during recovery"))?;
+    let candidate = generation_path(root, candidate_generation);
+    let active = active_segment_path(root, candidate_generation);
+    let candidate_exists = candidate.try_exists().map_err(io_error)?;
+    let active_exists = active.try_exists().map_err(io_error)?;
+    if !candidate_exists && !active_exists {
+        return Ok(());
+    }
+    if !candidate_exists || !active_exists {
+        return Err(corrupt(
+            0,
+            "orphan journal generation is missing its sealed or active segment",
+        ));
+    }
+    let current = read_snapshot(root)?;
+    let candidate_snapshot = read_snapshot_bounded_direct(&candidate, usize::MAX)?;
+    let active_snapshot = read_snapshot_bounded_direct(&active, usize::MAX)?;
+    if !active_snapshot.events.is_empty() || active_snapshot.identity.is_some() {
+        return Err(corrupt(
+            0,
+            "orphan journal active segment is not empty before manifest publication",
+        ));
+    }
+    let current_non_heartbeat: Vec<_> = current
+        .events
+        .iter()
+        .filter(|event| !matches!(event.event, WorkerEvent::Heartbeat { .. }))
+        .cloned()
+        .collect();
+    let candidate_non_heartbeat: Vec<_> = candidate_snapshot
+        .events
+        .iter()
+        .filter(|event| !matches!(event.event, WorkerEvent::Heartbeat { .. }))
+        .cloned()
+        .collect();
+    if candidate_snapshot.next_sequence != current.next_sequence
+        || candidate_snapshot.identity != current.identity
+        || candidate_non_heartbeat != current_non_heartbeat
+        || !candidate_snapshot.compaction_committed
+        || candidate_snapshot.compaction_layout != Some(CompactionLayout::CommitThenRetained)
+        || !candidate_snapshot.compaction_layout_is_explicit
+    {
+        return Err(corrupt(
+            0,
+            "orphan journal generation does not exactly cover the published journal",
+        ));
+    }
+    let sealed = prove_sealed_generation(&candidate, worker_id, channel_id)?;
+    publish_generation_manifest(root, candidate_generation, worker_id, channel_id, &sealed)
 }
 
 #[cfg(windows)]
@@ -3060,6 +3977,103 @@ mod tests {
         );
         assert!(read_snapshot(&path).unwrap().compaction_layout_is_explicit);
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn writer_migrates_v1_generation_manifest_without_resuming_its_byte_cursor() {
+        let path = test_path();
+        let mut writer = JournalWriter::open(&path, WORKER_ID, CHANNEL_ID).unwrap();
+        writer
+            .append(&event(1, WorkerEvent::Ready { graph_revision: 1 }))
+            .unwrap();
+        for sequence in 2..=514 {
+            writer
+                .append(&event(
+                    sequence,
+                    WorkerEvent::Heartbeat {
+                        monotonic_milliseconds: sequence * 5_000,
+                        outputs: Vec::new(),
+                    },
+                ))
+                .unwrap();
+        }
+        drop(writer);
+        let location = resolve_journal_location(&path).unwrap();
+        let sealed = sealed_manifest_cursor(&location).unwrap();
+        let legacy = LegacyJournalGenerationManifest {
+            version: LEGACY_GENERATION_MANIFEST_VERSION,
+            generation: location.generation,
+            worker_id: WORKER_ID.into(),
+            channel_id: CHANNEL_ID.into(),
+            file_identity: sealed.file_identity.clone(),
+            sealed_next_sequence: sealed.compaction_next_sequence,
+        };
+        std::fs::remove_file(location.active_path.as_ref().unwrap()).unwrap();
+        std::fs::write(
+            generation_manifest_path(&path),
+            serde_json::to_vec(&legacy).unwrap(),
+        )
+        .unwrap();
+        let legacy_cursor = read_journal_incremental(&path, None, 1, false)
+            .unwrap()
+            .cursor;
+        assert!(matches!(
+            read_journal_incremental(&path, Some(&legacy_cursor), 1, true),
+            Err(JournalError::Corrupt { reason, .. }) if reason.contains("requires writer migration")
+        ));
+
+        let mut migrated = JournalWriter::open(&path, WORKER_ID, CHANNEL_ID).unwrap();
+        let after = migrated.next_sequence();
+        migrated
+            .append(&event(after, WorkerEvent::ShutdownComplete))
+            .unwrap();
+        drop(migrated);
+
+        let location = resolve_journal_location(&path).unwrap();
+        assert!(location.manifest.is_some());
+        assert!(location.active_path.as_ref().unwrap().is_file());
+        assert_eq!(read_events(&path).unwrap().last().unwrap().sequence, after);
+    }
+
+    #[test]
+    fn writer_recovers_completed_orphan_generation_after_promotion_before_manifest() {
+        let path = test_path();
+        let mut writer = JournalWriter::open(&path, WORKER_ID, CHANNEL_ID).unwrap();
+        writer
+            .append(&event(1, WorkerEvent::Ready { graph_revision: 1 }))
+            .unwrap();
+        for sequence in 2..=514 {
+            writer
+                .append(&event(
+                    sequence,
+                    WorkerEvent::Heartbeat {
+                        monotonic_milliseconds: sequence * 5_000,
+                        outputs: Vec::new(),
+                    },
+                ))
+                .unwrap();
+        }
+        drop(writer);
+        let current = read_snapshot(&path).unwrap();
+        let location = resolve_journal_location(&path).unwrap();
+        let orphan_generation = location.generation + 1;
+        let orphan = generation_path(&path, orphan_generation);
+        // This is the durable state after candidate promotion and active
+        // creation, but before the atomic manifest replacement.
+        write_compacted_image(&orphan, &current, WORKER_ID, CHANNEL_ID).unwrap();
+        create_empty_active_segment(&path, orphan_generation).unwrap();
+
+        let mut recovered = JournalWriter::open(&path, WORKER_ID, CHANNEL_ID).unwrap();
+        assert_eq!(recovered.generation, orphan_generation);
+        let after = recovered.next_sequence();
+        recovered
+            .append(&event(after, WorkerEvent::ShutdownComplete))
+            .unwrap();
+        drop(recovered);
+        let resolved = resolve_journal_location(&path).unwrap();
+        assert_eq!(resolved.generation, orphan_generation);
+        assert!(resolved.manifest.is_some());
+        assert_eq!(read_events(&path).unwrap().last().unwrap().sequence, after);
     }
 
     #[test]

@@ -699,17 +699,25 @@ fn validate_projection(p: &AsRunProjectionRuntime, now: i64) -> Result<(), Strin
     }
     if !matches!(
         p.checkpoint.checkpoint_version,
-        0 | ASRUN_CHECKPOINT_VERSION
+        0 | 2 | ASRUN_CHECKPOINT_VERSION
     ) {
         return Err("as-run checkpoint version is unsupported".into());
     }
-    let v2 = p.checkpoint.checkpoint_version == ASRUN_CHECKPOINT_VERSION;
+    let v3 = p.checkpoint.checkpoint_version == ASRUN_CHECKPOINT_VERSION;
+    // A newly published active segment is intentionally empty. Its durable
+    // position is byte zero, but it inherits a nonzero raw sequence and the
+    // sealed compaction boundary from the authenticated manifest generation.
+    let empty_active_cursor = v3
+        && p.checkpoint.reader_byte_offset == 0
+        && p.checkpoint.reader_generation > 0
+        && p.checkpoint.reader_segment_kind == 1;
     if (p.entries.is_empty()
         && (p.checkpoint.materialized_sequence != 0 || !p.checkpoint.materialized_hash.is_empty()))
         || (!p.entries.is_empty()
             && (p.checkpoint.materialized_sequence == 0 || !sha(&p.checkpoint.materialized_hash)))
-        || (v2
+        || (v3
             && p.checkpoint.reader_byte_offset == 0
+            && !empty_active_cursor
             && (!p.checkpoint.reader_prefix_hash.is_empty()
                 || !p.checkpoint.reader_file_identity.is_empty()
                 || !p.checkpoint.reader_worker_id.is_empty()
@@ -718,9 +726,11 @@ fn validate_projection(p: &AsRunProjectionRuntime, now: i64) -> Result<(), Strin
                 || p.checkpoint.reader_saw_heartbeat_summary
                 || p.checkpoint.reader_saw_compaction_commit
                 || p.checkpoint.reader_compaction_next_sequence != 0
-                || p.checkpoint.reader_compaction_layout_version != 0))
-        || (v2
-            && p.checkpoint.reader_byte_offset > 0
+                || p.checkpoint.reader_compaction_layout_version != 0
+                || !p.checkpoint.reader_manifest_hash.is_empty()
+                || p.checkpoint.reader_segment_kind != 0))
+        || (v3
+            && (p.checkpoint.reader_byte_offset > 0 || empty_active_cursor)
             && (p.checkpoint.reader_raw_sequence == 0
                 || !sha(&p.checkpoint.reader_prefix_hash)
                 || p.checkpoint.reader_file_identity.trim().is_empty()
@@ -733,11 +743,19 @@ fn validate_projection(p: &AsRunProjectionRuntime, now: i64) -> Result<(), Strin
                 || (!p.checkpoint.reader_saw_compaction_commit
                     && p.checkpoint.reader_compaction_layout_version != 0)
                 || (p.checkpoint.reader_saw_heartbeat_summary
-                    && !p.checkpoint.reader_saw_compaction_commit)))
-        || (v2
+                    && !p.checkpoint.reader_saw_compaction_commit)
+                || p.checkpoint.reader_segment_kind > 1
+                || (p.checkpoint.reader_generation > 0
+                    && (!sha(&p.checkpoint.reader_manifest_hash)
+                        || (p.checkpoint.reader_segment_kind == 0
+                            && p.checkpoint.reader_manifest_hash.is_empty())))
+                || (p.checkpoint.reader_generation == 0
+                    && (!p.checkpoint.reader_manifest_hash.is_empty()
+                        || p.checkpoint.reader_segment_kind != 0))))
+        || (v3
             && ((p.checkpoint.source_anchor_sequence == 0)
                 != p.checkpoint.source_anchor_frame_hash.is_empty()))
-        || (v2
+        || (v3
             && p.checkpoint.source_anchor_sequence > 0
             && (!sha(&p.checkpoint.source_anchor_frame_hash)
                 || p.checkpoint.source_anchor_sequence > p.checkpoint.reader_raw_sequence))
