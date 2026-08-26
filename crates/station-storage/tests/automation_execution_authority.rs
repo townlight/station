@@ -574,3 +574,100 @@ fn attempt_failures_retry_only_under_the_live_owner_and_can_finish_terminally() 
     drop(reopened);
     let _ = std::fs::remove_file(database);
 }
+
+#[test]
+fn next_claim_is_fifo_and_recovers_an_expired_lease_after_restart() {
+    let (database, store) = configured_store("automation-execution-next-claim");
+    let mut second_request = request();
+    second_request.job_id = "66666666-2222-4333-8444-555555555555".into();
+    second_request.requested_at_unix_ms = 101;
+    store
+        .enqueue_automation_execution_job(&request(), &candidate(), 100)
+        .unwrap();
+    store
+        .enqueue_automation_execution_job(&second_request, &candidate(), 101)
+        .unwrap();
+
+    let first = store
+        .claim_next_automation_execution_job("automation-worker-1", &candidate(), 150, 1_000)
+        .unwrap()
+        .unwrap();
+    assert_eq!(first.request.job_id, JOB_ID);
+    let second = store
+        .claim_next_automation_execution_job("automation-worker-2", &candidate(), 151, 1_000)
+        .unwrap()
+        .unwrap();
+    assert_eq!(second.request.job_id, second_request.job_id);
+    assert!(
+        store
+            .claim_next_automation_execution_job("automation-worker-3", &candidate(), 152, 1_000,)
+            .unwrap()
+            .is_none()
+    );
+    drop(store);
+
+    let reopened = StationStore::open(&database).unwrap();
+    let recovered = reopened
+        .claim_next_automation_execution_job("automation-worker-3", &candidate(), 1_150, 1_000)
+        .unwrap()
+        .unwrap();
+    assert_eq!(recovered.request.job_id, JOB_ID);
+    assert_eq!(recovered.attempt_count, 2);
+    assert_eq!(
+        recovered.lease_owner.as_deref(),
+        Some("automation-worker-3")
+    );
+
+    drop(reopened);
+    let _ = std::fs::remove_file(database);
+}
+
+#[test]
+fn expired_tenth_attempt_is_terminalized_instead_of_wedging_the_queue() {
+    let (database, store) = configured_store("automation-execution-attempt-ceiling");
+    store
+        .enqueue_automation_execution_job(&request(), &candidate(), 100)
+        .unwrap();
+
+    for attempt in 0..10_i64 {
+        let now = 150 + attempt * 20;
+        let claimed = store
+            .claim_next_automation_execution_job("automation-worker-1", &candidate(), now, 10)
+            .unwrap()
+            .unwrap();
+        assert_eq!(claimed.attempt_count, u32::try_from(attempt + 1).unwrap());
+        if attempt < 9 {
+            let pending = store
+                .record_automation_execution_attempt_failure(
+                    JOB_ID,
+                    "automation-worker-1",
+                    "adapter_timeout",
+                    true,
+                    now + 1,
+                )
+                .unwrap();
+            assert_eq!(pending.state, AutomationExecutionJobState::Pending);
+        }
+    }
+
+    assert!(
+        store
+            .claim_next_automation_execution_job("automation-worker-2", &candidate(), 340, 1_000,)
+            .unwrap()
+            .is_none()
+    );
+    let terminal = store
+        .read_automation_execution_job(JOB_ID)
+        .unwrap()
+        .unwrap();
+    assert_eq!(terminal.state, AutomationExecutionJobState::Failed);
+    assert_eq!(terminal.attempt_count, 10);
+    assert_eq!(
+        terminal.last_failure_code.as_deref(),
+        Some("attempt_limit_exhausted")
+    );
+    assert_eq!(terminal.completed_at_unix_ms, Some(340));
+
+    drop(store);
+    let _ = std::fs::remove_file(database);
+}

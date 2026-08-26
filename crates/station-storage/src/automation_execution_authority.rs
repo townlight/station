@@ -220,47 +220,61 @@ impl StationStore {
             .checked_add(lease_ms)
             .ok_or_else(|| "automation execution lease overflowed".to_string())?;
         self.execute("BEGIN IMMEDIATE")?;
+        let outcome = self.claim_automation_execution_job_in_transaction(
+            job_id,
+            worker_id,
+            current_candidate,
+            now_unix_ms,
+            lease_expires,
+        );
+        self.finish_automation_execution_transaction(outcome)
+    }
+
+    pub fn claim_next_automation_execution_job(
+        &self,
+        worker_id: &str,
+        current_candidate: &AutomationCandidateIdentity,
+        now_unix_ms: i64,
+        lease_ms: i64,
+    ) -> Result<Option<AutomationExecutionJobRecord>, String> {
+        if !secret_field(worker_id, 200)
+            || now_unix_ms < 0
+            || !(1..=MAX_AUTOMATION_EXECUTION_LEASE_MS).contains(&lease_ms)
+        {
+            return Err("automation execution next claim is invalid or unbounded".into());
+        }
+        current_candidate.validate()?;
+        let lease_expires = now_unix_ms
+            .checked_add(lease_ms)
+            .ok_or_else(|| "automation execution lease overflowed".to_string())?;
+        self.execute("BEGIN IMMEDIATE")?;
         let outcome = (|| {
-            let current = self
-                .read_automation_execution_job(job_id)?
-                .ok_or_else(|| "automation execution job does not exist".to_string())?;
-            if current.state != AutomationExecutionJobState::Pending
-                && !(current.state == AutomationExecutionJobState::Claimed
-                    && current
-                        .lease_expires_at_unix_ms
-                        .is_some_and(|expiry| expiry <= now_unix_ms))
-            {
-                return Err("automation execution job is not claimable".into());
-            }
-            if current.attempt_count >= MAX_AUTOMATION_EXECUTION_ATTEMPTS {
-                return Err("automation execution attempt limit is exhausted".into());
-            }
-            self.validate_automation_execution_request_current(
-                &current.request,
+            let exhausted = self.prepare(
+                "UPDATE automation_execution_jobs SET state='failed',lease_owner='',lease_expires_at_unix_ms=-1,last_failure_code='attempt_limit_exhausted',completed_at_unix_ms=?1 \
+                 WHERE state='claimed' AND attempt_count>=10 AND lease_expires_at_unix_ms<=?1",
+            )?;
+            bind_i64(self.database, exhausted.raw, 1, now_unix_ms)?;
+            expect_done(self.database, exhausted.raw)?;
+            let select = self.prepare(
+                "SELECT job_id FROM automation_execution_jobs \
+                 WHERE attempt_count<10 AND (state='pending' OR (state='claimed' AND lease_expires_at_unix_ms<=?1)) \
+                 ORDER BY created_at_unix_ms,job_id LIMIT 1",
+            )?;
+            bind_i64(self.database, select.raw, 1, now_unix_ms)?;
+            let job_id = match unsafe { sqlite3_step(select.raw) } {
+                SQLITE_ROW => column_text(select.raw, 0)?,
+                SQLITE_DONE => return Ok(None),
+                _ => return Err(sqlite_error(self.database)),
+            };
+            drop(select);
+            self.claim_automation_execution_job_in_transaction(
+                &job_id,
+                worker_id,
                 current_candidate,
                 now_unix_ms,
-            )?;
-            let update = self.prepare(
-                "UPDATE automation_execution_jobs SET state='claimed',attempt_count=attempt_count+1,lease_owner=?1,lease_expires_at_unix_ms=?2,last_failure_code='' \
-                 WHERE job_id=?3 AND (state='pending' OR (state='claimed' AND lease_expires_at_unix_ms<=?4))",
-            )?;
-            let worker = c_string(worker_id, "automation execution worker identity")?;
-            let job = c_string(job_id, "automation execution job identity")?;
-            bind_text(self.database, update.raw, 1, &worker)?;
-            bind_i64(self.database, update.raw, 2, lease_expires)?;
-            bind_text(self.database, update.raw, 3, &job)?;
-            bind_i64(self.database, update.raw, 4, now_unix_ms)?;
-            expect_done(self.database, update.raw)?;
-            let claimed = self
-                .read_automation_execution_job(job_id)?
-                .ok_or_else(|| "automation execution job disappeared after claim".to_string())?;
-            if claimed.state != AutomationExecutionJobState::Claimed
-                || claimed.lease_owner.as_deref() != Some(worker_id)
-                || claimed.lease_expires_at_unix_ms != Some(lease_expires)
-            {
-                return Err("automation execution claim did not acquire exact authority".into());
-            }
-            Ok(claimed)
+                lease_expires,
+            )
+            .map(Some)
         })();
         self.finish_automation_execution_transaction(outcome)
     }
@@ -500,6 +514,59 @@ impl StationStore {
                 Err(error)
             }
         }
+    }
+
+    fn claim_automation_execution_job_in_transaction(
+        &self,
+        job_id: &str,
+        worker_id: &str,
+        current_candidate: &AutomationCandidateIdentity,
+        now_unix_ms: i64,
+        lease_expires: i64,
+    ) -> Result<AutomationExecutionJobRecord, String> {
+        let current = self
+            .read_automation_execution_job(job_id)?
+            .ok_or_else(|| "automation execution job does not exist".to_string())?;
+        if current.state != AutomationExecutionJobState::Pending
+            && !(current.state == AutomationExecutionJobState::Claimed
+                && current
+                    .lease_expires_at_unix_ms
+                    .is_some_and(|expiry| expiry <= now_unix_ms))
+        {
+            return Err("automation execution job is not claimable".into());
+        }
+        if current.attempt_count >= MAX_AUTOMATION_EXECUTION_ATTEMPTS {
+            return Err("automation execution attempt limit is exhausted".into());
+        }
+        self.validate_automation_execution_request_current(
+            &current.request,
+            current_candidate,
+            now_unix_ms,
+        )?;
+        let update = self.prepare(
+            "UPDATE automation_execution_jobs SET state='claimed',attempt_count=attempt_count+1,lease_owner=?1,lease_expires_at_unix_ms=?2,last_failure_code='' \
+             WHERE job_id=?3 AND (state='pending' OR (state='claimed' AND lease_expires_at_unix_ms<=?4))",
+        )?;
+        let worker = c_string(worker_id, "automation execution worker identity")?;
+        let job = c_string(job_id, "automation execution job identity")?;
+        bind_text(self.database, update.raw, 1, &worker)?;
+        bind_i64(self.database, update.raw, 2, lease_expires)?;
+        bind_text(self.database, update.raw, 3, &job)?;
+        bind_i64(self.database, update.raw, 4, now_unix_ms)?;
+        expect_done(self.database, update.raw)?;
+        if self.changes() != 1 {
+            return Err("automation execution claim lost its write lock".into());
+        }
+        let claimed = self
+            .read_automation_execution_job(job_id)?
+            .ok_or_else(|| "automation execution job disappeared after claim".to_string())?;
+        if claimed.state != AutomationExecutionJobState::Claimed
+            || claimed.lease_owner.as_deref() != Some(worker_id)
+            || claimed.lease_expires_at_unix_ms != Some(lease_expires)
+        {
+            return Err("automation execution claim did not acquire exact authority".into());
+        }
+        Ok(claimed)
     }
 
     fn validate_automation_execution_request_current(
