@@ -19,8 +19,8 @@ use station_captions::{
 };
 use station_cg::{CgBulletinContent, CgResolvedContent, CgResolvedSnapshot};
 use station_domain::{
-    AlertConditionKind, AlertEvent, AlertEventState, AlertSeverity, ChannelRuntimeObservation,
-    ChannelRuntimeState,
+    AlertConditionKind, AlertEvent, AlertEventState, AlertSeverity, CaptionCueMissEvidence,
+    CaptionCueMissReason, ChannelRuntimeObservation, ChannelRuntimeState,
 };
 use station_live::{LiveEndpoint, TakeoverSession, TakeoverState};
 use station_media_assets::{
@@ -115,6 +115,63 @@ fn due_caption_cues(
         due,
         missed_cue_ids: newly_missed_cue_ids,
     }
+}
+
+fn observe_caption_cue_misses(
+    store: &StationStore,
+    channel_id: &str,
+    report_id: &str,
+    track: &AssetCaptionTrack,
+    media_offset_ms: u64,
+    reason: CaptionCueMissReason,
+    cue_ids: &[String],
+) -> Result<bool, OrchestrationError> {
+    if cue_ids.is_empty() {
+        return Err(OrchestrationError::CaptionAuthority(
+            "caption miss evidence is empty".into(),
+        ));
+    }
+    let observed_at_unix_ms = system_time_millis()?;
+    store
+        .observe_caption_cue_misses_and_route(
+            &cue_ids
+                .iter()
+                .map(|cue_id| CaptionCueMissEvidence {
+                    channel_id: channel_id.into(),
+                    report_id: report_id.into(),
+                    track_id: track.track_id.clone(),
+                    track_revision: track.revision,
+                    cue_id: cue_id.clone(),
+                    reason,
+                    media_offset_ms,
+                    observed_at_unix_ms,
+                })
+                .collect::<Vec<_>>(),
+        )
+        .map_err(OrchestrationError::Storage)
+}
+
+fn resolve_caption_cue_miss_after_admission(
+    store: &StationStore,
+    channel_id: &str,
+    accepted_cue_count: usize,
+    batch_had_miss: bool,
+) -> Result<(), OrchestrationError> {
+    // A previous incident is not healed by time passing, an operator
+    // acknowledgment, an empty tick, or a mixed batch. The recovery boundary
+    // is one later complete dispatch batch which admitted at least one cue and
+    // had no expired or non-acknowledged cue.
+    if accepted_cue_count == 0 || batch_had_miss {
+        return Ok(());
+    }
+    store
+        .resolve_alert(
+            AlertConditionKind::CaptionCueMissed,
+            channel_id,
+            system_time_millis()?,
+        )
+        .map_err(OrchestrationError::Storage)?;
+    Ok(())
 }
 pub fn managed_cg_image_root(database_path: &Path) -> PathBuf {
     let parent = database_path
@@ -2577,7 +2634,17 @@ impl ChannelController {
             &dispatch_state.accepted_cue_ids,
             &dispatch_state.missed_cue_ids,
         );
+        let batch_had_miss = !plan.missed_cue_ids.is_empty();
         if let Some(first_missed_cue_id) = plan.missed_cue_ids.first() {
+            let newly_observed = observe_caption_cue_misses(
+                store,
+                &self.channel_id,
+                &job.report.report_id,
+                &track,
+                media_offset_ms,
+                CaptionCueMissReason::ExpiredBeforeAdmission,
+                &plan.missed_cue_ids,
+            )?;
             let Some(state) = self.caption_dispatch.as_mut() else {
                 return Err(OrchestrationError::CaptionAuthority(
                     "caption dispatch state ended while recording missed cues".into(),
@@ -2587,12 +2654,18 @@ impl ChannelController {
                 .missed_cue_ids
                 .extend(plan.missed_cue_ids.iter().cloned());
             self.caption_dispatch_detail = Some(format!(
-                "{} caption cue(s) expired before worker admission for report {} (first cue {}).",
+                "{} caption cue(s) missed their scheduled on-air window for report {} (first cue {}; durable evidence {}).",
                 plan.missed_cue_ids.len(),
                 job.report.report_id,
-                first_missed_cue_id
+                first_missed_cue_id,
+                if newly_observed {
+                    "recorded"
+                } else {
+                    "already recorded"
+                },
             ));
         }
+        let mut accepted_cue_count = 0usize;
         for cue in plan.due {
             let event = self
                 .supervisor
@@ -2607,6 +2680,26 @@ impl ChannelController {
                 .map_err(OrchestrationError::Worker)?;
             if !matches!(event.event, WorkerEvent::CaptionCueAccepted { ref cue_id } if cue_id == &cue.cue_id)
             {
+                let cue_ids = vec![cue.cue_id.clone()];
+                let newly_observed = observe_caption_cue_misses(
+                    store,
+                    &self.channel_id,
+                    &job.report.report_id,
+                    &track,
+                    media_offset_ms,
+                    CaptionCueMissReason::WorkerDidNotAcknowledge,
+                    &cue_ids,
+                )?;
+                self.caption_dispatch_detail = Some(format!(
+                    "Caption cue {} was not acknowledged by the worker for report {} (durable evidence {}).",
+                    cue.cue_id,
+                    job.report.report_id,
+                    if newly_observed {
+                        "recorded"
+                    } else {
+                        "already recorded"
+                    },
+                ));
                 return Err(OrchestrationError::CaptionAuthority(format!(
                     "worker did not accept caption cue {} from track {} revision {}",
                     cue.cue_id, track.track_id, track.revision
@@ -2618,6 +2711,20 @@ impl ChannelController {
                 ));
             };
             state.accepted_cue_ids.insert(cue.cue_id);
+            accepted_cue_count = accepted_cue_count.checked_add(1).ok_or_else(|| {
+                OrchestrationError::CaptionAuthority("caption acceptance count overflowed".into())
+            })?;
+        }
+        // An incident never clears merely because time advanced or because an
+        // operator acknowledged it. A later, completely clean worker
+        // admission is the recovery condition for this channel-scoped alert.
+        if accepted_cue_count > 0 {
+            resolve_caption_cue_miss_after_admission(
+                store,
+                &self.channel_id,
+                accepted_cue_count,
+                batch_had_miss,
+            )?;
         }
         Ok(())
     }
@@ -4224,9 +4331,11 @@ mod tests {
         CaptionCaptureTiming, CgSnapshotState, OrchestrationError, OutputExpectation,
         caption_capture_timing, capture_duration_for_sample, cleanup_orphan_output_proof_artifacts,
         due_caption_cues, expire_due_bulletins, generate_live_arm_token, hash_capture,
-        is_abort_confirmation, lease_renewal_due, managed_cg_image_root, on_air_source_started_at,
-        promote_caption_proof_artifact, proof_artifact_path, proof_bindings_match,
-        ready_duration_is_bounded, resolved_snapshot_to_protocol, stalled_required_output,
+        is_abort_confirmation, lease_renewal_due, managed_cg_image_root,
+        observe_caption_cue_misses, on_air_source_started_at, promote_caption_proof_artifact,
+        proof_artifact_path, proof_bindings_match, ready_duration_is_bounded,
+        resolve_caption_cue_miss_after_admission, resolved_snapshot_to_protocol,
+        stalled_required_output,
     };
     use sha2::{Digest, Sha256};
     use station_captions::{
@@ -4242,6 +4351,7 @@ mod tests {
         CgContentSource, CgRect, CgResolvedContent, CgResolvedSnapshot, CgResolvedZone,
         CgTemplateKind, CgZoneKind,
     };
+    use station_domain::CaptionCueMissReason;
     use station_media_journal::JournalWriter;
     use station_media_protocol::{
         ChannelCommand, CommandEnvelope, PROTOCOL_VERSION, WorkerEvent, WorkerEventEnvelope,
@@ -6158,6 +6268,12 @@ mod tests {
             vec!["11111111-1111-4111-8111-111111111111"]
         );
         assert!(
+            !planned
+                .missed_cue_ids
+                .contains(&"22222222-2222-4222-8222-222222222222".into()),
+            "an intentional active-cue catch-up is not an expired caption incident"
+        );
+        assert!(
             planned
                 .due
                 .iter()
@@ -6200,6 +6316,106 @@ mod tests {
                 .due
                 .len(),
             64
+        );
+    }
+
+    #[test]
+    fn caption_window_miss_is_durable_channel_scoped_and_only_a_later_admission_resolves_it() {
+        let path = database_path("caption-cue-missed-alert");
+        let store = StationStore::open(&path).unwrap();
+        let track = AssetCaptionTrack {
+            track_id: "65a26343-0339-4654-a92c-4bf9384f18df".into(),
+            asset_id: "a".repeat(64),
+            language: "en-US".into(),
+            service_number: 1,
+            source_kind: CaptionTrackSourceKind::Sidecar,
+            label: "Reviewed English".into(),
+            cues: Vec::new(),
+            revision: 7,
+            cues_sha256: "b".repeat(64),
+            created_at_unix_ms: 1,
+            updated_at_unix_ms: 2,
+            updated_by: "caption-reviewer".into(),
+        };
+        let cue_id = "11111111-1111-4111-8111-111111111111";
+
+        let cue_ids = vec![cue_id.into()];
+        assert!(
+            observe_caption_cue_misses(
+                &store,
+                CHANNEL_ID,
+                "report-a",
+                &track,
+                1_000,
+                CaptionCueMissReason::ExpiredBeforeAdmission,
+                &cue_ids,
+            )
+            .unwrap()
+        );
+        assert!(
+            !observe_caption_cue_misses(
+                &store,
+                CHANNEL_ID,
+                "report-a",
+                &track,
+                1_100,
+                CaptionCueMissReason::ExpiredBeforeAdmission,
+                &cue_ids,
+            )
+            .unwrap(),
+            "restart/replay of exact miss evidence must not re-alert"
+        );
+
+        let events = store.list_alert_events().unwrap();
+        let firing = events
+            .iter()
+            .find(|event| {
+                event.condition == station_domain::AlertConditionKind::CaptionCueMissed
+                    && event.resource_ref == CHANNEL_ID
+                    && event.state == station_domain::AlertEventState::Firing
+            })
+            .expect("the server-observed caption miss must be a durable firing alert");
+        assert_eq!(firing.severity, station_domain::AlertSeverity::Warning);
+        assert_eq!(firing.occurrence_count, 1);
+        assert!(firing.detail.contains("report-a"));
+        assert!(firing.detail.contains(cue_id));
+        assert!(!firing.detail.contains("caption text"));
+
+        assert!(
+            store
+                .resolve_alert(
+                    station_domain::AlertConditionKind::CaptionCueMissed,
+                    OTHER_CHANNEL_ID,
+                    firing.last_observed_at_unix_ms,
+                )
+                .unwrap()
+                .is_none(),
+            "one channel must never resolve another channel's caption incident"
+        );
+        assert!(
+            store
+                .read_alert_event(&firing.event_id)
+                .unwrap()
+                .is_some_and(|event| event.state == station_domain::AlertEventState::Firing),
+            "time passing and unrelated resolution must not clear the incident"
+        );
+
+        resolve_caption_cue_miss_after_admission(&store, CHANNEL_ID, 0, false).unwrap();
+        resolve_caption_cue_miss_after_admission(&store, CHANNEL_ID, 1, true).unwrap();
+        assert!(
+            store
+                .read_alert_event(&firing.event_id)
+                .unwrap()
+                .is_some_and(|event| event.state == station_domain::AlertEventState::Firing),
+            "empty or mixed dispatch batches cannot make readiness healthy"
+        );
+        resolve_caption_cue_miss_after_admission(&store, CHANNEL_ID, 1, false).unwrap();
+        assert!(
+            store
+                .read_alert_event(&firing.event_id)
+                .unwrap()
+                .is_some_and(|event| event.state == station_domain::AlertEventState::Resolved),
+            "only the subsequent successful-admission path resolves the channel incident"
         );
     }
 }

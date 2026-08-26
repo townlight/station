@@ -39,10 +39,11 @@ use station_cg::{
 use station_domain::{
     AUTOMATIC_SCHEDULE_MATERIALIZATION_ACTOR_ID, AlertChannel, AlertChannelKind,
     AlertConditionKind, AlertDelivery, AlertDeliveryPayload, AlertDeliveryState, AlertEvent,
-    AlertEventState, AlertNotificationKind, AlertRule, AlertSeverity, ChannelRuntimeObservation,
-    ChannelRuntimeState, SelfTestKind, SelfTestSchedule, SelfTestStatus, SelfTestTrigger,
-    StationProfile, StationProfileDocument, SystemResourceSample, SystemSelfTest,
-    redact_alert_channel_target, validate_alert_channel_target, validate_secure_url,
+    AlertEventState, AlertNotificationKind, AlertRule, AlertSeverity, CaptionCueMissEvidence,
+    CaptionCueMissReason, ChannelRuntimeObservation, ChannelRuntimeState, SelfTestKind,
+    SelfTestSchedule, SelfTestStatus, SelfTestTrigger, StationProfile, StationProfileDocument,
+    SystemResourceSample, SystemSelfTest, redact_alert_channel_target,
+    validate_alert_channel_target, validate_secure_url,
 };
 use station_live::{
     LiveSource, LiveSourceWriteError, TakeoverAuditEvent, TakeoverSession, TakeoverState,
@@ -1223,6 +1224,7 @@ impl StationStore {
         store.initialize_cg_schema()?;
         store.initialize_fallback_slate_schema()?;
         store.initialize_caption_policy_schema()?;
+        store.initialize_caption_cue_miss_evidence_schema()?;
         store.initialize_asset_caption_track_schema()?;
         store.initialize_caption_egress_proof_schema()?;
         store.initialize_caption_egress_job_schema()?;
@@ -7288,6 +7290,116 @@ impl StationStore {
         })();
         self.finish_transaction(outcome)?;
         recorded.ok_or_else(|| "alert routing transaction produced no event".into())
+    }
+
+    /// Atomically preserves server-observed caption miss evidence and opens or
+    /// updates its channel-scoped operator alert. Replaying an exact durable
+    /// evidence identity returns `false` without advancing occurrences or
+    /// routing a re-alert.
+    pub fn observe_caption_cue_misses_and_route(
+        &self,
+        evidence: &[CaptionCueMissEvidence],
+    ) -> Result<bool, String> {
+        if evidence.is_empty() || evidence.len() > 100_000 {
+            return Err("caption cue miss evidence batch is invalid".into());
+        }
+        let first = &evidence[0];
+        first.validate().map_err(str::to_string)?;
+        if evidence.iter().any(|item| {
+            item.validate().is_err()
+                || item.channel_id != first.channel_id
+                || item.report_id != first.report_id
+                || item.track_id != first.track_id
+                || item.track_revision != first.track_revision
+                || item.reason != first.reason
+                || item.media_offset_ms != first.media_offset_ms
+                || item.observed_at_unix_ms != first.observed_at_unix_ms
+        }) {
+            return Err("caption cue miss evidence batch has inconsistent authority".into());
+        }
+        self.execute("BEGIN IMMEDIATE")?;
+        let mut newly_recorded = 0usize;
+        let outcome = (|| {
+            for item in evidence {
+                let statement = self.prepare(
+                    "INSERT OR IGNORE INTO caption_cue_miss_evidence(channel_id, report_id, track_id, track_revision, cue_id, reason, media_offset_ms, observed_at_unix_ms) \
+                     VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                )?;
+                let channel = c_string(&item.channel_id, "caption miss channel")?;
+                let report = c_string(&item.report_id, "caption miss report")?;
+                let track = c_string(&item.track_id, "caption miss track")?;
+                let cue = c_string(&item.cue_id, "caption miss cue")?;
+                let reason = c_string(
+                    caption_cue_miss_reason_name(item.reason),
+                    "caption miss reason",
+                )?;
+                bind_text(self.database, statement.raw, 1, &channel)?;
+                bind_text(self.database, statement.raw, 2, &report)?;
+                bind_text(self.database, statement.raw, 3, &track)?;
+                bind_i64(
+                    self.database,
+                    statement.raw,
+                    4,
+                    i64::try_from(item.track_revision)
+                        .map_err(|_| "caption miss track revision exceeds i64")?,
+                )?;
+                bind_text(self.database, statement.raw, 5, &cue)?;
+                bind_text(self.database, statement.raw, 6, &reason)?;
+                bind_i64(
+                    self.database,
+                    statement.raw,
+                    7,
+                    i64::try_from(item.media_offset_ms)
+                        .map_err(|_| "caption miss media offset exceeds i64")?,
+                )?;
+                bind_i64(self.database, statement.raw, 8, item.observed_at_unix_ms)?;
+                expect_done(self.database, statement.raw)?;
+                if self.changes() == 1 {
+                    newly_recorded = newly_recorded
+                        .checked_add(1)
+                        .ok_or_else(|| "caption miss evidence count overflowed".to_string())?;
+                }
+            }
+            if newly_recorded == 0 {
+                return Ok(());
+            }
+            let detail = format!(
+                "{newly_recorded} caption cue(s) {} for report {}, track {} revision {}, at media offset {} ms (first cue {}). Cue text is intentionally not retained.",
+                caption_cue_miss_reason_detail(first.reason),
+                first.report_id,
+                first.track_id,
+                first.track_revision,
+                first.media_offset_ms,
+                first.cue_id,
+            );
+            let event_id = format!(
+                "caption-cue-missed-{}-{}",
+                first.channel_id,
+                self.next_alert_episode_ordinal_locked(
+                    AlertConditionKind::CaptionCueMissed,
+                    &first.channel_id,
+                )?
+            );
+            self.observe_alert_and_route_locked(&AlertEvent {
+                event_id,
+                condition: AlertConditionKind::CaptionCueMissed,
+                severity: AlertSeverity::Warning,
+                state: AlertEventState::Firing,
+                resource_ref: first.channel_id.clone(),
+                summary: "Caption cue missed its scheduled on-air window.".into(),
+                detail,
+                source_section: "S11".into(),
+                first_observed_at_unix_ms: first.observed_at_unix_ms,
+                last_observed_at_unix_ms: first.observed_at_unix_ms,
+                resolved_at_unix_ms: None,
+                occurrence_count: 1,
+                acknowledged_at_unix_ms: None,
+                acknowledged_by: None,
+            })?;
+            Ok(())
+        })();
+        self.finish_transaction(outcome)?;
+        Ok(newly_recorded > 0)
     }
 
     /// Records one operator-visible automatic materialization failure per
@@ -13631,6 +13743,30 @@ impl StationStore {
         )
     }
 
+    fn initialize_caption_cue_miss_evidence_schema(&self) -> Result<(), String> {
+        self.execute(
+            "CREATE TABLE IF NOT EXISTS caption_cue_miss_evidence (\
+               channel_id TEXT NOT NULL CHECK (length(channel_id) BETWEEN 1 AND 160),\
+               report_id TEXT NOT NULL CHECK (length(report_id) BETWEEN 1 AND 160),\
+               track_id TEXT NOT NULL CHECK (length(track_id) BETWEEN 1 AND 160),\
+               track_revision INTEGER NOT NULL CHECK (track_revision >= 1),\
+               cue_id TEXT NOT NULL CHECK (length(cue_id) BETWEEN 1 AND 160),\
+               reason TEXT NOT NULL CHECK (reason IN ('expired-before-admission','worker-did-not-acknowledge')),\
+               media_offset_ms INTEGER NOT NULL CHECK (media_offset_ms >= 0),\
+               observed_at_unix_ms INTEGER NOT NULL CHECK (observed_at_unix_ms >= 0),\
+               PRIMARY KEY(channel_id, report_id, track_id, track_revision, cue_id, reason)\
+             );\
+             CREATE INDEX IF NOT EXISTS caption_cue_miss_evidence_channel_time \
+               ON caption_cue_miss_evidence(channel_id, observed_at_unix_ms DESC, report_id, track_id, cue_id);\
+             CREATE TRIGGER IF NOT EXISTS caption_cue_miss_evidence_no_update \
+               BEFORE UPDATE ON caption_cue_miss_evidence \
+               BEGIN SELECT RAISE(ABORT, 'caption cue miss evidence is append-only'); END;\
+             CREATE TRIGGER IF NOT EXISTS caption_cue_miss_evidence_no_delete \
+               BEFORE DELETE ON caption_cue_miss_evidence \
+               BEGIN SELECT RAISE(ABORT, 'caption cue miss evidence is append-only'); END;",
+        )
+    }
+
     fn initialize_asset_caption_track_schema(&self) -> Result<(), String> {
         self.execute(
             "CREATE TABLE IF NOT EXISTS asset_caption_tracks (\
@@ -16643,6 +16779,23 @@ fn alert_condition_name(value: AlertConditionKind) -> &'static str {
         AlertConditionKind::UpdateCheckFailed => "update-check-failed",
         AlertConditionKind::UpdateApplyFailed => "update-apply-failed",
         AlertConditionKind::ScheduleMaterializationFailure => "schedule-materialization-failure",
+        AlertConditionKind::CaptionCueMissed => "caption-cue-missed",
+    }
+}
+
+fn caption_cue_miss_reason_name(value: CaptionCueMissReason) -> &'static str {
+    match value {
+        CaptionCueMissReason::ExpiredBeforeAdmission => "expired-before-admission",
+        CaptionCueMissReason::WorkerDidNotAcknowledge => "worker-did-not-acknowledge",
+    }
+}
+
+fn caption_cue_miss_reason_detail(value: CaptionCueMissReason) -> &'static str {
+    match value {
+        CaptionCueMissReason::ExpiredBeforeAdmission => "expired before worker admission",
+        CaptionCueMissReason::WorkerDidNotAcknowledge => {
+            "was not acknowledged by the caption worker"
+        }
     }
 }
 
@@ -16671,6 +16824,7 @@ fn parse_alert_condition(value: &str) -> Result<AlertConditionKind, String> {
         "schedule-materialization-failure" => {
             Ok(AlertConditionKind::ScheduleMaterializationFailure)
         }
+        "caption-cue-missed" => Ok(AlertConditionKind::CaptionCueMissed),
         _ => Err(format!("database returned invalid alert condition {value}")),
     }
 }
@@ -16759,6 +16913,11 @@ fn default_alert_rules() -> Vec<AlertRule> {
         ),
         (
             AlertConditionKind::ScheduleMaterializationFailure,
+            AlertSeverity::Warning,
+            1_800,
+        ),
+        (
+            AlertConditionKind::CaptionCueMissed,
             AlertSeverity::Warning,
             1_800,
         ),
@@ -20584,7 +20743,7 @@ mod tests {
             .unwrap();
         assert_eq!(delivery.notification_kind, AlertNotificationKind::Resolved);
         assert_eq!(delivery.state, AlertDeliveryState::Sent);
-        assert_eq!(migrated.list_alert_rules().unwrap().len(), 21);
+        assert_eq!(migrated.list_alert_rules().unwrap().len(), 22);
         drop(migrated);
         for candidate in [
             database.clone(),
@@ -20922,6 +21081,106 @@ mod tests {
                 .is_err()
         );
         drop(migrated);
+        for candidate in [
+            database.clone(),
+            PathBuf::from(format!("{}-wal", database.display())),
+            PathBuf::from(format!("{}-shm", database.display())),
+        ] {
+            let _ = std::fs::remove_file(candidate);
+        }
+    }
+
+    #[test]
+    fn caption_miss_evidence_replay_deduplicates_across_restart_and_alert_failure_rolls_back() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let database =
+            std::env::temp_dir().join(format!("townlight-caption-miss-evidence-{nonce}.db"));
+        let store = StationStore::open(&database).unwrap();
+        let first = CaptionCueMissEvidence {
+            channel_id: "5d85189a-cd1f-43dc-a619-66a2aeb09ac4".into(),
+            report_id: "b4e1eacb-ef88-4af5-a0d0-a74a76448801".into(),
+            track_id: "65a26343-0339-4654-a92c-4bf9384f18df".into(),
+            track_revision: 7,
+            cue_id: "11111111-1111-4111-8111-111111111111".into(),
+            reason: CaptionCueMissReason::ExpiredBeforeAdmission,
+            media_offset_ms: 1_000,
+            observed_at_unix_ms: 100,
+        };
+        assert!(
+            store
+                .observe_caption_cue_misses_and_route(std::slice::from_ref(&first))
+                .unwrap()
+        );
+        assert!(
+            !store
+                .observe_caption_cue_misses_and_route(std::slice::from_ref(&first))
+                .unwrap(),
+            "exact replay must be AlreadyObserved without another alert observation"
+        );
+        assert_eq!(
+            row_count(&store, "SELECT COUNT(*) FROM caption_cue_miss_evidence"),
+            1
+        );
+        let firing = store
+            .list_alert_events()
+            .unwrap()
+            .into_iter()
+            .find(|event| event.condition == AlertConditionKind::CaptionCueMissed)
+            .unwrap();
+        assert_eq!(firing.occurrence_count, 1);
+
+        store
+            .execute(
+                "CREATE TRIGGER reject_caption_miss_alert_update BEFORE UPDATE ON alert_events \
+                 WHEN NEW.condition='caption-cue-missed' BEGIN SELECT RAISE(ABORT, 'forced caption alert failure'); END",
+            )
+            .unwrap();
+        let mut second = first.clone();
+        second.cue_id = "22222222-2222-4222-8222-222222222222".into();
+        second.observed_at_unix_ms = 101;
+        assert!(
+            store
+                .observe_caption_cue_misses_and_route(std::slice::from_ref(&second))
+                .is_err(),
+            "evidence insertion and alert/outbox routing are one transaction"
+        );
+        assert_eq!(
+            row_count(&store, "SELECT COUNT(*) FROM caption_cue_miss_evidence"),
+            1,
+            "failed alert routing must roll back newly proposed evidence"
+        );
+        store
+            .execute("DROP TRIGGER reject_caption_miss_alert_update")
+            .unwrap();
+        assert!(
+            store
+                .observe_caption_cue_misses_and_route(std::slice::from_ref(&second))
+                .unwrap()
+        );
+        assert_eq!(
+            row_count(&store, "SELECT COUNT(*) FROM caption_cue_miss_evidence"),
+            2
+        );
+        drop(store);
+
+        let reopened = StationStore::open(&database).unwrap();
+        assert!(
+            !reopened
+                .observe_caption_cue_misses_and_route(std::slice::from_ref(&second))
+                .unwrap(),
+            "a service restart must preserve exact replay deduplication"
+        );
+        let replayed = reopened
+            .list_alert_events()
+            .unwrap()
+            .into_iter()
+            .find(|event| event.condition == AlertConditionKind::CaptionCueMissed)
+            .unwrap();
+        assert_eq!(replayed.occurrence_count, 2);
+        drop(reopened);
         for candidate in [
             database.clone(),
             PathBuf::from(format!("{}-wal", database.display())),

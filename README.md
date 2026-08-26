@@ -49,7 +49,7 @@ and independently decodes it off the control loop. The installer carries a pinne
 FFmpeg executable at a private absolute path; each proof records that executable's measured digest.
 The controller prequeues active and bounded-future cues, and requires an acknowledged caption clear
 before every source-role transition to synchronously remove them. A cue that expires before worker
-admission is surfaced only as transient runtime detail; it is not yet a durable incident or safe-to-air readiness authority. Live ASR,
+admission expiry or worker non-acknowledgment is server-observed as a durable, channel-scoped S11 Warning incident and appears through the existing authenticated alert and safe-to-air surfaces; it resolves only after a later clean complete admission batch. Intentional catch-up of a still-active cue is not an incident. Live ASR,
 that durable missed-cue authority, and installed/field evidence remain separate work, so
 commissioning still reports the caption authority as blocked.
 

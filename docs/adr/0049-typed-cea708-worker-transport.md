@@ -13,7 +13,7 @@ its running graph clock; callers cannot inject a wall-clock or arbitrary media t
 Protocol version 8 adds mandatory `ClearCaptionCues` / `CaptionCuesCleared` before every source-role
 transition. Orchestration prequeues active and bounded-future cues. The acknowledged clear
 synchronously removes them before the transition and then invalidates acknowledged cue state.
-Orchestration surfaces any cue that expires before worker admission as transient runtime detail.
+Orchestration records cues that expire before worker admission or are not acknowledged by the worker as durable channel-scoped S11 incidents with typed bounded non-secret evidence. Intentional catch-up of a still-active cue remains valid dispatch behavior.
 That detail is not durable incident/readiness authority. This is deliberately
 a major-version change: a pre-v8 worker cannot safely participate in
 source transitions because it cannot clear the CEA-708 display state.

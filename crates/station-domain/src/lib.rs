@@ -418,6 +418,42 @@ pub enum AlertConditionKind {
     UpdateCheckFailed,
     UpdateApplyFailed,
     ScheduleMaterializationFailure,
+    CaptionCueMissed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum CaptionCueMissReason {
+    ExpiredBeforeAdmission,
+    WorkerDidNotAcknowledge,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CaptionCueMissEvidence {
+    pub channel_id: String,
+    pub report_id: String,
+    pub track_id: String,
+    pub track_revision: u64,
+    pub cue_id: String,
+    pub reason: CaptionCueMissReason,
+    pub media_offset_ms: u64,
+    pub observed_at_unix_ms: i64,
+}
+
+impl CaptionCueMissEvidence {
+    pub fn validate(&self) -> Result<(), &'static str> {
+        if !visible_text(&self.channel_id, 160)
+            || !visible_text(&self.report_id, 160)
+            || !visible_text(&self.track_id, 160)
+            || !visible_text(&self.cue_id, 160)
+            || self.track_revision == 0
+            || self.media_offset_ms > i64::MAX as u64
+            || self.observed_at_unix_ms < 0
+        {
+            return Err("caption cue miss evidence is invalid.");
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

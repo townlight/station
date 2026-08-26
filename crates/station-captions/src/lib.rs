@@ -5,8 +5,8 @@ use sha2::{Digest, Sha256};
 
 pub const MAX_CAPTION_CUES_PER_TRACK: usize = 100_000;
 /// A caption cue has a finite, positive duration. Runtime scheduling surfaces
-/// cues that expire before admission only as transient runtime detail; it is
-/// not durable incident/readiness authority.
+/// cues whose planned window cannot be admitted. The controller converts every
+/// server-observed missed window into durable channel-scoped incident authority.
 pub const MIN_CAPTION_CUE_DURATION_MS: u64 = 1;
 pub const MAX_CAPTION_CUE_DURATION_MS: u64 = 60_000;
 pub const MAX_CAPTION_CUE_TEXT_BYTES: usize = 2_048;

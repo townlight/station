@@ -8,7 +8,7 @@ committed schedule window. It reads the channel's durable CEA-708 language/servi
 one current asset track occupying that exact language/service slot. Disabled policy or no matching
 track means no cue is expected; it never fabricates caption presence.
 
-Each controller tick surfaces expired cues as transient runtime detail, resumes a cue already active at the current media offset
+Each controller tick records expired cues as durable channel-scoped S11 incidents, resumes a cue already active at the current media offset
 with zero delay and only its remaining duration, and prequeues future cues within the worker
 protocol's bounded sixty-second relative-delay window. A tick sends at most 64 cues. The worker
 derives presentation timestamps from its running graph clock, acknowledges every canonical cue
