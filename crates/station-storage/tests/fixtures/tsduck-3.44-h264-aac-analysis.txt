@@ -1,0 +1,322 @@
+TITLE: ERROR ANALYSIS REPORT
+INFO: Transport Stream Identifier: 0x0001 (1)
+TS:1:0x0001: No BAT
+TS:1:0x0001: No TDT
+TS:1:0x0001: No TOT
+SUMMARY: Error count: 3
+{
+  "pids": [
+    {
+      "audio": false,
+      "bitrate": 14894,
+      "bitrate-204": 16161,
+      "description": "PAT",
+      "ecm": false,
+      "emm": false,
+      "global": true,
+      "id": 0,
+      "iip": false,
+      "is-scrambled": false,
+      "packets": {
+        "af": 0,
+        "clear": 20,
+        "discontinuities": 0,
+        "dts": 0,
+        "dts-leap": 0,
+        "duplicated": 0,
+        "invalid-scrambling": 0,
+        "pcr": 0,
+        "pcr-leap": 0,
+        "pts": 0,
+        "pts-leap": 0,
+        "scrambled": 0,
+        "total": 20
+      },
+      "pmt": false,
+      "service-count": 0,
+      "t2mi": false,
+      "unit-start": 20,
+      "unreferenced": false,
+      "video": false
+    },
+    {
+      "audio": false,
+      "bitrate": 2979,
+      "bitrate-204": 3232,
+      "description": "SDT/BAT",
+      "ecm": false,
+      "emm": false,
+      "global": true,
+      "id": 17,
+      "iip": false,
+      "is-scrambled": false,
+      "packets": {
+        "af": 0,
+        "clear": 4,
+        "discontinuities": 0,
+        "dts": 0,
+        "dts-leap": 0,
+        "duplicated": 0,
+        "invalid-scrambling": 0,
+        "pcr": 0,
+        "pcr-leap": 0,
+        "pts": 0,
+        "pts-leap": 0,
+        "scrambled": 0,
+        "total": 4
+      },
+      "pmt": false,
+      "service-count": 0,
+      "t2mi": false,
+      "unit-start": 4,
+      "unreferenced": false,
+      "video": false
+    },
+    {
+      "audio": false,
+      "bitrate": 48405,
+      "bitrate-204": 52524,
+      "description": "AVC video (320x180, baseline profile, level 1.3, 4:2:0)",
+      "ecm": false,
+      "emm": false,
+      "first-pcr": 19476000,
+      "first-pts": 127920,
+      "global": false,
+      "id": 256,
+      "iip": false,
+      "invalid-pes-prefix": 0,
+      "is-scrambled": false,
+      "last-pcr": 70776000,
+      "last-pts": 304920,
+      "packets": {
+        "af": 62,
+        "clear": 65,
+        "discontinuities": 0,
+        "dts": 0,
+        "dts-leap": 0,
+        "duplicated": 0,
+        "invalid-scrambling": 0,
+        "pcr": 20,
+        "pcr-leap": 0,
+        "pts": 60,
+        "pts-leap": 0,
+        "scrambled": 0,
+        "total": 65
+      },
+      "pes": 60,
+      "pes-stream-id": 224,
+      "pmt": false,
+      "service-count": 1,
+      "services": [
+        1
+      ],
+      "t2mi": false,
+      "unreferenced": false,
+      "video": true
+    },
+    {
+      "audio": true,
+      "bitrate": 132555,
+      "bitrate-204": 143836,
+      "description": "MPEG-2 AAC Audio",
+      "ecm": false,
+      "emm": false,
+      "first-pts": 126000,
+      "global": false,
+      "id": 257,
+      "iip": false,
+      "invalid-pes-prefix": 0,
+      "is-scrambled": false,
+      "last-pts": 296880,
+      "packets": {
+        "af": 24,
+        "clear": 178,
+        "discontinuities": 0,
+        "dts": 0,
+        "dts-leap": 0,
+        "duplicated": 0,
+        "invalid-scrambling": 0,
+        "pcr": 0,
+        "pcr-leap": 0,
+        "pts": 12,
+        "pts-leap": 0,
+        "scrambled": 0,
+        "total": 178
+      },
+      "pes": 12,
+      "pes-stream-id": 192,
+      "pmt": false,
+      "service-count": 1,
+      "services": [
+        1
+      ],
+      "t2mi": false,
+      "unreferenced": false,
+      "video": false
+    },
+    {
+      "audio": false,
+      "bitrate": 14894,
+      "bitrate-204": 16161,
+      "description": "PMT",
+      "ecm": false,
+      "emm": false,
+      "global": false,
+      "id": 4096,
+      "iip": false,
+      "is-scrambled": false,
+      "packets": {
+        "af": 0,
+        "clear": 20,
+        "discontinuities": 0,
+        "dts": 0,
+        "dts-leap": 0,
+        "duplicated": 0,
+        "invalid-scrambling": 0,
+        "pcr": 0,
+        "pcr-leap": 0,
+        "pts": 0,
+        "pts-leap": 0,
+        "scrambled": 0,
+        "total": 20
+      },
+      "pmt": true,
+      "service-count": 1,
+      "services": [
+        1
+      ],
+      "t2mi": false,
+      "unit-start": 20,
+      "unreferenced": false,
+      "video": false
+    }
+  ],
+  "services": [
+    {
+      "bitrate": 195854,
+      "bitrate-204": 212522,
+      "components": {
+        "clear": 3,
+        "scrambled": 0,
+        "total": 3
+      },
+      "hidden": false,
+      "id": 1,
+      "is-scrambled": false,
+      "name": "Service01",
+      "original-network-id": 65281,
+      "packets": 263,
+      "pcr-pid": 256,
+      "pids": [
+        256,
+        257,
+        4096
+      ],
+      "pmt-pid": 4096,
+      "provider": "FFmpeg",
+      "ssu": false,
+      "t2mi": false,
+      "tsid": 1,
+      "type": 1,
+      "type-name": "Digital television service"
+    }
+  ],
+  "tables": [
+    {
+      "first-version": 0,
+      "last-version": 0,
+      "max-repetition-ms": 148,
+      "max-repetition-pkt": 21,
+      "min-repetition-ms": 35,
+      "min-repetition-pkt": 5,
+      "pid": 0,
+      "repetition-ms": 99,
+      "repetition-pkt": 14,
+      "sections": 20,
+      "tables": 20,
+      "tid": 0,
+      "tid-ext": 1,
+      "versions": [
+        0
+      ]
+    },
+    {
+      "first-version": 0,
+      "last-version": 0,
+      "max-repetition-ms": 535,
+      "max-repetition-pkt": 76,
+      "min-repetition-ms": 394,
+      "min-repetition-pkt": 56,
+      "pid": 17,
+      "repetition-ms": 479,
+      "repetition-pkt": 68,
+      "sections": 4,
+      "tables": 4,
+      "tid": 66,
+      "tid-ext": 1,
+      "versions": [
+        0
+      ]
+    },
+    {
+      "first-version": 0,
+      "last-version": 0,
+      "max-repetition-ms": 148,
+      "max-repetition-pkt": 21,
+      "min-repetition-ms": 35,
+      "min-repetition-pkt": 5,
+      "pid": 4096,
+      "repetition-ms": 99,
+      "repetition-pkt": 14,
+      "sections": 20,
+      "tables": 20,
+      "tid": 2,
+      "tid-ext": 1,
+      "versions": [
+        0
+      ]
+    }
+  ],
+  "ts": {
+    "bitrate": 213726,
+    "bitrate-204": 231916,
+    "bytes": 53956,
+    "duration": 2,
+    "id": 1,
+    "packets": {
+      "invalid-syncs": 0,
+      "suspect-ignored": 0,
+      "total": 287,
+      "transport-errors": 0
+    },
+    "pcr-bitrate": 213726,
+    "pcr-bitrate-204": 231916,
+    "pids": {
+      "clear": 5,
+      "global": {
+        "bitrate": 17873,
+        "bitrate-204": 19394,
+        "clear": 2,
+        "is-scrambled": false,
+        "packets": 24,
+        "pids": [
+          0,
+          17
+        ],
+        "scrambled": 0,
+        "total": 2
+      },
+      "pcr": 1,
+      "scrambled": 0,
+      "total": 5,
+      "unreferenced": 0
+    },
+    "services": {
+      "clear": 1,
+      "scrambled": 0,
+      "total": 1
+    },
+    "user-bitrate": 0,
+    "user-bitrate-204": 0
+  }
+}

@@ -1,0 +1,72 @@
+[
+  {
+    "#name": "SDT",
+    "#nodes": [
+      {
+        "#name": "metadata",
+        "pid": 17
+      },
+      {
+        "#name": "service",
+        "#nodes": [
+          {
+            "#name": "service_descriptor",
+            "service_name": "Service01",
+            "service_provider_name": "FFmpeg",
+            "service_type": 1
+          }
+        ],
+        "ca_mode": false,
+        "eit_present_following": false,
+        "eit_schedule": false,
+        "running_status": "running",
+        "service_id": 1
+      }
+    ],
+    "actual": true,
+    "current": true,
+    "original_network_id": 65281,
+    "transport_stream_id": 1,
+    "version": 0
+  },
+  {
+    "#name": "PAT",
+    "#nodes": [
+      {
+        "#name": "metadata",
+        "pid": 0
+      },
+      {
+        "#name": "service",
+        "program_map_pid": 4096,
+        "service_id": 1
+      }
+    ],
+    "current": true,
+    "transport_stream_id": 1,
+    "version": 0
+  },
+  {
+    "#name": "PMT",
+    "#nodes": [
+      {
+        "#name": "metadata",
+        "pid": 4096
+      },
+      {
+        "#name": "component",
+        "elementary_pid": 256,
+        "stream_type": 27
+      },
+      {
+        "#name": "component",
+        "elementary_pid": 257,
+        "stream_type": 15
+      }
+    ],
+    "current": true,
+    "pcr_pid": 256,
+    "service_id": 1,
+    "version": 0
+  }
+]

@@ -33,6 +33,7 @@ members = [
     "crates/station-runtime",
     "crates/station-readiness",
     "crates/station-transport-proof",
+    "crates/station-transport-executor",
     "crates/station-reporting",
     "crates/station-schedule",
     "crates/station-schedule-automation",
@@ -100,6 +101,7 @@ station-publishing = { path = "crates/station-publishing" }
 station-runtime = { path = "crates/station-runtime" }
 station-readiness = { path = "crates/station-readiness" }
 station-transport-proof = { path = "crates/station-transport-proof" }
+station-transport-executor = { path = "crates/station-transport-executor" }
 station-schedule = { path = "crates/station-schedule" }
 station-schedule-automation = { path = "crates/station-schedule-automation" }
 station-source-evidence = { path = "crates/station-source-evidence" }
@@ -112,7 +114,7 @@ station-update-coordinator = { path = "crates/station-update-coordinator" }
 station-windows-ipc = { path = "crates/station-windows-ipc" }
 ureq = { version = "=3.4.0", features = ["platform-verifier"] }
 windows-service = "=0.8.1"
-windows-sys = { version = "=0.61.2", features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_SystemInformation", "Win32_System_Threading"] }
+windows-sys = { version = "=0.61.2", features = ["Win32_Foundation", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_IO", "Win32_System_JobObjects", "Win32_System_SystemInformation", "Win32_System_Threading"] }
 zeroize = "=1.9.0"
 zip = { version = "=8.6.0", default-features = false }
 

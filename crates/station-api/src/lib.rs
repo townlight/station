@@ -44,7 +44,10 @@ use station_domain::{
     validate_alert_channel_target,
 };
 use station_live::{LiveSource, LiveSourceWriteError, TakeoverSession, TakeoverState};
-use station_maintenance::read_verified_candidate_identity;
+use station_maintenance::{
+    acquire_install_authority_fence, read_verified_candidate_identity,
+    read_verified_install_authority,
+};
 use station_media_lifecycle::{
     AssetLoudnessAnalysis, AssetReadinessView, IngestJobStatus, IngestSourceKind,
     LoudnessGateStatus, MediaIngestJob, MissingMediaAlert, ReadinessDashboard, ReadinessState,
@@ -101,7 +104,8 @@ use station_storage::{
     ScheduleMaterializationHistoryReadError, ScheduleMaterializationOutcome,
     ScheduleMaterializationOutcomeRecord, ScheduleMaterializationPlanRecord,
     ScheduleMaterializationRun, ScheduleMaterializationRunOrigin,
-    ScheduleMaterializationWriteError, StationStore, StoredSinkLoudnessProof,
+    ScheduleMaterializationWriteError, StationStore, StoredSinkLoudnessProof, TransportProofJob,
+    TransportProofJobRecord, TransportProofJobState,
 };
 use station_transport_proof::{CableTransportValidation, TargetDeviceConfig, TargetProtocol};
 use station_update::UpdateCheckTrigger;
@@ -715,7 +719,9 @@ struct PutTransportTargetRequest {
     protocol: TargetProtocol,
     host: String,
     port: u16,
-    credential_configured: bool,
+    /// Write-only local Setup-Admin authorization. It is DPAPI-protected by
+    /// storage and is never included in responses, events, or receipts.
+    authorization: Option<String>,
     expected_revision: Option<u64>,
 }
 
@@ -724,6 +730,36 @@ struct TransportProofResponse {
     channel_id: String,
     history: station_storage::TransportProofHistory,
     validations: Vec<CableTransportValidation>,
+}
+
+#[derive(Debug, Serialize)]
+struct TransportProofJobResponse {
+    job_id: String,
+    channel_id: String,
+    sink_id: String,
+    target_id: String,
+    target_revision: u64,
+    candidate_version: String,
+    source_commit: String,
+    configuration_hash: String,
+    state: &'static str,
+    created_at_unix_ms: i64,
+    updated_at_unix_ms: i64,
+    lease_expires_at_unix_ms: Option<i64>,
+    capture: Option<TransportProofCaptureResponse>,
+    analyzer_output_sha256: Option<String>,
+    completed_at_unix_ms: Option<i64>,
+    failed_at_unix_ms: Option<i64>,
+    failure_detail: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct TransportProofCaptureResponse {
+    artifact_relative_path: String,
+    capture_bytes: u64,
+    capture_sha256: String,
+    started_at_unix_ms: i64,
+    ended_at_unix_ms: i64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2165,6 +2201,18 @@ impl Api {
                 if path.starts_with("/api/v1/channels/") && path.ends_with("/transport-proof") =>
             {
                 self.read_transport_proof(path, actor)
+            }
+            ("POST", path)
+                if path.starts_with("/api/v1/channels/")
+                    && path.ends_with("/transport-proof/jobs") =>
+            {
+                self.request_transport_proof_job(path, body, actor)
+            }
+            ("GET", path)
+                if path.starts_with("/api/v1/channels/")
+                    && path.contains("/transport-proof/jobs/") =>
+            {
+                self.read_transport_proof_job(path, actor)
             }
             ("GET", path)
                 if path.starts_with("/api/v1/channels/") && path.ends_with("/transport-target") =>
@@ -6201,7 +6249,7 @@ impl Api {
             protocol: request.protocol,
             host: request.host,
             port: request.port,
-            credential_configured: request.credential_configured,
+            credential_configured: request.authorization.is_some(),
             revision: 1,
             created_at_unix_ms: now,
             updated_at_unix_ms: now,
@@ -6237,11 +6285,34 @@ impl Api {
             request.expected_revision,
             &config,
         ) {
-            Ok(stored) => json_response(
-                200,
-                serde_json::to_vec(&stored)
-                    .expect("serializing transport target configuration cannot fail"),
-            ),
+            Ok(stored) => {
+                if let Some(authorization) = request.authorization.as_deref()
+                    && let Err(message) = self.storage.store_transport_target_authorization(
+                        channel_id,
+                        &sinks[0].sink_id,
+                        &stored,
+                        authorization,
+                    )
+                {
+                    return error_response(422, "credential_provisioning_failed", &message);
+                }
+                match self
+                    .storage
+                    .read_transport_target_config(channel_id, &sinks[0].sink_id)
+                {
+                    Ok(Some(stored)) => json_response(
+                        200,
+                        serde_json::to_vec(&stored)
+                            .expect("serializing transport target configuration cannot fail"),
+                    ),
+                    Ok(None) => error_response(
+                        500,
+                        "storage_error",
+                        "Target configuration disappeared after write.",
+                    ),
+                    Err(message) => error_response(500, "storage_error", &message),
+                }
+            }
             Err(message) if message.contains("revision conflict") => {
                 error_response(409, "revision_conflict", &message)
             }
@@ -6362,6 +6433,217 @@ impl Api {
             })
             .expect("serializing transport proof cannot fail"),
         )
+    }
+
+    /// A browser may request work, but it cannot nominate the candidate,
+    /// target, configuration, actor, clock, capture path, or outcome.  Those
+    /// facts are derived by the server and the store rechecks target/config in
+    /// its insertion transaction.
+    fn request_transport_proof_job(
+        &self,
+        path: &str,
+        body: Option<&[u8]>,
+        actor: Option<&OperatorAccount>,
+    ) -> ApiResponse {
+        let Some(actor) = actor.filter(|account| account.enabled() && is_setup_admin(account))
+        else {
+            return error_response(
+                403,
+                "setup_admin_required",
+                "Requesting transport proof requires the Setup Admin role.",
+            );
+        };
+        if body.is_some_and(|bytes| !bytes.is_empty()) {
+            return error_response(
+                400,
+                "invalid_json",
+                "A transport-proof request accepts no caller authority fields.",
+            );
+        }
+        let Some(channel_id) = path_identity(path, "/api/v1/channels/", "/transport-proof/jobs")
+        else {
+            return error_response(
+                400,
+                "invalid_path",
+                "The transport proof job path is invalid.",
+            );
+        };
+        if !is_api_uuid(channel_id) {
+            return error_response(400, "invalid_path", "The channel identity is invalid.");
+        }
+        let channel = match self.storage.list_channels() {
+            Ok(channels) => channels
+                .into_iter()
+                .find(|channel| channel.channel_id == channel_id),
+            Err(message) => return error_response(500, "storage_error", &message),
+        };
+        let Some(channel) = channel else {
+            return error_response(404, "channel_not_found", "The channel does not exist.");
+        };
+        let sinks = channel
+            .output_sinks
+            .into_iter()
+            .filter(|sink| {
+                sink.enabled
+                    && sink.required
+                    && sink.kind == station_schedule::OutputSinkKind::UdpTs
+            })
+            .collect::<Vec<_>>();
+        let [sink] = sinks.as_slice() else {
+            return error_response(
+                409,
+                "transport_sink_ambiguous",
+                "Transport proof currently requires exactly one enabled required UDP transport-stream sink.",
+            );
+        };
+        let target = match self
+            .storage
+            .read_transport_target_config(channel_id, &sink.sink_id)
+        {
+            Ok(Some(target)) => target,
+            Ok(None) => {
+                return error_response(
+                    409,
+                    "transport_target_not_configured",
+                    "The required transport sink has no target configuration.",
+                );
+            }
+            Err(message) => return error_response(500, "storage_error", &message),
+        };
+        let data_directory = match self.database_path.parent() {
+            Some(path) => path,
+            None => {
+                return error_response(
+                    500,
+                    "candidate_authority_unavailable",
+                    "The station data directory is unavailable.",
+                );
+            }
+        };
+        let install_authority_fence = match acquire_install_authority_fence(data_directory) {
+            Ok(fence) => fence,
+            Err(_) => {
+                return error_response(
+                    409,
+                    "candidate_authority_busy",
+                    "Candidate activation is in progress; wait for it to finish before requesting transport proof.",
+                );
+            }
+        };
+        if install_authority_fence.was_abandoned() {
+            return error_response(
+                409,
+                "candidate_authority_recovery_required",
+                "Candidate authority requires interrupted-update recovery before transport proof can be requested.",
+            );
+        }
+        let candidate = match read_verified_install_authority(
+            data_directory,
+            &self.application_directory,
+        ) {
+            Ok(candidate) => candidate,
+            Err(_) => {
+                return error_response(
+                    409,
+                    "candidate_not_verified",
+                    "A verified installed candidate is required before requesting transport proof.",
+                );
+            }
+        };
+        let now = match system_time_millis() {
+            Ok(now) => now,
+            Err(message) => return error_response(500, "clock_error", &message),
+        };
+        let job_id = match secure_canonical_uuid() {
+            Ok(value) => value,
+            Err(message) => return error_response(500, "entropy_unavailable", &message),
+        };
+        let configuration_hash = match self
+            .storage
+            .current_channel_output_configuration_hash(channel_id)
+        {
+            Ok(value) => value,
+            Err(message) => return error_response(500, "storage_error", &message),
+        };
+        let job = TransportProofJob {
+            job_id,
+            channel_id: channel_id.into(),
+            sink_id: sink.sink_id.clone(),
+            target_id: target.target_id,
+            target_revision: target.revision,
+            candidate_version: candidate.version().into(),
+            source_commit: candidate.source_commit().into(),
+            install_generation: Some(candidate.install_generation()),
+            configuration_hash,
+            requested_by: actor.account_id().as_str().into(),
+            created_at_unix_ms: now,
+            max_capture_bytes: station_transport_proof::MAX_PROOF_CAPTURE_BYTES,
+        };
+        match self.storage.enqueue_transport_proof_job(&job, || {
+            read_verified_install_authority(data_directory, &self.application_directory)
+        }) {
+            Ok(true) => json_response(
+                202,
+                serde_json::to_vec(&transport_proof_job_response(
+                    self.storage
+                        .read_transport_proof_job(&job.job_id)
+                        .ok()
+                        .flatten()
+                        .expect("created transport job must be readable"),
+                ))
+                .expect("serializing transport proof job cannot fail"),
+            ),
+            Ok(false) => error_response(
+                409,
+                "job_already_active",
+                "An active transport proof job already exists for this sink.",
+            ),
+            Err(message) if message.contains("stale") || message.contains("not configured") => {
+                error_response(
+                    409,
+                    "stale_authority",
+                    "The target or output configuration changed; refresh and request again.",
+                )
+            }
+            Err(message) => error_response(500, "storage_error", &message),
+        }
+    }
+
+    fn read_transport_proof_job(&self, path: &str, actor: Option<&OperatorAccount>) -> ApiResponse {
+        if !is_scheduling_reader(actor) {
+            return error_response(
+                403,
+                "operator_required",
+                "Reading transport proof jobs requires an enabled operator account.",
+            );
+        }
+        let Some((channel_id, job_id)) = transport_proof_job_path(path) else {
+            return error_response(
+                400,
+                "invalid_path",
+                "The transport proof job path is invalid.",
+            );
+        };
+        if !is_api_uuid(channel_id) || !is_canonical_api_uuid(job_id) {
+            return error_response(
+                400,
+                "invalid_path",
+                "The transport proof job identity is invalid.",
+            );
+        }
+        match self.storage.read_transport_proof_job(job_id) {
+            Ok(Some(record)) if record.job.channel_id == channel_id => json_response(
+                200,
+                serde_json::to_vec(&transport_proof_job_response(record))
+                    .expect("serializing transport proof job cannot fail"),
+            ),
+            Ok(_) => error_response(
+                404,
+                "job_not_found",
+                "The transport proof job does not exist.",
+            ),
+            Err(message) => error_response(500, "storage_error", &message),
+        }
     }
 
     fn create_receiver_receipt(
@@ -11116,6 +11398,18 @@ fn loudness_job_path(path: &str) -> Option<(&str, &str)> {
     .then_some((channel_id, job_id))
 }
 
+fn transport_proof_job_path(path: &str) -> Option<(&str, &str)> {
+    let remainder = path.strip_prefix("/api/v1/channels/")?;
+    let (channel_id, job_id) = remainder.split_once("/transport-proof/jobs/")?;
+    (!channel_id.is_empty()
+        && !job_id.is_empty()
+        && !channel_id.contains('/')
+        && !job_id.contains('/')
+        && !channel_id.contains(['?', '%', '\\'])
+        && !job_id.contains(['?', '%', '\\']))
+    .then_some((channel_id, job_id))
+}
+
 fn caption_job_path(path: &str) -> Option<(&str, &str)> {
     let remainder = path.strip_prefix("/api/v1/channels/")?;
     let (channel_id, job_id) = remainder.split_once("/caption-proof/jobs/")?;
@@ -11136,6 +11430,17 @@ fn loudness_job_state_name(state: OutputLoudnessProofJobState) -> &'static str {
         OutputLoudnessProofJobState::Analyzing => "analyzing",
         OutputLoudnessProofJobState::Completed => "completed",
         OutputLoudnessProofJobState::Failed => "failed",
+    }
+}
+
+fn transport_proof_job_state_name(state: TransportProofJobState) -> &'static str {
+    match state {
+        TransportProofJobState::Pending => "pending",
+        TransportProofJobState::Claimed => "claimed",
+        TransportProofJobState::Capturing => "capturing",
+        TransportProofJobState::Analyzing => "analyzing",
+        TransportProofJobState::Completed => "completed",
+        TransportProofJobState::Failed => "failed",
     }
 }
 
@@ -11235,6 +11540,35 @@ fn loudness_job_response(record: OutputLoudnessProofJobRecord) -> LoudnessProofJ
                 sample_duration_ms: capture.sample_duration_ms,
                 capture_sha256: capture.capture_sha256,
             }),
+        completed_at_unix_ms: record.completed_at_unix_ms,
+        failed_at_unix_ms: record.failed_at_unix_ms,
+        failure_detail: record.failure_detail,
+    }
+}
+
+fn transport_proof_job_response(record: TransportProofJobRecord) -> TransportProofJobResponse {
+    let job = record.job;
+    TransportProofJobResponse {
+        job_id: job.job_id,
+        channel_id: job.channel_id,
+        sink_id: job.sink_id,
+        target_id: job.target_id,
+        target_revision: job.target_revision,
+        candidate_version: job.candidate_version,
+        source_commit: job.source_commit,
+        configuration_hash: job.configuration_hash,
+        state: transport_proof_job_state_name(record.state),
+        created_at_unix_ms: job.created_at_unix_ms,
+        updated_at_unix_ms: record.updated_at_unix_ms,
+        lease_expires_at_unix_ms: record.lease_expires_at_unix_ms,
+        capture: record.capture.map(|capture| TransportProofCaptureResponse {
+            artifact_relative_path: capture.artifact_relative_path,
+            capture_bytes: capture.capture_bytes,
+            capture_sha256: capture.capture_sha256,
+            started_at_unix_ms: capture.started_at_unix_ms,
+            ended_at_unix_ms: capture.ended_at_unix_ms,
+        }),
+        analyzer_output_sha256: record.analyzer_output_sha256,
         completed_at_unix_ms: record.completed_at_unix_ms,
         failed_at_unix_ms: record.failed_at_unix_ms,
         failure_detail: record.failure_detail,
@@ -12968,6 +13302,88 @@ mod tests {
 
     const TEST_PASSWORD_PHC: &str = "$argon2id$v=19$m=65536,t=3,p=1$c2FsdHNhbHRzYWx0c2FsdA$QUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUE";
 
+    fn install_transport_candidate(data: &Path, application: &Path) {
+        const VERSION: &str = "0.2.0";
+        const COMMIT: &str = "0123456789abcdef0123456789abcdef01234567";
+        const RUNTIME_SHA: &str =
+            "abcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcd";
+        const TSDUCK_SHA: &str = "b0ca0f963fcd77488b8c32d6f9d85030daa891ed753c36e57bbb458807a44eb1";
+        let runtime = application.join("runtime/gstreamer");
+        let tsduck = application.join("runtime/tsduck");
+        std::fs::create_dir_all(runtime.join("bin")).unwrap();
+        std::fs::create_dir_all(runtime.join("lib/gstreamer-1.0")).unwrap();
+        std::fs::create_dir_all(runtime.join("lib/gst-validate-launcher/python/launcher/apps"))
+            .unwrap();
+        for (path, bytes) in [
+            ("bin/gstreamer.dll", b"runtime".as_slice()),
+            ("lib/gstreamer-1.0/plugin.dll", b"plugin".as_slice()),
+            (
+                "lib/gst-validate-launcher/python/launcher/apps/empty.py",
+                b"".as_slice(),
+            ),
+        ] {
+            std::fs::write(runtime.join(path), bytes).unwrap();
+        }
+        for (path, bytes) in [
+            ("LICENSE.txt", b"license".as_slice()),
+            ("OTHERS.txt", b"notices".as_slice()),
+            ("bin/tsp.exe", b"tsp".as_slice()),
+            ("bin/tsanalyze.exe", b"analyze".as_slice()),
+            ("bin/tstables.exe", b"tables".as_slice()),
+            ("bin/tsduck.dll", b"tsduck".as_slice()),
+            ("bin/tscore.dll", b"tscore".as_slice()),
+        ] {
+            let destination = tsduck.join(path);
+            std::fs::create_dir_all(destination.parent().unwrap()).unwrap();
+            std::fs::write(destination, bytes).unwrap();
+        }
+        let runtime_manifest_sha = station_maintenance::write_installed_runtime_manifest(
+            &runtime,
+            &data.join(station_maintenance::INSTALLED_RUNTIME_MANIFEST_NAME),
+            VERSION,
+            COMMIT,
+            RUNTIME_SHA,
+        )
+        .unwrap();
+        let tsduck_manifest_sha = station_maintenance::write_installed_runtime_manifest(
+            &tsduck,
+            &data.join(station_maintenance::TSDUCK_RUNTIME_MANIFEST_NAME),
+            VERSION,
+            COMMIT,
+            TSDUCK_SHA,
+        )
+        .unwrap();
+        let files = [
+            ("stationd.exe", b"stationd".as_slice()),
+            ("channel-worker.exe", b"worker".as_slice()),
+        ];
+        let manifest = station_update::UpdatePackageManifest {
+            schema_version: 2,
+            product: "TownLight Station".into(),
+            version: VERSION.into(),
+            source_commit: COMMIT.into(),
+            files: files
+                .iter()
+                .map(|(path, bytes)| station_update::UpdatePackageFile {
+                    path: (*path).into(),
+                    size_bytes: bytes.len() as u64,
+                    sha256: format!("{:x}", Sha256::digest(bytes)),
+                })
+                .collect(),
+        };
+        for (path, bytes) in files {
+            std::fs::write(application.join(path), bytes).unwrap();
+        }
+        std::fs::write(
+            data.join(station_maintenance::ACTIVE_SLOT_RECEIPT_NAME),
+            serde_json::json!({"schema_version":1,"generation":7,"activated_at_unix_ms":1,"transaction_id":"bootstrap","active":{"relative_directory":".","package_manifest":manifest},"previous":null}).to_string(),
+        ).unwrap();
+        std::fs::write(
+            data.join(station_maintenance::INSTALL_RECEIPT_NAME),
+            serde_json::json!({"product":"TownLight Station","version":VERSION,"source_commit":COMMIT,"media_runtime_sha256":RUNTIME_SHA,"runtime_manifest_sha256":runtime_manifest_sha,"tsduck_version":"3.44-4676","tsduck_source_url":"https://github.com/tsduck/tsduck/releases/download/v3.44-4676/TSDuck-Win64-3.44-4676-Portable.zip","tsduck_archive_name":"TSDuck-Win64-3.44-4676-Portable.zip","tsduck_runtime_sha256":TSDUCK_SHA,"tsduck_runtime_manifest_sha256":tsduck_manifest_sha,"installed_at_unix_ms":1,"health_uri":"http://127.0.0.1:4070/health"}).to_string(),
+        ).unwrap();
+    }
+
     fn test_actor_with_account(
         account_id: &str,
         username: &str,
@@ -14644,6 +15060,13 @@ mod tests {
         }
     }
 
+    fn transport_station_box_probe() -> StationBoxProbeInput {
+        let mut probe = station_box_probe();
+        probe.product_version = "0.2.0".into();
+        probe.source_commit = Some("0123456789abcdef0123456789abcdef01234567".into());
+        probe
+    }
+
     fn receiver_test_headend(
         enabled: bool,
         sinks: Vec<station_readiness::SinkHeadendReadiness>,
@@ -15642,6 +16065,104 @@ mod tests {
 
         std::fs::remove_dir_all(application).unwrap();
         let _ = std::fs::remove_file(database);
+    }
+
+    #[test]
+    fn authenticated_transport_post_and_get_derive_server_authority() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "townlight-transport-job-api-{}-{nonce}",
+            std::process::id()
+        ));
+        let application = root.join("application");
+        let database = root.join("data/station.db");
+        std::fs::create_dir_all(database.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(&application).unwrap();
+        install_transport_candidate(database.parent().unwrap(), &application);
+        let api =
+            Api::open_with_station_box_probe(&database, &application, station_box_probe()).unwrap();
+        let channel_id = "11111111-2222-4333-8444-555555555555";
+        let sink_id = "22222222-3333-4444-8555-666666666666";
+        api.storage
+            .put_channel(&ChannelConfiguration {
+                channel_id: channel_id.into(),
+                display_name: "Transport proof".into(),
+                output_profile: station_schedule::OutputProfileId::Proof360p30,
+                output_sinks: vec![station_schedule::OutputSinkConfiguration::required_udp(
+                    sink_id,
+                    "Cable primary",
+                    "127.0.0.1:5500",
+                    -24.0,
+                )],
+                enabled: true,
+            })
+            .unwrap();
+        api.storage
+            .write_transport_target_config(
+                channel_id,
+                sink_id,
+                None,
+                &TargetDeviceConfig {
+                    target_id: "receiver-1".into(),
+                    label: "Headend receiver".into(),
+                    protocol: TargetProtocol::HttpsApi,
+                    host: "receiver.example.test".into(),
+                    port: 443,
+                    credential_configured: true,
+                    revision: 1,
+                    created_at_unix_ms: 1,
+                    updated_at_unix_ms: 1,
+                    updated_by: "setup-admin".into(),
+                },
+            )
+            .unwrap();
+        let admin = test_actor(station_auth::OperatorRole::SetupAdmin);
+        let forbidden = api.handle_authenticated(
+            "POST",
+            &format!("/api/v1/channels/{channel_id}/transport-proof/jobs"),
+            None,
+            &test_actor(station_auth::OperatorRole::MeetingOperator),
+        );
+        assert_eq!(forbidden.status, 403);
+        let forged = api.handle_authenticated(
+            "POST",
+            &format!("/api/v1/channels/{channel_id}/transport-proof/jobs"),
+            Some(br#"{"candidate_version":"forged"}"#),
+            &admin,
+        );
+        assert_eq!(forged.status, 400);
+        let created = api.handle_authenticated(
+            "POST",
+            &format!("/api/v1/channels/{channel_id}/transport-proof/jobs"),
+            None,
+            &admin,
+        );
+        assert_eq!(
+            created.status,
+            202,
+            "{}",
+            String::from_utf8_lossy(&created.body)
+        );
+        let created: serde_json::Value = serde_json::from_slice(&created.body).unwrap();
+        assert_eq!(created["state"], "pending");
+        assert_eq!(created["target_id"], "receiver-1");
+        assert_eq!(created["candidate_version"], "0.2.0");
+        let job_id = created["job_id"].as_str().unwrap();
+        let status = api.handle_authenticated(
+            "GET",
+            &format!("/api/v1/channels/{channel_id}/transport-proof/jobs/{job_id}"),
+            None,
+            &admin,
+        );
+        assert_eq!(status.status, 200);
+        let status: serde_json::Value = serde_json::from_slice(&status.body).unwrap();
+        assert_eq!(status["job_id"], job_id);
+        assert_eq!(status["state"], "pending");
+        drop(api);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -19568,7 +20089,6 @@ mod tests {
             "protocol": "https_api",
             "host": format!("receiver.example.test/api/{secret}"),
             "port": 443,
-            "credential_configured": true,
             "expected_revision": null
         }))
         .unwrap();
@@ -19594,6 +20114,297 @@ mod tests {
     }
 
     #[test]
+    fn setup_admin_provisions_rotates_and_removes_a_write_only_transport_authorization() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let database =
+            std::env::temp_dir().join(format!("townlight-target-credential-api-{nonce}.db"));
+        let api = Api::open(&database).unwrap();
+        let channel_id = "11111111-2222-4333-8444-555555555555";
+        let sink_id = "22222222-3333-4444-8555-666666666666";
+        api.storage
+            .put_channel(&ChannelConfiguration {
+                channel_id: channel_id.into(),
+                display_name: "Transport credential API".into(),
+                output_profile: station_schedule::OutputProfileId::Proof360p30,
+                output_sinks: vec![station_schedule::OutputSinkConfiguration::required_udp(
+                    sink_id,
+                    "Required sink",
+                    "127.0.0.1:5500",
+                    -16.0,
+                )],
+                enabled: true,
+            })
+            .unwrap();
+        let path = format!("/api/v1/channels/{channel_id}/transport-target");
+        let secret = "Bearer local-setup-admin-secret";
+        let create = serde_json::to_vec(&serde_json::json!({
+            "target_id": "target-1",
+            "label": "Headend receiver",
+            "protocol": "https_api",
+            "host": "receiver.example.test",
+            "port": 443,
+            "authorization": secret,
+            "expected_revision": null
+        }))
+        .unwrap();
+        let setup_admin = test_actor(station_auth::OperatorRole::SetupAdmin);
+        let response = api.handle_authenticated("PUT", &path, Some(&create), &setup_admin);
+        assert_eq!(
+            response.status,
+            200,
+            "{}",
+            String::from_utf8_lossy(&response.body)
+        );
+        assert!(!String::from_utf8_lossy(&response.body).contains(secret));
+        let created: serde_json::Value = serde_json::from_slice(&response.body).unwrap();
+        assert_eq!(created["credential_configured"], true);
+
+        // Supplying a fresh write-only authorization rotates the target
+        // revision. Omitting it on a later revision removes authorization;
+        // old protected material is immutable but cannot authorize the new
+        // target revision.
+        let rotation = serde_json::to_vec(&serde_json::json!({
+            "target_id": "target-1",
+            "label": "Headend receiver",
+            "protocol": "https_api",
+            "host": "receiver.example.test",
+            "port": 443,
+            "authorization": "Bearer rotated-secret",
+            "expected_revision": 1
+        }))
+        .unwrap();
+        let rotated = api.handle_authenticated("PUT", &path, Some(&rotation), &setup_admin);
+        assert_eq!(rotated.status, 200);
+        assert!(!String::from_utf8_lossy(&rotated.body).contains("rotated-secret"));
+        let remove = serde_json::to_vec(&serde_json::json!({
+            "target_id": "target-1",
+            "label": "Headend receiver",
+            "protocol": "https_api",
+            "host": "receiver.example.test",
+            "port": 443,
+            "expected_revision": 2
+        }))
+        .unwrap();
+        let removed = api.handle_authenticated("PUT", &path, Some(&remove), &setup_admin);
+        assert_eq!(removed.status, 200);
+        let removed: serde_json::Value = serde_json::from_slice(&removed.body).unwrap();
+        assert_eq!(removed["credential_configured"], false);
+        let reader = test_actor(station_auth::OperatorRole::MeetingOperator);
+        let read = api.handle_authenticated("GET", &path, None, &reader);
+        assert_eq!(read.status, 200);
+        assert!(!String::from_utf8_lossy(&read.body).contains("secret"));
+        drop(api);
+        let _ = std::fs::remove_file(database);
+    }
+
+    #[test]
+    fn authenticated_api_queue_runs_private_analyzer_and_receiver_to_exact_current_receipts() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("townlight-transport-outer-e2e-{nonce}"));
+        let application = root.join("application");
+        let database = root.join("data/station.db");
+        std::fs::create_dir_all(database.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(&application).unwrap();
+        install_transport_candidate(database.parent().unwrap(), &application);
+        let api = Api::open_with_station_box_probe(
+            &database,
+            &application,
+            transport_station_box_probe(),
+        )
+        .unwrap();
+        let channel_id = "11111111-2222-4333-8444-555555555555";
+        let sink_id = "22222222-3333-4444-8555-666666666666";
+        api.storage
+            .put_channel(&ChannelConfiguration {
+                channel_id: channel_id.into(),
+                display_name: "Transport outer E2E".into(),
+                output_profile: station_schedule::OutputProfileId::Proof360p30,
+                output_sinks: vec![station_schedule::OutputSinkConfiguration::required_udp(
+                    sink_id,
+                    "Required sink",
+                    "127.0.0.1:5500",
+                    -16.0,
+                )],
+                enabled: true,
+            })
+            .unwrap();
+        let setup_admin = test_actor(station_auth::OperatorRole::SetupAdmin);
+        let reader = test_actor(station_auth::OperatorRole::MeetingOperator);
+        let initial_authorization = "Bearer outer-e2e-initial-secret";
+        let authorization = "Bearer outer-e2e-rotated-secret";
+        let target_path = format!("/api/v1/channels/{channel_id}/transport-target");
+        let target = serde_json::to_vec(&serde_json::json!({
+            "target_id": "receiver-1",
+            "label": "Headend receiver",
+            "protocol": "https_api",
+            "host": "receiver.example.test",
+            "port": 443,
+            "authorization": initial_authorization,
+            "expected_revision": null
+        }))
+        .unwrap();
+        assert_eq!(
+            api.handle_authenticated("PUT", &target_path, Some(&target), &setup_admin)
+                .status,
+            200
+        );
+        let rotated_target = serde_json::to_vec(&serde_json::json!({
+            "target_id": "receiver-1",
+            "label": "Headend receiver",
+            "protocol": "https_api",
+            "host": "receiver.example.test",
+            "port": 443,
+            "authorization": authorization,
+            "expected_revision": 1
+        }))
+        .unwrap();
+        let rotated =
+            api.handle_authenticated("PUT", &target_path, Some(&rotated_target), &setup_admin);
+        assert_eq!(rotated.status, 200);
+        assert!(!String::from_utf8_lossy(&rotated.body).contains(initial_authorization));
+        assert!(!String::from_utf8_lossy(&rotated.body).contains(authorization));
+        let jobs_path = format!("/api/v1/channels/{channel_id}/transport-proof/jobs");
+        let queued = api.handle_authenticated("POST", &jobs_path, None, &setup_admin);
+        assert_eq!(
+            queued.status,
+            202,
+            "{}",
+            String::from_utf8_lossy(&queued.body)
+        );
+        let queued: serde_json::Value = serde_json::from_slice(&queued.body).unwrap();
+        let job_id = queued["job_id"].as_str().unwrap();
+        let response = b"authenticated receiver response";
+        station_storage::test_support::run_injected_transport_controller_iteration(
+            &database,
+            &application,
+            authorization,
+            response,
+            station_storage::test_support::InjectedAuthorityMutation::None,
+        )
+        .unwrap();
+        let status_path = format!("/api/v1/channels/{channel_id}/transport-proof/jobs/{job_id}");
+        let status = api.handle_authenticated("GET", &status_path, None, &reader);
+        assert_eq!(status.status, 200);
+        let status: serde_json::Value = serde_json::from_slice(&status.body).unwrap();
+        assert_eq!(status["state"], "completed");
+        let proof_path = format!("/api/v1/channels/{channel_id}/transport-proof");
+        let proof = api.handle_authenticated("GET", &proof_path, None, &reader);
+        assert_eq!(proof.status, 200);
+        let proof: serde_json::Value = serde_json::from_slice(&proof.body).unwrap();
+        assert_eq!(proof["history"]["analysis"][0]["proof_id"], job_id);
+        assert_eq!(proof["history"]["reachability"][0]["proof_id"], job_id);
+        assert_eq!(
+            proof["history"]["reachability"][0]["response_identity_sha256"],
+            format!("{:x}", Sha256::digest(response))
+        );
+        assert_eq!(
+            proof["validations"][0]["outcome"],
+            "pass",
+            "{}",
+            serde_json::to_string_pretty(&proof).unwrap()
+        );
+        drop(api);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn private_controller_fails_closed_when_authority_mutates_after_receiver_probe() {
+        use station_storage::test_support::InjectedAuthorityMutation;
+        for mutation in [
+            InjectedAuthorityMutation::TargetRevision,
+            InjectedAuthorityMutation::OutputConfiguration,
+            InjectedAuthorityMutation::InstallGeneration,
+        ] {
+            let nonce = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            let root = std::env::temp_dir().join(format!(
+                "townlight-transport-stale-e2e-{mutation:?}-{nonce}"
+            ));
+            let application = root.join("application");
+            let database = root.join("data/station.db");
+            std::fs::create_dir_all(database.parent().unwrap()).unwrap();
+            std::fs::create_dir_all(&application).unwrap();
+            install_transport_candidate(database.parent().unwrap(), &application);
+            let api = Api::open_with_station_box_probe(
+                &database,
+                &application,
+                transport_station_box_probe(),
+            )
+            .unwrap();
+            let channel_id = "11111111-2222-4333-8444-555555555555";
+            let sink_id = "22222222-3333-4444-8555-666666666666";
+            api.storage
+                .put_channel(&ChannelConfiguration {
+                    channel_id: channel_id.into(),
+                    display_name: "Stale authority E2E".into(),
+                    output_profile: station_schedule::OutputProfileId::Proof360p30,
+                    output_sinks: vec![station_schedule::OutputSinkConfiguration::required_udp(
+                        sink_id,
+                        "Required sink",
+                        "127.0.0.1:5500",
+                        -16.0,
+                    )],
+                    enabled: true,
+                })
+                .unwrap();
+            let setup_admin = test_actor(station_auth::OperatorRole::SetupAdmin);
+            let authorization = "Bearer stale-e2e-secret";
+            let target_path = format!("/api/v1/channels/{channel_id}/transport-target");
+            let target = serde_json::to_vec(&serde_json::json!({
+                "target_id": "receiver-1", "label": "Headend receiver",
+                "protocol": "https_api", "host": "receiver.example.test", "port": 443,
+                "authorization": authorization, "expected_revision": null
+            }))
+            .unwrap();
+            assert_eq!(
+                api.handle_authenticated("PUT", &target_path, Some(&target), &setup_admin)
+                    .status,
+                200
+            );
+            let jobs_path = format!("/api/v1/channels/{channel_id}/transport-proof/jobs");
+            let queued = api.handle_authenticated("POST", &jobs_path, None, &setup_admin);
+            assert_eq!(queued.status, 202);
+            let queued: serde_json::Value = serde_json::from_slice(&queued.body).unwrap();
+            let job_id = queued["job_id"].as_str().unwrap();
+            assert!(
+                station_storage::test_support::run_injected_transport_controller_iteration(
+                    &database,
+                    &application,
+                    authorization,
+                    b"receiver response",
+                    mutation,
+                )
+                .is_err()
+            );
+            let record = api
+                .storage
+                .read_transport_proof_job(job_id)
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                record.state,
+                station_storage::TransportProofJobState::Failed
+            );
+            let history = api
+                .storage
+                .read_transport_proof_history(channel_id, None, 10)
+                .unwrap();
+            assert!(history.analysis.is_empty());
+            assert!(history.reachability.is_empty());
+            drop(api);
+            std::fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[test]
     fn commissioning_transport_uses_the_authoritative_sink_snapshot_after_a_stale_channel_read() {
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -19605,13 +20416,8 @@ mod tests {
         ));
         let application = database.with_extension("application");
         std::fs::create_dir_all(&application).unwrap();
-        let probe = station_box_probe();
-        let candidate_version = probe.product_version.clone();
-        let source_commit = probe
-            .source_commit
-            .clone()
-            .expect("verified test candidate");
-        let mut api = Api::open_with_station_box_probe(&database, &application, probe).unwrap();
+        let mut api =
+            Api::open_with_station_box_probe(&database, &application, station_box_probe()).unwrap();
         let channel_id = "11111111-2222-4333-8444-555555555555";
         let sink_a = "22222222-3333-4444-8555-666666666666";
         let sink_b = "33333333-4444-4555-8666-777777777777";
@@ -19630,14 +20436,10 @@ mod tests {
                 enabled: true,
             })
             .unwrap();
-        let now = system_time_millis().unwrap();
         let hook_fired = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let hook_observed = Arc::clone(&hook_fired);
         let hook_channel_id = channel_id.to_string();
-        let hook_sink_a = sink_a.to_string();
         let hook_sink_b = sink_b.to_string();
-        let hook_candidate_version = candidate_version.clone();
-        let hook_source_commit = source_commit.clone();
         api.commissioning_after_channel_read_hook = Some(Arc::new(move |storage| {
             if hook_observed.swap(true, std::sync::atomic::Ordering::SeqCst) {
                 return;
@@ -19658,83 +20460,6 @@ mod tests {
                     ],
                     enabled: true,
                 })
-                .unwrap();
-            let target = TargetDeviceConfig {
-                target_id: "target-a".into(),
-                label: "Target A".into(),
-                protocol: TargetProtocol::HttpsApi,
-                host: "receiver-a.example.test".into(),
-                port: 443,
-                credential_configured: true,
-                revision: 1,
-                created_at_unix_ms: now,
-                updated_at_unix_ms: now,
-                updated_by: "setup-admin".into(),
-            };
-            storage
-                .write_transport_target_config(&hook_channel_id, &hook_sink_a, None, &target)
-                .unwrap();
-            let configuration_hash = storage
-                .current_channel_output_configuration_hash(&hook_channel_id)
-                .unwrap();
-            storage
-                .append_transport_analysis_receipt(
-                    &station_storage::TransportAnalysisReceipt {
-                        proof_id: "analysis-a".into(),
-                        channel_id: hook_channel_id.clone(),
-                        sink_id: hook_sink_a.clone(),
-                        target_id: target.target_id.clone(),
-                        target_revision: 1,
-                        candidate_version: hook_candidate_version.clone(),
-                        source_commit: hook_source_commit.clone(),
-                        configuration_hash: configuration_hash.clone(),
-                        analyzer_id: "test-analyzer".into(),
-                        analyzer_version: "1".into(),
-                        analyzer_sha256: "a".repeat(64),
-                        outcome: station_storage::ProofOutcome::Pass,
-                        findings: station_storage::TransportFindings {
-                            packet_size_bytes: 188,
-                            packet_count: 10,
-                            capture_duration_ms: 1_000,
-                            bitrate_bps: 1_000_000,
-                            pat_program_count: 1,
-                            pmt_stream_count: 1,
-                            continuity_errors: 0,
-                            pcr_errors: 0,
-                            analyzer_output_sha256: "b".repeat(64),
-                        },
-                        captured_at_unix_ms: now,
-                        recorded_at_unix_ms: now,
-                        recorded_by: "worker".into(),
-                        detail: "A passed".into(),
-                    },
-                    now,
-                )
-                .unwrap();
-            storage
-                .append_target_device_reachability_receipt(
-                    &station_storage::TargetDeviceReachabilityReceipt {
-                        proof_id: "reach-a".into(),
-                        channel_id: hook_channel_id.clone(),
-                        sink_id: hook_sink_a.clone(),
-                        target_id: target.target_id,
-                        target_revision: 1,
-                        candidate_version: hook_candidate_version.clone(),
-                        source_commit: hook_source_commit.clone(),
-                        configuration_hash,
-                        adapter_id: "test-adapter".into(),
-                        adapter_version: "1".into(),
-                        auth_method: "challenge".into(),
-                        outcome: station_storage::ProofOutcome::Pass,
-                        response_identity_sha256: "c".repeat(64),
-                        latency_ms: 1,
-                        observed_at_unix_ms: now,
-                        recorded_at_unix_ms: now,
-                        recorded_by: "worker".into(),
-                        detail: "A reached".into(),
-                    },
-                    now,
-                )
                 .unwrap();
         }));
 

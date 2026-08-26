@@ -85,6 +85,15 @@ pub struct TransportFindings {
     pub continuity_errors: u64,
     pub pcr_errors: u64,
     pub analyzer_output_sha256: String,
+    /// Digest of the bounded `tstables --json-output` artifact which was
+    /// correlated with this analyzer report.
+    pub tables_output_sha256: String,
+    /// The one coherent PAT -> service -> PMT path accepted for this proof.
+    pub service_id: u64,
+    pub pmt_pid: u64,
+    pub pcr_pid: u64,
+    pub video_pid: u64,
+    pub audio_pid: u64,
 }
 
 impl TransportFindings {
@@ -103,6 +112,25 @@ impl TransportFindings {
             || self.pat_program_count == 0
             || self.pmt_stream_count == 0
             || !sha256(&self.analyzer_output_sha256)
+            || !sha256(&self.tables_output_sha256)
+            || self.service_id == 0
+            || self.service_id > 0xffff
+            || self.pmt_pid == 0
+            || self.pcr_pid == 0
+            || self.video_pid == 0
+            || self.audio_pid == 0
+            || self.pmt_pid > 0x1fff
+            || self.pcr_pid > 0x1fff
+            || self.video_pid > 0x1fff
+            || self.audio_pid > 0x1fff
+            || self.pmt_pid == self.pcr_pid
+            || self.pmt_pid == self.video_pid
+            || self.pmt_pid == self.audio_pid
+            || self.video_pid == self.audio_pid
+            || self.pmt_pid == 0x1fff
+            || self.pcr_pid == 0x1fff
+            || self.video_pid == 0x1fff
+            || self.audio_pid == 0x1fff
         {
             return Err("transport analysis findings are incomplete, oversized, or invalid".into());
         }
@@ -123,6 +151,9 @@ pub struct TransportAnalysisReceipt {
     pub analyzer_id: String,
     pub analyzer_version: String,
     pub analyzer_sha256: String,
+    /// Exact sealed capture identity, independently persisted on the job.
+    pub capture_bytes: u64,
+    pub capture_sha256: String,
     pub outcome: ProofOutcome,
     pub findings: TransportFindings,
     pub captured_at_unix_ms: i64,
@@ -148,7 +179,11 @@ impl TransportAnalysisReceipt {
         })?;
         bounded_token(&self.analyzer_id, 100, "analyzer id")?;
         bounded_text(&self.analyzer_version, 100, "analyzer version")?;
-        if !sha256(&self.analyzer_sha256) {
+        if !sha256(&self.analyzer_sha256)
+            || self.capture_bytes == 0
+            || self.capture_bytes > MAX_PROOF_CAPTURE_BYTES
+            || !sha256(&self.capture_sha256)
+        {
             return Err("analyzer executable hash is invalid".into());
         }
         if self.target_revision == 0 {
@@ -490,6 +525,12 @@ impl TransportAnalyzer for FakeTransportAnalyzer {
             continuity_errors: 0,
             pcr_errors: 0,
             analyzer_output_sha256: format!("{output_hash:x}"),
+            tables_output_sha256: "f".repeat(64),
+            service_id: 1,
+            pmt_pid: 4096,
+            pcr_pid: 256,
+            video_pid: 256,
+            audio_pid: 257,
         })
     }
 }
@@ -546,6 +587,8 @@ mod tests {
             analyzer_id: "fake-analyzer".into(),
             analyzer_version: "1".into(),
             analyzer_sha256: "c".repeat(64),
+            capture_bytes: 188,
+            capture_sha256: "e".repeat(64),
             outcome: ProofOutcome::Pass,
             findings: FakeTransportAnalyzer
                 .analyze(&[0u8; 188])
@@ -580,34 +623,34 @@ mod tests {
         }
     }
 
+    fn derive_validation(
+        target: &TargetDeviceConfig,
+        candidate_version: &str,
+        now_unix_ms: i64,
+        analysis: Option<TransportAnalysisReceipt>,
+        reachability: Option<TargetDeviceReachabilityReceipt>,
+    ) -> Result<CableTransportValidation, String> {
+        CableTransportValidation::derive(CableTransportValidationInput {
+            channel_id: "channel-1",
+            sink_id: "sink-1",
+            target,
+            candidate_version,
+            source_commit: &"a".repeat(40),
+            configuration_hash: &"b".repeat(64),
+            now_unix_ms,
+            analysis,
+            reachability,
+        })
+    }
+
     #[test]
     fn composite_requires_both_current_proofs() {
         let t = target();
-        let blocked = CableTransportValidation::derive(CableTransportValidationInput {
-            channel_id: "channel-1",
-            sink_id: "sink-1",
-            target: &t,
-            candidate_version: "0.1.0",
-            source_commit: &"a".repeat(40),
-            configuration_hash: &"b".repeat(64),
-            now_unix_ms: 2,
-            analysis: Some(analysis()),
-            reachability: None,
-        })
-        .expect("valid composite");
+        let blocked =
+            derive_validation(&t, "0.1.0", 2, Some(analysis()), None).expect("valid composite");
         assert_eq!(blocked.outcome, None);
-        let pass = CableTransportValidation::derive(CableTransportValidationInput {
-            channel_id: "channel-1",
-            sink_id: "sink-1",
-            target: &t,
-            candidate_version: "0.1.0",
-            source_commit: &"a".repeat(40),
-            configuration_hash: &"b".repeat(64),
-            now_unix_ms: 2,
-            analysis: Some(analysis()),
-            reachability: Some(reachability()),
-        })
-        .expect("valid composite");
+        let pass = derive_validation(&t, "0.1.0", 2, Some(analysis()), Some(reachability()))
+            .expect("valid composite");
         assert_eq!(pass.outcome, Some(ProofOutcome::Pass));
     }
 
@@ -617,36 +660,16 @@ mod tests {
         let mut r = reachability();
         r.target_revision = 2;
         assert_eq!(
-            CableTransportValidation::derive(CableTransportValidationInput {
-                channel_id: "channel-1",
-                sink_id: "sink-1",
-                target: &t,
-                candidate_version: "0.1.0",
-                source_commit: &"a".repeat(40),
-                configuration_hash: &"b".repeat(64),
-                now_unix_ms: 2,
-                analysis: Some(analysis()),
-                reachability: Some(r),
-            })
-            .expect("valid composite")
-            .outcome,
+            derive_validation(&t, "0.1.0", 2, Some(analysis()), Some(r))
+                .expect("valid composite")
+                .outcome,
             None
         );
         t.revision = 2;
         assert_eq!(
-            CableTransportValidation::derive(CableTransportValidationInput {
-                channel_id: "channel-1",
-                sink_id: "sink-1",
-                target: &t,
-                candidate_version: "0.2.0",
-                source_commit: &"a".repeat(40),
-                configuration_hash: &"b".repeat(64),
-                now_unix_ms: 2,
-                analysis: Some(analysis()),
-                reachability: None,
-            })
-            .expect("valid composite")
-            .outcome,
+            derive_validation(&t, "0.2.0", 2, Some(analysis()), None)
+                .expect("valid composite")
+                .outcome,
             None
         );
     }
@@ -762,17 +785,13 @@ mod tests {
 
     #[test]
     fn expired_evidence_cannot_pass_the_composite() {
-        let validation = CableTransportValidation::derive(CableTransportValidationInput {
-            channel_id: "channel-1",
-            sink_id: "sink-1",
-            target: &target(),
-            candidate_version: "0.1.0",
-            source_commit: &"a".repeat(40),
-            configuration_hash: &"b".repeat(64),
-            now_unix_ms: TRANSPORT_PROOF_FRESHNESS_MS + 3,
-            analysis: Some(analysis()),
-            reachability: Some(reachability()),
-        })
+        let validation = derive_validation(
+            &target(),
+            "0.1.0",
+            TRANSPORT_PROOF_FRESHNESS_MS + 3,
+            Some(analysis()),
+            Some(reachability()),
+        )
         .expect("valid composite");
         assert_eq!(validation.outcome, None);
     }

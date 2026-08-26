@@ -6,12 +6,18 @@ use station_update::{
     verify_prepared_slot,
 };
 use std::collections::BTreeSet;
+use std::ffi::c_void;
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 use windows_sys::Win32::Storage::FileSystem::{
     MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
+};
+use windows_sys::Win32::{
+    Foundation::{CloseHandle, HANDLE, LocalFree, WAIT_ABANDONED, WAIT_OBJECT_0},
+    Security::{GetKernelObjectSecurity, SECURITY_ATTRIBUTES},
+    System::Threading::{CreateMutexW, ReleaseMutex, WaitForSingleObject},
 };
 
 pub const ACTIVE_SLOT_SCHEMA_VERSION: u32 = 1;
@@ -41,14 +47,265 @@ const TSDUCK_SOURCE_URL: &str = "https://github.com/tsduck/tsduck/releases/downl
 const TSDUCK_ARCHIVE_NAME: &str = "TSDuck-Win64-3.44-4676-Portable.zip";
 const TSDUCK_ARCHIVE_SHA256: &str =
     "b0ca0f963fcd77488b8c32d6f9d85030daa891ed753c36e57bbb458807a44eb1";
-const REQUIRED_TSDUCK_RUNTIME_FILES: [&str; 6] = [
+const REQUIRED_TSDUCK_RUNTIME_FILES: [&str; 7] = [
     "LICENSE.txt",
     "OTHERS.txt",
     "bin/tsp.exe",
     "bin/tsanalyze.exe",
+    "bin/tstables.exe",
     "bin/tsduck.dll",
     "bin/tscore.dll",
 ];
+const INSTALL_AUTHORITY_FENCE_TIMEOUT: Duration = Duration::from_secs(30);
+// MUTEX_ALL_ACCESS after Windows applies the kernel object's generic mapping.
+const INSTALL_AUTHORITY_FENCE_SDDL: &str = "D:P(A;;0x1f0001;;;SY)(A;;0x1f0001;;;BA)";
+const DACL_SECURITY_INFORMATION: u32 = 0x0000_0004;
+const SECURITY_DESCRIPTOR_REVISION: u32 = 1;
+
+#[link(name = "advapi32")]
+unsafe extern "system" {
+    fn ConvertStringSecurityDescriptorToSecurityDescriptorW(
+        string_security_descriptor: *const u16,
+        string_revision: u32,
+        security_descriptor: *mut *mut c_void,
+        security_descriptor_size: *mut u32,
+    ) -> i32;
+    fn ConvertSecurityDescriptorToStringSecurityDescriptorW(
+        security_descriptor: *const c_void,
+        string_revision: u32,
+        security_information: u32,
+        string_security_descriptor: *mut *mut u16,
+        string_security_descriptor_length: *mut u32,
+    ) -> i32;
+    fn GetSecurityDescriptorDacl(
+        security_descriptor: *const c_void,
+        dacl_present: *mut i32,
+        dacl: *mut *mut c_void,
+        dacl_defaulted: *mut i32,
+    ) -> i32;
+}
+
+#[repr(C)]
+struct AclHeader {
+    revision: u8,
+    sbz1: u8,
+    size: u16,
+}
+
+struct InstallFenceSecurity(*mut c_void);
+
+impl InstallFenceSecurity {
+    fn local_system_and_administrators() -> Result<Self, String> {
+        let wide: Vec<u16> = INSTALL_AUTHORITY_FENCE_SDDL
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect();
+        let mut descriptor = std::ptr::null_mut();
+        if unsafe {
+            ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                wide.as_ptr(),
+                SECURITY_DESCRIPTOR_REVISION,
+                &mut descriptor,
+                std::ptr::null_mut(),
+            )
+        } == 0
+            || descriptor.is_null()
+        {
+            return Err("installation authority fence security could not be created".into());
+        }
+        Ok(Self(descriptor))
+    }
+
+    fn attributes(&self) -> SECURITY_ATTRIBUTES {
+        SECURITY_ATTRIBUTES {
+            nLength: u32::try_from(std::mem::size_of::<SECURITY_ATTRIBUTES>())
+                .expect("security attributes fit u32"),
+            lpSecurityDescriptor: self.0,
+            bInheritHandle: 0,
+        }
+    }
+
+    fn canonical_dacl(&self) -> Result<String, String> {
+        descriptor_dacl_string(self.0)
+    }
+}
+
+impl Drop for InstallFenceSecurity {
+    fn drop(&mut self) {
+        unsafe { LocalFree(self.0) };
+    }
+}
+
+fn descriptor_dacl_bytes(descriptor: *mut c_void) -> Result<Vec<u8>, String> {
+    let mut present = 0;
+    let mut defaulted = 0;
+    let mut dacl = std::ptr::null_mut();
+    if unsafe { GetSecurityDescriptorDacl(descriptor, &mut present, &mut dacl, &mut defaulted) }
+        == 0
+        || present == 0
+        || dacl.is_null()
+        || defaulted != 0
+    {
+        return Err("installation authority fence DACL is unavailable or inherited".into());
+    }
+    let size = usize::from(unsafe { (*(dacl.cast::<AclHeader>())).size });
+    if size < std::mem::size_of::<AclHeader>() || size > 4_096 {
+        return Err("installation authority fence DACL size is invalid".into());
+    }
+    Ok(unsafe { std::slice::from_raw_parts(dacl.cast::<u8>(), size) }.to_vec())
+}
+
+fn descriptor_dacl_string(descriptor: *mut c_void) -> Result<String, String> {
+    // Validate the ACL structure before asking Windows to serialize it.
+    let _ = descriptor_dacl_bytes(descriptor)?;
+    let mut wide = std::ptr::null_mut();
+    let mut length = 0_u32;
+    if unsafe {
+        ConvertSecurityDescriptorToStringSecurityDescriptorW(
+            descriptor,
+            SECURITY_DESCRIPTOR_REVISION,
+            DACL_SECURITY_INFORMATION,
+            &mut wide,
+            &mut length,
+        )
+    } == 0
+        || wide.is_null()
+        || length == 0
+        || length > 4_096
+    {
+        return Err("installation authority fence DACL could not be serialized".into());
+    }
+    let value = String::from_utf16(unsafe { std::slice::from_raw_parts(wide, length as usize) })
+        .map(|value| value.trim_end_matches('\0').to_string())
+        .map_err(|_| "installation authority fence DACL is malformed".to_string());
+    unsafe { LocalFree(wide.cast()) };
+    value
+}
+
+fn verify_install_fence_security(
+    handle: HANDLE,
+    expected: &InstallFenceSecurity,
+) -> Result<(), String> {
+    let mut required = 0_u32;
+    unsafe {
+        GetKernelObjectSecurity(
+            handle,
+            DACL_SECURITY_INFORMATION,
+            std::ptr::null_mut(),
+            0,
+            &mut required,
+        )
+    };
+    if required == 0 || required > 16 * 1024 {
+        return Err("installation authority fence security could not be measured".into());
+    }
+    let mut actual = vec![0_u8; required as usize];
+    if unsafe {
+        GetKernelObjectSecurity(
+            handle,
+            DACL_SECURITY_INFORMATION,
+            actual.as_mut_ptr().cast(),
+            required,
+            &mut required,
+        )
+    } == 0
+    {
+        return Err("installation authority fence security could not be read".into());
+    }
+    let actual_dacl = descriptor_dacl_string(actual.as_mut_ptr().cast())?;
+    let expected_dacl = expected.canonical_dacl()?;
+    if actual_dacl != expected_dacl {
+        return Err("installation authority fence has an unexpected security policy".into());
+    }
+    Ok(())
+}
+
+/// Cross-process fence shared by activation and evidence writers.  The active
+/// slot and install receipt live outside SQLite, so a SQLite transaction alone
+/// cannot prevent an installer from replacing their authority between a read
+/// and a receipt commit.  Every participating process holds this named mutex
+/// over its verified-candidate read and durable decision.
+pub struct InstallAuthorityFence {
+    handle: HANDLE,
+    abandoned: bool,
+}
+
+impl InstallAuthorityFence {
+    /// An abandoned wait transfers mutex ownership to this caller.  Only the
+    /// interrupted-update recovery path may continue under that ownership;
+    /// ordinary writers must release it and fail closed.
+    pub fn was_abandoned(&self) -> bool {
+        self.abandoned
+    }
+}
+
+impl Drop for InstallAuthorityFence {
+    fn drop(&mut self) {
+        unsafe {
+            ReleaseMutex(self.handle);
+            CloseHandle(self.handle);
+        }
+    }
+}
+
+/// Acquire the station-specific install authority fence.  The namespace is
+/// deterministic from the canonical data directory, so an updater service and
+/// stationd instance for the same station contend on one OS-owned object.
+pub fn acquire_install_authority_fence(
+    data_directory: &Path,
+) -> Result<InstallAuthorityFence, String> {
+    acquire_install_authority_fence_for(data_directory, INSTALL_AUTHORITY_FENCE_TIMEOUT)
+}
+
+fn acquire_install_authority_fence_for(
+    data_directory: &Path,
+    timeout: Duration,
+) -> Result<InstallAuthorityFence, String> {
+    if !data_directory.is_absolute() || !data_directory.is_dir() {
+        return Err("installation authority data directory is invalid".into());
+    }
+    let name = install_authority_fence_name(data_directory)?;
+    // The updater may run as a service while a diagnostic/once invocation runs
+    // in an interactive session. `Global` is therefore required; `Local`
+    // would create independent per-session locks and reopen the replacement
+    // race. Failure to create the global fence is fail-closed.
+    let mut wide: Vec<u16> = name.encode_utf16().collect();
+    wide.push(0);
+    let security = InstallFenceSecurity::local_system_and_administrators()?;
+    let attributes = security.attributes();
+    let handle = unsafe { CreateMutexW(&attributes, 0, wide.as_ptr()) };
+    if handle.is_null() {
+        return Err("installation authority fence could not be created".into());
+    }
+    if let Err(error) = verify_install_fence_security(handle, &security) {
+        unsafe { CloseHandle(handle) };
+        return Err(error);
+    }
+    let wait_ms = timeout.as_millis().min(u128::from(u32::MAX)) as u32;
+    match unsafe { WaitForSingleObject(handle, wait_ms) } {
+        WAIT_OBJECT_0 => Ok(InstallAuthorityFence {
+            handle,
+            abandoned: false,
+        }),
+        WAIT_ABANDONED => Ok(InstallAuthorityFence {
+            handle,
+            abandoned: true,
+        }),
+        _ => {
+            unsafe { CloseHandle(handle) };
+            Err("installation authority fence is busy".into())
+        }
+    }
+}
+
+fn install_authority_fence_name(data_directory: &Path) -> Result<String, String> {
+    let canonical = std::fs::canonicalize(data_directory)
+        .map_err(|_| "installation authority data directory is unavailable")?;
+    let digest = sha256_lowercase(canonical.to_string_lossy().as_bytes());
+    Ok(format!(
+        "Global\\TownLightStation.InstallAuthority.{digest}"
+    ))
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -311,6 +568,14 @@ pub fn activate_prepared_slot(
     let data_directory = database_path
         .parent()
         .ok_or_else(|| "station database has no data directory".to_string())?;
+    // One authority epoch spans the first receipt read, candidate proof,
+    // commit, and any rollback.  Narrower locking permits a competing updater
+    // to replace the active slot while this transaction still believes its
+    // original `current` receipt is authoritative.
+    let authority_fence = acquire_install_authority_fence(data_directory)?;
+    if authority_fence.was_abandoned() {
+        return Err("installation authority fence was abandoned; recover the interrupted update before activation".into());
+    }
     let active_path = data_directory.join(ACTIVE_SLOT_RECEIPT_NAME);
     let current = read_active_slot_receipt(&active_path)?;
     verify_active_application(application_root, &current.active)?;
@@ -409,6 +674,9 @@ pub fn activate_prepared_slot(
         previous: Some(current.active),
     };
     let commit_result = (|| {
+        // Hold the same fence used by stationd while it rechecks a candidate
+        // and commits evidence. This serializes the active-slot/receipt swap
+        // with the SQLite decision that names an install generation.
         // The first proof runs the candidate against the old receipts. Stop it
         // again before changing candidate authority so no running stationd can
         // append evidence across the receipt-generation boundary.
@@ -1261,6 +1529,13 @@ pub fn recover_incomplete_transaction(
     now_unix_ms: i64,
     host: &mut impl MaintenanceHost,
 ) -> Result<MaintenanceTransactionRecord, String> {
+    let data_directory = database_path
+        .parent()
+        .ok_or_else(|| "station database has no data directory".to_string())?;
+    // Recovery performs the same authority writes as activation and rollback;
+    // it must share their cross-process epoch before inspecting transaction or
+    // active-slot state.
+    let _authority_fence = acquire_install_authority_fence(data_directory)?;
     let mut transaction = read_transaction(transaction_path)?;
     if transaction.journal_snapshot.is_none() {
         transaction.journal_snapshot = discover_journal_snapshot(transaction_path, &transaction)?;
@@ -1445,8 +1720,35 @@ pub struct VerifiedCandidateIdentity {
     pub product: String,
     pub version: String,
     pub source_commit: String,
+    /// Monotonically advances whenever a verified active slot is activated.
+    /// Version and commit alone cannot distinguish a rollback/re-activation of
+    /// the same build from the installation instance that authorized a job.
+    pub install_generation: u64,
     pub media_runtime_sha256: String,
     pub runtime_manifest_sha256: String,
+}
+
+/// Opaque capability returned only after a complete manifest/runtime/active
+/// slot verification.  Evidence writers use this rather than accepting caller
+/// supplied version/commit/generation tuples, which prevents a production
+/// caller from forging install authority by assembling matching strings.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerifiedInstallAuthority {
+    identity: VerifiedCandidateIdentity,
+}
+
+impl VerifiedInstallAuthority {
+    pub fn version(&self) -> &str {
+        &self.identity.version
+    }
+
+    pub fn source_commit(&self) -> &str {
+        &self.identity.source_commit
+    }
+
+    pub fn install_generation(&self) -> u64 {
+        self.identity.install_generation
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -1595,8 +1897,67 @@ pub fn read_verified_candidate_identity(
         product: install.product,
         version: install.version,
         source_commit: install.source_commit,
+        install_generation: active.generation,
         media_runtime_sha256: install.media_runtime_sha256.to_ascii_lowercase(),
         runtime_manifest_sha256: install.runtime_manifest_sha256,
+    })
+}
+
+/// Read the verified installed candidate as an unforgeable cross-crate
+/// authority capability. Callers must also hold `InstallAuthorityFence` while
+/// carrying this value into a durable queue or evidence decision.
+pub fn read_verified_install_authority(
+    data_directory: &Path,
+    application_root: &Path,
+) -> Result<VerifiedInstallAuthority, String> {
+    Ok(VerifiedInstallAuthority {
+        identity: read_verified_candidate_identity(data_directory, application_root)?,
+    })
+}
+
+/// A runtime handle is constructed only after the full installation receipt,
+/// active slot, pinned TSDuck identity, complete manifest, file hashes, and
+/// non-reparse runtime tree have been verified by `read_verified_candidate_identity`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerifiedTsdDuckRuntime {
+    pub candidate: VerifiedCandidateIdentity,
+    pub root: PathBuf,
+    pub version: String,
+    pub tsp_sha256: String,
+    pub tsanalyze_sha256: String,
+    pub tstables_sha256: String,
+}
+
+pub fn read_verified_tsduck_runtime(
+    data_directory: &Path,
+    application_root: &Path,
+) -> Result<VerifiedTsdDuckRuntime, String> {
+    let candidate = read_verified_candidate_identity(data_directory, application_root)?;
+    let bytes = read_bounded_file(
+        &data_directory.join(TSDUCK_RUNTIME_MANIFEST_NAME),
+        MAX_RUNTIME_MANIFEST_BYTES,
+        "installed TSDuck runtime manifest",
+    )?;
+    let manifest: InstalledRuntimeManifest = serde_json::from_slice(&bytes)
+        .map_err(|_| "installed TSDuck runtime manifest is invalid")?;
+    manifest.validate()?;
+    let find = |path: &str| {
+        manifest
+            .files
+            .iter()
+            .find(|file| file.path == path)
+            .map(|file| file.sha256.clone())
+            .ok_or_else(|| {
+                "installed TSDuck runtime manifest is missing a required executable".to_string()
+            })
+    };
+    Ok(VerifiedTsdDuckRuntime {
+        candidate,
+        root: application_root.join("runtime").join("tsduck"),
+        version: TSDUCK_VERSION.into(),
+        tsp_sha256: find("bin/tsp.exe")?,
+        tsanalyze_sha256: find("bin/tsanalyze.exe")?,
+        tstables_sha256: find("bin/tstables.exe")?,
     })
 }
 
@@ -2198,6 +2559,85 @@ mod tests {
             .expect("system clock is before Unix epoch")
             .as_nanos();
         std::env::temp_dir().join(format!("townlight-maintenance-{name}-{nonce}"))
+    }
+
+    #[test]
+    fn install_authority_fence_blocks_a_concurrent_active_slot_replacement() {
+        let root = root("install-authority-fence");
+        let data = root.join("data");
+        std::fs::create_dir_all(&data).unwrap();
+        let fence = acquire_install_authority_fence_for(&data, Duration::from_secs(1)).unwrap();
+        let contender_data = data.clone();
+        let blocked = std::thread::spawn(move || {
+            acquire_install_authority_fence_for(&contender_data, Duration::from_millis(25)).is_err()
+        })
+        .join()
+        .unwrap();
+        assert!(blocked, "activation/evidence fence must serialize writers");
+        drop(fence);
+        acquire_install_authority_fence_for(&data, Duration::from_millis(25)).unwrap();
+        remove_tree(&root).unwrap();
+    }
+
+    #[test]
+    fn install_authority_fence_rejects_a_squatted_permissive_object() {
+        let root = root("install-authority-squat");
+        let data = root.join("data");
+        std::fs::create_dir_all(&data).unwrap();
+        let name = install_authority_fence_name(&data).unwrap();
+        let wide: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
+        let squatted = unsafe { CreateMutexW(std::ptr::null(), 0, wide.as_ptr()) };
+        assert!(!squatted.is_null());
+        let result = acquire_install_authority_fence_for(&data, Duration::from_millis(25));
+        assert!(
+            result.is_err(),
+            "a pre-created object with the caller default DACL must not become install authority"
+        );
+        unsafe { CloseHandle(squatted) };
+        remove_tree(&root).unwrap();
+    }
+
+    #[test]
+    fn abandoned_fence_retains_ownership_until_recovery_releases_it() {
+        let root = root("install-authority-abandoned");
+        let data = root.join("data");
+        std::fs::create_dir_all(&data).unwrap();
+        let name = install_authority_fence_name(&data).unwrap();
+        let retained = std::thread::spawn(move || {
+            let wide: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
+            let security = InstallFenceSecurity::local_system_and_administrators().unwrap();
+            let attributes = security.attributes();
+            let handle = unsafe { CreateMutexW(&attributes, 1, wide.as_ptr()) };
+            assert!(!handle.is_null());
+            handle as usize
+        })
+        .join()
+        .unwrap();
+
+        assert_eq!(
+            unsafe { WaitForSingleObject(retained as HANDLE, 1_000) },
+            WAIT_ABANDONED
+        );
+        let abandoned = InstallAuthorityFence {
+            handle: retained as HANDLE,
+            abandoned: true,
+        };
+        assert!(abandoned.was_abandoned());
+        let contender_data = data.clone();
+        assert!(
+            std::thread::spawn(move || {
+                acquire_install_authority_fence_for(&contender_data, Duration::from_millis(25))
+                    .is_err()
+            })
+            .join()
+            .unwrap()
+        );
+        drop(abandoned);
+        let normal =
+            acquire_install_authority_fence_for(&data, Duration::from_millis(100)).unwrap();
+        assert!(!normal.was_abandoned());
+        drop(normal);
+        remove_tree(&root).unwrap();
     }
 
     #[test]

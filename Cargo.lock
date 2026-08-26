@@ -2035,6 +2035,7 @@ dependencies = [
 name = "station-storage"
 version = "0.1.0"
 dependencies = [
+ "getrandom 0.4.3",
  "image",
  "serde",
  "serde_json",
@@ -2046,6 +2047,7 @@ dependencies = [
  "station-cg",
  "station-domain",
  "station-live",
+ "station-maintenance",
  "station-media-lifecycle",
  "station-metadata",
  "station-publishing",
@@ -2055,6 +2057,8 @@ dependencies = [
  "station-schedule-automation",
  "station-transport-proof",
  "station-update",
+ "ureq",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2078,6 +2082,20 @@ dependencies = [
  "station-storage",
  "station-update",
  "zip",
+]
+
+[[package]]
+name = "station-transport-executor"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "sha2",
+ "station-maintenance",
+ "station-storage",
+ "station-transport-proof",
+ "ureq",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2161,6 +2179,7 @@ dependencies = [
  "station-readiness",
  "station-source-evidence",
  "station-storage",
+ "station-transport-executor",
  "station-update-coordinator",
  "windows-service",
 ]

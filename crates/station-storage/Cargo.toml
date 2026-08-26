@@ -4,7 +4,11 @@ version.workspace = true
 edition.workspace = true
 publish.workspace = true
 
+[features]
+test-support = []
+
 [dependencies]
+getrandom.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
@@ -18,12 +22,15 @@ station-domain.workspace = true
 station-media-lifecycle.workspace = true
 station-metadata.workspace = true
 station-live.workspace = true
+station-maintenance.workspace = true
 station-readiness.workspace = true
 station-recording.workspace = true
 station-schedule.workspace = true
 station-schedule-automation.workspace = true
 station-update.workspace = true
 station-transport-proof.workspace = true
+ureq.workspace = true
+windows-sys.workspace = true
 
 [dev-dependencies]
 image.workspace = true
