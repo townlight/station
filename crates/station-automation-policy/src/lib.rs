@@ -11,6 +11,11 @@ const MAX_ADAPTERS: usize = 64;
 const MAX_POLICIES: usize = 3;
 const MAX_EVIDENCE: usize = 128;
 const MAX_TEST_WINDOW_MS: i64 = 86_400_000;
+const MAX_EXECUTION_WINDOW_MS: i64 = 86_400_000;
+const MAX_ARTIFACT_BYTES: u64 = 4 * 1024 * 1024 * 1024 * 1024;
+const MAX_MEDIA_TYPE: usize = 120;
+const MAX_LANGUAGE: usize = 35;
+const MAX_OUTPUT_UNITS: u32 = 1_000_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -94,6 +99,355 @@ pub struct AutomationConnectionTestEvidence {
     pub tested_at_unix_ms: i64,
     pub expires_at_unix_ms: i64,
     pub detail: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AutomationInputKind {
+    MediaAsset,
+    CaptionTrack,
+    Transcript,
+    TextDocument,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AutomationInputArtifact {
+    pub kind: AutomationInputKind,
+    pub artifact_sha256: String,
+    pub bytes: u64,
+    pub media_type: String,
+    pub language: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AutomationOutputArtifact {
+    pub artifact_sha256: String,
+    pub bytes: u64,
+    pub media_type: String,
+    pub language: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum AutomationExecutionEngine {
+    Local {
+        executable_sha256: String,
+        model_artifact_sha256: String,
+    },
+    Cloud {
+        provider_response_sha256: String,
+        provider_request_id_sha256: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum AutomationOutputFacts {
+    Captions {
+        language: String,
+        cue_count: u32,
+        text_sha256: String,
+        first_offset_ms: u64,
+        last_end_ms: u64,
+    },
+    Summary {
+        input_units: u32,
+        output_words: u32,
+    },
+    Translation {
+        source_language: String,
+        target_language: String,
+        translated_units: u32,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AutomationExecutionRequest {
+    pub job_id: String,
+    pub feature: AutomationFeature,
+    pub policy_id: String,
+    pub policy_revision: u64,
+    pub adapter_id: String,
+    pub adapter_revision: u64,
+    pub configuration_hash: String,
+    pub candidate: AutomationCandidateIdentity,
+    pub input: AutomationInputArtifact,
+    pub requested_output_language: Option<String>,
+    pub requested_at_unix_ms: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AutomationExecutionReceipt {
+    pub receipt_id: String,
+    pub job_id: String,
+    pub feature: AutomationFeature,
+    pub policy_id: String,
+    pub policy_revision: u64,
+    pub adapter_id: String,
+    pub adapter_revision: u64,
+    pub configuration_hash: String,
+    pub candidate: AutomationCandidateIdentity,
+    pub engine: AutomationExecutionEngine,
+    pub input: AutomationInputArtifact,
+    pub output: AutomationOutputArtifact,
+    pub facts: AutomationOutputFacts,
+    pub started_at_unix_ms: i64,
+    pub completed_at_unix_ms: i64,
+}
+
+impl AutomationInputArtifact {
+    pub fn validate(&self) -> Result<(), String> {
+        validate_artifact(
+            &self.artifact_sha256,
+            self.bytes,
+            &self.media_type,
+            self.language.as_deref(),
+            "automation input artifact",
+        )
+    }
+}
+
+impl AutomationOutputArtifact {
+    pub fn validate(&self) -> Result<(), String> {
+        validate_artifact(
+            &self.artifact_sha256,
+            self.bytes,
+            &self.media_type,
+            self.language.as_deref(),
+            "automation output artifact",
+        )
+    }
+}
+
+impl AutomationExecutionRequest {
+    pub fn validate_against(
+        &self,
+        policy: &AutomationFeaturePolicy,
+        adapter: &AutomationAdapterDescriptor,
+        current_candidate: &AutomationCandidateIdentity,
+    ) -> Result<(), String> {
+        validate_uuid(&self.job_id, "automation execution job identity")?;
+        policy.validate()?;
+        adapter.validate()?;
+        self.candidate.validate()?;
+        current_candidate.validate()?;
+        self.input.validate()?;
+        if self.requested_at_unix_ms < 0
+            || self.feature != policy.feature
+            || self.policy_id != policy.policy_id
+            || self.policy_revision != policy.revision
+            || self.adapter_id != adapter.adapter_id
+            || self.adapter_revision != adapter.revision
+            || self.configuration_hash != policy.configuration_hash
+            || self.candidate != *current_candidate
+            || policy.operator_selected_adapter_id.as_deref() != Some(self.adapter_id.as_str())
+            || !adapter.supported_features.contains(&self.feature)
+            || adapter.credential_availability == CredentialAvailability::Unavailable
+        {
+            return Err(
+                "automation execution request is stale or does not match current authority".into(),
+            );
+        }
+        match self.feature {
+            AutomationFeature::Captions => {
+                if self.input.kind != AutomationInputKind::MediaAsset
+                    || self.requested_output_language.is_some()
+                {
+                    return Err(
+                        "caption execution requires media input and no translation target".into(),
+                    );
+                }
+            }
+            AutomationFeature::Summaries => {
+                if self.input.kind == AutomationInputKind::MediaAsset
+                    || self.requested_output_language.is_some()
+                {
+                    return Err(
+                        "summary execution requires a text-bearing input and no translation target"
+                            .into(),
+                    );
+                }
+            }
+            AutomationFeature::Translation => {
+                if self.input.kind == AutomationInputKind::MediaAsset
+                    || self.input.language.is_none()
+                {
+                    return Err("translation execution requires a language-bound text input".into());
+                }
+                let target = self.requested_output_language.as_deref().ok_or_else(|| {
+                    "translation execution requires an output language".to_string()
+                })?;
+                validate_language(target, "translation output language")?;
+                if self.input.language.as_deref() == Some(target) {
+                    return Err("translation source and target languages must differ".into());
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+impl AutomationExecutionReceipt {
+    pub fn validate_against(
+        &self,
+        request: &AutomationExecutionRequest,
+        policy: &AutomationFeaturePolicy,
+        adapter: &AutomationAdapterDescriptor,
+        current_candidate: &AutomationCandidateIdentity,
+    ) -> Result<(), String> {
+        request.validate_against(policy, adapter, current_candidate)?;
+        validate_uuid(&self.receipt_id, "automation execution receipt identity")?;
+        self.input.validate()?;
+        self.output.validate()?;
+        if self.job_id != request.job_id
+            || self.feature != request.feature
+            || self.policy_id != request.policy_id
+            || self.policy_revision != request.policy_revision
+            || self.adapter_id != request.adapter_id
+            || self.adapter_revision != request.adapter_revision
+            || self.configuration_hash != request.configuration_hash
+            || self.candidate != request.candidate
+            || self.input != request.input
+            || self.started_at_unix_ms < request.requested_at_unix_ms
+            || self.completed_at_unix_ms < self.started_at_unix_ms
+            || self.completed_at_unix_ms - self.started_at_unix_ms > MAX_EXECUTION_WINDOW_MS
+        {
+            return Err("automation execution receipt does not match its exact request".into());
+        }
+        match (&adapter.location, &self.engine) {
+            (
+                AdapterLocation::Local,
+                AutomationExecutionEngine::Local {
+                    executable_sha256,
+                    model_artifact_sha256,
+                },
+            ) if is_sha256(executable_sha256) && is_sha256(model_artifact_sha256) => {}
+            (
+                AdapterLocation::Cloud,
+                AutomationExecutionEngine::Cloud {
+                    provider_response_sha256,
+                    provider_request_id_sha256,
+                },
+            ) if is_sha256(provider_response_sha256) && is_sha256(provider_request_id_sha256) => {}
+            _ => {
+                return Err(
+                    "automation execution engine proof does not match the selected adapter".into(),
+                );
+            }
+        }
+        validate_output_facts(
+            self.feature,
+            &self.input,
+            &self.output,
+            request.requested_output_language.as_deref(),
+            &self.facts,
+        )
+    }
+}
+
+fn validate_artifact(
+    sha256: &str,
+    bytes: u64,
+    media_type: &str,
+    language: Option<&str>,
+    field: &str,
+) -> Result<(), String> {
+    if !is_sha256(sha256) || bytes == 0 || bytes > MAX_ARTIFACT_BYTES {
+        return Err(format!("{field} identity or size is invalid or unbounded"));
+    }
+    validate_visible(media_type, MAX_MEDIA_TYPE, &format!("{field} media type"))?;
+    if !media_type.contains('/') {
+        return Err(format!("{field} media type is invalid"));
+    }
+    if let Some(language) = language {
+        validate_language(language, &format!("{field} language"))?;
+    }
+    Ok(())
+}
+
+fn validate_output_facts(
+    feature: AutomationFeature,
+    input: &AutomationInputArtifact,
+    output: &AutomationOutputArtifact,
+    requested_output_language: Option<&str>,
+    facts: &AutomationOutputFacts,
+) -> Result<(), String> {
+    match (feature, facts) {
+        (
+            AutomationFeature::Captions,
+            AutomationOutputFacts::Captions {
+                language,
+                cue_count,
+                text_sha256,
+                first_offset_ms,
+                last_end_ms,
+            },
+        ) => {
+            validate_language(language, "caption output language")?;
+            if *cue_count == 0
+                || *cue_count > MAX_OUTPUT_UNITS
+                || !is_sha256(text_sha256)
+                || last_end_ms <= first_offset_ms
+                || output.language.as_deref() != Some(language.as_str())
+            {
+                return Err("caption execution output facts are invalid or unbounded".into());
+            }
+        }
+        (
+            AutomationFeature::Summaries,
+            AutomationOutputFacts::Summary {
+                input_units,
+                output_words,
+            },
+        ) => {
+            if *input_units == 0
+                || *input_units > MAX_OUTPUT_UNITS
+                || *output_words == 0
+                || output_words > input_units
+            {
+                return Err("summary execution output facts are invalid or unbounded".into());
+            }
+        }
+        (
+            AutomationFeature::Translation,
+            AutomationOutputFacts::Translation {
+                source_language,
+                target_language,
+                translated_units,
+            },
+        ) => {
+            validate_language(source_language, "translation source language")?;
+            validate_language(target_language, "translation target language")?;
+            if source_language == target_language
+                || *translated_units == 0
+                || *translated_units > MAX_OUTPUT_UNITS
+                || input.language.as_deref() != Some(source_language.as_str())
+                || output.language.as_deref() != Some(target_language.as_str())
+                || requested_output_language != Some(target_language.as_str())
+            {
+                return Err("translation execution output facts are invalid or unbounded".into());
+            }
+        }
+        _ => return Err("automation execution output facts do not match the feature".into()),
+    }
+    Ok(())
+}
+
+fn validate_language(value: &str, field: &str) -> Result<(), String> {
+    validate_visible(value, MAX_LANGUAGE, field)?;
+    if value.starts_with('-')
+        || value.ends_with('-')
+        || value
+            .bytes()
+            .any(|byte| !(byte.is_ascii_alphanumeric() || byte == b'-'))
+    {
+        return Err(format!("{field} is not a bounded language tag"));
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
