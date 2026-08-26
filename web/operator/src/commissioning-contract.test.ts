@@ -5,6 +5,8 @@ import {
   commissioningAction,
   commissioningGroups,
   commissioningStatusLabel,
+  commissioningWizardCoverage,
+  commissioningWizardSteps,
   currentCommissioningCheck,
   isCoreCommissioningComplete,
   isCommissioningComplete,
@@ -73,4 +75,50 @@ test("actions and proof boundaries stay explicit", () => {
 test("schema-v2 explicit null action is not replaced by a browser fallback", () => {
   const blocked = { id: "fallback_slate", label: "Fallback", status: "blocked", blocking: true, action: null, detail: "Not implemented", evidence: "Authority" } as const;
   assert.equal(commissioningAction(blocked), null);
+});
+
+test("the 11-screen wizard covers every schema-v2 authoritative check exactly once", () => {
+  const ids = [
+    "station_profile", "operator_account_auth", "runtime_api", "station_box_storage", "station_time", "station_backup",
+    "channel_watch_folder", "fallback_slate", "cea708_captions", "publish_targets", "automation_model_policy",
+    "headend_output_setup", "cable_transport_validation", "guided_ingest", "guided_schedule", "guided_air_proof",
+    "selected_sink_ten_minute_proof", "support_bundle", "first_broadcast_report", "external_receiver_proof",
+    "clean_machine_install_proof", "one_station_week_proof", "three_station_week_proof",
+  ];
+  const report = {
+    schema_version: 2,
+    overall_status: "blocked",
+    current_step_id: "cable_transport_validation",
+    checks: ids.map((id) => ({ id, label: id, status: id === "station_profile" ? "pass" : "blocked", blocking: true, detail: id, evidence: id })),
+  } as AuthoritativeCommissioningReport;
+
+  const steps = commissioningWizardSteps(report);
+  assert.equal(steps.length, 11);
+  assert.deepEqual(commissioningWizardCoverage(report), { unmapped: [], duplicated: [], missing: [] });
+  assert.deepEqual(steps.flatMap((step) => step.checks.map((check) => check.id)).sort(), [...ids].sort());
+  assert.equal(steps.find((step) => step.current)?.id, "cable_checks");
+  assert.equal(steps[0].status, "pass");
+});
+
+test("new or multiply assigned server checks fail visibly instead of disappearing", () => {
+  const report = {
+    overall_status: "blocked",
+    checks: [{ id: "future_required_check", label: "Future", status: "blocked", blocking: true, detail: "Missing", evidence: "Server" }],
+  } as AuthoritativeCommissioningReport;
+  const coverage = commissioningWizardCoverage(report);
+  assert.deepEqual(coverage.unmapped, ["future_required_check"]);
+  assert.equal(coverage.duplicated.length, 0);
+  assert.ok(coverage.missing.includes("station_profile"));
+  assert.equal(commissioningWizardSteps(report)[0].status, "unknown");
+
+  const duplicate = { ...report, checks: [report.checks[0], report.checks[0]] };
+  assert.deepEqual(commissioningWizardCoverage(duplicate).duplicated, ["future_required_check"]);
+
+  const duplicateMapped = { ...report, checks: [
+    { id: "station_profile", label: "Profile A", status: "pass", blocking: false, detail: "A", evidence: "A" },
+    { id: "station_profile", label: "Profile B", status: "pass", blocking: false, detail: "B", evidence: "B" },
+  ] } as AuthoritativeCommissioningReport;
+  assert.deepEqual(commissioningWizardCoverage(duplicateMapped).duplicated, ["station_profile"]);
+  assert.equal(commissioningWizardSteps(duplicateMapped)[0].checks.length, 2);
+  assert.equal(commissioningWizardSteps(duplicateMapped)[0].status, "unknown");
 });

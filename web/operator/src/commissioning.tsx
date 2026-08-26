@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   commissioningAction,
-  commissioningGroups,
   commissioningStatusLabel,
+  commissioningWizardCoverage,
+  commissioningWizardSteps,
   currentCommissioningCheck,
   isCommissioningComplete,
   isCoreCommissioningComplete,
@@ -13,6 +14,7 @@ import type {
   AuthoritativeCommissioningReport,
   CommissioningAction,
   CommissioningStatus,
+  CommissioningWizardStepId,
 } from "./commissioning-contract";
 import { apiRequest } from "./api-client";
 import {
@@ -58,6 +60,7 @@ export function AuthoritativeCommissioning({ onNavigate }: CommissioningProps) {
   const [referenceTierDraft, setReferenceTierDraft] = useState("");
   const [referenceTierSaving, setReferenceTierSaving] = useState(false);
   const [referenceTierError, setReferenceTierError] = useState<string | null>(null);
+  const [selectedStepId, setSelectedStepId] = useState<CommissioningWizardStepId | null>(null);
   const [selectedCheckId, setSelectedCheckId] = useState<string | null>(null);
   const [readError, setReadError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
@@ -99,9 +102,14 @@ export function AuthoritativeCommissioning({ onNavigate }: CommissioningProps) {
   }, [load]);
 
   const recommended = report ? currentCommissioningCheck(report) : null;
-  const selected = report?.checks.find((check) => check.id === selectedCheckId) ?? null;
-  const focused = selected ?? recommended ?? report?.checks[0] ?? null;
-  const groups = report ? commissioningGroups(report) : [];
+  const wizard = report ? commissioningWizardSteps(report) : [];
+  const coverage = report ? commissioningWizardCoverage(report) : { unmapped: [], duplicated: [], missing: [] };
+  const authorityMismatch = Boolean(report?.current_step_id && (coverage.unmapped.includes(report.current_step_id) || coverage.duplicated.includes(report.current_step_id)));
+  const mismatchChecks = report?.checks.filter((check) => coverage.unmapped.includes(check.id) || coverage.duplicated.includes(check.id)) ?? [];
+  const recommendedStep = wizard.find((step) => step.current) ?? null;
+  const activeStep = authorityMismatch ? null : wizard.find((step) => step.id === selectedStepId) ?? recommendedStep ?? wizard[0] ?? null;
+  const selected = activeStep?.checks.find((check) => check.id === selectedCheckId) ?? null;
+  const focused = selected ?? (authorityMismatch ? recommended : activeStep?.checks.find((check) => check.id === recommended?.id) ?? activeStep?.checks[0] ?? null);
   const coreComplete = report ? isCoreCommissioningComplete(report) : false;
   const fullyComplete = report ? isCommissioningComplete(report) : false;
 
@@ -109,6 +117,11 @@ export function AuthoritativeCommissioning({ onNavigate }: CommissioningProps) {
     setSelectedCheckId(check.id);
     const view = actionView(commissioningAction(check));
     if (view) onNavigate(view);
+  }
+
+  function openStep(stepId: CommissioningWizardStepId) {
+    setSelectedStepId(stepId);
+    setSelectedCheckId(null);
   }
 
   async function saveReferenceTier() {
@@ -141,14 +154,17 @@ export function AuthoritativeCommissioning({ onNavigate }: CommissioningProps) {
 
   const focusedAction = focused ? commissioningAction(focused) : null;
   const focusedView = actionView(focusedAction);
+  const activeStepIndex = activeStep ? wizard.findIndex((step) => step.id === activeStep.id) : -1;
   return <>
-    <header className="page-header commissioning-header"><div><p className="eyebrow">Authoritative first-run commissioning</p><h1>{fullyComplete ? "Commissioning evidence is complete." : coreComplete ? "Local station commissioning is complete." : recommended ? `Next: ${recommended.label}` : "Review commissioning evidence."}</h1><p>Server checks stay in their required order and refresh every five seconds. The browser cannot mark a step complete.</p></div><div className="header-actions"><button className="secondary" onClick={() => void load()}>Refresh proof</button></div></header>
-    <div className="commissioning-boundary" role="note"><strong>Required gate: under 30:00</strong><span>healthy first launch → worker-acknowledged first scheduled broadcast</span><p>Installer and runtime-provisioning time are measured separately. Required product gaps remain blocked; external receiver and field proof are never inferred from local transport.</p></div>
+    <header className="page-header commissioning-header"><div><p className="eyebrow">Authoritative first-run commissioning</p><h1>{fullyComplete ? "Commissioning evidence is complete." : coreComplete ? "Local station commissioning is complete." : recommended ? `Next: ${recommended.label}` : "Review commissioning evidence."}</h1><p>The server selects the current required check; the 11 operator screens refresh every five seconds and cannot mark themselves complete.</p></div><div className="header-actions"><button className="secondary" onClick={() => void load()}>Refresh proof</button></div></header>
+    <div className="commissioning-boundary" role="note"><strong>Operator target: under 30:00</strong><span>healthy first launch → worker-acknowledged first scheduled broadcast</span><p>This report does not measure elapsed commissioning time. Installer and provisioning time require a separate timed proof; external receiver and field evidence are never inferred locally.</p></div>
     {readError && <div className="error-box" role="alert">Latest refresh failed: {readError}. Previously loaded authority remains visible.</div>}
     <section className={`commission-banner commission-authority-${report.overall_status}`} aria-live="polite"><div className="commission-score">{report.core_progress ? `${report.core_progress.passed}/${report.core_progress.total}` : "—"}</div><div><span className="commission-rollup">{coreComplete ? "Core verified by server" : report.schema_version === 2 ? "Core commissioning blocked" : "Core completion not reported"}</span><strong>{coreComplete ? "Ready for separate external and field gates" : recommended ? recommended.label : "No current server step reported"}</strong><p>{coreComplete ? "Local completion came from core_complete in the authoritative report; external gates remain visible below." : recommended?.detail ?? "This station must supply a schema-v2 core rollup before the console can claim local completion."}</p></div><Status status={report.overall_status === "pass" ? "pass" : report.overall_status} /></section>
     <div className="commissioning-layout">
-      <section className="commissioning-journey" aria-label="Ordered authoritative commissioning steps">
-        {groups.length === 0 ? <div className="panel commissioning-empty"><strong>No commissioning checks reported</strong><p>The station returned an empty authoritative report. Refresh after the service is repaired.</p></div> : groups.map((group) => <section className="panel commission-phase" key={group.id}><div className="panel-head"><div><p className="eyebrow">Commissioning phase</p><h2>{group.label}</h2></div><span className="count">{group.checks.filter((check) => check.status === "pass").length}/{group.checks.length}</span></div><div className="commission-checks">{group.checks.map((check) => {
+      <section className="commissioning-journey" aria-label="Eleven-screen authoritative commissioning workflow">
+        {(coverage.unmapped.length > 0 || coverage.duplicated.length > 0 || coverage.missing.length > 0) && <section className="error-box commissioning-contract-error" role="alert"><strong>Commissioning contract mismatch</strong><p>{coverage.unmapped.length > 0 ? `Unmapped server checks: ${coverage.unmapped.join(", ")}. ` : ""}{coverage.duplicated.length > 0 ? `Duplicated checks: ${coverage.duplicated.join(", ")}. ` : ""}{coverage.missing.length > 0 ? `Expected checks absent from the server report: ${coverage.missing.join(", ")}.` : ""} The console will not hide, invent, or reinterpret authority.</p>{mismatchChecks.map((check, index) => <article className="commission-mismatch-check" key={`${check.id}-${index}`}><div><strong>{check.label}</strong><Status status={check.status} /></div><p>{check.detail}</p><small>{check.evidence || "No evidence detail was reported."}</small></article>)}</section>}
+        <nav className="commission-wizard-rail" aria-label="Commissioning screens">{wizard.map((step) => <button key={step.id} className={`${step.id === activeStep?.id ? "selected" : ""} ${step.current ? "current" : ""}`} aria-current={step.current ? "step" : undefined} onClick={() => openStep(step.id)}><span>{step.status === "pass" ? "✓" : step.number}</span><strong>{step.title}</strong><small>{step.passed}/{step.checkIds.length}</small></button>)}</nav>
+        {!activeStep ? <div className="panel commissioning-empty"><strong>{authorityMismatch ? "Current server step does not match the 11-screen contract." : "No commissioning checks reported"}</strong><p>{authorityMismatch ? `The server selected ${report.current_step_id}; resolve the displayed contract mismatch before following another screen.` : "The station returned no usable commissioning workflow. Refresh after the service is repaired."}</p></div> : <section className="panel commission-phase commission-wizard-screen"><div className="panel-head"><div><p className="eyebrow">Screen {activeStep.number} of 11</p><h2>{activeStep.title}</h2><p className="commission-step-purpose">{activeStep.purpose}</p></div><div className="commission-step-summary"><span className="count">{activeStep.passed}/{activeStep.checkIds.length}</span><Status status={activeStep.status} /></div></div><div className="commission-checks">{activeStep.checks.length === 0 ? <div className="commission-no-action"><strong>Required server authority is absent.</strong><p>This screen stays unverified; the browser cannot create substitute proof.</p></div> : activeStep.checks.map((check) => {
           const external = isExternalCommissioningCheck(check);
           const current = check.id === recommended?.id;
           const active = check.id === focused?.id;
@@ -162,7 +178,7 @@ export function AuthoritativeCommissioning({ onNavigate }: CommissioningProps) {
             <div className="commission-check-meta"><span className={`commission-boundary-tag ${external ? "external" : "local"}`}>{external ? "External evidence" : "Local authority"}</span><Status status={check.status} />{check.required === false && <span className="commission-optional">Not core-required</span>}</div>
             {active && <div className="commission-evidence"><div><span>Evidence</span><p>{check.evidence || "No evidence detail was reported."}</p></div>{check.next_step && <div><span>Next step</span><p>{check.next_step}</p></div>}{check.status !== "pass" && !external && !view && <div className="commission-no-action"><strong>No operator action is available in this build.</strong><p>This required gap stays blocked until the product exposes and proves the capability.</p></div>}{view && action && <button className="secondary" onClick={() => openAction(check)}>Open {actionLabel(action)} →</button>}</div>}
           </article>;
-        })}</div></section>)}
+        })}</div><div className="commission-wizard-controls"><button className="secondary" disabled={activeStepIndex <= 0} onClick={() => openStep(wizard[activeStepIndex - 1].id)}>← Previous</button><span>Screen {activeStep.number} of {wizard.length}</span><button className="secondary" disabled={activeStepIndex < 0 || activeStepIndex >= wizard.length - 1} onClick={() => openStep(wizard[activeStepIndex + 1].id)}>Next →</button></div></section>}
       </section>
       <aside className="commissioning-side">
         <section className="panel commission-focus"><p className="eyebrow">Current server step</p>{focused ? <><h2>{focused.label}</h2><Status status={focused.status} /><p>{focused.detail}</p><dl><div><dt>Boundary</dt><dd>{isExternalCommissioningCheck(focused) ? "External evidence" : "Local station authority"}</dd></div><div><dt>Required for core</dt><dd>{focused.required === false ? "No" : "Yes"}</dd></div><div><dt>Evidence source</dt><dd>{focused.evidence || "Not reported"}</dd></div></dl>{focusedView && focusedAction && <button className="primary wide" onClick={() => openAction(focused)}>Continue to {actionLabel(focusedAction)}</button>}</> : <><h2>No current step</h2><p>The server did not name a next required check.</p></>}</section>
