@@ -17,6 +17,13 @@ use std::{
     time::{Instant, SystemTime},
 };
 pub use transport_executor::run_transport_proof_queue_controller;
+#[cfg(feature = "test-support")]
+#[doc(hidden)]
+pub mod test_support {
+    pub use super::transport_executor::{
+        InjectedAuthorityMutation, run_injected_transport_controller_iteration,
+    };
+}
 
 use serde::de::DeserializeOwned;
 use sha2::{Digest, Sha256};
@@ -18129,7 +18136,10 @@ fn validate_transport_proof_job_id(value: &str) -> Result<(), String> {
 }
 
 fn validate_transport_proof_lease(now_unix_ms: i64, lease_duration_ms: i64) -> Result<(), String> {
-    if now_unix_ms < 0 || !(1_000..=1_200_000).contains(&lease_duration_ms) {
+    // The controller's claim lease covers the bounded capture plus both
+    // analyzers and teardown. Analysis renewals remain shorter, but the
+    // initial claim must admit that complete 1.9M ms execution envelope.
+    if now_unix_ms < 0 || !(1_000..=1_900_000).contains(&lease_duration_ms) {
         return Err("transport proof lease request is invalid".into());
     }
     Ok(())
@@ -22585,7 +22595,7 @@ mod tests {
         assert!(store.seed_transport_proof_job_for_test(&job).unwrap());
         assert!(!store.seed_transport_proof_job_for_test(&job).unwrap());
         let claimed = store
-            .claim_next_transport_proof_job(20, 1_200_000)
+            .claim_next_transport_proof_job(20, 1_900_000)
             .unwrap()
             .unwrap();
         assert_eq!(claimed.job().state, TransportProofJobState::Claimed);

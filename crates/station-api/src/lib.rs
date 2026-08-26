@@ -15060,6 +15060,13 @@ mod tests {
         }
     }
 
+    fn transport_station_box_probe() -> StationBoxProbeInput {
+        let mut probe = station_box_probe();
+        probe.product_version = "0.2.0".into();
+        probe.source_commit = Some("0123456789abcdef0123456789abcdef01234567".into());
+        probe
+    }
+
     fn receiver_test_headend(
         enabled: bool,
         sinks: Vec<station_readiness::SinkHeadendReadiness>,
@@ -20191,6 +20198,210 @@ mod tests {
         assert!(!String::from_utf8_lossy(&read.body).contains("secret"));
         drop(api);
         let _ = std::fs::remove_file(database);
+    }
+
+    #[test]
+    fn authenticated_api_queue_runs_private_analyzer_and_receiver_to_exact_current_receipts() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("townlight-transport-outer-e2e-{nonce}"));
+        let application = root.join("application");
+        let database = root.join("data/station.db");
+        std::fs::create_dir_all(database.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(&application).unwrap();
+        install_transport_candidate(database.parent().unwrap(), &application);
+        let api = Api::open_with_station_box_probe(
+            &database,
+            &application,
+            transport_station_box_probe(),
+        )
+        .unwrap();
+        let channel_id = "11111111-2222-4333-8444-555555555555";
+        let sink_id = "22222222-3333-4444-8555-666666666666";
+        api.storage
+            .put_channel(&ChannelConfiguration {
+                channel_id: channel_id.into(),
+                display_name: "Transport outer E2E".into(),
+                output_profile: station_schedule::OutputProfileId::Proof360p30,
+                output_sinks: vec![station_schedule::OutputSinkConfiguration::required_udp(
+                    sink_id,
+                    "Required sink",
+                    "127.0.0.1:5500",
+                    -16.0,
+                )],
+                enabled: true,
+            })
+            .unwrap();
+        let setup_admin = test_actor(station_auth::OperatorRole::SetupAdmin);
+        let reader = test_actor(station_auth::OperatorRole::MeetingOperator);
+        let initial_authorization = "Bearer outer-e2e-initial-secret";
+        let authorization = "Bearer outer-e2e-rotated-secret";
+        let target_path = format!("/api/v1/channels/{channel_id}/transport-target");
+        let target = serde_json::to_vec(&serde_json::json!({
+            "target_id": "receiver-1",
+            "label": "Headend receiver",
+            "protocol": "https_api",
+            "host": "receiver.example.test",
+            "port": 443,
+            "authorization": initial_authorization,
+            "expected_revision": null
+        }))
+        .unwrap();
+        assert_eq!(
+            api.handle_authenticated("PUT", &target_path, Some(&target), &setup_admin)
+                .status,
+            200
+        );
+        let rotated_target = serde_json::to_vec(&serde_json::json!({
+            "target_id": "receiver-1",
+            "label": "Headend receiver",
+            "protocol": "https_api",
+            "host": "receiver.example.test",
+            "port": 443,
+            "authorization": authorization,
+            "expected_revision": 1
+        }))
+        .unwrap();
+        let rotated =
+            api.handle_authenticated("PUT", &target_path, Some(&rotated_target), &setup_admin);
+        assert_eq!(rotated.status, 200);
+        assert!(!String::from_utf8_lossy(&rotated.body).contains(initial_authorization));
+        assert!(!String::from_utf8_lossy(&rotated.body).contains(authorization));
+        let jobs_path = format!("/api/v1/channels/{channel_id}/transport-proof/jobs");
+        let queued = api.handle_authenticated("POST", &jobs_path, None, &setup_admin);
+        assert_eq!(
+            queued.status,
+            202,
+            "{}",
+            String::from_utf8_lossy(&queued.body)
+        );
+        let queued: serde_json::Value = serde_json::from_slice(&queued.body).unwrap();
+        let job_id = queued["job_id"].as_str().unwrap();
+        let response = b"authenticated receiver response";
+        station_storage::test_support::run_injected_transport_controller_iteration(
+            &database,
+            &application,
+            authorization,
+            response,
+            station_storage::test_support::InjectedAuthorityMutation::None,
+        )
+        .unwrap();
+        let status_path = format!("/api/v1/channels/{channel_id}/transport-proof/jobs/{job_id}");
+        let status = api.handle_authenticated("GET", &status_path, None, &reader);
+        assert_eq!(status.status, 200);
+        let status: serde_json::Value = serde_json::from_slice(&status.body).unwrap();
+        assert_eq!(status["state"], "completed");
+        let proof_path = format!("/api/v1/channels/{channel_id}/transport-proof");
+        let proof = api.handle_authenticated("GET", &proof_path, None, &reader);
+        assert_eq!(proof.status, 200);
+        let proof: serde_json::Value = serde_json::from_slice(&proof.body).unwrap();
+        assert_eq!(proof["history"]["analysis"][0]["proof_id"], job_id);
+        assert_eq!(proof["history"]["reachability"][0]["proof_id"], job_id);
+        assert_eq!(
+            proof["history"]["reachability"][0]["response_identity_sha256"],
+            format!("{:x}", Sha256::digest(response))
+        );
+        assert_eq!(
+            proof["validations"][0]["outcome"],
+            "pass",
+            "{}",
+            serde_json::to_string_pretty(&proof).unwrap()
+        );
+        drop(api);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn private_controller_fails_closed_when_authority_mutates_after_receiver_probe() {
+        use station_storage::test_support::InjectedAuthorityMutation;
+        for mutation in [
+            InjectedAuthorityMutation::TargetRevision,
+            InjectedAuthorityMutation::OutputConfiguration,
+            InjectedAuthorityMutation::InstallGeneration,
+        ] {
+            let nonce = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            let root = std::env::temp_dir().join(format!(
+                "townlight-transport-stale-e2e-{mutation:?}-{nonce}"
+            ));
+            let application = root.join("application");
+            let database = root.join("data/station.db");
+            std::fs::create_dir_all(database.parent().unwrap()).unwrap();
+            std::fs::create_dir_all(&application).unwrap();
+            install_transport_candidate(database.parent().unwrap(), &application);
+            let api = Api::open_with_station_box_probe(
+                &database,
+                &application,
+                transport_station_box_probe(),
+            )
+            .unwrap();
+            let channel_id = "11111111-2222-4333-8444-555555555555";
+            let sink_id = "22222222-3333-4444-8555-666666666666";
+            api.storage
+                .put_channel(&ChannelConfiguration {
+                    channel_id: channel_id.into(),
+                    display_name: "Stale authority E2E".into(),
+                    output_profile: station_schedule::OutputProfileId::Proof360p30,
+                    output_sinks: vec![station_schedule::OutputSinkConfiguration::required_udp(
+                        sink_id,
+                        "Required sink",
+                        "127.0.0.1:5500",
+                        -16.0,
+                    )],
+                    enabled: true,
+                })
+                .unwrap();
+            let setup_admin = test_actor(station_auth::OperatorRole::SetupAdmin);
+            let authorization = "Bearer stale-e2e-secret";
+            let target_path = format!("/api/v1/channels/{channel_id}/transport-target");
+            let target = serde_json::to_vec(&serde_json::json!({
+                "target_id": "receiver-1", "label": "Headend receiver",
+                "protocol": "https_api", "host": "receiver.example.test", "port": 443,
+                "authorization": authorization, "expected_revision": null
+            }))
+            .unwrap();
+            assert_eq!(
+                api.handle_authenticated("PUT", &target_path, Some(&target), &setup_admin)
+                    .status,
+                200
+            );
+            let jobs_path = format!("/api/v1/channels/{channel_id}/transport-proof/jobs");
+            let queued = api.handle_authenticated("POST", &jobs_path, None, &setup_admin);
+            assert_eq!(queued.status, 202);
+            let queued: serde_json::Value = serde_json::from_slice(&queued.body).unwrap();
+            let job_id = queued["job_id"].as_str().unwrap();
+            assert!(
+                station_storage::test_support::run_injected_transport_controller_iteration(
+                    &database,
+                    &application,
+                    authorization,
+                    b"receiver response",
+                    mutation,
+                )
+                .is_err()
+            );
+            let record = api
+                .storage
+                .read_transport_proof_job(job_id)
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                record.state,
+                station_storage::TransportProofJobState::Failed
+            );
+            let history = api
+                .storage
+                .read_transport_proof_history(channel_id, None, 10)
+                .unwrap();
+            assert!(history.analysis.is_empty());
+            assert!(history.reachability.is_empty());
+            drop(api);
+            std::fs::remove_dir_all(root).unwrap();
+        }
     }
 
     #[test]

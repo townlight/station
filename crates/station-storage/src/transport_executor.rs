@@ -11,6 +11,8 @@ use std::os::windows::fs::OpenOptionsExt;
 use std::os::windows::io::AsRawHandle;
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStderr, ChildStdout, Command, Stdio};
+#[cfg(test)]
+use std::sync::atomic::AtomicUsize;
 use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
@@ -56,9 +58,12 @@ const MAX_QUARANTINE_TREE_DEPTH: usize = 32;
 const QUARANTINE_SCAN_TIMEOUT: Duration = Duration::from_secs(2);
 const TSDUCK_ANALYZER_ID: &str = "tsduck-tsanalyze";
 const RECEIVER_ADAPTER_ID: &str = "townlight-https-receiver-v1";
+const RECEIVER_RESOURCE_PATH: &str = "/api/v1/townlight/reachability";
 
 #[cfg(test)]
 static FORCE_JOB_ASSIGN_FAILURE: AtomicBool = AtomicBool::new(false);
+#[cfg(test)]
+static FORCED_CANCEL_FAILURES: AtomicUsize = AtomicUsize::new(0);
 
 /// A capture namespace exclusively owned by stationd.  It rejects reparse
 /// points from its root through the per-job directory and exposes no API for a
@@ -1029,12 +1034,12 @@ struct TsdDuckTransportExecutor<R> {
     pub runner: R,
 }
 impl<R: ProcessRunner> TsdDuckTransportExecutor<R> {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     fn analyze_capture(&self, capture: &CaptureRequest) -> Result<TransportFindings, String> {
         self.analyze_capture_with_heartbeat(capture, &mut || Ok(()))
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     fn analyze_capture_with_heartbeat(
         &self,
         capture: &CaptureRequest,
@@ -1354,7 +1359,7 @@ impl AuthenticatedReceiver for HttpsReceiverAdapter {
             return Err("receiver protocol is not implemented".into());
         }
         let url = format!(
-            "https://{}:{}/api/v1/townlight/reachability",
+            "https://{}:{}{RECEIVER_RESOURCE_PATH}",
             target.host, target.port
         );
         let agent: ureq::Agent = ureq::Agent::config_builder()
@@ -1379,18 +1384,252 @@ impl AuthenticatedReceiver for HttpsReceiverAdapter {
         Ok(body)
     }
 }
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 #[derive(Debug, Clone)]
 struct FakeAuthenticatedReceiver {
     pub response: Result<Vec<u8>, String>,
 }
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl sealed::Receiver for FakeAuthenticatedReceiver {}
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl AuthenticatedReceiver for FakeAuthenticatedReceiver {
     fn probe(&self, _: &TargetDeviceConfig, _: Duration) -> Result<Vec<u8>, String> {
         self.response.clone()
     }
+}
+
+#[cfg(feature = "test-support")]
+struct InjectedFixtureRunner;
+
+#[cfg(feature = "test-support")]
+impl sealed::Process for InjectedFixtureRunner {}
+
+#[cfg(feature = "test-support")]
+impl ProcessRunner for InjectedFixtureRunner {
+    fn run(&self, _: &Path, argv: &[String], _: Duration) -> Result<ProcessResult, String> {
+        if argv
+            .first()
+            .is_some_and(|argument| argument == "--json-output")
+        {
+            if argv.get(1).map(String::as_str) != Some("-") || argv.len() != 3 {
+                return Err(
+                    "injected tstables invocation escaped its fixed stdout contract".into(),
+                );
+            }
+            Ok(ProcessResult {
+                status_success: true,
+                output: include_bytes!("../tests/fixtures/tsduck-3.44-h264-aac-tables.json")
+                    .to_vec(),
+            })
+        } else {
+            if argv.len() != 4
+                || argv[0] != "--json"
+                || argv[1] != "--deterministic"
+                || argv[2] != "--error-analysis"
+            {
+                return Err("injected tsanalyze invocation escaped its fixed argv contract".into());
+            }
+            Ok(ProcessResult {
+                status_success: true,
+                output: include_bytes!("../tests/fixtures/tsduck-3.44-h264-aac-analysis.txt")
+                    .to_vec(),
+            })
+        }
+    }
+}
+
+#[cfg(feature = "test-support")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InjectedAuthorityMutation {
+    None,
+    TargetRevision,
+    OutputConfiguration,
+    InstallGeneration,
+}
+
+/// Release-excluded proof harness for the private controller authority. The
+/// caller can enqueue only through the authenticated API; this function claims
+/// that durable row itself, runs fixed fake analyzer/table/receiver adapters,
+/// and invokes the same private CAS transitions as production. No receipt or
+/// outcome can be supplied by the caller.
+#[cfg(feature = "test-support")]
+pub fn run_injected_transport_controller_iteration(
+    database: &Path,
+    application_root: &Path,
+    expected_authorization: &str,
+    receiver_response: &[u8],
+    mutation: InjectedAuthorityMutation,
+) -> Result<(), String> {
+    let now = unix_time_millis()?;
+    let store = StationStore::open(database)?;
+    store.recover_expired_transport_proof_jobs(now)?;
+    let execution = store
+        .claim_next_transport_proof_job(now, CLAIM_LEASE_MS)?
+        .ok_or("injected controller found no queued transport proof job")?;
+    let outcome = (|| {
+        let job = execution.job();
+        let target = store
+            .read_transport_target_config(&job.job.channel_id, &job.job.sink_id)?
+            .ok_or("injected controller target is unavailable")?;
+        let authorization = store.read_transport_target_authorization(
+            &job.job.channel_id,
+            &job.job.sink_id,
+            &target,
+        )?;
+        if authorization != expected_authorization
+            || RECEIVER_RESOURCE_PATH != "/api/v1/townlight/reachability"
+        {
+            return Err("injected receiver authority did not match its exact contract".into());
+        }
+        let data_directory = database
+            .parent()
+            .ok_or("injected controller data directory is unavailable")?;
+        ensure_current_candidate(data_directory, application_root, &job.job)?;
+        let artifact_directory = data_directory
+            .join("artifacts")
+            .join("transport-proof")
+            .join(&job.job.job_id);
+        fs::create_dir_all(&artifact_directory)
+            .map_err(|_| "injected capture directory could not be created")?;
+        let artifact = artifact_directory.join("capture.ts");
+        let capture_bytes = include_bytes!("../tests/fixtures/tsduck-3.44-h264-aac.ts").as_slice();
+        fs::write(&artifact, capture_bytes)
+            .map_err(|_| "injected capture fixture could not be written")?;
+        let capture_started = now
+            .checked_sub(i64::try_from(MAX_PROOF_DURATION_MS).expect("duration fits i64"))
+            .ok_or("injected capture time underflowed")?;
+        let facts = TransportProofCaptureFacts {
+            artifact_relative_path: format!("{}/capture.ts", job.job.job_id),
+            capture_bytes: u64::try_from(capture_bytes.len())
+                .map_err(|_| "injected capture size overflowed")?,
+            capture_sha256: sha256(capture_bytes),
+            started_at_unix_ms: capture_started,
+            ended_at_unix_ms: now,
+        };
+        let analyzing =
+            store.begin_transport_proof_analysis(&execution, &facts, now, ANALYSIS_LEASE_MS)?;
+        let runtime =
+            AttestedTsdDuckRuntime::from_verified_install(data_directory, application_root)?;
+        let executor = TsdDuckTransportExecutor {
+            runtime,
+            runner: InjectedFixtureRunner,
+        };
+        let findings = executor.analyze_capture(&CaptureRequest {
+            udp_host: "127.0.0.1".into(),
+            udp_port: 5500,
+            duration_ms: MAX_PROOF_DURATION_MS,
+            max_bytes: job.job.max_capture_bytes,
+            artifact_path: artifact,
+        })?;
+        let analysis = TransportAnalysisReceipt {
+            proof_id: analyzing.job.job_id.clone(),
+            channel_id: analyzing.job.channel_id.clone(),
+            sink_id: analyzing.job.sink_id.clone(),
+            target_id: analyzing.job.target_id.clone(),
+            target_revision: analyzing.job.target_revision,
+            candidate_version: analyzing.job.candidate_version.clone(),
+            source_commit: analyzing.job.source_commit.clone(),
+            configuration_hash: analyzing.job.configuration_hash.clone(),
+            analyzer_id: TSDUCK_ANALYZER_ID.into(),
+            analyzer_version: executor.runtime.version.clone(),
+            analyzer_sha256: executor.runtime.tsanalyze_sha256.clone(),
+            capture_bytes: facts.capture_bytes,
+            capture_sha256: facts.capture_sha256.clone(),
+            outcome: ProofOutcome::Pass,
+            findings,
+            captured_at_unix_ms: now,
+            recorded_at_unix_ms: now,
+            recorded_by: "stationd-transport-proof-controller".into(),
+            detail: "Bounded TSDuck transport analysis passed.".into(),
+        };
+        let binding = ProofBinding {
+            proof_id: analyzing.job.job_id.clone(),
+            channel_id: analyzing.job.channel_id.clone(),
+            sink_id: analyzing.job.sink_id.clone(),
+            candidate_version: analyzing.job.candidate_version.clone(),
+            source_commit: analyzing.job.source_commit.clone(),
+            configuration_hash: analyzing.job.configuration_hash.clone(),
+            recorded_by: "stationd-transport-proof-controller".into(),
+            now_unix_ms: now,
+        };
+        let reachability = ReceiverProofExecutor {
+            adapter: FakeAuthenticatedReceiver {
+                response: Ok(receiver_response.to_vec()),
+            },
+            adapter_version: "1".into(),
+        }
+        .probe_receipt(&binding, &target)?;
+
+        match mutation {
+            InjectedAuthorityMutation::None => {}
+            InjectedAuthorityMutation::TargetRevision => {
+                let mut changed = target.clone();
+                changed.updated_at_unix_ms = changed.updated_at_unix_ms.saturating_add(1);
+                changed.credential_configured = false;
+                store.write_transport_target_config(
+                    &job.job.channel_id,
+                    &job.job.sink_id,
+                    Some(target.revision),
+                    &changed,
+                )?;
+            }
+            InjectedAuthorityMutation::OutputConfiguration => {
+                let mut channel = store
+                    .list_channels()?
+                    .into_iter()
+                    .find(|channel| channel.channel_id == job.job.channel_id)
+                    .ok_or("injected controller channel disappeared")?;
+                let sink = channel
+                    .output_sinks
+                    .iter_mut()
+                    .find(|sink| sink.sink_id == job.job.sink_id)
+                    .ok_or("injected controller sink disappeared")?;
+                sink.destination = "127.0.0.1:5501".into();
+                store.put_channel(&channel)?;
+            }
+            InjectedAuthorityMutation::InstallGeneration => {
+                let active_path =
+                    data_directory.join(station_maintenance::ACTIVE_SLOT_RECEIPT_NAME);
+                let mut active: serde_json::Value = serde_json::from_slice(
+                    &fs::read(&active_path)
+                        .map_err(|_| "injected active slot could not be read")?,
+                )
+                .map_err(|_| "injected active slot is invalid")?;
+                active["generation"] =
+                    serde_json::json!(active["generation"].as_u64().unwrap_or(0).saturating_add(1));
+                fs::write(&active_path, active.to_string())
+                    .map_err(|_| "injected active slot could not be mutated")?;
+            }
+        }
+
+        let fence = station_maintenance::acquire_install_authority_fence(data_directory)?;
+        if fence.was_abandoned() {
+            return Err("injected install authority fence was abandoned".into());
+        }
+        ensure_current_candidate(data_directory, application_root, &job.job)?;
+        let current_target = store
+            .read_transport_target_config(&job.job.channel_id, &job.job.sink_id)?
+            .ok_or("injected controller target disappeared")?;
+        if current_target != target
+            || store.current_channel_output_configuration_hash(&job.job.channel_id)?
+                != job.job.configuration_hash
+        {
+            return Err("injected controller authority changed before completion".into());
+        }
+        store.append_target_device_reachability_receipt(&reachability, now)?;
+        store.complete_transport_proof_job_with_analysis(&execution, &analysis, now, || {
+            station_maintenance::read_verified_install_authority(data_directory, application_root)
+        })?;
+        Ok(())
+    })();
+    if outcome.is_err() {
+        let _ = store.fail_transport_proof_job(
+            &execution,
+            unix_time_millis().unwrap_or(now),
+            "Transport proof execution failed before a passing receipt could be produced.",
+        );
+    }
+    outcome
 }
 struct ReceiverProofExecutor<A> {
     pub adapter: A,
@@ -1516,24 +1755,22 @@ fn collect_capture_stderr(
     drain: std::thread::JoinHandle<()>,
 ) -> Result<(), String> {
     let stderr_result = rx.recv_timeout(POST_EXIT_DRAIN_TIMEOUT);
+    let mut cancellation_failed = false;
     if stderr_result.is_err() || !drain.is_finished() {
         job.terminate();
         let _ = child.wait();
-        let cancelled = unsafe { CancelSynchronousIo(drain.as_raw_handle() as HANDLE) };
-        if cancelled == 0 && !drain.is_finished() {
-            return Err("TSDuck capture stderr drain cancellation failed".into());
-        }
+        cancellation_failed = cancel_until_finished(&drain, Duration::from_secs(1));
     }
-    let join_deadline = Instant::now() + Duration::from_secs(1);
-    while !drain.is_finished() && Instant::now() < join_deadline {
-        std::thread::sleep(Duration::from_millis(10));
-    }
-    if !drain.is_finished() {
-        return Err("TSDuck capture stderr drain did not stop after cancellation".into());
-    }
+    // The owned job has been terminated and waited before this point, so every
+    // inherited write handle is closed. Even if CancelSynchronousIo raced or
+    // transiently failed, the reader must observe EOF. Retain the JoinHandle
+    // and join unconditionally; never detach it on an error branch.
     drain
         .join()
         .map_err(|_| "TSDuck capture stderr drain panicked".to_string())?;
+    if cancellation_failed {
+        return Err("TSDuck capture stderr cancellation raced before the drain joined".into());
+    }
     match stderr_result {
         Ok(Ok(_)) => Ok(()),
         Ok(Err(_)) => Err("TSDuck capture stderr could not be read".into()),
@@ -1596,22 +1833,14 @@ fn collect_process_drains(
     };
     let stdout_result = receive(&stdout_rx, "stdout", heartbeat);
     let stderr_result = receive(&stderr_rx, "stderr", heartbeat);
+    let mut cancellation_failed = false;
     if stdout_result.is_err() || stderr_result.is_err() {
         // A descendant retaining an inherited pipe must not leave controller
         // resources behind after the bounded drain deadline. Cancel the exact
         // synchronous reads before joining their owning threads.
         job.terminate();
-        let (stdout_cancelled, stderr_cancelled) = unsafe {
-            (
-                CancelSynchronousIo(stdout_thread.as_raw_handle() as HANDLE),
-                CancelSynchronousIo(stderr_thread.as_raw_handle() as HANDLE),
-            )
-        };
-        if stdout_cancelled == 0 && !stdout_thread.is_finished()
-            || stderr_cancelled == 0 && !stderr_thread.is_finished()
-        {
-            return Err("TSDuck pipe drain cancellation failed".into());
-        }
+        cancellation_failed |= cancel_until_finished(&stdout_thread, Duration::from_secs(1));
+        cancellation_failed |= cancel_until_finished(&stderr_thread, Duration::from_secs(1));
     }
     let join_deadline = Instant::now() + Duration::from_secs(1);
     let mut heartbeat_error = None;
@@ -1623,27 +1852,52 @@ fn collect_process_drains(
         {
             heartbeat_error = Some(error);
             job.terminate();
-            unsafe {
-                CancelSynchronousIo(stdout_thread.as_raw_handle() as HANDLE);
-                CancelSynchronousIo(stderr_thread.as_raw_handle() as HANDLE);
-            }
+            cancellation_failed |=
+                cancel_drain_thread(&stdout_thread) == 0 && !stdout_thread.is_finished();
+            cancellation_failed |=
+                cancel_drain_thread(&stderr_thread) == 0 && !stderr_thread.is_finished();
         }
         std::thread::sleep(Duration::from_millis(10));
     }
-    if !stdout_thread.is_finished() || !stderr_thread.is_finished() {
-        return Err("TSDuck pipe drain threads did not stop after cancellation".into());
-    }
+    // TerminateJobObject closes every descendant write handle. Retain and join
+    // both owned readers even when cancellation reported a race/failure.
     stdout_thread
         .join()
         .map_err(|_| "TSDuck stdout drain thread panicked".to_string())?;
     stderr_thread
         .join()
         .map_err(|_| "TSDuck stderr drain thread panicked".to_string())?;
+    if cancellation_failed {
+        return Err("TSDuck pipe drain cancellation raced before both drains joined".into());
+    }
     if let Some(error) = heartbeat_error {
         return Err(error);
     }
     stderr_result?;
     stdout_result
+}
+
+fn cancel_until_finished(thread: &std::thread::JoinHandle<()>, timeout: Duration) -> bool {
+    let deadline = Instant::now() + timeout;
+    let mut cancellation_failed = false;
+    while !thread.is_finished() && Instant::now() < deadline {
+        cancellation_failed |= cancel_drain_thread(thread) == 0 && !thread.is_finished();
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    cancellation_failed
+}
+
+fn cancel_drain_thread(thread: &std::thread::JoinHandle<()>) -> i32 {
+    #[cfg(test)]
+    if FORCED_CANCEL_FAILURES
+        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |remaining| {
+            remaining.checked_sub(1)
+        })
+        .is_ok()
+    {
+        return 0;
+    }
+    unsafe { CancelSynchronousIo(thread.as_raw_handle() as HANDLE) }
 }
 fn bounded_capture(path: &Path, max: u64) -> Result<Vec<u8>, String> {
     let file = open_private_capture_no_follow(path)?;
@@ -2530,6 +2784,28 @@ mod tests {
             .open(root.join("capture.ts"))
             .unwrap();
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn cancellation_failure_race_retains_and_joins_the_owned_drain_thread() {
+        let active = Arc::new(AtomicUsize::new(0));
+        let thread_active = Arc::clone(&active);
+        FORCED_CANCEL_FAILURES.store(2, Ordering::Release);
+        let drain = std::thread::spawn(move || {
+            thread_active.fetch_add(1, Ordering::AcqRel);
+            std::thread::sleep(Duration::from_millis(50));
+            thread_active.fetch_sub(1, Ordering::AcqRel);
+        });
+        while active.load(Ordering::Acquire) == 0 {
+            std::thread::yield_now();
+        }
+        assert!(
+            cancel_until_finished(&drain, Duration::from_millis(250)),
+            "the injected CancelSynchronousIo failures must be observed"
+        );
+        drain.join().unwrap();
+        assert_eq!(active.load(Ordering::Acquire), 0);
+        assert_eq!(FORCED_CANCEL_FAILURES.load(Ordering::Acquire), 0);
     }
 
     #[test]

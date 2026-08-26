@@ -36,4 +36,5 @@ station-transport-proof.workspace = true
 gstreamer.workspace = true
 serde_json.workspace = true
 station-ingest.workspace = true
+station-storage = { workspace = true, features = ["test-support"] }
 zip.workspace = true
