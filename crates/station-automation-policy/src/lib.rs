@@ -224,33 +224,18 @@ impl AutomationOutputArtifact {
 }
 
 impl AutomationExecutionRequest {
-    pub fn validate_against(
-        &self,
-        policy: &AutomationFeaturePolicy,
-        adapter: &AutomationAdapterDescriptor,
-        current_candidate: &AutomationCandidateIdentity,
-    ) -> Result<(), String> {
+    pub fn validate_shape(&self) -> Result<(), String> {
         validate_uuid(&self.job_id, "automation execution job identity")?;
-        policy.validate()?;
-        adapter.validate()?;
         self.candidate.validate()?;
-        current_candidate.validate()?;
         self.input.validate()?;
+        validate_uuid(&self.policy_id, "automation execution policy identity")?;
+        validate_uuid(&self.adapter_id, "automation execution adapter identity")?;
         if self.requested_at_unix_ms < 0
-            || self.feature != policy.feature
-            || self.policy_id != policy.policy_id
-            || self.policy_revision != policy.revision
-            || self.adapter_id != adapter.adapter_id
-            || self.adapter_revision != adapter.revision
-            || self.configuration_hash != policy.configuration_hash
-            || self.candidate != *current_candidate
-            || policy.operator_selected_adapter_id.as_deref() != Some(self.adapter_id.as_str())
-            || !adapter.supported_features.contains(&self.feature)
-            || adapter.credential_availability == CredentialAvailability::Unavailable
+            || self.policy_revision == 0
+            || self.adapter_revision == 0
+            || !is_sha256(&self.configuration_hash)
         {
-            return Err(
-                "automation execution request is stale or does not match current authority".into(),
-            );
+            return Err("automation execution request shape is invalid".into());
         }
         match self.feature {
             AutomationFeature::Captions => {
@@ -289,17 +274,42 @@ impl AutomationExecutionRequest {
         }
         Ok(())
     }
-}
 
-impl AutomationExecutionReceipt {
     pub fn validate_against(
         &self,
-        request: &AutomationExecutionRequest,
         policy: &AutomationFeaturePolicy,
         adapter: &AutomationAdapterDescriptor,
         current_candidate: &AutomationCandidateIdentity,
     ) -> Result<(), String> {
-        request.validate_against(policy, adapter, current_candidate)?;
+        self.validate_shape()?;
+        policy.validate()?;
+        adapter.validate()?;
+        current_candidate.validate()?;
+        if self.feature != policy.feature
+            || self.policy_id != policy.policy_id
+            || self.policy_revision != policy.revision
+            || self.adapter_id != adapter.adapter_id
+            || self.adapter_revision != adapter.revision
+            || self.configuration_hash != policy.configuration_hash
+            || self.candidate != *current_candidate
+            || policy.operator_selected_adapter_id.as_deref() != Some(self.adapter_id.as_str())
+            || !adapter.supported_features.contains(&self.feature)
+            || adapter.credential_availability == CredentialAvailability::Unavailable
+        {
+            return Err(
+                "automation execution request is stale or does not match current authority".into(),
+            );
+        }
+        Ok(())
+    }
+}
+
+impl AutomationExecutionReceipt {
+    pub fn validate_shape_against_request(
+        &self,
+        request: &AutomationExecutionRequest,
+    ) -> Result<(), String> {
+        request.validate_shape()?;
         validate_uuid(&self.receipt_id, "automation execution receipt identity")?;
         self.input.validate()?;
         self.output.validate()?;
@@ -318,6 +328,35 @@ impl AutomationExecutionReceipt {
         {
             return Err("automation execution receipt does not match its exact request".into());
         }
+        match &self.engine {
+            AutomationExecutionEngine::Local {
+                executable_sha256,
+                model_artifact_sha256,
+            } if is_sha256(executable_sha256) && is_sha256(model_artifact_sha256) => {}
+            AutomationExecutionEngine::Cloud {
+                provider_response_sha256,
+                provider_request_id_sha256,
+            } if is_sha256(provider_response_sha256) && is_sha256(provider_request_id_sha256) => {}
+            _ => return Err("automation execution engine proof is invalid".into()),
+        }
+        validate_output_facts(
+            self.feature,
+            &self.input,
+            &self.output,
+            request.requested_output_language.as_deref(),
+            &self.facts,
+        )
+    }
+
+    pub fn validate_against(
+        &self,
+        request: &AutomationExecutionRequest,
+        policy: &AutomationFeaturePolicy,
+        adapter: &AutomationAdapterDescriptor,
+        current_candidate: &AutomationCandidateIdentity,
+    ) -> Result<(), String> {
+        request.validate_against(policy, adapter, current_candidate)?;
+        self.validate_shape_against_request(request)?;
         match (&adapter.location, &self.engine) {
             (
                 AdapterLocation::Local,
@@ -339,13 +378,7 @@ impl AutomationExecutionReceipt {
                 );
             }
         }
-        validate_output_facts(
-            self.feature,
-            &self.input,
-            &self.output,
-            request.requested_output_language.as_deref(),
-            &self.facts,
-        )
+        Ok(())
     }
 }
 

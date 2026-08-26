@@ -21,10 +21,19 @@ facts; wrong translation target; or an execution interval longer than 24 hours. 
 it possible for later storage and controller code to preserve exact execution provenance without
 turning a connection test into an execution claim.
 
+The single SQLite writer persists exact execution requests as idempotent jobs. Enqueue requires a
+current passing connection test. Claim and renewal use a bounded worker identity, attempt count, and
+lease, and an expired claim can be reclaimed without letting its old owner complete. Completion
+rechecks current policy, adapter, configuration, candidate, and connection-test authority inside the
+same immediate transaction that appends the immutable receipt and marks the job complete. Indexed
+identity, revision, candidate, input, output, size, and time columns are checked against the stored
+JSON on every read; receipt rows reject update and delete.
+
 ## Boundaries and non-claims
 
-This slice is a pure domain contract. It does not store credentials, enqueue or lease work, open an
-artifact, run a local model, call a cloud provider, assess semantic quality, write an output artifact,
-or prove an installed-machine execution. Later adapters must hash input and output from retained
-managed handles, store secrets only in the Windows-protected credential authority, and append a
-receipt atomically with successful job completion.
+This slice does not store credentials, open an artifact, run a local model, call a cloud provider,
+assess semantic quality, write an output artifact, expose an HTTP route, supervise a controller, or
+prove an installed-machine execution. A durable receipt is exact evidence accepted from a future
+trusted executor, not source proof that such an executor exists. Later adapters must hash input and
+output from retained managed handles and store secrets only in the Windows-protected credential
+authority.
