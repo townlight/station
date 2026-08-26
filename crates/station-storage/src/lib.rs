@@ -106,7 +106,8 @@ pub use publishing_authority::{
 };
 pub use publishing_executor::{
     PublishExecutionJob, PublishExecutionJobRecord, PublishExecutionJobState,
-    run_publish_controller_iteration,
+    PublishExecutionReadiness, run_publish_controller_iteration,
+    run_publish_execution_queue_controller,
 };
 mod actual_airing_authority;
 pub use actual_airing_authority::{

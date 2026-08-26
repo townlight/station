@@ -6,6 +6,10 @@ use station_publishing::{
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 use std::time::Duration;
 
 const MAX_PUBLISH_ATTEMPTS: u32 = 8;
@@ -75,6 +79,15 @@ pub struct PublishExecutionJobRecord {
     pub lease_expires_at_unix_ms: Option<i64>,
     pub completed_at_unix_ms: Option<i64>,
     pub failure_class: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct PublishExecutionReadiness {
+    pub canonical_portal: bool,
+    pub internet_archive: bool,
+    pub local_nas: bool,
+    pub reach_capacity: bool,
+    pub proven_target_count: usize,
 }
 
 pub(crate) struct PublishExecutionLease {
@@ -356,6 +369,63 @@ impl StationStore {
         }
     }
 
+    pub fn derive_current_publish_execution_readiness(
+        &self,
+        candidate_version: &str,
+        source_commit: &str,
+        install_generation: u64,
+    ) -> Result<PublishExecutionReadiness, String> {
+        if !secret_field(candidate_version, 200)
+            || !is_source_commit_identity(source_commit)
+            || install_generation == 0
+        {
+            return Err("publish execution candidate binding is invalid".into());
+        }
+        let targets = self.list_publish_target_profiles()?;
+        let mut proven = Vec::new();
+        for target in targets.iter().filter(|target| target.enabled) {
+            let jobs = self.list_publish_execution_jobs(&target.target_id, 128)?;
+            let mut target_proven = false;
+            for record in jobs {
+                if record.state != PublishExecutionJobState::Completed
+                    || record.job.candidate_version != candidate_version
+                    || record.job.source_commit != source_commit
+                    || record.job.install_generation != install_generation
+                    || self
+                        .validate_publish_execution_job_current(&record.job)
+                        .is_err()
+                {
+                    continue;
+                }
+                let receipts = self.list_publish_execution_receipts(&record.job.job_id, 128)?;
+                if receipts
+                    .last()
+                    .is_some_and(PublishExecutionReceipt::satisfies_required_delivery)
+                {
+                    target_proven = true;
+                    break;
+                }
+            }
+            if target_proven {
+                proven.push(target.kind);
+            }
+        }
+        let required_kind = |kind| {
+            let matching = targets
+                .iter()
+                .filter(|target| target.enabled && target.kind == kind)
+                .count();
+            matching > 0 && proven.iter().filter(|value| **value == kind).count() == matching
+        };
+        Ok(PublishExecutionReadiness {
+            canonical_portal: required_kind(PublishTargetKind::Portal),
+            internet_archive: required_kind(PublishTargetKind::InternetArchive),
+            local_nas: required_kind(PublishTargetKind::LocalNas),
+            reach_capacity: required_kind(PublishTargetKind::YouTubeLive),
+            proven_target_count: proven.len(),
+        })
+    }
+
     pub(crate) fn claim_publish_execution_job(
         &self,
         now_unix_ms: i64,
@@ -614,6 +684,94 @@ where
         &mut current_install,
         &mut clock,
     )
+}
+
+pub fn run_publish_execution_queue_controller(
+    database: &Path,
+    application_root: &Path,
+    stop: Arc<AtomicBool>,
+) -> Result<(), String> {
+    let mut backoff = Duration::from_millis(250);
+    while !stop.load(Ordering::Acquire) {
+        match run_publish_execution_queue_iteration(database, application_root) {
+            Ok(_) => {
+                resolve_publish_controller_alert(database);
+                backoff = Duration::from_millis(250);
+            }
+            Err(_) => {
+                observe_publish_controller_alert(database);
+                backoff = (backoff * 2).min(Duration::from_secs(5));
+            }
+        }
+        std::thread::sleep(backoff);
+    }
+    Ok(())
+}
+
+fn run_publish_execution_queue_iteration(
+    database: &Path,
+    application_root: &Path,
+) -> Result<bool, String> {
+    let data_root = database
+        .parent()
+        .ok_or_else(|| "publishing data root is unavailable".to_string())?;
+    let fence = station_maintenance::acquire_install_authority_fence(data_root)
+        .map_err(|_| "publishing install authority is busy".to_string())?;
+    if fence.was_abandoned() {
+        return Err("publishing install authority requires recovery".into());
+    }
+    let store = StationStore::open(database)?;
+    let now = unix_time_millis()?;
+    run_publish_controller_iteration(&store, now, || {
+        let candidate =
+            station_maintenance::read_verified_install_authority(data_root, application_root)?;
+        Ok((
+            candidate.version().into(),
+            candidate.source_commit().into(),
+            candidate.install_generation(),
+        ))
+    })
+}
+
+const PUBLISH_CONTROLLER_ALERT_RESOURCE: &str = "publishing-execution-controller";
+
+fn observe_publish_controller_alert(database: &Path) {
+    let Ok(now) = unix_time_millis() else {
+        return;
+    };
+    let Ok(store) = StationStore::open(database) else {
+        return;
+    };
+    let _ = store.observe_alert_and_route(&AlertEvent {
+        event_id: "publishing-execution-controller-service-down".into(),
+        condition: AlertConditionKind::ServiceDown,
+        severity: AlertSeverity::Warning,
+        state: AlertEventState::Firing,
+        resource_ref: PUBLISH_CONTROLLER_ALERT_RESOURCE.into(),
+        summary: "Publishing execution controller needs operator attention.".into(),
+        detail: "The controller could not complete a durable queue iteration and is retrying with bounded backoff.".into(),
+        source_section: "S3".into(),
+        first_observed_at_unix_ms: now,
+        last_observed_at_unix_ms: now,
+        resolved_at_unix_ms: None,
+        occurrence_count: 1,
+        acknowledged_at_unix_ms: None,
+        acknowledged_by: None,
+    });
+}
+
+fn resolve_publish_controller_alert(database: &Path) {
+    let Ok(now) = unix_time_millis() else {
+        return;
+    };
+    let Ok(store) = StationStore::open(database) else {
+        return;
+    };
+    let _ = store.resolve_alert(
+        AlertConditionKind::ServiceDown,
+        PUBLISH_CONTROLLER_ALERT_RESOURCE,
+        now,
+    );
 }
 
 fn run_publish_controller_iteration_with<A: PublishProviderAdapter>(

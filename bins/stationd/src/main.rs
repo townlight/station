@@ -333,6 +333,11 @@ fn run_console(config: DaemonConfig) -> Result<(), String> {
         &update_application,
         Arc::clone(&stop),
     )?;
+    let publishing_queue = spawn_publish_execution_queue_controller(
+        &config.database,
+        &update_application,
+        Arc::clone(&stop),
+    )?;
     let ingest_database = config.database.clone();
     let ingest_library = media_library(&config.database);
     let ingest_stop = Arc::clone(&stop);
@@ -373,6 +378,11 @@ fn run_console(config: DaemonConfig) -> Result<(), String> {
         join_worker(
             "transport proof queue",
             transport_queue,
+            WORKER_SHUTDOWN_TIMEOUT,
+        ),
+        join_worker(
+            "publishing execution queue",
+            publishing_queue,
             WORKER_SHUTDOWN_TIMEOUT,
         ),
         join_worker("feed fetch worker", feed_fetch, WORKER_SHUTDOWN_TIMEOUT),
@@ -566,6 +576,11 @@ fn run_service(config: DaemonConfig) -> Result<(), String> {
         &update_application,
         Arc::clone(&stop),
     )?;
+    let publishing_queue = spawn_publish_execution_queue_controller(
+        &config.database,
+        &update_application,
+        Arc::clone(&stop),
+    )?;
     let ingest_database = config.database.clone();
     let ingest_library = media_library(&config.database);
     let ingest_stop = Arc::clone(&stop);
@@ -623,6 +638,11 @@ fn run_service(config: DaemonConfig) -> Result<(), String> {
                 transport_queue,
                 WORKER_SHUTDOWN_TIMEOUT,
             ),
+            join_worker(
+                "publishing execution queue",
+                publishing_queue,
+                WORKER_SHUTDOWN_TIMEOUT,
+            ),
             join_worker("feed fetch worker", feed_fetch, WORKER_SHUTDOWN_TIMEOUT),
             join_worker(
                 "automatic materialization",
@@ -662,6 +682,11 @@ fn run_service(config: DaemonConfig) -> Result<(), String> {
         join_worker(
             "transport proof queue",
             transport_queue,
+            WORKER_SHUTDOWN_TIMEOUT,
+        ),
+        join_worker(
+            "publishing execution queue",
+            publishing_queue,
             WORKER_SHUTDOWN_TIMEOUT,
         ),
         join_worker("feed fetch worker", feed_fetch, WORKER_SHUTDOWN_TIMEOUT),
@@ -984,6 +1009,25 @@ fn spawn_transport_proof_queue_controller(
             )
         })
         .map_err(|error| format!("could not start transport proof queue controller: {error}"))
+}
+
+fn spawn_publish_execution_queue_controller(
+    database: &std::path::Path,
+    application_root: &std::path::Path,
+    stop: Arc<AtomicBool>,
+) -> Result<std::thread::JoinHandle<Result<(), String>>, String> {
+    let database = database.to_path_buf();
+    let application_root = application_root.to_path_buf();
+    std::thread::Builder::new()
+        .name("station-publishing-execution-queue".into())
+        .spawn(move || {
+            station_storage::run_publish_execution_queue_controller(
+                &database,
+                &application_root,
+                stop,
+            )
+        })
+        .map_err(|error| format!("could not start publishing execution queue controller: {error}"))
 }
 
 fn initialize_database(database: &std::path::Path) -> Result<(), String> {

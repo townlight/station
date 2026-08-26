@@ -8473,24 +8473,45 @@ impl Api {
                 && readiness.permanence == RequiredTierStatus::Passed
                 && readiness.reach_capacity == RequiredTierStatus::Passed
         });
+        let execution_readiness = self.database_path.parent().and_then(|data_root| {
+            let fence = acquire_install_authority_fence(data_root).ok()?;
+            if fence.was_abandoned() {
+                return None;
+            }
+            let candidate =
+                read_verified_install_authority(data_root, &self.application_directory).ok()?;
+            self.storage
+                .derive_current_publish_execution_readiness(
+                    candidate.version(),
+                    candidate.source_commit(),
+                    candidate.install_generation(),
+                )
+                .ok()
+        });
+        let publish_execution_pass = execution_readiness.as_ref().is_some_and(|readiness| {
+            readiness.canonical_portal
+                && readiness.internet_archive
+                && readiness.local_nas
+                && readiness.reach_capacity
+        });
         checks.push(commissioning_check(
             "publish_targets",
             "Required publish targets",
             CommissioningPhase::SourcesOutputs,
-            if publish_targets_pass { CommissioningCheckStatus::Pass } else { CommissioningCheckStatus::Blocked },
+            if publish_targets_pass && publish_execution_pass { CommissioningCheckStatus::Pass } else { CommissioningCheckStatus::Blocked },
             true,
             Some("publishing"),
             publication_readiness.as_ref().map_or_else(
                 || "No current-candidate publish-target connection authority is available because the installed candidate is not verified.".into(),
                 |readiness| format!(
-                    "Current publish-target authority: canonical portal={:?}; permanence={:?}; reach capacity={:?}; {} target record(s).",
-                    readiness.canonical_portal, readiness.permanence, readiness.reach_capacity, readiness.targets.len()
+                    "Current publish-target authority: canonical portal={:?}; permanence={:?}; reach capacity={:?}; {} target record(s). Exact provider execution is proven for {} current target(s).",
+                    readiness.canonical_portal, readiness.permanence, readiness.reach_capacity, readiness.targets.len(), execution_readiness.as_ref().map_or(0, |execution| execution.proven_target_count)
                 ),
             ),
             publication_readiness.as_ref().map_or_else(
-                || "requires a verified installed candidate plus current account, target, and connection-test authority only; this does not claim publication, delivery, or audience reach".into(),
+                || "requires a verified installed candidate plus current account, target, connection-test, and provider-execution receipts; it never claims audience reach".into(),
                 |readiness| format!(
-                    "current-candidate connection-test authority only: portal={:?}; permanence={:?}; reach_capacity={:?}; it does not claim publication, delivery, or audience reach",
+                    "current-candidate connection-test authority plus exact current provider execution receipts: portal={:?}; permanence={:?}; reach_capacity={:?}; it does not claim audience reach",
                     readiness.canonical_portal, readiness.permanence, readiness.reach_capacity
                 ),
             ),
@@ -17704,12 +17725,12 @@ mod tests {
             .iter()
             .find(|check| check["id"] == "publish_targets")
             .unwrap();
-        assert_eq!(publish["status"], "pass");
+        assert_eq!(publish["status"], "blocked");
         assert!(
             publish["evidence"]
                 .as_str()
                 .unwrap()
-                .contains("does not claim publication")
+                .contains("provider execution receipts")
         );
 
         drop(api);
