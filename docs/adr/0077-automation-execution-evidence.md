@@ -58,8 +58,11 @@ hash, and `CreateProcess` setup are not independently cancellable. This slice th
 an absolute 60-second host boundary for a configured executable adapter; production registration is
 blocked until setup moves behind a separately killable helper boundary.
 
-`station-automation-launch-helper` is a separate-process source prototype for that future
-registration. It is not yet packaged, installed, candidate-manifested, or invoked by stationd. Its
+`station-automation-launch-helper` is built and may be packaged, installed, and bound into the
+candidate and active-package manifests. Schema-2 packages retain compatibility when it is absent.
+stationd must therefore verify that helper's exact active-candidate identity under the install fence
+before a configured semantic adapter path executes it; the current unavailable path
+claims and durably paces work without requiring the helper. Its
 length-framed stdin read is bounded by a helper-process watchdog and the request is schema-closed, binding exact job, claim, adapter,
 candidate, install generation, configuration, input digest/size, output name, and deadline. It has
 no prompt, credential, provider-response, or diagnostic field. It presently has no configured
@@ -68,13 +71,12 @@ and returns only categorical `adapter_unavailable`. A prior pathname-based manag
 prototype was removed after proving that a retained directory handle did not prevent rename followed
 by junction substitution before the later leaf open. A future adapter must instead use handle-relative
 opens or exact inherited input/output-parent handles with file-identity binding; managed-handle proof
-therefore remains open. A host must start
-only a packaged, attested installed helper in a fresh kill-on-close Job Object, terminate and reap it at its
-monotonic deadline, and still recheck the durable claim before completion. Installed identity,
-containment integration, usable adapter configuration, and installed proof remain open.
-Root-authority open and any future adapter setup can still block
-inside the helper between monotonic checks. Only the still-unimplemented outer Job host can impose a
-hard whole-operation deadline by terminating and reaping the helper tree.
+therefore remains open. The host supervisor starts an owned child suspended, assigns it before resume
+to a fresh kill-on-close Job Object capped at eight active processes and 1 GiB total tree memory, bounds
+argv, environment, stdout, stderr, and monotonic execution time, and terminates and reaps the tree.
+No production semantic adapter is configured, so the packaged helper is not invoked as a fake
+adapter and current jobs retain categorical `adapter_unavailable`. Handle-relative managed-artifact
+proof, usable adapter configuration, installed execution proof, and field proof remain open.
 Configured input/output roots must be trusted, ACL-protected ordinary local-drive directories; UNC,
 verbatim/device/NT paths, aliases, traversal, reserved components, and unsafe Win32 names fail
 closed. Artifact paths must include at least one helper-owned relative parent directory. These fields

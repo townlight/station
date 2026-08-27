@@ -53,6 +53,10 @@ fn main() -> Result<(), String> {
         "nas-publisher.exe",
         b"fixture nas publisher helper".to_vec(),
     ));
+    payloads.push((
+        "station-automation-launch-helper.exe",
+        b"fixture automation launch helper".to_vec(),
+    ));
     let package_manifest = UpdatePackageManifest {
         schema_version: UPDATE_PACKAGE_SCHEMA_VERSION,
         product: "TownLight Station".into(),

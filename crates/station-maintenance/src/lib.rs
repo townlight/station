@@ -26,6 +26,10 @@ pub const ACTIVE_SLOT_RECEIPT_NAME: &str = "active-slot.json";
 pub const INSTALL_RECEIPT_NAME: &str = "install-receipt.json";
 pub const INSTALLED_RUNTIME_MANIFEST_NAME: &str = "runtime-manifest.json";
 pub const TSDUCK_RUNTIME_MANIFEST_NAME: &str = "tsduck-runtime-manifest.json";
+/// The only executable TownLight may use as an S13 launch boundary. It is a
+/// slot-owned payload and is never resolved from PATH or a configuration
+/// string.
+pub const AUTOMATION_LAUNCH_HELPER_FILE_NAME: &str = "station-automation-launch-helper.exe";
 pub const INSTALLED_RUNTIME_MANIFEST_SCHEMA_VERSION: u32 = 1;
 pub const TRANSACTION_DIRECTORY_NAME: &str = "maintenance-transactions";
 pub const REQUEST_DIRECTORY_NAME: &str = "maintenance-requests";
@@ -2241,6 +2245,33 @@ pub fn read_verified_active_application_file_hash(
         .find(|file| file.path == relative_path)
         .map(|file| file.sha256.clone())
         .ok_or_else(|| format!("installed application manifest is missing {relative_path}"))
+}
+
+/// A hash-attested helper identity obtained only after the full install and
+/// active-slot candidate have verified. The caller must retain the install
+/// authority fence through its later no-follow pin and process launch; this
+/// function intentionally does not launch a process or create an adapter.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerifiedAutomationLaunchHelper {
+    pub executable: PathBuf,
+    pub sha256: String,
+}
+
+pub fn read_verified_automation_launch_helper(
+    data_directory: &Path,
+    application_root: &Path,
+) -> Result<VerifiedAutomationLaunchHelper, String> {
+    let sha256 = read_verified_active_application_file_hash(
+        data_directory,
+        application_root,
+        AUTOMATION_LAUNCH_HELPER_FILE_NAME,
+    )?;
+    let active = read_active_slot_receipt(&data_directory.join(ACTIVE_SLOT_RECEIPT_NAME))?;
+    let directory = active.active.directory(application_root)?;
+    Ok(VerifiedAutomationLaunchHelper {
+        executable: directory.join(AUTOMATION_LAUNCH_HELPER_FILE_NAME),
+        sha256,
+    })
 }
 
 fn write_install_identity(

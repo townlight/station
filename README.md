@@ -114,12 +114,13 @@ Exact candidate `bd032f00f142dfd3475a76b406391fde611b5788` passed installed Gene
 Enabled Setup Admins and Meeting Operators can inspect an existing durable automation job through
 `GET /api/v1/automation/jobs/{job_id}`. It reports request, attempt, lease-expiry, durable
 next-attempt time, receipt, and failure truth but never an active worker or claim identity. stationd
-currently has no production automation adapter registered: it records paced retryable
+verifies the installed, candidate-manifest-attested automation launch helper before each queue
+decision but currently has no production semantic adapter registered: it records paced retryable
 `adapter_unavailable` attempts (one minute initially, then bounded exponential backoff) and does not
 fabricate a model receipt, provider contact, output artifact, or external success. The experimental
-base controller contains an already-started child and cancellable drains, but synchronous Windows
-launch setup is not independently cancellable. Production registration requires a separately killable
-launch helper plus managed input/output-handle proof.
+base controller starts a child suspended, assigns it to a kill-on-close Job Object with finite
+process-tree and memory limits, and owns bounded drains, deadline, termination, and reap. Production
+registration remains blocked on handle-safe managed input/output artifacts and a real semantic adapter.
 
 Caption decode-back requests use `POST /api/v1/channels/{channel_id}/caption-proof` with only
 `report_id`, `sink_id`, `capture_duration_ms`, and `max_capture_bytes`. The server requires that

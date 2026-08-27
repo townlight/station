@@ -25,7 +25,8 @@ use windows_sys::Win32::System::Diagnostics::ToolHelp::{
     CreateToolhelp32Snapshot, TH32CS_SNAPTHREAD, THREADENTRY32, Thread32First, Thread32Next,
 };
 use windows_sys::Win32::System::JobObjects::{
-    AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+    AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_ACTIVE_PROCESS,
+    JOB_OBJECT_LIMIT_JOB_MEMORY, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
     JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
     SetInformationJobObject, TerminateJobObject,
 };
@@ -59,7 +60,17 @@ const AUTOMATION_EXECUTION_REAP_MAX: Duration = Duration::from_secs(2);
 const MAX_AUTOMATION_EXECUTION_STDOUT_BYTES: u64 = 1_048_576;
 const MAX_AUTOMATION_EXECUTION_REQUEST_ENV_BYTES: usize = 32_768;
 const MAX_AUTOMATION_EXECUTION_STDERR_BYTES: u64 = 65_536;
+const MAX_AUTOMATION_EXECUTION_ACTIVE_PROCESSES: u32 = 8;
+const MAX_AUTOMATION_EXECUTION_JOB_MEMORY_BYTES: usize = 1_073_741_824;
 static NEVER_STOP_AUTOMATION_EXECUTION: AtomicBool = AtomicBool::new(false);
+
+#[doc(hidden)]
+pub fn automation_execution_process_limits_for_test() -> (u32, usize) {
+    (
+        MAX_AUTOMATION_EXECUTION_ACTIVE_PROCESSES,
+        MAX_AUTOMATION_EXECUTION_JOB_MEMORY_BYTES,
+    )
+}
 
 /// A typed adapter outcome deliberately carries only an approved categorical
 /// code. Raw provider errors, prompts, and response bodies never become
@@ -371,7 +382,11 @@ impl WindowsProcessTree {
             return Err(AutomationExecutionAdapterFailure::RetryableUnavailable);
         }
         let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
-        limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+            | JOB_OBJECT_LIMIT_ACTIVE_PROCESS
+            | JOB_OBJECT_LIMIT_JOB_MEMORY;
+        limits.BasicLimitInformation.ActiveProcessLimit = MAX_AUTOMATION_EXECUTION_ACTIVE_PROCESSES;
+        limits.JobMemoryLimit = MAX_AUTOMATION_EXECUTION_JOB_MEMORY_BYTES;
         let configured = unsafe {
             SetInformationJobObject(
                 handle,
@@ -998,7 +1013,8 @@ fn resolve_automation_execution_controller_alert(database: &Path) {
     );
 }
 
-fn run_automation_execution_queue_iteration(
+#[doc(hidden)]
+pub fn run_automation_execution_queue_iteration(
     database: &Path,
     application_root: &Path,
     stop: &AtomicBool,
@@ -1015,9 +1031,12 @@ fn run_automation_execution_queue_iteration(
         station_maintenance::read_verified_install_authority(data_root, application_root)?;
     let store = StationStore::open(database)?;
     let mut clock = unix_time_millis;
-    // No production adapter is registered in this slice. The controller still
-    // claims current durable work and records an exact retryable unavailable
-    // attempt, rather than inventing model, provider, output, or receipt truth.
+    // No production semantic adapter is registered in this slice. The
+    // controller still claims current durable work and records an exact
+    // retryable unavailable attempt, rather than invoking the launch boundary
+    // as a fake adapter or inventing model, provider, output, or receipt truth.
+    // The schema-2 helper is optional. A future semantic adapter path must
+    // verify its identity only if that path actually elects to execute it.
     run_automation_execution_controller_iteration_with_stop(
         &store,
         None,

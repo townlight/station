@@ -16,11 +16,20 @@ use station_automation_policy::{
 use station_maintenance::{VerifiedInstallAuthority, verified_install_authority_for_test};
 use station_storage::{
     AutomationExecutionAdapter, AutomationExecutionJobRecord, AutomationExecutionJobState,
-    AutomationExecutionSetupFault, StationStore, retained_pipe_wait_is_bounded_for_test,
-    run_automation_execution_controller_iteration,
+    AutomationExecutionSetupFault, StationStore, automation_execution_process_limits_for_test,
+    retained_pipe_wait_is_bounded_for_test, run_automation_execution_controller_iteration,
     run_automation_execution_controller_iteration_with_stop,
     run_automation_execution_controller_iteration_with_stop_and_elapsed,
+    run_automation_execution_queue_iteration,
 };
+
+#[test]
+fn supervised_execution_boundary_has_finite_process_and_memory_limits() {
+    let (active_process_limit, job_memory_limit_bytes) =
+        automation_execution_process_limits_for_test();
+    assert_eq!(active_process_limit, 8);
+    assert_eq!(job_memory_limit_bytes, 1_073_741_824);
+}
 
 const ADAPTER_ID: &str = "11111111-2222-4333-8444-555555555555";
 const POLICY_ID: &str = "22222222-2222-4333-8444-555555555555";
@@ -226,6 +235,167 @@ fn configured_store(name: &str) -> (PathBuf, StationStore) {
         )
         .unwrap();
     (database, store)
+}
+
+struct InstalledQueueFixture {
+    root: PathBuf,
+    data: PathBuf,
+    application: PathBuf,
+}
+
+impl Drop for InstalledQueueFixture {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.root);
+    }
+}
+
+fn schema_two_installed_queue_without_optional_helper(name: &str) -> InstalledQueueFixture {
+    let root = temporary_database(name).with_extension("dir");
+    let data = root.join("data");
+    let application = root.join("application");
+    let runtime = application.join("runtime/gstreamer");
+    let tsduck = application.join("runtime/tsduck");
+    std::fs::create_dir_all(runtime.join("bin")).unwrap();
+    std::fs::create_dir_all(runtime.join("lib/gstreamer-1.0")).unwrap();
+    std::fs::create_dir_all(runtime.join("lib/gst-validate-launcher/python/launcher/apps"))
+        .unwrap();
+    for (path, bytes) in [
+        ("bin/gstreamer.dll", b"runtime".as_slice()),
+        ("lib/gstreamer-1.0/plugin.dll", b"plugin".as_slice()),
+        (
+            "lib/gst-validate-launcher/python/launcher/apps/empty.py",
+            b"".as_slice(),
+        ),
+    ] {
+        std::fs::write(runtime.join(path), bytes).unwrap();
+    }
+    for (path, bytes) in [
+        ("LICENSE.txt", b"license".as_slice()),
+        ("OTHERS.txt", b"notices".as_slice()),
+        ("bin/tsp.exe", b"tsp".as_slice()),
+        ("bin/tsanalyze.exe", b"analyze".as_slice()),
+        ("bin/tstables.exe", b"tables".as_slice()),
+        ("bin/tsduck.dll", b"tsduck".as_slice()),
+        ("bin/tscore.dll", b"tscore".as_slice()),
+    ] {
+        let destination = tsduck.join(path);
+        std::fs::create_dir_all(destination.parent().unwrap()).unwrap();
+        std::fs::write(destination, bytes).unwrap();
+    }
+    let runtime_manifest_sha = station_maintenance::write_installed_runtime_manifest(
+        &runtime,
+        &data.join(station_maintenance::INSTALLED_RUNTIME_MANIFEST_NAME),
+        "0.1.0",
+        COMMIT,
+        RUNTIME_SHA,
+    )
+    .unwrap();
+    let tsduck_sha = "b0ca0f963fcd77488b8c32d6f9d85030daa891ed753c36e57bbb458807a44eb1";
+    let tsduck_manifest_sha = station_maintenance::write_installed_runtime_manifest(
+        &tsduck,
+        &data.join(station_maintenance::TSDUCK_RUNTIME_MANIFEST_NAME),
+        "0.1.0",
+        COMMIT,
+        tsduck_sha,
+    )
+    .unwrap();
+    let files = [
+        ("stationd.exe", b"stationd".as_slice()),
+        ("channel-worker.exe", b"worker".as_slice()),
+    ];
+    let manifest = station_update::UpdatePackageManifest {
+        schema_version: 2,
+        product: "TownLight Station".into(),
+        version: "0.1.0".into(),
+        source_commit: COMMIT.into(),
+        files: files
+            .iter()
+            .map(|(path, bytes)| station_update::UpdatePackageFile {
+                path: (*path).into(),
+                size_bytes: bytes.len() as u64,
+                sha256: format!("{:x}", Sha256::digest(bytes)),
+            })
+            .collect(),
+    };
+    for (path, bytes) in files {
+        std::fs::write(application.join(path), bytes).unwrap();
+    }
+    std::fs::write(
+        data.join(station_maintenance::ACTIVE_SLOT_RECEIPT_NAME),
+        serde_json::json!({"schema_version":1,"generation":7,"activated_at_unix_ms":1,"transaction_id":"bootstrap","active":{"relative_directory":".","package_manifest":manifest},"previous":null}).to_string(),
+    )
+    .unwrap();
+    std::fs::write(
+        data.join(station_maintenance::INSTALL_RECEIPT_NAME),
+        serde_json::json!({"product":"TownLight Station","version":"0.1.0","source_commit":COMMIT,"media_runtime_sha256":RUNTIME_SHA,"runtime_manifest_sha256":runtime_manifest_sha,"tsduck_version":"3.44-4676","tsduck_source_url":"https://github.com/tsduck/tsduck/releases/download/v3.44-4676/TSDuck-Win64-3.44-4676-Portable.zip","tsduck_archive_name":"TSDuck-Win64-3.44-4676-Portable.zip","tsduck_runtime_sha256":tsduck_sha,"tsduck_runtime_manifest_sha256":tsduck_manifest_sha,"installed_at_unix_ms":1,"health_uri":"http://127.0.0.1:4070/health"}).to_string(),
+    )
+    .unwrap();
+    InstalledQueueFixture {
+        root,
+        data,
+        application,
+    }
+}
+
+#[test]
+fn schema_two_install_without_optional_helper_claims_and_paces_unavailable_adapter() {
+    let fixture =
+        schema_two_installed_queue_without_optional_helper("automation-schema-two-no-helper");
+    let database = fixture.data.join("station.db");
+    let store = StationStore::open(&database).unwrap();
+    store
+        .write_automation_adapter_descriptor(&adapter(1), None, "setup-admin", 10)
+        .unwrap();
+    store
+        .write_automation_feature_policy(&policy(1), None, "setup-admin", 20)
+        .unwrap();
+    let now_unix_ms = i64::try_from(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis(),
+    )
+    .unwrap();
+    let mut evidence = connection_evidence();
+    evidence.tested_at_unix_ms = now_unix_ms - 1_000;
+    evidence.expires_at_unix_ms = now_unix_ms + 86_399_000;
+    store
+        .append_automation_connection_test_evidence(
+            &evidence,
+            &candidate_identity(),
+            evidence.tested_at_unix_ms,
+        )
+        .unwrap();
+    let mut pending_request = request();
+    pending_request.requested_at_unix_ms = now_unix_ms;
+    store
+        .enqueue_automation_execution_job(&pending_request, &candidate(), now_unix_ms)
+        .unwrap();
+    drop(store);
+
+    assert!(
+        run_automation_execution_queue_iteration(
+            &database,
+            &fixture.application,
+            &AtomicBool::new(false),
+        )
+        .expect("an absent optional helper is not a controller service failure")
+    );
+
+    let reopened = StationStore::open(&database).unwrap();
+    let pending = reopened
+        .read_automation_execution_job(JOB_ID)
+        .unwrap()
+        .unwrap();
+    assert_eq!(pending.state, AutomationExecutionJobState::Pending);
+    assert_eq!(pending.attempt_count, 1);
+    assert_eq!(
+        pending.last_failure_code.as_deref(),
+        Some("adapter_unavailable")
+    );
+    assert!(pending.next_attempt_at_unix_ms > pending.request.requested_at_unix_ms);
+    assert!(pending.claim_id.is_none());
+    assert!(pending.receipt.is_none());
 }
 
 #[test]

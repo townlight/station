@@ -473,6 +473,10 @@ fn read_installation_snapshot(
             payload_directory.join("nas-publisher.exe"),
         ),
         (
+            "station-automation-launch-helper.exe",
+            payload_directory.join("station-automation-launch-helper.exe"),
+        ),
+        (
             "station-updater.exe",
             application_directory.join("station-updater.exe"),
         ),
@@ -854,6 +858,11 @@ mod tests {
         std::fs::write(slot.join("stationd.exe"), b"active-stationd").unwrap();
         std::fs::write(slot.join("channel-worker.exe"), b"active-worker").unwrap();
         std::fs::write(slot.join("nas-publisher.exe"), b"active-nas-publisher").unwrap();
+        std::fs::write(
+            slot.join("station-automation-launch-helper.exe"),
+            b"active-automation-launch-helper",
+        )
+        .unwrap();
         std::fs::write(slot.join("station-updater.exe"), b"dormant-slot-updater").unwrap();
         std::fs::write(app.join("station-updater.exe"), b"running-root-updater").unwrap();
         std::fs::write(
@@ -889,6 +898,11 @@ mod tests {
                             "path": "nas-publisher.exe",
                             "size_bytes": b"active-nas-publisher".len(),
                             "sha256": sha256_bytes(b"active-nas-publisher")
+                        },
+                        {
+                            "path": "station-automation-launch-helper.exe",
+                            "size_bytes": b"active-automation-launch-helper".len(),
+                            "sha256": sha256_bytes(b"active-automation-launch-helper")
                         }
                     ]
                 }
@@ -915,10 +929,15 @@ mod tests {
         let root_updater_hash = sha256_bytes(b"running-root-updater");
         let dormant_updater_hash = sha256_bytes(b"dormant-slot-updater");
         let nas_publisher_hash = sha256_bytes(b"active-nas-publisher");
+        let automation_launch_helper_hash = sha256_bytes(b"active-automation-launch-helper");
         assert_eq!(hashes["stationd.exe"], Some(stationd_hash.as_str()));
         assert_eq!(
             hashes["nas-publisher.exe"],
             Some(nas_publisher_hash.as_str())
+        );
+        assert_eq!(
+            hashes["station-automation-launch-helper.exe"],
+            Some(automation_launch_helper_hash.as_str())
         );
         assert_eq!(
             hashes["station-updater.exe"],

@@ -1,6 +1,7 @@
 use sha2::{Digest, Sha256};
 use station_maintenance::{
-    INSTALLED_RUNTIME_MANIFEST_NAME, read_verified_candidate_identity,
+    AUTOMATION_LAUNCH_HELPER_FILE_NAME, INSTALLED_RUNTIME_MANIFEST_NAME,
+    read_verified_automation_launch_helper, read_verified_candidate_identity,
     write_installed_runtime_manifest,
 };
 use station_update::{UpdatePackageFile, UpdatePackageManifest};
@@ -99,6 +100,10 @@ fn fixture() -> Fixture {
         ("stationd.exe", b"stationd-candidate".as_slice()),
         ("channel-worker.exe", b"worker-candidate".as_slice()),
         ("nas-publisher.exe", b"nas-publisher-candidate".as_slice()),
+        (
+            AUTOMATION_LAUNCH_HELPER_FILE_NAME,
+            b"automation-launch-helper-candidate".as_slice(),
+        ),
     ];
     let manifest_files = files
         .iter()
@@ -179,6 +184,27 @@ fn returns_the_verified_active_candidate_and_approved_runtime_identity() {
     assert_eq!(identity.version, VERSION);
     assert_eq!(identity.source_commit, COMMIT);
     assert_eq!(identity.media_runtime_sha256, RUNTIME_SHA256);
+}
+
+#[test]
+fn returns_only_the_active_manifest_attested_automation_launch_helper() {
+    let fixture = fixture();
+    let helper = read_verified_automation_launch_helper(&fixture.data, &fixture.application)
+        .expect("helper must be part of the active verified candidate");
+    assert_eq!(
+        helper.executable,
+        fixture.application.join(AUTOMATION_LAUNCH_HELPER_FILE_NAME)
+    );
+    assert_eq!(
+        helper.sha256,
+        format!(
+            "{:x}",
+            Sha256::digest(b"automation-launch-helper-candidate")
+        )
+    );
+
+    std::fs::write(&helper.executable, b"substituted-helper").unwrap();
+    assert!(read_verified_automation_launch_helper(&fixture.data, &fixture.application).is_err());
 }
 
 #[test]

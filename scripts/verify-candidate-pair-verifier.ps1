@@ -43,6 +43,7 @@ try {
         stationd_sha256 = ('b' * 64)
         channel_worker_sha256 = ('c' * 64)
         nas_publisher_sha256 = ('e' * 64)
+        automation_launch_helper_sha256 = ('6' * 64)
         station_updater_sha256 = ('d' * 64)
         media_runtime_sha256 = ('e' * 64)
         caption_decoder_archive_sha256 = ('f' * 64)

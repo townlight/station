@@ -21,7 +21,7 @@ const REQUIRED_FILES: [&str; 2] = ["stationd.exe", "channel-worker.exe"];
 // The helper is optional for backwards-compatible update packages. New
 // installer candidates include and attest it; the controller enables NAS
 // publication only when its active manifest contains the helper hash.
-const OPTIONAL_FILES: [&str; 1] = ["nas-publisher.exe"];
+const OPTIONAL_FILES: [&str; 2] = ["nas-publisher.exe", "station-automation-launch-helper.exe"];
 const LEGACY_SCHEMA_ONE_FILES: [&str; 3] =
     ["stationd.exe", "channel-worker.exe", "station-updater.exe"];
 

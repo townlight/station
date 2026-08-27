@@ -243,7 +243,8 @@ public static class TownLightCandidateJsonGuard {
     }
     $allowedNames = @(
         'product', 'version', 'source_commit', 'installer', 'installer_sha256',
-        'stationd_sha256', 'channel_worker_sha256', 'nas_publisher_sha256', 'station_updater_sha256',
+        'stationd_sha256', 'channel_worker_sha256', 'nas_publisher_sha256',
+        'automation_launch_helper_sha256', 'station_updater_sha256',
         'media_runtime_sha256', 'caption_decoder_archive_sha256',
         'caption_decoder_sha256', 'caption_decoder_size_bytes',
         'caption_decoder_license_sha256', 'caption_decoder_license_size_bytes',
@@ -400,7 +401,8 @@ function Get-TownLightCandidateIdentity {
     $installerHash = Assert-TownLightCandidateString -Manifest $manifest -Name 'installer_sha256' -Pattern '^[0-9a-f]{64}$' -Code 'installer_hash_invalid'
 
     foreach ($name in @(
-        'stationd_sha256', 'channel_worker_sha256', 'nas_publisher_sha256', 'station_updater_sha256',
+        'stationd_sha256', 'channel_worker_sha256', 'nas_publisher_sha256',
+        'automation_launch_helper_sha256', 'station_updater_sha256',
         'media_runtime_sha256', 'caption_decoder_archive_sha256',
         'caption_decoder_sha256', 'caption_decoder_license_sha256'
     )) {

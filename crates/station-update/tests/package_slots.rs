@@ -19,6 +19,10 @@ fn payloads() -> Vec<(&'static str, &'static [u8])> {
         ("stationd.exe", b"station service proof bytes"),
         ("channel-worker.exe", b"channel worker proof bytes"),
         ("nas-publisher.exe", b"nas publisher proof bytes"),
+        (
+            "station-automation-launch-helper.exe",
+            b"automation launch helper proof bytes",
+        ),
     ]
 }
 
@@ -177,6 +181,26 @@ fn rejects_an_undeclared_optional_helper_after_manifest_parse() {
     let package = package_bytes(
         &manifest,
         Some(("payload/nas-publisher.exe", b"nas publisher proof bytes")),
+    );
+    let (updates, slots, staged) = staged_fixture(&package);
+    let error = prepare_release_slot(&staged, &updates, &slots, NOW + 1).unwrap_err();
+    assert!(error.contains("exactly match"), "{error}");
+    assert_eq!(std::fs::read_dir(&slots).unwrap().count(), 0);
+    remove_fixture(slots.parent().unwrap());
+}
+
+#[test]
+fn rejects_an_undeclared_automation_launch_helper_after_manifest_parse() {
+    let mut manifest = package_manifest();
+    manifest
+        .files
+        .retain(|file| file.path != "station-automation-launch-helper.exe");
+    let package = package_bytes(
+        &manifest,
+        Some((
+            "payload/station-automation-launch-helper.exe",
+            b"automation launch helper proof bytes",
+        )),
     );
     let (updates, slots, staged) = staged_fixture(&package);
     let error = prepare_release_slot(&staged, &updates, &slots, NOW + 1).unwrap_err();

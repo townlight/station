@@ -10,6 +10,9 @@
 #ifndef NasPublisherPath
   #error NasPublisherPath must be supplied by build-installer.ps1
 #endif
+#ifndef AutomationLaunchHelperPath
+  #error AutomationLaunchHelperPath must be supplied by build-installer.ps1
+#endif
 #ifndef StationUpdaterPath
   #error StationUpdaterPath must be supplied by build-installer.ps1
 #endif
@@ -22,6 +25,9 @@
 #ifndef NasPublisherSha256
   #error NasPublisherSha256 must be supplied by build-installer.ps1
 #endif
+#ifndef AutomationLaunchHelperSha256
+  #error AutomationLaunchHelperSha256 must be supplied by build-installer.ps1
+#endif
 #ifndef StationUpdaterSha256
   #error StationUpdaterSha256 must be supplied by build-installer.ps1
 #endif
@@ -33,6 +39,9 @@
 #endif
 #ifndef NasPublisherSize
   #error NasPublisherSize must be supplied by build-installer.ps1
+#endif
+#ifndef AutomationLaunchHelperSize
+  #error AutomationLaunchHelperSize must be supplied by build-installer.ps1
 #endif
 #ifndef StationUpdaterSize
   #error StationUpdaterSize must be supplied by build-installer.ps1
@@ -125,6 +134,7 @@ Source: "{#GStreamerInstaller}"; DestName: "{#GStreamerFile}"; Flags: dontcopy n
 Source: "{#StationdPath}"; DestName: "stationd.exe"; Flags: dontcopy noencryption
 Source: "{#ChannelWorkerPath}"; DestName: "channel-worker.exe"; Flags: dontcopy noencryption
 Source: "{#NasPublisherPath}"; DestName: "nas-publisher.exe"; Flags: dontcopy noencryption
+Source: "{#AutomationLaunchHelperPath}"; DestName: "station-automation-launch-helper.exe"; Flags: dontcopy noencryption
 Source: "{#StationUpdaterPath}"; DestName: "station-updater.exe"; Flags: dontcopy noencryption
 Source: "{#CaptionDecoderPath}"; DestName: "caption-decoder-ffmpeg.exe"; Flags: dontcopy noencryption
 Source: "{#CaptionDecoderLicensePath}"; DestName: "caption-decoder-LICENSE.txt"; Flags: dontcopy noencryption
@@ -137,6 +147,7 @@ Source: "..\LICENSE"; DestDir: "{app}"; Flags: ignoreversion
 Type: files; Name: "{app}\stationd.exe"
 Type: files; Name: "{app}\channel-worker.exe"
 Type: files; Name: "{app}\nas-publisher.exe"
+Type: files; Name: "{app}\station-automation-launch-helper.exe"
 Type: files; Name: "{app}\station-updater.exe"
 Type: filesandordirs; Name: "{app}\runtime"
 Type: dirifempty; Name: "{app}"
@@ -151,10 +162,12 @@ const
   StationdSha256 = '{#StationdSha256}';
   ChannelWorkerSha256 = '{#ChannelWorkerSha256}';
   NasPublisherSha256 = '{#NasPublisherSha256}';
+  AutomationLaunchHelperSha256 = '{#AutomationLaunchHelperSha256}';
   StationUpdaterSha256 = '{#StationUpdaterSha256}';
   StationdSize = '{#StationdSize}';
   ChannelWorkerSize = '{#ChannelWorkerSize}';
   NasPublisherSize = '{#NasPublisherSize}';
+  AutomationLaunchHelperSize = '{#AutomationLaunchHelperSize}';
   StationUpdaterSize = '{#StationUpdaterSize}';
   CaptionDecoderArchiveSha256 = '{#CaptionDecoderArchiveSha256}';
   CaptionDecoderSha256 = '{#CaptionDecoderSha256}';
@@ -689,6 +702,7 @@ begin
   ExtractTemporaryFile('stationd.exe');
   ExtractTemporaryFile('channel-worker.exe');
   ExtractTemporaryFile('nas-publisher.exe');
+  ExtractTemporaryFile('station-automation-launch-helper.exe');
   ExtractTemporaryFile('station-updater.exe');
   ExtractTemporaryFile('caption-decoder-ffmpeg.exe');
   ExtractTemporaryFile('caption-decoder-LICENSE.txt');
@@ -704,6 +718,9 @@ begin
   if not CopyFile(ExpandConstant('{tmp}\nas-publisher.exe'),
     AppDirectory + '\nas-publisher.exe', True) then
     RaiseException('The NAS publisher binary could not be staged.');
+  if not CopyFile(ExpandConstant('{tmp}\station-automation-launch-helper.exe'),
+    AppDirectory + '\station-automation-launch-helper.exe', True) then
+    RaiseException('The automation launch helper binary could not be staged.');
   if not CopyFile(ExpandConstant('{tmp}\station-updater.exe'),
     AppDirectory + '\station-updater.exe', True) then
     RaiseException('The maintenance updater binary could not be staged.');
@@ -920,7 +937,10 @@ begin
           '{"path":"channel-worker.exe","size_bytes":' + ChannelWorkerSize +
             ',"sha256":"' + ChannelWorkerSha256 + '"},' +
           '{"path":"nas-publisher.exe","size_bytes":' + NasPublisherSize +
-            ',"sha256":"' + NasPublisherSha256 + '"}' +
+            ',"sha256":"' + NasPublisherSha256 + '"},' +
+          '{"path":"station-automation-launch-helper.exe","size_bytes":' +
+            AutomationLaunchHelperSize + ',"sha256":"' +
+            AutomationLaunchHelperSha256 + '"}' +
         ']' +
       '}' +
     '},' +

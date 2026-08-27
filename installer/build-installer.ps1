@@ -73,6 +73,7 @@ $outputDirectory = Join-Path $repository 'dist'
 $stationd = Join-Path $repository 'target\release\stationd.exe'
 $channelWorker = Join-Path $repository 'target\release\channel-worker.exe'
 $nasPublisher = Join-Path $repository 'target\release\nas-publisher.exe'
+$automationLaunchHelper = Join-Path $repository 'target\release\station-automation-launch-helper.exe'
 $stationUpdater = Join-Path $repository 'target\release\station-updater.exe'
 $contract = Join-Path $PSScriptRoot 'verify-contract.ps1'
 $innoScript = Join-Path $PSScriptRoot 'TownLightStation.iss'
@@ -419,10 +420,10 @@ try {
     if ((ConvertTo-Json $gstreamerIdentityBefore -Compress) -cne (ConvertTo-Json $gstreamerIdentityAfterFrontend -Compress)) { throw 'GStreamer compile inputs changed during the operator build.' }
 
     $env:CARGO_HTTP_CHECK_REVOKE = 'false'
-    $cargoBuild = Invoke-CargoWrapperCapture -Arguments @('build', '--release', '--offline', '-p', 'stationd', '-p', 'channel-worker', '-p', 'nas-publisher', '-p', 'station-updater')
+    $cargoBuild = Invoke-CargoWrapperCapture -Arguments @('build', '--release', '--offline', '-p', 'stationd', '-p', 'channel-worker', '-p', 'nas-publisher', '-p', 'station-automation-launch-helper', '-p', 'station-updater')
     if (-not [string]::IsNullOrWhiteSpace($cargoBuild.standard_output)) { Write-Host $cargoBuild.standard_output }
     if (-not [string]::IsNullOrWhiteSpace($cargoBuild.standard_error)) { Write-Host $cargoBuild.standard_error }
-    foreach ($binary in @($stationd, $channelWorker, $nasPublisher, $stationUpdater)) {
+    foreach ($binary in @($stationd, $channelWorker, $nasPublisher, $automationLaunchHelper, $stationUpdater)) {
         if (-not (Test-Path -LiteralPath $binary -PathType Leaf)) { throw "Release binary is missing: $binary" }
     }
     $gstreamerIdentityAfterCargo = Get-GStreamerIdentity $expectedGStreamerRoot
@@ -432,13 +433,15 @@ try {
     $stationdHash = (Get-FileHash -LiteralPath $stationd -Algorithm SHA256).Hash.ToLowerInvariant()
     $workerHash = (Get-FileHash -LiteralPath $channelWorker -Algorithm SHA256).Hash.ToLowerInvariant()
     $nasPublisherHash = (Get-FileHash -LiteralPath $nasPublisher -Algorithm SHA256).Hash.ToLowerInvariant()
+    $automationLaunchHelperHash = (Get-FileHash -LiteralPath $automationLaunchHelper -Algorithm SHA256).Hash.ToLowerInvariant()
     $updaterHash = (Get-FileHash -LiteralPath $stationUpdater -Algorithm SHA256).Hash.ToLowerInvariant()
     $stationdSize = (Get-Item -LiteralPath $stationd).Length
     $workerSize = (Get-Item -LiteralPath $channelWorker).Length
     $nasPublisherSize = (Get-Item -LiteralPath $nasPublisher).Length
+    $automationLaunchHelperSize = (Get-Item -LiteralPath $automationLaunchHelper).Length
     $updaterSize = (Get-Item -LiteralPath $stationUpdater).Length
 
-    & $InnoCompiler "/DSourceCommit=$sourceCommit" "/DStationdPath=$stationd" "/DChannelWorkerPath=$channelWorker" "/DNasPublisherPath=$nasPublisher" "/DStationUpdaterPath=$stationUpdater" "/DStationdSha256=$stationdHash" "/DChannelWorkerSha256=$workerHash" "/DNasPublisherSha256=$nasPublisherHash" "/DStationUpdaterSha256=$updaterHash" "/DStationdSize=$stationdSize" "/DChannelWorkerSize=$workerSize" "/DNasPublisherSize=$nasPublisherSize" "/DStationUpdaterSize=$updaterSize" "/DGStreamerInstaller=$GStreamerInstaller" "/DCaptionDecoderPath=$captionDecoder" "/DCaptionDecoderLicensePath=$captionDecoderLicense" "/DCaptionDecoderArchiveSha256=$captionDecoderArchiveHash" "/DCaptionDecoderSha256=$captionDecoderHash" "/DCaptionDecoderSize=$expectedCaptionDecoderSize" "/DCaptionDecoderLicenseSha256=$captionDecoderLicenseHash" "/DCaptionDecoderLicenseSize=$expectedCaptionDecoderLicenseSize" "/DTSDuckRuntimeArchive=$TSDuckRuntimeArchive" "/DTSDuckRuntimeSha256=$tsduckRuntimeArchiveHash" "/DTSDuckVersion=$($tsduckPin.version)" "/DTSDuckSourceUrl=$($tsduckPin.source_url)" "/DTSDuckArchiveName=$($tsduckPin.archive_name)" "/DOutputDirectory=$releaseRunDirectory" $innoScript
+    & $InnoCompiler "/DSourceCommit=$sourceCommit" "/DStationdPath=$stationd" "/DChannelWorkerPath=$channelWorker" "/DNasPublisherPath=$nasPublisher" "/DAutomationLaunchHelperPath=$automationLaunchHelper" "/DStationUpdaterPath=$stationUpdater" "/DStationdSha256=$stationdHash" "/DChannelWorkerSha256=$workerHash" "/DNasPublisherSha256=$nasPublisherHash" "/DAutomationLaunchHelperSha256=$automationLaunchHelperHash" "/DStationUpdaterSha256=$updaterHash" "/DStationdSize=$stationdSize" "/DChannelWorkerSize=$workerSize" "/DNasPublisherSize=$nasPublisherSize" "/DAutomationLaunchHelperSize=$automationLaunchHelperSize" "/DStationUpdaterSize=$updaterSize" "/DGStreamerInstaller=$GStreamerInstaller" "/DCaptionDecoderPath=$captionDecoder" "/DCaptionDecoderLicensePath=$captionDecoderLicense" "/DCaptionDecoderArchiveSha256=$captionDecoderArchiveHash" "/DCaptionDecoderSha256=$captionDecoderHash" "/DCaptionDecoderSize=$expectedCaptionDecoderSize" "/DCaptionDecoderLicenseSha256=$captionDecoderLicenseHash" "/DCaptionDecoderLicenseSize=$expectedCaptionDecoderLicenseSize" "/DTSDuckRuntimeArchive=$TSDuckRuntimeArchive" "/DTSDuckRuntimeSha256=$tsduckRuntimeArchiveHash" "/DTSDuckVersion=$($tsduckPin.version)" "/DTSDuckSourceUrl=$($tsduckPin.source_url)" "/DTSDuckArchiveName=$($tsduckPin.archive_name)" "/DOutputDirectory=$releaseRunDirectory" $innoScript
     if ($LASTEXITCODE -ne 0) { throw 'Inno Setup compilation failed.' }
     $stagedInstaller = Join-Path $releaseRunDirectory $installerName
     if (-not (Test-Path -LiteralPath $stagedInstaller -PathType Leaf)) { throw "Expected installer was not produced: $stagedInstaller" }
@@ -453,6 +456,7 @@ try {
         stationd_sha256 = $stationdHash
         channel_worker_sha256 = $workerHash
         nas_publisher_sha256 = $nasPublisherHash
+        automation_launch_helper_sha256 = $automationLaunchHelperHash
         station_updater_sha256 = $updaterHash
         media_runtime_sha256 = $runtimeHash
         tsduck_version = $tsduckPin.version

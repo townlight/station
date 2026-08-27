@@ -137,6 +137,7 @@ if ($health.database -ne 'ready' -or
 $stationdHash = (Get-FileHash -LiteralPath (Join-Path $application 'stationd.exe') -Algorithm SHA256).Hash.ToLowerInvariant()
 $workerHash = (Get-FileHash -LiteralPath (Join-Path $application 'channel-worker.exe') -Algorithm SHA256).Hash.ToLowerInvariant()
 $nasPublisherHash = (Get-FileHash -LiteralPath (Join-Path $application 'nas-publisher.exe') -Algorithm SHA256).Hash.ToLowerInvariant()
+$automationLaunchHelperHash = (Get-FileHash -LiteralPath (Join-Path $application 'station-automation-launch-helper.exe') -Algorithm SHA256).Hash.ToLowerInvariant()
 $updaterHash = (Get-FileHash -LiteralPath (Join-Path $application 'station-updater.exe') -Algorithm SHA256).Hash.ToLowerInvariant()
 $captionDecoderHash = (Get-FileHash -LiteralPath $captionDecoder -Algorithm SHA256).Hash.ToLowerInvariant()
 $captionDecoderLicenseHash = (Get-FileHash -LiteralPath $captionDecoderLicense -Algorithm SHA256).Hash.ToLowerInvariant()
@@ -148,6 +149,9 @@ if ($workerHash -ne $manifestDocument.channel_worker_sha256) {
 }
 if ($nasPublisherHash -ne $manifestDocument.nas_publisher_sha256) {
     throw 'Installed nas-publisher does not match the candidate manifest.'
+}
+if ($automationLaunchHelperHash -ne $manifestDocument.automation_launch_helper_sha256) {
+    throw 'Installed automation launch helper does not match the candidate manifest.'
 }
 if ($updaterHash -ne $manifestDocument.station_updater_sha256) {
     throw 'Installed station-updater does not match the candidate manifest.'
@@ -210,7 +214,7 @@ foreach ($requiredTSDuckFile in @('LICENSE.txt', 'OTHERS.txt', 'bin\tsp.exe', 'b
 if ($activeReceipt.active.relative_directory -ne '.' -or
     $activeReceipt.active.package_manifest.source_commit -ne $manifestDocument.source_commit -or
     $activeReceipt.active.package_manifest.version -ne $manifestDocument.version -or
-    $activeReceipt.active.package_manifest.files.Count -ne 3) {
+    $activeReceipt.active.package_manifest.files.Count -ne 4) {
     throw 'The active application receipt does not match the installed candidate.'
 }
 $activeHashes = @{}
@@ -219,7 +223,8 @@ foreach ($file in $activeReceipt.active.package_manifest.files) {
 }
 if ($activeHashes['stationd.exe'] -ne $stationdHash -or
     $activeHashes['channel-worker.exe'] -ne $workerHash -or
-    $activeHashes['nas-publisher.exe'] -ne $nasPublisherHash) {
+    $activeHashes['nas-publisher.exe'] -ne $nasPublisherHash -or
+    $activeHashes['station-automation-launch-helper.exe'] -ne $automationLaunchHelperHash) {
     throw 'The active application receipt does not authenticate all slot-owned binaries.'
 }
 
@@ -271,6 +276,7 @@ if ($LASTEXITCODE -ne 0) {
     stationd_sha256 = $stationdHash
     channel_worker_sha256 = $workerHash
     nas_publisher_sha256 = $nasPublisherHash
+    automation_launch_helper_sha256 = $automationLaunchHelperHash
     station_updater_sha256 = $updaterHash
     caption_decoder_sha256 = $captionDecoderHash
     caption_decoder_license_sha256 = $captionDecoderLicenseHash

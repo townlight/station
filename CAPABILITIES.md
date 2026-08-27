@@ -80,19 +80,22 @@ real NAS/share race, interruption/retry, or installed-helper proof.
 
 ### S13 launch-helper source boundary
 
-`station-automation-launch-helper` now exists as an unintegrated, fail-closed Windows source
-prototype; it is not packaged, installed, candidate-manifested, or invoked by stationd. Its framed,
+`station-automation-launch-helper` is now built, packaged, installed, and bound into both the
+candidate and active-package manifests. Before stationd makes a queue execution decision, it
+verifies that exact active-candidate helper identity under the install fence. Its framed,
 watchdog-bounded schema-closed request binds exact job/claim/adapter/candidate/install/
 configuration and managed artifact facts, and excludes secrets and prompts. It has no configured
 semantic adapter, emits only categorical `adapter_unavailable`, and deliberately does not resolve,
 open, or create request-named artifacts. The earlier pathname-based artifact prototype was removed:
 retained Windows directory handles did not prevent an ancestor rename followed by junction
 substitution. A future adapter must use handle-relative opens or inherited input/output-parent handles
-whose exact file identities are bound before launch. Host Job Object integration, helper identity
-attestation, managed-handle proof, a usable adapter, installed proof, and field proof
-remain open; this source addition does not change S13's `partial` status.
-Only framed stdin is independently watchdog-bounded; root-authority I/O remains hard-bounded only
-after the unimplemented outer Job host can terminate and reap the helper process tree.
+whose exact file identities are bound before launch. The existing host supervisor assigns an owned
+suspended child to a kill-on-close Job Object before resume and now caps the whole tree at eight
+active processes and 1 GiB total memory, in addition to bounded argv, environment, stdout, stderr, monotonic time,
+termination, and reap. No production semantic adapter is configured, so stationd does not invoke the
+helper as a substitute adapter and retains truthful paced `adapter_unavailable`. Managed-handle
+execution, a usable adapter, installed execution proof, and field proof remain open; S13 remains
+`partial`.
 
 The current exact installed candidates prove substantial portions of S3-S9 and S15 on one
 Windows machine. Exact candidate `b6ae66e71e57cb2d48e7d5de917bc78349bb8d60` also passed a fresh,
