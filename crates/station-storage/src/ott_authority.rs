@@ -721,18 +721,20 @@ impl StationStore {
     }
 
     fn ott_capacity_retry(&self, now_unix_ms: i64) -> Result<OttAuthorityError, OttAuthorityError> {
-        let statement =
-            self.prepare("SELECT COUNT(*),MIN(expires_at_unix_ms) FROM ott_playback_sessions")?;
+        let statement = self.prepare(
+            "SELECT COUNT(*),MIN(expires_at_unix_ms),MAX(expires_at_unix_ms) FROM ott_playback_sessions",
+        )?;
         if unsafe { sqlite3_step(statement.raw) } != SQLITE_ROW
             || unsafe { sqlite3_column_int64(statement.raw, 0) } < 1
         {
             return Err(OttAuthorityError::Corrupt);
         }
         let earliest_expiry = unsafe { sqlite3_column_int64(statement.raw, 1) };
+        let latest_expiry = unsafe { sqlite3_column_int64(statement.raw, 2) };
         let latest_legitimate_expiry = now_unix_ms
             .checked_add(SESSION_TTL_MS)
             .ok_or(OttAuthorityError::Corrupt)?;
-        if earliest_expiry > latest_legitimate_expiry {
+        if earliest_expiry > latest_legitimate_expiry || latest_expiry > latest_legitimate_expiry {
             return Err(OttAuthorityError::Corrupt);
         }
         let retry_at = earliest_expiry
@@ -1305,7 +1307,7 @@ mod tests {
             client: client(),
         };
         let session_rows = format!(
-            "WITH RECURSIVE seq(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM seq WHERE x < {count}) INSERT INTO ott_playback_sessions(session_id,request_id,content_id,client_id,catalog_revision,session_revision,server_session_digest,issued_at_unix_ms,expires_at_unix_ms,client_json,capability_ciphertext) SELECT printf('%08d-0000-4000-8000-000000000000',x),printf('capacity-%d',x),'{{}}','{{}}',1,1,printf('%064d',0),1,9999999999999,'{{}}',X'00' FROM seq",
+            "WITH RECURSIVE seq(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM seq WHERE x < {count}) INSERT INTO ott_playback_sessions(session_id,request_id,content_id,client_id,catalog_revision,session_revision,server_session_digest,issued_at_unix_ms,expires_at_unix_ms,client_json,capability_ciphertext) SELECT printf('%08d-0000-4000-8000-000000000000',x),printf('capacity-%d',x),'{{}}','{{}}',1,1,printf('%064d',0),1,CASE WHEN x={count} THEN 9999999999999 ELSE 1700000900000 END,'{{}}',X'00' FROM seq",
             count = MAX_TOTAL_SESSIONS
         );
         store.execute(&session_rows).unwrap();

@@ -1830,6 +1830,8 @@ pub struct Api {
     source_evidence_authority: Arc<StationSourceEvidenceAuthority>,
     #[cfg(test)]
     commissioning_after_channel_read_hook: Option<CommissioningAfterChannelReadHook>,
+    #[cfg(test)]
+    ott_session_error_override: Option<OttAuthorityError>,
 }
 
 /// Complete receipt-backed input for one server-owned S19 materialization.
@@ -1900,6 +1902,8 @@ impl Api {
             source_evidence_authority,
             #[cfg(test)]
             commissioning_after_channel_read_hook: None,
+            #[cfg(test)]
+            ott_session_error_override: None,
         })
     }
 
@@ -1920,6 +1924,8 @@ impl Api {
             source_evidence_authority: new_source_evidence_authority()?,
             #[cfg(test)]
             commissioning_after_channel_read_hook: None,
+            #[cfg(test)]
+            ott_session_error_override: None,
         })
     }
 
@@ -2611,6 +2617,10 @@ impl Api {
         };
         if let Err(message) = station_ott_runtime::validate_issue_request(&request) {
             return error_response(422, "validation_failed", &message);
+        }
+        #[cfg(test)]
+        if let Some(error) = self.ott_session_error_override {
+            return ott_session_error(&error);
         }
         let now = match system_time_millis() {
             Ok(now) => now,
@@ -22600,7 +22610,7 @@ mod tests {
             .unwrap()
             .as_nanos();
         let database = std::env::temp_dir().join(format!("townlight-api-ott-{nonce}.db"));
-        let api = Api::open(&database).unwrap();
+        let mut api = Api::open(&database).unwrap();
         let page = PublicCatalogPage {
             contract_version: station_ott_contract::OTT_CONTRACT_VERSION,
             catalog_revision: 1,
@@ -22808,6 +22818,24 @@ mod tests {
             .unwrap();
         assert!((1..=60).contains(&retry_after));
         assert!(retry_after <= MAX_RETRY_AFTER_SECONDS);
+        api.ott_session_error_override = Some(OttAuthorityError::Corrupt);
+        let corrupt = dispatch_http(
+            &api,
+            &runtime,
+            &raw_request(
+                "POST",
+                "/api/v1/ott/sessions",
+                &[("Host", runtime.expected_host())],
+                &request_body,
+            ),
+        );
+        assert_eq!(corrupt.status, 500);
+        assert!(
+            corrupt
+                .headers
+                .iter()
+                .all(|header| header.name != "Retry-After")
+        );
         drop(api);
         let _ = std::fs::remove_file(database);
     }
