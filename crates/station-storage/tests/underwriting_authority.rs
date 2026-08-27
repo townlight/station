@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use station_schedule::{AssetReadiness, MediaAsset, ScheduleItem, ScheduleState};
 use station_storage::{ScheduleItemWrite, StationStore, UnderwritingWriteError};
@@ -15,10 +16,17 @@ const PLACEMENT: &str = "55555555-5555-4555-8555-555555555555";
 const PLACEMENT_TWO: &str = "66666666-6666-4666-8666-666666666666";
 const SCHEDULE: &str = "77777777-7777-4777-8777-777777777777";
 const SCHEDULE_TWO: &str = "88888888-8888-4888-8888-888888888888";
+const SPOT_TWO: &str = "99999999-9999-4999-8999-999999999999";
+const SPONSOR_TWO: &str = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+const FLIGHT_TWO: &str = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+const PLACEMENT_THREE: &str = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
 
 fn database_path(label: &str) -> PathBuf {
-    let directory = std::env::temp_dir().join(format!("townlight-underwriting-{label}"));
-    let _ = std::fs::remove_dir_all(&directory);
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let directory = std::env::temp_dir().join(format!("townlight-underwriting-{label}-{nonce}"));
     std::fs::create_dir_all(&directory).unwrap();
     directory.join("station.db")
 }
@@ -202,4 +210,105 @@ fn rejects_non_ready_media_even_when_the_draft_binding_matches() {
     assert!(
         matches!(store.write_underwriting_placement(&placement(PLACEMENT, 120_000), SCHEDULE, 1, None, "operator", 103), Err(UnderwritingWriteError::Invalid(message)) if message.contains("ready"))
     );
+}
+
+#[test]
+fn placement_cas_uses_immutable_spot_revision_and_keeps_one_stable_schedule_owner() {
+    let database = database_path("placement-cas-stable-schedule");
+    let store = StationStore::open(&database).unwrap();
+    store
+        .put_media_asset(&MediaAsset {
+            asset_id: ASSET.into(),
+            media_path: database.with_extension("ts").to_string_lossy().into_owned(),
+            duration_ms: 30_000,
+            readiness: AssetReadiness::Ready,
+        })
+        .unwrap();
+    store
+        .write_underwriting_spot(&spot(1), None, "operator", 100)
+        .unwrap();
+    store
+        .write_underwriting_flight(&flight(), None, "operator", 101)
+        .unwrap();
+    let schedule = ScheduleItem {
+        item_id: SCHEDULE.into(),
+        revision: 1,
+        channel_id: CHANNEL.into(),
+        asset_id: ASSET.into(),
+        title: "Underwriting".into(),
+        starts_at_unix_ms: 120_000,
+        duration_ms: 30_000,
+        state: ScheduleState::Draft,
+    };
+    store
+        .write_schedule_item(&ScheduleItemWrite {
+            item: schedule.clone(),
+            changed_by: "operator".into(),
+            occurred_at_unix_ms: 102,
+        })
+        .unwrap();
+    store
+        .write_underwriting_placement(
+            &placement(PLACEMENT, 120_000),
+            SCHEDULE,
+            1,
+            None,
+            "operator",
+            103,
+        )
+        .unwrap();
+
+    let mut current_spot = spot(2);
+    current_spot.duration_ms = 60_000;
+    store
+        .write_underwriting_spot(&current_spot, Some(1), "operator", 104)
+        .unwrap();
+    let mut schedule_v2 = schedule;
+    schedule_v2.revision = 2;
+    store
+        .write_schedule_item(&ScheduleItemWrite {
+            item: schedule_v2,
+            changed_by: "operator".into(),
+            occurred_at_unix_ms: 105,
+        })
+        .unwrap();
+    let mut placement_v2 = placement(PLACEMENT, 120_000);
+    placement_v2.revision = 2;
+    store
+        .write_underwriting_placement(&placement_v2, SCHEDULE, 2, Some(1), "operator", 106)
+        .unwrap();
+    assert_eq!(
+        store
+            .list_underwriting_placement_history(PLACEMENT)
+            .unwrap()
+            .iter()
+            .map(|entry| entry.schedule_item_revision)
+            .collect::<Vec<_>>(),
+        vec![1, 2]
+    );
+
+    let second_spot = UnderwritingSpot {
+        spot_id: SPOT_TWO.into(),
+        sponsor_id: SPONSOR_TWO.into(),
+        asset_id: ASSET.into(),
+        label: "Second sponsor".into(),
+        duration_ms: 30_000,
+        revision: 1,
+    };
+    store
+        .write_underwriting_spot(&second_spot, None, "operator", 107)
+        .unwrap();
+    let mut second_flight = flight();
+    second_flight.flight_id = FLIGHT_TWO.into();
+    second_flight.sponsor_id = SPONSOR_TWO.into();
+    second_flight.spot_id = SPOT_TWO.into();
+    store
+        .write_underwriting_flight(&second_flight, None, "operator", 108)
+        .unwrap();
+    let mut second_placement = placement(PLACEMENT_THREE, 120_000);
+    second_placement.flight_id = FLIGHT_TWO.into();
+    assert!(matches!(
+        store.write_underwriting_placement(&second_placement, SCHEDULE, 2, None, "operator", 109),
+        Err(UnderwritingWriteError::Conflict { .. })
+    ));
 }

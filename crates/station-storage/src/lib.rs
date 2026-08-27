@@ -140,7 +140,9 @@ pub use actual_airing_authority::{
     ScheduledTakeApplyOutcome,
 };
 mod underwriting_authority;
-pub use underwriting_authority::{UnderwritingHistoryEntry, UnderwritingWriteError};
+pub use underwriting_authority::{
+    UnderwritingHistoryEntry, UnderwritingPlacementHistoryEntry, UnderwritingWriteError,
+};
 mod asrun_epg_authority;
 pub use asrun_epg_authority::{
     AsRunProjectionPage, AsRunProjectionWriteError, MAX_ASRUN_EPG_PAGE_SIZE,

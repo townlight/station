@@ -51,7 +51,10 @@ its media authority is `Ready` with the exact spot duration, and one exact
 Draft schedule item has the same revision, channel, asset, start, and duration.
 The write transaction reconciles total-flight capacity and minimum separation
 against every current placement for the flight. Later Draft schedule mutations
-are rejected when they would invalidate that binding.
+are rejected when they would invalidate that binding. One stable schedule-item
+identity can belong to only one current placement; a placement compare-and-set
+revision may advance its bound schedule revision while immutable placement
+history retains each prior binding.
 
 This increment does not yet persist proof joins or export requests, consume
 trusted ScheduledAssetOnAir facts, render affidavit/export bytes, expose an

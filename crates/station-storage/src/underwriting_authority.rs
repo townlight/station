@@ -27,6 +27,15 @@ pub struct UnderwritingHistoryEntry {
     pub occurred_at_unix_ms: i64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnderwritingPlacementHistoryEntry {
+    pub placement: UnderwritingPlacementIntent,
+    pub schedule_item_id: String,
+    pub schedule_item_revision: u64,
+    pub changed_by: String,
+    pub occurred_at_unix_ms: i64,
+}
+
 impl StationStore {
     pub(super) fn initialize_underwriting_authority_schema(&self) -> Result<(), String> {
         self.execute(
@@ -62,7 +71,8 @@ impl StationStore {
              CREATE TABLE IF NOT EXISTS underwriting_placements(placement_id TEXT PRIMARY KEY,flight_id TEXT NOT NULL,channel_id TEXT NOT NULL,scheduled_at_unix_ms INTEGER NOT NULL,revision INTEGER NOT NULL,schedule_item_id TEXT NOT NULL,schedule_item_revision INTEGER NOT NULL,record_json TEXT NOT NULL);\
              CREATE TABLE IF NOT EXISTS underwriting_placement_history(placement_id TEXT NOT NULL,revision INTEGER NOT NULL,schedule_item_id TEXT NOT NULL,schedule_item_revision INTEGER NOT NULL,record_json TEXT NOT NULL,changed_by TEXT NOT NULL,occurred_at_unix_ms INTEGER NOT NULL,PRIMARY KEY(placement_id,revision));\
              CREATE INDEX IF NOT EXISTS underwriting_placements_flight_time ON underwriting_placements(flight_id,scheduled_at_unix_ms,placement_id);\
-             CREATE UNIQUE INDEX IF NOT EXISTS underwriting_placements_schedule ON underwriting_placements(schedule_item_id,schedule_item_revision);\
+             DROP INDEX IF EXISTS underwriting_placements_schedule;\
+             CREATE UNIQUE INDEX underwriting_placements_schedule ON underwriting_placements(schedule_item_id);\
              CREATE TRIGGER IF NOT EXISTS underwriting_placement_history_no_update BEFORE UPDATE ON underwriting_placement_history BEGIN SELECT RAISE(ABORT,'underwriting placement history is append-only'); END;\
              CREATE TRIGGER IF NOT EXISTS underwriting_placement_history_no_delete BEFORE DELETE ON underwriting_placement_history BEGIN SELECT RAISE(ABORT,'underwriting placement history is append-only'); END;"
         ))
@@ -357,11 +367,16 @@ impl StationStore {
             )
             .map_err(|e| map_contract_error(e, current.as_ref().map(|v| v.0.revision)))?;
             let spot = self
-                .read_underwriting_spot(&flight.spot_id)
+                .read_underwriting_spot_revision(&flight.spot_id, flight.spot_revision)
                 .map_err(UnderwritingWriteError::Storage)?
                 .ok_or_else(|| {
-                    UnderwritingWriteError::Invalid("underwriting spot does not exist".into())
+                    UnderwritingWriteError::Invalid(
+                        "underwriting flight's exact spot revision does not exist".into(),
+                    )
                 })?;
+            if spot.sponsor_id != flight.sponsor_id {
+                return Err(UnderwritingWriteError::Rebound);
+            }
             let item = self
                 .read_schedule_item(schedule_item_id)
                 .map_err(UnderwritingWriteError::Storage)?
@@ -381,6 +396,20 @@ impl StationStore {
                 ));
             }
             validate_schedule_binding(&item, schedule_item_revision, proposed, &spot)?;
+            if let Some((_, bound_schedule_item_id, _)) = &current
+                && bound_schedule_item_id != schedule_item_id
+            {
+                return Err(UnderwritingWriteError::Rebound);
+            }
+            if let Some(owner) = self
+                .read_schedule_placement_owner(schedule_item_id)
+                .map_err(UnderwritingWriteError::Storage)?
+                && owner != proposed.placement_id
+            {
+                return Err(UnderwritingWriteError::Conflict {
+                    current_revision: None,
+                });
+            }
             let placements = self
                 .list_flight_placements(&proposed.flight_id)
                 .map_err(UnderwritingWriteError::Storage)?;
@@ -414,7 +443,7 @@ impl StationStore {
                 .map_err(UnderwritingWriteError::Invalid)?;
             let schedrev = checked_i64(schedule_item_revision, "schedule revision")
                 .map_err(UnderwritingWriteError::Invalid)?;
-            let s=self.prepare("INSERT INTO underwriting_placements(placement_id,flight_id,channel_id,scheduled_at_unix_ms,revision,schedule_item_id,schedule_item_revision,record_json)VALUES(?1,?2,?3,?4,?5,?6,?7,?8)").map_err(UnderwritingWriteError::Storage)?;
+            let s=if current.is_some(){self.prepare("UPDATE underwriting_placements SET flight_id=?2,channel_id=?3,scheduled_at_unix_ms=?4,revision=?5,schedule_item_id=?6,schedule_item_revision=?7,record_json=?8 WHERE placement_id=?1 AND revision=?9")}else{self.prepare("INSERT INTO underwriting_placements(placement_id,flight_id,channel_id,scheduled_at_unix_ms,revision,schedule_item_id,schedule_item_revision,record_json)VALUES(?1,?2,?3,?4,?5,?6,?7,?8)")}.map_err(UnderwritingWriteError::Storage)?;
             bind_text(self.database, s.raw, 1, &values[0])
                 .map_err(UnderwritingWriteError::Storage)?;
             bind_text(self.database, s.raw, 2, &values[1])
@@ -429,7 +458,22 @@ impl StationStore {
             bind_i64(self.database, s.raw, 7, schedrev).map_err(UnderwritingWriteError::Storage)?;
             bind_text(self.database, s.raw, 8, &values[4])
                 .map_err(UnderwritingWriteError::Storage)?;
+            if let Some((current_placement, _, _)) = &current {
+                bind_i64(
+                    self.database,
+                    s.raw,
+                    9,
+                    checked_i64(current_placement.revision, "placement revision")
+                        .map_err(UnderwritingWriteError::Invalid)?,
+                )
+                .map_err(UnderwritingWriteError::Storage)?;
+            }
             expect_done(self.database, s.raw).map_err(UnderwritingWriteError::Storage)?;
+            if self.changes() != 1 {
+                return Err(UnderwritingWriteError::Conflict {
+                    current_revision: current.as_ref().map(|entry| entry.0.revision),
+                });
+            }
             let h=self.prepare("INSERT INTO underwriting_placement_history(placement_id,revision,schedule_item_id,schedule_item_revision,record_json,changed_by,occurred_at_unix_ms)VALUES(?1,?2,?3,?4,?5,?6,?7)").map_err(UnderwritingWriteError::Storage)?;
             let actor = c_string(changed_by, "actor").map_err(UnderwritingWriteError::Invalid)?;
             bind_text(self.database, h.raw, 1, &values[0])
@@ -446,6 +490,48 @@ impl StationStore {
             expect_done(self.database, h.raw).map_err(UnderwritingWriteError::Storage)
         })();
         finish_underwriting(self, result)
+    }
+
+    pub fn list_underwriting_placement_history(
+        &self,
+        placement_id: &str,
+    ) -> Result<Vec<UnderwritingPlacementHistoryEntry>, String> {
+        validate_underwriting_id(placement_id)?;
+        let statement = self.prepare("SELECT record_json,schedule_item_id,schedule_item_revision,changed_by,occurred_at_unix_ms FROM underwriting_placement_history WHERE placement_id=?1 ORDER BY revision ASC LIMIT ?2")?;
+        let id = c_string(placement_id, "underwriting placement identity")?;
+        bind_text(self.database, statement.raw, 1, &id)?;
+        bind_i64(
+            self.database,
+            statement.raw,
+            2,
+            MAX_UNDERWRITING_HISTORY as i64,
+        )?;
+        let mut entries = Vec::new();
+        loop {
+            match unsafe { sqlite3_step(statement.raw) } {
+                SQLITE_DONE => return Ok(entries),
+                SQLITE_ROW => {
+                    let placement: UnderwritingPlacementIntent =
+                        serde_json::from_str(&column_text(statement.raw, 0)?).map_err(|error| {
+                            format!("stored placement history is corrupt: {error}")
+                        })?;
+                    placement.validate_shape()?;
+                    let changed_by = column_text(statement.raw, 3)?;
+                    let occurred_at_unix_ms = unsafe { sqlite3_column_int64(statement.raw, 4) };
+                    if !valid_actor(&changed_by) || occurred_at_unix_ms < 0 {
+                        return Err("stored placement history attribution is corrupt".into());
+                    }
+                    entries.push(UnderwritingPlacementHistoryEntry {
+                        placement,
+                        schedule_item_id: column_text(statement.raw, 1)?,
+                        schedule_item_revision: column_u64(statement.raw, 2, "schedule revision")?,
+                        changed_by,
+                        occurred_at_unix_ms,
+                    });
+                }
+                _ => return Err(sqlite_error(self.database)),
+            }
+        }
     }
 
     fn read_underwriting_placement(
@@ -494,6 +580,22 @@ impl StationStore {
         }
     }
 
+    fn read_schedule_placement_owner(
+        &self,
+        schedule_item_id: &str,
+    ) -> Result<Option<String>, String> {
+        let statement = self.prepare(
+            "SELECT placement_id FROM underwriting_placements WHERE schedule_item_id=?1",
+        )?;
+        let id = c_string(schedule_item_id, "schedule item identity")?;
+        bind_text(self.database, statement.raw, 1, &id)?;
+        match unsafe { sqlite3_step(statement.raw) } {
+            SQLITE_DONE => Ok(None),
+            SQLITE_ROW => Ok(Some(column_text(statement.raw, 0)?)),
+            _ => Err(sqlite_error(self.database)),
+        }
+    }
+
     pub(super) fn validate_underwriting_schedule_successor(
         &self,
         item: &ScheduleItem,
@@ -506,13 +608,12 @@ impl StationStore {
             SQLITE_ROW => {
                 let p: UnderwritingPlacementIntent = serde_json::from_str(&column_text(s.raw, 0)?)
                     .map_err(|_| "stored placement corrupt")?;
-                let spot_id = self
-                    .read_underwriting_flight(&p.flight_id)?
-                    .ok_or("placement flight missing")?
-                    .spot_id;
+                let flight = self
+                    .read_underwriting_flight_revision(&p.flight_id, p.flight_revision)?
+                    .ok_or("placement flight revision missing")?;
                 let spot = self
-                    .read_underwriting_spot(&spot_id)?
-                    .ok_or("placement spot missing")?;
+                    .read_underwriting_spot_revision(&flight.spot_id, flight.spot_revision)?
+                    .ok_or("placement spot revision missing")?;
                 validate_schedule_binding(item, item.revision, &p, &spot).map_err(|e| {
                     format!("schedule mutation would invalidate underwriting authority: {e:?}")
                 })
@@ -538,6 +639,45 @@ impl StationStore {
         match unsafe { sqlite3_step(statement.raw) } {
             SQLITE_DONE => Ok(None),
             SQLITE_ROW => Ok(Some(read_history_row(statement.raw)?)),
+            _ => Err(sqlite_error(self.database)),
+        }
+    }
+
+    fn read_underwriting_spot_revision(
+        &self,
+        spot_id: &str,
+        revision: u64,
+    ) -> Result<Option<UnderwritingSpot>, String> {
+        Ok(self
+            .read_underwriting_spot_history_entry(spot_id, revision)?
+            .map(|entry| entry.spot))
+    }
+
+    fn read_underwriting_flight_revision(
+        &self,
+        flight_id: &str,
+        revision: u64,
+    ) -> Result<Option<UnderwritingFlight>, String> {
+        let statement = self.prepare(
+            "SELECT record_json FROM underwriting_flight_history WHERE flight_id=?1 AND revision=?2",
+        )?;
+        let id = c_string(flight_id, "underwriting flight identity")?;
+        bind_text(self.database, statement.raw, 1, &id)?;
+        bind_i64(
+            self.database,
+            statement.raw,
+            2,
+            checked_i64(revision, "underwriting flight revision")?,
+        )?;
+        match unsafe { sqlite3_step(statement.raw) } {
+            SQLITE_DONE => Ok(None),
+            SQLITE_ROW => {
+                let flight: UnderwritingFlight =
+                    serde_json::from_str(&column_text(statement.raw, 0)?)
+                        .map_err(|error| format!("stored flight history is corrupt: {error}"))?;
+                flight.validate()?;
+                Ok(Some(flight))
+            }
             _ => Err(sqlite_error(self.database)),
         }
     }
