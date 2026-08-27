@@ -124,8 +124,8 @@ pub use publishing_authority::{
 };
 pub use publishing_executor::{
     PublishExecutionJob, PublishExecutionJobRecord, PublishExecutionJobState,
-    PublishExecutionReadiness, run_publish_controller_iteration,
-    run_publish_execution_queue_controller,
+    PublishExecutionReadiness, run_local_nas_publisher_worker_from_env,
+    run_publish_controller_iteration, run_publish_execution_queue_controller,
 };
 mod actual_airing_authority;
 pub use actual_airing_authority::{

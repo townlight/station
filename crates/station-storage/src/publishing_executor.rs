@@ -2849,12 +2849,11 @@ mod tests {
         assert!(
             deliver_to_nas_with_heartbeat(&job, &media, &configured_root, &mut heartbeat).is_err()
         );
-        assert_eq!(
+        assert!(
             std::fs::read_dir(&root)
                 .unwrap()
                 .filter_map(Result::ok)
-                .all(|entry| entry.file_name() == "media"),
-            true
+                .all(|entry| entry.file_name() == "media")
         );
         assert_eq!(
             deliver_to_nas(&job, &media, &configured_root)

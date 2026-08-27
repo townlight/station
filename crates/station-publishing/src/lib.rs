@@ -170,8 +170,8 @@ pub fn validate_local_nas_root(value: &str) -> Result<(), String> {
     {
         return Err("managed NAS device and NT namespace paths are not allowed".into());
     }
-    if value.starts_with(r"\\") {
-        let components = value[2..].split('\\').collect::<Vec<_>>();
+    if let Some(stripped) = value.strip_prefix(r"\\") {
+        let components = stripped.split('\\').collect::<Vec<_>>();
         if components.len() < 2
             || components
                 .iter()
