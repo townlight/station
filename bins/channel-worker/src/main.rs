@@ -153,6 +153,11 @@ fn main() {
         .nth(1)
         .is_some_and(|argument| argument == "--youtube-publish-worker")
     {
+        // This one-shot mode receives a provider secret on stdin. Its parent
+        // discards stderr, but suppress panic rendering here as well so a
+        // direct invocation cannot turn an unexpected panic into a diagnostic
+        // persistence path.
+        std::panic::set_hook(Box::new(|_| {}));
         let mut arguments = std::env::args_os().skip(1);
         let _ = arguments.next();
         if arguments.next().is_some() {

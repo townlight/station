@@ -98,12 +98,6 @@ trait YoutubePublishPipeline {
         maximum_runtime: Duration,
         rtmps_location: &mut Zeroizing<String>,
     ) -> Result<(), &'static str>;
-
-    /// Every one-shot attempt reaches this boundary before returning its
-    /// secret-free result. The production implementation clears the sink
-    /// property during `stream_to_eos`; process exit destroys any native
-    /// plugin allocations that cannot be scrubbed from Rust.
-    fn teardown_after_delivery(&mut self) -> Result<(), &'static str>;
 }
 
 #[derive(PartialEq, Eq)]
@@ -128,10 +122,6 @@ impl YoutubePublishPipeline for GstreamerYoutubePublishPipeline {
             maximum_runtime,
             rtmps_location.as_str(),
         )
-    }
-
-    fn teardown_after_delivery(&mut self) -> Result<(), &'static str> {
-        Ok(())
     }
 }
 
@@ -224,10 +214,10 @@ fn execute(
         );
     }
 
-    // Rust-owned strings are zeroized at scope exit. GStreamer has a native
-    // location-property copy while active; its writable property is cleared
-    // before teardown, and the one-shot process exit bounds any allocation
-    // outside Rust's zeroization control.
+    // Rust-owned strings are zeroized at scope exit. GStreamer receives the
+    // location only inside this one-shot process. It may retain native copies;
+    // Rust deliberately makes no claim that those third-party allocations can
+    // be overwritten before the containing process is terminated and reaped.
     let mut rtmps_location = Zeroizing::new(format!(
         "{}/{}",
         command.rtmps_ingestion_address,
@@ -240,15 +230,9 @@ fn execute(
         &mut rtmps_location,
     );
     rtmps_location.zeroize();
-    let teardown = pipeline.teardown_after_delivery();
-    match (stream_result, teardown) {
-        (Ok(()), Ok(())) => published_result(actual_media.bytes, actual_media.sha256),
-        (Err(code), Ok(())) => {
-            failed_result_with_media(code, actual_media.bytes, actual_media.sha256)
-        }
-        (Ok(()), Err(code)) | (Err(_), Err(code)) => {
-            failed_result_with_media(code, actual_media.bytes, actual_media.sha256)
-        }
+    match stream_result {
+        Ok(()) => published_result(actual_media.bytes, actual_media.sha256),
+        Err(code) => failed_result_with_media(code, actual_media.bytes, actual_media.sha256),
     }
 }
 
@@ -523,18 +507,8 @@ fn stream_to_youtube_with_gstreamer(
             .map_err(|_| "pipeline_end_of_stream_failed")?;
         wait_for_eos(&bus, &video_linked, &audio_linked, maximum_runtime)
     })();
-    clear_sink_location_if_supported(&sink);
     let stopped = stop_pipeline(&pipeline);
     result.and(stopped)
-}
-
-fn clear_sink_location_if_supported(sink: &gst::Element) {
-    if sink
-        .find_property("location")
-        .is_some_and(|property| property.flags().contains(gst::glib::ParamFlags::WRITABLE))
-    {
-        sink.set_property("location", "");
-    }
 }
 
 fn make_element(
@@ -671,7 +645,6 @@ mod tests {
     struct FakePipeline {
         outcome: Result<(), &'static str>,
         called: bool,
-        location_cleared: bool,
         observed_media: Vec<u8>,
     }
 
@@ -688,11 +661,6 @@ mod tests {
                 .read_to_end(&mut self.observed_media)
                 .map_err(|_| "pipeline_test_read_failed")?;
             self.outcome
-        }
-
-        fn teardown_after_delivery(&mut self) -> Result<(), &'static str> {
-            self.location_cleared = true;
-            Ok(())
         }
     }
 
@@ -728,7 +696,6 @@ mod tests {
         FakePipeline {
             outcome,
             called: false,
-            location_cleared: false,
             observed_media: Vec::new(),
         }
     }
@@ -800,7 +767,6 @@ mod tests {
 
         assert_eq!(result.failure_code, Some("pipeline_error"));
         assert!(pipeline.called);
-        assert!(pipeline.location_cleared);
         assert!(!json.contains("synthetic-stream-key-123"));
         assert_eq!(pipeline.observed_media, b"test");
         let _ = std::fs::remove_file(path);
@@ -817,7 +783,6 @@ mod tests {
         assert_eq!(result.media_sha256, TEST_SHA256);
         assert_eq!(result.failure_code, None);
         assert!(pipeline.called);
-        assert!(pipeline.location_cleared);
         assert_eq!(pipeline.observed_media, b"test");
         let _ = std::fs::remove_file(path);
     }
@@ -843,6 +808,23 @@ mod tests {
             pipeline_eos_timeout(Duration::from_secs(60)),
             Duration::from_secs(12 * 60),
         );
+    }
+
+    #[test]
+    fn one_shot_entrypoint_suppresses_panic_output_before_exiting() {
+        let source = include_str!("main.rs");
+        let one_shot = source
+            .find("--youtube-publish-worker")
+            .expect("one-shot entrypoint exists");
+        let panic_hook = source
+            .find("std::panic::set_hook(Box::new(|_| {}));")
+            .expect("one-shot entrypoint suppresses panic output");
+        let exit = source
+            .find("std::process::exit(youtube_publish_worker::run_from_stdio());")
+            .expect("one-shot entrypoint exits after its only result");
+
+        assert!(one_shot < panic_hook);
+        assert!(panic_hook < exit);
     }
 
     #[test]

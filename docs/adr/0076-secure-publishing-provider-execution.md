@@ -67,16 +67,34 @@ handle through an in-process GStreamer pipeline, and succeeds only after clean E
 byte/hash identity. The controller additionally requires an active, good-health stream with no
 configuration issues, transitions the exact broadcast through `live` and `complete`, and appends
 `published` only after the full worker result and authoritative exact terminal provider observation.
-GStreamer necessarily owns a native copy of the RTMPS `location` property while the pipeline is
-active; Rust cannot promise to scrub that third-party allocation. Before pipeline teardown the worker
-replaces the writable location property with an empty value, zeroizes every Rust-owned secret buffer,
-and returns exactly one secret-free result. The parent contains the one-shot worker in a kill-on-close
-Job Object, discards its stderr, and waits for its terminal result; `main` then exits the worker
-process. OS process destruction—not a claim about zeroizing the GStreamer heap—is the guarantee for
-the residual native allocation. No stream key reaches argv, environment, worker result, controller
-receipt, log, event, or durable diagnostic. Tests inject the HTTP, process, and clock boundaries into
-this same lifecycle; they do not call Google,
-start the installed encoder, or prove a real account, installed candidate, playback, or audience reach.
+GStreamer necessarily receives an RTMPS location and may retain arbitrary native copies while the
+pipeline runs. TownLight does not claim to overwrite, clear, or otherwise zeroize those third-party
+allocations: assigning a later property value cannot prove that an earlier allocation or internal copy
+was erased.
+
+The enforceable product boundary is instead one-shot process containment. The parent supplies the
+bounded command only through a private stdin pipe, never through argv or environment; it disables
+GStreamer debug output, discards worker stderr, bounds stdout to one fixed schema and 4 KiB, and
+places the child in a `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` Job Object before giving it the command.
+The controller bounds stream-activation and live-observation loops to 60 seconds each with 30-second
+HTTP requests, then gives media delivery a hard maximum of 24 hours (including pipeline startup and
+teardown). It force-terminates and reaps the Job Object on every timeout, heartbeat failure, or
+enclosing error, and the hidden worker exits immediately after its one secret-free result. The worker
+also suppresses Rust panic rendering in this mode, uses only fixed failure codes, and zeroizes
+Rust-owned secret buffers on every return path. Thus TownLight creates no product-owned log, stderr,
+result, receipt, event, or durable diagnostic containing the stream key, and no successful or failed
+attempt leaves a worker process alive beyond the controller's containment path. Tests cover the hard
+parent delivery deadline, terminal cleanup on controller failures, secret-free result, and one-shot
+no-panic-output/exit contract.
+
+This is a precise threat model, not an absolute memory-erasure guarantee. It protects against ordinary
+TownLight process persistence and later unprivileged access after the contained worker exits. It does
+not protect against an administrator, debugger, kernel or endpoint-security agent, externally enabled
+Windows Error Reporting/local crash dumps, hibernation/pagefile forensics, a compromised GStreamer
+library, or provider-side retention during the authorized RTMPS session. Those OS- and provider-owned
+paths can retain native memory despite process exit and remain explicit residual risk. Tests inject the
+HTTP, process, and clock boundaries into this same lifecycle; they do not call Google, start the
+installed encoder, or prove a real account, installed candidate, playback, or audience reach.
 
 Primary contracts: [broadcasts and streams](https://developers.google.com/youtube/v3/live/guides/implementation/broadcasts-and-streams),
 [live broadcast lifecycle](https://developers.google.com/youtube/v3/live/life-of-a-broadcast),

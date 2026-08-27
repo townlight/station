@@ -31,6 +31,8 @@ const POLL_INTERVAL: Duration = Duration::from_millis(500);
 const PROCESS_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
 const WORKER_RESULT_BYTES: usize = 4 * 1024;
 const ACCESS_TOKEN_REFRESH_SKEW_MS: i64 = 10_000;
+const MAX_ONE_SHOT_WORKER_RUNTIME: Duration = Duration::from_secs(24 * 60 * 60);
+const ONE_SHOT_WORKER_RUNTIME_GRACE: Duration = Duration::from_secs(10 * 60);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Endpoint {
@@ -278,10 +280,7 @@ fn execute_with<R: RuntimeIo>(
                 )?;
                 let live_observation_digest = observed.digest();
                 observed.zeroize();
-                let maximum_runtime = Duration::from_millis(job.media_duration_ms)
-                    .saturating_mul(2)
-                    .saturating_add(Duration::from_secs(600))
-                    .min(Duration::from_secs(24 * 60 * 60));
+                let maximum_runtime = bounded_worker_runtime(job.media_duration_ms);
                 let delivery = process
                     .as_deref_mut()
                     .expect("publisher process retained")
@@ -363,6 +362,16 @@ fn execute_with<R: RuntimeIo>(
         digest,
         detail: "YouTube observed the exact configured broadcast complete after exact full-media delivery on the active, healthy configured stream.".into(),
     })
+}
+
+/// The parent-owned deadline is the containment limit for the one-shot
+/// process, including library initialization and teardown. It never exceeds
+/// one day even when a malformed or future caller supplies a larger duration.
+fn bounded_worker_runtime(media_duration_ms: u64) -> Duration {
+    Duration::from_millis(media_duration_ms)
+        .saturating_mul(2)
+        .saturating_add(ONE_SHOT_WORKER_RUNTIME_GRACE)
+        .min(MAX_ONE_SHOT_WORKER_RUNTIME)
 }
 
 struct OAuthCredential {
@@ -1621,11 +1630,12 @@ mod tests {
     use std::collections::VecDeque;
     use std::sync::{
         Arc,
-        atomic::{AtomicBool, AtomicI64, Ordering},
+        atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering},
     };
 
     struct FakeProcess {
         terminated: Arc<AtomicBool>,
+        maximum_runtime_ms: Arc<AtomicU64>,
         delivery_finished_at_ms: Option<(Arc<AtomicI64>, i64)>,
     }
 
@@ -1635,9 +1645,11 @@ mod tests {
         }
         fn wait_for_delivery(
             &mut self,
-            _: Duration,
+            maximum_runtime: Duration,
             _: &mut dyn FnMut() -> Result<(), String>,
         ) -> Result<WorkerDelivery, String> {
+            self.maximum_runtime_ms
+                .store(maximum_runtime.as_millis() as u64, Ordering::Release);
             if let Some((clock, finished_at_ms)) = &self.delivery_finished_at_ms {
                 clock.store(*finished_at_ms, Ordering::Release);
             }
@@ -1665,6 +1677,7 @@ mod tests {
         executable: Option<PathBuf>,
         worker_command_seen: bool,
         terminated: Arc<AtomicBool>,
+        worker_maximum_runtime_ms: Arc<AtomicU64>,
         worker_delivery_finished_at_ms: Option<i64>,
     }
 
@@ -1689,6 +1702,7 @@ mod tests {
                 && Path::new(&command.managed_media_root).is_absolute();
             Ok(Box::new(FakeProcess {
                 terminated: Arc::clone(&self.terminated),
+                maximum_runtime_ms: Arc::clone(&self.worker_maximum_runtime_ms),
                 delivery_finished_at_ms: self
                     .worker_delivery_finished_at_ms
                     .map(|finished_at_ms| (Arc::clone(&self.now), finished_at_ms)),
@@ -1759,6 +1773,7 @@ mod tests {
             executable: None,
             worker_command_seen: false,
             terminated: Arc::new(AtomicBool::new(false)),
+            worker_maximum_runtime_ms: Arc::new(AtomicU64::new(0)),
             worker_delivery_finished_at_ms: None,
         }
     }
@@ -1777,6 +1792,27 @@ mod tests {
             &ffmpeg(),
             &mut || Ok(()),
         )
+    }
+
+    #[test]
+    fn one_shot_worker_runtime_is_hard_capped_by_the_controller() {
+        assert_eq!(
+            bounded_worker_runtime(24 * 60 * 60 * 1_000),
+            Duration::from_secs(24 * 60 * 60),
+        );
+        assert_eq!(bounded_worker_runtime(60_000), Duration::from_secs(12 * 60),);
+    }
+
+    #[test]
+    fn one_shot_launch_has_no_product_diagnostic_egress() {
+        let source = include_str!("youtube_live_runtime.rs");
+        let stderr_discard = [".stderr", "(Stdio::null())"].concat();
+        let gstreamer_quiet = [".env(\"GST_DEBUG\", ", "\"0\")"].concat();
+        let kill_on_close = ["JOB_OBJECT_LIMIT_", "KILL_ON_JOB_CLOSE"].concat();
+
+        assert!(source.contains(&stderr_discard));
+        assert!(source.contains(&gstreamer_quiet));
+        assert!(source.contains(&kill_on_close));
     }
 
     #[test]
@@ -1817,6 +1853,10 @@ mod tests {
         let result = result.unwrap();
         assert_eq!(result.stage, PublishExecutionStage::Published);
         assert!(runtime.worker_command_seen);
+        assert_eq!(
+            runtime.worker_maximum_runtime_ms.load(Ordering::Acquire),
+            602_000,
+        );
         assert!(runtime.requests[0].0.contains("OAuthToken") && !runtime.requests[0].1);
         assert!(
             runtime
