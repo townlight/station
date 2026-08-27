@@ -17,6 +17,7 @@ $expected = @(
     'prove-installed-rollback.ps1',
     'prove-installed-self-tests.ps1',
     'prove-installed-signed-update.ps1',
+    'prove-installed-scheduled-recording.ps1',
     'prove-installed-srt-output.ps1',
     'prove-installed-support-bundles.ps1',
     'prove-installed-system-resource-sampling.ps1'
