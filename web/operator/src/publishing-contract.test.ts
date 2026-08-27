@@ -55,8 +55,8 @@ test("execution paths and labels are bounded and provider-truthful", () => {
   assert.doesNotMatch(publishingStageLabel("published"), /audience|reach/i);
 });
 
-test("the publishing UI never offers unavailable Local NAS execution", () => {
-  assert.match(publishingExecutionUnavailableReason("local_nas") ?? "", /unavailable|disabled/i);
+test("the publishing UI offers Local NAS execution through the bounded server path", () => {
+  assert.equal(publishingExecutionUnavailableReason("local_nas"), null);
   assert.equal(publishingExecutionUnavailableReason("portal"), null);
   assert.equal(publishingExecutionUnavailableReason("youtube_live"), null);
   const panel = readFileSync(new URL("./publishing.tsx", import.meta.url), "utf8");

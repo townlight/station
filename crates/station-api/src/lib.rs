@@ -6,6 +6,7 @@ use std::io::{Read, Write};
 use std::net::UdpSocket;
 use std::net::{TcpListener, TcpStream};
 use std::os::windows::fs::MetadataExt;
+use std::os::windows::fs::OpenOptionsExt;
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -12387,8 +12388,21 @@ fn publish_execution_job_response(
 }
 
 fn hash_publish_file(path: &Path) -> Result<(u64, String), String> {
-    let mut file = std::fs::File::open(path)
+    let mut file = std::fs::OpenOptions::new()
+        .read(true)
+        .share_mode(
+            windows_sys::Win32::Storage::FileSystem::FILE_SHARE_READ
+                | windows_sys::Win32::Storage::FileSystem::FILE_SHARE_WRITE,
+        )
+        .custom_flags(windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)
         .map_err(|error| format!("open publish media for hashing: {error}"))?;
+    let metadata = file
+        .metadata()
+        .map_err(|error| format!("inspect publish media for hashing: {error}"))?;
+    if metadata.file_attributes() & 0x0400 != 0 || !metadata.is_file() {
+        return Err("publish media is a reparse point or not a regular file".into());
+    }
     let mut digest = Sha256::new();
     let mut bytes = 0_u64;
     let mut buffer = [0_u8; 64 * 1024];
@@ -18881,6 +18895,17 @@ mod tests {
         let job_id = queued["job"]["job_id"].as_str().unwrap();
         assert_eq!(queued["state"], "pending");
         assert_eq!(queued["receipts"].as_array().unwrap().len(), 0);
+        let nas_request_path = format!(
+            "/api/v1/publishing/targets/{}/assets/{media_sha256}/jobs",
+            targets[2].1
+        );
+        let nas_queued = api.handle_authenticated("POST", &nas_request_path, None, &setup_admin);
+        assert_eq!(
+            nas_queued.status,
+            202,
+            "Local NAS queueing must use the same server-owned authority path: {}",
+            String::from_utf8_lossy(&nas_queued.body)
+        );
         assert_eq!(
             api.handle_authenticated(
                 "GET",

@@ -1748,6 +1748,7 @@ dependencies = [
  "station-transport-proof",
  "station-update",
  "station-update-coordinator",
+ "windows-sys 0.61.2",
  "zip",
 ]
 

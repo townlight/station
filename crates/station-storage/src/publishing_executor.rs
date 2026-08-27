@@ -5,7 +5,13 @@ use station_publishing::{
     validate_receipt_successor,
 };
 use std::fs::File;
-use std::io::Read;
+use std::io::{Read, Seek, SeekFrom, Write};
+#[cfg(windows)]
+use std::os::windows::ffi::OsStrExt;
+#[cfg(windows)]
+use std::os::windows::fs::OpenOptionsExt;
+#[cfg(windows)]
+use std::os::windows::io::AsRawHandle;
 use std::path::{Path, PathBuf};
 use std::sync::{
     Arc,
@@ -18,6 +24,8 @@ mod youtube_live_runtime;
 const MAX_PUBLISH_ATTEMPTS: u32 = 8;
 const MAX_PUBLISH_LEASE_MS: i64 = 900_000;
 const MAX_PROVIDER_RESPONSE_BYTES: usize = 1_048_576;
+const MAX_NAS_COPY_DURATION: Duration = Duration::from_secs(24 * 60 * 60);
+const NAS_COPY_BUFFER_BYTES: usize = 1024 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -1144,7 +1152,7 @@ impl PublishProviderAdapter for SystemPublishProviderAdapter<'_> {
         };
         let terminal = match config {
             PublishExecutionTargetConfig::LocalNas { managed_root } => {
-                deliver_to_nas(job, media_path, Path::new(managed_root))?
+                deliver_to_nas_with_heartbeat(job, media_path, Path::new(managed_root), heartbeat)?
             }
             PublishExecutionTargetConfig::Portal { endpoint } => http_provider_delivery(
                 endpoint,
@@ -1236,33 +1244,424 @@ fn http_provider_delivery(
     })
 }
 
+#[allow(dead_code)]
 fn deliver_to_nas(
     job: &PublishExecutionJob,
     media_path: &Path,
     root: &Path,
 ) -> Result<ProviderStageEvidence, String> {
-    let _ = (job, media_path, root);
-    Err("Local NAS execution is disabled: TownLight has not yet proved handle-anchored, no-reparse finalization semantics for this destination.".into())
+    let mut heartbeat = || Ok(());
+    deliver_to_nas_with_heartbeat(job, media_path, root, &mut heartbeat)
 }
 
-fn hash_publish_media(path: &Path) -> Result<(u64, String), String> {
-    let mut file = File::open(path).map_err(|_| "publish media could not be opened")?;
+fn deliver_to_nas_with_heartbeat(
+    job: &PublishExecutionJob,
+    media_path: &Path,
+    root: &Path,
+    heartbeat: &mut dyn FnMut() -> Result<(), String>,
+) -> Result<ProviderStageEvidence, String> {
+    if job.target_kind != PublishTargetKind::LocalNas {
+        return Err("NAS delivery job has the wrong target kind".into());
+    }
+    validate_managed_nas_root(root)?;
+    let started = std::time::Instant::now();
+    let (_root_pins, destination) = prepare_nas_destination(root, &job.media_sha256)?;
+    if destination
+        .try_exists()
+        .map_err(|_| "NAS destination could not be inspected")?
+    {
+        return Err("NAS destination already exists; overwrite or rebind is forbidden".into());
+    }
+
+    let mut source = open_publish_source_no_follow(media_path)?;
+    let source_metadata = source
+        .metadata()
+        .map_err(|_| "publish media could not be inspected")?;
+    if source_metadata.len() == 0 || source_metadata.len() != job.media_bytes {
+        return Err("publish media bytes do not match the exact job binding".into());
+    }
+    source
+        .seek(SeekFrom::Start(0))
+        .map_err(|_| "publish media could not be positioned")?;
+
+    let temporary = unique_nas_temp_path(root, &job.job_id)?;
+    let mut output = open_nas_temp(&temporary)?;
+    let mut hasher = Sha256::new();
+    let mut copied = 0_u64;
+    let mut buffer = vec![0_u8; NAS_COPY_BUFFER_BYTES];
+    let copy_result = (|| {
+        loop {
+            heartbeat()?;
+            if started.elapsed() >= MAX_NAS_COPY_DURATION {
+                return Err("NAS publication exceeded its bounded deadline".into());
+            }
+            let read = source
+                .read(&mut buffer)
+                .map_err(|_| "publish media could not be read from its retained handle")?;
+            if read == 0 {
+                break;
+            }
+            copied = copied
+                .checked_add(read as u64)
+                .ok_or("publish media size overflowed")?;
+            if copied > job.media_bytes {
+                return Err("publish media grew beyond the exact job binding".into());
+            }
+            hasher.update(&buffer[..read]);
+            output
+                .write_all(&buffer[..read])
+                .map_err(|_| "NAS temporary media could not be written")?;
+        }
+        if copied != job.media_bytes {
+            return Err("publish media ended before the exact job byte count".into());
+        }
+        let digest = format!("{:x}", hasher.finalize());
+        if digest != job.media_sha256 {
+            return Err("publish media changed on its retained handle".into());
+        }
+        output
+            .flush()
+            .and_then(|()| output.sync_all())
+            .map_err(|_| "NAS temporary media could not be durably flushed")?;
+        heartbeat()?;
+        if started.elapsed() >= MAX_NAS_COPY_DURATION {
+            return Err("NAS publication exceeded its bounded deadline".into());
+        }
+        rename_nas_temp_from_handle(&output, &destination)?;
+        output
+            .sync_all()
+            .map_err(|_| "NAS finalized media could not be durably flushed")?;
+        output
+            .seek(SeekFrom::Start(0))
+            .map_err(|_| "NAS finalized media could not be positioned")?;
+        let (final_bytes, final_digest) = hash_publish_handle_until(&mut output, Some(started))?;
+        if final_bytes != job.media_bytes || final_digest != job.media_sha256 {
+            return Err("NAS finalized media does not match the exact job binding".into());
+        }
+        Ok(())
+    })();
+    if let Err(error) = copy_result {
+        let cleanup = discard_owned_nas_temp(&output);
+        drop(output);
+        return match cleanup {
+            Ok(()) => Err(error),
+            Err(cleanup_error) => Err(format!(
+                "{error}; NAS temporary cleanup failed: {cleanup_error}"
+            )),
+        };
+    }
+    drop(output);
+    Ok(ProviderStageEvidence {
+        stage: PublishExecutionStage::Delivered,
+        digest: job.media_sha256.clone(),
+        detail: format!(
+            "Exact media delivered atomically to the configured NAS root at {}.",
+            destination.display()
+        ),
+    })
+}
+
+fn validate_managed_nas_root(root: &Path) -> Result<(), String> {
+    let value = root
+        .to_str()
+        .ok_or("managed NAS root is not valid Unicode")?;
+    if value.len() == 0
+        || value.len() > 500
+        || !value.starts_with(r"\\")
+        || value.contains('/')
+        || value.split(['\\']).any(|part| part == "..")
+        || value.ends_with('\\')
+    {
+        return Err("managed NAS root must be an exact absolute UNC path without traversal".into());
+    }
+    Ok(())
+}
+
+fn prepare_nas_destination(
+    root: &Path,
+    media_sha256: &str,
+) -> Result<(Vec<File>, PathBuf), String> {
+    let mut existing = root.to_path_buf();
+    let mut missing = Vec::new();
+    loop {
+        match std::fs::symlink_metadata(&existing) {
+            Ok(metadata) => {
+                if metadata.file_attributes() & 0x0400 != 0 || !metadata.is_dir() {
+                    return Err("managed NAS root contains a reparse point or non-directory".into());
+                }
+                break;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                let name = existing
+                    .file_name()
+                    .ok_or("managed NAS root has no existing ancestor")?;
+                missing.push(name.to_os_string());
+                existing = existing
+                    .parent()
+                    .ok_or("managed NAS root has no existing ancestor")?
+                    .to_path_buf();
+            }
+            Err(_) => return Err("managed NAS root could not be inspected".into()),
+        }
+    }
+    // Validate and retain every existing directory in the ancestry.  Checking
+    // only the configured leaf would allow a pre-existing junction above it
+    // to redirect the entire operation before the leaf is inspected.
+    let mut ancestry = Vec::new();
+    let mut ancestor = existing.clone();
+    loop {
+        let metadata = std::fs::symlink_metadata(&ancestor)
+            .map_err(|_| "managed NAS root ancestry could not be inspected")?;
+        if metadata.file_attributes() & 0x0400 != 0 || !metadata.is_dir() {
+            return Err(
+                "managed NAS root ancestry contains a reparse point or non-directory".into(),
+            );
+        }
+        ancestry.push(ancestor.clone());
+        let Some(parent) = ancestor.parent() else {
+            break;
+        };
+        if parent == ancestor {
+            break;
+        }
+        ancestor = parent.to_path_buf();
+    }
+    ancestry.reverse();
+    // The nearest existing directory is the handle anchor for creation and
+    // finalization. Ancestors were all checked above; opening a volume root or
+    // a UNC server namespace as an ordinary directory is not portable.
+    let mut pins = vec![open_nas_directory_no_follow(&existing)?];
+    let mut current = existing;
+    for component in missing.iter().rev() {
+        current.push(component);
+        std::fs::create_dir(&current).map_err(|_| "managed NAS root could not be created")?;
+        pins.push(open_nas_directory_no_follow(&current)?);
+    }
+    let destination = current.join(format!("{media_sha256}.mp4"));
+    Ok((pins, destination))
+}
+
+#[cfg(windows)]
+fn open_nas_directory_no_follow(path: &Path) -> Result<File, String> {
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_READ, FILE_SHARE_WRITE,
+    };
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)
+        .map_err(|error| {
+            format!(
+                "managed NAS directory could not be pinned at {}: {error}",
+                path.display()
+            )
+        })?;
+    let metadata = file
+        .metadata()
+        .map_err(|_| "managed NAS directory could not be inspected")?;
+    if metadata.file_attributes() & 0x0400 != 0 || !metadata.is_dir() {
+        return Err(format!(
+            "managed NAS directory is a reparse point or not a directory: {}",
+            path.display()
+        ));
+    }
+    Ok(file)
+}
+
+#[cfg(not(windows))]
+fn open_nas_directory_no_follow(path: &Path) -> Result<File, String> {
+    let file = File::open(path).map_err(|_| "managed NAS directory could not be pinned")?;
+    if !file
+        .metadata()
+        .map_err(|_| "managed NAS directory could not be inspected")?
+        .is_dir()
+    {
+        return Err("managed NAS directory is not a directory".into());
+    }
+    Ok(file)
+}
+
+#[cfg(windows)]
+fn open_publish_source_no_follow(path: &Path) -> Result<File, String> {
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_READ, FILE_SHARE_WRITE,
+    };
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)
+        .map_err(|_| "publish media could not be opened")?;
+    let metadata = file
+        .metadata()
+        .map_err(|_| "publish media could not be inspected")?;
+    if metadata.file_attributes() & 0x0400 != 0 || !metadata.is_file() {
+        return Err("publish media is a reparse point or not a regular file".into());
+    }
+    Ok(file)
+}
+
+#[cfg(not(windows))]
+fn open_publish_source_no_follow(path: &Path) -> Result<File, String> {
+    File::open(path).map_err(|_| "publish media could not be opened")
+}
+
+fn unique_nas_temp_path(root: &Path, job_id: &str) -> Result<PathBuf, String> {
+    let mut entropy = [0_u8; 16];
+    getrandom::fill(&mut entropy).map_err(|_| "NAS temporary identity entropy is unavailable")?;
+    let suffix = entropy
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    Ok(root.join(format!(".townlight-publish-{job_id}-{suffix}.tmp")))
+}
+
+#[cfg(windows)]
+fn open_nas_temp(path: &Path) -> Result<File, String> {
+    const DELETE_ACCESS: u32 = 0x0001_0000;
+    const GENERIC_READ: u32 = 0x8000_0000;
+    const GENERIC_WRITE: u32 = 0x4000_0000;
+    use windows_sys::Win32::Storage::FileSystem::{FILE_SHARE_READ, FILE_SHARE_WRITE};
+    let mut options = fs::OpenOptions::new();
+    options.read(true).write(true).create_new(true);
+    options.access_mode(GENERIC_READ | GENERIC_WRITE | DELETE_ACCESS);
+    options.share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE);
+    options
+        .open(path)
+        .map_err(|_| "NAS temporary media could not be created".into())
+}
+
+#[cfg(not(windows))]
+fn open_nas_temp(path: &Path) -> Result<File, String> {
+    fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .map_err(|_| "NAS temporary media could not be created".into())
+}
+
+fn hash_publish_handle(file: &mut File) -> Result<(u64, String), String> {
+    hash_publish_handle_until(file, None)
+}
+
+fn hash_publish_handle_until(
+    file: &mut File,
+    started: Option<std::time::Instant>,
+) -> Result<(u64, String), String> {
     let mut hasher = Sha256::new();
     let mut bytes = 0_u64;
     let mut buffer = [0_u8; 64 * 1024];
     loop {
+        if started.is_some_and(|started| started.elapsed() >= MAX_NAS_COPY_DURATION) {
+            return Err("NAS publication exceeded its bounded deadline".into());
+        }
         let read = file
             .read(&mut buffer)
-            .map_err(|_| "publish media could not be read")?;
+            .map_err(|_| "NAS finalized media could not be read")?;
         if read == 0 {
             break;
         }
         bytes = bytes
             .checked_add(read as u64)
-            .ok_or("publish media size overflowed")?;
+            .ok_or("NAS finalized media size overflowed")?;
         hasher.update(&buffer[..read]);
     }
     Ok((bytes, format!("{:x}", hasher.finalize())))
+}
+
+#[cfg(windows)]
+fn rename_nas_temp_from_handle(file: &File, destination: &Path) -> Result<(), String> {
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_RENAME_INFO, FileRenameInfo, SetFileInformationByHandle,
+    };
+    let name = destination.as_os_str().encode_wide().collect::<Vec<_>>();
+    let header_bytes = std::mem::offset_of!(FILE_RENAME_INFO, FileName);
+    let info_bytes = header_bytes
+        .checked_add(
+            name.len()
+                .checked_mul(std::mem::size_of::<u16>())
+                .ok_or("NAS destination path is too long")?,
+        )
+        .ok_or("NAS destination path is too long")?;
+    let info_length = u32::try_from(info_bytes).map_err(|_| "NAS destination path is too long")?;
+    let words = info_bytes
+        .checked_add(std::mem::size_of::<usize>() - 1)
+        .ok_or("NAS destination path is too long")?
+        / std::mem::size_of::<usize>();
+    let mut info = vec![0_usize; words];
+    let rename = info.as_mut_ptr().cast::<FILE_RENAME_INFO>();
+    // ReplaceIfExists is deliberately false: a pre-existing destination or
+    // a leaf created after the initial check must make the operation fail.
+    unsafe {
+        (*rename).Anonymous.ReplaceIfExists = false;
+        (*rename).RootDirectory = std::ptr::null_mut();
+        (*rename).FileNameLength = u32::try_from(name.len() * std::mem::size_of::<u16>())
+            .map_err(|_| "NAS destination path is too long")?;
+        std::ptr::copy_nonoverlapping(name.as_ptr(), (*rename).FileName.as_mut_ptr(), name.len());
+        if SetFileInformationByHandle(
+            file.as_raw_handle(),
+            FileRenameInfo,
+            rename.cast(),
+            info_length,
+        ) == 0
+        {
+            return Err(format!(
+                "NAS atomic finalization failed: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn rename_nas_temp_from_handle(_file: &File, destination: &Path) -> Result<(), String> {
+    Err(format!(
+        "NAS handle-anchored finalization is unavailable on this platform ({})",
+        destination.display()
+    ))
+}
+
+#[cfg(windows)]
+fn discard_owned_nas_temp(file: &File) -> Result<(), String> {
+    discard_nas_temp_by_handle(file)
+}
+
+#[cfg(windows)]
+fn discard_nas_temp_by_handle(file: &File) -> Result<(), String> {
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_DISPOSITION_INFO, FileDispositionInfo, SetFileInformationByHandle,
+    };
+    let mut disposition = FILE_DISPOSITION_INFO { DeleteFile: true };
+    // The temp was opened with DELETE access and without FILE_SHARE_DELETE.
+    // Deleting through this exact handle cannot affect a replacement pathname.
+    let status = unsafe {
+        SetFileInformationByHandle(
+            file.as_raw_handle(),
+            FileDispositionInfo,
+            (&mut disposition as *mut FILE_DISPOSITION_INFO).cast(),
+            std::mem::size_of::<FILE_DISPOSITION_INFO>() as u32,
+        )
+    };
+    if status == 0 {
+        return Err(format!(
+            "NAS temporary media could not be removed: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn discard_owned_nas_temp(_file: &File) -> Result<(), String> {
+    Ok(())
+}
+
+fn hash_publish_media(path: &Path) -> Result<(u64, String), String> {
+    let mut file = open_publish_source_no_follow(path)?;
+    hash_publish_handle(&mut file).map_err(|_| "publish media could not be read".into())
 }
 
 fn ensure_install_matches(
@@ -1706,7 +2105,7 @@ mod tests {
     }
 
     #[test]
-    fn local_nas_execution_fails_closed_until_it_has_anchored_handle_semantics() {
+    fn local_nas_execution_publishes_exact_bytes_without_overwrite() {
         let nonce = SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
@@ -1736,11 +2135,189 @@ mod tests {
             created_at_unix_ms: 1,
         };
 
-        let result = deliver_to_nas(&job, &media, &root);
-
-        assert!(result.is_err());
-        assert!(!root.join(format!("{}.mp4", job.media_sha256)).exists());
+        let configured_root = PathBuf::from(format!(r"\\?\{}", root.display()));
+        let result = deliver_to_nas(&job, &media, &configured_root).unwrap();
+        assert_eq!(result.stage, PublishExecutionStage::Delivered);
+        let destination = root.join(format!("{}.mp4", job.media_sha256));
+        assert_eq!(std::fs::read(&destination).unwrap(), b"exact media");
+        assert!(deliver_to_nas(&job, &media, &configured_root).is_err());
         let _ = std::fs::remove_file(media);
+        let _ = std::fs::remove_file(destination);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn local_nas_rejects_reparse_ancestor_and_leaf_without_touching_target() {
+        use std::os::windows::fs::symlink_dir;
+        let nonce = SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("townlight-nas-reparse-{nonce}"));
+        let source_root = root.join("source");
+        let configured_root = root.join("configured");
+        std::fs::create_dir_all(&source_root).unwrap();
+        std::fs::write(root.join("media"), b"exact media").unwrap();
+        if let Err(error) = symlink_dir(&source_root, &configured_root) {
+            if error.raw_os_error() != Some(1314) {
+                panic!("could not create junction fixture: {error}");
+            }
+            let status = std::process::Command::new("cmd.exe")
+                .args(["/d", "/c", "mklink", "/J"])
+                .arg(&configured_root)
+                .arg(&source_root)
+                .status()
+                .unwrap();
+            assert!(status.success());
+        }
+        let media = root.join("media");
+        let digest = format!("{:x}", Sha256::digest(b"exact media"));
+        let job = PublishExecutionJob {
+            job_id: "33333333-2222-4333-8444-555555555559".into(),
+            account_id: "11111111-2222-4333-8444-555555555555".into(),
+            account_revision: 1,
+            target_id: "22222222-2222-4333-8444-555555555555".into(),
+            target_revision: 1,
+            target_kind: PublishTargetKind::LocalNas,
+            configuration_hash: "a".repeat(64),
+            credential_version: 1,
+            candidate_version: "0.1.0".into(),
+            source_commit: "a".repeat(40),
+            install_generation: 1,
+            asset_id: digest.clone(),
+            media_sha256: digest,
+            media_bytes: 11,
+            media_duration_ms: 1_000,
+            requested_by: "setup".into(),
+            created_at_unix_ms: 1,
+        };
+        let configured_root = PathBuf::from(format!(r"\\?\{}", configured_root.display()));
+        assert!(deliver_to_nas(&job, &media, &configured_root).is_err());
+        assert!(
+            !source_root
+                .join(format!("{}.mp4", job.media_sha256))
+                .exists()
+        );
+        let _ = std::fs::remove_file(media);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn local_nas_interruption_cleans_only_its_owned_temp() {
+        let nonce = SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("townlight-nas-interrupt-{nonce}"));
+        std::fs::create_dir_all(&root).unwrap();
+        let media = root.join("media");
+        std::fs::write(&media, b"exact media").unwrap();
+        let digest = format!("{:x}", Sha256::digest(b"exact media"));
+        let job = PublishExecutionJob {
+            job_id: "33333333-2222-4333-8444-555555555560".into(),
+            account_id: "11111111-2222-4333-8444-555555555555".into(),
+            account_revision: 1,
+            target_id: "22222222-2222-4333-8444-555555555555".into(),
+            target_revision: 1,
+            target_kind: PublishTargetKind::LocalNas,
+            configuration_hash: "a".repeat(64),
+            credential_version: 1,
+            candidate_version: "0.1.0".into(),
+            source_commit: "a".repeat(40),
+            install_generation: 1,
+            asset_id: digest.clone(),
+            media_sha256: digest,
+            media_bytes: 11,
+            media_duration_ms: 1_000,
+            requested_by: "setup".into(),
+            created_at_unix_ms: 1,
+        };
+        let configured_root = PathBuf::from(format!(r"\\?\{}", root.display()));
+        let mut calls = 0;
+        let mut heartbeat = || {
+            calls += 1;
+            Err::<(), String>("cancelled".into())
+        };
+        assert!(
+            deliver_to_nas_with_heartbeat(&job, &media, &configured_root, &mut heartbeat).is_err()
+        );
+        assert_eq!(
+            std::fs::read_dir(&root)
+                .unwrap()
+                .filter_map(Result::ok)
+                .all(|entry| entry.file_name() == "media"),
+            true
+        );
+        assert_eq!(
+            deliver_to_nas(&job, &media, &configured_root)
+                .unwrap()
+                .stage,
+            PublishExecutionStage::Delivered
+        );
+        assert_eq!(
+            std::fs::read(root.join(format!("{}.mp4", job.media_sha256))).unwrap(),
+            b"exact media"
+        );
+        let _ = std::fs::remove_file(media);
+        let _ = std::fs::remove_file(root.join(format!("{}.mp4", job.media_sha256)));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn local_nas_rejects_a_substituted_destination_leaf_without_overwrite() {
+        use std::os::windows::fs::symlink_dir;
+        let nonce = SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("townlight-nas-leaf-{nonce}"));
+        std::fs::create_dir_all(&root).unwrap();
+        let media = root.join("media");
+        let victim = root.join("victim");
+        std::fs::write(&media, b"exact media").unwrap();
+        std::fs::create_dir(&victim).unwrap();
+        let digest = format!("{:x}", Sha256::digest(b"exact media"));
+        let destination = root.join(format!("{digest}.mp4"));
+        if let Err(error) = symlink_dir(&victim, &destination) {
+            if error.raw_os_error() != Some(1314) {
+                panic!("could not create leaf reparse fixture: {error}");
+            }
+            let status = std::process::Command::new("cmd.exe")
+                .args(["/d", "/c", "mklink", "/J"])
+                .arg(&destination)
+                .arg(&victim)
+                .status()
+                .unwrap();
+            assert!(status.success());
+        }
+        let job = PublishExecutionJob {
+            job_id: "33333333-2222-4333-8444-555555555561".into(),
+            account_id: "11111111-2222-4333-8444-555555555555".into(),
+            account_revision: 1,
+            target_id: "22222222-2222-4333-8444-555555555555".into(),
+            target_revision: 1,
+            target_kind: PublishTargetKind::LocalNas,
+            configuration_hash: "a".repeat(64),
+            credential_version: 1,
+            candidate_version: "0.1.0".into(),
+            source_commit: "a".repeat(40),
+            install_generation: 1,
+            asset_id: digest.clone(),
+            media_sha256: digest,
+            media_bytes: 11,
+            media_duration_ms: 1_000,
+            requested_by: "setup".into(),
+            created_at_unix_ms: 1,
+        };
+        let configured_root = PathBuf::from(format!(r"\\?\{}", root.display()));
+        assert!(deliver_to_nas(&job, &media, &configured_root).is_err());
+        assert!(victim.is_dir());
+        let _ = std::fs::remove_file(media);
+        let _ = std::fs::remove_file(destination);
+        let _ = std::fs::remove_dir_all(victim);
         let _ = std::fs::remove_dir_all(root);
     }
 }
