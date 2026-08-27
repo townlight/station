@@ -138,7 +138,14 @@ const MAX_AGENDA_CHAPTERS: usize = 512;
 const MAX_AGENDA_UUID_BYTES: usize = 36;
 const MAX_AGENDA_SHA256_BYTES: usize = 64;
 const MAX_AGENDA_I64_DECIMAL_BYTES: usize = 20;
-const MAX_JSON_ESCAPED_BYTES_PER_UTF8_BYTE: usize = 2;
+// JSON may spell one decoded ASCII byte as `\uXXXX` (six wire bytes). That is
+// the worst ratio: a BMP scalar uses six wire bytes for two or three decoded
+// UTF-8 bytes, and a supplementary scalar uses a twelve-byte surrogate pair
+// for four decoded UTF-8 bytes. Fixed ASCII property names may be escaped the
+// same way, so the conservative factor covers both bounded decoded strings and
+// the audited structure allowance below. Insignificant whitespace is finite
+// within that allowance; envelopes do not accept unbounded padding.
+const MAX_JSON_WIRE_BYTES_PER_DECODED_OR_STRUCTURE_BYTE: usize = 6;
 // These bounds cover fixed JSON property names, punctuation, enum tags, and
 // the bounded scalar fields not represented in the aggregate byte counts
 // below. They are deliberately separate from decoded text capacity so the
@@ -15159,9 +15166,9 @@ const fn checked_agenda_json_body_bound(
     decoded_string_bytes: usize,
     json_structure_bytes: usize,
 ) -> usize {
-    checked_agenda_body_add(
-        checked_agenda_body_mul(decoded_string_bytes, MAX_JSON_ESCAPED_BYTES_PER_UTF8_BYTE),
-        json_structure_bytes,
+    checked_agenda_body_mul(
+        checked_agenda_body_add(decoded_string_bytes, json_structure_bytes),
+        MAX_JSON_WIRE_BYTES_PER_DECODED_OR_STRUCTURE_BYTE,
     )
 }
 
@@ -15606,7 +15613,7 @@ mod tests {
             .unwrap();
         let import_path = format!("/api/v1/agendas/{agenda_id}/import-text");
         let source = escaped_agenda_import_source(MAX_AGENDA_IMPORT_BYTES);
-        let body = serde_json::to_vec(&serde_json::json!({
+        let body = unicode_escaped_json_wire(&serde_json::json!({
             "source_text": source,
             "channel_id": channel_id,
             "meeting_id": meeting_id,
@@ -15617,8 +15624,9 @@ mod tests {
             "meeting_starts_at_unix_ms": 1,
             "title": "Regular meeting",
             "expected_revision": null
-        }))
-        .unwrap();
+        }));
+        let body = body_after_http_parser("POST", &import_path, &body)
+            .expect("exact decoded import cap must pass the HTTP envelope");
         assert_eq!(
             api.handle_in_process("POST", &import_path, Some(&body))
                 .status,
@@ -15651,11 +15659,16 @@ mod tests {
             schedule_item_id,
             &media_sha256,
         );
-        let maximum_body = serde_json::to_vec(&serde_json::json!({
+        let maximum_body = unicode_escaped_json_wire(&serde_json::json!({
             "agenda": maximum,
             "expected_revision": 1,
-        }))
-        .unwrap();
+        }));
+        let maximum_body = body_after_http_parser(
+            "PUT",
+            &format!("/api/v1/agendas/{agenda_id}"),
+            &maximum_body,
+        )
+        .expect("maximum valid agenda must pass the HTTP envelope");
         let maximum_response = api.handle_authenticated(
             "PUT",
             &format!("/api/v1/agendas/{agenda_id}"),
@@ -15700,7 +15713,7 @@ mod tests {
             "agenda_import_source_immutable"
         );
         let too_large_source = escaped_agenda_import_source(MAX_AGENDA_IMPORT_BYTES + 1);
-        let too_large_body = serde_json::to_vec(&serde_json::json!({
+        let too_large_body = unicode_escaped_json_wire(&serde_json::json!({
             "source_text": too_large_source,
             "channel_id": channel_id,
             "meeting_id": meeting_id,
@@ -15711,14 +15724,12 @@ mod tests {
             "meeting_starts_at_unix_ms": 1,
             "title": "Regular meeting",
             "expected_revision": null
-        }))
-        .unwrap();
-        let too_large = api.handle_authenticated(
-            "POST",
-            "/api/v1/agendas/55555555-6666-4777-8888-999999999999/import-text",
-            Some(&too_large_body),
-            &admin,
-        );
+        }));
+        let too_large_path = "/api/v1/agendas/55555555-6666-4777-8888-999999999999/import-text";
+        let too_large_body = body_after_http_parser("POST", too_large_path, &too_large_body)
+            .expect("decoded import overflow must reach the domain validator");
+        let too_large =
+            api.handle_authenticated("POST", too_large_path, Some(&too_large_body), &admin);
         assert_eq!(too_large.status, 422);
         assert_eq!(
             serde_json::from_slice::<serde_json::Value>(&too_large.body).unwrap()["error"]["code"],
@@ -15784,6 +15795,75 @@ mod tests {
         assert_eq!(response.status, 413);
     }
 
+    fn body_after_http_parser(
+        method: &str,
+        path: &str,
+        body: &[u8],
+    ) -> Result<Vec<u8>, ApiResponse> {
+        let mut request = format!(
+            "{method} {path} HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\n\r\n",
+            body.len()
+        )
+        .into_bytes();
+        request.extend_from_slice(body);
+        parse_http_request(&request).map(|parsed| parsed.body.to_vec())
+    }
+
+    fn unicode_escaped_json_wire(value: &serde_json::Value) -> Vec<u8> {
+        fn write_string(value: &str, output: &mut String) {
+            output.push('"');
+            for character in value.chars() {
+                let scalar = character as u32;
+                if scalar <= 0xffff {
+                    output.push_str(&format!(r"\u{scalar:04x}"));
+                } else {
+                    let adjusted = scalar - 0x1_0000;
+                    let high = 0xd800 + (adjusted >> 10);
+                    let low = 0xdc00 + (adjusted & 0x3ff);
+                    output.push_str(&format!(r"\u{high:04x}\u{low:04x}"));
+                }
+            }
+            output.push('"');
+        }
+
+        fn write_value(value: &serde_json::Value, output: &mut String) {
+            match value {
+                serde_json::Value::Null => output.push_str("null"),
+                serde_json::Value::Bool(value) => {
+                    output.push_str(if *value { "true" } else { "false" })
+                }
+                serde_json::Value::Number(value) => output.push_str(&value.to_string()),
+                serde_json::Value::String(value) => write_string(value, output),
+                serde_json::Value::Array(values) => {
+                    output.push('[');
+                    for (index, value) in values.iter().enumerate() {
+                        if index > 0 {
+                            output.push(',');
+                        }
+                        write_value(value, output);
+                    }
+                    output.push(']');
+                }
+                serde_json::Value::Object(values) => {
+                    output.push('{');
+                    for (index, (key, value)) in values.iter().enumerate() {
+                        if index > 0 {
+                            output.push(',');
+                        }
+                        write_string(key, output);
+                        output.push(':');
+                        write_value(value, output);
+                    }
+                    output.push('}');
+                }
+            }
+        }
+
+        let mut output = String::new();
+        write_value(value, &mut output);
+        output.into_bytes()
+    }
+
     fn escaped_agenda_import_source(byte_count: usize) -> String {
         assert!(byte_count >= 128 * 201);
         let line = r#"\""#.repeat(100);
@@ -15809,11 +15889,10 @@ mod tests {
             &media_sha256,
         );
         agenda.validate().unwrap();
-        let body = serde_json::to_vec(&serde_json::json!({
+        let body = unicode_escaped_json_wire(&serde_json::json!({
             "agenda": agenda,
             "expected_revision": null,
-        }))
-        .unwrap();
+        }));
         let path = format!("/api/v1/agendas/{agenda_id}");
         assert!(body.len() > MAX_SMALL_REQUEST_BODY);
         assert!(body.len() <= request_body_limit("PUT", &path));
@@ -15839,6 +15918,63 @@ mod tests {
             ..first
         });
         assert!(overflow.validate().is_err());
+        let overflow_body = unicode_escaped_json_wire(&serde_json::json!({
+            "agenda": overflow,
+            "expected_revision": null,
+        }));
+        let parsed_overflow = body_after_http_parser("PUT", &path, &overflow_body)
+            .expect("domain item overflow must pass the HTTP envelope");
+        let database = std::env::temp_dir().join(format!(
+            "townlight-agenda-envelope-domain-overflow-{}.db",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let api = Api::open(&database).unwrap();
+        api.storage
+            .put_media_asset(&MediaAsset {
+                asset_id: media_sha256.clone(),
+                media_path: r"C:\Windows\System32\notepad.exe".into(),
+                duration_ms: 60_000,
+                readiness: AssetReadiness::Ready,
+            })
+            .unwrap();
+        api.storage
+            .put_schedule_item(&ScheduleItem {
+                item_id: schedule_item_id.into(),
+                revision: 1,
+                channel_id: channel_id.into(),
+                asset_id: media_sha256.clone(),
+                title: "Meeting recording".into(),
+                starts_at_unix_ms: 1,
+                duration_ms: 60_000,
+                state: ScheduleState::Draft,
+            })
+            .unwrap();
+        api.storage
+            .commit_schedule(
+                "agenda-envelope-overflow-report",
+                "agenda-envelope-overflow-plan",
+                schedule_item_id,
+                "test-harness",
+                1,
+                "agenda envelope overflow fixture",
+            )
+            .unwrap();
+        let response = api.handle_authenticated(
+            "PUT",
+            &path,
+            Some(&parsed_overflow),
+            &test_actor(station_auth::OperatorRole::SetupAdmin),
+        );
+        assert_eq!(response.status, 422);
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&response.body).unwrap()["error"]["code"],
+            "validation_failed"
+        );
+        drop(api);
+        let _ = std::fs::remove_file(database);
     }
 
     fn maximum_valid_agenda(
