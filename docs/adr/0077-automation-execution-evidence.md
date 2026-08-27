@@ -77,6 +77,12 @@ argv, environment, stdout, stderr, and monotonic execution time, and terminates 
 No production semantic adapter is configured, so the packaged helper is not invoked as a fake
 adapter and current jobs retain categorical `adapter_unavailable`. Handle-relative managed-artifact
 proof, usable adapter configuration, installed execution proof, and field proof remain open.
+An executable-helper capability requires a fence bound to both the canonical data authority root and
+the canonical active application root; both retained directory handles bind their Windows identities
+and exclude deletion while the fence is held. The update receipt does not independently persist an
+absolute application-root pathname, so the runtime binds that supplied root only for the fenced
+candidate-read-and-construction epoch. No semantic adapter is elected until that execution boundary
+can also bind any managed artifacts safely.
 Configured input/output roots must be trusted, ACL-protected ordinary local-drive directories; UNC,
 verbatim/device/NT paths, aliases, traversal, reserved components, and unsafe Win32 names fail
 closed. Artifact paths must include at least one helper-owned relative parent directory. These fields

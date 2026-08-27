@@ -9,10 +9,14 @@ use std::collections::BTreeSet;
 use std::ffi::c_void;
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
+use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
+use std::os::windows::io::AsRawHandle;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 use windows_sys::Win32::Storage::FileSystem::{
-    MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
+    BY_HANDLE_FILE_INFORMATION, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
+    FILE_SHARE_READ, FILE_SHARE_WRITE, GetFileInformationByHandle, MOVEFILE_REPLACE_EXISTING,
+    MOVEFILE_WRITE_THROUGH, MoveFileExW,
 };
 use windows_sys::Win32::{
     Foundation::{CloseHandle, HANDLE, LocalFree, WAIT_ABANDONED, WAIT_OBJECT_0},
@@ -232,6 +236,12 @@ fn verify_install_fence_security(
 pub struct InstallAuthorityFence {
     handle: HANDLE,
     abandoned: bool,
+    authority_root: PathBuf,
+    authority_root_identity: (u32, u64),
+    // This no-follow handle deliberately excludes FILE_SHARE_DELETE, keeping
+    // the exact authority root from being renamed while the fence is held.
+    _authority_root_handle: File,
+    application_root: Option<(PathBuf, (u32, u64), File)>,
 }
 
 impl InstallAuthorityFence {
@@ -240,6 +250,45 @@ impl InstallAuthorityFence {
     /// ordinary writers must release it and fail closed.
     pub fn was_abandoned(&self) -> bool {
         self.abandoned
+    }
+
+    fn verifies_authority_root(&self, data_directory: &Path) -> Result<(), String> {
+        let canonical = canonical_install_authority_root(data_directory)?;
+        if canonical != self.authority_root {
+            return Err("installation authority fence protects a different data root".into());
+        }
+        let root = open_authority_root(&canonical)?;
+        if authority_root_identity(&root)? != self.authority_root_identity {
+            return Err("installation authority root identity changed while fenced".into());
+        }
+        Ok(())
+    }
+
+    fn bind_application_root(&mut self, application_root: &Path) -> Result<(), String> {
+        let canonical = canonical_install_authority_root(application_root)?;
+        let handle = open_authority_root(&canonical)?;
+        let identity = authority_root_identity(&handle)?;
+        self.application_root = Some((canonical, identity, handle));
+        Ok(())
+    }
+
+    fn verifies_application_root(&self, application_root: &Path) -> Result<(), String> {
+        let (expected, expected_identity, _) = self.application_root.as_ref().ok_or_else(|| {
+            "installation authority fence is not bound to an application root".to_string()
+        })?;
+        let canonical = canonical_install_authority_root(application_root)?;
+        if &canonical != expected {
+            return Err(
+                "installation authority fence protects a different application root".into(),
+            );
+        }
+        let root = open_authority_root(&canonical)?;
+        if authority_root_identity(&root)? != *expected_identity {
+            return Err(
+                "installation authority application root identity changed while fenced".into(),
+            );
+        }
+        Ok(())
     }
 }
 
@@ -261,6 +310,15 @@ pub fn acquire_install_authority_fence(
     acquire_install_authority_fence_for(data_directory, INSTALL_AUTHORITY_FENCE_TIMEOUT)
 }
 
+pub fn acquire_install_authority_fence_for_application(
+    data_directory: &Path,
+    application_root: &Path,
+) -> Result<InstallAuthorityFence, String> {
+    let mut fence = acquire_install_authority_fence(data_directory)?;
+    fence.bind_application_root(application_root)?;
+    Ok(fence)
+}
+
 fn acquire_install_authority_fence_for(
     data_directory: &Path,
     timeout: Duration,
@@ -268,7 +326,10 @@ fn acquire_install_authority_fence_for(
     if !data_directory.is_absolute() || !data_directory.is_dir() {
         return Err("installation authority data directory is invalid".into());
     }
-    let name = install_authority_fence_name(data_directory)?;
+    let authority_root = canonical_install_authority_root(data_directory)?;
+    let authority_root_handle = open_authority_root(&authority_root)?;
+    let authority_root_identity = authority_root_identity(&authority_root_handle)?;
+    let name = install_authority_fence_name_for_canonical_root(&authority_root);
     // The updater may run as a service while a diagnostic/once invocation runs
     // in an interactive session. `Global` is therefore required; `Local`
     // would create independent per-session locks and reopen the replacement
@@ -290,10 +351,18 @@ fn acquire_install_authority_fence_for(
         WAIT_OBJECT_0 => Ok(InstallAuthorityFence {
             handle,
             abandoned: false,
+            authority_root,
+            authority_root_identity,
+            _authority_root_handle: authority_root_handle,
+            application_root: None,
         }),
         WAIT_ABANDONED => Ok(InstallAuthorityFence {
             handle,
             abandoned: true,
+            authority_root,
+            authority_root_identity,
+            _authority_root_handle: authority_root_handle,
+            application_root: None,
         }),
         _ => {
             unsafe { CloseHandle(handle) };
@@ -302,13 +371,54 @@ fn acquire_install_authority_fence_for(
     }
 }
 
+#[cfg(test)]
 fn install_authority_fence_name(data_directory: &Path) -> Result<String, String> {
-    let canonical = std::fs::canonicalize(data_directory)
-        .map_err(|_| "installation authority data directory is unavailable")?;
+    let canonical = canonical_install_authority_root(data_directory)?;
+    Ok(install_authority_fence_name_for_canonical_root(&canonical))
+}
+
+fn canonical_install_authority_root(data_directory: &Path) -> Result<PathBuf, String> {
+    std::fs::canonicalize(data_directory)
+        .map_err(|_| "installation authority data directory is unavailable".into())
+}
+
+fn install_authority_fence_name_for_canonical_root(canonical: &Path) -> String {
     let digest = sha256_lowercase(canonical.to_string_lossy().as_bytes());
-    Ok(format!(
-        "Global\\TownLightStation.InstallAuthority.{digest}"
-    ))
+    format!("Global\\TownLightStation.InstallAuthority.{digest}")
+}
+
+fn open_authority_root(path: &Path) -> Result<File, String> {
+    let file = OpenOptions::new()
+        .read(true)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS)
+        .open(path)
+        .map_err(|_| "installation authority root is unavailable")?;
+    let metadata = file
+        .metadata()
+        .map_err(|_| "installation authority root is unavailable")?;
+    if !metadata.is_dir()
+        || metadata.file_attributes()
+            & windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT
+            != 0
+    {
+        return Err("installation authority root is reparse-backed".into());
+    }
+    Ok(file)
+}
+
+fn authority_root_identity(file: &File) -> Result<(u32, u64), String> {
+    let mut information = BY_HANDLE_FILE_INFORMATION::default();
+    if unsafe { GetFileInformationByHandle(file.as_raw_handle() as HANDLE, &mut information) } == 0
+    {
+        return Err("installation authority root identity is unavailable".into());
+    }
+    let index =
+        (u64::from(information.nFileIndexHigh) << 32) | u64::from(information.nFileIndexLow);
+    if information.dwVolumeSerialNumber == 0 || index == 0 {
+        return Err("installation authority root identity is invalid".into());
+    }
+    Ok((information.dwVolumeSerialNumber, index))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1755,7 +1865,7 @@ impl VerifiedInstallAuthority {
     }
 }
 
-#[cfg(feature = "test-support")]
+#[cfg(feature = "test-injection")]
 #[doc(hidden)]
 pub fn verified_install_authority_for_test(
     version: &str,
@@ -2275,27 +2385,13 @@ impl VerifiedAutomationLaunchHelper {
     }
 }
 
-/// Test-only capability factory. Production callers can obtain this type only
-/// from `read_verified_automation_launch_helper` while holding the fence.
-#[cfg(feature = "test-support")]
-#[doc(hidden)]
-pub fn verified_automation_launch_helper_for_test(
-    application_root: impl Into<PathBuf>,
-    executable: impl Into<PathBuf>,
-    sha256: impl Into<String>,
-) -> VerifiedAutomationLaunchHelper {
-    VerifiedAutomationLaunchHelper {
-        application_root: application_root.into(),
-        executable: executable.into(),
-        sha256: sha256.into(),
-    }
-}
-
 pub fn read_verified_automation_launch_helper(
-    _fence: &InstallAuthorityFence,
+    fence: &InstallAuthorityFence,
     data_directory: &Path,
     application_root: &Path,
 ) -> Result<VerifiedAutomationLaunchHelper, String> {
+    fence.verifies_authority_root(data_directory)?;
+    fence.verifies_application_root(application_root)?;
     let sha256 = read_verified_active_application_file_hash(
         data_directory,
         application_root,
@@ -2303,6 +2399,8 @@ pub fn read_verified_automation_launch_helper(
     )?;
     let active = read_active_slot_receipt(&data_directory.join(ACTIVE_SLOT_RECEIPT_NAME))?;
     let directory = active.active.directory(application_root)?;
+    fence.verifies_authority_root(data_directory)?;
+    fence.verifies_application_root(application_root)?;
     Ok(VerifiedAutomationLaunchHelper {
         application_root: directory.clone(),
         executable: directory.join(AUTOMATION_LAUNCH_HELPER_FILE_NAME),
@@ -2730,9 +2828,16 @@ mod tests {
             unsafe { WaitForSingleObject(retained as HANDLE, 1_000) },
             WAIT_ABANDONED
         );
+        let authority_root = canonical_install_authority_root(&data).unwrap();
+        let authority_root_handle = open_authority_root(&authority_root).unwrap();
+        let authority_root_identity = authority_root_identity(&authority_root_handle).unwrap();
         let abandoned = InstallAuthorityFence {
             handle: retained as HANDLE,
             abandoned: true,
+            authority_root,
+            authority_root_identity,
+            _authority_root_handle: authority_root_handle,
+            application_root: None,
         };
         assert!(abandoned.was_abandoned());
         let contender_data = data.clone();

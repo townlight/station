@@ -5,7 +5,7 @@ edition.workspace = true
 publish.workspace = true
 
 [features]
-test-support = []
+test-injection = []
 
 [dependencies]
 getrandom.workspace = true
@@ -47,9 +47,4 @@ zeroize.workspace = true
 image.workspace = true
 station-media-journal = { workspace = true, features = ["test-support"] }
 station-metadata.workspace = true
-station-maintenance = { workspace = true, features = ["test-support"] }
-
-[[test]]
-name = "automation_execution_authority"
-path = "tests/automation_execution_authority.rs"
-required-features = ["test-support"]
+station-maintenance = { workspace = true, features = ["test-injection"] }

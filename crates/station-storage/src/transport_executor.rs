@@ -535,7 +535,7 @@ struct TransportExecutionAdapters<'a, R, F> {
 #[derive(Clone, Copy)]
 enum PostProbeAction {
     None,
-    #[cfg(feature = "test-support")]
+    #[cfg(feature = "test-injection")]
     Mutate(InjectedAuthorityMutation),
 }
 
@@ -719,7 +719,7 @@ fn apply_post_probe_action(
 ) -> Result<(), String> {
     match action {
         PostProbeAction::None => Ok(()),
-        #[cfg(feature = "test-support")]
+        #[cfg(feature = "test-injection")]
         PostProbeAction::Mutate(mutation) => {
             let (store, target, data_directory, job) = (_store, _target, _data_directory, _job);
             match mutation {
@@ -1612,27 +1612,27 @@ impl AuthenticatedReceiver for HttpsReceiverAdapter {
         Ok(body)
     }
 }
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(any(test, feature = "test-injection"))]
 #[derive(Debug, Clone)]
 struct FakeAuthenticatedReceiver {
     pub response: Result<Vec<u8>, String>,
 }
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(any(test, feature = "test-injection"))]
 impl sealed::Receiver for FakeAuthenticatedReceiver {}
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(any(test, feature = "test-injection"))]
 impl AuthenticatedReceiver for FakeAuthenticatedReceiver {
     fn probe(&self, _: &TargetDeviceConfig, _: Duration) -> Result<Vec<u8>, String> {
         self.response.clone()
     }
 }
 
-#[cfg(feature = "test-support")]
+#[cfg(feature = "test-injection")]
 struct InjectedFixtureRunner;
 
-#[cfg(feature = "test-support")]
+#[cfg(feature = "test-injection")]
 impl sealed::Process for InjectedFixtureRunner {}
 
-#[cfg(feature = "test-support")]
+#[cfg(feature = "test-injection")]
 impl ProcessRunner for InjectedFixtureRunner {
     fn run(&self, _: &Path, argv: &[String], _: Duration) -> Result<ProcessResult, String> {
         if argv
@@ -1666,7 +1666,7 @@ impl ProcessRunner for InjectedFixtureRunner {
     }
 }
 
-#[cfg(feature = "test-support")]
+#[cfg(feature = "test-injection")]
 impl CaptureProcessRunner for InjectedFixtureRunner {
     fn capture_to_handle(
         &self,
@@ -1694,7 +1694,7 @@ impl CaptureProcessRunner for InjectedFixtureRunner {
     }
 }
 
-#[cfg(feature = "test-support")]
+#[cfg(feature = "test-injection")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InjectedAuthorityMutation {
     None,
@@ -1708,7 +1708,7 @@ pub enum InjectedAuthorityMutation {
 /// that durable row itself, runs fixed fake analyzer/table/receiver adapters,
 /// and invokes the same private CAS transitions as production. No receipt or
 /// outcome can be supplied by the caller.
-#[cfg(feature = "test-support")]
+#[cfg(feature = "test-injection")]
 pub fn run_injected_transport_controller_iteration(
     database: &Path,
     application_root: &Path,

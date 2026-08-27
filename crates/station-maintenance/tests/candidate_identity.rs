@@ -1,7 +1,7 @@
 use sha2::{Digest, Sha256};
 use station_maintenance::{
     AUTOMATION_LAUNCH_HELPER_FILE_NAME, INSTALLED_RUNTIME_MANIFEST_NAME,
-    acquire_install_authority_fence, read_verified_automation_launch_helper,
+    acquire_install_authority_fence_for_application, read_verified_automation_launch_helper,
     read_verified_candidate_identity, write_installed_runtime_manifest,
 };
 use station_update::{UpdatePackageFile, UpdatePackageManifest};
@@ -189,7 +189,9 @@ fn returns_the_verified_active_candidate_and_approved_runtime_identity() {
 #[test]
 fn returns_only_the_active_manifest_attested_automation_launch_helper() {
     let fixture = fixture();
-    let fence = acquire_install_authority_fence(&fixture.data).unwrap();
+    let fence =
+        acquire_install_authority_fence_for_application(&fixture.data, &fixture.application)
+            .unwrap();
     let helper =
         read_verified_automation_launch_helper(&fence, &fixture.data, &fixture.application)
             .expect("helper must be part of the active verified candidate");
@@ -210,6 +212,31 @@ fn returns_only_the_active_manifest_attested_automation_launch_helper() {
     assert!(
         read_verified_automation_launch_helper(&fence, &fixture.data, &fixture.application)
             .is_err()
+    );
+}
+
+#[test]
+fn automation_helper_rejects_a_fence_for_a_different_authority_root() {
+    let first = fixture();
+    let second = fixture();
+    let first_fence =
+        acquire_install_authority_fence_for_application(&first.data, &first.application).unwrap();
+    assert!(
+        read_verified_automation_launch_helper(&first_fence, &second.data, &second.application)
+            .is_err(),
+        "a fence must bind the exact authority root that issued it"
+    );
+}
+
+#[test]
+fn automation_helper_rejects_a_fence_for_a_different_application_root() {
+    let first = fixture();
+    let second = fixture();
+    let fence =
+        acquire_install_authority_fence_for_application(&first.data, &first.application).unwrap();
+    assert!(
+        read_verified_automation_launch_helper(&fence, &first.data, &second.application).is_err(),
+        "a helper capability must retain the exact application root fenced for execution"
     );
 }
 

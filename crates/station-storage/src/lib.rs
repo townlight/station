@@ -5,6 +5,8 @@ extern crate self as station_storage;
 mod agenda_authority;
 mod automation_execution_authority;
 pub use agenda_authority::{AgendaHistoryEntry, AgendaWriteError};
+#[cfg(test)]
+mod automation_execution_authority_tests;
 mod media_lifecycle_authority;
 mod ott_authority;
 mod transport_executor;
@@ -38,7 +40,7 @@ use std::{
     time::{Instant, SystemTime},
 };
 pub use transport_executor::run_transport_proof_queue_controller;
-#[cfg(feature = "test-support")]
+#[cfg(feature = "test-injection")]
 #[doc(hidden)]
 pub mod test_support {
     pub use super::transport_executor::{

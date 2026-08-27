@@ -185,12 +185,11 @@ impl AutomationExecutionAdapter {
         })
     }
 
-    /// Test-only construction seam for hostile process-boundary coverage. It
-    /// is compiled only with the explicit `test-support` Cargo feature and is
-    /// unavailable to production stationd builds.
-    #[cfg(feature = "test-support")]
+    /// Internal test-only construction seam for hostile process-boundary
+    /// coverage. It is unavailable in every non-test dependency graph.
+    #[cfg(test)]
     #[doc(hidden)]
-    pub fn new_for_test(
+    pub(crate) fn new_for_test(
         adapter_id: impl Into<String>,
         adapter_revision: u64,
         application_root: impl Into<PathBuf>,
@@ -208,20 +207,33 @@ impl AutomationExecutionAdapter {
         )
     }
 
+    #[cfg(test)]
     #[doc(hidden)]
-    pub fn with_test_setup_fault(mut self, fault: AutomationExecutionSetupFault) -> Self {
+    pub(crate) fn with_test_setup_fault(mut self, fault: AutomationExecutionSetupFault) -> Self {
         self.setup_fault = Some(fault);
         self
     }
 
+    #[cfg(test)]
     #[doc(hidden)]
-    pub fn verify_program_for_test(&self, request: &AutomationExecutionRequest) -> bool {
+    pub(crate) fn verify_program_for_test(&self, request: &AutomationExecutionRequest) -> bool {
         self.pin_for_request(request, Instant::now() + Duration::from_secs(60))
             .is_ok()
     }
 
+    #[cfg(test)]
     #[doc(hidden)]
-    pub fn substitution_is_blocked_while_pinned_for_test(
+    pub(crate) fn launch_identity_for_test(&self) -> (&Path, &Path, &str) {
+        (
+            &self.application_root,
+            &self.executable,
+            &self.executable_sha256,
+        )
+    }
+
+    #[cfg(test)]
+    #[doc(hidden)]
+    pub(crate) fn substitution_is_blocked_while_pinned_for_test(
         &self,
         request: &AutomationExecutionRequest,
         replacement: &Path,
@@ -1070,8 +1082,11 @@ pub fn run_automation_execution_queue_iteration(
     let data_root = database
         .parent()
         .ok_or_else(|| "automation execution data root is unavailable".to_string())?;
-    let fence = station_maintenance::acquire_install_authority_fence(data_root)
-        .map_err(|_| "automation execution install authority is busy".to_string())?;
+    let fence = station_maintenance::acquire_install_authority_fence_for_application(
+        data_root,
+        application_root,
+    )
+    .map_err(|_| "automation execution install authority is busy".to_string())?;
     if fence.was_abandoned() {
         return Err("automation execution install authority requires recovery".into());
     }

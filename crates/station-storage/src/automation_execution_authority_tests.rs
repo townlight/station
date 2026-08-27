@@ -4,6 +4,7 @@ use std::ptr;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use super::Sqlite3;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use sha2::{Digest, Sha256};
 use station_automation_policy::{
@@ -14,7 +15,8 @@ use station_automation_policy::{
     ConnectionTestOutcome, CredentialAvailability,
 };
 use station_maintenance::{
-    VerifiedInstallAuthority, verified_automation_launch_helper_for_test,
+    AUTOMATION_LAUNCH_HELPER_FILE_NAME, VerifiedInstallAuthority,
+    acquire_install_authority_fence_for_application, read_verified_automation_launch_helper,
     verified_install_authority_for_test,
 };
 use station_storage::{
@@ -49,22 +51,23 @@ static DATABASE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 const SQLITE_OK: c_int = 0;
 const SQLITE_OPEN_READWRITE: c_int = 2;
 
+#[allow(clashing_extern_declarations)]
 #[link(name = "winsqlite3")]
 unsafe extern "C" {
     fn sqlite3_open_v2(
         filename: *const c_char,
-        database: *mut *mut c_void,
+        database: *mut *mut Sqlite3,
         flags: c_int,
         virtual_file_system: *const c_char,
     ) -> c_int;
     fn sqlite3_exec(
-        database: *mut c_void,
+        database: *mut Sqlite3,
         sql: *const c_char,
         callback: *mut c_void,
         callback_argument: *mut c_void,
         error_message: *mut *mut c_char,
     ) -> c_int;
-    fn sqlite3_close(database: *mut c_void) -> c_int;
+    fn sqlite3_close(database: *mut Sqlite3) -> c_int;
 }
 
 fn raw_sql_status(database_path: &Path, sql: &str) -> c_int {
@@ -242,18 +245,16 @@ fn configured_store(name: &str) -> (PathBuf, StationStore) {
 
 #[test]
 fn verified_helper_capability_binds_the_production_adapter_identity() {
-    let system_root =
-        PathBuf::from(std::env::var_os("SystemRoot").expect("Windows system root exists"));
-    let executable = system_root
-        .join("System32")
-        .join("WindowsPowerShell")
-        .join("v1.0")
-        .join("powershell.exe");
-    let helper = verified_automation_launch_helper_for_test(
-        &system_root,
-        &executable,
-        sha256_file(&executable),
-    );
+    let fixture = installed_queue_with_attested_helper("automation-verified-helper-binding");
+    let fence =
+        acquire_install_authority_fence_for_application(&fixture.data, &fixture.application)
+            .unwrap();
+    let helper =
+        read_verified_automation_launch_helper(&fence, &fixture.data, &fixture.application)
+            .expect("only the fenced active candidate may issue helper capability");
+    let expected_root = helper.application_root().to_path_buf();
+    let expected_executable = helper.executable().to_path_buf();
+    let expected_sha256 = helper.sha256().to_owned();
     let adapter = AutomationExecutionAdapter::from_verified_launch_helper(
         ADAPTER_ID,
         1,
@@ -265,7 +266,14 @@ fn verified_helper_capability_binds_the_production_adapter_identity() {
         ],
     )
     .expect("verified helper must bind the adapter's launch identity");
-    assert!(adapter.verify_program_for_test(&request()));
+    assert_eq!(
+        adapter.launch_identity_for_test(),
+        (
+            expected_root.as_path(),
+            expected_executable.as_path(),
+            expected_sha256.as_str()
+        )
+    );
 }
 
 struct InstalledQueueFixture {
@@ -366,6 +374,33 @@ fn schema_two_installed_queue_without_optional_helper(name: &str) -> InstalledQu
         data,
         application,
     }
+}
+
+fn installed_queue_with_attested_helper(name: &str) -> InstalledQueueFixture {
+    let fixture = schema_two_installed_queue_without_optional_helper(name);
+    let source = PathBuf::from(std::env::var_os("SystemRoot").expect("Windows system root exists"))
+        .join("System32")
+        .join("WindowsPowerShell")
+        .join("v1.0")
+        .join("powershell.exe");
+    let helper = fixture.application.join(AUTOMATION_LAUNCH_HELPER_FILE_NAME);
+    std::fs::copy(&source, &helper).expect("copy exact host-owned helper fixture");
+    let helper_bytes = std::fs::read(&helper).unwrap();
+    let active_path = fixture
+        .data
+        .join(station_maintenance::ACTIVE_SLOT_RECEIPT_NAME);
+    let mut active: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&active_path).unwrap()).unwrap();
+    active["active"]["package_manifest"]["files"]
+        .as_array_mut()
+        .unwrap()
+        .push(serde_json::json!({
+            "path": AUTOMATION_LAUNCH_HELPER_FILE_NAME,
+            "size_bytes": helper_bytes.len(),
+            "sha256": format!("{:x}", Sha256::digest(helper_bytes)),
+        }));
+    std::fs::write(active_path, active.to_string()).unwrap();
+    fixture
 }
 
 #[test]
