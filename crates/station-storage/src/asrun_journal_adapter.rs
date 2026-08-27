@@ -16,6 +16,9 @@ use station_reporting::runtime::{
 };
 use std::path::Path;
 
+#[cfg(all(test, windows))]
+use station_media_journal::seed_test_generation_zero_journal;
+
 const MAX_INCREMENTAL_JOURNAL_EVENTS: usize = 2_048;
 
 #[cfg(all(test, windows))]
@@ -929,17 +932,21 @@ mod tests {
         ffi::OsString,
         fs::File,
         path::PathBuf,
-        process::Command,
+        process::{Child, Command},
         sync::{
+            Mutex,
             atomic::{AtomicU64, Ordering},
             mpsc,
         },
         thread,
-        time::{Duration, SystemTime, UNIX_EPOCH},
+        time::{Duration, Instant, SystemTime, UNIX_EPOCH},
     };
 
     const CHANNEL: &str = "00000000-0000-4000-8000-000000000001";
+    const CHILD_SYNC_TIMEOUT: Duration = Duration::from_secs(120);
+    const WRITER_MANIFEST_TIMEOUT: Duration = Duration::from_secs(120);
     static NEXT_TEST_PATH: AtomicU64 = AtomicU64::new(0);
+    static WRITER_PROCESS_TEST_LOCK: Mutex<()> = Mutex::new(());
     const MANIFEST_SWAP_SOURCE: &str = "TOWNLIGHT_ASRUN_MANIFEST_SWAP_SOURCE";
     const MANIFEST_SWAP_DESTINATION: &str = "TOWNLIGHT_ASRUN_MANIFEST_SWAP_DESTINATION";
 
@@ -972,6 +979,115 @@ mod tests {
                 outputs: Vec::new(),
             },
         }
+    }
+
+    #[test]
+    fn seeded_generation_zero_journal_has_authentic_production_frames() {
+        let journal = test_path("tlj");
+        let worker_id = format!("station-worker-{CHANNEL}");
+        seed_test_generation_zero_journal(&journal, &worker_id, CHANNEL).unwrap();
+        let writer = JournalWriter::open(&journal, &worker_id, CHANNEL).unwrap();
+        assert_eq!(writer.next_sequence(), 514);
+        drop(writer);
+        let _ = std::fs::remove_file(journal.clone());
+        let _ = std::fs::remove_file(sidecar_path(&journal, ".writer-lock"));
+    }
+
+    #[test]
+    fn seeded_generation_zero_journal_rejects_a_corrupted_frame() {
+        let journal = test_path("tlj");
+        let worker_id = format!("station-worker-{CHANNEL}");
+        seed_test_generation_zero_journal(&journal, &worker_id, CHANNEL).unwrap();
+        let mut bytes = std::fs::read(&journal).unwrap();
+        bytes[16] ^= 0x01;
+        std::fs::write(&journal, bytes).unwrap();
+        assert!(matches!(
+            JournalWriter::open(&journal, &worker_id, CHANNEL),
+            Err(JournalError::Corrupt { .. })
+        ));
+        let _ = std::fs::remove_file(journal.clone());
+        let _ = std::fs::remove_file(sidecar_path(&journal, ".writer-lock"));
+    }
+
+    struct WriterChildGuard {
+        child: Child,
+        armed: bool,
+    }
+
+    impl WriterChildGuard {
+        fn new(child: Child) -> Self {
+            Self { child, armed: true }
+        }
+
+        fn try_wait(&mut self) -> std::io::Result<Option<std::process::ExitStatus>> {
+            self.child.try_wait()
+        }
+
+        fn kill_and_wait(&mut self) -> std::io::Result<std::process::ExitStatus> {
+            self.child.kill()?;
+            let status = self.child.wait()?;
+            self.armed = false;
+            Ok(status)
+        }
+    }
+
+    impl Drop for WriterChildGuard {
+        fn drop(&mut self) {
+            if self.armed && self.child.try_wait().ok().flatten().is_none() {
+                let _ = self.child.kill();
+                let _ = self.child.wait();
+            }
+        }
+    }
+
+    fn wait_for_writer_manifest(writer: &mut WriterChildGuard, ready: &Path, manifest: &Path) {
+        let deadline = Instant::now() + WRITER_MANIFEST_TIMEOUT;
+        loop {
+            if ready.exists() && manifest.exists() {
+                if let Some(status) = writer
+                    .try_wait()
+                    .expect("writer child status remains observable")
+                {
+                    panic!("writer child exited after publishing the compacted manifest: {status}");
+                }
+                return;
+            }
+            if let Some(status) = writer
+                .try_wait()
+                .expect("writer child status remains observable")
+            {
+                panic!("writer child exited before publishing the compacted manifest: {status}");
+            }
+            assert!(
+                Instant::now() < deadline,
+                "writer child did not publish the compacted manifest within {WRITER_MANIFEST_TIMEOUT:?}"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[test]
+    fn wait_for_writer_manifest_rejects_a_child_that_exits_after_publishing_sentinels() {
+        let ready = test_path("writer-ready");
+        let manifest = test_path("generation-manifest");
+        std::fs::write(&ready, b"ready").unwrap();
+        std::fs::write(&manifest, b"manifest").unwrap();
+        let mut writer = WriterChildGuard::new(
+            Command::new("cmd.exe")
+                .args(["/C", "exit", "0"])
+                .spawn()
+                .unwrap(),
+        );
+        thread::sleep(Duration::from_millis(100));
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            wait_for_writer_manifest(&mut writer, &ready, &manifest);
+        }));
+        assert!(
+            result.is_err(),
+            "a writer that exited after publishing sentinels must not be accepted"
+        );
+        let _ = std::fs::remove_file(ready);
+        let _ = std::fs::remove_file(manifest);
     }
 
     /// Verify the Windows share contract from a distinct process, rather than
@@ -1018,49 +1134,35 @@ mod tests {
         if std::env::var_os(ABRUPT_WRITER).is_some() {
             let journal = PathBuf::from(std::env::var_os(WRITER_JOURNAL).unwrap());
             let ready = PathBuf::from(std::env::var_os(WRITER_READY).unwrap());
-            let mut writer =
-                JournalWriter::open(&journal, &format!("station-worker-{CHANNEL}"), CHANNEL)
-                    .unwrap();
-            writer
-                .append(&WorkerEventEnvelope {
-                    version: PROTOCOL_VERSION,
-                    worker_id: format!("station-worker-{CHANNEL}"),
-                    channel_id: CHANNEL.into(),
-                    sequence: 1,
-                    event: WorkerEvent::Ready { graph_revision: 1 },
-                })
-                .unwrap();
-            for sequence in 2..=514 {
-                writer.append(&heartbeat(sequence)).unwrap();
-            }
+            let worker_id = format!("station-worker-{CHANNEL}");
+            seed_test_generation_zero_journal(&journal, &worker_id, CHANNEL).unwrap();
+            let mut writer = JournalWriter::open(&journal, &worker_id, CHANNEL).unwrap();
+            writer.append(&heartbeat(514)).unwrap();
             File::create(ready).unwrap();
             loop {
                 thread::sleep(Duration::from_secs(1));
             }
         }
 
+        let _writer_process_test_lock = WRITER_PROCESS_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
         let database = test_path("db");
         let journal = database.with_extension("tlj");
         let ready = test_path("writer-ready");
-        let mut writer = Command::new(std::env::current_exe().unwrap())
-            .arg("--exact")
-            .arg("asrun_journal_adapter::tests::persistence_failure_aborts_reporter_authority_after_writer_process_death")
-            .env(ABRUPT_WRITER, "1")
-            .env(WRITER_JOURNAL, &journal)
-            .env(WRITER_READY, &ready)
-            .spawn()
-            .unwrap();
-        for _ in 0..500 {
-            if ready.exists() {
-                break;
-            }
-            thread::sleep(Duration::from_millis(10));
-        }
-        let manifest = sidecar_path(&journal, ".generation-manifest");
-        assert!(
-            ready.exists() && manifest.exists(),
-            "writer child did not publish the compacted manifest"
+        let mut writer = WriterChildGuard::new(
+            Command::new(std::env::current_exe().unwrap())
+                .arg("--exact")
+                .arg("asrun_journal_adapter::tests::persistence_failure_aborts_reporter_authority_after_writer_process_death")
+                .env(ABRUPT_WRITER, "1")
+                .env(WRITER_JOURNAL, &journal)
+                .env(WRITER_READY, &ready)
+                .spawn()
+                .unwrap(),
         );
+        let manifest = sidecar_path(&journal, ".generation-manifest");
+        wait_for_writer_manifest(&mut writer, &ready, &manifest);
 
         // Use the real persistence method's final state write as the failure
         // source. The pause below is after successful authority verification,
@@ -1093,7 +1195,7 @@ mod tests {
             )
         });
         verified_rx
-            .recv_timeout(Duration::from_secs(2))
+            .recv_timeout(CHILD_SYNC_TIMEOUT)
             .expect("reporter passed final authority verification");
 
         let replacement = test_path("manifest-replacement");
@@ -1102,9 +1204,11 @@ mod tests {
         // verify and before persistence. No `Drop` waits or source writer
         // handle remain: replacement must be denied solely by the reporter's
         // duplicated no-delete manifest authority.
-        writer.kill().unwrap();
         assert!(
-            !writer.wait().unwrap().success(),
+            !writer
+                .kill_and_wait()
+                .expect("terminate and reap writer child")
+                .success(),
             "writer process must terminate without graceful Drop"
         );
         assert_manifest_replacement_is_blocked(&replacement, &manifest);
@@ -1147,49 +1251,35 @@ mod tests {
         if std::env::var_os(ABRUPT_WRITER).is_some() {
             let journal = PathBuf::from(std::env::var_os(WRITER_JOURNAL).unwrap());
             let ready = PathBuf::from(std::env::var_os(WRITER_READY).unwrap());
-            let mut writer =
-                JournalWriter::open(&journal, &format!("station-worker-{CHANNEL}"), CHANNEL)
-                    .unwrap();
-            writer
-                .append(&WorkerEventEnvelope {
-                    version: PROTOCOL_VERSION,
-                    worker_id: format!("station-worker-{CHANNEL}"),
-                    channel_id: CHANNEL.into(),
-                    sequence: 1,
-                    event: WorkerEvent::Ready { graph_revision: 1 },
-                })
-                .unwrap();
-            for sequence in 2..=514 {
-                writer.append(&heartbeat(sequence)).unwrap();
-            }
+            let worker_id = format!("station-worker-{CHANNEL}");
+            seed_test_generation_zero_journal(&journal, &worker_id, CHANNEL).unwrap();
+            let mut writer = JournalWriter::open(&journal, &worker_id, CHANNEL).unwrap();
+            writer.append(&heartbeat(514)).unwrap();
             File::create(ready).unwrap();
             loop {
                 thread::sleep(Duration::from_secs(1));
             }
         }
 
+        let _writer_process_test_lock = WRITER_PROCESS_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
         let database = test_path("db");
         let journal = database.with_extension("tlj");
         let ready = test_path("writer-ready");
-        let mut writer = Command::new(std::env::current_exe().unwrap())
-            .arg("--exact")
-            .arg("asrun_journal_adapter::tests::successful_persistence_commits_before_releasing_reporter_authority_after_writer_process_death")
-            .env(ABRUPT_WRITER, "1")
-            .env(WRITER_JOURNAL, &journal)
-            .env(WRITER_READY, &ready)
-            .spawn()
-            .unwrap();
-        for _ in 0..500 {
-            if ready.exists() {
-                break;
-            }
-            thread::sleep(Duration::from_millis(10));
-        }
-        let manifest = sidecar_path(&journal, ".generation-manifest");
-        assert!(
-            ready.exists() && manifest.exists(),
-            "writer child did not publish the compacted manifest"
+        let mut writer = WriterChildGuard::new(
+            Command::new(std::env::current_exe().unwrap())
+                .arg("--exact")
+                .arg("asrun_journal_adapter::tests::successful_persistence_commits_before_releasing_reporter_authority_after_writer_process_death")
+                .env(ABRUPT_WRITER, "1")
+                .env(WRITER_JOURNAL, &journal)
+                .env(WRITER_READY, &ready)
+                .spawn()
+                .unwrap(),
         );
+        let manifest = sidecar_path(&journal, ".generation-manifest");
+        wait_for_writer_manifest(&mut writer, &ready, &manifest);
 
         let (verified_tx, verified_rx) = mpsc::channel();
         let (resume_tx, resume_rx) = mpsc::channel();
@@ -1209,14 +1299,16 @@ mod tests {
             )
         });
         verified_rx
-            .recv_timeout(Duration::from_secs(2))
+            .recv_timeout(CHILD_SYNC_TIMEOUT)
             .expect("reporter passed final authority verification");
 
         let replacement = test_path("manifest-replacement");
         std::fs::write(&replacement, b"untrusted manifest replacement").unwrap();
-        writer.kill().unwrap();
         assert!(
-            !writer.wait().unwrap().success(),
+            !writer
+                .kill_and_wait()
+                .expect("terminate and reap writer child")
+                .success(),
             "writer process must terminate without graceful Drop"
         );
         assert_manifest_replacement_is_blocked(&replacement, &manifest);

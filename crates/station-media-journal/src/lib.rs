@@ -5354,6 +5354,45 @@ fn write_record(
     output.write_all(&record).map_err(io_error)
 }
 
+/// Seeds a generation-zero journal for station-storage's process-boundary
+/// tests without paying the production append path's per-record durability
+/// cost for setup. The final writer append still exercises the real compaction
+/// boundary, because this writes the same authenticated frames and records as
+/// [`JournalWriter::append`].
+#[cfg(feature = "test-support")]
+pub fn seed_test_generation_zero_journal(
+    path: impl AsRef<Path>,
+    worker_id: &str,
+    channel_id: &str,
+) -> Result<(), JournalError> {
+    let mut file = File::create(path).map_err(io_error)?;
+    let ready = WorkerEventEnvelope {
+        version: station_media_protocol::PROTOCOL_VERSION,
+        worker_id: worker_id.to_owned(),
+        channel_id: channel_id.to_owned(),
+        sequence: 1,
+        event: WorkerEvent::Ready { graph_revision: 1 },
+    };
+    let payload = encode_event_frame(&ready).map_err(JournalError::Protocol)?;
+    write_record(&mut file, RECORD_KIND_EVENT, &payload)?;
+    for sequence in 2..=513 {
+        let event = WorkerEventEnvelope {
+            version: station_media_protocol::PROTOCOL_VERSION,
+            worker_id: worker_id.to_owned(),
+            channel_id: channel_id.to_owned(),
+            sequence,
+            event: WorkerEvent::Heartbeat {
+                monotonic_milliseconds: sequence * 5_000,
+                outputs: Vec::new(),
+            },
+        };
+        let payload = encode_event_frame(&event).map_err(JournalError::Protocol)?;
+        write_record(&mut file, RECORD_KIND_EVENT, &payload)?;
+    }
+    file.flush().map_err(io_error)?;
+    file.sync_all().map_err(io_error)
+}
+
 fn add_compacted_heartbeat(
     summary: &mut HeartbeatSummary,
     event: &WorkerEventEnvelope,
