@@ -2102,6 +2102,7 @@ dependencies = [
  "station-schedule",
  "station-schedule-automation",
  "station-transport-proof",
+ "station-underwriting",
  "station-update",
  "subtle",
  "ureq",

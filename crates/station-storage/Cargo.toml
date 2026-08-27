@@ -31,6 +31,7 @@ station-recording.workspace = true
 station-schedule.workspace = true
 station-schedule-automation.workspace = true
 station-update.workspace = true
+station-underwriting.workspace = true
 station-transport-proof.workspace = true
 ureq.workspace = true
 windows-sys.workspace = true

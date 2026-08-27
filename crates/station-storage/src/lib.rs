@@ -139,6 +139,8 @@ pub use actual_airing_authority::{
     ScheduledTakeAcknowledgement, ScheduledTakeAcknowledgementBinding, ScheduledTakeApplyError,
     ScheduledTakeApplyOutcome,
 };
+mod underwriting_authority;
+pub use underwriting_authority::{UnderwritingHistoryEntry, UnderwritingWriteError};
 mod asrun_epg_authority;
 pub use asrun_epg_authority::{
     AsRunProjectionPage, AsRunProjectionWriteError, MAX_ASRUN_EPG_PAGE_SIZE,
@@ -1432,6 +1434,7 @@ impl StationStore {
         store.initialize_schedule_automation_schema()?;
         store.initialize_catalog_authority_schema()?;
         store.initialize_actual_airing_authority_schema()?;
+        store.initialize_underwriting_authority_schema()?;
         store.initialize_asrun_epg_authority_schema()?;
         store.initialize_schedule_materialization_schema()?;
         store.initialize_scheduled_recording_schema()?;
@@ -14360,6 +14363,9 @@ impl StationStore {
 
     fn write_schedule_item_in_transaction(&self, write: &ScheduleItemWrite) -> Result<(), String> {
         let current = self.read_schedule_item(&write.item.item_id)?;
+        if current.is_some() {
+            self.validate_underwriting_schedule_successor(&write.item)?;
+        }
         match current {
             None if write.item.revision == 1 => self.insert_schedule_item(&write.item)?,
             Some(current) if current.revision.checked_add(1) == Some(write.item.revision) => {

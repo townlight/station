@@ -35,3 +35,26 @@ payment is due. Later slices must persist immutable joins through the single SQL
 writer, reconcile aggregate placement constraints against authoritative schedule and
 as-run data, derive authenticated actor/time authority, generate actual affidavits
 and billing exports, and acquire installed-machine and field evidence.
+
+## S24 durable placement increment
+
+`station-storage` now persists underwriting spots, flights, and schedule-bound
+placements through the station's single SQLite writer. Spot, flight, and
+placement history is append-only; current spot reads cross-check indexed
+columns, JSON, and the exact latest history revision. Writes run under
+`BEGIN IMMEDIATE`, apply the pure compare-and-set and no-rebinding contracts,
+and retain the authenticated caller identity and server-supplied occurrence
+time.
+
+A placement is admitted only when its exact flight and spot revisions exist,
+its media authority is `Ready` with the exact spot duration, and one exact
+Draft schedule item has the same revision, channel, asset, start, and duration.
+The write transaction reconciles total-flight capacity and minimum separation
+against every current placement for the flight. Later Draft schedule mutations
+are rejected when they would invalidate that binding.
+
+This increment does not yet persist proof joins or export requests, consume
+trusted ScheduledAssetOnAir facts, render affidavit/export bytes, expose an
+authenticated staff API or operator UI, or enforce the per-station-day count
+across timezone transitions. It makes no claim about billing delivery,
+invoicing or payment, actual external airtime, installed proof, or field proof.

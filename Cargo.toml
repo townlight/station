@@ -108,6 +108,7 @@ station-runtime = { path = "crates/station-runtime" }
 station-readiness = { path = "crates/station-readiness" }
 station-transport-proof = { path = "crates/station-transport-proof" }
 station-transport-executor = { path = "crates/station-transport-executor" }
+station-underwriting = { path = "crates/station-underwriting" }
 station-schedule = { path = "crates/station-schedule" }
 station-schedule-automation = { path = "crates/station-schedule-automation" }
 station-source-evidence = { path = "crates/station-source-evidence" }
