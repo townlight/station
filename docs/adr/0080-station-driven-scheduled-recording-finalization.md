@@ -57,10 +57,14 @@ The finalizer resolves the
 worker-owned relative path only beneath the managed recording root, rejects
 reparse points and unexpected file types, retains a no-delete handle, and
 rehashes and recounts the exact opened object against the terminal event. It
-validates finite decodable audio/video media, then copies from that retained
-handle into a create-new content-addressed part in the managed media library,
-flushes and synchronizes it, atomically renames it, and reopens and verifies the
-final object. A database transaction then:
+validates finite decodable audio/video media before publication, then copies
+from that retained handle into a cryptographically random create-new part in
+the managed media library, flushes and synchronizes it, rehashes the part, and
+atomically renames it to the content hash. A concurrent same-hash publisher is
+accepted only after the winner is reopened and byte-validated. The finalizer
+retains and compares Windows file identity across a successful rename and then
+holds a no-delete final handle through the database commit. A database
+transaction then:
 
 - admits the exact media object as Ready;
 - creates an idempotent Draft catalog record using the authoritative schedule
@@ -75,6 +79,9 @@ therefore leave an unreferenced content-addressed object, but cannot leave a
 completed recording that references missing or different bytes. Retrying
 finalization is idempotent: existing destination bytes must match exactly, and
 the same evidence/transition is accepted only as the same completed result.
+An uncommitted global content-addressed object is never deleted inline because
+another channel or ingest transaction may already have adopted the same hash;
+reclamation requires a separate reference-aware lifecycle authority.
 
 ## Recovery
 

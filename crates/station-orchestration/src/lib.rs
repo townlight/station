@@ -70,9 +70,30 @@ use station_storage::{
 };
 use windows_sys::Win32::Storage::FileSystem::{
     FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
-    FILE_SHARE_READ, FILE_SHARE_WRITE,
+    FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
 };
 use windows_sys::Win32::System::IO::CancelSynchronousIo;
+
+#[repr(C)]
+struct RecordingFileId128 {
+    bytes: [u8; 16],
+}
+
+#[repr(C)]
+struct RecordingFileIdInfo {
+    volume_serial_number: u64,
+    file_id: RecordingFileId128,
+}
+
+#[link(name = "kernel32")]
+unsafe extern "system" {
+    fn GetFileInformationByHandleEx(
+        file: isize,
+        info_class: i32,
+        info: *mut std::ffi::c_void,
+        info_size: u32,
+    ) -> i32;
+}
 
 static ALERT_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 const HEARTBEAT_INTERVAL_MS: i64 = 5_000;
@@ -85,7 +106,6 @@ const MAX_CAPTION_CUES_PER_TICK: usize = 64;
 const ASRUN_PROJECTION_INTERVAL_MS: i64 = 60_000;
 const RECORDING_FINALIZATION_BUDGET: Duration = Duration::from_secs(30 * 60);
 const RECORDING_FINALIZATION_CHUNK_BYTES: usize = 128 * 1024;
-static RECORDING_PUBLICATION_ATTEMPT: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Debug, PartialEq, Eq)]
 struct CaptionDispatchPlan {
@@ -1010,24 +1030,16 @@ struct PublishedRecordingAsset {
     _recording_ancestry: Vec<File>,
     _media_ancestry: Vec<File>,
     _final_file: File,
-    newly_published: bool,
 }
 
 impl PublishedRecordingAsset {
-    fn cleanup_uncommitted(self) {
-        let PublishedRecordingAsset {
-            asset,
-            _recording_ancestry,
-            _media_ancestry,
-            _final_file,
-            newly_published,
-        } = self;
-        drop(_final_file);
-        drop(_media_ancestry);
-        drop(_recording_ancestry);
-        if newly_published {
-            let _ = fs::remove_file(asset.media_path);
-        }
+    fn release_uncommitted(self) {
+        // A published media name is global content-addressed authority. Even
+        // when this recording has not committed it, another channel or ingest
+        // transaction may already reference the same hash. Inline deletion
+        // would therefore race durable adoption. Orphan reclamation belongs to
+        // a separate reference-aware lifecycle/GC authority.
+        drop(self);
     }
 }
 
@@ -1064,6 +1076,16 @@ impl RecordingFinalizationTask {
     fn cancel_and_join(&mut self) -> Result<(), String> {
         self.request_cancel();
         self.join()
+    }
+
+    fn cancel_join_and_receive(
+        &mut self,
+    ) -> Result<Result<PublishedRecordingAsset, String>, String> {
+        self.request_cancel();
+        self.join()?;
+        self.result
+            .recv()
+            .map_err(|_| "scheduled recording finalizer disconnected without a result".to_string())
     }
 }
 
@@ -1126,6 +1148,31 @@ fn open_recording_file_no_follow(path: &Path) -> Result<File, String> {
     Ok(file)
 }
 
+fn recording_file_identity(file: &File) -> Result<(u64, [u8; 16]), String> {
+    const FILE_ID_INFO_CLASS: i32 = 18;
+    let mut info = RecordingFileIdInfo {
+        volume_serial_number: 0,
+        file_id: RecordingFileId128 { bytes: [0; 16] },
+    };
+    // SAFETY: `file` is live, `info` has the Windows FileIdInfo layout, and
+    // Windows fills the fixed-size output synchronously.
+    let result = unsafe {
+        GetFileInformationByHandleEx(
+            file.as_raw_handle() as isize,
+            FILE_ID_INFO_CLASS,
+            (&mut info as *mut RecordingFileIdInfo).cast(),
+            std::mem::size_of::<RecordingFileIdInfo>() as u32,
+        )
+    };
+    if result == 0 {
+        return Err(format!(
+            "read recording file identity: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    Ok((info.volume_serial_number, info.file_id.bytes))
+}
+
 fn check_finalization_control(cancel: &AtomicBool, deadline: Instant) -> Result<(), String> {
     if cancel.load(Ordering::Acquire) {
         return Err("scheduled recording finalization was cancelled".into());
@@ -1163,6 +1210,23 @@ fn hash_open_recording(
     Ok((format!("{:x}", digest.finalize()), bytes))
 }
 
+fn publish_recording_part(temporary_path: &Path, final_path: &Path) -> Result<bool, String> {
+    // Windows rename is atomic and does not replace an existing destination.
+    // A concurrent publisher of the same content may win; in that case discard
+    // only this uniquely owned part and let the caller revalidate the winner.
+    if let Err(rename_error) = fs::rename(temporary_path, final_path) {
+        let winner = fs::symlink_metadata(final_path)
+            .map_err(|_| format!("publish recording media atomically: {rename_error}"))?;
+        if !winner.is_file() || winner.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+            return Err("recording publication target is a reparse point or non-file".into());
+        }
+        fs::remove_file(temporary_path)
+            .map_err(|error| format!("remove duplicate recording publication: {error}"))?;
+        return Ok(false);
+    }
+    Ok(true)
+}
+
 fn publish_recording_capture(
     database_path: &Path,
     channel_id: &str,
@@ -1197,14 +1261,28 @@ fn publish_recording_capture(
     if source_sha256 != ready.capture_sha256 || source_bytes != ready.size_bytes {
         return Err("sealed recording bytes do not match worker evidence".into());
     }
+    // Validate before publication while `source` denies writers and deletion.
+    // Every later destination check is byte-for-byte bound to this same hash,
+    // so invalid media can never acquire a global content-addressed name.
+    let metadata = validate_media(&source_path)
+        .map_err(|error| format!("validate sealed recording media: {error:?}"))?;
+    check_finalization_control(cancel, deadline)?;
+    let decoded_duration_ms = metadata.duration_ns / 1_000_000;
+    if decoded_duration_ms == 0 || decoded_duration_ms.abs_diff(ready.captured_duration_ms) > 5_000
+    {
+        return Err("sealed recording duration disagrees with worker evidence".into());
+    }
 
-    let attempt = RECORDING_PUBLICATION_ATTEMPT.fetch_add(1, Ordering::Relaxed);
+    let mut attempt_nonce = [0_u8; 16];
+    getrandom::fill(&mut attempt_nonce)
+        .map_err(|error| format!("generate recording publication identity: {error}"))?;
+    let attempt = attempt_nonce
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
     let temporary_path = media_root.join(format!(
-        ".recording-{}-{}-{}-{}.part",
-        ready.active.recording_id,
-        ready.capture_sha256,
-        std::process::id(),
-        attempt
+        ".recording-{}-{}-{}.part",
+        ready.active.recording_id, ready.capture_sha256, attempt
     ));
     if let Ok(metadata) = fs::symlink_metadata(&temporary_path) {
         if !metadata.is_file() || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
@@ -1254,48 +1332,36 @@ fn publish_recording_capture(
         .map_err(|error| format!("seal recording publication part: {error}"))?;
     drop(temporary);
 
+    let mut sealed_part = OpenOptions::new()
+        .read(true)
+        // The retained handle prevents writers. FILE_SHARE_DELETE permits this
+        // owner to atomically rename the exact opened object below.
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_DELETE)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(&temporary_path)
+        .map_err(|error| format!("open sealed recording publication part: {error}"))?;
+    let sealed_part_identity = recording_file_identity(&sealed_part)?;
+    let (part_sha256, part_bytes) = hash_open_recording(&mut sealed_part, cancel, deadline)?;
+    if part_sha256 != ready.capture_sha256 || part_bytes != ready.size_bytes {
+        return Err("sealed recording publication part disagrees with source evidence".into());
+    }
+
     check_finalization_control(cancel, deadline)?;
     let final_path = media_root.join(format!("{}.ts", ready.capture_sha256));
-    let mut published_new = false;
-    if final_path.exists() {
-        fs::remove_file(&temporary_path)
-            .map_err(|error| format!("remove duplicate recording publication: {error}"))?;
-    } else {
-        fs::rename(&temporary_path, &final_path)
-            .map_err(|error| format!("publish recording media atomically: {error}"))?;
-        published_new = true;
-    }
+    let published_new = publish_recording_part(&temporary_path, &final_path)?;
     drop(temporary_guard);
-    check_finalization_control(cancel, deadline).inspect_err(|_| {
-        if published_new {
-            let _ = fs::remove_file(&final_path);
-        }
-    })?;
     let mut final_file = open_recording_file_no_follow(&final_path)?;
-    let (final_sha256, final_bytes) = hash_open_recording(&mut final_file, cancel, deadline)?;
-    if final_sha256 != ready.capture_sha256 || final_bytes != ready.size_bytes {
-        if published_new {
-            let _ = fs::remove_file(&final_path);
+    if published_new {
+        if recording_file_identity(&final_file)? != sealed_part_identity {
+            return Err("published recording media identity changed during atomic rename".into());
         }
-        return Err("published recording media disagrees with sealed capture evidence".into());
+    } else {
+        let (final_sha256, final_bytes) = hash_open_recording(&mut final_file, cancel, deadline)?;
+        if final_sha256 != ready.capture_sha256 || final_bytes != ready.size_bytes {
+            return Err("published recording media disagrees with sealed capture evidence".into());
+        }
     }
-    check_finalization_control(cancel, deadline).inspect_err(|_| {
-        if published_new {
-            let _ = fs::remove_file(&final_path);
-        }
-    })?;
-    let metadata = validate_media(&final_path)
-        .map_err(|error| format!("validate published recording media: {error:?}"))?;
-    check_finalization_control(cancel, deadline).inspect_err(|_| {
-        if published_new {
-            let _ = fs::remove_file(&final_path);
-        }
-    })?;
-    let decoded_duration_ms = metadata.duration_ns / 1_000_000;
-    if decoded_duration_ms == 0 || decoded_duration_ms.abs_diff(ready.captured_duration_ms) > 5_000
-    {
-        return Err("published recording duration disagrees with worker evidence".into());
-    }
+    drop(sealed_part);
     Ok(PublishedRecordingAsset {
         asset: MediaAsset {
             asset_id: ready.capture_sha256.clone(),
@@ -1306,7 +1372,6 @@ fn publish_recording_capture(
         _recording_ancestry: recording_ancestry,
         _media_ancestry: media_ancestry,
         _final_file: final_file,
-        newly_published: published_new,
     })
 }
 
@@ -4194,7 +4259,7 @@ impl ChannelController {
         now_unix_ms: i64,
     ) -> Result<(), OrchestrationError> {
         if let Err(_error) = self.verify_recording_dependencies(store, recording) {
-            published.cleanup_uncommitted();
+            published.release_uncommitted();
             return Self::fail_recording(
                 store,
                 recording,
@@ -4206,7 +4271,7 @@ impl ChannelController {
         let schedule = match store.read_schedule_item(&recording.definition.schedule_item_id) {
             Ok(Some(schedule)) => schedule,
             Ok(None) | Err(_) => {
-                published.cleanup_uncommitted();
+                published.release_uncommitted();
                 return Self::fail_recording(
                     store,
                     recording,
@@ -4226,7 +4291,7 @@ impl ChannelController {
         let captured_duration_ms = match i64::try_from(ready.captured_duration_ms) {
             Ok(value) => value,
             Err(_) => {
-                published.cleanup_uncommitted();
+                published.release_uncommitted();
                 return Self::fail_recording(
                     store,
                     recording,
@@ -4247,7 +4312,7 @@ impl ChannelController {
         }) {
             Ok(outcome) => outcome,
             Err(error) => {
-                published.cleanup_uncommitted();
+                published.release_uncommitted();
                 let _ = Self::fail_recording(
                     store,
                     recording,
@@ -4281,7 +4346,7 @@ impl ChannelController {
             )
             .is_err()
         {
-            published.cleanup_uncommitted();
+            published.release_uncommitted();
             return Self::fail_recording(
                 store,
                 recording,
@@ -4313,20 +4378,11 @@ impl ChannelController {
                 "Scheduled recording finalizer identity disagreed with durable authority.",
             );
         }
-        if Instant::now() >= task.deadline {
-            task.cancel_and_join().ok();
-            return Self::fail_recording(
-                store,
-                recording,
-                now_unix_ms,
-                "Scheduled recording finalization exceeded its monotonic deadline.",
-            );
-        }
         match task.result.try_recv() {
             Ok(Ok(published)) => {
                 let join_result = task.join();
                 if let Err(error) = join_result {
-                    published.cleanup_uncommitted();
+                    published.release_uncommitted();
                     return Self::fail_recording(
                         store,
                         recording,
@@ -4361,8 +4417,29 @@ impl ChannelController {
                 )
             }
             Err(mpsc::TryRecvError::Empty) => {
-                self.recording_finalization = Some(task);
-                Ok(())
+                if Instant::now() < task.deadline {
+                    self.recording_finalization = Some(task);
+                    return Ok(());
+                }
+                // The worker may cross publication and send its result between
+                // try_recv and cancellation. Join and drain before deciding
+                // that the deadline failed, so an exact completed publication
+                // is either committed or explicitly released here.
+                match task.cancel_join_and_receive() {
+                    Ok(Ok(published)) => self.complete_published_recording(
+                        store,
+                        recording,
+                        &task.ready,
+                        published,
+                        now_unix_ms,
+                    ),
+                    Ok(Err(_)) | Err(_) => Self::fail_recording(
+                        store,
+                        recording,
+                        now_unix_ms,
+                        "Scheduled recording finalization exceeded its monotonic deadline.",
+                    ),
+                }
             }
         }
     }
@@ -4486,7 +4563,7 @@ impl ChannelController {
         let Some(mut task) = self.recording_finalization.take() else {
             return Ok(());
         };
-        let join_error = task.cancel_and_join().err();
+        let finalizer_result = task.cancel_join_and_receive();
         let recording = store
             .read_scheduled_recording(&task.recording_id)
             .map_err(OrchestrationError::Storage)?;
@@ -4495,20 +4572,40 @@ impl ChannelController {
                 "scheduled recording finalization authority disappeared during shutdown".into(),
             ));
         };
-        if matches!(recording.lifecycle, RecordingLifecycle::Finalizing { .. }) {
-            Self::fail_recording(
-                store,
-                &recording,
-                now_unix_ms,
-                if join_error.is_some() {
-                    "Scheduled recording finalizer failed during shutdown."
-                } else {
-                    "Scheduled recording finalization was cancelled during shutdown."
-                },
-            )?;
-        }
-        if let Some(error) = join_error {
-            return Err(OrchestrationError::Storage(error));
+        match finalizer_result {
+            Ok(Ok(published))
+                if matches!(recording.lifecycle, RecordingLifecycle::Finalizing { .. }) =>
+            {
+                self.complete_published_recording(
+                    store,
+                    &recording,
+                    &task.ready,
+                    published,
+                    now_unix_ms,
+                )?;
+            }
+            Ok(Ok(published)) => published.release_uncommitted(),
+            Ok(Err(_)) => {
+                if matches!(recording.lifecycle, RecordingLifecycle::Finalizing { .. }) {
+                    Self::fail_recording(
+                        store,
+                        &recording,
+                        now_unix_ms,
+                        "Scheduled recording finalization was cancelled during shutdown.",
+                    )?;
+                }
+            }
+            Err(error) => {
+                if matches!(recording.lifecycle, RecordingLifecycle::Finalizing { .. }) {
+                    Self::fail_recording(
+                        store,
+                        &recording,
+                        now_unix_ms,
+                        "Scheduled recording finalizer failed during shutdown.",
+                    )?;
+                }
+                return Err(OrchestrationError::Storage(error));
+            }
         }
         Ok(())
     }
@@ -5631,15 +5728,16 @@ fn replay_scheduled_take_journal(
 mod tests {
     use super::{
         ActiveRecordingCapture, CaptionCaptureTiming, CgSnapshotState, OrchestrationError,
-        OutputExpectation, ReadyRecordingCapture, RecordingFinalizationTask,
-        caption_capture_timing, caption_miss_reason_for_attempt_failure,
+        OutputExpectation, PublishedRecordingAsset, ReadyRecordingCapture,
+        RecordingFinalizationTask, caption_capture_timing, caption_miss_reason_for_attempt_failure,
         capture_duration_for_sample, cleanup_orphan_output_proof_artifacts, due_caption_cues,
         expire_due_bulletins, generate_live_arm_token, hash_capture, is_abort_confirmation,
         lease_renewal_due, managed_cg_image_root, observe_asrun_projection_alert_failure,
         observe_caption_cue_misses, on_air_source_started_at, promote_caption_proof_artifact,
-        proof_artifact_path, proof_bindings_match, ready_duration_is_bounded,
-        resolve_asrun_projection_alert_after_catch_up, resolve_caption_cue_miss_after_admission,
-        resolved_snapshot_to_protocol, stalled_required_output,
+        proof_artifact_path, proof_bindings_match, publish_recording_part,
+        ready_duration_is_bounded, resolve_asrun_projection_alert_after_catch_up,
+        resolve_caption_cue_miss_after_admission, resolved_snapshot_to_protocol,
+        stalled_required_output,
     };
     use sha2::{Digest, Sha256};
     use station_captions::{
@@ -7832,6 +7930,122 @@ mod tests {
             task.join.is_none(),
             "cancellation must consume the join handle"
         );
+    }
+
+    #[test]
+    fn concurrent_recording_publication_preserves_the_existing_winner() {
+        let root = database_path("recording-publication-race").with_extension("dir");
+        std::fs::create_dir_all(&root).unwrap();
+        let temporary_path = root.join("owned-attempt.part");
+        let final_path = root.join("content-hash.ts");
+        std::fs::write(&temporary_path, b"same exact recording bytes").unwrap();
+        std::fs::write(&final_path, b"same exact recording bytes").unwrap();
+
+        publish_recording_part(&temporary_path, &final_path).unwrap();
+
+        assert!(
+            !temporary_path.exists(),
+            "only the losing owned part is removed"
+        );
+        assert_eq!(
+            std::fs::read(&final_path).unwrap(),
+            b"same exact recording bytes",
+            "the concurrently published global object remains authoritative"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn releasing_uncommitted_recording_never_deletes_global_content() {
+        let root = database_path("recording-publication-release").with_extension("dir");
+        std::fs::create_dir_all(&root).unwrap();
+        let final_path = root.join("content-hash.ts");
+        std::fs::write(&final_path, b"globally adoptable recording bytes").unwrap();
+        let final_file = std::fs::File::open(&final_path).unwrap();
+        let published = PublishedRecordingAsset {
+            asset: MediaAsset {
+                asset_id: "a".repeat(64),
+                media_path: final_path.to_string_lossy().into_owned(),
+                duration_ms: 1,
+                readiness: AssetReadiness::Ready,
+            },
+            _recording_ancestry: Vec::new(),
+            _media_ancestry: Vec::new(),
+            _final_file: final_file,
+        };
+
+        published.release_uncommitted();
+
+        assert!(
+            final_path.exists(),
+            "a recording failure cannot delete a global content-addressed object"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn cancellation_joins_and_drains_a_publication_that_won_the_race() {
+        let root = database_path("recording-publication-drain").with_extension("dir");
+        std::fs::create_dir_all(&root).unwrap();
+        let final_path = root.join("content-hash.ts");
+        std::fs::write(&final_path, b"completed recording bytes").unwrap();
+        let final_file = std::fs::File::open(&final_path).unwrap();
+        let published = PublishedRecordingAsset {
+            asset: MediaAsset {
+                asset_id: "b".repeat(64),
+                media_path: final_path.to_string_lossy().into_owned(),
+                duration_ms: 1,
+                readiness: AssetReadiness::Ready,
+            },
+            _recording_ancestry: Vec::new(),
+            _media_ancestry: Vec::new(),
+            _final_file: final_file,
+        };
+        let cancel = Arc::new(AtomicBool::new(false));
+        let worker_cancel = Arc::clone(&cancel);
+        let (sender, result) = mpsc::channel();
+        let join = thread::spawn(move || {
+            while !worker_cancel.load(Ordering::Acquire) {
+                thread::yield_now();
+            }
+            sender.send(Ok(published)).unwrap();
+        });
+        let active = ActiveRecordingCapture {
+            recording_id: "22222222-2222-4222-8222-222222222222".into(),
+            output_index: 0,
+            sink_id: "sink".into(),
+            duration_ms: 60_000,
+            max_bytes: 1_000_000,
+            artifact_relative_path: "22222222-2222-4222-8222-222222222222.ts".into(),
+            worker_instance_id: "worker".into(),
+            start_worker_sequence: 1,
+            graph_revision: 1,
+        };
+        let ready = ReadyRecordingCapture {
+            active,
+            terminal_worker_sequence: 2,
+            size_bytes: 1,
+            capture_sha256: "a".repeat(64),
+            captured_duration_ms: 1,
+        };
+        let mut task = RecordingFinalizationTask {
+            recording_id: ready.active.recording_id.clone(),
+            ready,
+            result,
+            cancel,
+            deadline: Instant::now() + Duration::from_secs(30),
+            join: Some(join),
+        };
+
+        let drained = task.cancel_join_and_receive().unwrap().unwrap();
+        drained.release_uncommitted();
+
+        assert!(
+            task.join.is_none(),
+            "the worker is joined before result use"
+        );
+        assert!(final_path.exists(), "draining never deletes global content");
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
