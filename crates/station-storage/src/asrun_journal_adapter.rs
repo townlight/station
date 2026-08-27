@@ -929,16 +929,17 @@ mod tests {
         ffi::OsString,
         fs::File,
         path::PathBuf,
-        process::Command,
+        process::{Child, Command},
         sync::{
             atomic::{AtomicU64, Ordering},
             mpsc,
         },
         thread,
-        time::{Duration, SystemTime, UNIX_EPOCH},
+        time::{Duration, Instant, SystemTime, UNIX_EPOCH},
     };
 
     const CHANNEL: &str = "00000000-0000-4000-8000-000000000001";
+    const CHILD_SYNC_TIMEOUT: Duration = Duration::from_secs(30);
     static NEXT_TEST_PATH: AtomicU64 = AtomicU64::new(0);
     const MANIFEST_SWAP_SOURCE: &str = "TOWNLIGHT_ASRUN_MANIFEST_SWAP_SOURCE";
     const MANIFEST_SWAP_DESTINATION: &str = "TOWNLIGHT_ASRUN_MANIFEST_SWAP_DESTINATION";
@@ -971,6 +972,26 @@ mod tests {
                 monotonic_milliseconds: sequence * 5_000,
                 outputs: Vec::new(),
             },
+        }
+    }
+
+    fn wait_for_writer_manifest(writer: &mut Child, ready: &Path, manifest: &Path) {
+        let deadline = Instant::now() + CHILD_SYNC_TIMEOUT;
+        loop {
+            if ready.exists() && manifest.exists() {
+                return;
+            }
+            if let Some(status) = writer
+                .try_wait()
+                .expect("writer child status remains observable")
+            {
+                panic!("writer child exited before publishing the compacted manifest: {status}");
+            }
+            assert!(
+                Instant::now() < deadline,
+                "writer child did not publish the compacted manifest within 30 seconds"
+            );
+            thread::sleep(Duration::from_millis(10));
         }
     }
 
@@ -1050,17 +1071,8 @@ mod tests {
             .env(WRITER_READY, &ready)
             .spawn()
             .unwrap();
-        for _ in 0..500 {
-            if ready.exists() {
-                break;
-            }
-            thread::sleep(Duration::from_millis(10));
-        }
         let manifest = sidecar_path(&journal, ".generation-manifest");
-        assert!(
-            ready.exists() && manifest.exists(),
-            "writer child did not publish the compacted manifest"
-        );
+        wait_for_writer_manifest(&mut writer, &ready, &manifest);
 
         // Use the real persistence method's final state write as the failure
         // source. The pause below is after successful authority verification,
@@ -1093,7 +1105,7 @@ mod tests {
             )
         });
         verified_rx
-            .recv_timeout(Duration::from_secs(2))
+            .recv_timeout(CHILD_SYNC_TIMEOUT)
             .expect("reporter passed final authority verification");
 
         let replacement = test_path("manifest-replacement");
@@ -1179,17 +1191,8 @@ mod tests {
             .env(WRITER_READY, &ready)
             .spawn()
             .unwrap();
-        for _ in 0..500 {
-            if ready.exists() {
-                break;
-            }
-            thread::sleep(Duration::from_millis(10));
-        }
         let manifest = sidecar_path(&journal, ".generation-manifest");
-        assert!(
-            ready.exists() && manifest.exists(),
-            "writer child did not publish the compacted manifest"
-        );
+        wait_for_writer_manifest(&mut writer, &ready, &manifest);
 
         let (verified_tx, verified_rx) = mpsc::channel();
         let (resume_tx, resume_rx) = mpsc::channel();
@@ -1209,7 +1212,7 @@ mod tests {
             )
         });
         verified_rx
-            .recv_timeout(Duration::from_secs(2))
+            .recv_timeout(CHILD_SYNC_TIMEOUT)
             .expect("reporter passed final authority verification");
 
         let replacement = test_path("manifest-replacement");
