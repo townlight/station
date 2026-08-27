@@ -40,6 +40,13 @@ pub struct OttCatalogHistoryEntry {
     pub occurred_at_unix_ms: i64,
 }
 
+struct OttPlaybackState {
+    last_event: String,
+    last_position: u64,
+    last_observed: i64,
+    last_beacon_id: String,
+}
+
 impl StationStore {
     pub(crate) fn initialize_ott_schema(&self) -> Result<(), String> {
         self.execute(
@@ -403,6 +410,12 @@ impl StationStore {
                             .map_err(|_| "OTT playback state position is invalid".to_string())?;
                     let last_observed = unsafe { sqlite3_column_int64(state.raw, 2) };
                     let last_beacon_id = column_text(state.raw, 3)?;
+                    let state_snapshot = OttPlaybackState {
+                        last_event: last_event.clone(),
+                        last_position,
+                        last_observed,
+                        last_beacon_id: last_beacon_id.clone(),
+                    };
                     if last_observed < 0
                         || stored.observed_at_unix_ms < last_observed
                         || !replayed_beacon_is_reflected(&stored, &last_event, last_position)
@@ -414,10 +427,7 @@ impl StationStore {
                         &old_session,
                         &session,
                         &capability,
-                        &last_event,
-                        last_position,
-                        last_observed,
-                        &last_beacon_id,
+                        &state_snapshot,
                     )?;
                     return Ok(PlaybackBeaconResponse {
                         receipt: PlaybackBeaconReceipt {
@@ -482,16 +492,18 @@ impl StationStore {
                 .map_err(|_| "OTT playback state position is invalid".to_string())?;
             let last_observed = unsafe { sqlite3_column_int64(state.raw, 2) };
             let last_beacon_id = column_text(state.raw, 3)?;
+            let state_snapshot = OttPlaybackState {
+                last_event: last_event.clone(),
+                last_position,
+                last_observed,
+                last_beacon_id: last_beacon_id.clone(),
+            };
             validate_state_matches_latest_beacon(
                 self,
                 &beacon.session_id,
                 &session,
                 &capability,
-                &last_event,
-                u64::try_from(unsafe { sqlite3_column_int64(state.raw, 1) })
-                    .map_err(|_| "OTT playback state position is invalid".to_string())?,
-                last_observed,
-                &last_beacon_id,
+                &state_snapshot,
             )?;
             let event_name = match beacon.event {
                 PlaybackBeaconEvent::Started => "started",
@@ -660,10 +672,7 @@ fn validate_state_matches_latest_beacon(
     session_id: &str,
     session: &PlaybackSessionAuthority,
     capability: &str,
-    last_event: &str,
-    last_position: u64,
-    last_observed: i64,
-    last_beacon_id: &str,
+    state: &OttPlaybackState,
 ) -> Result<(), OttAuthorityError> {
     let statement = store.prepare(
         "SELECT beacon_id,beacon_json FROM ott_playback_beacons WHERE session_id=?1 ORDER BY rowid DESC LIMIT 1",
@@ -671,10 +680,10 @@ fn validate_state_matches_latest_beacon(
     let session_id_c = c_string(session_id, "OTT session identity")?;
     bind_text(store.database, statement.raw, 1, &session_id_c)?;
     if unsafe { sqlite3_step(statement.raw) } == SQLITE_DONE {
-        if last_event == "none"
-            && last_position == 0
-            && last_observed == session.issued_at_unix_ms
-            && last_beacon_id.is_empty()
+        if state.last_event == "none"
+            && state.last_position == 0
+            && state.last_observed == session.issued_at_unix_ms
+            && state.last_beacon_id.is_empty()
         {
             return Ok(());
         }
@@ -703,11 +712,11 @@ fn validate_state_matches_latest_beacon(
             &format!("{:x}", Sha256::digest(capability.as_bytes())),
             &session.server_session_digest,
         )
-        || latest.position_ms != last_position
-        || latest.observed_at_unix_ms != last_observed
-        || !replayed_beacon_is_reflected(&latest, last_event, last_position)
-        || event_name(latest.event) != last_event
-        || last_beacon_id != beacon_id
+        || latest.position_ms != state.last_position
+        || latest.observed_at_unix_ms != state.last_observed
+        || !replayed_beacon_is_reflected(&latest, &state.last_event, state.last_position)
+        || event_name(latest.event) != state.last_event
+        || state.last_beacon_id != beacon_id
     {
         return Err(OttAuthorityError::Corrupt);
     }
