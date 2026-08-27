@@ -2,7 +2,11 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 extern crate self as station_storage;
 
+mod automation_execution_authority;
 mod transport_executor;
+pub use automation_execution_authority::{
+    AutomationExecutionJobRecord, AutomationExecutionJobState,
+};
 use std::ffi::{CStr, CString, c_char, c_int, c_longlong, c_void};
 use std::os::windows::fs::MetadataExt;
 use std::path::{Component, Path, PathBuf};
@@ -1386,6 +1390,7 @@ impl StationStore {
         store.initialize_caption_egress_proof_schema()?;
         store.initialize_caption_egress_job_schema()?;
         store.initialize_automation_policy_schema()?;
+        store.initialize_automation_execution_schema()?;
         store.initialize_publishing_authority_schema()?;
         store.initialize_custom_metadata_schema()?;
         store.initialize_schedule_automation_schema()?;
