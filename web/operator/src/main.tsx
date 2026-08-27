@@ -520,7 +520,7 @@ function Overview({ station, dashboard, channels, runtime, onNavigate }: { stati
     <section className="split-grid">
       <article className="panel">
         <div className="panel-head"><div><p className="eyebrow">Air chain</p><h2>Channel status</h2></div><button className="text-button" onClick={() => onNavigate("channels")}>Manage channels →</button></div>
-        {channels.length === 0 ? <Empty title="No channels configured" detail="Add the station’s first loopback, headend, or proof output." action="Configure channel" onAction={() => onNavigate("channels")} /> : <div className="row-list">{channels.slice(0, 5).map((channel) => <div className="data-row" key={channel.channel_id}><div className="signal-icon">◉</div><div><strong>{channel.display_name}</strong><small>{channel.output_sinks.filter((sink) => sink.enabled).map((sink) => sink.destination).join(" · ")}</small></div><StatusPill status={channel.enabled ? "enabled" : "disabled"} /></div>)}</div>}
+        {channels.length === 0 ? <Empty title="No channels configured" detail="Add the station’s first loopback, headend, or proof output." action="Configure channel" onAction={() => onNavigate("channels")} /> : <div className="row-list">{channels.slice(0, 5).map((channel) => <div className="data-row" key={channel.channel_id}><div className="signal-icon" aria-hidden="true">◉</div><div><strong>{channel.display_name}</strong><small>{channel.output_sinks.filter((sink) => sink.enabled).map((sink) => sink.destination).join(" · ")}</small></div><StatusPill status={channel.enabled ? "enabled" : "disabled"} /></div>)}</div>}
       </article>
       <article className="panel">
         <div className="panel-head"><div><p className="eyebrow">Media pipeline</p><h2>Recent ingest</h2></div><button className="text-button" onClick={() => onNavigate("media")}>Open library →</button></div>
@@ -532,7 +532,7 @@ function Overview({ station, dashboard, channels, runtime, onNavigate }: { stati
 
 function Empty({ title, detail, action, onAction }: { title: string; detail: string; action?: string; onAction?: () => void }) {
   const hasAction = Boolean(action && onAction);
-  return <div className="empty"><div className="empty-orbit" aria-hidden="true">+</div><strong>{title}</strong><p>{detail}</p>{hasAction && <button className="secondary" onClick={onAction}>{action}</button>}</div>;
+  return <div className="empty"><div className="empty-orbit" aria-hidden="true">+</div><strong>{title}</strong><p>{detail}</p>{hasAction && <button type="button" className="secondary" onClick={onAction}>{action}</button>}</div>;
 }
 
 function Media({ dashboard, onRefresh }: { dashboard: Dashboard | null; onRefresh: () => Promise<void> }) {

@@ -412,7 +412,7 @@ function CgError({ error, onRetry }: { error: string; onRetry: () => void }) {
 }
 
 function CgEmpty({ title, detail }: { title: string; detail: string }) {
-  return <div className="cg-empty"><div className="empty-orbit">+</div><strong>{title}</strong><p>{detail}</p></div>;
+  return <div className="cg-empty"><div className="empty-orbit" aria-hidden="true">+</div><strong>{title}</strong><p>{detail}</p></div>;
 }
 
 function MutationNotice({ children = "Editing is read-only in this slice." }: { children?: ReactNode }) {

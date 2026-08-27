@@ -30,6 +30,27 @@ test("keyboard focus and mobile navigation targets remain visible and operable",
   assert.match(styles, /\.cg-timeline code \{ color:#4f6c62; \}/);
   assert.match(styles, /\.commission-wizard-rail button>span \{ color:#4a6158; \}/);
   assert.match(styles, /\.commission-blocked \.commission-check-mark \{ color:#91332f; \}/);
+  assert.match(styles, /\.text-button \{ min-width:44px; min-height:44px;/);
+  assert.match(styles, /label small \{ color:#5d746b;/);
+  assert.match(styles, /\.mobile-nav \{ display:flex; overflow-x:auto;/);
+  assert.match(styles, /\.mobile-nav button \{ flex:0 0 72px; min-height:56px;/);
+});
+
+test("mobile navigation exposes the primary route set and CG entry without a clipped grid", () => {
+  assert.match(shell, /<nav className="mobile-nav" aria-label="Station screens">/);
+  assert.match(shell, /\[\.\.\.nav, \{ id: "cg-moderation"/);
+  assert.match(shell, /aria-current=\{selected \? "page" : undefined\}/);
+});
+
+test("later CG declarations cannot shrink text actions below the enhanced 44px target", () => {
+  const rules = [...styles.matchAll(/([^{}]+)\{([^{}]*)\}/g)]
+    .filter((match) => match[1].split(",").some((selector) => selector.includes(".text-button")));
+  const explicitMinimums = rules.flatMap((match) =>
+    [...match[2].matchAll(/min-(?:width|height):([0-9]+)px/g)].map((value) => Number(value[1])),
+  );
+  assert.ok(explicitMinimums.length >= 4, "expected shared and CG-specific target declarations");
+  assert.ok(explicitMinimums.every((value) => value >= 44), `text action override below 44px: ${explicitMinimums.join(", ")}`);
+  assert.match(styles, /\.cg-inline-actions \.secondary,\.cg-zone-dim \.text-button \{ min-width:44px; min-height:44px;/);
 });
 
 test("S20 keeps dense CG controls reflowable and contrast-safe", () => {
