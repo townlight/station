@@ -2010,7 +2010,7 @@ fn open_nas_temp_relative(root: &File, leaf: &std::ffi::OsStr) -> Result<File, S
     let status = unsafe {
         NtCreateFile(
             &mut handle,
-            GENERIC_READ | GENERIC_WRITE | 0x0001_0000,
+            GENERIC_READ | GENERIC_WRITE | 0x0001_0000 | 0x0010_0000,
             &attributes,
             &mut iosb,
             std::ptr::null(),
@@ -2070,7 +2070,7 @@ fn open_nas_final_relative(root: &File, leaf: &std::ffi::OsStr) -> Result<Option
     let status = unsafe {
         NtCreateFile(
             &mut handle,
-            GENERIC_READ,
+            GENERIC_READ | 0x0010_0000,
             &attributes,
             &mut iosb,
             std::ptr::null(),
@@ -2146,15 +2146,21 @@ fn hash_publish_handle_until(
 
 #[cfg(windows)]
 fn rename_nas_temp_from_handle(file: &File, destination: &Path, root: &File) -> Result<(), String> {
-    use windows_sys::Win32::Storage::FileSystem::{
-        FILE_RENAME_INFO, FileRenameInfo, SetFileInformationByHandle,
+    use windows_sys::Wdk::Storage::FileSystem::{
+        FILE_RENAME_INFORMATION, FileRenameInformation, NtSetInformationFile,
     };
+    use windows_sys::Win32::Foundation::STATUS_SUCCESS;
+    use windows_sys::Win32::System::IO::IO_STATUS_BLOCK;
     let name = destination
         .file_name()
         .ok_or("NAS destination leaf is unavailable")?
         .encode_wide()
         .collect::<Vec<_>>();
-    let header_bytes = std::mem::offset_of!(FILE_RENAME_INFO, FileName);
+    // Use the native rename primitive: unlike the Win32 convenience wrapper,
+    // NtSetInformationFile applies RootDirectory to the retained directory
+    // handle and therefore never reparses the configured path during the
+    // final transition.
+    let header_bytes = std::mem::offset_of!(FILE_RENAME_INFORMATION, FileName);
     let info_bytes = header_bytes
         .checked_add(
             name.len()
@@ -2168,7 +2174,7 @@ fn rename_nas_temp_from_handle(file: &File, destination: &Path, root: &File) -> 
         .ok_or("NAS destination path is too long")?
         / std::mem::size_of::<usize>();
     let mut info = vec![0_usize; words];
-    let rename = info.as_mut_ptr().cast::<FILE_RENAME_INFO>();
+    let rename = info.as_mut_ptr().cast::<FILE_RENAME_INFORMATION>();
     // ReplaceIfExists is deliberately false: a pre-existing destination or
     // a leaf created after the initial check must make the operation fail.
     unsafe {
@@ -2177,15 +2183,17 @@ fn rename_nas_temp_from_handle(file: &File, destination: &Path, root: &File) -> 
         (*rename).FileNameLength = u32::try_from(name.len() * std::mem::size_of::<u16>())
             .map_err(|_| "NAS destination path is too long")?;
         std::ptr::copy_nonoverlapping(name.as_ptr(), (*rename).FileName.as_mut_ptr(), name.len());
-        if SetFileInformationByHandle(
+        let mut iosb = IO_STATUS_BLOCK::default();
+        let status = NtSetInformationFile(
             file.as_raw_handle(),
-            FileRenameInfo,
+            &mut iosb,
             rename.cast(),
             info_length,
-        ) == 0
-        {
+            FileRenameInformation,
+        );
+        if status != STATUS_SUCCESS {
             return Err(format!(
-                "NAS atomic finalization failed: {}",
+                "NAS atomic finalization failed: NTSTATUS 0x{status:08x} ({})",
                 std::io::Error::last_os_error()
             ));
         }

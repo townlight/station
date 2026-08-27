@@ -17,14 +17,16 @@ local drive or genuine UNC server/share root that must already exist and publish
 configured destination `<sha256>.mp4`; it rejects Win32/device aliases, never follows reparse points,
 creates no directories, and never overwrites an existing destination.
 
-The NAS adapter validates the complete pre-existing root ancestry with no-follow metadata,
-retains no-delete directory and source-file handles, copies only from the retained source handle,
-and hashes the exact bytes before and after a durable flush. A unique job-owned temporary file is
+The NAS adapter validates the complete pre-existing root ancestry with no-follow metadata and
+retains the validated directory handles for identity checks and handle-relative leaf operations;
+sharing flags are not treated as a guarantee against an external directory rename. It copies only
+from the retained source handle and hashes the exact bytes before and after a durable flush. A unique job-owned temporary file is
 created with `CREATE_NEW`; failures cancel at heartbeat/deadline boundaries and remove that exact
 temporary handle. Synchronous SMB copy/sync/rename runs in a separately installed helper contained
 by a kill-on-close Windows Job Object; the controller drains its bounded result while it runs,
 force-terminates and reaps it on every cancellation/deadline/failure path, and verifies the helper
-hash against the active installed manifest before launch. Finalization uses `FileRenameInfo` with
+hash against the active installed manifest before launch. Finalization uses native
+`FileRenameInformation` with
 replacement disabled, so a destination created or substituted by another actor fails closed. A
 successful receipt is only `delivered` for the exact configured root and media hash. If the controller
 loses the helper result after rename, retry opens the final path without following reparse points and
