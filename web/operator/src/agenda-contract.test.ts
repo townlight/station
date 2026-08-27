@@ -7,6 +7,7 @@ import {
   AGENDA_TITLE_MAX_UTF8_BYTES,
   agendaTextByteError,
   isCurrentAgendaRequest,
+  normalizeAgendaTitle,
   utf8ByteLength,
 } from "./agenda-contract.ts";
 
@@ -70,4 +71,21 @@ test("agenda component treats maxLength as convenience and byte guards as author
   assert.match(source, /importByteError/);
   assert.match(source, /disabled=\{busy \|\| !channelId \|\| !!titleByteError\}/);
   assert.match(source, /disabled=\{busy \|\| !!visibleAgenda \|\| !importText\.trim\(\) \|\| !!titleByteError \|\| !!importByteError\}/);
+});
+
+test("agenda title byte authority measures the single transmitted trimmed value", () => {
+  const paddedExact = `  ${"a".repeat(200)} \r\n`;
+  const normalizedExact = normalizeAgendaTitle(paddedExact);
+  assert.equal(normalizedExact, "a".repeat(200));
+  assert.equal(agendaTextByteError(normalizedExact, AGENDA_TITLE_MAX_UTF8_BYTES, "Meeting title"), null);
+
+  const paddedOverflow = `\t${"a".repeat(201)}  `;
+  const normalizedOverflow = normalizeAgendaTitle(paddedOverflow);
+  assert.match(agendaTextByteError(normalizedOverflow, AGENDA_TITLE_MAX_UTF8_BYTES, "Meeting title") ?? "", /201 UTF-8 bytes/);
+
+  const paddedMultibyteExact = `  ${"😀".repeat(50)}  `;
+  assert.equal(utf8ByteLength(normalizeAgendaTitle(paddedMultibyteExact)), 200);
+  assert.equal(agendaTextByteError(normalizeAgendaTitle(paddedMultibyteExact), AGENDA_TITLE_MAX_UTF8_BYTES, "Meeting title"), null);
+  assert.doesNotMatch(source, /title\.trim\(\)/);
+  assert.match(source, /title: normalizedTitle/);
 });

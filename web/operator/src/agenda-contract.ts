@@ -13,6 +13,10 @@ export function utf8ByteLength(value: string): number {
   return utf8Encoder.encode(value).byteLength;
 }
 
+export function normalizeAgendaTitle(value: string): string {
+  return value.trim();
+}
+
 export function agendaTextByteError(value: string, maximum: number, field: string): string | null {
   const actual = utf8ByteLength(value);
   return actual <= maximum
