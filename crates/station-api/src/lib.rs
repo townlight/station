@@ -5,6 +5,7 @@ use std::collections::{BTreeSet, HashMap};
 use std::io::{Read, Write};
 use std::net::UdpSocket;
 use std::net::{TcpListener, TcpStream};
+use std::os::windows::fs::MetadataExt;
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -48,9 +49,11 @@ use station_maintenance::{
     acquire_install_authority_fence, read_verified_candidate_identity,
     read_verified_install_authority,
 };
+use station_media_assets::ingest_media;
 use station_media_lifecycle::{
-    AssetLoudnessAnalysis, AssetReadinessView, IngestJobStatus, IngestSourceKind,
-    LoudnessGateStatus, MediaIngestJob, MissingMediaAlert, ReadinessDashboard, ReadinessState,
+    AssetLoudnessAnalysis, AssetReadinessView, AssetRecoveryAudit, AssetReplacementLink,
+    AssetRetentionPolicy, AssetThumbnail, IngestJobStatus, IngestSourceKind, LoudnessGateStatus,
+    MediaIngestJob, MissingMediaAlert, ReadinessDashboard, ReadinessState, RetentionDisposition,
     TranscodeJobStatus, WatchFolderConfig,
 };
 use station_metadata::{
@@ -1522,6 +1525,37 @@ struct IngestMedia {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct RelinkMissingAssetRequest {
+    source_path: PathBuf,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CreateAssetReplacementRequest {
+    source_path: PathBuf,
+    expected_predecessor_revision: u64,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PutAssetRetentionRequest {
+    permanent: bool,
+    review_after_unix_ms: Option<i64>,
+    legal_hold: bool,
+    expected_revision: u64,
+}
+
+#[derive(Serialize)]
+struct AssetLifecycleResponse {
+    asset_id: String,
+    retention: Option<AssetRetentionPolicy>,
+    replacement: Option<AssetReplacementLink>,
+    thumbnail: Option<AssetThumbnail>,
+    recovery_history: Vec<AssetRecoveryAudit>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct AcknowledgeAlert {
     acknowledged_by: String,
 }
@@ -2494,6 +2528,29 @@ impl Api {
                 if path.starts_with("/api/v1/assets/") && path.ends_with("/readiness") =>
             {
                 self.read_asset_readiness(path)
+            }
+            ("GET", path)
+                if path.starts_with("/api/v1/assets/") && path.ends_with("/lifecycle") =>
+            {
+                self.read_asset_lifecycle(path, actor)
+            }
+            ("GET", path)
+                if path.starts_with("/api/v1/assets/") && path.ends_with("/thumbnail") =>
+            {
+                self.read_asset_thumbnail(path, actor)
+            }
+            ("PUT", path)
+                if path.starts_with("/api/v1/assets/") && path.ends_with("/retention") =>
+            {
+                self.put_asset_retention(path, body, actor)
+            }
+            ("POST", path) if path.starts_with("/api/v1/assets/") && path.ends_with("/relink") => {
+                self.relink_missing_asset(path, body, actor)
+            }
+            ("POST", path)
+                if path.starts_with("/api/v1/assets/") && path.ends_with("/replacements") =>
+            {
+                self.create_asset_replacement(path, body, actor)
             }
             ("GET", path) if path.starts_with("/api/v1/assets/") => self.read_media_asset(path),
             _ => error_response(404, "not_found", "The requested route does not exist."),
@@ -5765,6 +5822,390 @@ impl Api {
             serde_json::to_vec(&asset_readiness_view(&asset, loudness.as_ref()))
                 .expect("serializing asset readiness cannot fail"),
         )
+    }
+
+    fn read_asset_lifecycle(&self, path: &str, actor: Option<&OperatorAccount>) -> ApiResponse {
+        if !is_metadata_reader(actor) {
+            return error_response(
+                403,
+                "media_lifecycle_reader_required",
+                "Reading media lifecycle authority requires an enabled Setup Admin or Meeting Operator account.",
+            );
+        }
+        let Some(asset_id) = asset_lifecycle_path(path, "/lifecycle") else {
+            return error_response(400, "invalid_path", "The media asset identity is invalid.");
+        };
+        if let Err(response) = self.require_lifecycle_asset(asset_id) {
+            return response;
+        }
+        let response = AssetLifecycleResponse {
+            asset_id: asset_id.into(),
+            retention: match self.storage.read_asset_retention_policy(asset_id) {
+                Ok(value) => value,
+                Err(message) => return error_response(500, "storage_error", &message),
+            },
+            replacement: match self.storage.read_asset_replacement_link(asset_id) {
+                Ok(value) => value,
+                Err(message) => return error_response(500, "storage_error", &message),
+            },
+            thumbnail: match self.storage.read_asset_thumbnail(asset_id) {
+                Ok(value) => value,
+                Err(message) => return error_response(500, "storage_error", &message),
+            },
+            recovery_history: match self.storage.list_asset_recovery_history(asset_id, 64) {
+                Ok(value) => value,
+                Err(message) => return error_response(500, "storage_error", &message),
+            },
+        };
+        json_response(
+            200,
+            serde_json::to_vec(&response).expect("serializing lifecycle response cannot fail"),
+        )
+    }
+
+    /// Serves only a server-derived PNG whose content identity is bound to the
+    /// asset thumbnail record. Neither the request nor the durable record
+    /// carries a filesystem path.
+    fn read_asset_thumbnail(&self, path: &str, actor: Option<&OperatorAccount>) -> ApiResponse {
+        if !is_metadata_reader(actor) {
+            return error_response(
+                403,
+                "media_lifecycle_reader_required",
+                "Reading media review evidence requires an enabled Setup Admin or Meeting Operator account.",
+            );
+        }
+        let Some(asset_id) = asset_lifecycle_path(path, "/thumbnail") else {
+            return error_response(400, "invalid_path", "The media asset identity is invalid.");
+        };
+        if let Err(response) = self.require_lifecycle_asset(asset_id) {
+            return response;
+        }
+        let thumbnail = match self.storage.read_asset_thumbnail(asset_id) {
+            Ok(Some(value)) => value,
+            Ok(None) => {
+                return error_response(
+                    404,
+                    "thumbnail_pending",
+                    "Review evidence has not been derived for this asset yet.",
+                );
+            }
+            Err(message) => return error_response(500, "storage_error", &message),
+        };
+        if thumbnail.source_asset_sha256 != asset_id {
+            return error_response(
+                500,
+                "thumbnail_authority_invalid",
+                "Stored review evidence is not bound to this asset.",
+            );
+        }
+        let root = match self.database_path.parent() {
+            Some(parent) => parent.join("media-review"),
+            None => {
+                return error_response(
+                    500,
+                    "managed_root_unavailable",
+                    "The managed review evidence root is unavailable.",
+                );
+            }
+        };
+        let bytes = match read_pinned_thumbnail_bytes(&root, &thumbnail.thumbnail_sha256) {
+            Ok(value) => value,
+            Err(message) => return error_response(500, "thumbnail_evidence_unavailable", &message),
+        };
+        dynamic_response(200, "image/png", bytes)
+            .with_header("Cache-Control", "no-store")
+            .expect("static thumbnail response headers are valid")
+    }
+
+    fn put_asset_retention(
+        &self,
+        path: &str,
+        body: Option<&[u8]>,
+        actor: Option<&OperatorAccount>,
+    ) -> ApiResponse {
+        let Some(actor) = lifecycle_writer(actor) else {
+            return error_response(
+                403,
+                "setup_admin_required",
+                "Changing media retention requires an enabled Setup Admin account.",
+            );
+        };
+        let Some(asset_id) = asset_lifecycle_path(path, "/retention") else {
+            return error_response(400, "invalid_path", "The media asset identity is invalid.");
+        };
+        if let Err(response) = self.require_lifecycle_asset(asset_id) {
+            return response;
+        }
+        let Some(request) = parse_body::<PutAssetRetentionRequest>(body) else {
+            return error_response(400, "invalid_json", "A media retention body is required.");
+        };
+        let occurred_at_unix_ms = match system_time_millis() {
+            Ok(value) => value,
+            Err(message) => return error_response(500, "clock_error", &message),
+        };
+        let revision = match request.expected_revision.checked_add(1) {
+            Some(value) => value,
+            None => {
+                return error_response(
+                    422,
+                    "validation_failed",
+                    "The expected retention revision is invalid.",
+                );
+            }
+        };
+        let disposition = if request.legal_hold {
+            RetentionDisposition::LegalHold
+        } else {
+            RetentionDisposition::Retained
+        };
+        let policy = AssetRetentionPolicy {
+            asset_id: asset_id.into(),
+            revision,
+            permanent: request.permanent,
+            review_after_unix_ms: request.review_after_unix_ms,
+            legal_hold: request.legal_hold,
+            disposition,
+        };
+        match self.storage.write_asset_retention_policy(
+            &policy,
+            request.expected_revision,
+            actor.account_id().as_str(),
+            occurred_at_unix_ms,
+        ) {
+            Ok(policy) => json_response(
+                200,
+                serde_json::to_vec(&policy).expect("serializing retention policy cannot fail"),
+            ),
+            Err(message) if message.contains("conflict") => {
+                error_response(409, "revision_conflict", &message)
+            }
+            Err(message)
+                if message.contains("invalid")
+                    || message.contains("requires")
+                    || message.contains("must") =>
+            {
+                error_response(422, "validation_failed", &message)
+            }
+            Err(message) => error_response(500, "storage_error", &message),
+        }
+    }
+
+    fn relink_missing_asset(
+        &self,
+        path: &str,
+        body: Option<&[u8]>,
+        actor: Option<&OperatorAccount>,
+    ) -> ApiResponse {
+        let Some(actor) = lifecycle_writer(actor) else {
+            return error_response(
+                403,
+                "setup_admin_required",
+                "Relinking managed media requires an enabled Setup Admin account.",
+            );
+        };
+        let Some(asset_id) = asset_lifecycle_path(path, "/relink") else {
+            return error_response(400, "invalid_path", "The media asset identity is invalid.");
+        };
+        let asset = match self.storage.read_media_asset(asset_id) {
+            Ok(Some(asset)) if asset.readiness == AssetReadiness::Missing => asset,
+            Ok(Some(_)) => {
+                return error_response(
+                    409,
+                    "asset_not_missing",
+                    "Only a missing managed asset can be relinked.",
+                );
+            }
+            Ok(None) => {
+                return error_response(404, "asset_not_found", "The media asset does not exist.");
+            }
+            Err(message) => return error_response(500, "storage_error", &message),
+        };
+        let Some(request) = parse_body::<RelinkMissingAssetRequest>(body) else {
+            return error_response(400, "invalid_json", "A candidate source path is required.");
+        };
+        let admitted = match self.admit_lifecycle_source(&request.source_path) {
+            Ok(value) => value,
+            Err(message) => return error_response(422, "media_admission_failed", &message),
+        };
+        if admitted.asset_id != asset.asset_id {
+            return error_response(
+                422,
+                "media_identity_mismatch",
+                "The admitted candidate bytes do not match the missing asset identity.",
+            );
+        }
+        let duration_ms = (admitted.metadata.duration_ns / 1_000_000).max(1);
+        let occurred_at_unix_ms = match system_time_millis() {
+            Ok(value) => value,
+            Err(message) => return error_response(500, "clock_error", &message),
+        };
+        let history = match self.storage.list_asset_recovery_history(asset_id, 256) {
+            Ok(value) => value,
+            Err(message) => return error_response(500, "storage_error", &message),
+        };
+        let revision = match history
+            .last()
+            .map_or(Some(1), |entry| entry.revision.checked_add(1))
+        {
+            Some(value) => value,
+            None => {
+                return error_response(
+                    409,
+                    "recovery_revision_exhausted",
+                    "The recovery history revision is exhausted.",
+                );
+            }
+        };
+        let audit = AssetRecoveryAudit {
+            asset_id: asset_id.into(),
+            revision,
+            recovered_asset_sha256: admitted.asset_id,
+            managed_path: admitted.stored_path.to_string_lossy().into_owned(),
+            byte_count: admitted.size_bytes,
+            duration_ms,
+            changed_by: actor.account_id().as_str().into(),
+            occurred_at_unix_ms,
+        };
+        match self.storage.relink_missing_media_asset(&audit) {
+            Ok(_asset) => json_response(
+                200,
+                serde_json::to_vec(&audit).expect("serializing recovery audit cannot fail"),
+            ),
+            Err(message) if message.contains("missing") || message.contains("raced") => {
+                error_response(409, "asset_state_conflict", &message)
+            }
+            Err(message) => error_response(500, "storage_error", &message),
+        }
+    }
+
+    fn create_asset_replacement(
+        &self,
+        path: &str,
+        body: Option<&[u8]>,
+        actor: Option<&OperatorAccount>,
+    ) -> ApiResponse {
+        let Some(actor) = lifecycle_writer(actor) else {
+            return error_response(
+                403,
+                "setup_admin_required",
+                "Replacing managed media requires an enabled Setup Admin account.",
+            );
+        };
+        let Some(predecessor_asset_id) = asset_lifecycle_path(path, "/replacements") else {
+            return error_response(400, "invalid_path", "The media asset identity is invalid.");
+        };
+        if let Err(response) = self.require_lifecycle_asset(predecessor_asset_id) {
+            return response;
+        }
+        let Some(request) = parse_body::<CreateAssetReplacementRequest>(body) else {
+            return error_response(
+                400,
+                "invalid_json",
+                "A replacement source body is required.",
+            );
+        };
+        let admitted = match self.admit_lifecycle_source(&request.source_path) {
+            Ok(value) => value,
+            Err(message) => return error_response(422, "media_admission_failed", &message),
+        };
+        if admitted.asset_id == predecessor_asset_id {
+            return error_response(
+                422,
+                "replacement_identity_unchanged",
+                "Replacement bytes must create a different immutable media identity.",
+            );
+        }
+        let replacement = MediaAsset {
+            asset_id: admitted.asset_id.clone(),
+            media_path: admitted.stored_path.to_string_lossy().into_owned(),
+            duration_ms: (admitted.metadata.duration_ns / 1_000_000).max(1),
+            readiness: AssetReadiness::Ready,
+        };
+        match self.storage.read_media_asset(&replacement.asset_id) {
+            Ok(None) => {
+                if let Err(message) = self.storage.put_media_asset(&replacement) {
+                    return error_response(500, "storage_error", &message);
+                }
+            }
+            Ok(Some(existing))
+                if existing.readiness == AssetReadiness::Ready
+                    && existing.asset_id == replacement.asset_id => {}
+            Ok(Some(_)) => {
+                return error_response(
+                    409,
+                    "replacement_asset_state_conflict",
+                    "The immutable replacement asset exists but is not ready.",
+                );
+            }
+            Err(message) => return error_response(500, "storage_error", &message),
+        }
+        let occurred_at_unix_ms = match system_time_millis() {
+            Ok(value) => value,
+            Err(message) => return error_response(500, "clock_error", &message),
+        };
+        let link = AssetReplacementLink {
+            predecessor_asset_id: predecessor_asset_id.into(),
+            successor_asset_id: replacement.asset_id.clone(),
+            revision: 1,
+            changed_by: actor.account_id().as_str().into(),
+            occurred_at_unix_ms,
+        };
+        match self
+            .storage
+            .create_asset_replacement_link(&link, request.expected_predecessor_revision)
+        {
+            Ok(()) => json_response(
+                201,
+                serde_json::to_vec(&link).expect("serializing replacement link cannot fail"),
+            ),
+            Err(message)
+                if message.contains("already")
+                    || message.contains("once")
+                    || message.contains("ready") =>
+            {
+                error_response(409, "replacement_conflict", &message)
+            }
+            Err(message) => error_response(500, "storage_error", &message),
+        }
+    }
+
+    fn require_lifecycle_asset(&self, asset_id: &str) -> Result<(), ApiResponse> {
+        match self.storage.read_media_asset(asset_id) {
+            Ok(Some(_)) => Ok(()),
+            Ok(None) => Err(error_response(
+                404,
+                "asset_not_found",
+                "The media asset does not exist.",
+            )),
+            Err(message) => Err(error_response(500, "storage_error", &message)),
+        }
+    }
+
+    fn admit_lifecycle_source(
+        &self,
+        source_path: &Path,
+    ) -> Result<station_media_assets::IngestedAsset, String> {
+        if !source_path.is_absolute() {
+            return Err("the candidate source path must be absolute".into());
+        }
+        ensure_non_reparse_ancestry(source_path).map_err(
+            |_| "the candidate source ancestry contains a reparse point or is unavailable",
+        )?;
+        let metadata = std::fs::symlink_metadata(source_path)
+            .map_err(|error| format!("inspect candidate source: {error}"))?;
+        if !metadata.file_type().is_file()
+            || metadata.len() == 0
+            || metadata.file_attributes() & 0x400 != 0
+        {
+            return Err("the candidate source must be a non-empty regular non-reparse file".into());
+        }
+        let parent = self
+            .database_path
+            .parent()
+            .ok_or("the station data root is unavailable")?;
+        let library = parent.join("media");
+        ingest_media(source_path, library)
+            .map_err(|error| format!("admit candidate source: {error:?}"))
     }
 
     fn put_channel(&self, body: Option<&[u8]>) -> ApiResponse {
@@ -11265,6 +11706,15 @@ fn metadata_writer(
     })
 }
 
+fn lifecycle_writer(actor: Option<&OperatorAccount>) -> Option<&OperatorAccount> {
+    actor.filter(|account| {
+        account.enabled()
+            && account
+                .roles()
+                .contains(&station_auth::OperatorRole::SetupAdmin)
+    })
+}
+
 fn metadata_next_revision(expected_revision: Option<u64>) -> Result<u64, String> {
     match expected_revision {
         Some(revision) => revision
@@ -11766,6 +12216,65 @@ fn asset_caption_tracks_path(path: &str) -> Option<&str> {
         .strip_prefix("/api/v1/assets/")?
         .strip_suffix("/caption-tracks")?;
     is_lowercase_sha256(asset_id).then_some(asset_id)
+}
+
+fn asset_lifecycle_path<'a>(path: &'a str, suffix: &str) -> Option<&'a str> {
+    let asset_id = path.strip_prefix("/api/v1/assets/")?.strip_suffix(suffix)?;
+    is_lowercase_sha256(asset_id).then_some(asset_id)
+}
+
+fn read_pinned_thumbnail_bytes(root: &Path, digest: &str) -> Result<Vec<u8>, String> {
+    const MAX_THUMBNAIL_BYTES: u64 = 8 * 1024 * 1024;
+    if !is_lowercase_sha256(digest) {
+        return Err("thumbnail identity is invalid".into());
+    }
+    ensure_non_reparse_ancestry(root)?;
+    let canonical_root =
+        std::fs::canonicalize(root).map_err(|_| "managed review evidence root is unavailable")?;
+    ensure_non_reparse_ancestry(&canonical_root)?;
+    let path = canonical_root.join(format!("{digest}.png"));
+    let metadata =
+        std::fs::symlink_metadata(&path).map_err(|_| "managed review evidence is unavailable")?;
+    if metadata.file_attributes() & 0x0400 != 0
+        || !metadata.is_file()
+        || metadata.len() == 0
+        || metadata.len() > MAX_THUMBNAIL_BYTES
+    {
+        return Err("managed review evidence is invalid or exceeds its bound".into());
+    }
+    let mut file =
+        std::fs::File::open(&path).map_err(|_| "managed review evidence cannot be opened")?;
+    let handle_metadata = file
+        .metadata()
+        .map_err(|_| "managed review evidence cannot be inspected")?;
+    if !handle_metadata.is_file() || handle_metadata.len() != metadata.len() {
+        return Err("managed review evidence changed before it could be opened".into());
+    }
+    let mut bytes = Vec::with_capacity(handle_metadata.len() as usize);
+    std::io::Read::by_ref(&mut file)
+        .take(MAX_THUMBNAIL_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| "managed review evidence cannot be read")?;
+    if bytes.is_empty() || bytes.len() as u64 != handle_metadata.len() {
+        return Err("managed review evidence changed while it was read".into());
+    }
+    if format!("{:x}", Sha256::digest(&bytes)) != digest {
+        return Err("managed review evidence does not match its recorded identity".into());
+    }
+    Ok(bytes)
+}
+
+fn ensure_non_reparse_ancestry(path: &Path) -> Result<(), String> {
+    let mut current = Some(path);
+    while let Some(candidate) = current {
+        let metadata = std::fs::symlink_metadata(candidate)
+            .map_err(|_| "managed review evidence ancestry is unavailable")?;
+        if metadata.file_attributes() & 0x0400 != 0 {
+            return Err("managed review evidence ancestry contains a reparse point".into());
+        }
+        current = candidate.parent();
+    }
+    Ok(())
 }
 
 fn is_lowercase_sha256(value: &str) -> bool {
@@ -14001,6 +14510,8 @@ fn error_response(status: u16, code: &str, message: &str) -> ApiResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gst::prelude::*;
+    use gstreamer as gst;
     use station_schedule_automation::{
         AssetPredicate, DstApplication, SavedSearchOrder, SourceEvidenceVerifier,
     };
@@ -14034,6 +14545,24 @@ mod tests {
     ];
 
     const TEST_PASSWORD_PHC: &str = "$argon2id$v=19$m=65536,t=3,p=1$c2FsdHNhbHRzYWx0c2FsdA$QUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUE";
+
+    #[test]
+    fn thumbnail_reader_accepts_only_the_content_addressed_managed_png() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("townlight-thumbnail-reader-{nonce}"));
+        std::fs::create_dir_all(&root).unwrap();
+        let digest = format!("{:x}", Sha256::digest(PNG_1X1));
+        std::fs::write(root.join(format!("{digest}.png")), PNG_1X1).unwrap();
+        assert_eq!(
+            read_pinned_thumbnail_bytes(&root, &digest).unwrap(),
+            PNG_1X1
+        );
+        assert!(read_pinned_thumbnail_bytes(&root, "0".repeat(64).as_str()).is_err());
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     fn install_transport_candidate(data: &Path, application: &Path) {
         const VERSION: &str = "0.2.0";
@@ -14249,6 +14778,215 @@ mod tests {
                 readiness,
             })
             .unwrap();
+    }
+
+    fn generate_lifecycle_media_fixture(path: &Path, video_buffers: i32) {
+        gst::init().unwrap();
+        let pipeline = gst::Pipeline::new();
+        let video = gst::ElementFactory::make("videotestsrc")
+            .property("num-buffers", video_buffers)
+            .build()
+            .unwrap();
+        let video_convert = gst::ElementFactory::make("videoconvert").build().unwrap();
+        let video_encoder = gst::ElementFactory::make("openh264enc").build().unwrap();
+        let video_parser = gst::ElementFactory::make("h264parse").build().unwrap();
+        let audio = gst::ElementFactory::make("audiotestsrc")
+            .property("num-buffers", 64_i32)
+            .build()
+            .unwrap();
+        let audio_convert = gst::ElementFactory::make("audioconvert").build().unwrap();
+        let audio_encoder = gst::ElementFactory::make("voaacenc").build().unwrap();
+        let audio_parser = gst::ElementFactory::make("aacparse").build().unwrap();
+        let mux = gst::ElementFactory::make("mpegtsmux").build().unwrap();
+        let sink = gst::ElementFactory::make("filesink")
+            .property("location", path.to_string_lossy().as_ref())
+            .build()
+            .unwrap();
+        pipeline
+            .add_many([
+                &video,
+                &video_convert,
+                &video_encoder,
+                &video_parser,
+                &audio,
+                &audio_convert,
+                &audio_encoder,
+                &audio_parser,
+                &mux,
+                &sink,
+            ])
+            .unwrap();
+        gst::Element::link_many([
+            &video,
+            &video_convert,
+            &video_encoder,
+            &video_parser,
+            &mux,
+            &sink,
+        ])
+        .unwrap();
+        gst::Element::link_many([&audio, &audio_convert, &audio_encoder, &audio_parser, &mux])
+            .unwrap();
+        pipeline.set_state(gst::State::Playing).unwrap();
+        let bus = pipeline.bus().unwrap();
+        for message in bus.iter_timed(gst::ClockTime::from_seconds(15)) {
+            match message.view() {
+                gst::MessageView::Eos(_) => break,
+                gst::MessageView::Error(error) => {
+                    panic!("lifecycle fixture failed: {}", error.error())
+                }
+                _ => {}
+            }
+        }
+        pipeline.set_state(gst::State::Null).unwrap();
+        assert!(path.is_file());
+    }
+
+    #[test]
+    fn media_lifecycle_api_enforces_roles_server_authority_and_isolated_immutable_changes() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("townlight-media-lifecycle-api-{nonce}"));
+        std::fs::create_dir_all(&root).unwrap();
+        let database = root.join("station.db");
+        let recovery_source = root.join("recovery-source.ts");
+        let replacement_source = root.join("replacement-source.ts");
+        generate_lifecycle_media_fixture(&recovery_source, 30);
+        generate_lifecycle_media_fixture(&replacement_source, 31);
+        let seeded =
+            station_media_assets::ingest_media(&recovery_source, root.join("seed")).unwrap();
+        let api = Api::open(&database).unwrap();
+        let admin = test_actor(station_auth::OperatorRole::SetupAdmin);
+        let operator = test_actor_with_account(
+            "eeeeeeee-ffff-4000-8000-111111111111",
+            "meeting.operator",
+            station_auth::OperatorRole::MeetingOperator,
+        );
+        api.storage
+            .put_media_asset(&MediaAsset {
+                asset_id: seeded.asset_id.clone(),
+                media_path: r"C:\missing\original.ts".into(),
+                duration_ms: 1,
+                readiness: AssetReadiness::Missing,
+            })
+            .unwrap();
+        let lifecycle_path = format!("/api/v1/assets/{}/lifecycle", seeded.asset_id);
+        assert_eq!(api.route("GET", &lifecycle_path, None, None).status, 403);
+        assert_eq!(
+            api.route("GET", &lifecycle_path, None, Some(&operator))
+                .status,
+            200
+        );
+
+        let relink_path = format!("/api/v1/assets/{}/relink", seeded.asset_id);
+        let relink_body =
+            serde_json::to_vec(&serde_json::json!({"source_path": recovery_source})).unwrap();
+        assert_eq!(
+            api.route("POST", &relink_path, Some(&relink_body), Some(&operator))
+                .status,
+            403
+        );
+        let before = system_time_millis().unwrap();
+        let recovered = api.route("POST", &relink_path, Some(&relink_body), Some(&admin));
+        assert_eq!(recovered.status, 200);
+        let recovered: serde_json::Value = serde_json::from_slice(&recovered.body).unwrap();
+        assert_eq!(recovered["asset_id"], seeded.asset_id);
+        assert_eq!(recovered["recovered_asset_sha256"], seeded.asset_id);
+        assert_eq!(recovered["changed_by"], admin.account_id().as_str());
+        assert!(recovered["occurred_at_unix_ms"].as_i64().unwrap() >= before);
+        assert_eq!(recovered["byte_count"], seeded.size_bytes);
+        let lifecycle = api.route("GET", &lifecycle_path, None, Some(&operator));
+        let lifecycle: serde_json::Value = serde_json::from_slice(&lifecycle.body).unwrap();
+        assert_eq!(lifecycle["recovery_history"].as_array().unwrap().len(), 1);
+
+        let retention_path = format!("/api/v1/assets/{}/retention", seeded.asset_id);
+        let retention = serde_json::to_vec(&serde_json::json!({"permanent":true,"review_after_unix_ms":null,"legal_hold":false,"expected_revision":0})).unwrap();
+        assert_eq!(
+            api.route("PUT", &retention_path, Some(&retention), Some(&operator))
+                .status,
+            403
+        );
+        assert_eq!(
+            api.route("PUT", &retention_path, Some(&retention), Some(&admin))
+                .status,
+            200
+        );
+        assert_eq!(
+            api.route("PUT", &retention_path, Some(&retention), Some(&admin))
+                .status,
+            409
+        );
+
+        let schedule_item = ScheduleItem {
+            item_id: "11111111-2222-4333-8444-555555555555".into(),
+            revision: 1,
+            channel_id: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee".into(),
+            asset_id: seeded.asset_id.clone(),
+            title: "Recovery isolation".into(),
+            starts_at_unix_ms: 10_000,
+            duration_ms: 1_000,
+            state: ScheduleState::Draft,
+        };
+        api.storage
+            .write_schedule_item(&ScheduleItemWrite {
+                item: schedule_item.clone(),
+                changed_by: admin.account_id().as_str().into(),
+                occurred_at_unix_ms: 1,
+            })
+            .unwrap();
+        let replacement_path = format!("/api/v1/assets/{}/replacements", seeded.asset_id);
+        let replacement_body = serde_json::to_vec(&serde_json::json!({"source_path":replacement_source,"expected_predecessor_revision":0})).unwrap();
+        assert_eq!(
+            api.route(
+                "POST",
+                &replacement_path,
+                Some(&replacement_body),
+                Some(&operator)
+            )
+            .status,
+            403
+        );
+        let replacement = api.route(
+            "POST",
+            &replacement_path,
+            Some(&replacement_body),
+            Some(&admin),
+        );
+        assert_eq!(replacement.status, 201);
+        let replacement: serde_json::Value = serde_json::from_slice(&replacement.body).unwrap();
+        assert_ne!(replacement["successor_asset_id"], seeded.asset_id);
+        assert_eq!(
+            api.storage
+                .read_schedule_item(&schedule_item.item_id)
+                .unwrap()
+                .unwrap(),
+            schedule_item
+        );
+
+        let review_root = root.join("media-review");
+        std::fs::create_dir_all(&review_root).unwrap();
+        let thumbnail_sha256 = format!("{:x}", Sha256::digest(PNG_1X1));
+        std::fs::write(review_root.join(format!("{thumbnail_sha256}.png")), PNG_1X1).unwrap();
+        api.storage
+            .record_asset_thumbnail(&AssetThumbnail {
+                asset_id: seeded.asset_id.clone(),
+                thumbnail_sha256: thumbnail_sha256.clone(),
+                source_asset_sha256: seeded.asset_id.clone(),
+                generated_at_unix_ms: 2,
+                byte_count: PNG_1X1.len() as u64,
+            })
+            .unwrap();
+        let thumbnail_path = format!("/api/v1/assets/{}/thumbnail", seeded.asset_id);
+        assert_eq!(api.route("GET", &thumbnail_path, None, None).status, 403);
+        let thumbnail = api.route("GET", &thumbnail_path, None, Some(&operator));
+        assert_eq!(thumbnail.status, 200);
+        assert_eq!(thumbnail.content_type, "image/png");
+        assert_eq!(thumbnail.body, PNG_1X1);
+
+        drop(api);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

@@ -19,6 +19,7 @@ station-captions.workspace = true
 station-catalog.workspace = true
 station-domain.workspace = true
 station-media-lifecycle.workspace = true
+station-media-assets.workspace = true
 station-maintenance.workspace = true
 station-metadata.workspace = true
 station-readiness.workspace = true

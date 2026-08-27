@@ -14,6 +14,7 @@ import { CatalogAssetEditor } from "./catalog-editor";
 import { ScheduledRecordingsPanel } from "./recordings";
 import { ReportingPanel } from "./reporting";
 import { ScheduleMaterializationCard } from "./schedule-materialization";
+import { MediaLifecyclePanel } from "./media-lifecycle";
 import { channelSchedulePath, shouldApplyMaterializationChannel } from "./schedule-materialization-contract";
 import {
   HeadendProfile,
@@ -539,6 +540,7 @@ function Media({ dashboard, onRefresh }: { dashboard: Dashboard | null; onRefres
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const [captionAsset, setCaptionAsset] = useState<AssetView | null>(null);
+  const [lifecycleAsset, setLifecycleAsset] = useState<AssetView | null>(null);
   const catalogAssetFingerprint = (dashboard?.by_asset ?? [])
     .map((asset) => `${asset.asset_id}\u0000${asset.media_path}`)
     .join("\u0001");
@@ -557,10 +559,11 @@ function Media({ dashboard, onRefresh }: { dashboard: Dashboard | null; onRefres
   return <><header className="page-header"><div><p className="eyebrow">Media lifecycle</p><h1>Managed library</h1><p>Only verified canonical derivatives can become air-ready.</p></div></header>
     <section className="panel import-panel"><div><p className="eyebrow">Import from this station</p><h2>Admit a media file</h2><p className="muted">Use an absolute path on this PC, USB media, or an accessible network share. The original is left untouched.</p></div><form onSubmit={admit} className="inline-form"><label>Absolute source path<input required value={sourcePath} onChange={(event) => setSourcePath(event.target.value)} placeholder="C:\Media\Council Meeting.mp4" /></label><button className="primary" disabled={busy}>{busy ? "Admitting…" : "Import & verify"}</button></form>{message && <div className="notice" role="status">{message}</div>}</section>
     <section className="panel"><div className="panel-head"><div><p className="eyebrow">Air-ready media</p><h2>Library assets</h2></div><span className="count">{dashboard?.by_asset.length ?? 0} items</span></div>
-      {!dashboard?.by_asset.length ? <Empty title="The library is empty" detail="Import a program to begin the managed-media lifecycle." action="Focus import" onAction={() => document.querySelector<HTMLInputElement>(".inline-form input")?.focus()} /> : <div className="asset-grid">{dashboard.by_asset.map((asset) => <article className={`asset-card ${captionAsset?.asset_id === asset.asset_id ? "selected" : ""}`} key={asset.asset_id}><div className="asset-preview"><span>TL</span><StatusPill status={asset.readiness_state} /></div><div className="asset-copy"><strong>{asset.media_path.split(/[\\/]/).pop()}</strong><p>{formatDuration(asset.duration_ms)} · {asset.measured_lufs === null ? "Loudness unavailable" : `${asset.measured_lufs.toFixed(2)} LUFS`}</p><code>{asset.asset_id.slice(0, 12)}…</code>{asset.readiness_reason && <small className="reason">{asset.readiness_reason}</small>}<button className="secondary wide asset-caption-button" onClick={() => setCaptionAsset(asset)}>{captionAsset?.asset_id === asset.asset_id ? "Captions open" : "Manage captions"}</button></div></article>)}</div>}
+      {!dashboard?.by_asset.length ? <Empty title="The library is empty" detail="Import a program to begin the managed-media lifecycle." action="Focus import" onAction={() => document.querySelector<HTMLInputElement>(".inline-form input")?.focus()} /> : <div className="asset-grid">{dashboard.by_asset.map((asset) => <article className={`asset-card ${captionAsset?.asset_id === asset.asset_id || lifecycleAsset?.asset_id === asset.asset_id ? "selected" : ""}`} key={asset.asset_id}><div className="asset-preview"><span>TL</span><StatusPill status={asset.readiness_state} /></div><div className="asset-copy"><strong>{asset.media_path.split(/[\\/]/).pop()}</strong><p>{formatDuration(asset.duration_ms)} · {asset.measured_lufs === null ? "Loudness unavailable" : `${asset.measured_lufs.toFixed(2)} LUFS`}</p><code>{asset.asset_id.slice(0, 12)}…</code>{asset.readiness_reason && <small className="reason">{asset.readiness_reason}</small>}<button className="secondary wide asset-caption-button" onClick={() => setCaptionAsset(asset)}>{captionAsset?.asset_id === asset.asset_id ? "Captions open" : "Manage captions"}</button><button className="secondary wide" onClick={() => setLifecycleAsset(asset)}>Lifecycle & retention</button></div></article>)}</div>}
      </section>
      <CatalogAssetEditor assets={catalogAssets} />
      {captionAsset && <CaptionTrackEditor assetId={captionAsset.asset_id} assetName={captionAsset.media_path.split(/[\\/]/).pop() ?? captionAsset.asset_id} assetDurationMs={captionAsset.duration_ms} assetReady={captionAsset.readiness_state === "ready"} onClose={() => setCaptionAsset(null)} />}
+     {lifecycleAsset && <MediaLifecyclePanel asset={lifecycleAsset} onClose={() => setLifecycleAsset(null)} onRefresh={onRefresh} />}
     <section className="panel"><div className="panel-head"><div><p className="eyebrow">Background work</p><h2>Ingest and transcode jobs</h2></div></div><div className="row-list">{dashboard?.ingest_jobs.map((job) => <div className="job-row" key={job.job_id}><div><strong>{job.source_path.split(/[\\/]/).pop()}</strong><small>{job.error_detail || `${job.progress_percent}% complete · ${job.attempts} attempt${job.attempts === 1 ? "" : "s"}`}</small></div><div className="progress"><i style={{ width: `${job.progress_percent}%` }} /></div><StatusPill status={job.status} /></div>)}</div></section>
   </>;
 }

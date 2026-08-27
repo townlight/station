@@ -161,6 +161,179 @@ pub struct MissingMediaAlert {
     pub readiness_reason: String,
 }
 
+/// A revisioned, operator-owned retention intent for one immutable media object.
+///
+/// This is deliberately an intent, rather than a deletion order. A scanner may
+/// advance it to `ReviewRequired`, but never removes media bytes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AssetRetentionPolicy {
+    pub asset_id: String,
+    pub revision: u64,
+    pub permanent: bool,
+    pub review_after_unix_ms: Option<i64>,
+    pub legal_hold: bool,
+    pub disposition: RetentionDisposition,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RetentionDisposition {
+    Retained,
+    ReviewRequired,
+    LegalHold,
+}
+
+/// Append-only evidence that one immutable object supersedes another.  It
+/// never changes either object's content identity or schedule bindings.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AssetReplacementLink {
+    pub predecessor_asset_id: String,
+    pub successor_asset_id: String,
+    pub revision: u64,
+    pub changed_by: String,
+    pub occurred_at_unix_ms: i64,
+}
+
+/// A server-derived preview artifact. The artifact identity is the SHA-256 of
+/// the produced PNG bytes and its path is derived by the server, never supplied
+/// by a browser or worker command.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AssetThumbnail {
+    pub asset_id: String,
+    pub thumbnail_sha256: String,
+    pub source_asset_sha256: String,
+    pub generated_at_unix_ms: i64,
+    pub byte_count: u64,
+}
+
+/// Append-only server authority for one exact-byte restoration of a missing
+/// immutable asset. The managed path, actor, time, byte count, and duration are
+/// derived after admission; none is accepted from the browser.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AssetRecoveryAudit {
+    pub asset_id: String,
+    pub revision: u64,
+    pub recovered_asset_sha256: String,
+    pub managed_path: String,
+    pub byte_count: u64,
+    pub duration_ms: u64,
+    pub changed_by: String,
+    pub occurred_at_unix_ms: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RetentionScanAction {
+    NoAction,
+    FlagForReview,
+    Held,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LifecycleError {
+    Invalid(&'static str),
+}
+
+impl AssetRetentionPolicy {
+    pub fn validate(&self) -> Result<(), LifecycleError> {
+        if !is_asset_id(&self.asset_id) || self.revision == 0 {
+            return Err(LifecycleError::Invalid(
+                "retention policy requires a SHA-256 asset identity and nonzero revision",
+            ));
+        }
+        if self.review_after_unix_ms.is_some_and(|value| value < 0) {
+            return Err(LifecycleError::Invalid(
+                "retention review time must be nonnegative",
+            ));
+        }
+        if self.permanent && self.review_after_unix_ms.is_some() {
+            return Err(LifecycleError::Invalid(
+                "a permanent asset cannot carry a review deadline",
+            ));
+        }
+        if !self.permanent && self.review_after_unix_ms.is_none() {
+            return Err(LifecycleError::Invalid(
+                "a non-permanent asset requires a review deadline",
+            ));
+        }
+        if self.legal_hold != matches!(self.disposition, RetentionDisposition::LegalHold) {
+            return Err(LifecycleError::Invalid(
+                "legal-hold state and disposition must agree",
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn scan_action_at(&self, now_unix_ms: i64) -> Result<RetentionScanAction, LifecycleError> {
+        self.validate()?;
+        if now_unix_ms < 0 {
+            return Err(LifecycleError::Invalid("scan time must be nonnegative"));
+        }
+        if self.legal_hold {
+            return Ok(RetentionScanAction::Held);
+        }
+        if !self.permanent
+            && self
+                .review_after_unix_ms
+                .is_some_and(|value| value <= now_unix_ms)
+        {
+            return Ok(RetentionScanAction::FlagForReview);
+        }
+        Ok(RetentionScanAction::NoAction)
+    }
+}
+
+impl AssetReplacementLink {
+    pub fn validate(&self) -> Result<(), LifecycleError> {
+        if !is_asset_id(&self.predecessor_asset_id)
+            || !is_asset_id(&self.successor_asset_id)
+            || self.predecessor_asset_id == self.successor_asset_id
+            || self.revision == 0
+            || !visible_bounded(&self.changed_by, 200)
+            || self.occurred_at_unix_ms < 0
+        {
+            return Err(LifecycleError::Invalid(
+                "replacement link contains an invalid identity, revision, actor, or timestamp",
+            ));
+        }
+        Ok(())
+    }
+}
+
+impl AssetThumbnail {
+    pub fn validate(&self) -> Result<(), LifecycleError> {
+        if !is_asset_id(&self.asset_id)
+            || !is_asset_id(&self.thumbnail_sha256)
+            || self.source_asset_sha256 != self.asset_id
+            || self.generated_at_unix_ms < 0
+            || self.byte_count == 0
+        {
+            return Err(LifecycleError::Invalid(
+                "thumbnail evidence must bind non-empty derived bytes to its exact source asset",
+            ));
+        }
+        Ok(())
+    }
+}
+
+impl AssetRecoveryAudit {
+    pub fn validate(&self) -> Result<(), LifecycleError> {
+        if !is_asset_id(&self.asset_id)
+            || self.recovered_asset_sha256 != self.asset_id
+            || self.revision == 0
+            || !visible_bounded(&self.managed_path, 2_000)
+            || self.byte_count == 0
+            || self.duration_ms == 0
+            || !visible_bounded(&self.changed_by, 200)
+            || self.occurred_at_unix_ms < 0
+        {
+            return Err(LifecycleError::Invalid(
+                "recovery audit must bind exact admitted bytes to server-owned path, actor, and time",
+            ));
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IngestJobError {
     Invalid(&'static str),
@@ -422,7 +595,9 @@ fn visible_bounded(value: &str, maximum: usize) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        IngestJobError, TranscodeFormat, TranscodeJob, TranscodeJobStatus, WatchFolderConfig,
+        AssetReplacementLink, AssetRetentionPolicy, AssetThumbnail, IngestJobError,
+        RetentionDisposition, RetentionScanAction, TranscodeFormat, TranscodeJob,
+        TranscodeJobStatus, WatchFolderConfig,
     };
 
     fn config() -> WatchFolderConfig {
@@ -508,5 +683,79 @@ mod tests {
         let mut impossible = job;
         impossible.asset_id = Some("a".repeat(64));
         assert!(impossible.validate().is_err());
+    }
+
+    #[test]
+    fn retention_scanner_flags_review_but_never_authorizes_deletion() {
+        let policy = AssetRetentionPolicy {
+            asset_id: "a".repeat(64),
+            revision: 3,
+            permanent: false,
+            review_after_unix_ms: Some(100),
+            legal_hold: false,
+            disposition: RetentionDisposition::Retained,
+        };
+        assert_eq!(
+            policy.scan_action_at(99).unwrap(),
+            RetentionScanAction::NoAction
+        );
+        assert_eq!(
+            policy.scan_action_at(100).unwrap(),
+            RetentionScanAction::FlagForReview
+        );
+        let held = AssetRetentionPolicy {
+            legal_hold: true,
+            disposition: RetentionDisposition::LegalHold,
+            ..policy
+        };
+        assert_eq!(
+            held.scan_action_at(10_000).unwrap(),
+            RetentionScanAction::Held
+        );
+    }
+
+    #[test]
+    fn retention_and_replacement_bind_immutable_asset_identities() {
+        let mut policy = AssetRetentionPolicy {
+            asset_id: "a".repeat(64),
+            revision: 1,
+            permanent: true,
+            review_after_unix_ms: None,
+            legal_hold: false,
+            disposition: RetentionDisposition::Retained,
+        };
+        policy.review_after_unix_ms = Some(1);
+        assert!(policy.validate().is_err());
+
+        let replacement = AssetReplacementLink {
+            predecessor_asset_id: "a".repeat(64),
+            successor_asset_id: "b".repeat(64),
+            revision: 1,
+            changed_by: "setup-admin".into(),
+            occurred_at_unix_ms: 1,
+        };
+        replacement.validate().unwrap();
+        let self_replacement = AssetReplacementLink {
+            successor_asset_id: replacement.predecessor_asset_id.clone(),
+            ..replacement
+        };
+        assert!(self_replacement.validate().is_err());
+    }
+
+    #[test]
+    fn thumbnail_evidence_is_content_addressed_and_exactly_source_bound() {
+        let thumbnail = AssetThumbnail {
+            asset_id: "a".repeat(64),
+            source_asset_sha256: "a".repeat(64),
+            thumbnail_sha256: "b".repeat(64),
+            generated_at_unix_ms: 1,
+            byte_count: 1,
+        };
+        thumbnail.validate().unwrap();
+        let forged_source = AssetThumbnail {
+            source_asset_sha256: "c".repeat(64),
+            ..thumbnail
+        };
+        assert!(forged_source.validate().is_err());
     }
 }
