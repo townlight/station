@@ -1451,6 +1451,38 @@ fn parent_directory_junction_cannot_hide_executable_identity() {
 }
 
 #[test]
+fn executable_substitution_is_denied_for_the_complete_pinned_launch_window() {
+    let root = temporary_database("automation-launch-substitution").with_extension("dir");
+    std::fs::create_dir_all(&root).unwrap();
+    let source = PathBuf::from(std::env::var_os("SystemRoot").unwrap())
+        .join("System32")
+        .join("WindowsPowerShell")
+        .join("v1.0")
+        .join("powershell.exe");
+    let worker = root.join("worker.exe");
+    std::fs::copy(&source, &worker).unwrap();
+    let replacement = root.join("replacement.exe");
+    std::fs::copy(
+        PathBuf::from(std::env::var_os("SystemRoot").unwrap())
+            .join("System32")
+            .join("cmd.exe"),
+        &replacement,
+    )
+    .unwrap();
+    let adapter = AutomationExecutionAdapter::new(
+        ADAPTER_ID,
+        1,
+        &root,
+        &worker,
+        sha256_file(&worker),
+        Vec::new(),
+    )
+    .unwrap();
+    assert!(adapter.substitution_is_blocked_while_pinned_for_test(&request(), &replacement));
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+#[test]
 fn externally_retained_pipe_completion_cannot_hold_the_host_fence() {
     assert!(retained_pipe_wait_is_bounded_for_test());
 }

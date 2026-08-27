@@ -16,11 +16,12 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
     mpsc::{self, Receiver},
 };
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE};
 use windows_sys::Win32::Storage::FileSystem::{
     BY_HANDLE_FILE_INFORMATION, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
-    FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, GetFileInformationByHandle,
+    FILE_SHARE_READ, FILE_SHARE_WRITE, GetFileInformationByHandle,
 };
 use windows_sys::Win32::System::Diagnostics::ToolHelp::{
     CreateToolhelp32Snapshot, TH32CS_SNAPTHREAD, THREADENTRY32, Thread32First, Thread32Next,
@@ -31,8 +32,14 @@ use windows_sys::Win32::System::JobObjects::{
     SetInformationJobObject, TerminateJobObject,
 };
 use windows_sys::Win32::System::Threading::{
-    CREATE_SUSPENDED, OpenThread, QueryFullProcessImageNameW, ResumeThread, THREAD_SUSPEND_RESUME,
+    CREATE_SUSPENDED, GetCurrentThreadId, OpenThread, QueryFullProcessImageNameW, ResumeThread,
+    THREAD_SUSPEND_RESUME, THREAD_TERMINATE,
 };
+
+#[link(name = "kernel32")]
+unsafe extern "system" {
+    fn CancelSynchronousIo(thread: HANDLE) -> i32;
+}
 
 const AUTOMATION_EXECUTION_WORKER_ID: &str = "stationd-automation-execution";
 const AUTOMATION_EXECUTION_LEASE_MS: i64 = 60_000;
@@ -146,7 +153,29 @@ impl AutomationExecutionAdapter {
 
     #[doc(hidden)]
     pub fn verify_program_for_test(&self, request: &AutomationExecutionRequest) -> bool {
-        self.pin_for_request(request).is_ok()
+        self.pin_for_request(request, Instant::now() + Duration::from_secs(60))
+            .is_ok()
+    }
+
+    #[doc(hidden)]
+    pub fn substitution_is_blocked_while_pinned_for_test(
+        &self,
+        request: &AutomationExecutionRequest,
+        _replacement: &Path,
+    ) -> bool {
+        let pinned = match self.pin_for_request(request, Instant::now() + Duration::from_secs(60)) {
+            Ok(pinned) => pinned,
+            // Failure to acquire the complete replacement-denying chain is
+            // itself a fail-closed launch result: no pathname launch occurs.
+            Err(_) => return true,
+        };
+        let blocked = std::fs::OpenOptions::new()
+            .write(true)
+            .truncate(true)
+            .open(&self.executable)
+            .is_err();
+        drop(pinned);
+        blocked
     }
 
     pub fn adapter_id(&self) -> &str {
@@ -156,6 +185,7 @@ impl AutomationExecutionAdapter {
     fn pin_for_request(
         &self,
         request: &AutomationExecutionRequest,
+        hard_deadline: Instant,
     ) -> Result<PinnedAutomationExecutable, AutomationExecutionAdapterFailure> {
         if self.adapter_id != request.adapter_id
             || self.adapter_revision != request.adapter_revision
@@ -180,6 +210,9 @@ impl AutomationExecutionAdapter {
         let mut ancestors: Vec<_> = self.application_root.ancestors().collect();
         ancestors.reverse();
         for ancestor in ancestors.iter().copied() {
+            if Instant::now() >= hard_deadline {
+                return Err(AutomationExecutionAdapterFailure::RetryableTimeout);
+            }
             if !ancestor.as_os_str().is_empty() {
                 handles.push(
                     open_no_follow_directory(ancestor)
@@ -190,6 +223,9 @@ impl AutomationExecutionAdapter {
         let mut current = self.application_root.clone();
         let components: Vec<_> = relative.components().collect();
         for component in &components[..components.len() - 1] {
+            if Instant::now() >= hard_deadline {
+                return Err(AutomationExecutionAdapterFailure::RetryableTimeout);
+            }
             current.push(component.as_os_str());
             handles.push(
                 open_no_follow_directory(&current)
@@ -198,7 +234,13 @@ impl AutomationExecutionAdapter {
         }
         let mut file = open_no_follow_file(&self.executable)
             .map_err(|_| AutomationExecutionAdapterFailure::RetryableUnavailable)?;
-        let actual = hash_open_file(&mut file)
+        let metadata = file
+            .metadata()
+            .map_err(|_| AutomationExecutionAdapterFailure::RetryableUnavailable)?;
+        if metadata.len() > 268_435_456 {
+            return Err(AutomationExecutionAdapterFailure::PermanentRejected);
+        }
+        let actual = hash_open_file(&mut file, hard_deadline)
             .map_err(|_| AutomationExecutionAdapterFailure::RetryableUnavailable)?;
         if actual != self.executable_sha256 {
             return Err(AutomationExecutionAdapterFailure::PermanentRejected);
@@ -234,7 +276,7 @@ fn is_lowercase_sha256(value: &str) -> bool {
 fn open_no_follow_directory(path: &Path) -> Result<std::fs::File, String> {
     let file = std::fs::OpenOptions::new()
         .read(true)
-        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
         .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS)
         .open(path)
         .map_err(|_| "automation executable directory is unavailable")?;
@@ -263,10 +305,13 @@ fn open_no_follow_file(path: &Path) -> Result<std::fs::File, String> {
     Ok(file)
 }
 
-fn hash_open_file(file: &mut std::fs::File) -> Result<String, String> {
+fn hash_open_file(file: &mut std::fs::File, hard_deadline: Instant) -> Result<String, String> {
     let mut digest = Sha256::new();
     let mut buffer = [0_u8; 64 * 1024];
     loop {
+        if Instant::now() >= hard_deadline {
+            return Err("automation executable hash deadline expired".into());
+        }
         let read = file
             .read(&mut buffer)
             .map_err(|_| "automation executable could not be read")?;
@@ -374,12 +419,11 @@ fn resume_suspended_process_primary_thread(
     result
 }
 
-fn spawn_bounded_pipe_drain<R: Read + Send + 'static>(
-    mut pipe: R,
-    limit: u64,
-) -> Receiver<Result<Vec<u8>, AutomationExecutionAdapterFailure>> {
+fn spawn_bounded_pipe_drain<R: Read + Send + 'static>(mut pipe: R, limit: u64) -> DrainWorker {
     let (sender, receiver) = mpsc::sync_channel(1);
-    std::thread::spawn(move || {
+    let (id_sender, id_receiver) = mpsc::sync_channel(1);
+    let join = std::thread::spawn(move || {
+        let _ = id_sender.send(unsafe { GetCurrentThreadId() });
         let result = (|| {
             let mut bytes = Vec::new();
             pipe.by_ref()
@@ -393,7 +437,19 @@ fn spawn_bounded_pipe_drain<R: Read + Send + 'static>(
         })();
         let _ = sender.send(result);
     });
-    receiver
+    let thread_id = id_receiver.recv().unwrap_or(0);
+    let thread_handle = unsafe { OpenThread(THREAD_TERMINATE, 0, thread_id) };
+    DrainWorker {
+        receiver,
+        join: Some(join),
+        thread_handle,
+    }
+}
+
+struct DrainWorker {
+    receiver: Receiver<Result<Vec<u8>, AutomationExecutionAdapterFailure>>,
+    join: Option<JoinHandle<()>>,
+    thread_handle: HANDLE,
 }
 
 /// The only execution resource the controller supervises.  It is created by
@@ -403,8 +459,8 @@ struct OwnedAutomationExecutionProcess {
     child: Child,
     job: WindowsProcessTree,
     _pinned_executable: PinnedAutomationExecutable,
-    stdout: Option<Receiver<Result<Vec<u8>, AutomationExecutionAdapterFailure>>>,
-    stderr: Option<Receiver<Result<Vec<u8>, AutomationExecutionAdapterFailure>>>,
+    stdout: Option<DrainWorker>,
+    stderr: Option<DrainWorker>,
     drained_stdout: Option<Vec<u8>>,
     hard_deadline: Instant,
 }
@@ -417,7 +473,10 @@ impl OwnedAutomationExecutionProcess {
         deadline_unix_ms: i64,
         hard_deadline: Instant,
     ) -> Result<Self, AutomationExecutionAdapterFailure> {
-        let pinned_executable = adapter.pin_for_request(request)?;
+        let pinned_executable = adapter.pin_for_request(request, hard_deadline)?;
+        if Instant::now() >= hard_deadline {
+            return Err(AutomationExecutionAdapterFailure::RetryableTimeout);
+        }
         let request_json = serde_json::to_string(request)
             .map_err(|_| AutomationExecutionAdapterFailure::PermanentInvalidResponse)?;
         if request_json.len() > MAX_AUTOMATION_EXECUTION_REQUEST_ENV_BYTES {
@@ -480,8 +539,8 @@ impl OwnedAutomationExecutionProcess {
             job.terminate()?;
             bounded_reap_child(&mut child)?;
             let drain_deadline = hard_deadline.min(Instant::now() + AUTOMATION_EXECUTION_REAP_MAX);
-            let _ = receive_drain(&stdout, drain_deadline);
-            let _ = receive_drain(&stderr, drain_deadline);
+            let _ = finish_drain(stdout, drain_deadline);
+            let _ = finish_drain(stderr, drain_deadline);
             return Err(error);
         }
         Ok(Self {
@@ -505,12 +564,12 @@ impl OwnedAutomationExecutionProcess {
             .stdout
             .take()
             .ok_or(AutomationExecutionAdapterFailure::RetryableUnavailable)?;
-        let stdout = receive_drain(&stdout, drain_deadline)?;
+        let stdout = finish_drain(stdout, drain_deadline)?;
         let _stderr = self
             .stderr
             .take()
             .ok_or(AutomationExecutionAdapterFailure::RetryableUnavailable)?;
-        let _stderr = receive_drain(&_stderr, drain_deadline)?;
+        let _stderr = finish_drain(_stderr, drain_deadline)?;
         // Retain only the success payload. stderr is concurrently drained so
         // a child cannot deadlock on it, but it is never persisted or exposed.
         self.drained_stdout = Some(stdout);
@@ -605,24 +664,56 @@ fn bounded_reap_child(child: &mut Child) -> Result<(), AutomationExecutionAdapte
     }
 }
 
-fn receive_drain(
-    receiver: &Receiver<Result<Vec<u8>, AutomationExecutionAdapterFailure>>,
+fn finish_drain(
+    mut worker: DrainWorker,
     deadline: Instant,
 ) -> Result<Vec<u8>, AutomationExecutionAdapterFailure> {
     let remaining = deadline.saturating_duration_since(Instant::now());
-    receiver
-        .recv_timeout(remaining)
-        .map_err(|_| AutomationExecutionAdapterFailure::RetryableUnavailable)?
+    let result = match worker.receiver.recv_timeout(remaining) {
+        Ok(result) => result,
+        Err(_) => {
+            if worker.thread_handle.is_null()
+                || worker.thread_handle == INVALID_HANDLE_VALUE
+                || unsafe { CancelSynchronousIo(worker.thread_handle) } == 0
+            {
+                return Err(AutomationExecutionAdapterFailure::RetryableUnavailable);
+            }
+            worker
+                .receiver
+                .recv_timeout(AUTOMATION_EXECUTION_REAP_MAX)
+                .map_err(|_| AutomationExecutionAdapterFailure::RetryableUnavailable)?
+        }
+    };
+    worker
+        .join
+        .take()
+        .ok_or(AutomationExecutionAdapterFailure::RetryableUnavailable)?
+        .join()
+        .map_err(|_| AutomationExecutionAdapterFailure::RetryableUnavailable)?;
+    unsafe { CloseHandle(worker.thread_handle) };
+    result
 }
 
 #[doc(hidden)]
 pub fn retained_pipe_wait_is_bounded_for_test() -> bool {
-    let (sender, receiver) =
-        mpsc::sync_channel::<Result<Vec<u8>, AutomationExecutionAdapterFailure>>(1);
-    let _retained_external_sender = sender;
+    let mut external = match Command::new("cmd.exe")
+        .args(["/d", "/c", "ping -n 30 127.0.0.1 >nul"])
+        .stdout(Stdio::piped())
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(_) => return false,
+    };
+    let pipe = match external.stdout.take() {
+        Some(pipe) => pipe,
+        None => return false,
+    };
+    let worker = spawn_bounded_pipe_drain(pipe, 1024);
     let started = Instant::now();
-    let result = receive_drain(&receiver, started + Duration::from_millis(25));
-    result.is_err() && started.elapsed() < Duration::from_secs(1)
+    let result = finish_drain(worker, started + Duration::from_millis(25));
+    let _ = external.kill();
+    let _ = bounded_reap_child(&mut external);
+    result.is_err() && started.elapsed() < Duration::from_secs(3)
 }
 
 /// Runs one bounded queue decision. The store performs the authoritative
