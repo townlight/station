@@ -13,7 +13,10 @@ use station_automation_policy::{
     AutomationInputArtifact, AutomationInputKind, AutomationOutputArtifact, AutomationOutputFacts,
     ConnectionTestOutcome, CredentialAvailability,
 };
-use station_maintenance::{VerifiedInstallAuthority, verified_install_authority_for_test};
+use station_maintenance::{
+    VerifiedInstallAuthority, verified_automation_launch_helper_for_test,
+    verified_install_authority_for_test,
+};
 use station_storage::{
     AutomationExecutionAdapter, AutomationExecutionJobRecord, AutomationExecutionJobState,
     AutomationExecutionSetupFault, StationStore, automation_execution_process_limits_for_test,
@@ -235,6 +238,34 @@ fn configured_store(name: &str) -> (PathBuf, StationStore) {
         )
         .unwrap();
     (database, store)
+}
+
+#[test]
+fn verified_helper_capability_binds_the_production_adapter_identity() {
+    let system_root =
+        PathBuf::from(std::env::var_os("SystemRoot").expect("Windows system root exists"));
+    let executable = system_root
+        .join("System32")
+        .join("WindowsPowerShell")
+        .join("v1.0")
+        .join("powershell.exe");
+    let helper = verified_automation_launch_helper_for_test(
+        &system_root,
+        &executable,
+        sha256_file(&executable),
+    );
+    let adapter = AutomationExecutionAdapter::from_verified_launch_helper(
+        ADAPTER_ID,
+        1,
+        helper,
+        vec![
+            "-NoLogo".into(),
+            "-NoProfile".into(),
+            "-NonInteractive".into(),
+        ],
+    )
+    .expect("verified helper must bind the adapter's launch identity");
+    assert!(adapter.verify_program_for_test(&request()));
 }
 
 struct InstalledQueueFixture {
@@ -1286,7 +1317,7 @@ fn exact_test_adapter() -> AutomationExecutionAdapter {
             .flat_map(u16::to_le_bytes)
             .collect::<Vec<_>>(),
     );
-    AutomationExecutionAdapter::new(
+    AutomationExecutionAdapter::new_for_test(
         ADAPTER_ID,
         1,
         application_root,
@@ -1317,7 +1348,7 @@ fn blocking_test_adapter() -> AutomationExecutionAdapter {
         .join("WindowsPowerShell")
         .join("v1.0")
         .join("powershell.exe");
-    AutomationExecutionAdapter::new(
+    AutomationExecutionAdapter::new_for_test(
         ADAPTER_ID,
         1,
         application_root,
@@ -1346,7 +1377,7 @@ fn descendant_holding_pipe_test_adapter() -> AutomationExecutionAdapter {
     // that descendant in the same Job Object and drain its inherited pipes
     // while stopping the parent; otherwise this test would hang at teardown.
     let script = "Start-Process -FilePath powershell.exe -ArgumentList '-NoLogo','-NoProfile','-NonInteractive','-Command','[Console]::Out.Write(\"held\"); Start-Sleep -Seconds 30'; Start-Sleep -Seconds 30";
-    AutomationExecutionAdapter::new(
+    AutomationExecutionAdapter::new_for_test(
         ADAPTER_ID,
         1,
         application_root,
@@ -1603,7 +1634,7 @@ fn parent_directory_junction_cannot_hide_executable_identity() {
         "test host must support local directory junctions"
     );
     let aliased_worker = alias.join("app").join("worker.exe");
-    let adapter = AutomationExecutionAdapter::new(
+    let adapter = AutomationExecutionAdapter::new_for_test(
         ADAPTER_ID,
         1,
         alias.join("app"),
@@ -1639,7 +1670,7 @@ fn executable_substitution_is_denied_for_the_complete_pinned_launch_window() {
         &replacement,
     )
     .unwrap();
-    let adapter = AutomationExecutionAdapter::new(
+    let adapter = AutomationExecutionAdapter::new_for_test(
         ADAPTER_ID,
         1,
         &root,

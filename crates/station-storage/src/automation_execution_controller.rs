@@ -2,7 +2,7 @@ use super::*;
 use sha2::{Digest, Sha256};
 use station_automation_policy::{AutomationExecutionReceipt, AutomationExecutionRequest};
 use station_domain::{AlertConditionKind, AlertEvent, AlertEventState, AlertSeverity};
-use station_maintenance::VerifiedInstallAuthority;
+use station_maintenance::{VerifiedAutomationLaunchHelper, VerifiedInstallAuthority};
 use std::ffi::OsString;
 use std::io::Read;
 use std::os::windows::ffi::OsStringExt;
@@ -123,7 +123,32 @@ pub enum AutomationExecutionSetupFault {
 }
 
 impl AutomationExecutionAdapter {
-    pub fn new(
+    /// Constructs an executable adapter only from the helper capability read
+    /// from the active candidate while the install authority fence is held.
+    /// There is no production constructor accepting a caller-supplied root,
+    /// executable, or digest.
+    ///
+    /// ```compile_fail
+    /// use station_storage::AutomationExecutionAdapter;
+    /// let _ = AutomationExecutionAdapter::new;
+    /// ```
+    pub fn from_verified_launch_helper(
+        adapter_id: impl Into<String>,
+        adapter_revision: u64,
+        helper: VerifiedAutomationLaunchHelper,
+        arguments: Vec<OsString>,
+    ) -> Result<Self, String> {
+        Self::new_unverified(
+            adapter_id,
+            adapter_revision,
+            helper.application_root().to_path_buf(),
+            helper.executable().to_path_buf(),
+            helper.sha256().to_owned(),
+            arguments,
+        )
+    }
+
+    fn new_unverified(
         adapter_id: impl Into<String>,
         adapter_revision: u64,
         application_root: impl Into<PathBuf>,
@@ -158,6 +183,29 @@ impl AutomationExecutionAdapter {
             arguments,
             setup_fault: None,
         })
+    }
+
+    /// Test-only construction seam for hostile process-boundary coverage. It
+    /// is compiled only with the explicit `test-support` Cargo feature and is
+    /// unavailable to production stationd builds.
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
+    pub fn new_for_test(
+        adapter_id: impl Into<String>,
+        adapter_revision: u64,
+        application_root: impl Into<PathBuf>,
+        executable: impl Into<PathBuf>,
+        executable_sha256: impl Into<String>,
+        arguments: Vec<OsString>,
+    ) -> Result<Self, String> {
+        Self::new_unverified(
+            adapter_id,
+            adapter_revision,
+            application_root,
+            executable,
+            executable_sha256,
+            arguments,
+        )
     }
 
     #[doc(hidden)]

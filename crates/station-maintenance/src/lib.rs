@@ -2248,16 +2248,51 @@ pub fn read_verified_active_application_file_hash(
 }
 
 /// A hash-attested helper identity obtained only after the full install and
-/// active-slot candidate have verified. The caller must retain the install
-/// authority fence through its later no-follow pin and process launch; this
-/// function intentionally does not launch a process or create an adapter.
+/// active-slot candidate have verified while the caller holds the install
+/// authority fence. This capability intentionally does not launch a process
+/// or create an adapter.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VerifiedAutomationLaunchHelper {
-    pub executable: PathBuf,
-    pub sha256: String,
+    application_root: PathBuf,
+    executable: PathBuf,
+    sha256: String,
+}
+
+impl VerifiedAutomationLaunchHelper {
+    /// The exact active application root that contained the attested helper.
+    pub fn application_root(&self) -> &Path {
+        &self.application_root
+    }
+
+    /// The exact active-candidate helper path, never a PATH resolution.
+    pub fn executable(&self) -> &Path {
+        &self.executable
+    }
+
+    /// Lowercase SHA-256 from the active candidate manifest.
+    pub fn sha256(&self) -> &str {
+        &self.sha256
+    }
+}
+
+/// Test-only capability factory. Production callers can obtain this type only
+/// from `read_verified_automation_launch_helper` while holding the fence.
+#[cfg(feature = "test-support")]
+#[doc(hidden)]
+pub fn verified_automation_launch_helper_for_test(
+    application_root: impl Into<PathBuf>,
+    executable: impl Into<PathBuf>,
+    sha256: impl Into<String>,
+) -> VerifiedAutomationLaunchHelper {
+    VerifiedAutomationLaunchHelper {
+        application_root: application_root.into(),
+        executable: executable.into(),
+        sha256: sha256.into(),
+    }
 }
 
 pub fn read_verified_automation_launch_helper(
+    _fence: &InstallAuthorityFence,
     data_directory: &Path,
     application_root: &Path,
 ) -> Result<VerifiedAutomationLaunchHelper, String> {
@@ -2269,6 +2304,7 @@ pub fn read_verified_automation_launch_helper(
     let active = read_active_slot_receipt(&data_directory.join(ACTIVE_SLOT_RECEIPT_NAME))?;
     let directory = active.active.directory(application_root)?;
     Ok(VerifiedAutomationLaunchHelper {
+        application_root: directory.clone(),
         executable: directory.join(AUTOMATION_LAUNCH_HELPER_FILE_NAME),
         sha256,
     })

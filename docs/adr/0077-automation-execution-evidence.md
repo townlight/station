@@ -60,8 +60,8 @@ blocked until setup moves behind a separately killable helper boundary.
 
 `station-automation-launch-helper` is built and may be packaged, installed, and bound into the
 candidate and active-package manifests. Schema-2 packages retain compatibility when it is absent.
-stationd must therefore verify that helper's exact active-candidate identity under the install fence
-before a configured semantic adapter path executes it; the current unavailable path
+Any future elected execution path must verify that helper's exact active-candidate identity under the
+install fence before using it; the current unavailable path
 claims and durably paces work without requiring the helper. Its
 length-framed stdin read is bounded by a helper-process watchdog and the request is schema-closed, binding exact job, claim, adapter,
 candidate, install generation, configuration, input digest/size, output name, and deadline. It has

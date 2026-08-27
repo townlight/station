@@ -80,9 +80,10 @@ real NAS/share race, interruption/retry, or installed-helper proof.
 
 ### S13 launch-helper source boundary
 
-`station-automation-launch-helper` is now built, packaged, installed, and bound into both the
-candidate and active-package manifests. Before stationd makes a queue execution decision, it
-verifies that exact active-candidate helper identity under the install fence. Its framed,
+`station-automation-launch-helper` is built, packaged, installed, and bound into both the
+candidate and active-package manifests when present. The current queue path has no elected
+semantic adapter and therefore records `adapter_unavailable` without using it. A future elected
+execution path must verify that exact active-candidate helper identity under the install fence. Its framed,
 watchdog-bounded schema-closed request binds exact job/claim/adapter/candidate/install/
 configuration and managed artifact facts, and excludes secrets and prompts. It has no configured
 semantic adapter, emits only categorical `adapter_unavailable`, and deliberately does not resolve,

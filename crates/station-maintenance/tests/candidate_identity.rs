@@ -1,8 +1,8 @@
 use sha2::{Digest, Sha256};
 use station_maintenance::{
     AUTOMATION_LAUNCH_HELPER_FILE_NAME, INSTALLED_RUNTIME_MANIFEST_NAME,
-    read_verified_automation_launch_helper, read_verified_candidate_identity,
-    write_installed_runtime_manifest,
+    acquire_install_authority_fence, read_verified_automation_launch_helper,
+    read_verified_candidate_identity, write_installed_runtime_manifest,
 };
 use station_update::{UpdatePackageFile, UpdatePackageManifest};
 use std::path::PathBuf;
@@ -189,22 +189,28 @@ fn returns_the_verified_active_candidate_and_approved_runtime_identity() {
 #[test]
 fn returns_only_the_active_manifest_attested_automation_launch_helper() {
     let fixture = fixture();
-    let helper = read_verified_automation_launch_helper(&fixture.data, &fixture.application)
-        .expect("helper must be part of the active verified candidate");
+    let fence = acquire_install_authority_fence(&fixture.data).unwrap();
+    let helper =
+        read_verified_automation_launch_helper(&fence, &fixture.data, &fixture.application)
+            .expect("helper must be part of the active verified candidate");
+    assert_eq!(helper.application_root(), fixture.application);
     assert_eq!(
-        helper.executable,
+        helper.executable(),
         fixture.application.join(AUTOMATION_LAUNCH_HELPER_FILE_NAME)
     );
     assert_eq!(
-        helper.sha256,
+        helper.sha256(),
         format!(
             "{:x}",
             Sha256::digest(b"automation-launch-helper-candidate")
         )
     );
 
-    std::fs::write(&helper.executable, b"substituted-helper").unwrap();
-    assert!(read_verified_automation_launch_helper(&fixture.data, &fixture.application).is_err());
+    std::fs::write(helper.executable(), b"substituted-helper").unwrap();
+    assert!(
+        read_verified_automation_launch_helper(&fence, &fixture.data, &fixture.application)
+            .is_err()
+    );
 }
 
 #[test]

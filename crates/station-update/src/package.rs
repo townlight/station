@@ -18,9 +18,9 @@ const MAX_PACKAGE_MANIFEST_BYTES: u64 = 64 * 1024;
 const MAX_SLOT_FILE_BYTES: u64 = 512 * 1024 * 1024;
 const MAX_SLOT_BYTES: u64 = 1024 * 1024 * 1024;
 const REQUIRED_FILES: [&str; 2] = ["stationd.exe", "channel-worker.exe"];
-// The helper is optional for backwards-compatible update packages. New
-// installer candidates include and attest it; the controller enables NAS
-// publication only when its active manifest contains the helper hash.
+// These files are optional for backwards-compatible update packages. New
+// installer candidates include and attest the automation helper when present;
+// an elected automation execution path must verify that active identity before use.
 const OPTIONAL_FILES: [&str; 2] = ["nas-publisher.exe", "station-automation-launch-helper.exe"];
 const LEGACY_SCHEMA_ONE_FILES: [&str; 3] =
     ["stationd.exe", "channel-worker.exe", "station-updater.exe"];
