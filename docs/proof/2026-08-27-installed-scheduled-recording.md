@@ -9,8 +9,7 @@ media fixture:
 $credential = Get-Credential
 & .\scripts\prove-installed-scheduled-recording.ps1 `
     -Credential $credential `
-    -FixturePath 'C:\path\to\real-proof-fixture.ts' `
-    -ResultPath '.\outputs\installed-scheduled-recording.json'
+    -FixturePath 'C:\path\to\real-proof-fixture.ts'
 ```
 
 The proof authenticates the installed receipt and exact candidate manifest,
@@ -20,6 +19,10 @@ capture and finalize real media. It then verifies the completed lifecycle,
 durable transition chain, content-addressed asset readiness, and generated Draft
 catalog record. A failed or missing transition is a failure; the proof never
 fabricates worker evidence or completion facts.
+
+The proof emits its JSON receipt only to standard output. It deliberately has
+no output-file parameter and cannot overwrite station data, installed proof
+state, or an arbitrary caller-selected path.
 
 Cleanup disables the proof-owned channel. The API has no delete operation for
 the durable proof schedule, recording, or catalog history; those records remain

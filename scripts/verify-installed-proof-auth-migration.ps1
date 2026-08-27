@@ -31,7 +31,7 @@ function Assert-Contract([bool]$Condition, [string]$Message) {
 }
 
 $actual = @(Get-ChildItem -LiteralPath $PSScriptRoot -Filter 'prove-installed-*.ps1' | Sort-Object Name | ForEach-Object Name)
-Assert-Contract (($actual -join '|') -eq (($expected | Sort-Object) -join '|')) 'The authenticated migration contract must enumerate the exact 19 installed proof harnesses.'
+Assert-Contract (($actual -join '|') -eq (($expected | Sort-Object) -join '|')) 'The authenticated migration contract must enumerate the exact 20 installed proof harnesses.'
 
 foreach ($name in $expected) {
     $path = Join-Path $PSScriptRoot $name

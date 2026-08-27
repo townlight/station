@@ -24,13 +24,13 @@ param(
     [string]$CandidateManifestPath = (Join-Path (Split-Path $PSScriptRoot -Parent) 'dist\candidate-manifest.json'),
     [ValidateRange(5, 300)][int]$StartLeadSeconds = 20,
     [ValidateRange(3, 300)][int]$RecordingSeconds = 5,
-    [ValidateRange(30, 1800)][int]$TimeoutSeconds = 300,
-    [string]$ResultPath = ''
+    [ValidateRange(30, 1800)][int]$TimeoutSeconds = 300
 )
 
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'candidate-pair-verifier.ps1')
 . (Join-Path $PSScriptRoot 'installed-proof-api.ps1')
+. (Join-Path $PSScriptRoot 'installed-private-runtime-verifier.ps1')
 
 $runId = [guid]::NewGuid().ToString()
 $channelId = [guid]::NewGuid().ToString()
@@ -41,7 +41,6 @@ $recordingId = [guid]::NewGuid().ToString()
 $planId = "scheduled-recording-$runId"
 $reportId = "scheduled-recording-$runId"
 $serviceUri = $BaseUri.TrimEnd('/') -replace '/api/v1$', ''
-$apiUri = "$serviceUri/api/v1"
 $apiSession = $null
 $proofChannel = $null
 $mutex = [Threading.Mutex]::new($false, 'Global\TownLightStationInstalledScheduledRecordingProof')
@@ -99,13 +98,46 @@ function Get-FreeUdpPort {
 }
 
 function Assert-InstalledCandidate {
-    $receiptPath = Join-Path $env:ProgramData 'TownLight Station\install-receipt.json'
-    if (-not (Test-Path -LiteralPath $receiptPath -PathType Leaf)) { throw 'Installed receipt is missing.' }
-    $receipt = Get-Content -LiteralPath $receiptPath -Raw | ConvertFrom-Json
+    $programFiles = [Environment]::GetFolderPath([Environment+SpecialFolder]::ProgramFiles)
+    $commonApplicationData = [Environment]::GetFolderPath([Environment+SpecialFolder]::CommonApplicationData)
+    if (-not [Environment]::Is64BitProcess -or [string]::IsNullOrWhiteSpace($programFiles) -or
+        [string]::IsNullOrWhiteSpace($commonApplicationData)) {
+        throw 'Trusted Windows installation roots are unavailable.'
+    }
+    $application = Join-Path ([IO.Path]::GetFullPath($programFiles).TrimEnd('\')) 'TownLight Station'
+    $data = Join-Path ([IO.Path]::GetFullPath($commonApplicationData).TrimEnd('\')) 'TownLight Station'
+    $receiptPath = Join-Path $data 'install-receipt.json'
+    $runtimeManifestPath = Join-Path $data 'runtime-manifest.json'
+    foreach ($installedAuthorityPath in @($receiptPath, $runtimeManifestPath)) {
+        $authorityItem = Get-Item -LiteralPath $installedAuthorityPath -Force -ErrorAction Stop
+        if ($authorityItem.PSIsContainer -or
+            ($authorityItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or
+            -not [string]::Equals($authorityItem.Directory.FullName.TrimEnd('\'), $data.TrimEnd('\'), [StringComparison]::OrdinalIgnoreCase)) {
+            throw 'Installed candidate authority is missing, rebound, or a reparse point.'
+        }
+    }
+    try {
+        $receipt = Get-Content -LiteralPath $receiptPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+        $runtimeManifest = Get-Content -LiteralPath $runtimeManifestPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+    }
+    catch { throw 'Installed receipt or private-runtime manifest is invalid.' }
     $manifest = Resolve-Path -LiteralPath $CandidateManifestPath -ErrorAction Stop
     $pair = Get-TownLightCandidateIdentity -ManifestPath $manifest.Path -ExpectedSourceCommit $receipt.source_commit
     $manifestHash = (Get-FileHash -LiteralPath $manifest.Path -Algorithm SHA256).Hash.ToLowerInvariant()
-    $application = Join-Path ([Environment]::GetFolderPath('ProgramFiles')) 'TownLight Station'
+    $runtimeManifestHash = (Get-FileHash -LiteralPath $runtimeManifestPath -Algorithm SHA256).Hash.ToLowerInvariant()
+    if ([string]$receipt.version -cne [string]$pair.manifest.version -or
+        [string]$receipt.source_commit -cne [string]$pair.manifest.source_commit -or
+        [string]$receipt.media_runtime_sha256 -cne [string]$pair.manifest.media_runtime_sha256 -or
+        [string]$receipt.runtime_manifest_sha256 -cne $runtimeManifestHash -or
+        [int]$runtimeManifest.schema_version -ne 1 -or
+        [string]$runtimeManifest.product -cne 'TownLight Station' -or
+        [string]$runtimeManifest.version -cne [string]$pair.manifest.version -or
+        [string]$runtimeManifest.source_commit -cne [string]$pair.manifest.source_commit -or
+        [string]$runtimeManifest.runtime_package_sha256 -cne [string]$pair.manifest.media_runtime_sha256) {
+        throw 'Installed receipt and private-runtime manifest do not identify the candidate.'
+    }
+    $runtimeVerification = Assert-TownLightInstalledPrivateRuntime `
+        -RuntimeRoot (Join-Path $application 'runtime\gstreamer') -RuntimeManifest $runtimeManifest
     $stationd = (Get-FileHash -LiteralPath (Join-Path $application 'stationd.exe') -Algorithm SHA256).Hash.ToLowerInvariant()
     $worker = (Get-FileHash -LiteralPath (Join-Path $application 'channel-worker.exe') -Algorithm SHA256).Hash.ToLowerInvariant()
     $updater = (Get-FileHash -LiteralPath (Join-Path $application 'station-updater.exe') -Algorithm SHA256).Hash.ToLowerInvariant()
@@ -119,6 +151,9 @@ function Assert-InstalledCandidate {
         version = [string]$receipt.version
         installer_sha256 = [string]$pair.manifest.installer_sha256
         candidate_manifest_sha256 = $manifestHash
+        media_runtime_sha256 = [string]$receipt.media_runtime_sha256
+        runtime_manifest_sha256 = $runtimeManifestHash
+        runtime_file_count = [int]$runtimeVerification.file_count
         stationd_sha256 = $stationd
         channel_worker_sha256 = $worker
         station_updater_sha256 = $updater
@@ -228,11 +263,6 @@ finally {
         try { Invoke-Api 'Put' '/channels' $proofChannel | Out-Null } catch { Write-Warning 'Could not disable the proof channel during cleanup.' }
     }
     $result.finished_at_unix_ms = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
-    if ($ResultPath) {
-        $parent = Split-Path -Parent $ResultPath
-        if ($parent -and -not (Test-Path -LiteralPath $parent)) { New-Item -ItemType Directory -Path $parent -Force | Out-Null }
-        $result | ConvertTo-Json -Depth 40 | Set-Content -LiteralPath $ResultPath -Encoding utf8
-    }
     if ($mutexHeld) { $mutex.ReleaseMutex() }
     $mutex.Dispose()
 }
