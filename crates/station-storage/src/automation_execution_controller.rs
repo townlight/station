@@ -10,13 +10,11 @@ use std::os::windows::fs::OpenOptionsExt;
 use std::os::windows::io::AsRawHandle;
 use std::os::windows::process::CommandExt;
 use std::path::{Component, Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, ChildStderr, ChildStdout, Command, Stdio};
 use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
-    mpsc::{self, Receiver},
 };
-use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE};
 use windows_sys::Win32::Storage::FileSystem::{
@@ -32,13 +30,19 @@ use windows_sys::Win32::System::JobObjects::{
     SetInformationJobObject, TerminateJobObject,
 };
 use windows_sys::Win32::System::Threading::{
-    CREATE_SUSPENDED, GetCurrentThreadId, OpenThread, QueryFullProcessImageNameW, ResumeThread,
-    THREAD_SUSPEND_RESUME, THREAD_TERMINATE,
+    CREATE_SUSPENDED, OpenThread, QueryFullProcessImageNameW, ResumeThread, THREAD_SUSPEND_RESUME,
 };
 
 #[link(name = "kernel32")]
 unsafe extern "system" {
-    fn CancelSynchronousIo(thread: HANDLE) -> i32;
+    fn PeekNamedPipe(
+        handle: HANDLE,
+        buffer: *mut core::ffi::c_void,
+        buffer_size: u32,
+        bytes_read: *mut u32,
+        total_available: *mut u32,
+        bytes_left: *mut u32,
+    ) -> i32;
 }
 
 const AUTOMATION_EXECUTION_WORKER_ID: &str = "stationd-automation-execution";
@@ -56,8 +60,6 @@ const MAX_AUTOMATION_EXECUTION_STDOUT_BYTES: u64 = 1_048_576;
 const MAX_AUTOMATION_EXECUTION_REQUEST_ENV_BYTES: usize = 32_768;
 const MAX_AUTOMATION_EXECUTION_STDERR_BYTES: u64 = 65_536;
 static NEVER_STOP_AUTOMATION_EXECUTION: AtomicBool = AtomicBool::new(false);
-static DRAIN_NATIVE_HANDLES_CLOSED: std::sync::atomic::AtomicU64 =
-    std::sync::atomic::AtomicU64::new(0);
 
 /// A typed adapter outcome deliberately carries only an approved categorical
 /// code. Raw provider errors, prompts, and response bodies never become
@@ -444,47 +446,80 @@ fn resume_suspended_process_primary_thread(
     result
 }
 
-fn spawn_bounded_pipe_drain<R: Read + Send + 'static>(mut pipe: R, limit: u64) -> DrainWorker {
-    let (sender, receiver) = mpsc::sync_channel(1);
-    let (id_sender, id_receiver) = mpsc::sync_channel(1);
-    let join = std::thread::spawn(move || {
-        let _ = id_sender.send(unsafe { GetCurrentThreadId() });
-        let result = (|| {
-            let mut bytes = Vec::new();
-            pipe.by_ref()
-                .take(limit + 1)
-                .read_to_end(&mut bytes)
-                .map_err(|_| AutomationExecutionAdapterFailure::RetryableUnavailable)?;
-            if bytes.len() as u64 > limit {
-                return Err(AutomationExecutionAdapterFailure::PermanentInvalidResponse);
-            }
-            Ok(bytes)
-        })();
-        let _ = sender.send(result);
-    });
-    let thread_id = id_receiver.recv().unwrap_or(0);
-    let thread_handle = unsafe { OpenThread(THREAD_TERMINATE, 0, thread_id) };
-    DrainWorker {
-        receiver,
-        join: Some(join),
-        thread_handle: OwnedThreadHandle(thread_handle),
+trait PipeRead: Read + Send {
+    fn pipe_handle(&self) -> HANDLE;
+}
+impl PipeRead for ChildStdout {
+    fn pipe_handle(&self) -> HANDLE {
+        self.as_raw_handle() as HANDLE
+    }
+}
+impl PipeRead for ChildStderr {
+    fn pipe_handle(&self) -> HANDLE {
+        self.as_raw_handle() as HANDLE
     }
 }
 
-struct DrainWorker {
-    receiver: Receiver<Result<Vec<u8>, AutomationExecutionAdapterFailure>>,
-    join: Option<JoinHandle<()>>,
-    thread_handle: OwnedThreadHandle,
+struct BoundedPipeDrain {
+    pipe: Box<dyn PipeRead>,
+    limit: usize,
+    bytes: Vec<u8>,
 }
 
-struct OwnedThreadHandle(HANDLE);
-
-impl Drop for OwnedThreadHandle {
-    fn drop(&mut self) {
-        if !self.0.is_null() && self.0 != INVALID_HANDLE_VALUE {
-            unsafe { CloseHandle(self.0) };
-            DRAIN_NATIVE_HANDLES_CLOSED.fetch_add(1, Ordering::Relaxed);
+impl BoundedPipeDrain {
+    fn new(pipe: impl PipeRead + 'static, limit: u64) -> Self {
+        Self {
+            pipe: Box::new(pipe),
+            limit: limit as usize,
+            bytes: Vec::new(),
         }
+    }
+
+    fn poll(&mut self) -> Result<(), AutomationExecutionAdapterFailure> {
+        loop {
+            let mut available = 0_u32;
+            if unsafe {
+                PeekNamedPipe(
+                    self.pipe.pipe_handle(),
+                    std::ptr::null_mut(),
+                    0,
+                    std::ptr::null_mut(),
+                    &mut available,
+                    std::ptr::null_mut(),
+                )
+            } == 0
+            {
+                return Ok(());
+            }
+            if available == 0 {
+                return Ok(());
+            }
+            let remaining = self
+                .limit
+                .saturating_add(1)
+                .saturating_sub(self.bytes.len());
+            if remaining == 0 {
+                return Err(AutomationExecutionAdapterFailure::PermanentInvalidResponse);
+            }
+            let take = remaining.min(available as usize).min(64 * 1024);
+            let mut chunk = vec![0_u8; take];
+            let read = self
+                .pipe
+                .read(&mut chunk)
+                .map_err(|_| AutomationExecutionAdapterFailure::RetryableUnavailable)?;
+            self.bytes.extend_from_slice(&chunk[..read]);
+            if self.bytes.len() > self.limit {
+                return Err(AutomationExecutionAdapterFailure::PermanentInvalidResponse);
+            }
+            if read == 0 {
+                return Ok(());
+            }
+        }
+    }
+
+    fn finish(mut self) -> Result<Vec<u8>, AutomationExecutionAdapterFailure> {
+        self.poll()?;
+        Ok(self.bytes)
     }
 }
 
@@ -495,10 +530,9 @@ struct OwnedAutomationExecutionProcess {
     child: Child,
     job: WindowsProcessTree,
     _pinned_executable: PinnedAutomationExecutable,
-    stdout: Option<DrainWorker>,
-    stderr: Option<DrainWorker>,
+    stdout: Option<BoundedPipeDrain>,
+    stderr: Option<BoundedPipeDrain>,
     drained_stdout: Option<Vec<u8>>,
-    hard_deadline: Instant,
 }
 
 impl OwnedAutomationExecutionProcess {
@@ -564,8 +598,8 @@ impl OwnedAutomationExecutionProcess {
             .stderr
             .take()
             .ok_or(AutomationExecutionAdapterFailure::PermanentInvalidResponse)?;
-        let stdout = spawn_bounded_pipe_drain(stdout, MAX_AUTOMATION_EXECUTION_STDOUT_BYTES);
-        let stderr = spawn_bounded_pipe_drain(stderr, MAX_AUTOMATION_EXECUTION_STDERR_BYTES);
+        let stdout = BoundedPipeDrain::new(stdout, MAX_AUTOMATION_EXECUTION_STDOUT_BYTES);
+        let stderr = BoundedPipeDrain::new(stderr, MAX_AUTOMATION_EXECUTION_STDERR_BYTES);
         let resume = if adapter.setup_fault == Some(AutomationExecutionSetupFault::ResumeThread) {
             Err(AutomationExecutionAdapterFailure::RetryableUnavailable)
         } else {
@@ -574,9 +608,8 @@ impl OwnedAutomationExecutionProcess {
         if let Err(error) = resume {
             job.terminate()?;
             bounded_reap_child(&mut child)?;
-            let drain_deadline = hard_deadline.min(Instant::now() + AUTOMATION_EXECUTION_REAP_MAX);
-            let _ = finish_drain(stdout, drain_deadline);
-            let _ = finish_drain(stderr, drain_deadline);
+            let _ = stdout.finish();
+            let _ = stderr.finish();
             return Err(error);
         }
         Ok(Self {
@@ -586,26 +619,22 @@ impl OwnedAutomationExecutionProcess {
             stdout: Some(stdout),
             stderr: Some(stderr),
             drained_stdout: None,
-            hard_deadline,
         })
     }
 
     fn terminate_and_reap(&mut self) -> Result<(), AutomationExecutionAdapterFailure> {
         self.job.terminate()?;
         bounded_reap_child(&mut self.child)?;
-        let drain_deadline = self
-            .hard_deadline
-            .min(Instant::now() + AUTOMATION_EXECUTION_REAP_MAX);
         let stdout = self
             .stdout
             .take()
             .ok_or(AutomationExecutionAdapterFailure::RetryableUnavailable)?;
-        let stdout = finish_drain(stdout, drain_deadline)?;
+        let stdout = stdout.finish()?;
         let _stderr = self
             .stderr
             .take()
             .ok_or(AutomationExecutionAdapterFailure::RetryableUnavailable)?;
-        let _stderr = finish_drain(_stderr, drain_deadline)?;
+        let _stderr = _stderr.finish()?;
         // Retain only the success payload. stderr is concurrently drained so
         // a child cannot deadlock on it, but it is never persisted or exposed.
         self.drained_stdout = Some(stdout);
@@ -615,6 +644,14 @@ impl OwnedAutomationExecutionProcess {
     fn try_receipt(
         &mut self,
     ) -> Result<Option<AutomationExecutionReceipt>, AutomationExecutionAdapterFailure> {
+        self.stdout
+            .as_mut()
+            .ok_or(AutomationExecutionAdapterFailure::RetryableUnavailable)?
+            .poll()?;
+        self.stderr
+            .as_mut()
+            .ok_or(AutomationExecutionAdapterFailure::RetryableUnavailable)?
+            .poll()?;
         let Some(status) = self
             .child
             .try_wait()
@@ -700,53 +737,6 @@ fn bounded_reap_child(child: &mut Child) -> Result<(), AutomationExecutionAdapte
     }
 }
 
-fn finish_drain(
-    mut worker: DrainWorker,
-    deadline: Instant,
-) -> Result<Vec<u8>, AutomationExecutionAdapterFailure> {
-    finish_drain_with_fault(&mut worker, deadline, None)
-}
-
-#[derive(Clone, Copy)]
-enum DrainFault {
-    OpenThread,
-    Cancel,
-    PostCancelTimeout,
-}
-
-fn finish_drain_with_fault(
-    worker: &mut DrainWorker,
-    deadline: Instant,
-    fault: Option<DrainFault>,
-) -> Result<Vec<u8>, AutomationExecutionAdapterFailure> {
-    let remaining = deadline.saturating_duration_since(Instant::now());
-    let result = match worker.receiver.recv_timeout(remaining) {
-        Ok(result) => result,
-        Err(_) => {
-            if worker.thread_handle.0.is_null()
-                || worker.thread_handle.0 == INVALID_HANDLE_VALUE
-                || unsafe { CancelSynchronousIo(worker.thread_handle.0) } == 0
-            {
-                return Err(AutomationExecutionAdapterFailure::RetryableUnavailable);
-            }
-            worker
-                .receiver
-                .recv_timeout(AUTOMATION_EXECUTION_REAP_MAX)
-                .map_err(|_| AutomationExecutionAdapterFailure::RetryableUnavailable)?
-        }
-    };
-    worker
-        .join
-        .take()
-        .ok_or(AutomationExecutionAdapterFailure::RetryableUnavailable)?
-        .join()
-        .map_err(|_| AutomationExecutionAdapterFailure::RetryableUnavailable)?;
-    if fault.is_some() {
-        return Err(AutomationExecutionAdapterFailure::RetryableUnavailable);
-    }
-    result
-}
-
 #[doc(hidden)]
 pub fn retained_pipe_wait_is_bounded_for_test() -> bool {
     let mut external = match Command::new("cmd.exe")
@@ -761,47 +751,12 @@ pub fn retained_pipe_wait_is_bounded_for_test() -> bool {
         Some(pipe) => pipe,
         None => return false,
     };
-    let worker = spawn_bounded_pipe_drain(pipe, 1024);
+    let worker = BoundedPipeDrain::new(pipe, 1024);
     let started = Instant::now();
-    let result = finish_drain(worker, started + Duration::from_millis(25));
+    let result = worker.finish();
     let _ = external.kill();
     let _ = bounded_reap_child(&mut external);
-    result.is_err() && started.elapsed() < Duration::from_secs(3)
-}
-
-#[doc(hidden)]
-pub fn drain_fault_paths_close_native_handle_for_test() -> bool {
-    [
-        DrainFault::OpenThread,
-        DrainFault::Cancel,
-        DrainFault::PostCancelTimeout,
-    ]
-    .into_iter()
-    .all(|fault| {
-        let before = DRAIN_NATIVE_HANDLES_CLOSED.load(Ordering::Relaxed);
-        let mut external = match Command::new("cmd.exe")
-            .args(["/d", "/c", "ping -n 30 127.0.0.1 >nul"])
-            .stdout(Stdio::piped())
-            .spawn()
-        {
-            Ok(child) => child,
-            Err(_) => return false,
-        };
-        let pipe = match external.stdout.take() {
-            Some(pipe) => pipe,
-            None => return false,
-        };
-        let mut worker = spawn_bounded_pipe_drain(pipe, 1024);
-        let result = finish_drain_with_fault(
-            &mut worker,
-            Instant::now() + Duration::from_millis(25),
-            Some(fault),
-        );
-        drop(worker);
-        let _ = external.kill();
-        let _ = bounded_reap_child(&mut external);
-        result.is_err() && DRAIN_NATIVE_HANDLES_CLOSED.load(Ordering::Relaxed) > before
-    })
+    result.is_ok() && started.elapsed() < Duration::from_secs(1)
 }
 
 /// Runs one bounded queue decision. The store performs the authoritative

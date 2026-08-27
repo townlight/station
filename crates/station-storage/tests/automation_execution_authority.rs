@@ -16,8 +16,8 @@ use station_automation_policy::{
 use station_maintenance::{VerifiedInstallAuthority, verified_install_authority_for_test};
 use station_storage::{
     AutomationExecutionAdapter, AutomationExecutionJobRecord, AutomationExecutionJobState,
-    AutomationExecutionSetupFault, StationStore, drain_fault_paths_close_native_handle_for_test,
-    retained_pipe_wait_is_bounded_for_test, run_automation_execution_controller_iteration,
+    AutomationExecutionSetupFault, StationStore, retained_pipe_wait_is_bounded_for_test,
+    run_automation_execution_controller_iteration,
     run_automation_execution_controller_iteration_with_stop,
     run_automation_execution_controller_iteration_with_stop_and_elapsed,
 };
@@ -1485,11 +1485,6 @@ fn executable_substitution_is_denied_for_the_complete_pinned_launch_window() {
 #[test]
 fn externally_retained_pipe_completion_cannot_hold_the_host_fence() {
     assert!(retained_pipe_wait_is_bounded_for_test());
-}
-
-#[test]
-fn drain_open_cancel_and_post_cancel_faults_close_native_handles() {
-    assert!(drain_fault_paths_close_native_handle_for_test());
 }
 
 #[test]
