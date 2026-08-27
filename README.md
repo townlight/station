@@ -116,9 +116,10 @@ Enabled Setup Admins and Meeting Operators can inspect an existing durable autom
 next-attempt time, receipt, and failure truth but never an active worker or claim identity. stationd
 currently has no production automation adapter registered: it records paced retryable
 `adapter_unavailable` attempts (one minute initially, then bounded exponential backoff) and does not
-fabricate a model receipt, provider contact, output artifact, or external success. The base controller
-accepts only a cancellable managed-attempt contract; it does not yet prove a production provider's
-managed input/output-handle or process containment implementation.
+fabricate a model receipt, provider contact, output artifact, or external success. The experimental
+base controller contains an already-started child and cancellable drains, but synchronous Windows
+launch setup is not independently cancellable. Production registration requires a separately killable
+launch helper plus managed input/output-handle proof.
 
 Caption decode-back requests use `POST /api/v1/channels/{channel_id}/caption-proof` with only
 `report_id`, `sink_id`, `capture_duration_ms`, and `max_capture_bytes`. The server requires that

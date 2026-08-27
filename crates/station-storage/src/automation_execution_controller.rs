@@ -442,14 +442,24 @@ fn spawn_bounded_pipe_drain<R: Read + Send + 'static>(mut pipe: R, limit: u64) -
     DrainWorker {
         receiver,
         join: Some(join),
-        thread_handle,
+        thread_handle: OwnedThreadHandle(thread_handle),
     }
 }
 
 struct DrainWorker {
     receiver: Receiver<Result<Vec<u8>, AutomationExecutionAdapterFailure>>,
     join: Option<JoinHandle<()>>,
-    thread_handle: HANDLE,
+    thread_handle: OwnedThreadHandle,
+}
+
+struct OwnedThreadHandle(HANDLE);
+
+impl Drop for OwnedThreadHandle {
+    fn drop(&mut self) {
+        if !self.0.is_null() && self.0 != INVALID_HANDLE_VALUE {
+            unsafe { CloseHandle(self.0) };
+        }
+    }
 }
 
 /// The only execution resource the controller supervises.  It is created by
@@ -672,9 +682,9 @@ fn finish_drain(
     let result = match worker.receiver.recv_timeout(remaining) {
         Ok(result) => result,
         Err(_) => {
-            if worker.thread_handle.is_null()
-                || worker.thread_handle == INVALID_HANDLE_VALUE
-                || unsafe { CancelSynchronousIo(worker.thread_handle) } == 0
+            if worker.thread_handle.0.is_null()
+                || worker.thread_handle.0 == INVALID_HANDLE_VALUE
+                || unsafe { CancelSynchronousIo(worker.thread_handle.0) } == 0
             {
                 return Err(AutomationExecutionAdapterFailure::RetryableUnavailable);
             }
@@ -690,7 +700,6 @@ fn finish_drain(
         .ok_or(AutomationExecutionAdapterFailure::RetryableUnavailable)?
         .join()
         .map_err(|_| AutomationExecutionAdapterFailure::RetryableUnavailable)?;
-    unsafe { CloseHandle(worker.thread_handle) };
     result
 }
 

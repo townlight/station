@@ -45,15 +45,18 @@ job identity even when a corrupted parent pointer or parent row tries to hide th
 
 ## Boundaries and non-claims
 
-stationd now runs one bounded automation-execution queue controller under the same install-authority
-fence as the durable decision. It claims FIFO current work with a 60-second lease and accepts only a
+stationd runs an automation-execution queue controller under the install-authority fence, but the
+installed runtime deliberately registers no executable adapter. It records paced `adapter_unavailable`
+truth without entering executable setup. The experimental base controller accepts only a
 declarative installed worker program whose adapter ID/revision matches the claimed request and whose
 regular executable is rooted under the trusted installed application tree, free of reparse points, and
 rehashes to the configured identity. The host starts the child suspended, assigns it to a fresh
 kill-on-close Windows Job Object before resuming its primary thread, drains bounded stdout and stderr
-concurrently, and checks both tree termination and reaping before parsing a receipt. A fixed 60-second
-action deadline starts at claim and is never extended by lease renewal; renewal preserves only durable
-ownership. Thus no adapter callback can synchronously hold stationd, the queue, or the install fence.
+concurrently, and checks both tree termination and reaping before parsing a receipt. Its monotonic
+deadline bounds an already-started owned child and cancellable drains, but synchronous Windows path,
+hash, and `CreateProcess` setup are not independently cancellable. This slice therefore does not claim
+an absolute 60-second host boundary for a configured executable adapter; production registration is
+blocked until setup moves behind a separately killable helper boundary.
 An expired claim is left for
 the next durable claim transaction rather than allowing its old capability to write a late failure; renewal,
 retryable failure, and completion all require the random per-attempt claim identity as well as the stable
