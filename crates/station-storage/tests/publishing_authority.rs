@@ -73,6 +73,15 @@ fn publishing_authority_persists_cas_history_and_current_candidate_evidence() {
         .write_publish_target_account(&account(1), None, "setup-admin", 10)
         .unwrap();
     store
+        .provision_publish_account_credential(
+            ACCOUNT_ID,
+            1,
+            b"test-provider-secret",
+            "setup-admin",
+            10,
+        )
+        .unwrap();
+    store
         .write_publish_target_profile(&target(1), None, "setup-admin", 11)
         .unwrap();
     store

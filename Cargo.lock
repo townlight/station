@@ -118,6 +118,9 @@ version = "0.1.0"
 dependencies = [
  "getrandom 0.4.3",
  "gstreamer",
+ "serde",
+ "serde_json",
+ "sha2",
  "station-captions",
  "station-domain",
  "station-live",
@@ -131,6 +134,7 @@ dependencies = [
  "station-schedule",
  "station-storage",
  "station-windows-ipc",
+ "zeroize",
 ]
 
 [[package]]
@@ -2066,6 +2070,7 @@ dependencies = [
  "station-update",
  "ureq",
  "windows-sys 0.61.2",
+ "zeroize",
 ]
 
 [[package]]

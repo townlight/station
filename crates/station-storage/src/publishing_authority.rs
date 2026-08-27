@@ -91,6 +91,19 @@ impl StationStore {
              );\
              CREATE INDEX IF NOT EXISTS publish_connection_test_evidence_current \
                ON publish_connection_test_evidence(target_id, candidate_version, source_commit, tested_at_unix_ms DESC, evidence_id DESC);\
+             CREATE TABLE IF NOT EXISTS publish_account_credentials (\
+               account_id TEXT NOT NULL,\
+               account_revision INTEGER NOT NULL CHECK (account_revision >= 1),\
+               credential_version INTEGER NOT NULL CHECK (credential_version >= 1),\
+               state TEXT NOT NULL CHECK (state IN ('active','deleted')),\
+               protected_secret BLOB NOT NULL,\
+               changed_by TEXT NOT NULL CHECK (length(changed_by) BETWEEN 1 AND 200 AND changed_by=trim(changed_by)),\
+               occurred_at_unix_ms INTEGER NOT NULL CHECK (occurred_at_unix_ms >= 0),\
+               PRIMARY KEY(account_id,credential_version),\
+               FOREIGN KEY(account_id) REFERENCES publish_target_accounts(account_id)\
+             );\
+             CREATE INDEX IF NOT EXISTS publish_account_credentials_current \
+               ON publish_account_credentials(account_id,credential_version DESC);\
              CREATE TABLE IF NOT EXISTS publish_authority_epoch (\
                singleton INTEGER PRIMARY KEY CHECK (singleton=1),\
                revision INTEGER NOT NULL CHECK (revision >= 0)\
@@ -107,7 +120,11 @@ impl StationStore {
              CREATE TRIGGER IF NOT EXISTS publish_connection_test_evidence_no_update \
                BEFORE UPDATE ON publish_connection_test_evidence BEGIN SELECT RAISE(ABORT, 'publish connection evidence is append-only'); END;\
              CREATE TRIGGER IF NOT EXISTS publish_connection_test_evidence_no_delete \
-               BEFORE DELETE ON publish_connection_test_evidence BEGIN SELECT RAISE(ABORT, 'publish connection evidence is append-only'); END;",
+               BEFORE DELETE ON publish_connection_test_evidence BEGIN SELECT RAISE(ABORT, 'publish connection evidence is append-only'); END;\
+             CREATE TRIGGER IF NOT EXISTS publish_account_credentials_no_update \
+               BEFORE UPDATE ON publish_account_credentials BEGIN SELECT RAISE(ABORT, 'publish credential audit is append-only'); END;\
+             CREATE TRIGGER IF NOT EXISTS publish_account_credentials_no_delete \
+               BEFORE DELETE ON publish_account_credentials BEGIN SELECT RAISE(ABORT, 'publish credential audit is append-only'); END;",
         )
     }
 
@@ -125,8 +142,11 @@ impl StationStore {
         )?;
         match unsafe { sqlite3_step(statement.raw) } {
             SQLITE_ROW => {
-                let account = read_publish_account(statement.raw)?;
+                let mut account = read_publish_account(statement.raw)?;
                 self.validate_publish_account_snapshot(&account)?;
+                account.credential_configured = self
+                    .current_publish_credential_version(&account.account_id, account.revision)?
+                    .is_some();
                 Ok(Some(account))
             }
             SQLITE_DONE => Ok(None),
@@ -139,7 +159,14 @@ impl StationStore {
         let mut accounts = Vec::new();
         loop {
             match unsafe { sqlite3_step(statement.raw) } {
-                SQLITE_ROW => accounts.push(read_publish_account(statement.raw)?),
+                SQLITE_ROW => {
+                    let mut account = read_publish_account(statement.raw)?;
+                    self.validate_publish_account_snapshot(&account)?;
+                    account.credential_configured = self
+                        .current_publish_credential_version(&account.account_id, account.revision)?
+                        .is_some();
+                    accounts.push(account);
+                }
                 SQLITE_DONE if accounts.len() <= MAX_PUBLISHING_RECORDS => break,
                 SQLITE_DONE => {
                     return Err("publish target account authority exceeds 64 records".into());
@@ -147,10 +174,201 @@ impl StationStore {
                 _ => return Err(sqlite_error(self.database)),
             }
         }
-        for account in &accounts {
-            self.validate_publish_account_snapshot(account)?;
-        }
         Ok(accounts)
+    }
+
+    pub fn provision_publish_account_credential(
+        &self,
+        account_id: &str,
+        expected_account_revision: u64,
+        secret: &[u8],
+        changed_by: &str,
+        occurred_at_unix_ms: i64,
+    ) -> Result<u64, String> {
+        validate_publishing_id(account_id, "publish target account")?;
+        if !secret_field(changed_by, 200) || occurred_at_unix_ms < 0 {
+            return Err("publish credential attribution is invalid".into());
+        }
+        if secret.len() < 8 || secret.len() > 16_384 || secret.contains(&0) {
+            return Err("publish provider credential is empty, oversized, or invalid".into());
+        }
+        let protected = protect_local_machine(secret)?;
+        self.execute("BEGIN IMMEDIATE")?;
+        let outcome = (|| {
+            let account = self
+                .read_publish_target_account(account_id)?
+                .ok_or_else(|| "publish target account is missing".to_string())?;
+            if account.revision != expected_account_revision {
+                return Err("publish target account changed before credential provisioning".into());
+            }
+            let version = self.next_publish_credential_version(account_id)?;
+            let statement = self.prepare("INSERT INTO publish_account_credentials(account_id,account_revision,credential_version,state,protected_secret,changed_by,occurred_at_unix_ms) VALUES(?1,?2,?3,'active',?4,?5,?6)")?;
+            bind_text(
+                self.database,
+                statement.raw,
+                1,
+                &c_string(account_id, "publish account")?,
+            )?;
+            bind_i64(
+                self.database,
+                statement.raw,
+                2,
+                checked_i64(expected_account_revision, "publish account revision")?,
+            )?;
+            bind_i64(
+                self.database,
+                statement.raw,
+                3,
+                checked_i64(version, "publish credential version")?,
+            )?;
+            bind_blob(self.database, statement.raw, 4, &protected)?;
+            bind_text(
+                self.database,
+                statement.raw,
+                5,
+                &c_string(changed_by, "publish credential actor")?,
+            )?;
+            bind_i64(self.database, statement.raw, 6, occurred_at_unix_ms)?;
+            expect_done(self.database, statement.raw)?;
+            advance_publish_authority_epoch(self)?;
+            Ok(version)
+        })();
+        self.finish_value_transaction(outcome)
+    }
+
+    pub fn delete_publish_account_credential(
+        &self,
+        account_id: &str,
+        expected_account_revision: u64,
+        changed_by: &str,
+        occurred_at_unix_ms: i64,
+    ) -> Result<u64, String> {
+        validate_publishing_id(account_id, "publish target account")?;
+        if !secret_field(changed_by, 200) || occurred_at_unix_ms < 0 {
+            return Err("publish credential attribution is invalid".into());
+        }
+        self.execute("BEGIN IMMEDIATE")?;
+        let outcome = (|| {
+            let account = self
+                .read_publish_target_account(account_id)?
+                .ok_or_else(|| "publish target account is missing".to_string())?;
+            if account.revision != expected_account_revision {
+                return Err("publish target account changed before credential deletion".into());
+            }
+            if self
+                .current_publish_credential_version(account_id, expected_account_revision)?
+                .is_none()
+            {
+                return Err("publish provider credential is not configured".into());
+            }
+            let version = self.next_publish_credential_version(account_id)?;
+            let statement = self.prepare("INSERT INTO publish_account_credentials(account_id,account_revision,credential_version,state,protected_secret,changed_by,occurred_at_unix_ms) VALUES(?1,?2,?3,'deleted',x'',?4,?5)")?;
+            bind_text(
+                self.database,
+                statement.raw,
+                1,
+                &c_string(account_id, "publish account")?,
+            )?;
+            bind_i64(
+                self.database,
+                statement.raw,
+                2,
+                checked_i64(expected_account_revision, "publish account revision")?,
+            )?;
+            bind_i64(
+                self.database,
+                statement.raw,
+                3,
+                checked_i64(version, "publish credential version")?,
+            )?;
+            bind_text(
+                self.database,
+                statement.raw,
+                4,
+                &c_string(changed_by, "publish credential actor")?,
+            )?;
+            bind_i64(self.database, statement.raw, 5, occurred_at_unix_ms)?;
+            expect_done(self.database, statement.raw)?;
+            advance_publish_authority_epoch(self)?;
+            Ok(version)
+        })();
+        self.finish_value_transaction(outcome)
+    }
+
+    pub(crate) fn read_current_publish_account_credential(
+        &self,
+        account_id: &str,
+        account_revision: u64,
+    ) -> Result<Option<(u64, Vec<u8>)>, String> {
+        let statement = self.prepare("SELECT account_revision,credential_version,state,protected_secret FROM publish_account_credentials WHERE account_id=?1 ORDER BY credential_version DESC LIMIT 1")?;
+        bind_text(
+            self.database,
+            statement.raw,
+            1,
+            &c_string(account_id, "publish account")?,
+        )?;
+        match unsafe { sqlite3_step(statement.raw) } {
+            SQLITE_ROW => {
+                let bound_revision =
+                    column_u64(statement.raw, 0, "publish credential account revision")?;
+                let version = column_u64(statement.raw, 1, "publish credential version")?;
+                let state = column_text(statement.raw, 2)?;
+                if state == "deleted" || bound_revision != account_revision {
+                    return Ok(None);
+                }
+                if state != "active" {
+                    return Err("publish credential state is invalid".into());
+                }
+                Ok(Some((
+                    version,
+                    unprotect_local_machine(&column_blob(statement.raw, 3)?)?,
+                )))
+            }
+            SQLITE_DONE => Ok(None),
+            _ => Err(sqlite_error(self.database)),
+        }
+    }
+
+    pub fn current_publish_account_credential_version(
+        &self,
+        account_id: &str,
+        account_revision: u64,
+    ) -> Result<Option<u64>, String> {
+        Ok(self
+            .read_current_publish_account_credential(account_id, account_revision)?
+            .map(|(version, mut secret)| {
+                secret.fill(0);
+                version
+            }))
+    }
+
+    fn current_publish_credential_version(
+        &self,
+        account_id: &str,
+        account_revision: u64,
+    ) -> Result<Option<u64>, String> {
+        Ok(self
+            .read_current_publish_account_credential(account_id, account_revision)?
+            .map(|(version, mut secret)| {
+                secret.fill(0);
+                version
+            }))
+    }
+
+    fn next_publish_credential_version(&self, account_id: &str) -> Result<u64, String> {
+        let statement = self.prepare("SELECT COALESCE(MAX(credential_version),0) FROM publish_account_credentials WHERE account_id=?1")?;
+        bind_text(
+            self.database,
+            statement.raw,
+            1,
+            &c_string(account_id, "publish account")?,
+        )?;
+        match unsafe { sqlite3_step(statement.raw) } {
+            SQLITE_ROW => column_u64(statement.raw, 0, "publish credential version")?
+                .checked_add(1)
+                .ok_or_else(|| "publish credential version overflowed".into()),
+            _ => Err(sqlite_error(self.database)),
+        }
     }
 
     pub fn list_publish_target_account_history(
@@ -365,6 +583,23 @@ impl StationStore {
         validate_publishing_attribution(changed_by, occurred_at_unix_ms)?;
         self.execute("BEGIN IMMEDIATE")
             .map_err(PublishingAuthorityWriteError::Storage)?;
+        let outcome = self.write_publish_target_profile_in_transaction(
+            target,
+            expected_revision,
+            changed_by,
+            occurred_at_unix_ms,
+        );
+        finish_publishing_write(self, outcome)
+    }
+
+    #[allow(clippy::let_and_return)]
+    pub(crate) fn write_publish_target_profile_in_transaction(
+        &self,
+        target: &PublishTargetProfile,
+        expected_revision: Option<u64>,
+        changed_by: &str,
+        occurred_at_unix_ms: i64,
+    ) -> Result<(), PublishingAuthorityWriteError> {
         let outcome = (|| {
             let account = self
                 .read_publish_target_account(&target.account_id)
@@ -447,7 +682,7 @@ impl StationStore {
                 .map_err(PublishingAuthorityWriteError::Storage)?;
             advance_publish_authority_epoch(self).map_err(PublishingAuthorityWriteError::Storage)
         })();
-        finish_publishing_write(self, outcome)
+        outcome
     }
 
     pub fn append_publish_connection_test_evidence(
@@ -799,7 +1034,7 @@ fn validate_publishing_cas(
         Ok(())
     }
 }
-fn finish_publishing_write(
+pub(super) fn finish_publishing_write(
     store: &StationStore,
     outcome: Result<(), PublishingAuthorityWriteError>,
 ) -> Result<(), PublishingAuthorityWriteError> {
@@ -852,6 +1087,122 @@ where
     let record = serde_json::from_str::<T>(&record_json)
         .map_err(|error| format!("database returned invalid {record_name} JSON: {error}"))?;
     Ok(record)
+}
+
+#[cfg(test)]
+mod credential_tests {
+    use super::*;
+
+    #[test]
+    fn protected_publish_credential_rotates_deletes_and_rejects_tampering() {
+        let path = std::env::temp_dir().join(format!(
+            "townlight-publish-credential-{}.db",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let store = StationStore::open(&path).unwrap();
+        let account_id = "11111111-2222-4333-8444-555555555555";
+        let account = PublishTargetAccount {
+            account_id: account_id.into(),
+            kind: PublishTargetKind::Portal,
+            label: "Credential test".into(),
+            enabled: true,
+            credential_configured: false,
+            revision: 1,
+        };
+        store
+            .write_publish_target_account(&account, None, "setup-admin", 1)
+            .unwrap();
+        assert_eq!(
+            store
+                .provision_publish_account_credential(
+                    account_id,
+                    1,
+                    b"first-secret",
+                    "setup-admin",
+                    2
+                )
+                .unwrap(),
+            1
+        );
+        assert!(
+            store
+                .read_publish_target_account(account_id)
+                .unwrap()
+                .unwrap()
+                .credential_configured
+        );
+        assert_eq!(
+            store
+                .provision_publish_account_credential(
+                    account_id,
+                    1,
+                    b"rotated-secret",
+                    "setup-admin",
+                    3
+                )
+                .unwrap(),
+            2
+        );
+        let (version, mut secret) = store
+            .read_current_publish_account_credential(account_id, 1)
+            .unwrap()
+            .unwrap();
+        assert_eq!(version, 2);
+        assert_eq!(secret, b"rotated-secret");
+        secret.fill(0);
+        store
+            .execute("DROP TRIGGER publish_account_credentials_no_update")
+            .unwrap();
+        store
+            .execute("UPDATE publish_account_credentials SET protected_secret=x'00' WHERE credential_version=2")
+            .unwrap();
+        assert!(
+            store
+                .read_current_publish_account_credential(account_id, 1)
+                .is_err()
+        );
+
+        let clean_path = path.with_extension("delete.db");
+        let clean = StationStore::open(&clean_path).unwrap();
+        clean
+            .write_publish_target_account(&account, None, "setup-admin", 1)
+            .unwrap();
+        clean
+            .provision_publish_account_credential(
+                account_id,
+                1,
+                b"deletable-secret",
+                "setup-admin",
+                2,
+            )
+            .unwrap();
+        assert_eq!(
+            clean
+                .delete_publish_account_credential(account_id, 1, "setup-admin", 3)
+                .unwrap(),
+            2
+        );
+        assert!(
+            !clean
+                .read_publish_target_account(account_id)
+                .unwrap()
+                .unwrap()
+                .credential_configured
+        );
+        assert!(
+            clean
+                .read_current_publish_account_credential(account_id, 1)
+                .unwrap()
+                .is_none()
+        );
+        drop(clean);
+        drop(store);
+        let _ = std::fs::remove_file(path);
+        let _ = std::fs::remove_file(clean_path);
+    }
 }
 
 #[cfg(test)]

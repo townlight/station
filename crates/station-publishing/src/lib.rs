@@ -9,6 +9,7 @@ const MAX_DETAIL: usize = 1_000;
 const MAX_TARGETS: usize = 64;
 const MAX_EVIDENCE: usize = 128;
 const MAX_TEST_WINDOW_MS: i64 = 86_400_000;
+const MAX_MEDIA_BYTES: u64 = 1_099_511_627_776;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -90,6 +91,178 @@ pub struct PublishConnectionTestEvidence {
     pub tested_at_unix_ms: i64,
     pub expires_at_unix_ms: i64,
     pub detail: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum PublishExecutionTargetConfig {
+    Portal {
+        endpoint: String,
+    },
+    InternetArchive {
+        item_identifier: String,
+    },
+    LocalNas {
+        managed_root: String,
+    },
+    YouTubeLive {
+        channel_id: String,
+        broadcast_id: String,
+        stream_id: String,
+        privacy_status: YouTubePrivacyStatus,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum YouTubePrivacyStatus {
+    Public,
+    Unlisted,
+}
+
+impl PublishExecutionTargetConfig {
+    pub fn kind(&self) -> PublishTargetKind {
+        match self {
+            Self::Portal { .. } => PublishTargetKind::Portal,
+            Self::InternetArchive { .. } => PublishTargetKind::InternetArchive,
+            Self::LocalNas { .. } => PublishTargetKind::LocalNas,
+            Self::YouTubeLive { .. } => PublishTargetKind::YouTubeLive,
+        }
+    }
+
+    pub fn validate(&self) -> Result<(), String> {
+        match self {
+            Self::Portal { endpoint } => validate_https_endpoint(endpoint),
+            Self::InternetArchive { item_identifier } => {
+                validate_slug(item_identifier, 100, "Internet Archive item identifier")
+            }
+            Self::LocalNas { managed_root } => {
+                validate_visible(managed_root, 500, "managed NAS root")?;
+                if !managed_root.starts_with("\\\\")
+                    || managed_root.contains("..")
+                    || managed_root.contains('/')
+                {
+                    return Err(
+                        "managed NAS root must be an absolute UNC path without traversal".into(),
+                    );
+                }
+                Ok(())
+            }
+            Self::YouTubeLive {
+                channel_id,
+                broadcast_id,
+                stream_id,
+                ..
+            } => {
+                validate_slug(channel_id, 100, "YouTube channel identity")?;
+                validate_slug(broadcast_id, 100, "YouTube broadcast identity")?;
+                validate_slug(stream_id, 100, "YouTube stream identity")
+            }
+        }
+    }
+}
+
+/// Durable provider truth advances one explicit stage at a time. A later stage
+/// never implies audience reach, playback, or retention beyond the provider's
+/// exact acknowledgement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PublishExecutionStage {
+    Attempted,
+    Uploaded,
+    Delivered,
+    Published,
+    ExternallyVerified,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PublishExecutionReceipt {
+    pub receipt_id: String,
+    pub job_id: String,
+    pub account_id: String,
+    pub account_revision: u64,
+    pub target_id: String,
+    pub target_revision: u64,
+    pub target_kind: PublishTargetKind,
+    pub configuration_hash: String,
+    pub credential_version: u64,
+    pub candidate: PublishCandidateIdentity,
+    pub media_sha256: String,
+    pub media_bytes: u64,
+    pub stage: PublishExecutionStage,
+    /// Digest of the bounded provider acknowledgement or verified destination
+    /// bytes. Raw provider response bodies never enter durable authority.
+    pub delivery_identity_sha256: String,
+    pub occurred_at_unix_ms: i64,
+    pub recorded_at_unix_ms: i64,
+    pub detail: String,
+}
+
+impl PublishExecutionReceipt {
+    pub fn validate(&self) -> Result<(), String> {
+        for (value, field) in [
+            (&self.receipt_id, "publish receipt identity"),
+            (&self.job_id, "publish job identity"),
+            (&self.account_id, "publish account identity"),
+            (&self.target_id, "publish target identity"),
+        ] {
+            validate_uuid(value, field)?;
+        }
+        if self.account_revision == 0
+            || self.target_revision == 0
+            || self.credential_version == 0
+            || !is_sha256(&self.configuration_hash)
+            || !is_sha256(&self.media_sha256)
+            || !is_sha256(&self.delivery_identity_sha256)
+            || self.media_bytes == 0
+            || self.media_bytes > MAX_MEDIA_BYTES
+            || self.occurred_at_unix_ms < 0
+            || self.recorded_at_unix_ms < self.occurred_at_unix_ms
+        {
+            return Err("publish execution receipt binding or evidence is invalid".into());
+        }
+        self.candidate.validate()?;
+        validate_visible(&self.detail, MAX_DETAIL, "publish execution detail")
+    }
+
+    pub fn satisfies_required_delivery(&self) -> bool {
+        let minimum = match self.target_kind {
+            PublishTargetKind::Portal | PublishTargetKind::YouTubeLive => {
+                PublishExecutionStage::Published
+            }
+            PublishTargetKind::InternetArchive | PublishTargetKind::LocalNas => {
+                PublishExecutionStage::Delivered
+            }
+            PublishTargetKind::Syndication | PublishTargetKind::Podcast => return false,
+        };
+        self.stage >= minimum
+    }
+}
+
+pub fn validate_receipt_successor(
+    prior: &PublishExecutionReceipt,
+    next: &PublishExecutionReceipt,
+) -> Result<(), String> {
+    prior.validate()?;
+    next.validate()?;
+    if prior.job_id != next.job_id
+        || prior.account_id != next.account_id
+        || prior.account_revision != next.account_revision
+        || prior.target_id != next.target_id
+        || prior.target_revision != next.target_revision
+        || prior.target_kind != next.target_kind
+        || prior.configuration_hash != next.configuration_hash
+        || prior.credential_version != next.credential_version
+        || prior.candidate != next.candidate
+        || prior.media_sha256 != next.media_sha256
+        || prior.media_bytes != next.media_bytes
+        || next.stage <= prior.stage
+        || next.occurred_at_unix_ms < prior.occurred_at_unix_ms
+    {
+        return Err("publish execution receipt does not advance the exact job binding".into());
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -430,4 +603,31 @@ fn is_source_commit(value: &str) -> bool {
         && value
             .bytes()
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+fn validate_https_endpoint(value: &str) -> Result<(), String> {
+    validate_visible(value, 500, "publishing HTTPS endpoint")?;
+    let Some(authority) = value.strip_prefix("https://") else {
+        return Err("publishing provider endpoint must use HTTPS".into());
+    };
+    if authority.is_empty()
+        || authority.contains('@')
+        || authority.contains('?')
+        || authority.contains('#')
+        || authority.ends_with('/')
+    {
+        return Err("publishing provider endpoint contains unsafe authority or URL data".into());
+    }
+    Ok(())
+}
+
+fn validate_slug(value: &str, maximum: usize, field: &str) -> Result<(), String> {
+    validate_visible(value, maximum, field)?;
+    if value
+        .bytes()
+        .any(|byte| !(byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_')))
+    {
+        return Err(format!("{field} contains unsupported characters"));
+    }
+    Ok(())
 }

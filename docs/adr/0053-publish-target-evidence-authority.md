@@ -28,14 +28,17 @@ has not been tested is `unknown`.
 
 ## Boundaries and non-claims
 
-This vertical slice has no provider adapter, network access, SQLite persistence, API, UI, job
-queue, media transfer, retention verifier, or live-stream capacity probe. It neither invokes a
-provider nor asserts credentials are usable merely because they are configured. A connection-test
-outcome is supplied as bounded evidence by a future trusted server-side adapter.
+This ADR defines the original connection-evidence slice. That slice, by itself, has no provider
+adapter, network access, SQLite persistence, API, UI, job queue, media transfer, retention verifier,
+or live-stream capacity probe. The later execution authority in ADR 0076 adds protected credentials,
+durable jobs, provider adapters, immutable execution receipts, API, and operator workflow without
+changing the narrower meaning of the connection evidence defined here. A connection-test result
+still cannot substitute for an exact current execution receipt, and configured credentials alone
+still prove nothing about provider access.
 
 The model does not establish that the Portal is a public canonical record, that Internet Archive
 and NAS copies are bit-for-bit peers, or that YouTube can currently ingest or reach viewers.
-Those claims require provider-specific execution and independently persisted acceptance or
-transfer evidence in later slices. This crate also does not decide publication policy for an
-individual program, provide audit overrides, or let callers manufacture a pass by selecting an
-optional target.
+Those claims require provider-specific execution and independently persisted acceptance or transfer
+evidence. ADR 0076 defines that later authority and its remaining installed/provider/field proof
+boundaries. This crate also does not decide publication policy for an individual program, provide
+audit overrides, or let callers manufacture a pass by selecting an optional target.

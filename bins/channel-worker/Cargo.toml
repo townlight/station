@@ -6,6 +6,10 @@ publish.workspace = true
 
 [dependencies]
 getrandom.workspace = true
+gstreamer.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
 station-media-journal.workspace = true
 station-media-engine.workspace = true
 station-media-protocol.workspace = true
@@ -13,9 +17,9 @@ station-orchestration.workspace = true
 station-schedule.workspace = true
 station-storage.workspace = true
 station-windows-ipc.workspace = true
+zeroize.workspace = true
 
 [dev-dependencies]
-gstreamer.workspace = true
 station-captions.workspace = true
 station-domain.workspace = true
 station-live.workspace = true

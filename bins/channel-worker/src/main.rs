@@ -1,3 +1,5 @@
+mod youtube_publish_worker;
+
 use std::collections::HashMap;
 use std::io::{ErrorKind, Read};
 use std::net::{IpAddr, SocketAddr};
@@ -147,6 +149,22 @@ impl LiveBufferHealth {
 }
 
 fn main() {
+    if std::env::args_os()
+        .nth(1)
+        .is_some_and(|argument| argument == "--youtube-publish-worker")
+    {
+        // This one-shot mode receives a provider secret on stdin. Its parent
+        // discards stderr, but suppress panic rendering here as well so a
+        // direct invocation cannot turn an unexpected panic into a diagnostic
+        // persistence path.
+        std::panic::set_hook(Box::new(|_| {}));
+        let mut arguments = std::env::args_os().skip(1);
+        let _ = arguments.next();
+        if arguments.next().is_some() {
+            std::process::exit(2);
+        }
+        std::process::exit(youtube_publish_worker::run_from_stdio());
+    }
     let WorkerArguments {
         worker_id,
         channel_id,

@@ -58,8 +58,8 @@ use station_metadata::{
 };
 use station_publishing::{
     ConnectionTestOutcome as PublishConnectionTestOutcome, PublishCandidateIdentity,
-    PublishConnectionTestEvidence, PublishTargetAccount, PublishTargetKind, PublishTargetProfile,
-    RequiredTierStatus,
+    PublishConnectionTestEvidence, PublishExecutionReceipt, PublishExecutionTargetConfig,
+    PublishTargetAccount, PublishTargetKind, PublishTargetProfile, RequiredTierStatus,
 };
 use station_readiness::{
     BackupProbeInput, CandidateIdentity, CapabilitySupport, ChannelOutputRuntimeProbe,
@@ -98,15 +98,15 @@ use station_storage::{
     CommitWriteError, CustomMetadataSchemaWriteError, ExistingScheduleSnapshot,
     ExternalReceiverAcceptanceReceipt, FallbackSlateWriteError, HeadendProfileWriteError,
     OutputLoudnessProofJob, OutputLoudnessProofJobRecord, OutputLoudnessProofJobState,
-    ProfileWriteError, PublishingAuthorityWriteError, ReceiverAcceptanceOutcome,
-    ReceiverEvidenceMethod, ReferenceStationTierWrite, ReferenceStationTierWriteError,
-    ScheduleAutomationWriteError, ScheduleItemWrite, ScheduleMaterializationApplyOutcome,
-    ScheduleMaterializationHistoryCursor, ScheduleMaterializationHistoryEntry,
-    ScheduleMaterializationHistoryReadError, ScheduleMaterializationOutcome,
-    ScheduleMaterializationOutcomeRecord, ScheduleMaterializationPlanRecord,
-    ScheduleMaterializationRun, ScheduleMaterializationRunOrigin,
-    ScheduleMaterializationWriteError, StationStore, StoredSinkLoudnessProof, TransportProofJob,
-    TransportProofJobRecord, TransportProofJobState,
+    ProfileWriteError, PublishExecutionJob, PublishExecutionJobRecord, PublishExecutionJobState,
+    PublishingAuthorityWriteError, ReceiverAcceptanceOutcome, ReceiverEvidenceMethod,
+    ReferenceStationTierWrite, ReferenceStationTierWriteError, ScheduleAutomationWriteError,
+    ScheduleItemWrite, ScheduleMaterializationApplyOutcome, ScheduleMaterializationHistoryCursor,
+    ScheduleMaterializationHistoryEntry, ScheduleMaterializationHistoryReadError,
+    ScheduleMaterializationOutcome, ScheduleMaterializationOutcomeRecord,
+    ScheduleMaterializationPlanRecord, ScheduleMaterializationRun,
+    ScheduleMaterializationRunOrigin, ScheduleMaterializationWriteError, StationStore,
+    StoredSinkLoudnessProof, TransportProofJob, TransportProofJobRecord, TransportProofJobState,
 };
 use station_transport_proof::{CableTransportValidation, TargetDeviceConfig, TargetProtocol};
 use station_update::UpdateCheckTrigger;
@@ -781,8 +781,20 @@ struct PutPublishTargetAccountRequest {
     kind: PublishTargetKind,
     label: String,
     enabled: bool,
-    credential_configured: bool,
     expected_revision: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PutPublishAccountCredentialRequest {
+    expected_account_revision: u64,
+    credential: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DeletePublishAccountCredentialRequest {
+    expected_account_revision: u64,
 }
 
 /// The browser proposes non-secret target configuration. Identity, revision,
@@ -794,8 +806,21 @@ struct PutPublishTargetProfileRequest {
     kind: PublishTargetKind,
     label: String,
     enabled: bool,
-    configuration_hash: String,
+    configuration: PublishExecutionTargetConfig,
     expected_revision: Option<u64>,
+}
+
+#[derive(Debug, Serialize)]
+struct PublishExecutionJobResponse {
+    job: PublishExecutionJob,
+    state: &'static str,
+    attempts: u32,
+    next_attempt_at_unix_ms: i64,
+    updated_at_unix_ms: i64,
+    lease_expires_at_unix_ms: Option<i64>,
+    completed_at_unix_ms: Option<i64>,
+    failure_class: Option<String>,
+    receipts: Vec<PublishExecutionReceipt>,
 }
 
 /// The browser proposes only mutable field definitions. Schema identity,
@@ -2022,6 +2047,12 @@ impl Api {
                 self.put_automation_policy(path, body, actor)
             }
             ("GET", "/api/v1/publishing/accounts") => self.list_publish_target_accounts(actor),
+            ("PUT", path) if publish_account_credential_path(path).is_some() => {
+                self.put_publish_account_credential(path, body, actor)
+            }
+            ("DELETE", path) if publish_account_credential_path(path).is_some() => {
+                self.delete_publish_account_credential(path, body, actor)
+            }
             ("GET", path) if publish_target_account_history_path(path).is_some() => {
                 self.list_publish_target_account_history(path, actor)
             }
@@ -2032,6 +2063,15 @@ impl Api {
                 self.put_publish_target_account(path, body, actor)
             }
             ("GET", "/api/v1/publishing/targets") => self.list_publish_target_profiles(actor),
+            ("POST", path) if publish_execution_request_path(path).is_some() => {
+                self.request_publish_execution(path, body, actor)
+            }
+            ("GET", path) if publish_execution_job_path(path).is_some() => {
+                self.read_publish_execution_job(path, actor)
+            }
+            ("GET", path) if publish_execution_history_path(path).is_some() => {
+                self.list_publish_execution_jobs(path, actor)
+            }
             ("GET", path) if publish_target_profile_history_path(path).is_some() => {
                 self.list_publish_target_profile_history(path, actor)
             }
@@ -3165,7 +3205,12 @@ impl Api {
             kind: request.kind,
             label: request.label,
             enabled: request.enabled,
-            credential_configured: request.credential_configured,
+            credential_configured: self
+                .storage
+                .read_publish_target_account(account_id)
+                .ok()
+                .flatten()
+                .is_some_and(|current| current.credential_configured),
             revision,
         };
         match self.storage.write_publish_target_account(
@@ -3179,6 +3224,148 @@ impl Api {
                 serde_json::to_vec(&account).expect("serializing publish account cannot fail"),
             ),
             Err(error) => publishing_write_error_response(error),
+        }
+    }
+
+    fn put_publish_account_credential(
+        &self,
+        path: &str,
+        body: Option<&[u8]>,
+        actor: Option<&OperatorAccount>,
+    ) -> ApiResponse {
+        let Some(account_id) = publish_account_credential_path(path) else {
+            return error_response(
+                400,
+                "invalid_path",
+                "The publishing account identity is invalid.",
+            );
+        };
+        let Some(actor) = actor.filter(|account| account.enabled() && is_setup_admin(account))
+        else {
+            return error_response(
+                403,
+                "setup_admin_required",
+                "Publishing credentials require the Setup Admin role.",
+            );
+        };
+        let Some(request) = parse_body::<PutPublishAccountCredentialRequest>(body) else {
+            return error_response(
+                400,
+                "invalid_json",
+                "A bounded write-only credential body is required.",
+            );
+        };
+        if request.credential.len() < 8
+            || request.credential.len() > 16_384
+            || request
+                .credential
+                .chars()
+                .any(|character| character == '\0')
+        {
+            return error_response(
+                422,
+                "validation_failed",
+                "The publishing credential is invalid or oversized.",
+            );
+        }
+        let now = match system_time_millis() {
+            Ok(now) => now,
+            Err(message) => return error_response(500, "clock_error", &message),
+        };
+        match self.storage.provision_publish_account_credential(
+            account_id,
+            request.expected_account_revision,
+            request.credential.as_bytes(),
+            actor.account_id().as_str(),
+            now,
+        ) {
+            Ok(_) => match self.storage.read_publish_target_account(account_id) {
+                Ok(Some(account)) => json_response(
+                    200,
+                    serde_json::to_vec(&account)
+                        .expect("serializing redacted publish account cannot fail"),
+                ),
+                Ok(None) => error_response(
+                    404,
+                    "publish_target_account_not_found",
+                    "The publishing account does not exist.",
+                ),
+                Err(message) => error_response(500, "storage_error", &message),
+            },
+            Err(message) if message.contains("changed") => {
+                error_response(409, "revision_conflict", &message)
+            }
+            Err(message) if message.contains("missing") => {
+                error_response(404, "publish_target_account_not_found", &message)
+            }
+            Err(message) if message.contains("invalid") || message.contains("oversized") => {
+                error_response(422, "validation_failed", &message)
+            }
+            Err(message) => error_response(500, "credential_provisioning_failed", &message),
+        }
+    }
+
+    fn delete_publish_account_credential(
+        &self,
+        path: &str,
+        body: Option<&[u8]>,
+        actor: Option<&OperatorAccount>,
+    ) -> ApiResponse {
+        let Some(account_id) = publish_account_credential_path(path) else {
+            return error_response(
+                400,
+                "invalid_path",
+                "The publishing account identity is invalid.",
+            );
+        };
+        let Some(actor) = actor.filter(|account| account.enabled() && is_setup_admin(account))
+        else {
+            return error_response(
+                403,
+                "setup_admin_required",
+                "Publishing credentials require the Setup Admin role.",
+            );
+        };
+        let Some(request) = parse_body::<DeletePublishAccountCredentialRequest>(body) else {
+            return error_response(
+                400,
+                "invalid_json",
+                "The expected account revision is required.",
+            );
+        };
+        let now = match system_time_millis() {
+            Ok(now) => now,
+            Err(message) => return error_response(500, "clock_error", &message),
+        };
+        match self.storage.delete_publish_account_credential(
+            account_id,
+            request.expected_account_revision,
+            actor.account_id().as_str(),
+            now,
+        ) {
+            Ok(_) => match self.storage.read_publish_target_account(account_id) {
+                Ok(Some(account)) => json_response(
+                    200,
+                    serde_json::to_vec(&account)
+                        .expect("serializing redacted publish account cannot fail"),
+                ),
+                Ok(None) => error_response(
+                    404,
+                    "publish_target_account_not_found",
+                    "The publishing account does not exist.",
+                ),
+                Err(message) => error_response(500, "storage_error", &message),
+            },
+            Err(message) if message.contains("changed") => {
+                error_response(409, "revision_conflict", &message)
+            }
+            Err(message) if message.contains("missing") => {
+                error_response(404, "publish_target_account_not_found", &message)
+            }
+            Err(message) if message.contains("not configured") => {
+                error_response(409, "credential_not_configured", &message)
+            }
+            Err(message) => error_response(500, "credential_deletion_failed", &message),
         }
     }
 
@@ -3300,26 +3487,286 @@ impl Api {
             Ok(now) => now,
             Err(message) => return error_response(500, "clock_error", &message),
         };
+        if request.configuration.kind() != request.kind {
+            return error_response(
+                422,
+                "validation_failed",
+                "The execution configuration kind must match the publish target kind.",
+            );
+        }
+        if let Err(message) = request.configuration.validate() {
+            return error_response(422, "validation_failed", &message);
+        }
+        let configuration_json = match serde_json::to_vec(&request.configuration) {
+            Ok(value) => value,
+            Err(error) => return error_response(500, "serialization_error", &error.to_string()),
+        };
+        let configuration_hash = format!("{:x}", Sha256::digest(&configuration_json));
         let target = PublishTargetProfile {
             target_id: target_id.into(),
             account_id: request.account_id,
             kind: request.kind,
             label: request.label,
             enabled: request.enabled,
-            configuration_hash: request.configuration_hash,
+            configuration_hash,
             revision,
         };
-        match self.storage.write_publish_target_profile(
-            &target,
-            request.expected_revision,
-            actor.account_id().as_str(),
-            now,
-        ) {
+        match self
+            .storage
+            .write_publish_target_profile_with_execution_config(
+                &target,
+                request.expected_revision,
+                &request.configuration,
+                actor.account_id().as_str(),
+                now,
+            ) {
             Ok(()) => json_response(
                 if revision == 1 { 201 } else { 200 },
                 serde_json::to_vec(&target).expect("serializing publish target cannot fail"),
             ),
             Err(error) => publishing_write_error_response(error),
+        }
+    }
+
+    fn request_publish_execution(
+        &self,
+        path: &str,
+        body: Option<&[u8]>,
+        actor: Option<&OperatorAccount>,
+    ) -> ApiResponse {
+        if body.is_some_and(|body| !body.is_empty()) {
+            return error_response(
+                400,
+                "body_not_allowed",
+                "Publish execution requests are bodyless.",
+            );
+        }
+        let Some(actor) = actor.filter(|account| {
+            account.enabled()
+                && (is_setup_admin(account)
+                    || account
+                        .roles()
+                        .contains(&station_auth::OperatorRole::PublishOperator))
+        }) else {
+            return error_response(
+                403,
+                "publish_operator_required",
+                "Requesting publication requires the Publish Operator or Setup Admin role.",
+            );
+        };
+        let Some((target_id, asset_id)) = publish_execution_request_path(path) else {
+            return error_response(
+                400,
+                "invalid_path",
+                "The publish execution path is invalid.",
+            );
+        };
+        let data_directory = match self.database_path.parent() {
+            Some(value) => value,
+            None => {
+                return error_response(
+                    500,
+                    "candidate_authority_unavailable",
+                    "The station data directory is unavailable.",
+                );
+            }
+        };
+        let fence = match acquire_install_authority_fence(data_directory) {
+            Ok(value) => value,
+            Err(_) => {
+                return error_response(
+                    409,
+                    "candidate_authority_busy",
+                    "Candidate activation is in progress; wait before requesting publication.",
+                );
+            }
+        };
+        if fence.was_abandoned() {
+            return error_response(
+                409,
+                "candidate_authority_recovery_required",
+                "Candidate authority requires recovery before publication.",
+            );
+        }
+        let candidate =
+            match read_verified_install_authority(data_directory, &self.application_directory) {
+                Ok(value) => value,
+                Err(_) => {
+                    return error_response(
+                        409,
+                        "candidate_not_verified",
+                        "A verified installed candidate is required before publication.",
+                    );
+                }
+            };
+        let target = match self.storage.read_publish_target_profile(target_id) {
+            Ok(Some(value)) => value,
+            Ok(None) => {
+                return error_response(
+                    404,
+                    "publish_target_not_found",
+                    "The publish target does not exist.",
+                );
+            }
+            Err(message) => return error_response(500, "storage_error", &message),
+        };
+        let account = match self.storage.read_publish_target_account(&target.account_id) {
+            Ok(Some(value)) => value,
+            Ok(None) => {
+                return error_response(
+                    409,
+                    "stale_authority",
+                    "The publish account does not exist.",
+                );
+            }
+            Err(message) => return error_response(500, "storage_error", &message),
+        };
+        let credential_version = match self
+            .storage
+            .current_publish_account_credential_version(&account.account_id, account.revision)
+        {
+            Ok(Some(value)) => value,
+            Ok(None) => {
+                return error_response(
+                    409,
+                    "credential_unavailable",
+                    "The publish account credential is not configured.",
+                );
+            }
+            Err(message) => return error_response(500, "storage_error", &message),
+        };
+        let asset = match self.storage.read_media_asset(asset_id) {
+            Ok(Some(value)) if value.readiness == AssetReadiness::Ready => value,
+            Ok(Some(_)) => {
+                return error_response(
+                    409,
+                    "media_not_ready",
+                    "The selected media is not ready for publication.",
+                );
+            }
+            Ok(None) => {
+                return error_response(
+                    404,
+                    "media_not_found",
+                    "The selected media does not exist.",
+                );
+            }
+            Err(message) => return error_response(500, "storage_error", &message),
+        };
+        let (media_bytes, media_sha256) = match hash_publish_file(Path::new(&asset.media_path)) {
+            Ok(value) => value,
+            Err(message) => return error_response(409, "media_unavailable", &message),
+        };
+        if media_sha256 != asset.asset_id {
+            return error_response(
+                409,
+                "media_changed",
+                "The selected media no longer matches its catalog identity.",
+            );
+        }
+        let now = match system_time_millis() {
+            Ok(value) => value,
+            Err(message) => return error_response(500, "clock_error", &message),
+        };
+        let job_id = match secure_canonical_uuid() {
+            Ok(value) => value,
+            Err(message) => return error_response(500, "entropy_unavailable", &message),
+        };
+        let job = PublishExecutionJob {
+            job_id,
+            account_id: account.account_id,
+            account_revision: account.revision,
+            target_id: target.target_id,
+            target_revision: target.revision,
+            target_kind: target.kind,
+            configuration_hash: target.configuration_hash,
+            credential_version,
+            candidate_version: candidate.version().into(),
+            source_commit: candidate.source_commit().into(),
+            install_generation: candidate.install_generation(),
+            asset_id: asset.asset_id,
+            media_sha256,
+            media_bytes,
+            media_duration_ms: asset.duration_ms,
+            requested_by: actor.account_id().as_str().into(),
+            created_at_unix_ms: now,
+        };
+        match self.storage.enqueue_publish_execution_job(&job) {
+            Ok(()) => self.publish_execution_job_response(&job.target_id, job.job_id.as_str(), 202),
+            Err(message) if message.contains("stale") || message.contains("missing") => {
+                error_response(409, "stale_authority", &message)
+            }
+            Err(message) => error_response(500, "storage_error", &message),
+        }
+    }
+
+    fn read_publish_execution_job(
+        &self,
+        path: &str,
+        actor: Option<&OperatorAccount>,
+    ) -> ApiResponse {
+        if !is_publishing_reader(actor) {
+            return publishing_reader_required();
+        }
+        let Some((target_id, job_id)) = publish_execution_job_path(path) else {
+            return error_response(400, "invalid_path", "The publish job path is invalid.");
+        };
+        self.publish_execution_job_response(target_id, job_id, 200)
+    }
+
+    fn list_publish_execution_jobs(
+        &self,
+        path: &str,
+        actor: Option<&OperatorAccount>,
+    ) -> ApiResponse {
+        if !is_publishing_reader(actor) {
+            return publishing_reader_required();
+        }
+        let Some((target_id, limit)) = publish_execution_history_path(path) else {
+            return error_response(
+                400,
+                "invalid_path",
+                "The publish job history path is invalid.",
+            );
+        };
+        match self.storage.list_publish_execution_jobs(target_id, limit) {
+            Ok(records) => json_response(
+                200,
+                serde_json::to_vec(
+                    &records
+                        .into_iter()
+                        .map(|record| publish_execution_job_response(record, Vec::new()))
+                        .collect::<Vec<_>>(),
+                )
+                .expect("serializing publish job history cannot fail"),
+            ),
+            Err(message) => error_response(500, "storage_error", &message),
+        }
+    }
+
+    fn publish_execution_job_response(
+        &self,
+        target_id: &str,
+        job_id: &str,
+        status: u16,
+    ) -> ApiResponse {
+        match self.storage.read_publish_execution_job(job_id) {
+            Ok(Some(record)) if record.job.target_id == target_id => {
+                match self.storage.list_publish_execution_receipts(job_id, 128) {
+                    Ok(receipts) => json_response(
+                        status,
+                        serde_json::to_vec(&publish_execution_job_response(record, receipts))
+                            .expect("serializing publish job cannot fail"),
+                    ),
+                    Err(message) => error_response(500, "storage_error", &message),
+                }
+            }
+            Ok(Some(_)) | Ok(None) => error_response(
+                404,
+                "publish_job_not_found",
+                "The publish job does not exist.",
+            ),
+            Err(message) => error_response(500, "storage_error", &message),
         }
     }
 
@@ -8162,24 +8609,45 @@ impl Api {
                 && readiness.permanence == RequiredTierStatus::Passed
                 && readiness.reach_capacity == RequiredTierStatus::Passed
         });
+        let execution_readiness = self.database_path.parent().and_then(|data_root| {
+            let fence = acquire_install_authority_fence(data_root).ok()?;
+            if fence.was_abandoned() {
+                return None;
+            }
+            let candidate =
+                read_verified_install_authority(data_root, &self.application_directory).ok()?;
+            self.storage
+                .derive_current_publish_execution_readiness(
+                    candidate.version(),
+                    candidate.source_commit(),
+                    candidate.install_generation(),
+                )
+                .ok()
+        });
+        let publish_execution_pass = execution_readiness.as_ref().is_some_and(|readiness| {
+            readiness.canonical_portal
+                && readiness.internet_archive
+                && readiness.local_nas
+                && readiness.reach_capacity
+        });
         checks.push(commissioning_check(
             "publish_targets",
             "Required publish targets",
             CommissioningPhase::SourcesOutputs,
-            if publish_targets_pass { CommissioningCheckStatus::Pass } else { CommissioningCheckStatus::Blocked },
+            if publish_targets_pass && publish_execution_pass { CommissioningCheckStatus::Pass } else { CommissioningCheckStatus::Blocked },
             true,
             Some("publishing"),
             publication_readiness.as_ref().map_or_else(
                 || "No current-candidate publish-target connection authority is available because the installed candidate is not verified.".into(),
                 |readiness| format!(
-                    "Current publish-target authority: canonical portal={:?}; permanence={:?}; reach capacity={:?}; {} target record(s).",
-                    readiness.canonical_portal, readiness.permanence, readiness.reach_capacity, readiness.targets.len()
+                    "Current publish-target authority: canonical portal={:?}; permanence={:?}; reach capacity={:?}; {} target record(s). Exact provider execution is proven for {} current target(s).",
+                    readiness.canonical_portal, readiness.permanence, readiness.reach_capacity, readiness.targets.len(), execution_readiness.as_ref().map_or(0, |execution| execution.proven_target_count)
                 ),
             ),
             publication_readiness.as_ref().map_or_else(
-                || "requires a verified installed candidate plus current account, target, and connection-test authority only; this does not claim publication, delivery, or audience reach".into(),
+                || "requires a verified installed candidate plus current account, target, connection-test, and provider-execution receipts; it never claims audience reach".into(),
                 |readiness| format!(
-                    "current-candidate connection-test authority only: portal={:?}; permanence={:?}; reach_capacity={:?}; it does not claim publication, delivery, or audience reach",
+                    "current-candidate connection-test authority plus exact current provider execution receipts: portal={:?}; permanence={:?}; reach_capacity={:?}; it does not claim audience reach",
                     readiness.canonical_portal, readiness.permanence, readiness.reach_capacity
                 ),
             ),
@@ -10991,6 +11459,11 @@ fn publish_target_account_path(path: &str) -> Option<&str> {
         .filter(|identity| is_canonical_api_uuid(identity))
 }
 
+fn publish_account_credential_path(path: &str) -> Option<&str> {
+    path_identity(path, "/api/v1/publishing/accounts/", "/credential")
+        .filter(|identity| is_canonical_api_uuid(identity))
+}
+
 fn publish_target_account_history_path(path: &str) -> Option<(&str, usize)> {
     publishing_history_path(path, "/api/v1/publishing/accounts/")
 }
@@ -11002,6 +11475,31 @@ fn publish_target_profile_path(path: &str) -> Option<&str> {
 
 fn publish_target_profile_history_path(path: &str) -> Option<(&str, usize)> {
     publishing_history_path(path, "/api/v1/publishing/targets/")
+}
+
+fn publish_execution_request_path(path: &str) -> Option<(&str, &str)> {
+    let remainder = path.strip_prefix("/api/v1/publishing/targets/")?;
+    let (target_id, remainder) = remainder.split_once("/assets/")?;
+    let asset_id = remainder.strip_suffix("/jobs")?;
+    (is_canonical_api_uuid(target_id) && is_lowercase_sha256(asset_id))
+        .then_some((target_id, asset_id))
+}
+
+fn publish_execution_job_path(path: &str) -> Option<(&str, &str)> {
+    let remainder = path.strip_prefix("/api/v1/publishing/targets/")?;
+    let (target_id, job_id) = remainder.split_once("/jobs/")?;
+    (is_canonical_api_uuid(target_id) && is_canonical_api_uuid(job_id))
+        .then_some((target_id, job_id))
+}
+
+fn publish_execution_history_path(path: &str) -> Option<(&str, usize)> {
+    let remainder = path.strip_prefix("/api/v1/publishing/targets/")?;
+    let (target_id, query) = remainder.split_once("/jobs?")?;
+    if !is_canonical_api_uuid(target_id) || query.contains('&') {
+        return None;
+    }
+    let limit = query.strip_prefix("limit=")?.parse::<usize>().ok()?;
+    (1..=128).contains(&limit).then_some((target_id, limit))
 }
 
 fn publishing_history_path<'a>(path: &'a str, prefix: &str) -> Option<(&'a str, usize)> {
@@ -11274,6 +11772,56 @@ fn is_lowercase_sha256(value: &str) -> bool {
         && value
             .bytes()
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+fn publish_execution_job_response(
+    record: PublishExecutionJobRecord,
+    receipts: Vec<PublishExecutionReceipt>,
+) -> PublishExecutionJobResponse {
+    let state = match record.state {
+        PublishExecutionJobState::Pending => "pending",
+        PublishExecutionJobState::Running => "running",
+        PublishExecutionJobState::Completed => "completed",
+        PublishExecutionJobState::Failed => "failed",
+    };
+    PublishExecutionJobResponse {
+        job: record.job,
+        state,
+        attempts: record.attempts,
+        next_attempt_at_unix_ms: record.next_attempt_at_unix_ms,
+        updated_at_unix_ms: record.updated_at_unix_ms,
+        lease_expires_at_unix_ms: record.lease_expires_at_unix_ms,
+        completed_at_unix_ms: record.completed_at_unix_ms,
+        failure_class: record.failure_class,
+        receipts,
+    }
+}
+
+fn hash_publish_file(path: &Path) -> Result<(u64, String), String> {
+    let mut file = std::fs::File::open(path)
+        .map_err(|error| format!("open publish media for hashing: {error}"))?;
+    let mut digest = Sha256::new();
+    let mut bytes = 0_u64;
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .map_err(|error| format!("hash publish media: {error}"))?;
+        if read == 0 {
+            break;
+        }
+        bytes = bytes
+            .checked_add(read as u64)
+            .ok_or_else(|| "publish media size overflowed".to_string())?;
+        if bytes > 1_099_511_627_776 {
+            return Err("publish media exceeds the bounded maximum".into());
+        }
+        digest.update(&buffer[..read]);
+    }
+    if bytes == 0 {
+        return Err("publish media is empty".into());
+    }
+    Ok((bytes, format!("{:x}", digest.finalize())))
 }
 
 fn is_api_uuid(value: &str) -> bool {
@@ -17240,9 +17788,12 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let database = std::env::temp_dir().join(format!("townlight-publishing-api-{nonce}.db"));
-        let application = database.with_extension("application");
+        let root = std::env::temp_dir().join(format!("townlight-publishing-api-{nonce}"));
+        std::fs::create_dir_all(&root).unwrap();
+        let database = root.join("station.db");
+        let application = root.join("application");
         std::fs::create_dir_all(&application).unwrap();
+        install_transport_candidate(&root, &application);
         let api =
             Api::open_with_station_box_probe(&database, &application, station_box_probe()).unwrap();
         let setup_admin = test_actor(station_auth::OperatorRole::SetupAdmin);
@@ -17272,7 +17823,7 @@ mod tests {
         for (index, (account_id, target_id, kind)) in targets.iter().enumerate() {
             let account_request = serde_json::to_vec(&serde_json::json!({
                 "kind": kind, "label": format!("{kind:?} account"), "enabled": true,
-                "credential_configured": true, "expected_revision": null
+                "expected_revision": null
             }))
             .unwrap();
             assert_eq!(
@@ -17285,9 +17836,44 @@ mod tests {
                 .status,
                 201
             );
+            let credential_request = serde_json::to_vec(&serde_json::json!({
+                "expected_account_revision": 1,
+                "credential": format!("provider-secret-{index}")
+            }))
+            .unwrap();
+            let credential_response = api.handle_authenticated(
+                "PUT",
+                &format!("/api/v1/publishing/accounts/{account_id}/credential"),
+                Some(&credential_request),
+                &setup_admin,
+            );
+            assert_eq!(credential_response.status, 200);
+            assert!(
+                !credential_response
+                    .body
+                    .windows(15)
+                    .any(|bytes| bytes == b"provider-secret")
+            );
+            let configuration = match kind {
+                station_publishing::PublishTargetKind::Portal => serde_json::json!({
+                    "kind": "portal", "endpoint": "https://portal.example.test/api/media"
+                }),
+                station_publishing::PublishTargetKind::InternetArchive => serde_json::json!({
+                    "kind": "internet_archive", "item_identifier": "townlight-station"
+                }),
+                station_publishing::PublishTargetKind::LocalNas => serde_json::json!({
+                    "kind": "local_nas", "managed_root": r"\\station-nas\archive"
+                }),
+                station_publishing::PublishTargetKind::YouTubeLive => serde_json::json!({
+                    "kind": "you_tube_live", "channel_id": "townlight-channel",
+                    "broadcast_id": "townlight-broadcast", "stream_id": "townlight-stream",
+                    "privacy_status": "public"
+                }),
+                _ => unreachable!("required publishing test target"),
+            };
             let target_request = serde_json::to_vec(&serde_json::json!({
                 "account_id": account_id, "kind": kind, "label": format!("{kind:?} target"),
-                "enabled": true, "configuration_hash": "b".repeat(64), "expected_revision": null
+                "enabled": true, "configuration": configuration, "expected_revision": null
             }))
             .unwrap();
             assert_eq!(
@@ -17310,15 +17896,70 @@ mod tests {
             )
             .unwrap();
         }
+        let media_path = root.join("publish-media.ts");
+        std::fs::write(&media_path, b"exact publish media").unwrap();
+        let media_sha256 = format!("{:x}", Sha256::digest(b"exact publish media"));
+        api.storage
+            .put_media_asset(&MediaAsset {
+                asset_id: media_sha256.clone(),
+                media_path: media_path.to_string_lossy().into_owned(),
+                duration_ms: 60_000,
+                readiness: AssetReadiness::Ready,
+            })
+            .unwrap();
+        let request_path = format!(
+            "/api/v1/publishing/targets/{}/assets/{media_sha256}/jobs",
+            targets[0].1
+        );
+        assert_eq!(
+            api.handle_authenticated("POST", &request_path, Some(br#"{}"#), &setup_admin)
+                .status,
+            400,
+            "publish execution is bodyless"
+        );
+        let queued = api.handle_authenticated("POST", &request_path, None, &setup_admin);
+        assert_eq!(
+            queued.status,
+            202,
+            "{}",
+            String::from_utf8_lossy(&queued.body)
+        );
+        let queued: serde_json::Value = serde_json::from_slice(&queued.body).unwrap();
+        let job_id = queued["job"]["job_id"].as_str().unwrap();
+        assert_eq!(queued["state"], "pending");
+        assert_eq!(queued["receipts"].as_array().unwrap().len(), 0);
+        assert_eq!(
+            api.handle_authenticated(
+                "GET",
+                &format!("/api/v1/publishing/targets/{}/jobs/{job_id}", targets[0].1),
+                None,
+                &reader,
+            )
+            .status,
+            200
+        );
+        assert_eq!(
+            api.handle_authenticated(
+                "GET",
+                &format!("/api/v1/publishing/targets/{}/jobs?limit=10", targets[0].1),
+                None,
+                &reader,
+            )
+            .status,
+            200
+        );
         assert_eq!(
             api.handle_in_process("GET", "/api/v1/publishing/accounts", None)
                 .status,
             403
         );
+        let account_list =
+            api.handle_authenticated("GET", "/api/v1/publishing/accounts", None, &reader);
         assert_eq!(
-            api.handle_authenticated("GET", "/api/v1/publishing/accounts", None, &reader)
-                .status,
-            200
+            account_list.status,
+            200,
+            "{}",
+            String::from_utf8_lossy(&account_list.body)
         );
         assert_eq!(
             api.handle_authenticated(
@@ -17349,17 +17990,16 @@ mod tests {
             .iter()
             .find(|check| check["id"] == "publish_targets")
             .unwrap();
-        assert_eq!(publish["status"], "pass");
+        assert_eq!(publish["status"], "blocked");
         assert!(
             publish["evidence"]
                 .as_str()
                 .unwrap()
-                .contains("does not claim publication")
+                .contains("provider execution receipts")
         );
 
         drop(api);
-        let _ = std::fs::remove_file(database);
-        let _ = std::fs::remove_dir_all(application);
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
