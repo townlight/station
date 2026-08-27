@@ -387,6 +387,24 @@ pub fn project_public_metadata(
     })
 }
 
+/// Projects only values explicitly approved for both public disclosure and
+/// exact-match faceting. Internal search keeps its broader `faceted` contract.
+pub fn project_public_facets(
+    record: &AssetMetadataRecord,
+    schema: &MetadataSchema,
+) -> Result<Vec<MetadataFacet>, String> {
+    validate_asset_metadata_record(record, schema)?;
+    project_values(record, schema, |field| field.public && field.faceted).map(|values| {
+        values
+            .into_iter()
+            .map(|value| MetadataFacet {
+                field_key: value.field_key,
+                value: value.value,
+            })
+            .collect()
+    })
+}
+
 struct ProjectedValue {
     field_key: String,
     value: MetadataProjectionValue,
@@ -737,14 +755,21 @@ mod tests {
     fn projects_only_public_and_faceted_values_in_stable_key_order() {
         let mut schema = schema(1);
         schema.fields[0].public = false;
-        schema.fields[0].faceted = false;
+        schema.fields[1].faceted = false;
         let record = record(1);
         let facets = project_search_facets(&record, &schema).unwrap();
         let public = project_public_metadata(&record, &schema).unwrap();
+        let public_facets = project_public_facets(&record, &schema).unwrap();
         assert_eq!(facets.len(), 4);
         assert_eq!(public.len(), 4);
-        assert!(facets.iter().all(|facet| facet.field_key != "air_date"));
+        assert!(facets.iter().all(|facet| facet.field_key != "episode"));
         assert!(public.iter().all(|value| value.field_key != "air_date"));
+        assert_eq!(public_facets.len(), 3);
+        assert!(
+            public_facets
+                .iter()
+                .all(|facet| facet.field_key != "air_date" && facet.field_key != "episode")
+        );
         assert!(
             facets
                 .windows(2)

@@ -121,10 +121,15 @@ pub use schedule_automation_authority::{
     ScheduleAutomationWriteError,
 };
 mod catalog_authority;
+mod public_catalog_projection;
 pub use catalog_authority::{
     CatalogAssetHistoryEntry, CatalogAssetPage, CatalogAssetWriteError,
     ScheduledRecordingCaptureEvidence, ScheduledRecordingFinalizationEvidence,
     ScheduledRecordingReadyEvidence,
+};
+pub use public_catalog_projection::{
+    MAX_PUBLIC_CATALOG_FILTERS, MAX_PUBLIC_CATALOG_PAGE_SIZE, PublicCatalogCursor,
+    PublicCatalogFilter, PublicCatalogItem, PublicCatalogPage,
 };
 mod publishing_authority;
 mod publishing_executor;
@@ -1441,6 +1446,7 @@ impl StationStore {
         store.initialize_custom_metadata_schema()?;
         store.initialize_schedule_automation_schema()?;
         store.initialize_catalog_authority_schema()?;
+        store.initialize_public_catalog_projection_schema()?;
         store.initialize_actual_airing_authority_schema()?;
         store.initialize_underwriting_authority_schema()?;
         store.initialize_asrun_epg_authority_schema()?;
@@ -9549,6 +9555,8 @@ impl StationStore {
                     }
                 },
             )?;
+            self.validate_public_facet_schema_policy(schema)
+                .map_err(CustomMetadataSchemaWriteError::Invalid)?;
             let record_json = serde_json::to_string(schema).map_err(|error| {
                 CustomMetadataSchemaWriteError::Storage(format!(
                     "serialize custom metadata schema: {error}"

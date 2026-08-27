@@ -14,6 +14,7 @@ import {
   type CatalogAssetRecord,
   type CatalogAssetTransition,
 } from "./catalog-contract";
+import { parsePublicCatalogPage, type PublicCatalogPage } from "./public-catalog-contract";
 
 interface CatalogAssetSummary { asset_id: string; media_path: string; }
 interface OperatorSession { session: { roles: string[] } }
@@ -31,6 +32,9 @@ export function CatalogAssetEditor({ assets }: { assets: CatalogAssetSummary[] }
   const [conflict, setConflict] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const [publicPreview, setPublicPreview] = useState<PublicCatalogPage | null>(null);
+  const [previewError, setPreviewError] = useState<string | null>(null);
+  const previewGeneration = useRef(0);
   const selectedShaRef = useRef("");
   const readGeneration = useRef(0);
   const loadGeneration = useRef(0);
@@ -179,6 +183,17 @@ export function CatalogAssetEditor({ assets }: { assets: CatalogAssetSummary[] }
     } finally { setBusy(null); }
   }
 
+  async function loadPublicPreview() {
+    const generation = ++previewGeneration.current;
+    setBusy("preview"); setPreviewError(null);
+    try {
+      const page = parsePublicCatalogPage(await apiRequest<unknown>("/api/v1/public/catalog?limit=25"));
+      if (generation === previewGeneration.current) setPublicPreview(page);
+    } catch (problem) {
+      if (generation === previewGeneration.current) setPreviewError(problem instanceof Error ? problem.message : "Public projection preview could not be read.");
+    } finally { if (generation === previewGeneration.current) setBusy(null); }
+  }
+
   const actionBusy = busy !== null;
   return <section className="catalog-editor panel">
     <div className="panel-head"><div><p className="eyebrow">Editorial authority</p><h2>Catalog details</h2></div><div className="button-row"><span className="count">{records.length} records</span>{dirty && <><span className="count">Unsaved changes</span><button type="button" className="secondary" onClick={discardEdits} disabled={actionBusy}>Discard changes</button></>}<button type="button" className="secondary" onClick={() => void load(true)} disabled={actionBusy || dirty}>Refresh</button></div></div>
@@ -196,5 +211,11 @@ export function CatalogAssetEditor({ assets }: { assets: CatalogAssetSummary[] }
         <div className="button-row"><button type="submit" className="primary" disabled={!canEdit || actionBusy || conflict}>{busy === "save" ? "Saving…" : record ? "Save" : "Create draft"}</button>{record?.editorial_state === "draft" && <button type="button" className="primary" disabled={!canEdit || actionBusy || conflict} onClick={(event) => void transition(event, "publish")}>Publish</button>}{record?.editorial_state === "withdrawn" && <button type="button" className="primary" disabled={!canEdit || actionBusy || conflict} onClick={(event) => void transition(event, "publish")}>Republish</button>}{record?.editorial_state === "published" && <button type="button" className="danger" disabled={!canEdit || actionBusy || conflict} onClick={(event) => void transition(event, "withdraw")}>Withdraw</button>}</div>
       </form><aside className="catalog-history"><div className="panel-head"><div><p className="eyebrow">Append-only record</p><h3>Revision history</h3></div>{record && <button type="button" className="text-button" onClick={() => void readCurrent(record.asset_sha256)} disabled={actionBusy}>Read current</button>}</div>{history.length ? <div className="catalog-history-list">{history.map((entry) => <div key={`${entry.record.revision}-${entry.occurred_at_utc_ms}`}><strong>Revision {entry.record.revision} · {entry.record.editorial_state}</strong><small>{entry.changed_by} · {formatCatalogTime(entry.occurred_at_utc_ms)}</small></div>)}</div> : <p className="muted">{record ? "No history available." : "Create the draft to begin append-only history."}</p>}</aside></div>}
     </>}
+    <section className="catalog-history" aria-label="Public catalog projection preview">
+      <div className="panel-head"><div><p className="eyebrow">Public discovery</p><h3>Projection preview</h3></div><button type="button" className="secondary" disabled={actionBusy} onClick={() => void loadPublicPreview()}>Refresh preview</button></div>
+      <p className="muted">This is the exact bounded public discovery projection. It is not playback, OTT publication, public-site delivery, or installed/field proof.</p>
+      {previewError && <div className="error-box" role="alert">{previewError}</div>}
+      {publicPreview && <div className="catalog-history-list">{publicPreview.items.map((item) => <div key={item.asset_id}><strong>{item.title}</strong><small>{item.duration_ms} ms · {item.facets.length} public facets</small></div>)}</div>}
+    </section>
   </section>;
 }

@@ -1138,6 +1138,9 @@ fn write_catalog_rows(
     changed_by: &str,
     occurred_at_utc_ms: i64,
 ) -> Result<(), CatalogAssetWriteError> {
+    store
+        .ensure_public_catalog_identity(&value.asset_sha256)
+        .map_err(CatalogAssetWriteError::Storage)?;
     let json = serde_json::to_string(value).map_err(|error| {
         CatalogAssetWriteError::Storage(format!("serialize catalog asset authority: {error}"))
     })?;

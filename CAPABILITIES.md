@@ -1,5 +1,7 @@
 # TownLight Station capability ledger
 
+S22 now also includes bounded public discovery: unauthenticated `GET /api/v1/public/catalog` derives redacted pages in one read snapshot from Published catalog, Ready media, exact metadata history, and historical schema authority. It exposes an opaque public ID, title, publication time, duration, and only `public && faceted` typed equality values. Indexed candidate windows and boot-scoped HMAC-authenticated filter/generation cursors bound anonymous work across the full catalog. This is a read-time projection—not a persistent/full-text index, public-site delivery, playback/OTT publication, installed-machine evidence, or field proof.
+
 This ledger is the release-scope truth for the complete Station product. It separates product
 implementation from proof: source code, tests, one-machine installed evidence, clean-machine
 acceptance, headend acceptance, and field acceptance are different states. A capability is not

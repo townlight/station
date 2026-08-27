@@ -18,6 +18,7 @@ use std::sync::{
 use std::time::{Duration, Instant};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use station_agenda::{
@@ -109,16 +110,16 @@ use station_storage::{
     CommitWriteError, CustomMetadataSchemaWriteError, ExistingScheduleSnapshot,
     ExternalReceiverAcceptanceReceipt, FallbackSlateWriteError, HeadendProfileWriteError,
     OttAuthorityError, OutputLoudnessProofJob, OutputLoudnessProofJobRecord,
-    OutputLoudnessProofJobState, ProfileWriteError, PublishExecutionJob, PublishExecutionJobRecord,
-    PublishExecutionJobState, PublishingAuthorityWriteError, ReceiverAcceptanceOutcome,
-    ReceiverEvidenceMethod, ReferenceStationTierWrite, ReferenceStationTierWriteError,
-    ScheduleAutomationWriteError, ScheduleItemWrite, ScheduleMaterializationApplyOutcome,
-    ScheduleMaterializationHistoryCursor, ScheduleMaterializationHistoryEntry,
-    ScheduleMaterializationHistoryReadError, ScheduleMaterializationOutcome,
-    ScheduleMaterializationOutcomeRecord, ScheduleMaterializationPlanRecord,
-    ScheduleMaterializationRun, ScheduleMaterializationRunOrigin,
-    ScheduleMaterializationWriteError, StationStore, StoredSinkLoudnessProof, TransportProofJob,
-    TransportProofJobRecord, TransportProofJobState,
+    OutputLoudnessProofJobState, ProfileWriteError, PublicCatalogCursor, PublicCatalogFilter,
+    PublicCatalogItem, PublishExecutionJob, PublishExecutionJobRecord, PublishExecutionJobState,
+    PublishingAuthorityWriteError, ReceiverAcceptanceOutcome, ReceiverEvidenceMethod,
+    ReferenceStationTierWrite, ReferenceStationTierWriteError, ScheduleAutomationWriteError,
+    ScheduleItemWrite, ScheduleMaterializationApplyOutcome, ScheduleMaterializationHistoryCursor,
+    ScheduleMaterializationHistoryEntry, ScheduleMaterializationHistoryReadError,
+    ScheduleMaterializationOutcome, ScheduleMaterializationOutcomeRecord,
+    ScheduleMaterializationPlanRecord, ScheduleMaterializationRun,
+    ScheduleMaterializationRunOrigin, ScheduleMaterializationWriteError, StationStore,
+    StoredSinkLoudnessProof, TransportProofJob, TransportProofJobRecord, TransportProofJobState,
 };
 use station_transport_proof::{CableTransportValidation, TargetDeviceConfig, TargetProtocol};
 use station_update::UpdateCheckTrigger;
@@ -1347,6 +1348,12 @@ struct CatalogAssetPageResponse {
     next_after_asset_sha256: Option<String>,
 }
 
+#[derive(Serialize)]
+struct PublicCatalogResponse {
+    items: Vec<PublicCatalogItem>,
+    next_cursor: Option<String>,
+}
+
 /// Trusted adapter-to-server observation. Candidate identity and all timestamps are
 /// deliberately absent so this type cannot self-assert server authority facts.
 #[derive(Debug, Clone)]
@@ -1946,6 +1953,7 @@ pub struct Api {
     station_box_cache: Arc<Mutex<Option<(Instant, StationBoxProfile)>>>,
     orchestration_health: Arc<OrchestrationHealth>,
     source_evidence_authority: Arc<StationSourceEvidenceAuthority>,
+    public_catalog_cursor_authority: Arc<PublicCatalogCursorAuthority>,
     #[cfg(test)]
     commissioning_after_channel_read_hook: Option<CommissioningAfterChannelReadHook>,
     #[cfg(test)]
@@ -1993,12 +2001,14 @@ impl Api {
         application_directory: impl AsRef<Path>,
         orchestration_health: Arc<OrchestrationHealth>,
     ) -> Result<Self, String> {
+        StationStore::open(database_path.as_ref())?.begin_public_catalog_boot_epoch()?;
         Self::open_with_application_directory_and_cache(
             database_path,
             application_directory,
             Arc::new(Mutex::new(None)),
             orchestration_health,
             new_source_evidence_authority()?,
+            new_public_catalog_cursor_authority()?,
         )
     }
 
@@ -2008,6 +2018,7 @@ impl Api {
         station_box_cache: Arc<Mutex<Option<(Instant, StationBoxProfile)>>>,
         orchestration_health: Arc<OrchestrationHealth>,
         source_evidence_authority: Arc<StationSourceEvidenceAuthority>,
+        public_catalog_cursor_authority: Arc<PublicCatalogCursorAuthority>,
     ) -> Result<Self, String> {
         let database_path = database_path.as_ref().to_path_buf();
         Ok(Self {
@@ -2018,6 +2029,7 @@ impl Api {
             station_box_cache,
             orchestration_health,
             source_evidence_authority,
+            public_catalog_cursor_authority,
             #[cfg(test)]
             commissioning_after_channel_read_hook: None,
             #[cfg(test)]
@@ -2032,6 +2044,7 @@ impl Api {
         probe: StationBoxProbeInput,
     ) -> Result<Self, String> {
         let database_path = database_path.as_ref().to_path_buf();
+        StationStore::open(&database_path)?.begin_public_catalog_boot_epoch()?;
         Ok(Self {
             storage: StationStore::open(&database_path)?,
             database_path,
@@ -2040,6 +2053,7 @@ impl Api {
             station_box_cache: Arc::new(Mutex::new(None)),
             orchestration_health: OrchestrationHealth::ready_without_supervisor(),
             source_evidence_authority: new_source_evidence_authority()?,
+            public_catalog_cursor_authority: new_public_catalog_cursor_authority()?,
             #[cfg(test)]
             commissioning_after_channel_read_hook: None,
             #[cfg(test)]
@@ -2193,6 +2207,22 @@ impl Api {
                 ),
                 Err(message) => error_response(500, "storage_error", &message),
             },
+            ("GET", path)
+                if path == "/api/v1/public/catalog"
+                    || path.starts_with("/api/v1/public/catalog?") =>
+            {
+                self.read_public_catalog(path, body)
+            }
+            (_, path)
+                if path == "/api/v1/public/catalog"
+                    || path.starts_with("/api/v1/public/catalog?") =>
+            {
+                error_response(
+                    405,
+                    "method_not_allowed",
+                    "Public catalog discovery supports only GET.",
+                )
+            }
             ("GET", "/api/v1/ott/catalog") => self.read_ott_catalog(),
             ("POST", "/api/v1/ott/sessions") => self.issue_ott_session(body),
             ("POST", "/api/v1/ott/beacons") => self.collect_ott_beacon(body),
@@ -5059,6 +5089,74 @@ impl Api {
                 .expect("serializing a catalog page cannot fail"),
             ),
             Err(message) => error_response(500, "storage_error", &message),
+        }
+    }
+
+    fn read_public_catalog(&self, path: &str, body: Option<&[u8]>) -> ApiResponse {
+        if body.is_some_and(|value| !value.is_empty()) {
+            return error_response(
+                400,
+                "unexpected_body",
+                "Public catalog discovery does not accept a request body.",
+            );
+        }
+        let Some((after, limit, filters)) = public_catalog_query(path) else {
+            return error_response(
+                400,
+                "invalid_public_catalog_query",
+                "The public catalog query is invalid or unbounded.",
+            );
+        };
+        let cursor = match after
+            .as_deref()
+            .map(|value| {
+                verify_public_catalog_cursor(&self.public_catalog_cursor_authority.key, value)
+            })
+            .transpose()
+        {
+            Ok(cursor) => cursor,
+            Err(()) => {
+                return error_response(
+                    422,
+                    "invalid_public_catalog_cursor",
+                    "The public catalog cursor is malformed or unauthenticated.",
+                );
+            }
+        };
+        match self
+            .storage
+            .read_public_catalog(cursor.as_ref(), limit, &filters)
+        {
+            Ok(page) => json_response(
+                200,
+                serde_json::to_vec(&PublicCatalogResponse {
+                    items: page.items,
+                    next_cursor: page.next_cursor.as_ref().map(|cursor| {
+                        sign_public_catalog_cursor(
+                            &self.public_catalog_cursor_authority.key,
+                            cursor,
+                        )
+                    }),
+                })
+                .expect("serializing public catalog projection cannot fail"),
+            ),
+            Err(message) if message.contains("cursor stale") => error_response(
+                409,
+                "stale_public_catalog_cursor",
+                "The public catalog changed; restart discovery from the first page.",
+            ),
+            Err(message) if message.contains("filter is") || message.contains("query invalid") => {
+                error_response(
+                    422,
+                    "invalid_public_catalog_filter",
+                    "The public catalog facet filter is invalid.",
+                )
+            }
+            Err(_) => error_response(
+                500,
+                "public_catalog_authority_corrupt",
+                "Public catalog authority could not be projected safely.",
+            ),
         }
     }
 
@@ -11612,6 +11710,116 @@ fn parse_window_query(query: &str) -> Option<(i64, i64)> {
     let (now, horizon) = (now?, horizon?);
     (now >= 0 && horizon > 0).then_some((now, horizon))
 }
+struct PublicCatalogCursorAuthority {
+    key: [u8; 32],
+}
+fn new_public_catalog_cursor_authority() -> Result<Arc<PublicCatalogCursorAuthority>, String> {
+    let mut key = [0_u8; 32];
+    getrandom::fill(&mut key)
+        .map_err(|error| format!("generate public catalog cursor key: {error}"))?;
+    Ok(Arc::new(PublicCatalogCursorAuthority { key }))
+}
+
+fn public_catalog_query(path: &str) -> Option<(Option<String>, usize, Vec<PublicCatalogFilter>)> {
+    if path == "/api/v1/public/catalog" {
+        return Some((None, 25, Vec::new()));
+    }
+    let query = path.strip_prefix("/api/v1/public/catalog?")?;
+    if query.is_empty() || query.len() > 4_096 {
+        return None;
+    }
+    let mut after = None;
+    let mut limit = None;
+    let mut filters: Vec<PublicCatalogFilter> = Vec::new();
+    for pair in query.split('&') {
+        let (name, wire_value) = pair.split_once('=')?;
+        let value = strict_percent_decode(wire_value)?;
+        match name {
+            "after" if after.is_none() => after = Some(value),
+            "limit" if limit.is_none() => limit = Some(value.parse().ok()?),
+            "facet" if filters.len() < station_storage::MAX_PUBLIC_CATALOG_FILTERS => {
+                filters.push(serde_json::from_str(&value).ok()?);
+            }
+            _ => return None,
+        }
+    }
+    filters.sort_by(|left, right| left.field_key.cmp(&right.field_key));
+    Some((after, limit.unwrap_or(25), filters))
+}
+
+fn sign_public_catalog_cursor(key: &[u8; 32], cursor: &PublicCatalogCursor) -> String {
+    let payload = format!(
+        "v1.{}.{}.{}.{}",
+        cursor.published_at_utc_ms, cursor.asset_id, cursor.filter_digest, cursor.generation
+    );
+    let mut mac = Hmac::<Sha256>::new_from_slice(key).expect("fixed HMAC key length is valid");
+    mac.update(payload.as_bytes());
+    format!(
+        "{payload}.{}",
+        mac.finalize()
+            .into_bytes()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
+    )
+}
+
+fn verify_public_catalog_cursor(key: &[u8; 32], wire: &str) -> Result<PublicCatalogCursor, ()> {
+    if wire.len() > 320
+        || wire
+            .bytes()
+            .any(|byte| byte.is_ascii_control() || byte.is_ascii_uppercase())
+    {
+        return Err(());
+    }
+    let (payload, tag_hex) = wire.rsplit_once('.').ok_or(())?;
+    if tag_hex.len() != 64 {
+        return Err(());
+    }
+    let mut tag = [0_u8; 32];
+    for (index, chunk) in tag_hex.as_bytes().chunks_exact(2).enumerate() {
+        tag[index] =
+            u8::from_str_radix(std::str::from_utf8(chunk).map_err(|_| ())?, 16).map_err(|_| ())?;
+    }
+    let mut mac = Hmac::<Sha256>::new_from_slice(key).map_err(|_| ())?;
+    mac.update(payload.as_bytes());
+    mac.verify_slice(&tag).map_err(|_| ())?;
+    let parts = payload.split('.').collect::<Vec<_>>();
+    if parts.len() != 5 || parts[0] != "v1" || parts[2].len() != 64 || parts[3].len() != 64 {
+        return Err(());
+    }
+    Ok(PublicCatalogCursor {
+        version: 1,
+        published_at_utc_ms: parts[1].parse().map_err(|_| ())?,
+        asset_id: parts[2].into(),
+        filter_digest: parts[3].into(),
+        generation: parts[4].parse().map_err(|_| ())?,
+    })
+}
+
+fn strict_percent_decode(value: &str) -> Option<String> {
+    if value.len() > 2_048 || value.contains('+') {
+        return None;
+    }
+    let bytes = value.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%' {
+            let high = char::from(*bytes.get(index + 1)?).to_digit(16)?;
+            let low = char::from(*bytes.get(index + 2)?).to_digit(16)?;
+            decoded.push(u8::try_from(high * 16 + low).ok()?);
+            index += 3;
+        } else {
+            if bytes[index].is_ascii_control() || bytes[index] == b'#' {
+                return None;
+            }
+            decoded.push(bytes[index]);
+            index += 1;
+        }
+    }
+    String::from_utf8(decoded).ok()
+}
 
 fn parse_body<T: serde::de::DeserializeOwned>(body: Option<&[u8]>) -> Option<T> {
     body.and_then(|body| serde_json::from_slice(body).ok())
@@ -14263,6 +14471,8 @@ pub fn serve_until_with_application_directory_and_health_and_source_evidence_aut
     let database_path = database_path.as_ref().to_path_buf();
     let application_directory = application_directory.as_ref().to_path_buf();
     let auth_runtime = Arc::new(initialize_auth_runtime(&listener, &database_path)?);
+    let public_catalog_cursor_authority = new_public_catalog_cursor_authority()?;
+    StationStore::open(&database_path)?.begin_public_catalog_boot_epoch()?;
     let station_box_cache = Arc::new(Mutex::new(None));
     Api::open_with_application_directory_and_cache(
         &database_path,
@@ -14270,6 +14480,7 @@ pub fn serve_until_with_application_directory_and_health_and_source_evidence_aut
         Arc::clone(&station_box_cache),
         Arc::clone(&orchestration_health),
         Arc::clone(&source_evidence_authority),
+        Arc::clone(&public_catalog_cursor_authority),
     )?;
     let active_requests = Arc::new(AtomicUsize::new(0));
     listener
@@ -14311,6 +14522,8 @@ pub fn serve_until_with_application_directory_and_health_and_source_evidence_aut
                 let request_station_box_cache = Arc::clone(&station_box_cache);
                 let request_orchestration_health = Arc::clone(&orchestration_health);
                 let request_source_evidence_authority = Arc::clone(&source_evidence_authority);
+                let request_public_catalog_cursor_authority =
+                    Arc::clone(&public_catalog_cursor_authority);
                 let request_count = Arc::clone(&active_requests);
                 let request_auth_runtime = Arc::clone(&auth_runtime);
                 std::thread::spawn(move || {
@@ -14321,6 +14534,7 @@ pub fn serve_until_with_application_directory_and_health_and_source_evidence_aut
                         request_station_box_cache,
                         request_orchestration_health,
                         request_source_evidence_authority,
+                        request_public_catalog_cursor_authority,
                     )
                     .and_then(|api| serve_stream(&mut stream, &api, &request_auth_runtime));
                     if let Err(error) = result {
@@ -20668,6 +20882,159 @@ mod tests {
     }
 
     #[test]
+    fn public_catalog_is_unauthenticated_exact_and_bounded() {
+        let database = std::env::temp_dir().join(format!(
+            "townlight-public-catalog-api-{}.db",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let api = Api::open(database).unwrap();
+        let response = api.handle_in_process("GET", "/api/v1/public/catalog?limit=25", None);
+        assert_eq!(response.status, 200);
+        let value: serde_json::Value = serde_json::from_slice(&response.body).unwrap();
+        assert_eq!(value["items"], serde_json::json!([]));
+        for path in [
+            "/api/v1/public/catalog?limit=0",
+            "/api/v1/public/catalog?limit=101",
+            "/api/v1/public/catalog?unknown=1",
+            "/api/v1/public/catalog?limit=1&limit=2",
+            "/api/v1/public/catalog?facet=%7B%22field_key%22%3A%22private%22%2C%22value%22%3A%7B%22kind%22%3A%22text%22%2C%22value%22%3A%22x%22%7D%7D",
+        ] {
+            assert_ne!(
+                api.handle_in_process("GET", path, None).status,
+                200,
+                "{path}"
+            );
+        }
+        assert_eq!(
+            api.handle_in_process("POST", "/api/v1/public/catalog", None)
+                .status,
+            405
+        );
+        assert_eq!(
+            api.handle_in_process("GET", "/api/v1/public/catalog-extra", None)
+                .status,
+            404
+        );
+        for (index, asset) in ["a".repeat(64), "b".repeat(64)].into_iter().enumerate() {
+            api.storage
+                .put_media_asset(&MediaAsset {
+                    asset_id: asset.clone(),
+                    media_path: format!(r"C:\private\{index}.ts"),
+                    duration_ms: 1_000,
+                    readiness: AssetReadiness::Ready,
+                })
+                .unwrap();
+            let draft = CatalogAssetRecord {
+                asset_sha256: asset.clone(),
+                title: format!("Item {index}"),
+                meeting_body: None,
+                editorial_state: CatalogEditorialState::Draft,
+                published_at_utc_ms: None,
+                revision: 1,
+            };
+            api.storage
+                .write_catalog_asset(&asset, &draft, None, "actor", 10 + index as i64)
+                .unwrap();
+            let mut published = draft;
+            published.revision = 2;
+            published.editorial_state = CatalogEditorialState::Published;
+            published.published_at_utc_ms = Some(20 + index as i64);
+            api.storage
+                .write_catalog_asset(&asset, &published, Some(1), "actor", 20 + index as i64)
+                .unwrap();
+        }
+        let first = api.handle_in_process("GET", "/api/v1/public/catalog?limit=1", None);
+        let first: serde_json::Value = serde_json::from_slice(&first.body).unwrap();
+        let cursor = first["next_cursor"].as_str().unwrap();
+        let reconstructed = Api::open_with_application_directory_and_cache(
+            &api.database_path,
+            &api.application_directory,
+            Arc::new(Mutex::new(None)),
+            OrchestrationHealth::ready_without_supervisor(),
+            Arc::clone(&api.source_evidence_authority),
+            Arc::clone(&api.public_catalog_cursor_authority),
+        )
+        .unwrap();
+        assert_eq!(
+            reconstructed
+                .handle_in_process(
+                    "GET",
+                    &format!("/api/v1/public/catalog?limit=1&after={cursor}"),
+                    None,
+                )
+                .status,
+            200
+        );
+        let different_boot = Api::open_with_application_directory_and_cache(
+            &api.database_path,
+            &api.application_directory,
+            Arc::new(Mutex::new(None)),
+            OrchestrationHealth::ready_without_supervisor(),
+            Arc::clone(&api.source_evidence_authority),
+            new_public_catalog_cursor_authority().unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            different_boot
+                .handle_in_process(
+                    "GET",
+                    &format!("/api/v1/public/catalog?limit=1&after={cursor}"),
+                    None,
+                )
+                .status,
+            422
+        );
+        let mut changed = reconstructed
+            .storage
+            .read_catalog_asset(&"b".repeat(64))
+            .unwrap()
+            .unwrap();
+        changed.revision = 3;
+        changed.title = "Changed".into();
+        let changed_id = changed.asset_sha256.clone();
+        reconstructed
+            .storage
+            .write_catalog_asset(&changed_id, &changed, Some(2), "actor", 30)
+            .unwrap();
+        assert_eq!(
+            reconstructed
+                .handle_in_process(
+                    "GET",
+                    &format!("/api/v1/public/catalog?limit=1&after={cursor}"),
+                    None,
+                )
+                .status,
+            409
+        );
+    }
+
+    #[test]
+    fn public_catalog_cursor_is_boot_authenticated_and_canonical() {
+        let first = new_public_catalog_cursor_authority().unwrap();
+        let second = new_public_catalog_cursor_authority().unwrap();
+        let cursor = PublicCatalogCursor {
+            version: 1,
+            published_at_utc_ms: 20,
+            asset_id: "a".repeat(64),
+            filter_digest: "b".repeat(64),
+            generation: 7,
+        };
+        let wire = sign_public_catalog_cursor(&first.key, &cursor);
+        assert_eq!(
+            verify_public_catalog_cursor(&first.key, &wire).unwrap(),
+            cursor
+        );
+        assert!(verify_public_catalog_cursor(&second.key, &wire).is_err());
+        assert!(verify_public_catalog_cursor(&first.key, &wire.to_uppercase()).is_err());
+        let mut forged = wire;
+        forged.replace_range(4..5, "9");
+        assert!(verify_public_catalog_cursor(&first.key, &forged).is_err());
+    }
+
+    #[test]
     fn catalog_api_derives_authority_and_preserves_editorial_lifecycle() {
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -22957,6 +23324,7 @@ mod tests {
             Arc::new(Mutex::new(None)),
             OrchestrationHealth::ready_without_supervisor(),
             authority,
+            new_public_catalog_cursor_authority().unwrap(),
         )
         .unwrap()
     }
