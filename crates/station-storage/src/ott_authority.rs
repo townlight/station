@@ -722,10 +722,12 @@ impl StationStore {
 
     fn ott_capacity_retry(&self, now_unix_ms: i64) -> Result<OttAuthorityError, OttAuthorityError> {
         let statement = self.prepare(
-            "SELECT COUNT(*),MIN(expires_at_unix_ms),MAX(expires_at_unix_ms) FROM ott_playback_sessions",
+            "SELECT COUNT(*),MIN(expires_at_unix_ms),MAX(expires_at_unix_ms),SUM(CASE WHEN issued_at_unix_ms<0 OR (expires_at_unix_ms>?1 AND issued_at_unix_ms<expires_at_unix_ms-?1) THEN 1 ELSE 0 END) FROM ott_playback_sessions",
         )?;
+        bind_i64(self.database, statement.raw, 1, SESSION_TTL_MS)?;
         if unsafe { sqlite3_step(statement.raw) } != SQLITE_ROW
             || unsafe { sqlite3_column_int64(statement.raw, 0) } < 1
+            || unsafe { sqlite3_column_int64(statement.raw, 3) } != 0
         {
             return Err(OttAuthorityError::Corrupt);
         }
@@ -1307,10 +1309,24 @@ mod tests {
             client: client(),
         };
         let session_rows = format!(
-            "WITH RECURSIVE seq(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM seq WHERE x < {count}) INSERT INTO ott_playback_sessions(session_id,request_id,content_id,client_id,catalog_revision,session_revision,server_session_digest,issued_at_unix_ms,expires_at_unix_ms,client_json,capability_ciphertext) SELECT printf('%08d-0000-4000-8000-000000000000',x),printf('capacity-%d',x),'{{}}','{{}}',1,1,printf('%064d',0),1,CASE WHEN x={count} THEN 9999999999999 ELSE 1700000900000 END,'{{}}',X'00' FROM seq",
+            "WITH RECURSIVE seq(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM seq WHERE x < {count}) INSERT INTO ott_playback_sessions(session_id,request_id,content_id,client_id,catalog_revision,session_revision,server_session_digest,issued_at_unix_ms,expires_at_unix_ms,client_json,capability_ciphertext) SELECT printf('%08d-0000-4000-8000-000000000000',x),printf('capacity-%d',x),'{{}}','{{}}',1,1,printf('%064d',0),1700000000000,1700000900000,'{{}}',X'00' FROM seq",
             count = MAX_TOTAL_SESSIONS
         );
         store.execute(&session_rows).unwrap();
+        assert_eq!(
+            store.issue_ott_playback_session(&session_request, 1_700_000_000_000),
+            Err(OttAuthorityError::RateLimited(MAX_RETRY_AFTER_SECONDS))
+        );
+        drop(store);
+        let _ = std::fs::remove_file(path);
+
+        let (store, path) = test_store();
+        store.write_ott_catalog_page(&catalog(), "test", 1).unwrap();
+        let mixed_rows = format!(
+            "WITH RECURSIVE seq(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM seq WHERE x < {count}) INSERT INTO ott_playback_sessions(session_id,request_id,content_id,client_id,catalog_revision,session_revision,server_session_digest,issued_at_unix_ms,expires_at_unix_ms,client_json,capability_ciphertext) SELECT printf('%08d-0000-4000-8000-000000000000',x),printf('mixed-capacity-%d',x),'{{}}','{{}}',1,1,printf('%064d',0),CASE WHEN x={count} THEN 1 ELSE 1700000000000 END,1700000900000,'{{}}',X'00' FROM seq",
+            count = MAX_TOTAL_SESSIONS
+        );
+        store.execute(&mixed_rows).unwrap();
         assert_eq!(
             store.issue_ott_playback_session(&session_request, 1_700_000_000_000),
             Err(OttAuthorityError::Corrupt)
