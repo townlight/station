@@ -1373,6 +1373,95 @@ fn spawned_worker_recording_and_output_proof_finish_independently_with_exact_has
     );
     assert_eq!(certutil_sha256(&recording_artifact), recording_sha256);
 
+    // Let the capture seal before changing the worker graph revision. The
+    // worker must report that exact Ready authority, not contradict the
+    // published artifact with a later graph-drift failure.
+    let fenced_recording_id = "66666666-7777-4888-8999-aaaaaaaaaaaa";
+    stream
+        .write_all(
+            &encode_command_frame(&command(
+                "start-fenced-scheduled-recording",
+                expected_sequence,
+                ChannelCommand::StartScheduledRecording {
+                    recording_id: fenced_recording_id.into(),
+                    output_index: 0,
+                    sink_id: sink_id.into(),
+                    duration_ms: 3_000,
+                    max_bytes: 16 * 1024 * 1024,
+                },
+            ))
+            .unwrap(),
+        )
+        .unwrap();
+    let fenced_artifact_relative_path = match read_event(&mut stream).event {
+        WorkerEvent::ScheduledRecordingStarted {
+            recording_id,
+            artifact_relative_path,
+            graph_revision,
+            ..
+        } => {
+            assert_eq!(recording_id, fenced_recording_id);
+            assert_eq!(graph_revision, 1);
+            artifact_relative_path
+        }
+        other => panic!("unexpected fenced recording start event: {other:?}"),
+    };
+    expected_sequence += 1;
+    std::thread::sleep(Duration::from_millis(3_500));
+    stream
+        .write_all(
+            &encode_command_frame(&command(
+                "change-graph-after-recording-ready",
+                expected_sequence,
+                ChannelCommand::ApplyPlan {
+                    plan_id: "graph-drift-fence".into(),
+                    revision: 2,
+                },
+            ))
+            .unwrap(),
+        )
+        .unwrap();
+    assert!(matches!(
+        read_event(&mut stream).event,
+        WorkerEvent::Ready { graph_revision: 2 }
+    ));
+    expected_sequence += 1;
+    stream
+        .write_all(
+            &encode_command_frame(&command(
+                "poll-fenced-scheduled-recording",
+                expected_sequence,
+                ChannelCommand::PollScheduledRecording {
+                    recording_id: fenced_recording_id.into(),
+                },
+            ))
+            .unwrap(),
+        )
+        .unwrap();
+    let (fenced_size, fenced_sha256) = match read_event(&mut stream).event {
+        WorkerEvent::ScheduledRecordingReady {
+            recording_id,
+            artifact_relative_path,
+            graph_revision,
+            size_bytes,
+            capture_sha256,
+            ..
+        } => {
+            assert_eq!(recording_id, fenced_recording_id);
+            assert_eq!(artifact_relative_path, fenced_artifact_relative_path);
+            assert_eq!(graph_revision, 1);
+            (size_bytes, capture_sha256)
+        }
+        other => panic!("sealed recording must remain Ready across graph drift: {other:?}"),
+    };
+    expected_sequence += 1;
+    let fenced_artifact = root
+        .join("recordings")
+        .join(CHANNEL_ID)
+        .join(fenced_artifact_relative_path);
+    assert_eq!(fs::metadata(&fenced_artifact).unwrap().len(), fenced_size);
+    assert_eq!(certutil_sha256(&fenced_artifact), fenced_sha256);
+
     let aborted_recording_id = "55555555-6666-4777-8888-999999999999";
     stream
         .write_all(
@@ -1425,7 +1514,7 @@ fn spawned_worker_recording_and_output_proof_finish_independently_with_exact_has
             assert_eq!(recording_id, aborted_recording_id);
             assert_eq!(artifact_relative_path, aborted_recording_artifact);
             assert_eq!(code, "capture_aborted");
-            assert_eq!(graph_revision, 1);
+            assert_eq!(graph_revision, 2);
         }
         other => panic!("unexpected scheduled recording abort event: {other:?}"),
     }
@@ -1522,7 +1611,7 @@ fn spawned_worker_recording_and_output_proof_finish_independently_with_exact_has
             assert_eq!(proof_id, aborted_proof_id);
             assert_eq!(artifact_relative_path, aborted_artifact);
             assert_eq!(code, "capture_aborted");
-            assert_eq!(graph_revision, 1);
+            assert_eq!(graph_revision, 2);
         }
         other => panic!("unexpected output proof abort event: {other:?}"),
     }

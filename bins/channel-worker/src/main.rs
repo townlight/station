@@ -1549,36 +1549,122 @@ fn decide_event(
                 .copied()
                 .unwrap_or(*graph_revision);
             if capture_graph_revision != *graph_revision {
-                let artifact_relative_path = media
-                    .poll_scheduled_recording_capture(recording_id)
-                    .ok()
-                    .map(|status| match status {
-                        ScheduledRecordingCaptureStatus::Pending {
-                            artifact_relative_path,
-                            ..
+                // The status mutex is the capture terminal fence. If the
+                // writer already committed Ready before this graph change,
+                // preserve and report that exact sealed artifact instead of
+                // contradicting it with a graph-drift failure. A Pending
+                // capture is still aborted and fails closed on drift.
+                return match media.poll_scheduled_recording_capture(recording_id) {
+                    Ok(ScheduledRecordingCaptureStatus::Ready(ready)) => {
+                        recording_graph_revisions.remove(recording_id);
+                        (
+                            WorkerEvent::ScheduledRecordingReady {
+                                recording_id: ready.recording_id,
+                                output_index: ready.output_index,
+                                sink_id: ready.sink_id,
+                                artifact_relative_path: ready.artifact_relative_path,
+                                worker_instance_id: worker_instance_id.into(),
+                                graph_revision: capture_graph_revision,
+                                size_bytes: ready.capture_bytes,
+                                capture_sha256: ready.capture_sha256,
+                                duration_ms: ready.capture_duration_ms,
+                            },
+                            false,
+                        )
+                    }
+                    Ok(ScheduledRecordingCaptureStatus::Pending { .. }) => {
+                        // `abort_scheduled_recording_capture` only transitions
+                        // Pending. The writer can seal between the first poll
+                        // and that transition, so poll once more before
+                        // claiming graph-drift failure.
+                        let abort = media.abort_scheduled_recording_capture(recording_id);
+                        match media.poll_scheduled_recording_capture(recording_id) {
+                            Ok(ScheduledRecordingCaptureStatus::Ready(ready)) => {
+                                recording_graph_revisions.remove(recording_id);
+                                (
+                                    WorkerEvent::ScheduledRecordingReady {
+                                        recording_id: ready.recording_id,
+                                        output_index: ready.output_index,
+                                        sink_id: ready.sink_id,
+                                        artifact_relative_path: ready.artifact_relative_path,
+                                        worker_instance_id: worker_instance_id.into(),
+                                        graph_revision: capture_graph_revision,
+                                        size_bytes: ready.capture_bytes,
+                                        capture_sha256: ready.capture_sha256,
+                                        duration_ms: ready.capture_duration_ms,
+                                    },
+                                    false,
+                                )
+                            }
+                            Ok(ScheduledRecordingCaptureStatus::Failed {
+                                artifact_relative_path,
+                                code,
+                                message,
+                                ..
+                            }) => {
+                                recording_graph_revisions.remove(recording_id);
+                                (
+                                    WorkerEvent::ScheduledRecordingFailed {
+                                        recording_id: recording_id.clone(),
+                                        artifact_relative_path,
+                                        worker_instance_id: worker_instance_id.into(),
+                                        graph_revision: capture_graph_revision,
+                                        code,
+                                        message,
+                                    },
+                                    false,
+                                )
+                            }
+                            Ok(ScheduledRecordingCaptureStatus::Pending { .. }) => (
+                                rejection(
+                                    command,
+                                    "scheduled_recording_abort_failed",
+                                    &format!(
+                                        "The scheduled recording did not reach a terminal state after graph drift: {abort:?}"
+                                    ),
+                                ),
+                                false,
+                            ),
+                            Err(error) => (
+                                rejection(
+                                    command,
+                                    "scheduled_recording_poll_failed",
+                                    &format!(
+                                        "The scheduled recording could not be polled after graph drift: {error:?}"
+                                    ),
+                                ),
+                                false,
+                            ),
                         }
-                        | ScheduledRecordingCaptureStatus::Failed {
-                            artifact_relative_path,
-                            ..
-                        } => artifact_relative_path,
-                        ScheduledRecordingCaptureStatus::Ready(ready) => {
-                            ready.artifact_relative_path
-                        }
-                    })
-                    .unwrap_or_else(|| format!("{recording_id}.ts"));
-                let _ = media.abort_scheduled_recording_capture(recording_id);
-                recording_graph_revisions.remove(recording_id);
-                return (
-                    WorkerEvent::ScheduledRecordingFailed {
-                        recording_id: recording_id.clone(),
+                    }
+                    Ok(ScheduledRecordingCaptureStatus::Failed {
                         artifact_relative_path,
-                        worker_instance_id: worker_instance_id.into(),
-                        graph_revision: capture_graph_revision,
-                        code: "graph_revision_changed".into(),
-                        message: "output graph revision changed during scheduled recording".into(),
-                    },
-                    false,
-                );
+                        code,
+                        message,
+                        ..
+                    }) => {
+                        recording_graph_revisions.remove(recording_id);
+                        (
+                            WorkerEvent::ScheduledRecordingFailed {
+                                recording_id: recording_id.clone(),
+                                artifact_relative_path,
+                                worker_instance_id: worker_instance_id.into(),
+                                graph_revision: capture_graph_revision,
+                                code,
+                                message,
+                            },
+                            false,
+                        )
+                    }
+                    Err(error) => (
+                        rejection(
+                            command,
+                            "scheduled_recording_poll_failed",
+                            &format!("The scheduled recording could not be polled: {error:?}"),
+                        ),
+                        false,
+                    ),
+                };
             }
             match media.poll_scheduled_recording_capture(recording_id) {
                 Ok(ScheduledRecordingCaptureStatus::Pending {

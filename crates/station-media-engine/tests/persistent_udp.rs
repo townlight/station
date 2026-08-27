@@ -49,6 +49,7 @@ fn scheduled_recording_and_commissioning_proof_capture_the_same_output_independe
         .join("recordings")
         .join("33333333-4444-4555-8666-777777777777");
     fs::create_dir_all(&proof_root).unwrap();
+    fs::create_dir_all(&recording_root).unwrap();
     let sink_id = "7ef1430d-a35c-49f7-91f0-d03cc96bf4af";
     let recording_id = "11111111-2222-4333-8444-555555555555";
     let proof_id = "22222222-3333-4444-8555-666666666666";
@@ -155,6 +156,47 @@ fn scheduled_recording_requires_a_per_channel_managed_root() {
         Err(EngineError::OutputCapture(message))
             if message == "managed scheduled recording root is unavailable"
     ));
+}
+
+#[test]
+fn scheduled_recording_root_cannot_be_replaced_after_graph_startup() {
+    let _guard = persistent_graph_test_guard();
+    let receiver = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let root = test_root("scheduled-recording-root-pinned");
+    let proof_root = root.join("output-proofs");
+    let recording_root = root
+        .join("recordings")
+        .join("33333333-4444-4555-8666-777777777777");
+    fs::create_dir_all(&proof_root).unwrap();
+    fs::create_dir_all(&recording_root).unwrap();
+    let playout =
+        PersistentPlayout::start_configured_outputs_with_profile_managed_roots_and_authorities(
+            &[ConfiguredTransportOutput::udp_identified(
+                "7ef1430d-a35c-49f7-91f0-d03cc96bf4af",
+                receiver.local_addr().unwrap(),
+                LoudnessTarget::CABLE,
+            )],
+            OutputProfileId::Proof360p30,
+            None,
+            Some(&proof_root),
+            Some(&recording_root),
+            None,
+            None,
+        )
+        .unwrap();
+
+    let moved_root = root.join("recording-root-moved");
+    let replacement = fs::rename(&recording_root, &moved_root);
+    playout.stop().unwrap();
+    if replacement.is_ok() {
+        fs::rename(&moved_root, &recording_root).unwrap();
+    }
+    fs::remove_dir_all(root).unwrap();
+
+    assert!(
+        replacement.is_err(),
+        "the recording root must remain pinned so it cannot be replaced by a junction"
+    );
 }
 
 #[test]

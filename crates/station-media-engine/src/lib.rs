@@ -1,6 +1,7 @@
-use std::fs::{self, OpenOptions};
+use std::fs::{self, File, OpenOptions};
 use std::io::{BufWriter, Write};
 use std::net::SocketAddr;
+use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::{
     Arc, Mutex, TryLockError,
@@ -24,6 +25,9 @@ use station_media_protocol::{
     WorkerCaptionPolicy, WorkerFallbackSlate, WorkerFallbackTone,
 };
 use station_schedule::{OutputProfile, OutputProfileId};
+use windows_sys::Win32::Storage::FileSystem::{
+    FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_READ, FILE_SHARE_WRITE,
+};
 
 static FILE_PROGRAM_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 static LIVE_PROGRAM_SEQUENCE: AtomicU64 = AtomicU64::new(1);
@@ -348,7 +352,7 @@ pub struct PersistentPlayout {
     output_capture_ingresses: Vec<Arc<CaptureIngress>>,
     recording_capture_ingresses: Vec<Arc<CaptureIngress>>,
     proof_artifact_root: Option<PathBuf>,
-    recording_artifact_root: Option<PathBuf>,
+    recording_artifact_root: Option<PinnedRecordingArtifactRoot>,
     caption_source: gst::Element,
     caption_encoder: gst::Element,
     caption_queue: gst::Element,
@@ -385,6 +389,14 @@ struct CaptureIngress {
     sender: Mutex<Option<SyncSender<(u64, gst::Buffer)>>>,
     proof: Mutex<Option<ActiveOutputCapture>>,
     writer: Mutex<Option<JoinHandle<()>>>,
+}
+
+/// The recording root and its `recordings` parent remain open without delete
+/// sharing for the worker lifetime. On Windows that prevents either directory
+/// from being renamed or replaced by a junction after Ready.
+struct PinnedRecordingArtifactRoot {
+    path: PathBuf,
+    _directories: Vec<File>,
 }
 
 struct ActiveOutputCapture {
@@ -634,7 +646,7 @@ impl PersistentPlayout {
             caption_policy,
         )?;
         playout.recording_artifact_root = recording_artifact_root
-            .map(validate_recording_artifact_root)
+            .map(pin_recording_artifact_root)
             .transpose()?;
         Ok(playout)
     }
@@ -1649,7 +1661,7 @@ impl PersistentPlayout {
                 duration_ms: request.duration_ms,
                 max_bytes: request.max_bytes,
             },
-            root,
+            &root.path,
         )?;
         Ok(ScheduledRecordingCaptureStarted {
             recording_id,
@@ -3200,9 +3212,6 @@ impl CaptureIngress {
             ));
         }
 
-        fs::create_dir_all(root).map_err(|error| {
-            EngineError::OutputCapture(format!("could not create managed proof root: {error}"))
-        })?;
         let artifact_relative_path = format!("{}.ts", request.proof_id);
         let final_path = root.join(&artifact_relative_path);
         let part_path = root.join(format!("{}.ts.part", request.proof_id));
@@ -3661,7 +3670,7 @@ fn validate_proof_artifact_root(root: &Path) -> Result<PathBuf, EngineError> {
     Ok(root.to_path_buf())
 }
 
-fn validate_recording_artifact_root(root: &Path) -> Result<PathBuf, EngineError> {
+fn pin_recording_artifact_root(root: &Path) -> Result<PinnedRecordingArtifactRoot, EngineError> {
     use std::path::Component;
 
     let channel_id = root.file_name().and_then(|name| name.to_str());
@@ -3682,7 +3691,41 @@ fn validate_recording_artifact_root(root: &Path) -> Result<PathBuf, EngineError>
                 .into(),
         ));
     }
-    Ok(root.to_path_buf())
+    let parent = root.parent().expect("recording root has a checked parent");
+    let directories = [parent, root]
+        .into_iter()
+        .map(|path| {
+            let file = OpenOptions::new()
+                .read(true)
+                // Deliberately omit FILE_SHARE_DELETE. The retained handles
+                // are the root authority: Windows rejects a rename or
+                // junction replacement while either directory is pinned.
+                .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+                .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+                .open(path)
+                .map_err(|_| {
+                    EngineError::OutputCapture(
+                        "managed scheduled recording root could not be pinned".into(),
+                    )
+                })?;
+            let metadata = file.metadata().map_err(|_| {
+                EngineError::OutputCapture(
+                    "managed scheduled recording root could not be inspected".into(),
+                )
+            })?;
+            if !metadata.is_dir() || metadata.file_attributes() & 0x0400 != 0 {
+                return Err(EngineError::OutputCapture(
+                    "managed scheduled recording root contains a reparse point or non-directory"
+                        .into(),
+                ));
+            }
+            Ok(file)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(PinnedRecordingArtifactRoot {
+        path: root.to_path_buf(),
+        _directories: directories,
+    })
 }
 
 fn is_canonical_uuid(value: &str) -> bool {
