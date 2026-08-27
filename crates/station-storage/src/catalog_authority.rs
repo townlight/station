@@ -386,6 +386,14 @@ impl StationStore {
         }
         self.execute("BEGIN IMMEDIATE")?;
         let outcome = (|| {
+            let execution = scheduled_recording_execution(recording).ok_or_else(|| {
+                "scheduled recording start has no execution authority".to_string()
+            })?;
+            if self.current_channel_output_configuration_hash(&recording.definition.channel_id)?
+                != execution.channel_configuration_hash
+            {
+                return Err("scheduled recording start configuration authority is stale".into());
+            }
             let current = self
                 .read_scheduled_recording(&recording.definition.recording_id)?
                 .ok_or_else(|| "scheduled recording does not exist".to_string())?;
@@ -469,6 +477,14 @@ impl StationStore {
         }
         self.execute("BEGIN IMMEDIATE")?;
         let outcome = (|| {
+            let execution = scheduled_recording_execution(recording).ok_or_else(|| {
+                "scheduled recording Ready event has no execution authority".to_string()
+            })?;
+            if self.current_channel_output_configuration_hash(&recording.definition.channel_id)?
+                != execution.channel_configuration_hash
+            {
+                return Err("scheduled recording Ready configuration authority is stale".into());
+            }
             let current = self
                 .read_scheduled_recording(&recording.definition.recording_id)?
                 .ok_or_else(|| "scheduled recording does not exist".to_string())?;
