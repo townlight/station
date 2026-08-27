@@ -312,3 +312,171 @@ fn placement_cas_uses_immutable_spot_revision_and_keeps_one_stable_schedule_owne
         Err(UnderwritingWriteError::Conflict { .. })
     ));
 }
+
+#[test]
+fn audited_commit_gate_preserves_exact_underwriting_binding() {
+    let database = database_path("commit-gate");
+    let media_path = database.with_extension("ts");
+    std::fs::write(&media_path, b"underwriting media").unwrap();
+    let store = StationStore::open(&database).unwrap();
+    store
+        .put_media_asset(&MediaAsset {
+            asset_id: ASSET.into(),
+            media_path: media_path.to_string_lossy().into_owned(),
+            duration_ms: 30_000,
+            readiness: AssetReadiness::Ready,
+        })
+        .unwrap();
+    store
+        .write_underwriting_spot(&spot(1), None, "operator", 100)
+        .unwrap();
+    store
+        .write_underwriting_flight(&flight(), None, "operator", 101)
+        .unwrap();
+    let schedule = ScheduleItem {
+        item_id: SCHEDULE.into(),
+        revision: 1,
+        channel_id: CHANNEL.into(),
+        asset_id: ASSET.into(),
+        title: "Underwriting".into(),
+        starts_at_unix_ms: 120_000,
+        duration_ms: 30_000,
+        state: ScheduleState::Draft,
+    };
+    store
+        .write_schedule_item(&ScheduleItemWrite {
+            item: schedule,
+            changed_by: "operator".into(),
+            occurred_at_unix_ms: 102,
+        })
+        .unwrap();
+    store
+        .write_underwriting_placement(
+            &placement(PLACEMENT, 120_000),
+            SCHEDULE,
+            1,
+            None,
+            "operator",
+            103,
+        )
+        .unwrap();
+
+    let report = store
+        .commit_schedule(
+            "underwriting-report",
+            "underwriting-plan",
+            SCHEDULE,
+            "operator",
+            104,
+            "Reviewed underwriting binding.",
+        )
+        .unwrap();
+    assert_eq!(report.schedule_item_revision, 2);
+    assert_eq!(
+        store.read_schedule_item(SCHEDULE).unwrap().unwrap().state,
+        ScheduleState::Committed
+    );
+    let mut placement_v2 = placement(PLACEMENT, 120_000);
+    placement_v2.revision = 2;
+    store
+        .write_underwriting_placement(&placement_v2, SCHEDULE, 2, Some(1), "operator", 105)
+        .unwrap();
+    assert_eq!(
+        store
+            .list_underwriting_placement_history(PLACEMENT)
+            .unwrap()
+            .len(),
+        2
+    );
+}
+
+#[test]
+fn flight_and_placement_backdated_cas_roll_back_without_history_change() {
+    let database = database_path("backdated-cas");
+    let store = StationStore::open(&database).unwrap();
+    store
+        .put_media_asset(&MediaAsset {
+            asset_id: ASSET.into(),
+            media_path: database.with_extension("ts").to_string_lossy().into_owned(),
+            duration_ms: 30_000,
+            readiness: AssetReadiness::Ready,
+        })
+        .unwrap();
+    store
+        .write_underwriting_spot(&spot(1), None, "operator", 100)
+        .unwrap();
+    store
+        .write_underwriting_flight(&flight(), None, "operator", 110)
+        .unwrap();
+    let mut flight_v2 = flight();
+    flight_v2.revision = 2;
+    flight_v2.placement.max_airings = 2;
+    assert!(
+        matches!(store.write_underwriting_flight(&flight_v2, Some(1), "operator", 109), Err(UnderwritingWriteError::Invalid(message)) if message.contains("precedes"))
+    );
+    assert_eq!(
+        store
+            .read_underwriting_flight(FLIGHT)
+            .unwrap()
+            .unwrap()
+            .revision,
+        1
+    );
+    store
+        .write_underwriting_flight(&flight_v2, Some(1), "operator", 111)
+        .unwrap();
+
+    let schedule = ScheduleItem {
+        item_id: SCHEDULE.into(),
+        revision: 1,
+        channel_id: CHANNEL.into(),
+        asset_id: ASSET.into(),
+        title: "Underwriting".into(),
+        starts_at_unix_ms: 120_000,
+        duration_ms: 30_000,
+        state: ScheduleState::Draft,
+    };
+    store
+        .write_schedule_item(&ScheduleItemWrite {
+            item: schedule.clone(),
+            changed_by: "operator".into(),
+            occurred_at_unix_ms: 112,
+        })
+        .unwrap();
+    let mut placement_v1 = placement(PLACEMENT, 120_000);
+    placement_v1.flight_revision = 2;
+    store
+        .write_underwriting_placement(&placement_v1, SCHEDULE, 1, None, "operator", 120)
+        .unwrap();
+    let mut schedule_v2 = schedule;
+    schedule_v2.revision = 2;
+    store
+        .write_schedule_item(&ScheduleItemWrite {
+            item: schedule_v2,
+            changed_by: "operator".into(),
+            occurred_at_unix_ms: 121,
+        })
+        .unwrap();
+    let mut placement_v2 = placement_v1;
+    placement_v2.revision = 2;
+    assert!(
+        matches!(store.write_underwriting_placement(&placement_v2, SCHEDULE, 2, Some(1), "operator", 119), Err(UnderwritingWriteError::Invalid(message)) if message.contains("precedes"))
+    );
+    assert_eq!(
+        store
+            .list_underwriting_placement_history(PLACEMENT)
+            .unwrap()
+            .len(),
+        1
+    );
+    store
+        .write_underwriting_placement(&placement_v2, SCHEDULE, 2, Some(1), "operator", 122)
+        .unwrap();
+    assert_eq!(
+        store
+            .list_underwriting_placement_history(PLACEMENT)
+            .unwrap()
+            .len(),
+        2
+    );
+}

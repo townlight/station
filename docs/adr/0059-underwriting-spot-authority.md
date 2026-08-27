@@ -54,7 +54,12 @@ against every current placement for the flight. Later Draft schedule mutations
 are rejected when they would invalidate that binding. One stable schedule-item
 identity can belong to only one current placement; a placement compare-and-set
 revision may advance its bound schedule revision while immutable placement
-history retains each prior binding.
+history retains each prior binding. Initial placement admission requires Draft,
+while the audited schedule commit gate may advance that exact binding to
+Committed without changing channel, asset, start, or duration. Current and
+historical flight and placement readers fail closed when indexed identities or
+revisions, JSON, and the latest immutable history snapshot disagree; successor
+write occurrence times cannot move backwards.
 
 This increment does not yet persist proof joins or export requests, consume
 trusted ScheduledAssetOnAir facts, render affidavit/export bytes, expose an

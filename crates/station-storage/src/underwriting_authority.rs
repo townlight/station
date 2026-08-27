@@ -249,15 +249,21 @@ impl StationStore {
         flight_id: &str,
     ) -> Result<Option<UnderwritingFlight>, String> {
         validate_underwriting_id(flight_id)?;
-        let s = self.prepare("SELECT record_json FROM underwriting_flights WHERE flight_id=?1")?;
+        let s = self.prepare(
+            "SELECT flight_id,revision,record_json FROM underwriting_flights WHERE flight_id=?1",
+        )?;
         let id = c_string(flight_id, "underwriting flight identity")?;
         bind_text(self.database, s.raw, 1, &id)?;
         match unsafe { sqlite3_step(s.raw) } {
             SQLITE_DONE => Ok(None),
             SQLITE_ROW => {
-                let value: UnderwritingFlight = serde_json::from_str(&column_text(s.raw, 0)?)
-                    .map_err(|e| format!("stored underwriting flight is corrupt: {e}"))?;
-                value.validate()?;
+                let value = read_flight_row(s.raw, 0)?;
+                let latest = self
+                    .read_underwriting_flight_revision(flight_id, value.revision)?
+                    .ok_or("current underwriting flight has no exact history snapshot")?;
+                if latest != value {
+                    return Err("current underwriting flight and exact history disagree".into());
+                }
                 Ok(Some(value))
             }
             _ => Err(sqlite_error(self.database)),
@@ -291,6 +297,24 @@ impl StationStore {
                 })?;
             validate_flight_write(current.as_ref(), expected_revision, proposed, &spot)
                 .map_err(|error| map_contract_error(error, current.as_ref().map(|v| v.revision)))?;
+            if let Some(current) = &current {
+                let latest = self
+                    .read_underwriting_flight_history_attribution(
+                        &current.flight_id,
+                        current.revision,
+                    )
+                    .map_err(UnderwritingWriteError::Storage)?
+                    .ok_or_else(|| {
+                        UnderwritingWriteError::Storage(
+                            "current underwriting flight has no exact history snapshot".into(),
+                        )
+                    })?;
+                if occurred_at_unix_ms < latest {
+                    return Err(UnderwritingWriteError::Invalid(
+                        "underwriting occurrence time precedes latest flight history".into(),
+                    ));
+                }
+            }
             let json = serde_json::to_string(proposed)
                 .map_err(|e| UnderwritingWriteError::Storage(e.to_string()))?;
             let ids = [
@@ -395,11 +419,35 @@ impl StationStore {
                         .into(),
                 ));
             }
-            validate_schedule_binding(&item, schedule_item_revision, proposed, &spot)?;
+            if current.is_none() {
+                validate_schedule_binding(&item, schedule_item_revision, proposed, &spot)?;
+            } else {
+                validate_schedule_successor_binding(
+                    &item,
+                    schedule_item_revision,
+                    proposed,
+                    &spot,
+                )?;
+            }
             if let Some((_, bound_schedule_item_id, _)) = &current
                 && bound_schedule_item_id != schedule_item_id
             {
                 return Err(UnderwritingWriteError::Rebound);
+            }
+            if let Some((current_placement, _, _)) = &current {
+                let latest = self
+                    .read_latest_underwriting_placement_history(&current_placement.placement_id)
+                    .map_err(UnderwritingWriteError::Storage)?
+                    .ok_or_else(|| {
+                        UnderwritingWriteError::Storage(
+                            "current underwriting placement has no exact history snapshot".into(),
+                        )
+                    })?;
+                if occurred_at_unix_ms < latest.occurred_at_unix_ms {
+                    return Err(UnderwritingWriteError::Invalid(
+                        "underwriting occurrence time precedes latest placement history".into(),
+                    ));
+                }
             }
             if let Some(owner) = self
                 .read_schedule_placement_owner(schedule_item_id)
@@ -497,7 +545,7 @@ impl StationStore {
         placement_id: &str,
     ) -> Result<Vec<UnderwritingPlacementHistoryEntry>, String> {
         validate_underwriting_id(placement_id)?;
-        let statement = self.prepare("SELECT record_json,schedule_item_id,schedule_item_revision,changed_by,occurred_at_unix_ms FROM underwriting_placement_history WHERE placement_id=?1 ORDER BY revision ASC LIMIT ?2")?;
+        let statement = self.prepare("SELECT placement_id,revision,record_json,schedule_item_id,schedule_item_revision,changed_by,occurred_at_unix_ms FROM underwriting_placement_history WHERE placement_id=?1 ORDER BY revision ASC LIMIT ?2")?;
         let id = c_string(placement_id, "underwriting placement identity")?;
         bind_text(self.database, statement.raw, 1, &id)?;
         bind_i64(
@@ -511,23 +559,7 @@ impl StationStore {
             match unsafe { sqlite3_step(statement.raw) } {
                 SQLITE_DONE => return Ok(entries),
                 SQLITE_ROW => {
-                    let placement: UnderwritingPlacementIntent =
-                        serde_json::from_str(&column_text(statement.raw, 0)?).map_err(|error| {
-                            format!("stored placement history is corrupt: {error}")
-                        })?;
-                    placement.validate_shape()?;
-                    let changed_by = column_text(statement.raw, 3)?;
-                    let occurred_at_unix_ms = unsafe { sqlite3_column_int64(statement.raw, 4) };
-                    if !valid_actor(&changed_by) || occurred_at_unix_ms < 0 {
-                        return Err("stored placement history attribution is corrupt".into());
-                    }
-                    entries.push(UnderwritingPlacementHistoryEntry {
-                        placement,
-                        schedule_item_id: column_text(statement.raw, 1)?,
-                        schedule_item_revision: column_u64(statement.raw, 2, "schedule revision")?,
-                        changed_by,
-                        occurred_at_unix_ms,
-                    });
+                    entries.push(read_placement_history_row(statement.raw)?);
                 }
                 _ => return Err(sqlite_error(self.database)),
             }
@@ -538,19 +570,27 @@ impl StationStore {
         &self,
         id: &str,
     ) -> Result<Option<(UnderwritingPlacementIntent, String, u64)>, String> {
-        let s=self.prepare("SELECT record_json,schedule_item_id,schedule_item_revision FROM underwriting_placements WHERE placement_id=?1")?;
+        let s=self.prepare("SELECT placement_id,flight_id,channel_id,scheduled_at_unix_ms,revision,schedule_item_id,schedule_item_revision,record_json FROM underwriting_placements WHERE placement_id=?1")?;
         let id = c_string(id, "placement")?;
         bind_text(self.database, s.raw, 1, &id)?;
         match unsafe { sqlite3_step(s.raw) } {
             SQLITE_DONE => Ok(None),
             SQLITE_ROW => {
-                let p: UnderwritingPlacementIntent = serde_json::from_str(&column_text(s.raw, 0)?)
-                    .map_err(|e| format!("stored placement corrupt: {e}"))?;
-                Ok(Some((
-                    p,
-                    column_text(s.raw, 1)?,
-                    column_u64(s.raw, 2, "schedule revision")?,
-                )))
+                let current = read_placement_row(s.raw)?;
+                let latest = self
+                    .read_latest_underwriting_placement_history(
+                        id.to_str().map_err(|_| "placement identity is invalid")?,
+                    )?
+                    .ok_or("current underwriting placement has no exact history snapshot")?;
+                if latest.placement != current.0
+                    || latest.schedule_item_id != current.1
+                    || latest.schedule_item_revision != current.2
+                {
+                    return Err(
+                        "current underwriting placement and exact latest history disagree".into(),
+                    );
+                }
+                Ok(Some(current))
             }
             _ => Err(sqlite_error(self.database)),
         }
@@ -559,22 +599,14 @@ impl StationStore {
         &self,
         id: &str,
     ) -> Result<Vec<(UnderwritingPlacementIntent, String, u64)>, String> {
-        let s=self.prepare("SELECT record_json,schedule_item_id,schedule_item_revision FROM underwriting_placements WHERE flight_id=?1 ORDER BY scheduled_at_unix_ms,placement_id LIMIT 100001")?;
+        let s=self.prepare("SELECT placement_id,flight_id,channel_id,scheduled_at_unix_ms,revision,schedule_item_id,schedule_item_revision,record_json FROM underwriting_placements WHERE flight_id=?1 ORDER BY scheduled_at_unix_ms,placement_id LIMIT 100001")?;
         let id = c_string(id, "flight")?;
         bind_text(self.database, s.raw, 1, &id)?;
         let mut out = Vec::new();
         loop {
             match unsafe { sqlite3_step(s.raw) } {
                 SQLITE_DONE => return Ok(out),
-                SQLITE_ROW => {
-                    let p = serde_json::from_str(&column_text(s.raw, 0)?)
-                        .map_err(|e| format!("stored placement corrupt: {e}"))?;
-                    out.push((
-                        p,
-                        column_text(s.raw, 1)?,
-                        column_u64(s.raw, 2, "schedule revision")?,
-                    ))
-                }
+                SQLITE_ROW => out.push(read_placement_row(s.raw)?),
                 _ => return Err(sqlite_error(self.database)),
             }
         }
@@ -614,7 +646,7 @@ impl StationStore {
                 let spot = self
                     .read_underwriting_spot_revision(&flight.spot_id, flight.spot_revision)?
                     .ok_or("placement spot revision missing")?;
-                validate_schedule_binding(item, item.revision, &p, &spot).map_err(|e| {
+                validate_schedule_successor_binding(item, item.revision, &p, &spot).map_err(|e| {
                     format!("schedule mutation would invalidate underwriting authority: {e:?}")
                 })
             }
@@ -659,7 +691,7 @@ impl StationStore {
         revision: u64,
     ) -> Result<Option<UnderwritingFlight>, String> {
         let statement = self.prepare(
-            "SELECT record_json FROM underwriting_flight_history WHERE flight_id=?1 AND revision=?2",
+            "SELECT flight_id,revision,record_json FROM underwriting_flight_history WHERE flight_id=?1 AND revision=?2",
         )?;
         let id = c_string(flight_id, "underwriting flight identity")?;
         bind_text(self.database, statement.raw, 1, &id)?;
@@ -671,13 +703,49 @@ impl StationStore {
         )?;
         match unsafe { sqlite3_step(statement.raw) } {
             SQLITE_DONE => Ok(None),
+            SQLITE_ROW => Ok(Some(read_flight_row(statement.raw, 0)?)),
+            _ => Err(sqlite_error(self.database)),
+        }
+    }
+
+    fn read_underwriting_flight_history_attribution(
+        &self,
+        flight_id: &str,
+        revision: u64,
+    ) -> Result<Option<i64>, String> {
+        let statement = self.prepare("SELECT occurred_at_unix_ms FROM underwriting_flight_history WHERE flight_id=?1 AND revision=?2")?;
+        let id = c_string(flight_id, "underwriting flight identity")?;
+        bind_text(self.database, statement.raw, 1, &id)?;
+        bind_i64(
+            self.database,
+            statement.raw,
+            2,
+            checked_i64(revision, "flight revision")?,
+        )?;
+        match unsafe { sqlite3_step(statement.raw) } {
+            SQLITE_DONE => Ok(None),
             SQLITE_ROW => {
-                let flight: UnderwritingFlight =
-                    serde_json::from_str(&column_text(statement.raw, 0)?)
-                        .map_err(|error| format!("stored flight history is corrupt: {error}"))?;
-                flight.validate()?;
-                Ok(Some(flight))
+                let value = unsafe { sqlite3_column_int64(statement.raw, 0) };
+                if value < 0 {
+                    Err("stored flight history attribution is corrupt".into())
+                } else {
+                    Ok(Some(value))
+                }
             }
+            _ => Err(sqlite_error(self.database)),
+        }
+    }
+
+    fn read_latest_underwriting_placement_history(
+        &self,
+        placement_id: &str,
+    ) -> Result<Option<UnderwritingPlacementHistoryEntry>, String> {
+        let statement = self.prepare("SELECT placement_id,revision,record_json,schedule_item_id,schedule_item_revision,changed_by,occurred_at_unix_ms FROM underwriting_placement_history WHERE placement_id=?1 ORDER BY revision DESC LIMIT 1")?;
+        let id = c_string(placement_id, "underwriting placement identity")?;
+        bind_text(self.database, statement.raw, 1, &id)?;
+        match unsafe { sqlite3_step(statement.raw) } {
+            SQLITE_DONE => Ok(None),
+            SQLITE_ROW => Ok(Some(read_placement_history_row(statement.raw)?)),
             _ => Err(sqlite_error(self.database)),
         }
     }
@@ -738,6 +806,25 @@ fn validate_schedule_binding(
     }
     Ok(())
 }
+fn validate_schedule_successor_binding(
+    item: &ScheduleItem,
+    revision: u64,
+    placement: &UnderwritingPlacementIntent,
+    spot: &UnderwritingSpot,
+) -> Result<(), UnderwritingWriteError> {
+    if item.revision != revision
+        || !matches!(item.state, ScheduleState::Draft | ScheduleState::Committed)
+        || item.channel_id != placement.channel_id
+        || item.asset_id != spot.asset_id
+        || item.starts_at_unix_ms != placement.scheduled_at_unix_ms
+        || item.duration_ms != spot.duration_ms
+    {
+        return Err(UnderwritingWriteError::Invalid(
+            "schedule successor does not preserve exact underwriting authority".into(),
+        ));
+    }
+    Ok(())
+}
 fn validate_underwriting_id(value: &str) -> Result<(), String> {
     if is_canonical_uuid(value) {
         Ok(())
@@ -773,4 +860,174 @@ fn read_history_row(statement: *mut SqliteStatement) -> Result<UnderwritingHisto
         changed_by,
         occurred_at_unix_ms,
     })
+}
+
+fn read_flight_row(
+    statement: *mut SqliteStatement,
+    offset: c_int,
+) -> Result<UnderwritingFlight, String> {
+    let flight: UnderwritingFlight = serde_json::from_str(&column_text(statement, offset + 2)?)
+        .map_err(|error| format!("stored underwriting flight is corrupt: {error}"))?;
+    flight.validate()?;
+    if flight.flight_id != column_text(statement, offset)?
+        || flight.revision != column_u64(statement, offset + 1, "flight revision")?
+    {
+        return Err("stored underwriting flight indexed fields disagree with JSON".into());
+    }
+    Ok(flight)
+}
+
+fn read_placement_row(
+    statement: *mut SqliteStatement,
+) -> Result<(UnderwritingPlacementIntent, String, u64), String> {
+    let placement: UnderwritingPlacementIntent = serde_json::from_str(&column_text(statement, 7)?)
+        .map_err(|error| format!("stored underwriting placement is corrupt: {error}"))?;
+    placement.validate_shape()?;
+    if placement.placement_id != column_text(statement, 0)?
+        || placement.flight_id != column_text(statement, 1)?
+        || placement.channel_id != column_text(statement, 2)?
+        || placement.scheduled_at_unix_ms != unsafe { sqlite3_column_int64(statement, 3) }
+        || placement.revision != column_u64(statement, 4, "placement revision")?
+    {
+        return Err("stored underwriting placement indexed fields disagree with JSON".into());
+    }
+    Ok((
+        placement,
+        column_text(statement, 5)?,
+        column_u64(statement, 6, "schedule revision")?,
+    ))
+}
+
+fn read_placement_history_row(
+    statement: *mut SqliteStatement,
+) -> Result<UnderwritingPlacementHistoryEntry, String> {
+    let placement: UnderwritingPlacementIntent = serde_json::from_str(&column_text(statement, 2)?)
+        .map_err(|error| format!("stored placement history is corrupt: {error}"))?;
+    placement.validate_shape()?;
+    if placement.placement_id != column_text(statement, 0)?
+        || placement.revision != column_u64(statement, 1, "placement revision")?
+    {
+        return Err("stored placement history indexed fields disagree with JSON".into());
+    }
+    let changed_by = column_text(statement, 5)?;
+    let occurred_at_unix_ms = unsafe { sqlite3_column_int64(statement, 6) };
+    if !valid_actor(&changed_by) || occurred_at_unix_ms < 0 {
+        return Err("stored placement history attribution is corrupt".into());
+    }
+    Ok(UnderwritingPlacementHistoryEntry {
+        placement,
+        schedule_item_id: column_text(statement, 3)?,
+        schedule_item_revision: column_u64(statement, 4, "schedule revision")?,
+        changed_by,
+        occurred_at_unix_ms,
+    })
+}
+
+#[cfg(test)]
+mod corruption_tests {
+    use super::*;
+    use station_underwriting::PlacementConstraints;
+
+    const SPOT: &str = "11111111-1111-4111-8111-111111111111";
+    const SPONSOR: &str = "22222222-2222-4222-8222-222222222222";
+    const FLIGHT: &str = "33333333-3333-4333-8333-333333333333";
+    const CHANNEL: &str = "44444444-4444-4444-8444-444444444444";
+    const PLACEMENT: &str = "55555555-5555-4555-8555-555555555555";
+    const SCHEDULE: &str = "77777777-7777-4777-8777-777777777777";
+    const ASSET: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+    fn open_store(label: &str) -> StationStore {
+        let nonce = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        StationStore::open(std::env::temp_dir().join(format!(
+            "townlight-underwriting-corruption-{label}-{nonce}.db"
+        )))
+        .unwrap()
+    }
+
+    fn spot() -> UnderwritingSpot {
+        UnderwritingSpot {
+            spot_id: SPOT.into(),
+            sponsor_id: SPONSOR.into(),
+            asset_id: ASSET.into(),
+            label: "Sponsor".into(),
+            duration_ms: 30_000,
+            revision: 1,
+        }
+    }
+    fn flight() -> UnderwritingFlight {
+        UnderwritingFlight {
+            flight_id: FLIGHT.into(),
+            sponsor_id: SPONSOR.into(),
+            spot_id: SPOT.into(),
+            spot_revision: 1,
+            starts_at_unix_ms: 0,
+            ends_at_unix_ms: 1_000_000,
+            channel_ids: vec![CHANNEL.into()],
+            placement: PlacementConstraints {
+                allowed_weekdays: 0b111_1111,
+                daypart_start_minute: 0,
+                daypart_end_minute: 1440,
+                max_airings: 1,
+                max_airings_per_day: 1,
+                minimum_separation_ms: 0,
+            },
+            revision: 1,
+        }
+    }
+
+    #[test]
+    fn flight_and_placement_readers_reject_index_json_and_latest_history_drift() {
+        let store = open_store("readers");
+        store
+            .put_media_asset(&MediaAsset {
+                asset_id: ASSET.into(),
+                media_path: r"C:\TownLight\spot.ts".into(),
+                duration_ms: 30_000,
+                readiness: AssetReadiness::Ready,
+            })
+            .unwrap();
+        store
+            .write_underwriting_spot(&spot(), None, "operator", 1)
+            .unwrap();
+        store
+            .write_underwriting_flight(&flight(), None, "operator", 2)
+            .unwrap();
+        store.execute("UPDATE underwriting_flights SET revision=2 WHERE flight_id='33333333-3333-4333-8333-333333333333'").unwrap();
+        assert!(store.read_underwriting_flight(FLIGHT).is_err());
+        store.execute("UPDATE underwriting_flights SET revision=1 WHERE flight_id='33333333-3333-4333-8333-333333333333'").unwrap();
+        store
+            .write_schedule_item(&ScheduleItemWrite {
+                item: ScheduleItem {
+                    item_id: SCHEDULE.into(),
+                    revision: 1,
+                    channel_id: CHANNEL.into(),
+                    asset_id: ASSET.into(),
+                    title: "Spot".into(),
+                    starts_at_unix_ms: 120_000,
+                    duration_ms: 30_000,
+                    state: ScheduleState::Draft,
+                },
+                changed_by: "operator".into(),
+                occurred_at_unix_ms: 3,
+            })
+            .unwrap();
+        let placement = UnderwritingPlacementIntent {
+            placement_id: PLACEMENT.into(),
+            flight_id: FLIGHT.into(),
+            flight_revision: 1,
+            channel_id: CHANNEL.into(),
+            scheduled_at_unix_ms: 120_000,
+            station_weekday: 0,
+            station_minute_of_day: 2,
+            revision: 1,
+        };
+        store
+            .write_underwriting_placement(&placement, SCHEDULE, 1, None, "operator", 4)
+            .unwrap();
+        store.execute("UPDATE underwriting_placements SET revision=2 WHERE placement_id='55555555-5555-4555-8555-555555555555'").unwrap();
+        assert!(store.read_underwriting_placement(PLACEMENT).is_err());
+    }
 }
