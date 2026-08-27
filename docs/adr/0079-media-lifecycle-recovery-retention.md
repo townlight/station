@@ -8,7 +8,11 @@ accepts a candidate only for an existing `missing` asset, requires the server to
 discover, copy, and hash that candidate into the managed library, and restores
 readiness only if the resulting digest is exactly the original asset identity.
 The persisted path is the server-produced managed path; the browser's input path
-is neither retained as authority nor allowed to declare readiness.
+is neither retained as authority nor allowed to declare readiness. The same
+transaction appends an immutable recovery record containing the exact admitted
+digest, managed path, byte count and duration together with the authenticated
+account and server clock. Asset status returns only this server-attributed,
+revisioned recovery history.
 
 Replacement creates a different ready immutable asset, then appends a one-time
 predecessor/successor link. The link is revision-one only and protected against
@@ -22,7 +26,8 @@ permanent or has a review deadline; a legal hold has an explicit held
 disposition. Every change is recorded in append-only history. Stationd runs a
 named supervised scanner that advances a due retained record to
 `review_required`. It cannot delete, move, modify, or un-link media and it
-never touches scheduling authority.
+never touches scheduling authority. Each scan selects a bounded due-first page;
+permanent and held assets cannot consume that page and starve an overdue review.
 
 The ingest supervisor also runs a bounded review-evidence worker. It opens the
 managed source, copies exact verified bytes through that handle to a

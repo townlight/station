@@ -206,6 +206,21 @@ pub struct AssetThumbnail {
     pub byte_count: u64,
 }
 
+/// Append-only server authority for one exact-byte restoration of a missing
+/// immutable asset. The managed path, actor, time, byte count, and duration are
+/// derived after admission; none is accepted from the browser.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AssetRecoveryAudit {
+    pub asset_id: String,
+    pub revision: u64,
+    pub recovered_asset_sha256: String,
+    pub managed_path: String,
+    pub byte_count: u64,
+    pub duration_ms: u64,
+    pub changed_by: String,
+    pub occurred_at_unix_ms: i64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RetentionScanAction {
     NoAction,
@@ -294,6 +309,25 @@ impl AssetThumbnail {
         {
             return Err(LifecycleError::Invalid(
                 "thumbnail evidence must bind non-empty derived bytes to its exact source asset",
+            ));
+        }
+        Ok(())
+    }
+}
+
+impl AssetRecoveryAudit {
+    pub fn validate(&self) -> Result<(), LifecycleError> {
+        if !is_asset_id(&self.asset_id)
+            || self.recovered_asset_sha256 != self.asset_id
+            || self.revision == 0
+            || !visible_bounded(&self.managed_path, 2_000)
+            || self.byte_count == 0
+            || self.duration_ms == 0
+            || !visible_bounded(&self.changed_by, 200)
+            || self.occurred_at_unix_ms < 0
+        {
+            return Err(LifecycleError::Invalid(
+                "recovery audit must bind exact admitted bytes to server-owned path, actor, and time",
             ));
         }
         Ok(())

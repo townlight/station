@@ -51,9 +51,9 @@ use station_maintenance::{
 };
 use station_media_assets::ingest_media;
 use station_media_lifecycle::{
-    AssetLoudnessAnalysis, AssetReadinessView, AssetReplacementLink, AssetRetentionPolicy,
-    AssetThumbnail, IngestJobStatus, IngestSourceKind, LoudnessGateStatus, MediaIngestJob,
-    MissingMediaAlert, ReadinessDashboard, ReadinessState, RetentionDisposition,
+    AssetLoudnessAnalysis, AssetReadinessView, AssetRecoveryAudit, AssetReplacementLink,
+    AssetRetentionPolicy, AssetThumbnail, IngestJobStatus, IngestSourceKind, LoudnessGateStatus,
+    MediaIngestJob, MissingMediaAlert, ReadinessDashboard, ReadinessState, RetentionDisposition,
     TranscodeJobStatus, WatchFolderConfig,
 };
 use station_metadata::{
@@ -1551,6 +1551,7 @@ struct AssetLifecycleResponse {
     retention: Option<AssetRetentionPolicy>,
     replacement: Option<AssetReplacementLink>,
     thumbnail: Option<AssetThumbnail>,
+    recovery_history: Vec<AssetRecoveryAudit>,
 }
 
 #[derive(Deserialize)]
@@ -5851,6 +5852,10 @@ impl Api {
                 Ok(value) => value,
                 Err(message) => return error_response(500, "storage_error", &message),
             },
+            recovery_history: match self.storage.list_asset_recovery_history(asset_id, 64) {
+                Ok(value) => value,
+                Err(message) => return error_response(500, "storage_error", &message),
+            },
         };
         json_response(
             200,
@@ -5991,13 +5996,13 @@ impl Api {
         body: Option<&[u8]>,
         actor: Option<&OperatorAccount>,
     ) -> ApiResponse {
-        if lifecycle_writer(actor).is_none() {
+        let Some(actor) = lifecycle_writer(actor) else {
             return error_response(
                 403,
                 "setup_admin_required",
                 "Relinking managed media requires an enabled Setup Admin account.",
             );
-        }
+        };
         let Some(asset_id) = asset_lifecycle_path(path, "/relink") else {
             return error_response(400, "invalid_path", "The media asset identity is invalid.");
         };
@@ -6030,14 +6035,41 @@ impl Api {
             );
         }
         let duration_ms = (admitted.metadata.duration_ns / 1_000_000).max(1);
-        match self.storage.relink_missing_media_asset(
-            asset_id,
-            &admitted.stored_path.to_string_lossy(),
+        let occurred_at_unix_ms = match system_time_millis() {
+            Ok(value) => value,
+            Err(message) => return error_response(500, "clock_error", &message),
+        };
+        let history = match self.storage.list_asset_recovery_history(asset_id, 256) {
+            Ok(value) => value,
+            Err(message) => return error_response(500, "storage_error", &message),
+        };
+        let revision = match history
+            .last()
+            .map_or(Some(1), |entry| entry.revision.checked_add(1))
+        {
+            Some(value) => value,
+            None => {
+                return error_response(
+                    409,
+                    "recovery_revision_exhausted",
+                    "The recovery history revision is exhausted.",
+                );
+            }
+        };
+        let audit = AssetRecoveryAudit {
+            asset_id: asset_id.into(),
+            revision,
+            recovered_asset_sha256: admitted.asset_id,
+            managed_path: admitted.stored_path.to_string_lossy().into_owned(),
+            byte_count: admitted.size_bytes,
             duration_ms,
-        ) {
-            Ok(asset) => json_response(
+            changed_by: actor.account_id().as_str().into(),
+            occurred_at_unix_ms,
+        };
+        match self.storage.relink_missing_media_asset(&audit) {
+            Ok(_asset) => json_response(
                 200,
-                serde_json::to_vec(&asset).expect("serializing relinked asset cannot fail"),
+                serde_json::to_vec(&audit).expect("serializing recovery audit cannot fail"),
             ),
             Err(message) if message.contains("missing") || message.contains("raced") => {
                 error_response(409, "asset_state_conflict", &message)
@@ -14478,6 +14510,8 @@ fn error_response(status: u16, code: &str, message: &str) -> ApiResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gst::prelude::*;
+    use gstreamer as gst;
     use station_schedule_automation::{
         AssetPredicate, DstApplication, SavedSearchOrder, SourceEvidenceVerifier,
     };
@@ -14744,6 +14778,215 @@ mod tests {
                 readiness,
             })
             .unwrap();
+    }
+
+    fn generate_lifecycle_media_fixture(path: &Path, video_buffers: i32) {
+        gst::init().unwrap();
+        let pipeline = gst::Pipeline::new();
+        let video = gst::ElementFactory::make("videotestsrc")
+            .property("num-buffers", video_buffers)
+            .build()
+            .unwrap();
+        let video_convert = gst::ElementFactory::make("videoconvert").build().unwrap();
+        let video_encoder = gst::ElementFactory::make("openh264enc").build().unwrap();
+        let video_parser = gst::ElementFactory::make("h264parse").build().unwrap();
+        let audio = gst::ElementFactory::make("audiotestsrc")
+            .property("num-buffers", 64_i32)
+            .build()
+            .unwrap();
+        let audio_convert = gst::ElementFactory::make("audioconvert").build().unwrap();
+        let audio_encoder = gst::ElementFactory::make("voaacenc").build().unwrap();
+        let audio_parser = gst::ElementFactory::make("aacparse").build().unwrap();
+        let mux = gst::ElementFactory::make("mpegtsmux").build().unwrap();
+        let sink = gst::ElementFactory::make("filesink")
+            .property("location", path.to_string_lossy().as_ref())
+            .build()
+            .unwrap();
+        pipeline
+            .add_many([
+                &video,
+                &video_convert,
+                &video_encoder,
+                &video_parser,
+                &audio,
+                &audio_convert,
+                &audio_encoder,
+                &audio_parser,
+                &mux,
+                &sink,
+            ])
+            .unwrap();
+        gst::Element::link_many([
+            &video,
+            &video_convert,
+            &video_encoder,
+            &video_parser,
+            &mux,
+            &sink,
+        ])
+        .unwrap();
+        gst::Element::link_many([&audio, &audio_convert, &audio_encoder, &audio_parser, &mux])
+            .unwrap();
+        pipeline.set_state(gst::State::Playing).unwrap();
+        let bus = pipeline.bus().unwrap();
+        for message in bus.iter_timed(gst::ClockTime::from_seconds(15)) {
+            match message.view() {
+                gst::MessageView::Eos(_) => break,
+                gst::MessageView::Error(error) => {
+                    panic!("lifecycle fixture failed: {}", error.error())
+                }
+                _ => {}
+            }
+        }
+        pipeline.set_state(gst::State::Null).unwrap();
+        assert!(path.is_file());
+    }
+
+    #[test]
+    fn media_lifecycle_api_enforces_roles_server_authority_and_isolated_immutable_changes() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("townlight-media-lifecycle-api-{nonce}"));
+        std::fs::create_dir_all(&root).unwrap();
+        let database = root.join("station.db");
+        let recovery_source = root.join("recovery-source.ts");
+        let replacement_source = root.join("replacement-source.ts");
+        generate_lifecycle_media_fixture(&recovery_source, 30);
+        generate_lifecycle_media_fixture(&replacement_source, 31);
+        let seeded =
+            station_media_assets::ingest_media(&recovery_source, root.join("seed")).unwrap();
+        let api = Api::open(&database).unwrap();
+        let admin = test_actor(station_auth::OperatorRole::SetupAdmin);
+        let operator = test_actor_with_account(
+            "eeeeeeee-ffff-4000-8000-111111111111",
+            "meeting.operator",
+            station_auth::OperatorRole::MeetingOperator,
+        );
+        api.storage
+            .put_media_asset(&MediaAsset {
+                asset_id: seeded.asset_id.clone(),
+                media_path: r"C:\missing\original.ts".into(),
+                duration_ms: 1,
+                readiness: AssetReadiness::Missing,
+            })
+            .unwrap();
+        let lifecycle_path = format!("/api/v1/assets/{}/lifecycle", seeded.asset_id);
+        assert_eq!(api.route("GET", &lifecycle_path, None, None).status, 403);
+        assert_eq!(
+            api.route("GET", &lifecycle_path, None, Some(&operator))
+                .status,
+            200
+        );
+
+        let relink_path = format!("/api/v1/assets/{}/relink", seeded.asset_id);
+        let relink_body =
+            serde_json::to_vec(&serde_json::json!({"source_path": recovery_source})).unwrap();
+        assert_eq!(
+            api.route("POST", &relink_path, Some(&relink_body), Some(&operator))
+                .status,
+            403
+        );
+        let before = system_time_millis().unwrap();
+        let recovered = api.route("POST", &relink_path, Some(&relink_body), Some(&admin));
+        assert_eq!(recovered.status, 200);
+        let recovered: serde_json::Value = serde_json::from_slice(&recovered.body).unwrap();
+        assert_eq!(recovered["asset_id"], seeded.asset_id);
+        assert_eq!(recovered["recovered_asset_sha256"], seeded.asset_id);
+        assert_eq!(recovered["changed_by"], admin.account_id().as_str());
+        assert!(recovered["occurred_at_unix_ms"].as_i64().unwrap() >= before);
+        assert_eq!(recovered["byte_count"], seeded.size_bytes);
+        let lifecycle = api.route("GET", &lifecycle_path, None, Some(&operator));
+        let lifecycle: serde_json::Value = serde_json::from_slice(&lifecycle.body).unwrap();
+        assert_eq!(lifecycle["recovery_history"].as_array().unwrap().len(), 1);
+
+        let retention_path = format!("/api/v1/assets/{}/retention", seeded.asset_id);
+        let retention = serde_json::to_vec(&serde_json::json!({"permanent":true,"review_after_unix_ms":null,"legal_hold":false,"expected_revision":0})).unwrap();
+        assert_eq!(
+            api.route("PUT", &retention_path, Some(&retention), Some(&operator))
+                .status,
+            403
+        );
+        assert_eq!(
+            api.route("PUT", &retention_path, Some(&retention), Some(&admin))
+                .status,
+            200
+        );
+        assert_eq!(
+            api.route("PUT", &retention_path, Some(&retention), Some(&admin))
+                .status,
+            409
+        );
+
+        let schedule_item = ScheduleItem {
+            item_id: "11111111-2222-4333-8444-555555555555".into(),
+            revision: 1,
+            channel_id: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee".into(),
+            asset_id: seeded.asset_id.clone(),
+            title: "Recovery isolation".into(),
+            starts_at_unix_ms: 10_000,
+            duration_ms: 1_000,
+            state: ScheduleState::Draft,
+        };
+        api.storage
+            .write_schedule_item(&ScheduleItemWrite {
+                item: schedule_item.clone(),
+                changed_by: admin.account_id().as_str().into(),
+                occurred_at_unix_ms: 1,
+            })
+            .unwrap();
+        let replacement_path = format!("/api/v1/assets/{}/replacements", seeded.asset_id);
+        let replacement_body = serde_json::to_vec(&serde_json::json!({"source_path":replacement_source,"expected_predecessor_revision":0})).unwrap();
+        assert_eq!(
+            api.route(
+                "POST",
+                &replacement_path,
+                Some(&replacement_body),
+                Some(&operator)
+            )
+            .status,
+            403
+        );
+        let replacement = api.route(
+            "POST",
+            &replacement_path,
+            Some(&replacement_body),
+            Some(&admin),
+        );
+        assert_eq!(replacement.status, 201);
+        let replacement: serde_json::Value = serde_json::from_slice(&replacement.body).unwrap();
+        assert_ne!(replacement["successor_asset_id"], seeded.asset_id);
+        assert_eq!(
+            api.storage
+                .read_schedule_item(&schedule_item.item_id)
+                .unwrap()
+                .unwrap(),
+            schedule_item
+        );
+
+        let review_root = root.join("media-review");
+        std::fs::create_dir_all(&review_root).unwrap();
+        let thumbnail_sha256 = format!("{:x}", Sha256::digest(PNG_1X1));
+        std::fs::write(review_root.join(format!("{thumbnail_sha256}.png")), PNG_1X1).unwrap();
+        api.storage
+            .record_asset_thumbnail(&AssetThumbnail {
+                asset_id: seeded.asset_id.clone(),
+                thumbnail_sha256: thumbnail_sha256.clone(),
+                source_asset_sha256: seeded.asset_id.clone(),
+                generated_at_unix_ms: 2,
+                byte_count: PNG_1X1.len() as u64,
+            })
+            .unwrap();
+        let thumbnail_path = format!("/api/v1/assets/{}/thumbnail", seeded.asset_id);
+        assert_eq!(api.route("GET", &thumbnail_path, None, None).status, 403);
+        let thumbnail = api.route("GET", &thumbnail_path, None, Some(&operator));
+        assert_eq!(thumbnail.status, 200);
+        assert_eq!(thumbnail.content_type, "image/png");
+        assert_eq!(thumbnail.body, PNG_1X1);
+
+        drop(api);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

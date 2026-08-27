@@ -137,10 +137,23 @@ pub fn ingest_media(
     fs::create_dir_all(library.as_ref()).map_err(|error| AssetError::Io(error.to_string()))?;
     let library =
         fs::canonicalize(library.as_ref()).map_err(|error| AssetError::Io(error.to_string()))?;
+    let worker_name = std::thread::current()
+        .name()
+        .unwrap_or("worker")
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || matches!(character, '-' | '_') {
+                character
+            } else {
+                '_'
+            }
+        })
+        .take(64)
+        .collect::<String>();
     let temporary = library.join(format!(
         ".ingest-{}-{}.part",
         std::process::id(),
-        std::thread::current().name().unwrap_or("worker")
+        worker_name
     ));
     let copied = copy_and_hash(source, &temporary);
     let (asset_id, size_bytes) = match copied {

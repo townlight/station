@@ -1,7 +1,7 @@
 use super::*;
 use station_media_lifecycle::{
-    AssetReplacementLink, AssetRetentionPolicy, AssetThumbnail, RetentionDisposition,
-    RetentionScanAction,
+    AssetRecoveryAudit, AssetReplacementLink, AssetRetentionPolicy, AssetThumbnail,
+    RetentionDisposition, RetentionScanAction,
 };
 
 const MAX_MEDIA_LIFECYCLE_HISTORY: usize = 256;
@@ -22,7 +22,7 @@ pub struct MediaLifecycleScanResult {
 
 impl StationStore {
     pub(crate) fn initialize_media_lifecycle_schema(&self) -> Result<(), String> {
-        self.execute(
+        self.execute(concat!(
             "CREATE TABLE IF NOT EXISTS asset_retention_policies (\
                asset_id TEXT PRIMARY KEY CHECK (length(asset_id) = 64),\
                revision INTEGER NOT NULL CHECK (revision >= 1),\
@@ -57,6 +57,13 @@ impl StationStore {
                record_json TEXT NOT NULL,\
                FOREIGN KEY(asset_id) REFERENCES media_assets(asset_id)\
              );\
+             CREATE TABLE IF NOT EXISTS asset_recovery_history (\
+               asset_id TEXT NOT NULL CHECK (length(asset_id) = 64),\
+               revision INTEGER NOT NULL CHECK (revision >= 1),\
+               record_json TEXT NOT NULL,\
+               PRIMARY KEY(asset_id, revision),\
+               FOREIGN KEY(asset_id) REFERENCES media_assets(asset_id)\
+             );\
              CREATE INDEX IF NOT EXISTS asset_retention_scan ON asset_retention_policies(legal_hold, permanent, review_after_unix_ms, asset_id);\
              CREATE TRIGGER IF NOT EXISTS asset_retention_history_no_update BEFORE UPDATE ON asset_retention_policy_history BEGIN SELECT RAISE(ABORT, 'asset retention history is append-only'); END;\
              CREATE TRIGGER IF NOT EXISTS asset_retention_history_no_delete BEFORE DELETE ON asset_retention_policy_history BEGIN SELECT RAISE(ABORT, 'asset retention history is append-only'); END;\
@@ -64,7 +71,36 @@ impl StationStore {
              CREATE TRIGGER IF NOT EXISTS asset_replacement_links_no_delete BEFORE DELETE ON asset_replacement_links BEGIN SELECT RAISE(ABORT, 'asset replacement links are append-only'); END;\
              CREATE TRIGGER IF NOT EXISTS asset_thumbnails_no_update BEFORE UPDATE ON asset_thumbnails BEGIN SELECT RAISE(ABORT, 'asset thumbnails are immutable'); END;\
              CREATE TRIGGER IF NOT EXISTS asset_thumbnails_no_delete BEFORE DELETE ON asset_thumbnails BEGIN SELECT RAISE(ABORT, 'asset thumbnails are immutable'); END;",
-        )
+            "CREATE TRIGGER IF NOT EXISTS asset_recovery_history_no_update BEFORE UPDATE ON asset_recovery_history BEGIN SELECT RAISE(ABORT, 'asset recovery history is append-only'); END;\
+             CREATE TRIGGER IF NOT EXISTS asset_recovery_history_no_delete BEFORE DELETE ON asset_recovery_history BEGIN SELECT RAISE(ABORT, 'asset recovery history is append-only'); END;",
+        ))
+    }
+
+    pub fn list_asset_recovery_history(
+        &self,
+        asset_id: &str,
+        limit: usize,
+    ) -> Result<Vec<AssetRecoveryAudit>, String> {
+        if !is_sha256_identity(asset_id) || !(1..=MAX_MEDIA_LIFECYCLE_HISTORY).contains(&limit) {
+            return Err("asset recovery history query is invalid or unbounded".into());
+        }
+        let statement = self.prepare(
+            "SELECT record_json FROM asset_recovery_history WHERE asset_id=?1 ORDER BY revision DESC LIMIT ?2",
+        )?;
+        let asset = c_string(asset_id, "recovery asset identity")?;
+        bind_text(self.database, statement.raw, 1, &asset)?;
+        bind_i64(self.database, statement.raw, 2, limit as i64)?;
+        let mut entries = Vec::new();
+        loop {
+            match unsafe { sqlite3_step(statement.raw) } {
+                SQLITE_ROW => entries.push(read_recovery_json(column_text(statement.raw, 0)?)?),
+                SQLITE_DONE => {
+                    entries.reverse();
+                    return Ok(entries);
+                }
+                _ => return Err(sqlite_error(self.database)),
+            }
+        }
     }
 
     pub fn read_asset_retention_policy(
@@ -169,12 +205,16 @@ impl StationStore {
         self.execute("BEGIN IMMEDIATE")?;
         let outcome = (|| {
             let statement = self.prepare(
-                "SELECT record_json FROM asset_retention_policies ORDER BY asset_id LIMIT ?1",
+                "SELECT record_json FROM asset_retention_policies \
+                 WHERE legal_hold=0 AND permanent=0 AND disposition='retained' \
+                   AND review_after_unix_ms>=0 AND review_after_unix_ms<=?1 \
+                 ORDER BY review_after_unix_ms, asset_id LIMIT ?2",
             )?;
+            bind_i64(self.database, statement.raw, 1, now_unix_ms)?;
             bind_i64(
                 self.database,
                 statement.raw,
-                1,
+                2,
                 MAX_RETENTION_SCAN_BATCH as i64,
             )?;
             let mut policies = Vec::new();
@@ -191,6 +231,23 @@ impl StationStore {
                 review_required_asset_ids: Vec::new(),
                 held_asset_ids: Vec::new(),
             };
+            let held = self.prepare(
+                "SELECT asset_id FROM asset_retention_policies WHERE legal_hold=1 ORDER BY asset_id LIMIT ?1",
+            )?;
+            bind_i64(self.database, held.raw, 1, MAX_RETENTION_SCAN_BATCH as i64)?;
+            loop {
+                match unsafe { sqlite3_step(held.raw) } {
+                    SQLITE_ROW => {
+                        let asset_id = column_text(held.raw, 0)?;
+                        if !is_sha256_identity(&asset_id) {
+                            return Err("stored legal-hold asset identity is invalid".into());
+                        }
+                        result.held_asset_ids.push(asset_id);
+                    }
+                    SQLITE_DONE => break,
+                    _ => return Err(sqlite_error(self.database)),
+                }
+            }
             for mut policy in policies {
                 match policy
                     .scan_action_at(now_unix_ms)
@@ -340,39 +397,60 @@ impl StationStore {
     /// SHA-256 identity, after an admission worker has produced `managed_path`.
     pub fn relink_missing_media_asset(
         &self,
-        asset_id: &str,
-        managed_path: &str,
-        duration_ms: u64,
+        audit: &AssetRecoveryAudit,
     ) -> Result<MediaAsset, String> {
-        if !is_sha256_identity(asset_id) || !visible_path(managed_path) || duration_ms == 0 {
-            return Err("media relink input is invalid".into());
-        }
+        audit.validate().map_err(|error| format!("{error:?}"))?;
         self.execute("BEGIN IMMEDIATE")?;
         let outcome = (|| {
             let current = self
-                .read_media_asset(asset_id)?
+                .read_media_asset(&audit.asset_id)?
                 .ok_or_else(|| "missing asset does not exist".to_string())?;
             if current.readiness != AssetReadiness::Missing {
                 return Err("only a missing asset may be relinked".to_string());
             }
+            let history =
+                self.list_asset_recovery_history(&audit.asset_id, MAX_MEDIA_LIFECYCLE_HISTORY)?;
+            let expected_revision = history
+                .last()
+                .map_or(1, |entry| entry.revision.saturating_add(1));
+            if audit.revision != expected_revision {
+                return Err(format!(
+                    "asset recovery revision conflict: expected {expected_revision}"
+                ));
+            }
             let statement = self.prepare(
                 "UPDATE media_assets SET media_path=?1, duration_ms=?2, readiness='ready' WHERE asset_id=?3 AND readiness='missing'",
             )?;
-            let path = c_string(managed_path, "managed media relink path")?;
-            let id = c_string(asset_id, "media relink identity")?;
+            let path = c_string(&audit.managed_path, "managed media relink path")?;
+            let id = c_string(&audit.asset_id, "media relink identity")?;
             bind_text(self.database, statement.raw, 1, &path)?;
             bind_i64(
                 self.database,
                 statement.raw,
                 2,
-                checked_i64(duration_ms, "media relink duration")?,
+                checked_i64(audit.duration_ms, "media relink duration")?,
             )?;
             bind_text(self.database, statement.raw, 3, &id)?;
             expect_done(self.database, statement.raw)?;
             if self.changes() != 1 {
                 return Err("media relink raced with a newer asset state".to_string());
             }
-            self.read_media_asset(asset_id)?
+            let record_json = serde_json::to_string(audit)
+                .map_err(|error| format!("serialize asset recovery audit: {error}"))?;
+            let insert = self.prepare(
+                "INSERT INTO asset_recovery_history(asset_id, revision, record_json) VALUES(?1, ?2, ?3)",
+            )?;
+            let json = c_string(&record_json, "asset recovery audit")?;
+            bind_text(self.database, insert.raw, 1, &id)?;
+            bind_i64(
+                self.database,
+                insert.raw,
+                2,
+                checked_i64(audit.revision, "asset recovery revision")?,
+            )?;
+            bind_text(self.database, insert.raw, 3, &json)?;
+            expect_done(self.database, insert.raw)?;
+            self.read_media_asset(&audit.asset_id)?
                 .ok_or_else(|| "media relink did not persist".to_string())
         })();
         self.finish_value_transaction(outcome)
@@ -479,6 +557,11 @@ fn read_thumbnail_json(value: String) -> Result<AssetThumbnail, String> {
     Ok(thumbnail)
 }
 
-fn visible_path(value: &str) -> bool {
-    !value.trim().is_empty() && value.len() <= 2_000 && !value.chars().any(char::is_control)
+fn read_recovery_json(value: String) -> Result<AssetRecoveryAudit, String> {
+    let audit = serde_json::from_str::<AssetRecoveryAudit>(&value)
+        .map_err(|error| format!("stored recovery audit JSON is invalid: {error}"))?;
+    audit
+        .validate()
+        .map_err(|error| format!("stored recovery audit is invalid: {error:?}"))?;
+    Ok(audit)
 }
