@@ -27,3 +27,24 @@ export function assetOperationStillOwns(
 ): boolean {
   return owner.asset_id === currentAssetId && owner.generation === currentGeneration;
 }
+
+export type MediaLifecycleDraft = {
+  draft_asset_id: string;
+  source_path: string;
+  review_after: string;
+  permanent: boolean;
+  legal_hold: boolean;
+};
+
+export function mediaLifecycleDraftForAsset(assetId: string, draft: MediaLifecycleDraft): MediaLifecycleDraft {
+  if (draft.draft_asset_id === assetId) return draft;
+  return { draft_asset_id: assetId, source_path: "", review_after: "", permanent: false, legal_hold: false };
+}
+
+export function mediaLifecycleDraftCanSubmit(
+  assetId: string,
+  draft: MediaLifecycleDraft,
+  authority: MediaLifecycleAuthority | null,
+): boolean {
+  return draft.draft_asset_id === assetId && authority?.asset_id === assetId;
+}

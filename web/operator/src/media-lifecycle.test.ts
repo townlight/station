@@ -2,7 +2,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { readFileSync } from "node:fs";
-import { assetOperationStillOwns, mediaLifecycleRenderState } from "./media-lifecycle-contract.ts";
+import { assetOperationStillOwns, mediaLifecycleDraftCanSubmit, mediaLifecycleDraftForAsset, mediaLifecycleRenderState } from "./media-lifecycle-contract.ts";
 
 const source = readFileSync(new URL("./media-lifecycle.tsx", import.meta.url), "utf8");
 
@@ -57,4 +57,30 @@ test("a late asset mutation cannot write, reload, or clear the next asset operat
   assert.deepEqual(writes, ["b-busy"]);
   assert.match(source, /if \(!owns\(owner\)\) return;/);
   assert.match(source, /finally \{ if \(owns\(owner\)\) setBusy\(false\); \}/);
+});
+
+test("an asset switch clears every prior draft field and refuses submission until the new draft is owned", () => {
+  const assetA = "a".repeat(64);
+  const assetB = "b".repeat(64);
+  const staleDraft = {
+    draft_asset_id: assetA,
+    source_path: "C:\\private\\asset-a.ts",
+    review_after: "1893456000000",
+    permanent: true,
+    legal_hold: true,
+  };
+  const renderedForB = mediaLifecycleDraftForAsset(assetB, staleDraft);
+
+  assert.deepEqual(renderedForB, {
+    draft_asset_id: assetB,
+    source_path: "",
+    review_after: "",
+    permanent: false,
+    legal_hold: false,
+  });
+  assert.equal(mediaLifecycleDraftCanSubmit(assetB, staleDraft, { asset_id: assetB }), false);
+  assert.equal(mediaLifecycleDraftCanSubmit(assetB, renderedForB, null), false);
+  assert.equal(mediaLifecycleDraftCanSubmit(assetB, renderedForB, { asset_id: assetB }), true);
+  assert.match(source, /if \(!mediaLifecycleDraftCanSubmit\(asset\.asset_id,/);
+  assert.match(source, /disabled=\{!formCanSubmit\}/);
 });
