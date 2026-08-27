@@ -3,6 +3,7 @@ $ErrorActionPreference = 'Stop'
 $repository = Split-Path -Parent $PSScriptRoot
 $configPath = Join-Path $repository '.cargo\config.toml'
 $runnerPath = Join-Path $repository '.cargo\run-with-gstreamer.ps1'
+$publisherPath = Join-Path $repository '.cargo\TownLightCargoArtifactRuntime.cs'
 $cargoWrapperPath = Join-Path $repository 'scripts\invoke-cargo.ps1'
 
 if (-not (Test-Path -LiteralPath $configPath -PathType Leaf)) {
@@ -13,6 +14,9 @@ if (-not (Test-Path -LiteralPath $runnerPath -PathType Leaf)) {
 }
 if (-not (Test-Path -LiteralPath $cargoWrapperPath -PathType Leaf)) {
     throw 'Cargo GStreamer process wrapper is missing.'
+}
+if (-not (Test-Path -LiteralPath $publisherPath -PathType Leaf)) {
+    throw 'Cargo artifact runtime publisher is missing.'
 }
 
 $config = (Get-Content -LiteralPath $configPath -Raw) -replace "`r`n", "`n"
@@ -29,14 +33,9 @@ foreach ($requiredFragment in @(
     'SetErrorMode',
     'Push-Location -LiteralPath $repositoryRoot',
     'Sync-TownLightGStreamerArtifactRuntime',
-    'Copy-Item -LiteralPath $SourcePath',
     'CARGO_TARGET_DIR',
-    'TownLightCargoFileIdentity',
-    'GetFileInformationByHandle',
-    'Publish-TownLightGStreamerRuntimeCopy',
-    'Assert-TownLightNonReparsePath',
-    '[IO.File]::Replace',
-    'ReparsePoint'
+    'TownLightCargoArtifactRuntimePublisher',
+    'PublishClosure'
 )) {
     if (-not $wrapper.Contains($requiredFragment)) {
         throw "Cargo process wrapper is missing the required protection '$requiredFragment'."
@@ -44,6 +43,20 @@ foreach ($requiredFragment in @(
 }
 if ($wrapper -match 'HardLink') {
     throw 'Cargo process wrapper must not hard-link writable target output to the installed GStreamer runtime.'
+}
+$publisher = Get-Content -LiteralPath $publisherPath -Raw
+foreach ($requiredFragment in @(
+    'FileFlagOpenReparsePoint',
+    'NtCreateFile',
+    'NtSetInformationFile',
+    'RootDirectory',
+    'GetFileInformationByHandle',
+    'SameIdentity',
+    'ProvePinnedDirectorySwapCannotRedirect'
+)) {
+    if (-not $publisher.Contains($requiredFragment)) {
+        throw "Cargo artifact runtime publisher is missing '$requiredFragment'."
+    }
 }
 
 $runner = Get-Content -LiteralPath $runnerPath -Raw
@@ -142,11 +155,9 @@ try {
         throw "The Cargo process wrapper did not propagate the exact runtime environment (exit $LASTEXITCODE)."
     }
 
-    # A wrapper --no-run build produces a directly executable artifact with an
-    # adjacent DLL closure. This deliberate direct launch is contained here:
-    # its error mode suppresses loader dialogs and its PATH excludes the source
-    # GStreamer bin, so a successful process proves the artifact directory is
-    # self-sufficient for the loader search order.
+    # This fake artifact proves deployment integrity only. It is deliberately
+    # never launched; a real GStreamer-dependent loader proof is a separate,
+    # root-controlled manual gate after exact runtime hash preflight.
     $env:TOWNLIGHT_CARGO_EXECUTABLE = (Get-Command pwsh.exe -ErrorAction Stop).Source
     $env:TOWNLIGHT_CARGO_TEST_ARTIFACT_DIRECTORY = $artifactDirectory
     $env:TOWNLIGHT_CARGO_TEST_BUILD_SCRIPT_DIRECTORY = $buildScriptDirectory
@@ -164,6 +175,10 @@ try {
     if (Test-Path -LiteralPath (Join-Path $buildScriptDirectory 'gstreamer-1.0-0.dll') -PathType Leaf) {
         throw 'The Cargo process wrapper seeded the full runtime beside a build-script executable.'
     }
+    if (-not ('TownLightCargoArtifactRuntimePublisher' -as [type])) {
+        Add-Type -Path $publisherPath
+    }
+    [TownLightCargoArtifactRuntimePublisher]::ProvePinnedDirectorySwapCannotRedirect($artifactDirectory)
 
     $sourceProbeDll = Join-Path $bin 'gstreamer-1.0-0.dll'
     $deployedProbeDll = Join-Path $artifactDirectory 'gstreamer-1.0-0.dll'
@@ -189,29 +204,6 @@ try {
         throw 'The Cargo process wrapper left a deployed runtime DLL hard-linked to the source runtime.'
     }
     & $cargoWrapperPath -NoProfile -NonInteractive -File $fakeCargo test --no-run
-
-    if (-not ('TownLightArtifactProofNativeErrorMode' -as [type])) {
-        Add-Type -TypeDefinition @'
-using System.Runtime.InteropServices;
-public static class TownLightArtifactProofNativeErrorMode {
-    [DllImport("kernel32.dll")]
-    public static extern uint SetErrorMode(uint mode);
-}
-'@
-    }
-    $directLaunchPriorErrorMode = [TownLightArtifactProofNativeErrorMode]::SetErrorMode(0x0001 -bor 0x0002)
-    $directLaunchPriorPath = $env:PATH
-    try {
-        $env:PATH = (($directLaunchPriorPath -split ';') | Where-Object { $_ -and $_ -ne $bin }) -join ';'
-        & $artifact '/d' '/c' 'exit 0'
-        if ($LASTEXITCODE -ne 0) {
-            throw "The contained direct-launch artifact did not execute normally (exit $LASTEXITCODE)."
-        }
-    }
-    finally {
-        [void][TownLightArtifactProofNativeErrorMode]::SetErrorMode($directLaunchPriorErrorMode)
-        $env:PATH = $directLaunchPriorPath
-    }
 
     & $cargoWrapperPath -NoProfile -NonInteractive -File $fakeCargo clean
     if (Test-Path -LiteralPath (Join-Path $artifactDirectory 'gdk_pixbuf-2.0-0.dll') -PathType Leaf) {

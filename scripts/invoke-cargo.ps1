@@ -9,55 +9,8 @@ $cargoExecutable = if ([string]::IsNullOrWhiteSpace($configuredCargo)) {
 $cargoArguments = @($args)
 $repositoryRoot = Split-Path -Parent $PSScriptRoot
 
-if (-not ('TownLightCargoFileIdentity' -as [type])) {
-    Add-Type -TypeDefinition @'
-using System;
-using System.ComponentModel;
-using System.IO;
-using System.Runtime.InteropServices;
-using Microsoft.Win32.SafeHandles;
-
-public static class TownLightCargoFileIdentity {
-    [StructLayout(LayoutKind.Sequential)]
-    private struct ByHandleFileInformation {
-        public uint FileAttributes;
-        public System.Runtime.InteropServices.ComTypes.FILETIME CreationTime;
-        public System.Runtime.InteropServices.ComTypes.FILETIME LastAccessTime;
-        public System.Runtime.InteropServices.ComTypes.FILETIME LastWriteTime;
-        public uint VolumeSerialNumber;
-        public uint FileSizeHigh;
-        public uint FileSizeLow;
-        public uint NumberOfLinks;
-        public uint FileIndexHigh;
-        public uint FileIndexLow;
-    }
-
-    [DllImport("kernel32.dll", SetLastError = true)]
-    private static extern bool GetFileInformationByHandle(
-        SafeFileHandle file,
-        out ByHandleFileInformation information);
-
-    private static ByHandleFileInformation Read(string path) {
-        using (var file = new FileStream(path, FileMode.Open, FileAccess.Read,
-            FileShare.ReadWrite | FileShare.Delete)) {
-            ByHandleFileInformation information;
-            if (!GetFileInformationByHandle(file.SafeFileHandle, out information)) {
-                throw new Win32Exception(Marshal.GetLastWin32Error(),
-                    "GetFileInformationByHandle failed for " + path);
-            }
-            return information;
-        }
-    }
-
-    public static bool SameFile(string first, string second) {
-        var firstInformation = Read(first);
-        var secondInformation = Read(second);
-        return firstInformation.VolumeSerialNumber == secondInformation.VolumeSerialNumber &&
-            firstInformation.FileIndexHigh == secondInformation.FileIndexHigh &&
-            firstInformation.FileIndexLow == secondInformation.FileIndexLow;
-    }
-}
-'@
+if (-not ('TownLightCargoArtifactRuntimePublisher' -as [type])) {
+    Add-Type -Path (Join-Path $repositoryRoot '.cargo\TownLightCargoArtifactRuntime.cs')
 }
 
 function Get-TownLightCargoTargetRoot {
@@ -78,59 +31,6 @@ function Get-TownLightCargoTargetRoot {
     return [IO.Path]::GetFullPath((Join-Path $RepositoryRoot $configuredTarget))
 }
 
-function Assert-TownLightNonReparsePath {
-    param(
-        [Parameter(Mandatory = $true)]
-        [string]$Path,
-        [Parameter(Mandatory = $true)]
-        [string]$Description
-    )
-
-    $item = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
-    if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
-        throw "The $Description is a reparse point and cannot receive the GStreamer runtime: '$Path'."
-    }
-}
-
-function Publish-TownLightGStreamerRuntimeCopy {
-    param(
-        [Parameter(Mandatory = $true)]
-        [string]$SourcePath,
-        [Parameter(Mandatory = $true)]
-        [string]$SourceHash,
-        [Parameter(Mandatory = $true)]
-        [string]$DestinationPath,
-        [Parameter(Mandatory = $true)]
-        [string]$ArtifactDirectory
-    )
-
-    $temporaryPath = Join-Path $ArtifactDirectory ".$(Split-Path -Leaf $DestinationPath).townlight-$PID-$([guid]::NewGuid().ToString('N')).tmp"
-    $backupPath = "$temporaryPath.bak"
-    try {
-        Copy-Item -LiteralPath $SourcePath -Destination $temporaryPath -ErrorAction Stop
-        if ((Get-FileHash -LiteralPath $temporaryPath -Algorithm SHA256).Hash -ne $SourceHash) {
-            throw "The staged GStreamer runtime DLL did not verify: '$temporaryPath'."
-        }
-        Assert-TownLightNonReparsePath -Path $ArtifactDirectory -Description 'artifact directory'
-
-        if (Test-Path -LiteralPath $DestinationPath) {
-            Assert-TownLightNonReparsePath -Path $DestinationPath -Description 'artifact target'
-            [IO.File]::Replace($temporaryPath, $DestinationPath, $backupPath)
-        }
-        else {
-            [IO.File]::Move($temporaryPath, $DestinationPath)
-        }
-    }
-    finally {
-        if (Test-Path -LiteralPath $temporaryPath) {
-            Remove-Item -LiteralPath $temporaryPath -Force -ErrorAction SilentlyContinue
-        }
-        if (Test-Path -LiteralPath $backupPath) {
-            Remove-Item -LiteralPath $backupPath -Force -ErrorAction SilentlyContinue
-        }
-    }
-}
-
 function Sync-TownLightGStreamerArtifactRuntime {
     param(
         [Parameter(Mandatory = $true)]
@@ -143,14 +43,10 @@ function Sync-TownLightGStreamerArtifactRuntime {
         return
     }
 
-    # The target directory is writable build output. Do not hard-link runtime
-    # DLLs into it: an in-place write through a hard link would mutate the
-    # installed GStreamer runtime. Independent copies give direct artifact
-    # launches their own complete DLL closure without that aliasing hazard.
-    Assert-TownLightNonReparsePath -Path $TargetRoot -Description 'Cargo target root'
-    Get-ChildItem -LiteralPath $TargetRoot -Directory -Force -Recurse | ForEach-Object {
-        Assert-TownLightNonReparsePath -Path $_.FullName -Description 'Cargo target directory'
-    }
+    # Writable build output must never alias or redirect writes from the
+    # installed runtime. The native publisher pins each selected directory,
+    # creates and renames leaves relative to that retained no-follow handle,
+    # and verifies hashes plus file identities before releasing it.
     $runtimeDlls = @(Get-ChildItem -LiteralPath $RuntimeBin -File -Filter '*.dll' | ForEach-Object {
         [pscustomobject]@{
             name = $_.Name
@@ -162,45 +58,58 @@ function Sync-TownLightGStreamerArtifactRuntime {
         throw "The explicit GStreamer runtime has no DLL closure: '$RuntimeBin'."
     }
 
+    $targetRootItem = Get-Item -LiteralPath $TargetRoot -Force
+    if (($targetRootItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw "The Cargo target root is a reparse point: '$TargetRoot'."
+    }
+
+    # Cargo places runnable artifacts only in a profile root or its direct
+    # deps child. Construct those lexical paths instead of recursively deriving
+    # a parent from an executable reached through a junction.
+    $profileDirectories = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    foreach ($profileName in @('debug', 'release')) {
+        [void]$profileDirectories.Add((Join-Path $TargetRoot $profileName))
+    }
+    foreach ($targetChild in @(Get-ChildItem -LiteralPath $TargetRoot -Directory -Force)) {
+        if (($targetChild.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw "A Cargo target child is a reparse point: '$($targetChild.FullName)'."
+        }
+        if ($targetChild.Name -notin @('debug', 'release')) {
+            foreach ($profileName in @('debug', 'release')) {
+                [void]$profileDirectories.Add((Join-Path $targetChild.FullName $profileName))
+            }
+        }
+    }
+
     $artifactDirectories = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
-    Get-ChildItem -LiteralPath $TargetRoot -File -Filter '*.exe' -Recurse | ForEach-Object {
-        $candidateDirectory = $_.Directory
-        $candidateLeaf = $candidateDirectory.Name
-        $isProfileRoot = $candidateLeaf -in @('debug', 'release')
-        $isProfileDepsDirectory = $candidateLeaf -eq 'deps' -and $candidateDirectory.Parent -and
-            $candidateDirectory.Parent.Name -in @('debug', 'release')
-        if ($isProfileRoot -or $isProfileDepsDirectory) {
-            [void]$artifactDirectories.Add($candidateDirectory.FullName)
+    foreach ($profileDirectory in $profileDirectories) {
+        if (-not (Test-Path -LiteralPath $profileDirectory -PathType Container)) {
+            continue
+        }
+        $profileItem = Get-Item -LiteralPath $profileDirectory -Force
+        if (($profileItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw "A Cargo profile directory is a reparse point: '$profileDirectory'."
+        }
+        if (@(Get-ChildItem -LiteralPath $profileDirectory -File -Filter '*.exe').Count -gt 0) {
+            [void]$artifactDirectories.Add($profileDirectory)
+        }
+        $depsDirectory = Join-Path $profileDirectory 'deps'
+        if (Test-Path -LiteralPath $depsDirectory -PathType Container) {
+            $depsItem = Get-Item -LiteralPath $depsDirectory -Force
+            if (($depsItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+                throw "A Cargo deps directory is a reparse point: '$depsDirectory'."
+            }
+            if (@(Get-ChildItem -LiteralPath $depsDirectory -File -Filter '*.exe').Count -gt 0) {
+                [void]$artifactDirectories.Add($depsDirectory)
+            }
         }
     }
 
     foreach ($artifactDirectory in $artifactDirectories) {
-        Assert-TownLightNonReparsePath -Path $artifactDirectory -Description 'artifact directory'
-        foreach ($runtimeDll in $runtimeDlls) {
-            $deployedDll = Join-Path $artifactDirectory $runtimeDll.name
-            if (Test-Path -LiteralPath $deployedDll) {
-                if (-not (Test-Path -LiteralPath $deployedDll -PathType Leaf)) {
-                    throw "The deployed GStreamer runtime target is not a file: '$deployedDll'."
-                }
-                Assert-TownLightNonReparsePath -Path $deployedDll -Description 'artifact target'
-                $deployedHash = (Get-FileHash -LiteralPath $deployedDll -Algorithm SHA256).Hash
-                $aliasesSource = [TownLightCargoFileIdentity]::SameFile($runtimeDll.path, $deployedDll)
-                if ($deployedHash -eq $runtimeDll.sha256 -and -not $aliasesSource) {
-                    continue
-                }
-            }
-
-            Publish-TownLightGStreamerRuntimeCopy `
-                -SourcePath $runtimeDll.path `
-                -SourceHash $runtimeDll.sha256 `
-                -DestinationPath $deployedDll `
-                -ArtifactDirectory $artifactDirectory
-            $verifiedHash = (Get-FileHash -LiteralPath $deployedDll -Algorithm SHA256).Hash
-            if ($verifiedHash -ne $runtimeDll.sha256 -or
-                [TownLightCargoFileIdentity]::SameFile($runtimeDll.path, $deployedDll)) {
-                throw "The deployed GStreamer runtime DLL did not verify: '$deployedDll'."
-            }
-        }
+        [TownLightCargoArtifactRuntimePublisher]::PublishClosure(
+            $artifactDirectory,
+            [string[]]$runtimeDlls.path,
+            [string[]]$runtimeDlls.sha256)
     }
 }
 
