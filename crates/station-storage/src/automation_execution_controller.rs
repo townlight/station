@@ -406,6 +406,7 @@ struct OwnedAutomationExecutionProcess {
     stdout: Option<Receiver<Result<Vec<u8>, AutomationExecutionAdapterFailure>>>,
     stderr: Option<Receiver<Result<Vec<u8>, AutomationExecutionAdapterFailure>>>,
     drained_stdout: Option<Vec<u8>>,
+    hard_deadline: Instant,
 }
 
 impl OwnedAutomationExecutionProcess {
@@ -414,6 +415,7 @@ impl OwnedAutomationExecutionProcess {
         request: &AutomationExecutionRequest,
         claim_id: &str,
         deadline_unix_ms: i64,
+        hard_deadline: Instant,
     ) -> Result<Self, AutomationExecutionAdapterFailure> {
         let pinned_executable = adapter.pin_for_request(request)?;
         let request_json = serde_json::to_string(request)
@@ -477,7 +479,7 @@ impl OwnedAutomationExecutionProcess {
         if let Err(error) = resume {
             job.terminate()?;
             bounded_reap_child(&mut child)?;
-            let drain_deadline = Instant::now() + AUTOMATION_EXECUTION_REAP_MAX;
+            let drain_deadline = hard_deadline.min(Instant::now() + AUTOMATION_EXECUTION_REAP_MAX);
             let _ = receive_drain(&stdout, drain_deadline);
             let _ = receive_drain(&stderr, drain_deadline);
             return Err(error);
@@ -489,13 +491,16 @@ impl OwnedAutomationExecutionProcess {
             stdout: Some(stdout),
             stderr: Some(stderr),
             drained_stdout: None,
+            hard_deadline,
         })
     }
 
     fn terminate_and_reap(&mut self) -> Result<(), AutomationExecutionAdapterFailure> {
         self.job.terminate()?;
         bounded_reap_child(&mut self.child)?;
-        let drain_deadline = Instant::now() + AUTOMATION_EXECUTION_REAP_MAX;
+        let drain_deadline = self
+            .hard_deadline
+            .min(Instant::now() + AUTOMATION_EXECUTION_REAP_MAX);
         let stdout = self
             .stdout
             .take()
@@ -671,6 +676,8 @@ pub fn run_automation_execution_controller_iteration_with_stop_and_elapsed(
     stop: &AtomicBool,
     elapsed: &mut dyn FnMut() -> Duration,
 ) -> Result<bool, String> {
+    let hard_deadline =
+        Instant::now() + Duration::from_millis(AUTOMATION_EXECUTION_ACTION_MAX_MS as u64);
     let claimed_at_unix_ms = clock()?;
     let Some(claimed) = store.claim_next_automation_execution_job(
         worker_id,
@@ -707,6 +714,7 @@ pub fn run_automation_execution_controller_iteration_with_stop_and_elapsed(
                         &claimed.request,
                         claim_id,
                         action_deadline_unix_ms,
+                        hard_deadline,
                     ) {
                         Ok(process) => process,
                         Err(failure) => return Ok(Err(failure)),
