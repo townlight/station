@@ -278,7 +278,13 @@ fn commissioning_report_is_ordered_and_does_not_claim_field_proof() {
         publish_targets["evidence"]
             .as_str()
             .unwrap()
-            .contains("connection-test authority only")
+            .contains("provider-execution receipts")
+    );
+    assert!(
+        publish_targets["evidence"]
+            .as_str()
+            .unwrap()
+            .contains("never claims audience reach")
     );
 
     let automation = checks
