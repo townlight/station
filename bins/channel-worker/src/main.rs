@@ -964,6 +964,46 @@ fn apply_plan_revision<E>(
     Ok(())
 }
 
+/// Render an already-selected scheduled-recording terminal authority.  The
+/// caller obtains `status` from the engine's abort/status mutex; this function
+/// deliberately has no fallback that could turn writer-owned Ready evidence
+/// into an abort failure.
+fn scheduled_recording_terminal_event(
+    status: ScheduledRecordingCaptureStatus,
+    worker_instance_id: &str,
+    graph_revision: u64,
+) -> Option<WorkerEvent> {
+    match status {
+        ScheduledRecordingCaptureStatus::Ready(ready) => {
+            Some(WorkerEvent::ScheduledRecordingReady {
+                recording_id: ready.recording_id,
+                output_index: ready.output_index,
+                sink_id: ready.sink_id,
+                artifact_relative_path: ready.artifact_relative_path,
+                worker_instance_id: worker_instance_id.into(),
+                graph_revision,
+                size_bytes: ready.capture_bytes,
+                capture_sha256: ready.capture_sha256,
+                duration_ms: ready.capture_duration_ms,
+            })
+        }
+        ScheduledRecordingCaptureStatus::Failed {
+            recording_id,
+            artifact_relative_path,
+            code,
+            message,
+        } => Some(WorkerEvent::ScheduledRecordingFailed {
+            recording_id,
+            artifact_relative_path,
+            worker_instance_id: worker_instance_id.into(),
+            graph_revision,
+            code,
+            message,
+        }),
+        ScheduledRecordingCaptureStatus::Pending { .. } => None,
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn decide_event(
     command: &CommandEnvelope,
@@ -1754,12 +1794,8 @@ fn decide_event(
                 .get(recording_id)
                 .copied()
                 .unwrap_or(*graph_revision);
-            let artifact_relative_path = match media.poll_scheduled_recording_capture(recording_id)
-            {
-                Ok(ScheduledRecordingCaptureStatus::Pending {
-                    artifact_relative_path,
-                    ..
-                }) => artifact_relative_path,
+            match media.poll_scheduled_recording_capture(recording_id) {
+                Ok(ScheduledRecordingCaptureStatus::Pending { .. }) => {}
                 Ok(ScheduledRecordingCaptureStatus::Failed { .. })
                 | Ok(ScheduledRecordingCaptureStatus::Ready(_)) => {
                     return (
@@ -1783,20 +1819,30 @@ fn decide_event(
                 }
             };
             match media.abort_scheduled_recording_capture(recording_id) {
-                Ok(()) => {
+                // This is the authoritative terminal result selected under the
+                // writer's status mutex.  Do not turn a writer-owned Ready
+                // into a synthetic abort failure after the earlier poll.
+                Ok(status @ ScheduledRecordingCaptureStatus::Ready(_))
+                | Ok(status @ ScheduledRecordingCaptureStatus::Failed { .. }) => {
                     recording_graph_revisions.remove(recording_id);
                     (
-                        WorkerEvent::ScheduledRecordingFailed {
-                            recording_id: recording_id.clone(),
-                            artifact_relative_path,
-                            worker_instance_id: worker_instance_id.into(),
-                            graph_revision: capture_graph_revision,
-                            code: "capture_aborted".into(),
-                            message: "scheduled recording was aborted".into(),
-                        },
+                        scheduled_recording_terminal_event(
+                            status,
+                            worker_instance_id,
+                            capture_graph_revision,
+                        )
+                        .expect("selected terminal status cannot be pending"),
                         false,
                     )
                 }
+                Ok(ScheduledRecordingCaptureStatus::Pending { .. }) => (
+                    rejection(
+                        command,
+                        "scheduled_recording_abort_failed",
+                        "The scheduled recording did not reach a terminal state after abort.",
+                    ),
+                    false,
+                ),
                 Err(error) => (
                     rejection(
                         command,
@@ -2182,6 +2228,66 @@ mod tests {
 
         assert_eq!(fenced_revision, Some(1));
         assert_eq!(graph_revision, 2);
+    }
+
+    #[test]
+    fn scheduled_recording_abort_renders_only_the_mutex_selected_terminal_authority() {
+        let ready = scheduled_recording_terminal_event(
+            ScheduledRecordingCaptureStatus::Ready(
+                station_media_engine::ScheduledRecordingCaptureReady {
+                    recording_id: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee".into(),
+                    output_index: 0,
+                    sink_id: "11111111-2222-4333-8444-555555555555".into(),
+                    artifact_relative_path: "ready.ts".into(),
+                    capture_bytes: 188,
+                    capture_sha256: "a".repeat(64),
+                    capture_duration_ms: 3_000,
+                },
+            ),
+            "worker-1",
+            7,
+        )
+        .expect("Ready is terminal");
+        assert!(matches!(
+            ready,
+            WorkerEvent::ScheduledRecordingReady {
+                artifact_relative_path,
+                graph_revision: 7,
+                ..
+            } if artifact_relative_path == "ready.ts"
+        ));
+
+        let aborted = scheduled_recording_terminal_event(
+            ScheduledRecordingCaptureStatus::Failed {
+                recording_id: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee".into(),
+                artifact_relative_path: "aborted.ts".into(),
+                code: "capture_aborted".into(),
+                message: "scheduled recording was aborted".into(),
+            },
+            "worker-1",
+            7,
+        )
+        .expect("Failed is terminal");
+        assert!(matches!(
+            aborted,
+            WorkerEvent::ScheduledRecordingFailed {
+                artifact_relative_path,
+                code,
+                graph_revision: 7,
+                ..
+            } if artifact_relative_path == "aborted.ts" && code == "capture_aborted"
+        ));
+        assert!(
+            scheduled_recording_terminal_event(
+                ScheduledRecordingCaptureStatus::Pending {
+                    recording_id: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee".into(),
+                    artifact_relative_path: "pending.ts".into(),
+                },
+                "worker-1",
+                7,
+            )
+            .is_none()
+        );
     }
 
     fn armed_state() -> LiveState {

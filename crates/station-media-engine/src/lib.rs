@@ -1595,11 +1595,10 @@ impl PersistentPlayout {
 
     pub fn abort_output_capture(&mut self, proof_id: &str) -> Result<(), EngineError> {
         for ingress in &self.output_capture_ingresses {
-            if ingress.abort_if_matches(
-                proof_id,
-                "capture_aborted",
-                "output capture was aborted",
-            )? {
+            if ingress
+                .abort_if_matches(proof_id, "capture_aborted", "output capture was aborted")?
+                .is_some()
+            {
                 return Ok(());
             }
         }
@@ -1680,37 +1679,7 @@ impl PersistentPlayout {
         }
         for ingress in &self.recording_capture_ingresses {
             if let Some(status) = ingress.status_for(recording_id)? {
-                return Ok(match status {
-                    OutputCaptureStatus::Pending {
-                        proof_id,
-                        artifact_relative_path,
-                    } => ScheduledRecordingCaptureStatus::Pending {
-                        recording_id: proof_id,
-                        artifact_relative_path,
-                    },
-                    OutputCaptureStatus::Ready(ready) => {
-                        ScheduledRecordingCaptureStatus::Ready(ScheduledRecordingCaptureReady {
-                            recording_id: ready.proof_id,
-                            output_index: ready.output_index,
-                            sink_id: ready.sink_id,
-                            artifact_relative_path: ready.artifact_relative_path,
-                            capture_bytes: ready.capture_bytes,
-                            capture_sha256: ready.capture_sha256,
-                            capture_duration_ms: ready.capture_duration_ms,
-                        })
-                    }
-                    OutputCaptureStatus::Failed {
-                        proof_id,
-                        artifact_relative_path,
-                        code,
-                        message,
-                    } => ScheduledRecordingCaptureStatus::Failed {
-                        recording_id: proof_id,
-                        artifact_relative_path,
-                        code,
-                        message,
-                    },
-                });
+                return Ok(scheduled_recording_status_from_output(status));
             }
         }
         Err(EngineError::OutputCapture(
@@ -1718,17 +1687,24 @@ impl PersistentPlayout {
         ))
     }
 
+    /// Atomically return the terminal capture authority selected by an abort.
+    ///
+    /// The capture writer and the abort path serialize the terminal transition
+    /// on the same status mutex.  Consequently a caller must use this returned
+    /// status rather than manufacturing an aborted result after a prior poll:
+    /// a writer that already committed `Ready` owns that evidence and its
+    /// sealed artifact remains authoritative.
     pub fn abort_scheduled_recording_capture(
         &mut self,
         recording_id: &str,
-    ) -> Result<(), EngineError> {
+    ) -> Result<ScheduledRecordingCaptureStatus, EngineError> {
         for ingress in &self.recording_capture_ingresses {
-            if ingress.abort_if_matches(
+            if let Some(status) = ingress.abort_if_matches(
                 recording_id,
                 "capture_aborted",
                 "scheduled recording was aborted",
             )? {
-                return Ok(());
+                return Ok(scheduled_recording_status_from_output(status));
             }
         }
         Err(EngineError::OutputCapture(
@@ -2290,6 +2266,42 @@ impl PersistentPlayout {
             }
             std::thread::sleep(Duration::from_millis(2));
         }
+    }
+}
+
+fn scheduled_recording_status_from_output(
+    status: OutputCaptureStatus,
+) -> ScheduledRecordingCaptureStatus {
+    match status {
+        OutputCaptureStatus::Pending {
+            proof_id,
+            artifact_relative_path,
+        } => ScheduledRecordingCaptureStatus::Pending {
+            recording_id: proof_id,
+            artifact_relative_path,
+        },
+        OutputCaptureStatus::Ready(ready) => {
+            ScheduledRecordingCaptureStatus::Ready(ScheduledRecordingCaptureReady {
+                recording_id: ready.proof_id,
+                output_index: ready.output_index,
+                sink_id: ready.sink_id,
+                artifact_relative_path: ready.artifact_relative_path,
+                capture_bytes: ready.capture_bytes,
+                capture_sha256: ready.capture_sha256,
+                capture_duration_ms: ready.capture_duration_ms,
+            })
+        }
+        OutputCaptureStatus::Failed {
+            proof_id,
+            artifact_relative_path,
+            code,
+            message,
+        } => ScheduledRecordingCaptureStatus::Failed {
+            recording_id: proof_id,
+            artifact_relative_path,
+            code,
+            message,
+        },
     }
 }
 
@@ -3351,52 +3363,72 @@ impl CaptureIngress {
         proof_id: &str,
         code: &str,
         message: &str,
-    ) -> Result<bool, EngineError> {
-        let matches = self
+    ) -> Result<Option<OutputCaptureStatus>, EngineError> {
+        let status = self
             .proof
             .lock()
             .map_err(|_| EngineError::OutputCapture("capture state lock is poisoned".into()))?
             .as_ref()
-            .is_some_and(|proof| proof.proof_id == proof_id);
-        if matches {
-            self.abort_any(code, message)?;
-        }
-        Ok(matches)
+            .filter(|proof| proof.proof_id == proof_id)
+            .map(|proof| Arc::clone(&proof.status));
+        status
+            .map(|status| self.abort_status(proof_id, status, code, message))
+            .transpose()
     }
 
-    fn abort_any(&self, code: &str, message: &str) -> Result<(), EngineError> {
+    fn abort_any(
+        &self,
+        code: &str,
+        message: &str,
+    ) -> Result<Option<OutputCaptureStatus>, EngineError> {
         let proof = self
             .proof
             .lock()
             .map_err(|_| EngineError::OutputCapture("capture state lock is poisoned".into()))?
             .as_ref()
             .map(|proof| (proof.proof_id.clone(), Arc::clone(&proof.status)));
+        proof
+            .map(|(proof_id, status)| self.abort_status(&proof_id, status, code, message))
+            .transpose()
+    }
+
+    /// Perform the one terminal race with the writer and return the status
+    /// selected while holding its mutex.  A `Failed` carrying this abort's
+    /// code means this path won Pending -> Failed; `Ready` means the writer
+    /// won and the sealed file must be retained.
+    fn abort_status(
+        &self,
+        proof_id: &str,
+        status: Arc<Mutex<OutputCaptureStatus>>,
+        code: &str,
+        message: &str,
+    ) -> Result<OutputCaptureStatus, EngineError> {
+        let mut status = status
+            .lock()
+            .map_err(|_| EngineError::OutputCapture("capture result lock is poisoned".into()))?;
         let mut aborted_pending = false;
-        if let Some((proof_id, status)) = proof {
-            let mut status = status.lock().map_err(|_| {
-                EngineError::OutputCapture("capture result lock is poisoned".into())
-            })?;
-            if let OutputCaptureStatus::Pending {
+        if let OutputCaptureStatus::Pending {
+            artifact_relative_path,
+            ..
+        } = &*status
+        {
+            let artifact_relative_path = artifact_relative_path.clone();
+            // The abort flag and terminal status are committed under the same
+            // mutex used by the writer. Whichever side acquires this lock
+            // first owns the terminal transition and its evidence.
+            self.aborted.store(true, Ordering::Release);
+            *status = OutputCaptureStatus::Failed {
+                proof_id: proof_id.into(),
                 artifact_relative_path,
-                ..
-            } = &*status
-            {
-                let artifact_relative_path = artifact_relative_path.clone();
-                // The abort flag and terminal status are committed under the
-                // same mutex used by the writer. Whichever side acquires this
-                // lock first owns the terminal transition.
-                self.aborted.store(true, Ordering::Release);
-                *status = OutputCaptureStatus::Failed {
-                    proof_id,
-                    artifact_relative_path,
-                    code: code.into(),
-                    message: message.into(),
-                };
-                aborted_pending = true;
-            }
+                code: code.into(),
+                message: message.into(),
+            };
+            aborted_pending = true;
         }
+        let terminal = status.clone();
+        drop(status);
         if !aborted_pending {
-            return Ok(());
+            return Ok(terminal);
         }
         self.callback_failed.store(true, Ordering::Release);
         let mut sender = self
@@ -3406,7 +3438,7 @@ impl CaptureIngress {
         self.active.store(false, Ordering::Release);
         sender.take();
         drop(sender);
-        Ok(())
+        Ok(terminal)
     }
 
     fn reap_writer(&self) -> Result<(), EngineError> {
@@ -3600,6 +3632,27 @@ fn run_capture_writer(
     if result.is_err() {
         let _ = fs::remove_file(&part_path);
     }
+    commit_capture_terminal(
+        &ingress,
+        &status,
+        result,
+        failure_proof_id,
+        failure_artifact_relative_path,
+        &final_path,
+    );
+}
+
+/// Commit the writer's result against the same mutex used by abort.  If abort
+/// already owns Pending -> Failed, a just-published file is removed; if the
+/// writer owns Pending -> Ready, a later abort observes and preserves it.
+fn commit_capture_terminal(
+    ingress: &CaptureIngress,
+    status: &Mutex<OutputCaptureStatus>,
+    result: Result<OutputCaptureReady, (&'static str, String)>,
+    failure_proof_id: String,
+    failure_artifact_relative_path: String,
+    final_path: &Path,
+) {
     let mut remove_published_artifact = false;
     if let Ok(mut current) = status.lock() {
         if matches!(*current, OutputCaptureStatus::Pending { .. }) {
@@ -3627,7 +3680,7 @@ fn run_capture_writer(
         }
     }
     if remove_published_artifact {
-        let _ = fs::remove_file(&final_path);
+        let _ = fs::remove_file(final_path);
     }
 }
 
@@ -4525,6 +4578,44 @@ fn connect_source(
 mod tests {
     use super::*;
 
+    const TEST_CAPTURE_ID: &str = "11111111-2222-4333-8444-555555555555";
+
+    fn pending_capture() -> OutputCaptureStatus {
+        OutputCaptureStatus::Pending {
+            proof_id: TEST_CAPTURE_ID.into(),
+            artifact_relative_path: format!("{TEST_CAPTURE_ID}.ts"),
+        }
+    }
+
+    fn ready_capture() -> OutputCaptureReady {
+        OutputCaptureReady {
+            proof_id: TEST_CAPTURE_ID.into(),
+            output_index: 0,
+            sink_id: "66666666-7777-4888-8999-aaaaaaaaaaaa".into(),
+            loudness_target: LoudnessTarget::CABLE,
+            artifact_relative_path: format!("{TEST_CAPTURE_ID}.ts"),
+            capture_bytes: 4,
+            capture_sha256: "a".repeat(64),
+            capture_duration_ms: 3_000,
+        }
+    }
+
+    fn test_capture_path(label: &str) -> PathBuf {
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        std::env::temp_dir().join(format!(
+            "townlight-{label}-{}-{}.ts",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::AcqRel),
+        ))
+    }
+
+    fn armed_capture(ingress: &Arc<CaptureIngress>, status: Arc<Mutex<OutputCaptureStatus>>) {
+        *ingress.proof.lock().unwrap() = Some(ActiveOutputCapture {
+            proof_id: TEST_CAPTURE_ID.into(),
+            status,
+        });
+    }
+
     #[test]
     fn capture_ingress_byte_reservation_is_bounded_and_releasable() {
         let ingress = CaptureIngress::new();
@@ -4534,5 +4625,108 @@ mod tests {
 
         ingress.release_queued_bytes(OUTPUT_CAPTURE_QUEUE_BYTES);
         assert!(ingress.reserve_queued_bytes(1));
+    }
+
+    #[test]
+    fn scheduled_recording_abort_preserves_writer_won_ready_artifact() {
+        let ingress = Arc::new(CaptureIngress::new());
+        let status = Arc::new(Mutex::new(pending_capture()));
+        armed_capture(&ingress, Arc::clone(&status));
+        let final_path = test_capture_path("recording-abort-writer-wins");
+        fs::write(&final_path, b"seal").unwrap();
+
+        // The writer commits before it releases this barrier.  The abort
+        // therefore cannot observe Pending and must return the exact Ready.
+        let committed = Arc::new(std::sync::Barrier::new(2));
+        let writer_ingress = Arc::clone(&ingress);
+        let writer_status = Arc::clone(&status);
+        let writer_path = final_path.clone();
+        let writer_barrier = Arc::clone(&committed);
+        let writer = std::thread::spawn(move || {
+            commit_capture_terminal(
+                &writer_ingress,
+                &writer_status,
+                Ok(ready_capture()),
+                TEST_CAPTURE_ID.into(),
+                format!("{TEST_CAPTURE_ID}.ts"),
+                &writer_path,
+            );
+            writer_barrier.wait();
+        });
+        committed.wait();
+
+        let terminal = ingress
+            .abort_if_matches(
+                TEST_CAPTURE_ID,
+                "capture_aborted",
+                "scheduled recording was aborted",
+            )
+            .unwrap()
+            .expect("recording must still be addressable");
+        writer.join().unwrap();
+
+        assert!(matches!(terminal, OutputCaptureStatus::Ready(_)));
+        assert!(matches!(
+            *status.lock().unwrap(),
+            OutputCaptureStatus::Ready(_)
+        ));
+        assert!(
+            final_path.is_file(),
+            "writer-owned Ready must retain its seal"
+        );
+        fs::remove_file(final_path).unwrap();
+    }
+
+    #[test]
+    fn scheduled_recording_abort_removes_seal_when_abort_wins_pending() {
+        let ingress = Arc::new(CaptureIngress::new());
+        let status = Arc::new(Mutex::new(pending_capture()));
+        armed_capture(&ingress, Arc::clone(&status));
+        let final_path = test_capture_path("recording-abort-wins");
+        fs::write(&final_path, b"seal").unwrap();
+
+        // Hold the simulated writer until after abort has atomically selected
+        // Pending -> Failed.  This models a writer that has sealed bytes but
+        // has not yet committed Ready, without timing or sleeps.
+        let release_writer = Arc::new(std::sync::Barrier::new(2));
+        let writer_ingress = Arc::clone(&ingress);
+        let writer_status = Arc::clone(&status);
+        let writer_path = final_path.clone();
+        let writer_barrier = Arc::clone(&release_writer);
+        let writer = std::thread::spawn(move || {
+            writer_barrier.wait();
+            commit_capture_terminal(
+                &writer_ingress,
+                &writer_status,
+                Ok(ready_capture()),
+                TEST_CAPTURE_ID.into(),
+                format!("{TEST_CAPTURE_ID}.ts"),
+                &writer_path,
+            );
+        });
+
+        let terminal = ingress
+            .abort_if_matches(
+                TEST_CAPTURE_ID,
+                "capture_aborted",
+                "scheduled recording was aborted",
+            )
+            .unwrap()
+            .expect("recording must still be addressable");
+        release_writer.wait();
+        writer.join().unwrap();
+
+        assert!(matches!(
+            terminal,
+            OutputCaptureStatus::Failed { ref code, .. } if code == "capture_aborted"
+        ));
+        assert!(matches!(
+            *status.lock().unwrap(),
+            OutputCaptureStatus::Failed { ref code, .. } if code == "capture_aborted"
+        ));
+        assert!(
+            !final_path.exists(),
+            "abort-owned Failed must not leave a sealed orphan"
+        );
     }
 }
