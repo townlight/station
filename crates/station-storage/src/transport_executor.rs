@@ -573,6 +573,12 @@ where
         &analysis_input,
         &mut || analysis_lease.renew_if_due(),
     )?;
+    analysis_lease.renew_now()?;
+    store.retain_transport_proof_tables_output(
+        execution,
+        &findings.tables_output_sha256,
+        unix_time_millis()?,
+    )?;
     // Renew immediately before and after removing the analyzer input. A slow
     // filesystem teardown cannot turn a still-running controller into an
     // expired lease that a second controller may recover.
@@ -2263,6 +2269,7 @@ fn is_sha256(value: &str) -> bool {
 }
 
 fn validate_tstables_json(output: &[u8], findings: &TransportFindings) -> Result<(), String> {
+    findings.validate()?;
     if output.is_empty() || output.len() > MAX_PROCESS_OUTPUT_BYTES {
         return Err("TSDuck tables output is missing or oversized".into());
     }
@@ -2317,6 +2324,10 @@ fn validate_tstables_json(output: &[u8], findings: &TransportFindings) -> Result
         .iter()
         .filter(|node| node["#name"] == "component")
         .collect();
+    let pmt_metadata: Vec<&serde_json::Value> = components
+        .iter()
+        .filter(|node| node["#name"] == "metadata")
+        .collect();
     let component = |pid, stream_type| {
         stream_components
             .iter()
@@ -2328,6 +2339,8 @@ fn validate_tstables_json(output: &[u8], findings: &TransportFindings) -> Result
             == 1
     };
     if !pat_matches
+        || pmt_metadata.len() != 1
+        || pmt_metadata[0]["pid"].as_u64() != Some(findings.pmt_pid)
         || pmt["pcr_pid"].as_u64() != Some(findings.pcr_pid)
         || findings.pcr_pid != findings.video_pid
         || stream_components.len() != findings.pmt_stream_count as usize
@@ -2791,6 +2804,63 @@ mod tests {
             detail: "Authenticated receiver reachability passed.".into(),
         };
         let _fence = station_maintenance::acquire_install_authority_fence(&data).unwrap();
+        store
+            .retain_transport_proof_tables_output(
+                &execution,
+                &receipt.findings.tables_output_sha256,
+                600_002,
+            )
+            .unwrap();
+        let mut unrelated_tables = receipt.clone();
+        unrelated_tables.findings.tables_output_sha256 = "d".repeat(64);
+        assert!(
+            store
+                .complete_transport_proof_job_with_analysis(
+                    &execution,
+                    &unrelated_tables,
+                    &reachability,
+                    600_002,
+                    || station_maintenance::read_verified_install_authority(&data, &application),
+                )
+                .is_err(),
+            "a valid-looking receipt must bind to the tables evidence retained for this capture"
+        );
+        assert_eq!(
+            store
+                .read_transport_proof_job(&job.job_id)
+                .unwrap()
+                .unwrap()
+                .state,
+            station_storage::TransportProofJobState::Analyzing
+        );
+        let mut unrelated_capture = receipt.clone();
+        unrelated_capture.capture_sha256 = "e".repeat(64);
+        assert!(
+            store
+                .complete_transport_proof_job_with_analysis(
+                    &execution,
+                    &unrelated_capture,
+                    &reachability,
+                    600_002,
+                    || station_maintenance::read_verified_install_authority(&data, &application),
+                )
+                .is_err(),
+            "a valid-looking receipt must not complete for unrelated capture bytes"
+        );
+        let mut unrelated_duration = receipt.clone();
+        unrelated_duration.findings.capture_duration_ms = 599_999;
+        assert!(
+            store
+                .complete_transport_proof_job_with_analysis(
+                    &execution,
+                    &unrelated_duration,
+                    &reachability,
+                    600_002,
+                    || station_maintenance::read_verified_install_authority(&data, &application),
+                )
+                .is_err(),
+            "a receipt duration must be measured from the sealed capture facts"
+        );
         let completed = store
             .complete_transport_proof_job_with_analysis(
                 &execution,
@@ -2807,6 +2877,10 @@ mod tests {
         assert_eq!(
             completed.analyzer_output_sha256,
             Some(receipt.findings.analyzer_output_sha256)
+        );
+        assert_eq!(
+            completed.tables_output_sha256,
+            Some(receipt.findings.tables_output_sha256)
         );
         drop(store);
         fs::remove_dir_all(base).unwrap();
@@ -3043,6 +3117,30 @@ mod tests {
                 &inconsistent
             )
             .is_err()
+        );
+
+        let mut tables: Vec<serde_json::Value> = serde_json::from_slice(include_bytes!(
+            "../tests/fixtures/tsduck-3.44-h264-aac-tables.json"
+        ))
+        .unwrap();
+        tables[2]["#nodes"][0]["pid"] = serde_json::json!(4097);
+        assert!(
+            validate_tstables_json(&serde_json::to_vec(&tables).unwrap(), &findings).is_err(),
+            "the PMT must be carried on the exact PID named by the selected PAT service"
+        );
+
+        let mut invalid_pcr = findings.clone();
+        invalid_pcr.pcr_pid = 0;
+        invalid_pcr.video_pid = 0;
+        let mut tables: Vec<serde_json::Value> = serde_json::from_slice(include_bytes!(
+            "../tests/fixtures/tsduck-3.44-h264-aac-tables.json"
+        ))
+        .unwrap();
+        tables[2]["pcr_pid"] = serde_json::json!(0);
+        tables[2]["#nodes"][1]["elementary_pid"] = serde_json::json!(0);
+        assert!(
+            validate_tstables_json(&serde_json::to_vec(&tables).unwrap(), &invalid_pcr).is_err(),
+            "a table correlation must reject the reserved PCR PID zero"
         );
     }
 

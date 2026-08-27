@@ -907,6 +907,9 @@ pub struct TransportProofJobRecord {
     pub lease_expires_at_unix_ms: Option<i64>,
     pub capture: Option<TransportProofCaptureFacts>,
     pub analyzer_output_sha256: Option<String>,
+    /// Digest of the bounded `tstables --json-output` evidence retained for
+    /// the same sealed capture as the analysis receipt.
+    pub tables_output_sha256: Option<String>,
     pub completed_at_unix_ms: Option<i64>,
     pub failed_at_unix_ms: Option<i64>,
     pub failure_detail: Option<String>,
@@ -1737,6 +1740,7 @@ impl StationStore {
                capture_started_at_unix_ms INTEGER NOT NULL DEFAULT -1 CHECK (capture_started_at_unix_ms >= -1),\
                capture_ended_at_unix_ms INTEGER NOT NULL DEFAULT -1 CHECK (capture_ended_at_unix_ms >= -1),\
                analyzer_output_sha256 TEXT NOT NULL DEFAULT '',\
+               tables_output_sha256 TEXT NOT NULL DEFAULT '',\
                completed_at_unix_ms INTEGER NOT NULL DEFAULT -1 CHECK (completed_at_unix_ms >= -1),\
                failed_at_unix_ms INTEGER NOT NULL DEFAULT -1 CHECK (failed_at_unix_ms >= -1),\
                failure_detail TEXT NOT NULL DEFAULT '',\
@@ -1794,12 +1798,20 @@ impl StationStore {
         let jobs_need_execution_capability = jobs_exist
             && !self
                 .sqlite_table_has_column("transport_proof_jobs", "execution_capability_sha256")?;
+        let jobs_need_tables_output = jobs_exist
+            && !self.sqlite_table_has_column("transport_proof_jobs", "tables_output_sha256")?;
         let migrated_configs = if target_configs_exist {
             self.legacy_transport_target_config_rewrites()?
         } else {
             Vec::new()
         };
-        if !analysis_needs_revision && migrated_configs.is_empty() && !jobs_exist {
+        if !analysis_needs_revision
+            && migrated_configs.is_empty()
+            && !jobs_need_install_generation
+            && !jobs_need_execution_capability
+            && !jobs_need_tables_output
+            && !jobs_exist
+        {
             return Ok(());
         }
 
@@ -1906,6 +1918,11 @@ impl StationStore {
             if jobs_need_execution_capability {
                 self.execute(
                     "ALTER TABLE transport_proof_jobs ADD COLUMN execution_capability_sha256 TEXT NOT NULL DEFAULT ''",
+                )?;
+            }
+            if jobs_need_tables_output {
+                self.execute(
+                    "ALTER TABLE transport_proof_jobs ADD COLUMN tables_output_sha256 TEXT NOT NULL DEFAULT ''",
                 )?;
             }
             if jobs_exist {
@@ -11731,7 +11748,7 @@ impl StationStore {
                 return Err("transport proof configuration binding is stale".into());
             }
             let statement = self.prepare(
-                "INSERT OR IGNORE INTO transport_proof_jobs(job_id, channel_id, sink_id, target_id, target_revision, candidate_version, source_commit, configuration_hash, requested_by, max_capture_bytes, state, created_at_unix_ms, updated_at_unix_ms, lease_expires_at_unix_ms, capture_relative_path, capture_bytes, capture_sha256, capture_started_at_unix_ms, capture_ended_at_unix_ms, analyzer_output_sha256, completed_at_unix_ms, failed_at_unix_ms, failure_detail, install_generation) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,'pending',?11,?11,-1,'',-1,'',-1,-1,'',-1,-1,'',?12)",
+                "INSERT OR IGNORE INTO transport_proof_jobs(job_id, channel_id, sink_id, target_id, target_revision, candidate_version, source_commit, configuration_hash, requested_by, max_capture_bytes, state, created_at_unix_ms, updated_at_unix_ms, lease_expires_at_unix_ms, capture_relative_path, capture_bytes, capture_sha256, capture_started_at_unix_ms, capture_ended_at_unix_ms, analyzer_output_sha256, tables_output_sha256, completed_at_unix_ms, failed_at_unix_ms, failure_detail, install_generation) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,'pending',?11,?11,-1,'',-1,'',-1,-1,'','',-1,-1,'',?12)",
             )?;
             for (index, value, field) in [
                 (1, job.job_id.as_str(), "transport proof job identity"),
@@ -11818,7 +11835,7 @@ impl StationStore {
                 return Err("transport proof configuration binding is stale".into());
             }
             let statement = self.prepare(
-                "INSERT OR IGNORE INTO transport_proof_jobs(job_id, channel_id, sink_id, target_id, target_revision, candidate_version, source_commit, configuration_hash, requested_by, max_capture_bytes, state, created_at_unix_ms, updated_at_unix_ms, lease_expires_at_unix_ms, capture_relative_path, capture_bytes, capture_sha256, capture_started_at_unix_ms, capture_ended_at_unix_ms, analyzer_output_sha256, completed_at_unix_ms, failed_at_unix_ms, failure_detail, install_generation) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,'pending',?11,?11,-1,'',-1,'',-1,-1,'',-1,-1,'',?12)",
+                "INSERT OR IGNORE INTO transport_proof_jobs(job_id, channel_id, sink_id, target_id, target_revision, candidate_version, source_commit, configuration_hash, requested_by, max_capture_bytes, state, created_at_unix_ms, updated_at_unix_ms, lease_expires_at_unix_ms, capture_relative_path, capture_bytes, capture_sha256, capture_started_at_unix_ms, capture_ended_at_unix_ms, analyzer_output_sha256, tables_output_sha256, completed_at_unix_ms, failed_at_unix_ms, failure_detail, install_generation) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,'pending',?11,?11,-1,'',-1,'',-1,-1,'','',-1,-1,'',?12)",
             )?;
             for (index, value, field) in [
                 (1, job.job_id.as_str(), "transport proof job identity"),
@@ -11887,7 +11904,7 @@ impl StationStore {
     ) -> Result<Option<TransportProofJobRecord>, String> {
         validate_transport_proof_job_id(job_id)?;
         let statement = self.prepare(
-            "SELECT job_id,channel_id,sink_id,target_id,target_revision,candidate_version,source_commit,configuration_hash,requested_by,max_capture_bytes,state,created_at_unix_ms,updated_at_unix_ms,lease_expires_at_unix_ms,capture_relative_path,capture_bytes,capture_sha256,capture_started_at_unix_ms,capture_ended_at_unix_ms,analyzer_output_sha256,completed_at_unix_ms,failed_at_unix_ms,failure_detail,install_generation FROM transport_proof_jobs WHERE job_id=?1",
+            "SELECT job_id,channel_id,sink_id,target_id,target_revision,candidate_version,source_commit,configuration_hash,requested_by,max_capture_bytes,state,created_at_unix_ms,updated_at_unix_ms,lease_expires_at_unix_ms,capture_relative_path,capture_bytes,capture_sha256,capture_started_at_unix_ms,capture_ended_at_unix_ms,analyzer_output_sha256,completed_at_unix_ms,failed_at_unix_ms,failure_detail,install_generation,tables_output_sha256 FROM transport_proof_jobs WHERE job_id=?1",
         )?;
         bind_text(
             self.database,
@@ -12103,6 +12120,58 @@ impl StationStore {
         self.finish_value_transaction(outcome)
     }
 
+    /// Retain the bounded `tstables` output digest exactly once while this
+    /// opaque execution capability still owns the sealed capture. Completion
+    /// compares the analysis receipt against this durable fact instead of
+    /// accepting a self-consistent but unrelated tables digest.
+    fn retain_transport_proof_tables_output(
+        &self,
+        execution: &TransportProofExecution,
+        tables_output_sha256: &str,
+        now_unix_ms: i64,
+    ) -> Result<TransportProofJobRecord, String> {
+        validate_transport_proof_job_id(&execution.job_id)?;
+        if now_unix_ms < 0 || !is_sha256_identity(tables_output_sha256) {
+            return Err("transport proof tables evidence is invalid".into());
+        }
+        self.execute("BEGIN IMMEDIATE")?;
+        let outcome = (|| {
+            let statement = self.prepare("UPDATE transport_proof_jobs SET tables_output_sha256=?1,updated_at_unix_ms=?2 WHERE job_id=?3 AND state='analyzing' AND lease_expires_at_unix_ms>?2 AND execution_capability_sha256=?4 AND tables_output_sha256='' ")?;
+            bind_text(
+                self.database,
+                statement.raw,
+                1,
+                &c_string(tables_output_sha256, "transport tables output hash")?,
+            )?;
+            bind_i64(self.database, statement.raw, 2, now_unix_ms)?;
+            bind_text(
+                self.database,
+                statement.raw,
+                3,
+                &c_string(&execution.job_id, "transport proof job identity")?,
+            )?;
+            bind_text(
+                self.database,
+                statement.raw,
+                4,
+                &c_string(
+                    &execution.capability_sha256,
+                    "transport execution capability",
+                )?,
+            )?;
+            expect_done(self.database, statement.raw)?;
+            if self.changes() != 1 {
+                return Err(
+                    "transport proof tables evidence compare-and-set failed or lease expired"
+                        .into(),
+                );
+            }
+            self.read_transport_proof_job(&execution.job_id)?
+                .ok_or_else(|| "transport proof job disappeared".to_string())
+        })();
+        self.finish_value_transaction(outcome)
+    }
+
     /// Test-only state advancement for queue state-machine tests. Production
     /// completion has no shortcut: it must append the exact receipt through
     /// `complete_transport_proof_job_with_analysis`.
@@ -12119,7 +12188,7 @@ impl StationStore {
         }
         self.execute("BEGIN IMMEDIATE")?;
         let outcome = (|| {
-            let statement = self.prepare("UPDATE transport_proof_jobs SET state='completed',updated_at_unix_ms=?1,lease_expires_at_unix_ms=-1,analyzer_output_sha256=?2,completed_at_unix_ms=?1 WHERE job_id=?3 AND state='analyzing' AND lease_expires_at_unix_ms>?1")?;
+            let statement = self.prepare("UPDATE transport_proof_jobs SET state='completed',updated_at_unix_ms=?1,lease_expires_at_unix_ms=-1,analyzer_output_sha256=?2,tables_output_sha256=?2,completed_at_unix_ms=?1 WHERE job_id=?3 AND state='analyzing' AND lease_expires_at_unix_ms>?1")?;
             bind_i64(self.database, statement.raw, 1, now_unix_ms)?;
             bind_text(
                 self.database,
@@ -12217,6 +12286,14 @@ impl StationStore {
             {
                 return Err(
                     "transport proof completion receipt does not bind the sealed capture".into(),
+                );
+            }
+            if current.tables_output_sha256.as_deref()
+                != Some(receipt.findings.tables_output_sha256.as_str())
+            {
+                return Err(
+                    "transport proof completion receipt does not bind retained tables evidence"
+                        .into(),
                 );
             }
             let reachability_record = serde_json::to_string(reachability)
@@ -17911,6 +17988,7 @@ fn read_transport_proof_job_row(
         Some(capture)
     };
     let analyzer_output_sha256 = column_text(statement, 19)?;
+    let tables_output_sha256 = column_text(statement, 24)?;
     let state = parse_transport_proof_job_state(&column_text(statement, 10)?)?;
     let record = TransportProofJobRecord {
         job,
@@ -17920,6 +17998,7 @@ fn read_transport_proof_job_row(
         capture,
         analyzer_output_sha256: (!analyzer_output_sha256.is_empty())
             .then_some(analyzer_output_sha256),
+        tables_output_sha256: (!tables_output_sha256.is_empty()).then_some(tables_output_sha256),
         completed_at_unix_ms: optional_nonnegative_i64(
             statement,
             20,
@@ -17941,10 +18020,18 @@ fn read_transport_proof_job_row(
     {
         return Err("database returned invalid transport analyzer output hash".into());
     }
+    if record
+        .tables_output_sha256
+        .as_deref()
+        .is_some_and(|hash| !is_sha256_identity(hash))
+    {
+        return Err("database returned invalid transport tables output hash".into());
+    }
     match record.state {
         TransportProofJobState::Completed => {
             if record.capture.is_none()
                 || record.analyzer_output_sha256.is_none()
+                || record.tables_output_sha256.is_none()
                 || record.completed_at_unix_ms.is_none()
                 || record.lease_expires_at_unix_ms.is_some()
             {
@@ -19071,7 +19158,7 @@ fn recover_expired_transport_proof_jobs_in_transaction(
     now_unix_ms: i64,
 ) -> Result<u64, String> {
     let statement = store.prepare(
-        "UPDATE transport_proof_jobs SET state='pending',updated_at_unix_ms=?1,lease_expires_at_unix_ms=-1,execution_capability_sha256='',capture_relative_path='',capture_bytes=-1,capture_sha256='',capture_started_at_unix_ms=-1,capture_ended_at_unix_ms=-1,analyzer_output_sha256='' WHERE state IN ('claimed','capturing','analyzing') AND lease_expires_at_unix_ms<=?1",
+        "UPDATE transport_proof_jobs SET state='pending',updated_at_unix_ms=?1,lease_expires_at_unix_ms=-1,execution_capability_sha256='',capture_relative_path='',capture_bytes=-1,capture_sha256='',capture_started_at_unix_ms=-1,capture_ended_at_unix_ms=-1,analyzer_output_sha256='',tables_output_sha256='' WHERE state IN ('claimed','capturing','analyzing') AND lease_expires_at_unix_ms<=?1",
     )?;
     bind_i64(store.database, statement.raw, 1, now_unix_ms)?;
     expect_done(store.database, statement.raw)?;

@@ -19,7 +19,9 @@ count mismatch, continuity error, PCR error, missing or ambiguous PAT/PMT/servic
 binding, or a changed runtime identity fails closed. The sealed analyzer input and
 its directory ancestry remain open without write/delete sharing for the complete
 child lifetime. `tstables` JSON is returned through the bounded stdout pipe rather
-than a replaceable output pathname.
+than a replaceable output pathname. Its SHA-256 is retained under the same opaque
+lease as the sealed capture; completion requires that durable digest and the
+receipt's exact bytes, hash, and measured duration to agree.
 
 Captures and analyzer output are bounded by the durable authority limits. The
 executor persists only typed findings and SHA-256 digests: it never persists raw
