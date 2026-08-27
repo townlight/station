@@ -2,7 +2,8 @@
 
 ## Decision
 
-`station-ott-contract` owns a pure, versioned public interchange contract for Roku,
+`station-ott-contract` owns a pure, versioned public interchange contract (current
+wire version 2) for Roku,
 Apple, Android, and Fire TV clients. It defines bounded catalog pagination, tagged
 unambiguous live/VOD identity, HLS playback source, WebVTT subtitle tracks,
 accessibility semantics, explicit platform capability declarations, server-issued
@@ -17,17 +18,28 @@ caption, accessibility, navigation, and beacon capabilities before a server sess
 may bind it to an exact catalog item/revision.
 
 The playback session is server-issued authority represented by its own record and a
-digest; a beacon only references that supplied current session. Beacons contain no
-account, plan, entitlement, grant, content selection, or server-session-authority
-field. Mismatched, stale, expired, or client-invented session references fail closed.
+digest. The session response separately returns one random bearer capability; only
+its protected copy and digest are durable, and the bearer is never written into a
+beacon record. A beacon presents that bearer at the transport boundary and only
+references the independently loaded current session after constant-time digest and
+exact capability checks. Beacons contain no account, plan, entitlement, grant,
+content selection, or server-session-authority field. Mismatched, stale, expired,
+replayed-with-different-content, or client-invented session references fail closed.
 
 ## Boundaries and non-claims
 
-This crate contains no Roku, tvOS/iOS, Android, Fire TV, web, API, storage, session
-issuer, authentication, entitlement checker, CDN, HLS packager, playback runtime,
-beacon collector, subtitle renderer, accessibility implementation, build pipeline,
-or installed-machine proof. It does not prove that a client is authentic, a session
-was actually issued, a URL resolves, media plays, captions render, accessibility works,
-or a beacon is collected. Later slices must establish server-side issuance/access
-authority, platform applications, safe public delivery, telemetry collection,
-accessibility verification, and platform build/field evidence.
+The pure contract crate contains no Roku, tvOS/iOS, Android, Fire TV, web, API,
+storage, session issuer, authentication, entitlement checker, CDN, HLS packager,
+playback runtime, beacon collector, subtitle renderer, accessibility implementation,
+build pipeline, or installed-machine proof. A later source slice provides a bounded
+single-page server-side catalog read, public session issuance, and privacy-minimized
+beacon collection through API/storage adapters. A continuation cursor is rejected by
+that adapter until multi-page query and storage authority exists. Catalog publication
+remains a trusted in-process source seam: there is no production publisher or external
+entitlement provider yet. The persistence prototype has fixed session/beacon capacity
+and no reclamation policy, so it must not be treated as an indefinite telemetry service.
+Nothing here proves a client is authentic, a URL resolves, media plays, captions
+render, accessibility works, or a field station collects beacons. Later slices must
+establish catalog publication, entitlement/access policy, platform applications, safe
+delivery, retention/reclamation, accessibility verification, and platform/field
+evidence.

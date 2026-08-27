@@ -1,0 +1,10 @@
+[package]
+name = "station-ott-runtime"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+getrandom.workspace = true
+serde.workspace = true
+station-ott-contract.workspace = true

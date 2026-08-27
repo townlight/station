@@ -32,6 +32,8 @@ station-storage.workspace = true
 station-support.workspace = true
 station-update.workspace = true
 station-update-coordinator.workspace = true
+station-ott-contract.workspace = true
+station-ott-runtime.workspace = true
 station-transport-proof.workspace = true
 station-reporting.workspace = true
 

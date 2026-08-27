@@ -61,6 +61,8 @@ use station_media_lifecycle::{
 use station_metadata::{
     AssetMetadataRecord, AssetMetadataValue, MetadataFieldDefinition, MetadataSchema,
 };
+use station_ott_contract::ClientPlaybackBeacon;
+use station_ott_runtime::PlaybackSessionIssueRequest;
 use station_publishing::{
     ConnectionTestOutcome as PublishConnectionTestOutcome, PublishCandidateIdentity,
     PublishConnectionTestEvidence, PublishExecutionReceipt, PublishExecutionTargetConfig,
@@ -103,16 +105,17 @@ use station_storage::{
     ChannelFallbackSlateAuditEvent, ChannelWriteError, CommissioningSupportBundleReceipt,
     CommitWriteError, CustomMetadataSchemaWriteError, ExistingScheduleSnapshot,
     ExternalReceiverAcceptanceReceipt, FallbackSlateWriteError, HeadendProfileWriteError,
-    OutputLoudnessProofJob, OutputLoudnessProofJobRecord, OutputLoudnessProofJobState,
-    ProfileWriteError, PublishExecutionJob, PublishExecutionJobRecord, PublishExecutionJobState,
-    PublishingAuthorityWriteError, ReceiverAcceptanceOutcome, ReceiverEvidenceMethod,
-    ReferenceStationTierWrite, ReferenceStationTierWriteError, ScheduleAutomationWriteError,
-    ScheduleItemWrite, ScheduleMaterializationApplyOutcome, ScheduleMaterializationHistoryCursor,
-    ScheduleMaterializationHistoryEntry, ScheduleMaterializationHistoryReadError,
-    ScheduleMaterializationOutcome, ScheduleMaterializationOutcomeRecord,
-    ScheduleMaterializationPlanRecord, ScheduleMaterializationRun,
-    ScheduleMaterializationRunOrigin, ScheduleMaterializationWriteError, StationStore,
-    StoredSinkLoudnessProof, TransportProofJob, TransportProofJobRecord, TransportProofJobState,
+    OttAuthorityError, OutputLoudnessProofJob, OutputLoudnessProofJobRecord,
+    OutputLoudnessProofJobState, ProfileWriteError, PublishExecutionJob, PublishExecutionJobRecord,
+    PublishExecutionJobState, PublishingAuthorityWriteError, ReceiverAcceptanceOutcome,
+    ReceiverEvidenceMethod, ReferenceStationTierWrite, ReferenceStationTierWriteError,
+    ScheduleAutomationWriteError, ScheduleItemWrite, ScheduleMaterializationApplyOutcome,
+    ScheduleMaterializationHistoryCursor, ScheduleMaterializationHistoryEntry,
+    ScheduleMaterializationHistoryReadError, ScheduleMaterializationOutcome,
+    ScheduleMaterializationOutcomeRecord, ScheduleMaterializationPlanRecord,
+    ScheduleMaterializationRun, ScheduleMaterializationRunOrigin,
+    ScheduleMaterializationWriteError, StationStore, StoredSinkLoudnessProof, TransportProofJob,
+    TransportProofJobRecord, TransportProofJobState,
 };
 use station_transport_proof::{CableTransportValidation, TargetDeviceConfig, TargetProtocol};
 use station_update::UpdateCheckTrigger;
@@ -2066,6 +2069,9 @@ impl Api {
                 ),
                 Err(message) => error_response(500, "storage_error", &message),
             },
+            ("GET", "/api/v1/ott/catalog") => self.read_ott_catalog(),
+            ("POST", "/api/v1/ott/sessions") => self.issue_ott_session(body),
+            ("POST", "/api/v1/ott/beacons") => self.collect_ott_beacon(body),
             ("GET", "/api/v1/commissioning/report") => {
                 self.commissioning_report(actor.is_some_and(|account| {
                     account.enabled()
@@ -2573,6 +2579,73 @@ impl Api {
             }
             ("GET", path) if path.starts_with("/api/v1/assets/") => self.read_media_asset(path),
             _ => error_response(404, "not_found", "The requested route does not exist."),
+        }
+    }
+
+    fn read_ott_catalog(&self) -> ApiResponse {
+        match self.storage.read_ott_catalog_page() {
+            Ok(Some(page)) => json_response(
+                200,
+                serde_json::to_vec(&page).expect("serializing OTT catalog cannot fail"),
+            ),
+            Ok(None) => error_response(
+                404,
+                "ott_catalog_unavailable",
+                "No published OTT catalog is available.",
+            ),
+            Err(_) => error_response(
+                500,
+                "ott_storage_error",
+                "The OTT catalog authority is temporarily unavailable.",
+            ),
+        }
+    }
+
+    fn issue_ott_session(&self, body: Option<&[u8]>) -> ApiResponse {
+        let Some(request) = parse_body::<PlaybackSessionIssueRequest>(body) else {
+            return error_response(
+                400,
+                "invalid_json",
+                "An OTT playback-session request body is required.",
+            );
+        };
+        if let Err(message) = station_ott_runtime::validate_issue_request(&request) {
+            return error_response(422, "validation_failed", &message);
+        }
+        let now = match system_time_millis() {
+            Ok(now) => now,
+            Err(message) => return error_response(500, "clock_error", &message),
+        };
+        match self.storage.issue_ott_playback_session(&request, now) {
+            Ok(response) => json_response(
+                200,
+                serde_json::to_vec(&response).expect("serializing OTT session cannot fail"),
+            ),
+            Err(error) => ott_session_error(&error),
+        }
+    }
+
+    fn collect_ott_beacon(&self, body: Option<&[u8]>) -> ApiResponse {
+        let Some(beacon) = parse_body::<ClientPlaybackBeacon>(body) else {
+            return error_response(
+                400,
+                "invalid_json",
+                "An OTT playback beacon body is required.",
+            );
+        };
+        if let Err(message) = station_ott_runtime::validate_beacon_input(&beacon) {
+            return error_response(422, "validation_failed", &message);
+        }
+        let now = match system_time_millis() {
+            Ok(now) => now,
+            Err(message) => return error_response(500, "clock_error", &message),
+        };
+        match self.storage.collect_ott_playback_beacon(&beacon, now) {
+            Ok(response) => json_response(
+                202,
+                serde_json::to_vec(&response).expect("serializing OTT beacon receipt cannot fail"),
+            ),
+            Err(error) => ott_beacon_error(&error),
         }
     }
 
@@ -14134,19 +14207,56 @@ fn dispatch_parsed_http(
     };
     debug_assert_eq!(host, runtime.expected_host());
     let unsafe_request = !matches!(request.method, "GET" | "HEAD" | "OPTIONS");
-    if unsafe_request {
-        if request.unique_header("origin").ok().flatten() != Some(runtime.expected_origin()) {
+    let public_ott_request = is_public_ott_endpoint(request.method, request.path);
+    if unsafe_request && !public_ott_request {
+        let origin = match request.unique_header("origin") {
+            Ok(origin) => origin,
+            Err(response) => return response,
+        };
+        if origin != Some(runtime.expected_origin()) {
             return error_response(
                 403,
                 "cross_origin_denied",
                 "Unsafe requests require this station's exact Origin.",
             );
         }
-        if request.unique_header("sec-fetch-site").ok().flatten() != Some("same-origin") {
+        let fetch_site = match request.unique_header("sec-fetch-site") {
+            Ok(fetch_site) => fetch_site,
+            Err(response) => return response,
+        };
+        if fetch_site != Some("same-origin") {
             return error_response(
                 403,
                 "cross_site_denied",
                 "Unsafe requests require Sec-Fetch-Site: same-origin.",
+            );
+        }
+    }
+    if unsafe_request && public_ott_request {
+        let origin = match request.unique_header("origin") {
+            Ok(origin) => origin,
+            Err(response) => return response,
+        };
+        if let Some(origin) = origin
+            && origin != runtime.expected_origin()
+        {
+            return error_response(
+                403,
+                "cross_origin_denied",
+                "OTT requests with a browser Origin must use this station's exact Origin.",
+            );
+        }
+        let fetch_site = match request.unique_header("sec-fetch-site") {
+            Ok(fetch_site) => fetch_site,
+            Err(response) => return response,
+        };
+        if let Some(fetch_site) = fetch_site
+            && fetch_site != "same-origin"
+        {
+            return error_response(
+                403,
+                "cross_site_denied",
+                "OTT requests with browser Fetch Metadata must be same-origin.",
             );
         }
     }
@@ -14170,6 +14280,14 @@ fn dispatch_parsed_http(
         }
         ("GET", "/operator.js" | "/operator.css" | "/health") => {
             return api.route(request.method, request.path, None, None);
+        }
+        // OTT catalog/session/beacon endpoints are deliberately public: the
+        // session body carries a bounded client capability declaration, while
+        // the server derives all content, entitlement/session, and time facts.
+        // They still pass the exact-origin checks above for unsafe methods.
+        ("GET", "/api/v1/ott/catalog")
+        | ("POST", "/api/v1/ott/sessions" | "/api/v1/ott/beacons") => {
+            return api.route(request.method, request.path, body, None);
         }
         ("GET", "/api/v1/auth/status") => {
             let authority =
@@ -14598,6 +14716,79 @@ fn error_response(status: u16, code: &str, message: &str) -> ApiResponse {
         serde_json::to_vec(&serde_json::json!({ "error": { "code": code, "message": message } }))
             .expect("serializing an error response cannot fail"),
     )
+}
+
+fn is_public_ott_endpoint(method: &str, path: &str) -> bool {
+    matches!(
+        (method, path),
+        ("GET", "/api/v1/ott/catalog")
+            | ("POST", "/api/v1/ott/sessions")
+            | ("POST", "/api/v1/ott/beacons")
+    )
+}
+
+fn ott_session_error(error: &OttAuthorityError) -> ApiResponse {
+    match error {
+        OttAuthorityError::Unavailable => error_response(
+            404,
+            "ott_content_unavailable",
+            "The requested OTT content is unavailable.",
+        ),
+        OttAuthorityError::ReplayConflict => error_response(
+            409,
+            "ott_request_replay_conflict",
+            "The OTT session request conflicts with a previous request.",
+        ),
+        OttAuthorityError::Capacity => error_response(
+            429,
+            "ott_capacity_reached",
+            "The OTT session service is at capacity; retry later.",
+        ),
+        OttAuthorityError::InvalidCapability
+        | OttAuthorityError::Stale
+        | OttAuthorityError::InvalidSequence => error_response(
+            409,
+            "ott_session_rejected",
+            "The OTT session request is stale or invalid.",
+        ),
+        OttAuthorityError::Corrupt | OttAuthorityError::Internal => error_response(
+            500,
+            "ott_storage_error",
+            "The OTT session authority is temporarily unavailable.",
+        ),
+    }
+}
+
+fn ott_beacon_error(error: &OttAuthorityError) -> ApiResponse {
+    match error {
+        OttAuthorityError::Unavailable => error_response(
+            404,
+            "ott_session_unavailable",
+            "The OTT playback session is unavailable.",
+        ),
+        OttAuthorityError::ReplayConflict
+        | OttAuthorityError::Stale
+        | OttAuthorityError::InvalidSequence => error_response(
+            409,
+            "ott_beacon_rejected",
+            "The OTT playback beacon is stale or conflicts with session state.",
+        ),
+        OttAuthorityError::Capacity => error_response(
+            429,
+            "ott_capacity_reached",
+            "The OTT beacon service is at capacity; retry later.",
+        ),
+        OttAuthorityError::InvalidCapability => error_response(
+            403,
+            "ott_capability_rejected",
+            "The OTT playback capability is invalid.",
+        ),
+        OttAuthorityError::Corrupt | OttAuthorityError::Internal => error_response(
+            500,
+            "ott_storage_error",
+            "The OTT beacon authority is temporarily unavailable.",
+        ),
+    }
 }
 
 #[cfg(test)]
@@ -22373,5 +22564,201 @@ mod tests {
         drop(api);
         std::fs::remove_dir_all(application).unwrap();
         let _ = std::fs::remove_file(database);
+    }
+
+    #[test]
+    fn public_ott_routes_issue_server_bound_sessions_and_collect_verified_beacons() {
+        use station_ott_contract::{
+            AccessibilitySemantics, ClientPlaybackBeacon, OttCapability, OttPlatform,
+            PlaybackBeaconEvent, PlaybackProtocol, PlaybackSource, PublicCatalogItem,
+            PublicCatalogPage, PublicContentIdentity, PublicSubtitleTrack, SubtitleKind,
+        };
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let database = std::env::temp_dir().join(format!("townlight-api-ott-{nonce}.db"));
+        let api = Api::open(&database).unwrap();
+        let page = PublicCatalogPage {
+            contract_version: station_ott_contract::OTT_CONTRACT_VERSION,
+            catalog_revision: 1,
+            items: vec![PublicCatalogItem {
+                content_id: "22222222-2222-4222-8222-222222222222".into(),
+                identity: PublicContentIdentity::Live {
+                    channel_id: "11111111-1111-4111-8111-111111111111".into(),
+                },
+                title: "Council meeting".into(),
+                summary: "Accessible civic programming".into(),
+                vod_duration_ms: None,
+                playback: PlaybackSource {
+                    protocol: PlaybackProtocol::Hls,
+                    manifest_url: "https://cdn.example.test/live.m3u8".into(),
+                },
+                subtitles: vec![PublicSubtitleTrack {
+                    track_id: "33333333-3333-4333-8333-333333333333".into(),
+                    language: "en-US".into(),
+                    kind: SubtitleKind::ClosedCaptions,
+                    url: "https://cdn.example.test/live.vtt".into(),
+                    is_default: true,
+                }],
+                accessibility: AccessibilitySemantics {
+                    captions_available: true,
+                    screen_reader_summary: "Council meeting".into(),
+                    remote_navigation_supported: true,
+                },
+            }],
+            next_cursor: None,
+        };
+        api.storage
+            .write_ott_catalog_page(&page, "test", 1)
+            .unwrap();
+        let runtime = auth::AuthRuntime::new("127.0.0.1:4070".parse().unwrap()).unwrap();
+        let native_catalog = dispatch_http(
+            &api,
+            &runtime,
+            &raw_request(
+                "GET",
+                "/api/v1/ott/catalog",
+                &[("Host", runtime.expected_host())],
+                b"",
+            ),
+        );
+        assert_eq!(native_catalog.status, 200);
+        let request = station_ott_runtime::PlaybackSessionIssueRequest {
+            request_id: "api-request-1".into(),
+            content_id: page.items[0].content_id.clone(),
+            client: station_ott_contract::PlatformCapabilityDeclaration {
+                contract_version: station_ott_contract::OTT_CONTRACT_VERSION,
+                client_id: "44444444-4444-4444-8444-444444444444".into(),
+                platform: OttPlatform::Roku,
+                capabilities: vec![
+                    OttCapability::HlsPlayback,
+                    OttCapability::WebVttSubtitles,
+                    OttCapability::ClosedCaptions,
+                    OttCapability::ScreenReaderSemantics,
+                    OttCapability::KeyboardOrRemoteNavigation,
+                    OttCapability::PlaybackBeacons,
+                ],
+            },
+        };
+        let request_body = serde_json::to_vec(&request).unwrap();
+        let issued = dispatch_http(
+            &api,
+            &runtime,
+            &raw_request(
+                "POST",
+                "/api/v1/ott/sessions",
+                &[("Host", runtime.expected_host())],
+                &request_body,
+            ),
+        );
+        assert_eq!(issued.status, 200);
+        let issued: station_ott_runtime::PlaybackSessionIssueResponse =
+            serde_json::from_slice(&issued.body).unwrap();
+        let beacon = ClientPlaybackBeacon {
+            contract_version: station_ott_contract::OTT_CONTRACT_VERSION,
+            beacon_id: "55555555-5555-4555-8555-555555555555".into(),
+            session_id: issued.session.session_id.clone(),
+            session_revision: issued.session.session_revision,
+            session_capability: issued.session_capability.clone(),
+            observed_at_unix_ms: issued.session.issued_at_unix_ms + 1,
+            event: PlaybackBeaconEvent::Started,
+            position_ms: 0,
+        };
+        let beacon_body = serde_json::to_vec(&beacon).unwrap();
+        let accepted = dispatch_http(
+            &api,
+            &runtime,
+            &raw_request(
+                "POST",
+                "/api/v1/ott/beacons",
+                &[("Host", runtime.expected_host())],
+                &beacon_body,
+            ),
+        );
+        assert_eq!(accepted.status, 202);
+        let replay = dispatch_http(
+            &api,
+            &runtime,
+            &raw_request(
+                "POST",
+                "/api/v1/ott/beacons",
+                &[("Host", runtime.expected_host())],
+                &beacon_body,
+            ),
+        );
+        assert_eq!(replay.status, 202);
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&replay.body).unwrap()["replayed"],
+            true
+        );
+        let hostile = dispatch_http(
+            &api,
+            &runtime,
+            &raw_request(
+                "POST",
+                "/api/v1/ott/beacons",
+                &[
+                    ("Host", runtime.expected_host()),
+                    ("Origin", "https://evil.invalid"),
+                ],
+                &beacon_body,
+            ),
+        );
+        assert_eq!(hostile.status, 403);
+        let duplicate_origin = dispatch_http(
+            &api,
+            &runtime,
+            &raw_request(
+                "POST",
+                "/api/v1/ott/beacons",
+                &[
+                    ("Host", runtime.expected_host()),
+                    ("Origin", runtime.expected_origin()),
+                    ("Origin", runtime.expected_origin()),
+                ],
+                &beacon_body,
+            ),
+        );
+        assert_eq!(duplicate_origin.status, 400);
+        let contradictory_fetch = dispatch_http(
+            &api,
+            &runtime,
+            &raw_request(
+                "POST",
+                "/api/v1/ott/beacons",
+                &[
+                    ("Host", runtime.expected_host()),
+                    ("Origin", runtime.expected_origin()),
+                    ("Sec-Fetch-Site", "cross-site"),
+                ],
+                &beacon_body,
+            ),
+        );
+        assert_eq!(contradictory_fetch.status, 403);
+        let mut forged = beacon;
+        forged.beacon_id = "66666666-6666-4666-8666-666666666666".into();
+        forged.session_capability = "a".repeat(64);
+        assert_ne!(
+            api.handle_in_process(
+                "POST",
+                "/api/v1/ott/beacons",
+                Some(&serde_json::to_vec(&forged).unwrap())
+            )
+            .status,
+            202
+        );
+        drop(api);
+        let _ = std::fs::remove_file(database);
+    }
+
+    #[test]
+    fn ott_route_storage_failures_are_typed_and_redacted() {
+        let session_error = ott_session_error(&OttAuthorityError::Internal);
+        assert_eq!(session_error.status, 500);
+        assert!(!String::from_utf8_lossy(&session_error.body).contains("123"));
+        let beacon_error = ott_beacon_error(&OttAuthorityError::Corrupt);
+        assert_eq!(beacon_error.status, 500);
+        assert!(!String::from_utf8_lossy(&beacon_error.body).contains("secret"));
     }
 }

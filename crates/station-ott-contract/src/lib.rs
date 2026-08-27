@@ -7,7 +7,10 @@ use std::collections::HashSet;
 
 use serde::{Deserialize, Serialize};
 
-pub const OTT_CONTRACT_VERSION: u16 = 1;
+/// Version 2 adds the session-issue bearer envelope and requires beacons to
+/// present the raw server-issued capability at the transport boundary. It is
+/// intentionally not wire-compatible with the earlier pure-contract draft.
+pub const OTT_CONTRACT_VERSION: u16 = 2;
 pub const MAX_CATALOG_ITEMS: usize = 100;
 pub const MAX_PAGE_CURSOR_BYTES: usize = 256;
 pub const MAX_TEXT_BYTES: usize = 500;
@@ -136,7 +139,8 @@ pub enum PlaybackBeaconEvent {
 }
 
 /// A client observation only. It cannot carry account, plan, entitlement, grant, or
-/// server-issued-session fields; validation requires an independently supplied session.
+/// content-selection fields. The bearer proof is the exact server-issued capability;
+/// validation still requires the independently loaded server session.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ClientPlaybackBeacon {
@@ -144,6 +148,7 @@ pub struct ClientPlaybackBeacon {
     pub beacon_id: String,
     pub session_id: String,
     pub session_revision: u64,
+    pub session_capability: String,
     pub observed_at_unix_ms: i64,
     pub event: PlaybackBeaconEvent,
     pub position_ms: u64,
@@ -299,7 +304,10 @@ impl ClientPlaybackBeacon {
         validate_version(self.contract_version)?;
         validate_uuid(&self.beacon_id, "OTT playback beacon identity")?;
         validate_uuid(&self.session_id, "OTT playback beacon session identity")?;
-        if self.session_revision == 0 || self.observed_at_unix_ms < 0 {
+        if self.session_revision == 0
+            || !is_sha256(&self.session_capability)
+            || self.observed_at_unix_ms < 0
+        {
             return Err("OTT playback beacon revision or time is invalid".into());
         }
         Ok(())
@@ -515,11 +523,14 @@ mod tests {
         let catalog = catalog();
         let client = client();
         let session = session();
+        let authority_json = serde_json::to_value(&session).unwrap();
+        assert!(authority_json.get("session_capability").is_none());
         let beacon = ClientPlaybackBeacon {
             contract_version: OTT_CONTRACT_VERSION,
             beacon_id: "88888888-8888-4888-8888-888888888888".into(),
             session_id: session.session_id.clone(),
             session_revision: 1,
+            session_capability: "b".repeat(64),
             observed_at_unix_ms: 1_700_000_001_000,
             event: PlaybackBeaconEvent::Started,
             position_ms: 0,
@@ -586,6 +597,7 @@ mod tests {
             beacon_id: "88888888-8888-4888-8888-888888888888".into(),
             session_id: "99999999-9999-4999-8999-999999999999".into(),
             session_revision: 1,
+            session_capability: "b".repeat(64),
             observed_at_unix_ms: 1_700_000_001_000,
             event: PlaybackBeaconEvent::Progress,
             position_ms: 1_000,

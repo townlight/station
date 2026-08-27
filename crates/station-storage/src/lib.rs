@@ -4,11 +4,15 @@ extern crate self as station_storage;
 
 mod automation_execution_authority;
 mod media_lifecycle_authority;
+mod ott_authority;
 mod transport_executor;
 pub use automation_execution_authority::{
     AutomationExecutionJobRecord, AutomationExecutionJobState,
 };
 pub use media_lifecycle_authority::{AssetRetentionHistoryEntry, MediaLifecycleScanResult};
+pub use ott_authority::{
+    OttAuthorityError, OttBeaconCollection, OttCatalogHistoryEntry, OttSessionIssue,
+};
 mod automation_execution_controller;
 pub use automation_execution_controller::{
     AutomationExecutionAdapter, AutomationExecutionAdapterFailure, AutomationExecutionSetupFault,
@@ -1432,6 +1436,7 @@ impl StationStore {
         store.initialize_schedule_materialization_schema()?;
         store.initialize_scheduled_recording_schema()?;
         store.initialize_media_lifecycle_schema()?;
+        store.initialize_ott_schema()?;
         store.migrate_caption_egress_history_sink_foreign_keys()?;
         store.migrate_cg_feed_cache_schema()?;
         store.initialize_operator_auth_schema()?;

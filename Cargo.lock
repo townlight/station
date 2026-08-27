@@ -1743,6 +1743,8 @@ dependencies = [
  "station-media-assets",
  "station-media-lifecycle",
  "station-metadata",
+ "station-ott-contract",
+ "station-ott-runtime",
  "station-publishing",
  "station-readiness",
  "station-recording",
@@ -1994,6 +1996,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "station-ott-runtime"
+version = "0.1.0"
+dependencies = [
+ "getrandom 0.4.3",
+ "serde",
+ "station-ott-contract",
+]
+
+[[package]]
 name = "station-publishing"
 version = "0.1.0"
 dependencies = [
@@ -2082,6 +2093,8 @@ dependencies = [
  "station-media-lifecycle",
  "station-media-protocol",
  "station-metadata",
+ "station-ott-contract",
+ "station-ott-runtime",
  "station-publishing",
  "station-readiness",
  "station-recording",
@@ -2090,6 +2103,7 @@ dependencies = [
  "station-schedule-automation",
  "station-transport-proof",
  "station-update",
+ "subtle",
  "ureq",
  "windows-sys 0.61.2",
  "zeroize",

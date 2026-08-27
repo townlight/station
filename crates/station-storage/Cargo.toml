@@ -14,6 +14,7 @@ jiff.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
+subtle.workspace = true
 station-auth.workspace = true
 station-automation-policy.workspace = true
 station-publishing.workspace = true
@@ -36,6 +37,8 @@ windows-sys.workspace = true
 station-reporting.workspace = true
 station-media-journal.workspace = true
 station-media-protocol.workspace = true
+station-ott-contract.workspace = true
+station-ott-runtime.workspace = true
 zeroize.workspace = true
 
 [dev-dependencies]
