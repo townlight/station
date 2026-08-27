@@ -14,6 +14,7 @@ pub use automation_execution_controller::{
     AutomationExecutionAdapter, AutomationExecutionAdapterFailure,
     run_automation_execution_controller_iteration,
     run_automation_execution_controller_iteration_with_stop,
+    run_automation_execution_controller_iteration_with_stop_and_elapsed,
     run_automation_execution_queue_controller,
 };
 use std::ffi::{CStr, CString, c_char, c_int, c_longlong, c_void};

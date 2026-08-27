@@ -15,9 +15,11 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 use std::thread::JoinHandle;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE};
-use windows_sys::Win32::Storage::FileSystem::{FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_READ};
+use windows_sys::Win32::Storage::FileSystem::{
+    FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_READ,
+};
 use windows_sys::Win32::System::Diagnostics::ToolHelp::{
     CreateToolhelp32Snapshot, TH32CS_SNAPTHREAD, THREADENTRY32, Thread32First, Thread32Next,
 };
@@ -40,6 +42,7 @@ const AUTOMATION_EXECUTION_RENEWAL_LEAD_MS: i64 = AUTOMATION_EXECUTION_LEASE_MS 
 const AUTOMATION_EXECUTION_POLL_INTERVAL: Duration = Duration::from_millis(250);
 const AUTOMATION_EXECUTION_MAX_BACKOFF: Duration = Duration::from_secs(5);
 const AUTOMATION_EXECUTION_CHILD_POLL_INTERVAL: Duration = Duration::from_millis(10);
+const AUTOMATION_EXECUTION_REAP_MAX: Duration = Duration::from_secs(2);
 const MAX_AUTOMATION_EXECUTION_STDOUT_BYTES: u64 = 1_048_576;
 const MAX_AUTOMATION_EXECUTION_REQUEST_ENV_BYTES: usize = 32_768;
 const MAX_AUTOMATION_EXECUTION_STDERR_BYTES: u64 = 65_536;
@@ -128,17 +131,15 @@ impl AutomationExecutionAdapter {
         &self.adapter_id
     }
 
-    fn verify_for_request(
+    fn pin_for_request(
         &self,
         request: &AutomationExecutionRequest,
-    ) -> Result<(), AutomationExecutionAdapterFailure> {
+    ) -> Result<PinnedAutomationExecutable, AutomationExecutionAdapterFailure> {
         if self.adapter_id != request.adapter_id
             || self.adapter_revision != request.adapter_revision
         {
             return Err(AutomationExecutionAdapterFailure::PermanentRejected);
         }
-        let root = canonical_non_reparse_directory(&self.application_root)
-            .map_err(|_| AutomationExecutionAdapterFailure::RetryableUnavailable)?;
         let relative = self
             .executable
             .strip_prefix(&self.application_root)
@@ -150,16 +151,57 @@ impl AutomationExecutionAdapter {
         {
             return Err(AutomationExecutionAdapterFailure::PermanentRejected);
         }
-        let executable = root.join(relative);
-        let metadata = verify_non_reparse_regular_file(&root, &executable)
-            .map_err(|_| AutomationExecutionAdapterFailure::PermanentRejected)?;
-        let actual = hash_non_reparse_regular_file(&executable, &metadata)
+        let mut handles = Vec::new();
+        // Inspect the supplied path itself, not a canonicalized replacement:
+        // every existing ancestor from the volume root through the trusted
+        // application root must be an ordinary non-reparse directory.
+        let mut ancestors: Vec<_> = self.application_root.ancestors().collect();
+        ancestors.reverse();
+        for ancestor in ancestors.iter().copied() {
+            if !ancestor.as_os_str().is_empty() {
+                let metadata = std::fs::symlink_metadata(ancestor)
+                    .map_err(|_| AutomationExecutionAdapterFailure::PermanentRejected)?;
+                if !metadata.is_dir()
+                    || metadata.file_type().is_symlink()
+                    || is_reparse_metadata(&metadata)
+                {
+                    return Err(AutomationExecutionAdapterFailure::PermanentRejected);
+                }
+            }
+        }
+        let mut current = self.application_root.clone();
+        handles.push(
+            open_no_follow_directory(&current)
+                .map_err(|_| AutomationExecutionAdapterFailure::PermanentRejected)?,
+        );
+        let components: Vec<_> = relative.components().collect();
+        for component in &components[..components.len() - 1] {
+            current.push(component.as_os_str());
+            handles.push(
+                open_no_follow_directory(&current)
+                    .map_err(|_| AutomationExecutionAdapterFailure::PermanentRejected)?,
+            );
+        }
+        let mut file = open_no_follow_file(&self.executable)
+            .map_err(|_| AutomationExecutionAdapterFailure::RetryableUnavailable)?;
+        let actual = hash_open_file(&mut file)
             .map_err(|_| AutomationExecutionAdapterFailure::RetryableUnavailable)?;
         if actual != self.executable_sha256 {
             return Err(AutomationExecutionAdapterFailure::PermanentRejected);
         }
-        Ok(())
+        handles.push(file);
+        Ok(PinnedAutomationExecutable {
+            executable: self.executable.clone(),
+            _handles: handles,
+        })
     }
+}
+
+struct PinnedAutomationExecutable {
+    executable: PathBuf,
+    // Deny delete/write replacement of the verified leaf and retain no-follow
+    // handles for the trusted-root-to-leaf chain through CreateProcess.
+    _handles: Vec<std::fs::File>,
 }
 
 fn is_lowercase_sha256(value: &str) -> bool {
@@ -169,79 +211,39 @@ fn is_lowercase_sha256(value: &str) -> bool {
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
-fn canonical_non_reparse_directory(path: &Path) -> Result<PathBuf, String> {
-    if !path.is_absolute() {
-        return Err("automation execution application root is not absolute".into());
+fn open_no_follow_directory(path: &Path) -> Result<std::fs::File, String> {
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .share_mode(FILE_SHARE_READ)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS)
+        .open(path)
+        .map_err(|_| "automation executable directory is unavailable")?;
+    let metadata = file
+        .metadata()
+        .map_err(|_| "automation executable directory is unavailable")?;
+    if !metadata.is_dir() || is_reparse_metadata(&metadata) {
+        return Err("automation executable directory is reparse-backed".into());
     }
-    let supplied = std::fs::symlink_metadata(path)
-        .map_err(|_| "automation execution application root is unavailable")?;
-    if !supplied.is_dir() || supplied.file_type().is_symlink() || is_reparse_metadata(&supplied) {
-        return Err("automation execution application root contains a reparse point".into());
-    }
-    let canonical = std::fs::canonicalize(path)
-        .map_err(|_| "automation execution application root is unavailable")?;
-    let metadata = std::fs::symlink_metadata(&canonical)
-        .map_err(|_| "automation execution application root is unavailable")?;
-    if !metadata.is_dir() || metadata.file_type().is_symlink() || is_reparse_metadata(&metadata) {
-        return Err("automation execution application root is not a directory".into());
-    }
-    Ok(canonical)
+    Ok(file)
 }
 
-fn verify_non_reparse_regular_file(
-    canonical_root: &Path,
-    executable: &Path,
-) -> Result<std::fs::Metadata, String> {
-    let relative = executable
-        .strip_prefix(canonical_root)
-        .map_err(|_| "automation executable escapes its application root")?;
-    if relative.as_os_str().is_empty()
-        || relative
-            .components()
-            .any(|component| !matches!(component, Component::Normal(_)))
-    {
-        return Err("automation executable path is invalid".into());
-    }
-    let mut current = canonical_root.to_path_buf();
-    for component in relative.components() {
-        current.push(component.as_os_str());
-        let metadata = std::fs::symlink_metadata(&current)
-            .map_err(|_| "automation executable is unavailable")?;
-        if metadata.file_type().is_symlink() || is_reparse_metadata(&metadata) {
-            return Err("automation executable path contains a reparse point".into());
-        }
-        if current != executable && !metadata.is_dir() {
-            return Err("automation executable parent is not a directory".into());
-        }
-        if current == executable && !metadata.is_file() {
-            return Err("automation executable is not a regular file".into());
-        }
-    }
-    std::fs::symlink_metadata(executable).map_err(|_| "automation executable is unavailable".into())
-}
-
-fn hash_non_reparse_regular_file(
-    executable: &Path,
-    metadata: &std::fs::Metadata,
-) -> Result<String, String> {
-    if !metadata.is_file() || metadata.file_type().is_symlink() || is_reparse_metadata(metadata) {
-        return Err("automation executable is not a regular file".into());
-    }
-    // Open the leaf with the Windows no-follow flag and deny replacement
-    // writers while its bytes are hashed. This closes the leaf inspection/open
-    // race; every ancestor was independently checked above.
-    let mut file = std::fs::OpenOptions::new()
+fn open_no_follow_file(path: &Path) -> Result<std::fs::File, String> {
+    let file = std::fs::OpenOptions::new()
         .read(true)
         .share_mode(FILE_SHARE_READ)
         .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
-        .open(executable)
+        .open(path)
         .map_err(|_| "automation executable is unavailable")?;
-    let opened = file
+    let metadata = file
         .metadata()
         .map_err(|_| "automation executable is unavailable")?;
-    if !opened.is_file() || is_reparse_metadata(&opened) || opened.len() != metadata.len() {
-        return Err("automation executable changed during verification".into());
+    if !metadata.is_file() || is_reparse_metadata(&metadata) {
+        return Err("automation executable is not a regular file".into());
     }
+    Ok(file)
+}
+
+fn hash_open_file(file: &mut std::fs::File) -> Result<String, String> {
     let mut digest = Sha256::new();
     let mut buffer = [0_u8; 64 * 1024];
     loop {
@@ -376,6 +378,7 @@ fn spawn_bounded_pipe_drain<R: Read + Send + 'static>(
 struct OwnedAutomationExecutionProcess {
     child: Child,
     job: WindowsProcessTree,
+    _pinned_executable: PinnedAutomationExecutable,
     stdout: Option<JoinHandle<Result<Vec<u8>, AutomationExecutionAdapterFailure>>>,
     stderr: Option<JoinHandle<Result<Vec<u8>, AutomationExecutionAdapterFailure>>>,
     drained_stdout: Option<Vec<u8>>,
@@ -388,14 +391,14 @@ impl OwnedAutomationExecutionProcess {
         claim_id: &str,
         deadline_unix_ms: i64,
     ) -> Result<Self, AutomationExecutionAdapterFailure> {
-        adapter.verify_for_request(request)?;
+        let pinned_executable = adapter.pin_for_request(request)?;
         let request_json = serde_json::to_string(request)
             .map_err(|_| AutomationExecutionAdapterFailure::PermanentInvalidResponse)?;
         if request_json.len() > MAX_AUTOMATION_EXECUTION_REQUEST_ENV_BYTES {
             return Err(AutomationExecutionAdapterFailure::PermanentInvalidResponse);
         }
         let job = WindowsProcessTree::new()?;
-        let mut child = Command::new(&adapter.executable)
+        let mut child = Command::new(&pinned_executable.executable)
             .args(&adapter.arguments)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
@@ -413,8 +416,10 @@ impl OwnedAutomationExecutionProcess {
             .spawn()
             .map_err(|_| AutomationExecutionAdapterFailure::RetryableUnavailable)?;
         if let Err(error) = job.assign(&child) {
-            let _ = job.terminate();
-            let _ = child.wait();
+            child
+                .kill()
+                .map_err(|_| AutomationExecutionAdapterFailure::RetryableUnavailable)?;
+            bounded_reap_child(&mut child)?;
             return Err(error);
         }
         let stdout = child
@@ -428,8 +433,8 @@ impl OwnedAutomationExecutionProcess {
         let stdout = spawn_bounded_pipe_drain(stdout, MAX_AUTOMATION_EXECUTION_STDOUT_BYTES);
         let stderr = spawn_bounded_pipe_drain(stderr, MAX_AUTOMATION_EXECUTION_STDERR_BYTES);
         if let Err(error) = resume_suspended_process_primary_thread(child.id()) {
-            let _ = job.terminate();
-            let _ = child.wait();
+            job.terminate()?;
+            bounded_reap_child(&mut child)?;
             let _ = stdout.join();
             let _ = stderr.join();
             return Err(error);
@@ -437,6 +442,7 @@ impl OwnedAutomationExecutionProcess {
         Ok(Self {
             child,
             job,
+            _pinned_executable: pinned_executable,
             stdout: Some(stdout),
             stderr: Some(stderr),
             drained_stdout: None,
@@ -445,9 +451,7 @@ impl OwnedAutomationExecutionProcess {
 
     fn terminate_and_reap(&mut self) -> Result<(), AutomationExecutionAdapterFailure> {
         self.job.terminate()?;
-        self.child
-            .wait()
-            .map_err(|_| AutomationExecutionAdapterFailure::RetryableUnavailable)?;
+        bounded_reap_child(&mut self.child)?;
         let stdout = self
             .stdout
             .take()
@@ -497,6 +501,23 @@ impl OwnedAutomationExecutionProcess {
     }
 }
 
+fn bounded_reap_child(child: &mut Child) -> Result<(), AutomationExecutionAdapterFailure> {
+    let deadline = Instant::now() + AUTOMATION_EXECUTION_REAP_MAX;
+    loop {
+        if child
+            .try_wait()
+            .map_err(|_| AutomationExecutionAdapterFailure::RetryableUnavailable)?
+            .is_some()
+        {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            return Err(AutomationExecutionAdapterFailure::RetryableUnavailable);
+        }
+        std::thread::sleep(AUTOMATION_EXECUTION_CHILD_POLL_INTERVAL);
+    }
+}
+
 /// Runs one bounded queue decision. The store performs the authoritative
 /// candidate, policy, adapter, configuration, connection-evidence, lease, and
 /// receipt checks inside durable transactions; this controller never converts
@@ -526,6 +547,28 @@ pub fn run_automation_execution_controller_iteration_with_stop(
     clock: &mut dyn FnMut() -> Result<i64, String>,
     stop: &AtomicBool,
 ) -> Result<bool, String> {
+    let action_started_monotonic = Instant::now();
+    run_automation_execution_controller_iteration_with_stop_and_elapsed(
+        store,
+        adapter,
+        install_authority,
+        worker_id,
+        clock,
+        stop,
+        &mut || action_started_monotonic.elapsed(),
+    )
+}
+
+#[doc(hidden)]
+pub fn run_automation_execution_controller_iteration_with_stop_and_elapsed(
+    store: &StationStore,
+    adapter: Option<&AutomationExecutionAdapter>,
+    install_authority: &VerifiedInstallAuthority,
+    worker_id: &str,
+    clock: &mut dyn FnMut() -> Result<i64, String>,
+    stop: &AtomicBool,
+    elapsed: &mut dyn FnMut() -> Duration,
+) -> Result<bool, String> {
     let claimed_at_unix_ms = clock()?;
     let Some(claimed) = store.claim_next_automation_execution_job(
         worker_id,
@@ -550,8 +593,9 @@ pub fn run_automation_execution_controller_iteration_with_stop(
     let outcome = match adapter.filter(|adapter| adapter.adapter_id() == claimed.request.adapter_id)
     {
         Some(adapter) => {
-            let action_started_at_unix_ms = clock()?;
-            if action_started_at_unix_ms >= action_deadline_unix_ms || stop.load(Ordering::Acquire)
+            let _action_started_at_unix_ms = clock()?;
+            if elapsed() >= Duration::from_millis(AUTOMATION_EXECUTION_ACTION_MAX_MS as u64)
+                || stop.load(Ordering::Acquire)
             {
                 Err(AutomationExecutionAdapterFailure::RetryableTimeout)
             } else {
@@ -576,7 +620,9 @@ pub fn run_automation_execution_controller_iteration_with_stop(
                             break Ok(Err(AutomationExecutionAdapterFailure::RetryableTimeout));
                         }
                         let now_unix_ms = clock()?;
-                        if now_unix_ms >= action_deadline_unix_ms {
+                        if elapsed()
+                            >= Duration::from_millis(AUTOMATION_EXECUTION_ACTION_MAX_MS as u64)
+                        {
                             if process.terminate().is_err() {
                                 break Ok(Err(AutomationExecutionAdapterFailure::RetryableUnavailable));
                             }

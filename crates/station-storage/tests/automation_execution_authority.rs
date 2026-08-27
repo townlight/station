@@ -2,7 +2,7 @@ use std::ffi::{CString, c_char, c_int, c_void};
 use std::path::{Path, PathBuf};
 use std::ptr;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use sha2::{Digest, Sha256};
@@ -18,6 +18,7 @@ use station_storage::{
     AutomationExecutionAdapter, AutomationExecutionJobRecord, AutomationExecutionJobState,
     StationStore, run_automation_execution_controller_iteration,
     run_automation_execution_controller_iteration_with_stop,
+    run_automation_execution_controller_iteration_with_stop_and_elapsed,
 };
 
 const ADAPTER_ID: &str = "11111111-2222-4333-8444-555555555555";
@@ -1353,7 +1354,7 @@ fn job_containment_reaps_an_early_descendant_holding_a_pipe() {
 }
 
 #[test]
-fn action_deadline_is_absolute_even_after_a_live_lease_renewal() {
+fn action_deadline_is_monotonic_across_lease_renewal_and_wall_clock_rollback() {
     let (database, store) = configured_store("automation-execution-deadline-containment");
     store
         .enqueue_automation_execution_job(&request(), &candidate(), 100)
@@ -1362,16 +1363,23 @@ fn action_deadline_is_absolute_even_after_a_live_lease_renewal() {
     let stop = AtomicBool::new(false);
     // The third clock observation reaches the renewal lead, extending only
     // durable ownership. The fourth reaches the immutable action deadline.
-    let mut times = [150_i64, 151, 30_150, 60_150, 60_151].into_iter();
+    let mut times = [150_i64, 151, 30_150, 100, 101].into_iter();
+    let mut elapsed = [
+        Duration::ZERO,
+        Duration::from_secs(30),
+        Duration::from_secs(60),
+    ]
+    .into_iter();
 
     assert!(
-        run_automation_execution_controller_iteration_with_stop(
+        run_automation_execution_controller_iteration_with_stop_and_elapsed(
             &store,
             Some(&adapter),
             &candidate(),
             "stationd-test-controller",
             &mut || Ok(times.next().unwrap()),
             &stop,
+            &mut || elapsed.next().unwrap(),
         )
         .expect("deadline teardown must not require a blocking worker callback")
     );
@@ -1387,7 +1395,7 @@ fn action_deadline_is_absolute_even_after_a_live_lease_renewal() {
     );
     // Attempt one retains its normal durable backoff; a lease renewal cannot
     // turn the action into an unbounded run or a hot retry.
-    assert_eq!(pending.next_attempt_at_unix_ms, 120_151);
+    assert_eq!(pending.next_attempt_at_unix_ms, 60_101);
     drop(store);
     let _ = std::fs::remove_file(database);
 }
