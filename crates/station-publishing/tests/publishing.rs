@@ -416,4 +416,36 @@ fn executable_targets_are_typed_and_reject_secret_bearing_or_escaping_locations(
         .validate()
         .is_err()
     );
+    for invalid in [
+        r"\\?\C:\TownLight",
+        r"\\.\C:\TownLight",
+        r"\Device\HarddiskVolume1\TownLight",
+        r"C:relative\TownLight",
+        r"\\station-nas",
+        r"\\\TownLight",
+        r"\\station-nas\TownLight\",
+        r"C:\TownLight.",
+        r"C:\TownLight ",
+        r"C:\CON\Published",
+        r"C:\archive\NUL.txt",
+        r"C:\archive\COM1\Published",
+        r"C:\archive\bad<name\Published",
+        r"\\station-nas\TownLight\bad|name",
+    ] {
+        assert!(
+            PublishExecutionTargetConfig::LocalNas {
+                managed_root: invalid.into(),
+            }
+            .validate()
+            .is_err(),
+            "unexpectedly accepted invalid NAS root {invalid:?}"
+        );
+    }
+    assert!(
+        PublishExecutionTargetConfig::LocalNas {
+            managed_root: r"C:\TownLight\Published".into(),
+        }
+        .validate()
+        .is_ok()
+    );
 }

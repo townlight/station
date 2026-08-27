@@ -206,9 +206,11 @@ try {
     }
     $stationArtifact = @($installation.artifacts).Where({ $_.name -eq 'stationd.exe' }, 'First')
     $workerArtifact = @($installation.artifacts).Where({ $_.name -eq 'channel-worker.exe' }, 'First')
+    $nasPublisherArtifact = @($installation.artifacts).Where({ $_.name -eq 'nas-publisher.exe' }, 'First')
     $updaterArtifact = @($installation.artifacts).Where({ $_.name -eq 'station-updater.exe' }, 'First')
     if (-not $stationArtifact.present -or $stationArtifact.sha256 -ne $candidate.stationd_sha256 -or
         -not $workerArtifact.present -or $workerArtifact.sha256 -ne $candidate.channel_worker_sha256 -or
+        -not $nasPublisherArtifact.present -or $nasPublisherArtifact.sha256 -ne $candidate.nas_publisher_sha256 -or
         -not $updaterArtifact.present -or $updaterArtifact.sha256 -ne $candidate.station_updater_sha256) {
         throw 'The support installation snapshot does not match the installed candidate binaries.'
     }

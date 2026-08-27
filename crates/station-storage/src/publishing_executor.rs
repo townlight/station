@@ -12,7 +12,11 @@ use std::os::windows::ffi::OsStrExt;
 use std::os::windows::fs::OpenOptionsExt;
 #[cfg(windows)]
 use std::os::windows::io::AsRawHandle;
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
+#[cfg(windows)]
+use std::process::{Child, Command, Stdio};
 use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
@@ -26,6 +30,8 @@ const MAX_PUBLISH_LEASE_MS: i64 = 900_000;
 const MAX_PROVIDER_RESPONSE_BYTES: usize = 1_048_576;
 const MAX_NAS_COPY_DURATION: Duration = Duration::from_secs(24 * 60 * 60);
 const NAS_COPY_BUFFER_BYTES: usize = 1024 * 1024;
+const MAX_NAS_WORKER_REQUEST_BYTES: usize = 4 * 1024;
+const MAX_NAS_WORKER_RESULT_BYTES: usize = 2 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -36,7 +42,7 @@ pub enum PublishExecutionJobState {
     Failed,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PublishExecutionJob {
     pub job_id: String,
     pub account_id: String,
@@ -115,7 +121,7 @@ impl PublishExecutionLease {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 struct ProviderStageEvidence {
     stage: PublishExecutionStage,
     digest: String,
@@ -136,6 +142,7 @@ trait PublishProviderAdapter {
 struct SystemPublishProviderAdapter<'a> {
     application_root: Option<&'a Path>,
     data_root: Option<&'a Path>,
+    nas_worker_sha256: Option<String>,
 }
 
 impl StationStore {
@@ -891,6 +898,7 @@ where
     let adapter = SystemPublishProviderAdapter {
         application_root: None,
         data_root: None,
+        nas_worker_sha256: None,
     };
     run_publish_controller_iteration_with(
         store,
@@ -940,6 +948,15 @@ fn run_publish_execution_queue_iteration(
     let adapter = SystemPublishProviderAdapter {
         application_root: Some(application_root),
         data_root: Some(data_root),
+        // Existing installations may predate the optional helper. Keep the
+        // other provider lanes update-compatible; a NAS job fails closed when
+        // this attested helper hash is unavailable.
+        nas_worker_sha256: station_maintenance::read_verified_active_application_file_hash(
+            data_root,
+            application_root,
+            "nas-publisher.exe",
+        )
+        .ok(),
     };
     let mut clock = unix_time_millis;
     run_publish_controller_iteration_with(
@@ -1151,9 +1168,14 @@ impl PublishProviderAdapter for SystemPublishProviderAdapter<'_> {
             detail: "Provider execution started for the exact media binding.".into(),
         };
         let terminal = match config {
-            PublishExecutionTargetConfig::LocalNas { managed_root } => {
-                deliver_to_nas_with_heartbeat(job, media_path, Path::new(managed_root), heartbeat)?
-            }
+            PublishExecutionTargetConfig::LocalNas { managed_root } => deliver_to_nas_for_adapter(
+                job,
+                media_path,
+                Path::new(managed_root),
+                self.application_root,
+                self.nas_worker_sha256.as_deref(),
+                heartbeat,
+            )?,
             PublishExecutionTargetConfig::Portal { endpoint } => http_provider_delivery(
                 endpoint,
                 media_path,
@@ -1265,12 +1287,22 @@ fn deliver_to_nas_with_heartbeat(
     }
     validate_managed_nas_root(root)?;
     let started = std::time::Instant::now();
-    let (_root_pins, destination) = prepare_nas_destination(root, &job.media_sha256)?;
-    if destination
-        .try_exists()
-        .map_err(|_| "NAS destination could not be inspected")?
-    {
-        return Err("NAS destination already exists; overwrite or rebind is forbidden".into());
+    let (root_pins, destination) = prepare_nas_destination(root, &job.media_sha256)?;
+    let root_handle = root_pins
+        .last()
+        .ok_or("managed NAS root ancestry was not retained")?;
+    let destination_name = destination
+        .file_name()
+        .ok_or("NAS destination leaf is unavailable")?;
+    if let Some(mut existing) = open_nas_final_relative(root_handle, destination_name)? {
+        return reconcile_existing_nas_destination(
+            &mut existing,
+            &destination,
+            root,
+            root_handle,
+            job,
+            started,
+        );
     }
 
     let mut source = open_publish_source_no_follow(media_path)?;
@@ -1285,7 +1317,15 @@ fn deliver_to_nas_with_heartbeat(
         .map_err(|_| "publish media could not be positioned")?;
 
     let temporary = unique_nas_temp_path(root, &job.job_id)?;
+    #[cfg(windows)]
+    let temporary_name = temporary
+        .file_name()
+        .ok_or("NAS temporary leaf is unavailable")?;
+    #[cfg(windows)]
+    let mut output = open_nas_temp_relative(root_handle, temporary_name)?;
+    #[cfg(not(windows))]
     let mut output = open_nas_temp(&temporary)?;
+    let mut finalized = false;
     let mut hasher = Sha256::new();
     let mut copied = 0_u64;
     let mut buffer = vec![0_u8; NAS_COPY_BUFFER_BYTES];
@@ -1327,7 +1367,11 @@ fn deliver_to_nas_with_heartbeat(
         if started.elapsed() >= MAX_NAS_COPY_DURATION {
             return Err("NAS publication exceeded its bounded deadline".into());
         }
-        rename_nas_temp_from_handle(&output, &destination)?;
+        rename_nas_temp_from_handle(&output, &destination, root_handle)?;
+        // From this point the handle names the final destination. It is no
+        // longer an owned temporary and must never be passed to cleanup, even
+        // when a post-rename durability/evidence check fails.
+        finalized = true;
         output
             .sync_all()
             .map_err(|_| "NAS finalized media could not be durably flushed")?;
@@ -1338,9 +1382,14 @@ fn deliver_to_nas_with_heartbeat(
         if final_bytes != job.media_bytes || final_digest != job.media_sha256 {
             return Err("NAS finalized media does not match the exact job binding".into());
         }
+        verify_nas_root_file_id(root, root_handle)?;
         Ok(())
     })();
     if let Err(error) = copy_result {
+        if finalized {
+            drop(output);
+            return Err(error);
+        }
         let cleanup = discard_owned_nas_temp(&output);
         drop(output);
         return match cleanup {
@@ -1361,19 +1410,76 @@ fn deliver_to_nas_with_heartbeat(
     })
 }
 
+/// Reconcile a final path left behind when the controller lost the helper
+/// result after the atomic rename. The path is accepted only when a fresh
+/// no-follow handle proves it is a regular file with the exact bound bytes and
+/// digest; mismatches remain a hard overwrite/rebind failure.
+fn reconcile_existing_nas_destination(
+    file: &mut File,
+    destination: &Path,
+    root: &Path,
+    root_handle: &File,
+    job: &PublishExecutionJob,
+    started: std::time::Instant,
+) -> Result<ProviderStageEvidence, String> {
+    let metadata = file
+        .metadata()
+        .map_err(|_| "existing NAS destination could not be inspected")?;
+    if metadata.len() != job.media_bytes {
+        return Err(
+            "NAS destination already exists with different bytes; overwrite or rebind is forbidden"
+                .into(),
+        );
+    }
+    file.seek(SeekFrom::Start(0))
+        .map_err(|_| "existing NAS destination could not be positioned")?;
+    let (bytes, digest) = hash_publish_handle_until(file, Some(started))?;
+    if bytes != job.media_bytes || digest != job.media_sha256 {
+        return Err("NAS destination already exists with different content; overwrite or rebind is forbidden".into());
+    }
+    verify_nas_root_file_id(root, root_handle)?;
+    Ok(ProviderStageEvidence {
+        stage: PublishExecutionStage::Delivered,
+        digest: job.media_sha256.clone(),
+        detail: format!(
+            "Exact media was reconciled at the configured NAS root after atomic finalization at {}.",
+            destination.display()
+        ),
+    })
+}
+
 fn validate_managed_nas_root(root: &Path) -> Result<(), String> {
     let value = root
         .to_str()
         .ok_or("managed NAS root is not valid Unicode")?;
-    if value.len() == 0
-        || value.len() > 500
-        || !value.starts_with(r"\\")
-        || value.contains('/')
-        || value.split(['\\']).any(|part| part == "..")
-        || value.ends_with('\\')
-    {
-        return Err("managed NAS root must be an exact absolute UNC path without traversal".into());
+    station_publishing::validate_local_nas_root(value)
+}
+
+#[cfg(windows)]
+fn verify_nas_root_file_id(path: &Path, retained: &File) -> Result<(), String> {
+    use windows_sys::Win32::Storage::FileSystem::{
+        BY_HANDLE_FILE_INFORMATION, GetFileInformationByHandle,
+    };
+    let mut current = BY_HANDLE_FILE_INFORMATION::default();
+    let status = unsafe { GetFileInformationByHandle(retained.as_raw_handle(), &mut current) };
+    if status == 0 {
+        return Err("managed NAS root identity could not be read from its retained handle".into());
     }
+    let fresh = open_nas_directory_no_follow(path)?;
+    let mut rebound = BY_HANDLE_FILE_INFORMATION::default();
+    let status = unsafe { GetFileInformationByHandle(fresh.as_raw_handle(), &mut rebound) };
+    if status == 0
+        || current.dwVolumeSerialNumber != rebound.dwVolumeSerialNumber
+        || current.nFileIndexHigh != rebound.nFileIndexHigh
+        || current.nFileIndexLow != rebound.nFileIndexLow
+    {
+        return Err("configured NAS root was rebound after acquisition".into());
+    }
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn verify_nas_root_file_id(_path: &Path, _retained: &File) -> Result<(), String> {
     Ok(())
 }
 
@@ -1404,50 +1510,400 @@ fn prepare_nas_destination(
             Err(_) => return Err("managed NAS root could not be inspected".into()),
         }
     }
-    // Validate and retain every existing directory in the ancestry.  Checking
-    // only the configured leaf would allow a pre-existing junction above it
-    // to redirect the entire operation before the leaf is inspected.
-    let mut ancestry = Vec::new();
-    let mut ancestor = existing.clone();
-    loop {
-        let metadata = std::fs::symlink_metadata(&ancestor)
-            .map_err(|_| "managed NAS root ancestry could not be inspected")?;
-        if metadata.file_attributes() & 0x0400 != 0 || !metadata.is_dir() {
-            return Err(
-                "managed NAS root ancestry contains a reparse point or non-directory".into(),
-            );
-        }
-        ancestry.push(ancestor.clone());
-        let Some(parent) = ancestor.parent() else {
-            break;
-        };
-        if parent == ancestor {
-            break;
-        }
-        ancestor = parent.to_path_buf();
+    if !missing.is_empty() {
+        return Err(
+            "managed NAS root must already exist; directory creation is not permitted".into(),
+        );
     }
-    ancestry.reverse();
-    // The nearest existing directory is the handle anchor for creation and
-    // finalization. Ancestors were all checked above; opening a volume root or
-    // a UNC server namespace as an ordinary directory is not portable.
-    let mut pins = vec![open_nas_directory_no_follow(&existing)?];
-    let mut current = existing;
-    for component in missing.iter().rev() {
-        current.push(component);
-        std::fs::create_dir(&current).map_err(|_| "managed NAS root could not be created")?;
-        pins.push(open_nas_directory_no_follow(&current)?);
+    let current = existing;
+    // Pin every directory from the volume/share root through the configured
+    // root. Each handle is opened without reparse traversal and without
+    // delete sharing, so an intermediate junction/rename cannot rebind a
+    // pathname while the operation is in progress. Failure to pin any link
+    // fails closed rather than falling back to a nearest pathname anchor.
+    let mut chain = Vec::new();
+    let mut ancestor = current.clone();
+    loop {
+        chain.push(ancestor.clone());
+        let parent = ancestor.parent().map(Path::to_path_buf);
+        match parent {
+            Some(parent) if parent != ancestor => ancestor = parent,
+            _ => break,
+        }
+    }
+    chain.reverse();
+    let mut pins = Vec::with_capacity(chain.len());
+    for path in chain {
+        pins.push(open_nas_directory_no_follow(&path)?);
     }
     let destination = current.join(format!("{media_sha256}.mp4"));
     Ok((pins, destination))
 }
 
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+struct NasWorkerRequest {
+    job: PublishExecutionJob,
+    media_path: String,
+    managed_root: String,
+}
+
+fn deliver_to_nas_for_adapter(
+    job: &PublishExecutionJob,
+    media_path: &Path,
+    root: &Path,
+    application_root: Option<&Path>,
+    nas_worker_sha256: Option<&str>,
+    heartbeat: &mut dyn FnMut() -> Result<(), String>,
+) -> Result<ProviderStageEvidence, String> {
+    #[cfg(windows)]
+    if application_root.is_some() {
+        return deliver_to_nas_in_worker_process(
+            job,
+            media_path,
+            root,
+            nas_worker_sha256,
+            heartbeat,
+        );
+    }
+    let _ = application_root;
+    deliver_to_nas_with_heartbeat(job, media_path, root, heartbeat)
+}
+
+/// Entry point for the separately installed NAS publisher helper. It is kept
+/// deliberately tiny: all durable authority remains in the parent controller.
+#[allow(dead_code)]
+pub fn run_local_nas_publisher_worker_from_env() -> Result<(), String> {
+    let request = std::env::var("TOWNLIGHT_NAS_PUBLISH_REQUEST_JSON")
+        .map_err(|_| "NAS publisher worker request is missing")?;
+    if request.len() > MAX_NAS_WORKER_REQUEST_BYTES {
+        return Err("NAS publisher worker request is oversized".into());
+    }
+    let request: NasWorkerRequest =
+        serde_json::from_str(&request).map_err(|_| "NAS publisher worker request is invalid")?;
+    if request.media_path.len() > 2_000 || request.managed_root.len() > 500 {
+        return Err("NAS publisher worker request path is oversized".into());
+    }
+    let expected_helper_hash = std::env::var("TOWNLIGHT_NAS_PUBLISH_HELPER_SHA256")
+        .map_err(|_| "NAS publisher worker helper identity is missing")?;
+    let helper_path = std::env::current_exe()
+        .map_err(|_| "NAS publisher worker executable path is unavailable")?;
+    let mut helper = open_publish_source_no_follow(&helper_path)?;
+    let (_, helper_hash) = hash_publish_handle(&mut helper)?;
+    if helper_hash != expected_helper_hash {
+        return Err("NAS publisher worker executable changed after install verification".into());
+    }
+    let evidence = deliver_to_nas(
+        &request.job,
+        Path::new(&request.media_path),
+        Path::new(&request.managed_root),
+    )?;
+    let encoded = serde_json::to_vec(&evidence)
+        .map_err(|_| "NAS publisher worker result could not be encoded")?;
+    if encoded.len() > MAX_NAS_WORKER_RESULT_BYTES {
+        return Err("NAS publisher worker result is oversized".into());
+    }
+    std::io::stdout()
+        .write_all(&encoded)
+        .map_err(|_| "NAS publisher worker result could not be written")?;
+    Ok(())
+}
+
+#[cfg(windows)]
+fn deliver_to_nas_in_worker_process(
+    job: &PublishExecutionJob,
+    media_path: &Path,
+    root: &Path,
+    expected_helper_hash: Option<&str>,
+    heartbeat: &mut dyn FnMut() -> Result<(), String>,
+) -> Result<ProviderStageEvidence, String> {
+    let executable = std::env::current_exe()
+        .map_err(|_| "NAS publisher helper path is unavailable")?
+        .with_file_name("nas-publisher.exe");
+    if !executable.is_file() {
+        return Err("NAS publisher helper is missing from the installed application".into());
+    }
+    let request = NasWorkerRequest {
+        job: job.clone(),
+        media_path: media_path
+            .to_str()
+            .ok_or("publish media path is not valid Unicode")?
+            .into(),
+        managed_root: root
+            .to_str()
+            .ok_or("managed NAS root is not valid Unicode")?
+            .into(),
+    };
+    let encoded = serde_json::to_string(&request)
+        .map_err(|_| "NAS publisher worker request could not be encoded")?;
+    if encoded.len() > MAX_NAS_WORKER_REQUEST_BYTES {
+        return Err("NAS publisher worker request is oversized".into());
+    }
+    let expected_helper_hash =
+        expected_helper_hash.ok_or("NAS publisher helper has no verified installed hash")?;
+    let mut helper_pin = open_publish_source_no_follow(&executable)?;
+    let (_, actual_helper_hash) = hash_publish_handle(&mut helper_pin)?;
+    if actual_helper_hash != expected_helper_hash {
+        return Err("NAS publisher helper does not match the installed manifest".into());
+    }
+    let mut worker =
+        NasWorkerProcess::spawn(&executable, encoded, expected_helper_hash, helper_pin)?;
+    // Drain stdout while the helper is running. Even though the protocol is
+    // capped below the documented result bound, draining concurrently keeps
+    // the parent independent of the platform's anonymous-pipe capacity and
+    // guarantees the reader is joined after every reap path.
+    let stdout = worker
+        .child
+        .stdout
+        .take()
+        .ok_or("NAS publisher worker result pipe is unavailable")?;
+    let result_reader = std::thread::spawn(move || {
+        let stdout = stdout;
+        let mut bytes = Vec::new();
+        stdout
+            .take((MAX_NAS_WORKER_RESULT_BYTES + 1) as u64)
+            .read_to_end(&mut bytes)
+            .map_err(|_| "NAS publisher worker result could not be read".to_string())?;
+        Ok::<Vec<u8>, String>(bytes)
+    });
+    let started = std::time::Instant::now();
+    let result = (|| {
+        loop {
+            if let Some(status) = worker
+                .child
+                .try_wait()
+                .map_err(|_| "NAS publisher worker status could not be read")?
+            {
+                if !status.success() {
+                    return Err("NAS publisher worker failed before finalization".into());
+                }
+                break;
+            }
+            heartbeat()?;
+            if started.elapsed() >= MAX_NAS_COPY_DURATION {
+                return Err("NAS publication exceeded its hard worker deadline".into());
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        Ok(())
+    })();
+    match result {
+        Ok(()) => {
+            let reap = worker.reap();
+            let reader = result_reader.join();
+            reap?;
+            let bytes =
+                reader.map_err(|_| "NAS publisher worker result reader panicked".to_string())??;
+            if bytes.len() > MAX_NAS_WORKER_RESULT_BYTES {
+                return Err("NAS publisher worker result is oversized".into());
+            }
+            let evidence: ProviderStageEvidence = serde_json::from_slice(&bytes)
+                .map_err(|_| "NAS publisher worker result is invalid")?;
+            if evidence.stage != PublishExecutionStage::Delivered
+                || evidence.digest != job.media_sha256
+            {
+                return Err(
+                    "NAS publisher worker result is not bound to the exact job media".into(),
+                );
+            }
+            Ok(evidence)
+        }
+        Err(error) => {
+            let reap = worker.terminate_and_reap();
+            let reader = result_reader
+                .join()
+                .map_err(|_| "NAS publisher worker result reader panicked".to_string());
+            if let Err(reap_error) = reap {
+                return Err(format!("{error}; NAS worker reap failed: {reap_error}"));
+            }
+            if reader.is_err() {
+                return Err(format!("{error}; NAS worker result reader failed"));
+            }
+            Err(error)
+        }
+    }
+}
+
+#[cfg(windows)]
+struct NasWorkerProcess {
+    child: Child,
+    job: NasWorkerJobObject,
+    _helper_pin: File,
+}
+
+#[cfg(windows)]
+impl NasWorkerProcess {
+    fn spawn(
+        executable: &Path,
+        request: String,
+        helper_hash: &str,
+        helper_pin: File,
+    ) -> Result<Self, String> {
+        let job = NasWorkerJobObject::new()?;
+        let mut child = Command::new(executable)
+            .arg("--nas-publisher-worker")
+            .env("TOWNLIGHT_NAS_PUBLISH_REQUEST_JSON", request)
+            .env("TOWNLIGHT_NAS_PUBLISH_HELPER_SHA256", helper_hash)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .creation_flags(windows_sys::Win32::System::Threading::CREATE_SUSPENDED)
+            .spawn()
+            .map_err(|_| "NAS publisher worker could not be spawned")?;
+        if unsafe {
+            windows_sys::Win32::System::JobObjects::AssignProcessToJobObject(
+                job.handle,
+                child.as_raw_handle() as windows_sys::Win32::Foundation::HANDLE,
+            )
+        } == 0
+        {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err("NAS publisher worker could not be contained".into());
+        }
+        if let Err(error) = resume_process(child.id()) {
+            let _ = job.terminate();
+            let _ = child.wait();
+            return Err(error);
+        }
+        Ok(Self {
+            child,
+            job,
+            _helper_pin: helper_pin,
+        })
+    }
+
+    fn reap(&mut self) -> Result<(), String> {
+        self.child
+            .wait()
+            .map(|_| ())
+            .map_err(|_| "NAS publisher worker could not be reaped".into())
+    }
+
+    fn terminate_and_reap(&mut self) -> Result<(), String> {
+        let _ = self.job.terminate();
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            if self
+                .child
+                .try_wait()
+                .map_err(|_| "NAS publisher worker status could not be read")?
+                .is_some()
+            {
+                return Ok(());
+            }
+            if std::time::Instant::now() >= deadline {
+                return Err("NAS publisher worker did not terminate within the reap bound".into());
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+    }
+}
+
+#[cfg(windows)]
+struct NasWorkerJobObject {
+    handle: windows_sys::Win32::Foundation::HANDLE,
+}
+
+#[cfg(windows)]
+impl NasWorkerJobObject {
+    fn new() -> Result<Self, String> {
+        use windows_sys::Win32::System::JobObjects::{
+            CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+            JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
+            SetInformationJobObject,
+        };
+        let handle = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
+        if handle.is_null() {
+            return Err("NAS publisher worker job object could not be created".into());
+        }
+        let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+        limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        let configured = unsafe {
+            SetInformationJobObject(
+                handle,
+                JobObjectExtendedLimitInformation,
+                (&limits as *const JOBOBJECT_EXTENDED_LIMIT_INFORMATION).cast(),
+                u32::try_from(std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>())
+                    .map_err(|_| "NAS publisher worker job limits overflowed")?,
+            )
+        };
+        if configured == 0 {
+            unsafe { windows_sys::Win32::Foundation::CloseHandle(handle) };
+            return Err("NAS publisher worker job object could not be configured".into());
+        }
+        Ok(Self { handle })
+    }
+
+    fn terminate(&self) -> Result<(), String> {
+        if unsafe { windows_sys::Win32::System::JobObjects::TerminateJobObject(self.handle, 1) }
+            == 0
+        {
+            return Err("NAS publisher worker job could not be terminated".into());
+        }
+        Ok(())
+    }
+}
+
+#[cfg(windows)]
+impl Drop for NasWorkerJobObject {
+    fn drop(&mut self) {
+        unsafe { windows_sys::Win32::Foundation::CloseHandle(self.handle) };
+    }
+}
+
+#[cfg(windows)]
+fn resume_process(process_id: u32) -> Result<(), String> {
+    use windows_sys::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, TH32CS_SNAPTHREAD, THREADENTRY32, Thread32First, Thread32Next,
+    };
+    use windows_sys::Win32::System::Threading::{OpenThread, ResumeThread, THREAD_SUSPEND_RESUME};
+    let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0) };
+    if snapshot == windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE {
+        return Err("NAS publisher worker primary thread could not be found".into());
+    }
+    let result = (|| {
+        let mut entry = THREADENTRY32 {
+            dwSize: u32::try_from(std::mem::size_of::<THREADENTRY32>())
+                .map_err(|_| "NAS publisher worker thread record overflowed")?,
+            ..Default::default()
+        };
+        let mut found = unsafe { Thread32First(snapshot, &mut entry) } != 0;
+        while found {
+            if entry.th32OwnerProcessID == process_id {
+                let thread = unsafe { OpenThread(THREAD_SUSPEND_RESUME, 0, entry.th32ThreadID) };
+                if thread.is_null() {
+                    return Err("NAS publisher worker primary thread could not be opened".into());
+                }
+                let resumed = unsafe { ResumeThread(thread) };
+                unsafe { windows_sys::Win32::Foundation::CloseHandle(thread) };
+                return if resumed == u32::MAX {
+                    Err("NAS publisher worker primary thread could not be resumed".into())
+                } else {
+                    Ok(())
+                };
+            }
+            entry.dwSize = u32::try_from(std::mem::size_of::<THREADENTRY32>())
+                .map_err(|_| "NAS publisher worker thread record overflowed")?;
+            found = unsafe { Thread32Next(snapshot, &mut entry) } != 0;
+        }
+        Err("NAS publisher worker primary thread was not found".into())
+    })();
+    unsafe { windows_sys::Win32::Foundation::CloseHandle(snapshot) };
+    result
+}
+
 #[cfg(windows)]
 fn open_nas_directory_no_follow(path: &Path) -> Result<File, String> {
+    const FILE_READ_ATTRIBUTES: u32 = 0x0000_0080;
     use windows_sys::Win32::Storage::FileSystem::{
         FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_READ, FILE_SHARE_WRITE,
     };
     let file = fs::OpenOptions::new()
-        .read(true)
+        // Attribute access is sufficient to pin a directory and avoids
+        // requesting list/read permission from SMB shares. Omitting
+        // FILE_SHARE_DELETE is intentional: this handle owns the ancestry
+        // pin against rename, removal, and junction substitution.
+        .access_mode(FILE_READ_ATTRIBUTES)
         .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
         .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
         .open(path)
@@ -1518,18 +1974,135 @@ fn unique_nas_temp_path(root: &Path, job_id: &str) -> Result<PathBuf, String> {
 }
 
 #[cfg(windows)]
-fn open_nas_temp(path: &Path) -> Result<File, String> {
-    const DELETE_ACCESS: u32 = 0x0001_0000;
-    const GENERIC_READ: u32 = 0x8000_0000;
-    const GENERIC_WRITE: u32 = 0x4000_0000;
-    use windows_sys::Win32::Storage::FileSystem::{FILE_SHARE_READ, FILE_SHARE_WRITE};
-    let mut options = fs::OpenOptions::new();
-    options.read(true).write(true).create_new(true);
-    options.access_mode(GENERIC_READ | GENERIC_WRITE | DELETE_ACCESS);
-    options.share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE);
-    options
-        .open(path)
-        .map_err(|_| "NAS temporary media could not be created".into())
+fn open_nas_temp_relative(root: &File, leaf: &std::ffi::OsStr) -> Result<File, String> {
+    use std::os::windows::io::{FromRawHandle, RawHandle};
+    use windows_sys::Wdk::Foundation::OBJECT_ATTRIBUTES;
+    use windows_sys::Wdk::Storage::FileSystem::{
+        FILE_CREATE, FILE_NON_DIRECTORY_FILE, FILE_OPEN_REPARSE_POINT,
+        FILE_SYNCHRONOUS_IO_NONALERT, NtCreateFile,
+    };
+    use windows_sys::Win32::Foundation::{
+        GENERIC_READ, GENERIC_WRITE, STATUS_SUCCESS, UNICODE_STRING,
+    };
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_ATTRIBUTE_NORMAL, FILE_SHARE_READ, FILE_SHARE_WRITE,
+    };
+    use windows_sys::Win32::System::IO::IO_STATUS_BLOCK;
+
+    let name = leaf.encode_wide().collect::<Vec<_>>();
+    let byte_length = u16::try_from(name.len().saturating_mul(std::mem::size_of::<u16>()))
+        .map_err(|_| "NAS temporary leaf is too long")?;
+    let unicode = UNICODE_STRING {
+        Length: byte_length,
+        MaximumLength: byte_length,
+        Buffer: name.as_ptr() as *mut u16,
+    };
+    let attributes = OBJECT_ATTRIBUTES {
+        Length: std::mem::size_of::<OBJECT_ATTRIBUTES>() as u32,
+        RootDirectory: root.as_raw_handle(),
+        ObjectName: &unicode,
+        Attributes: 0,
+        SecurityDescriptor: std::ptr::null(),
+        SecurityQualityOfService: std::ptr::null(),
+    };
+    let mut iosb = IO_STATUS_BLOCK::default();
+    let mut handle = std::ptr::null_mut();
+    let status = unsafe {
+        NtCreateFile(
+            &mut handle,
+            GENERIC_READ | GENERIC_WRITE | 0x0001_0000,
+            &attributes,
+            &mut iosb,
+            std::ptr::null(),
+            FILE_ATTRIBUTE_NORMAL,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            FILE_CREATE,
+            FILE_NON_DIRECTORY_FILE | FILE_OPEN_REPARSE_POINT | FILE_SYNCHRONOUS_IO_NONALERT,
+            std::ptr::null(),
+            0,
+        )
+    };
+    if status != STATUS_SUCCESS {
+        return Err(format!(
+            "NAS temporary media could not be created relative to its retained root: NTSTATUS 0x{status:08x}"
+        ));
+    }
+    if handle.is_null() {
+        return Err("NAS temporary media returned an invalid handle".into());
+    }
+    Ok(unsafe { File::from_raw_handle(handle as RawHandle) })
+}
+
+#[cfg(windows)]
+fn open_nas_final_relative(root: &File, leaf: &std::ffi::OsStr) -> Result<Option<File>, String> {
+    use std::os::windows::io::{FromRawHandle, RawHandle};
+    use windows_sys::Wdk::Foundation::OBJECT_ATTRIBUTES;
+    use windows_sys::Wdk::Storage::FileSystem::{
+        FILE_NON_DIRECTORY_FILE, FILE_OPEN, FILE_OPEN_REPARSE_POINT, FILE_SYNCHRONOUS_IO_NONALERT,
+        NtCreateFile,
+    };
+    use windows_sys::Win32::Foundation::{
+        GENERIC_READ, STATUS_OBJECT_NAME_NOT_FOUND, STATUS_SUCCESS, UNICODE_STRING,
+    };
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_ATTRIBUTE_NORMAL, FILE_SHARE_READ, FILE_SHARE_WRITE,
+    };
+    use windows_sys::Win32::System::IO::IO_STATUS_BLOCK;
+
+    let name = leaf.encode_wide().collect::<Vec<_>>();
+    let byte_length = u16::try_from(name.len().saturating_mul(std::mem::size_of::<u16>()))
+        .map_err(|_| "NAS destination leaf is too long")?;
+    let unicode = UNICODE_STRING {
+        Length: byte_length,
+        MaximumLength: byte_length,
+        Buffer: name.as_ptr() as *mut u16,
+    };
+    let attributes = OBJECT_ATTRIBUTES {
+        Length: std::mem::size_of::<OBJECT_ATTRIBUTES>() as u32,
+        RootDirectory: root.as_raw_handle(),
+        ObjectName: &unicode,
+        Attributes: 0,
+        SecurityDescriptor: std::ptr::null(),
+        SecurityQualityOfService: std::ptr::null(),
+    };
+    let mut iosb = IO_STATUS_BLOCK::default();
+    let mut handle = std::ptr::null_mut();
+    let status = unsafe {
+        NtCreateFile(
+            &mut handle,
+            GENERIC_READ,
+            &attributes,
+            &mut iosb,
+            std::ptr::null(),
+            FILE_ATTRIBUTE_NORMAL,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            FILE_OPEN,
+            FILE_NON_DIRECTORY_FILE | FILE_OPEN_REPARSE_POINT | FILE_SYNCHRONOUS_IO_NONALERT,
+            std::ptr::null(),
+            0,
+        )
+    };
+    if status == STATUS_OBJECT_NAME_NOT_FOUND {
+        return Ok(None);
+    }
+    if status != STATUS_SUCCESS || handle.is_null() {
+        return Err(format!(
+            "NAS destination could not be opened relative to its retained root: NTSTATUS 0x{status:08x}"
+        ));
+    }
+    let file = unsafe { File::from_raw_handle(handle as RawHandle) };
+    let metadata = file
+        .metadata()
+        .map_err(|_| "existing NAS destination could not be inspected")?;
+    if metadata.file_attributes() & 0x0400 != 0 || !metadata.is_file() {
+        return Err("existing NAS destination is a reparse point or not a regular file".into());
+    }
+    Ok(Some(file))
+}
+
+#[cfg(not(windows))]
+fn open_nas_final_relative(_root: &File, _leaf: &std::ffi::OsStr) -> Result<Option<File>, String> {
+    Ok(None)
 }
 
 #[cfg(not(windows))]
@@ -1572,11 +2145,15 @@ fn hash_publish_handle_until(
 }
 
 #[cfg(windows)]
-fn rename_nas_temp_from_handle(file: &File, destination: &Path) -> Result<(), String> {
+fn rename_nas_temp_from_handle(file: &File, destination: &Path, root: &File) -> Result<(), String> {
     use windows_sys::Win32::Storage::FileSystem::{
         FILE_RENAME_INFO, FileRenameInfo, SetFileInformationByHandle,
     };
-    let name = destination.as_os_str().encode_wide().collect::<Vec<_>>();
+    let name = destination
+        .file_name()
+        .ok_or("NAS destination leaf is unavailable")?
+        .encode_wide()
+        .collect::<Vec<_>>();
     let header_bytes = std::mem::offset_of!(FILE_RENAME_INFO, FileName);
     let info_bytes = header_bytes
         .checked_add(
@@ -1596,7 +2173,7 @@ fn rename_nas_temp_from_handle(file: &File, destination: &Path) -> Result<(), St
     // a leaf created after the initial check must make the operation fail.
     unsafe {
         (*rename).Anonymous.ReplaceIfExists = false;
-        (*rename).RootDirectory = std::ptr::null_mut();
+        (*rename).RootDirectory = root.as_raw_handle();
         (*rename).FileNameLength = u32::try_from(name.len() * std::mem::size_of::<u16>())
             .map_err(|_| "NAS destination path is too long")?;
         std::ptr::copy_nonoverlapping(name.as_ptr(), (*rename).FileName.as_mut_ptr(), name.len());
@@ -1617,7 +2194,11 @@ fn rename_nas_temp_from_handle(file: &File, destination: &Path) -> Result<(), St
 }
 
 #[cfg(not(windows))]
-fn rename_nas_temp_from_handle(_file: &File, destination: &Path) -> Result<(), String> {
+fn rename_nas_temp_from_handle(
+    _file: &File,
+    destination: &Path,
+    _root: &File,
+) -> Result<(), String> {
     Err(format!(
         "NAS handle-anchored finalization is unavailable on this platform ({})",
         destination.display()
@@ -2110,7 +2691,8 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let root = std::env::temp_dir().join(format!("townlight-nas-delivery-{nonce}"));
+        let root = PathBuf::from(r"C:\Users\scott\AppData\Local\Temp")
+            .join(format!("townlight-nas-delivery-{nonce}"));
         let media = root.with_extension("media");
         std::fs::create_dir_all(&root).unwrap();
         std::fs::write(&media, b"exact media").unwrap();
@@ -2135,15 +2717,30 @@ mod tests {
             created_at_unix_ms: 1,
         };
 
-        let configured_root = PathBuf::from(format!(r"\\?\{}", root.display()));
+        let configured_root = root.clone();
         let result = deliver_to_nas(&job, &media, &configured_root).unwrap();
         assert_eq!(result.stage, PublishExecutionStage::Delivered);
         let destination = root.join(format!("{}.mp4", job.media_sha256));
         assert_eq!(std::fs::read(&destination).unwrap(), b"exact media");
-        assert!(deliver_to_nas(&job, &media, &configured_root).is_err());
+        let retry = deliver_to_nas(&job, &media, &configured_root).unwrap();
+        assert!(retry.detail.contains("reconciled"));
         let _ = std::fs::remove_file(media);
         let _ = std::fs::remove_file(destination);
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn local_nas_missing_root_never_creates_directories() {
+        let nonce = SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = PathBuf::from(r"C:\Users\scott\AppData\Local\Temp")
+            .join(format!("townlight-nas-missing-{nonce}"))
+            .join("not-created");
+        assert!(!root.exists());
+        assert!(prepare_nas_destination(&root, &"a".repeat(64)).is_err());
+        assert!(!root.exists());
     }
 
     #[cfg(windows)]
@@ -2154,7 +2751,8 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let root = std::env::temp_dir().join(format!("townlight-nas-reparse-{nonce}"));
+        let root = PathBuf::from(r"C:\Users\scott\AppData\Local\Temp")
+            .join(format!("townlight-nas-reparse-{nonce}"));
         let source_root = root.join("source");
         let configured_root = root.join("configured");
         std::fs::create_dir_all(&source_root).unwrap();
@@ -2192,7 +2790,6 @@ mod tests {
             requested_by: "setup".into(),
             created_at_unix_ms: 1,
         };
-        let configured_root = PathBuf::from(format!(r"\\?\{}", configured_root.display()));
         assert!(deliver_to_nas(&job, &media, &configured_root).is_err());
         assert!(
             !source_root
@@ -2210,7 +2807,8 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let root = std::env::temp_dir().join(format!("townlight-nas-interrupt-{nonce}"));
+        let root = PathBuf::from(r"C:\Users\scott\AppData\Local\Temp")
+            .join(format!("townlight-nas-interrupt-{nonce}"));
         std::fs::create_dir_all(&root).unwrap();
         let media = root.join("media");
         std::fs::write(&media, b"exact media").unwrap();
@@ -2234,7 +2832,7 @@ mod tests {
             requested_by: "setup".into(),
             created_at_unix_ms: 1,
         };
-        let configured_root = PathBuf::from(format!(r"\\?\{}", root.display()));
+        let configured_root = root.clone();
         let mut calls = 0;
         let mut heartbeat = || {
             calls += 1;
@@ -2273,7 +2871,8 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let root = std::env::temp_dir().join(format!("townlight-nas-leaf-{nonce}"));
+        let root = PathBuf::from(r"C:\Users\scott\AppData\Local\Temp")
+            .join(format!("townlight-nas-leaf-{nonce}"));
         std::fs::create_dir_all(&root).unwrap();
         let media = root.join("media");
         let victim = root.join("victim");
@@ -2312,7 +2911,7 @@ mod tests {
             requested_by: "setup".into(),
             created_at_unix_ms: 1,
         };
-        let configured_root = PathBuf::from(format!(r"\\?\{}", root.display()));
+        let configured_root = root.clone();
         assert!(deliver_to_nas(&job, &media, &configured_root).is_err());
         assert!(victim.is_dir());
         let _ = std::fs::remove_file(media);

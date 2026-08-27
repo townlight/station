@@ -2,6 +2,7 @@
 resolver = "3"
 members = [
     "bins/channel-worker",
+    "bins/nas-publisher",
     "bins/station-updater",
     "bins/station-automation-launch-helper",
     "bins/stationd",
@@ -116,7 +117,7 @@ station-update-coordinator = { path = "crates/station-update-coordinator" }
 station-windows-ipc = { path = "crates/station-windows-ipc" }
 ureq = { version = "=3.4.0", features = ["platform-verifier"] }
 windows-service = "=0.8.1"
-windows-sys = { version = "=0.61.2", features = ["Win32_Foundation", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_Diagnostics_ToolHelp", "Win32_System_IO", "Win32_System_JobObjects", "Win32_System_SystemInformation", "Win32_System_Threading"] }
+windows-sys = { version = "=0.61.2", features = ["Win32_Foundation", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_Diagnostics_ToolHelp", "Win32_System_IO", "Win32_System_JobObjects", "Win32_System_SystemInformation", "Win32_System_Threading", "Wdk_Foundation", "Wdk_Storage_FileSystem"] }
 zeroize = "=1.9.0"
 zip = { version = "=8.6.0", default-features = false }
 

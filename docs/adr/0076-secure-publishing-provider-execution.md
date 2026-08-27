@@ -13,17 +13,23 @@ Target execution configuration is typed. Portal uses an explicit HTTPS endpoint 
 query, or fragment. Internet Archive uses the fixed provider adapter and a bounded item identifier.
 YouTube uses fixed Google OAuth and Live Streaming API endpoints plus bounded exact channel,
 broadcast, stream, and expected privacy identities. A Local NAS target retains an administrator-selected
-UNC root and publishes only the exact configured destination `<sha256>.mp4`; it never follows
-reparse points or overwrites an existing destination.
+local drive or genuine UNC server/share root that must already exist and publishes only the exact
+configured destination `<sha256>.mp4`; it rejects Win32/device aliases, never follows reparse points,
+creates no directories, and never overwrites an existing destination.
 
-The NAS adapter validates the complete existing and missing root ancestry with no-follow metadata,
+The NAS adapter validates the complete pre-existing root ancestry with no-follow metadata,
 retains no-delete directory and source-file handles, copies only from the retained source handle,
 and hashes the exact bytes before and after a durable flush. A unique job-owned temporary file is
 created with `CREATE_NEW`; failures cancel at heartbeat/deadline boundaries and remove that exact
-temporary handle. Finalization uses `FileRenameInfo` with replacement disabled, so a destination
-created or substituted by another actor fails closed. A successful receipt is only `delivered` for
-the exact configured root and media hash; it is not proof of NAS availability, replication, or
-operator/field acceptance.
+temporary handle. Synchronous SMB copy/sync/rename runs in a separately installed helper contained
+by a kill-on-close Windows Job Object; the controller drains its bounded result while it runs,
+force-terminates and reaps it on every cancellation/deadline/failure path, and verifies the helper
+hash against the active installed manifest before launch. Finalization uses `FileRenameInfo` with
+replacement disabled, so a destination created or substituted by another actor fails closed. A
+successful receipt is only `delivered` for the exact configured root and media hash. If the controller
+loses the helper result after rename, retry opens the final path without following reparse points and
+reconciles only an exact regular-file byte/hash match; it never cleans a final path. This is not proof
+of NAS availability, replication, or operator/field acceptance.
 
 Provider credentials have a separate append-only authority. Setup Admin may provision, rotate, or
 delete a write-only secret for one exact account revision. Windows DPAPI Local Machine protection is
@@ -31,6 +37,11 @@ applied before SQLite. Only protected bytes and non-secret attribution/version f
 API responses, audit, status, receipts, support data, and errors never contain plaintext secrets or
 provider response bodies. `credential_configured` is derived from the current decryptable authority,
 not accepted as browser truth.
+
+The update package schema remains version 2 so an already installed updater can continue to apply
+legacy stationd/channel-worker packages. The NAS helper is an optional schema-2 payload for update
+compatibility, but NAS execution is enabled only after a full installer migration has installed it
+and recorded its active-manifest hash; an old installation cannot silently claim NAS delivery.
 
 Jobs are bounded, leased, recoverable, and retry transient failures with durable backoff. Production
 HTTPS adapters use platform certificate verification, no redirects, fixed provider paths, bounded

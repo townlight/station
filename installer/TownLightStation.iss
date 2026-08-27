@@ -7,6 +7,9 @@
 #ifndef ChannelWorkerPath
   #error ChannelWorkerPath must be supplied by build-installer.ps1
 #endif
+#ifndef NasPublisherPath
+  #error NasPublisherPath must be supplied by build-installer.ps1
+#endif
 #ifndef StationUpdaterPath
   #error StationUpdaterPath must be supplied by build-installer.ps1
 #endif
@@ -16,6 +19,9 @@
 #ifndef ChannelWorkerSha256
   #error ChannelWorkerSha256 must be supplied by build-installer.ps1
 #endif
+#ifndef NasPublisherSha256
+  #error NasPublisherSha256 must be supplied by build-installer.ps1
+#endif
 #ifndef StationUpdaterSha256
   #error StationUpdaterSha256 must be supplied by build-installer.ps1
 #endif
@@ -24,6 +30,9 @@
 #endif
 #ifndef ChannelWorkerSize
   #error ChannelWorkerSize must be supplied by build-installer.ps1
+#endif
+#ifndef NasPublisherSize
+  #error NasPublisherSize must be supplied by build-installer.ps1
 #endif
 #ifndef StationUpdaterSize
   #error StationUpdaterSize must be supplied by build-installer.ps1
@@ -115,6 +124,7 @@ Name: "{commonappdata}\TownLight Station"; Permissions: system-full admins-full
 Source: "{#GStreamerInstaller}"; DestName: "{#GStreamerFile}"; Flags: dontcopy noencryption
 Source: "{#StationdPath}"; DestName: "stationd.exe"; Flags: dontcopy noencryption
 Source: "{#ChannelWorkerPath}"; DestName: "channel-worker.exe"; Flags: dontcopy noencryption
+Source: "{#NasPublisherPath}"; DestName: "nas-publisher.exe"; Flags: dontcopy noencryption
 Source: "{#StationUpdaterPath}"; DestName: "station-updater.exe"; Flags: dontcopy noencryption
 Source: "{#CaptionDecoderPath}"; DestName: "caption-decoder-ffmpeg.exe"; Flags: dontcopy noencryption
 Source: "{#CaptionDecoderLicensePath}"; DestName: "caption-decoder-LICENSE.txt"; Flags: dontcopy noencryption
@@ -126,6 +136,7 @@ Source: "..\LICENSE"; DestDir: "{app}"; Flags: ignoreversion
 [UninstallDelete]
 Type: files; Name: "{app}\stationd.exe"
 Type: files; Name: "{app}\channel-worker.exe"
+Type: files; Name: "{app}\nas-publisher.exe"
 Type: files; Name: "{app}\station-updater.exe"
 Type: filesandordirs; Name: "{app}\runtime"
 Type: dirifempty; Name: "{app}"
@@ -139,9 +150,11 @@ const
   CandidateVersion = '{#ProductVersion}';
   StationdSha256 = '{#StationdSha256}';
   ChannelWorkerSha256 = '{#ChannelWorkerSha256}';
+  NasPublisherSha256 = '{#NasPublisherSha256}';
   StationUpdaterSha256 = '{#StationUpdaterSha256}';
   StationdSize = '{#StationdSize}';
   ChannelWorkerSize = '{#ChannelWorkerSize}';
+  NasPublisherSize = '{#NasPublisherSize}';
   StationUpdaterSize = '{#StationUpdaterSize}';
   CaptionDecoderArchiveSha256 = '{#CaptionDecoderArchiveSha256}';
   CaptionDecoderSha256 = '{#CaptionDecoderSha256}';
@@ -675,6 +688,7 @@ var
 begin
   ExtractTemporaryFile('stationd.exe');
   ExtractTemporaryFile('channel-worker.exe');
+  ExtractTemporaryFile('nas-publisher.exe');
   ExtractTemporaryFile('station-updater.exe');
   ExtractTemporaryFile('caption-decoder-ffmpeg.exe');
   ExtractTemporaryFile('caption-decoder-LICENSE.txt');
@@ -687,6 +701,9 @@ begin
   if not CopyFile(ExpandConstant('{tmp}\channel-worker.exe'),
     AppDirectory + '\channel-worker.exe', True) then
     RaiseException('The channel worker binary could not be staged.');
+  if not CopyFile(ExpandConstant('{tmp}\nas-publisher.exe'),
+    AppDirectory + '\nas-publisher.exe', True) then
+    RaiseException('The NAS publisher binary could not be staged.');
   if not CopyFile(ExpandConstant('{tmp}\station-updater.exe'),
     AppDirectory + '\station-updater.exe', True) then
     RaiseException('The maintenance updater binary could not be staged.');
@@ -901,7 +918,9 @@ begin
           '{"path":"stationd.exe","size_bytes":' + StationdSize +
             ',"sha256":"' + StationdSha256 + '"},' +
           '{"path":"channel-worker.exe","size_bytes":' + ChannelWorkerSize +
-            ',"sha256":"' + ChannelWorkerSha256 + '"}' +
+            ',"sha256":"' + ChannelWorkerSha256 + '"},' +
+          '{"path":"nas-publisher.exe","size_bytes":' + NasPublisherSize +
+            ',"sha256":"' + NasPublisherSha256 + '"}' +
         ']' +
       '}' +
     '},' +

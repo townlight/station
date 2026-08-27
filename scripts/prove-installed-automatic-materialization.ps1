@@ -245,7 +245,7 @@ function Assert-ExactInstalledCandidate {
     if ([string]$manifest.source_commit -cne $head -or ($ExpectedSourceCommit -and $ExpectedSourceCommit -cne $head)) {
         Stop-Proof 'candidate_manifest_source_mismatch'
     }
-    foreach ($field in @('media_runtime_sha256', 'stationd_sha256', 'channel_worker_sha256', 'station_updater_sha256')) {
+    foreach ($field in @('media_runtime_sha256', 'stationd_sha256', 'channel_worker_sha256', 'nas_publisher_sha256', 'station_updater_sha256')) {
         Assert-Sha256 -Value ([string]$manifest.$field) -Code 'candidate_manifest_invalid'
     }
 
@@ -273,6 +273,7 @@ function Assert-ExactInstalledCandidate {
     $installedHashes = [ordered]@{
         stationd_sha256 = Get-FileSha256 (Join-Path $applicationRoot 'stationd.exe')
         channel_worker_sha256 = Get-FileSha256 (Join-Path $applicationRoot 'channel-worker.exe')
+        nas_publisher_sha256 = Get-FileSha256 (Join-Path $applicationRoot 'nas-publisher.exe')
         station_updater_sha256 = Get-FileSha256 (Join-Path $applicationRoot 'station-updater.exe')
     }
     if ($OuterHostAttested -and $candidatePair.installer_sha256 -cne $ExpectedInstallerSha256) {
@@ -285,7 +286,7 @@ function Assert-ExactInstalledCandidate {
     }
     if ($null -eq $active.active -or [string]$active.active.relative_directory -cne '.' -or
         [string]$active.active.package_manifest.source_commit -cne $head -or
-        @($active.active.package_manifest.files).Count -ne 2) {
+        @($active.active.package_manifest.files).Count -notin @(2, 3)) {
         Stop-Proof 'active_slot_candidate_mismatch'
     }
     $activeHashes = @{}
@@ -296,7 +297,9 @@ function Assert-ExactInstalledCandidate {
         $activeHashes[[string]$file.path] = ([string]$file.sha256).ToLowerInvariant()
     }
     if ($activeHashes['stationd.exe'] -cne $installedHashes.stationd_sha256 -or
-        $activeHashes['channel-worker.exe'] -cne $installedHashes.channel_worker_sha256) {
+        $activeHashes['channel-worker.exe'] -cne $installedHashes.channel_worker_sha256 -or
+        (@($active.active.package_manifest.files).Count -eq 3 -and
+            $activeHashes['nas-publisher.exe'] -cne $installedHashes.nas_publisher_sha256)) {
         Stop-Proof 'active_slot_binary_mismatch'
     }
     [pscustomobject]@{

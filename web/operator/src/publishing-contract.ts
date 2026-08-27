@@ -83,6 +83,20 @@ function labelReason(label: string, subject: string): string | null {
     : null;
 }
 
+function validManagedNasRoot(value: string): boolean {
+  if (value.length === 0 || value.length > 500 || value !== value.trim() || value.includes("/")) return false;
+  const lower = value.toLowerCase();
+  if (lower.startsWith("\\\\?\\") || lower.startsWith("\\\\.\\") || lower.startsWith("\\??\\") || lower.startsWith("\\device\\")) return false;
+  const validComponent = (component: string) => {
+    if (!component || component === "." || component === ".." || component.endsWith(".") || component.endsWith(" ") || component.trim() !== component || /[\x00-\x1f\x7f:\"<>|?*]/.test(component)) return false;
+    const basename = component.split(".", 1)[0].toUpperCase();
+    return !["CON", "PRN", "AUX", "NUL"].includes(basename) && !/^(COM|LPT)[1-9]$/.test(basename);
+  };
+  if (value.startsWith("\\\\")) return value.slice(2).split("\\").length >= 2 && value.slice(2).split("\\").every(validComponent);
+  if (!/^[A-Za-z]:\\/.test(value)) return false;
+  return value.slice(3).split("\\").every(validComponent);
+}
+
 export function emptyPublishingConfiguration(kind: PublishTargetKind): PublishExecutionTargetConfig {
   switch (kind) {
     case "portal": return { kind, endpoint: "https://" };
@@ -102,7 +116,7 @@ function configurationReason(configuration: PublishExecutionTargetConfig, kind: 
   } else if (configuration.kind === "internet_archive") {
     if (typeof configuration.item_identifier !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/.test(configuration.item_identifier)) return "Internet Archive item identifier must be a bounded slug.";
   } else if (configuration.kind === "local_nas") {
-    if (typeof configuration.managed_root !== "string" || configuration.managed_root.length === 0 || configuration.managed_root.length > 500 || !configuration.managed_root.startsWith("\\\\") || configuration.managed_root.includes("..") || configuration.managed_root.includes("/")) return "Managed NAS root must be an absolute UNC path without traversal.";
+    if (typeof configuration.managed_root !== "string" || !validManagedNasRoot(configuration.managed_root)) return "Managed NAS root must be an ordinary absolute drive or UNC path without traversal or device aliases.";
   } else if (![configuration.channel_id, configuration.broadcast_id, configuration.stream_id].every((value) => typeof value === "string" && /^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/.test(value))) {
     return "YouTube channel, broadcast, and stream identities must be bounded identifiers.";
   } else if (configuration.privacy_status !== "public" && configuration.privacy_status !== "unlisted") {

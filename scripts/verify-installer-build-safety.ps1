@@ -23,6 +23,12 @@ function Read-ParsedSource([string]$Path) {
 
 $build = Read-ParsedSource $buildPath
 $verify = Read-ParsedSource $verifyPath
+$inno = Get-Content -LiteralPath (Join-Path $repository 'installer\TownLightStation.iss') -Raw
+Assert-Contract ($inno -match 'NasPublisherPath' -and
+    $inno -match 'Source: "\{#NasPublisherPath\}"; DestName: "nas-publisher\.exe"' -and
+    $inno -match "ExtractTemporaryFile\('nas-publisher\.exe'\)" -and
+    $inno -match 'AppDirectory \+ ''\\nas-publisher\.exe''') `
+    'the installer must carry, extract, and stage the helper from the build-pinned source.'
 $knownFolderBootstrapEnd = $build.IndexOf('$expectedRuntimeHash', [StringComparison]::Ordinal)
 Assert-Contract ($knownFolderBootstrapEnd -gt 0) 'build script must retain a known-folder bootstrap boundary.'
 # Execute only the parameter/default/known-folder prefix. This proves the trusted
@@ -57,6 +63,10 @@ Assert-Contract ($build -match 'function Invoke-CargoWrapperCapture' -and
 Assert-Contract ($build -match 'Invoke-CargoWrapperCapture\s+-Arguments\s+@\(\x27build\x27,\s*\x27--release\x27,\s*\x27--offline\x27' -and
     $build -notmatch '& \$cargoWrapper build') `
     'the actual release build must use the synchronous child wrapper path rather than inheriting wrapper exit.'
+Assert-Contract ($build -match '\$nasPublisher\s*=\s*Join-Path' -and
+    $build -match 'nas-publisher' -and $build -match '\$nasPublisherHash' -and
+    $build -match 'NasPublisherPath') `
+    'the release candidate must build, hash, package, and manifest the supervised NAS publisher helper.'
 $probeFunctionStart = $build.IndexOf('function Invoke-CargoWrapperCapture', [StringComparison]::Ordinal)
 $probeFunctionEnd = $build.IndexOf('function Get-RustIdentity', [StringComparison]::Ordinal)
 Assert-Contract ($probeFunctionStart -ge 0 -and $probeFunctionEnd -gt $probeFunctionStart) `
@@ -76,14 +86,14 @@ try {
 
     [IO.File]::WriteAllText($fakeCargoWrapper, @'
 param([Parameter(ValueFromRemainingArguments = $true)][string[]]$CargoArguments)
-if (($CargoArguments -join ' ') -cne 'build --release --offline -p stationd -p channel-worker -p station-updater') {
+if (($CargoArguments -join ' ') -cne 'build --release --offline -p stationd -p channel-worker -p nas-publisher -p station-updater') {
     Write-Error "unexpected cargo arguments: $($CargoArguments -join ' ')"
     exit 41
 }
 Write-Output 'cargo-release-output'
 exit 0
 '@, [Text.UTF8Encoding]::new($false))
-    $releaseOutput = Invoke-CargoWrapperCapture -Arguments @('build', '--release', '--offline', '-p', 'stationd', '-p', 'channel-worker', '-p', 'station-updater')
+    $releaseOutput = Invoke-CargoWrapperCapture -Arguments @('build', '--release', '--offline', '-p', 'stationd', '-p', 'channel-worker', '-p', 'nas-publisher', '-p', 'station-updater')
     $publicationSentinel = 'reached'
     Assert-Contract ($publicationSentinel -ceq 'reached' -and $releaseOutput.exit_code -eq 0 -and
         $releaseOutput.standard_output -ceq 'cargo-release-output') `
@@ -164,6 +174,7 @@ Assert-Contract ($mutexWait -ge 0 -and $staleCleanup -gt $mutexWait -and
     'the mutex must cover exact stale cleanup and a rollback-protected, failure-free installer-to-manifest publication boundary.'
 Assert-Contract ($verify -match '\$stationdHash[^\r\n]*ToLowerInvariant' -and
     $verify -match '\$workerHash[^\r\n]*ToLowerInvariant' -and
+    $verify -match '\$nasPublisherHash[^\r\n]*ToLowerInvariant' -and
     $verify -match '\$updaterHash[^\r\n]*ToLowerInvariant') 'installed binary hashes must use manifest casing.'
 Assert-Contract ($verify -match "Get-TrustedKnownFolder 'ProgramFilesX64'" -and
     $verify -match "Get-TrustedKnownFolder 'CommonApplicationData'" -and

@@ -469,6 +469,10 @@ fn read_installation_snapshot(
             payload_directory.join("channel-worker.exe"),
         ),
         (
+            "nas-publisher.exe",
+            payload_directory.join("nas-publisher.exe"),
+        ),
+        (
             "station-updater.exe",
             application_directory.join("station-updater.exe"),
         ),
@@ -849,6 +853,7 @@ mod tests {
         std::fs::create_dir_all(&slot).unwrap();
         std::fs::write(slot.join("stationd.exe"), b"active-stationd").unwrap();
         std::fs::write(slot.join("channel-worker.exe"), b"active-worker").unwrap();
+        std::fs::write(slot.join("nas-publisher.exe"), b"active-nas-publisher").unwrap();
         std::fs::write(slot.join("station-updater.exe"), b"dormant-slot-updater").unwrap();
         std::fs::write(app.join("station-updater.exe"), b"running-root-updater").unwrap();
         std::fs::write(
@@ -879,6 +884,11 @@ mod tests {
                             "path": "channel-worker.exe",
                             "size_bytes": b"active-worker".len(),
                             "sha256": sha256_bytes(b"active-worker")
+                        },
+                        {
+                            "path": "nas-publisher.exe",
+                            "size_bytes": b"active-nas-publisher".len(),
+                            "sha256": sha256_bytes(b"active-nas-publisher")
                         }
                     ]
                 }
@@ -904,7 +914,12 @@ mod tests {
         let stationd_hash = sha256_bytes(b"active-stationd");
         let root_updater_hash = sha256_bytes(b"running-root-updater");
         let dormant_updater_hash = sha256_bytes(b"dormant-slot-updater");
+        let nas_publisher_hash = sha256_bytes(b"active-nas-publisher");
         assert_eq!(hashes["stationd.exe"], Some(stationd_hash.as_str()));
+        assert_eq!(
+            hashes["nas-publisher.exe"],
+            Some(nas_publisher_hash.as_str())
+        );
         assert_eq!(
             hashes["station-updater.exe"],
             Some(root_updater_hash.as_str())

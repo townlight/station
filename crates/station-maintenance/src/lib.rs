@@ -2222,6 +2222,27 @@ pub fn verify_active_application(
     Ok(())
 }
 
+/// Return the manifest hash for one active-application file after validating
+/// the complete installed candidate and active package. Callers retain their
+/// install authority fence while using the result to pin the exact file.
+pub fn read_verified_active_application_file_hash(
+    data_directory: &Path,
+    application_root: &Path,
+    relative_path: &str,
+) -> Result<String, String> {
+    let _ = read_verified_candidate_identity(data_directory, application_root)?;
+    let active = read_active_slot_receipt(&data_directory.join(ACTIVE_SLOT_RECEIPT_NAME))?;
+    active.validate()?;
+    active
+        .active
+        .package_manifest
+        .files
+        .iter()
+        .find(|file| file.path == relative_path)
+        .map(|file| file.sha256.clone())
+        .ok_or_else(|| format!("installed application manifest is missing {relative_path}"))
+}
+
 fn write_install_identity(
     data_directory: &Path,
     application: &ActiveApplication,

@@ -710,7 +710,7 @@ fn write_application(
     source_commit: &str,
     read_only: bool,
 ) -> UpdatePackageManifest {
-    let payloads: [(&str, &[u8]); 2] = [
+    let payloads: [(&str, &[u8]); 3] = [
         (
             "stationd.exe",
             format!("stationd-{version}").leak().as_bytes(),
@@ -718,6 +718,10 @@ fn write_application(
         (
             "channel-worker.exe",
             format!("channel-worker-{version}").leak().as_bytes(),
+        ),
+        (
+            "nas-publisher.exe",
+            format!("nas-publisher-{version}").leak().as_bytes(),
         ),
     ];
     let mut files = Vec::new();

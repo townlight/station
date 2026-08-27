@@ -49,6 +49,10 @@ fn main() -> Result<(), String> {
         }
         payloads.push((name, bytes));
     }
+    payloads.push((
+        "nas-publisher.exe",
+        b"fixture nas publisher helper".to_vec(),
+    ));
     let package_manifest = UpdatePackageManifest {
         schema_version: UPDATE_PACKAGE_SCHEMA_VERSION,
         product: "TownLight Station".into(),

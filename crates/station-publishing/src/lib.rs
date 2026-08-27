@@ -136,18 +136,7 @@ impl PublishExecutionTargetConfig {
             Self::InternetArchive { item_identifier } => {
                 validate_slug(item_identifier, 100, "Internet Archive item identifier")
             }
-            Self::LocalNas { managed_root } => {
-                validate_visible(managed_root, 500, "managed NAS root")?;
-                if !managed_root.starts_with("\\\\")
-                    || managed_root.contains("..")
-                    || managed_root.contains('/')
-                {
-                    return Err(
-                        "managed NAS root must be an absolute UNC path without traversal".into(),
-                    );
-                }
-                Ok(())
-            }
+            Self::LocalNas { managed_root } => validate_local_nas_root(managed_root),
             Self::YouTubeLive {
                 channel_id,
                 broadcast_id,
@@ -160,6 +149,86 @@ impl PublishExecutionTargetConfig {
             }
         }
     }
+}
+
+/// Validate the only path forms accepted for a managed Local NAS target.
+///
+/// Device namespaces (`\\?\\`, `\\.\\`, and NT paths) are deliberately
+/// excluded: they bypass the ordinary Win32 path grammar used by the
+/// handle-anchored executor. Both an ordinary absolute drive path and a
+/// genuine UNC server/share path are supported.
+pub fn validate_local_nas_root(value: &str) -> Result<(), String> {
+    validate_visible(value, 500, "managed NAS root")?;
+    if value.contains('/') || value.ends_with('\\') && !is_drive_root(value) {
+        return Err("managed NAS root must use an ordinary absolute drive or UNC path".into());
+    }
+    let lower = value.to_ascii_lowercase();
+    if lower.starts_with("\\\\?\\")
+        || lower.starts_with("\\\\.\\")
+        || lower.starts_with("\\??\\")
+        || lower.starts_with("\\device\\")
+    {
+        return Err("managed NAS device and NT namespace paths are not allowed".into());
+    }
+    if value.starts_with(r"\\") {
+        let components = value[2..].split('\\').collect::<Vec<_>>();
+        if components.len() < 2
+            || components
+                .iter()
+                .any(|component| !valid_nas_component(component))
+        {
+            return Err(
+                "managed NAS UNC path must contain a server and share without traversal".into(),
+            );
+        }
+        return Ok(());
+    }
+    let bytes = value.as_bytes();
+    if bytes.len() < 3 || !bytes[0].is_ascii_alphabetic() || bytes[1] != b':' || bytes[2] != b'\\' {
+        return Err("managed NAS root must be an ordinary absolute drive or UNC path".into());
+    }
+    let remainder = &value[3..];
+    if !remainder.is_empty()
+        && remainder
+            .split('\\')
+            .any(|component| !valid_nas_component(component))
+    {
+        return Err("managed NAS root contains an invalid Win32 path component".into());
+    }
+    Ok(())
+}
+
+fn valid_nas_component(component: &str) -> bool {
+    if component.is_empty()
+        || component == "."
+        || component == ".."
+        || component.ends_with('.')
+        || component.ends_with(' ')
+        || component.trim() != component
+        || component.chars().any(|character| {
+            character.is_control()
+                || character == '\u{7f}'
+                || matches!(character, ':' | '"' | '<' | '>' | '|' | '?' | '*')
+        })
+    {
+        return false;
+    }
+    let basename = component
+        .split('.')
+        .next()
+        .unwrap_or(component)
+        .to_ascii_uppercase();
+    let reserved = matches!(basename.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+        || (basename.len() == 4
+            && matches!(&basename[..3], "COM" | "LPT")
+            && basename.as_bytes()[3].is_ascii_digit()
+            && basename.as_bytes()[3] != b'0');
+    !reserved
+}
+
+fn is_drive_root(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    bytes.len() == 3 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' && bytes[2] == b'\\'
 }
 
 /// Durable provider truth advances one explicit stage at a time. A later stage

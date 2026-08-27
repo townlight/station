@@ -98,6 +98,7 @@ fn fixture() -> Fixture {
     let files = [
         ("stationd.exe", b"stationd-candidate".as_slice()),
         ("channel-worker.exe", b"worker-candidate".as_slice()),
+        ("nas-publisher.exe", b"nas-publisher-candidate".as_slice()),
     ];
     let manifest_files = files
         .iter()
@@ -111,7 +112,7 @@ fn fixture() -> Fixture {
         std::fs::write(application.join(name), bytes).unwrap();
     }
     let manifest = UpdatePackageManifest {
-        schema_version: 2,
+        schema_version: station_update::UPDATE_PACKAGE_SCHEMA_VERSION,
         product: "TownLight Station".into(),
         version: VERSION.into(),
         source_commit: COMMIT.into(),
