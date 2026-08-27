@@ -883,6 +883,7 @@ struct AutomationExecutionJobStatusResponse<'a> {
     receipt: Option<&'a AutomationExecutionReceipt>,
     last_failure_code: Option<&'a str>,
     created_at_unix_ms: i64,
+    next_attempt_at_unix_ms: i64,
     completed_at_unix_ms: Option<i64>,
 }
 
@@ -10652,6 +10653,7 @@ fn automation_execution_job_status_response(
         receipt: record.receipt.as_ref(),
         last_failure_code: record.last_failure_code.as_deref(),
         created_at_unix_ms: record.created_at_unix_ms,
+        next_attempt_at_unix_ms: record.next_attempt_at_unix_ms,
         completed_at_unix_ms: record.completed_at_unix_ms,
     }
 }
@@ -17985,6 +17987,7 @@ mod tests {
         let body: serde_json::Value = serde_json::from_slice(&response.body).unwrap();
         assert_eq!(body["request"]["job_id"], job_id);
         assert_eq!(body["state"], "pending");
+        assert_eq!(body["next_attempt_at_unix_ms"], 100);
         assert!(body.get("lease_owner").is_none());
         assert!(body.get("claim_id").is_none());
 

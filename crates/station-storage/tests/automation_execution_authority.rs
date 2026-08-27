@@ -13,8 +13,9 @@ use station_automation_policy::{
 };
 use station_maintenance::{VerifiedInstallAuthority, verified_install_authority_for_test};
 use station_storage::{
-    AutomationExecutionAdapter, AutomationExecutionAdapterFailure, AutomationExecutionJobRecord,
-    AutomationExecutionJobState, StationStore, run_automation_execution_controller_iteration,
+    AutomationExecutionAdapter, AutomationExecutionAdapterFailure, AutomationExecutionAttempt,
+    AutomationExecutionAttemptState, AutomationExecutionJobRecord, AutomationExecutionJobState,
+    StationStore, run_automation_execution_controller_iteration,
 };
 
 const ADAPTER_ID: &str = "11111111-2222-4333-8444-555555555555";
@@ -199,7 +200,7 @@ fn connection_evidence() -> AutomationConnectionTestEvidence {
         candidate: candidate_identity(),
         outcome: ConnectionTestOutcome::Passed,
         tested_at_unix_ms: 50,
-        expires_at_unix_ms: 10_000,
+        expires_at_unix_ms: 80_000_000,
         detail: "Trusted adapter connection test passed.".into(),
     }
 }
@@ -647,9 +648,16 @@ fn attempt_failures_retry_only_under_the_live_owner_and_can_finish_terminally() 
     );
     assert!(pending.lease_owner.is_none());
     assert!(pending.completed_at_unix_ms.is_none());
+    assert_eq!(pending.next_attempt_at_unix_ms, 60_200);
 
     store
-        .claim_automation_execution_job(JOB_ID, "automation-worker-2", &candidate(), 250, 1_000)
+        .claim_automation_execution_job(
+            JOB_ID,
+            "automation-worker-2",
+            &candidate(),
+            pending.next_attempt_at_unix_ms,
+            1_000,
+        )
         .unwrap();
     let failed = store
         .record_automation_execution_attempt_failure(
@@ -657,7 +665,7 @@ fn attempt_failures_retry_only_under_the_live_owner_and_can_finish_terminally() 
             "automation-worker-2",
             "invalid_provider_response",
             false,
-            300,
+            60_250,
         )
         .unwrap();
     assert_eq!(failed.state, AutomationExecutionJobState::Failed);
@@ -666,7 +674,7 @@ fn attempt_failures_retry_only_under_the_live_owner_and_can_finish_terminally() 
         failed.last_failure_code.as_deref(),
         Some("invalid_provider_response")
     );
-    assert_eq!(failed.completed_at_unix_ms, Some(300));
+    assert_eq!(failed.completed_at_unix_ms, Some(60_250));
     assert!(failed.receipt.is_none());
     assert!(
         store
@@ -675,7 +683,7 @@ fn attempt_failures_retry_only_under_the_live_owner_and_can_finish_terminally() 
                 "automation-worker-2",
                 "retry_after_terminal",
                 true,
-                301,
+                60_251,
             )
             .is_err()
     );
@@ -747,8 +755,8 @@ fn expired_tenth_attempt_is_terminalized_instead_of_wedging_the_queue() {
         .enqueue_automation_execution_job(&request(), &candidate(), 100)
         .unwrap();
 
+    let mut now = 150_i64;
     for attempt in 0..10_i64 {
-        let now = 150 + attempt * 20;
         let claimed = store
             .claim_next_automation_execution_job("automation-worker-1", &candidate(), now, 10)
             .unwrap()
@@ -765,12 +773,18 @@ fn expired_tenth_attempt_is_terminalized_instead_of_wedging_the_queue() {
                 )
                 .unwrap();
             assert_eq!(pending.state, AutomationExecutionJobState::Pending);
+            now = pending.next_attempt_at_unix_ms;
         }
     }
 
     assert!(
         store
-            .claim_next_automation_execution_job("automation-worker-2", &candidate(), 340, 1_000,)
+            .claim_next_automation_execution_job(
+                "automation-worker-2",
+                &candidate(),
+                now + 10,
+                1_000,
+            )
             .unwrap()
             .is_none()
     );
@@ -784,7 +798,7 @@ fn expired_tenth_attempt_is_terminalized_instead_of_wedging_the_queue() {
         terminal.last_failure_code.as_deref(),
         Some("attempt_limit_exhausted")
     );
-    assert_eq!(terminal.completed_at_unix_ms, Some(340));
+    assert_eq!(terminal.completed_at_unix_ms, Some(now + 10));
 
     drop(store);
     let _ = std::fs::remove_file(database);
@@ -829,7 +843,7 @@ fn install_generation_and_live_claim_interval_are_required_for_completion() {
         )
         .unwrap();
     store
-        .claim_automation_execution_job(JOB_ID, "automation-worker-2", &candidate(), 250, 1_000)
+        .claim_automation_execution_job(JOB_ID, "automation-worker-2", &candidate(), 60_200, 1_000)
         .unwrap();
     assert!(
         store
@@ -957,22 +971,43 @@ fn missing_parent_receipt_and_corrupt_failure_code_fail_closed() {
 
 struct ExactTestAdapter;
 
+struct ExactTestAttempt {
+    receipt: AutomationExecutionReceipt,
+}
+
+impl AutomationExecutionAttempt for ExactTestAttempt {
+    fn poll(
+        &mut self,
+        _deadline_unix_ms: i64,
+        _heartbeat: &mut dyn FnMut() -> Result<(), String>,
+    ) -> Result<AutomationExecutionAttemptState, AutomationExecutionAdapterFailure> {
+        Ok(AutomationExecutionAttemptState::Completed(Box::new(
+            self.receipt.clone(),
+        )))
+    }
+
+    fn terminate(&mut self) -> Result<(), String> {
+        Ok(())
+    }
+}
+
 impl AutomationExecutionAdapter for ExactTestAdapter {
     fn adapter_id(&self) -> &str {
         ADAPTER_ID
     }
 
-    fn execute(
+    fn begin(
         &self,
         execution_request: &AutomationExecutionRequest,
         claim_id: &str,
         _deadline_unix_ms: i64,
-        _heartbeat: &mut dyn FnMut() -> Result<(), String>,
-    ) -> Result<AutomationExecutionReceipt, AutomationExecutionAdapterFailure> {
+    ) -> Result<Box<dyn AutomationExecutionAttempt>, AutomationExecutionAdapterFailure> {
         assert_eq!(execution_request, &request());
         let mut exact_receipt = receipt();
         exact_receipt.claim_id = claim_id.into();
-        Ok(exact_receipt)
+        Ok(Box::new(ExactTestAttempt {
+            receipt: exact_receipt,
+        }))
     }
 }
 
@@ -1044,6 +1079,139 @@ fn controller_without_an_implemented_exact_adapter_records_no_success() {
     );
     assert!(pending.receipt.is_none());
 
+    drop(store);
+    let _ = std::fs::remove_file(database);
+}
+
+#[test]
+fn unavailable_adapter_retries_are_durable_paced_and_survive_restart() {
+    let (database, store) = configured_store("automation-execution-unavailable-backoff");
+    store
+        .enqueue_automation_execution_job(&request(), &candidate(), 100)
+        .unwrap();
+    let mut first_times = [150_i64, 200].into_iter();
+    assert!(
+        run_automation_execution_controller_iteration(
+            &store,
+            None,
+            &candidate(),
+            "stationd-test-controller",
+            &mut || Ok(first_times.next().unwrap()),
+        )
+        .unwrap()
+    );
+    let first = store
+        .read_automation_execution_job(JOB_ID)
+        .unwrap()
+        .unwrap();
+    assert_eq!(first.attempt_count, 1);
+    assert_eq!(first.next_attempt_at_unix_ms, 60_200);
+    assert!(
+        store
+            .claim_next_automation_execution_job("other-controller", &candidate(), 60_199, 1_000)
+            .unwrap()
+            .is_none()
+    );
+    drop(store);
+
+    let reopened = StationStore::open(&database).unwrap();
+    let second = reopened
+        .claim_next_automation_execution_job("other-controller", &candidate(), 60_200, 1_000)
+        .unwrap()
+        .unwrap();
+    assert_eq!(second.attempt_count, 2);
+    reopened
+        .record_automation_execution_attempt_failure(
+            JOB_ID,
+            "other-controller",
+            "adapter_unavailable",
+            true,
+            60_250,
+        )
+        .unwrap();
+    let second_pending = reopened
+        .read_automation_execution_job(JOB_ID)
+        .unwrap()
+        .unwrap();
+    assert_eq!(second_pending.next_attempt_at_unix_ms, 180_250);
+    drop(reopened);
+    let _ = std::fs::remove_file(database);
+}
+
+struct HeartbeatAttempt {
+    receipt: AutomationExecutionReceipt,
+}
+
+impl AutomationExecutionAttempt for HeartbeatAttempt {
+    fn poll(
+        &mut self,
+        _deadline_unix_ms: i64,
+        heartbeat: &mut dyn FnMut() -> Result<(), String>,
+    ) -> Result<AutomationExecutionAttemptState, AutomationExecutionAdapterFailure> {
+        heartbeat().map_err(|_| AutomationExecutionAdapterFailure::RetryableTimeout)?;
+        Ok(AutomationExecutionAttemptState::Completed(Box::new(
+            self.receipt.clone(),
+        )))
+    }
+
+    fn terminate(&mut self) -> Result<(), String> {
+        Ok(())
+    }
+}
+
+struct HeartbeatAdapter;
+
+impl AutomationExecutionAdapter for HeartbeatAdapter {
+    fn adapter_id(&self) -> &str {
+        ADAPTER_ID
+    }
+
+    fn begin(
+        &self,
+        _request: &AutomationExecutionRequest,
+        claim_id: &str,
+        _deadline_unix_ms: i64,
+    ) -> Result<Box<dyn AutomationExecutionAttempt>, AutomationExecutionAdapterFailure> {
+        let mut exact_receipt = receipt();
+        exact_receipt.claim_id = claim_id.into();
+        Ok(Box::new(HeartbeatAttempt {
+            receipt: exact_receipt,
+        }))
+    }
+}
+
+#[test]
+fn heartbeat_extends_the_authoritative_deadline_before_completion() {
+    let (database, store) = configured_store("automation-execution-heartbeat-deadline");
+    let mut long_lived_evidence = connection_evidence();
+    long_lived_evidence.evidence_id = "99999999-2222-4333-8444-555555555555".into();
+    long_lived_evidence.expires_at_unix_ms = 100_000;
+    store
+        .append_automation_connection_test_evidence(&long_lived_evidence, &candidate_identity(), 60)
+        .unwrap();
+    store
+        .enqueue_automation_execution_job(&request(), &candidate(), 100)
+        .unwrap();
+    // The original 60-second lease expires at 60,150. The completion arrives
+    // after that point, but the adapter heartbeat renews durable authority at
+    // 50,000 and completion is therefore valid.
+    let mut times = [150_i64, 151, 50_000, 65_000].into_iter();
+    assert!(
+        run_automation_execution_controller_iteration(
+            &store,
+            Some(&HeartbeatAdapter),
+            &candidate(),
+            "stationd-test-controller",
+            &mut || Ok(times.next().unwrap()),
+        )
+        .unwrap()
+    );
+    let completed = store
+        .read_automation_execution_job(JOB_ID)
+        .unwrap()
+        .unwrap();
+    assert_eq!(completed.state, AutomationExecutionJobState::Completed);
+    assert_eq!(completed.completed_at_unix_ms, Some(65_000));
     drop(store);
     let _ = std::fs::remove_file(database);
 }
