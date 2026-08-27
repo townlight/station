@@ -16,6 +16,9 @@ use station_reporting::runtime::{
 };
 use std::path::Path;
 
+#[cfg(all(test, windows))]
+use station_media_journal::seed_test_generation_zero_journal;
+
 const MAX_INCREMENTAL_JOURNAL_EVENTS: usize = 2_048;
 
 #[cfg(all(test, windows))]
@@ -978,6 +981,34 @@ mod tests {
         }
     }
 
+    #[test]
+    fn seeded_generation_zero_journal_has_authentic_production_frames() {
+        let journal = test_path("tlj");
+        let worker_id = format!("station-worker-{CHANNEL}");
+        seed_test_generation_zero_journal(&journal, &worker_id, CHANNEL).unwrap();
+        let writer = JournalWriter::open(&journal, &worker_id, CHANNEL).unwrap();
+        assert_eq!(writer.next_sequence(), 514);
+        drop(writer);
+        let _ = std::fs::remove_file(journal.clone());
+        let _ = std::fs::remove_file(sidecar_path(&journal, ".writer-lock"));
+    }
+
+    #[test]
+    fn seeded_generation_zero_journal_rejects_a_corrupted_frame() {
+        let journal = test_path("tlj");
+        let worker_id = format!("station-worker-{CHANNEL}");
+        seed_test_generation_zero_journal(&journal, &worker_id, CHANNEL).unwrap();
+        let mut bytes = std::fs::read(&journal).unwrap();
+        bytes[16] ^= 0x01;
+        std::fs::write(&journal, bytes).unwrap();
+        assert!(matches!(
+            JournalWriter::open(&journal, &worker_id, CHANNEL),
+            Err(JournalError::Corrupt { .. })
+        ));
+        let _ = std::fs::remove_file(journal.clone());
+        let _ = std::fs::remove_file(sidecar_path(&journal, ".writer-lock"));
+    }
+
     struct WriterChildGuard {
         child: Child,
         armed: bool,
@@ -1103,21 +1134,10 @@ mod tests {
         if std::env::var_os(ABRUPT_WRITER).is_some() {
             let journal = PathBuf::from(std::env::var_os(WRITER_JOURNAL).unwrap());
             let ready = PathBuf::from(std::env::var_os(WRITER_READY).unwrap());
-            let mut writer =
-                JournalWriter::open(&journal, &format!("station-worker-{CHANNEL}"), CHANNEL)
-                    .unwrap();
-            writer
-                .append(&WorkerEventEnvelope {
-                    version: PROTOCOL_VERSION,
-                    worker_id: format!("station-worker-{CHANNEL}"),
-                    channel_id: CHANNEL.into(),
-                    sequence: 1,
-                    event: WorkerEvent::Ready { graph_revision: 1 },
-                })
-                .unwrap();
-            for sequence in 2..=514 {
-                writer.append(&heartbeat(sequence)).unwrap();
-            }
+            let worker_id = format!("station-worker-{CHANNEL}");
+            seed_test_generation_zero_journal(&journal, &worker_id, CHANNEL).unwrap();
+            let mut writer = JournalWriter::open(&journal, &worker_id, CHANNEL).unwrap();
+            writer.append(&heartbeat(514)).unwrap();
             File::create(ready).unwrap();
             loop {
                 thread::sleep(Duration::from_secs(1));
@@ -1231,21 +1251,10 @@ mod tests {
         if std::env::var_os(ABRUPT_WRITER).is_some() {
             let journal = PathBuf::from(std::env::var_os(WRITER_JOURNAL).unwrap());
             let ready = PathBuf::from(std::env::var_os(WRITER_READY).unwrap());
-            let mut writer =
-                JournalWriter::open(&journal, &format!("station-worker-{CHANNEL}"), CHANNEL)
-                    .unwrap();
-            writer
-                .append(&WorkerEventEnvelope {
-                    version: PROTOCOL_VERSION,
-                    worker_id: format!("station-worker-{CHANNEL}"),
-                    channel_id: CHANNEL.into(),
-                    sequence: 1,
-                    event: WorkerEvent::Ready { graph_revision: 1 },
-                })
-                .unwrap();
-            for sequence in 2..=514 {
-                writer.append(&heartbeat(sequence)).unwrap();
-            }
+            let worker_id = format!("station-worker-{CHANNEL}");
+            seed_test_generation_zero_journal(&journal, &worker_id, CHANNEL).unwrap();
+            let mut writer = JournalWriter::open(&journal, &worker_id, CHANNEL).unwrap();
+            writer.append(&heartbeat(514)).unwrap();
             File::create(ready).unwrap();
             loop {
                 thread::sleep(Duration::from_secs(1));

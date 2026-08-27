@@ -40,5 +40,6 @@ zeroize.workspace = true
 
 [dev-dependencies]
 image.workspace = true
+station-media-journal = { workspace = true, features = ["test-support"] }
 station-metadata.workspace = true
 station-maintenance = { workspace = true, features = ["test-support"] }
