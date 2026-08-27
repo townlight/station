@@ -16,6 +16,7 @@ station-media-assets.workspace = true
 station-media-journal.workspace = true
 station-media-protocol.workspace = true
 station-readiness.workspace = true
+station-recording.workspace = true
 station-runtime.workspace = true
 station-schedule.workspace = true
 station-storage.workspace = true

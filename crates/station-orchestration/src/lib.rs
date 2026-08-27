@@ -1,3 +1,10 @@
+mod scheduled_recording_controller;
+
+use scheduled_recording_controller::{
+    ActiveRecordingCapture, ArmedRecordingPlan, RECORDING_WORKER_ACTOR_ID, ReadyRecordingCapture,
+    RecordingCaptureControllerState, plan_armed_recording,
+};
+
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 use std::fs;
@@ -38,6 +45,10 @@ use station_media_protocol::{
 use station_readiness::derive_loudness_outcome;
 use station_readiness::{
     CandidateIdentity, LoudnessProofOutcome, ReceiverAcceptance, SinkLoudnessProof,
+};
+use station_recording::{
+    RecordingActor, RecordingActorRole, RecordingEvent, RecordingExecutionAuthority,
+    RecordingLifecycle, RecordingTransitionRequest, ScheduledRecording,
 };
 use station_runtime::{
     CommandAttemptFailure, CommandAttemptPhase, SupervisorError, WorkerSupervisor,
@@ -1004,6 +1015,8 @@ pub struct ChannelController {
     live_control: Option<LiveControlState>,
     caption_dispatch: Option<CaptionDispatchState>,
     caption_dispatch_detail: Option<String>,
+    channel_configuration: ChannelConfiguration,
+    recording_capture: Option<RecordingCaptureControllerState>,
 }
 
 impl ChannelController {
@@ -1104,6 +1117,8 @@ impl ChannelController {
             live_control: None,
             caption_dispatch: None,
             caption_dispatch_detail: None,
+            channel_configuration: channel.clone(),
+            recording_capture: None,
         })
     }
 
@@ -3357,6 +3372,365 @@ impl ChannelController {
         }
     }
 
+    fn recording_worker_actor() -> RecordingActor {
+        RecordingActor {
+            actor_id: RECORDING_WORKER_ACTOR_ID.into(),
+            role: RecordingActorRole::RecordingWorker,
+        }
+    }
+
+    fn recording_execution(recording: &ScheduledRecording) -> Option<RecordingExecutionAuthority> {
+        match &recording.lifecycle {
+            RecordingLifecycle::Armed { execution, .. }
+            | RecordingLifecycle::Capturing { execution, .. }
+            | RecordingLifecycle::Finalizing { execution, .. }
+            | RecordingLifecycle::Completed { execution, .. }
+            | RecordingLifecycle::Failed { execution, .. }
+            | RecordingLifecycle::CancelledAfterArm { execution, .. } => Some(execution.clone()),
+            RecordingLifecycle::Draft | RecordingLifecycle::CancelledBeforeArm { .. } => None,
+        }
+    }
+
+    fn transition_recording(
+        store: &StationStore,
+        recording: &ScheduledRecording,
+        event: RecordingEvent,
+        now_unix_ms: i64,
+    ) -> Result<ScheduledRecording, OrchestrationError> {
+        let outcome = recording
+            .transition(RecordingTransitionRequest {
+                expected_revision: recording.revision,
+                actor: Self::recording_worker_actor(),
+                occurred_at_unix_ms: now_unix_ms,
+                execution: Self::recording_execution(recording),
+                event,
+            })
+            .map_err(OrchestrationError::Storage)?;
+        store
+            .write_scheduled_recording_transition(&outcome.recording, &outcome.receipt)
+            .map_err(OrchestrationError::Storage)?;
+        Ok(outcome.recording)
+    }
+
+    fn fail_recording(
+        store: &StationStore,
+        recording: &ScheduledRecording,
+        now_unix_ms: i64,
+        reason: impl Into<String>,
+    ) -> Result<(), OrchestrationError> {
+        Self::transition_recording(
+            store,
+            recording,
+            RecordingEvent::Fail {
+                reason: reason.into(),
+            },
+            now_unix_ms,
+        )
+        .map(|_| ())
+    }
+
+    fn verify_recording_dependencies(
+        &self,
+        store: &StationStore,
+        recording: &ScheduledRecording,
+    ) -> Result<(), String> {
+        let execution = Self::recording_execution(recording)
+            .ok_or_else(|| "scheduled recording has no execution authority".to_string())?;
+        let current_candidate = self
+            .candidate_authority
+            .as_ref()
+            .ok_or_else(|| "scheduled recording candidate authority is not connected".to_string())?
+            .current_candidate()?;
+        if current_candidate.version != execution.candidate.version
+            || current_candidate.source_commit.as_deref()
+                != Some(execution.candidate.source_commit.as_str())
+        {
+            return Err("scheduled recording candidate identity is stale".into());
+        }
+        let current_configuration =
+            store.current_channel_output_configuration_hash(&self.channel_id)?;
+        if current_configuration != execution.channel_configuration_hash {
+            return Err("scheduled recording channel output configuration is stale".into());
+        }
+        Ok(())
+    }
+
+    fn start_scheduled_recording(
+        &mut self,
+        store: &StationStore,
+        recording: &ScheduledRecording,
+        now_unix_ms: i64,
+        output_index: u16,
+        sink_id: String,
+        duration_ms: u64,
+        max_bytes: u64,
+    ) -> Result<(), OrchestrationError> {
+        if let Err(reason) = self.verify_recording_dependencies(store, recording) {
+            return Self::fail_recording(store, recording, now_unix_ms, reason);
+        }
+        let response = match self.supervisor.command(
+            &format!("recording-start-{}", recording.definition.recording_id),
+            ChannelCommand::StartScheduledRecording {
+                recording_id: recording.definition.recording_id.clone(),
+                output_index,
+                sink_id: sink_id.clone(),
+                duration_ms,
+                max_bytes,
+            },
+            self.command_timeout,
+        ) {
+            Ok(response) => response,
+            Err(error) => {
+                let termination = self.supervisor.force_terminate();
+                Self::fail_recording(
+                    store,
+                    recording,
+                    now_unix_ms,
+                    format!(
+                        "Scheduled recording start delivery was ambiguous; the worker session was retired ({termination:?}): {error:?}"
+                    ),
+                )?;
+                return Err(OrchestrationError::Worker(error));
+            }
+        };
+        let WorkerEvent::ScheduledRecordingStarted {
+            recording_id,
+            output_index: actual_output_index,
+            sink_id: actual_sink_id,
+            duration_ms: actual_duration_ms,
+            max_bytes: actual_max_bytes,
+            artifact_relative_path,
+            worker_instance_id,
+            graph_revision,
+        } = response.event
+        else {
+            self.supervisor
+                .force_terminate()
+                .map_err(OrchestrationError::Worker)?;
+            Self::fail_recording(
+                store,
+                recording,
+                now_unix_ms,
+                "Scheduled recording worker did not acknowledge the requested capture.",
+            )?;
+            return Err(OrchestrationError::UnexpectedWorkerEvent);
+        };
+        let active = ActiveRecordingCapture {
+            recording_id,
+            output_index: actual_output_index,
+            sink_id: actual_sink_id,
+            duration_ms: actual_duration_ms,
+            max_bytes: actual_max_bytes,
+            artifact_relative_path,
+            worker_instance_id,
+            graph_revision,
+        };
+        if active.recording_id != recording.definition.recording_id
+            || active.output_index != output_index
+            || active.sink_id != sink_id
+            || active.duration_ms != duration_ms
+            || active.max_bytes != max_bytes
+            || active.validate().is_err()
+        {
+            self.supervisor
+                .force_terminate()
+                .map_err(OrchestrationError::Worker)?;
+            Self::fail_recording(
+                store,
+                recording,
+                now_unix_ms,
+                "Scheduled recording worker returned mismatched start authority.",
+            )?;
+            return Err(OrchestrationError::UnexpectedWorkerEvent);
+        }
+        Self::transition_recording(store, recording, RecordingEvent::StartCapture, now_unix_ms)?;
+        self.recording_capture = Some(RecordingCaptureControllerState::Capturing(active));
+        Ok(())
+    }
+
+    fn poll_scheduled_recording(
+        &mut self,
+        store: &StationStore,
+        recording: &ScheduledRecording,
+        active: ActiveRecordingCapture,
+        now_unix_ms: i64,
+    ) -> Result<(), OrchestrationError> {
+        let response = self
+            .supervisor
+            .command(
+                &format!("recording-poll-{}", active.recording_id),
+                ChannelCommand::PollScheduledRecording {
+                    recording_id: active.recording_id.clone(),
+                },
+                self.command_timeout,
+            )
+            .map_err(OrchestrationError::Worker)?;
+        match response.event {
+            WorkerEvent::ScheduledRecordingPending {
+                recording_id,
+                artifact_relative_path,
+                worker_instance_id,
+                graph_revision,
+            } if recording_id == active.recording_id
+                && artifact_relative_path == active.artifact_relative_path
+                && worker_instance_id == active.worker_instance_id
+                && graph_revision == active.graph_revision =>
+            {
+                self.recording_capture = Some(RecordingCaptureControllerState::Capturing(active));
+                Ok(())
+            }
+            WorkerEvent::ScheduledRecordingFailed {
+                recording_id,
+                artifact_relative_path,
+                worker_instance_id,
+                graph_revision,
+                code,
+                message,
+            } if recording_id == active.recording_id
+                && artifact_relative_path == active.artifact_relative_path
+                && worker_instance_id == active.worker_instance_id
+                && graph_revision == active.graph_revision =>
+            {
+                Self::fail_recording(
+                    store,
+                    recording,
+                    now_unix_ms,
+                    format!("Scheduled recording worker failed ({code}): {message}"),
+                )
+            }
+            WorkerEvent::ScheduledRecordingReady {
+                recording_id,
+                output_index,
+                sink_id,
+                artifact_relative_path,
+                worker_instance_id,
+                graph_revision,
+                size_bytes,
+                capture_sha256,
+                duration_ms,
+            } => {
+                let ready = ReadyRecordingCapture {
+                    active: ActiveRecordingCapture {
+                        recording_id,
+                        output_index,
+                        sink_id,
+                        duration_ms: active.duration_ms,
+                        max_bytes: active.max_bytes,
+                        artifact_relative_path,
+                        worker_instance_id,
+                        graph_revision,
+                    },
+                    size_bytes,
+                    capture_sha256,
+                    captured_duration_ms: duration_ms,
+                };
+                if ready.active != active || ready.validate().is_err() {
+                    self.supervisor
+                        .force_terminate()
+                        .map_err(OrchestrationError::Worker)?;
+                    Self::fail_recording(
+                        store,
+                        recording,
+                        now_unix_ms,
+                        "Scheduled recording worker returned mismatched terminal authority.",
+                    )?;
+                    return Err(OrchestrationError::UnexpectedWorkerEvent);
+                }
+                Self::transition_recording(
+                    store,
+                    recording,
+                    RecordingEvent::BeginFinalization,
+                    now_unix_ms,
+                )?;
+                self.recording_capture = Some(RecordingCaptureControllerState::Ready(ready));
+                Ok(())
+            }
+            _ => {
+                self.supervisor
+                    .force_terminate()
+                    .map_err(OrchestrationError::Worker)?;
+                Self::fail_recording(
+                    store,
+                    recording,
+                    now_unix_ms,
+                    "Scheduled recording worker returned an unexpected capture event.",
+                )?;
+                Err(OrchestrationError::UnexpectedWorkerEvent)
+            }
+        }
+    }
+
+    fn scheduled_recording_tick(
+        &mut self,
+        store: &StationStore,
+        now_unix_ms: i64,
+    ) -> Result<(), OrchestrationError> {
+        if matches!(
+            self.recording_capture,
+            Some(RecordingCaptureControllerState::Ready(_))
+        ) {
+            // Finalization is the next bounded controller slice. Retain the
+            // exact terminal authority in memory and do not issue another
+            // worker command until that authority has been durably consumed.
+            return Ok(());
+        }
+        if let Some(RecordingCaptureControllerState::Capturing(active)) =
+            self.recording_capture.take()
+        {
+            let recording = store
+                .read_scheduled_recording(&active.recording_id)
+                .map_err(OrchestrationError::Storage)?
+                .ok_or_else(|| {
+                    OrchestrationError::Storage(
+                        "active scheduled recording authority disappeared".into(),
+                    )
+                })?;
+            return self.poll_scheduled_recording(store, &recording, active, now_unix_ms);
+        }
+        let recordings = store
+            .list_scheduled_recordings_for_channel(&self.channel_id, 128)
+            .map_err(OrchestrationError::Storage)?;
+        if let Some(interrupted) = recordings
+            .iter()
+            .find(|recording| matches!(recording.lifecycle, RecordingLifecycle::Capturing { .. }))
+        {
+            return Self::fail_recording(
+                store,
+                interrupted,
+                now_unix_ms,
+                "Scheduled recording capture was interrupted before terminal worker evidence was retained.",
+            );
+        }
+        let Some(recording) = recordings
+            .iter()
+            .find(|recording| matches!(recording.lifecycle, RecordingLifecycle::Armed { .. }))
+        else {
+            return Ok(());
+        };
+        match plan_armed_recording(recording, &self.channel_configuration, now_unix_ms)
+            .map_err(OrchestrationError::Storage)?
+        {
+            ArmedRecordingPlan::Wait => Ok(()),
+            ArmedRecordingPlan::Fail { reason } => {
+                Self::fail_recording(store, recording, now_unix_ms, reason)
+            }
+            ArmedRecordingPlan::Start {
+                output_index,
+                sink_id,
+                duration_ms,
+                max_bytes,
+            } => self.start_scheduled_recording(
+                store,
+                recording,
+                now_unix_ms,
+                output_index,
+                sink_id,
+                duration_ms,
+                max_bytes,
+            ),
+        }
+    }
+
     pub fn run_once(
         &mut self,
         now_unix_ms: i64,
@@ -3365,6 +3739,7 @@ impl ChannelController {
             .ensure_running()
             .map_err(OrchestrationError::Worker)?;
         let store = StationStore::open(&self.database_path).map_err(OrchestrationError::Storage)?;
+        self.scheduled_recording_tick(&store, now_unix_ms)?;
         if matches!(self.output_proof, OutputProofState::Idle) {
             self.caption_proof_tick(&store, now_unix_ms)?;
         }

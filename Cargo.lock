@@ -1958,6 +1958,7 @@ dependencies = [
  "station-media-journal",
  "station-media-protocol",
  "station-readiness",
+ "station-recording",
  "station-runtime",
  "station-schedule",
  "station-schedule-automation",

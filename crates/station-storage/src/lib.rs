@@ -9909,7 +9909,14 @@ impl StationStore {
                         .into(),
                 );
             }
-            if receipt.kind != RecordingTransitionKind::Cancel {
+            // Failure must remain writable with the exact execution authority
+            // that was already persisted. A stale/removed schedule dependency
+            // is itself a reason execution may need to fail; rechecking it here
+            // would strand an armed or capturing recording forever.
+            if !matches!(
+                receipt.kind,
+                RecordingTransitionKind::Cancel | RecordingTransitionKind::Fail
+            ) {
                 self.recheck_scheduled_recording_schedule_binding(recording)?;
             }
             let record_json = serde_json::to_string(recording)
@@ -20679,6 +20686,35 @@ mod tests {
                 .unwrap_err()
                 .contains("schedule item is not committed")
         );
+        let failed_after_dependency_change = armed
+            .recording
+            .transition(station_recording::RecordingTransitionRequest {
+                expected_revision: 2,
+                actor: RecordingActor {
+                    actor_id: "00000000-0000-4000-8000-000000000021".into(),
+                    role: RecordingActorRole::RecordingWorker,
+                },
+                occurred_at_unix_ms: 10_001,
+                execution: scheduled_recording_execution(&armed.recording).cloned(),
+                event: station_recording::RecordingEvent::Fail {
+                    reason: "The committed schedule dependency changed before capture.".into(),
+                },
+            })
+            .unwrap();
+        store
+            .write_scheduled_recording_transition(
+                &failed_after_dependency_change.recording,
+                &failed_after_dependency_change.receipt,
+            )
+            .unwrap();
+        assert!(matches!(
+            store
+                .read_scheduled_recording(&draft.definition.recording_id)
+                .unwrap()
+                .unwrap()
+                .lifecycle,
+            RecordingLifecycle::Failed { .. }
+        ));
         let mut stale_schedule_recording = draft.clone();
         stale_schedule_recording.definition.recording_id =
             "77777777-8888-4999-8aaa-bbbbbbbbbbbb".into();
