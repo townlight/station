@@ -89,6 +89,15 @@ appends a server-attributed immutable access-audit row only after the bounded pa
 or bytes are constructed; invalid query shapes, unavailable projection, render
 failure, and audit failure fail closed without a success audit.
 
+The operator Reports screen is a read-only view of that authority. It validates the
+complete response shape, bounded fields, ordered entries, source/checkpoint binding,
+and opaque continuation pages before presenting them. It refuses to combine pages
+whose channel, window, journal/file source, raw sequence, or checkpoint revision
+changes, and it does not accept projection facts from the browser. CSV and XMLTV
+links use the authenticated server export routes. The screen labels absent metadata
+and journal gaps explicitly and states that neither the projection nor an export
+proves receiver delivery, downstream publication, playback, or audience viewing.
+
 This crate has no journal adapter, UTC timing derivation, content/franchise/category
 enrichment, evidence authenticator, worker-journal reader/writer, persistence, API,
 UI, catalog metadata join, EPG feed renderer, filesystem/network export delivery,
