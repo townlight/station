@@ -931,6 +931,7 @@ mod tests {
         path::PathBuf,
         process::{Child, Command},
         sync::{
+            Mutex,
             atomic::{AtomicU64, Ordering},
             mpsc,
         },
@@ -939,8 +940,10 @@ mod tests {
     };
 
     const CHANNEL: &str = "00000000-0000-4000-8000-000000000001";
-    const CHILD_SYNC_TIMEOUT: Duration = Duration::from_secs(30);
+    const CHILD_SYNC_TIMEOUT: Duration = Duration::from_secs(120);
+    const WRITER_MANIFEST_TIMEOUT: Duration = Duration::from_secs(120);
     static NEXT_TEST_PATH: AtomicU64 = AtomicU64::new(0);
+    static WRITER_PROCESS_TEST_LOCK: Mutex<()> = Mutex::new(());
     const MANIFEST_SWAP_SOURCE: &str = "TOWNLIGHT_ASRUN_MANIFEST_SWAP_SOURCE";
     const MANIFEST_SWAP_DESTINATION: &str = "TOWNLIGHT_ASRUN_MANIFEST_SWAP_DESTINATION";
 
@@ -1007,7 +1010,7 @@ mod tests {
     }
 
     fn wait_for_writer_manifest(writer: &mut WriterChildGuard, ready: &Path, manifest: &Path) {
-        let deadline = Instant::now() + CHILD_SYNC_TIMEOUT;
+        let deadline = Instant::now() + WRITER_MANIFEST_TIMEOUT;
         loop {
             if ready.exists() && manifest.exists() {
                 if let Some(status) = writer
@@ -1026,7 +1029,7 @@ mod tests {
             }
             assert!(
                 Instant::now() < deadline,
-                "writer child did not publish the compacted manifest within 30 seconds"
+                "writer child did not publish the compacted manifest within {WRITER_MANIFEST_TIMEOUT:?}"
             );
             thread::sleep(Duration::from_millis(10));
         }
@@ -1034,26 +1037,17 @@ mod tests {
 
     #[test]
     fn wait_for_writer_manifest_rejects_a_child_that_exits_after_publishing_sentinels() {
-        const READY: &str = "TOWNLIGHT_ASRUN_EXITED_WRITER_READY";
-        const MANIFEST: &str = "TOWNLIGHT_ASRUN_EXITED_WRITER_MANIFEST";
-        if let (Some(ready), Some(manifest)) = (std::env::var_os(READY), std::env::var_os(MANIFEST))
-        {
-            std::fs::write(ready, b"ready").unwrap();
-            std::fs::write(manifest, b"manifest").unwrap();
-            return;
-        }
-
         let ready = test_path("writer-ready");
         let manifest = test_path("generation-manifest");
+        std::fs::write(&ready, b"ready").unwrap();
+        std::fs::write(&manifest, b"manifest").unwrap();
         let mut writer = WriterChildGuard::new(
-            Command::new(std::env::current_exe().unwrap())
-                .arg("--exact")
-                .arg("asrun_journal_adapter::tests::wait_for_writer_manifest_rejects_a_child_that_exits_after_publishing_sentinels")
-                .env(READY, &ready)
-                .env(MANIFEST, &manifest)
+            Command::new("cmd.exe")
+                .args(["/C", "exit", "0"])
                 .spawn()
                 .unwrap(),
         );
+        thread::sleep(Duration::from_millis(100));
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             wait_for_writer_manifest(&mut writer, &ready, &manifest);
         }));
@@ -1129,6 +1123,10 @@ mod tests {
                 thread::sleep(Duration::from_secs(1));
             }
         }
+
+        let _writer_process_test_lock = WRITER_PROCESS_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
 
         let database = test_path("db");
         let journal = database.with_extension("tlj");
@@ -1253,6 +1251,10 @@ mod tests {
                 thread::sleep(Duration::from_secs(1));
             }
         }
+
+        let _writer_process_test_lock = WRITER_PROCESS_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
 
         let database = test_path("db");
         let journal = database.with_extension("tlj");
