@@ -250,14 +250,14 @@ impl StationStore {
     ) -> Result<Option<UnderwritingFlight>, String> {
         validate_underwriting_id(flight_id)?;
         let s = self.prepare(
-            "SELECT flight_id,revision,record_json FROM underwriting_flights WHERE flight_id=?1",
+            "SELECT flight_id,sponsor_id,spot_id,revision,record_json FROM underwriting_flights WHERE flight_id=?1",
         )?;
         let id = c_string(flight_id, "underwriting flight identity")?;
         bind_text(self.database, s.raw, 1, &id)?;
         match unsafe { sqlite3_step(s.raw) } {
             SQLITE_DONE => Ok(None),
             SQLITE_ROW => {
-                let value = read_flight_row(s.raw, 0)?;
+                let value = read_current_flight_row(s.raw)?;
                 let latest = self
                     .read_underwriting_flight_revision(flight_id, value.revision)?
                     .ok_or("current underwriting flight has no exact history snapshot")?;
@@ -632,14 +632,19 @@ impl StationStore {
         &self,
         item: &ScheduleItem,
     ) -> Result<(), String> {
-        let s=self.prepare("SELECT record_json,schedule_item_revision FROM underwriting_placements WHERE schedule_item_id=?1")?;
+        let s = self.prepare(
+            "SELECT placement_id FROM underwriting_placements WHERE schedule_item_id=?1",
+        )?;
         let id = c_string(&item.item_id, "schedule")?;
         bind_text(self.database, s.raw, 1, &id)?;
         match unsafe { sqlite3_step(s.raw) } {
             SQLITE_DONE => Ok(()),
             SQLITE_ROW => {
-                let p: UnderwritingPlacementIntent = serde_json::from_str(&column_text(s.raw, 0)?)
-                    .map_err(|_| "stored placement corrupt")?;
+                let placement_id = column_text(s.raw, 0)?;
+                drop(s);
+                let (p, _, _) = self
+                    .read_underwriting_placement(&placement_id)?
+                    .ok_or("underwriting-bound current placement is missing")?;
                 let flight = self
                     .read_underwriting_flight_revision(&p.flight_id, p.flight_revision)?
                     .ok_or("placement flight revision missing")?;
@@ -769,8 +774,12 @@ fn validate_attribution(actor: &str, time: i64) -> Result<(), UnderwritingWriteE
 fn map_contract_error(error: String, current_revision: Option<u64>) -> UnderwritingWriteError {
     if error.contains("cannot be rebound") {
         UnderwritingWriteError::Rebound
-    } else {
+    } else if error.contains("compare-and-set revision")
+        || error.contains("creation requires revision one and no expected revision")
+    {
         UnderwritingWriteError::Conflict { current_revision }
+    } else {
+        UnderwritingWriteError::Invalid(error)
     }
 }
 fn finish_underwriting(
@@ -871,6 +880,20 @@ fn read_flight_row(
     flight.validate()?;
     if flight.flight_id != column_text(statement, offset)?
         || flight.revision != column_u64(statement, offset + 1, "flight revision")?
+    {
+        return Err("stored underwriting flight indexed fields disagree with JSON".into());
+    }
+    Ok(flight)
+}
+
+fn read_current_flight_row(statement: *mut SqliteStatement) -> Result<UnderwritingFlight, String> {
+    let flight: UnderwritingFlight = serde_json::from_str(&column_text(statement, 4)?)
+        .map_err(|error| format!("stored underwriting flight is corrupt: {error}"))?;
+    flight.validate()?;
+    if flight.flight_id != column_text(statement, 0)?
+        || flight.sponsor_id != column_text(statement, 1)?
+        || flight.spot_id != column_text(statement, 2)?
+        || flight.revision != column_u64(statement, 3, "flight revision")?
     {
         return Err("stored underwriting flight indexed fields disagree with JSON".into());
     }
@@ -998,6 +1021,12 @@ mod corruption_tests {
         store.execute("UPDATE underwriting_flights SET revision=2 WHERE flight_id='33333333-3333-4333-8333-333333333333'").unwrap();
         assert!(store.read_underwriting_flight(FLIGHT).is_err());
         store.execute("UPDATE underwriting_flights SET revision=1 WHERE flight_id='33333333-3333-4333-8333-333333333333'").unwrap();
+        store.execute("UPDATE underwriting_flights SET sponsor_id='aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa' WHERE flight_id='33333333-3333-4333-8333-333333333333'").unwrap();
+        assert!(store.read_underwriting_flight(FLIGHT).is_err());
+        store.execute("UPDATE underwriting_flights SET sponsor_id='22222222-2222-4222-8222-222222222222' WHERE flight_id='33333333-3333-4333-8333-333333333333'").unwrap();
+        store.execute("UPDATE underwriting_flights SET spot_id='99999999-9999-4999-8999-999999999999' WHERE flight_id='33333333-3333-4333-8333-333333333333'").unwrap();
+        assert!(store.read_underwriting_flight(FLIGHT).is_err());
+        store.execute("UPDATE underwriting_flights SET spot_id='11111111-1111-4111-8111-111111111111' WHERE flight_id='33333333-3333-4333-8333-333333333333'").unwrap();
         store
             .write_schedule_item(&ScheduleItemWrite {
                 item: ScheduleItem {
@@ -1029,5 +1058,32 @@ mod corruption_tests {
             .unwrap();
         store.execute("UPDATE underwriting_placements SET revision=2 WHERE placement_id='55555555-5555-4555-8555-555555555555'").unwrap();
         assert!(store.read_underwriting_placement(PLACEMENT).is_err());
+        let revised_schedule = ScheduleItem {
+            item_id: SCHEDULE.into(),
+            revision: 2,
+            channel_id: CHANNEL.into(),
+            asset_id: ASSET.into(),
+            title: "Spot title edit".into(),
+            starts_at_unix_ms: 120_000,
+            duration_ms: 30_000,
+            state: ScheduleState::Draft,
+        };
+        assert!(
+            store
+                .write_schedule_item(&ScheduleItemWrite {
+                    item: revised_schedule,
+                    changed_by: "operator".into(),
+                    occurred_at_unix_ms: 5,
+                })
+                .is_err()
+        );
+        assert_eq!(
+            store
+                .read_schedule_item(SCHEDULE)
+                .unwrap()
+                .unwrap()
+                .revision,
+            1
+        );
     }
 }

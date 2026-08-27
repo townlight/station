@@ -480,3 +480,90 @@ fn flight_and_placement_backdated_cas_roll_back_without_history_change() {
         2
     );
 }
+
+#[test]
+fn classifies_only_creation_and_revision_fences_as_conflicts() {
+    let database = database_path("error-classification");
+    let store = StationStore::open(&database).unwrap();
+    store
+        .put_media_asset(&MediaAsset {
+            asset_id: ASSET.into(),
+            media_path: database.with_extension("ts").to_string_lossy().into_owned(),
+            duration_ms: 30_000,
+            readiness: AssetReadiness::Ready,
+        })
+        .unwrap();
+    store
+        .write_underwriting_spot(&spot(1), None, "operator", 100)
+        .unwrap();
+
+    let mut semantic_mismatch = flight();
+    semantic_mismatch.sponsor_id = SPONSOR_TWO.into();
+    assert!(
+        matches!(store.write_underwriting_flight(&semantic_mismatch, None, "operator", 101), Err(UnderwritingWriteError::Invalid(message)) if message.contains("exact current sponsor spot revision"))
+    );
+
+    let mut wrong_creation_revision = flight();
+    wrong_creation_revision.revision = 2;
+    assert!(matches!(
+        store.write_underwriting_flight(&wrong_creation_revision, None, "operator", 102),
+        Err(UnderwritingWriteError::Conflict {
+            current_revision: None
+        })
+    ));
+    store
+        .write_underwriting_flight(&flight(), None, "operator", 103)
+        .unwrap();
+
+    let second_spot = UnderwritingSpot {
+        spot_id: SPOT_TWO.into(),
+        sponsor_id: SPONSOR_TWO.into(),
+        asset_id: ASSET.into(),
+        label: "Second sponsor".into(),
+        duration_ms: 30_000,
+        revision: 1,
+    };
+    store
+        .write_underwriting_spot(&second_spot, None, "operator", 104)
+        .unwrap();
+    let mut rebound = flight();
+    rebound.revision = 2;
+    rebound.sponsor_id = SPONSOR_TWO.into();
+    rebound.spot_id = SPOT_TWO.into();
+    assert!(matches!(
+        store.write_underwriting_flight(&rebound, Some(1), "operator", 105),
+        Err(UnderwritingWriteError::Rebound)
+    ));
+
+    let mut flight_v2 = flight();
+    flight_v2.revision = 2;
+    assert!(matches!(
+        store.write_underwriting_flight(&flight_v2, Some(9), "operator", 106),
+        Err(UnderwritingWriteError::Conflict {
+            current_revision: Some(1)
+        })
+    ));
+
+    let schedule = ScheduleItem {
+        item_id: SCHEDULE.into(),
+        revision: 1,
+        channel_id: CHANNEL.into(),
+        asset_id: ASSET.into(),
+        title: "Underwriting".into(),
+        starts_at_unix_ms: 120_000,
+        duration_ms: 30_000,
+        state: ScheduleState::Draft,
+    };
+    store
+        .write_schedule_item(&ScheduleItemWrite {
+            item: schedule,
+            changed_by: "operator".into(),
+            occurred_at_unix_ms: 107,
+        })
+        .unwrap();
+    let mut wrong_channel = placement(PLACEMENT, 120_000);
+    wrong_channel.channel_id = "dddddddd-dddd-4ddd-8ddd-dddddddddddd".into();
+    assert!(
+        matches!(store.write_underwriting_placement(&wrong_channel, SCHEDULE, 1, None, "operator", 108), Err(UnderwritingWriteError::Invalid(message)) if message.contains("violates"))
+    );
+}

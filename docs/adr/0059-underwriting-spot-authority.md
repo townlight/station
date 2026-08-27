@@ -59,7 +59,11 @@ while the audited schedule commit gate may advance that exact binding to
 Committed without changing channel, asset, start, or duration. Current and
 historical flight and placement readers fail closed when indexed identities or
 revisions, JSON, and the latest immutable history snapshot disagree; successor
-write occurrence times cannot move backwards.
+write occurrence times cannot move backwards. Current flight reads additionally
+cross-check the indexed sponsor and spot identities. Schedule commit/edit gates
+resolve the full strict current-placement/latest-history authority, and write
+errors distinguish semantic invalidity from actual creation or revision-fence
+conflicts.
 
 This increment does not yet persist proof joins or export requests, consume
 trusted ScheduledAssetOnAir facts, render affidavit/export bytes, expose an
