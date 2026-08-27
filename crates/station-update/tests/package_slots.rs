@@ -51,9 +51,20 @@ fn package_bytes(manifest: &UpdatePackageManifest, extra: Option<(&str, &[u8])>)
     archive
         .write_all(&serde_json::to_vec(manifest).unwrap())
         .unwrap();
-    for (path, bytes) in payloads() {
+    for specification in &manifest.files {
+        let bytes = payloads()
+            .into_iter()
+            .find(|(path, _)| *path == specification.path)
+            .map(|(_, bytes)| bytes)
+            .unwrap_or_else(|| {
+                if specification.path == "station-updater.exe" {
+                    b"legacy station updater proof bytes"
+                } else {
+                    panic!("missing package fixture bytes for {}", specification.path)
+                }
+            });
         archive
-            .start_file(format!("payload/{path}"), options)
+            .start_file(format!("payload/{}", specification.path), options)
             .unwrap();
         archive.write_all(bytes).unwrap();
     }
@@ -147,6 +158,34 @@ fn rejects_extra_or_path_traversal_entries_before_extraction() {
 }
 
 #[test]
+fn rejects_an_undeclared_allowlisted_entry_after_manifest_parse() {
+    let manifest = package_manifest();
+    let package = package_bytes(&manifest, Some(("payload/station-updater.exe", b"legacy")));
+    let (updates, slots, staged) = staged_fixture(&package);
+    let error = prepare_release_slot(&staged, &updates, &slots, NOW + 1).unwrap_err();
+    assert!(error.contains("exactly match"), "{error}");
+    assert_eq!(std::fs::read_dir(&slots).unwrap().count(), 0);
+    remove_fixture(slots.parent().unwrap());
+}
+
+#[test]
+fn rejects_an_undeclared_optional_helper_after_manifest_parse() {
+    let mut manifest = package_manifest();
+    manifest
+        .files
+        .retain(|file| file.path != "nas-publisher.exe");
+    let package = package_bytes(
+        &manifest,
+        Some(("payload/nas-publisher.exe", b"nas publisher proof bytes")),
+    );
+    let (updates, slots, staged) = staged_fixture(&package);
+    let error = prepare_release_slot(&staged, &updates, &slots, NOW + 1).unwrap_err();
+    assert!(error.contains("exactly match"), "{error}");
+    assert_eq!(std::fs::read_dir(&slots).unwrap().count(), 0);
+    remove_fixture(slots.parent().unwrap());
+}
+
+#[test]
 fn reads_legacy_three_payload_identity_but_refuses_to_prepare_it() {
     let updater = b"legacy station updater proof bytes";
     let mut legacy = package_manifest();
@@ -158,10 +197,10 @@ fn reads_legacy_three_payload_identity_but_refuses_to_prepare_it() {
     });
     legacy.validate().unwrap();
 
-    let package = package_bytes(&legacy, Some(("payload/station-updater.exe", updater)));
+    let package = package_bytes(&legacy, None);
     let (updates, slots, staged) = staged_fixture(&package);
     let error = prepare_release_slot(&staged, &updates, &slots, NOW + 1).unwrap_err();
-    assert!(error.contains("unexpected number") || error.contains("legacy package schema"));
+    assert!(error.contains("identity") || error.contains("legacy package schema"));
     remove_fixture(slots.parent().unwrap());
 }
 

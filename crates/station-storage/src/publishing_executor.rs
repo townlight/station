@@ -1517,10 +1517,12 @@ fn prepare_nas_destination(
     }
     let current = existing;
     // Pin every directory from the volume/share root through the configured
-    // root. Each handle is opened without reparse traversal and without
-    // delete sharing, so an intermediate junction/rename cannot rebind a
-    // pathname while the operation is in progress. Failure to pin any link
-    // fails closed rather than falling back to a nearest pathname anchor.
+    // root with handle-relative, no-follow opens. Higher ancestors may allow
+    // delete sharing because they are not the configured authority; the
+    // configured root itself remains non-delete-shared. A final fresh-path
+    // FileId recheck rejects a root rebind before any receipt is emitted.
+    // Failure to pin any link fails closed rather than falling back to a
+    // nearest pathname anchor.
     let mut chain = Vec::new();
     let mut ancestor = current.clone();
     loop {
@@ -1533,8 +1535,18 @@ fn prepare_nas_destination(
     }
     chain.reverse();
     let mut pins = Vec::with_capacity(chain.len());
-    for path in chain {
-        pins.push(open_nas_directory_no_follow(&path)?);
+    for (index, path) in chain.iter().enumerate() {
+        if index == 0 {
+            pins.push(open_nas_directory_no_follow(path)?);
+            continue;
+        }
+        let leaf = path
+            .file_name()
+            .ok_or("managed NAS ancestry component is unavailable")?;
+        let parent = pins
+            .last()
+            .ok_or("managed NAS ancestry parent was not retained")?;
+        pins.push(open_nas_directory_relative(parent, leaf, path != &current)?);
     }
     let destination = current.join(format!("{media_sha256}.mp4"));
     Ok((pins, destination))
@@ -1894,17 +1906,100 @@ fn resume_process(process_id: u32) -> Result<(), String> {
 
 #[cfg(windows)]
 fn open_nas_directory_no_follow(path: &Path) -> Result<File, String> {
+    open_nas_directory_no_follow_with_share(path, false)
+}
+
+#[cfg(windows)]
+fn open_nas_directory_relative(
+    parent: &File,
+    leaf: &std::ffi::OsStr,
+    share_delete: bool,
+) -> Result<File, String> {
+    use std::os::windows::io::{FromRawHandle, RawHandle};
+    use windows_sys::Wdk::Foundation::OBJECT_ATTRIBUTES;
+    use windows_sys::Wdk::Storage::FileSystem::{
+        FILE_DIRECTORY_FILE, FILE_OPEN, FILE_OPEN_REPARSE_POINT, FILE_SYNCHRONOUS_IO_NONALERT,
+        NtCreateFile,
+    };
+    use windows_sys::Win32::Foundation::{STATUS_SUCCESS, UNICODE_STRING};
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_ATTRIBUTE_NORMAL, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+    };
+    use windows_sys::Win32::System::IO::IO_STATUS_BLOCK;
+
+    let name = leaf.encode_wide().collect::<Vec<_>>();
+    let byte_length = u16::try_from(name.len().saturating_mul(std::mem::size_of::<u16>()))
+        .map_err(|_| "managed NAS ancestry component is too long")?;
+    let unicode = UNICODE_STRING {
+        Length: byte_length,
+        MaximumLength: byte_length,
+        Buffer: name.as_ptr() as *mut u16,
+    };
+    let attributes = OBJECT_ATTRIBUTES {
+        Length: std::mem::size_of::<OBJECT_ATTRIBUTES>() as u32,
+        RootDirectory: parent.as_raw_handle(),
+        ObjectName: &unicode,
+        Attributes: 0,
+        SecurityDescriptor: std::ptr::null(),
+        SecurityQualityOfService: std::ptr::null(),
+    };
+    let mut iosb = IO_STATUS_BLOCK::default();
+    let mut handle = std::ptr::null_mut();
+    let status = unsafe {
+        NtCreateFile(
+            &mut handle,
+            // NtCreateFile requires traverse rights on a retained directory
+            // handle when it is used as OBJECT_ATTRIBUTES.RootDirectory;
+            // FILE_LIST_DIRECTORY is deliberately not requested.
+            0x0000_0080 | 0x0000_0020 | 0x0010_0000,
+            &attributes,
+            &mut iosb,
+            std::ptr::null(),
+            FILE_ATTRIBUTE_NORMAL,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | if share_delete { FILE_SHARE_DELETE } else { 0 },
+            FILE_OPEN,
+            FILE_DIRECTORY_FILE | FILE_OPEN_REPARSE_POINT | FILE_SYNCHRONOUS_IO_NONALERT,
+            std::ptr::null(),
+            0,
+        )
+    };
+    if status != STATUS_SUCCESS || handle.is_null() {
+        return Err(format!(
+            "managed NAS directory could not be pinned relative to its retained parent ({}): NTSTATUS 0x{status:08x}",
+            leaf.to_string_lossy()
+        ));
+    }
+    let file = unsafe { File::from_raw_handle(handle as RawHandle) };
+    let metadata = file
+        .metadata()
+        .map_err(|_| "managed NAS directory could not be inspected")?;
+    if metadata.file_attributes() & 0x0400 != 0 || !metadata.is_dir() {
+        return Err("managed NAS ancestry component is a reparse point or not a directory".into());
+    }
+    Ok(file)
+}
+
+#[cfg(windows)]
+fn open_nas_directory_no_follow_with_share(
+    path: &Path,
+    share_delete: bool,
+) -> Result<File, String> {
     const FILE_READ_ATTRIBUTES: u32 = 0x0000_0080;
     use windows_sys::Win32::Storage::FileSystem::{
-        FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_READ, FILE_SHARE_WRITE,
+        FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_DELETE,
+        FILE_SHARE_READ, FILE_SHARE_WRITE,
     };
     let file = fs::OpenOptions::new()
         // Attribute access is sufficient to pin a directory and avoids
-        // requesting list/read permission from SMB shares. Omitting
-        // FILE_SHARE_DELETE is intentional: this handle owns the ancestry
-        // pin against rename, removal, and junction substitution.
+        // requesting list/read permission from SMB shares. The configured
+        // root uses no delete sharing; higher ancestors may allow it solely
+        // for ordinary local roots already held by other processes. Every
+        // ancestor remains no-follow pinned and the configured root is
+        // rechecked by FileId before a receipt.
         .access_mode(FILE_READ_ATTRIBUTES)
-        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+        .share_mode(
+            FILE_SHARE_READ | FILE_SHARE_WRITE | if share_delete { FILE_SHARE_DELETE } else { 0 },
+        )
         .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
         .open(path)
         .map_err(|error| {
@@ -2699,8 +2794,7 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let root = PathBuf::from(r"C:\Users\scott\AppData\Local\Temp")
-            .join(format!("townlight-nas-delivery-{nonce}"));
+        let root = std::env::temp_dir().join(format!("townlight-nas-delivery-{nonce}"));
         let media = root.with_extension("media");
         std::fs::create_dir_all(&root).unwrap();
         std::fs::write(&media, b"exact media").unwrap();
@@ -2743,7 +2837,7 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let root = PathBuf::from(r"C:\Users\scott\AppData\Local\Temp")
+        let root = std::env::temp_dir()
             .join(format!("townlight-nas-missing-{nonce}"))
             .join("not-created");
         assert!(!root.exists());
@@ -2759,8 +2853,7 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let root = PathBuf::from(r"C:\Users\scott\AppData\Local\Temp")
-            .join(format!("townlight-nas-reparse-{nonce}"));
+        let root = std::env::temp_dir().join(format!("townlight-nas-reparse-{nonce}"));
         let source_root = root.join("source");
         let configured_root = root.join("configured");
         std::fs::create_dir_all(&source_root).unwrap();
@@ -2815,8 +2908,7 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let root = PathBuf::from(r"C:\Users\scott\AppData\Local\Temp")
-            .join(format!("townlight-nas-interrupt-{nonce}"));
+        let root = std::env::temp_dir().join(format!("townlight-nas-interrupt-{nonce}"));
         std::fs::create_dir_all(&root).unwrap();
         let media = root.join("media");
         std::fs::write(&media, b"exact media").unwrap();
@@ -2878,8 +2970,7 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let root = PathBuf::from(r"C:\Users\scott\AppData\Local\Temp")
-            .join(format!("townlight-nas-leaf-{nonce}"));
+        let root = std::env::temp_dir().join(format!("townlight-nas-leaf-{nonce}"));
         std::fs::create_dir_all(&root).unwrap();
         let media = root.join("media");
         let victim = root.join("victim");

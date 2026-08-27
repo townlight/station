@@ -246,7 +246,7 @@ fn read_package_manifest(
         .map_err(|error| format!("could not open staged update package: {error}"))?;
     let mut archive = ZipArchive::new(file)
         .map_err(|error| format!("staged update package is not a valid ZIP container: {error}"))?;
-    inspect_archive(&mut archive)?;
+    let archive_names = inspect_archive(&mut archive)?;
     let mut entry = archive
         .by_name(PACKAGE_MANIFEST_NAME)
         .map_err(|_| "update package manifest is missing".to_string())?;
@@ -261,14 +261,27 @@ fn read_package_manifest(
     }
     let manifest: UpdatePackageManifest = serde_json::from_slice(&bytes)
         .map_err(|error| format!("update package manifest is invalid: {error}"))?;
+    let expected_names = manifest
+        .files
+        .iter()
+        .map(|file| format!("payload/{}", file.path))
+        .chain(std::iter::once(PACKAGE_MANIFEST_NAME.to_string()))
+        .collect::<BTreeSet<_>>();
+    if archive_names != expected_names {
+        return Err(
+            "update package archive entries do not exactly match its internal file manifest".into(),
+        );
+    }
     manifest.validate_against(release)?;
     Ok(manifest)
 }
 
-fn inspect_archive(archive: &mut ZipArchive<File>) -> Result<(), String> {
-    if !(REQUIRED_FILES.len() + 1..=REQUIRED_FILES.len() + OPTIONAL_FILES.len() + 1)
-        .contains(&archive.len())
-    {
+fn inspect_archive(archive: &mut ZipArchive<File>) -> Result<BTreeSet<String>, String> {
+    // The manifest is parsed after this structural pass. Permit the bounded
+    // legacy updater name here so a schema-1 package can be compared against
+    // its declared set; the post-parse equality check below rejects any
+    // allowlisted-but-undeclared payload.
+    if !(1..=REQUIRED_FILES.len() + OPTIONAL_FILES.len() + 2).contains(&archive.len()) {
         return Err("update package contains an unexpected number of entries".into());
     }
     let mut names = BTreeSet::new();
@@ -302,7 +315,7 @@ fn inspect_archive(archive: &mut ZipArchive<File>) -> Result<(), String> {
             return Err("update package entry size is outside the accepted bounds".into());
         }
     }
-    Ok(())
+    Ok(names)
 }
 
 fn extract_package(
