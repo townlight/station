@@ -12,7 +12,8 @@ pub use media_lifecycle_authority::{AssetRetentionHistoryEntry, MediaLifecycleSc
 mod automation_execution_controller;
 pub use automation_execution_controller::{
     AutomationExecutionAdapter, AutomationExecutionAdapterFailure, AutomationExecutionSetupFault,
-    retained_pipe_wait_is_bounded_for_test, run_automation_execution_controller_iteration,
+    drain_fault_paths_close_native_handle_for_test, retained_pipe_wait_is_bounded_for_test,
+    run_automation_execution_controller_iteration,
     run_automation_execution_controller_iteration_with_stop,
     run_automation_execution_controller_iteration_with_stop_and_elapsed,
     run_automation_execution_queue_controller,

@@ -56,6 +56,8 @@ const MAX_AUTOMATION_EXECUTION_STDOUT_BYTES: u64 = 1_048_576;
 const MAX_AUTOMATION_EXECUTION_REQUEST_ENV_BYTES: usize = 32_768;
 const MAX_AUTOMATION_EXECUTION_STDERR_BYTES: u64 = 65_536;
 static NEVER_STOP_AUTOMATION_EXECUTION: AtomicBool = AtomicBool::new(false);
+static DRAIN_NATIVE_HANDLES_CLOSED: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
 
 /// A typed adapter outcome deliberately carries only an approved categorical
 /// code. Raw provider errors, prompts, and response bodies never become
@@ -161,7 +163,7 @@ impl AutomationExecutionAdapter {
     pub fn substitution_is_blocked_while_pinned_for_test(
         &self,
         request: &AutomationExecutionRequest,
-        _replacement: &Path,
+        replacement: &Path,
     ) -> bool {
         let pinned = match self.pin_for_request(request, Instant::now() + Duration::from_secs(60)) {
             Ok(pinned) => pinned,
@@ -169,13 +171,36 @@ impl AutomationExecutionAdapter {
             // itself a fail-closed launch result: no pathname launch occurs.
             Err(_) => return true,
         };
-        let blocked = std::fs::OpenOptions::new()
+        let overwrite_blocked = std::fs::copy(replacement, &self.executable).is_err();
+        let leaf_rename_blocked = std::fs::rename(
+            &self.executable,
+            self.executable.with_extension("renamed-during-launch"),
+        )
+        .is_err();
+        let ancestor_rename_blocked = std::fs::rename(
+            &self.application_root,
+            self.application_root
+                .with_extension("renamed-during-launch"),
+        )
+        .is_err();
+        let junction_insertion_blocked = Command::new("cmd.exe")
+            .args(["/d", "/c", "mklink", "/J"])
+            .arg(&self.application_root)
+            .arg(replacement.parent().unwrap_or(replacement))
+            .status()
+            .map(|status| !status.success())
+            .unwrap_or(true);
+        let write_blocked = std::fs::OpenOptions::new()
             .write(true)
             .truncate(true)
             .open(&self.executable)
             .is_err();
         drop(pinned);
-        blocked
+        overwrite_blocked
+            && leaf_rename_blocked
+            && ancestor_rename_blocked
+            && junction_insertion_blocked
+            && write_blocked
     }
 
     pub fn adapter_id(&self) -> &str {
@@ -458,6 +483,7 @@ impl Drop for OwnedThreadHandle {
     fn drop(&mut self) {
         if !self.0.is_null() && self.0 != INVALID_HANDLE_VALUE {
             unsafe { CloseHandle(self.0) };
+            DRAIN_NATIVE_HANDLES_CLOSED.fetch_add(1, Ordering::Relaxed);
         }
     }
 }
@@ -678,6 +704,21 @@ fn finish_drain(
     mut worker: DrainWorker,
     deadline: Instant,
 ) -> Result<Vec<u8>, AutomationExecutionAdapterFailure> {
+    finish_drain_with_fault(&mut worker, deadline, None)
+}
+
+#[derive(Clone, Copy)]
+enum DrainFault {
+    OpenThread,
+    Cancel,
+    PostCancelTimeout,
+}
+
+fn finish_drain_with_fault(
+    worker: &mut DrainWorker,
+    deadline: Instant,
+    fault: Option<DrainFault>,
+) -> Result<Vec<u8>, AutomationExecutionAdapterFailure> {
     let remaining = deadline.saturating_duration_since(Instant::now());
     let result = match worker.receiver.recv_timeout(remaining) {
         Ok(result) => result,
@@ -700,6 +741,9 @@ fn finish_drain(
         .ok_or(AutomationExecutionAdapterFailure::RetryableUnavailable)?
         .join()
         .map_err(|_| AutomationExecutionAdapterFailure::RetryableUnavailable)?;
+    if fault.is_some() {
+        return Err(AutomationExecutionAdapterFailure::RetryableUnavailable);
+    }
     result
 }
 
@@ -723,6 +767,41 @@ pub fn retained_pipe_wait_is_bounded_for_test() -> bool {
     let _ = external.kill();
     let _ = bounded_reap_child(&mut external);
     result.is_err() && started.elapsed() < Duration::from_secs(3)
+}
+
+#[doc(hidden)]
+pub fn drain_fault_paths_close_native_handle_for_test() -> bool {
+    [
+        DrainFault::OpenThread,
+        DrainFault::Cancel,
+        DrainFault::PostCancelTimeout,
+    ]
+    .into_iter()
+    .all(|fault| {
+        let before = DRAIN_NATIVE_HANDLES_CLOSED.load(Ordering::Relaxed);
+        let mut external = match Command::new("cmd.exe")
+            .args(["/d", "/c", "ping -n 30 127.0.0.1 >nul"])
+            .stdout(Stdio::piped())
+            .spawn()
+        {
+            Ok(child) => child,
+            Err(_) => return false,
+        };
+        let pipe = match external.stdout.take() {
+            Some(pipe) => pipe,
+            None => return false,
+        };
+        let mut worker = spawn_bounded_pipe_drain(pipe, 1024);
+        let result = finish_drain_with_fault(
+            &mut worker,
+            Instant::now() + Duration::from_millis(25),
+            Some(fault),
+        );
+        drop(worker);
+        let _ = external.kill();
+        let _ = bounded_reap_child(&mut external);
+        result.is_err() && DRAIN_NATIVE_HANDLES_CLOSED.load(Ordering::Relaxed) > before
+    })
 }
 
 /// Runs one bounded queue decision. The store performs the authoritative
