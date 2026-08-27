@@ -32,7 +32,9 @@ impl std::fmt::Display for AgendaWriteError {
             Self::Storage(s) => f.write_str(s),
             Self::Conflict => f.write_str("agenda revision compare-and-set conflict"),
             Self::Rebound => f.write_str("agenda identity or provenance cannot be rebound"),
-            Self::Capacity => f.write_str("agenda capacity is bounded at 256 records"),
+            Self::Capacity => f.write_str(
+                "agenda capacity is bounded at 256 records and 128 revisions per agenda",
+            ),
         }
     }
 }
@@ -98,6 +100,9 @@ impl StationStore {
                             break;
                         }
                         SQLITE_ROW => {
+                            if expected_revision > MAX_HISTORY as u64 {
+                                return Err("agenda immutable history exceeds 128 revisions".into());
+                            }
                             let revision = u64::try_from(unsafe {
                                 super::sqlite3_column_int64(all_history.raw, 0)
                             })
@@ -124,6 +129,7 @@ impl StationStore {
                         _ => return Err(sqlite_error(self.database)),
                     }
                 }
+                validate_complete_history(self, id, Some((&agenda, &updated_by, updated_at)))?;
                 Ok(Some(agenda))
             }
             _ => Err(sqlite_error(self.database)),
@@ -152,6 +158,9 @@ impl StationStore {
                 .map_err(AgendaWriteError::Storage)?;
             validate_agenda_write_typed(expected, current.as_ref(), agenda)
                 .map_err(map_validation_error)?;
+            if agenda.revision > MAX_HISTORY as u64 {
+                return Err(AgendaWriteError::Capacity);
+            }
             let json = serde_json::to_string(agenda)
                 .map_err(|e| AgendaWriteError::Storage(format!("serialize agenda: {e}")))?;
             let (kind, source) = provenance_columns(&agenda.provenance);
@@ -392,32 +401,127 @@ impl StationStore {
         if !(1..=MAX_HISTORY).contains(&limit) {
             return Err("agenda history limit must be between 1 and 128".into());
         }
-        let s=self.prepare("SELECT revision,channel_id,meeting_id,provenance_kind,provenance_source_sha256,record_json,changed_by,occurred_at_unix_ms FROM agenda_history WHERE agenda_id=?1 ORDER BY revision DESC LIMIT ?2")?;
-        bind_text(self.database, s.raw, 1, &c_string(id, "agenda identity")?)?;
-        bind_i64(self.database, s.raw, 2, limit as i64)?;
-        let mut out = Vec::new();
-        loop {
-            match unsafe { super::sqlite3_step(s.raw) } {
-                SQLITE_DONE => return Ok(out),
-                SQLITE_ROW => {
-                    let agenda = read_row(s.raw, id)?;
-                    let actor = column_text(s.raw, 6)?;
-                    validate_uuid(&actor, "agenda history actor")?;
-                    let at = unsafe { super::sqlite3_column_int64(s.raw, 7) };
-                    if at < 0 {
-                        return Err("agenda history timestamp is invalid".into());
-                    }
-                    out.push(AgendaHistoryEntry {
-                        agenda,
-                        changed_by: actor,
-                        occurred_at_unix_ms: at,
-                    })
-                }
-                _ => return Err(sqlite_error(self.database)),
+        let current = self.read_current_authority(id)?;
+        let mut history = match current.as_ref() {
+            Some((agenda, actor, at)) => {
+                validate_complete_history(self, id, Some((agenda, actor, *at)))?
             }
+            None => validate_complete_history(self, id, None)?,
+        };
+        history.reverse();
+        history.truncate(limit);
+        Ok(history)
+    }
+
+    fn read_current_authority(&self, id: &str) -> Result<Option<(Agenda, String, i64)>, String> {
+        let statement = self.prepare(
+            "SELECT revision,channel_id,meeting_id,provenance_kind,provenance_source_sha256,record_json,updated_by,updated_at_unix_ms FROM agendas WHERE agenda_id=?1",
+        )?;
+        bind_text(
+            self.database,
+            statement.raw,
+            1,
+            &c_string(id, "agenda identity")?,
+        )?;
+        match unsafe { super::sqlite3_step(statement.raw) } {
+            SQLITE_DONE => Ok(None),
+            SQLITE_ROW => {
+                let agenda = read_row(statement.raw, id)?;
+                let actor = column_text(statement.raw, 6)?;
+                validate_uuid(&actor, "agenda current actor")?;
+                let at = unsafe { super::sqlite3_column_int64(statement.raw, 7) };
+                if at < 0 {
+                    return Err("agenda current timestamp is invalid".into());
+                }
+                Ok(Some((agenda, actor, at)))
+            }
+            _ => Err(sqlite_error(self.database)),
         }
     }
 }
+
+fn validate_complete_history(
+    store: &StationStore,
+    id: &str,
+    current: Option<(&Agenda, &str, i64)>,
+) -> Result<Vec<AgendaHistoryEntry>, String> {
+    let statement = store.prepare(
+        "SELECT revision,channel_id,meeting_id,provenance_kind,provenance_source_sha256,record_json,changed_by,occurred_at_unix_ms FROM agenda_history WHERE agenda_id=?1 ORDER BY revision ASC",
+    )?;
+    bind_text(
+        store.database,
+        statement.raw,
+        1,
+        &c_string(id, "agenda identity")?,
+    )?;
+    let mut expected_revision = 1_u64;
+    let mut baseline: Option<Agenda> = None;
+    let mut history = Vec::new();
+    loop {
+        match unsafe { super::sqlite3_step(statement.raw) } {
+            SQLITE_DONE => break,
+            SQLITE_ROW => {
+                if expected_revision > MAX_HISTORY as u64 {
+                    return Err("agenda immutable history exceeds 128 revisions".into());
+                }
+                let revision =
+                    u64::try_from(unsafe { super::sqlite3_column_int64(statement.raw, 0) })
+                        .map_err(|_| "agenda history revision is invalid".to_string())?;
+                if revision != expected_revision {
+                    return Err(
+                        "agenda immutable history is not contiguous through current revision"
+                            .into(),
+                    );
+                }
+                let agenda = read_row(statement.raw, id)?;
+                let actor = column_text(statement.raw, 6)?;
+                validate_uuid(&actor, "agenda history actor")?;
+                let at = unsafe { super::sqlite3_column_int64(statement.raw, 7) };
+                if at < 0 {
+                    return Err("agenda history timestamp is invalid".into());
+                }
+                if let Some(first) = &baseline {
+                    if agenda.channel_id != first.channel_id
+                        || agenda.meeting_id != first.meeting_id
+                        || agenda.provenance != first.provenance
+                    {
+                        return Err(
+                            "agenda immutable history rebinding disagrees with initial authority"
+                                .into(),
+                        );
+                    }
+                } else {
+                    baseline = Some(agenda.clone());
+                }
+                history.push(AgendaHistoryEntry {
+                    agenda,
+                    changed_by: actor,
+                    occurred_at_unix_ms: at,
+                });
+                expected_revision = expected_revision.saturating_add(1);
+            }
+            _ => return Err(sqlite_error(store.database)),
+        }
+    }
+    let Some((current_agenda, current_actor, current_at)) = current else {
+        if !history.is_empty() {
+            return Err("agenda immutable history exists without a current row".into());
+        }
+        return Ok(history);
+    };
+    let Some(latest) = history.last() else {
+        return Err("agenda current has no matching immutable history row".into());
+    };
+    if expected_revision != current_agenda.revision.saturating_add(1)
+        || latest.agenda != *current_agenda
+        || latest.changed_by != current_actor
+        || latest.occurred_at_unix_ms != current_at
+    {
+        return Err("agenda current disagrees with immutable history".into());
+    }
+    Ok(history)
+}
+
 fn provenance_columns(p: &AgendaProvenance) -> (&'static str, &str) {
     match p {
         AgendaProvenance::StaffAuthored { .. } => ("staff_authored", ""),
@@ -746,6 +850,7 @@ mod tests {
                     first.agenda_id
                 ))
                 .unwrap();
+            assert!(store.list_agenda_history(&first.agenda_id, 10).is_err());
             assert!(
                 store.read_current_agenda(&first.agenda_id).is_err(),
                 "missing {name} history must fail closed"
@@ -753,6 +858,99 @@ mod tests {
             drop(store);
             let _ = std::fs::remove_file(p);
         }
+    }
+
+    #[test]
+    fn history_list_rejects_orphan_history_without_current_authority() {
+        let p = temp_db("orphan-history");
+        let _ = std::fs::remove_file(&p);
+        let store = StationStore::open(&p).unwrap();
+        let first = write_fixture(&store);
+        store.execute("DELETE FROM agendas").unwrap();
+        assert!(store.list_agenda_history(&first.agenda_id, 10).is_err());
+        drop(store);
+        let _ = std::fs::remove_file(p);
+    }
+
+    #[test]
+    fn every_history_revision_preserves_stable_identity_and_provenance() {
+        let p = temp_db("stable-history");
+        let _ = std::fs::remove_file(&p);
+        let store = StationStore::open(&p).unwrap();
+        let first = write_fixture(&store);
+        let mut second = first.clone();
+        second.revision = 2;
+        second.title = "Updated once".into();
+        store.write_agenda(Some(1), &second, &id("04"), 4).unwrap();
+        let mut third = second.clone();
+        third.revision = 3;
+        third.title = "Updated twice".into();
+        store.write_agenda(Some(2), &third, &id("04"), 5).unwrap();
+
+        let mut tampered = first.clone();
+        tampered.channel_id = id("07");
+        tampered.meeting_id = id("08");
+        tampered.sync_intent.channel_id = tampered.channel_id.clone();
+        tampered.provenance = AgendaProvenance::TextImportClaim {
+            importer: AgendaActor { actor_id: id("04") },
+            source_sha256: "b".repeat(64),
+            asserted_at_unix_ms: 6,
+        };
+        let json = serde_json::to_string(&tampered).unwrap();
+        store
+            .execute("DROP TRIGGER agenda_history_no_update")
+            .unwrap();
+        store
+            .execute(&format!(
+                "UPDATE agenda_history SET channel_id='{}',meeting_id='{}',provenance_kind='text_import_claim',provenance_source_sha256='{}',record_json='{}' WHERE agenda_id='{}' AND revision=1",
+                tampered.channel_id,
+                tampered.meeting_id,
+                "b".repeat(64),
+                json,
+                first.agenda_id
+            ))
+            .unwrap();
+        assert!(store.read_current_agenda(&first.agenda_id).is_err());
+        assert!(store.list_agenda_history(&first.agenda_id, 10).is_err());
+        drop(store);
+        let _ = std::fs::remove_file(p);
+    }
+
+    #[test]
+    fn agenda_history_growth_is_bounded_at_128_revisions() {
+        let p = temp_db("history-capacity");
+        let _ = std::fs::remove_file(&p);
+        let store = StationStore::open(&p).unwrap();
+        let first = write_fixture(&store);
+        let mut current = first;
+        for revision in 2..=MAX_HISTORY as u64 {
+            let mut next = current.clone();
+            next.revision = revision;
+            next.title = format!("Revision {revision}");
+            store
+                .write_agenda(Some(revision - 1), &next, &id("04"), revision as i64 + 2)
+                .unwrap();
+            current = next;
+        }
+        let mut overflow = current.clone();
+        overflow.revision = MAX_HISTORY as u64 + 1;
+        assert!(matches!(
+            store.write_agenda(Some(MAX_HISTORY as u64), &overflow, &id("04"), 200),
+            Err(AgendaWriteError::Capacity)
+        ));
+        assert_eq!(
+            store.read_current_agenda(&current.agenda_id).unwrap(),
+            Some(current)
+        );
+        assert_eq!(
+            store
+                .list_agenda_history(&overflow.agenda_id, MAX_HISTORY)
+                .unwrap()
+                .len(),
+            MAX_HISTORY
+        );
+        drop(store);
+        let _ = std::fs::remove_file(p);
     }
 
     #[test]

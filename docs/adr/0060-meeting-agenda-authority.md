@@ -17,8 +17,8 @@ The authority supports three provenance forms:
 
 The PDF form remains a claim-only contract and is rejected by the current API. The
 operator API supports a bounded UTF-8 plain-text import endpoint for creating a new
-agenda only: it hashes the exact
-request bytes, creates one public item per nonempty line, and records a server-owned
+agenda only: it hashes the exact UTF-8 bytes of the decoded `source_text` value,
+creates one public item per nonempty line, and records a server-owned
 `TextImportClaim`. Existing agenda source provenance cannot be rebound. This proves
 only bounded text handling and source attribution; it
 does not claim PDF parsing, schedule/media synchronization, chapter detection, or
@@ -39,7 +39,7 @@ actors, and all execution claims by construction.
 
 The current slice persists current/history through SQLite with indexed/JSON
 cross-checks, append-only history triggers, typed validation/conflict/rebinding
-errors, bounded capacity, and exact CAS. Setup Admin and Meeting Operator roles may
+errors, bounded capacity (256 agendas and 128 revisions per agenda), and exact CAS. Setup Admin and Meeting Operator roles may
 read or mutate through authenticated routes; actor/time are server-owned. A public
 projection endpoint excludes staff-only items, notes, provenance, and sync intent.
 The operator UI covers create/edit/read/history, bounded creation-only import, and explicit loading,
