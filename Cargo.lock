@@ -1764,6 +1764,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "station-automation-launch-helper"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "sha2",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "station-automation-policy"
 version = "0.1.0"
 dependencies = [

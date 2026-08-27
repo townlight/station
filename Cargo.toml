@@ -3,6 +3,7 @@ resolver = "3"
 members = [
     "bins/channel-worker",
     "bins/station-updater",
+    "bins/station-automation-launch-helper",
     "bins/stationd",
     "crates/station-api",
     "crates/station-alerting",

@@ -74,6 +74,22 @@ bodyless and cannot select either diagnostic seam or inject source evidence.
 
 ## Evidence state
 
+### S13 launch-helper source boundary
+
+`station-automation-launch-helper` now exists as an unintegrated, fail-closed Windows source
+prototype; it is not packaged, installed, candidate-manifested, or invoked by stationd. Its framed,
+watchdog-bounded schema-closed request binds exact job/claim/adapter/candidate/install/
+configuration and managed artifact facts, and excludes secrets and prompts. It has no configured
+semantic adapter, emits only categorical `adapter_unavailable`, and deliberately does not resolve,
+open, or create request-named artifacts. The earlier pathname-based artifact prototype was removed:
+retained Windows directory handles did not prevent an ancestor rename followed by junction
+substitution. A future adapter must use handle-relative opens or inherited input/output-parent handles
+whose exact file identities are bound before launch. Host Job Object integration, helper identity
+attestation, managed-handle proof, a usable adapter, installed proof, and field proof
+remain open; this source addition does not change S13's `partial` status.
+Only framed stdin is independently watchdog-bounded; root-authority I/O remains hard-bounded only
+after the unimplemented outer Job host can terminate and reap the helper process tree.
+
 The current exact installed candidates prove substantial portions of S3-S9 and S15 on one
 Windows machine. Exact candidate `b6ae66e71e57cb2d48e7d5de917bc78349bb8d60` also passed a fresh,
 network-isolated Windows Sandbox installation with candidate hashes, both LocalSystem services,

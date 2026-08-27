@@ -57,6 +57,28 @@ deadline bounds an already-started owned child and cancellable drains, but synch
 hash, and `CreateProcess` setup are not independently cancellable. This slice therefore does not claim
 an absolute 60-second host boundary for a configured executable adapter; production registration is
 blocked until setup moves behind a separately killable helper boundary.
+
+`station-automation-launch-helper` is a separate-process source prototype for that future
+registration. It is not yet packaged, installed, candidate-manifested, or invoked by stationd. Its
+length-framed stdin read is bounded by a helper-process watchdog and the request is schema-closed, binding exact job, claim, adapter,
+candidate, install generation, configuration, input digest/size, output name, and deadline. It has
+no prompt, credential, provider-response, or diagnostic field. It presently has no configured
+semantic adapter: it does not resolve or open request-named input/output paths, creates no output,
+and returns only categorical `adapter_unavailable`. A prior pathname-based managed-artifact
+prototype was removed after proving that a retained directory handle did not prevent rename followed
+by junction substitution before the later leaf open. A future adapter must instead use handle-relative
+opens or exact inherited input/output-parent handles with file-identity binding; managed-handle proof
+therefore remains open. A host must start
+only a packaged, attested installed helper in a fresh kill-on-close Job Object, terminate and reap it at its
+monotonic deadline, and still recheck the durable claim before completion. Installed identity,
+containment integration, usable adapter configuration, and installed proof remain open.
+Root-authority open and any future adapter setup can still block
+inside the helper between monotonic checks. Only the still-unimplemented outer Job host can impose a
+hard whole-operation deadline by terminating and reaping the helper tree.
+Configured input/output roots must be trusted, ACL-protected ordinary local-drive directories; UNC,
+verbatim/device/NT paths, aliases, traversal, reserved components, and unsafe Win32 names fail
+closed. Artifact paths must include at least one helper-owned relative parent directory. These fields
+are validated contract data only in this unavailable prototype and are not filesystem authority.
 An expired claim is left for
 the next durable claim transaction rather than allowing its old capability to write a late failure; renewal,
 retryable failure, and completion all require the random per-attempt claim identity as well as the stable
