@@ -5280,7 +5280,7 @@ mod tests {
     }
 
     #[test]
-    fn s19_draft_identity_survives_edit_then_s4_v9_worker_confirmation_and_durable_as_run() {
+    fn s19_draft_identity_survives_edit_then_s4_v12_worker_confirmation_and_durable_as_run() {
         const SEARCH_ID: &str = "20000000-0000-4000-8000-000000000001";
         const BLOCK_ID: &str = "20000000-0000-4000-8000-000000000002";
         const RULE_ID: &str = "20000000-0000-4000-8000-000000000003";
@@ -5515,7 +5515,7 @@ mod tests {
             decode_command_frame(&encode_command_frame(&dispatch).unwrap()).unwrap(),
             dispatch
         );
-        assert_eq!(dispatch.version.major, 11);
+        assert_eq!(dispatch.version.major, 12);
 
         let journal = root
             .join("channel-journals")
@@ -5570,7 +5570,7 @@ mod tests {
         );
         assert_eq!(facts[0].report_id, REPORT_ID);
         assert_eq!(facts[0].asset_sha256, ASSET_ID);
-        assert_eq!(PROTOCOL_VERSION.major, 11);
+        assert_eq!(PROTOCOL_VERSION.major, 12);
 
         super::replay_scheduled_take_journal(&store, &journal, CHANNEL_ID).unwrap();
         assert_eq!(

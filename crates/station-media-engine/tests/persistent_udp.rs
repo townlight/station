@@ -18,7 +18,8 @@ use station_captions::canonical_caption_text_sha256;
 use station_media_assets::{decode_output_captions, ingest_media};
 use station_media_engine::{
     ConfiguredTransportOutput, EngineError, OutputCaptureRequest, OutputCaptureStatus,
-    PersistentPlayout, SourceRole, TransportOutput,
+    PersistentPlayout, ScheduledRecordingCaptureRequest, ScheduledRecordingCaptureStatus,
+    SourceRole, TransportOutput,
 };
 use station_media_protocol::{
     CaptionCue, CgImageFormat, CgOverlay, CgOverlayContent, CgRect, CgSnapshot, FallbackToneKind,
@@ -33,6 +34,207 @@ fn persistent_graph_test_guard() -> MutexGuard<'static, ()> {
     PERSISTENT_GRAPH_TEST_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+#[test]
+fn scheduled_recording_and_commissioning_proof_capture_the_same_output_independently() {
+    let _guard = persistent_graph_test_guard();
+    let receiver = UdpSocket::bind("127.0.0.1:0").unwrap();
+    receiver
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    let root = test_root("scheduled-recording-independent");
+    let proof_root = root.join("output-proofs");
+    let recording_root = root
+        .join("recordings")
+        .join("33333333-4444-4555-8666-777777777777");
+    fs::create_dir_all(&proof_root).unwrap();
+    fs::create_dir_all(&recording_root).unwrap();
+    let sink_id = "7ef1430d-a35c-49f7-91f0-d03cc96bf4af";
+    let recording_id = "11111111-2222-4333-8444-555555555555";
+    let proof_id = "22222222-3333-4444-8555-666666666666";
+    let mut playout =
+        PersistentPlayout::start_configured_outputs_with_profile_managed_roots_and_authorities(
+            &[ConfiguredTransportOutput::udp_identified(
+                sink_id,
+                receiver.local_addr().unwrap(),
+                LoudnessTarget::CABLE,
+            )],
+            OutputProfileId::Proof360p30,
+            None,
+            Some(&proof_root),
+            Some(&recording_root),
+            None,
+            None,
+        )
+        .unwrap();
+
+    playout
+        .start_scheduled_recording_capture(ScheduledRecordingCaptureRequest {
+            recording_id: recording_id.into(),
+            output_index: 0,
+            sink_id: sink_id.into(),
+            duration_ms: 3_000,
+            max_bytes: 8 * 1024 * 1024,
+        })
+        .unwrap();
+    playout
+        .start_output_capture(OutputCaptureRequest {
+            proof_id: proof_id.into(),
+            output_index: 0,
+            sink_id: sink_id.into(),
+            loudness_target: LoudnessTarget::CABLE,
+            duration_ms: 3_000,
+            max_bytes: 8 * 1024 * 1024,
+        })
+        .unwrap();
+
+    let deadline = Instant::now() + Duration::from_secs(12);
+    let (recording, proof) = loop {
+        assert!(Instant::now() < deadline, "both capture taps must finish");
+        let recording = playout
+            .poll_scheduled_recording_capture(recording_id)
+            .unwrap();
+        let proof = playout.poll_output_capture(proof_id).unwrap();
+        if let (
+            ScheduledRecordingCaptureStatus::Ready(recording),
+            OutputCaptureStatus::Ready(proof),
+        ) = (recording, proof)
+        {
+            break (recording, proof);
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    playout.stop().unwrap();
+
+    assert_eq!(recording.recording_id, recording_id);
+    assert_eq!(proof.proof_id, proof_id);
+    assert!(
+        recording_root
+            .join(recording.artifact_relative_path)
+            .is_file()
+    );
+    assert!(proof_root.join(proof.artifact_relative_path).is_file());
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn scheduled_recording_requires_a_per_channel_managed_root() {
+    let _guard = persistent_graph_test_guard();
+    let receiver = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let root = test_root("scheduled-recording-managed-root");
+    let proof_root = root.join("output-proofs");
+    fs::create_dir_all(&proof_root).unwrap();
+    let sink_id = "7ef1430d-a35c-49f7-91f0-d03cc96bf4af";
+    let mut playout =
+        PersistentPlayout::start_configured_outputs_with_profile_roots_and_authorities(
+            &[ConfiguredTransportOutput::udp_identified(
+                sink_id,
+                receiver.local_addr().unwrap(),
+                LoudnessTarget::CABLE,
+            )],
+            OutputProfileId::Proof360p30,
+            None,
+            Some(&proof_root),
+            None,
+            None,
+        )
+        .unwrap();
+
+    let result = playout.start_scheduled_recording_capture(ScheduledRecordingCaptureRequest {
+        recording_id: "11111111-2222-4333-8444-555555555555".into(),
+        output_index: 0,
+        sink_id: sink_id.into(),
+        duration_ms: 3_000,
+        max_bytes: 8 * 1024 * 1024,
+    });
+    playout.stop().unwrap();
+    fs::remove_dir_all(root).unwrap();
+
+    assert!(matches!(
+        result,
+        Err(EngineError::OutputCapture(message))
+            if message == "managed scheduled recording root is unavailable"
+    ));
+}
+
+#[test]
+fn scheduled_recording_root_cannot_be_replaced_after_graph_startup() {
+    let _guard = persistent_graph_test_guard();
+    let receiver = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let root = test_root("scheduled-recording-root-pinned");
+    let proof_root = root.join("output-proofs");
+    let recording_root = root
+        .join("recordings")
+        .join("33333333-4444-4555-8666-777777777777");
+    fs::create_dir_all(&proof_root).unwrap();
+    fs::create_dir_all(&recording_root).unwrap();
+    let playout =
+        PersistentPlayout::start_configured_outputs_with_profile_managed_roots_and_authorities(
+            &[ConfiguredTransportOutput::udp_identified(
+                "7ef1430d-a35c-49f7-91f0-d03cc96bf4af",
+                receiver.local_addr().unwrap(),
+                LoudnessTarget::CABLE,
+            )],
+            OutputProfileId::Proof360p30,
+            None,
+            Some(&proof_root),
+            Some(&recording_root),
+            None,
+            None,
+        )
+        .unwrap();
+
+    let moved_root = root.join("recording-root-moved");
+    let replacement = fs::rename(&recording_root, &moved_root);
+    playout.stop().unwrap();
+    if replacement.is_ok() {
+        fs::rename(&moved_root, &recording_root).unwrap();
+    }
+    fs::remove_dir_all(root).unwrap();
+
+    assert!(
+        replacement.is_err(),
+        "the recording root must remain pinned so it cannot be replaced by a junction"
+    );
+}
+
+#[test]
+fn scheduled_recording_startup_cleans_stale_parts_after_pinning_root() {
+    let _guard = persistent_graph_test_guard();
+    let receiver = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let root = test_root("scheduled-recording-stale-parts-pinned");
+    let proof_root = root.join("output-proofs");
+    let recording_root = root
+        .join("recordings")
+        .join("33333333-4444-4555-8666-777777777777");
+    let stale_part = recording_root.join("11111111-2222-4333-8444-555555555555.ts.part");
+    fs::create_dir_all(&proof_root).unwrap();
+    fs::create_dir_all(&recording_root).unwrap();
+    fs::write(&stale_part, b"abandoned recording").unwrap();
+
+    let playout =
+        PersistentPlayout::start_configured_outputs_with_profile_managed_roots_and_authorities(
+            &[ConfiguredTransportOutput::udp_identified(
+                "7ef1430d-a35c-49f7-91f0-d03cc96bf4af",
+                receiver.local_addr().unwrap(),
+                LoudnessTarget::CABLE,
+            )],
+            OutputProfileId::Proof360p30,
+            None,
+            Some(&proof_root),
+            Some(&recording_root),
+            None,
+            None,
+        )
+        .unwrap();
+
+    assert!(
+        !stale_part.exists(),
+        "startup must remove stale recording parts only after pinning the exact root"
+    );
+    playout.stop().unwrap();
+    fs::remove_dir_all(root).unwrap();
 }
 
 #[test]

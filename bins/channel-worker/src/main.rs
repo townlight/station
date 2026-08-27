@@ -8,7 +8,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use station_media_engine::{
     ConfiguredTransportOutput, MpegTsMuxContract, OutputCaptureRequest, OutputCaptureStatus,
-    PersistentPlayout, SourceRole,
+    PersistentPlayout, ScheduledRecordingCaptureRequest, ScheduledRecordingCaptureStatus,
+    SourceRole,
 };
 use station_media_journal::{FallbackToneJournalEntry, JournalWriter};
 use station_media_protocol::{
@@ -266,6 +267,54 @@ fn main() {
             "the output proof root escapes the journal-owned managed data root",
         );
     }
+    let recording_parent = managed_data_root.join("recordings");
+    std::fs::create_dir_all(&recording_parent).unwrap_or_else(|error| {
+        fatal(
+            6,
+            "create its managed scheduled recording root",
+            &format!("{}: {error}", recording_parent.display()),
+        )
+    });
+    let recording_parent = std::fs::canonicalize(&recording_parent).unwrap_or_else(|error| {
+        fatal(
+            6,
+            "validate its managed scheduled recording root",
+            &format!("{}: {error}", recording_parent.display()),
+        )
+    });
+    if !recording_parent.is_dir() || recording_parent.parent() != Some(managed_data_root.as_path())
+    {
+        fatal(
+            6,
+            "validate its managed scheduled recording root",
+            "the recording parent escapes the journal-owned managed data root",
+        );
+    }
+    let recording_artifact_root = recording_parent.join(&channel_id);
+    std::fs::create_dir_all(&recording_artifact_root).unwrap_or_else(|error| {
+        fatal(
+            6,
+            "create its channel recording root",
+            &format!("{}: {error}", recording_artifact_root.display()),
+        )
+    });
+    let recording_artifact_root =
+        std::fs::canonicalize(&recording_artifact_root).unwrap_or_else(|error| {
+            fatal(
+                6,
+                "validate its managed scheduled recording root",
+                &format!("{}: {error}", recording_artifact_root.display()),
+            )
+        });
+    if !recording_artifact_root.is_dir()
+        || recording_artifact_root.parent() != Some(recording_parent.as_path())
+    {
+        fatal(
+            6,
+            "validate its managed scheduled recording root",
+            "the recording root escapes the journal-owned managed data root",
+        );
+    }
     remove_stale_proof_parts(&proof_artifact_root)
         .unwrap_or_else(|error| fatal(6, "clean stale output proof parts", &error));
     let output_profile = OutputProfileId::from_storage_name(&bootstrap.output_profile)
@@ -361,11 +410,12 @@ fn main() {
         .unwrap_or_else(|error| fatal(7, "record and emit fallback tone recovery", &error));
     }
     let mut media = Some(
-        PersistentPlayout::start_configured_outputs_with_profile_roots_and_authorities(
+        PersistentPlayout::start_configured_outputs_with_profile_managed_roots_and_authorities(
             &outputs,
             output_profile,
             Some(&cg_image_root),
             Some(&proof_artifact_root),
+            Some(&recording_artifact_root),
             bootstrap.fallback_slate.as_ref(),
             bootstrap.caption_policy.as_ref(),
         )
@@ -385,6 +435,7 @@ fn main() {
     let worker_instance_id = format!("{worker_id}-{}", std::process::id());
     let mut graph_revision = 1_u64;
     let mut proof_graph_revisions = HashMap::new();
+    let mut recording_graph_revisions = HashMap::new();
     let mut fallback_tone: Option<ActiveFallbackTone> = None;
 
     loop {
@@ -469,6 +520,7 @@ fn main() {
                 &worker_boot_id,
                 &mut graph_revision,
                 &mut proof_graph_revisions,
+                &mut recording_graph_revisions,
                 &mut fallback_tone,
             );
             let now = started.elapsed().as_millis() as u64;
@@ -899,6 +951,59 @@ fn expire_fallback_tone_if_due(
     }))
 }
 
+fn apply_plan_revision<E>(
+    graph_revision: &mut u64,
+    requested_revision: u64,
+    fence_scheduled_recordings: impl FnOnce(u64) -> Result<(), E>,
+) -> Result<(), E> {
+    let next_revision = requested_revision.max(1);
+    if next_revision != *graph_revision {
+        fence_scheduled_recordings(*graph_revision)?;
+        *graph_revision = next_revision;
+    }
+    Ok(())
+}
+
+/// Render an already-selected scheduled-recording terminal authority.  The
+/// caller obtains `status` from the engine's abort/status mutex; this function
+/// deliberately has no fallback that could turn writer-owned Ready evidence
+/// into an abort failure.
+fn scheduled_recording_terminal_event(
+    status: ScheduledRecordingCaptureStatus,
+    worker_instance_id: &str,
+    graph_revision: u64,
+) -> Option<WorkerEvent> {
+    match status {
+        ScheduledRecordingCaptureStatus::Ready(ready) => {
+            Some(WorkerEvent::ScheduledRecordingReady {
+                recording_id: ready.recording_id,
+                output_index: ready.output_index,
+                sink_id: ready.sink_id,
+                artifact_relative_path: ready.artifact_relative_path,
+                worker_instance_id: worker_instance_id.into(),
+                graph_revision,
+                size_bytes: ready.capture_bytes,
+                capture_sha256: ready.capture_sha256,
+                duration_ms: ready.capture_duration_ms,
+            })
+        }
+        ScheduledRecordingCaptureStatus::Failed {
+            recording_id,
+            artifact_relative_path,
+            code,
+            message,
+        } => Some(WorkerEvent::ScheduledRecordingFailed {
+            recording_id,
+            artifact_relative_path,
+            worker_instance_id: worker_instance_id.into(),
+            graph_revision,
+            code,
+            message,
+        }),
+        ScheduledRecordingCaptureStatus::Pending { .. } => None,
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn decide_event(
     command: &CommandEnvelope,
@@ -913,6 +1018,7 @@ fn decide_event(
     worker_boot_id: &str,
     graph_revision: &mut u64,
     proof_graph_revisions: &mut HashMap<String, u64>,
+    recording_graph_revisions: &mut HashMap<String, u64>,
     fallback_tone: &mut Option<ActiveFallbackTone>,
 ) -> (WorkerEvent, bool) {
     if command.channel_id != channel_id {
@@ -1016,13 +1122,26 @@ fn decide_event(
             }
         }
         ChannelCommand::ApplyPlan { revision, .. } => {
-            *graph_revision = (*revision).max(1);
-            (
-                WorkerEvent::Ready {
-                    graph_revision: *graph_revision,
-                },
-                false,
-            )
+            match apply_plan_revision(graph_revision, *revision, |_| {
+                media.fence_scheduled_recording_captures_for_graph_change()
+            }) {
+                Ok(()) => (
+                    WorkerEvent::Ready {
+                        graph_revision: *graph_revision,
+                    },
+                    false,
+                ),
+                Err(error) => (
+                    rejection(
+                        command,
+                        "scheduled_recording_fence_failed",
+                        &format!(
+                            "Scheduled recordings could not be fenced before changing the output graph: {error:?}"
+                        ),
+                    ),
+                    false,
+                ),
+            }
         }
         ChannelCommand::ApplyCgSnapshot { snapshot } => match media.apply_cg_snapshot(snapshot) {
             Ok(()) => (
@@ -1440,6 +1559,300 @@ fn decide_event(
                 ),
             }
         }
+        ChannelCommand::StartScheduledRecording {
+            recording_id,
+            output_index,
+            sink_id,
+            duration_ms,
+            max_bytes,
+        } => {
+            if let Err(message) =
+                bootstrap.validate_scheduled_recording_binding(*output_index, sink_id)
+            {
+                return (
+                    rejection(command, "scheduled_recording_binding_invalid", &message),
+                    false,
+                );
+            }
+            match media.start_scheduled_recording_capture(ScheduledRecordingCaptureRequest {
+                recording_id: recording_id.clone(),
+                output_index: *output_index,
+                sink_id: sink_id.clone(),
+                duration_ms: *duration_ms,
+                max_bytes: *max_bytes,
+            }) {
+                Ok(started) => {
+                    recording_graph_revisions.insert(recording_id.clone(), *graph_revision);
+                    (
+                        WorkerEvent::ScheduledRecordingStarted {
+                            recording_id: recording_id.clone(),
+                            output_index: *output_index,
+                            sink_id: sink_id.clone(),
+                            duration_ms: *duration_ms,
+                            max_bytes: *max_bytes,
+                            artifact_relative_path: started.artifact_relative_path,
+                            worker_instance_id: worker_instance_id.into(),
+                            graph_revision: *graph_revision,
+                        },
+                        false,
+                    )
+                }
+                Err(error) => (
+                    rejection(
+                        command,
+                        "scheduled_recording_start_failed",
+                        &format!("The scheduled recording could not start: {error:?}"),
+                    ),
+                    false,
+                ),
+            }
+        }
+        ChannelCommand::PollScheduledRecording { recording_id } => {
+            let capture_graph_revision = recording_graph_revisions
+                .get(recording_id)
+                .copied()
+                .unwrap_or(*graph_revision);
+            if capture_graph_revision != *graph_revision {
+                // The status mutex is the capture terminal fence. If the
+                // writer already committed Ready before this graph change,
+                // preserve and report that exact sealed artifact instead of
+                // contradicting it with a graph-drift failure. A Pending
+                // capture is still aborted and fails closed on drift.
+                return match media.poll_scheduled_recording_capture(recording_id) {
+                    Ok(ScheduledRecordingCaptureStatus::Ready(ready)) => {
+                        recording_graph_revisions.remove(recording_id);
+                        (
+                            WorkerEvent::ScheduledRecordingReady {
+                                recording_id: ready.recording_id,
+                                output_index: ready.output_index,
+                                sink_id: ready.sink_id,
+                                artifact_relative_path: ready.artifact_relative_path,
+                                worker_instance_id: worker_instance_id.into(),
+                                graph_revision: capture_graph_revision,
+                                size_bytes: ready.capture_bytes,
+                                capture_sha256: ready.capture_sha256,
+                                duration_ms: ready.capture_duration_ms,
+                            },
+                            false,
+                        )
+                    }
+                    Ok(ScheduledRecordingCaptureStatus::Pending { .. }) => {
+                        // `abort_scheduled_recording_capture` only transitions
+                        // Pending. The writer can seal between the first poll
+                        // and that transition, so poll once more before
+                        // claiming graph-drift failure.
+                        let abort = media.abort_scheduled_recording_capture(recording_id);
+                        match media.poll_scheduled_recording_capture(recording_id) {
+                            Ok(ScheduledRecordingCaptureStatus::Ready(ready)) => {
+                                recording_graph_revisions.remove(recording_id);
+                                (
+                                    WorkerEvent::ScheduledRecordingReady {
+                                        recording_id: ready.recording_id,
+                                        output_index: ready.output_index,
+                                        sink_id: ready.sink_id,
+                                        artifact_relative_path: ready.artifact_relative_path,
+                                        worker_instance_id: worker_instance_id.into(),
+                                        graph_revision: capture_graph_revision,
+                                        size_bytes: ready.capture_bytes,
+                                        capture_sha256: ready.capture_sha256,
+                                        duration_ms: ready.capture_duration_ms,
+                                    },
+                                    false,
+                                )
+                            }
+                            Ok(ScheduledRecordingCaptureStatus::Failed {
+                                artifact_relative_path,
+                                code,
+                                message,
+                                ..
+                            }) => {
+                                recording_graph_revisions.remove(recording_id);
+                                (
+                                    WorkerEvent::ScheduledRecordingFailed {
+                                        recording_id: recording_id.clone(),
+                                        artifact_relative_path,
+                                        worker_instance_id: worker_instance_id.into(),
+                                        graph_revision: capture_graph_revision,
+                                        code,
+                                        message,
+                                    },
+                                    false,
+                                )
+                            }
+                            Ok(ScheduledRecordingCaptureStatus::Pending { .. }) => (
+                                rejection(
+                                    command,
+                                    "scheduled_recording_abort_failed",
+                                    &format!(
+                                        "The scheduled recording did not reach a terminal state after graph drift: {abort:?}"
+                                    ),
+                                ),
+                                false,
+                            ),
+                            Err(error) => (
+                                rejection(
+                                    command,
+                                    "scheduled_recording_poll_failed",
+                                    &format!(
+                                        "The scheduled recording could not be polled after graph drift: {error:?}"
+                                    ),
+                                ),
+                                false,
+                            ),
+                        }
+                    }
+                    Ok(ScheduledRecordingCaptureStatus::Failed {
+                        artifact_relative_path,
+                        code,
+                        message,
+                        ..
+                    }) => {
+                        recording_graph_revisions.remove(recording_id);
+                        (
+                            WorkerEvent::ScheduledRecordingFailed {
+                                recording_id: recording_id.clone(),
+                                artifact_relative_path,
+                                worker_instance_id: worker_instance_id.into(),
+                                graph_revision: capture_graph_revision,
+                                code,
+                                message,
+                            },
+                            false,
+                        )
+                    }
+                    Err(error) => (
+                        rejection(
+                            command,
+                            "scheduled_recording_poll_failed",
+                            &format!("The scheduled recording could not be polled: {error:?}"),
+                        ),
+                        false,
+                    ),
+                };
+            }
+            match media.poll_scheduled_recording_capture(recording_id) {
+                Ok(ScheduledRecordingCaptureStatus::Pending {
+                    artifact_relative_path,
+                    ..
+                }) => (
+                    WorkerEvent::ScheduledRecordingPending {
+                        recording_id: recording_id.clone(),
+                        artifact_relative_path,
+                        worker_instance_id: worker_instance_id.into(),
+                        graph_revision: capture_graph_revision,
+                    },
+                    false,
+                ),
+                Ok(ScheduledRecordingCaptureStatus::Ready(ready)) => {
+                    recording_graph_revisions.remove(recording_id);
+                    (
+                        WorkerEvent::ScheduledRecordingReady {
+                            recording_id: ready.recording_id,
+                            output_index: ready.output_index,
+                            sink_id: ready.sink_id,
+                            artifact_relative_path: ready.artifact_relative_path,
+                            worker_instance_id: worker_instance_id.into(),
+                            graph_revision: capture_graph_revision,
+                            size_bytes: ready.capture_bytes,
+                            capture_sha256: ready.capture_sha256,
+                            duration_ms: ready.capture_duration_ms,
+                        },
+                        false,
+                    )
+                }
+                Ok(ScheduledRecordingCaptureStatus::Failed {
+                    artifact_relative_path,
+                    code,
+                    message,
+                    ..
+                }) => {
+                    recording_graph_revisions.remove(recording_id);
+                    (
+                        WorkerEvent::ScheduledRecordingFailed {
+                            recording_id: recording_id.clone(),
+                            artifact_relative_path,
+                            worker_instance_id: worker_instance_id.into(),
+                            graph_revision: capture_graph_revision,
+                            code,
+                            message,
+                        },
+                        false,
+                    )
+                }
+                Err(error) => (
+                    rejection(
+                        command,
+                        "scheduled_recording_poll_failed",
+                        &format!("The scheduled recording could not be polled: {error:?}"),
+                    ),
+                    false,
+                ),
+            }
+        }
+        ChannelCommand::AbortScheduledRecording { recording_id } => {
+            let capture_graph_revision = recording_graph_revisions
+                .get(recording_id)
+                .copied()
+                .unwrap_or(*graph_revision);
+            match media.poll_scheduled_recording_capture(recording_id) {
+                Ok(ScheduledRecordingCaptureStatus::Pending { .. }) => {}
+                Ok(ScheduledRecordingCaptureStatus::Failed { .. })
+                | Ok(ScheduledRecordingCaptureStatus::Ready(_)) => {
+                    return (
+                        rejection(
+                            command,
+                            "scheduled_recording_already_terminal",
+                            "The scheduled recording reached a terminal state before abort.",
+                        ),
+                        false,
+                    );
+                }
+                Err(error) => {
+                    return (
+                        rejection(
+                            command,
+                            "scheduled_recording_abort_failed",
+                            &format!("The scheduled recording could not be located: {error:?}"),
+                        ),
+                        false,
+                    );
+                }
+            };
+            match media.abort_scheduled_recording_capture(recording_id) {
+                // This is the authoritative terminal result selected under the
+                // writer's status mutex.  Do not turn a writer-owned Ready
+                // into a synthetic abort failure after the earlier poll.
+                Ok(status @ ScheduledRecordingCaptureStatus::Ready(_))
+                | Ok(status @ ScheduledRecordingCaptureStatus::Failed { .. }) => {
+                    recording_graph_revisions.remove(recording_id);
+                    (
+                        scheduled_recording_terminal_event(
+                            status,
+                            worker_instance_id,
+                            capture_graph_revision,
+                        )
+                        .expect("selected terminal status cannot be pending"),
+                        false,
+                    )
+                }
+                Ok(ScheduledRecordingCaptureStatus::Pending { .. }) => (
+                    rejection(
+                        command,
+                        "scheduled_recording_abort_failed",
+                        "The scheduled recording did not reach a terminal state after abort.",
+                    ),
+                    false,
+                ),
+                Err(error) => (
+                    rejection(
+                        command,
+                        "scheduled_recording_abort_failed",
+                        &format!("The scheduled recording could not be aborted: {error:?}"),
+                    ),
+                    false,
+                ),
+            }
+        }
         ChannelCommand::Shutdown => (WorkerEvent::ShutdownComplete, true),
         ChannelCommand::ArmLive { input, arm_token } => {
             if live_state.is_some() {
@@ -1801,6 +2214,81 @@ mod tests {
 
     const SESSION: &str = "11111111-1111-4111-8111-111111111111";
     const SOURCE: &str = "22222222-2222-4222-8222-222222222222";
+
+    #[test]
+    fn apply_plan_fences_recordings_before_changing_the_graph_revision() {
+        let mut graph_revision = 1;
+        let mut fenced_revision = None;
+
+        apply_plan_revision(&mut graph_revision, 2, |revision| {
+            fenced_revision = Some(revision);
+            Ok::<(), ()>(())
+        })
+        .unwrap();
+
+        assert_eq!(fenced_revision, Some(1));
+        assert_eq!(graph_revision, 2);
+    }
+
+    #[test]
+    fn scheduled_recording_abort_renders_only_the_mutex_selected_terminal_authority() {
+        let ready = scheduled_recording_terminal_event(
+            ScheduledRecordingCaptureStatus::Ready(
+                station_media_engine::ScheduledRecordingCaptureReady {
+                    recording_id: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee".into(),
+                    output_index: 0,
+                    sink_id: "11111111-2222-4333-8444-555555555555".into(),
+                    artifact_relative_path: "ready.ts".into(),
+                    capture_bytes: 188,
+                    capture_sha256: "a".repeat(64),
+                    capture_duration_ms: 3_000,
+                },
+            ),
+            "worker-1",
+            7,
+        )
+        .expect("Ready is terminal");
+        assert!(matches!(
+            ready,
+            WorkerEvent::ScheduledRecordingReady {
+                artifact_relative_path,
+                graph_revision: 7,
+                ..
+            } if artifact_relative_path == "ready.ts"
+        ));
+
+        let aborted = scheduled_recording_terminal_event(
+            ScheduledRecordingCaptureStatus::Failed {
+                recording_id: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee".into(),
+                artifact_relative_path: "aborted.ts".into(),
+                code: "capture_aborted".into(),
+                message: "scheduled recording was aborted".into(),
+            },
+            "worker-1",
+            7,
+        )
+        .expect("Failed is terminal");
+        assert!(matches!(
+            aborted,
+            WorkerEvent::ScheduledRecordingFailed {
+                artifact_relative_path,
+                code,
+                graph_revision: 7,
+                ..
+            } if artifact_relative_path == "aborted.ts" && code == "capture_aborted"
+        ));
+        assert!(
+            scheduled_recording_terminal_event(
+                ScheduledRecordingCaptureStatus::Pending {
+                    recording_id: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee".into(),
+                    artifact_relative_path: "pending.ts".into(),
+                },
+                "worker-1",
+                7,
+            )
+            .is_none()
+        );
+    }
 
     fn armed_state() -> LiveState {
         LiveState {

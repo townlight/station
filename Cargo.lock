@@ -1904,6 +1904,7 @@ dependencies = [
  "station-media-assets",
  "station-media-protocol",
  "station-schedule",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
