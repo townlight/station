@@ -130,7 +130,81 @@ const OPERATOR_STYLES: &[u8] = include_bytes!("../../../web/operator/dist/operat
 const MAX_CONCURRENT_REQUESTS: usize = 16;
 const MAX_SMALL_REQUEST_BODY: usize = 65_536;
 const MAX_AGENDA_IMPORT_BYTES: usize = 64 * 1024;
-const MAX_AGENDA_IMPORT_BODY: usize = MAX_AGENDA_IMPORT_BYTES + 8 * 1024;
+const MAX_AGENDA_VISIBLE_TEXT_BYTES: usize = 200;
+const MAX_AGENDA_PUBLIC_SUMMARY_BYTES: usize = 2_000;
+const MAX_AGENDA_STAFF_NOTES_BYTES: usize = 4_000;
+const MAX_AGENDA_ITEMS: usize = 128;
+const MAX_AGENDA_CHAPTERS: usize = 512;
+const MAX_AGENDA_UUID_BYTES: usize = 36;
+const MAX_AGENDA_SHA256_BYTES: usize = 64;
+const MAX_AGENDA_I64_DECIMAL_BYTES: usize = 20;
+const MAX_JSON_ESCAPED_BYTES_PER_UTF8_BYTE: usize = 2;
+// These bounds cover fixed JSON property names, punctuation, enum tags, and
+// the bounded scalar fields not represented in the aggregate byte counts
+// below. They are deliberately separate from decoded text capacity so the
+// maximum valid domain representation remains finite and auditable.
+const MAX_AGENDA_IMPORT_JSON_STRUCTURE_BYTES: usize = 2_048;
+const MAX_AGENDA_PUT_JSON_STRUCTURE_BYTES: usize = checked_agenda_body_add(
+    checked_agenda_body_mul(MAX_AGENDA_ITEMS, 128),
+    checked_agenda_body_add(checked_agenda_body_mul(MAX_AGENDA_CHAPTERS, 128), 4_096),
+);
+const MAX_AGENDA_IMPORT_BOUND_STRING_BYTES: usize = checked_agenda_body_add(
+    MAX_AGENDA_IMPORT_BYTES,
+    checked_agenda_body_add(
+        MAX_AGENDA_VISIBLE_TEXT_BYTES,
+        checked_agenda_body_add(
+            checked_agenda_body_mul(MAX_AGENDA_UUID_BYTES, 3),
+            checked_agenda_body_add(MAX_AGENDA_SHA256_BYTES, MAX_AGENDA_I64_DECIMAL_BYTES),
+        ),
+    ),
+);
+const MAX_AGENDA_IMPORT_BODY: usize = checked_agenda_json_body_bound(
+    MAX_AGENDA_IMPORT_BOUND_STRING_BYTES,
+    MAX_AGENDA_IMPORT_JSON_STRUCTURE_BYTES,
+);
+const MAX_AGENDA_PUT_TEXT_BYTES: usize = checked_agenda_body_add(
+    MAX_AGENDA_VISIBLE_TEXT_BYTES,
+    checked_agenda_body_add(
+        checked_agenda_body_mul(
+            MAX_AGENDA_ITEMS,
+            checked_agenda_body_add(
+                MAX_AGENDA_VISIBLE_TEXT_BYTES,
+                checked_agenda_body_add(
+                    MAX_AGENDA_PUBLIC_SUMMARY_BYTES,
+                    MAX_AGENDA_STAFF_NOTES_BYTES,
+                ),
+            ),
+        ),
+        checked_agenda_body_mul(MAX_AGENDA_CHAPTERS, MAX_AGENDA_VISIBLE_TEXT_BYTES),
+    ),
+);
+const MAX_AGENDA_PUT_IDENTIFIER_BYTES: usize = checked_agenda_body_add(
+    checked_agenda_body_mul(MAX_AGENDA_UUID_BYTES, 8),
+    checked_agenda_body_add(
+        MAX_AGENDA_SHA256_BYTES,
+        checked_agenda_body_add(
+            checked_agenda_body_mul(MAX_AGENDA_ITEMS, MAX_AGENDA_UUID_BYTES),
+            checked_agenda_body_mul(
+                MAX_AGENDA_CHAPTERS,
+                checked_agenda_body_mul(MAX_AGENDA_UUID_BYTES, 2),
+            ),
+        ),
+    ),
+);
+const MAX_AGENDA_PUT_NUMERIC_BYTES: usize = checked_agenda_body_mul(
+    MAX_AGENDA_I64_DECIMAL_BYTES,
+    checked_agenda_body_add(8, checked_agenda_body_mul(MAX_AGENDA_CHAPTERS, 3)),
+);
+const MAX_AGENDA_PUT_BODY: usize = checked_agenda_json_body_bound(
+    checked_agenda_body_add(
+        MAX_AGENDA_PUT_TEXT_BYTES,
+        checked_agenda_body_add(
+            MAX_AGENDA_PUT_IDENTIFIER_BYTES,
+            MAX_AGENDA_PUT_NUMERIC_BYTES,
+        ),
+    ),
+    MAX_AGENDA_PUT_JSON_STRUCTURE_BYTES,
+);
 const MAX_AGENDA_IMPORT_LINES: usize = 128;
 const MAX_CG_IMAGE_BODY: usize = 8 * 1024 * 1024;
 const MAX_CAPTION_TRACK_BODY: usize = 8 * 1024 * 1024;
@@ -15067,6 +15141,30 @@ fn security_headers(response: ApiResponse) -> ApiResponse {
     .unwrap_or_else(|message| error_response(500, "response_error", &message))
 }
 
+const fn checked_agenda_body_add(left: usize, right: usize) -> usize {
+    match left.checked_add(right) {
+        Some(value) => value,
+        None => panic!("agenda body bound overflow"),
+    }
+}
+
+const fn checked_agenda_body_mul(left: usize, right: usize) -> usize {
+    match left.checked_mul(right) {
+        Some(value) => value,
+        None => panic!("agenda body bound overflow"),
+    }
+}
+
+const fn checked_agenda_json_body_bound(
+    decoded_string_bytes: usize,
+    json_structure_bytes: usize,
+) -> usize {
+    checked_agenda_body_add(
+        checked_agenda_body_mul(decoded_string_bytes, MAX_JSON_ESCAPED_BYTES_PER_UTF8_BYTE),
+        json_structure_bytes,
+    )
+}
+
 fn request_body_limit(method: &str, path: &str) -> usize {
     if method == "POST" && path == "/api/v1/cg/images" {
         MAX_CG_IMAGE_BODY
@@ -15074,6 +15172,8 @@ fn request_body_limit(method: &str, path: &str) -> usize {
         MAX_CAPTION_TRACK_BODY
     } else if method == "POST" && agenda_import_path(path).is_some() {
         MAX_AGENDA_IMPORT_BODY
+    } else if method == "PUT" && agenda_path(path).is_some() {
+        MAX_AGENDA_PUT_BODY
     } else {
         MAX_SMALL_REQUEST_BODY
     }
@@ -15085,7 +15185,10 @@ fn request_too_large_message(method: &str, path: &str) -> &'static str {
             "CG image uploads may not exceed 8 MiB."
         }
         MAX_CAPTION_TRACK_BODY => "Caption track requests may not exceed 8 MiB.",
-        MAX_AGENDA_IMPORT_BODY => "Agenda text-import envelopes may not exceed 72 KiB.",
+        MAX_AGENDA_IMPORT_BODY => {
+            "Agenda text-import envelopes may not exceed their bounded maximum."
+        }
+        MAX_AGENDA_PUT_BODY => "Agenda write envelopes may not exceed their bounded maximum.",
         _ => "Requests may not exceed 64 KiB.",
     }
 }
@@ -15283,6 +15386,7 @@ mod tests {
     use super::*;
     use gst::prelude::*;
     use gstreamer as gst;
+    use station_agenda::AgendaChapter;
     use station_schedule_automation::{
         AssetPredicate, DstApplication, SavedSearchOrder, SourceEvidenceVerifier,
     };
@@ -15501,8 +15605,9 @@ mod tests {
             )
             .unwrap();
         let import_path = format!("/api/v1/agendas/{agenda_id}/import-text");
+        let source = escaped_agenda_import_source(MAX_AGENDA_IMPORT_BYTES);
         let body = serde_json::to_vec(&serde_json::json!({
-            "source_text": "Call to order\nPublic comment",
+            "source_text": source,
             "channel_id": channel_id,
             "meeting_id": meeting_id,
             "schedule_item_id": schedule_item_id,
@@ -15531,7 +15636,7 @@ mod tests {
         assert_eq!(imported_json["provenance"]["kind"], "text_import_claim");
         assert_eq!(
             imported_json["provenance"]["source_sha256"],
-            sha256_hex(b"Call to order\nPublic comment")
+            sha256_hex(escaped_agenda_import_source(MAX_AGENDA_IMPORT_BYTES).as_bytes())
         );
         let public =
             api.handle_in_process("GET", &format!("/api/v1/public/agendas/{agenda_id}"), None);
@@ -15539,11 +15644,85 @@ mod tests {
         let projection: serde_json::Value = serde_json::from_slice(&public.body).unwrap();
         assert!(projection.get("provenance").is_none());
         assert!(projection["items"][0].get("staff_notes").is_none());
+        let maximum = maximum_valid_agenda(
+            agenda_id,
+            channel_id,
+            meeting_id,
+            schedule_item_id,
+            &media_sha256,
+        );
+        let maximum_body = serde_json::to_vec(&serde_json::json!({
+            "agenda": maximum,
+            "expected_revision": 1,
+        }))
+        .unwrap();
+        let maximum_response = api.handle_authenticated(
+            "PUT",
+            &format!("/api/v1/agendas/{agenda_id}"),
+            Some(&maximum_body),
+            &admin,
+        );
+        assert_eq!(
+            maximum_response.status,
+            200,
+            "{}",
+            String::from_utf8_lossy(&maximum_response.body)
+        );
+        let mut overflow: Agenda = serde_json::from_slice(&maximum_response.body).unwrap();
+        let first = overflow.items[0].clone();
+        overflow.items.push(AgendaItem {
+            item_id: "eeeeeeee-ffff-4000-8000-111111111111".into(),
+            ordinal: 129,
+            ..first
+        });
+        overflow.revision = 3;
+        let overflow_body = serde_json::to_vec(&serde_json::json!({
+            "agenda": overflow,
+            "expected_revision": 2,
+        }))
+        .unwrap();
+        let overflow_response = api.handle_authenticated(
+            "PUT",
+            &format!("/api/v1/agendas/{agenda_id}"),
+            Some(&overflow_body),
+            &admin,
+        );
+        assert_eq!(overflow_response.status, 422);
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&overflow_response.body).unwrap()["error"]
+                ["code"],
+            "validation_failed"
+        );
         let existing_import = api.handle_authenticated("POST", &import_path, Some(&body), &admin);
         assert_eq!(existing_import.status, 409);
         assert_eq!(
             serde_json::from_slice::<serde_json::Value>(&existing_import.body).unwrap()["error"]["code"],
             "agenda_import_source_immutable"
+        );
+        let too_large_source = escaped_agenda_import_source(MAX_AGENDA_IMPORT_BYTES + 1);
+        let too_large_body = serde_json::to_vec(&serde_json::json!({
+            "source_text": too_large_source,
+            "channel_id": channel_id,
+            "meeting_id": meeting_id,
+            "schedule_item_id": schedule_item_id,
+            "schedule_revision": 2,
+            "media_asset_sha256": media_sha256,
+            "expected_media_duration_ms": 60000,
+            "meeting_starts_at_unix_ms": 1,
+            "title": "Regular meeting",
+            "expected_revision": null
+        }))
+        .unwrap();
+        let too_large = api.handle_authenticated(
+            "POST",
+            "/api/v1/agendas/55555555-6666-4777-8888-999999999999/import-text",
+            Some(&too_large_body),
+            &admin,
+        );
+        assert_eq!(too_large.status, 422);
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&too_large.body).unwrap()["error"]["code"],
+            "import_bounds_exceeded"
         );
         let mut wrong_hash: serde_json::Value = serde_json::from_slice(&body).unwrap();
         wrong_hash["media_asset_sha256"] = serde_json::Value::String("b".repeat(64));
@@ -15580,7 +15759,7 @@ mod tests {
     #[test]
     fn agenda_import_http_envelope_allows_exact_source_cap_but_rejects_over_limit() {
         let path = "/api/v1/agendas/11111111-2222-4333-8444-555555555555/import-text";
-        let source = "a".repeat(MAX_AGENDA_IMPORT_BYTES);
+        let source = escaped_agenda_import_source(MAX_AGENDA_IMPORT_BYTES);
         assert_eq!(source.len(), MAX_AGENDA_IMPORT_BYTES);
         let body = serde_json::to_vec(&serde_json::json!({"source_text": source})).unwrap();
         assert!(body.len() > MAX_AGENDA_IMPORT_BYTES);
@@ -15603,6 +15782,127 @@ mod tests {
         oversized_request.extend_from_slice(&over_limit);
         let response = parse_http_request(&oversized_request).unwrap_err();
         assert_eq!(response.status, 413);
+    }
+
+    fn escaped_agenda_import_source(byte_count: usize) -> String {
+        assert!(byte_count >= 128 * 201);
+        let line = r#"\""#.repeat(100);
+        let mut source = std::iter::repeat_n(line.as_str(), 128)
+            .collect::<Vec<_>>()
+            .join("\n");
+        source.extend(std::iter::repeat_n('\n', byte_count - source.len()));
+        source
+    }
+
+    #[test]
+    fn agenda_put_http_envelope_allows_maximum_valid_shape_but_domain_rejects_overflow() {
+        let agenda_id = "11111111-2222-4333-8444-555555555555";
+        let channel_id = "22222222-3333-4444-8555-666666666666";
+        let meeting_id = "33333333-4444-4555-8666-777777777777";
+        let schedule_item_id = "44444444-5555-4666-8777-888888888888";
+        let media_sha256 = "a".repeat(64);
+        let agenda = maximum_valid_agenda(
+            agenda_id,
+            channel_id,
+            meeting_id,
+            schedule_item_id,
+            &media_sha256,
+        );
+        agenda.validate().unwrap();
+        let body = serde_json::to_vec(&serde_json::json!({
+            "agenda": agenda,
+            "expected_revision": null,
+        }))
+        .unwrap();
+        let path = format!("/api/v1/agendas/{agenda_id}");
+        assert!(body.len() > MAX_SMALL_REQUEST_BODY);
+        assert!(body.len() <= request_body_limit("PUT", &path));
+        let mut request = format!(
+            "PUT {path} HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\n\r\n",
+            body.len()
+        )
+        .into_bytes();
+        request.extend_from_slice(&body);
+        assert!(parse_http_request(&request).is_ok());
+
+        let mut overflow = maximum_valid_agenda(
+            agenda_id,
+            channel_id,
+            meeting_id,
+            schedule_item_id,
+            &media_sha256,
+        );
+        let first = overflow.items[0].clone();
+        overflow.items.push(AgendaItem {
+            item_id: "eeeeeeee-ffff-4000-8000-111111111111".into(),
+            ordinal: 129,
+            ..first
+        });
+        assert!(overflow.validate().is_err());
+    }
+
+    fn maximum_valid_agenda(
+        agenda_id: &str,
+        channel_id: &str,
+        meeting_id: &str,
+        schedule_item_id: &str,
+        media_asset_sha256: &str,
+    ) -> Agenda {
+        let item_ids = (0..128)
+            .map(|index| format!("10000000-0000-4000-8000-{:012x}", index + 1))
+            .collect::<Vec<_>>();
+        let items = item_ids
+            .iter()
+            .enumerate()
+            .map(|(index, item_id)| AgendaItem {
+                item_id: item_id.clone(),
+                ordinal: u16::try_from(index + 1).unwrap(),
+                title: r#"\""#.repeat(100),
+                public_summary: Some(r#"\""#.repeat(1_000)),
+                staff_notes: Some(r#"\""#.repeat(2_000)),
+                visibility: AgendaItemVisibility::StaffOnly,
+            })
+            .collect::<Vec<_>>();
+        let chapters = (0..512)
+            .map(|index| {
+                let starts_at_media_offset_ms = i64::try_from(index).unwrap() * 100;
+                AgendaChapter {
+                    chapter_id: format!("20000000-0000-4000-8000-{:012x}", index + 1),
+                    agenda_item_id: item_ids[index / 4].clone(),
+                    ordinal: u16::try_from(index + 1).unwrap(),
+                    title: r#"\""#.repeat(100),
+                    starts_at_media_offset_ms,
+                    ends_at_media_offset_ms: Some(starts_at_media_offset_ms + 100),
+                }
+            })
+            .collect::<Vec<_>>();
+        Agenda {
+            agenda_id: agenda_id.into(),
+            channel_id: channel_id.into(),
+            meeting_id: meeting_id.into(),
+            title: r#"\""#.repeat(100),
+            meeting_starts_at_unix_ms: 1,
+            provenance: AgendaProvenance::StaffAuthored {
+                author: AgendaActor {
+                    actor_id: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee".into(),
+                },
+                asserted_at_unix_ms: 1,
+            },
+            sync_intent: AgendaSyncIntent {
+                channel_id: channel_id.into(),
+                schedule_item_id: schedule_item_id.into(),
+                schedule_revision: 2,
+                media_asset_sha256: media_asset_sha256.into(),
+                expected_media_duration_ms: 60_000,
+                requested_by: AgendaActor {
+                    actor_id: "bbbbbbbb-cccc-4ddd-8eee-ffffffffffff".into(),
+                },
+                requested_at_unix_ms: 1,
+            },
+            items,
+            chapters,
+            revision: 1,
+        }
     }
 
     #[test]
