@@ -1,9 +1,10 @@
 use std::ffi::{CString, c_char, c_int, c_void};
 use std::path::{Path, PathBuf};
 use std::ptr;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 use station_automation_policy::{
     AdapterLocation, AutomationAdapterDescriptor, AutomationCandidateIdentity,
     AutomationConnectionTestEvidence, AutomationExecutionEngine, AutomationExecutionReceipt,
@@ -13,9 +14,9 @@ use station_automation_policy::{
 };
 use station_maintenance::{VerifiedInstallAuthority, verified_install_authority_for_test};
 use station_storage::{
-    AutomationExecutionAdapter, AutomationExecutionAdapterFailure, AutomationExecutionAttempt,
-    AutomationExecutionAttemptState, AutomationExecutionJobRecord, AutomationExecutionJobState,
+    AutomationExecutionAdapter, AutomationExecutionJobRecord, AutomationExecutionJobState,
     StationStore, run_automation_execution_controller_iteration,
+    run_automation_execution_controller_iteration_with_stop,
 };
 
 const ADAPTER_ID: &str = "11111111-2222-4333-8444-555555555555";
@@ -390,7 +391,7 @@ fn live_owner_can_renew_but_expired_or_wrong_owner_cannot() {
     store
         .enqueue_automation_execution_job(&request(), &candidate(), 100)
         .unwrap();
-    store
+    let claimed = store
         .claim_automation_execution_job(JOB_ID, "automation-worker-1", &candidate(), 150, 100)
         .unwrap();
 
@@ -399,6 +400,7 @@ fn live_owner_can_renew_but_expired_or_wrong_owner_cannot() {
             .renew_automation_execution_job_lease(
                 JOB_ID,
                 "automation-worker-2",
+                claimed.claim_id.as_deref().unwrap(),
                 &candidate(),
                 200,
                 1_000,
@@ -409,6 +411,7 @@ fn live_owner_can_renew_but_expired_or_wrong_owner_cannot() {
         .renew_automation_execution_job_lease(
             JOB_ID,
             "automation-worker-1",
+            claimed.claim_id.as_deref().unwrap(),
             &candidate(),
             200,
             1_000,
@@ -421,12 +424,70 @@ fn live_owner_can_renew_but_expired_or_wrong_owner_cannot() {
             .renew_automation_execution_job_lease(
                 JOB_ID,
                 "automation-worker-1",
+                claimed.claim_id.as_deref().unwrap(),
                 &candidate(),
                 1_200,
                 1_000,
             )
             .is_err()
     );
+
+    drop(store);
+    let _ = std::fs::remove_file(database);
+}
+
+#[test]
+fn stale_claim_cannot_renew_or_fail_a_reclaimed_job_under_the_same_worker_identity() {
+    let (database, store) = configured_store("automation-execution-stale-claim-capability");
+    store
+        .enqueue_automation_execution_job(&request(), &candidate(), 100)
+        .unwrap();
+    let first = store
+        .claim_automation_execution_job(JOB_ID, "stable-controller", &candidate(), 150, 100)
+        .unwrap();
+    let second = store
+        .claim_automation_execution_job(JOB_ID, "stable-controller", &candidate(), 250, 1_000)
+        .unwrap();
+    let first_claim = first.claim_id.as_deref().unwrap();
+    let second_claim = second.claim_id.as_deref().unwrap();
+    assert_ne!(first_claim, second_claim);
+
+    assert!(
+        store
+            .renew_automation_execution_job_lease(
+                JOB_ID,
+                "stable-controller",
+                first_claim,
+                &candidate(),
+                251,
+                1_000,
+            )
+            .is_err()
+    );
+    assert!(
+        store
+            .record_automation_execution_attempt_failure(
+                JOB_ID,
+                "stable-controller",
+                first_claim,
+                "adapter_timeout",
+                true,
+                251,
+            )
+            .is_err()
+    );
+    let live = store
+        .renew_automation_execution_job_lease(
+            JOB_ID,
+            "stable-controller",
+            second_claim,
+            &candidate(),
+            251,
+            1_000,
+        )
+        .unwrap();
+    assert_eq!(live.claim_id.as_deref(), Some(second_claim));
+    assert_eq!(live.lease_expires_at_unix_ms, Some(1_251));
 
     drop(store);
     let _ = std::fs::remove_file(database);
@@ -478,6 +539,61 @@ fn durable_job_bindings_and_terminal_rows_are_immutable() {
         "durable job history must not be deletable"
     );
 
+    let _ = std::fs::remove_file(database);
+}
+
+#[test]
+fn v1_execution_schema_migrates_without_losing_pending_job_authority() {
+    let (database, store) = configured_store("automation-execution-v1-migration");
+    let pending = store
+        .enqueue_automation_execution_job(&request(), &candidate(), 100)
+        .unwrap();
+    drop(store);
+
+    assert_eq!(
+        raw_sql_status(
+            &database,
+            "DROP INDEX automation_execution_jobs_pending;\
+             ALTER TABLE automation_execution_jobs DROP COLUMN next_attempt_at_unix_ms;\
+             CREATE INDEX automation_execution_jobs_pending \
+               ON automation_execution_jobs(state,created_at_unix_ms,job_id)",
+        ),
+        SQLITE_OK,
+        "the fixture must be an authentic pre-retry v1 schema"
+    );
+
+    let reopened = StationStore::open(&database).expect("v1 schema must migrate exactly once");
+    assert_eq!(
+        reopened
+            .read_automation_execution_job(JOB_ID)
+            .expect("read migrated durable job"),
+        Some(pending)
+    );
+    let claimed = reopened
+        .claim_automation_execution_job(JOB_ID, "migration-worker", &candidate(), 150, 1_000)
+        .expect("migrated job remains claimable");
+    assert_eq!(claimed.next_attempt_at_unix_ms, 150);
+    drop(reopened);
+    let _ = std::fs::remove_file(database);
+}
+
+#[test]
+fn malformed_execution_schema_is_rejected_instead_of_silently_repaired() {
+    let (database, store) = configured_store("automation-execution-malformed-schema");
+    drop(store);
+    assert_eq!(
+        raw_sql_status(
+            &database,
+            "DROP INDEX automation_execution_jobs_pending;\
+             CREATE INDEX automation_execution_jobs_pending \
+               ON automation_execution_jobs(state,created_at_unix_ms,job_id)",
+        ),
+        SQLITE_OK
+    );
+    assert!(
+        StationStore::open(&database).is_err(),
+        "an ambiguous schema must fail closed rather than be treated as a safe v1 migration"
+    );
     let _ = std::fs::remove_file(database);
 }
 
@@ -616,7 +732,7 @@ fn attempt_failures_retry_only_under_the_live_owner_and_can_finish_terminally() 
     store
         .enqueue_automation_execution_job(&request(), &candidate(), 100)
         .unwrap();
-    store
+    let first_claim = store
         .claim_automation_execution_job(JOB_ID, "automation-worker-1", &candidate(), 150, 1_000)
         .unwrap();
 
@@ -625,6 +741,7 @@ fn attempt_failures_retry_only_under_the_live_owner_and_can_finish_terminally() 
             .record_automation_execution_attempt_failure(
                 JOB_ID,
                 "automation-worker-2",
+                first_claim.claim_id.as_deref().unwrap(),
                 "adapter_timeout",
                 true,
                 200,
@@ -635,6 +752,7 @@ fn attempt_failures_retry_only_under_the_live_owner_and_can_finish_terminally() 
         .record_automation_execution_attempt_failure(
             JOB_ID,
             "automation-worker-1",
+            first_claim.claim_id.as_deref().unwrap(),
             "adapter_timeout",
             true,
             200,
@@ -650,7 +768,7 @@ fn attempt_failures_retry_only_under_the_live_owner_and_can_finish_terminally() 
     assert!(pending.completed_at_unix_ms.is_none());
     assert_eq!(pending.next_attempt_at_unix_ms, 60_200);
 
-    store
+    let second_claim = store
         .claim_automation_execution_job(
             JOB_ID,
             "automation-worker-2",
@@ -663,6 +781,7 @@ fn attempt_failures_retry_only_under_the_live_owner_and_can_finish_terminally() 
         .record_automation_execution_attempt_failure(
             JOB_ID,
             "automation-worker-2",
+            second_claim.claim_id.as_deref().unwrap(),
             "invalid_provider_response",
             false,
             60_250,
@@ -681,6 +800,7 @@ fn attempt_failures_retry_only_under_the_live_owner_and_can_finish_terminally() 
             .record_automation_execution_attempt_failure(
                 JOB_ID,
                 "automation-worker-2",
+                second_claim.claim_id.as_deref().unwrap(),
                 "retry_after_terminal",
                 true,
                 60_251,
@@ -767,6 +887,7 @@ fn expired_tenth_attempt_is_terminalized_instead_of_wedging_the_queue() {
                 .record_automation_execution_attempt_failure(
                     JOB_ID,
                     "automation-worker-1",
+                    claimed.claim_id.as_deref().unwrap(),
                     "adapter_timeout",
                     true,
                     now + 1,
@@ -837,6 +958,7 @@ fn install_generation_and_live_claim_interval_are_required_for_completion() {
         .record_automation_execution_attempt_failure(
             JOB_ID,
             "automation-worker-1",
+            first_claim.claim_id.as_deref().unwrap(),
             "adapter_timeout",
             true,
             200,
@@ -861,6 +983,7 @@ fn install_generation_and_live_claim_interval_are_required_for_completion() {
             .renew_automation_execution_job_lease(
                 JOB_ID,
                 "automation-worker-2",
+                first_claim.claim_id.as_deref().unwrap(),
                 &reactivated,
                 300,
                 1_000,
@@ -969,46 +1092,58 @@ fn missing_parent_receipt_and_corrupt_failure_code_fail_closed() {
     let _ = std::fs::remove_file(database);
 }
 
-struct ExactTestAdapter;
-
-struct ExactTestAttempt {
-    receipt: AutomationExecutionReceipt,
+fn exact_test_adapter() -> AutomationExecutionAdapter {
+    let system_root = std::env::var_os("SystemRoot").expect("Windows system root exists");
+    let executable = PathBuf::from(system_root)
+        .join("System32")
+        .join("WindowsPowerShell")
+        .join("v1.0")
+        .join("powershell.exe");
+    let mut exact_receipt = receipt();
+    exact_receipt.claim_id = "CLAIM_PLACEHOLDER".into();
+    let payload = serde_json::to_string(&exact_receipt).expect("serialize exact receipt");
+    let encoded_payload = STANDARD.encode(payload);
+    let script = format!(
+        "$payload=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('{encoded_payload}'));[Console]::Out.Write($payload.Replace('CLAIM_PLACEHOLDER',$env:TOWNLIGHT_AUTOMATION_EXECUTION_CLAIM_ID))"
+    );
+    let encoded_script = STANDARD.encode(
+        script
+            .encode_utf16()
+            .flat_map(u16::to_le_bytes)
+            .collect::<Vec<_>>(),
+    );
+    AutomationExecutionAdapter::new(
+        ADAPTER_ID,
+        executable,
+        vec![
+            "-NoLogo".into(),
+            "-NoProfile".into(),
+            "-NonInteractive".into(),
+            "-EncodedCommand".into(),
+            encoded_script.into(),
+        ],
+    )
+    .expect("build host-owned test worker")
 }
 
-impl AutomationExecutionAttempt for ExactTestAttempt {
-    fn poll(
-        &mut self,
-        _deadline_unix_ms: i64,
-        _heartbeat: &mut dyn FnMut() -> Result<(), String>,
-    ) -> Result<AutomationExecutionAttemptState, AutomationExecutionAdapterFailure> {
-        Ok(AutomationExecutionAttemptState::Completed(Box::new(
-            self.receipt.clone(),
-        )))
-    }
-
-    fn terminate(&mut self) -> Result<(), String> {
-        Ok(())
-    }
-}
-
-impl AutomationExecutionAdapter for ExactTestAdapter {
-    fn adapter_id(&self) -> &str {
-        ADAPTER_ID
-    }
-
-    fn begin(
-        &self,
-        execution_request: &AutomationExecutionRequest,
-        claim_id: &str,
-        _deadline_unix_ms: i64,
-    ) -> Result<Box<dyn AutomationExecutionAttempt>, AutomationExecutionAdapterFailure> {
-        assert_eq!(execution_request, &request());
-        let mut exact_receipt = receipt();
-        exact_receipt.claim_id = claim_id.into();
-        Ok(Box::new(ExactTestAttempt {
-            receipt: exact_receipt,
-        }))
-    }
+fn blocking_test_adapter() -> AutomationExecutionAdapter {
+    let system_root = std::env::var_os("SystemRoot").expect("Windows system root exists");
+    AutomationExecutionAdapter::new(
+        ADAPTER_ID,
+        PathBuf::from(system_root)
+            .join("System32")
+            .join("WindowsPowerShell")
+            .join("v1.0")
+            .join("powershell.exe"),
+        vec![
+            "-NoLogo".into(),
+            "-NoProfile".into(),
+            "-NonInteractive".into(),
+            "-Command".into(),
+            "Start-Sleep -Seconds 30".into(),
+        ],
+    )
+    .expect("build blocking host-owned test worker")
 }
 
 #[test]
@@ -1017,15 +1152,16 @@ fn controller_commits_only_an_exact_typed_adapter_receipt() {
     store
         .enqueue_automation_execution_job(&request(), &candidate(), 100)
         .unwrap();
-    let mut times = [150_i64, 151, 350].into_iter();
+    let adapter = exact_test_adapter();
+    let mut times = [150_i64, 151, 152, 350].into_iter();
 
     assert!(
         run_automation_execution_controller_iteration(
             &store,
-            Some(&ExactTestAdapter),
+            Some(&adapter),
             &candidate(),
             "stationd-test-controller",
-            &mut || Ok(times.next().expect("controller clock call is bounded")),
+            &mut || Ok(times.next().unwrap_or(350)),
         )
         .unwrap()
     );
@@ -1084,6 +1220,83 @@ fn controller_without_an_implemented_exact_adapter_records_no_success() {
 }
 
 #[test]
+fn host_owned_blocking_worker_is_terminated_on_stop_and_releases_its_claim_for_a_paced_retry() {
+    let (database, store) = configured_store("automation-execution-stop-containment");
+    store
+        .enqueue_automation_execution_job(&request(), &candidate(), 100)
+        .unwrap();
+    let adapter = blocking_test_adapter();
+    let stop = AtomicBool::new(false);
+    let mut calls = 0_u8;
+    let mut times = [150_i64, 151, 152, 200].into_iter();
+
+    assert!(
+        run_automation_execution_controller_iteration_with_stop(
+            &store,
+            Some(&adapter),
+            &candidate(),
+            "stationd-test-controller",
+            &mut || {
+                calls += 1;
+                if calls == 3 {
+                    stop.store(true, Ordering::Release);
+                }
+                Ok(times.next().unwrap())
+            },
+            &stop,
+        )
+        .expect("host must stop its own process tree without waiting for worker cooperation")
+    );
+    let pending = store
+        .read_automation_execution_job(JOB_ID)
+        .unwrap()
+        .unwrap();
+    assert_eq!(pending.state, AutomationExecutionJobState::Pending);
+    assert_eq!(
+        pending.last_failure_code.as_deref(),
+        Some("adapter_timeout")
+    );
+    assert_eq!(pending.next_attempt_at_unix_ms, 60_200);
+    drop(store);
+    let _ = std::fs::remove_file(database);
+}
+
+#[test]
+fn host_owned_blocking_worker_deadline_never_blocks_reclaim_of_its_expired_claim() {
+    let (database, store) = configured_store("automation-execution-deadline-containment");
+    store
+        .enqueue_automation_execution_job(&request(), &candidate(), 100)
+        .unwrap();
+    let adapter = blocking_test_adapter();
+    let stop = AtomicBool::new(false);
+    let mut times = [150_i64, 151, 60_150, 60_151].into_iter();
+
+    assert!(
+        run_automation_execution_controller_iteration_with_stop(
+            &store,
+            Some(&adapter),
+            &candidate(),
+            "stationd-test-controller",
+            &mut || Ok(times.next().unwrap()),
+            &stop,
+        )
+        .expect("deadline teardown must not require a blocking worker callback")
+    );
+    let reclaimed = store
+        .claim_next_automation_execution_job(
+            "stationd-test-controller",
+            &candidate(),
+            60_151,
+            1_000,
+        )
+        .expect("expired contained claim is reclaimable")
+        .expect("same job is reclaimed");
+    assert_eq!(reclaimed.attempt_count, 2);
+    drop(store);
+    let _ = std::fs::remove_file(database);
+}
+
+#[test]
 fn unavailable_adapter_retries_are_durable_paced_and_survive_restart() {
     let (database, store) = configured_store("automation-execution-unavailable-backoff");
     store
@@ -1124,6 +1337,7 @@ fn unavailable_adapter_retries_are_durable_paced_and_survive_restart() {
         .record_automation_execution_attempt_failure(
             JOB_ID,
             "other-controller",
+            second.claim_id.as_deref().unwrap(),
             "adapter_unavailable",
             true,
             60_250,
@@ -1135,83 +1349,5 @@ fn unavailable_adapter_retries_are_durable_paced_and_survive_restart() {
         .unwrap();
     assert_eq!(second_pending.next_attempt_at_unix_ms, 180_250);
     drop(reopened);
-    let _ = std::fs::remove_file(database);
-}
-
-struct HeartbeatAttempt {
-    receipt: AutomationExecutionReceipt,
-}
-
-impl AutomationExecutionAttempt for HeartbeatAttempt {
-    fn poll(
-        &mut self,
-        _deadline_unix_ms: i64,
-        heartbeat: &mut dyn FnMut() -> Result<(), String>,
-    ) -> Result<AutomationExecutionAttemptState, AutomationExecutionAdapterFailure> {
-        heartbeat().map_err(|_| AutomationExecutionAdapterFailure::RetryableTimeout)?;
-        Ok(AutomationExecutionAttemptState::Completed(Box::new(
-            self.receipt.clone(),
-        )))
-    }
-
-    fn terminate(&mut self) -> Result<(), String> {
-        Ok(())
-    }
-}
-
-struct HeartbeatAdapter;
-
-impl AutomationExecutionAdapter for HeartbeatAdapter {
-    fn adapter_id(&self) -> &str {
-        ADAPTER_ID
-    }
-
-    fn begin(
-        &self,
-        _request: &AutomationExecutionRequest,
-        claim_id: &str,
-        _deadline_unix_ms: i64,
-    ) -> Result<Box<dyn AutomationExecutionAttempt>, AutomationExecutionAdapterFailure> {
-        let mut exact_receipt = receipt();
-        exact_receipt.claim_id = claim_id.into();
-        Ok(Box::new(HeartbeatAttempt {
-            receipt: exact_receipt,
-        }))
-    }
-}
-
-#[test]
-fn heartbeat_extends_the_authoritative_deadline_before_completion() {
-    let (database, store) = configured_store("automation-execution-heartbeat-deadline");
-    let mut long_lived_evidence = connection_evidence();
-    long_lived_evidence.evidence_id = "99999999-2222-4333-8444-555555555555".into();
-    long_lived_evidence.expires_at_unix_ms = 100_000;
-    store
-        .append_automation_connection_test_evidence(&long_lived_evidence, &candidate_identity(), 60)
-        .unwrap();
-    store
-        .enqueue_automation_execution_job(&request(), &candidate(), 100)
-        .unwrap();
-    // The original 60-second lease expires at 60,150. The completion arrives
-    // after that point, but the adapter heartbeat renews durable authority at
-    // 50,000 and completion is therefore valid.
-    let mut times = [150_i64, 151, 50_000, 65_000].into_iter();
-    assert!(
-        run_automation_execution_controller_iteration(
-            &store,
-            Some(&HeartbeatAdapter),
-            &candidate(),
-            "stationd-test-controller",
-            &mut || Ok(times.next().unwrap()),
-        )
-        .unwrap()
-    );
-    let completed = store
-        .read_automation_execution_job(JOB_ID)
-        .unwrap()
-        .unwrap();
-    assert_eq!(completed.state, AutomationExecutionJobState::Completed);
-    assert_eq!(completed.completed_at_unix_ms, Some(65_000));
-    drop(store);
     let _ = std::fs::remove_file(database);
 }

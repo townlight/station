@@ -46,15 +46,16 @@ job identity even when a corrupted parent pointer or parent row tries to hide th
 ## Boundaries and non-claims
 
 stationd now runs one bounded automation-execution queue controller under the same install-authority
-fence as the durable decision. It claims FIFO current work with a 60-second lease, lets only a typed
-adapter whose identity exactly matches the claimed request return a receipt, renews leases only through
-the durable live-owner check, and commits either the exact receipt or a bounded categorical attempt
-failure. Adapters enter through a cancellable managed-attempt boundary: provider/model work cannot be
-called synchronously on the controller thread, polling is a bounded scheduling probe, and a still-running
-attempt must prove termination before its claim is returned for retry. A heartbeat replaces the controller's
-authoritative completion deadline with the renewed durable lease expiry. A returned receipt is not success until the storage completion transaction rechecks the live
+fence as the durable decision. It claims FIFO current work with a 60-second lease and accepts only a
+declarative installed worker program whose identity exactly matches the claimed request. The host creates
+a fresh Windows Job Object, assigns the exact child before supervising it, polls only `Child::try_wait`,
+renews the lease itself, and terminates that exact process tree on stop or deadline. Thus no adapter
+callback can synchronously hold stationd, the queue, or the install fence. An expired claim is left for
+the next durable claim transaction rather than allowing its old capability to write a late failure; renewal,
+retryable failure, and completion all require the random per-attempt claim identity as well as the stable
+worker identity. A returned receipt is not success until the storage completion transaction rechecks the live
 candidate, policy, adapter, configuration, connection evidence, claim, and receipt binding. A late
-adapter return is recorded as `adapter_timeout`, not completed. Restarted or expired claims remain
+worker return is never completed. Restarted or expired claims remain
 recoverable through the durable queue rules. Fence, verified-install, and store failures are not
 treated as idle: the controller appends/routs a redacted durable S13 `ServiceDown` health alert and
 retries with bounded backoff, resolving that alert only after a successful durable iteration. The
@@ -64,6 +65,7 @@ next-attempt truth without lease-owner or claim identity.
 No production automation adapter is implemented or registered in this slice. Current jobs with no
 exact registered adapter record a paced retryable `adapter_unavailable` attempt and no receipt; this
 does not claim model execution, provider contact, output creation, or external success. The base
-attempt contract is not proof that any provider helper has implemented managed-handle verification or
-Windows Job Object containment. Later adapters must prove both, hash input and output from retained
-managed handles, and store secrets only in the Windows-protected credential authority.
+controller's Job Object boundary does not prove that any provider worker has implemented managed
+input/output-handle verification, nor does it prove an installed candidate actually runs a production
+adapter. Later adapters must hash input and output from retained managed handles and store secrets only
+in the Windows-protected credential authority.

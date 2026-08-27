@@ -128,6 +128,13 @@ impl StationStore {
             self.execute(
                 "ALTER TABLE automation_execution_jobs ADD COLUMN next_attempt_at_unix_ms INTEGER NOT NULL DEFAULT 0 CHECK (next_attempt_at_unix_ms >= 0)",
             )?;
+            // v1 had no retry clock: a pending row was eligible no earlier
+            // than its creation time.  Preserve that authority explicitly;
+            // the SQL default only exists for the ALTER TABLE operation and
+            // must not make historical work claimable before it was created.
+            self.execute(
+                "UPDATE automation_execution_jobs SET next_attempt_at_unix_ms=created_at_unix_ms WHERE state='pending'",
+            )?;
             self.execute("DROP INDEX automation_execution_jobs_pending")?;
             self.execute(
                 "CREATE INDEX automation_execution_jobs_pending ON automation_execution_jobs(state,next_attempt_at_unix_ms,created_at_unix_ms,job_id)",
@@ -554,16 +561,20 @@ impl StationStore {
             bind_text(self.database, insert.raw, 8, &values[4])?;
             expect_done(self.database, insert.raw)?;
 
+            // `worker_id` is stable across controller restarts.  The claim id is
+            // the per-lease capability: without it, a worker that lost C1 could
+            // complete a job reclaimed as C2 under the same worker identity.
             let update = self.prepare(
                 "UPDATE automation_execution_jobs SET state='completed',lease_owner='',lease_expires_at_unix_ms=-1,receipt_id=?1,completed_at_unix_ms=?2 \
-                 WHERE job_id=?3 AND state='claimed' AND lease_owner=?4 AND lease_expires_at_unix_ms>?5",
+                 WHERE job_id=?3 AND state='claimed' AND lease_owner=?4 AND claim_id=?5 AND lease_expires_at_unix_ms>?6",
             )?;
             bind_text(self.database, update.raw, 1, &values[0])?;
             bind_i64(self.database, update.raw, 2, now_unix_ms)?;
             bind_text(self.database, update.raw, 3, &values[1])?;
             let worker = c_string(worker_id, "automation execution worker identity")?;
             bind_text(self.database, update.raw, 4, &worker)?;
-            bind_i64(self.database, update.raw, 5, now_unix_ms)?;
+            bind_text(self.database, update.raw, 5, &values[2])?;
+            bind_i64(self.database, update.raw, 6, now_unix_ms)?;
             expect_done(self.database, update.raw)?;
             let completed = self.read_automation_execution_job(job_id)?.ok_or_else(|| {
                 "automation execution job disappeared after completion".to_string()
@@ -582,12 +593,14 @@ impl StationStore {
         &self,
         job_id: &str,
         worker_id: &str,
+        claim_id: &str,
         install_authority: &VerifiedInstallAuthority,
         now_unix_ms: i64,
         lease_ms: i64,
     ) -> Result<AutomationExecutionJobRecord, String> {
         if !is_canonical_uuid(job_id)
             || !secret_field(worker_id, 200)
+            || !is_canonical_uuid(claim_id)
             || now_unix_ms < 0
             || !(1..=MAX_AUTOMATION_EXECUTION_LEASE_MS).contains(&lease_ms)
         {
@@ -604,6 +617,7 @@ impl StationStore {
                 .ok_or_else(|| "automation execution job does not exist".to_string())?;
             if current.state != AutomationExecutionJobState::Claimed
                 || current.lease_owner.as_deref() != Some(worker_id)
+                || current.claim_id.as_deref() != Some(claim_id)
                 || current
                     .lease_expires_at_unix_ms
                     .is_none_or(|expiry| expiry <= now_unix_ms)
@@ -616,20 +630,23 @@ impl StationStore {
                 now_unix_ms,
             )?;
             let update = self.prepare(
-                "UPDATE automation_execution_jobs SET lease_expires_at_unix_ms=?1 WHERE job_id=?2 AND state='claimed' AND lease_owner=?3 AND lease_expires_at_unix_ms>?4",
+                "UPDATE automation_execution_jobs SET lease_expires_at_unix_ms=?1 WHERE job_id=?2 AND state='claimed' AND lease_owner=?3 AND claim_id=?4 AND lease_expires_at_unix_ms>?5",
             )?;
             let job = c_string(job_id, "automation execution job identity")?;
             let worker = c_string(worker_id, "automation execution worker identity")?;
+            let claim = c_string(claim_id, "automation execution claim identity")?;
             bind_i64(self.database, update.raw, 1, lease_expires)?;
             bind_text(self.database, update.raw, 2, &job)?;
             bind_text(self.database, update.raw, 3, &worker)?;
-            bind_i64(self.database, update.raw, 4, now_unix_ms)?;
+            bind_text(self.database, update.raw, 4, &claim)?;
+            bind_i64(self.database, update.raw, 5, now_unix_ms)?;
             expect_done(self.database, update.raw)?;
             let renewed = self.read_automation_execution_job(job_id)?.ok_or_else(|| {
                 "automation execution job disappeared after lease renewal".to_string()
             })?;
             if renewed.state != AutomationExecutionJobState::Claimed
                 || renewed.lease_owner.as_deref() != Some(worker_id)
+                || renewed.claim_id.as_deref() != Some(claim_id)
                 || renewed.lease_expires_at_unix_ms != Some(lease_expires)
             {
                 return Err("automation execution lease renewal was not exact".into());
@@ -643,12 +660,14 @@ impl StationStore {
         &self,
         job_id: &str,
         worker_id: &str,
+        claim_id: &str,
         failure_code: &str,
         retryable: bool,
         now_unix_ms: i64,
     ) -> Result<AutomationExecutionJobRecord, String> {
         if !is_canonical_uuid(job_id)
             || !secret_field(worker_id, 200)
+            || !is_canonical_uuid(claim_id)
             || !valid_automation_execution_failure_code(failure_code)
             || now_unix_ms < 0
         {
@@ -661,6 +680,7 @@ impl StationStore {
                 .ok_or_else(|| "automation execution job does not exist".to_string())?;
             if current.state != AutomationExecutionJobState::Claimed
                 || current.lease_owner.as_deref() != Some(worker_id)
+                || current.claim_id.as_deref() != Some(claim_id)
                 || current
                     .lease_expires_at_unix_ms
                     .is_none_or(|expiry| expiry <= now_unix_ms)
@@ -671,28 +691,32 @@ impl StationStore {
             let update = if terminal {
                 self.prepare(
                     "UPDATE automation_execution_jobs SET state='failed',lease_owner='',lease_expires_at_unix_ms=-1,last_failure_code=?1,completed_at_unix_ms=?2 \
-                     WHERE job_id=?3 AND state='claimed' AND lease_owner=?4 AND lease_expires_at_unix_ms>?2",
+                     WHERE job_id=?3 AND state='claimed' AND lease_owner=?4 AND claim_id=?5 AND lease_expires_at_unix_ms>?2",
                 )?
             } else {
                 self.prepare(
                     "UPDATE automation_execution_jobs SET state='pending',lease_owner='',lease_expires_at_unix_ms=-1,claim_id='',claimed_at_unix_ms=-1,last_failure_code=?1,next_attempt_at_unix_ms=?5 \
-                     WHERE job_id=?3 AND state='claimed' AND lease_owner=?4 AND lease_expires_at_unix_ms>?2",
+                     WHERE job_id=?3 AND state='claimed' AND lease_owner=?4 AND claim_id=?6 AND lease_expires_at_unix_ms>?2",
                 )?
             };
             let code = c_string(failure_code, "automation execution failure code")?;
             let job = c_string(job_id, "automation execution job identity")?;
             let worker = c_string(worker_id, "automation execution worker identity")?;
+            let claim = c_string(claim_id, "automation execution claim identity")?;
             bind_text(self.database, update.raw, 1, &code)?;
             bind_i64(self.database, update.raw, 2, now_unix_ms)?;
             bind_text(self.database, update.raw, 3, &job)?;
             bind_text(self.database, update.raw, 4, &worker)?;
-            if !terminal {
+            if terminal {
+                bind_text(self.database, update.raw, 5, &claim)?;
+            } else {
                 bind_i64(
                     self.database,
                     update.raw,
                     5,
                     automation_execution_retry_at(now_unix_ms, current.attempt_count)?,
                 )?;
+                bind_text(self.database, update.raw, 6, &claim)?;
             }
             expect_done(self.database, update.raw)?;
             if self.changes() != 1 {

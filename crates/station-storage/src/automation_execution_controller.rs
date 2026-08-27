@@ -2,18 +2,32 @@ use super::*;
 use station_automation_policy::{AutomationExecutionReceipt, AutomationExecutionRequest};
 use station_domain::{AlertConditionKind, AlertEvent, AlertEventState, AlertSeverity};
 use station_maintenance::VerifiedInstallAuthority;
-use std::cell::Cell;
+use std::ffi::OsString;
+use std::io::Read;
+use std::os::windows::io::AsRawHandle;
 use std::path::Path;
+use std::process::{Child, ChildStdout, Command, Stdio};
 use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
 };
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE};
+use windows_sys::Win32::System::JobObjects::{
+    AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+    JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
+    SetInformationJobObject, TerminateJobObject,
+};
 
 const AUTOMATION_EXECUTION_WORKER_ID: &str = "stationd-automation-execution";
 const AUTOMATION_EXECUTION_LEASE_MS: i64 = 60_000;
+const AUTOMATION_EXECUTION_RENEWAL_LEAD_MS: i64 = AUTOMATION_EXECUTION_LEASE_MS / 2;
 const AUTOMATION_EXECUTION_POLL_INTERVAL: Duration = Duration::from_millis(250);
 const AUTOMATION_EXECUTION_MAX_BACKOFF: Duration = Duration::from_secs(5);
+const AUTOMATION_EXECUTION_CHILD_POLL_INTERVAL: Duration = Duration::from_millis(10);
+const MAX_AUTOMATION_EXECUTION_STDOUT_BYTES: u64 = 1_048_576;
+const MAX_AUTOMATION_EXECUTION_REQUEST_ENV_BYTES: usize = 32_768;
+static NEVER_STOP_AUTOMATION_EXECUTION: AtomicBool = AtomicBool::new(false);
 
 /// A typed adapter outcome deliberately carries only an approved categorical
 /// code. Raw provider errors, prompts, and response bodies never become
@@ -41,42 +55,183 @@ impl AutomationExecutionAdapterFailure {
     }
 }
 
-/// A controller-owned attempt is a non-blocking, cancellable boundary around
-/// provider work.  Implementations must put provider execution in a managed
-/// child/job boundary before returning this object.  `poll` is a scheduling
-/// probe, never a place to perform unbounded provider I/O; `terminate` must
-/// synchronously revoke that managed child before the claim can be released.
-/// This deliberately prevents an arbitrary synchronous adapter call from
-/// keeping stationd alive after its durable authority has expired.
-pub trait AutomationExecutionAttempt: Send {
-    fn poll(
-        &mut self,
-        deadline_unix_ms: i64,
-        heartbeat: &mut dyn FnMut() -> Result<(), String>,
-    ) -> Result<AutomationExecutionAttemptState, AutomationExecutionAdapterFailure>;
-
-    fn terminate(&mut self) -> Result<(), String>;
-}
-
+/// A declarative, installed worker program.  This is intentionally data, not
+/// a callback interface: adapter code has no synchronous `poll` hook through
+/// which it can hold stationd, its queue lease, or the install fence hostage.
+/// The controller starts, observes, and terminates the one process tree it
+/// owns.  There is currently no production program registered; that remains a
+/// truthful `adapter_unavailable` retry rather than fabricated execution.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum AutomationExecutionAttemptState {
-    Completed(Box<AutomationExecutionReceipt>),
-    Running,
+pub struct AutomationExecutionAdapter {
+    adapter_id: String,
+    executable: std::path::PathBuf,
+    arguments: Vec<OsString>,
 }
 
-/// The controller gives adapters only a claimed request and a bounded
-/// execution boundary. Implementations must return a cancellable managed
-/// attempt, never run provider/model work synchronously on the stationd
-/// controller thread.
-pub trait AutomationExecutionAdapter {
-    fn adapter_id(&self) -> &str;
+impl AutomationExecutionAdapter {
+    pub fn new(
+        adapter_id: impl Into<String>,
+        executable: impl Into<std::path::PathBuf>,
+        arguments: Vec<OsString>,
+    ) -> Result<Self, String> {
+        let adapter_id = adapter_id.into();
+        let executable = executable.into();
+        if !is_canonical_uuid(&adapter_id) || !executable.is_absolute() || arguments.len() > 64 {
+            return Err(
+                "automation execution program specification is invalid or unbounded".into(),
+            );
+        }
+        if arguments.iter().any(|argument| argument.len() > 8_192) {
+            return Err("automation execution program argument is oversized".into());
+        }
+        Ok(Self {
+            adapter_id,
+            executable,
+            arguments,
+        })
+    }
 
-    fn begin(
-        &self,
+    pub fn adapter_id(&self) -> &str {
+        &self.adapter_id
+    }
+}
+
+struct WindowsProcessTree(HANDLE);
+
+impl WindowsProcessTree {
+    fn new() -> Result<Self, AutomationExecutionAdapterFailure> {
+        let handle = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
+        if handle == INVALID_HANDLE_VALUE || handle.is_null() {
+            return Err(AutomationExecutionAdapterFailure::RetryableUnavailable);
+        }
+        let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+        limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        let configured = unsafe {
+            SetInformationJobObject(
+                handle,
+                JobObjectExtendedLimitInformation,
+                (&limits as *const JOBOBJECT_EXTENDED_LIMIT_INFORMATION).cast(),
+                u32::try_from(std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>())
+                    .expect("automation execution job limits fit u32"),
+            )
+        };
+        if configured == 0 {
+            unsafe { CloseHandle(handle) };
+            return Err(AutomationExecutionAdapterFailure::RetryableUnavailable);
+        }
+        Ok(Self(handle))
+    }
+
+    fn assign(&self, child: &Child) -> Result<(), AutomationExecutionAdapterFailure> {
+        if unsafe { AssignProcessToJobObject(self.0, child.as_raw_handle() as HANDLE) } == 0 {
+            return Err(AutomationExecutionAdapterFailure::RetryableUnavailable);
+        }
+        Ok(())
+    }
+
+    fn terminate(&self) {
+        unsafe { TerminateJobObject(self.0, 1) };
+    }
+}
+
+impl Drop for WindowsProcessTree {
+    fn drop(&mut self) {
+        unsafe { CloseHandle(self.0) };
+    }
+}
+
+/// The only execution resource the controller supervises.  It is created by
+/// the host after it has acquired the durable claim, placed in a fresh Windows
+/// Job Object immediately, and never exposes a blocking adapter callback.
+struct OwnedAutomationExecutionProcess {
+    child: Child,
+    job: WindowsProcessTree,
+    stdout: Option<ChildStdout>,
+}
+
+impl OwnedAutomationExecutionProcess {
+    fn spawn(
+        adapter: &AutomationExecutionAdapter,
         request: &AutomationExecutionRequest,
         claim_id: &str,
         deadline_unix_ms: i64,
-    ) -> Result<Box<dyn AutomationExecutionAttempt>, AutomationExecutionAdapterFailure>;
+    ) -> Result<Self, AutomationExecutionAdapterFailure> {
+        let request_json = serde_json::to_string(request)
+            .map_err(|_| AutomationExecutionAdapterFailure::PermanentInvalidResponse)?;
+        if request_json.len() > MAX_AUTOMATION_EXECUTION_REQUEST_ENV_BYTES {
+            return Err(AutomationExecutionAdapterFailure::PermanentInvalidResponse);
+        }
+        let job = WindowsProcessTree::new()?;
+        let mut child = Command::new(&adapter.executable)
+            .args(&adapter.arguments)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .env("TOWNLIGHT_AUTOMATION_EXECUTION_REQUEST_JSON", request_json)
+            .env("TOWNLIGHT_AUTOMATION_EXECUTION_CLAIM_ID", claim_id)
+            .env(
+                "TOWNLIGHT_AUTOMATION_EXECUTION_DEADLINE_UNIX_MS",
+                deadline_unix_ms.to_string(),
+            )
+            .spawn()
+            .map_err(|_| AutomationExecutionAdapterFailure::RetryableUnavailable)?;
+        if let Err(error) = job.assign(&child) {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(error);
+        }
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or(AutomationExecutionAdapterFailure::PermanentInvalidResponse)?;
+        Ok(Self {
+            child,
+            job,
+            stdout: Some(stdout),
+        })
+    }
+
+    fn try_receipt(
+        &mut self,
+    ) -> Result<Option<AutomationExecutionReceipt>, AutomationExecutionAdapterFailure> {
+        let Some(status) = self
+            .child
+            .try_wait()
+            .map_err(|_| AutomationExecutionAdapterFailure::RetryableUnavailable)?
+        else {
+            return Ok(None);
+        };
+        // The child has exited, but descendants might retain stdout.  They are
+        // all inside this exact Job Object, so revoke them before the bounded
+        // read; no unowned process is ever targeted.
+        self.job.terminate();
+        let _ = self.child.wait();
+        if !status.success() {
+            return Err(AutomationExecutionAdapterFailure::PermanentRejected);
+        }
+        let mut stdout = self
+            .stdout
+            .take()
+            .ok_or(AutomationExecutionAdapterFailure::PermanentInvalidResponse)?;
+        let mut bytes = Vec::new();
+        stdout
+            .by_ref()
+            .take(MAX_AUTOMATION_EXECUTION_STDOUT_BYTES + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|_| AutomationExecutionAdapterFailure::RetryableUnavailable)?;
+        if bytes.len() as u64 > MAX_AUTOMATION_EXECUTION_STDOUT_BYTES {
+            return Err(AutomationExecutionAdapterFailure::PermanentInvalidResponse);
+        }
+        let receipt = serde_json::from_slice(&bytes)
+            .map_err(|_| AutomationExecutionAdapterFailure::PermanentInvalidResponse)?;
+        Ok(Some(receipt))
+    }
+
+    fn terminate(&mut self) {
+        self.job.terminate();
+        let _ = self.child.wait();
+        let _ = self.stdout.take();
+    }
 }
 
 /// Runs one bounded queue decision. The store performs the authoritative
@@ -85,10 +240,28 @@ pub trait AutomationExecutionAdapter {
 /// an adapter return into success without that final commit.
 pub fn run_automation_execution_controller_iteration(
     store: &StationStore,
-    adapter: Option<&dyn AutomationExecutionAdapter>,
+    adapter: Option<&AutomationExecutionAdapter>,
     install_authority: &VerifiedInstallAuthority,
     worker_id: &str,
     clock: &mut dyn FnMut() -> Result<i64, String>,
+) -> Result<bool, String> {
+    run_automation_execution_controller_iteration_with_stop(
+        store,
+        adapter,
+        install_authority,
+        worker_id,
+        clock,
+        &NEVER_STOP_AUTOMATION_EXECUTION,
+    )
+}
+
+pub fn run_automation_execution_controller_iteration_with_stop(
+    store: &StationStore,
+    adapter: Option<&AutomationExecutionAdapter>,
+    install_authority: &VerifiedInstallAuthority,
+    worker_id: &str,
+    clock: &mut dyn FnMut() -> Result<i64, String>,
+    stop: &AtomicBool,
 ) -> Result<bool, String> {
     let claimed_at_unix_ms = clock()?;
     let Some(claimed) = store.claim_next_automation_execution_job(
@@ -112,54 +285,55 @@ pub fn run_automation_execution_controller_iteration(
     {
         Some(adapter) => {
             let action_started_at_unix_ms = clock()?;
-            if action_started_at_unix_ms >= deadline_unix_ms {
+            if action_started_at_unix_ms >= deadline_unix_ms || stop.load(Ordering::Acquire) {
                 Err(AutomationExecutionAdapterFailure::RetryableTimeout)
             } else {
-                match adapter.begin(&claimed.request, claim_id, deadline_unix_ms) {
-                    Err(failure) => Err(failure),
-                    Ok(mut attempt) => {
-                        let renewed_deadline = Cell::new(deadline_unix_ms);
-                        let mut heartbeat = || {
-                            let now_unix_ms = clock()?;
-                            if now_unix_ms >= renewed_deadline.get() {
-                                return Err(
-                                    "automation execution adapter exceeded its bounded lease"
-                                        .into(),
-                                );
-                            }
+                (|| -> Result<Result<AutomationExecutionReceipt, AutomationExecutionAdapterFailure>, String> {
+                    let mut process = match OwnedAutomationExecutionProcess::spawn(
+                        adapter,
+                        &claimed.request,
+                        claim_id,
+                        deadline_unix_ms,
+                    ) {
+                        Ok(process) => process,
+                        Err(failure) => return Ok(Err(failure)),
+                    };
+                    let mut renewal_at_unix_ms = deadline_unix_ms
+                        .checked_sub(AUTOMATION_EXECUTION_RENEWAL_LEAD_MS)
+                        .ok_or_else(|| "automation execution renewal deadline overflowed".to_string())?;
+                    loop {
+                        if stop.load(Ordering::Acquire) {
+                            process.terminate();
+                            break Ok(Err(AutomationExecutionAdapterFailure::RetryableTimeout));
+                        }
+                        let now_unix_ms = clock()?;
+                        if now_unix_ms >= deadline_unix_ms {
+                            process.terminate();
+                            break Ok(Err(AutomationExecutionAdapterFailure::RetryableTimeout));
+                        }
+                        if now_unix_ms >= renewal_at_unix_ms {
                             let renewed = store.renew_automation_execution_job_lease(
                                 &claimed.request.job_id,
                                 worker_id,
+                                claim_id,
                                 install_authority,
                                 now_unix_ms,
                                 AUTOMATION_EXECUTION_LEASE_MS,
                             )?;
-                            renewed_deadline.set(renewed.lease_expires_at_unix_ms.ok_or_else(
+                            deadline_unix_ms = renewed.lease_expires_at_unix_ms.ok_or_else(
                                 || "renewed automation execution job lacks a deadline".to_string(),
-                            )?);
-                            Ok(())
-                        };
-                        let result = match attempt.poll(renewed_deadline.get(), &mut heartbeat) {
-                            Err(failure) => Err(failure),
-                            Ok(AutomationExecutionAttemptState::Completed(receipt)) => Ok(*receipt),
-                            Ok(AutomationExecutionAttemptState::Running) => {
-                                // A controller iteration does not retain an attempt across
-                                // authority/fence lifetimes. It must prove the managed child
-                                // was terminated before releasing this claim for a paced retry.
-                                match attempt.terminate() {
-                                    Ok(()) => {
-                                        Err(AutomationExecutionAdapterFailure::RetryableTimeout)
-                                    }
-                                    Err(_) => Err(
-                                        AutomationExecutionAdapterFailure::PermanentInvalidResponse,
-                                    ),
-                                }
-                            }
-                        };
-                        deadline_unix_ms = renewed_deadline.get();
-                        result
+                            )?;
+                            renewal_at_unix_ms = deadline_unix_ms
+                                .checked_sub(AUTOMATION_EXECUTION_RENEWAL_LEAD_MS)
+                                .ok_or_else(|| "automation execution renewal deadline overflowed".to_string())?;
+                        }
+                        match process.try_receipt() {
+                            Ok(Some(receipt)) => break Ok(Ok(receipt)),
+                            Ok(None) => std::thread::sleep(AUTOMATION_EXECUTION_CHILD_POLL_INTERVAL),
+                            Err(failure) => break Ok(Err(failure)),
+                        }
                     }
-                }
+                })()?
             }
         }
         None => Err(AutomationExecutionAdapterFailure::RetryableUnavailable),
@@ -167,13 +341,9 @@ pub fn run_automation_execution_controller_iteration(
 
     let finished_at_unix_ms = clock()?;
     if finished_at_unix_ms >= deadline_unix_ms {
-        store.record_automation_execution_attempt_failure(
-            &claimed.request.job_id,
-            worker_id,
-            AutomationExecutionAdapterFailure::RetryableTimeout.code(),
-            true,
-            finished_at_unix_ms,
-        )?;
+        // The owned process tree was already terminated at the deadline.  Do
+        // not let an expired C1 write a failure after another controller may
+        // have reclaimed C2; the next durable claim transaction recovers it.
         return Ok(true);
     }
     match outcome {
@@ -191,6 +361,7 @@ pub fn run_automation_execution_controller_iteration(
             store.record_automation_execution_attempt_failure(
                 &claimed.request.job_id,
                 worker_id,
+                claim_id,
                 failure.code(),
                 failure.retryable(),
                 finished_at_unix_ms,
@@ -207,7 +378,7 @@ pub fn run_automation_execution_queue_controller(
 ) -> Result<(), String> {
     let mut backoff = AUTOMATION_EXECUTION_POLL_INTERVAL;
     while !stop.load(Ordering::Acquire) {
-        match run_automation_execution_queue_iteration(database, application_root) {
+        match run_automation_execution_queue_iteration(database, application_root, &stop) {
             Ok(_) => {
                 resolve_automation_execution_controller_alert(database);
                 backoff = AUTOMATION_EXECUTION_POLL_INTERVAL;
@@ -269,6 +440,7 @@ fn resolve_automation_execution_controller_alert(database: &Path) {
 fn run_automation_execution_queue_iteration(
     database: &Path,
     application_root: &Path,
+    stop: &AtomicBool,
 ) -> Result<bool, String> {
     let data_root = database
         .parent()
@@ -285,12 +457,13 @@ fn run_automation_execution_queue_iteration(
     // No production adapter is registered in this slice. The controller still
     // claims current durable work and records an exact retryable unavailable
     // attempt, rather than inventing model, provider, output, or receipt truth.
-    run_automation_execution_controller_iteration(
+    run_automation_execution_controller_iteration_with_stop(
         &store,
         None,
         &install_authority,
         AUTOMATION_EXECUTION_WORKER_ID,
         &mut clock,
+        stop,
     )
 }
 
