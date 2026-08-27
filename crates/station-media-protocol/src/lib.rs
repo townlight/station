@@ -74,10 +74,10 @@ impl<'de> Deserialize<'de> for LoudnessTarget {
 }
 
 pub const MAX_FRAME_BYTES: usize = 65_536;
-// Revisioned fallback-tone acknowledgement and audit fields are a breaking
-// worker capability, so mixed pre-v11 workers fail closed on the control pipe.
+// Scheduled-recording capture is a separate, bounded worker capability, so
+// mixed pre-v12 workers fail closed on the control pipe.
 pub const PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion {
-    major: 11,
+    major: 12,
     minor: 0,
 };
 
@@ -96,6 +96,9 @@ pub const MIN_OUTPUT_PROOF_DURATION_MS: u64 = 3_000;
 // sample plus headroom. Keep the operator boundary finite while leaving
 // enough margin for the exact configured mux stream.
 pub const MAX_OUTPUT_PROOF_BYTES: u64 = 1024 * 1024 * 1024;
+pub const MIN_SCHEDULED_RECORDING_DURATION_MS: u64 = 3_000;
+pub const MAX_SCHEDULED_RECORDING_DURATION_MS: u64 = 86_400_000;
+pub const MAX_SCHEDULED_RECORDING_BYTES: u64 = 128 * 1024 * 1024 * 1024;
 const MAX_OUTPUT_PROOF_ARTIFACT_PATH_BYTES: usize = 2_048;
 const MAX_OUTPUT_PROOF_TEXT_BYTES: usize = 512;
 const MAX_REPORT_ID_BYTES: usize = 200;
@@ -565,6 +568,19 @@ pub enum ChannelCommand {
     AbortOutputProof {
         proof_id: String,
     },
+    StartScheduledRecording {
+        recording_id: String,
+        output_index: u16,
+        sink_id: String,
+        duration_ms: u64,
+        max_bytes: u64,
+    },
+    PollScheduledRecording {
+        recording_id: String,
+    },
+    AbortScheduledRecording {
+        recording_id: String,
+    },
     Shutdown,
 }
 
@@ -706,6 +722,41 @@ pub enum WorkerEvent {
         code: String,
         message: String,
     },
+    ScheduledRecordingStarted {
+        recording_id: String,
+        output_index: u16,
+        sink_id: String,
+        duration_ms: u64,
+        max_bytes: u64,
+        artifact_relative_path: String,
+        worker_instance_id: String,
+        graph_revision: u64,
+    },
+    ScheduledRecordingPending {
+        recording_id: String,
+        artifact_relative_path: String,
+        worker_instance_id: String,
+        graph_revision: u64,
+    },
+    ScheduledRecordingReady {
+        recording_id: String,
+        output_index: u16,
+        sink_id: String,
+        artifact_relative_path: String,
+        worker_instance_id: String,
+        graph_revision: u64,
+        size_bytes: u64,
+        capture_sha256: String,
+        duration_ms: u64,
+    },
+    ScheduledRecordingFailed {
+        recording_id: String,
+        artifact_relative_path: String,
+        worker_instance_id: String,
+        graph_revision: u64,
+        code: String,
+        message: String,
+    },
 }
 
 #[cfg(test)]
@@ -803,6 +854,7 @@ pub enum ProtocolError {
     InvalidLiveEvent(String),
     InvalidScheduledTake(String),
     InvalidOutputProof(String),
+    InvalidScheduledRecording(String),
     InvalidOutputConfiguration(String),
 }
 
@@ -811,6 +863,8 @@ pub fn encode_command_frame(command: &CommandEnvelope) -> Result<Vec<u8>, Protoc
     validate_live_command(&command.command).map_err(ProtocolError::InvalidLiveCommand)?;
     validate_scheduled_take_command(command).map_err(ProtocolError::InvalidScheduledTake)?;
     validate_output_proof_command(&command.command).map_err(ProtocolError::InvalidOutputProof)?;
+    validate_scheduled_recording_command(&command.command)
+        .map_err(ProtocolError::InvalidScheduledRecording)?;
     validate_fallback_tone_command(&command.command).map_err(ProtocolError::InvalidFallbackTone)?;
     encode_frame(command)
 }
@@ -1301,6 +1355,137 @@ fn validate_output_proof_event(event: &WorkerEvent) -> Result<(), String> {
     }
 }
 
+fn validate_scheduled_recording_bounds(duration_ms: u64, max_bytes: u64) -> Result<(), String> {
+    if !(MIN_SCHEDULED_RECORDING_DURATION_MS..=MAX_SCHEDULED_RECORDING_DURATION_MS)
+        .contains(&duration_ms)
+    {
+        return Err("scheduled recording duration is outside the bounded range".into());
+    }
+    if max_bytes == 0 || max_bytes > MAX_SCHEDULED_RECORDING_BYTES {
+        return Err("scheduled recording byte bound is outside the bounded range".into());
+    }
+    Ok(())
+}
+
+fn validate_scheduled_recording_identity(
+    recording_id: &str,
+    output_index: u16,
+    sink_id: &str,
+) -> Result<(), String> {
+    validate_canonical_uuid(recording_id, "recording_id")?;
+    validate_canonical_uuid(sink_id, "sink_id")?;
+    if output_index > MAX_OUTPUT_PROOF_INDEX {
+        return Err("scheduled recording output index is outside the bounded range".into());
+    }
+    Ok(())
+}
+
+fn validate_scheduled_recording_command(command: &ChannelCommand) -> Result<(), String> {
+    match command {
+        ChannelCommand::StartScheduledRecording {
+            recording_id,
+            output_index,
+            sink_id,
+            duration_ms,
+            max_bytes,
+        } => {
+            validate_scheduled_recording_identity(recording_id, *output_index, sink_id)?;
+            validate_scheduled_recording_bounds(*duration_ms, *max_bytes)
+        }
+        ChannelCommand::PollScheduledRecording { recording_id }
+        | ChannelCommand::AbortScheduledRecording { recording_id } => {
+            validate_canonical_uuid(recording_id, "recording_id")
+        }
+        _ => Ok(()),
+    }
+}
+
+fn validate_scheduled_recording_event(event: &WorkerEvent) -> Result<(), String> {
+    match event {
+        WorkerEvent::ScheduledRecordingStarted {
+            recording_id,
+            output_index,
+            sink_id,
+            duration_ms,
+            max_bytes,
+            artifact_relative_path,
+            worker_instance_id,
+            graph_revision,
+        } => {
+            validate_scheduled_recording_identity(recording_id, *output_index, sink_id)?;
+            validate_scheduled_recording_bounds(*duration_ms, *max_bytes)?;
+            validate_artifact_relative_path(artifact_relative_path)?;
+            validate_worker_instance(worker_instance_id)?;
+            if *graph_revision == 0 {
+                return Err("scheduled recording graph revision must be nonzero".into());
+            }
+            Ok(())
+        }
+        WorkerEvent::ScheduledRecordingPending {
+            recording_id,
+            artifact_relative_path,
+            worker_instance_id,
+            graph_revision,
+        } => {
+            validate_canonical_uuid(recording_id, "recording_id")?;
+            validate_artifact_relative_path(artifact_relative_path)?;
+            validate_worker_instance(worker_instance_id)?;
+            if *graph_revision == 0 {
+                return Err("scheduled recording graph revision must be nonzero".into());
+            }
+            Ok(())
+        }
+        WorkerEvent::ScheduledRecordingReady {
+            recording_id,
+            output_index,
+            sink_id,
+            artifact_relative_path,
+            worker_instance_id,
+            graph_revision,
+            size_bytes,
+            capture_sha256,
+            duration_ms,
+        } => {
+            validate_scheduled_recording_identity(recording_id, *output_index, sink_id)?;
+            validate_artifact_relative_path(artifact_relative_path)?;
+            validate_worker_instance(worker_instance_id)?;
+            if *graph_revision == 0 {
+                return Err("scheduled recording graph revision must be nonzero".into());
+            }
+            if *size_bytes == 0 || *size_bytes > MAX_SCHEDULED_RECORDING_BYTES {
+                return Err("scheduled recording ready size is outside the bounded range".into());
+            }
+            validate_capture_hash(capture_sha256)?;
+            if !(MIN_SCHEDULED_RECORDING_DURATION_MS..=MAX_SCHEDULED_RECORDING_DURATION_MS)
+                .contains(duration_ms)
+            {
+                return Err(
+                    "scheduled recording ready duration is outside the bounded range".into(),
+                );
+            }
+            Ok(())
+        }
+        WorkerEvent::ScheduledRecordingFailed {
+            recording_id,
+            artifact_relative_path,
+            worker_instance_id,
+            graph_revision,
+            code,
+            message,
+        } => {
+            validate_canonical_uuid(recording_id, "recording_id")?;
+            validate_artifact_relative_path(artifact_relative_path)?;
+            validate_worker_instance(worker_instance_id)?;
+            if *graph_revision == 0 {
+                return Err("scheduled recording graph revision must be nonzero".into());
+            }
+            validate_proof_text(code, "scheduled recording failure code")?;
+            validate_proof_text(message, "scheduled recording failure message")
+        }
+        _ => Ok(()),
+    }
+}
+
 fn validate_bootstrap_outputs(bootstrap: &WorkerBootstrapEnvelope) -> Result<(), String> {
     if bootstrap.outputs.len() > usize::from(MAX_OUTPUT_PROOF_INDEX) + 1 {
         return Err("worker bootstrap has more outputs than the proof index can address".into());
@@ -1402,6 +1587,26 @@ impl WorkerBootstrapEnvelope {
         }
         Ok(())
     }
+
+    pub fn validate_scheduled_recording_binding(
+        &self,
+        output_index: u16,
+        sink_id: &str,
+    ) -> Result<(), String> {
+        validate_canonical_uuid(sink_id, "sink_id")?;
+        let configured = self
+            .outputs
+            .get(usize::from(output_index))
+            .ok_or_else(|| "scheduled recording output index is not configured".to_string())?;
+        let configured_sink_id = match configured {
+            WorkerOutputConfiguration::UdpTs { sink_id, .. }
+            | WorkerOutputConfiguration::Srt { sink_id, .. } => sink_id,
+        };
+        if configured_sink_id != sink_id {
+            return Err("scheduled recording identity does not match bootstrap output".into());
+        }
+        Ok(())
+    }
 }
 
 pub fn decode_command_frame(frame: &[u8]) -> Result<CommandEnvelope, ProtocolError> {
@@ -1413,6 +1618,8 @@ pub fn decode_command_frame(frame: &[u8]) -> Result<CommandEnvelope, ProtocolErr
     validate_live_command(&command.command).map_err(ProtocolError::InvalidLiveCommand)?;
     validate_scheduled_take_command(&command).map_err(ProtocolError::InvalidScheduledTake)?;
     validate_output_proof_command(&command.command).map_err(ProtocolError::InvalidOutputProof)?;
+    validate_scheduled_recording_command(&command.command)
+        .map_err(ProtocolError::InvalidScheduledRecording)?;
     validate_fallback_tone_command(&command.command).map_err(ProtocolError::InvalidFallbackTone)?;
     Ok(command)
 }
@@ -1459,6 +1666,8 @@ pub fn encode_event_frame(event: &WorkerEventEnvelope) -> Result<Vec<u8>, Protoc
     validate_live_event(&event.event).map_err(ProtocolError::InvalidLiveEvent)?;
     validate_scheduled_take_event(event).map_err(ProtocolError::InvalidScheduledTake)?;
     validate_output_proof_event(&event.event).map_err(ProtocolError::InvalidOutputProof)?;
+    validate_scheduled_recording_event(&event.event)
+        .map_err(ProtocolError::InvalidScheduledRecording)?;
     validate_fallback_tone_event(&event.event, event.version.major == PROTOCOL_VERSION.major)
         .map_err(ProtocolError::InvalidFallbackTone)?;
     encode_frame(event)
@@ -1496,6 +1705,8 @@ fn validate_decoded_event(
     validate_live_event(&event.event).map_err(ProtocolError::InvalidLiveEvent)?;
     validate_scheduled_take_event(event).map_err(ProtocolError::InvalidScheduledTake)?;
     validate_output_proof_event(&event.event).map_err(ProtocolError::InvalidOutputProof)?;
+    validate_scheduled_recording_event(&event.event)
+        .map_err(ProtocolError::InvalidScheduledRecording)?;
     validate_fallback_tone_event(&event.event, require_complete_tone_audit)
         .map_err(ProtocolError::InvalidFallbackTone)?;
     Ok(event.clone())

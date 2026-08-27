@@ -19,8 +19,9 @@ use station_media_protocol::{
     CaptionCue, CgImageFormat, CgOverlayContent, CgSnapshot, LoudnessTarget,
     MAX_CAPTION_DURATION_MS, MAX_CAPTION_START_AFTER_MS, MAX_CAPTION_TEXT_BYTES, MAX_CG_SLOTS,
     MAX_CG_TEXT_BYTES, MAX_OUTPUT_PROOF_BYTES, MAX_OUTPUT_PROOF_DURATION_MS,
-    MIN_OUTPUT_PROOF_DURATION_MS, WorkerCaptionMode, WorkerCaptionPolicy, WorkerFallbackSlate,
-    WorkerFallbackTone,
+    MAX_SCHEDULED_RECORDING_BYTES, MAX_SCHEDULED_RECORDING_DURATION_MS,
+    MIN_OUTPUT_PROOF_DURATION_MS, MIN_SCHEDULED_RECORDING_DURATION_MS, WorkerCaptionMode,
+    WorkerCaptionPolicy, WorkerFallbackSlate, WorkerFallbackTone,
 };
 use station_schedule::{OutputProfile, OutputProfileId};
 
@@ -130,6 +131,47 @@ pub enum OutputCaptureStatus {
     Ready(OutputCaptureReady),
     Failed {
         proof_id: String,
+        artifact_relative_path: String,
+        code: String,
+        message: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScheduledRecordingCaptureRequest {
+    pub recording_id: String,
+    pub output_index: u16,
+    pub sink_id: String,
+    pub duration_ms: u64,
+    pub max_bytes: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScheduledRecordingCaptureStarted {
+    pub recording_id: String,
+    pub artifact_relative_path: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScheduledRecordingCaptureReady {
+    pub recording_id: String,
+    pub output_index: u16,
+    pub sink_id: String,
+    pub artifact_relative_path: String,
+    pub capture_bytes: u64,
+    pub capture_sha256: String,
+    pub capture_duration_ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ScheduledRecordingCaptureStatus {
+    Pending {
+        recording_id: String,
+        artifact_relative_path: String,
+    },
+    Ready(ScheduledRecordingCaptureReady),
+    Failed {
+        recording_id: String,
         artifact_relative_path: String,
         code: String,
         message: String,
@@ -304,7 +346,9 @@ pub struct PersistentPlayout {
     output_variant_count: usize,
     output_capture_bindings: Vec<OutputCaptureBinding>,
     output_capture_ingresses: Vec<Arc<CaptureIngress>>,
+    recording_capture_ingresses: Vec<Arc<CaptureIngress>>,
     proof_artifact_root: Option<PathBuf>,
+    recording_artifact_root: Option<PathBuf>,
     caption_source: gst::Element,
     caption_encoder: gst::Element,
     caption_queue: gst::Element,
@@ -365,6 +409,7 @@ struct OutputBranch {
     sink: gst::Element,
     variant_index: usize,
     capture_ingress: Arc<CaptureIngress>,
+    recording_capture_ingress: Arc<CaptureIngress>,
 }
 
 struct LoudnessVariant {
@@ -570,6 +615,30 @@ impl PersistentPlayout {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub fn start_configured_outputs_with_profile_managed_roots_and_authorities(
+        outputs: &[ConfiguredTransportOutput],
+        output_profile: OutputProfileId,
+        cg_image_root: Option<&Path>,
+        proof_artifact_root: Option<&Path>,
+        recording_artifact_root: Option<&Path>,
+        fallback_slate: Option<&WorkerFallbackSlate>,
+        caption_policy: Option<&WorkerCaptionPolicy>,
+    ) -> Result<Self, EngineError> {
+        let mut playout = Self::start_configured_outputs_with_profile_roots_and_authorities(
+            outputs,
+            output_profile,
+            cg_image_root,
+            proof_artifact_root,
+            fallback_slate,
+            caption_policy,
+        )?;
+        playout.recording_artifact_root = recording_artifact_root
+            .map(validate_recording_artifact_root)
+            .transpose()?;
+        Ok(playout)
+    }
+
     fn start_outputs_with_program(
         outputs: &[ConfiguredTransportOutput],
         media_path: Option<&Path>,
@@ -591,6 +660,11 @@ impl PersistentPlayout {
         let proof_artifact_root = proof_artifact_root
             .map(validate_proof_artifact_root)
             .transpose()?;
+        // Scheduled capture has no safe default root: it is permitted only
+        // when the channel worker has supplied and confined its exact
+        // `recordings/<channel UUID>` directory through the managed-roots
+        // constructor below.
+        let recording_artifact_root = None;
         let fallback_pixbuf = fallback_slate
             .map(|slate| {
                 let root = cg_image_root.ok_or_else(|| {
@@ -818,6 +892,7 @@ impl PersistentPlayout {
         for (index, output) in outputs.iter().enumerate() {
             let queue = element("queue", format!("transport-output-queue-{index}"))?;
             let capture_ingress = install_output_capture_ingress(&queue)?;
+            let recording_capture_ingress = install_output_capture_ingress(&queue)?;
             let sink = match &output.transport {
                 TransportOutput::Udp(destination) => gst::ElementFactory::make("udpsink")
                     .name(format!("udp-output-{index}"))
@@ -867,6 +942,7 @@ impl PersistentPlayout {
                 sink,
                 variant_index,
                 capture_ingress,
+                recording_capture_ingress,
             });
         }
 
@@ -1138,6 +1214,10 @@ impl PersistentPlayout {
             .iter()
             .map(|branch| Arc::clone(&branch.capture_ingress))
             .collect();
+        let recording_capture_ingresses = output_branches
+            .iter()
+            .map(|branch| Arc::clone(&branch.recording_capture_ingress))
+            .collect();
         let output_variant_count = loudness_variants.len();
         let playout = Self {
             pipeline,
@@ -1160,7 +1240,9 @@ impl PersistentPlayout {
             output_variant_count,
             output_capture_bindings,
             output_capture_ingresses,
+            recording_capture_ingresses,
             proof_artifact_root,
+            recording_artifact_root,
             caption_source,
             caption_encoder,
             caption_queue,
@@ -1511,6 +1593,134 @@ impl PersistentPlayout {
         }
         Err(EngineError::OutputCapture(
             "output capture identity is not active in this graph".into(),
+        ))
+    }
+
+    pub fn start_scheduled_recording_capture(
+        &mut self,
+        request: ScheduledRecordingCaptureRequest,
+    ) -> Result<ScheduledRecordingCaptureStarted, EngineError> {
+        if self.stopped {
+            return Err(EngineError::OutputCapture(
+                "scheduled recording requires a running graph".into(),
+            ));
+        }
+        if !is_canonical_uuid(&request.recording_id) || !is_canonical_uuid(&request.sink_id) {
+            return Err(EngineError::OutputCapture(
+                "scheduled recording identities must be canonical UUIDs".into(),
+            ));
+        }
+        if !(MIN_SCHEDULED_RECORDING_DURATION_MS..=MAX_SCHEDULED_RECORDING_DURATION_MS)
+            .contains(&request.duration_ms)
+        {
+            return Err(EngineError::OutputCapture(
+                "scheduled recording duration is outside the bounded range".into(),
+            ));
+        }
+        if !(1..=MAX_SCHEDULED_RECORDING_BYTES).contains(&request.max_bytes) {
+            return Err(EngineError::OutputCapture(
+                "scheduled recording byte limit is outside the bounded range".into(),
+            ));
+        }
+        let output_index = usize::from(request.output_index);
+        let binding = self
+            .output_capture_bindings
+            .get(output_index)
+            .ok_or_else(|| {
+                EngineError::OutputCapture(
+                    "scheduled recording output index is not configured".into(),
+                )
+            })?;
+        if binding.sink_id.as_deref() != Some(request.sink_id.as_str()) {
+            return Err(EngineError::OutputCapture(
+                "scheduled recording sink does not match the configured output index".into(),
+            ));
+        }
+        let root = self.recording_artifact_root.as_ref().ok_or_else(|| {
+            EngineError::OutputCapture("managed scheduled recording root is unavailable".into())
+        })?;
+        let recording_id = request.recording_id.clone();
+        let started = self.recording_capture_ingresses[binding.capture_index].begin(
+            OutputCaptureRequest {
+                proof_id: request.recording_id,
+                output_index: request.output_index,
+                sink_id: request.sink_id,
+                loudness_target: binding.loudness_target,
+                duration_ms: request.duration_ms,
+                max_bytes: request.max_bytes,
+            },
+            root,
+        )?;
+        Ok(ScheduledRecordingCaptureStarted {
+            recording_id,
+            artifact_relative_path: started.artifact_relative_path,
+        })
+    }
+
+    pub fn poll_scheduled_recording_capture(
+        &mut self,
+        recording_id: &str,
+    ) -> Result<ScheduledRecordingCaptureStatus, EngineError> {
+        if !is_canonical_uuid(recording_id) {
+            return Err(EngineError::OutputCapture(
+                "scheduled recording identity must be a canonical UUID".into(),
+            ));
+        }
+        for ingress in &self.recording_capture_ingresses {
+            if let Some(status) = ingress.status_for(recording_id)? {
+                return Ok(match status {
+                    OutputCaptureStatus::Pending {
+                        proof_id,
+                        artifact_relative_path,
+                    } => ScheduledRecordingCaptureStatus::Pending {
+                        recording_id: proof_id,
+                        artifact_relative_path,
+                    },
+                    OutputCaptureStatus::Ready(ready) => {
+                        ScheduledRecordingCaptureStatus::Ready(ScheduledRecordingCaptureReady {
+                            recording_id: ready.proof_id,
+                            output_index: ready.output_index,
+                            sink_id: ready.sink_id,
+                            artifact_relative_path: ready.artifact_relative_path,
+                            capture_bytes: ready.capture_bytes,
+                            capture_sha256: ready.capture_sha256,
+                            capture_duration_ms: ready.capture_duration_ms,
+                        })
+                    }
+                    OutputCaptureStatus::Failed {
+                        proof_id,
+                        artifact_relative_path,
+                        code,
+                        message,
+                    } => ScheduledRecordingCaptureStatus::Failed {
+                        recording_id: proof_id,
+                        artifact_relative_path,
+                        code,
+                        message,
+                    },
+                });
+            }
+        }
+        Err(EngineError::OutputCapture(
+            "scheduled recording identity is not active in this graph".into(),
+        ))
+    }
+
+    pub fn abort_scheduled_recording_capture(
+        &mut self,
+        recording_id: &str,
+    ) -> Result<(), EngineError> {
+        for ingress in &self.recording_capture_ingresses {
+            if ingress.abort_if_matches(
+                recording_id,
+                "capture_aborted",
+                "scheduled recording was aborted",
+            )? {
+                return Ok(());
+            }
+        }
+        Err(EngineError::OutputCapture(
+            "scheduled recording identity is not active in this graph".into(),
         ))
     }
 
@@ -1954,7 +2164,16 @@ impl PersistentPlayout {
         for ingress in &self.output_capture_ingresses {
             ingress.abort_any("graph_stopped", "output graph stopped during capture")?;
         }
+        for ingress in &self.recording_capture_ingresses {
+            ingress.abort_any(
+                "graph_stopped",
+                "output graph stopped during scheduled recording",
+            )?;
+        }
         for ingress in &self.output_capture_ingresses {
+            ingress.join_finished_by(deadline)?;
+        }
+        for ingress in &self.recording_capture_ingresses {
             ingress.join_finished_by(deadline)?;
         }
         Ok(())
@@ -2858,8 +3077,17 @@ impl Drop for PersistentPlayout {
             for ingress in &self.output_capture_ingresses {
                 let _ = ingress.abort_any("graph_dropped", "output graph dropped during capture");
             }
+            for ingress in &self.recording_capture_ingresses {
+                let _ = ingress.abort_any(
+                    "graph_dropped",
+                    "output graph dropped during scheduled recording",
+                );
+            }
             let deadline = Instant::now() + Duration::from_secs(2);
             for ingress in &self.output_capture_ingresses {
+                let _ = ingress.join_finished_by(deadline);
+            }
+            for ingress in &self.recording_capture_ingresses {
                 let _ = ingress.join_finished_by(deadline);
             }
             if let Err(error) = self.stop_pipeline() {
@@ -3428,6 +3656,30 @@ fn validate_proof_artifact_root(root: &Path) -> Result<PathBuf, EngineError> {
     {
         return Err(EngineError::OutputCapture(
             "proof artifact root must be an absolute managed output-proofs directory".into(),
+        ));
+    }
+    Ok(root.to_path_buf())
+}
+
+fn validate_recording_artifact_root(root: &Path) -> Result<PathBuf, EngineError> {
+    use std::path::Component;
+
+    let channel_id = root.file_name().and_then(|name| name.to_str());
+    let parent_name = root
+        .parent()
+        .and_then(Path::file_name)
+        .and_then(|name| name.to_str());
+    if !root.is_absolute()
+        || parent_name != Some("recordings")
+        || channel_id.is_none_or(|channel_id| !is_canonical_uuid(channel_id))
+        || root.to_string_lossy().chars().any(char::is_control)
+        || root
+            .components()
+            .any(|component| matches!(component, Component::ParentDir | Component::CurDir))
+    {
+        return Err(EngineError::OutputCapture(
+            "recording artifact root must be an absolute managed recordings/channel UUID directory"
+                .into(),
         ));
     }
     Ok(root.to_path_buf())

@@ -92,10 +92,10 @@ fn round_trips_scheduled_take_command_and_on_air_event() {
 }
 
 #[test]
-fn protocol_requires_the_tone_capability_major() {
-    // A worker that cannot enforce the finite fallback-tone contract must not
-    // participate in a mixed-version station.
-    assert_eq!(PROTOCOL_VERSION.major, 11);
+fn protocol_requires_the_scheduled_recording_capability_major() {
+    // A worker that cannot enforce the independent bounded scheduled-recording
+    // contract must not participate in a mixed-version station.
+    assert_eq!(PROTOCOL_VERSION.major, 12);
 }
 
 fn fallback_tone() -> WorkerFallbackTone {

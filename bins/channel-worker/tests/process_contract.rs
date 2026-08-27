@@ -1070,7 +1070,7 @@ fn certutil_sha256(path: &Path) -> String {
 }
 
 #[test]
-fn spawned_worker_output_proof_reaches_ready_with_artifact_hash_and_health() {
+fn spawned_worker_recording_and_output_proof_finish_independently_with_exact_hashes() {
     let _guard = process_contract_test_guard();
     let nonce = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -1162,6 +1162,42 @@ fn spawned_worker_output_proof_reaches_ready_with_artifact_hash_and_health() {
         }
         std::thread::sleep(Duration::from_millis(100));
     };
+
+    let recording_id = "44444444-5555-4666-8777-888888888888";
+    stream
+        .write_all(
+            &encode_command_frame(&command(
+                "start-scheduled-recording",
+                expected_sequence,
+                ChannelCommand::StartScheduledRecording {
+                    recording_id: recording_id.into(),
+                    output_index: 0,
+                    sink_id: sink_id.into(),
+                    duration_ms: 3_000,
+                    max_bytes: 16 * 1024 * 1024,
+                },
+            ))
+            .unwrap(),
+        )
+        .unwrap();
+    let recording_artifact_relative_path = match read_event(&mut stream).event {
+        WorkerEvent::ScheduledRecordingStarted {
+            recording_id: event_recording_id,
+            output_index,
+            sink_id: event_sink_id,
+            graph_revision,
+            artifact_relative_path,
+            ..
+        } => {
+            assert_eq!(event_recording_id, recording_id);
+            assert_eq!(output_index, 0);
+            assert_eq!(event_sink_id, sink_id);
+            assert_eq!(graph_revision, 1);
+            artifact_relative_path
+        }
+        other => panic!("unexpected scheduled recording start event: {other:?}"),
+    };
+    expected_sequence += 1;
 
     let proof_id = "11111111-2222-4333-8444-555555555555";
     stream
@@ -1269,6 +1305,147 @@ fn spawned_worker_output_proof_reaches_ready_with_artifact_hash_and_health() {
     assert_eq!(bytes.len() as u64, size_bytes);
     assert_eq!(certutil_sha256(&artifact), capture_sha256);
     assert!(health_before.bytes_sent_total > 0);
+
+    let recording_deadline = Instant::now() + Duration::from_secs(12);
+    let ready_recording = loop {
+        assert!(
+            Instant::now() < recording_deadline,
+            "scheduled recording did not reach terminal state"
+        );
+        stream
+            .write_all(
+                &encode_command_frame(&command(
+                    "poll-scheduled-recording",
+                    expected_sequence,
+                    ChannelCommand::PollScheduledRecording {
+                        recording_id: recording_id.into(),
+                    },
+                ))
+                .unwrap(),
+            )
+            .unwrap();
+        expected_sequence += 1;
+        match read_event(&mut stream).event {
+            WorkerEvent::ScheduledRecordingPending {
+                recording_id: event_recording_id,
+                graph_revision,
+                ..
+            } => {
+                assert_eq!(event_recording_id, recording_id);
+                assert_eq!(graph_revision, 1);
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            WorkerEvent::ScheduledRecordingReady {
+                recording_id: event_recording_id,
+                output_index,
+                sink_id: event_sink_id,
+                artifact_relative_path,
+                graph_revision,
+                size_bytes,
+                capture_sha256,
+                duration_ms,
+                ..
+            } => {
+                assert_eq!(event_recording_id, recording_id);
+                assert_eq!(output_index, 0);
+                assert_eq!(event_sink_id, sink_id);
+                assert_eq!(artifact_relative_path, recording_artifact_relative_path);
+                assert_eq!(graph_revision, 1);
+                assert!(size_bytes > 0 && size_bytes <= 16 * 1024 * 1024);
+                assert!(duration_ms >= 3_000);
+                break (artifact_relative_path, size_bytes, capture_sha256);
+            }
+            WorkerEvent::ScheduledRecordingFailed { code, message, .. } => {
+                panic!("scheduled recording failed: {code}: {message}")
+            }
+            other => panic!("unexpected scheduled recording event: {other:?}"),
+        }
+    };
+    let (recording_path, recording_size, recording_sha256) = ready_recording;
+    let recording_artifact = root
+        .join("recordings")
+        .join(CHANNEL_ID)
+        .join(recording_path);
+    assert!(recording_artifact.is_file());
+    assert_eq!(
+        fs::metadata(&recording_artifact).unwrap().len(),
+        recording_size
+    );
+    assert_eq!(certutil_sha256(&recording_artifact), recording_sha256);
+
+    let aborted_recording_id = "55555555-6666-4777-8888-999999999999";
+    stream
+        .write_all(
+            &encode_command_frame(&command(
+                "start-aborted-scheduled-recording",
+                expected_sequence,
+                ChannelCommand::StartScheduledRecording {
+                    recording_id: aborted_recording_id.into(),
+                    output_index: 0,
+                    sink_id: sink_id.into(),
+                    duration_ms: 30_000,
+                    max_bytes: 16 * 1024 * 1024,
+                },
+            ))
+            .unwrap(),
+        )
+        .unwrap();
+    let aborted_recording_artifact = match read_event(&mut stream).event {
+        WorkerEvent::ScheduledRecordingStarted {
+            recording_id,
+            artifact_relative_path,
+            ..
+        } => {
+            assert_eq!(recording_id, aborted_recording_id);
+            artifact_relative_path
+        }
+        other => panic!("unexpected aborted recording start event: {other:?}"),
+    };
+    expected_sequence += 1;
+    stream
+        .write_all(
+            &encode_command_frame(&command(
+                "abort-scheduled-recording",
+                expected_sequence,
+                ChannelCommand::AbortScheduledRecording {
+                    recording_id: aborted_recording_id.into(),
+                },
+            ))
+            .unwrap(),
+        )
+        .unwrap();
+    match read_event(&mut stream).event {
+        WorkerEvent::ScheduledRecordingFailed {
+            recording_id,
+            artifact_relative_path,
+            code,
+            graph_revision,
+            ..
+        } => {
+            assert_eq!(recording_id, aborted_recording_id);
+            assert_eq!(artifact_relative_path, aborted_recording_artifact);
+            assert_eq!(code, "capture_aborted");
+            assert_eq!(graph_revision, 1);
+        }
+        other => panic!("unexpected scheduled recording abort event: {other:?}"),
+    }
+    expected_sequence += 1;
+    let recording_abort_deadline = Instant::now() + Duration::from_secs(2);
+    let aborted_recording_part = root
+        .join("recordings")
+        .join(CHANNEL_ID)
+        .join(format!("{aborted_recording_id}.ts.part"));
+    while aborted_recording_part.exists() && Instant::now() < recording_abort_deadline {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(!aborted_recording_part.exists());
+    assert!(
+        !root
+            .join("recordings")
+            .join(CHANNEL_ID)
+            .join(&aborted_recording_artifact)
+            .exists()
+    );
 
     stream
         .write_all(
