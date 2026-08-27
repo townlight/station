@@ -1494,9 +1494,27 @@ fn spawned_worker_recording_and_output_proof_finish_independently_with_exact_has
     stream
         .write_all(
             &encode_command_frame(&command(
-                "abort-scheduled-recording",
+                "change-graph-while-recording-is-capturing",
                 expected_sequence,
-                ChannelCommand::AbortScheduledRecording {
+                ChannelCommand::ApplyPlan {
+                    plan_id: "graph-drift-pending-fence".into(),
+                    revision: 3,
+                },
+            ))
+            .unwrap(),
+        )
+        .unwrap();
+    assert!(matches!(
+        read_event(&mut stream).event,
+        WorkerEvent::Ready { graph_revision: 3 }
+    ));
+    expected_sequence += 1;
+    stream
+        .write_all(
+            &encode_command_frame(&command(
+                "poll-graph-fenced-scheduled-recording",
+                expected_sequence,
+                ChannelCommand::PollScheduledRecording {
                     recording_id: aborted_recording_id.into(),
                 },
             ))
@@ -1513,28 +1531,12 @@ fn spawned_worker_recording_and_output_proof_finish_independently_with_exact_has
         } => {
             assert_eq!(recording_id, aborted_recording_id);
             assert_eq!(artifact_relative_path, aborted_recording_artifact);
-            assert_eq!(code, "capture_aborted");
+            assert_eq!(code, "graph_revision_changed");
             assert_eq!(graph_revision, 2);
         }
-        other => panic!("unexpected scheduled recording abort event: {other:?}"),
+        other => panic!("graph-fenced recording must not report Ready: {other:?}"),
     }
     expected_sequence += 1;
-    let recording_abort_deadline = Instant::now() + Duration::from_secs(2);
-    let aborted_recording_part = root
-        .join("recordings")
-        .join(CHANNEL_ID)
-        .join(format!("{aborted_recording_id}.ts.part"));
-    while aborted_recording_part.exists() && Instant::now() < recording_abort_deadline {
-        std::thread::sleep(Duration::from_millis(20));
-    }
-    assert!(!aborted_recording_part.exists());
-    assert!(
-        !root
-            .join("recordings")
-            .join(CHANNEL_ID)
-            .join(&aborted_recording_artifact)
-            .exists()
-    );
 
     stream
         .write_all(
@@ -1611,7 +1613,7 @@ fn spawned_worker_recording_and_output_proof_finish_independently_with_exact_has
             assert_eq!(proof_id, aborted_proof_id);
             assert_eq!(artifact_relative_path, aborted_artifact);
             assert_eq!(code, "capture_aborted");
-            assert_eq!(graph_revision, 2);
+            assert_eq!(graph_revision, 3);
         }
         other => panic!("unexpected output proof abort event: {other:?}"),
     }

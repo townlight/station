@@ -17,18 +17,20 @@ GiB. Each configured post-mux output branch owns two independent bounded tap
 ingresses, so recording cannot monopolize or weaken the proof capture. Both
 write through finite queues to `create_new` part files, flush and sync bytes,
 then atomically rename inside separate managed roots. A graph revision change
-aborts a still-pending recording; if the writer has already atomically sealed
-Ready, the worker reports that exact Ready artifact bound to its original
-revision rather than contradicting it with a later failure. Worker shutdown
-and drop abort and join both capture classes.
+first fences every scheduled-recording ingress on its terminal-status mutex,
+then advances the revision: a still-pending recording is terminally aborted;
+only an artifact already atomically sealed Ready before that fence is reported
+at its original revision. Worker shutdown and drop abort and join both capture
+classes.
 
 The channel worker derives `recordings/<channel UUID>` as a sibling of its
 already confined `output-proofs` root under the journal-owned managed data
 root, rejects an escaped/non-directory parent or channel root before Ready,
 and retains no-delete Windows directory handles for both the `recordings`
 parent and channel root through runtime capture, publication, and abort cleanup. Neither
-can therefore be renamed or replaced by a junction after Ready. It removes
-stale part files only inside its own channel directory at startup.
+can therefore be renamed or replaced by a junction after Ready. Once those
+handles are retained, the media engine removes stale part files only inside
+that exact channel directory at startup.
 One channel can therefore never clean another channel's active recording. A
 real child-process contract proves simultaneous recording and proof
 capture from one mux branch, independent terminal events, managed artifacts,

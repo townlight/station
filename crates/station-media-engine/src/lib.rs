@@ -1736,6 +1736,18 @@ impl PersistentPlayout {
         ))
     }
 
+    pub fn fence_scheduled_recording_captures_for_graph_change(
+        &mut self,
+    ) -> Result<(), EngineError> {
+        for ingress in &self.recording_capture_ingresses {
+            ingress.abort_any(
+                "graph_revision_changed",
+                "output graph revision changed during scheduled recording",
+            )?;
+        }
+        Ok(())
+    }
+
     pub fn apply_cg_snapshot(
         &mut self,
         snapshot: &station_media_protocol::CgSnapshot,
@@ -3722,10 +3734,46 @@ fn pin_recording_artifact_root(root: &Path) -> Result<PinnedRecordingArtifactRoo
             Ok(file)
         })
         .collect::<Result<Vec<_>, _>>()?;
+    remove_stale_recording_parts(root)?;
     Ok(PinnedRecordingArtifactRoot {
         path: root.to_path_buf(),
         _directories: directories,
     })
+}
+
+fn remove_stale_recording_parts(root: &Path) -> Result<(), EngineError> {
+    for entry in fs::read_dir(root).map_err(|_| {
+        EngineError::OutputCapture("managed scheduled recording root could not be traversed".into())
+    })? {
+        let entry = entry.map_err(|_| {
+            EngineError::OutputCapture(
+                "managed scheduled recording root contains an unreadable entry".into(),
+            )
+        })?;
+        let file_type = entry.file_type().map_err(|_| {
+            EngineError::OutputCapture(
+                "managed scheduled recording root contains an uninspectable entry".into(),
+            )
+        })?;
+        if !file_type.is_file() || file_type.is_symlink() {
+            continue;
+        }
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        let Some(recording_id) = name.strip_suffix(".ts.part") else {
+            continue;
+        };
+        if is_canonical_uuid(recording_id) {
+            fs::remove_file(entry.path()).map_err(|_| {
+                EngineError::OutputCapture(
+                    "managed scheduled recording root contains an unremovable stale part".into(),
+                )
+            })?;
+        }
+    }
+    Ok(())
 }
 
 fn is_canonical_uuid(value: &str) -> bool {

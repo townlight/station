@@ -200,6 +200,44 @@ fn scheduled_recording_root_cannot_be_replaced_after_graph_startup() {
 }
 
 #[test]
+fn scheduled_recording_startup_cleans_stale_parts_after_pinning_root() {
+    let _guard = persistent_graph_test_guard();
+    let receiver = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let root = test_root("scheduled-recording-stale-parts-pinned");
+    let proof_root = root.join("output-proofs");
+    let recording_root = root
+        .join("recordings")
+        .join("33333333-4444-4555-8666-777777777777");
+    let stale_part = recording_root.join("11111111-2222-4333-8444-555555555555.ts.part");
+    fs::create_dir_all(&proof_root).unwrap();
+    fs::create_dir_all(&recording_root).unwrap();
+    fs::write(&stale_part, b"abandoned recording").unwrap();
+
+    let playout =
+        PersistentPlayout::start_configured_outputs_with_profile_managed_roots_and_authorities(
+            &[ConfiguredTransportOutput::udp_identified(
+                "7ef1430d-a35c-49f7-91f0-d03cc96bf4af",
+                receiver.local_addr().unwrap(),
+                LoudnessTarget::CABLE,
+            )],
+            OutputProfileId::Proof360p30,
+            None,
+            Some(&proof_root),
+            Some(&recording_root),
+            None,
+            None,
+        )
+        .unwrap();
+
+    assert!(
+        !stale_part.exists(),
+        "startup must remove stale recording parts only after pinning the exact root"
+    );
+    playout.stop().unwrap();
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn fans_one_persistent_transport_out_to_two_independent_udp_sinks() {
     let _guard = persistent_graph_test_guard();
     let primary = UdpSocket::bind("127.0.0.1:0").unwrap();

@@ -317,8 +317,6 @@ fn main() {
     }
     remove_stale_proof_parts(&proof_artifact_root)
         .unwrap_or_else(|error| fatal(6, "clean stale output proof parts", &error));
-    remove_stale_proof_parts(&recording_artifact_root)
-        .unwrap_or_else(|error| fatal(6, "clean stale scheduled recording parts", &error));
     let output_profile = OutputProfileId::from_storage_name(&bootstrap.output_profile)
         .unwrap_or_else(|error| fatal(6, "validate its output profile", &format!("{error:?}")));
     if !output_profile.is_runnable() {
@@ -953,6 +951,19 @@ fn expire_fallback_tone_if_due(
     }))
 }
 
+fn apply_plan_revision<E>(
+    graph_revision: &mut u64,
+    requested_revision: u64,
+    fence_scheduled_recordings: impl FnOnce(u64) -> Result<(), E>,
+) -> Result<(), E> {
+    let next_revision = requested_revision.max(1);
+    if next_revision != *graph_revision {
+        fence_scheduled_recordings(*graph_revision)?;
+        *graph_revision = next_revision;
+    }
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 fn decide_event(
     command: &CommandEnvelope,
@@ -1071,13 +1082,26 @@ fn decide_event(
             }
         }
         ChannelCommand::ApplyPlan { revision, .. } => {
-            *graph_revision = (*revision).max(1);
-            (
-                WorkerEvent::Ready {
-                    graph_revision: *graph_revision,
-                },
-                false,
-            )
+            match apply_plan_revision(graph_revision, *revision, |_| {
+                media.fence_scheduled_recording_captures_for_graph_change()
+            }) {
+                Ok(()) => (
+                    WorkerEvent::Ready {
+                        graph_revision: *graph_revision,
+                    },
+                    false,
+                ),
+                Err(error) => (
+                    rejection(
+                        command,
+                        "scheduled_recording_fence_failed",
+                        &format!(
+                            "Scheduled recordings could not be fenced before changing the output graph: {error:?}"
+                        ),
+                    ),
+                    false,
+                ),
+            }
         }
         ChannelCommand::ApplyCgSnapshot { snapshot } => match media.apply_cg_snapshot(snapshot) {
             Ok(()) => (
@@ -2144,6 +2168,21 @@ mod tests {
 
     const SESSION: &str = "11111111-1111-4111-8111-111111111111";
     const SOURCE: &str = "22222222-2222-4222-8222-222222222222";
+
+    #[test]
+    fn apply_plan_fences_recordings_before_changing_the_graph_revision() {
+        let mut graph_revision = 1;
+        let mut fenced_revision = None;
+
+        apply_plan_revision(&mut graph_revision, 2, |revision| {
+            fenced_revision = Some(revision);
+            Ok::<(), ()>(())
+        })
+        .unwrap();
+
+        assert_eq!(fenced_revision, Some(1));
+        assert_eq!(graph_revision, 2);
+    }
 
     fn armed_state() -> LiveState {
         LiveState {
