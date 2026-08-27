@@ -15,10 +15,35 @@ if (-not (Test-Path -LiteralPath $cargoWrapperPath -PathType Leaf)) {
     throw 'Cargo GStreamer process wrapper is missing.'
 }
 
-$config = Get-Content -LiteralPath $configPath -Raw
+$config = (Get-Content -LiteralPath $configPath -Raw) -replace "`r`n", "`n"
 if ($config -notmatch '(?m)^\[target\.x86_64-pc-windows-msvc\]$' -or
     $config -notmatch '(?m)^runner\s*=.*run-with-gstreamer\.ps1') {
     throw 'Cargo does not bind Windows MSVC executables to the GStreamer runner.'
+}
+
+$wrapper = Get-Content -LiteralPath $cargoWrapperPath -Raw
+foreach ($requiredFragment in @(
+    'gstpbutils-1.0-0.dll',
+    'gobject-2.0-0.dll',
+    'glib-2.0-0.dll',
+    'SetErrorMode',
+    'Push-Location -LiteralPath $repositoryRoot'
+)) {
+    if (-not $wrapper.Contains($requiredFragment)) {
+        throw "Cargo process wrapper is missing the required protection '$requiredFragment'."
+    }
+}
+
+$runner = Get-Content -LiteralPath $runnerPath -Raw
+foreach ($requiredDll in @(
+    'gstreamer-1.0-0.dll',
+    'gstpbutils-1.0-0.dll',
+    'gobject-2.0-0.dll',
+    'glib-2.0-0.dll'
+)) {
+    if (-not $runner.Contains($requiredDll)) {
+        throw "Cargo target runner does not preflight '$requiredDll'."
+    }
 }
 
 $temporaryRoot = Join-Path ([IO.Path]::GetTempPath()) "townlight-cargo-runner-$([guid]::NewGuid().ToString('N'))"
@@ -29,7 +54,14 @@ $probe = Join-Path $temporaryRoot 'probe.ps1'
 
 New-Item -ItemType Directory -Path $bin -Force | Out-Null
 New-Item -ItemType Directory -Path $plugins -Force | Out-Null
-[IO.File]::WriteAllBytes((Join-Path $bin 'gstreamer-1.0-0.dll'), [byte[]]@(1))
+foreach ($requiredDll in @(
+    'gstreamer-1.0-0.dll',
+    'gstpbutils-1.0-0.dll',
+    'gobject-2.0-0.dll',
+    'glib-2.0-0.dll'
+)) {
+    [IO.File]::WriteAllBytes((Join-Path $bin $requiredDll), [byte[]]@(1))
+}
 [IO.File]::WriteAllText(
     $probe,
     @'
@@ -66,6 +98,28 @@ try {
     & $cargoWrapperPath -NoProfile -NonInteractive -File $probe $bin $plugins
     if ($LASTEXITCODE -ne 0) {
         throw "The Cargo process wrapper did not propagate the exact runtime environment (exit $LASTEXITCODE)."
+    }
+
+    Remove-Item -LiteralPath (Join-Path $bin 'gstpbutils-1.0-0.dll') -Force
+    $rejectedIncompleteRunnerRuntime = $false
+    try {
+        & $runnerPath (Get-Command pwsh.exe -ErrorAction Stop).Source -NoProfile -NonInteractive `
+            -Command 'exit 0' *> $null
+    } catch {
+        $rejectedIncompleteRunnerRuntime = $true
+    }
+    if (-not $rejectedIncompleteRunnerRuntime) {
+        throw 'The Cargo GStreamer runner launched with an incomplete native runtime.'
+    }
+
+    $rejectedIncompleteWrapperRuntime = $false
+    try {
+        & $cargoWrapperPath -NoProfile -NonInteractive -Command 'exit 0' *> $null
+    } catch {
+        $rejectedIncompleteWrapperRuntime = $true
+    }
+    if (-not $rejectedIncompleteWrapperRuntime) {
+        throw 'The Cargo process wrapper launched with an incomplete native runtime.'
     }
 
     $env:TOWNLIGHT_GSTREAMER_ROOT = Join-Path $temporaryRoot 'missing'

@@ -22,3 +22,8 @@
   `scripts/invoke-cargo.ps1`; it binds Cargo and every descendant process to the explicit GStreamer
   runtime. The checked-in target runner is a second boundary. Never bypass either boundary or launch
   `target` artifacts directly.
+- This is an operator-safety rule, not a preference: raw `cargo`, `cargo.exe`, direct test binaries,
+  and IDE test launchers can create persistent modal Windows DLL-error dialogs. The only allowed
+  Windows Cargo command form is `powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass
+  -File scripts\invoke-cargo.ps1 ...`. If that wrapper cannot run, report the test as blocked; do not
+  substitute another launcher.

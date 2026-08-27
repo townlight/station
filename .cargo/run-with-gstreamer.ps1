@@ -20,9 +20,17 @@ if (-not (Test-Path -LiteralPath $runtimeRoot -PathType Container)) {
 $runtimeRoot = (Resolve-Path -LiteralPath $runtimeRoot).Path
 $runtimeBin = Join-Path $runtimeRoot 'bin'
 $pluginPath = Join-Path $runtimeRoot 'lib\gstreamer-1.0'
-$loaderDll = Join-Path $runtimeBin 'gstreamer-1.0-0.dll'
-if (-not (Test-Path -LiteralPath $loaderDll -PathType Leaf)) {
-    throw "The explicit GStreamer loader DLL is missing: '$loaderDll'."
+$requiredRuntimeDlls = @(
+    'gstreamer-1.0-0.dll',
+    'gstpbutils-1.0-0.dll',
+    'gobject-2.0-0.dll',
+    'glib-2.0-0.dll'
+)
+foreach ($requiredRuntimeDll in $requiredRuntimeDlls) {
+    $requiredRuntimePath = Join-Path $runtimeBin $requiredRuntimeDll
+    if (-not (Test-Path -LiteralPath $requiredRuntimePath -PathType Leaf)) {
+        throw "The explicit GStreamer runtime DLL is missing: '$requiredRuntimePath'."
+    }
 }
 if (-not (Test-Path -LiteralPath $pluginPath -PathType Container)) {
     throw "The explicit GStreamer plugin directory is missing: '$pluginPath'."
