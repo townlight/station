@@ -7,9 +7,10 @@ use scheduled_recording_controller::{
 
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
-use std::fs;
-use std::io::Read;
+use std::fs::{self, File, OpenOptions};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::num::NonZeroU16;
+use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::{
     Arc,
@@ -24,6 +25,7 @@ use station_captions::{
     AssetCaptionTrack, CaptionEgressProof, CaptionEgressProofJobRecord, CaptionEgressProofJobState,
     CaptionProofCaptureFacts, CaptionProofOutcome,
 };
+use station_catalog::{CatalogAssetRecord, CatalogEditorialState};
 use station_cg::{CgBulletinContent, CgResolvedContent, CgResolvedSnapshot};
 use station_domain::{
     AlertConditionKind, AlertEvent, AlertEventState, AlertSeverity, CaptionCueMissEvidence,
@@ -31,7 +33,7 @@ use station_domain::{
 };
 use station_live::{LiveEndpoint, TakeoverSession, TakeoverState};
 use station_media_assets::{
-    DecodedCaptionEvidence, decode_output_captions, measure_output_loudness,
+    DecodedCaptionEvidence, decode_output_captions, measure_output_loudness, validate_media,
 };
 use station_media_journal::inspect_journal;
 use station_media_protocol::{
@@ -54,14 +56,19 @@ use station_runtime::{
     CommandAttemptFailure, CommandAttemptPhase, SupervisorError, WorkerSupervisor,
 };
 use station_schedule::{
-    ChannelConfiguration, DispatchJob, DispatchStatus, HeadendProfileId, HeadendSinkContract,
-    OutputProfileId, OutputSinkKind, ScheduleWindow,
+    AssetReadiness, ChannelConfiguration, DispatchJob, DispatchStatus, HeadendProfileId,
+    HeadendSinkContract, MediaAsset, OutputProfileId, OutputSinkKind, ScheduleWindow,
 };
 use station_storage::{
     CaptionCueMissResolutionFence, CgSnapshotReadError, CgWriteError, ChannelCaptionMode,
     OutputLoudnessCaptureFacts, OutputLoudnessProofJobRecord, OutputLoudnessProofJobState,
-    ScheduledTakeAcknowledgement, ScheduledTakeAcknowledgementBinding, ScheduledTakeApplyOutcome,
-    StationStore, project_durable_journal,
+    ScheduledRecordingFinalizationEvidence, ScheduledTakeAcknowledgement,
+    ScheduledTakeAcknowledgementBinding, ScheduledTakeApplyOutcome, StationStore,
+    project_durable_journal,
+};
+use windows_sys::Win32::Storage::FileSystem::{
+    FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
+    FILE_SHARE_READ, FILE_SHARE_WRITE,
 };
 
 static ALERT_SEQUENCE: AtomicU64 = AtomicU64::new(1);
@@ -984,6 +991,184 @@ struct CaptionDispatchState {
     missed_cue_ids: HashSet<String>,
 }
 
+struct TemporaryRecordingPublication(PathBuf);
+
+impl Drop for TemporaryRecordingPublication {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.0);
+    }
+}
+
+struct PublishedRecordingAsset {
+    asset: MediaAsset,
+    _recording_ancestry: Vec<File>,
+    _media_ancestry: Vec<File>,
+    _final_file: File,
+}
+
+fn open_recording_directory_no_follow(path: &Path) -> Result<File, String> {
+    let file = OpenOptions::new()
+        .read(true)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)
+        .map_err(|error| format!("open managed recording directory: {error}"))?;
+    let metadata = file
+        .metadata()
+        .map_err(|error| format!("inspect managed recording directory: {error}"))?;
+    if !metadata.is_dir() || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+        return Err("managed recording ancestry contains a reparse point or non-directory".into());
+    }
+    Ok(file)
+}
+
+fn pin_recording_ancestry(path: &Path) -> Result<Vec<File>, String> {
+    if !path.is_absolute() {
+        return Err("managed recording path must be absolute".into());
+    }
+    let mut ancestors = path.ancestors().collect::<Vec<_>>();
+    ancestors.reverse();
+    ancestors
+        .into_iter()
+        .map(open_recording_directory_no_follow)
+        .collect()
+}
+
+fn open_recording_file_no_follow(path: &Path) -> Result<File, String> {
+    let file = OpenOptions::new()
+        .read(true)
+        // No writer or rename/delete authority can coexist while the exact
+        // capture object is hashed, copied, and independently decoded.
+        .share_mode(FILE_SHARE_READ)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)
+        .map_err(|error| format!("open sealed recording capture: {error}"))?;
+    let metadata = file
+        .metadata()
+        .map_err(|error| format!("inspect sealed recording capture: {error}"))?;
+    if !metadata.is_file() || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+        return Err("sealed recording capture is a reparse point or non-file".into());
+    }
+    Ok(file)
+}
+
+fn hash_open_recording(file: &mut File) -> Result<(String, u64), String> {
+    file.seek(SeekFrom::Start(0))
+        .map_err(|error| format!("seek sealed recording capture: {error}"))?;
+    let mut digest = Sha256::new();
+    let mut bytes = 0_u64;
+    let mut buffer = [0_u8; 128 * 1024];
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .map_err(|error| format!("read sealed recording capture: {error}"))?;
+        if read == 0 {
+            break;
+        }
+        bytes = bytes
+            .checked_add(read as u64)
+            .ok_or_else(|| "sealed recording capture size overflowed".to_string())?;
+        digest.update(&buffer[..read]);
+    }
+    Ok((format!("{:x}", digest.finalize()), bytes))
+}
+
+fn publish_recording_capture(
+    database_path: &Path,
+    channel_id: &str,
+    ready: &ReadyRecordingCapture,
+) -> Result<PublishedRecordingAsset, String> {
+    ready.validate()?;
+    let data_root = database_path
+        .parent()
+        .ok_or_else(|| "station database has no managed data directory".to_string())?;
+    let recording_parent = data_root.join("recordings");
+    let recording_root = recording_parent.join(channel_id);
+    let media_root = data_root.join("media");
+    fs::create_dir_all(&media_root)
+        .map_err(|error| format!("create managed media directory: {error}"))?;
+    let recording_ancestry = pin_recording_ancestry(&recording_root)?;
+    let media_ancestry = pin_recording_ancestry(&media_root)?;
+    let source_path = recording_root.join(&ready.active.artifact_relative_path);
+    if source_path.parent() != Some(recording_root.as_path()) {
+        return Err("scheduled recording capture escaped its managed root".into());
+    }
+    let mut source = open_recording_file_no_follow(&source_path)?;
+    let source_metadata = source
+        .metadata()
+        .map_err(|error| format!("inspect sealed recording size: {error}"))?;
+    if source_metadata.len() != ready.size_bytes {
+        return Err("sealed recording size does not match worker evidence".into());
+    }
+    let (source_sha256, source_bytes) = hash_open_recording(&mut source)?;
+    if source_sha256 != ready.capture_sha256 || source_bytes != ready.size_bytes {
+        return Err("sealed recording bytes do not match worker evidence".into());
+    }
+
+    let temporary_path = media_root.join(format!(
+        ".recording-{}-{}.part",
+        ready.active.recording_id, ready.capture_sha256
+    ));
+    if let Ok(metadata) = fs::symlink_metadata(&temporary_path) {
+        if !metadata.is_file() || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+            return Err("owned recording publication part is not a regular file".into());
+        }
+        fs::remove_file(&temporary_path)
+            .map_err(|error| format!("remove interrupted recording publication: {error}"))?;
+    }
+    let temporary_guard = TemporaryRecordingPublication(temporary_path.clone());
+    let mut temporary = OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .share_mode(0)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(&temporary_path)
+        .map_err(|error| format!("create recording publication part: {error}"))?;
+    source
+        .seek(SeekFrom::Start(0))
+        .map_err(|error| format!("rewind sealed recording capture: {error}"))?;
+    std::io::copy(&mut source, &mut temporary)
+        .map_err(|error| format!("copy sealed recording capture: {error}"))?;
+    temporary
+        .flush()
+        .and_then(|()| temporary.sync_all())
+        .map_err(|error| format!("seal recording publication part: {error}"))?;
+    drop(temporary);
+
+    let final_path = media_root.join(format!("{}.ts", ready.capture_sha256));
+    if final_path.exists() {
+        fs::remove_file(&temporary_path)
+            .map_err(|error| format!("remove duplicate recording publication: {error}"))?;
+    } else {
+        fs::rename(&temporary_path, &final_path)
+            .map_err(|error| format!("publish recording media atomically: {error}"))?;
+    }
+    drop(temporary_guard);
+    let mut final_file = open_recording_file_no_follow(&final_path)?;
+    let (final_sha256, final_bytes) = hash_open_recording(&mut final_file)?;
+    if final_sha256 != ready.capture_sha256 || final_bytes != ready.size_bytes {
+        return Err("published recording media disagrees with sealed capture evidence".into());
+    }
+    let metadata = validate_media(&final_path)
+        .map_err(|error| format!("validate published recording media: {error:?}"))?;
+    let decoded_duration_ms = metadata.duration_ns / 1_000_000;
+    if decoded_duration_ms == 0 || decoded_duration_ms.abs_diff(ready.captured_duration_ms) > 5_000
+    {
+        return Err("published recording duration disagrees with worker evidence".into());
+    }
+    Ok(PublishedRecordingAsset {
+        asset: MediaAsset {
+            asset_id: ready.capture_sha256.clone(),
+            media_path: final_path.to_string_lossy().into_owned(),
+            duration_ms: ready.captured_duration_ms,
+            readiness: AssetReadiness::Ready,
+        },
+        _recording_ancestry: recording_ancestry,
+        _media_ancestry: media_ancestry,
+        _final_file: final_file,
+    })
+}
+
 /// Supplies the candidate identity that is actually running on the station.
 /// Proof jobs fail closed when this authority has not been connected by the
 /// service host; a job's originally requested identity is never treated as
@@ -995,6 +1180,7 @@ pub trait CandidateAuthority: Send + Sync {
 pub struct ChannelController {
     supervisor: WorkerSupervisor,
     database_path: PathBuf,
+    journal_path: PathBuf,
     channel_id: String,
     command_timeout: Duration,
     loaded_report_id: Option<String>,
@@ -1097,6 +1283,7 @@ impl ChannelController {
         Ok(Self {
             supervisor,
             database_path: database_path.to_path_buf(),
+            journal_path: journal_path.to_path_buf(),
             channel_id: channel.channel_id.clone(),
             command_timeout: timeout,
             loaded_report_id: None,
@@ -3493,6 +3680,7 @@ impl ChannelController {
                 return Err(OrchestrationError::Worker(error));
             }
         };
+        let start_worker_sequence = response.sequence;
         let WorkerEvent::ScheduledRecordingStarted {
             recording_id,
             output_index: actual_output_index,
@@ -3523,6 +3711,7 @@ impl ChannelController {
             max_bytes: actual_max_bytes,
             artifact_relative_path,
             worker_instance_id,
+            start_worker_sequence,
             graph_revision,
         };
         if active.recording_id != recording.definition.recording_id
@@ -3565,6 +3754,7 @@ impl ChannelController {
                 self.command_timeout,
             )
             .map_err(OrchestrationError::Worker)?;
+        let terminal_worker_sequence = response.sequence;
         match response.event {
             WorkerEvent::ScheduledRecordingPending {
                 recording_id,
@@ -3618,8 +3808,10 @@ impl ChannelController {
                         max_bytes: active.max_bytes,
                         artifact_relative_path,
                         worker_instance_id,
+                        start_worker_sequence: active.start_worker_sequence,
                         graph_revision,
                     },
+                    terminal_worker_sequence,
                     size_bytes,
                     capture_sha256,
                     captured_duration_ms: duration_ms,
@@ -3660,19 +3852,193 @@ impl ChannelController {
         }
     }
 
+    fn recover_ready_recording(
+        &self,
+        recording_id: &str,
+    ) -> Result<Option<ReadyRecordingCapture>, OrchestrationError> {
+        let inspection = inspect_journal(&self.journal_path).map_err(|error| {
+            OrchestrationError::Storage(format!(
+                "scheduled recording journal recovery failed: {error:?}"
+            ))
+        })?;
+        if inspection.channel_id.as_deref() != Some(self.channel_id.as_str()) {
+            return Err(OrchestrationError::Storage(
+                "scheduled recording journal channel authority is foreign".into(),
+            ));
+        }
+        let mut started = None;
+        let mut ready = None;
+        for envelope in inspection.retained_events {
+            match envelope.event {
+                WorkerEvent::ScheduledRecordingStarted {
+                    recording_id: event_recording_id,
+                    output_index,
+                    sink_id,
+                    duration_ms,
+                    max_bytes,
+                    artifact_relative_path,
+                    worker_instance_id,
+                    graph_revision,
+                } if event_recording_id == recording_id => {
+                    started = Some(ActiveRecordingCapture {
+                        recording_id: event_recording_id,
+                        output_index,
+                        sink_id,
+                        duration_ms,
+                        max_bytes,
+                        artifact_relative_path,
+                        worker_instance_id,
+                        start_worker_sequence: envelope.sequence,
+                        graph_revision,
+                    });
+                    ready = None;
+                }
+                WorkerEvent::ScheduledRecordingReady {
+                    recording_id: event_recording_id,
+                    output_index,
+                    sink_id,
+                    artifact_relative_path,
+                    worker_instance_id,
+                    graph_revision,
+                    size_bytes,
+                    capture_sha256,
+                    duration_ms,
+                } if event_recording_id == recording_id => {
+                    let Some(active) = started.clone() else {
+                        return Err(OrchestrationError::Storage(
+                            "scheduled recording Ready event has no retained start authority"
+                                .into(),
+                        ));
+                    };
+                    let candidate = ReadyRecordingCapture {
+                        active: ActiveRecordingCapture {
+                            recording_id: event_recording_id,
+                            output_index,
+                            sink_id,
+                            duration_ms: active.duration_ms,
+                            max_bytes: active.max_bytes,
+                            artifact_relative_path,
+                            worker_instance_id,
+                            start_worker_sequence: active.start_worker_sequence,
+                            graph_revision,
+                        },
+                        terminal_worker_sequence: envelope.sequence,
+                        size_bytes,
+                        capture_sha256,
+                        captured_duration_ms: duration_ms,
+                    };
+                    if candidate.active != active || candidate.validate().is_err() {
+                        return Err(OrchestrationError::Storage(
+                            "scheduled recording journal terminal authority is inconsistent".into(),
+                        ));
+                    }
+                    ready = Some(candidate);
+                }
+                WorkerEvent::ScheduledRecordingFailed {
+                    recording_id: event_recording_id,
+                    ..
+                } if event_recording_id == recording_id => {
+                    ready = None;
+                }
+                _ => {}
+            }
+        }
+        Ok(ready)
+    }
+
+    fn finalize_ready_recording(
+        &mut self,
+        store: &StationStore,
+        recording: &ScheduledRecording,
+        ready: &ReadyRecordingCapture,
+        now_unix_ms: i64,
+    ) -> Result<(), OrchestrationError> {
+        if !matches!(recording.lifecycle, RecordingLifecycle::Finalizing { .. }) {
+            return Err(OrchestrationError::Storage(
+                "scheduled recording finalization lifecycle is not authoritative".into(),
+            ));
+        }
+        self.verify_recording_dependencies(store, recording)
+            .map_err(OrchestrationError::Storage)?;
+        let published = publish_recording_capture(&self.database_path, &self.channel_id, ready)
+            .map_err(OrchestrationError::Storage)?;
+        let asset = &published.asset;
+        let schedule = store
+            .read_schedule_item(&recording.definition.schedule_item_id)
+            .map_err(OrchestrationError::Storage)?
+            .ok_or_else(|| {
+                OrchestrationError::Storage(
+                    "scheduled recording finalization schedule disappeared".into(),
+                )
+            })?;
+        let catalog = CatalogAssetRecord {
+            asset_sha256: asset.asset_id.clone(),
+            title: schedule.title,
+            meeting_body: None,
+            editorial_state: CatalogEditorialState::Draft,
+            published_at_utc_ms: None,
+            revision: 1,
+        };
+        let outcome = recording
+            .transition(RecordingTransitionRequest {
+                expected_revision: recording.revision,
+                actor: Self::recording_worker_actor(),
+                occurred_at_unix_ms: now_unix_ms,
+                execution: Self::recording_execution(recording),
+                event: RecordingEvent::FinalizeSuccess {
+                    captured_asset_hash: ready.capture_sha256.clone(),
+                    captured_duration_ms: i64::try_from(ready.captured_duration_ms).map_err(
+                        |_| {
+                            OrchestrationError::Storage(
+                                "scheduled recording duration exceeds lifecycle authority".into(),
+                            )
+                        },
+                    )?,
+                },
+            })
+            .map_err(OrchestrationError::Storage)?;
+        let evidence = ScheduledRecordingFinalizationEvidence {
+            recording_id: ready.active.recording_id.clone(),
+            worker_instance_id: ready.active.worker_instance_id.clone(),
+            worker_sequence: ready.terminal_worker_sequence,
+            graph_revision: ready.active.graph_revision,
+            output_index: ready.active.output_index,
+            sink_id: ready.active.sink_id.clone(),
+            artifact_relative_path: ready.active.artifact_relative_path.clone(),
+            capture_bytes: ready.size_bytes,
+            capture_sha256: ready.capture_sha256.clone(),
+            captured_duration_ms: ready.captured_duration_ms,
+            final_media_path: asset.media_path.clone(),
+            recorded_at_unix_ms: now_unix_ms,
+        };
+        store
+            .finalize_scheduled_recording(
+                &outcome.recording,
+                &outcome.receipt,
+                &evidence,
+                asset,
+                &catalog,
+            )
+            .map_err(OrchestrationError::Storage)?;
+        self.recording_capture = None;
+        Ok(())
+    }
+
     fn scheduled_recording_tick(
         &mut self,
         store: &StationStore,
         now_unix_ms: i64,
     ) -> Result<(), OrchestrationError> {
-        if matches!(
-            self.recording_capture,
-            Some(RecordingCaptureControllerState::Ready(_))
-        ) {
-            // Finalization is the next bounded controller slice. Retain the
-            // exact terminal authority in memory and do not issue another
-            // worker command until that authority has been durably consumed.
-            return Ok(());
+        if let Some(RecordingCaptureControllerState::Ready(ready)) = self.recording_capture.take() {
+            let recording = store
+                .read_scheduled_recording(&ready.active.recording_id)
+                .map_err(OrchestrationError::Storage)?
+                .ok_or_else(|| {
+                    OrchestrationError::Storage(
+                        "ready scheduled recording authority disappeared".into(),
+                    )
+                })?;
+            return self.finalize_ready_recording(store, &recording, &ready, now_unix_ms);
         }
         if let Some(RecordingCaptureControllerState::Capturing(active)) =
             self.recording_capture.take()
@@ -3690,10 +4056,47 @@ impl ChannelController {
         let recordings = store
             .list_scheduled_recordings_for_channel(&self.channel_id, 128)
             .map_err(OrchestrationError::Storage)?;
+        if let Some(finalizing) = recordings
+            .iter()
+            .find(|recording| matches!(recording.lifecycle, RecordingLifecycle::Finalizing { .. }))
+        {
+            let Some(ready) = self.recover_ready_recording(&finalizing.definition.recording_id)?
+            else {
+                return Self::fail_recording(
+                    store,
+                    finalizing,
+                    now_unix_ms,
+                    "Scheduled recording finalization has no exact retained Ready event.",
+                );
+            };
+            return self.finalize_ready_recording(store, finalizing, &ready, now_unix_ms);
+        }
         if let Some(interrupted) = recordings
             .iter()
             .find(|recording| matches!(recording.lifecycle, RecordingLifecycle::Capturing { .. }))
         {
+            if let Some(ready) =
+                self.recover_ready_recording(&interrupted.definition.recording_id)?
+            {
+                let outcome = interrupted
+                    .transition(RecordingTransitionRequest {
+                        expected_revision: interrupted.revision,
+                        actor: Self::recording_worker_actor(),
+                        occurred_at_unix_ms: now_unix_ms,
+                        execution: Self::recording_execution(interrupted),
+                        event: RecordingEvent::BeginFinalization,
+                    })
+                    .map_err(OrchestrationError::Storage)?;
+                store
+                    .write_scheduled_recording_transition(&outcome.recording, &outcome.receipt)
+                    .map_err(OrchestrationError::Storage)?;
+                return self.finalize_ready_recording(
+                    store,
+                    &outcome.recording,
+                    &ready,
+                    now_unix_ms,
+                );
+            }
             return Self::fail_recording(
                 store,
                 interrupted,

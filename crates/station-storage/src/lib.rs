@@ -112,7 +112,10 @@ pub use schedule_automation_authority::{
     ScheduleAutomationWriteError,
 };
 mod catalog_authority;
-pub use catalog_authority::{CatalogAssetHistoryEntry, CatalogAssetPage, CatalogAssetWriteError};
+pub use catalog_authority::{
+    CatalogAssetHistoryEntry, CatalogAssetPage, CatalogAssetWriteError,
+    ScheduledRecordingFinalizationEvidence,
+};
 mod publishing_authority;
 mod publishing_executor;
 pub use publishing_authority::{
@@ -1638,7 +1641,29 @@ impl StationStore {
                BEGIN SELECT RAISE(ABORT, 'scheduled recording history is append-only'); END;\
              CREATE TRIGGER IF NOT EXISTS scheduled_recording_history_no_delete \
                BEFORE DELETE ON scheduled_recording_history \
-               BEGIN SELECT RAISE(ABORT, 'scheduled recording history is append-only'); END;",
+               BEGIN SELECT RAISE(ABORT, 'scheduled recording history is append-only'); END;\
+             CREATE TABLE IF NOT EXISTS scheduled_recording_finalizations (\
+               recording_id TEXT PRIMARY KEY,\
+               worker_instance_id TEXT NOT NULL,\
+               worker_sequence INTEGER NOT NULL CHECK (worker_sequence >= 1),\
+               graph_revision INTEGER NOT NULL CHECK (graph_revision >= 1),\
+               output_index INTEGER NOT NULL CHECK (output_index BETWEEN 0 AND 255),\
+               sink_id TEXT NOT NULL,\
+               artifact_relative_path TEXT NOT NULL,\
+               capture_bytes INTEGER NOT NULL CHECK (capture_bytes >= 1),\
+               capture_sha256 TEXT NOT NULL CHECK (length(capture_sha256) = 64),\
+               captured_duration_ms INTEGER NOT NULL CHECK (captured_duration_ms >= 1),\
+               final_media_path TEXT NOT NULL,\
+               recorded_at_unix_ms INTEGER NOT NULL CHECK (recorded_at_unix_ms >= 0),\
+               record_json TEXT NOT NULL,\
+               FOREIGN KEY(recording_id) REFERENCES scheduled_recordings(recording_id)\
+             );\
+             CREATE TRIGGER IF NOT EXISTS scheduled_recording_finalizations_no_update \
+               BEFORE UPDATE ON scheduled_recording_finalizations \
+               BEGIN SELECT RAISE(ABORT, 'scheduled recording finalization evidence is immutable'); END;\
+             CREATE TRIGGER IF NOT EXISTS scheduled_recording_finalizations_no_delete \
+               BEFORE DELETE ON scheduled_recording_finalizations \
+               BEGIN SELECT RAISE(ABORT, 'scheduled recording finalization evidence is immutable'); END;",
         )
     }
 
@@ -9895,94 +9920,100 @@ impl StationStore {
         recording.validate()?;
         validate_scheduled_recording_transition_receipt(recording, receipt)?;
         self.execute("BEGIN IMMEDIATE")?;
-        let outcome = (|| {
-            let current = self
-                .read_scheduled_recording(&recording.definition.recording_id)?
-                .ok_or_else(|| "scheduled recording does not exist".to_string())?;
-            if current.definition != recording.definition
-                || receipt.prior_revision != current.revision
-                || receipt.resulting_revision != recording.revision
-                || recording.revision != current.revision.saturating_add(1)
-            {
-                return Err(
-                    "scheduled recording transition revision or definition authority conflicts"
-                        .into(),
-                );
-            }
-            // Failure must remain writable with the exact execution authority
-            // that was already persisted. A stale/removed schedule dependency
-            // is itself a reason execution may need to fail; rechecking it here
-            // would strand an armed or capturing recording forever.
-            if !matches!(
+        let outcome = self.write_scheduled_recording_transition_rows(recording, receipt, true);
+        self.finish_transaction(outcome)
+    }
+
+    fn write_scheduled_recording_transition_rows(
+        &self,
+        recording: &ScheduledRecording,
+        receipt: &RecordingTransitionReceipt,
+        recheck_dependencies: bool,
+    ) -> Result<(), String> {
+        let current = self
+            .read_scheduled_recording(&recording.definition.recording_id)?
+            .ok_or_else(|| "scheduled recording does not exist".to_string())?;
+        if current.definition != recording.definition
+            || receipt.prior_revision != current.revision
+            || receipt.resulting_revision != recording.revision
+            || recording.revision != current.revision.saturating_add(1)
+        {
+            return Err(
+                "scheduled recording transition revision or definition authority conflicts".into(),
+            );
+        }
+        // Failure must remain writable with the exact execution authority
+        // that was already persisted. A stale/removed schedule dependency is
+        // itself a reason execution may need to fail; rechecking it here would
+        // strand an armed or capturing recording forever.
+        if recheck_dependencies
+            && !matches!(
                 receipt.kind,
                 RecordingTransitionKind::Cancel | RecordingTransitionKind::Fail
-            ) {
-                self.recheck_scheduled_recording_schedule_binding(recording)?;
-            }
-            let record_json = serde_json::to_string(recording)
-                .map_err(|error| format!("serialize scheduled recording: {error}"))?;
-            let indexed_execution = scheduled_recording_execution(recording);
-            let statement = self.prepare(
-                "UPDATE scheduled_recordings SET revision=?1, lifecycle=?2, candidate_version=?3, \
-                 source_commit=?4, channel_configuration_hash=?5, record_json=?6 \
-                 WHERE recording_id=?7 AND revision=?8",
-            )?;
-            let values = [
-                c_string(
-                    scheduled_recording_lifecycle_name(&recording.lifecycle),
-                    "recording lifecycle",
-                )?,
-                c_string(
-                    indexed_execution.map_or("", |value| value.candidate.version.as_str()),
-                    "recording candidate version",
-                )?,
-                c_string(
-                    indexed_execution.map_or("", |value| value.candidate.source_commit.as_str()),
-                    "recording source commit",
-                )?,
-                c_string(
-                    indexed_execution.map_or("", |value| value.channel_configuration_hash.as_str()),
-                    "recording configuration hash",
-                )?,
-                c_string(&record_json, "scheduled recording record")?,
-                c_string(
-                    &recording.definition.recording_id,
-                    "scheduled recording identity",
-                )?,
-            ];
-            bind_i64(
-                self.database,
-                statement.raw,
-                1,
-                checked_i64(recording.revision, "scheduled recording revision")?,
-            )?;
-            bind_text(self.database, statement.raw, 2, &values[0])?;
-            bind_text(self.database, statement.raw, 3, &values[1])?;
-            bind_text(self.database, statement.raw, 4, &values[2])?;
-            bind_text(self.database, statement.raw, 5, &values[3])?;
-            bind_text(self.database, statement.raw, 6, &values[4])?;
-            bind_text(self.database, statement.raw, 7, &values[5])?;
-            bind_i64(
-                self.database,
-                statement.raw,
-                8,
-                checked_i64(current.revision, "current scheduled recording revision")?,
-            )?;
-            expect_done(self.database, statement.raw)?;
-            if self.changes() != 1 {
-                return Err(
-                    "scheduled recording transition lost its optimistic revision race".into(),
-                );
-            }
-            self.append_scheduled_recording_history(
-                recording,
-                Some(receipt),
-                &receipt.actor,
-                receipt.occurred_at_unix_ms,
-                scheduled_recording_transition_kind_name(receipt.kind),
             )
-        })();
-        self.finish_transaction(outcome)
+        {
+            self.recheck_scheduled_recording_schedule_binding(recording)?;
+        }
+        let record_json = serde_json::to_string(recording)
+            .map_err(|error| format!("serialize scheduled recording: {error}"))?;
+        let indexed_execution = scheduled_recording_execution(recording);
+        let statement = self.prepare(
+            "UPDATE scheduled_recordings SET revision=?1, lifecycle=?2, candidate_version=?3, \
+             source_commit=?4, channel_configuration_hash=?5, record_json=?6 \
+             WHERE recording_id=?7 AND revision=?8",
+        )?;
+        let values = [
+            c_string(
+                scheduled_recording_lifecycle_name(&recording.lifecycle),
+                "recording lifecycle",
+            )?,
+            c_string(
+                indexed_execution.map_or("", |value| value.candidate.version.as_str()),
+                "recording candidate version",
+            )?,
+            c_string(
+                indexed_execution.map_or("", |value| value.candidate.source_commit.as_str()),
+                "recording source commit",
+            )?,
+            c_string(
+                indexed_execution.map_or("", |value| value.channel_configuration_hash.as_str()),
+                "recording configuration hash",
+            )?,
+            c_string(&record_json, "scheduled recording record")?,
+            c_string(
+                &recording.definition.recording_id,
+                "scheduled recording identity",
+            )?,
+        ];
+        bind_i64(
+            self.database,
+            statement.raw,
+            1,
+            checked_i64(recording.revision, "scheduled recording revision")?,
+        )?;
+        bind_text(self.database, statement.raw, 2, &values[0])?;
+        bind_text(self.database, statement.raw, 3, &values[1])?;
+        bind_text(self.database, statement.raw, 4, &values[2])?;
+        bind_text(self.database, statement.raw, 5, &values[3])?;
+        bind_text(self.database, statement.raw, 6, &values[4])?;
+        bind_text(self.database, statement.raw, 7, &values[5])?;
+        bind_i64(
+            self.database,
+            statement.raw,
+            8,
+            checked_i64(current.revision, "current scheduled recording revision")?,
+        )?;
+        expect_done(self.database, statement.raw)?;
+        if self.changes() != 1 {
+            return Err("scheduled recording transition lost its optimistic revision race".into());
+        }
+        self.append_scheduled_recording_history(
+            recording,
+            Some(receipt),
+            &receipt.actor,
+            receipt.occurred_at_unix_ms,
+            scheduled_recording_transition_kind_name(receipt.kind),
+        )
     }
 
     pub fn read_scheduled_recording(

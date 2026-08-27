@@ -1964,6 +1964,7 @@ dependencies = [
  "station-schedule-automation",
  "station-storage",
  "station-windows-ipc",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

@@ -10,6 +10,7 @@ serde_json.workspace = true
 sha2.workspace = true
 station-cg.workspace = true
 station-captions.workspace = true
+station-catalog.workspace = true
 station-domain.workspace = true
 station-live.workspace = true
 station-media-assets.workspace = true
@@ -20,8 +21,8 @@ station-recording.workspace = true
 station-runtime.workspace = true
 station-schedule.workspace = true
 station-storage.workspace = true
+windows-sys.workspace = true
 
 [dev-dependencies]
-station-catalog.workspace = true
 station-schedule-automation.workspace = true
 station-windows-ipc.workspace = true

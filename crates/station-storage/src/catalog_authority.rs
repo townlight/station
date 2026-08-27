@@ -32,6 +32,47 @@ pub struct CatalogAssetPage {
     pub next_after_asset_sha256: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ScheduledRecordingFinalizationEvidence {
+    pub recording_id: String,
+    pub worker_instance_id: String,
+    pub worker_sequence: u64,
+    pub graph_revision: u64,
+    pub output_index: u16,
+    pub sink_id: String,
+    pub artifact_relative_path: String,
+    pub capture_bytes: u64,
+    pub capture_sha256: String,
+    pub captured_duration_ms: u64,
+    pub final_media_path: String,
+    pub recorded_at_unix_ms: i64,
+}
+
+impl ScheduledRecordingFinalizationEvidence {
+    pub fn validate(&self) -> Result<(), String> {
+        if !is_canonical_uuid(&self.recording_id)
+            || !is_canonical_uuid(&self.sink_id)
+            || self.worker_instance_id.trim().is_empty()
+            || self.worker_instance_id.len() > 200
+            || self.worker_instance_id.chars().any(char::is_control)
+            || self.worker_sequence == 0
+            || self.graph_revision == 0
+            || self.artifact_relative_path != format!("{}.ts", self.recording_id)
+            || self.capture_bytes == 0
+            || self.captured_duration_ms == 0
+            || validate_asset_identity(&self.capture_sha256).is_err()
+            || !Path::new(&self.final_media_path).is_absolute()
+            || self.final_media_path.trim() != self.final_media_path
+            || self.final_media_path.chars().any(char::is_control)
+            || self.recorded_at_unix_ms < 0
+        {
+            return Err("scheduled recording finalization evidence is invalid".into());
+        }
+        Ok(())
+    }
+}
+
 impl StationStore {
     pub(super) fn initialize_catalog_authority_schema(&self) -> Result<(), String> {
         self.execute(
@@ -261,6 +302,215 @@ impl StationStore {
             )
         })();
         finish_catalog_write(self, outcome)
+    }
+
+    /// Atomically publishes one already-sealed capture into media/catalog
+    /// authority and completes its recording lifecycle. Filesystem publication
+    /// occurs before this call; every database fact either commits together or
+    /// rolls back together. An exact retry after an ambiguous commit is
+    /// idempotent, while any rebound fails closed.
+    pub fn finalize_scheduled_recording(
+        &self,
+        recording: &ScheduledRecording,
+        receipt: &RecordingTransitionReceipt,
+        evidence: &ScheduledRecordingFinalizationEvidence,
+        asset: &MediaAsset,
+        catalog: &CatalogAssetRecord,
+    ) -> Result<(), String> {
+        recording.validate()?;
+        validate_scheduled_recording_transition_receipt(recording, receipt)?;
+        evidence.validate()?;
+        asset
+            .validate()
+            .map_err(|error| format!("scheduled recording media asset is invalid: {error:?}"))?;
+        catalog
+            .validate_creation()
+            .map_err(|error| format!("scheduled recording catalog draft is invalid: {error:?}"))?;
+        let (captured_asset_hash, captured_duration_ms, execution) = match &recording.lifecycle {
+            RecordingLifecycle::Completed {
+                captured_asset_hash,
+                captured_duration_ms,
+                execution,
+                ..
+            } => (captured_asset_hash, captured_duration_ms, execution),
+            _ => {
+                return Err("scheduled recording finalization requires completed authority".into());
+            }
+        };
+        if receipt.kind != RecordingTransitionKind::FinalizeSuccess
+            || evidence.recording_id != recording.definition.recording_id
+            || evidence.capture_sha256 != *captured_asset_hash
+            || i64::try_from(evidence.captured_duration_ms).ok() != Some(*captured_duration_ms)
+            || asset.asset_id != evidence.capture_sha256
+            || asset.duration_ms != evidence.captured_duration_ms
+            || asset.media_path != evidence.final_media_path
+            || asset.readiness != AssetReadiness::Ready
+            || catalog.asset_sha256 != evidence.capture_sha256
+            || catalog.title.trim() != catalog.title
+        {
+            return Err("scheduled recording finalization bindings do not match".into());
+        }
+        self.execute("BEGIN IMMEDIATE")?;
+        let outcome = (|| {
+            let current_configuration =
+                self.current_channel_output_configuration_hash(&recording.definition.channel_id)?;
+            if current_configuration != execution.channel_configuration_hash {
+                return Err(
+                    "scheduled recording finalization configuration authority is stale".into(),
+                );
+            }
+            let current = self
+                .read_scheduled_recording(&recording.definition.recording_id)?
+                .ok_or_else(|| "scheduled recording does not exist".to_string())?;
+            if current == *recording {
+                let stored = self
+                    .read_scheduled_recording_finalization(&evidence.recording_id)?
+                    .ok_or_else(|| {
+                        "completed scheduled recording is missing finalization evidence".to_string()
+                    })?;
+                if stored != *evidence
+                    || self.read_media_asset(&asset.asset_id)? != Some(asset.clone())
+                    || self.read_catalog_asset(&catalog.asset_sha256)? != Some(catalog.clone())
+                {
+                    return Err(
+                        "scheduled recording finalization retry disagrees with authority".into(),
+                    );
+                }
+                return Ok(());
+            }
+            self.write_scheduled_recording_transition_rows(recording, receipt, true)?;
+            match self.read_media_asset(&asset.asset_id)? {
+                Some(existing) if existing == *asset => {}
+                Some(_) => return Err("scheduled recording media identity is rebound".into()),
+                None => self.put_media_asset(asset)?,
+            }
+            match self.read_catalog_asset(&catalog.asset_sha256)? {
+                Some(existing) if existing == *catalog => {}
+                Some(_) => return Err("scheduled recording catalog identity is rebound".into()),
+                None => {
+                    ensure_catalog_capacity(self).map_err(|error| format!("{error:?}"))?;
+                    write_catalog_rows(
+                        self,
+                        catalog,
+                        None,
+                        &receipt.actor.actor_id,
+                        receipt.occurred_at_unix_ms,
+                    )
+                    .map_err(|error| format!("{error:?}"))?;
+                }
+            }
+            let record_json = serde_json::to_string(evidence)
+                .map_err(|error| format!("serialize recording finalization evidence: {error}"))?;
+            let statement = self.prepare(
+                "INSERT INTO scheduled_recording_finalizations(recording_id,worker_instance_id,worker_sequence,graph_revision,output_index,sink_id,artifact_relative_path,capture_bytes,capture_sha256,captured_duration_ms,final_media_path,recorded_at_unix_ms,record_json) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)",
+            )?;
+            let values = [
+                c_string(&evidence.recording_id, "recording finalization identity")?,
+                c_string(&evidence.worker_instance_id, "recording worker instance")?,
+                c_string(&evidence.sink_id, "recording finalization sink")?,
+                c_string(&evidence.artifact_relative_path, "recording artifact path")?,
+                c_string(&evidence.capture_sha256, "recording capture hash")?,
+                c_string(&evidence.final_media_path, "recording final media path")?,
+                c_string(&record_json, "recording finalization JSON")?,
+            ];
+            bind_text(self.database, statement.raw, 1, &values[0])?;
+            bind_text(self.database, statement.raw, 2, &values[1])?;
+            bind_i64(
+                self.database,
+                statement.raw,
+                3,
+                checked_i64(evidence.worker_sequence, "recording worker sequence")?,
+            )?;
+            bind_i64(
+                self.database,
+                statement.raw,
+                4,
+                checked_i64(evidence.graph_revision, "recording graph revision")?,
+            )?;
+            bind_i64(
+                self.database,
+                statement.raw,
+                5,
+                i64::from(evidence.output_index),
+            )?;
+            bind_text(self.database, statement.raw, 6, &values[2])?;
+            bind_text(self.database, statement.raw, 7, &values[3])?;
+            bind_i64(
+                self.database,
+                statement.raw,
+                8,
+                checked_i64(evidence.capture_bytes, "recording capture bytes")?,
+            )?;
+            bind_text(self.database, statement.raw, 9, &values[4])?;
+            bind_i64(
+                self.database,
+                statement.raw,
+                10,
+                checked_i64(evidence.captured_duration_ms, "recording capture duration")?,
+            )?;
+            bind_text(self.database, statement.raw, 11, &values[5])?;
+            bind_i64(
+                self.database,
+                statement.raw,
+                12,
+                evidence.recorded_at_unix_ms,
+            )?;
+            bind_text(self.database, statement.raw, 13, &values[6])?;
+            expect_done(self.database, statement.raw)
+        })();
+        self.finish_transaction(outcome)
+    }
+
+    pub fn read_scheduled_recording_finalization(
+        &self,
+        recording_id: &str,
+    ) -> Result<Option<ScheduledRecordingFinalizationEvidence>, String> {
+        if !is_canonical_uuid(recording_id) {
+            return Err("scheduled recording finalization identity is invalid".into());
+        }
+        let statement = self.prepare(
+            "SELECT worker_instance_id,worker_sequence,graph_revision,output_index,sink_id,artifact_relative_path,capture_bytes,capture_sha256,captured_duration_ms,final_media_path,recorded_at_unix_ms,record_json FROM scheduled_recording_finalizations WHERE recording_id=?1",
+        )?;
+        let identity = c_string(recording_id, "recording finalization identity")?;
+        bind_text(self.database, statement.raw, 1, &identity)?;
+        match unsafe { sqlite3_step(statement.raw) } {
+            SQLITE_DONE => Ok(None),
+            SQLITE_ROW => {
+                let evidence: ScheduledRecordingFinalizationEvidence =
+                    serde_json::from_str(&column_text(statement.raw, 11)?).map_err(|error| {
+                        format!("decode recording finalization evidence: {error}")
+                    })?;
+                evidence.validate()?;
+                let indexed = ScheduledRecordingFinalizationEvidence {
+                    recording_id: recording_id.into(),
+                    worker_instance_id: column_text(statement.raw, 0)?,
+                    worker_sequence: column_u64(statement.raw, 1, "recording worker sequence")?,
+                    graph_revision: column_u64(statement.raw, 2, "recording graph revision")?,
+                    output_index: u16::try_from(column_u64(
+                        statement.raw,
+                        3,
+                        "recording output index",
+                    )?)
+                    .map_err(|_| "database returned invalid recording output index".to_string())?,
+                    sink_id: column_text(statement.raw, 4)?,
+                    artifact_relative_path: column_text(statement.raw, 5)?,
+                    capture_bytes: column_u64(statement.raw, 6, "recording capture bytes")?,
+                    capture_sha256: column_text(statement.raw, 7)?,
+                    captured_duration_ms: column_u64(
+                        statement.raw,
+                        8,
+                        "recording capture duration",
+                    )?,
+                    final_media_path: column_text(statement.raw, 9)?,
+                    recorded_at_unix_ms: unsafe { sqlite3_column_int64(statement.raw, 10) },
+                };
+                if evidence != indexed {
+                    return Err("recording finalization indexed authority and JSON disagree".into());
+                }
+                Ok(Some(evidence))
+            }
+            _ => Err(sqlite_error(self.database)),
+        }
     }
 
     pub(super) fn validate_current_catalog_snapshot(

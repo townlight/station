@@ -17,12 +17,14 @@ pub(crate) struct ActiveRecordingCapture {
     pub max_bytes: u64,
     pub artifact_relative_path: String,
     pub worker_instance_id: String,
+    pub start_worker_sequence: u64,
     pub graph_revision: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ReadyRecordingCapture {
     pub active: ActiveRecordingCapture,
+    pub terminal_worker_sequence: u64,
     pub size_bytes: u64,
     pub capture_sha256: String,
     pub captured_duration_ms: u64,
@@ -37,7 +39,8 @@ pub(crate) enum RecordingCaptureControllerState {
 impl ReadyRecordingCapture {
     pub(crate) fn validate(&self) -> Result<(), String> {
         self.active.validate()?;
-        if self.size_bytes == 0
+        if self.terminal_worker_sequence <= self.active.start_worker_sequence
+            || self.size_bytes == 0
             || self.size_bytes > self.active.max_bytes
             || self.captured_duration_ms == 0
             || self.captured_duration_ms > self.active.duration_ms
@@ -61,6 +64,7 @@ impl ActiveRecordingCapture {
         if self.worker_instance_id.trim().is_empty()
             || self.worker_instance_id.len() > 200
             || self.worker_instance_id.chars().any(char::is_control)
+            || self.start_worker_sequence == 0
             || self.graph_revision == 0
         {
             return Err("scheduled recording worker authority is invalid".into());
@@ -297,6 +301,7 @@ mod tests {
             max_bytes: 1_000_000,
             artifact_relative_path: format!("{RECORDING_ID}.ts"),
             worker_instance_id: "worker-boot-one".into(),
+            start_worker_sequence: 8,
             graph_revision: 2,
         };
         capture.validate().unwrap();
@@ -320,10 +325,12 @@ mod tests {
             max_bytes: 1_000_000,
             artifact_relative_path: format!("{RECORDING_ID}.ts"),
             worker_instance_id: "worker-boot-one".into(),
+            start_worker_sequence: 8,
             graph_revision: 2,
         };
         let mut ready = ReadyRecordingCapture {
             active,
+            terminal_worker_sequence: 9,
             size_bytes: 750_000,
             capture_sha256: "a".repeat(64),
             captured_duration_ms: 59_000,
