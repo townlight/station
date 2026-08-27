@@ -76,13 +76,39 @@ static ACTIVE_PROCESS_DRAINS: AtomicUsize = AtomicUsize::new(0);
 static FORCED_STDERR_DRAIN_DELAY_MS: AtomicUsize = AtomicUsize::new(0);
 #[cfg(test)]
 static RUNNER_FAULT_TEST_LOCK: Mutex<()> = Mutex::new(());
+#[cfg(test)]
+type ManagedPathInterposer = Box<dyn Fn(&Path) + Send + Sync>;
+#[cfg(test)]
+static MANAGED_PATH_INTERPOSER: Mutex<Option<ManagedPathInterposer>> = Mutex::new(None);
+#[cfg(test)]
+static MANAGED_PATH_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+#[cfg(test)]
+fn interpose_managed_path(path: &Path) {
+    if let Some(action) = MANAGED_PATH_INTERPOSER
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .as_ref()
+    {
+        action(path);
+    }
+}
+
+#[cfg(not(test))]
+fn interpose_managed_path(_: &Path) {}
 
 /// A capture namespace exclusively owned by stationd.  It rejects reparse
 /// points from its root through the per-job directory and exposes no API for a
 /// caller to nominate an absolute artifact path.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub(crate) struct ManagedCaptureRoot {
     root: PathBuf,
+    // The nearest existing ancestor and every service-owned component through
+    // `root` are held without FILE_SHARE_DELETE. This is the authority for
+    // every later path below the namespace: an attacker cannot swap an
+    // authority-bearing ancestor between a check and an operation and redirect
+    // a create, rename, traversal, or delete elsewhere.
+    _ancestry: Vec<File>,
 }
 
 struct PinnedAnalysisInput {
@@ -115,34 +141,47 @@ impl ManagedCaptureRoot {
         if !root.is_absolute() {
             return Err("transport artifact root must be absolute".into());
         }
-        create_non_reparse_directory_chain(root)?;
+        let ancestry = create_non_reparse_directory_chain(root)?;
         let root = root.to_path_buf();
-        ensure_non_reparse_ancestry(&root)?;
-        Ok(Self { root })
+        Ok(Self {
+            root,
+            _ancestry: ancestry,
+        })
     }
 
     fn begin_job(&self, job_id: &str) -> Result<PinnedCaptureOutput, String> {
         if !is_canonical_uuid(job_id) {
             return Err("transport capture job identity is invalid".into());
         }
-        ensure_non_reparse_ancestry(&self.root)?;
         self.cleanup_quarantine()?;
         let job = self.root.join(job_id);
-        if job.exists() {
-            ensure_non_reparse_ancestry(&job)?;
-            verify_quarantine_owner(&job, job_id)?;
-            let nonce = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map_err(|_| "transport artifact clock is unavailable")?
-                .as_nanos();
-            let quarantine = self.root.join(format!("{job_id}.quarantine-{nonce}"));
-            fs::rename(&job, &quarantine)
-                .map_err(|_| "stale transport capture could not be quarantined")?;
-            ensure_non_reparse_ancestry(&quarantine)?;
+        match fs::symlink_metadata(&job) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => return Err("transport capture job directory could not be inspected".into()),
+            Ok(_) => {
+                // The root is pinned.  Opening this leaf no-follow before reading
+                // its owner closes the inspect/read race.  It is deliberately
+                // dropped before rename: a handle without DELETE sharing would
+                // prevent the service's own claim move.
+                let job_handle = open_managed_directory_no_follow(&job)?;
+                verify_quarantine_owner(&job, job_id)?;
+                drop(job_handle);
+                let nonce = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_err(|_| "transport artifact clock is unavailable")?
+                    .as_nanos();
+                let quarantine = self.root.join(format!("{job_id}.quarantine-{nonce}"));
+                fs::rename(&job, &quarantine)
+                    .map_err(|_| "stale transport capture could not be quarantined")?;
+                let quarantine_handle = open_managed_directory_no_follow(&quarantine)?;
+                verify_quarantine_owner(&quarantine, job_id)?;
+                drop(quarantine_handle);
+            }
         }
         self.cleanup_quarantine()?;
+        interpose_managed_path(&job);
         fs::create_dir(&job).map_err(|_| "transport capture job directory could not be created")?;
-        ensure_non_reparse_ancestry(&job)?;
+        let job_handle = open_managed_directory_no_follow(&job)?;
         write_quarantine_owner(&job, job_id)?;
         let path = job.join("capture.ts");
         let file = fs::OpenOptions::new()
@@ -153,7 +192,7 @@ impl ManagedCaptureRoot {
             .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
             .open(&path)
             .map_err(|_| "transport capture output handle could not be created")?;
-        let directories = pin_directory_ancestry(&self.root, &job)?;
+        let directories = vec![job_handle];
         Ok(PinnedCaptureOutput {
             path,
             file,
@@ -182,12 +221,15 @@ impl ManagedCaptureRoot {
             let name = name.to_string_lossy();
             if name.starts_with(".deleting-") {
                 let path = entry.path();
-                ensure_non_reparse_ancestry(&path)?;
+                let directory = open_managed_directory_no_follow(&path)?;
                 let owner = read_quarantine_owner(&path)?;
                 verify_quarantine_owner(&path, &owner)?;
                 quarantine_tree_bytes(&path, scan_deadline)?;
-                fs::remove_dir_all(&path)
-                    .map_err(|_| "transport quarantine tombstone could not be recovered")?;
+                drop(directory);
+                interpose_managed_path(&path);
+                remove_owned_tree_no_follow(&path).map_err(|error| {
+                    format!("transport quarantine tombstone could not be recovered: {error}")
+                })?;
                 continue;
             }
             let Some((job_id, _)) = name.split_once(".quarantine-") else {
@@ -197,19 +239,20 @@ impl ManagedCaptureRoot {
                 return Err("transport quarantine name is not service-owned".into());
             }
             let path = entry.path();
-            ensure_non_reparse_ancestry(&path)?;
-            let metadata = fs::symlink_metadata(&path)
+            let directory = open_managed_directory_no_follow(&path)?;
+            let metadata = directory
+                .metadata()
                 .map_err(|_| "transport quarantine could not be inspected")?;
-            if !metadata.is_dir() {
-                return Err("transport quarantine is not a directory".into());
-            }
             verify_quarantine_owner(&path, job_id)?;
             let modified = metadata.modified().unwrap_or(std::time::UNIX_EPOCH);
+            // The recursive reader pins every descendant it enters; holding
+            // this leaf through that reader also prevents a leaf swap.
             entries.push((
                 path,
                 modified,
                 quarantine_tree_bytes(&entry.path(), scan_deadline)?,
             ));
+            drop(directory);
         }
         entries.sort_by_key(|(_, modified, _)| *modified);
         let mut total = entries.iter().try_fold(0_u64, |sum, (_, _, bytes)| {
@@ -222,7 +265,7 @@ impl ManagedCaptureRoot {
             {
                 break;
             }
-            ensure_non_reparse_ancestry(&path)?;
+            let candidate = open_managed_directory_no_follow(&path)?;
             let deleting = self.root.join(format!(
                 ".deleting-{}-{}",
                 std::process::id(),
@@ -231,9 +274,12 @@ impl ManagedCaptureRoot {
                     .map_err(|_| "transport quarantine clock is unavailable")?
                     .as_nanos()
             ));
+            // A no-delete handle is the authority for the inspection but must
+            // be closed before our own atomic claim move.
+            drop(candidate);
             fs::rename(&path, &deleting)
                 .map_err(|_| "transport quarantine could not be claimed for deletion")?;
-            ensure_non_reparse_ancestry(&deleting)?;
+            let deleting_handle = open_managed_directory_no_follow(&deleting)?;
             verify_quarantine_owner(
                 &deleting,
                 path.file_name()
@@ -243,8 +289,11 @@ impl ManagedCaptureRoot {
                     .ok_or("transport quarantine identity was lost")?,
             )?;
             quarantine_tree_bytes(&deleting, Instant::now() + QUARANTINE_SCAN_TIMEOUT)?;
-            fs::remove_dir_all(&deleting)
-                .map_err(|_| "transport quarantine could not be removed safely")?;
+            drop(deleting_handle);
+            interpose_managed_path(&deleting);
+            remove_owned_tree_no_follow(&deleting).map_err(|error| {
+                format!("transport quarantine could not be removed safely: {error}")
+            })?;
             total = total
                 .checked_sub(bytes)
                 .ok_or("transport quarantine accounting underflowed")?;
@@ -271,7 +320,7 @@ impl ManagedCaptureRoot {
             return Err("transport capture job identity is invalid".into());
         }
         let job = self.root.join(job_id);
-        ensure_non_reparse_ancestry(&job)?;
+        let _job_handle = open_managed_directory_no_follow(&job)?;
         let final_path = job.join("capture.ts");
         if capture.path != final_path {
             return Err("transport capture handle is not bound to this job".into());
@@ -324,7 +373,7 @@ impl ManagedCaptureRoot {
             return Err("transport analysis copy does not match sealed capture facts".into());
         }
         let job = self.root.join(job_id);
-        ensure_non_reparse_ancestry(&job)?;
+        let job_handle = open_managed_directory_no_follow(&job)?;
         let path = job.join("analysis-input.ts");
         let mut copy = fs::OpenOptions::new()
             .write(true)
@@ -336,12 +385,11 @@ impl ManagedCaptureRoot {
         copy.sync_all()
             .map_err(|_| "transport analysis input could not be sealed")?;
         drop(copy);
-        ensure_non_reparse_ancestry(&path)?;
         let copied = bounded_capture(&path, facts.capture_bytes)?;
         if copied != bytes {
             return Err("transport analysis input changed after sealing".into());
         }
-        let directories = pin_directory_ancestry(&self.root, &job)?;
+        let directories = vec![job_handle];
         let file = fs::OpenOptions::new()
             .read(true)
             // TSDuck may open the same leaf for reading. No writer or deleter
@@ -2012,39 +2060,33 @@ fn bounded_capture_file(file: File, max: u64) -> Result<Vec<u8>, String> {
     Ok(out)
 }
 
-fn pin_directory_ancestry(root: &Path, leaf_directory: &Path) -> Result<Vec<File>, String> {
-    if !leaf_directory.starts_with(root) {
-        return Err("transport analysis directory escaped its managed root".into());
+/// Opens a directory without following a junction and retains it without
+/// FILE_SHARE_DELETE.  A caller must keep the returned handle alive for every
+/// path operation below that directory.  Windows then refuses an ancestor
+/// rename/delete while the operation is in flight.
+fn open_managed_directory_no_follow(path: &Path) -> Result<File, String> {
+    open_directory_no_follow(path, FILE_SHARE_READ | FILE_SHARE_WRITE)
+}
+
+fn open_directory_no_follow(path: &Path, share_mode: u32) -> Result<File, String> {
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .share_mode(share_mode)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)
+        .map_err(|error| {
+            format!(
+                "transport managed directory could not be pinned at {}: {error}",
+                path.display()
+            )
+        })?;
+    let metadata = file
+        .metadata()
+        .map_err(|_| "transport managed directory could not be inspected")?;
+    if metadata.file_attributes() & 0x0400 != 0 || !metadata.is_dir() {
+        return Err("transport managed directory is a reparse point or not a directory".into());
     }
-    let mut paths = vec![root.to_path_buf()];
-    let mut current = root.to_path_buf();
-    for component in leaf_directory
-        .strip_prefix(root)
-        .map_err(|_| "transport analysis directory escaped its managed root")?
-        .components()
-    {
-        current.push(component.as_os_str());
-        paths.push(current.clone());
-    }
-    paths
-        .into_iter()
-        .map(|path| {
-            fs::OpenOptions::new()
-                .read(true)
-                .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
-                .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
-                .open(&path)
-                .and_then(|file| {
-                    let metadata = file.metadata()?;
-                    if metadata.file_attributes() & 0x0400 != 0 || !metadata.is_dir() {
-                        Err(std::io::Error::other("directory is not a real directory"))
-                    } else {
-                        Ok(file)
-                    }
-                })
-                .map_err(|_| "transport analysis ancestry could not be pinned".to_string())
-        })
-        .collect()
+    Ok(file)
 }
 
 /// Opens the leaf through a Windows no-follow handle.  `FILE_FLAG_OPEN_REPARSE_POINT`
@@ -2103,57 +2145,45 @@ fn open_attested_executable(path: &Path, expected_sha256: &str) -> Result<File, 
     Ok(file)
 }
 
-fn ensure_non_reparse_ancestry(path: &Path) -> Result<(), String> {
-    let mut current = Some(path);
-    while let Some(candidate) = current {
-        let metadata = fs::symlink_metadata(candidate)
-            .map_err(|_| "transport artifact ancestry is unavailable")?;
-        if metadata.file_attributes() & 0x0400 != 0 {
-            return Err("transport artifact ancestry contains a reparse point".into());
-        }
-        current = candidate.parent();
-    }
-    Ok(())
-}
-
-/// Creates each missing component only after inspecting its original parent
-/// path.  Deliberately never canonicalizes first: canonicalization follows a
-/// junction and would validate a path outside the service-owned namespace.
-fn create_non_reparse_directory_chain(path: &Path) -> Result<(), String> {
-    let mut current = PathBuf::new();
-    for component in path.components() {
-        current.push(component.as_os_str());
-        match fs::symlink_metadata(&current) {
+/// Finds the nearest existing ancestor, pins it no-follow, then creates and
+/// pins only the missing service-owned tail.  We intentionally do not lock a
+/// user's complete profile/volume ancestry: unrelated Windows handles may
+/// legitimately deny that.  The nearest existing ancestor is opened no-follow
+/// before the first mutation, and every later mutation is beneath a retained
+/// no-delete parent handle.
+fn create_non_reparse_directory_chain(path: &Path) -> Result<Vec<File>, String> {
+    let mut missing = Vec::new();
+    let mut existing = path;
+    loop {
+        match fs::symlink_metadata(existing) {
             Ok(metadata) => {
                 if metadata.file_attributes() & 0x0400 != 0 || !metadata.is_dir() {
                     return Err(
                         "transport artifact root contains a reparse point or non-directory".into(),
                     );
                 }
+                break;
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                let parent = current
+                let name = existing
+                    .file_name()
+                    .ok_or("transport artifact root has no existing ancestor")?;
+                missing.push(name.to_os_string());
+                existing = existing
                     .parent()
-                    .ok_or("transport artifact root has no parent")?;
-                let parent_metadata = fs::symlink_metadata(parent)
-                    .map_err(|_| "transport artifact root parent is unavailable")?;
-                if parent_metadata.file_attributes() & 0x0400 != 0 || !parent_metadata.is_dir() {
-                    return Err(
-                        "transport artifact root parent is a reparse point or non-directory".into(),
-                    );
-                }
-                fs::create_dir(&current)
-                    .map_err(|_| "transport artifact root could not be created")?;
-                let created = fs::symlink_metadata(&current)
-                    .map_err(|_| "transport artifact root disappeared after creation")?;
-                if created.file_attributes() & 0x0400 != 0 || !created.is_dir() {
-                    return Err("transport artifact root changed after creation".into());
-                }
+                    .ok_or("transport artifact root has no existing ancestor")?;
             }
             Err(_) => return Err("transport artifact root could not be inspected".into()),
         }
     }
-    Ok(())
+    let mut current = existing.to_path_buf();
+    let mut pins = vec![open_managed_directory_no_follow(&current)?];
+    for component in missing.iter().rev() {
+        current.push(component);
+        fs::create_dir(&current).map_err(|_| "transport artifact root could not be created")?;
+        pins.push(open_managed_directory_no_follow(&current)?);
+    }
+    Ok(pins)
 }
 
 fn write_quarantine_owner(directory: &Path, job_id: &str) -> Result<(), String> {
@@ -2197,6 +2227,10 @@ fn read_quarantine_owner(directory: &Path) -> Result<String, String> {
 
 fn quarantine_tree_bytes(path: &Path, deadline: Instant) -> Result<u64, String> {
     let mut stack = vec![(path.to_path_buf(), 0_usize)];
+    // Keep each directory open while its descendants are reached by pathname.
+    // This is deliberately not an optimization: these handles are the
+    // no-follow authority for the recursive reader.
+    let mut _pins = Vec::new();
     let mut total = 0_u64;
     let mut entries = 0_usize;
     while let Some((candidate, depth)) = stack.pop() {
@@ -2215,6 +2249,10 @@ fn quarantine_tree_bytes(path: &Path, deadline: Instant) -> Result<u64, String> 
             return Err("transport quarantine contains a reparse point".into());
         }
         if metadata.is_file() {
+            let file = open_private_capture_no_follow(&candidate)?;
+            let metadata = file
+                .metadata()
+                .map_err(|_| "transport quarantine entry could not be inspected")?;
             total = total
                 .checked_add(metadata.len())
                 .ok_or("transport quarantine size overflowed")?;
@@ -2222,6 +2260,7 @@ fn quarantine_tree_bytes(path: &Path, deadline: Instant) -> Result<u64, String> 
                 return Err("transport quarantine scan exceeded its byte bound".into());
             }
         } else if metadata.is_dir() {
+            let directory = open_managed_directory_no_follow(&candidate)?;
             for entry in fs::read_dir(&candidate)
                 .map_err(|_| "transport quarantine directory could not be read")?
             {
@@ -2232,11 +2271,56 @@ fn quarantine_tree_bytes(path: &Path, deadline: Instant) -> Result<u64, String> 
                     depth + 1,
                 ));
             }
+            _pins.push(directory);
         } else {
             return Err("transport quarantine contains an unsupported entry".into());
         }
     }
     Ok(total)
+}
+
+/// Deletes only a tree that was already claimed into the service-owned
+/// `.deleting-*` namespace.  The routine never invokes `remove_dir_all`:
+/// every directory is opened no-follow before enumeration.  If a leaf changes
+/// after its handle is closed, Windows removes the replacement leaf itself or
+/// returns an error; it never traverses a junction target.
+fn remove_owned_tree_no_follow(path: &Path) -> Result<(), String> {
+    let metadata = fs::symlink_metadata(path)
+        .map_err(|_| "transport quarantine entry could not be inspected")?;
+    if metadata.file_attributes() & 0x0400 != 0 {
+        // A reparse point is never enumerated.  Removing a junction removes
+        // the link, not its target; try both Windows directory/file forms.
+        return fs::remove_dir(path)
+            .or_else(|_| fs::remove_file(path))
+            .map_err(|error| {
+                format!("transport quarantine reparse leaf could not be removed: {error}")
+            });
+    }
+    if metadata.is_file() {
+        let file = open_private_capture_no_follow(path)?;
+        drop(file);
+        return fs::remove_file(path)
+            .map_err(|_| "transport quarantine file could not be removed".into());
+    }
+    if !metadata.is_dir() {
+        return Err("transport quarantine contains an unsupported entry".into());
+    }
+    let directory = open_managed_directory_no_follow(path)?;
+    let mut children = Vec::new();
+    for entry in
+        fs::read_dir(path).map_err(|_| "transport quarantine directory could not be read")?
+    {
+        children.push(
+            entry
+                .map_err(|_| "transport quarantine entry could not be read")?
+                .path(),
+        );
+    }
+    for child in children {
+        remove_owned_tree_no_follow(&child)?;
+    }
+    drop(directory);
+    fs::remove_dir(path).map_err(|_| "transport quarantine directory could not be removed".into())
 }
 
 fn is_canonical_uuid(value: &str) -> bool {
@@ -2480,6 +2564,32 @@ mod tests {
         fs::write(root.join("bin/tstables.exe"), b"tables").unwrap();
         root
     }
+
+    fn create_test_junction(link: &Path, target: &Path) -> Result<(), String> {
+        let command = format!(
+            "New-Item -ItemType Junction -Path '{}' -Target '{}' | Out-Null",
+            link.display(),
+            target.display()
+        );
+        let output = Command::new("powershell.exe")
+            .args(["-NoProfile", "-NonInteractive", "-Command", &command])
+            .output()
+            .map_err(|_| "junction command could not start")?;
+        if output.status.success() {
+            Ok(())
+        } else {
+            Err(format!(
+                "junction command `{command}` failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            ))
+        }
+    }
+
+    fn clear_managed_path_interposer() {
+        *MANAGED_PATH_INTERPOSER
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+    }
     fn runtime(root: &Path) -> AttestedTsdDuckRuntime {
         AttestedTsdDuckRuntime {
             root: root.into(),
@@ -2648,6 +2758,7 @@ mod tests {
         );
         drop(input);
         drop(partial);
+        drop(managed);
         fs::remove_dir_all(base).unwrap();
     }
 
@@ -2673,6 +2784,105 @@ mod tests {
             managed.cleanup_quarantine().is_err(),
             "an unmarked lookalike must never be recursively deleted"
         );
+        drop(managed);
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn managed_root_pin_blocks_a_root_swap_before_capture_create() {
+        let _guard = MANAGED_PATH_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let base = root();
+        let managed = ManagedCaptureRoot::open(base.join("managed")).unwrap();
+        let outside = base.join("outside");
+        fs::create_dir(&outside).unwrap();
+        fs::write(outside.join("sentinel"), b"outside").unwrap();
+        let job_id = "11111111-2222-4333-8444-555555555555";
+        let expected_job = managed.root.join(job_id);
+        let managed_root = managed.root.clone();
+        let swap_attempted = Arc::new(AtomicBool::new(false));
+        let swap_attempted_for_hook = Arc::clone(&swap_attempted);
+        *MANAGED_PATH_INTERPOSER
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(Box::new(move |path| {
+            if path != expected_job {
+                return;
+            }
+            swap_attempted_for_hook.store(true, Ordering::Release);
+            // This is the exact old check/use interposition point. The open
+            // root handle omits FILE_SHARE_DELETE, so the hostile rename is
+            // refused before a junction can redirect create_dir.
+            assert!(fs::rename(&managed_root, managed_root.with_extension("moved")).is_err());
+        }));
+        let output = managed.begin_job(job_id).unwrap();
+        clear_managed_path_interposer();
+        assert!(swap_attempted.load(Ordering::Acquire));
+        assert!(output.path.starts_with(&managed.root));
+        assert!(!outside.join(job_id).exists());
+        assert_eq!(fs::read(outside.join("sentinel")).unwrap(), b"outside");
+        drop(output);
+        drop(managed);
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn cleanup_does_not_follow_a_junction_swapped_after_owned_validation() {
+        let _guard = MANAGED_PATH_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let base = root();
+        let managed = ManagedCaptureRoot::open(base.join("managed")).unwrap();
+        let outside = base.join("outside");
+        fs::create_dir(&outside).unwrap();
+        fs::write(outside.join("sentinel"), b"outside").unwrap();
+        let tombstone = managed.root.join(".deleting-owned");
+        fs::create_dir(&tombstone).unwrap();
+        write_quarantine_owner(&tombstone, "11111111-2222-4333-8444-555555555555").unwrap();
+        fs::write(tombstone.join("capture.ts"), b"owned").unwrap();
+        let expected = tombstone.clone();
+        let outside_for_hook = outside.clone();
+        let swapped = Arc::new(AtomicBool::new(false));
+        let swapped_for_hook = Arc::clone(&swapped);
+        let junction_failure = Arc::new(Mutex::new(None));
+        let junction_failure_for_hook = Arc::clone(&junction_failure);
+        *MANAGED_PATH_INTERPOSER
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(Box::new(move |path| {
+            if path != expected || swapped_for_hook.swap(true, Ordering::AcqRel) {
+                return;
+            }
+            let displaced = path.with_extension("displaced");
+            if let Err(error) = fs::rename(path, &displaced) {
+                *junction_failure_for_hook.lock().unwrap() = Some(error.to_string());
+                return;
+            }
+            let staging = path.with_file_name("junction-stage");
+            if let Err(error) = create_test_junction(&staging, &outside_for_hook) {
+                *junction_failure_for_hook.lock().unwrap() = Some(error);
+            } else if let Err(error) = fs::rename(&staging, path) {
+                *junction_failure_for_hook.lock().unwrap() = Some(error.to_string());
+            }
+        }));
+        let cleanup = managed.cleanup_quarantine();
+        clear_managed_path_interposer();
+        assert!(
+            junction_failure.lock().unwrap().is_none(),
+            "{:?}",
+            *junction_failure.lock().unwrap()
+        );
+        assert!(swapped.load(Ordering::Acquire));
+        if cleanup.is_ok() {
+            assert!(
+                !tombstone.exists(),
+                "success may remove only the swapped junction leaf"
+            );
+        }
+        assert_eq!(fs::read(outside.join("sentinel")).unwrap(), b"outside");
+        assert!(outside.join("sentinel").exists());
+        let _ = fs::remove_dir(&tombstone);
+        let _ = fs::remove_dir(tombstone.with_extension("displaced"));
+        drop(managed);
         fs::remove_dir_all(base).unwrap();
     }
 
@@ -3244,6 +3454,7 @@ mod tests {
                 .to_string_lossy()
                 .starts_with(&format!("{job_id}.quarantine-"))
         }));
+        drop(managed);
         fs::remove_dir_all(root).unwrap();
     }
 }
