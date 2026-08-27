@@ -60,8 +60,9 @@ rehashes and recounts the exact opened object against the terminal event. It
 validates finite decodable audio/video media before publication, then copies
 from that retained handle into a cryptographically random create-new part in
 the managed media library, flushes and synchronizes it, rehashes the part, and
-atomically renames it to the content hash. A concurrent same-hash publisher is
-accepted only after the winner is reopened and byte-validated. The finalizer
+atomically renames it to the content hash with the Windows no-replace primitive.
+A concurrent same-hash publisher is accepted only after the unchanged winner
+is reopened and byte-validated. The finalizer
 retains and compares Windows file identity across a successful rename and then
 holds a no-delete final handle through the database commit. A database
 transaction then:

@@ -10,6 +10,7 @@ use std::fmt::Write as _;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::num::NonZeroU16;
+use std::os::windows::ffi::OsStrExt;
 use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
 use std::os::windows::io::AsRawHandle;
 use std::path::{Path, PathBuf};
@@ -93,6 +94,7 @@ unsafe extern "system" {
         info: *mut std::ffi::c_void,
         info_size: u32,
     ) -> i32;
+    fn MoveFileExW(existing_path: *const u16, new_path: *const u16, flags: u32) -> i32;
 }
 
 static ALERT_SEQUENCE: AtomicU64 = AtomicU64::new(1);
@@ -1211,10 +1213,29 @@ fn hash_open_recording(
 }
 
 fn publish_recording_part(temporary_path: &Path, final_path: &Path) -> Result<bool, String> {
-    // Windows rename is atomic and does not replace an existing destination.
-    // A concurrent publisher of the same content may win; in that case discard
-    // only this uniquely owned part and let the caller revalidate the winner.
-    if let Err(rename_error) = fs::rename(temporary_path, final_path) {
+    const MOVEFILE_WRITE_THROUGH: u32 = 0x0000_0008;
+    let temporary_wide = temporary_path
+        .as_os_str()
+        .encode_wide()
+        .chain(Some(0))
+        .collect::<Vec<_>>();
+    let final_wide = final_path
+        .as_os_str()
+        .encode_wide()
+        .chain(Some(0))
+        .collect::<Vec<_>>();
+    // MoveFileExW without MOVEFILE_REPLACE_EXISTING is the Windows atomic
+    // no-replace primitive. A same-hash concurrent publisher may win, but its
+    // named object is never replaced by this attempt.
+    let moved = unsafe {
+        MoveFileExW(
+            temporary_wide.as_ptr(),
+            final_wide.as_ptr(),
+            MOVEFILE_WRITE_THROUGH,
+        )
+    };
+    if moved == 0 {
+        let rename_error = std::io::Error::last_os_error();
         let winner = fs::symlink_metadata(final_path)
             .map_err(|_| format!("publish recording media atomically: {rename_error}"))?;
         if !winner.is_file() || winner.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
@@ -5735,9 +5756,9 @@ mod tests {
         lease_renewal_due, managed_cg_image_root, observe_asrun_projection_alert_failure,
         observe_caption_cue_misses, on_air_source_started_at, promote_caption_proof_artifact,
         proof_artifact_path, proof_bindings_match, publish_recording_part,
-        ready_duration_is_bounded, resolve_asrun_projection_alert_after_catch_up,
-        resolve_caption_cue_miss_after_admission, resolved_snapshot_to_protocol,
-        stalled_required_output,
+        ready_duration_is_bounded, recording_file_identity,
+        resolve_asrun_projection_alert_after_catch_up, resolve_caption_cue_miss_after_admission,
+        resolved_snapshot_to_protocol, stalled_required_output,
     };
     use sha2::{Digest, Sha256};
     use station_captions::{
@@ -7938,10 +7959,15 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         let temporary_path = root.join("owned-attempt.part");
         let final_path = root.join("content-hash.ts");
-        std::fs::write(&temporary_path, b"same exact recording bytes").unwrap();
-        std::fs::write(&final_path, b"same exact recording bytes").unwrap();
+        std::fs::write(&temporary_path, b"replacement bytes must never win").unwrap();
+        std::fs::write(&final_path, b"original immutable winner").unwrap();
+        let winner_identity_before =
+            recording_file_identity(&std::fs::File::open(&final_path).unwrap()).unwrap();
 
-        publish_recording_part(&temporary_path, &final_path).unwrap();
+        assert!(
+            !publish_recording_part(&temporary_path, &final_path).unwrap(),
+            "an existing destination must take the concurrent-winner path"
+        );
 
         assert!(
             !temporary_path.exists(),
@@ -7949,8 +7975,14 @@ mod tests {
         );
         assert_eq!(
             std::fs::read(&final_path).unwrap(),
-            b"same exact recording bytes",
+            b"original immutable winner",
             "the concurrently published global object remains authoritative"
+        );
+        let winner_identity_after =
+            recording_file_identity(&std::fs::File::open(&final_path).unwrap()).unwrap();
+        assert_eq!(
+            winner_identity_after, winner_identity_before,
+            "no-replace publication must preserve the winner's FileIdInfo"
         );
         std::fs::remove_dir_all(root).unwrap();
     }
