@@ -4,7 +4,9 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 import {
   AGENDA_IMPORT_MAX_UTF8_BYTES,
+  AGENDA_RAW_TITLE_INPUT_MAX_UTF8_BYTES,
   AGENDA_TITLE_MAX_UTF8_BYTES,
+  boundedAgendaTitleInput,
   agendaTextByteError,
   isCurrentAgendaRequest,
   normalizeAgendaTitle,
@@ -88,4 +90,27 @@ test("agenda title byte authority measures the single transmitted trimmed value"
   assert.equal(agendaTextByteError(normalizeAgendaTitle(paddedMultibyteExact), AGENDA_TITLE_MAX_UTF8_BYTES, "Meeting title"), null);
   assert.doesNotMatch(source, /title\.trim\(\)/);
   assert.match(source, /title: normalizedTitle/);
+});
+
+test("controlled title input accepts padded exact-boundary paste and rejects normalized overflow", () => {
+  const paddedExact = `  ${"a".repeat(200)}  `;
+  const accepted = boundedAgendaTitleInput("old", paddedExact);
+  assert.deepEqual(accepted, { value: paddedExact, rejected: false });
+  assert.equal(agendaTextByteError(normalizeAgendaTitle(accepted.value), AGENDA_TITLE_MAX_UTF8_BYTES, "Meeting title"), null);
+
+  const paddedOverflow = `  ${"a".repeat(201)}  `;
+  const overflow = boundedAgendaTitleInput(accepted.value, paddedOverflow);
+  assert.equal(overflow.rejected, false);
+  assert.match(agendaTextByteError(normalizeAgendaTitle(overflow.value), AGENDA_TITLE_MAX_UTF8_BYTES, "Meeting title") ?? "", /201 UTF-8 bytes/);
+
+  const absurdPadding = `${" ".repeat(AGENDA_RAW_TITLE_INPUT_MAX_UTF8_BYTES)}${"😀".repeat(50)}${" ".repeat(AGENDA_RAW_TITLE_INPUT_MAX_UTF8_BYTES)}`;
+  const compacted = boundedAgendaTitleInput("old", absurdPadding);
+  assert.deepEqual(compacted, { value: "😀".repeat(50), rejected: false });
+  assert.equal(utf8ByteLength(compacted.value), 200);
+
+  const invalidHuge = "x".repeat(AGENDA_RAW_TITLE_INPUT_MAX_UTF8_BYTES + 1);
+  assert.deepEqual(boundedAgendaTitleInput("stable", invalidHuge), { value: "stable", rejected: true });
+  assert.doesNotMatch(source, /maxLength=\{200\}/);
+  assert.match(source, /boundedAgendaTitleInput\(title, value\)/);
+  assert.match(source, /onChange=\{\(event\) => titleChanged\(event\.target\.value\)\}/);
 });
