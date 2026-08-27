@@ -125,6 +125,116 @@ fn schema_writes_reject_global_public_facet_collisions_and_cardinality_overflow(
 }
 
 #[test]
+fn current_schema_visibility_retires_historical_facets_before_key_reuse() {
+    let path = database();
+    let store = StationStore::open(&path).unwrap();
+    let asset = "e".repeat(64);
+    store
+        .put_media_asset(&MediaAsset {
+            asset_id: asset.clone(),
+            media_path: r"C:\private\visibility.ts".into(),
+            duration_ms: 1_000,
+            readiness: AssetReadiness::Ready,
+        })
+        .unwrap();
+    let a_id = "20000000-0000-4000-8000-000000000001";
+    let b_id = "20000000-0000-4000-8000-000000000002";
+    let a1 = public_schema(a_id, 0, 128);
+    store
+        .write_custom_metadata_schema(&a1, None, "actor", 1)
+        .unwrap();
+    let a_record = AssetMetadataRecord {
+        metadata_id: "30000000-0000-4000-8000-000000000001".into(),
+        asset_id: asset.clone(),
+        schema_id: a_id.into(),
+        schema_revision: 1,
+        revision: 1,
+        values: a1
+            .fields
+            .iter()
+            .map(|field| AssetMetadataValue {
+                field_id: field.field_id.clone(),
+                value: MetadataFieldValue::Boolean(true),
+            })
+            .collect(),
+    };
+    store
+        .write_asset_metadata_record(&a_record, None, "actor", 2)
+        .unwrap();
+    let mut a2 = a1.clone();
+    a2.revision = 2;
+    for field in &mut a2.fields {
+        field.public = false;
+    }
+    store
+        .write_custom_metadata_schema(&a2, Some(1), "actor", 3)
+        .unwrap();
+    let b1 = public_schema(b_id, 0, 128);
+    store
+        .write_custom_metadata_schema(&b1, None, "actor", 4)
+        .unwrap();
+    let b_record = AssetMetadataRecord {
+        metadata_id: "30000000-0000-4000-8000-000000000002".into(),
+        asset_id: asset.clone(),
+        schema_id: b_id.into(),
+        schema_revision: 1,
+        revision: 1,
+        values: b1
+            .fields
+            .iter()
+            .map(|field| AssetMetadataValue {
+                field_id: field.field_id.clone(),
+                value: MetadataFieldValue::Boolean(false),
+            })
+            .collect(),
+    };
+    store
+        .write_asset_metadata_record(&b_record, None, "actor", 5)
+        .unwrap();
+    let draft = CatalogAssetRecord {
+        asset_sha256: asset.clone(),
+        title: "Visibility".into(),
+        meeting_body: None,
+        editorial_state: CatalogEditorialState::Draft,
+        published_at_utc_ms: None,
+        revision: 1,
+    };
+    store
+        .write_catalog_asset(&asset, &draft, None, "actor", 6)
+        .unwrap();
+    let mut published = draft;
+    published.revision = 2;
+    published.editorial_state = CatalogEditorialState::Published;
+    published.published_at_utc_ms = Some(7);
+    store
+        .write_catalog_asset(&asset, &published, Some(1), "actor", 7)
+        .unwrap();
+    let page = store.read_public_catalog(None, 10, &[]).unwrap();
+    assert_eq!(page.items[0].facets.len(), 128);
+    assert!(
+        page.items[0]
+            .facets
+            .iter()
+            .all(|facet| facet.value == MetadataProjectionValue::Boolean(false))
+    );
+}
+
+#[test]
+fn anonymous_query_structure_is_bounded_and_never_full_scans_identity_rows() {
+    let source = include_str!("../src/public_catalog_projection.rs");
+    let snapshot = source
+        .split("fn public_snapshot")
+        .nth(1)
+        .unwrap()
+        .split("fn public_facets")
+        .next()
+        .unwrap();
+    assert!(snapshot.contains("LEFT JOIN public_catalog_identities"));
+    assert!(snapshot.contains("MAX_CANDIDATES + 1"));
+    assert!(!snapshot.contains("LIMIT 100001"));
+}
+
+#[test]
 fn generation_ledger_rejects_rollback_and_capacity_overflow_atomically() {
     let path = database();
     let store = StationStore::open(&path).unwrap();
@@ -198,23 +308,19 @@ fn projects_only_published_ready_assets_with_exact_public_facets() {
     store
         .write_custom_metadata_schema(&schema, None, "actor", 2)
         .unwrap();
+    let metadata = AssetMetadataRecord {
+        metadata_id: RECORD.into(),
+        asset_id: ASSET.into(),
+        schema_id: SCHEMA.into(),
+        schema_revision: 1,
+        revision: 1,
+        values: vec![AssetMetadataValue {
+            field_id: FIELD.into(),
+            value: MetadataFieldValue::Text("budget".into()),
+        }],
+    };
     store
-        .write_asset_metadata_record(
-            &AssetMetadataRecord {
-                metadata_id: RECORD.into(),
-                asset_id: ASSET.into(),
-                schema_id: SCHEMA.into(),
-                schema_revision: 1,
-                revision: 1,
-                values: vec![AssetMetadataValue {
-                    field_id: FIELD.into(),
-                    value: MetadataFieldValue::Text("budget".into()),
-                }],
-            },
-            None,
-            "actor",
-            3,
-        )
+        .write_asset_metadata_record(&metadata, None, "actor", 3)
         .unwrap();
     let mut published = draft;
     published.revision = 2;
@@ -299,6 +405,40 @@ fn projects_only_published_ready_assets_with_exact_public_facets() {
         .unwrap();
     assert_eq!(filtered.items, vec![council.clone()]);
 
+    let mut schema_129 = schema;
+    for revision in 2..=129 {
+        schema_129.revision = revision;
+        store
+            .write_custom_metadata_schema(
+                &schema_129,
+                Some(revision - 1),
+                "actor",
+                1_000 + revision as i64,
+            )
+            .unwrap();
+    }
+    let mut metadata_129 = metadata;
+    metadata_129.schema_revision = 129;
+    for revision in 2..=129 {
+        metadata_129.revision = revision;
+        store
+            .write_asset_metadata_record(
+                &metadata_129,
+                Some(revision - 1),
+                "actor",
+                2_000 + revision as i64,
+            )
+            .unwrap();
+    }
+    assert_eq!(
+        store
+            .read_public_catalog(None, 10, &[])
+            .unwrap()
+            .items
+            .len(),
+        2
+    );
+
     drop(store);
     let reopened = StationStore::open(&path).unwrap();
     assert_eq!(
@@ -309,8 +449,18 @@ fn projects_only_published_ready_assets_with_exact_public_facets() {
             .len(),
         2
     );
-    raw_sql(&path, "DELETE FROM public_catalog_identities");
-    assert!(reopened.read_public_catalog(None, 10, &[]).is_err());
+    assert_ne!(
+        raw_sql_status(&path, "DELETE FROM public_catalog_identities"),
+        SQLITE_OK
+    );
+    assert_eq!(
+        reopened
+            .read_public_catalog(None, 10, &[])
+            .unwrap()
+            .items
+            .len(),
+        2
+    );
     drop(reopened);
     let repaired = StationStore::open(&path).unwrap();
     assert_eq!(
@@ -323,19 +473,13 @@ fn projects_only_published_ready_assets_with_exact_public_facets() {
     );
     drop(repaired);
     let mapping_reader = StationStore::open(&path).unwrap();
+    raw_sql(&path, "DROP TRIGGER public_discovery_identity_no_delete");
     raw_sql(
         &path,
-        "DELETE FROM public_catalog_identities WHERE asset_sha256='bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb';INSERT INTO public_catalog_identities(asset_sha256,public_id) VALUES('cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc','dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd')",
+        "DELETE FROM public_catalog_identities WHERE asset_sha256='bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'",
     );
-    let mapping_corrupt = mapping_reader
-        .read_public_catalog(None, 10, &[])
-        .unwrap_err();
-    assert!(mapping_corrupt.contains("public catalog"));
+    assert!(mapping_reader.read_public_catalog(None, 10, &[]).is_err());
     drop(mapping_reader);
-    raw_sql(
-        &path,
-        "DELETE FROM public_catalog_identities WHERE asset_sha256='cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc'",
-    );
     let repaired = StationStore::open(&path).unwrap();
     raw_sql(
         &path,

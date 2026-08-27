@@ -9910,6 +9910,38 @@ impl StationStore {
         }
     }
 
+    fn read_asset_metadata_record_history_revision(
+        &self,
+        metadata_id: &str,
+        revision: u64,
+    ) -> Result<Option<AssetMetadataRecord>, String> {
+        if !is_canonical_uuid(metadata_id) || revision == 0 {
+            return Err("asset metadata history identity is invalid".into());
+        }
+        let statement = self.prepare("SELECT metadata_id,asset_id,schema_id,schema_revision,revision,record_json FROM asset_metadata_record_history WHERE metadata_id=?1 AND revision=?2")?;
+        let metadata_id = c_string(metadata_id, "asset metadata identity")?;
+        bind_text(self.database, statement.raw, 1, &metadata_id)?;
+        bind_i64(
+            self.database,
+            statement.raw,
+            2,
+            checked_i64(revision, "asset metadata revision")?,
+        )?;
+        match unsafe { sqlite3_step(statement.raw) } {
+            SQLITE_ROW => Ok(Some(read_asset_metadata_record_row(
+                statement.raw,
+                0,
+                1,
+                2,
+                3,
+                4,
+                5,
+            )?)),
+            SQLITE_DONE => Ok(None),
+            _ => Err(sqlite_error(self.database)),
+        }
+    }
+
     fn validate_stored_asset_metadata_record(
         &self,
         record: &AssetMetadataRecord,

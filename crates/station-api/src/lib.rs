@@ -20834,7 +20834,9 @@ mod tests {
                 .is_none()
         );
 
-        let fields: Vec<MetadataFieldDefinition> = serde_json::from_value(fields).unwrap();
+        let mut fields: Vec<MetadataFieldDefinition> = serde_json::from_value(fields).unwrap();
+        fields[0].public = false;
+        fields[0].faceted = false;
         for index in 1_u64..=64 {
             let schema_id = format!("{index:08x}-aaaa-4bbb-8ccc-{index:012x}");
             api.storage

@@ -83,15 +83,7 @@ CREATE TRIGGER IF NOT EXISTS public_discovery_media_i AFTER INSERT ON media_asse
 CREATE TRIGGER IF NOT EXISTS public_discovery_schema_i AFTER INSERT ON custom_metadata_schemas BEGIN UPDATE public_catalog_generation SET generation=generation+1 WHERE singleton=1;END;CREATE TRIGGER IF NOT EXISTS public_discovery_schema_u AFTER UPDATE ON custom_metadata_schemas BEGIN UPDATE public_catalog_generation SET generation=generation+1 WHERE singleton=1;END;CREATE TRIGGER IF NOT EXISTS public_discovery_schema_h AFTER INSERT ON custom_metadata_schema_history BEGIN UPDATE public_catalog_generation SET generation=generation+1 WHERE singleton=1;END;
 CREATE TRIGGER IF NOT EXISTS public_discovery_metadata_i AFTER INSERT ON asset_metadata_records BEGIN UPDATE public_catalog_generation SET generation=generation+1 WHERE singleton=1;END;CREATE TRIGGER IF NOT EXISTS public_discovery_metadata_u AFTER UPDATE ON asset_metadata_records BEGIN UPDATE public_catalog_generation SET generation=generation+1 WHERE singleton=1;END;CREATE TRIGGER IF NOT EXISTS public_discovery_metadata_h AFTER INSERT ON asset_metadata_record_history BEGIN UPDATE public_catalog_generation SET generation=generation+1 WHERE singleton=1;END;CREATE TRIGGER IF NOT EXISTS public_discovery_catalog_h AFTER INSERT ON catalog_asset_history BEGIN UPDATE public_catalog_generation SET generation=generation+1 WHERE singleton=1;END;
 CREATE TABLE IF NOT EXISTS public_catalog_generation_history(generation INTEGER PRIMARY KEY CHECK(generation BETWEEN 1 AND 1000001));INSERT OR IGNORE INTO public_catalog_generation_history SELECT generation FROM public_catalog_generation WHERE singleton=1;CREATE TRIGGER IF NOT EXISTS public_discovery_generation_capacity BEFORE UPDATE ON public_catalog_generation WHEN NEW.generation>1000001 BEGIN SELECT RAISE(ABORT,'public catalog generation capacity exceeded');END;CREATE TRIGGER IF NOT EXISTS public_discovery_generation_append AFTER UPDATE ON public_catalog_generation BEGIN INSERT INTO public_catalog_generation_history(generation) VALUES(NEW.generation);END;CREATE TRIGGER IF NOT EXISTS public_discovery_generation_history_no_update BEFORE UPDATE ON public_catalog_generation_history BEGIN SELECT RAISE(ABORT,'public catalog generation history is append-only');END;CREATE TRIGGER IF NOT EXISTS public_discovery_generation_history_no_delete BEFORE DELETE ON public_catalog_generation_history BEGIN SELECT RAISE(ABORT,'public catalog generation history is append-only');END;")?;
-            let q =
-                self.prepare("SELECT asset_sha256 FROM catalog_assets ORDER BY asset_sha256")?;
-            loop {
-                match unsafe { sqlite3_step(q.raw) } {
-                    SQLITE_ROW => self.ensure_public_catalog_identity(&column_text(q.raw, 0)?)?,
-                    SQLITE_DONE => break,
-                    _ => return Err(sqlite_error(self.database)),
-                }
-            }
+            self.execute("CREATE TRIGGER IF NOT EXISTS public_discovery_identity_no_update BEFORE UPDATE ON public_catalog_identities BEGIN SELECT RAISE(ABORT,'public catalog identities are immutable');END;CREATE TRIGGER IF NOT EXISTS public_discovery_identity_no_delete BEFORE DELETE ON public_catalog_identities BEGIN SELECT RAISE(ABORT,'public catalog identities are immutable');END;CREATE TRIGGER IF NOT EXISTS public_discovery_identity_catalog_required BEFORE INSERT ON public_catalog_identities WHEN NOT EXISTS(SELECT 1 FROM catalog_assets WHERE asset_sha256=NEW.asset_sha256) BEGIN SELECT RAISE(ABORT,'public catalog identity requires catalog authority');END;")?;
             Ok(())
         })();
         self.finish_transaction(result)
@@ -99,6 +91,24 @@ CREATE TABLE IF NOT EXISTS public_catalog_generation_history(generation INTEGER 
     pub fn begin_public_catalog_boot_epoch(&self) -> Result<(), String> {
         self.execute("BEGIN IMMEDIATE")?;
         let result = (|| {
+            let catalog = self.prepare(
+                "SELECT asset_sha256 FROM catalog_assets ORDER BY asset_sha256 LIMIT 100001",
+            )?;
+            let mut count = 0usize;
+            loop {
+                match unsafe { sqlite3_step(catalog.raw) } {
+                    SQLITE_ROW => {
+                        count += 1;
+                        self.ensure_public_catalog_identity(&column_text(catalog.raw, 0)?)?;
+                    }
+                    SQLITE_DONE => break,
+                    _ => return Err(sqlite_error(self.database)),
+                }
+            }
+            if count > catalog_authority::MAX_CATALOG_ASSETS {
+                return Err("public catalog authority exceeds capacity".into());
+            }
+            self.validate_public_catalog_identity_bijection()?;
             self.validate_public_projection_infrastructure()?;
             self.execute("DROP TRIGGER public_discovery_generation_append;DROP TRIGGER public_discovery_generation_capacity;DROP TRIGGER public_discovery_generation_history_no_update;DROP TRIGGER public_discovery_generation_history_no_delete;DELETE FROM public_catalog_generation_history;UPDATE public_catalog_generation SET generation=1 WHERE singleton=1;INSERT INTO public_catalog_generation_history VALUES(1);CREATE TRIGGER public_discovery_generation_capacity BEFORE UPDATE ON public_catalog_generation WHEN NEW.generation>1000001 BEGIN SELECT RAISE(ABORT,'public catalog generation capacity exceeded');END;CREATE TRIGGER public_discovery_generation_append AFTER UPDATE ON public_catalog_generation BEGIN INSERT INTO public_catalog_generation_history(generation) VALUES(NEW.generation);END;CREATE TRIGGER public_discovery_generation_history_no_update BEFORE UPDATE ON public_catalog_generation_history BEGIN SELECT RAISE(ABORT,'public catalog generation history is append-only');END;CREATE TRIGGER public_discovery_generation_history_no_delete BEFORE DELETE ON public_catalog_generation_history BEGIN SELECT RAISE(ABORT,'public catalog generation history is append-only');END;")?;
             self.validate_public_projection_infrastructure()
@@ -107,15 +117,21 @@ CREATE TABLE IF NOT EXISTS public_catalog_generation_history(generation INTEGER 
     }
     pub(super) fn ensure_public_catalog_identity(&self, asset: &str) -> Result<(), String> {
         let id = public_id(asset);
-        let q=self.prepare("INSERT INTO public_catalog_identities(asset_sha256,public_id) VALUES(?1,?2) ON CONFLICT(asset_sha256) DO UPDATE SET public_id=public_id RETURNING public_id")?;
+        let q = self.prepare(
+            "INSERT OR IGNORE INTO public_catalog_identities(asset_sha256,public_id) VALUES(?1,?2)",
+        )?;
         let a = c_string(asset, "catalog identity")?;
         let p = c_string(&id, "public identity")?;
         bind_text(self.database, q.raw, 1, &a)?;
         bind_text(self.database, q.raw, 2, &p)?;
-        match unsafe { sqlite3_step(q.raw) } {
-            SQLITE_ROW if column_text(q.raw, 0)? == id => Ok(()),
+        expect_done(self.database, q.raw)?;
+        let verify =
+            self.prepare("SELECT public_id FROM public_catalog_identities WHERE asset_sha256=?1")?;
+        bind_text(self.database, verify.raw, 1, &a)?;
+        match unsafe { sqlite3_step(verify.raw) } {
+            SQLITE_ROW if column_text(verify.raw, 0)? == id => Ok(()),
             SQLITE_ROW => Err("public catalog identity mapping disagrees".into()),
-            _ => Err(sqlite_error(self.database)),
+            _ => Err("public catalog identity mapping is missing".into()),
         }
     }
     pub fn read_public_catalog(
@@ -150,7 +166,7 @@ CREATE TABLE IF NOT EXISTS public_catalog_generation_history(generation INTEGER 
         let generation = self.public_generation()?;
         let fd = filter_digest(filters)?;
         let (time, id) = parse_cursor(cursor, generation, &fd)?;
-        let q=self.prepare("SELECT c.asset_sha256,c.title,c.meeting_body,c.editorial_state,c.published_at_utc_ms,c.revision,c.record_json,p.public_id FROM catalog_assets c JOIN public_catalog_identities p ON p.asset_sha256=c.asset_sha256 WHERE c.editorial_state='published' AND (?1='' OR c.published_at_utc_ms<?2 OR(c.published_at_utc_ms=?2 AND p.public_id>?1)) ORDER BY c.published_at_utc_ms DESC,p.public_id LIMIT ?3")?;
+        let q=self.prepare("SELECT c.asset_sha256,c.title,c.meeting_body,c.editorial_state,c.published_at_utc_ms,c.revision,c.record_json,COALESCE(p.public_id,'') FROM catalog_assets c LEFT JOIN public_catalog_identities p ON p.asset_sha256=c.asset_sha256 WHERE c.editorial_state='published' AND (?1='' OR c.published_at_utc_ms<?2 OR(c.published_at_utc_ms=?2 AND p.public_id>?1)) ORDER BY c.published_at_utc_ms DESC,p.public_id LIMIT ?3")?;
         let ci = c_string(id.as_deref().unwrap_or_default(), "cursor")?;
         bind_text(self.database, q.raw, 1, &ci)?;
         bind_i64(self.database, q.raw, 2, time.unwrap_or(i64::MAX))?;
@@ -228,17 +244,38 @@ CREATE TABLE IF NOT EXISTS public_catalog_generation_history(generation INTEGER 
         let mut out = Vec::new();
         let mut keys = HashSet::new();
         for r in self.list_asset_metadata_records(asset)? {
-            let h = self
-                .list_asset_metadata_record_history(&r.metadata_id, MAX_CUSTOM_METADATA_HISTORY)?;
-            if h.len() != usize::try_from(r.revision).map_err(|_| "metadata revision overflow")?
-                || h.last().map(|x| &x.record) != Some(&r)
+            if self.read_asset_metadata_record_history_revision(&r.metadata_id, r.revision)?
+                != Some(r.clone())
             {
                 return Err("metadata history mismatch".into());
             }
-            let s = self
+            let historical = self
                 .read_custom_metadata_schema_revision(&r.schema_id, r.schema_revision)?
                 .ok_or("historical schema missing")?;
-            for f in project_public_facets(&r, &s)? {
+            let current = self
+                .read_custom_metadata_schema(&r.schema_id)?
+                .ok_or("current schema missing")?;
+            let visible = current
+                .fields
+                .iter()
+                .filter(|field| field.public && field.faceted)
+                .map(|field| (field.key.as_str(), field_kind(&field.field_type)))
+                .collect::<std::collections::HashMap<_, _>>();
+            for f in project_public_facets(&r, &historical)?
+                .into_iter()
+                .filter(|facet| {
+                    historical
+                        .fields
+                        .iter()
+                        .find(|field| field.key == facet.field_key)
+                        .and_then(|field| {
+                            visible
+                                .get(field.key.as_str())
+                                .map(|kind| (*kind, field_kind(&field.field_type)))
+                        })
+                        .is_some_and(|(current, historical)| current == historical)
+                })
+            {
                 if !keys.insert(f.field_key.clone()) {
                     return Err("duplicate public facet".into());
                 }
@@ -268,7 +305,7 @@ CREATE TABLE IF NOT EXISTS public_catalog_generation_history(generation INTEGER 
             _ => Err("generation missing".into()),
         }
     }
-    fn validate_public_projection_infrastructure(&self) -> Result<(), String> {
+    fn validate_public_catalog_identity_bijection(&self) -> Result<(), String> {
         let mappings = self.prepare("SELECT c.asset_sha256,COALESCE(p.public_id,'') FROM catalog_assets c LEFT JOIN public_catalog_identities p ON p.asset_sha256=c.asset_sha256 ORDER BY c.asset_sha256 LIMIT 100001")?;
         let mut count = 0usize;
         loop {
@@ -292,6 +329,39 @@ CREATE TABLE IF NOT EXISTS public_catalog_generation_history(generation INTEGER 
             || unsafe { sqlite3_column_int64(orphans.raw, 0) } != 0
         {
             return Err("public catalog identity mapping contains orphan rows".into());
+        }
+        Ok(())
+    }
+    fn validate_public_projection_infrastructure(&self) -> Result<(), String> {
+        const EXPECTED: &[(&str, &str)] = &[
+            (
+                "public_discovery_identity_catalog_required",
+                "createtriggerpublic_discovery_identity_catalog_requiredbeforeinsertonpublic_catalog_identitieswhennotexists(select1fromcatalog_assetswhereasset_sha256=new.asset_sha256)beginselectraise(abort,'publiccatalogidentityrequirescatalogauthority');end",
+            ),
+            (
+                "public_discovery_identity_no_delete",
+                "createtriggerpublic_discovery_identity_no_deletebeforedeleteonpublic_catalog_identitiesbeginselectraise(abort,'publiccatalogidentitiesareimmutable');end",
+            ),
+            (
+                "public_discovery_identity_no_update",
+                "createtriggerpublic_discovery_identity_no_updatebeforeupdateonpublic_catalog_identitiesbeginselectraise(abort,'publiccatalogidentitiesareimmutable');end",
+            ),
+        ];
+        let query = self.prepare("SELECT name,sql FROM sqlite_master WHERE type='trigger' AND name LIKE 'public_discovery_identity_%' ORDER BY name")?;
+        for (name, expected) in EXPECTED {
+            if unsafe { sqlite3_step(query.raw) } != SQLITE_ROW
+                || column_text(query.raw, 0)? != *name
+                || column_text(query.raw, 1)?
+                    .split_whitespace()
+                    .collect::<String>()
+                    .to_ascii_lowercase()
+                    != *expected
+            {
+                return Err("public catalog identity trigger authority is corrupt".into());
+            }
+        }
+        if unsafe { sqlite3_step(query.raw) } != SQLITE_DONE {
+            return Err("public catalog identity trigger authority is unbounded".into());
         }
         self.validate_public_generation_triggers()
     }
@@ -337,7 +407,7 @@ CREATE TABLE IF NOT EXISTS public_catalog_generation_history(generation INTEGER 
                 "update",
             ),
         ];
-        let query = self.prepare("SELECT name,tbl_name,sql FROM sqlite_master WHERE type='trigger' AND name LIKE 'public_discovery_%' AND name NOT LIKE 'public_discovery_generation_%' ORDER BY name")?;
+        let query = self.prepare("SELECT name,tbl_name,sql FROM sqlite_master WHERE type='trigger' AND name LIKE 'public_discovery_%' AND name NOT LIKE 'public_discovery_generation_%' AND name NOT LIKE 'public_discovery_identity_%' ORDER BY name")?;
         for (name, table, event) in EXPECTED {
             if unsafe { sqlite3_step(query.raw) } != SQLITE_ROW
                 || column_text(query.raw, 0)? != *name
@@ -404,11 +474,8 @@ fn validate_definitions(s: &StationStore, fs: &[PublicCatalogFilter]) -> Result<
     let mut global = std::collections::HashMap::new();
     let mut count = 0usize;
     for schema in &schemas {
-        let history =
-            s.list_custom_metadata_schema_history(&schema.schema_id, MAX_CUSTOM_METADATA_HISTORY)?;
-        if history.len()
-            != usize::try_from(schema.revision).map_err(|_| "schema revision overflow")?
-            || history.last().map(|entry| &entry.schema) != Some(schema)
+        if s.read_custom_metadata_schema_revision(&schema.schema_id, schema.revision)?
+            != Some(schema.clone())
         {
             return Err("current custom metadata schema disagrees with immutable history".into());
         }
