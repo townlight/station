@@ -16,7 +16,8 @@ use station_automation_policy::{
 use station_maintenance::{VerifiedInstallAuthority, verified_install_authority_for_test};
 use station_storage::{
     AutomationExecutionAdapter, AutomationExecutionJobRecord, AutomationExecutionJobState,
-    AutomationExecutionSetupFault, StationStore, run_automation_execution_controller_iteration,
+    AutomationExecutionSetupFault, StationStore, retained_pipe_wait_is_bounded_for_test,
+    run_automation_execution_controller_iteration,
     run_automation_execution_controller_iteration_with_stop,
     run_automation_execution_controller_iteration_with_stop_and_elapsed,
 };
@@ -1405,6 +1406,53 @@ fn forced_primary_thread_resume_failure_terminates_job_and_bounded_reaps_child()
         AutomationExecutionSetupFault::ResumeThread,
         "automation-execution-forced-resume-failure",
     );
+}
+
+#[test]
+fn parent_directory_junction_cannot_hide_executable_identity() {
+    let root = temporary_database("automation-parent-reparse").with_extension("dir");
+    let real_root = root.join("real");
+    let app_root = real_root.join("app");
+    std::fs::create_dir_all(&app_root).unwrap();
+    let source = PathBuf::from(std::env::var_os("SystemRoot").unwrap())
+        .join("System32")
+        .join("WindowsPowerShell")
+        .join("v1.0")
+        .join("powershell.exe");
+    let worker = app_root.join("worker.exe");
+    std::fs::copy(&source, &worker).unwrap();
+    let alias = root.join("alias");
+    let junction = std::process::Command::new("cmd.exe")
+        .args(["/d", "/c", "mklink", "/J"])
+        .arg(&alias)
+        .arg(&real_root)
+        .status()
+        .expect("launch junction creator");
+    assert!(
+        junction.success(),
+        "test host must support local directory junctions"
+    );
+    let aliased_worker = alias.join("app").join("worker.exe");
+    let adapter = AutomationExecutionAdapter::new(
+        ADAPTER_ID,
+        1,
+        alias.join("app"),
+        &aliased_worker,
+        sha256_file(&worker),
+        Vec::new(),
+    )
+    .unwrap();
+    assert!(
+        !adapter.verify_program_for_test(&request()),
+        "a parent reparse point must be rejected before process creation"
+    );
+    std::fs::remove_dir(&alias).unwrap();
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+#[test]
+fn externally_retained_pipe_completion_cannot_hold_the_host_fence() {
+    assert!(retained_pipe_wait_is_bounded_for_test());
 }
 
 #[test]
