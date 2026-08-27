@@ -15,6 +15,7 @@ station-alerting.workspace = true
 station-automation-policy.workspace = true
 station-publishing.workspace = true
 station-auth.workspace = true
+station-agenda.workspace = true
 station-cg.workspace = true
 station-captions.workspace = true
 station-catalog.workspace = true

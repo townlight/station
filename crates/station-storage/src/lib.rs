@@ -2,7 +2,9 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 extern crate self as station_storage;
 
+mod agenda_authority;
 mod automation_execution_authority;
+pub use agenda_authority::{AgendaHistoryEntry, AgendaWriteError};
 mod media_lifecycle_authority;
 mod ott_authority;
 mod transport_executor;
@@ -1408,6 +1410,7 @@ impl StationStore {
         store.migrate_schedule_item_revision()?;
         store.migrate_commit_report_schedule_item_revision()?;
         store.initialize_schedule_item_history_schema()?;
+        store.initialize_agenda_schema()?;
         store.initialize_commissioning_support_bundle_schema()?;
         store.migrate_channel_runtime_live_state()?;
         store.migrate_alert_delivery_realerts()?;

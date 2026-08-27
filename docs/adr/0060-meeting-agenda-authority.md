@@ -15,11 +15,14 @@ The authority supports three provenance forms:
 - `text_import_claim` records the claimed source hash and importer assertion;
 - `pdf_import_claim` records the claimed source hash and importer assertion.
 
-The import forms are deliberately claims, not execution outcomes. They have no
-parser name, extracted-byte count, parse-success flag, synchronization status, or
-publication status. Accepting one only says an authenticated future boundary may
-associate the agenda with a source hash; it never says the source was safely parsed,
-that its contents were faithfully extracted, or that its chapters reached media.
+The PDF form remains a claim-only contract and is rejected by the current API. The
+operator API supports a bounded UTF-8 plain-text import endpoint for creating a new
+agenda only: it hashes the exact
+request bytes, creates one public item per nonempty line, and records a server-owned
+`TextImportClaim`. Existing agenda source provenance cannot be rebound. This proves
+only bounded text handling and source attribution; it
+does not claim PDF parsing, schedule/media synchronization, chapter detection, or
+publication.
 
 Writes use explicit compare-and-set intent: creation is revision one with no current
 revision, and replacement advances exactly one revision from the named current
@@ -32,14 +35,17 @@ retain ordinal order and expose only public title/summary, chapter title, and me
 offsets. It excludes staff-only items, staff notes, import provenance, sync intent,
 actors, and all execution claims by construction.
 
-## Boundaries and non-claims
+## Durable/API/UI boundary
 
-This slice has no persistence, authentication, PDF/text parser, file access,
-schedule/media lookup, worker command, synchronization executor, chapter detector,
-public endpoint, renderer, or UI. It does not establish that a meeting exists, that
-a media asset exists or matches its hash, that a schedule revision is current, that
-an import is safe, that a chapter occurs at the declared point, or that the public
-projection was published. Later slices must obtain actor/time authority server-side,
-persist append-only history through the single SQLite writer, safely parse bounded
-imports, verify/execute schedule/media synchronization, and collect installed-machine
-and field evidence.
+The current slice persists current/history through SQLite with indexed/JSON
+cross-checks, append-only history triggers, typed validation/conflict/rebinding
+errors, bounded capacity, and exact CAS. Setup Admin and Meeting Operator roles may
+read or mutate through authenticated routes; actor/time are server-owned. A public
+projection endpoint excludes staff-only items, notes, provenance, and sync intent.
+The operator UI covers create/edit/read/history, bounded creation-only import, and explicit loading,
+empty, error, and conflict states. This does not establish that a meeting exists,
+that a media asset exists or matches its hash, that a schedule revision is current,
+that an imported line is faithful to an external document, that a chapter occurs at
+the declared point, or that the public projection was published. PDF parsing,
+schedule/media synchronization execution, installed-machine evidence, and field
+evidence remain future work.

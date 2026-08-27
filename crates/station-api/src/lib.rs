@@ -20,6 +20,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use station_agenda::{
+    Agenda, AgendaActor, AgendaItem, AgendaItemVisibility, AgendaProvenance, AgendaSyncIntent,
+};
 use station_alerting::probe_system_resources;
 use station_auth::{OperatorAccount, SecretToken, digest_secret};
 use station_automation_policy::{
@@ -98,7 +101,7 @@ use station_source_evidence::{
     CanonicalProjectionSha256, EvidenceScopeSha256, StationSourceEvidenceAuthority,
 };
 use station_storage::{
-    AlertChannelSecret, AssetMetadataWriteError, AutomationExecutionJobRecord,
+    AgendaWriteError, AlertChannelSecret, AssetMetadataWriteError, AutomationExecutionJobRecord,
     AutomationExecutionJobState, CableTransportValidationSnapshot, CaptionPolicyWriteError,
     CatalogAssetWriteError, CgSnapshotReadError, CgWriteError, ChannelCaptionMode,
     ChannelCaptionPolicy, ChannelCaptionPolicyAuditEvent, ChannelFallbackSlate,
@@ -126,6 +129,9 @@ const OPERATOR_SCRIPT: &[u8] = include_bytes!("../../../web/operator/dist/operat
 const OPERATOR_STYLES: &[u8] = include_bytes!("../../../web/operator/dist/operator.css");
 const MAX_CONCURRENT_REQUESTS: usize = 16;
 const MAX_SMALL_REQUEST_BODY: usize = 65_536;
+const MAX_AGENDA_IMPORT_BYTES: usize = 64 * 1024;
+const MAX_AGENDA_IMPORT_BODY: usize = MAX_AGENDA_IMPORT_BYTES + 8 * 1024;
+const MAX_AGENDA_IMPORT_LINES: usize = 128;
 const MAX_CG_IMAGE_BODY: usize = 8 * 1024 * 1024;
 const MAX_CAPTION_TRACK_BODY: usize = 8 * 1024 * 1024;
 const STATION_BOX_CACHE_TTL: Duration = Duration::from_secs(60);
@@ -918,6 +924,37 @@ struct PutSavedSearchRequest {
     name: String,
     query: SavedSearchQuery,
     expected_revision: Option<u64>,
+}
+
+/// Agenda content is proposed by the operator; provenance, actor, time, and
+/// revision are always replaced with server-owned authority before storage.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PutAgendaRequest {
+    agenda: Agenda,
+    expected_revision: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ImportAgendaTextRequest {
+    source_text: String,
+    channel_id: String,
+    meeting_id: String,
+    schedule_item_id: String,
+    schedule_revision: u64,
+    media_asset_sha256: String,
+    expected_media_duration_ms: i64,
+    meeting_starts_at_unix_ms: i64,
+    title: String,
+    expected_revision: Option<u64>,
+}
+
+#[derive(Debug, Serialize)]
+struct AgendaHistoryResponse {
+    agenda: Agenda,
+    changed_by: String,
+    occurred_at_unix_ms: i64,
 }
 
 /// The browser proposes mutable daypart fields. Identity, revision,
@@ -2088,6 +2125,15 @@ impl Api {
             }
             ("GET", "/api/v1/station-box-profile") => self.station_box_profile(false),
             ("GET", "/api/v1/station-box-profile/readiness") => self.station_box_profile(true),
+            ("GET", path) if public_agenda_path(path).is_some() => self.read_public_agenda(path),
+            ("GET", path) if agenda_history_path(path).is_some() => {
+                self.list_agenda_history(path, actor)
+            }
+            ("GET", path) if agenda_path(path).is_some() => self.read_agenda(path, actor),
+            ("POST", path) if agenda_import_path(path).is_some() => {
+                self.import_agenda_text(path, body, actor)
+            }
+            ("PUT", path) if agenda_path(path).is_some() => self.put_agenda(path, body, actor),
             ("GET", "/api/v1/automation/adapters") => self.list_automation_adapters(actor),
             ("GET", "/api/v1/automation/policies") => self.list_automation_policies(actor),
             ("GET", path) if automation_execution_job_path(path).is_some() => {
@@ -4012,6 +4058,369 @@ impl Api {
         };
         candidate.validate()?;
         Ok(candidate)
+    }
+
+    fn read_public_agenda(&self, path: &str) -> ApiResponse {
+        let Some(agenda_id) = public_agenda_path(path) else {
+            return error_response(400, "invalid_path", "The public agenda path is invalid.");
+        };
+        match self.storage.read_current_agenda(agenda_id) {
+            Ok(Some(agenda)) => match agenda.public_projection() {
+                Ok(projection) => json_response(200, serde_json::to_vec(&projection).unwrap()),
+                Err(message) => error_response(500, "storage_error", &message),
+            },
+            Ok(None) => error_response(404, "agenda_not_found", "The agenda does not exist."),
+            Err(message) => error_response(500, "storage_error", &message),
+        }
+    }
+
+    fn read_agenda(&self, path: &str, actor: Option<&OperatorAccount>) -> ApiResponse {
+        if !is_agenda_reader(actor) {
+            return error_response(
+                401,
+                "operator_auth_required",
+                "An enabled Setup Admin or Meeting Operator account is required.",
+            );
+        }
+        let Some(agenda_id) = agenda_path(path) else {
+            return error_response(400, "invalid_path", "The agenda path is invalid.");
+        };
+        match self.storage.read_current_agenda(agenda_id) {
+            Ok(Some(agenda)) => json_response(200, serde_json::to_vec(&agenda).unwrap()),
+            Ok(None) => error_response(404, "agenda_not_found", "The agenda does not exist."),
+            Err(message) => error_response(500, "storage_error", &message),
+        }
+    }
+
+    fn list_agenda_history(&self, path: &str, actor: Option<&OperatorAccount>) -> ApiResponse {
+        if !is_agenda_reader(actor) {
+            return error_response(
+                401,
+                "operator_auth_required",
+                "An enabled Setup Admin or Meeting Operator account is required.",
+            );
+        }
+        let Some((agenda_id, limit)) = agenda_history_path(path) else {
+            return error_response(
+                400,
+                "invalid_path",
+                "The agenda history path or bounded limit is invalid.",
+            );
+        };
+        match self.storage.list_agenda_history(agenda_id, limit) {
+            Ok(history) => json_response(
+                200,
+                serde_json::to_vec(
+                    &history
+                        .into_iter()
+                        .map(|entry| AgendaHistoryResponse {
+                            agenda: entry.agenda,
+                            changed_by: entry.changed_by,
+                            occurred_at_unix_ms: entry.occurred_at_unix_ms,
+                        })
+                        .collect::<Vec<_>>(),
+                )
+                .unwrap(),
+            ),
+            Err(message) => error_response(500, "storage_error", &message),
+        }
+    }
+
+    fn put_agenda(
+        &self,
+        path: &str,
+        body: Option<&[u8]>,
+        actor: Option<&OperatorAccount>,
+    ) -> ApiResponse {
+        let Some(actor) = actor.filter(|account| is_agenda_writer(account)) else {
+            return error_response(
+                403,
+                "agenda_writer_required",
+                "An enabled Setup Admin or Meeting Operator account is required.",
+            );
+        };
+        let Some(agenda_id) = agenda_path(path) else {
+            return error_response(400, "invalid_path", "The agenda path is invalid.");
+        };
+        let Some(request) = parse_body::<PutAgendaRequest>(body) else {
+            return error_response(400, "invalid_json", "A complete agenda body is required.");
+        };
+        if request.agenda.agenda_id != agenda_id {
+            return error_response(
+                422,
+                "agenda_identity_mismatch",
+                "The agenda body identity must match the URL.",
+            );
+        }
+        if matches!(
+            request.agenda.provenance,
+            AgendaProvenance::PdfImportClaim { .. }
+        ) {
+            return error_response(
+                422,
+                "pdf_import_unavailable",
+                "PDF parsing is not implemented; provide reviewed plain text or author the agenda manually.",
+            );
+        }
+        let now = match system_time_millis() {
+            Ok(value) => value,
+            Err(message) => return error_response(500, "clock_error", &message),
+        };
+        let current = match self.storage.read_current_agenda(agenda_id) {
+            Ok(value) => value,
+            Err(message) => return error_response(500, "storage_error", &message),
+        };
+        let mut agenda = request.agenda;
+        if let Err(message) = self.validate_agenda_sync_binding(&agenda) {
+            return error_response(422, "sync_binding_unavailable", &message);
+        }
+        agenda.revision = match request.expected_revision {
+            Some(revision) => match revision.checked_add(1) {
+                Some(value) => value,
+                None => {
+                    return error_response(
+                        422,
+                        "validation_failed",
+                        "The expected revision is invalid.",
+                    );
+                }
+            },
+            None => 1,
+        };
+        agenda.provenance = current
+            .as_ref()
+            .map(|value| value.provenance.clone())
+            .unwrap_or_else(|| AgendaProvenance::StaffAuthored {
+                author: AgendaActor {
+                    actor_id: actor.account_id().as_str().into(),
+                },
+                asserted_at_unix_ms: now,
+            });
+        agenda.sync_intent.requested_by = AgendaActor {
+            actor_id: actor.account_id().as_str().into(),
+        };
+        agenda.sync_intent.requested_at_unix_ms = now;
+        match self.storage.write_agenda(
+            request.expected_revision,
+            &agenda,
+            actor.account_id().as_str(),
+            now,
+        ) {
+            Ok(()) => json_response(200, serde_json::to_vec(&agenda).unwrap()),
+            Err(AgendaWriteError::Conflict) => error_response(
+                409,
+                "revision_conflict",
+                "The agenda changed; reload it before saving.",
+            ),
+            Err(AgendaWriteError::Rebound) => error_response(
+                409,
+                "agenda_identity_rebound",
+                "Agenda identity and provenance cannot be rebound.",
+            ),
+            Err(AgendaWriteError::Capacity) => error_response(
+                422,
+                "agenda_capacity_exceeded",
+                "The bounded agenda capacity has been reached.",
+            ),
+            Err(AgendaWriteError::Invalid(message)) => {
+                error_response(422, "validation_failed", &message)
+            }
+            Err(AgendaWriteError::Storage(message)) => {
+                error_response(500, "storage_error", &message)
+            }
+        }
+    }
+
+    fn validate_agenda_sync_binding(&self, agenda: &Agenda) -> Result<(), String> {
+        let intent = &agenda.sync_intent;
+        let schedule = self
+            .storage
+            .read_schedule_item(&intent.schedule_item_id)?
+            .ok_or_else(|| "the agenda schedule item does not exist".to_string())?;
+        if schedule.channel_id != agenda.channel_id
+            || schedule.revision != intent.schedule_revision
+            || schedule.state != ScheduleState::Committed
+        {
+            return Err("the agenda schedule binding is not the current committed revision".into());
+        }
+        let media = self
+            .storage
+            .read_media_asset(&schedule.asset_id)?
+            .ok_or_else(|| "the agenda media asset does not exist".to_string())?;
+        if media.readiness != AssetReadiness::Ready
+            || i64::try_from(media.duration_ms).ok() != Some(intent.expected_media_duration_ms)
+            || intent.media_asset_sha256 != schedule.asset_id
+        {
+            return Err("the agenda media binding is not an exact ready asset authority".into());
+        }
+        Ok(())
+    }
+
+    fn import_agenda_text(
+        &self,
+        path: &str,
+        body: Option<&[u8]>,
+        actor: Option<&OperatorAccount>,
+    ) -> ApiResponse {
+        let Some(actor) = actor.filter(|account| is_agenda_writer(account)) else {
+            return error_response(
+                403,
+                "agenda_writer_required",
+                "An enabled Setup Admin or Meeting Operator account is required.",
+            );
+        };
+        let Some(agenda_id) = agenda_import_path(path) else {
+            return error_response(400, "invalid_path", "The agenda import path is invalid.");
+        };
+        let Some(request) = parse_body::<ImportAgendaTextRequest>(body) else {
+            return error_response(
+                400,
+                "invalid_json",
+                "A complete text import body is required.",
+            );
+        };
+        if request.source_text.is_empty()
+            || request.source_text.len() > MAX_AGENDA_IMPORT_BYTES
+            || request.source_text.chars().any(|character| {
+                character.is_control()
+                    && character != '\r'
+                    && character != '\n'
+                    && character != '\t'
+            })
+        {
+            return error_response(
+                422,
+                "import_bounds_exceeded",
+                "Text import must be nonempty, UTF-8, visible, and at most 64 KiB.",
+            );
+        }
+        let titles: Vec<String> = request
+            .source_text
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .map(str::to_owned)
+            .collect();
+        if titles.is_empty() || titles.len() > MAX_AGENDA_IMPORT_LINES {
+            return error_response(
+                422,
+                "import_bounds_exceeded",
+                "Text import must contain between 1 and 128 nonempty lines.",
+            );
+        }
+        if titles
+            .iter()
+            .any(|title| title.len() > 200 || title.chars().any(char::is_control))
+        {
+            return error_response(
+                422,
+                "import_bounds_exceeded",
+                "Each imported agenda item must be visible and at most 200 bytes.",
+            );
+        }
+        let now = match system_time_millis() {
+            Ok(value) => value,
+            Err(message) => return error_response(500, "clock_error", &message),
+        };
+        let current = match self.storage.read_current_agenda(agenda_id) {
+            Ok(value) => value,
+            Err(message) => return error_response(500, "storage_error", &message),
+        };
+        if current.is_some() {
+            return error_response(
+                409,
+                "agenda_import_source_immutable",
+                "Text import creates a new agenda only; existing agenda source provenance cannot be rebound.",
+            );
+        }
+        let revision = match request.expected_revision {
+            Some(expected) => match expected.checked_add(1) {
+                Some(value) => value,
+                None => {
+                    return error_response(
+                        422,
+                        "validation_failed",
+                        "The expected revision is invalid.",
+                    );
+                }
+            },
+            None => 1,
+        };
+        let source_sha256 = sha256_hex(request.source_text.as_bytes());
+        let actor_id = actor.account_id().as_str().to_owned();
+        let mut items = Vec::with_capacity(titles.len());
+        for (index, title) in titles.into_iter().enumerate() {
+            let item_id = match secure_canonical_uuid() {
+                Ok(value) => value,
+                Err(message) => return error_response(500, "identity_error", &message),
+            };
+            items.push(AgendaItem {
+                item_id,
+                ordinal: (index + 1) as u16,
+                title,
+                public_summary: None,
+                staff_notes: None,
+                visibility: AgendaItemVisibility::Public,
+            });
+        }
+        let agenda = Agenda {
+            agenda_id: agenda_id.to_owned(),
+            channel_id: request.channel_id.clone(),
+            meeting_id: request.meeting_id,
+            title: request.title,
+            meeting_starts_at_unix_ms: request.meeting_starts_at_unix_ms,
+            provenance: AgendaProvenance::TextImportClaim {
+                importer: AgendaActor {
+                    actor_id: actor_id.clone(),
+                },
+                source_sha256,
+                asserted_at_unix_ms: now,
+            },
+            sync_intent: AgendaSyncIntent {
+                channel_id: request.channel_id.clone(),
+                schedule_item_id: request.schedule_item_id,
+                schedule_revision: request.schedule_revision,
+                media_asset_sha256: request.media_asset_sha256,
+                expected_media_duration_ms: request.expected_media_duration_ms,
+                requested_by: AgendaActor {
+                    actor_id: actor_id.clone(),
+                },
+                requested_at_unix_ms: now,
+            },
+            items,
+            chapters: Vec::new(),
+            revision,
+        };
+        if let Err(message) = self.validate_agenda_sync_binding(&agenda) {
+            return error_response(422, "sync_binding_unavailable", &message);
+        }
+        match self
+            .storage
+            .write_agenda(request.expected_revision, &agenda, actor_id.as_str(), now)
+        {
+            Ok(()) => json_response(200, serde_json::to_vec(&agenda).unwrap()),
+            Err(AgendaWriteError::Conflict) => error_response(
+                409,
+                "revision_conflict",
+                "The agenda changed; reload it before importing.",
+            ),
+            Err(AgendaWriteError::Rebound) => error_response(
+                409,
+                "agenda_identity_rebound",
+                "Agenda identity and provenance cannot be rebound.",
+            ),
+            Err(AgendaWriteError::Capacity) => error_response(
+                422,
+                "agenda_capacity_exceeded",
+                "The bounded agenda capacity has been reached.",
+            ),
+            Err(AgendaWriteError::Invalid(message)) => {
+                error_response(422, "validation_failed", &message)
+            }
+            Err(AgendaWriteError::Storage(message)) => {
+                error_response(500, "storage_error", &message)
+            }
+        }
     }
 
     fn list_saved_searches(&self, path: &str, actor: Option<&OperatorAccount>) -> ApiResponse {
@@ -12001,6 +12410,49 @@ fn path_identity<'a>(path: &'a str, prefix: &str, suffix: &str) -> Option<&'a st
         .then_some(identity)
 }
 
+fn agenda_path(path: &str) -> Option<&str> {
+    path_identity(path, "/api/v1/agendas/", "").filter(|id| is_canonical_api_uuid(id))
+}
+
+fn agenda_import_path(path: &str) -> Option<&str> {
+    path_identity(path, "/api/v1/agendas/", "/import-text").filter(|id| is_canonical_api_uuid(id))
+}
+
+fn public_agenda_path(path: &str) -> Option<&str> {
+    path_identity(path, "/api/v1/public/agendas/", "").filter(|id| is_canonical_api_uuid(id))
+}
+
+fn agenda_history_path(path: &str) -> Option<(&str, usize)> {
+    let remainder = path.strip_prefix("/api/v1/agendas/")?;
+    let (id, query) = remainder.split_once("/history?")?;
+    if !is_canonical_api_uuid(id) || query.contains('&') {
+        return None;
+    }
+    let limit = query.strip_prefix("limit=")?.parse::<usize>().ok()?;
+    (1..=128).contains(&limit).then_some((id, limit))
+}
+
+fn is_agenda_reader(actor: Option<&OperatorAccount>) -> bool {
+    actor.is_some_and(is_agenda_writer)
+}
+
+fn is_agenda_writer(account: &OperatorAccount) -> bool {
+    account.enabled()
+        && (account
+            .roles()
+            .contains(&station_auth::OperatorRole::SetupAdmin)
+            || account
+                .roles()
+                .contains(&station_auth::OperatorRole::MeetingOperator))
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    Sha256::digest(bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
 /// The reporting read surface accepts a bounded page size and an optional
 /// opaque continuation token. The token is validated by storage against the
 /// current channel/window/checkpoint projection revision.
@@ -14620,6 +15072,8 @@ fn request_body_limit(method: &str, path: &str) -> usize {
         MAX_CG_IMAGE_BODY
     } else if method == "PUT" && asset_caption_track_path(path).is_some() {
         MAX_CAPTION_TRACK_BODY
+    } else if method == "POST" && agenda_import_path(path).is_some() {
+        MAX_AGENDA_IMPORT_BODY
     } else {
         MAX_SMALL_REQUEST_BODY
     }
@@ -14631,6 +15085,7 @@ fn request_too_large_message(method: &str, path: &str) -> &'static str {
             "CG image uploads may not exceed 8 MiB."
         }
         MAX_CAPTION_TRACK_BODY => "Caption track requests may not exceed 8 MiB.",
+        MAX_AGENDA_IMPORT_BODY => "Agenda text-import envelopes may not exceed 72 KiB.",
         _ => "Requests may not exceed 64 KiB.",
     }
 }
@@ -14998,6 +15453,156 @@ mod tests {
             1,
         )
         .unwrap()
+    }
+
+    #[test]
+    fn agenda_api_auth_import_and_public_redaction_are_bounded() {
+        let database = std::env::temp_dir().join(format!(
+            "townlight-agenda-api-{}.db",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let api = Api::open(&database).unwrap();
+        let agenda_id = "11111111-2222-4333-8444-555555555555";
+        let channel_id = "22222222-3333-4444-8555-666666666666";
+        let meeting_id = "33333333-4444-4555-8666-777777777777";
+        let schedule_item_id = "44444444-5555-4666-8777-888888888888";
+        let media_sha256 = "a".repeat(64);
+        api.storage
+            .put_media_asset(&MediaAsset {
+                asset_id: media_sha256.clone(),
+                media_path: r"C:\Windows\System32\notepad.exe".into(),
+                duration_ms: 60_000,
+                readiness: AssetReadiness::Ready,
+            })
+            .unwrap();
+        api.storage
+            .put_schedule_item(&ScheduleItem {
+                item_id: schedule_item_id.into(),
+                revision: 1,
+                channel_id: channel_id.into(),
+                asset_id: media_sha256.clone(),
+                title: "Meeting recording".into(),
+                starts_at_unix_ms: 1,
+                duration_ms: 60_000,
+                state: ScheduleState::Draft,
+            })
+            .unwrap();
+        api.storage
+            .commit_schedule(
+                "agenda-api-report",
+                "agenda-api-plan",
+                schedule_item_id,
+                "test-harness",
+                1,
+                "agenda fixture",
+            )
+            .unwrap();
+        let import_path = format!("/api/v1/agendas/{agenda_id}/import-text");
+        let body = serde_json::to_vec(&serde_json::json!({
+            "source_text": "Call to order\nPublic comment",
+            "channel_id": channel_id,
+            "meeting_id": meeting_id,
+            "schedule_item_id": schedule_item_id,
+            "schedule_revision": 2,
+            "media_asset_sha256": media_sha256,
+            "expected_media_duration_ms": 60000,
+            "meeting_starts_at_unix_ms": 1,
+            "title": "Regular meeting",
+            "expected_revision": null
+        }))
+        .unwrap();
+        assert_eq!(
+            api.handle_in_process("POST", &import_path, Some(&body))
+                .status,
+            403
+        );
+        let admin = test_actor(station_auth::OperatorRole::SetupAdmin);
+        let imported = api.handle_authenticated("POST", &import_path, Some(&body), &admin);
+        assert_eq!(
+            imported.status,
+            200,
+            "{}",
+            String::from_utf8_lossy(&imported.body)
+        );
+        let imported_json: serde_json::Value = serde_json::from_slice(&imported.body).unwrap();
+        assert_eq!(imported_json["provenance"]["kind"], "text_import_claim");
+        assert_eq!(
+            imported_json["provenance"]["source_sha256"],
+            sha256_hex(b"Call to order\nPublic comment")
+        );
+        let public =
+            api.handle_in_process("GET", &format!("/api/v1/public/agendas/{agenda_id}"), None);
+        assert_eq!(public.status, 200);
+        let projection: serde_json::Value = serde_json::from_slice(&public.body).unwrap();
+        assert!(projection.get("provenance").is_none());
+        assert!(projection["items"][0].get("staff_notes").is_none());
+        let existing_import = api.handle_authenticated("POST", &import_path, Some(&body), &admin);
+        assert_eq!(existing_import.status, 409);
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&existing_import.body).unwrap()["error"]["code"],
+            "agenda_import_source_immutable"
+        );
+        let mut wrong_hash: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        wrong_hash["media_asset_sha256"] = serde_json::Value::String("b".repeat(64));
+        wrong_hash["source_text"] = serde_json::Value::String("Wrong hash".into());
+        let wrong_hash_path = "/api/v1/agendas/66666666-7777-4888-8999-aaaaaaaaaaaa/import-text";
+        assert_eq!(
+            api.handle_authenticated(
+                "POST",
+                wrong_hash_path,
+                Some(&serde_json::to_vec(&wrong_hash).unwrap()),
+                &admin,
+            )
+            .status,
+            422
+        );
+        api.storage
+            .put_media_asset(&MediaAsset {
+                asset_id: media_sha256.clone(),
+                media_path: r"C:\Windows\System32\notepad.exe".into(),
+                duration_ms: 60_000,
+                readiness: AssetReadiness::Missing,
+            })
+            .unwrap();
+        let not_ready_path = "/api/v1/agendas/77777777-8888-4999-8aaa-bbbbbbbbbbbb/import-text";
+        assert_eq!(
+            api.handle_authenticated("POST", not_ready_path, Some(&body), &admin)
+                .status,
+            422
+        );
+        drop(api);
+        let _ = std::fs::remove_file(database);
+    }
+
+    #[test]
+    fn agenda_import_http_envelope_allows_exact_source_cap_but_rejects_over_limit() {
+        let path = "/api/v1/agendas/11111111-2222-4333-8444-555555555555/import-text";
+        let source = "a".repeat(MAX_AGENDA_IMPORT_BYTES);
+        assert_eq!(source.len(), MAX_AGENDA_IMPORT_BYTES);
+        let body = serde_json::to_vec(&serde_json::json!({"source_text": source})).unwrap();
+        assert!(body.len() > MAX_AGENDA_IMPORT_BYTES);
+        assert!(body.len() <= request_body_limit("POST", path));
+        let mut request = format!(
+            "POST {path} HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\n\r\n",
+            body.len()
+        )
+        .into_bytes();
+        request.extend_from_slice(&body);
+        assert!(parse_http_request(&request).is_ok());
+
+        let over_limit = vec![b'x'; request_body_limit("POST", path) + 1];
+        let oversized = format!(
+            "POST {path} HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\n\r\n",
+            over_limit.len()
+        )
+        .into_bytes();
+        let mut oversized_request = oversized;
+        oversized_request.extend_from_slice(&over_limit);
+        let response = parse_http_request(&oversized_request).unwrap_err();
+        assert_eq!(response.status, 413);
     }
 
     #[test]

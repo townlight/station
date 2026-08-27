@@ -121,6 +121,23 @@ pub struct PublicAgendaProjection {
     pub items: Vec<PublicAgendaItem>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AgendaWriteValidationError {
+    Invalid(String),
+    Conflict,
+    Rebound,
+}
+
+impl std::fmt::Display for AgendaWriteValidationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Invalid(message) => f.write_str(message),
+            Self::Conflict => f.write_str("agenda revision compare-and-set conflict"),
+            Self::Rebound => f.write_str("agenda identity or provenance cannot be rebound"),
+        }
+    }
+}
+
 impl AgendaActor {
     pub fn validate(&self) -> Result<(), String> {
         validate_uuid(&self.actor_id, "agenda actor identity")
@@ -234,26 +251,39 @@ pub fn validate_agenda_write(
     current: Option<&Agenda>,
     incoming: &Agenda,
 ) -> Result<(), String> {
-    incoming.validate()?;
+    validate_agenda_write_typed(expected_revision, current, incoming)
+        .map_err(|error| error.to_string())
+}
+
+pub fn validate_agenda_write_typed(
+    expected_revision: Option<u64>,
+    current: Option<&Agenda>,
+    incoming: &Agenda,
+) -> Result<(), AgendaWriteValidationError> {
+    incoming
+        .validate()
+        .map_err(AgendaWriteValidationError::Invalid)?;
     match (expected_revision, current) {
         (None, None) if incoming.revision == 1 => Ok(()),
         (Some(expected), Some(current))
             if expected == current.revision
                 && incoming.revision == current.revision.saturating_add(1) =>
         {
-            current.validate()?;
+            current
+                .validate()
+                .map_err(AgendaWriteValidationError::Invalid)?;
             if incoming.agenda_id != current.agenda_id
                 || incoming.channel_id != current.channel_id
                 || incoming.meeting_id != current.meeting_id
             {
-                return Err("agenda identity cannot be rebound".into());
+                return Err(AgendaWriteValidationError::Rebound);
             }
             if incoming.provenance != current.provenance {
-                return Err("agenda provenance cannot be rebound".into());
+                return Err(AgendaWriteValidationError::Rebound);
             }
             Ok(())
         }
-        _ => Err("agenda revision compare-and-set conflict".into()),
+        _ => Err(AgendaWriteValidationError::Conflict),
     }
 }
 
@@ -344,6 +374,8 @@ fn validate_uuid(value: &str, field: &str) -> Result<(), String> {
     let bytes = value.as_bytes();
     if bytes.len() != 36
         || ![8, 13, 18, 23].iter().all(|&index| bytes[index] == b'-')
+        || bytes[14] != b'4'
+        || !matches!(bytes[19], b'8'..=b'9' | b'a'..=b'b')
         || bytes.iter().enumerate().any(|(index, byte)| {
             index != 8
                 && index != 13

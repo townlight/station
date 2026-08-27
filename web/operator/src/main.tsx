@@ -15,6 +15,7 @@ import { ScheduledRecordingsPanel } from "./recordings";
 import { ReportingPanel } from "./reporting";
 import { ScheduleMaterializationCard } from "./schedule-materialization";
 import { MediaLifecyclePanel } from "./media-lifecycle";
+import { AgendaPanel } from "./agenda";
 import { channelSchedulePath, shouldApplyMaterializationChannel } from "./schedule-materialization-contract";
 import {
   HeadendProfile,
@@ -836,6 +837,7 @@ function Schedule({ dashboard, channels }: { dashboard: Dashboard | null; channe
     <header className="page-header"><div><p className="eyebrow">Commit to air</p><h1>Schedule a program</h1><p>Generate recurring Drafts, then review and commit exact items through the station write lock.</p></div></header>
     {!channels.length ? <section className="panel"><Empty title="Schedule prerequisites are missing" detail="Configure a channel before scheduling." /></section> : <>
       <section className="panel schedule-channel-scope"><label>Schedule channel<select required value={channelId} onChange={(event) => setChannelId(event.target.value)}>{channels.map((channel) => <option key={channel.channel_id} value={channel.channel_id}>{channel.display_name}</option>)}</select><small>Recurring generation and the schedule list below are scoped to this output channel.</small></label></section>
+      <AgendaPanel channelId={channelId} />
       <ScheduleMaterializationCard channelId={channelId} channelName={selectedChannel?.display_name ?? channelId} channelEnabled={selectedChannel?.enabled ?? false} onApplied={refreshCurrentSchedule} />
       <section className="panel channel-schedule-list" aria-labelledby="channel-schedule-title">
         <div className="panel-head"><div><p className="eyebrow">Current channel authority</p><h2 id="channel-schedule-title">Schedule items</h2></div><div className="button-row"><span className="count">{scheduleItems.length}</span><button type="button" className="text-button" disabled={scheduleLoading} onClick={() => void loadSchedule(channelId)}>{scheduleLoading ? "Refreshing…" : "Refresh schedule"}</button></div></div>

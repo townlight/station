@@ -16,6 +16,7 @@ serde_json.workspace = true
 sha2.workspace = true
 subtle.workspace = true
 station-auth.workspace = true
+station-agenda.workspace = true
 station-automation-policy.workspace = true
 station-publishing.workspace = true
 station-cg.workspace = true
