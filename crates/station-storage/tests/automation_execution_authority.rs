@@ -506,6 +506,65 @@ fn reopening_rejects_same_name_noop_trigger_and_consistent_authority_rebind() {
 }
 
 #[test]
+fn reopening_rejects_deleted_trigger_after_consistent_authority_rebind() {
+    let (database, store) = configured_store("automation-execution-deleted-trigger-drift");
+    store
+        .enqueue_automation_execution_job(&request(), &candidate(), 100)
+        .unwrap();
+    drop(store);
+
+    let mut rebound = request();
+    rebound.input.artifact_sha256 = "e".repeat(64);
+    let rebound_json = serde_json::to_string(&rebound).unwrap();
+    let corruption = format!(
+        "DROP TRIGGER automation_execution_jobs_binding_immutable;\
+         UPDATE automation_execution_jobs SET input_sha256='{}',request_json='{}'",
+        rebound.input.artifact_sha256, rebound_json
+    );
+    assert_eq!(raw_sql_status(&database, &corruption), SQLITE_OK);
+    assert!(
+        StationStore::open(&database).is_err(),
+        "an established schema must be attested before a missing trigger can be recreated"
+    );
+
+    let _ = std::fs::remove_file(database);
+}
+
+#[test]
+fn reopening_rejects_trigger_literal_case_drift() {
+    let (database, store) = configured_store("automation-execution-trigger-case-drift");
+    drop(store);
+    assert_eq!(
+        raw_sql_status(
+            &database,
+            "DROP TRIGGER automation_execution_jobs_no_delete;\
+             CREATE TRIGGER automation_execution_jobs_no_delete BEFORE DELETE ON automation_execution_jobs \
+             BEGIN SELECT RAISE(ABORT, 'AUTOMATION EXECUTION JOBS ARE DURABLE HISTORY'); END"
+        ),
+        SQLITE_OK
+    );
+    assert!(StationStore::open(&database).is_err());
+    let _ = std::fs::remove_file(database);
+}
+
+#[test]
+fn reopening_rejects_trigger_literal_embedded_semicolon_drift() {
+    let (database, store) = configured_store("automation-execution-trigger-semicolon-drift");
+    drop(store);
+    assert_eq!(
+        raw_sql_status(
+            &database,
+            "DROP TRIGGER automation_execution_jobs_no_delete;\
+             CREATE TRIGGER automation_execution_jobs_no_delete BEFORE DELETE ON automation_execution_jobs \
+             BEGIN SELECT RAISE(ABORT, 'automation; execution jobs are durable history'); END"
+        ),
+        SQLITE_OK
+    );
+    assert!(StationStore::open(&database).is_err());
+    let _ = std::fs::remove_file(database);
+}
+
+#[test]
 fn read_fails_closed_when_a_receipt_is_orphaned_from_its_job_row() {
     let (database, store) = configured_store("automation-execution-orphan-receipt");
     store
@@ -529,7 +588,11 @@ fn read_fails_closed_when_a_receipt_is_orphaned_from_its_job_row() {
         raw_sql_status(
             &database,
             "DROP TRIGGER automation_execution_jobs_terminal_immutable;\
-             UPDATE automation_execution_jobs SET state='pending',receipt_id='',completed_at_unix_ms=-1"
+             UPDATE automation_execution_jobs SET state='pending',receipt_id='',completed_at_unix_ms=-1;\
+             CREATE TRIGGER automation_execution_jobs_terminal_immutable \
+               BEFORE UPDATE ON automation_execution_jobs \
+               WHEN OLD.state IN ('completed','failed') \
+               BEGIN SELECT RAISE(ABORT, 'terminal automation execution jobs are immutable'); END"
         ),
         SQLITE_OK
     );
@@ -859,7 +922,10 @@ fn missing_parent_receipt_and_corrupt_failure_code_fail_closed() {
         raw_sql_status(
             &database,
             "DROP TRIGGER automation_execution_jobs_no_delete;\
-             DELETE FROM automation_execution_jobs"
+             DELETE FROM automation_execution_jobs;\
+             CREATE TRIGGER automation_execution_jobs_no_delete \
+               BEFORE DELETE ON automation_execution_jobs \
+               BEGIN SELECT RAISE(ABORT, 'automation execution jobs are durable history'); END"
         ),
         SQLITE_OK
     );

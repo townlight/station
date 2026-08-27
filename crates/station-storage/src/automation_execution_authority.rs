@@ -30,6 +30,23 @@ pub struct AutomationExecutionJobRecord {
 
 impl StationStore {
     pub(super) fn initialize_automation_execution_schema(&self) -> Result<(), String> {
+        let expected_objects = [
+            ("table", "automation_execution_jobs"),
+            ("index", "automation_execution_jobs_pending"),
+            ("table", "automation_execution_receipts"),
+            ("trigger", "automation_execution_receipts_no_update"),
+            ("trigger", "automation_execution_receipts_no_delete"),
+            ("trigger", "automation_execution_jobs_binding_immutable"),
+            ("trigger", "automation_execution_jobs_terminal_immutable"),
+            ("trigger", "automation_execution_jobs_no_delete"),
+        ];
+        let mut existing_objects = 0_usize;
+        for (kind, name) in expected_objects {
+            existing_objects += usize::from(self.sqlite_schema_object_sql(kind, name)?.is_some());
+        }
+        if existing_objects != 0 {
+            return self.attest_automation_execution_schema_v1();
+        }
         self.execute(
             "CREATE TABLE IF NOT EXISTS automation_execution_jobs (\
                job_id TEXT PRIMARY KEY,\
@@ -949,12 +966,82 @@ fn parse_automation_execution_state(value: &str) -> Result<AutomationExecutionJo
 }
 
 fn canonical_automation_schema_sql(value: &str) -> String {
-    value
-        .chars()
-        .filter(|character| !character.is_whitespace() && *character != ';')
-        .flat_map(char::to_lowercase)
-        .collect::<String>()
-        .replace("ifnotexists", "")
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum Quote {
+        None,
+        Single,
+        Double,
+        Backtick,
+        Bracket,
+    }
+
+    let mut normalized = String::with_capacity(value.len());
+    let mut quote = Quote::None;
+    let mut pending_space = false;
+    let mut characters = value.chars().peekable();
+    while let Some(character) = characters.next() {
+        match quote {
+            Quote::None if character.is_whitespace() => pending_space = true,
+            Quote::None => {
+                let prior = normalized.chars().next_back();
+                let token_edge = |value: char| {
+                    value.is_alphanumeric()
+                        || value == '_'
+                        || value == '$'
+                        || matches!(value, '\'' | '"' | '`' | ']')
+                };
+                if pending_space
+                    && prior.is_some_and(token_edge)
+                    && (token_edge(character) || character == '[')
+                {
+                    normalized.push(' ');
+                }
+                pending_space = false;
+                match character {
+                    '\'' => {
+                        quote = Quote::Single;
+                        normalized.push(character);
+                    }
+                    '"' => {
+                        quote = Quote::Double;
+                        normalized.push(character);
+                    }
+                    '`' => {
+                        quote = Quote::Backtick;
+                        normalized.push(character);
+                    }
+                    '[' => {
+                        quote = Quote::Bracket;
+                        normalized.push(character);
+                    }
+                    _ => normalized.extend(character.to_lowercase()),
+                }
+            }
+            Quote::Single | Quote::Double | Quote::Backtick => {
+                normalized.push(character);
+                let delimiter = match quote {
+                    Quote::Single => '\'',
+                    Quote::Double => '"',
+                    Quote::Backtick => '`',
+                    Quote::None | Quote::Bracket => unreachable!(),
+                };
+                if character == delimiter {
+                    if characters.peek() == Some(&delimiter) {
+                        normalized.push(characters.next().unwrap());
+                    } else {
+                        quote = Quote::None;
+                    }
+                }
+            }
+            Quote::Bracket => {
+                normalized.push(character);
+                if character == ']' {
+                    quote = Quote::None;
+                }
+            }
+        }
+    }
+    normalized
 }
 
 fn valid_automation_execution_failure_code(value: &str) -> bool {
