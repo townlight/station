@@ -179,6 +179,13 @@ export function publishingExecutionRequestPath(targetId: string, assetId: string
     : null;
 }
 
+/** A saved NAS target is configuration authority only until secure finalization exists. */
+export function publishingExecutionUnavailableReason(kind: PublishTargetKind): string | null {
+  return kind === "local_nas"
+    ? "Local NAS publication is unavailable until handle-anchored, no-reparse finalization is implemented."
+    : null;
+}
+
 export function publishingExecutionJobPath(targetId: string, jobId: string): string | null {
   return UUID.test(targetId) && UUID.test(jobId)
     ? `/api/v1/publishing/targets/${encodeURIComponent(targetId)}/jobs/${encodeURIComponent(jobId)}`

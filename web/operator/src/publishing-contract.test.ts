@@ -1,11 +1,13 @@
 // @ts-nocheck
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 import {
   publishAccountMutation,
   publishTargetMutation,
   publishingExecutionHistoryPath,
   publishingExecutionRequestPath,
+  publishingExecutionUnavailableReason,
   publishingJobStateLabel,
   publishingStageLabel,
   publishingAccountMutationReason,
@@ -51,6 +53,16 @@ test("execution paths and labels are bounded and provider-truthful", () => {
   assert.equal(publishingJobStateLabel("completed"), "Completed");
   assert.equal(publishingStageLabel("externally_verified"), "Externally verified");
   assert.doesNotMatch(publishingStageLabel("published"), /audience|reach/i);
+});
+
+test("the publishing UI never offers unavailable Local NAS execution", () => {
+  assert.match(publishingExecutionUnavailableReason("local_nas") ?? "", /unavailable|disabled/i);
+  assert.equal(publishingExecutionUnavailableReason("portal"), null);
+  assert.equal(publishingExecutionUnavailableReason("youtube_live"), null);
+  const panel = readFileSync(new URL("./publishing.tsx", import.meta.url), "utf8");
+  assert.match(panel, /const executionUnavailable = publishingExecutionUnavailableReason\(target\.kind\)/);
+  assert.match(panel, /executionUnavailable \? <p className="headend-warning" role="status">/);
+  assert.match(panel, /executionUnavailable \? "Publication unavailable" : "Queue a bounded publication job"/);
 });
 
 test("readiness labels and history paths avoid delivery and audience claims", () => {

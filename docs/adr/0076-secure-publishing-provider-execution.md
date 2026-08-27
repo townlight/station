@@ -2,8 +2,10 @@
 
 ## Decision
 
-TownLight executes the four required S3 publishing targets—Portal, Internet Archive, Local NAS,
-and YouTube Live—from one durable server-owned job authority. The browser may identify an existing
+TownLight executes Portal, Internet Archive, and YouTube Live from one durable server-owned job
+authority. Local NAS target configuration remains durable authority, but NAS execution is explicitly
+unavailable: the browser does not offer Queue publication and the executor fails closed until
+handle-anchored, no-reparse finalization is implemented. The browser may identify an existing
 media asset and target in the request path, but cannot submit candidate identity, revisions,
 configuration hashes, credential versions, media paths, hashes, provider responses, outcomes,
 actor, or time. Those facts are resolved by the server before enqueue and revalidated inside the
@@ -12,10 +14,8 @@ completion transaction.
 Target execution configuration is typed. Portal uses an explicit HTTPS endpoint without user-info,
 query, or fragment. Internet Archive uses the fixed provider adapter and a bounded item identifier.
 YouTube uses fixed Google OAuth and Live Streaming API endpoints plus bounded exact channel,
-broadcast, stream, and expected privacy identities. NAS uses an administrator
-selected UNC root; execution opens only managed descendants, rejects reparse points throughout the
-existing path, copies to a unique partial file, flushes, rehashes, and atomically renames without
-following caller-controlled paths.
+broadcast, stream, and expected privacy identities. A Local NAS target retains an administrator
+selected UNC root for future execution authority, but it does not copy or rename media today.
 
 Provider credentials have a separate append-only authority. Setup Admin may provision, rotate, or
 delete a write-only secret for one exact account revision. Windows DPAPI Local Machine protection is
@@ -36,7 +36,8 @@ browser-supplied executable is involved.
 Receipts are immutable and distinguish `attempted`, `uploaded`, `delivered`, `published`, and
 `externally_verified`. Portal and YouTube satisfy their required execution gate only when the chain
 contains an explicit `published` receipt; a later capability or resource verification cannot skip
-that stage. Internet Archive and NAS require an explicit `delivered` stage. These states do not prove
+that stage. Internet Archive requires an explicit `delivered` stage. Local NAS has no successful
+execution stage while disabled. These states do not prove
 audience reach, playback, editorial correctness, indefinite retention, or field acceptance.
 
 ## Failure and testing boundary
@@ -66,7 +67,15 @@ handle through an in-process GStreamer pipeline, and succeeds only after clean E
 byte/hash identity. The controller additionally requires an active, good-health stream with no
 configuration issues, transitions the exact broadcast through `live` and `complete`, and appends
 `published` only after the full worker result and authoritative exact terminal provider observation.
-Tests inject the HTTP, process, and clock boundaries into this same lifecycle; they do not call Google,
+GStreamer necessarily owns a native copy of the RTMPS `location` property while the pipeline is
+active; Rust cannot promise to scrub that third-party allocation. Before pipeline teardown the worker
+replaces the writable location property with an empty value, zeroizes every Rust-owned secret buffer,
+and returns exactly one secret-free result. The parent contains the one-shot worker in a kill-on-close
+Job Object, discards its stderr, and waits for its terminal result; `main` then exits the worker
+process. OS process destruction—not a claim about zeroizing the GStreamer heap—is the guarantee for
+the residual native allocation. No stream key reaches argv, environment, worker result, controller
+receipt, log, event, or durable diagnostic. Tests inject the HTTP, process, and clock boundaries into
+this same lifecycle; they do not call Google,
 start the installed encoder, or prove a real account, installed candidate, playback, or audience reach.
 
 Primary contracts: [broadcasts and streams](https://developers.google.com/youtube/v3/live/guides/implementation/broadcasts-and-streams),
