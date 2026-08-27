@@ -62,7 +62,7 @@ use station_metadata::{
     AssetMetadataRecord, AssetMetadataValue, MetadataFieldDefinition, MetadataSchema,
 };
 use station_ott_contract::ClientPlaybackBeacon;
-use station_ott_runtime::PlaybackSessionIssueRequest;
+use station_ott_runtime::{MAX_RETRY_AFTER_SECONDS, PlaybackSessionIssueRequest};
 use station_publishing::{
     ConnectionTestOutcome as PublishConnectionTestOutcome, PublishCandidateIdentity,
     PublishConnectionTestEvidence, PublishExecutionReceipt, PublishExecutionTargetConfig,
@@ -14744,7 +14744,10 @@ fn ott_session_error(error: &OttAuthorityError) -> ApiResponse {
             "ott_rate_limited",
             "The OTT session admission window is full; retry later.",
         )
-        .with_header("Retry-After", seconds.max(&1).to_string())
+        .with_header(
+            "Retry-After",
+            seconds.clamp(&1, &MAX_RETRY_AFTER_SECONDS).to_string(),
+        )
         .unwrap_or_else(|_| {
             error_response(
                 500,
@@ -14786,7 +14789,10 @@ fn ott_beacon_error(error: &OttAuthorityError) -> ApiResponse {
             "ott_rate_limited",
             "The OTT beacon admission window is full; retry later.",
         )
-        .with_header("Retry-After", seconds.max(&1).to_string())
+        .with_header(
+            "Retry-After",
+            seconds.clamp(&1, &MAX_RETRY_AFTER_SECONDS).to_string(),
+        )
         .unwrap_or_else(|_| {
             error_response(
                 500,
@@ -22801,6 +22807,7 @@ mod tests {
             .parse::<u64>()
             .unwrap();
         assert!((1..=60).contains(&retry_after));
+        assert!(retry_after <= MAX_RETRY_AFTER_SECONDS);
         drop(api);
         let _ = std::fs::remove_file(database);
     }
@@ -22831,5 +22838,8 @@ mod tests {
                 value: "11".into(),
             }]
         );
+        let impossible_retry = ott_session_error(&OttAuthorityError::RateLimited(u64::MAX));
+        assert_eq!(impossible_retry.status, 429);
+        assert_eq!(impossible_retry.headers[0].value, "87300");
     }
 }

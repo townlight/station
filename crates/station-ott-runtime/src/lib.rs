@@ -23,6 +23,7 @@ pub const MAX_RECLAIMED_BEACONS_PER_REQUEST: u32 = 4_096;
 pub const MAX_BEACON_POSITION_MS: u64 = station_ott_contract::MAX_VOD_DURATION_MS;
 pub const MAX_BEACON_CLOCK_SKEW_MS: i64 = 5 * 60 * 1_000;
 pub const SESSION_TTL_MS: i64 = 15 * 60 * 1_000;
+pub const MAX_RETRY_AFTER_SECONDS: u64 = (15 * 60) + (24 * 60 * 60);
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -136,5 +137,9 @@ mod tests {
         let maximum_beacons = retained_windows * u64::from(MAX_BEACONS_PER_WINDOW);
         assert!(maximum_sessions * 4 <= MAX_TOTAL_SESSIONS * 3);
         assert!(maximum_beacons * 4 <= MAX_TOTAL_BEACONS * 3);
+        assert_eq!(
+            MAX_RETRY_AFTER_SECONDS,
+            u64::try_from((SESSION_TTL_MS + SESSION_RETENTION_AFTER_EXPIRY_MS) / 1_000).unwrap()
+        );
     }
 }

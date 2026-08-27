@@ -5,7 +5,7 @@ use station_ott_contract::{
 };
 use station_ott_runtime::{
     ADMISSION_WINDOW_MS, MAX_BEACON_CLOCK_SKEW_MS, MAX_BEACONS_PER_SESSION, MAX_BEACONS_PER_WINDOW,
-    MAX_RECLAIMED_BEACONS_PER_REQUEST, MAX_RECLAIMED_SESSIONS_PER_REQUEST,
+    MAX_RECLAIMED_BEACONS_PER_REQUEST, MAX_RECLAIMED_SESSIONS_PER_REQUEST, MAX_RETRY_AFTER_SECONDS,
     MAX_SESSION_ISSUES_PER_WINDOW, MAX_TOTAL_BEACONS, MAX_TOTAL_SESSIONS, MIN_BEACON_INTERVAL_MS,
     PlaybackBeaconReceipt, PlaybackBeaconResponse, PlaybackSessionIssueRequest,
     PlaybackSessionIssueResponse, SESSION_RETENTION_AFTER_EXPIRY_MS, SESSION_TTL_MS,
@@ -729,6 +729,12 @@ impl StationStore {
             return Err(OttAuthorityError::Corrupt);
         }
         let earliest_expiry = unsafe { sqlite3_column_int64(statement.raw, 1) };
+        let latest_legitimate_expiry = now_unix_ms
+            .checked_add(SESSION_TTL_MS)
+            .ok_or(OttAuthorityError::Corrupt)?;
+        if earliest_expiry > latest_legitimate_expiry {
+            return Err(OttAuthorityError::Corrupt);
+        }
         let retry_at = earliest_expiry
             .checked_add(SESSION_RETENTION_AFTER_EXPIRY_MS)
             .ok_or(OttAuthorityError::Corrupt)?;
@@ -741,7 +747,9 @@ impl StationStore {
 
 fn retry_after_seconds(now_unix_ms: i64, retry_at_unix_ms: i64) -> u64 {
     let remaining = retry_at_unix_ms.saturating_sub(now_unix_ms).max(1);
-    u64::try_from(remaining.saturating_add(999) / 1_000).unwrap_or(u64::MAX)
+    u64::try_from(remaining.saturating_add(999) / 1_000)
+        .unwrap_or(MAX_RETRY_AFTER_SECONDS)
+        .clamp(1, MAX_RETRY_AFTER_SECONDS)
 }
 
 fn read_session_row(statement: *mut SqliteStatement) -> Result<PlaybackSessionAuthority, String> {
@@ -1301,10 +1309,10 @@ mod tests {
             count = MAX_TOTAL_SESSIONS
         );
         store.execute(&session_rows).unwrap();
-        assert!(matches!(
+        assert_eq!(
             store.issue_ott_playback_session(&session_request, 1_700_000_000_000),
-            Err(OttAuthorityError::RateLimited(_))
-        ));
+            Err(OttAuthorityError::Corrupt)
+        );
         drop(store);
         let _ = std::fs::remove_file(path);
 

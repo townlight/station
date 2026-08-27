@@ -58,7 +58,11 @@ each session's non-replayed beacons are paced at least one second apart and reta
 10,000-event lifetime bound. Replays and requests rejected before admission do not
 consume a window. A full window or retained-row cap returns a typed 429 with a bounded
 `Retry-After`; the windows survive process restart and reset at their exact server-time
-boundary. This is conservative station-wide protection, not per-device fairness or
+boundary. Every OTT `Retry-After` is capped at 87,300 seconds, the 15-minute
+session lifetime plus the 24-hour post-expiry retention horizon. A retained capacity
+row whose expiry lies beyond the server-owned session lifetime is corrupt authority,
+not a client retry schedule, and fails closed without a `Retry-After` header. This is
+conservative station-wide protection, not per-device fairness or
 cryptographic client authentication. Even if every window is filled throughout the
 maximum 1,455-minute session-plus-retention lifetime, boundary alignment spans at
 most 1,456 windows: 7,280 sessions and 69,888 beacons, leaving headroom under the
