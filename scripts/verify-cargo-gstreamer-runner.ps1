@@ -52,7 +52,10 @@ foreach ($requiredFragment in @(
     'RootDirectory',
     'GetFileInformationByHandle',
     'SameIdentity',
-    'ProvePinnedDirectorySwapCannotRedirect'
+    'ProvePinnedDirectorySwapCannotRedirect',
+    'PinDirectoryAncestryNoFollow',
+    'NumberOfLinks == 1',
+    'ProveCheckedTemporaryCleanup'
 )) {
     if (-not $publisher.Contains($requiredFragment)) {
         throw "Cargo artifact runtime publisher is missing '$requiredFragment'."
@@ -179,6 +182,7 @@ try {
         Add-Type -Path $publisherPath
     }
     [TownLightCargoArtifactRuntimePublisher]::ProvePinnedDirectorySwapCannotRedirect($artifactDirectory)
+    [TownLightCargoArtifactRuntimePublisher]::ProveCheckedTemporaryCleanup($artifactDirectory)
 
     $sourceProbeDll = Join-Path $bin 'gstreamer-1.0-0.dll'
     $deployedProbeDll = Join-Path $artifactDirectory 'gstreamer-1.0-0.dll'
@@ -186,6 +190,18 @@ try {
     [IO.File]::WriteAllBytes($deployedProbeDll, [byte[]]@(9, 9, 9))
     if ((Get-FileHash -LiteralPath $sourceProbeDll -Algorithm SHA256).Hash -ne $sourceHashBeforeMutation) {
         throw 'A writable target DLL aliases and can mutate the source GStreamer runtime.'
+    }
+    & $cargoWrapperPath -NoProfile -NonInteractive -File $fakeCargo test --no-run
+
+    $externalProbeDll = Join-Path $temporaryRoot 'external-equal-content.dll'
+    Copy-Item -LiteralPath $sourceProbeDll -Destination $externalProbeDll
+    $externalHashBeforeMutation = (Get-FileHash -LiteralPath $externalProbeDll -Algorithm SHA256).Hash
+    Remove-Item -LiteralPath $deployedProbeDll -Force
+    New-Item -ItemType HardLink -Path $deployedProbeDll -Target $externalProbeDll | Out-Null
+    & $cargoWrapperPath -NoProfile -NonInteractive -File $fakeCargo test --no-run
+    [IO.File]::WriteAllBytes($deployedProbeDll, [byte[]]@(7, 7, 7))
+    if ((Get-FileHash -LiteralPath $externalProbeDll -Algorithm SHA256).Hash -ne $externalHashBeforeMutation) {
+        throw 'The Cargo process wrapper left an equal-content external hard link deployed.'
     }
     & $cargoWrapperPath -NoProfile -NonInteractive -File $fakeCargo test --no-run
     if ((Get-FileHash -LiteralPath $deployedProbeDll -Algorithm SHA256).Hash -ne $sourceHashBeforeMutation) {
@@ -224,6 +240,28 @@ try {
     if (-not $rejectedReparseArtifactDirectory) {
         throw 'The Cargo process wrapper seeded a reparse-point artifact directory.'
     }
+
+    [IO.Directory]::Delete($artifactDirectory)
+    $ancestryPhysicalRoot = Join-Path $temporaryRoot 'ancestry-physical-target'
+    $ancestryJunctionRoot = Join-Path $temporaryRoot 'ancestry-junction-target'
+    New-Item -ItemType Directory -Path $ancestryPhysicalRoot -Force | Out-Null
+    New-Item -ItemType Junction -Path $ancestryJunctionRoot -Target $ancestryPhysicalRoot | Out-Null
+    $env:CARGO_TARGET_DIR = $ancestryJunctionRoot
+    $env:TOWNLIGHT_CARGO_TEST_ARTIFACT_DIRECTORY = Join-Path $ancestryJunctionRoot 'debug\deps'
+    $env:TOWNLIGHT_CARGO_TEST_BUILD_SCRIPT_DIRECTORY = Join-Path $ancestryJunctionRoot 'debug\build\ignored'
+    $rejectedReparseAncestry = $false
+    try {
+        & $cargoWrapperPath -NoProfile -NonInteractive -File $fakeCargo test --no-run *> $null
+    }
+    catch {
+        $rejectedReparseAncestry = $true
+    }
+    if (-not $rejectedReparseAncestry) {
+        throw 'The Cargo process wrapper accepted a reparse-point target ancestry.'
+    }
+    $env:CARGO_TARGET_DIR = $targetRoot
+    $env:TOWNLIGHT_CARGO_TEST_ARTIFACT_DIRECTORY = $artifactDirectory
+    $env:TOWNLIGHT_CARGO_TEST_BUILD_SCRIPT_DIRECTORY = $buildScriptDirectory
 
     Remove-Item -LiteralPath (Join-Path $bin 'gstpbutils-1.0-0.dll') -Force
     $rejectedIncompleteRunnerRuntime = $false

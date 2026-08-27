@@ -1,5 +1,6 @@
 using System;
 using System.ComponentModel;
+using System.Collections.Generic;
 using System.IO;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
@@ -12,6 +13,7 @@ public static class TownLightCargoArtifactRuntimePublisher
     private const uint Delete = 0x00010000;
     private const uint Synchronize = 0x00100000;
     private const uint FileReadAttributes = 0x00000080;
+    private const uint FileTraverse = 0x00000020;
     private const uint FileShareRead = 0x00000001;
     private const uint FileShareWrite = 0x00000002;
     private const uint OpenExisting = 3;
@@ -23,11 +25,33 @@ public static class TownLightCargoArtifactRuntimePublisher
     private const uint FileCreate = 2;
     private const uint FileOpen = 1;
     private const uint FileNonDirectoryFile = 0x00000040;
+    private const uint FileDirectoryFile = 0x00000001;
     private const uint FileSynchronousIoNonAlert = 0x00000020;
     private const uint StatusSuccess = 0;
     private const uint StatusObjectNameNotFound = 0xC0000034;
     private const int FileRenameInformation = 10;
     private const int FileDispositionInformation = 13;
+    private const uint ObjectCaseInsensitive = 0x00000040;
+
+    private sealed class PinnedDirectoryAncestry : IDisposable
+    {
+        private readonly List<IntPtr> handles;
+        public IntPtr Final { get { return handles[handles.Count - 1]; } }
+
+        public PinnedDirectoryAncestry(List<IntPtr> handles)
+        {
+            this.handles = handles;
+        }
+
+        public void Dispose()
+        {
+            for (int index = handles.Count - 1; index >= 0; index--)
+            {
+                CloseHandle(handles[index]);
+            }
+            handles.Clear();
+        }
+    }
 
     [StructLayout(LayoutKind.Sequential)]
     private struct UnicodeString
@@ -118,45 +142,48 @@ public static class TownLightCargoArtifactRuntimePublisher
             throw new InvalidOperationException("The GStreamer runtime closure is invalid.");
         }
 
-        IntPtr root = OpenDirectoryNoFollow(artifactDirectory);
-        ByHandleFileInformation rootIdentity = ReadInformation(root, artifactDirectory);
-        try
+        using (PinnedDirectoryAncestry ancestry = PinDirectoryAncestryNoFollow(artifactDirectory))
         {
+            IntPtr root = ancestry.Final;
+            ByHandleFileInformation rootIdentity = ReadInformation(root, artifactDirectory);
             for (int index = 0; index < sourcePaths.Length; index++)
             {
                 PublishOne(root, sourcePaths[index], expectedHashes[index]);
             }
 
-            IntPtr reopened = OpenDirectoryNoFollow(artifactDirectory);
-            try
+            using (PinnedDirectoryAncestry reopened = PinDirectoryAncestryNoFollow(artifactDirectory))
             {
-                ByHandleFileInformation reopenedIdentity = ReadInformation(reopened, artifactDirectory);
+                ByHandleFileInformation reopenedIdentity = ReadInformation(reopened.Final, artifactDirectory);
                 if (!SameIdentity(rootIdentity, reopenedIdentity))
                 {
                     throw new InvalidOperationException("The artifact directory identity changed during runtime publication.");
                 }
             }
-            finally
-            {
-                CloseHandle(reopened);
-            }
-        }
-        finally
-        {
-            CloseHandle(root);
         }
     }
 
     public static void ProvePinnedDirectorySwapCannotRedirect(string directory)
     {
-        IntPtr root = OpenDirectoryNoFollow(directory);
+        PinnedDirectoryAncestry ancestry = PinDirectoryAncestryNoFollow(directory);
+        IntPtr root = ancestry.Final;
         string moved = directory + ".swap-proof-" + Guid.NewGuid().ToString("N");
         string leaf = ".townlight-retained-root-proof-" + Guid.NewGuid().ToString("N") + ".tmp";
         bool directoryMoved = false;
         bool replacementCreated = false;
         try
         {
-            Directory.Move(directory, moved);
+            try
+            {
+                Directory.Move(directory, moved);
+            }
+            catch (IOException)
+            {
+                return;
+            }
+            catch (UnauthorizedAccessException)
+            {
+                return;
+            }
             directoryMoved = true;
             Directory.CreateDirectory(directory);
             replacementCreated = true;
@@ -188,7 +215,7 @@ public static class TownLightCargoArtifactRuntimePublisher
         }
         finally
         {
-            CloseHandle(root);
+            ancestry.Dispose();
             if (directoryMoved)
             {
                 string proofPath = Path.Combine(moved, leaf);
@@ -196,6 +223,45 @@ public static class TownLightCargoArtifactRuntimePublisher
             }
             if (replacementCreated && Directory.Exists(directory)) Directory.Delete(directory, true);
             if (directoryMoved && Directory.Exists(moved)) Directory.Move(moved, directory);
+        }
+    }
+
+    public static void ProveCheckedTemporaryCleanup(string directory)
+    {
+        using (PinnedDirectoryAncestry ancestry = PinDirectoryAncestryNoFollow(directory))
+        {
+            string leaf = ".townlight-cleanup-proof-" + Guid.NewGuid().ToString("N") + ".tmp";
+            IntPtr temporary;
+            uint status = OpenRelative(ancestry.Final, leaf,
+                GenericRead | GenericWrite | Delete | Synchronize, FileCreate, out temporary);
+            if (status != StatusSuccess) ThrowNt("The cleanup proof could not create its temporary leaf", status);
+            MarkDelete(temporary);
+            CloseHandle(temporary);
+            IntPtr reopened;
+            uint reopenStatus = OpenRelative(ancestry.Final, leaf, GenericRead | Synchronize, FileOpen, out reopened);
+            if (reopenStatus == StatusSuccess)
+            {
+                CloseHandle(reopened);
+                throw new InvalidOperationException("A checked temporary cleanup left a stale artifact.");
+            }
+            if (reopenStatus != StatusObjectNameNotFound)
+            {
+                ThrowNt("The checked temporary cleanup could not prove absence", reopenStatus);
+            }
+
+            bool failureVisible = false;
+            try
+            {
+                MarkDelete(IntPtr.Zero);
+            }
+            catch (InvalidOperationException)
+            {
+                failureVisible = true;
+            }
+            if (!failureVisible)
+            {
+                throw new InvalidOperationException("A temporary cleanup failure was not visible.");
+            }
         }
     }
 
@@ -237,7 +303,8 @@ public static class TownLightCargoArtifactRuntimePublisher
                     {
                         throw new InvalidOperationException("A deployed runtime target is a reparse point or directory.");
                     }
-                    if (!SameIdentity(sourceIdentity, existingIdentity) &&
+                    if (existingIdentity.NumberOfLinks == 1 &&
+                        !SameIdentity(sourceIdentity, existingIdentity) &&
                         expectedHash.Equals(Sha256Handle(existing), StringComparison.OrdinalIgnoreCase))
                     {
                         return;
@@ -263,6 +330,7 @@ public static class TownLightCargoArtifactRuntimePublisher
             }
 
             bool renamed = false;
+            ByHandleFileInformation stagedIdentity;
             try
             {
                 using (var sourceStream = new FileStream(new SafeFileHandle(source, false), FileAccess.Read))
@@ -274,6 +342,12 @@ public static class TownLightCargoArtifactRuntimePublisher
                 if (!expectedHash.Equals(Sha256Handle(temporary), StringComparison.OrdinalIgnoreCase))
                 {
                     throw new InvalidOperationException("The staged runtime DLL did not verify.");
+                }
+                stagedIdentity = ReadInformation(temporary, temporaryLeaf);
+                if (stagedIdentity.NumberOfLinks != 1 ||
+                    (stagedIdentity.FileAttributes & FileAttributeReparsePoint) != 0)
+                {
+                    throw new InvalidOperationException("The staged runtime DLL is not an independent regular file.");
                 }
 
                 RenameRelative(temporary, root, leaf);
@@ -299,6 +373,8 @@ public static class TownLightCargoArtifactRuntimePublisher
                 ByHandleFileInformation verifiedIdentity = ReadInformation(verified, leaf);
                 if ((verifiedIdentity.FileAttributes & FileAttributeReparsePoint) != 0 ||
                     (verifiedIdentity.FileAttributes & FileAttributeDirectory) != 0 ||
+                    verifiedIdentity.NumberOfLinks != 1 ||
+                    !SameIdentity(stagedIdentity, verifiedIdentity) ||
                     SameIdentity(sourceIdentity, verifiedIdentity) ||
                     !expectedHash.Equals(Sha256Handle(verified), StringComparison.OrdinalIgnoreCase))
                 {
@@ -316,9 +392,57 @@ public static class TownLightCargoArtifactRuntimePublisher
         }
     }
 
-    private static IntPtr OpenDirectoryNoFollow(string path)
+    private static PinnedDirectoryAncestry PinDirectoryAncestryNoFollow(string path)
     {
-        IntPtr handle = CreateFileW(path, FileReadAttributes | Synchronize,
+        string fullPath = Path.GetFullPath(path);
+        string rootPath = Path.GetPathRoot(fullPath);
+        if (String.IsNullOrWhiteSpace(rootPath) || rootPath.StartsWith("\\\\", StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException("Cargo artifact publication requires a local drive-rooted target path.");
+        }
+
+        var handles = new List<IntPtr>();
+        try
+        {
+            IntPtr root = OpenAbsoluteDirectoryNoFollow(rootPath);
+            handles.Add(root);
+            string remainder = fullPath.Substring(rootPath.Length);
+            foreach (string component in remainder.Split(new[] { '\\', '/' }, StringSplitOptions.RemoveEmptyEntries))
+            {
+                if (component == "." || component == "..")
+                {
+                    throw new InvalidOperationException("The Cargo artifact path contains an invalid ancestry component.");
+                }
+                IntPtr child;
+                uint status = OpenRelativeObject(handles[handles.Count - 1], component,
+                    FileReadAttributes | FileTraverse | Synchronize, FileOpen,
+                    FileDirectoryFile | FileFlagOpenReparsePoint | FileSynchronousIoNonAlert,
+                    out child);
+                if (status != StatusSuccess)
+                {
+                    ThrowNt("A Cargo artifact ancestry component could not be pinned (" + component + ")", status);
+                }
+                ByHandleFileInformation information = ReadInformation(child, component);
+                if ((information.FileAttributes & FileAttributeReparsePoint) != 0 ||
+                    (information.FileAttributes & FileAttributeDirectory) == 0)
+                {
+                    CloseHandle(child);
+                    throw new InvalidOperationException("A Cargo artifact ancestry component is a reparse point or not a directory.");
+                }
+                handles.Add(child);
+            }
+            return new PinnedDirectoryAncestry(handles);
+        }
+        catch
+        {
+            for (int index = handles.Count - 1; index >= 0; index--) CloseHandle(handles[index]);
+            throw;
+        }
+    }
+
+    private static IntPtr OpenAbsoluteDirectoryNoFollow(string path)
+    {
+        IntPtr handle = CreateFileW(path, FileReadAttributes | FileTraverse | Synchronize,
             FileShareRead | FileShareWrite, IntPtr.Zero, OpenExisting,
             FileFlagBackupSemantics | FileFlagOpenReparsePoint, IntPtr.Zero);
         if (handle == new IntPtr(-1))
@@ -337,6 +461,19 @@ public static class TownLightCargoArtifactRuntimePublisher
 
     private static uint OpenRelative(IntPtr root, string leaf, uint access, uint disposition, out IntPtr handle)
     {
+        return OpenRelativeObject(root, leaf, access, disposition,
+            FileNonDirectoryFile | FileFlagOpenReparsePoint | FileSynchronousIoNonAlert,
+            out handle);
+    }
+
+    private static uint OpenRelativeObject(
+        IntPtr root,
+        string leaf,
+        uint access,
+        uint disposition,
+        uint options,
+        out IntPtr handle)
+    {
         IntPtr buffer = Marshal.StringToHGlobalUni(leaf);
         IntPtr unicodePointer = IntPtr.Zero;
         try
@@ -352,15 +489,14 @@ public static class TownLightCargoArtifactRuntimePublisher
                 Length = (uint)Marshal.SizeOf(typeof(ObjectAttributes)),
                 RootDirectory = root,
                 ObjectName = unicodePointer,
-                Attributes = 0,
+                Attributes = ObjectCaseInsensitive,
                 SecurityDescriptor = IntPtr.Zero,
                 SecurityQualityOfService = IntPtr.Zero
             };
             IoStatusBlock statusBlock;
             return NtCreateFile(out handle, access, ref attributes, out statusBlock,
                 IntPtr.Zero, FileAttributeNormal, FileShareRead | FileShareWrite,
-                disposition, FileNonDirectoryFile | FileFlagOpenReparsePoint |
-                    FileSynchronousIoNonAlert, IntPtr.Zero, 0);
+                disposition, options, IntPtr.Zero, 0);
         }
         finally
         {
@@ -401,7 +537,11 @@ public static class TownLightCargoArtifactRuntimePublisher
         {
             Marshal.WriteByte(information, 1);
             IoStatusBlock statusBlock;
-            NtSetInformationFile(file, out statusBlock, information, 1, FileDispositionInformation);
+            uint status = NtSetInformationFile(file, out statusBlock, information, 1, FileDispositionInformation);
+            if (status != StatusSuccess)
+            {
+                ThrowNt("The staged runtime DLL could not be marked for checked cleanup", status);
+            }
         }
         finally
         {
