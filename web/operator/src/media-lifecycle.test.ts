@@ -2,7 +2,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { readFileSync } from "node:fs";
-import { mediaLifecycleRenderState } from "./media-lifecycle-contract.ts";
+import { assetOperationStillOwns, mediaLifecycleRenderState } from "./media-lifecycle-contract.ts";
 
 const source = readFileSync(new URL("./media-lifecycle.tsx", import.meta.url), "utf8");
 
@@ -33,4 +33,28 @@ test("an asset prop switch synchronously hides older authority, errors, and muta
     message: null,
     busy: false,
   });
+});
+
+test("a late asset mutation cannot write, reload, or clear the next asset operation", async () => {
+  let currentAssetId = "a".repeat(64);
+  let currentGeneration = 4;
+  const owner = { asset_id: currentAssetId, generation: currentGeneration };
+  const writes: string[] = [];
+  let release!: () => void;
+  const response = new Promise<void>((resolve) => { release = resolve; });
+
+  const lateMutation = (async () => {
+    await response;
+    if (!assetOperationStillOwns(owner, currentAssetId, currentGeneration)) return;
+    writes.push("message", "reload", "clear-busy");
+  })();
+  currentAssetId = "b".repeat(64);
+  currentGeneration += 1;
+  writes.push("b-busy");
+  release();
+  await lateMutation;
+
+  assert.deepEqual(writes, ["b-busy"]);
+  assert.match(source, /if \(!owns\(owner\)\) return;/);
+  assert.match(source, /finally \{ if \(owns\(owner\)\) setBusy\(false\); \}/);
 });

@@ -1050,30 +1050,96 @@ fn spawn_publish_execution_queue_controller(
 /// This is intentionally a review-only retention controller. It persists a
 /// durable `review_required` flag for due policies and has no capability to
 /// delete, move, or rewrite media bytes or schedule authority.
+const RETENTION_SCAN_INTERVAL: Duration = Duration::from_secs(60);
+const RETENTION_SCAN_FAILURE_LIMIT: u8 = 3;
+
+fn wait_retention_interval(stop: &AtomicBool, duration: Duration) {
+    let ticks = duration.as_millis().div_ceil(100).max(1);
+    for _ in 0..ticks {
+        if stop.load(Ordering::Acquire) {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+fn run_retention_scanner_loop<S, W>(
+    stop: &AtomicBool,
+    mut scan_once: S,
+    mut wait: W,
+) -> Result<(), String>
+where
+    S: FnMut() -> Result<(), String>,
+    W: FnMut(&AtomicBool, Duration),
+{
+    let mut consecutive_failures = 0_u8;
+    while !stop.load(Ordering::Acquire) {
+        match scan_once() {
+            Ok(()) => {
+                consecutive_failures = 0;
+                if !stop.load(Ordering::Acquire) {
+                    wait(stop, RETENTION_SCAN_INTERVAL);
+                }
+            }
+            Err(_) => {
+                consecutive_failures = consecutive_failures.saturating_add(1);
+                if consecutive_failures >= RETENTION_SCAN_FAILURE_LIMIT {
+                    return Err("media retention scanner exceeded its retry limit".into());
+                }
+                let seconds = 1_u64 << (consecutive_failures - 1);
+                wait(stop, Duration::from_secs(seconds));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn spawn_supervised_retention_scanner<S, W>(
+    stop: Arc<AtomicBool>,
+    mut scan_once: S,
+    wait: W,
+) -> Result<std::thread::JoinHandle<Result<(), String>>, String>
+where
+    S: FnMut() -> Result<(), String> + Send + 'static,
+    W: FnMut(&AtomicBool, Duration) + Send + 'static,
+{
+    let worker_stop = Arc::clone(&stop);
+    std::thread::Builder::new()
+        .name("station-media-retention".into())
+        .spawn(move || {
+            let result = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                run_retention_scanner_loop(&worker_stop, &mut scan_once, wait)
+            })) {
+                Ok(Ok(())) if worker_stop.load(Ordering::Acquire) => Ok(()),
+                Ok(Ok(())) => Err("media retention scanner stopped unexpectedly".into()),
+                Ok(Err(_)) => Err("media retention scanner failed after bounded retries".into()),
+                Err(_) => Err("media retention scanner thread panicked".into()),
+            };
+            if result.is_err() {
+                worker_stop.store(true, Ordering::Release);
+            }
+            result
+        })
+        .map_err(|error| format!("could not start media retention scanner: {error}"))
+}
+
 fn spawn_retention_scanner(
     database: &std::path::Path,
     stop: Arc<AtomicBool>,
 ) -> Result<std::thread::JoinHandle<Result<(), String>>, String> {
     let database = database.to_path_buf();
-    std::thread::Builder::new()
-        .name("station-media-retention".into())
-        .spawn(move || {
-            while !stop.load(Ordering::Acquire) {
-                let now = SystemUtcClock
-                    .now_utc_ms()
-                    .map_err(|_| "retention scanner clock is unavailable".to_string())?;
-                StationStore::open(&database)?
-                    .scan_retention_due(now, "townlight-retention-scanner")?;
-                for _ in 0..60 {
-                    if stop.load(Ordering::Acquire) {
-                        break;
-                    }
-                    std::thread::sleep(Duration::from_secs(1));
-                }
-            }
+    spawn_supervised_retention_scanner(
+        stop,
+        move || {
+            let now = SystemUtcClock
+                .now_utc_ms()
+                .map_err(|_| "retention scanner clock is unavailable".to_string())?;
+            StationStore::open(&database)?
+                .scan_retention_due(now, "townlight-retention-scanner")?;
             Ok(())
-        })
-        .map_err(|error| format!("could not start media retention scanner: {error}"))
+        },
+        wait_retention_interval,
+    )
 }
 
 fn initialize_database(database: &std::path::Path) -> Result<(), String> {
@@ -1124,7 +1190,60 @@ fn fatal(message: &str) -> ! {
 #[cfg(test)]
 mod startup_tests {
     use super::*;
+    use std::sync::Mutex;
+    use std::sync::atomic::AtomicUsize;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn retention_scanner_recovers_after_a_transient_failure_with_bounded_backoff() {
+        let stop = AtomicBool::new(false);
+        let attempts = AtomicUsize::new(0);
+        let waits = Mutex::new(Vec::new());
+
+        let result = run_retention_scanner_loop(
+            &stop,
+            || {
+                let attempt = attempts.fetch_add(1, Ordering::AcqRel);
+                if attempt == 0 {
+                    Err("injected transient database-open failure".into())
+                } else {
+                    stop.store(true, Ordering::Release);
+                    Ok(())
+                }
+            },
+            |_stop, duration| waits.lock().unwrap().push(duration),
+        );
+
+        assert_eq!(result, Ok(()));
+        assert_eq!(attempts.load(Ordering::Acquire), 2);
+        assert_eq!(*waits.lock().unwrap(), vec![Duration::from_secs(1)]);
+    }
+
+    #[test]
+    fn retention_scanner_terminal_failure_requests_global_service_stop() {
+        let stop = Arc::new(AtomicBool::new(false));
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let worker_attempts = Arc::clone(&attempts);
+        let worker = spawn_supervised_retention_scanner(
+            Arc::clone(&stop),
+            move || {
+                worker_attempts.fetch_add(1, Ordering::AcqRel);
+                Err("secret injected storage failure".into())
+            },
+            |_stop, _duration| {},
+        )
+        .unwrap();
+
+        assert_eq!(
+            worker.join().unwrap(),
+            Err("media retention scanner failed after bounded retries".into())
+        );
+        assert_eq!(
+            attempts.load(Ordering::Acquire),
+            RETENTION_SCAN_FAILURE_LIMIT as usize
+        );
+        assert!(stop.load(Ordering::Acquire));
+    }
 
     #[test]
     fn orchestration_error_fails_current_boot_health_and_requests_service_stop() {

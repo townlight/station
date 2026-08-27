@@ -28,6 +28,10 @@ named supervised scanner that advances a due retained record to
 `review_required`. It cannot delete, move, modify, or un-link media and it
 never touches scheduling authority. Each scan selects a bounded due-first page;
 permanent and held assets cannot consume that page and starve an overdue review.
+Clock, database-open, and scan failures receive bounded exponential retry. A
+third consecutive failure terminates the supervised worker, requests global
+service shutdown, and therefore relies on the Windows service restart policy;
+the API cannot silently remain green after the scanner dies.
 
 The ingest supervisor also runs a bounded review-evidence worker. It opens the
 managed source, copies exact verified bytes through that handle to a

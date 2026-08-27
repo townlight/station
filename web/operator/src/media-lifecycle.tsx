@@ -1,6 +1,6 @@
 import { FormEvent, useEffect, useRef, useState } from "react";
 import { apiRequest } from "./api-client";
-import { MediaLifecycleAuthority, mediaLifecycleRenderState } from "./media-lifecycle-contract";
+import { AssetOperationOwner, MediaLifecycleAuthority, assetOperationStillOwns, mediaLifecycleRenderState } from "./media-lifecycle-contract";
 
 type Asset = { asset_id: string; media_path: string; readiness_state: "ready" | "processing" | "missing_file" | "rejected" };
 
@@ -14,49 +14,77 @@ export function MediaLifecyclePanel({ asset, onClose, onRefresh }: { asset: Asse
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const requestGeneration = useRef(0);
+  const currentAssetId = useRef(asset.asset_id);
+  if (currentAssetId.current !== asset.asset_id) {
+    currentAssetId.current = asset.asset_id;
+    requestGeneration.current += 1;
+  }
 
-  async function load() {
-    const requestedAssetId = asset.asset_id;
+  function owns(owner: AssetOperationOwner) {
+    return assetOperationStillOwns(owner, currentAssetId.current, requestGeneration.current);
+  }
+
+  async function load(requestedAssetId = asset.asset_id) {
     const generation = ++requestGeneration.current;
+    const owner = { asset_id: requestedAssetId, generation };
     setStateAssetId(requestedAssetId); setLifecycle(null); setMessage(null); setBusy(false);
     try {
       const value = await apiRequest<MediaLifecycleAuthority>(`/api/v1/assets/${requestedAssetId}/lifecycle`);
-      if (generation !== requestGeneration.current) return;
+      if (!owns(owner)) return;
       if (value.asset_id !== requestedAssetId) throw new Error("Lifecycle authority was returned for a different asset.");
       setLifecycle(value);
       setPermanent(value.retention?.permanent ?? false);
       setLegalHold(value.retention?.legal_hold ?? false);
       setReviewAfter(value.retention?.review_after_unix_ms?.toString() ?? "");
     } catch (problem) {
-      if (generation === requestGeneration.current) setMessage(problem instanceof Error ? problem.message : "Lifecycle authority could not be read.");
+      if (owns(owner)) setMessage(problem instanceof Error ? problem.message : "Lifecycle authority could not be read.");
     }
   }
   useEffect(() => { void load(); return () => { requestGeneration.current += 1; }; }, [asset.asset_id]);
 
   async function relink(event: FormEvent) {
-    event.preventDefault(); setBusy(true); setMessage(null);
+    event.preventDefault();
+    const requestedAssetId = asset.asset_id;
+    const owner = { asset_id: requestedAssetId, generation: ++requestGeneration.current };
+    setStateAssetId(requestedAssetId); setBusy(true); setMessage(null);
     try {
-      await apiRequest(`/api/v1/assets/${asset.asset_id}/relink`, { method: "POST", body: JSON.stringify({ source_path: sourcePath.trim() }) });
-      setSourcePath(""); setMessage("The server admitted exact matching bytes and restored this missing asset."); await onRefresh(); await load();
-    } catch (problem) { setMessage(problem instanceof Error ? problem.message : "The missing asset could not be relinked."); }
-    finally { setBusy(false); }
+      await apiRequest(`/api/v1/assets/${requestedAssetId}/relink`, { method: "POST", body: JSON.stringify({ source_path: sourcePath.trim() }) });
+      if (!owns(owner)) return;
+      setSourcePath(""); setMessage("The server admitted exact matching bytes and restored this missing asset.");
+      await onRefresh();
+      if (!owns(owner)) return;
+      await load(requestedAssetId);
+    } catch (problem) { if (owns(owner)) setMessage(problem instanceof Error ? problem.message : "The missing asset could not be relinked."); }
+    finally { if (owns(owner)) setBusy(false); }
   }
   async function replace(event: FormEvent) {
-    event.preventDefault(); setBusy(true); setMessage(null);
+    event.preventDefault();
+    const requestedAssetId = asset.asset_id;
+    const owner = { asset_id: requestedAssetId, generation: ++requestGeneration.current };
+    setStateAssetId(requestedAssetId); setBusy(true); setMessage(null);
     try {
-      await apiRequest(`/api/v1/assets/${asset.asset_id}/replacements`, { method: "POST", body: JSON.stringify({ source_path: sourcePath.trim(), expected_predecessor_revision: lifecycle?.replacement ? 1 : 0 }) });
-      setSourcePath(""); setMessage("A distinct immutable replacement was admitted. No scheduled or on-air authority was changed."); await onRefresh(); await load();
-    } catch (problem) { setMessage(problem instanceof Error ? problem.message : "Replacement could not be recorded."); }
-    finally { setBusy(false); }
+      await apiRequest(`/api/v1/assets/${requestedAssetId}/replacements`, { method: "POST", body: JSON.stringify({ source_path: sourcePath.trim(), expected_predecessor_revision: lifecycle?.replacement ? 1 : 0 }) });
+      if (!owns(owner)) return;
+      setSourcePath(""); setMessage("A distinct immutable replacement was admitted. No scheduled or on-air authority was changed.");
+      await onRefresh();
+      if (!owns(owner)) return;
+      await load(requestedAssetId);
+    } catch (problem) { if (owns(owner)) setMessage(problem instanceof Error ? problem.message : "Replacement could not be recorded."); }
+    finally { if (owns(owner)) setBusy(false); }
   }
   async function saveRetention(event: FormEvent) {
-    event.preventDefault(); setBusy(true); setMessage(null);
+    event.preventDefault();
+    const requestedAssetId = asset.asset_id;
+    const owner = { asset_id: requestedAssetId, generation: ++requestGeneration.current };
+    setStateAssetId(requestedAssetId); setBusy(true); setMessage(null);
     try {
       const review_after_unix_ms = reviewAfter.trim() ? Number(reviewAfter) : null;
-      await apiRequest(`/api/v1/assets/${asset.asset_id}/retention`, { method: "PUT", body: JSON.stringify({ permanent, review_after_unix_ms, legal_hold: legalHold, expected_revision: lifecycle?.retention?.revision ?? 0 }) });
-      setMessage("Retention intent was recorded. Due items require review; the station never deletes media automatically."); await load();
-    } catch (problem) { setMessage(problem instanceof Error ? problem.message : "Retention intent could not be saved."); }
-    finally { setBusy(false); }
+      await apiRequest(`/api/v1/assets/${requestedAssetId}/retention`, { method: "PUT", body: JSON.stringify({ permanent, review_after_unix_ms, legal_hold: legalHold, expected_revision: lifecycle?.retention?.revision ?? 0 }) });
+      if (!owns(owner)) return;
+      setMessage("Retention intent was recorded. Due items require review; the station never deletes media automatically.");
+      await load(requestedAssetId);
+    } catch (problem) { if (owns(owner)) setMessage(problem instanceof Error ? problem.message : "Retention intent could not be saved."); }
+    finally { if (owns(owner)) setBusy(false); }
   }
 
   const rendered = mediaLifecycleRenderState(asset.asset_id, { state_asset_id: stateAssetId, authority: lifecycle, message, busy });

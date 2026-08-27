@@ -17,3 +17,13 @@ export function mediaLifecycleRenderState(assetId: string, state: MediaLifecycle
   if (state.state_asset_id === assetId && (!state.authority || state.authority.asset_id === assetId)) return state;
   return { state_asset_id: assetId, authority: null, message: null, busy: false };
 }
+
+export type AssetOperationOwner = { asset_id: string; generation: number };
+
+export function assetOperationStillOwns(
+  owner: AssetOperationOwner,
+  currentAssetId: string,
+  currentGeneration: number,
+): boolean {
+  return owner.asset_id === currentAssetId && owner.generation === currentGeneration;
+}
