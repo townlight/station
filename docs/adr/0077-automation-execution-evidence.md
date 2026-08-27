@@ -44,9 +44,18 @@ job identity even when a corrupted parent pointer or parent row tries to hide th
 
 ## Boundaries and non-claims
 
-This slice does not yet acquire the required `InstallAuthorityFence`, store credentials, open an artifact, run a local model, call a cloud provider,
-assess semantic quality, write an output artifact, expose an HTTP route, supervise a controller, or
-prove an installed-machine execution. A durable receipt is exact evidence accepted from a future
-trusted executor, not source proof that such an executor exists. Later adapters must hash input and
-output from retained managed handles and store secrets only in the Windows-protected credential
-authority.
+stationd now runs one bounded automation-execution queue controller under the same install-authority
+fence as the durable decision. It claims FIFO current work with a 60-second lease, lets only a typed
+adapter whose identity exactly matches the claimed request return a receipt, renews leases only through
+the durable live-owner check, and commits either the exact receipt or a bounded categorical attempt
+failure. A returned receipt is not success until the storage completion transaction rechecks the live
+candidate, policy, adapter, configuration, connection evidence, claim, and receipt binding. A late
+adapter return is recorded as `adapter_timeout`, not completed. Restarted or expired claims remain
+recoverable through the durable queue rules. The authenticated `GET /api/v1/automation/jobs/{job_id}`
+status route exposes request/status/receipt truth without lease-owner or claim identity.
+
+No production automation adapter is implemented or registered in this slice. Current jobs with no
+exact registered adapter record a retryable `adapter_unavailable` attempt and no receipt; this does
+not claim model execution, provider contact, output creation, or external success. Later adapters
+must hash input and output from retained managed handles and store secrets only in the
+Windows-protected credential authority.

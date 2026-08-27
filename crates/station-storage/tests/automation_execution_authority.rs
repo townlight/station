@@ -12,7 +12,10 @@ use station_automation_policy::{
     ConnectionTestOutcome, CredentialAvailability,
 };
 use station_maintenance::{VerifiedInstallAuthority, verified_install_authority_for_test};
-use station_storage::{AutomationExecutionJobRecord, AutomationExecutionJobState, StationStore};
+use station_storage::{
+    AutomationExecutionAdapter, AutomationExecutionAdapterFailure, AutomationExecutionJobRecord,
+    AutomationExecutionJobState, StationStore, run_automation_execution_controller_iteration,
+};
 
 const ADAPTER_ID: &str = "11111111-2222-4333-8444-555555555555";
 const POLICY_ID: &str = "22222222-2222-4333-8444-555555555555";
@@ -949,5 +952,98 @@ fn missing_parent_receipt_and_corrupt_failure_code_fail_closed() {
     let reopened = StationStore::open(&database).unwrap();
     assert!(reopened.read_automation_execution_job(JOB_ID).is_err());
     drop(reopened);
+    let _ = std::fs::remove_file(database);
+}
+
+struct ExactTestAdapter;
+
+impl AutomationExecutionAdapter for ExactTestAdapter {
+    fn adapter_id(&self) -> &str {
+        ADAPTER_ID
+    }
+
+    fn execute(
+        &self,
+        execution_request: &AutomationExecutionRequest,
+        claim_id: &str,
+        _deadline_unix_ms: i64,
+        _heartbeat: &mut dyn FnMut() -> Result<(), String>,
+    ) -> Result<AutomationExecutionReceipt, AutomationExecutionAdapterFailure> {
+        assert_eq!(execution_request, &request());
+        let mut exact_receipt = receipt();
+        exact_receipt.claim_id = claim_id.into();
+        Ok(exact_receipt)
+    }
+}
+
+#[test]
+fn controller_commits_only_an_exact_typed_adapter_receipt() {
+    let (database, store) = configured_store("automation-execution-controller-success");
+    store
+        .enqueue_automation_execution_job(&request(), &candidate(), 100)
+        .unwrap();
+    let mut times = [150_i64, 151, 350].into_iter();
+
+    assert!(
+        run_automation_execution_controller_iteration(
+            &store,
+            Some(&ExactTestAdapter),
+            &candidate(),
+            "stationd-test-controller",
+            &mut || Ok(times.next().expect("controller clock call is bounded")),
+        )
+        .unwrap()
+    );
+
+    let completed = store
+        .read_automation_execution_job(JOB_ID)
+        .unwrap()
+        .unwrap();
+    assert_eq!(completed.state, AutomationExecutionJobState::Completed);
+    assert_eq!(completed.attempt_count, 1);
+    assert_eq!(
+        completed
+            .receipt
+            .as_ref()
+            .map(|receipt| receipt.claim_id.as_str()),
+        completed.claim_id.as_deref()
+    );
+
+    drop(store);
+    let _ = std::fs::remove_file(database);
+}
+
+#[test]
+fn controller_without_an_implemented_exact_adapter_records_no_success() {
+    let (database, store) = configured_store("automation-execution-controller-unavailable");
+    store
+        .enqueue_automation_execution_job(&request(), &candidate(), 100)
+        .unwrap();
+    let mut times = [150_i64, 200].into_iter();
+
+    assert!(
+        run_automation_execution_controller_iteration(
+            &store,
+            None,
+            &candidate(),
+            "stationd-test-controller",
+            &mut || Ok(times.next().expect("controller clock call is bounded")),
+        )
+        .unwrap()
+    );
+
+    let pending = store
+        .read_automation_execution_job(JOB_ID)
+        .unwrap()
+        .unwrap();
+    assert_eq!(pending.state, AutomationExecutionJobState::Pending);
+    assert_eq!(pending.attempt_count, 1);
+    assert_eq!(
+        pending.last_failure_code.as_deref(),
+        Some("adapter_unavailable")
+    );
+    assert!(pending.receipt.is_none());
+
+    drop(store);
     let _ = std::fs::remove_file(database);
 }
