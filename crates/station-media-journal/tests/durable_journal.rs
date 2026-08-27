@@ -4,7 +4,8 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use station_media_journal::{
-    FallbackToneJournalEntry, JournalError, JournalWriter, inspect_journal, read_events,
+    FallbackToneJournalEntry, JournalError, JournalWriter, current_journal_generation_path,
+    inspect_journal, read_events, read_journal_incremental,
 };
 use station_media_protocol::{
     FallbackToneDeactivationReason, FallbackToneKind, OutputTransportObservation, PROTOCOL_VERSION,
@@ -27,6 +28,12 @@ fn compaction_temp_path(path: &Path) -> PathBuf {
     let mut temporary = path.as_os_str().to_owned();
     temporary.push(".compact.tmp");
     temporary.into()
+}
+
+fn generation_manifest_path(path: &Path) -> PathBuf {
+    let mut manifest = path.as_os_str().to_owned();
+    manifest.push(".generation-manifest");
+    manifest.into()
 }
 
 fn crc32(bytes: &[u8]) -> u32 {
@@ -172,6 +179,57 @@ fn preserves_exact_fallback_tone_activation_and_expiry_audit_across_reopen() {
             },
         ]
     );
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn compaction_preserves_fallback_tone_audit_and_incremental_readers_cross_it() {
+    let path = journal_path("fallback-tone-compaction");
+    let tone = WorkerFallbackTone {
+        activation_id: "1c63ef7e-6e4b-4fa6-b5d8-c15e2b735c05".into(),
+        authority_revision: 3,
+        kind: FallbackToneKind::Test,
+        frequency_hz: 1_000,
+        level_milli_dbfs: -20_000,
+        duration_ms: 1_000,
+    };
+    let activated = FallbackToneJournalEntry::Activated {
+        worker_id: WORKER_ID.into(),
+        channel_id: CHANNEL_ID.into(),
+        tone: tone.clone(),
+        activated_at_monotonic_ms: 500,
+    };
+    let deactivated = FallbackToneJournalEntry::Deactivated {
+        worker_id: WORKER_ID.into(),
+        channel_id: CHANNEL_ID.into(),
+        tone,
+        reason: FallbackToneDeactivationReason::Expired,
+        deactivated_at_monotonic_ms: 1_500,
+    };
+
+    let mut writer = JournalWriter::open(&path, WORKER_ID, CHANNEL_ID).unwrap();
+    writer.append_fallback_tone_audit(&activated).unwrap();
+    for sequence in 1..=600 {
+        writer
+            .append(&event(
+                sequence,
+                WorkerEvent::Heartbeat {
+                    monotonic_milliseconds: sequence * 5_000,
+                    outputs: Vec::new(),
+                },
+            ))
+            .unwrap();
+    }
+    writer.append_fallback_tone_audit(&deactivated).unwrap();
+    drop(writer);
+
+    assert_eq!(
+        inspect_journal(&path).unwrap().fallback_tone_audit,
+        vec![activated, deactivated]
+    );
+    let incremental = read_journal_incremental(&path, None, 1_024, false).unwrap();
+    assert_eq!(incremental.events.last().unwrap().sequence, 600);
+    assert_eq!(incremental.cursor.raw_sequence, 600);
     let _ = std::fs::remove_file(path);
 }
 
@@ -600,7 +658,8 @@ fn refuses_a_retained_sequence_gap_when_the_compaction_summary_is_missing() {
     }
     drop(writer);
 
-    let bytes = std::fs::read(&path).unwrap();
+    let active = current_journal_generation_path(&path).unwrap();
+    let bytes = std::fs::read(&active).unwrap();
     assert_eq!(u16::from_le_bytes(bytes[4..6].try_into().unwrap()), 2);
     assert_eq!(u16::from_le_bytes(bytes[6..8].try_into().unwrap()), 1);
     let summary_bytes = 16 + u32::from_le_bytes(bytes[8..12].try_into().unwrap()) as usize;
@@ -616,7 +675,7 @@ fn refuses_a_retained_sequence_gap_when_the_compaction_summary_is_missing() {
         cursor = next;
     }
     assert!(summary_bytes < bytes.len());
-    std::fs::write(&path, without_compaction_records).unwrap();
+    std::fs::write(&active, without_compaction_records).unwrap();
 
     assert_eq!(
         read_events(&path),
@@ -648,7 +707,8 @@ fn refuses_a_compacted_active_journal_without_its_commit_record() {
     }
     drop(writer);
 
-    let bytes = std::fs::read(&path).unwrap();
+    let active = current_journal_generation_path(&path).unwrap();
+    let bytes = std::fs::read(&active).unwrap();
     let mut without_commit = Vec::new();
     let mut cursor = 0_usize;
     while cursor < bytes.len() {
@@ -660,7 +720,7 @@ fn refuses_a_compacted_active_journal_without_its_commit_record() {
         }
         cursor = next;
     }
-    std::fs::write(&path, without_commit).unwrap();
+    std::fs::write(&active, without_commit).unwrap();
 
     assert!(matches!(
         inspect_journal(&path),
@@ -689,8 +749,10 @@ fn recovers_a_synced_compaction_temp_when_the_active_file_is_missing() {
             .unwrap();
     }
     drop(writer);
-    std::fs::copy(&path, &temporary).unwrap();
-    std::fs::remove_file(&path).unwrap();
+    let active = current_journal_generation_path(&path).unwrap();
+    std::fs::copy(&active, &temporary).unwrap();
+    std::fs::remove_file(active).unwrap();
+    std::fs::remove_file(generation_manifest_path(&path)).unwrap();
 
     let recovered = JournalWriter::open(&path, WORKER_ID, CHANNEL_ID).unwrap();
     assert_eq!(recovered.next_sequence(), 521);
@@ -745,6 +807,9 @@ fn does_not_promote_a_wrong_identity_compaction_temp() {
         writer.append(&wrong_heartbeat).unwrap();
     }
     drop(writer);
+    let wrong_active = current_journal_generation_path(&temporary).unwrap();
+    std::fs::rename(wrong_active, &temporary).unwrap();
+    std::fs::remove_file(generation_manifest_path(&temporary)).unwrap();
 
     assert!(matches!(
         JournalWriter::open(&path, WORKER_ID, CHANNEL_ID),
@@ -796,7 +861,9 @@ fn does_not_promote_a_truncated_compaction_commit() {
             .unwrap();
     }
     drop(writer);
-    std::fs::rename(&path, &temporary).unwrap();
+    let active = current_journal_generation_path(&path).unwrap();
+    std::fs::rename(active, &temporary).unwrap();
+    std::fs::remove_file(generation_manifest_path(&path)).unwrap();
     let file = OpenOptions::new().write(true).open(&temporary).unwrap();
     file.set_len(file.metadata().unwrap().len() - 1).unwrap();
     file.sync_all().unwrap();
@@ -931,7 +998,8 @@ fn splits_many_sparse_heartbeat_ranges_across_bounded_summary_records() {
     }
     drop(writer);
 
-    let bytes = std::fs::read(&path).unwrap();
+    let active = current_journal_generation_path(&path).unwrap();
+    let bytes = std::fs::read(&active).unwrap();
     let mut offset = 0_usize;
     let mut summary_records = 0_usize;
     while offset < bytes.len() {
@@ -974,7 +1042,8 @@ fn rejects_summary_output_endpoints_that_change_identity() {
     }
     drop(writer);
 
-    let bytes = std::fs::read(&path).unwrap();
+    let active = current_journal_generation_path(&path).unwrap();
+    let bytes = std::fs::read(&active).unwrap();
     let payload_length = u32::from_le_bytes(bytes[8..12].try_into().unwrap()) as usize;
     let mut summary: serde_json::Value =
         serde_json::from_slice(&bytes[16..16 + payload_length]).unwrap();
@@ -986,7 +1055,7 @@ fn rejects_summary_output_endpoints_that_change_identity() {
     corrupted.extend_from_slice(&crc32(&payload).to_le_bytes());
     corrupted.extend_from_slice(&payload);
     corrupted.extend_from_slice(&bytes[16 + payload_length..]);
-    std::fs::write(&path, corrupted).unwrap();
+    std::fs::write(&active, corrupted).unwrap();
 
     assert!(matches!(
         inspect_journal(&path),

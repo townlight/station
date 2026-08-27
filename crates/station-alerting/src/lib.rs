@@ -955,6 +955,7 @@ fn alert_condition_label(condition: station_domain::AlertConditionKind) -> &'sta
         AlertConditionKind::UpdateApplyFailed => "update-apply-failed",
         AlertConditionKind::ScheduleMaterializationFailure => "schedule-materialization-failure",
         AlertConditionKind::CaptionCueMissed => "caption-cue-missed",
+        AlertConditionKind::AsRunProjectionFailure => "as-run-projection-failure",
     }
 }
 

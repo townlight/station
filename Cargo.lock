@@ -1734,6 +1734,7 @@ dependencies = [
  "station-publishing",
  "station-readiness",
  "station-recording",
+ "station-reporting",
  "station-schedule",
  "station-schedule-automation",
  "station-source-evidence",
@@ -2036,8 +2037,10 @@ dependencies = [
 name = "station-storage"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "getrandom 0.4.3",
  "image",
+ "jiff",
  "serde",
  "serde_json",
  "sha2",
@@ -2049,11 +2052,14 @@ dependencies = [
  "station-domain",
  "station-live",
  "station-maintenance",
+ "station-media-journal",
  "station-media-lifecycle",
+ "station-media-protocol",
  "station-metadata",
  "station-publishing",
  "station-readiness",
  "station-recording",
+ "station-reporting",
  "station-schedule",
  "station-schedule-automation",
  "station-transport-proof",

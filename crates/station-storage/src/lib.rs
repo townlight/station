@@ -115,6 +115,14 @@ pub use actual_airing_authority::{
     ScheduledTakeAcknowledgement, ScheduledTakeAcknowledgementBinding, ScheduledTakeApplyError,
     ScheduledTakeApplyOutcome,
 };
+mod asrun_epg_authority;
+pub use asrun_epg_authority::{
+    AsRunProjectionPage, AsRunProjectionWriteError, MAX_ASRUN_EPG_PAGE_SIZE,
+};
+mod asrun_journal_adapter;
+pub use asrun_journal_adapter::{
+    AsRunJournalAdapterError, project_durable_journal, station_local_day_window,
+};
 mod catalog_candidate_projection;
 pub use catalog_candidate_projection::CatalogCandidateProjection;
 mod materialization_evidence;
@@ -1396,6 +1404,7 @@ impl StationStore {
         store.initialize_schedule_automation_schema()?;
         store.initialize_catalog_authority_schema()?;
         store.initialize_actual_airing_authority_schema()?;
+        store.initialize_asrun_epg_authority_schema()?;
         store.initialize_schedule_materialization_schema()?;
         store.initialize_scheduled_recording_schema()?;
         store.migrate_caption_egress_history_sink_foreign_keys()?;
@@ -18589,6 +18598,7 @@ fn alert_condition_name(value: AlertConditionKind) -> &'static str {
         AlertConditionKind::UpdateApplyFailed => "update-apply-failed",
         AlertConditionKind::ScheduleMaterializationFailure => "schedule-materialization-failure",
         AlertConditionKind::CaptionCueMissed => "caption-cue-missed",
+        AlertConditionKind::AsRunProjectionFailure => "as-run-projection-failure",
     }
 }
 
@@ -18673,6 +18683,7 @@ fn parse_alert_condition(value: &str) -> Result<AlertConditionKind, String> {
             Ok(AlertConditionKind::ScheduleMaterializationFailure)
         }
         "caption-cue-missed" => Ok(AlertConditionKind::CaptionCueMissed),
+        "as-run-projection-failure" => Ok(AlertConditionKind::AsRunProjectionFailure),
         _ => Err(format!("database returned invalid alert condition {value}")),
     }
 }
@@ -18766,6 +18777,11 @@ fn default_alert_rules() -> Vec<AlertRule> {
         ),
         (
             AlertConditionKind::CaptionCueMissed,
+            AlertSeverity::Warning,
+            1_800,
+        ),
+        (
+            AlertConditionKind::AsRunProjectionFailure,
             AlertSeverity::Warning,
             1_800,
         ),
@@ -22635,7 +22651,18 @@ mod tests {
             .unwrap();
         assert_eq!(delivery.notification_kind, AlertNotificationKind::Resolved);
         assert_eq!(delivery.state, AlertDeliveryState::Sent);
-        assert_eq!(migrated.list_alert_rules().unwrap().len(), 22);
+        let rules = migrated.list_alert_rules().unwrap();
+        assert_eq!(rules.len(), 23);
+        assert!(
+            rules
+                .iter()
+                .any(|rule| rule.condition == AlertConditionKind::CaptionCueMissed)
+        );
+        assert!(
+            rules
+                .iter()
+                .any(|rule| rule.condition == AlertConditionKind::AsRunProjectionFailure)
+        );
         drop(migrated);
         for candidate in [
             database.clone(),

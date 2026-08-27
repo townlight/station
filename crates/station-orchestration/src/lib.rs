@@ -50,7 +50,7 @@ use station_storage::{
     CaptionCueMissResolutionFence, CgSnapshotReadError, CgWriteError, ChannelCaptionMode,
     OutputLoudnessCaptureFacts, OutputLoudnessProofJobRecord, OutputLoudnessProofJobState,
     ScheduledTakeAcknowledgement, ScheduledTakeAcknowledgementBinding, ScheduledTakeApplyOutcome,
-    StationStore,
+    StationStore, project_durable_journal,
 };
 
 static ALERT_SEQUENCE: AtomicU64 = AtomicU64::new(1);
@@ -61,6 +61,7 @@ const MEDIA_TEARDOWN_TIMEOUT: Duration = Duration::from_secs(30);
 const CG_EXPIRER_OPERATOR_ID: &str = "stationd-cg-expirer";
 const CG_SYNC_INTERVAL_MS: i64 = 1_000;
 const MAX_CAPTION_CUES_PER_TICK: usize = 64;
+const ASRUN_PROJECTION_INTERVAL_MS: i64 = 60_000;
 
 #[derive(Debug, PartialEq, Eq)]
 struct CaptionDispatchPlan {
@@ -3894,6 +3895,7 @@ where
     let mut cg_states: HashMap<String, CgSnapshotState> = HashMap::new();
     let mut restart_attempts: HashMap<String, u32> = HashMap::new();
     let mut restart_after: HashMap<String, i64> = HashMap::new();
+    let mut next_asrun_projection_after: HashMap<String, i64> = HashMap::new();
     while !stop.load(Ordering::Acquire) {
         let now = system_time_millis()?;
         let store = StationStore::open(database_path).map_err(OrchestrationError::Storage)?;
@@ -4069,6 +4071,62 @@ where
                 )?;
             }
         }
+        // Projection is service-owned and replayable. It never accepts browser
+        // facts: the authoritative enabled-channel -> journal-file mapping is
+        // the same one used by the supervised worker launcher. A journal can
+        // legitimately lack a closing lookahead, so an incomplete or corrupt
+        // reporting lane is recoverable and must not terminate on-air control.
+        if let Some(profile) = store.read_profile().map_err(OrchestrationError::Storage)? {
+            for channel in channels.iter().filter(|channel| channel.enabled) {
+                if next_asrun_projection_after
+                    .get(&channel.channel_id)
+                    .is_some_and(|after| dispatch_now < *after)
+                {
+                    continue;
+                }
+                next_asrun_projection_after.insert(
+                    channel.channel_id.clone(),
+                    dispatch_now.saturating_add(ASRUN_PROJECTION_INTERVAL_MS),
+                );
+                let journal = journal_root.join(format!("{}.tlj", channel.channel_id));
+                if journal.is_file() {
+                    match project_durable_journal(
+                        &store,
+                        &journal,
+                        &format!("station-worker-{}", channel.channel_id),
+                        &channel.channel_id,
+                        &profile.profile.timezone,
+                        dispatch_now,
+                        // This lane is deliberately at least 60 seconds away
+                        // from the 50 ms reconciliation loop. Authenticate the
+                        // durable prefix every reporting pass so a same-file,
+                        // CRC-valid rewrite before the cursor cannot be hidden
+                        // by an unchanged suffix.
+                        true,
+                    ) {
+                        Ok(_) => {
+                            resolve_asrun_projection_alert_after_catch_up(
+                                &store,
+                                &channel.channel_id,
+                                dispatch_now,
+                            )?;
+                        }
+                        Err(error) => {
+                            let mut detail =
+                                format!("as-run projection is pending recovery: {error:?}");
+                            detail.truncate(512);
+                            observe_asrun_projection_alert_failure(
+                                &store,
+                                &channel.channel_id,
+                                &detail,
+                                dispatch_now,
+                                &error,
+                            )?;
+                        }
+                    }
+                }
+            }
+        }
         on_reconciled();
         std::thread::sleep(Duration::from_millis(50));
     }
@@ -4089,6 +4147,42 @@ where
         controller.shutdown(Duration::from_secs(3))?;
     }
     Ok(())
+}
+
+/// A reporting projection failure is recoverable; failure to durably record
+/// or resolve its operator alert is not silently recoverable. Returning this
+/// error lets the supervisor restart/escalate rather than losing the only
+/// durable signal that the reporting lane is unhealthy.
+fn observe_asrun_projection_alert_failure(
+    store: &StationStore,
+    channel_id: &str,
+    detail: &str,
+    now: i64,
+    projection_error: &impl std::fmt::Debug,
+) -> Result<(), OrchestrationError> {
+    store
+        .observe_asrun_projection_failure_and_route(channel_id, detail, now)
+        .map(|_| ())
+        .map_err(|delivery_error| {
+            OrchestrationError::Storage(format!(
+                "as-run projection failed ({projection_error:?}) and durable alert routing failed: {delivery_error}"
+            ))
+        })
+}
+
+fn resolve_asrun_projection_alert_after_catch_up(
+    store: &StationStore,
+    channel_id: &str,
+    now: i64,
+) -> Result<(), OrchestrationError> {
+    store
+        .resolve_asrun_projection_failure_after_catch_up(channel_id, now)
+        .map(|_| ())
+        .map_err(|error| {
+            OrchestrationError::Storage(format!(
+                "as-run projection caught up but durable alert resolution failed: {error}"
+            ))
+        })
 }
 
 fn fail_active_takeover(
@@ -4374,9 +4468,10 @@ mod tests {
         caption_capture_timing, caption_miss_reason_for_attempt_failure,
         capture_duration_for_sample, cleanup_orphan_output_proof_artifacts, due_caption_cues,
         expire_due_bulletins, generate_live_arm_token, hash_capture, is_abort_confirmation,
-        lease_renewal_due, managed_cg_image_root, observe_caption_cue_misses,
-        on_air_source_started_at, promote_caption_proof_artifact, proof_artifact_path,
-        proof_bindings_match, ready_duration_is_bounded, resolve_caption_cue_miss_after_admission,
+        lease_renewal_due, managed_cg_image_root, observe_asrun_projection_alert_failure,
+        observe_caption_cue_misses, on_air_source_started_at, promote_caption_proof_artifact,
+        proof_artifact_path, proof_bindings_match, ready_duration_is_bounded,
+        resolve_asrun_projection_alert_after_catch_up, resolve_caption_cue_miss_after_admission,
         resolved_snapshot_to_protocol, stalled_required_output,
     };
     use sha2::{Digest, Sha256};
@@ -4491,6 +4586,35 @@ mod tests {
             managed_cg_image_root(&database),
             PathBuf::from(r"C:\ProgramData\TownLight Station\cg-images")
         );
+    }
+
+    #[test]
+    fn asrun_alert_observe_and_resolve_persistence_failures_are_supervised() {
+        let path = database_path("asrun-alert-persistence");
+        let store = StationStore::open(&path).unwrap();
+        let observed = observe_asrun_projection_alert_failure(
+            &store,
+            "not-a-channel-uuid",
+            "projection cursor is corrupt",
+            1,
+            &"journal read failed",
+        )
+        .unwrap_err();
+        assert!(matches!(
+            observed,
+            OrchestrationError::Storage(message)
+                if message.contains("durable alert routing failed")
+        ));
+        let resolved =
+            resolve_asrun_projection_alert_after_catch_up(&store, "not-a-channel-uuid", 1)
+                .unwrap_err();
+        assert!(matches!(
+            resolved,
+            OrchestrationError::Storage(message)
+                if message.contains("durable alert resolution failed")
+        ));
+        drop(store);
+        remove_database(&path);
     }
 
     #[test]

@@ -97,6 +97,7 @@ station-metadata = { path = "crates/station-metadata" }
 station-orchestration = { path = "crates/station-orchestration" }
 station-automation-policy = { path = "crates/station-automation-policy" }
 station-recording = { path = "crates/station-recording" }
+station-reporting = { path = "crates/station-reporting" }
 station-publishing = { path = "crates/station-publishing" }
 station-runtime = { path = "crates/station-runtime" }
 station-readiness = { path = "crates/station-readiness" }

@@ -8,6 +8,11 @@ use std::collections::{BTreeMap, HashSet};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+/// Runtime projection adapter. It accepts only journal records that have already
+/// been bound to catalog and schedule authority; it never manufactures airings
+/// from a browser or schedule intent.
+pub mod runtime;
+
 pub const MAX_AS_RUN_FACTS: usize = 100_000;
 pub const MAX_REPORT_ROWS: usize = 10_000;
 pub const MAX_EXPORT_ROWS: usize = 100_000;
