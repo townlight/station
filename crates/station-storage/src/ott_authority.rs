@@ -722,7 +722,7 @@ impl StationStore {
 
     fn ott_capacity_retry(&self, now_unix_ms: i64) -> Result<OttAuthorityError, OttAuthorityError> {
         let statement = self.prepare(
-            "SELECT COUNT(*),MIN(expires_at_unix_ms),MAX(expires_at_unix_ms),SUM(CASE WHEN issued_at_unix_ms<0 OR (expires_at_unix_ms>?1 AND issued_at_unix_ms<expires_at_unix_ms-?1) THEN 1 ELSE 0 END) FROM ott_playback_sessions",
+            "SELECT COUNT(*),MIN(expires_at_unix_ms),MAX(expires_at_unix_ms),SUM(CASE WHEN issued_at_unix_ms<0 OR expires_at_unix_ms<=issued_at_unix_ms OR (expires_at_unix_ms>?1 AND issued_at_unix_ms<expires_at_unix_ms-?1) THEN 1 ELSE 0 END) FROM ott_playback_sessions",
         )?;
         bind_i64(self.database, statement.raw, 1, SESSION_TTL_MS)?;
         if unsafe { sqlite3_step(statement.raw) } != SQLITE_ROW
@@ -1364,6 +1364,27 @@ mod tests {
             store.collect_ott_playback_beacon(&beacon, 1_700_000_000_002),
             Err(OttAuthorityError::RateLimited(_))
         ));
+        drop(store);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn capacity_retry_rejects_signed_and_reversed_session_times() {
+        let (store, path) = test_store();
+        store.execute("PRAGMA ignore_check_constraints=ON; INSERT INTO ott_playback_sessions(session_id,request_id,content_id,client_id,catalog_revision,session_revision,server_session_digest,issued_at_unix_ms,expires_at_unix_ms,client_json,capability_ciphertext) VALUES('10000000-0000-4000-8000-000000000002','reversed-time','{}','{}',1,1,printf('%064d',0),1700000000000,1700000000000,'{}',X'00'); PRAGMA ignore_check_constraints=OFF;").unwrap();
+        assert_eq!(
+            store.ott_capacity_retry(1_700_000_000_000),
+            Err(OttAuthorityError::Corrupt)
+        );
+        drop(store);
+        let _ = std::fs::remove_file(path);
+
+        let (store, path) = test_store();
+        store.execute("PRAGMA ignore_check_constraints=ON; INSERT INTO ott_playback_sessions(session_id,request_id,content_id,client_id,catalog_revision,session_revision,server_session_digest,issued_at_unix_ms,expires_at_unix_ms,client_json,capability_ciphertext) VALUES('10000000-0000-4000-8000-000000000001','negative-time','{}','{}',1,1,printf('%064d',0),-1,1,'{}',X'00'); PRAGMA ignore_check_constraints=OFF;").unwrap();
+        assert_eq!(
+            store.ott_capacity_retry(1_700_000_000_000),
+            Err(OttAuthorityError::Corrupt)
+        );
         drop(store);
         let _ = std::fs::remove_file(path);
     }

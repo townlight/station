@@ -61,7 +61,7 @@ consume a window. A full window or retained-row cap returns a typed 429 with a b
 boundary. Every OTT `Retry-After` is capped at 87,300 seconds, the 15-minute
 session lifetime plus the 24-hour post-expiry retention horizon. A retained capacity
 row whose expiry lies beyond the server-owned session lifetime, has a negative issue
-time, or spans more than the 15-minute server-owned TTL is corrupt authority, not a
+time, does not expire strictly after issuance, or spans more than the 15-minute server-owned TTL is corrupt authority, not a
 client retry schedule, and fails closed without a `Retry-After` header. This is
 conservative station-wide protection, not per-device fairness or
 cryptographic client authentication. Even if every window is filled throughout the
