@@ -2,7 +2,7 @@ use std::ffi::{CString, c_char, c_int, c_void};
 use std::path::{Path, PathBuf};
 use std::ptr;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use sha2::{Digest, Sha256};
@@ -16,7 +16,7 @@ use station_automation_policy::{
 use station_maintenance::{VerifiedInstallAuthority, verified_install_authority_for_test};
 use station_storage::{
     AutomationExecutionAdapter, AutomationExecutionJobRecord, AutomationExecutionJobState,
-    StationStore, run_automation_execution_controller_iteration,
+    AutomationExecutionSetupFault, StationStore, run_automation_execution_controller_iteration,
     run_automation_execution_controller_iteration_with_stop,
     run_automation_execution_controller_iteration_with_stop_and_elapsed,
 };
@@ -1351,6 +1351,60 @@ fn job_containment_reaps_an_early_descendant_holding_a_pipe() {
     );
     drop(store);
     let _ = std::fs::remove_file(database);
+}
+
+fn assert_setup_fault_is_bounded_and_fails_closed(
+    fault: AutomationExecutionSetupFault,
+    name: &str,
+) {
+    let (database, store) = configured_store(name);
+    store
+        .enqueue_automation_execution_job(&request(), &candidate(), 100)
+        .unwrap();
+    let adapter = blocking_test_adapter().with_test_setup_fault(fault);
+    let mut times = [150_i64, 151, 200].into_iter();
+    let started = Instant::now();
+    assert!(
+        run_automation_execution_controller_iteration(
+            &store,
+            Some(&adapter),
+            &candidate(),
+            "stationd-test-controller",
+            &mut || Ok(times.next().unwrap()),
+        )
+        .expect("setup fault must kill and bounded-reap its exact suspended child")
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(3),
+        "setup fault held the fence beyond bounded reap"
+    );
+    let pending = store
+        .read_automation_execution_job(JOB_ID)
+        .unwrap()
+        .unwrap();
+    assert_eq!(pending.state, AutomationExecutionJobState::Pending);
+    assert_eq!(
+        pending.last_failure_code.as_deref(),
+        Some("adapter_unavailable")
+    );
+    drop(store);
+    let _ = std::fs::remove_file(database);
+}
+
+#[test]
+fn forced_job_assignment_failure_kills_and_bounded_reaps_exact_suspended_child() {
+    assert_setup_fault_is_bounded_and_fails_closed(
+        AutomationExecutionSetupFault::AssignProcess,
+        "automation-execution-forced-assign-failure",
+    );
+}
+
+#[test]
+fn forced_primary_thread_resume_failure_terminates_job_and_bounded_reaps_child() {
+    assert_setup_fault_is_bounded_and_fails_closed(
+        AutomationExecutionSetupFault::ResumeThread,
+        "automation-execution-forced-resume-failure",
+    );
 }
 
 #[test]

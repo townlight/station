@@ -11,7 +11,7 @@ pub use automation_execution_authority::{
 pub use media_lifecycle_authority::{AssetRetentionHistoryEntry, MediaLifecycleScanResult};
 mod automation_execution_controller;
 pub use automation_execution_controller::{
-    AutomationExecutionAdapter, AutomationExecutionAdapterFailure,
+    AutomationExecutionAdapter, AutomationExecutionAdapterFailure, AutomationExecutionSetupFault,
     run_automation_execution_controller_iteration,
     run_automation_execution_controller_iteration_with_stop,
     run_automation_execution_controller_iteration_with_stop_and_elapsed,

@@ -88,6 +88,14 @@ pub struct AutomationExecutionAdapter {
     executable: PathBuf,
     executable_sha256: String,
     arguments: Vec<OsString>,
+    setup_fault: Option<AutomationExecutionSetupFault>,
+}
+
+#[doc(hidden)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AutomationExecutionSetupFault {
+    AssignProcess,
+    ResumeThread,
 }
 
 impl AutomationExecutionAdapter {
@@ -124,7 +132,14 @@ impl AutomationExecutionAdapter {
             executable,
             executable_sha256,
             arguments,
+            setup_fault: None,
         })
+    }
+
+    #[doc(hidden)]
+    pub fn with_test_setup_fault(mut self, fault: AutomationExecutionSetupFault) -> Self {
+        self.setup_fault = Some(fault);
+        self
     }
 
     pub fn adapter_id(&self) -> &str {
@@ -415,7 +430,13 @@ impl OwnedAutomationExecutionProcess {
             )
             .spawn()
             .map_err(|_| AutomationExecutionAdapterFailure::RetryableUnavailable)?;
-        if let Err(error) = job.assign(&child) {
+        let assignment =
+            if adapter.setup_fault == Some(AutomationExecutionSetupFault::AssignProcess) {
+                Err(AutomationExecutionAdapterFailure::RetryableUnavailable)
+            } else {
+                job.assign(&child)
+            };
+        if let Err(error) = assignment {
             child
                 .kill()
                 .map_err(|_| AutomationExecutionAdapterFailure::RetryableUnavailable)?;
@@ -432,7 +453,12 @@ impl OwnedAutomationExecutionProcess {
             .ok_or(AutomationExecutionAdapterFailure::PermanentInvalidResponse)?;
         let stdout = spawn_bounded_pipe_drain(stdout, MAX_AUTOMATION_EXECUTION_STDOUT_BYTES);
         let stderr = spawn_bounded_pipe_drain(stderr, MAX_AUTOMATION_EXECUTION_STDERR_BYTES);
-        if let Err(error) = resume_suspended_process_primary_thread(child.id()) {
+        let resume = if adapter.setup_fault == Some(AutomationExecutionSetupFault::ResumeThread) {
+            Err(AutomationExecutionAdapterFailure::RetryableUnavailable)
+        } else {
+            resume_suspended_process_primary_thread(child.id())
+        };
+        if let Err(error) = resume {
             job.terminate()?;
             bounded_reap_child(&mut child)?;
             let _ = stdout.join();
