@@ -229,9 +229,9 @@ impl StationStore {
         let client_json = serde_json::to_string(&request.client)
             .map_err(|error| format!("serialize OTT client: {error}"))?;
         let request_hash = format!("{:x}", Sha256::digest(client_json.as_bytes()));
+        self.run_ott_reclamation(now_unix_ms)?;
         self.execute("BEGIN IMMEDIATE")?;
         let result = (|| {
-            self.reclaim_expired_ott_sessions(now_unix_ms)?;
             let existing = self.prepare("SELECT session_id,content_id,client_id,catalog_revision,session_revision,server_session_digest,issued_at_unix_ms,expires_at_unix_ms,client_json,capability_ciphertext FROM ott_playback_sessions WHERE request_id=?1")?;
             let request_id = c_string(&request.request_id, "OTT session request identity")?;
             bind_text(self.database, existing.raw, 1, &request_id)?;
@@ -360,9 +360,9 @@ impl StationStore {
         if now_unix_ms < 0 {
             return Err("OTT beacon time is invalid".to_string().into());
         }
+        self.run_ott_reclamation(now_unix_ms)?;
         self.execute("BEGIN IMMEDIATE")?;
         let result = (|| {
-            self.reclaim_expired_ott_sessions(now_unix_ms)?;
             let existing = self.prepare("SELECT session_id,beacon_json,accepted_at_unix_ms FROM ott_playback_beacons WHERE beacon_id=?1")?;
             let beacon_id = c_string(&beacon.beacon_id, "OTT beacon identity")?;
             bind_text(self.database, existing.raw, 1, &beacon_id)?;
@@ -654,6 +654,12 @@ impl StationStore {
         bind_i64(self.database, sessions.raw, 2, session_limit)?;
         expect_done(self.database, sessions.raw)?;
         u64::try_from(self.changes()).map_err(|_| OttAuthorityError::Internal)
+    }
+
+    fn run_ott_reclamation(&self, now_unix_ms: i64) -> Result<u64, OttAuthorityError> {
+        self.execute("BEGIN IMMEDIATE")?;
+        let outcome = self.reclaim_expired_ott_sessions(now_unix_ms);
+        self.finish_ott_transaction(outcome)
     }
 
     fn consume_ott_admission_window(
@@ -1432,6 +1438,135 @@ mod tests {
             ))
             .unwrap();
         assert_eq!(unsafe { sqlite3_step(parent.raw) }, SQLITE_DONE);
+        drop(store);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn rejected_capacity_admission_still_commits_bounded_reclamation_progress() {
+        let (store, path) = test_store();
+        store.write_ott_catalog_page(&catalog(), "test", 1).unwrap();
+        let sessions = format!(
+            "WITH RECURSIVE seq(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM seq WHERE x < {count}) INSERT INTO ott_playback_sessions(session_id,request_id,content_id,client_id,catalog_revision,session_revision,server_session_digest,issued_at_unix_ms,expires_at_unix_ms,client_json,capability_ciphertext) SELECT printf('%08d-1000-4000-8000-000000000000',x),printf('wedged-%d',x),'{CONTENT}','{CLIENT}',1,1,printf('%064d',0),1,2,'{{}}',X'00' FROM seq",
+            count = MAX_TOTAL_SESSIONS
+        );
+        store.execute(&sessions).unwrap();
+        let one_each = format!(
+            "WITH RECURSIVE seq(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM seq WHERE x < {count}) INSERT INTO ott_playback_beacons(beacon_id,session_id,beacon_json,accepted_at_unix_ms) SELECT printf('%08d-aaaa-4aaa-8aaa-aaaaaaaaaaaa',x),printf('%08d-1000-4000-8000-000000000000',x),'{{}}',1 FROM seq",
+            count = MAX_TOTAL_SESSIONS
+        );
+        store.execute(&one_each).unwrap();
+        let extra = format!(
+            "WITH RECURSIVE seq(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM seq WHERE x <= {count}) INSERT INTO ott_playback_beacons(beacon_id,session_id,beacon_json,accepted_at_unix_ms) SELECT printf('%08d-bbbb-4bbb-8bbb-bbbbbbbbbbbb',x),'00000001-1000-4000-8000-000000000000','{{}}',1 FROM seq",
+            count = MAX_RECLAIMED_BEACONS_PER_REQUEST
+        );
+        store.execute(&extra).unwrap();
+        let request = PlaybackSessionIssueRequest {
+            request_id: "recover-after-capacity".into(),
+            content_id: CONTENT.into(),
+            client: client(),
+        };
+        let now = 1_700_000_000_000;
+        assert!(matches!(
+            store.issue_ott_playback_session(&request, now),
+            Err(OttAuthorityError::RateLimited(_))
+        ));
+        let beacons = store
+            .prepare("SELECT COUNT(*) FROM ott_playback_beacons")
+            .unwrap();
+        assert_eq!(unsafe { sqlite3_step(beacons.raw) }, SQLITE_ROW);
+        assert_eq!(
+            unsafe { sqlite3_column_int64(beacons.raw, 0) },
+            i64::try_from(MAX_TOTAL_SESSIONS).unwrap() + 1
+        );
+
+        store.issue_ott_playback_session(&request, now + 1).unwrap();
+        let sessions = store
+            .prepare("SELECT COUNT(*) FROM ott_playback_sessions")
+            .unwrap();
+        assert_eq!(unsafe { sqlite3_step(sessions.raw) }, SQLITE_ROW);
+        assert!(
+            unsafe { sqlite3_column_int64(sessions.raw, 0) }
+                < i64::try_from(MAX_TOTAL_SESSIONS).unwrap()
+        );
+        drop(store);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn interrupted_reclamation_transaction_rolls_back_before_later_progress() {
+        let (store, path) = test_store();
+        let session_id = "88888888-1000-4000-8000-000000000000";
+        store.execute(&format!("INSERT INTO ott_playback_sessions(session_id,request_id,content_id,client_id,catalog_revision,session_revision,server_session_digest,issued_at_unix_ms,expires_at_unix_ms,client_json,capability_ciphertext) VALUES('{session_id}','rollback-maintenance','{CONTENT}','{CLIENT}',1,1,printf('%064d',0),1,2,'{{}}',X'00'); INSERT INTO ott_playback_beacons(beacon_id,session_id,beacon_json,accepted_at_unix_ms) VALUES('88888888-aaaa-4aaa-8aaa-aaaaaaaaaaaa','{session_id}','{{}}',1);")).unwrap();
+        let now = 1_700_000_000_000;
+        store.execute("BEGIN IMMEDIATE").unwrap();
+        assert_eq!(store.reclaim_expired_ott_sessions(now).unwrap(), 1);
+        assert_eq!(
+            store.finish_ott_transaction::<()>(Err(OttAuthorityError::Internal)),
+            Err(OttAuthorityError::Internal)
+        );
+        let retained = store
+            .prepare(&format!(
+                "SELECT COUNT(*) FROM ott_playback_sessions WHERE session_id='{session_id}'"
+            ))
+            .unwrap();
+        assert_eq!(unsafe { sqlite3_step(retained.raw) }, SQLITE_ROW);
+        assert_eq!(unsafe { sqlite3_column_int64(retained.raw, 0) }, 1);
+        let retained_beacon = store
+            .prepare(&format!(
+                "SELECT COUNT(*) FROM ott_playback_beacons WHERE session_id='{session_id}'"
+            ))
+            .unwrap();
+        assert_eq!(unsafe { sqlite3_step(retained_beacon.raw) }, SQLITE_ROW);
+        assert_eq!(unsafe { sqlite3_column_int64(retained_beacon.raw, 0) }, 1);
+
+        assert_eq!(store.run_ott_reclamation(now).unwrap(), 1);
+        let reclaimed = store
+            .prepare(&format!(
+                "SELECT 1 FROM ott_playback_sessions WHERE session_id='{session_id}'"
+            ))
+            .unwrap();
+        assert_eq!(unsafe { sqlite3_step(reclaimed.raw) }, SQLITE_DONE);
+        drop(store);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn stale_beacon_rejection_still_commits_unrelated_reclamation_progress() {
+        let (store, path) = test_store();
+        store.write_ott_catalog_page(&catalog(), "test", 1).unwrap();
+        let request = PlaybackSessionIssueRequest {
+            request_id: "live-during-stale-maintenance".into(),
+            content_id: CONTENT.into(),
+            client: client(),
+        };
+        let issued = store
+            .issue_ott_playback_session(&request, 1_700_000_000_000)
+            .unwrap();
+        let expired = format!(
+            "WITH RECURSIVE seq(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM seq WHERE x < {count}) INSERT INTO ott_playback_sessions(session_id,request_id,content_id,client_id,catalog_revision,session_revision,server_session_digest,issued_at_unix_ms,expires_at_unix_ms,client_json,capability_ciphertext) SELECT printf('%08d-2000-4000-8000-000000000000',x),printf('stale-maintenance-%d',x),'{CONTENT}','{CLIENT}',1,1,printf('%064d',0),1,2,'{{}}',X'00' FROM seq",
+            count = MAX_RECLAIMED_SESSIONS_PER_REQUEST + 1
+        );
+        store.execute(&expired).unwrap();
+        let beacon = ClientPlaybackBeacon {
+            contract_version: OTT_CONTRACT_VERSION,
+            beacon_id: "99999999-aaaa-4aaa-8aaa-aaaaaaaaaaaa".into(),
+            session_id: issued.session.session_id.clone(),
+            session_revision: issued.session.session_revision,
+            session_capability: issued.session_capability,
+            observed_at_unix_ms: issued.session.issued_at_unix_ms + 1,
+            event: PlaybackBeaconEvent::Started,
+            position_ms: 0,
+        };
+        assert_eq!(
+            store.collect_ott_playback_beacon(&beacon, issued.session.expires_at_unix_ms),
+            Err(OttAuthorityError::Stale)
+        );
+        let sessions = store
+            .prepare("SELECT COUNT(*) FROM ott_playback_sessions")
+            .unwrap();
+        assert_eq!(unsafe { sqlite3_step(sessions.raw) }, SQLITE_ROW);
+        assert_eq!(unsafe { sqlite3_column_int64(sessions.raw, 0) }, 2);
         drop(store);
         let _ = std::fs::remove_file(path);
     }

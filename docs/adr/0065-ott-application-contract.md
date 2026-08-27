@@ -39,10 +39,14 @@ remains a trusted in-process source seam: there is no production publisher or ex
 entitlement provider yet. The persistence prototype has fixed session/beacon capacity
 but no permanent lifetime cap: playback sessions and their beacon/state rows are
 TTL-scoped ephemeral authority, not an indefinite audit log. Each session request or
-beacon transaction deletes at most 4,096 beacon rows and then at most 64 now-childless
+beacon request first commits a separate bounded maintenance transaction that deletes
+at most 4,096 beacon rows and then at most 64 now-childless
 sessions whose 15-minute session expiry is at least 24 hours old, together with only
-those sessions' state rows, before
-counting retained rows for admission. Live and within-retention request identities
+those sessions' state rows. Admission then runs in its own transaction and counts the
+post-maintenance retained rows. A rejected capacity, stale-session, replay-conflict,
+or invalid-sequence outcome therefore cannot roll back already completed maintenance;
+an interrupted maintenance transaction itself rolls back all of its partial deletions.
+Live and within-retention request identities
 are never reclaimed; request replay remains exact until reclamation, after which the
 same request identity may establish a new session.
 
