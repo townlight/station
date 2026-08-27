@@ -13,6 +13,13 @@ pub const MAX_SESSION_REQUEST_ID_BYTES: usize = 128;
 pub const MAX_BEACONS_PER_SESSION: u32 = 10_000;
 pub const MAX_TOTAL_SESSIONS: u64 = 10_000;
 pub const MAX_TOTAL_BEACONS: u64 = 100_000;
+pub const MAX_SESSION_ISSUES_PER_WINDOW: u32 = 5;
+pub const MAX_BEACONS_PER_WINDOW: u32 = 48;
+pub const ADMISSION_WINDOW_MS: i64 = 60 * 1_000;
+pub const MIN_BEACON_INTERVAL_MS: i64 = 1_000;
+pub const SESSION_RETENTION_AFTER_EXPIRY_MS: i64 = 24 * 60 * 60 * 1_000;
+pub const MAX_RECLAIMED_SESSIONS_PER_REQUEST: u32 = 64;
+pub const MAX_RECLAIMED_BEACONS_PER_REQUEST: u32 = 4_096;
 pub const MAX_BEACON_POSITION_MS: u64 = station_ott_contract::MAX_VOD_DURATION_MS;
 pub const MAX_BEACON_CLOCK_SKEW_MS: i64 = 5 * 60 * 1_000;
 pub const SESSION_TTL_MS: i64 = 15 * 60 * 1_000;
@@ -115,5 +122,19 @@ mod tests {
         assert_eq!(value.len(), 36);
         assert_eq!(&value[14..15], "4");
         assert!(matches!(&value[19..20], "8" | "9" | "a" | "b"));
+    }
+
+    #[test]
+    fn admission_rates_cannot_exhaust_retained_row_capacity() {
+        let retained_windows = u64::try_from(
+            (SESSION_TTL_MS + SESSION_RETENTION_AFTER_EXPIRY_MS + ADMISSION_WINDOW_MS - 1)
+                / ADMISSION_WINDOW_MS,
+        )
+        .unwrap()
+        .saturating_add(1);
+        let maximum_sessions = retained_windows * u64::from(MAX_SESSION_ISSUES_PER_WINDOW);
+        let maximum_beacons = retained_windows * u64::from(MAX_BEACONS_PER_WINDOW);
+        assert!(maximum_sessions * 4 <= MAX_TOTAL_SESSIONS * 3);
+        assert!(maximum_beacons * 4 <= MAX_TOTAL_BEACONS * 3);
     }
 }

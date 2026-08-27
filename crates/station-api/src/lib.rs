@@ -14739,11 +14739,19 @@ fn ott_session_error(error: &OttAuthorityError) -> ApiResponse {
             "ott_request_replay_conflict",
             "The OTT session request conflicts with a previous request.",
         ),
-        OttAuthorityError::Capacity => error_response(
+        OttAuthorityError::RateLimited(seconds) => error_response(
             429,
-            "ott_capacity_reached",
-            "The OTT session service is at capacity; retry later.",
-        ),
+            "ott_rate_limited",
+            "The OTT session admission window is full; retry later.",
+        )
+        .with_header("Retry-After", seconds.max(&1).to_string())
+        .unwrap_or_else(|_| {
+            error_response(
+                500,
+                "response_error",
+                "The OTT session response could not be constructed.",
+            )
+        }),
         OttAuthorityError::InvalidCapability
         | OttAuthorityError::Stale
         | OttAuthorityError::InvalidSequence => error_response(
@@ -14773,11 +14781,19 @@ fn ott_beacon_error(error: &OttAuthorityError) -> ApiResponse {
             "ott_beacon_rejected",
             "The OTT playback beacon is stale or conflicts with session state.",
         ),
-        OttAuthorityError::Capacity => error_response(
+        OttAuthorityError::RateLimited(seconds) => error_response(
             429,
-            "ott_capacity_reached",
-            "The OTT beacon service is at capacity; retry later.",
-        ),
+            "ott_rate_limited",
+            "The OTT beacon admission window is full; retry later.",
+        )
+        .with_header("Retry-After", seconds.max(&1).to_string())
+        .unwrap_or_else(|_| {
+            error_response(
+                500,
+                "response_error",
+                "The OTT beacon response could not be constructed.",
+            )
+        }),
         OttAuthorityError::InvalidCapability => error_response(
             403,
             "ott_capability_rejected",
@@ -22748,6 +22764,43 @@ mod tests {
             .status,
             202
         );
+        for suffix in 2..=station_ott_runtime::MAX_SESSION_ISSUES_PER_WINDOW {
+            let mut admitted = request.clone();
+            admitted.request_id = format!("api-request-{suffix}");
+            let response = dispatch_http(
+                &api,
+                &runtime,
+                &raw_request(
+                    "POST",
+                    "/api/v1/ott/sessions",
+                    &[("Host", runtime.expected_host())],
+                    &serde_json::to_vec(&admitted).unwrap(),
+                ),
+            );
+            assert_eq!(response.status, 200);
+        }
+        let mut blocked_request = request;
+        blocked_request.request_id = "api-request-rate-limited".into();
+        let blocked = dispatch_http(
+            &api,
+            &runtime,
+            &raw_request(
+                "POST",
+                "/api/v1/ott/sessions",
+                &[("Host", runtime.expected_host())],
+                &serde_json::to_vec(&blocked_request).unwrap(),
+            ),
+        );
+        assert_eq!(blocked.status, 429);
+        let retry_after = blocked
+            .headers
+            .iter()
+            .find(|header| header.name == "Retry-After")
+            .unwrap()
+            .value
+            .parse::<u64>()
+            .unwrap();
+        assert!((1..=60).contains(&retry_after));
         drop(api);
         let _ = std::fs::remove_file(database);
     }
@@ -22760,5 +22813,23 @@ mod tests {
         let beacon_error = ott_beacon_error(&OttAuthorityError::Corrupt);
         assert_eq!(beacon_error.status, 500);
         assert!(!String::from_utf8_lossy(&beacon_error.body).contains("secret"));
+        let throttled_session = ott_session_error(&OttAuthorityError::RateLimited(7));
+        assert_eq!(throttled_session.status, 429);
+        assert_eq!(
+            throttled_session.headers,
+            vec![ApiResponseHeader {
+                name: "Retry-After",
+                value: "7".into(),
+            }]
+        );
+        let throttled_beacon = ott_beacon_error(&OttAuthorityError::RateLimited(11));
+        assert_eq!(throttled_beacon.status, 429);
+        assert_eq!(
+            throttled_beacon.headers,
+            vec![ApiResponseHeader {
+                name: "Retry-After",
+                value: "11".into(),
+            }]
+        );
     }
 }
