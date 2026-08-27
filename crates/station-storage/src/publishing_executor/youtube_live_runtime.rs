@@ -20,6 +20,7 @@ use windows_sys::Win32::System::JobObjects::{
     JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
     SetInformationJobObject, TerminateJobObject,
 };
+use zeroize::{Zeroize, Zeroizing};
 
 const MAX_HTTP_BODY_BYTES: usize = 1_048_576;
 const MAX_SECRET_BYTES: usize = 4_096;
@@ -29,6 +30,7 @@ const BROADCAST_COMPLETE_TIMEOUT: Duration = Duration::from_secs(60);
 const POLL_INTERVAL: Duration = Duration::from_millis(500);
 const PROCESS_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
 const WORKER_RESULT_BYTES: usize = 4 * 1024;
+const ACCESS_TOKEN_REFRESH_SKEW_MS: i64 = 10_000;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Endpoint {
@@ -41,8 +43,8 @@ enum Endpoint {
 
 struct HttpRequest {
     endpoint: Endpoint,
-    authorization: Option<String>,
-    form: Vec<(String, String)>,
+    authorization: Option<Zeroizing<String>>,
+    form: Vec<(Zeroizing<String>, Zeroizing<String>)>,
 }
 
 struct HttpResponse {
@@ -90,7 +92,6 @@ struct VerifiedFfmpeg {
     sha256: String,
 }
 
-#[derive(serde::Serialize)]
 struct WorkerCommand {
     schema_version: u8,
     managed_media_root: String,
@@ -99,7 +100,27 @@ struct WorkerCommand {
     expected_sha256: String,
     expected_duration_ms: u64,
     rtmps_ingestion_address: String,
-    stream_key: String,
+    stream_key: Zeroizing<String>,
+}
+
+impl serde::Serialize for WorkerCommand {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeStruct;
+
+        let mut state = serializer.serialize_struct("WorkerCommand", 8)?;
+        state.serialize_field("schema_version", &self.schema_version)?;
+        state.serialize_field("managed_media_root", &self.managed_media_root)?;
+        state.serialize_field("media_path", &self.media_path)?;
+        state.serialize_field("expected_bytes", &self.expected_bytes)?;
+        state.serialize_field("expected_sha256", &self.expected_sha256)?;
+        state.serialize_field("expected_duration_ms", &self.expected_duration_ms)?;
+        state.serialize_field("rtmps_ingestion_address", &self.rtmps_ingestion_address)?;
+        state.serialize_field("stream_key", self.stream_key.as_str())?;
+        state.end()
+    }
 }
 
 impl Drop for WorkerCommand {
@@ -117,6 +138,16 @@ struct WorkerDelivery {
     media_bytes: u64,
     media_sha256: String,
     failure_code: Option<String>,
+}
+
+impl Drop for WorkerDelivery {
+    fn drop(&mut self) {
+        zero_string(&mut self.outcome);
+        zero_string(&mut self.media_sha256);
+        if let Some(failure_code) = &mut self.failure_code {
+            zero_string(failure_code);
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -168,11 +199,10 @@ fn execute_with<R: RuntimeIo>(
     // and reaped. The process path cannot be substituted between its verified
     // identity check and this controller's bounded execution.
     let _ffmpeg_pin = verify_ffmpeg_identity(ffmpeg)?;
-    let mut oauth = OAuthCredential::parse(credential)?;
+    let oauth = OAuthCredential::parse(credential)?;
     let mut access_token = refresh_access_token(runtime, &oauth)?;
-    oauth.zeroize();
     let result = {
-        let mut authorization = format!("Bearer {access_token}");
+        let mut authorization = access_token.authorization();
         let provider_result = (|| {
             let mut broadcast = get_broadcast(runtime, broadcast_id, &authorization)?;
             require_broadcast_binding(
@@ -186,7 +216,7 @@ fn execute_with<R: RuntimeIo>(
             let broadcast_digest = broadcast.digest();
             broadcast.zeroize();
             let mut stream = get_stream(runtime, stream_id, &authorization)?;
-            let mut ingestion = require_stream_binding(&stream, channel_id, stream_id, false)?;
+            let mut ingestion = require_stream_binding(&mut stream, channel_id, stream_id, false)?;
             let stream_binding_digest = stream.digest();
             let mut command = WorkerCommand {
                 schema_version: 1,
@@ -209,11 +239,19 @@ fn execute_with<R: RuntimeIo>(
                     process.as_deref_mut().expect("ffmpeg process retained"),
                     channel_id,
                     stream_id,
-                    &authorization,
+                    &oauth,
+                    &mut access_token,
+                    &mut authorization,
                     heartbeat,
                 )?;
                 let active_stream_digest = active_stream.digest();
                 active_stream.zeroize();
+                refresh_authorization_if_due(
+                    runtime,
+                    &oauth,
+                    &mut access_token,
+                    &mut authorization,
+                )?;
                 let mut transitioned =
                     transition_broadcast_live(runtime, broadcast_id, &authorization)?;
                 require_broadcast_binding(
@@ -233,7 +271,9 @@ fn execute_with<R: RuntimeIo>(
                     broadcast_id,
                     stream_id,
                     privacy_status,
-                    &authorization,
+                    &oauth,
+                    &mut access_token,
+                    &mut authorization,
                     heartbeat,
                 )?;
                 let live_observation_digest = observed.digest();
@@ -248,6 +288,12 @@ fn execute_with<R: RuntimeIo>(
                     .wait_for_delivery(maximum_runtime, heartbeat)?;
                 validate_worker_delivery(&delivery, job)?;
                 process.take();
+                refresh_authorization_if_due(
+                    runtime,
+                    &oauth,
+                    &mut access_token,
+                    &mut authorization,
+                )?;
                 let mut completed =
                     transition_broadcast_complete(runtime, broadcast_id, &authorization)?;
                 require_broadcast_lifecycle(
@@ -266,13 +312,16 @@ fn execute_with<R: RuntimeIo>(
                     broadcast_id,
                     stream_id,
                     privacy_status,
-                    &authorization,
+                    &oauth,
+                    &mut access_token,
+                    &mut authorization,
                     heartbeat,
                 )?;
                 let complete_observation_digest = completed_observation.digest();
                 completed_observation.zeroize();
+                let terminal_observed_at_monotonic_ms = runtime.now()?;
                 let evidence = format!(
-                    "youtube-live-v2|{}|{}|{}|{}|{}|{}|{}|{}|{}",
+                    "youtube-live-v3|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}",
                     broadcast_digest,
                     stream_binding_digest,
                     active_stream_digest,
@@ -280,6 +329,12 @@ fn execute_with<R: RuntimeIo>(
                     live_observation_digest,
                     complete_transition_digest,
                     complete_observation_digest,
+                    delivery.schema_version,
+                    delivery.outcome,
+                    delivery.media_sha256,
+                    delivery.media_bytes,
+                    delivery.failure_code.as_deref().unwrap_or(""),
+                    terminal_observed_at_monotonic_ms,
                     job.media_sha256,
                     job.media_bytes,
                 );
@@ -299,21 +354,34 @@ fn execute_with<R: RuntimeIo>(
                 )),
             }
         })();
-        zero_string(&mut authorization);
+        authorization.zeroize();
         provider_result
     };
-    zero_string(&mut access_token);
+    access_token.zeroize();
     result.map(|digest| ProviderStageEvidence {
         stage: PublishExecutionStage::Published,
         digest,
-        detail: "YouTube observed the exact configured broadcast live with the required privacy status after the exact stream became active.".into(),
+        detail: "YouTube observed the exact configured broadcast complete after exact full-media delivery on the active, healthy configured stream.".into(),
     })
 }
 
 struct OAuthCredential {
-    client_id: String,
-    client_secret: String,
-    refresh_token: String,
+    client_id: Zeroizing<String>,
+    client_secret: Zeroizing<String>,
+    refresh_token: Zeroizing<String>,
+}
+
+/// A parsed secret always owns zeroizing storage, including while Serde is
+/// unwinding a partially-valid OAuth payload.
+struct SecretText(Zeroizing<String>);
+
+impl<'de> serde::Deserialize<'de> for SecretText {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        String::deserialize(deserializer).map(|value| Self(Zeroizing::new(value)))
+    }
 }
 
 impl OAuthCredential {
@@ -321,36 +389,40 @@ impl OAuthCredential {
         #[derive(serde::Deserialize)]
         #[serde(deny_unknown_fields)]
         struct Wire {
-            client_id: String,
-            client_secret: String,
-            refresh_token: String,
+            client_id: SecretText,
+            client_secret: SecretText,
+            refresh_token: SecretText,
         }
         let mut wire: Wire = serde_json::from_slice(bytes)
             .map_err(|_| "YouTube credential authority is malformed")?;
-        let valid = [&wire.client_id, &wire.client_secret, &wire.refresh_token]
-            .iter()
-            .all(|secret| {
-                !(secret.is_empty()
-                    || secret.len() > MAX_SECRET_BYTES
-                    || secret.chars().any(char::is_control))
-            });
+        let valid = [
+            &wire.client_id.0,
+            &wire.client_secret.0,
+            &wire.refresh_token.0,
+        ]
+        .iter()
+        .all(|secret| {
+            !(secret.is_empty()
+                || secret.len() > MAX_SECRET_BYTES
+                || secret.chars().any(char::is_control))
+        });
         if !valid {
-            zero_string(&mut wire.client_id);
-            zero_string(&mut wire.client_secret);
-            zero_string(&mut wire.refresh_token);
+            wire.client_id.0.zeroize();
+            wire.client_secret.0.zeroize();
+            wire.refresh_token.0.zeroize();
             return Err("YouTube credential authority is invalid or unbounded".into());
         }
         Ok(Self {
-            client_id: wire.client_id,
-            client_secret: wire.client_secret,
-            refresh_token: wire.refresh_token,
+            client_id: wire.client_id.0,
+            client_secret: wire.client_secret.0,
+            refresh_token: wire.refresh_token.0,
         })
     }
 
     fn zeroize(&mut self) {
-        zero_string(&mut self.client_id);
-        zero_string(&mut self.client_secret);
-        zero_string(&mut self.refresh_token);
+        self.client_id.zeroize();
+        self.client_secret.zeroize();
+        self.refresh_token.zeroize();
     }
 }
 
@@ -360,10 +432,49 @@ impl Drop for OAuthCredential {
     }
 }
 
+struct OAuthAccessToken {
+    value: Zeroizing<String>,
+    refresh_at_monotonic_ms: i64,
+}
+
+impl OAuthAccessToken {
+    fn authorization(&self) -> Zeroizing<String> {
+        Zeroizing::new(format!("Bearer {}", self.value.as_str()))
+    }
+
+    fn needs_refresh(&self, now_monotonic_ms: i64) -> bool {
+        now_monotonic_ms >= self.refresh_at_monotonic_ms
+    }
+
+    fn zeroize(&mut self) {
+        self.value.zeroize();
+    }
+}
+
+impl Drop for OAuthAccessToken {
+    fn drop(&mut self) {
+        self.zeroize();
+    }
+}
+
+fn refresh_authorization_if_due<R: RuntimeIo>(
+    runtime: &mut R,
+    credential: &OAuthCredential,
+    access_token: &mut OAuthAccessToken,
+    authorization: &mut Zeroizing<String>,
+) -> Result<(), String> {
+    if access_token.needs_refresh(runtime.now()?) {
+        authorization.zeroize();
+        *access_token = refresh_access_token(runtime, credential)?;
+        *authorization = access_token.authorization();
+    }
+    Ok(())
+}
+
 fn refresh_access_token<R: RuntimeIo>(
     runtime: &mut R,
     credential: &OAuthCredential,
-) -> Result<String, String> {
+) -> Result<OAuthAccessToken, String> {
     let mut response = checked_response(
         request_and_zeroize(
             runtime,
@@ -371,10 +482,22 @@ fn refresh_access_token<R: RuntimeIo>(
                 endpoint: Endpoint::OAuthToken,
                 authorization: None,
                 form: vec![
-                    ("client_id".into(), credential.client_id.clone()),
-                    ("client_secret".into(), credential.client_secret.clone()),
-                    ("refresh_token".into(), credential.refresh_token.clone()),
-                    ("grant_type".into(), "refresh_token".into()),
+                    (
+                        Zeroizing::new("client_id".into()),
+                        credential.client_id.clone(),
+                    ),
+                    (
+                        Zeroizing::new("client_secret".into()),
+                        credential.client_secret.clone(),
+                    ),
+                    (
+                        Zeroizing::new("refresh_token".into()),
+                        credential.refresh_token.clone(),
+                    ),
+                    (
+                        Zeroizing::new("grant_type".into()),
+                        Zeroizing::new("refresh_token".into()),
+                    ),
                 ],
             },
         )?,
@@ -383,40 +506,54 @@ fn refresh_access_token<R: RuntimeIo>(
     #[derive(serde::Deserialize)]
     #[serde(deny_unknown_fields)]
     struct Token {
-        access_token: String,
+        access_token: SecretText,
         expires_in: u64,
         token_type: String,
         #[serde(default)]
-        scope: Option<String>,
+        scope: Option<SecretText>,
     }
     let parsed = serde_json::from_slice(&response.body);
     response.body.fill(0);
     let mut token: Token = parsed.map_err(|_| "YouTube OAuth response was malformed")?;
     if token.token_type != "Bearer"
-        || token.access_token.is_empty()
-        || token.access_token.len() > MAX_SECRET_BYTES
-        || token.access_token.chars().any(char::is_control)
+        || token.access_token.0.is_empty()
+        || token.access_token.0.len() > MAX_SECRET_BYTES
+        || token.access_token.0.chars().any(char::is_control)
         || !(60..=86_400).contains(&token.expires_in)
     {
-        zero_string(&mut token.access_token);
+        token.access_token.0.zeroize();
         zero_string(&mut token.token_type);
         if let Some(scope) = &mut token.scope {
-            zero_string(scope);
+            scope.0.zeroize();
         }
         return Err("YouTube OAuth response was invalid or unbounded".into());
     }
-    let access_token = std::mem::take(&mut token.access_token);
+    let access_token = token.access_token.0;
     zero_string(&mut token.token_type);
     if let Some(scope) = &mut token.scope {
-        zero_string(scope);
+        scope.0.zeroize();
     }
-    Ok(access_token)
+    let now_monotonic_ms = runtime.now()?;
+    let expires_in_ms = i64::try_from(token.expires_in)
+        .map_err(|_| "YouTube OAuth expiry is out of range")?
+        .checked_mul(1_000)
+        .ok_or("YouTube OAuth expiry is out of range")?;
+    let refresh_after_ms = expires_in_ms
+        .checked_sub(ACCESS_TOKEN_REFRESH_SKEW_MS.min(expires_in_ms / 2))
+        .ok_or("YouTube OAuth expiry is out of range")?;
+    let refresh_at_monotonic_ms = now_monotonic_ms
+        .checked_add(refresh_after_ms)
+        .ok_or("YouTube OAuth expiry is out of range")?;
+    Ok(OAuthAccessToken {
+        value: access_token,
+        refresh_at_monotonic_ms,
+    })
 }
 
 fn get_broadcast<R: RuntimeIo>(
     runtime: &mut R,
     broadcast_id: &str,
-    authorization: &str,
+    authorization: &Zeroizing<String>,
 ) -> Result<YouTubeDocument, String> {
     let mut response = checked_response(
         request_and_zeroize(
@@ -425,7 +562,7 @@ fn get_broadcast<R: RuntimeIo>(
                 endpoint: Endpoint::Broadcast {
                     id: broadcast_id.into(),
                 },
-                authorization: Some(authorization.into()),
+                authorization: Some(authorization.clone()),
                 form: Vec::new(),
             },
         )?,
@@ -440,7 +577,7 @@ fn get_broadcast<R: RuntimeIo>(
 fn get_stream<R: RuntimeIo>(
     runtime: &mut R,
     stream_id: &str,
-    authorization: &str,
+    authorization: &Zeroizing<String>,
 ) -> Result<YouTubeDocument, String> {
     let mut response = checked_response(
         request_and_zeroize(
@@ -449,7 +586,7 @@ fn get_stream<R: RuntimeIo>(
                 endpoint: Endpoint::Stream {
                     id: stream_id.into(),
                 },
-                authorization: Some(authorization.into()),
+                authorization: Some(authorization.clone()),
                 form: Vec::new(),
             },
         )?,
@@ -464,7 +601,7 @@ fn get_stream<R: RuntimeIo>(
 fn transition_broadcast_live<R: RuntimeIo>(
     runtime: &mut R,
     broadcast_id: &str,
-    authorization: &str,
+    authorization: &Zeroizing<String>,
 ) -> Result<YouTubeDocument, String> {
     let mut response = checked_response(
         request_and_zeroize(
@@ -473,7 +610,7 @@ fn transition_broadcast_live<R: RuntimeIo>(
                 endpoint: Endpoint::TransitionLive {
                     id: broadcast_id.into(),
                 },
-                authorization: Some(authorization.into()),
+                authorization: Some(authorization.clone()),
                 form: Vec::new(),
             },
         )?,
@@ -488,7 +625,7 @@ fn transition_broadcast_live<R: RuntimeIo>(
 fn transition_broadcast_complete<R: RuntimeIo>(
     runtime: &mut R,
     broadcast_id: &str,
-    authorization: &str,
+    authorization: &Zeroizing<String>,
 ) -> Result<YouTubeDocument, String> {
     let mut response = checked_response(
         request_and_zeroize(
@@ -497,7 +634,7 @@ fn transition_broadcast_complete<R: RuntimeIo>(
                 endpoint: Endpoint::TransitionComplete {
                     id: broadcast_id.into(),
                 },
-                authorization: Some(authorization.into()),
+                authorization: Some(authorization.clone()),
                 form: Vec::new(),
             },
         )?,
@@ -573,11 +710,11 @@ fn request_and_zeroize<R: RuntimeIo>(
 ) -> Result<HttpResponse, String> {
     let result = runtime.request(&mut request);
     if let Some(authorization) = &mut request.authorization {
-        zero_string(authorization);
+        authorization.zeroize();
     }
     for (name, value) in &mut request.form {
-        zero_string(name);
-        zero_string(value);
+        name.zeroize();
+        value.zeroize();
     }
     result
 }
@@ -585,11 +722,11 @@ fn request_and_zeroize<R: RuntimeIo>(
 impl Drop for HttpRequest {
     fn drop(&mut self) {
         if let Some(authorization) = &mut self.authorization {
-            zero_string(authorization);
+            authorization.zeroize();
         }
         for (name, value) in &mut self.form {
-            zero_string(name);
-            zero_string(value);
+            name.zeroize();
+            value.zeroize();
         }
     }
 }
@@ -740,13 +877,13 @@ fn validate_worker_delivery(
 
 struct Ingestion {
     address: String,
-    stream_key: String,
+    stream_key: Zeroizing<String>,
 }
 
 impl Ingestion {
     fn zeroize(&mut self) {
         zero_string(&mut self.address);
-        zero_string(&mut self.stream_key);
+        self.stream_key.zeroize();
     }
 }
 
@@ -757,7 +894,7 @@ impl Drop for Ingestion {
 }
 
 fn require_stream_binding(
-    document: &YouTubeDocument,
+    document: &mut YouTubeDocument,
     channel_id: &str,
     stream_id: &str,
     require_active: bool,
@@ -809,8 +946,7 @@ fn require_stream_binding(
     let stream_key = item
         .pointer("/cdn/ingestionInfo/streamName")
         .and_then(serde_json::Value::as_str)
-        .ok_or_else(|| "YouTube stream is missing a provider-issued stream key".to_string())?
-        .to_owned();
+        .ok_or_else(|| "YouTube stream is missing a provider-issued stream key".to_string())?;
     if address != "rtmps://a.rtmp.youtube.com:443/live2"
         || address.len() > 512
         || address.chars().any(char::is_control)
@@ -820,18 +956,28 @@ fn require_stream_binding(
     {
         return Err("YouTube provider-issued RTMPS ingestion authority is invalid".into());
     }
+    let stream_key = match document
+        .value
+        .pointer_mut("/items/0/cdn/ingestionInfo/streamName")
+    {
+        Some(serde_json::Value::String(value)) => Zeroizing::new(std::mem::take(value)),
+        _ => return Err("YouTube stream is missing a provider-issued stream key".into()),
+    };
     Ok(Ingestion {
         address,
         stream_key,
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn poll_stream_active<R: RuntimeIo>(
     runtime: &mut R,
     process: &mut dyn RunningFfmpeg,
     channel_id: &str,
     stream_id: &str,
-    authorization: &str,
+    credential: &OAuthCredential,
+    access_token: &mut OAuthAccessToken,
+    authorization: &mut Zeroizing<String>,
     heartbeat: &mut dyn FnMut() -> Result<(), String>,
 ) -> Result<YouTubeDocument, String> {
     let deadline = runtime
@@ -843,8 +989,9 @@ fn poll_stream_active<R: RuntimeIo>(
         if process.try_wait()?.is_some() {
             return Err("YouTube ffmpeg stopped before the configured stream became active".into());
         }
+        refresh_authorization_if_due(runtime, credential, access_token, authorization)?;
         let mut document = get_stream(runtime, stream_id, authorization)?;
-        let state = require_stream_binding(&document, channel_id, stream_id, true);
+        let state = require_stream_binding(&mut document, channel_id, stream_id, true);
         match state {
             Ok(_) => return Ok(document),
             Err(error) if error == "YouTube stream is not active yet" => document.zeroize(),
@@ -868,7 +1015,9 @@ fn poll_broadcast_live<R: RuntimeIo>(
     broadcast_id: &str,
     stream_id: &str,
     privacy_status: YouTubePrivacyStatus,
-    authorization: &str,
+    credential: &OAuthCredential,
+    access_token: &mut OAuthAccessToken,
+    authorization: &mut Zeroizing<String>,
     heartbeat: &mut dyn FnMut() -> Result<(), String>,
 ) -> Result<YouTubeDocument, String> {
     let deadline = runtime
@@ -882,6 +1031,7 @@ fn poll_broadcast_live<R: RuntimeIo>(
                 "YouTube ffmpeg stopped before the configured broadcast became live".into(),
             );
         }
+        refresh_authorization_if_due(runtime, credential, access_token, authorization)?;
         let mut document = get_broadcast(runtime, broadcast_id, authorization)?;
         let state = require_broadcast_binding(
             &document,
@@ -913,7 +1063,9 @@ fn poll_broadcast_complete<R: RuntimeIo>(
     broadcast_id: &str,
     stream_id: &str,
     privacy_status: YouTubePrivacyStatus,
-    authorization: &str,
+    credential: &OAuthCredential,
+    access_token: &mut OAuthAccessToken,
+    authorization: &mut Zeroizing<String>,
     heartbeat: &mut dyn FnMut() -> Result<(), String>,
 ) -> Result<YouTubeDocument, String> {
     let deadline = runtime
@@ -922,6 +1074,7 @@ fn poll_broadcast_complete<R: RuntimeIo>(
         .ok_or_else(|| "YouTube completion observation deadline overflowed".to_string())?;
     loop {
         heartbeat()?;
+        refresh_authorization_if_due(runtime, credential, access_token, authorization)?;
         let mut document = get_broadcast(runtime, broadcast_id, authorization)?;
         match require_broadcast_lifecycle(
             &document,
@@ -1151,7 +1304,7 @@ impl RuntimeIo for SystemRuntimeIo {
     }
 }
 
-fn encode_secret_form(fields: &[(String, String)]) -> Vec<u8> {
+fn encode_secret_form(fields: &[(Zeroizing<String>, Zeroizing<String>)]) -> Vec<u8> {
     let mut encoded = Vec::new();
     for (index, (name, value)) in fields.iter().enumerate() {
         if index != 0 {
@@ -1468,11 +1621,12 @@ mod tests {
     use std::collections::VecDeque;
     use std::sync::{
         Arc,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicI64, Ordering},
     };
 
     struct FakeProcess {
         terminated: Arc<AtomicBool>,
+        delivery_finished_at_ms: Option<(Arc<AtomicI64>, i64)>,
     }
 
     impl RunningFfmpeg for FakeProcess {
@@ -1484,6 +1638,9 @@ mod tests {
             _: Duration,
             _: &mut dyn FnMut() -> Result<(), String>,
         ) -> Result<WorkerDelivery, String> {
+            if let Some((clock, finished_at_ms)) = &self.delivery_finished_at_ms {
+                clock.store(*finished_at_ms, Ordering::Release);
+            }
             Ok(WorkerDelivery {
                 schema_version: 1,
                 outcome: "published".into(),
@@ -1504,10 +1661,11 @@ mod tests {
     struct FakeRuntime {
         responses: VecDeque<HttpResponse>,
         requests: Vec<(String, bool)>,
-        now: i64,
+        now: Arc<AtomicI64>,
         executable: Option<PathBuf>,
         worker_command_seen: bool,
         terminated: Arc<AtomicBool>,
+        worker_delivery_finished_at_ms: Option<i64>,
     }
 
     impl RuntimeIo for FakeRuntime {
@@ -1531,13 +1689,17 @@ mod tests {
                 && Path::new(&command.managed_media_root).is_absolute();
             Ok(Box::new(FakeProcess {
                 terminated: Arc::clone(&self.terminated),
+                delivery_finished_at_ms: self
+                    .worker_delivery_finished_at_ms
+                    .map(|finished_at_ms| (Arc::clone(&self.now), finished_at_ms)),
             }))
         }
         fn now(&mut self) -> Result<i64, String> {
-            Ok(self.now)
+            Ok(self.now.load(Ordering::Acquire))
         }
         fn sleep(&mut self, duration: Duration) {
-            self.now += duration.as_millis() as i64;
+            self.now
+                .fetch_add(duration.as_millis() as i64, Ordering::AcqRel);
         }
     }
 
@@ -1593,10 +1755,11 @@ mod tests {
         FakeRuntime {
             responses: responses.into(),
             requests: Vec::new(),
-            now: 0,
+            now: Arc::new(AtomicI64::new(0)),
             executable: None,
             worker_command_seen: false,
             terminated: Arc::new(AtomicBool::new(false)),
+            worker_delivery_finished_at_ms: None,
         }
     }
 
@@ -1664,6 +1827,68 @@ mod tests {
         );
         assert!(!format!("{result:?}").contains("never-durable-key"));
         assert!(!runtime.terminated.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn published_evidence_binds_the_post_terminal_observation_time() {
+        let media = std::env::temp_dir().join("townlight-youtube-runtime-observation-time.mp4");
+        fs::write(&media, [0]).unwrap();
+        let responses = || {
+            vec![
+                response(
+                    serde_json::json!({"access_token":"test-access","expires_in":3600,"token_type":"Bearer"}),
+                ),
+                broadcast("ready"),
+                stream("ready"),
+                stream("active"),
+                broadcast("live"),
+                broadcast("live"),
+                broadcast("complete"),
+                broadcast("complete"),
+            ]
+        };
+        let mut first = runtime(responses());
+        let first_result = invoke(&mut first, &media).unwrap();
+        let mut later = runtime(responses());
+        later.now.store(1, Ordering::Release);
+        let later_result = invoke(&mut later, &media).unwrap();
+        let _ = fs::remove_file(media);
+
+        assert_ne!(first_result.digest, later_result.digest);
+    }
+
+    #[test]
+    fn long_delivery_refreshes_access_before_completion() {
+        let media = std::env::temp_dir().join("townlight-youtube-runtime-refresh.mp4");
+        fs::write(&media, [0]).unwrap();
+        let mut fake = runtime(vec![
+            response(
+                serde_json::json!({"access_token":"test-access","expires_in":60,"token_type":"Bearer"}),
+            ),
+            broadcast("ready"),
+            stream("ready"),
+            stream("active"),
+            broadcast("live"),
+            broadcast("live"),
+            response(
+                serde_json::json!({"access_token":"refreshed-access","expires_in":3600,"token_type":"Bearer"}),
+            ),
+            broadcast("complete"),
+            broadcast("complete"),
+        ]);
+        fake.worker_delivery_finished_at_ms = Some(60_000);
+
+        let result = invoke(&mut fake, &media);
+
+        let _ = fs::remove_file(media);
+        assert_eq!(result.unwrap().stage, PublishExecutionStage::Published);
+        assert_eq!(
+            fake.requests
+                .iter()
+                .filter(|(endpoint, _)| endpoint.contains("OAuthToken"))
+                .count(),
+            2
+        );
     }
 
     #[test]

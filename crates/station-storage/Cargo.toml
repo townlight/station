@@ -31,6 +31,7 @@ station-update.workspace = true
 station-transport-proof.workspace = true
 ureq.workspace = true
 windows-sys.workspace = true
+zeroize.workspace = true
 
 [dev-dependencies]
 image.workspace = true

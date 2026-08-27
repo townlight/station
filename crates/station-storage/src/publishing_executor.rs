@@ -4,8 +4,8 @@ use station_publishing::{
     PublishExecutionTargetConfig, PublishTargetKind, PublishTargetProfile,
     validate_receipt_successor,
 };
-use std::fs::{self, File, OpenOptions};
-use std::io::{Read, Write};
+use std::fs::File;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::{
     Arc,
@@ -62,7 +62,7 @@ impl PublishExecutionJob {
             || !is_sha256_identity(&self.asset_id)
             || self.asset_id != self.media_sha256
             || self.media_bytes == 0
-            || !(1..=43_200_000).contains(&self.media_duration_ms)
+            || !(1..=86_400_000).contains(&self.media_duration_ms)
             || !secret_field(&self.candidate_version, 200)
             || !is_source_commit_identity(&self.source_commit)
             || !secret_field(&self.requested_by, 200)
@@ -83,6 +83,7 @@ pub struct PublishExecutionJobRecord {
     pub updated_at_unix_ms: i64,
     pub lease_expires_at_unix_ms: Option<i64>,
     pub completed_at_unix_ms: Option<i64>,
+    pub external_effect_started_at_unix_ms: Option<i64>,
     pub failure_class: Option<String>,
 }
 
@@ -142,10 +143,10 @@ impl StationStore {
                target_id TEXT NOT NULL, target_revision INTEGER NOT NULL, target_kind TEXT NOT NULL,\
                configuration_hash TEXT NOT NULL, credential_version INTEGER NOT NULL,\
                candidate_version TEXT NOT NULL, source_commit TEXT NOT NULL, install_generation INTEGER NOT NULL,\
-               asset_id TEXT NOT NULL, media_sha256 TEXT NOT NULL, media_bytes INTEGER NOT NULL, media_duration_ms INTEGER NOT NULL CHECK(media_duration_ms BETWEEN 1 AND 43200000), requested_by TEXT NOT NULL,\
+               asset_id TEXT NOT NULL, media_sha256 TEXT NOT NULL, media_bytes INTEGER NOT NULL, media_duration_ms INTEGER NOT NULL CHECK(media_duration_ms BETWEEN 1 AND 86400000), requested_by TEXT NOT NULL,\
                created_at_unix_ms INTEGER NOT NULL, state TEXT NOT NULL CHECK(state IN ('pending','running','completed','failed')),\
                attempts INTEGER NOT NULL DEFAULT 0, next_attempt_at_unix_ms INTEGER NOT NULL, updated_at_unix_ms INTEGER NOT NULL,\
-               lease_token TEXT, lease_expires_at_unix_ms INTEGER, completed_at_unix_ms INTEGER, failure_class TEXT);\
+               lease_token TEXT, lease_expires_at_unix_ms INTEGER, completed_at_unix_ms INTEGER, external_effect_started_at_unix_ms INTEGER, failure_class TEXT);\
              CREATE INDEX IF NOT EXISTS publish_execution_jobs_claim ON publish_execution_jobs(state,next_attempt_at_unix_ms,created_at_unix_ms);\
              CREATE TABLE IF NOT EXISTS publish_execution_receipts (\
                receipt_id TEXT PRIMARY KEY, job_id TEXT NOT NULL, stage TEXT NOT NULL, recorded_at_unix_ms INTEGER NOT NULL, record_json TEXT NOT NULL,\
@@ -161,6 +162,71 @@ impl StationStore {
                 "ALTER TABLE publish_execution_jobs ADD COLUMN media_duration_ms INTEGER NOT NULL DEFAULT -1;\
                  UPDATE publish_execution_jobs SET media_duration_ms=COALESCE((SELECT duration_ms FROM media_assets WHERE media_assets.asset_id=publish_execution_jobs.asset_id),-1)",
             )?;
+        }
+        if !self.sqlite_table_has_column(
+            "publish_execution_jobs",
+            "external_effect_started_at_unix_ms",
+        )? {
+            self.execute(
+                "ALTER TABLE publish_execution_jobs ADD COLUMN external_effect_started_at_unix_ms INTEGER",
+            )?;
+        }
+        self.migrate_publish_execution_duration_bound()?;
+        Ok(())
+    }
+
+    fn migrate_publish_execution_duration_bound(&self) -> Result<(), String> {
+        let definition = {
+            let statement = self.prepare(
+                "SELECT sql FROM sqlite_master WHERE type='table' AND name='publish_execution_jobs'",
+            )?;
+            match unsafe { sqlite3_step(statement.raw) } {
+                SQLITE_ROW => column_text(statement.raw, 0)?,
+                _ => return Err("publish execution job schema is unavailable".into()),
+            }
+        };
+        if definition.contains("86400000") {
+            return Ok(());
+        }
+        if !definition.contains("43200000") {
+            return Err("publish execution job duration bound is unrecognized".into());
+        }
+        // A receipt references this parent table. Retain its declared parent
+        // name while replacing the bounded CHECK constraint, then prove the
+        // foreign-key graph before opening the store for work.
+        self.execute("PRAGMA foreign_keys=OFF")?;
+        self.execute("PRAGMA legacy_alter_table=ON")?;
+        let migration = self.execute(
+            "BEGIN IMMEDIATE;\
+             DROP INDEX IF EXISTS publish_execution_jobs_claim;\
+             ALTER TABLE publish_execution_jobs RENAME TO publish_execution_jobs_legacy;\
+             CREATE TABLE publish_execution_jobs (\
+               job_id TEXT PRIMARY KEY, account_id TEXT NOT NULL, account_revision INTEGER NOT NULL,\
+               target_id TEXT NOT NULL, target_revision INTEGER NOT NULL, target_kind TEXT NOT NULL,\
+               configuration_hash TEXT NOT NULL, credential_version INTEGER NOT NULL,\
+               candidate_version TEXT NOT NULL, source_commit TEXT NOT NULL, install_generation INTEGER NOT NULL,\
+               asset_id TEXT NOT NULL, media_sha256 TEXT NOT NULL, media_bytes INTEGER NOT NULL, media_duration_ms INTEGER NOT NULL CHECK(media_duration_ms BETWEEN 1 AND 86400000), requested_by TEXT NOT NULL,\
+               created_at_unix_ms INTEGER NOT NULL, state TEXT NOT NULL CHECK(state IN ('pending','running','completed','failed')),\
+               attempts INTEGER NOT NULL DEFAULT 0, next_attempt_at_unix_ms INTEGER NOT NULL, updated_at_unix_ms INTEGER NOT NULL,\
+               lease_token TEXT, lease_expires_at_unix_ms INTEGER, completed_at_unix_ms INTEGER, external_effect_started_at_unix_ms INTEGER, failure_class TEXT\
+             );\
+             INSERT INTO publish_execution_jobs(job_id,account_id,account_revision,target_id,target_revision,target_kind,configuration_hash,credential_version,candidate_version,source_commit,install_generation,asset_id,media_sha256,media_bytes,media_duration_ms,requested_by,created_at_unix_ms,state,attempts,next_attempt_at_unix_ms,updated_at_unix_ms,lease_token,lease_expires_at_unix_ms,completed_at_unix_ms,external_effect_started_at_unix_ms,failure_class) \
+             SELECT job_id,account_id,account_revision,target_id,target_revision,target_kind,configuration_hash,credential_version,candidate_version,source_commit,install_generation,asset_id,media_sha256,media_bytes,media_duration_ms,requested_by,created_at_unix_ms,state,attempts,next_attempt_at_unix_ms,updated_at_unix_ms,lease_token,lease_expires_at_unix_ms,completed_at_unix_ms,external_effect_started_at_unix_ms,failure_class FROM publish_execution_jobs_legacy;\
+             DROP TABLE publish_execution_jobs_legacy;\
+             CREATE INDEX publish_execution_jobs_claim ON publish_execution_jobs(state,next_attempt_at_unix_ms,created_at_unix_ms);\
+             COMMIT;",
+        );
+        if migration.is_err() {
+            let _ = self.execute("ROLLBACK");
+        }
+        let legacy_reset = self.execute("PRAGMA legacy_alter_table=OFF");
+        let foreign_key_reset = self.execute("PRAGMA foreign_keys=ON");
+        migration.and(legacy_reset).and(foreign_key_reset)?;
+        let statement = self.prepare("PRAGMA foreign_key_check")?;
+        if unsafe { sqlite3_step(statement.raw) } != SQLITE_DONE {
+            return Err(
+                "publish execution job duration migration broke foreign-key integrity".into(),
+            );
         }
         Ok(())
     }
@@ -521,7 +587,10 @@ impl StationStore {
         }
         self.execute("BEGIN IMMEDIATE")?;
         let outcome = (|| {
-            let recover = self.prepare("UPDATE publish_execution_jobs SET state='pending',lease_token=NULL,lease_expires_at_unix_ms=NULL,next_attempt_at_unix_ms=?1,updated_at_unix_ms=?1,failure_class='lease_expired' WHERE state='running' AND lease_expires_at_unix_ms<=?1")?;
+            let recover_unknown = self.prepare("UPDATE publish_execution_jobs SET state='failed',lease_token=NULL,lease_expires_at_unix_ms=NULL,next_attempt_at_unix_ms=?1,updated_at_unix_ms=?1,failure_class='external_outcome_unknown' WHERE state='running' AND external_effect_started_at_unix_ms IS NOT NULL AND lease_expires_at_unix_ms<=?1")?;
+            bind_i64(self.database, recover_unknown.raw, 1, now_unix_ms)?;
+            expect_done(self.database, recover_unknown.raw)?;
+            let recover = self.prepare("UPDATE publish_execution_jobs SET state='pending',lease_token=NULL,lease_expires_at_unix_ms=NULL,next_attempt_at_unix_ms=?1,updated_at_unix_ms=?1,failure_class='lease_expired' WHERE state='running' AND external_effect_started_at_unix_ms IS NULL AND lease_expires_at_unix_ms<=?1")?;
             bind_i64(self.database, recover.raw, 1, now_unix_ms)?;
             expect_done(self.database, recover.raw)?;
             let statement = self.prepare(&format!("{} WHERE state='pending' AND next_attempt_at_unix_ms<=?1 AND attempts<?2 ORDER BY next_attempt_at_unix_ms,created_at_unix_ms,job_id LIMIT 1", publish_job_select()))?;
@@ -612,6 +681,37 @@ impl StationStore {
         Ok(())
     }
 
+    pub(crate) fn mark_publish_execution_external_effect_started(
+        &self,
+        lease: &mut PublishExecutionLease,
+        now_unix_ms: i64,
+    ) -> Result<(), String> {
+        if now_unix_ms < 0 {
+            return Err("publish external-effect time is invalid".into());
+        }
+        let update = self.prepare("UPDATE publish_execution_jobs SET external_effect_started_at_unix_ms=?1,updated_at_unix_ms=?1 WHERE job_id=?2 AND state='running' AND lease_token=?3 AND lease_expires_at_unix_ms>?1 AND external_effect_started_at_unix_ms IS NULL")?;
+        bind_i64(self.database, update.raw, 1, now_unix_ms)?;
+        bind_text(
+            self.database,
+            update.raw,
+            2,
+            &c_string(&lease.record.job.job_id, "publish job")?,
+        )?;
+        bind_text(
+            self.database,
+            update.raw,
+            3,
+            &c_string(&lease.lease_token, "publish lease")?,
+        )?;
+        expect_done(self.database, update.raw)?;
+        if self.changes() != 1 {
+            return Err("publish job external-effect marker compare-and-set failed".into());
+        }
+        lease.record.external_effect_started_at_unix_ms = Some(now_unix_ms);
+        lease.record.updated_at_unix_ms = now_unix_ms;
+        Ok(())
+    }
+
     pub(crate) fn fail_publish_execution_job(
         &self,
         lease: PublishExecutionLease,
@@ -622,7 +722,9 @@ impl StationStore {
         if !secret_field(failure_class, 100) {
             return Err("publish failure class is invalid".into());
         }
-        let retry = transient && lease.record.attempts < MAX_PUBLISH_ATTEMPTS;
+        let retry = transient
+            && lease.record.external_effect_started_at_unix_ms.is_none()
+            && lease.record.attempts < MAX_PUBLISH_ATTEMPTS;
         let state = if retry { "pending" } else { "failed" };
         let delay = 1_000_i64
             .checked_mul(1_i64 << lease.record.attempts.min(8))
@@ -893,10 +995,14 @@ fn resolve_publish_controller_alert(database: &Path) {
 fn run_publish_controller_iteration_with<A: PublishProviderAdapter>(
     store: &StationStore,
     adapter: &A,
-    now_unix_ms: i64,
+    _scheduled_now_unix_ms: i64,
     current_install: &mut dyn FnMut() -> Result<(String, String, u64), String>,
     clock: &mut dyn FnMut() -> Result<i64, String>,
 ) -> Result<bool, String> {
+    // Lease expiry recovery and retry scheduling are evaluated against the
+    // controller's current authority, never a scheduler tick retained before
+    // a provider operation or restart.
+    let now_unix_ms = clock()?;
     let Some(claimed) = store.claim_publish_execution_job(now_unix_ms)? else {
         return Ok(false);
     };
@@ -927,6 +1033,13 @@ fn run_publish_controller_iteration_with<A: PublishProviderAdapter>(
             credential.fill(0);
             return Err("publish credential rotated after enqueue".into());
         }
+        let external_effect_started_at_unix_ms = clock()?;
+        store.mark_publish_execution_external_effect_started(
+            lease
+                .as_mut()
+                .expect("publish lease is retained until completion"),
+            external_effect_started_at_unix_ms,
+        )?;
         let mut heartbeat = || {
             let now = clock()?;
             store.renew_publish_execution_lease(
@@ -981,11 +1094,18 @@ fn run_publish_controller_iteration_with<A: PublishProviderAdapter>(
         Ok(()) => Ok(true),
         Err(error) => {
             if let Some(lease) = lease.take() {
+                let failure_time = clock()?;
+                let external_outcome_unknown =
+                    lease.record.external_effect_started_at_unix_ms.is_some();
                 store.fail_publish_execution_job(
                     lease,
-                    classify_publish_failure(&error),
-                    true,
-                    now_unix_ms,
+                    if external_outcome_unknown {
+                        "external_outcome_unknown"
+                    } else {
+                        classify_publish_failure(&error)
+                    },
+                    !external_outcome_unknown,
+                    failure_time,
                 )?;
             }
             Err(error)
@@ -1121,59 +1241,8 @@ fn deliver_to_nas(
     media_path: &Path,
     root: &Path,
 ) -> Result<ProviderStageEvidence, String> {
-    reject_reparse_ancestry(root)?;
-    let final_path = root.join(format!("{}.mp4", job.media_sha256));
-    let partial = root.join(format!(".{}.{}.part", job.media_sha256, job.job_id));
-    if final_path.exists() || partial.exists() {
-        return Err("managed NAS destination already exists".into());
-    }
-    let mut source = File::open(media_path).map_err(|_| "publish media could not be opened")?;
-    let mut destination = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&partial)
-        .map_err(|_| "managed NAS partial could not be created")?;
-    std::io::copy(&mut source, &mut destination).map_err(|_| "managed NAS copy failed")?;
-    destination
-        .flush()
-        .map_err(|_| "managed NAS copy could not be flushed")?;
-    destination
-        .sync_all()
-        .map_err(|_| "managed NAS copy could not be synchronized")?;
-    drop(destination);
-    let (bytes, digest) = hash_publish_media(&partial)?;
-    if bytes != job.media_bytes || digest != job.media_sha256 {
-        let _ = fs::remove_file(&partial);
-        return Err("managed NAS copy did not match the exact media binding".into());
-    }
-    fs::rename(&partial, &final_path).map_err(|_| "managed NAS copy could not be finalized")?;
-    Ok(ProviderStageEvidence {
-        stage: PublishExecutionStage::Delivered,
-        digest,
-        detail: "Exact media bytes were atomically finalized and rehashed at the managed NAS destination.".into(),
-    })
-}
-
-fn reject_reparse_ancestry(path: &Path) -> Result<(), String> {
-    if !path.is_absolute() {
-        return Err("managed NAS root is not absolute".into());
-    }
-    let mut current = PathBuf::new();
-    for component in path.components() {
-        current.push(component.as_os_str());
-        if current.exists()
-            && fs::symlink_metadata(&current)
-                .map_err(|_| "managed NAS ancestry could not be inspected")?
-                .file_type()
-                .is_symlink()
-        {
-            return Err("managed NAS ancestry contains a reparse point".into());
-        }
-    }
-    if !path.is_dir() {
-        return Err("managed NAS root is unavailable".into());
-    }
-    Ok(())
+    let _ = (job, media_path, root);
+    Err("Local NAS execution is disabled: TownLight has not yet proved handle-anchored, no-reparse finalization semantics for this destination.".into())
 }
 
 fn hash_publish_media(path: &Path) -> Result<(u64, String), String> {
@@ -1234,7 +1303,7 @@ fn unix_time_millis() -> Result<i64, String> {
 }
 
 fn publish_job_select() -> &'static str {
-    "SELECT job_id,account_id,account_revision,target_id,target_revision,target_kind,configuration_hash,credential_version,candidate_version,source_commit,install_generation,asset_id,media_sha256,media_bytes,media_duration_ms,requested_by,created_at_unix_ms,state,attempts,next_attempt_at_unix_ms,updated_at_unix_ms,COALESCE(lease_expires_at_unix_ms,-1),COALESCE(completed_at_unix_ms,-1),COALESCE(failure_class,'') FROM publish_execution_jobs"
+    "SELECT job_id,account_id,account_revision,target_id,target_revision,target_kind,configuration_hash,credential_version,candidate_version,source_commit,install_generation,asset_id,media_sha256,media_bytes,media_duration_ms,requested_by,created_at_unix_ms,state,attempts,next_attempt_at_unix_ms,updated_at_unix_ms,COALESCE(lease_expires_at_unix_ms,-1),COALESCE(completed_at_unix_ms,-1),COALESCE(external_effect_started_at_unix_ms,-1),COALESCE(failure_class,'') FROM publish_execution_jobs"
 }
 
 fn read_publish_job(statement: *mut SqliteStatement) -> Result<PublishExecutionJobRecord, String> {
@@ -1274,7 +1343,8 @@ fn read_publish_job(statement: *mut SqliteStatement) -> Result<PublishExecutionJ
         updated_at_unix_ms: unsafe { sqlite3_column_int64(statement, 20) },
         lease_expires_at_unix_ms: optional_i64(statement, 21),
         completed_at_unix_ms: optional_i64(statement, 22),
-        failure_class: optional_column_text(statement, 23)?,
+        external_effect_started_at_unix_ms: optional_i64(statement, 23),
+        failure_class: optional_column_text(statement, 24)?,
     })
 }
 
@@ -1326,6 +1396,10 @@ fn receipt_matches_job(receipt: &PublishExecutionReceipt, job: &PublishExecution
 mod tests {
     use super::*;
     use station_publishing::{PublishExecutionStage, PublishTargetAccount, PublishTargetProfile};
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
 
     struct FakeProvider;
 
@@ -1387,6 +1461,24 @@ mod tests {
     struct RotatingProvider<'a> {
         store: &'a StationStore,
         account_id: &'a str,
+    }
+
+    struct UnknownExternalOutcomeProvider {
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl PublishProviderAdapter for UnknownExternalOutcomeProvider {
+        fn execute(
+            &self,
+            _: &PublishExecutionJob,
+            _: &PublishExecutionTargetConfig,
+            _: &Path,
+            _: &[u8],
+            _: &mut dyn FnMut() -> Result<(), String>,
+        ) -> Result<Vec<ProviderStageEvidence>, String> {
+            self.calls.fetch_add(1, Ordering::AcqRel);
+            Err("provider outcome became unknown after execution began".into())
+        }
     }
 
     impl PublishProviderAdapter for RotatingProvider<'_> {
@@ -1552,7 +1644,7 @@ mod tests {
                 .unwrap()
                 .unwrap()
                 .state,
-            PublishExecutionJobState::Pending
+            PublishExecutionJobState::Failed
         );
         let statement = store
             .prepare("SELECT COUNT(*) FROM publish_execution_receipts WHERE job_id=?1")
@@ -1566,9 +1658,90 @@ mod tests {
         .unwrap();
         assert_eq!(unsafe { sqlite3_step(statement.raw) }, SQLITE_ROW);
         assert_eq!(unsafe { sqlite3_column_int64(statement.raw, 0) }, 0);
+
+        let mut unknown_job = job.clone();
+        unknown_job.job_id = "33333333-2222-4333-8444-555555555557".into();
+        unknown_job.credential_version = store
+            .current_publish_account_credential_version(account_id, 1)
+            .unwrap()
+            .unwrap();
+        unknown_job.created_at_unix_ms = 10;
+        store.enqueue_publish_execution_job(&unknown_job).unwrap();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let provider = UnknownExternalOutcomeProvider {
+            calls: Arc::clone(&calls),
+        };
+        let mut install = || Ok(("0.1.0".into(), "a".repeat(40), 1));
+        let mut clock = || Ok(10_000);
+        assert!(
+            run_publish_controller_iteration_with(&store, &provider, 11, &mut install, &mut clock,)
+                .is_err()
+        );
+        let record = store
+            .read_publish_execution_job(&unknown_job.job_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(record.state, PublishExecutionJobState::Failed);
+        assert_eq!(
+            record.failure_class.as_deref(),
+            Some("external_outcome_unknown")
+        );
+        assert_eq!(record.updated_at_unix_ms, 10_000);
+        let mut install = || Ok(("0.1.0".into(), "a".repeat(40), 1));
+        let mut clock = || Ok(20_000);
+        assert!(
+            !run_publish_controller_iteration_with(
+                &store,
+                &provider,
+                20_000,
+                &mut install,
+                &mut clock,
+            )
+            .unwrap()
+        );
+        assert_eq!(calls.load(Ordering::Acquire), 1);
         drop(store);
         let _ = std::fs::remove_file(path);
         let _ = std::fs::remove_file(media_path);
+    }
+
+    #[test]
+    fn local_nas_execution_fails_closed_until_it_has_anchored_handle_semantics() {
+        let nonce = SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("townlight-nas-delivery-{nonce}"));
+        let media = root.with_extension("media");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(&media, b"exact media").unwrap();
+        let digest = format!("{:x}", Sha256::digest(b"exact media"));
+        let job = PublishExecutionJob {
+            job_id: "33333333-2222-4333-8444-555555555558".into(),
+            account_id: "11111111-2222-4333-8444-555555555555".into(),
+            account_revision: 1,
+            target_id: "22222222-2222-4333-8444-555555555555".into(),
+            target_revision: 1,
+            target_kind: PublishTargetKind::LocalNas,
+            configuration_hash: "a".repeat(64),
+            credential_version: 1,
+            candidate_version: "0.1.0".into(),
+            source_commit: "a".repeat(40),
+            install_generation: 1,
+            asset_id: digest.clone(),
+            media_sha256: digest,
+            media_bytes: 11,
+            media_duration_ms: 1_000,
+            requested_by: "setup".into(),
+            created_at_unix_ms: 1,
+        };
+
+        let result = deliver_to_nas(&job, &media, &root);
+
+        assert!(result.is_err());
+        assert!(!root.join(format!("{}.mp4", job.media_sha256)).exists());
+        let _ = std::fs::remove_file(media);
+        let _ = std::fs::remove_dir_all(root);
     }
 }
 

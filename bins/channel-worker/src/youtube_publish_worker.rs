@@ -23,7 +23,7 @@ const MAX_STREAM_KEY_BYTES: usize = 256;
 const APP_SOURCE_CHUNK_BYTES: usize = 64 * 1024;
 const MAX_APP_SOURCE_QUEUED_BYTES: u64 = 1024 * 1024;
 const PIPELINE_STALL_TIMEOUT: Duration = Duration::from_secs(30);
-const MAX_EXPECTED_DURATION_MS: u64 = 12 * 60 * 60 * 1_000;
+const MAX_EXPECTED_DURATION_MS: u64 = 24 * 60 * 60 * 1_000;
 const MAX_PIPELINE_RUNTIME: Duration = Duration::from_secs(24 * 60 * 60);
 const PIPELINE_RUNTIME_GRACE: Duration = Duration::from_secs(10 * 60);
 const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
@@ -41,7 +41,33 @@ struct YoutubePublishCommand {
     expected_sha256: String,
     expected_duration_ms: u64,
     rtmps_ingestion_address: String,
-    stream_key: String,
+    stream_key: SecretString,
+}
+
+/// Owns provider credentials from the moment Serde finishes a string field.
+/// If a later field or unknown-field check rejects the enclosing command, this
+/// wrapper still zeroizes the key during partial-deserialization cleanup.
+struct SecretString(Zeroizing<String>);
+
+impl<'de> Deserialize<'de> for SecretString {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        String::deserialize(deserializer).map(|value| Self(Zeroizing::new(value)))
+    }
+}
+
+impl SecretString {
+    fn as_str(&self) -> &str {
+        self.0.as_str()
+    }
+}
+
+impl From<String> for SecretString {
+    fn from(value: String) -> Self {
+        Self(Zeroizing::new(value))
+    }
 }
 
 #[derive(Debug, Serialize, PartialEq, Eq)]
@@ -165,7 +191,7 @@ fn execute(
     if command.rtmps_ingestion_address != YOUTUBE_RTMPS_INGESTION_ADDRESS {
         return failed_result("invalid_rtmps_ingestion_address");
     }
-    let stream_key = Zeroizing::new(command.stream_key);
+    let stream_key = command.stream_key;
     if !is_valid_stream_key(stream_key.as_str()) {
         return failed_result("invalid_stream_key");
     }
@@ -650,7 +676,7 @@ mod tests {
             expected_sha256: sha256.into(),
             expected_duration_ms: 1_000,
             rtmps_ingestion_address: YOUTUBE_RTMPS_INGESTION_ADDRESS.into(),
-            stream_key: "synthetic-stream-key-123".into(),
+            stream_key: String::from("synthetic-stream-key-123").into(),
         }
     }
 
@@ -721,7 +747,7 @@ mod tests {
     fn rejects_an_unsafe_stream_key_without_starting_pipeline() {
         let path = temp_media();
         let mut value = command(path.clone(), TEST_SHA256);
-        value.stream_key = "key\\nlocation=attacker".into();
+        value.stream_key = String::from("key\\nlocation=attacker").into();
         let mut pipeline = fake(Ok(()));
 
         let result = execute(value, &mut pipeline);
@@ -793,6 +819,20 @@ mod tests {
         let result = execute(value, &mut pipeline);
 
         assert_eq!(result.failure_code, Some("invalid_expected_duration"));
+        assert!(!pipeline.called);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn permits_a_declared_twenty_four_hour_delivery_bound() {
+        let path = temp_media();
+        let mut value = command(path.clone(), &"0".repeat(64));
+        value.expected_duration_ms = 24 * 60 * 60 * 1_000;
+        let mut pipeline = fake(Ok(()));
+
+        let result = execute(value, &mut pipeline);
+
+        assert_eq!(result.failure_code, Some("media_identity_mismatch"));
         assert!(!pipeline.called);
         let _ = std::fs::remove_file(path);
     }
