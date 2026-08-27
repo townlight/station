@@ -7,10 +7,12 @@ use std::sync::{
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use sha2::{Digest, Sha256};
-use station_media_assets::{AssetError, ingest_media, measure_loudness, transcode_playout_asset};
+use station_media_assets::{
+    AssetError, derive_review_thumbnail, ingest_media, measure_loudness, transcode_playout_asset,
+};
 use station_media_lifecycle::{
-    AssetLoudnessAnalysis, IngestSourceKind, LoudnessGateStatus, MediaIngestJob, TranscodeFormat,
-    TranscodeJob, TranscodeJobStatus, WatchFolderConfig,
+    AssetLoudnessAnalysis, AssetThumbnail, IngestSourceKind, LoudnessGateStatus, MediaIngestJob,
+    TranscodeFormat, TranscodeJob, TranscodeJobStatus, WatchFolderConfig,
 };
 use station_schedule::{AssetReadiness, MediaAsset};
 use station_storage::StationStore;
@@ -70,6 +72,22 @@ pub struct TranscodeWorker {
 
 pub struct WatchFolderMonitor {
     database_path: PathBuf,
+}
+
+/// A single-process, bounded evidence worker. It selects only ready assets
+/// without a durable thumbnail record, derives a PNG from an exact-byte pinned
+/// source snapshot, and commits immutable evidence after the file is sealed.
+pub struct ThumbnailWorker {
+    database_path: PathBuf,
+    thumbnail_root: PathBuf,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ThumbnailOutcome {
+    Generated {
+        asset_id: String,
+        thumbnail_sha256: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -169,6 +187,58 @@ impl IngestWorker {
                 }))
             }
         }
+    }
+}
+
+impl ThumbnailWorker {
+    pub fn new(database_path: impl Into<PathBuf>) -> Self {
+        let database_path = database_path.into();
+        let thumbnail_root = database_path
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join("media-review");
+        Self {
+            database_path,
+            thumbnail_root,
+        }
+    }
+
+    pub fn run_once(&self) -> Result<Option<ThumbnailOutcome>, IngestWorkerError> {
+        let store = StationStore::open(&self.database_path).map_err(IngestWorkerError::Storage)?;
+        let candidate = store
+            .list_media_assets()
+            .map_err(IngestWorkerError::Storage)?
+            .into_iter()
+            .filter(|asset| asset.readiness == AssetReadiness::Ready)
+            .find(|asset| {
+                store
+                    .read_asset_thumbnail(&asset.asset_id)
+                    .ok()
+                    .flatten()
+                    .is_none()
+            });
+        let Some(asset) = candidate else {
+            return Ok(None);
+        };
+        drop(store);
+        let artifact =
+            derive_review_thumbnail(&asset.media_path, &self.thumbnail_root, &asset.asset_id)
+                .map_err(|error| IngestWorkerError::Storage(operator_error(&error)))?;
+        let generated_at_unix_ms = system_time_millis()?;
+        let thumbnail = AssetThumbnail {
+            asset_id: asset.asset_id.clone(),
+            thumbnail_sha256: artifact.thumbnail_sha256.clone(),
+            source_asset_sha256: asset.asset_id.clone(),
+            generated_at_unix_ms,
+            byte_count: artifact.size_bytes,
+        };
+        StationStore::open(&self.database_path)
+            .and_then(|store| store.record_asset_thumbnail(&thumbnail))
+            .map_err(IngestWorkerError::Storage)?;
+        Ok(Some(ThumbnailOutcome::Generated {
+            asset_id: asset.asset_id,
+            thumbnail_sha256: artifact.thumbnail_sha256,
+        }))
     }
 }
 
@@ -393,10 +463,12 @@ pub fn run_until(
 ) -> Result<(), IngestWorkerError> {
     let worker = IngestWorker::new(database_path, media_library);
     let transcode_worker = TranscodeWorker::new(database_path, media_library);
+    let thumbnail_worker = ThumbnailWorker::new(database_path);
     let watch_folders = WatchFolderMonitor::new(database_path);
     worker.recover_interrupted()?;
     transcode_worker.recover_interrupted()?;
     let mut next_watch_scan = Instant::now();
+    let mut next_thumbnail_scan = Instant::now();
     while !stop.load(Ordering::Acquire) {
         if Instant::now() >= next_watch_scan {
             watch_folders
@@ -406,6 +478,13 @@ pub fn run_until(
         }
         let ingest_idle = worker.run_once()?.is_none();
         let transcode_idle = transcode_worker.run_once()?.is_none();
+        if Instant::now() >= next_thumbnail_scan {
+            // A failed decode has no authority effect and remains retryable;
+            // do not take ingest/transcode down merely because review evidence
+            // cannot yet be derived on this machine.
+            let _ = thumbnail_worker.run_once();
+            next_thumbnail_scan = Instant::now() + Duration::from_secs(5);
+        }
         if ingest_idle && transcode_idle {
             std::thread::sleep(Duration::from_millis(100));
         }

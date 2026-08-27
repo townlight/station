@@ -1,5 +1,6 @@
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufReader, BufWriter, Read, Write};
+use std::os::windows::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Arc;
@@ -15,6 +16,8 @@ use sha2::{Digest, Sha256};
 use station_captions::{MAX_CAPTION_PROOF_CAPTURE_BYTES, canonical_caption_text_sha256};
 
 const MAX_DECODED_CAPTION_SRT_BYTES: u64 = 32 * 1024 * 1024;
+const MAX_REVIEW_THUMBNAIL_BYTES: u64 = 8 * 1024 * 1024;
+const REVIEW_THUMBNAIL_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MediaMetadata {
@@ -32,6 +35,14 @@ pub struct IngestedAsset {
     pub stored_path: PathBuf,
     pub size_bytes: u64,
     pub metadata: MediaMetadata,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ThumbnailArtifact {
+    pub source_asset_id: String,
+    pub thumbnail_sha256: String,
+    pub stored_path: PathBuf,
+    pub size_bytes: u64,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -205,6 +216,154 @@ pub fn verify_media_identity(
         )));
     }
     validate_media(path)
+}
+
+/// Decodes at most one scaled video frame from an identity-verified managed
+/// source. The caller supplies only a managed root; both the temporary and
+/// final output names are generated from server-owned identity facts.
+pub fn derive_review_thumbnail(
+    source: impl AsRef<Path>,
+    thumbnail_root: impl AsRef<Path>,
+    expected_asset_id: &str,
+) -> Result<ThumbnailArtifact, AssetError> {
+    let source = source.as_ref();
+    validate_asset_id(expected_asset_id)?;
+    let source_metadata = fs::symlink_metadata(source)
+        .map_err(|error| AssetError::InvalidSource(error.to_string()))?;
+    if source_metadata.file_attributes() & 0x0400 != 0 || !source_metadata.is_file() {
+        return Err(AssetError::InvalidSource(
+            "thumbnail source must be a non-reparse regular managed file".into(),
+        ));
+    }
+    // Hold this handle through the copy.  The decoder never consumes the
+    // caller's pathname: it consumes a verified, worker-owned snapshot.
+    let source_handle = File::open(source).map_err(|error| AssetError::Io(error.to_string()))?;
+    if !source_handle
+        .metadata()
+        .map_err(|error| AssetError::Io(error.to_string()))?
+        .is_file()
+    {
+        return Err(AssetError::InvalidSource(
+            "thumbnail source handle is not a regular file".into(),
+        ));
+    }
+    gst::init().map_err(|error| AssetError::Discovery(error.to_string()))?;
+    create_non_reparse_directory_chain(thumbnail_root.as_ref())?;
+    ensure_non_reparse_ancestry(thumbnail_root.as_ref())?;
+    let root = fs::canonicalize(thumbnail_root.as_ref())
+        .map_err(|error| AssetError::Io(error.to_string()))?;
+    ensure_non_reparse_ancestry(&root)?;
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|error| AssetError::Io(error.to_string()))?
+        .as_nanos();
+    let pinned_source = root.join(format!(
+        ".thumbnail-source-{expected_asset_id}-{nonce}.part"
+    ));
+    let temporary = root.join(format!(".thumbnail-{expected_asset_id}-{nonce}.part.png"));
+    let (measured_id, _) = copy_open_file_and_hash(source_handle, &pinned_source)?;
+    if measured_id != expected_asset_id {
+        let _ = fs::remove_file(&pinned_source);
+        return Err(AssetError::InvalidSource(format!(
+            "asset identity mismatch: expected {expected_asset_id}, measured {measured_id}"
+        )));
+    }
+    ensure_non_reparse_ancestry(&pinned_source)?;
+    let uri = gst::glib::filename_to_uri(&pinned_source, None)
+        .map_err(|error| AssetError::InvalidSource(error.to_string()))?;
+    let pipeline = gst::Pipeline::new();
+    let decoder = gst::ElementFactory::make("uridecodebin")
+        .property("uri", uri.as_str())
+        .property("expose-all-streams", false)
+        .build()
+        .map_err(|error| AssetError::Discovery(error.to_string()))?;
+    let queue = make_element("queue")?;
+    let convert = make_element("videoconvert")?;
+    let scale = make_element("videoscale")?;
+    let caps = gst::ElementFactory::make("capsfilter")
+        .property(
+            "caps",
+            gst::Caps::builder("video/x-raw")
+                .field("format", "RGBA")
+                .field("width", 320_i32)
+                .field("height", 180_i32)
+                .build(),
+        )
+        .build()
+        .map_err(|error| AssetError::Discovery(error.to_string()))?;
+    let encoder = gst::ElementFactory::make("pngenc")
+        .property("snapshot", true)
+        .build()
+        .map_err(|error| AssetError::Discovery(error.to_string()))?;
+    let sink = gst::ElementFactory::make("filesink")
+        .property("location", temporary.to_string_lossy().as_ref())
+        .property("sync", false)
+        .build()
+        .map_err(|error| AssetError::Discovery(error.to_string()))?;
+    pipeline
+        .add_many([&decoder, &queue, &convert, &scale, &caps, &encoder, &sink])
+        .map_err(|error| AssetError::Discovery(error.to_string()))?;
+    gst::Element::link_many([&queue, &convert, &scale, &caps, &encoder, &sink])
+        .map_err(|error| AssetError::Discovery(error.to_string()))?;
+    let queue_pad = queue
+        .static_pad("sink")
+        .ok_or_else(|| AssetError::Discovery("thumbnail queue has no sink pad".into()))?;
+    let linked = Arc::new(AtomicBool::new(false));
+    let linked_signal = Arc::clone(&linked);
+    decoder.connect_pad_added(move |_, source_pad| {
+        let caps = source_pad
+            .current_caps()
+            .unwrap_or_else(|| source_pad.query_caps(None));
+        if caps
+            .structure(0)
+            .is_some_and(|structure| structure.name().starts_with("video/"))
+            && !queue_pad.is_linked()
+            && source_pad.link(&queue_pad).is_ok()
+        {
+            linked_signal.store(true, Ordering::Release);
+        }
+    });
+    pipeline
+        .set_state(gst::State::Playing)
+        .map_err(|error| AssetError::Discovery(error.to_string()))?;
+    let result = wait_for_thumbnail(&pipeline, &linked);
+    let stopped = stop_pipeline(&pipeline);
+    let _ = fs::remove_file(&pinned_source);
+    if let Err(error) = result {
+        let _ = fs::remove_file(&temporary);
+        return Err(error);
+    }
+    if let Err(error) = stopped {
+        let _ = fs::remove_file(&temporary);
+        return Err(error);
+    }
+    ensure_non_reparse_ancestry(&temporary)?;
+    let (thumbnail_sha256, size_bytes) = hash_file(&temporary)?;
+    if size_bytes > MAX_REVIEW_THUMBNAIL_BYTES {
+        let _ = fs::remove_file(&temporary);
+        return Err(AssetError::Io(
+            "derived thumbnail exceeds the 8 MiB bound".into(),
+        ));
+    }
+    let final_path = root.join(format!("{thumbnail_sha256}.png"));
+    if final_path.exists() {
+        let (existing_hash, existing_bytes) = hash_file(&final_path)?;
+        let _ = fs::remove_file(&temporary);
+        if existing_hash != thumbnail_sha256 || existing_bytes != size_bytes {
+            return Err(AssetError::Io(
+                "content-addressed thumbnail path is corrupt".into(),
+            ));
+        }
+    } else if let Err(error) = fs::rename(&temporary, &final_path) {
+        let _ = fs::remove_file(&temporary);
+        return Err(AssetError::Io(error.to_string()));
+    }
+    Ok(ThumbnailArtifact {
+        source_asset_id: expected_asset_id.into(),
+        thumbnail_sha256,
+        stored_path: final_path,
+        size_bytes,
+    })
 }
 
 pub fn measure_loudness(path: impl AsRef<Path>) -> Result<LoudnessMeasurement, AssetError> {
@@ -807,6 +966,43 @@ fn wait_for_transcode(
     ))
 }
 
+fn wait_for_thumbnail(
+    pipeline: &gst::Pipeline,
+    video_linked: &AtomicBool,
+) -> Result<(), AssetError> {
+    let bus = pipeline
+        .bus()
+        .ok_or_else(|| AssetError::Discovery("thumbnail pipeline has no bus".into()))?;
+    let deadline = Instant::now() + REVIEW_THUMBNAIL_TIMEOUT;
+    while Instant::now() < deadline {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let Some(message) = bus.timed_pop(gst::ClockTime::from_nseconds(
+            remaining.as_nanos().min(u128::from(u64::MAX)) as u64,
+        )) else {
+            break;
+        };
+        match message.view() {
+            gst::MessageView::Eos(_) if video_linked.load(Ordering::Acquire) => return Ok(()),
+            gst::MessageView::Eos(_) => {
+                return Err(AssetError::UnsupportedMedia(
+                    "thumbnail worker received no decodable video stream".into(),
+                ));
+            }
+            gst::MessageView::Error(error) => {
+                return Err(AssetError::Discovery(format!(
+                    "thumbnail worker failed: {} ({:?})",
+                    error.error(),
+                    error.debug()
+                )));
+            }
+            _ => {}
+        }
+    }
+    Err(AssetError::Discovery(
+        "thumbnail worker exceeded its 30-second deadline".into(),
+    ))
+}
+
 fn collect_loudness(
     pipeline: &gst::Pipeline,
     level: &gst::Element,
@@ -906,6 +1102,10 @@ fn codec_name(stream: &impl IsA<gst_pbutils::DiscovererStreamInfo>) -> Result<St
 
 fn copy_and_hash(source: &Path, destination: &Path) -> Result<(String, u64), AssetError> {
     let input = File::open(source).map_err(|error| AssetError::Io(error.to_string()))?;
+    copy_open_file_and_hash(input, destination)
+}
+
+fn copy_open_file_and_hash(input: File, destination: &Path) -> Result<(String, u64), AssetError> {
     let output = OpenOptions::new()
         .create_new(true)
         .write(true)
@@ -937,6 +1137,72 @@ fn copy_and_hash(source: &Path, destination: &Path) -> Result<(String, u64), Ass
         .sync_all()
         .map_err(|error| AssetError::Io(error.to_string()))?;
     Ok((format!("{:x}", digest.finalize()), size))
+}
+
+fn validate_asset_id(expected_asset_id: &str) -> Result<(), AssetError> {
+    if expected_asset_id.len() != 64
+        || !expected_asset_id
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+    {
+        return Err(AssetError::InvalidSource(
+            "asset identity must be a lowercase SHA-256 digest".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn ensure_non_reparse_ancestry(path: &Path) -> Result<(), AssetError> {
+    let mut current = Some(path);
+    while let Some(candidate) = current {
+        let metadata = fs::symlink_metadata(candidate)
+            .map_err(|_| AssetError::Io("managed thumbnail ancestry is unavailable".into()))?;
+        if metadata.file_attributes() & 0x0400 != 0 {
+            return Err(AssetError::InvalidSource(
+                "managed thumbnail ancestry contains a reparse point".into(),
+            ));
+        }
+        current = candidate.parent();
+    }
+    Ok(())
+}
+
+fn create_non_reparse_directory_chain(path: &Path) -> Result<(), AssetError> {
+    let mut current = PathBuf::new();
+    for component in path.components() {
+        current.push(component.as_os_str());
+        match fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.file_attributes() & 0x0400 == 0 && metadata.is_dir() => {}
+            Ok(_) => {
+                return Err(AssetError::InvalidSource(
+                    "managed thumbnail root contains a reparse point or non-directory".into(),
+                ));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                let parent = current
+                    .parent()
+                    .ok_or_else(|| AssetError::Io("managed thumbnail root has no parent".into()))?;
+                let parent_metadata = fs::symlink_metadata(parent).map_err(|_| {
+                    AssetError::Io("managed thumbnail root parent is unavailable".into())
+                })?;
+                if parent_metadata.file_attributes() & 0x0400 != 0 || !parent_metadata.is_dir() {
+                    return Err(AssetError::InvalidSource(
+                        "managed thumbnail root parent is a reparse point or non-directory".into(),
+                    ));
+                }
+                fs::create_dir(&current).map_err(|error| AssetError::Io(error.to_string()))?;
+                let created = fs::symlink_metadata(&current)
+                    .map_err(|error| AssetError::Io(error.to_string()))?;
+                if created.file_attributes() & 0x0400 != 0 || !created.is_dir() {
+                    return Err(AssetError::InvalidSource(
+                        "managed thumbnail root changed after creation".into(),
+                    ));
+                }
+            }
+            Err(error) => return Err(AssetError::Io(error.to_string())),
+        }
+    }
+    Ok(())
 }
 
 fn hash_file(path: &Path) -> Result<(String, u64), AssetError> {
@@ -1015,5 +1281,13 @@ mod tests {
             "1\n00:00:00,100 --> 00:00:00,101\n\n2\n00:00:00,350 --> 00:00:01,350\ntext after malformed block\n"
         )
         .is_err());
+    }
+
+    #[test]
+    fn thumbnail_worker_rejects_an_untrusted_identity_before_opening_any_path() {
+        let error = derive_review_thumbnail("not-used", "not-used", "not-a-sha").unwrap_err();
+        assert!(
+            matches!(error, AssetError::InvalidSource(message) if message.contains("lowercase SHA-256"))
+        );
     }
 }

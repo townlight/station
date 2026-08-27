@@ -338,6 +338,7 @@ fn run_console(config: DaemonConfig) -> Result<(), String> {
         &update_application,
         Arc::clone(&stop),
     )?;
+    let retention_scanner = spawn_retention_scanner(&config.database, Arc::clone(&stop))?;
     let ingest_database = config.database.clone();
     let ingest_library = media_library(&config.database);
     let ingest_stop = Arc::clone(&stop);
@@ -375,6 +376,11 @@ fn run_console(config: DaemonConfig) -> Result<(), String> {
         join_worker("media ingest", ingest, WORKER_SHUTDOWN_TIMEOUT),
         join_worker("operator alerting", alerting, WORKER_SHUTDOWN_TIMEOUT),
         join_worker("update monitor", updates, WORKER_SHUTDOWN_TIMEOUT),
+        join_worker(
+            "media retention scanner",
+            retention_scanner,
+            WORKER_SHUTDOWN_TIMEOUT,
+        ),
         join_worker(
             "transport proof queue",
             transport_queue,
@@ -581,6 +587,7 @@ fn run_service(config: DaemonConfig) -> Result<(), String> {
         &update_application,
         Arc::clone(&stop),
     )?;
+    let retention_scanner = spawn_retention_scanner(&config.database, Arc::clone(&stop))?;
     let ingest_database = config.database.clone();
     let ingest_library = media_library(&config.database);
     let ingest_stop = Arc::clone(&stop);
@@ -634,6 +641,11 @@ fn run_service(config: DaemonConfig) -> Result<(), String> {
             join_worker("operator alerting", alerting, WORKER_SHUTDOWN_TIMEOUT),
             join_worker("update monitor", updates, WORKER_SHUTDOWN_TIMEOUT),
             join_worker(
+                "media retention scanner",
+                retention_scanner,
+                WORKER_SHUTDOWN_TIMEOUT,
+            ),
+            join_worker(
                 "transport proof queue",
                 transport_queue,
                 WORKER_SHUTDOWN_TIMEOUT,
@@ -679,6 +691,11 @@ fn run_service(config: DaemonConfig) -> Result<(), String> {
         join_worker("media ingest", ingest, WORKER_SHUTDOWN_TIMEOUT),
         join_worker("operator alerting", alerting, WORKER_SHUTDOWN_TIMEOUT),
         join_worker("update monitor", updates, WORKER_SHUTDOWN_TIMEOUT),
+        join_worker(
+            "media retention scanner",
+            retention_scanner,
+            WORKER_SHUTDOWN_TIMEOUT,
+        ),
         join_worker(
             "transport proof queue",
             transport_queue,
@@ -1028,6 +1045,35 @@ fn spawn_publish_execution_queue_controller(
             )
         })
         .map_err(|error| format!("could not start publishing execution queue controller: {error}"))
+}
+
+/// This is intentionally a review-only retention controller. It persists a
+/// durable `review_required` flag for due policies and has no capability to
+/// delete, move, or rewrite media bytes or schedule authority.
+fn spawn_retention_scanner(
+    database: &std::path::Path,
+    stop: Arc<AtomicBool>,
+) -> Result<std::thread::JoinHandle<Result<(), String>>, String> {
+    let database = database.to_path_buf();
+    std::thread::Builder::new()
+        .name("station-media-retention".into())
+        .spawn(move || {
+            while !stop.load(Ordering::Acquire) {
+                let now = SystemUtcClock
+                    .now_utc_ms()
+                    .map_err(|_| "retention scanner clock is unavailable".to_string())?;
+                StationStore::open(&database)?
+                    .scan_retention_due(now, "townlight-retention-scanner")?;
+                for _ in 0..60 {
+                    if stop.load(Ordering::Acquire) {
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_secs(1));
+                }
+            }
+            Ok(())
+        })
+        .map_err(|error| format!("could not start media retention scanner: {error}"))
 }
 
 fn initialize_database(database: &std::path::Path) -> Result<(), String> {

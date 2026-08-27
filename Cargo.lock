@@ -1733,6 +1733,7 @@ dependencies = [
  "station-ingest",
  "station-live",
  "station-maintenance",
+ "station-media-assets",
  "station-media-lifecycle",
  "station-metadata",
  "station-publishing",

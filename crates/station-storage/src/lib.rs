@@ -3,10 +3,12 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 extern crate self as station_storage;
 
 mod automation_execution_authority;
+mod media_lifecycle_authority;
 mod transport_executor;
 pub use automation_execution_authority::{
     AutomationExecutionJobRecord, AutomationExecutionJobState,
 };
+pub use media_lifecycle_authority::{AssetRetentionHistoryEntry, MediaLifecycleScanResult};
 use std::ffi::{CStr, CString, c_char, c_int, c_longlong, c_void};
 use std::os::windows::fs::MetadataExt;
 use std::path::{Component, Path, PathBuf};
@@ -1417,6 +1419,7 @@ impl StationStore {
         store.initialize_asrun_epg_authority_schema()?;
         store.initialize_schedule_materialization_schema()?;
         store.initialize_scheduled_recording_schema()?;
+        store.initialize_media_lifecycle_schema()?;
         store.migrate_caption_egress_history_sink_foreign_keys()?;
         store.migrate_cg_feed_cache_schema()?;
         store.initialize_operator_auth_schema()?;
