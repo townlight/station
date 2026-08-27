@@ -749,6 +749,7 @@ struct TransportProofJobResponse {
     lease_expires_at_unix_ms: Option<i64>,
     capture: Option<TransportProofCaptureResponse>,
     analyzer_output_sha256: Option<String>,
+    tables_output_sha256: Option<String>,
     completed_at_unix_ms: Option<i64>,
     failed_at_unix_ms: Option<i64>,
     failure_detail: Option<String>,
@@ -12300,6 +12301,7 @@ fn transport_proof_job_response(record: TransportProofJobRecord) -> TransportPro
             ended_at_unix_ms: capture.ended_at_unix_ms,
         }),
         analyzer_output_sha256: record.analyzer_output_sha256,
+        tables_output_sha256: record.tables_output_sha256,
         completed_at_unix_ms: record.completed_at_unix_ms,
         failed_at_unix_ms: record.failed_at_unix_ms,
         failure_detail: record.failure_detail,
@@ -21201,6 +21203,15 @@ mod tests {
         assert_eq!(status.status, 200);
         let status: serde_json::Value = serde_json::from_slice(&status.body).unwrap();
         assert_eq!(status["state"], "completed");
+        assert_eq!(
+            status["tables_output_sha256"],
+            format!(
+                "{:x}",
+                Sha256::digest(include_bytes!(
+                    "../../station-storage/tests/fixtures/tsduck-3.44-h264-aac-tables.json"
+                ))
+            )
+        );
         let proof_path = format!("/api/v1/channels/{channel_id}/transport-proof");
         let proof = api.handle_authenticated("GET", &proof_path, None, &reader);
         assert_eq!(proof.status, 200);

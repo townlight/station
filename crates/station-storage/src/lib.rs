@@ -1924,6 +1924,7 @@ impl StationStore {
                 self.execute(
                     "ALTER TABLE transport_proof_jobs ADD COLUMN tables_output_sha256 TEXT NOT NULL DEFAULT ''",
                 )?;
+                self.backfill_completed_transport_proof_tables_digests()?;
             }
             if jobs_exist {
                 // Pre-generation work has no candidate epoch and can never be
@@ -1937,6 +1938,148 @@ impl StationStore {
             Ok(())
         })();
         self.finish_transaction(outcome)
+    }
+
+    /// Existing completed jobs predate the job-local tables digest. Preserve
+    /// them only when the one immutable receipt with the same proof id proves
+    /// every stored binding and capture fact. A partial, ambiguous, or corrupt
+    /// row is not upgraded by guesswork.
+    fn backfill_completed_transport_proof_tables_digests(&self) -> Result<(), String> {
+        let jobs = self.prepare(
+            "SELECT job_id,channel_id,sink_id,target_id,target_revision,candidate_version,source_commit,configuration_hash,max_capture_bytes,created_at_unix_ms,updated_at_unix_ms,lease_expires_at_unix_ms,capture_relative_path,capture_bytes,capture_sha256,capture_started_at_unix_ms,capture_ended_at_unix_ms,analyzer_output_sha256,completed_at_unix_ms,failed_at_unix_ms,failure_detail FROM transport_proof_jobs WHERE state='completed' AND tables_output_sha256=''",
+        )?;
+        loop {
+            let step = unsafe { sqlite3_step(jobs.raw) };
+            if step == SQLITE_DONE {
+                return Ok(());
+            }
+            if step != SQLITE_ROW {
+                return Err(sqlite_error(self.database));
+            }
+            let job_id = column_text(jobs.raw, 0)?;
+            let max_capture_bytes = column_u64(jobs.raw, 8, "transport proof capture limit")?;
+            let created_at_unix_ms = unsafe { sqlite3_column_int64(jobs.raw, 9) };
+            let updated_at_unix_ms = unsafe { sqlite3_column_int64(jobs.raw, 10) };
+            let lease_expires_at_unix_ms = unsafe { sqlite3_column_int64(jobs.raw, 11) };
+            let completed_at_unix_ms = unsafe { sqlite3_column_int64(jobs.raw, 18) };
+            let failed_at_unix_ms = unsafe { sqlite3_column_int64(jobs.raw, 19) };
+            let failure_detail = column_text(jobs.raw, 20)?;
+            if created_at_unix_ms < 0
+                || updated_at_unix_ms < created_at_unix_ms
+                || lease_expires_at_unix_ms != -1
+                || completed_at_unix_ms < 0
+                || failed_at_unix_ms != -1
+                || !failure_detail.is_empty()
+            {
+                return Err(
+                    "legacy completed transport proof job has invalid terminal facts".into(),
+                );
+            }
+            let capture = TransportProofCaptureFacts {
+                artifact_relative_path: column_text(jobs.raw, 12)?,
+                capture_bytes: column_u64(jobs.raw, 13, "transport capture bytes")?,
+                capture_sha256: column_text(jobs.raw, 14)?,
+                started_at_unix_ms: unsafe { sqlite3_column_int64(jobs.raw, 15) },
+                ended_at_unix_ms: unsafe { sqlite3_column_int64(jobs.raw, 16) },
+            };
+            capture.validate(max_capture_bytes)?;
+            let analyzer_output_sha256 = column_text(jobs.raw, 17)?;
+            if !is_sha256_identity(&analyzer_output_sha256) {
+                return Err("legacy completed transport proof analyzer digest is invalid".into());
+            }
+
+            let receipt_row = self.prepare(
+                "SELECT channel_id,sink_id,target_id,target_revision,candidate_version,source_commit,configuration_hash,outcome,captured_at_unix_ms,recorded_at_unix_ms,record_json FROM transport_analysis_receipts WHERE proof_id=?1",
+            )?;
+            bind_text(
+                self.database,
+                receipt_row.raw,
+                1,
+                &c_string(&job_id, "transport proof job identity")?,
+            )?;
+            if unsafe { sqlite3_step(receipt_row.raw) } != SQLITE_ROW {
+                return Err(
+                    "legacy completed transport proof has no exact analysis receipt".into(),
+                );
+            }
+            let receipt_channel_id = column_text(receipt_row.raw, 0)?;
+            let receipt_sink_id = column_text(receipt_row.raw, 1)?;
+            let receipt_target_id = column_text(receipt_row.raw, 2)?;
+            let receipt_target_revision =
+                column_u64(receipt_row.raw, 3, "transport receipt target revision")?;
+            let receipt_candidate_version = column_text(receipt_row.raw, 4)?;
+            let receipt_source_commit = column_text(receipt_row.raw, 5)?;
+            let receipt_configuration_hash = column_text(receipt_row.raw, 6)?;
+            let receipt_outcome = column_text(receipt_row.raw, 7)?;
+            let receipt_captured_at_unix_ms = unsafe { sqlite3_column_int64(receipt_row.raw, 8) };
+            let receipt_recorded_at_unix_ms = unsafe { sqlite3_column_int64(receipt_row.raw, 9) };
+            let receipt: TransportAnalysisReceipt =
+                serde_json::from_str(&column_text(receipt_row.raw, 10)?)
+                    .map_err(|_| "legacy transport analysis receipt is malformed")?;
+            if unsafe { sqlite3_step(receipt_row.raw) } != SQLITE_DONE {
+                return Err("legacy completed transport proof receipt lookup is ambiguous".into());
+            }
+            receipt.validate()?;
+            if receipt.proof_id != job_id
+                || receipt.channel_id != column_text(jobs.raw, 1)?
+                || receipt.sink_id != column_text(jobs.raw, 2)?
+                || receipt.target_id != column_text(jobs.raw, 3)?
+                || receipt.target_revision
+                    != column_u64(jobs.raw, 4, "transport proof target revision")?
+                || receipt.candidate_version != column_text(jobs.raw, 5)?
+                || receipt.source_commit != column_text(jobs.raw, 6)?
+                || receipt.configuration_hash != column_text(jobs.raw, 7)?
+                || receipt.outcome != ProofOutcome::Pass
+                || receipt.capture_bytes != capture.capture_bytes
+                || receipt.capture_sha256 != capture.capture_sha256
+                || receipt.captured_at_unix_ms != capture.ended_at_unix_ms
+                || receipt.findings.capture_duration_ms
+                    != u64::try_from(
+                        capture
+                            .ended_at_unix_ms
+                            .checked_sub(capture.started_at_unix_ms)
+                            .ok_or("legacy transport capture duration is invalid")?,
+                    )
+                    .map_err(|_| "legacy transport capture duration is invalid")?
+                || receipt.findings.analyzer_output_sha256 != analyzer_output_sha256
+                || receipt.channel_id != receipt_channel_id
+                || receipt.sink_id != receipt_sink_id
+                || receipt.target_id != receipt_target_id
+                || receipt.target_revision != receipt_target_revision
+                || receipt.candidate_version != receipt_candidate_version
+                || receipt.source_commit != receipt_source_commit
+                || receipt.configuration_hash != receipt_configuration_hash
+                || receipt_outcome != "pass"
+                || receipt.captured_at_unix_ms != receipt_captured_at_unix_ms
+                || receipt.recorded_at_unix_ms != receipt_recorded_at_unix_ms
+            {
+                return Err("legacy completed transport proof receipt binding is invalid".into());
+            }
+            let update = self.prepare(
+                "UPDATE transport_proof_jobs SET tables_output_sha256=?1 WHERE job_id=?2 AND state='completed' AND tables_output_sha256=''",
+            )?;
+            bind_text(
+                self.database,
+                update.raw,
+                1,
+                &c_string(
+                    &receipt.findings.tables_output_sha256,
+                    "transport tables output hash",
+                )?,
+            )?;
+            bind_text(
+                self.database,
+                update.raw,
+                2,
+                &c_string(&job_id, "transport proof job identity")?,
+            )?;
+            expect_done(self.database, update.raw)?;
+            if self.changes() != 1 {
+                return Err(
+                    "legacy transport proof tables digest backfill compare-and-set failed".into(),
+                );
+            }
+        }
     }
 
     fn sqlite_table_exists(&self, table: &str) -> Result<bool, String> {
@@ -23214,6 +23357,102 @@ mod tests {
                 .is_err()
         );
         drop(migrated);
+        for candidate in [
+            database.clone(),
+            PathBuf::from(format!("{}-wal", database.display())),
+            PathBuf::from(format!("{}-shm", database.display())),
+        ] {
+            let _ = std::fs::remove_file(candidate);
+        }
+    }
+
+    #[test]
+    fn migration_backfills_completed_transport_job_tables_digest_from_its_exact_receipt() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let database =
+            std::env::temp_dir().join(format!("townlight-transport-tables-backfill-{nonce}.db"));
+        let job_id = "33333333-4444-4555-8666-777777777777";
+        let channel_id = "11111111-2222-4333-8444-555555555555";
+        let sink_id = "22222222-3333-4444-8555-666666666666";
+        let source_commit = "a".repeat(40);
+        let configuration_hash = "b".repeat(64);
+        let analyzer_digest = "c".repeat(64);
+        let capture_digest = "d".repeat(64);
+        let tables_digest = "e".repeat(64);
+        let receipt = serde_json::json!({
+            "proof_id": job_id, "channel_id": channel_id, "sink_id": sink_id,
+            "target_id": "receiver-1", "target_revision": 1,
+            "candidate_version": "0.2.0", "source_commit": source_commit,
+            "configuration_hash": configuration_hash, "analyzer_id": "tsduck-tsanalyze",
+            "analyzer_version": "3.44", "analyzer_sha256": "f".repeat(64),
+            "capture_bytes": 188_000, "capture_sha256": capture_digest,
+            "outcome": "pass",
+            "findings": {
+                "packet_size_bytes": 188, "packet_count": 1_000,
+                "capture_duration_ms": 600_000, "bitrate_bps": 1_000_000,
+                "pat_program_count": 1, "pmt_stream_count": 2,
+                "continuity_errors": 0, "pcr_errors": 0,
+                "analyzer_output_sha256": analyzer_digest,
+                "tables_output_sha256": tables_digest,
+                "service_id": 1, "pmt_pid": 4096, "pcr_pid": 256,
+                "video_pid": 256, "audio_pid": 257
+            },
+            "captured_at_unix_ms": 600_001, "recorded_at_unix_ms": 600_002,
+            "recorded_by": "stationd", "detail": "completed transport analysis"
+        });
+        let store = StationStore::open(&database).unwrap();
+        store
+            .execute(&format!(
+                "DROP TABLE transport_proof_jobs;\
+                 CREATE TABLE transport_proof_jobs (\
+                   job_id TEXT PRIMARY KEY,channel_id TEXT NOT NULL,sink_id TEXT NOT NULL,target_id TEXT NOT NULL,\
+                   target_revision INTEGER NOT NULL,candidate_version TEXT NOT NULL,source_commit TEXT NOT NULL,\
+                   configuration_hash TEXT NOT NULL,requested_by TEXT NOT NULL,max_capture_bytes INTEGER NOT NULL,\
+                   state TEXT NOT NULL,created_at_unix_ms INTEGER NOT NULL,updated_at_unix_ms INTEGER NOT NULL,\
+                   lease_expires_at_unix_ms INTEGER NOT NULL,capture_relative_path TEXT NOT NULL,capture_bytes INTEGER NOT NULL,\
+                   capture_sha256 TEXT NOT NULL,capture_started_at_unix_ms INTEGER NOT NULL,capture_ended_at_unix_ms INTEGER NOT NULL,\
+                   analyzer_output_sha256 TEXT NOT NULL,completed_at_unix_ms INTEGER NOT NULL,failed_at_unix_ms INTEGER NOT NULL,\
+                   failure_detail TEXT NOT NULL,install_generation INTEGER NOT NULL,execution_capability_sha256 TEXT NOT NULL);\
+                 INSERT INTO transport_proof_jobs VALUES(\
+                   '{job_id}','{channel_id}','{sink_id}','receiver-1',1,'0.2.0','{source_commit}','{configuration_hash}',\
+                   'setup-admin',188000,'completed',1,600002,-1,'{job_id}/capture.ts',188000,'{capture_digest}',1,600001,\
+                   '{analyzer_digest}',600002,-1,'',7,'');\
+                 INSERT INTO transport_analysis_receipts(\
+                   proof_id,channel_id,sink_id,target_id,target_revision,candidate_version,source_commit,configuration_hash,\
+                   outcome,captured_at_unix_ms,recorded_at_unix_ms,record_json) VALUES(\
+                   '{job_id}','{channel_id}','{sink_id}','receiver-1',1,'0.2.0','{source_commit}','{configuration_hash}',\
+                   'pass',600001,600002,'{receipt}');"
+            ))
+            .unwrap();
+        drop(store);
+
+        let migrated =
+            StationStore::open(&database).expect("provable completed proof must migrate");
+        let record = migrated
+            .read_transport_proof_job(job_id)
+            .unwrap()
+            .expect("migrated completed job remains readable");
+        assert_eq!(record.state, TransportProofJobState::Completed);
+        assert_eq!(
+            record.tables_output_sha256.as_deref(),
+            Some(tables_digest.as_str())
+        );
+        drop(migrated);
+
+        let reopened = StationStore::open(&database).expect("backfilled proof survives restart");
+        assert_eq!(
+            reopened
+                .read_transport_proof_job(job_id)
+                .unwrap()
+                .unwrap()
+                .tables_output_sha256
+                .as_deref(),
+            Some(tables_digest.as_str())
+        );
+        drop(reopened);
         for candidate in [
             database.clone(),
             PathBuf::from(format!("{}-wal", database.display())),
