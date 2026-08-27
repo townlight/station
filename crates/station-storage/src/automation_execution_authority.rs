@@ -4,6 +4,11 @@ use station_maintenance::VerifiedInstallAuthority;
 
 const MAX_AUTOMATION_EXECUTION_ATTEMPTS: u32 = 10;
 const MAX_AUTOMATION_EXECUTION_LEASE_MS: i64 = 900_000;
+// Retry timing is durable authority, not an in-memory controller preference.  In
+// particular, an installed station with no registered production adapter must
+// not consume all ten attempts in one tight service loop.
+const AUTOMATION_EXECUTION_RETRY_INITIAL_MS: i64 = 60_000;
+const AUTOMATION_EXECUTION_RETRY_MAX_MS: i64 = 3_600_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AutomationExecutionJobState {
@@ -25,6 +30,7 @@ pub struct AutomationExecutionJobRecord {
     pub receipt: Option<AutomationExecutionReceipt>,
     pub last_failure_code: Option<String>,
     pub created_at_unix_ms: i64,
+    pub next_attempt_at_unix_ms: i64,
     pub completed_at_unix_ms: Option<i64>,
 }
 
@@ -45,7 +51,8 @@ impl StationStore {
             existing_objects += usize::from(self.sqlite_schema_object_sql(kind, name)?.is_some());
         }
         if existing_objects != 0 {
-            return self.attest_automation_execution_schema_v1();
+            self.migrate_automation_execution_schema_v1_to_v2()?;
+            return self.attest_automation_execution_schema_v2();
         }
         self.execute(
             "CREATE TABLE IF NOT EXISTS automation_execution_jobs (\
@@ -72,11 +79,12 @@ impl StationStore {
                created_at_unix_ms INTEGER NOT NULL CHECK (created_at_unix_ms >= 0),\
                completed_at_unix_ms INTEGER NOT NULL CHECK (completed_at_unix_ms >= -1),\
                request_json TEXT NOT NULL,\
+               next_attempt_at_unix_ms INTEGER NOT NULL DEFAULT 0 CHECK (next_attempt_at_unix_ms >= 0),\
                FOREIGN KEY(policy_id) REFERENCES automation_feature_policies(policy_id),\
                FOREIGN KEY(adapter_id) REFERENCES automation_adapter_descriptors(adapter_id)\
              );\
              CREATE INDEX IF NOT EXISTS automation_execution_jobs_pending \
-               ON automation_execution_jobs(state, created_at_unix_ms, job_id);\
+               ON automation_execution_jobs(state,next_attempt_at_unix_ms,created_at_unix_ms,job_id);\
              CREATE TABLE IF NOT EXISTS automation_execution_receipts (\
                receipt_id TEXT PRIMARY KEY,\
                job_id TEXT NOT NULL UNIQUE,\
@@ -106,10 +114,29 @@ impl StationStore {
                BEFORE DELETE ON automation_execution_jobs \
                BEGIN SELECT RAISE(ABORT, 'automation execution jobs are durable history'); END;",
         )?;
-        self.attest_automation_execution_schema_v1()
+        self.attest_automation_execution_schema_v2()
     }
 
-    fn attest_automation_execution_schema_v1(&self) -> Result<(), String> {
+    fn migrate_automation_execution_schema_v1_to_v2(&self) -> Result<(), String> {
+        let table = self
+            .sqlite_schema_object_sql("table", "automation_execution_jobs")?
+            .ok_or_else(|| "automation execution schema is missing its jobs table".to_string())?;
+        if !table
+            .to_ascii_lowercase()
+            .contains("next_attempt_at_unix_ms")
+        {
+            self.execute(
+                "ALTER TABLE automation_execution_jobs ADD COLUMN next_attempt_at_unix_ms INTEGER NOT NULL DEFAULT 0 CHECK (next_attempt_at_unix_ms >= 0)",
+            )?;
+            self.execute("DROP INDEX automation_execution_jobs_pending")?;
+            self.execute(
+                "CREATE INDEX automation_execution_jobs_pending ON automation_execution_jobs(state,next_attempt_at_unix_ms,created_at_unix_ms,job_id)",
+            )?;
+        }
+        Ok(())
+    }
+
+    fn attest_automation_execution_schema_v2(&self) -> Result<(), String> {
         let objects = [
             (
                 "table",
@@ -138,6 +165,7 @@ impl StationStore {
                    created_at_unix_ms INTEGER NOT NULL CHECK (created_at_unix_ms >= 0),
                    completed_at_unix_ms INTEGER NOT NULL CHECK (completed_at_unix_ms >= -1),
                    request_json TEXT NOT NULL,
+                   next_attempt_at_unix_ms INTEGER NOT NULL DEFAULT 0 CHECK (next_attempt_at_unix_ms >= 0),
                    FOREIGN KEY(policy_id) REFERENCES automation_feature_policies(policy_id),
                    FOREIGN KEY(adapter_id) REFERENCES automation_adapter_descriptors(adapter_id)
                  )",
@@ -145,7 +173,7 @@ impl StationStore {
             (
                 "index",
                 "automation_execution_jobs_pending",
-                "CREATE INDEX automation_execution_jobs_pending ON automation_execution_jobs(state, created_at_unix_ms, job_id)",
+                "CREATE INDEX automation_execution_jobs_pending ON automation_execution_jobs(state,next_attempt_at_unix_ms,created_at_unix_ms,job_id)",
             ),
             (
                 "table",
@@ -229,8 +257,8 @@ impl StationStore {
             let request_json = serde_json::to_string(request)
                 .map_err(|error| format!("serialize automation execution request: {error}"))?;
             let statement = self.prepare(
-                "INSERT INTO automation_execution_jobs(job_id,feature,policy_id,policy_revision,adapter_id,adapter_revision,configuration_hash,candidate_version,source_commit,install_generation,input_sha256,input_bytes,state,attempt_count,lease_owner,lease_expires_at_unix_ms,claim_id,claimed_at_unix_ms,receipt_id,last_failure_code,created_at_unix_ms,completed_at_unix_ms,request_json) \
-                 VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,'pending',0,'',-1,'',-1,'','',?13,-1,?14)",
+                "INSERT INTO automation_execution_jobs(job_id,feature,policy_id,policy_revision,adapter_id,adapter_revision,configuration_hash,candidate_version,source_commit,install_generation,input_sha256,input_bytes,state,attempt_count,lease_owner,lease_expires_at_unix_ms,claim_id,claimed_at_unix_ms,receipt_id,last_failure_code,created_at_unix_ms,completed_at_unix_ms,request_json,next_attempt_at_unix_ms) \
+                 VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,'pending',0,'',-1,'',-1,'','',?13,-1,?14,?15)",
             )?;
             let values = [
                 c_string(&request.job_id, "automation execution job identity")?,
@@ -301,6 +329,7 @@ impl StationStore {
             )?;
             bind_i64(self.database, statement.raw, 13, now_unix_ms)?;
             bind_text(self.database, statement.raw, 14, &values[8])?;
+            bind_i64(self.database, statement.raw, 15, now_unix_ms)?;
             expect_done(self.database, statement.raw)?;
             self.read_automation_execution_job(&request.job_id)?
                 .ok_or_else(|| "automation execution job disappeared after enqueue".into())
@@ -316,7 +345,7 @@ impl StationStore {
             return Err("automation execution job identity is invalid".into());
         }
         let statement = self.prepare(
-            "SELECT job_id,feature,policy_id,policy_revision,adapter_id,adapter_revision,configuration_hash,candidate_version,source_commit,install_generation,input_sha256,input_bytes,state,attempt_count,lease_owner,lease_expires_at_unix_ms,claim_id,claimed_at_unix_ms,receipt_id,last_failure_code,created_at_unix_ms,completed_at_unix_ms,request_json \
+            "SELECT job_id,feature,policy_id,policy_revision,adapter_id,adapter_revision,configuration_hash,candidate_version,source_commit,install_generation,input_sha256,input_bytes,state,attempt_count,lease_owner,lease_expires_at_unix_ms,claim_id,claimed_at_unix_ms,receipt_id,last_failure_code,created_at_unix_ms,completed_at_unix_ms,request_json,next_attempt_at_unix_ms \
              FROM automation_execution_jobs WHERE job_id=?1",
         )?;
         let identity = c_string(job_id, "automation execution job identity")?;
@@ -392,7 +421,7 @@ impl StationStore {
             for _ in 0..256 {
                 let select = self.prepare(
                     "SELECT job_id FROM automation_execution_jobs \
-                     WHERE attempt_count<10 AND (state='pending' OR (state='claimed' AND lease_expires_at_unix_ms<=?1)) \
+                     WHERE attempt_count<10 AND ((state='pending' AND next_attempt_at_unix_ms<=?1) OR (state='claimed' AND lease_expires_at_unix_ms<=?1)) \
                      ORDER BY created_at_unix_ms,job_id LIMIT 1",
                 )?;
                 bind_i64(self.database, select.raw, 1, now_unix_ms)?;
@@ -422,7 +451,7 @@ impl StationStore {
                 }
                 let terminal = self.prepare(
                     "UPDATE automation_execution_jobs SET state='failed',lease_owner='',lease_expires_at_unix_ms=-1,last_failure_code='authority_changed',completed_at_unix_ms=?1 \
-                     WHERE job_id=?2 AND (state='pending' OR (state='claimed' AND lease_expires_at_unix_ms<=?1))",
+                     WHERE job_id=?2 AND ((state='pending' AND next_attempt_at_unix_ms<=?1) OR (state='claimed' AND lease_expires_at_unix_ms<=?1))",
                 )?;
                 bind_i64(self.database, terminal.raw, 1, now_unix_ms)?;
                 bind_text(
@@ -646,7 +675,7 @@ impl StationStore {
                 )?
             } else {
                 self.prepare(
-                    "UPDATE automation_execution_jobs SET state='pending',lease_owner='',lease_expires_at_unix_ms=-1,claim_id='',claimed_at_unix_ms=-1,last_failure_code=?1 \
+                    "UPDATE automation_execution_jobs SET state='pending',lease_owner='',lease_expires_at_unix_ms=-1,claim_id='',claimed_at_unix_ms=-1,last_failure_code=?1,next_attempt_at_unix_ms=?5 \
                      WHERE job_id=?3 AND state='claimed' AND lease_owner=?4 AND lease_expires_at_unix_ms>?2",
                 )?
             };
@@ -657,6 +686,14 @@ impl StationStore {
             bind_i64(self.database, update.raw, 2, now_unix_ms)?;
             bind_text(self.database, update.raw, 3, &job)?;
             bind_text(self.database, update.raw, 4, &worker)?;
+            if !terminal {
+                bind_i64(
+                    self.database,
+                    update.raw,
+                    5,
+                    automation_execution_retry_at(now_unix_ms, current.attempt_count)?,
+                )?;
+            }
             expect_done(self.database, update.raw)?;
             if self.changes() != 1 {
                 return Err("automation execution failure compare-and-set was lost".into());
@@ -730,8 +767,8 @@ impl StationStore {
         )?;
         let claim_id = generate_automation_execution_claim_id()?;
         let update = self.prepare(
-            "UPDATE automation_execution_jobs SET state='claimed',attempt_count=attempt_count+1,lease_owner=?1,lease_expires_at_unix_ms=?2,claim_id=?3,claimed_at_unix_ms=?4,last_failure_code='' \
-             WHERE job_id=?5 AND (state='pending' OR (state='claimed' AND lease_expires_at_unix_ms<=?6))",
+            "UPDATE automation_execution_jobs SET state='claimed',attempt_count=attempt_count+1,lease_owner=?1,lease_expires_at_unix_ms=?2,claim_id=?3,claimed_at_unix_ms=?4,last_failure_code='',next_attempt_at_unix_ms=?4 \
+             WHERE job_id=?5 AND ((state='pending' AND next_attempt_at_unix_ms<=?4) OR (state='claimed' AND lease_expires_at_unix_ms<=?6))",
         )?;
         let worker = c_string(worker_id, "automation execution worker identity")?;
         let claim = c_string(&claim_id, "automation execution claim identity")?;
@@ -844,6 +881,7 @@ impl StationStore {
             bounded_automation_column_text(statement, 19, 80, "automation execution failure code")?;
         let created_at_unix_ms = unsafe { sqlite3_column_int64(statement, 20) };
         let completed_at = unsafe { sqlite3_column_int64(statement, 21) };
+        let next_attempt_at_unix_ms = unsafe { sqlite3_column_int64(statement, 23) };
         if request.job_id != column_text(statement, 0)?
             || automation_feature_name(request.feature) != column_text(statement, 1)?
             || request.policy_id != column_text(statement, 2)?
@@ -861,6 +899,7 @@ impl StationStore {
             || request.input.bytes != column_u64(statement, 11, "automation execution input bytes")?
             || attempt_count > MAX_AUTOMATION_EXECUTION_ATTEMPTS
             || created_at_unix_ms < 0
+            || next_attempt_at_unix_ms < 0
             || (!last_failure_code.is_empty()
                 && !valid_automation_execution_failure_code(&last_failure_code))
         {
@@ -894,6 +933,7 @@ impl StationStore {
             receipt,
             last_failure_code: (!last_failure_code.is_empty()).then_some(last_failure_code),
             created_at_unix_ms,
+            next_attempt_at_unix_ms,
             completed_at_unix_ms: (completed_at >= 0).then_some(completed_at),
         };
         validate_automation_execution_job_state(&record)?;
@@ -1049,6 +1089,17 @@ fn valid_automation_execution_failure_code(value: &str) -> bool {
         && value
             .bytes()
             .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+}
+
+fn automation_execution_retry_at(now_unix_ms: i64, attempt_count: u32) -> Result<i64, String> {
+    let exponent = attempt_count.saturating_sub(1).min(5);
+    let delay = AUTOMATION_EXECUTION_RETRY_INITIAL_MS
+        .checked_mul(1_i64 << exponent)
+        .ok_or_else(|| "automation execution retry delay overflowed".to_string())?
+        .min(AUTOMATION_EXECUTION_RETRY_MAX_MS);
+    now_unix_ms
+        .checked_add(delay)
+        .ok_or_else(|| "automation execution retry time overflowed".to_string())
 }
 
 fn automation_candidate_from_install(
