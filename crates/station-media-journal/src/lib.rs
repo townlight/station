@@ -8,7 +8,10 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
 #[cfg(windows)]
-use std::os::windows::{fs::OpenOptionsExt, io::AsRawHandle};
+use std::os::windows::{
+    fs::OpenOptionsExt,
+    io::{AsRawHandle, FromRawHandle},
+};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -38,19 +41,14 @@ const LEGACY_GENERATION_MANIFEST_VERSION: u8 = 1;
 
 /// A manifest authority binds one exact Windows file handle, FileId, and
 /// digest to a generation selection rather than trusting the pathname after
-/// JSON parsing. Strict handles omit write/delete sharing; the narrowly
-/// scoped reporter handoff may share a live writer only while separately
-/// proving that writer's retained no-delete authority. The publisher keeps
-/// its same no-delete source handle through handle-based rename and proof.
+/// JSON parsing. Strict handles omit write/delete sharing. A reporter that
+/// encounters a live writer duplicates the writer's exact no-delete source
+/// handle, so its authority survives abrupt writer-process termination. The
+/// publisher keeps its same source handle through handle-based rename/proof.
 struct ManifestAuthorityHandle {
     file: File,
     file_identity: String,
     manifest_hash: String,
-    /// True only for a reporter that had to share the live writer's DELETE
-    /// access. Such a handle is not independently rename-proof, so its
-    /// consumer must prove the writer's recorded no-delete authority again at
-    /// the durable acknowledgement boundary.
-    shared_with_live_writer: bool,
 }
 
 #[cfg(windows)]
@@ -121,7 +119,6 @@ fn duplicate_retained_manifest_authority(
             file: authority.file.try_clone().map_err(io_error)?,
             file_identity: authority.file_identity.clone(),
             manifest_hash: authority.manifest_hash.clone(),
-            shared_with_live_writer: authority.shared_with_live_writer,
         }
     };
     let bytes = read_file_bytes(&authority.file)?;
@@ -137,10 +134,10 @@ fn duplicate_retained_manifest_authority(
 }
 
 /// Returns the durable manifest binding held by this process's current
-/// incremental-reader transaction. A shared binding is valid only while the
-/// owning writer's separately recorded no-delete authority remains live.
+/// incremental-reader transaction. The retained handle itself denies delete
+/// sharing, including after the writer process that supplied it exits.
 #[cfg(windows)]
-fn retained_manifest_authority_binding(root: &Path) -> Option<(String, String, bool)> {
+fn retained_manifest_authority_binding(root: &Path) -> Option<(String, String)> {
     retained_manifest_authorities()
         .lock()
         .expect("retained manifest authorities are not poisoned")
@@ -149,7 +146,6 @@ fn retained_manifest_authority_binding(root: &Path) -> Option<(String, String, b
             (
                 authority.manifest_hash.clone(),
                 authority.file_identity.clone(),
-                authority.shared_with_live_writer,
             )
         })
 }
@@ -163,7 +159,6 @@ fn mirror_manifest_authority_for_resolution(
         file: authority.file.try_clone().map_err(io_error)?,
         file_identity: authority.file_identity.clone(),
         manifest_hash: authority.manifest_hash.clone(),
-        shared_with_live_writer: authority.shared_with_live_writer,
     };
     let mut authorities = retained_manifest_authorities()
         .lock()
@@ -554,12 +549,12 @@ fn resolve_journal_location_strict(root: &Path) -> Result<JournalLocation, Journ
 fn resolve_journal_location_with_authority(
     root: &Path,
     retain_authority: bool,
-    allow_shared_with_live_writer: bool,
+    allow_live_writer_handoff: bool,
 ) -> Result<JournalLocation, JournalError> {
     resolve_journal_location_with_authority_policy(
         root,
         retain_authority,
-        allow_shared_with_live_writer,
+        allow_live_writer_handoff,
         true,
     )
 }
@@ -567,7 +562,7 @@ fn resolve_journal_location_with_authority(
 fn resolve_journal_location_with_authority_policy(
     root: &Path,
     retain_authority: bool,
-    allow_shared_with_live_writer: bool,
+    allow_live_writer_handoff: bool,
     reuse_retained_authority: bool,
 ) -> Result<JournalLocation, JournalError> {
     let manifest_path = generation_manifest_path(root);
@@ -585,15 +580,10 @@ fn resolve_journal_location_with_authority_policy(
         if let Some(authority) = duplicate_retained_manifest_authority(root)? {
             authority
         } else {
-            open_manifest_authority_handle(
-                root,
-                &manifest_path,
-                None,
-                allow_shared_with_live_writer,
-            )?
+            open_manifest_authority_handle(root, &manifest_path, None, allow_live_writer_handoff)?
         }
     } else {
-        open_manifest_authority_handle(root, &manifest_path, None, allow_shared_with_live_writer)?
+        open_manifest_authority_handle(root, &manifest_path, None, allow_live_writer_handoff)?
     };
     let manifest: JournalGenerationManifest = match serde_json::from_slice(&manifest_bytes) {
         Ok(manifest) => manifest,
@@ -727,7 +717,7 @@ fn open_manifest_authority_handle(
     root: &Path,
     path: &Path,
     expected_manifest_hash: Option<&str>,
-    allow_shared_with_live_writer: bool,
+    allow_live_writer_handoff: bool,
 ) -> Result<(ManifestAuthorityHandle, Vec<u8>), JournalError> {
     let metadata = std::fs::symlink_metadata(path).map_err(io_error)?;
     if !metadata.is_file() || metadata.file_type().is_symlink() || is_reparse_point(&metadata) {
@@ -744,21 +734,22 @@ fn open_manifest_authority_handle(
     // replace the pathname between proof and projection persistence.
     options.share_mode(0x0000_0001);
     #[cfg(windows)]
-    let (file, shared_with_live_writer) = match options.open(path) {
-        Ok(file) => (file, false),
+    let file = match options.open(path) {
+        Ok(file) => file,
         // Only an incremental reporter reaches this fallback, and it has
-        // acquired the cross-process reader lease before opening anything.
-        // Startup/default resolution remains strict so an arbitrary pre-open
-        // WRITE/DELETE handle cannot downgrade manifest authority.
-        Err(error)
-            if allow_shared_with_live_writer
-                && error.raw_os_error() == Some(32)
-                && writer_owns_matching_manifest_authority(root, None, None)? =>
-        {
-            let mut shared = OpenOptions::new();
-            shared.read(true);
-            shared.share_mode(0x0000_0001 | 0x0000_0002 | 0x0000_0004);
-            (shared.open(path).map_err(io_error)?, true)
+        // acquired the cross-process reader lease before opening anything. It
+        // duplicates the publisher's exact no-delete source handle; opening a
+        // second permissively shared pathname handle would become mutable if
+        // the publisher process died before projection persistence.
+        Err(error) if allow_live_writer_handoff && error.raw_os_error() == Some(32) => {
+            let (authority, _) =
+                duplicate_live_writer_manifest_authority(root)?.ok_or_else(|| {
+                    corrupt(
+                        0,
+                        "live writer manifest authority cannot be duplicated for the reporter",
+                    )
+                })?;
+            authority.file
         }
         Err(error) => return Err(io_error(error)),
     };
@@ -774,15 +765,6 @@ fn open_manifest_authority_handle(
     let identity = journal_file_identity(&file)?;
     let bytes = read_file_bytes(&file)?;
     let digest = manifest_hash(&bytes);
-    #[cfg(windows)]
-    if shared_with_live_writer
-        && !writer_owns_matching_manifest_authority(root, Some(&digest), Some(&identity))?
-    {
-        return Err(corrupt(
-            0,
-            "shared manifest read is not bound to a live writer authority",
-        ));
-    }
     if expected_manifest_hash.is_some_and(|expected| expected != digest) {
         return Err(corrupt(
             0,
@@ -796,10 +778,9 @@ fn open_manifest_authority_handle(
             "journal generation manifest changed while acquiring authority",
         ));
     }
-    // A strict retained handle omits FILE_SHARE_DELETE and therefore prevents
-    // a later swap. A shared handoff is instead bound to the live writer's
-    // recorded no-delete authority above; compare the current pathname now to
-    // detect a swap which won before this handle was acquired.
+    // The direct open or duplicated source handle omits FILE_SHARE_DELETE and
+    // therefore prevents a later swap. Compare the currently named object to
+    // the exact handle to detect a replacement which won before acquisition.
     let current = OpenOptions::new().read(true).open(path).map_err(io_error)?;
     if journal_file_identity(&current)? != identity {
         return Err(corrupt(
@@ -812,7 +793,6 @@ fn open_manifest_authority_handle(
             file,
             file_identity: identity,
             manifest_hash: digest,
-            shared_with_live_writer,
         },
         bytes,
     ))
@@ -2181,8 +2161,7 @@ fn observe_writer_authority_retirement_interleaving(path: &Path) {
         .remove(path);
     if let Some(cursor) = cursor {
         #[cfg(windows)]
-        if let Some((manifest_hash, manifest_identity, _)) =
-            retained_manifest_authority_binding(path)
+        if let Some((manifest_hash, manifest_identity)) = retained_manifest_authority_binding(path)
         {
             assert!(
                 !writer_owns_matching_manifest_authority(
@@ -2461,6 +2440,11 @@ struct JournalWriterOwnership {
 struct WriterManifestAuthority {
     manifest_hash: String,
     file_identity: String,
+    /// The live writer process that owns `manifest_handle`. The reporter
+    /// duplicates this exact handle rather than reopening the pathname with
+    /// permissive DELETE sharing.
+    process_id: u32,
+    manifest_handle: u64,
 }
 
 impl Drop for JournalWriterOwnership {
@@ -2526,6 +2510,12 @@ fn record_writer_manifest_authority(
             &WriterManifestAuthority {
                 manifest_hash: authority.manifest_hash.clone(),
                 file_identity: authority.file_identity.clone(),
+                // The writer lock is process-owned, so the PID/handle pair
+                // is meaningful only while its exclusive status handle still
+                // proves this writer live. A reporter validates both the
+                // duplicated FileId and content digest before retaining it.
+                process_id: unsafe { windows_sys::Win32::System::Threading::GetCurrentProcessId() },
+                manifest_handle: authority.file.as_raw_handle() as usize as u64,
             },
         )
         .map_err(|error| {
@@ -2539,7 +2529,130 @@ fn record_writer_manifest_authority(
     handle.sync_all().map_err(io_error)
 }
 
+/// Reads one writer-owned manifest binding only while the writer's exclusive
+/// ownership sidecar remains live. The record carries a process-local handle
+/// value, so it is never authority by itself: callers must duplicate and
+/// revalidate the referenced file object before using it.
 #[cfg(windows)]
+fn live_writer_manifest_authority(
+    root: &Path,
+) -> Result<Option<WriterManifestAuthority>, JournalError> {
+    let lock_path = writer_lock_path(root);
+    let mut exclusive = OpenOptions::new();
+    exclusive.read(true).write(true);
+    exclusive.share_mode(0);
+    match exclusive.open(&lock_path) {
+        Ok(file) => {
+            drop(file);
+            return Ok(None);
+        }
+        Err(error) if error.raw_os_error() == Some(32) => {}
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(io_error(error)),
+    }
+    let mut reader = OpenOptions::new();
+    reader.read(true);
+    reader.share_mode(0x0000_0001 | 0x0000_0002 | 0x0000_0004);
+    let mut reader = reader.open(&lock_path).map_err(io_error)?;
+    let mut bytes = Vec::new();
+    reader.read_to_end(&mut bytes).map_err(io_error)?;
+    let Ok(authority) = serde_json::from_slice::<WriterManifestAuthority>(&bytes) else {
+        return Ok(None);
+    };
+    if authority.manifest_hash.is_empty()
+        || authority.file_identity.is_empty()
+        || authority.process_id == 0
+        || authority.manifest_handle == 0
+    {
+        return Ok(None);
+    }
+    let mut still_exclusive = OpenOptions::new();
+    still_exclusive.read(true).write(true);
+    still_exclusive.share_mode(0);
+    match still_exclusive.open(&lock_path) {
+        Ok(file) => {
+            drop(file);
+            Ok(None)
+        }
+        Err(error) if error.raw_os_error() == Some(32) => Ok(Some(authority)),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(io_error(error)),
+    }
+}
+
+/// Duplicates the writer's original manifest handle into the reporter. A
+/// duplicate references the same Windows file object, retaining its omitted
+/// FILE_SHARE_DELETE even if the writer process terminates immediately after
+/// this call. The sidecar merely locates the handle; the FileId and digest
+/// checks below bind it to the manifest selected by the reader.
+#[cfg(windows)]
+fn duplicate_live_writer_manifest_authority(
+    root: &Path,
+) -> Result<Option<(ManifestAuthorityHandle, Vec<u8>)>, JournalError> {
+    use windows_sys::Win32::{
+        Foundation::{CloseHandle, DUPLICATE_SAME_ACCESS, DuplicateHandle},
+        System::Threading::{GetCurrentProcess, OpenProcess, PROCESS_DUP_HANDLE},
+    };
+
+    let Some(record) = live_writer_manifest_authority(root)? else {
+        return Ok(None);
+    };
+    // SAFETY: `record.process_id` came from the still-live writer ownership
+    // record above. Failure is fail-closed; successful acquisition is closed
+    // below after the duplicate has been made.
+    let source_process = unsafe { OpenProcess(PROCESS_DUP_HANDLE, 0, record.process_id) };
+    if source_process.is_null() {
+        return Err(corrupt(
+            0,
+            "live writer process cannot provide a durable manifest authority duplicate",
+        ));
+    }
+    let mut duplicated = std::ptr::null_mut();
+    // SAFETY: both process handles are valid for this call and the source
+    // handle value is meaningful only in `source_process`. DUPLICATE_SAME_ACCESS
+    // preserves the original no-delete file object's access/share state.
+    let copied = unsafe {
+        DuplicateHandle(
+            source_process,
+            record.manifest_handle as usize as isize as _,
+            GetCurrentProcess(),
+            &mut duplicated,
+            0,
+            0,
+            DUPLICATE_SAME_ACCESS,
+        )
+    };
+    // SAFETY: `source_process` is no longer needed after DuplicateHandle.
+    unsafe { CloseHandle(source_process) };
+    if copied == 0 || duplicated.is_null() {
+        return Err(corrupt(
+            0,
+            "live writer manifest authority duplication failed",
+        ));
+    }
+    // SAFETY: DuplicateHandle transferred a fresh owned handle into this
+    // process. File owns and closes it on every subsequent error path.
+    let file = unsafe { File::from_raw_handle(duplicated) };
+    let identity = journal_file_identity(&file)?;
+    let bytes = read_file_bytes(&file)?;
+    let digest = manifest_hash(&bytes);
+    if identity != record.file_identity || digest != record.manifest_hash {
+        return Err(corrupt(
+            0,
+            "duplicated live writer manifest authority does not match its durable binding",
+        ));
+    }
+    Ok(Some((
+        ManifestAuthorityHandle {
+            file,
+            file_identity: identity,
+            manifest_hash: digest,
+        },
+        bytes,
+    )))
+}
+
+#[cfg(all(test, windows))]
 fn writer_owns_matching_manifest_authority(
     root: &Path,
     manifest_hash: Option<&str>,
@@ -2567,7 +2680,11 @@ fn writer_owns_matching_manifest_authority(
     let Ok(authority) = serde_json::from_slice::<WriterManifestAuthority>(&bytes) else {
         return Ok(false);
     };
-    if authority.manifest_hash.is_empty() || authority.file_identity.is_empty() {
+    if authority.manifest_hash.is_empty()
+        || authority.file_identity.is_empty()
+        || authority.process_id == 0
+        || authority.manifest_handle == 0
+    {
         return Ok(false);
     }
     if manifest_hash.is_some_and(|value| value != authority.manifest_hash)
@@ -2802,9 +2919,9 @@ pub fn read_journal_incremental(
 /// This is deliberately separate from [`read_journal_incremental`]: a
 /// reporter can process a bounded batch without holding an SQLite transaction
 /// open, but must not acknowledge that batch if a writer exited or switched
-/// the manifest in the meantime. On Windows a reader which shared a live
-/// writer's DELETE access must prove the writer's exact manifest authority is
-/// still live; a generic sharing violation is never treated as proof.
+/// the manifest in the meantime. On Windows a reporter that encountered a
+/// live writer retains a duplicate of that writer's exact no-delete manifest
+/// handle, so the proof remains authority even if that writer then exits.
 pub fn verify_incremental_reader_authority(
     path: impl AsRef<Path>,
     cursor: &JournalCursor,
@@ -2815,8 +2932,8 @@ pub fn verify_incremental_reader_authority(
 
     // Do not reuse the process cache here: this is the acknowledgement
     // boundary, so resolve the current pathname anew and compare it with the
-    // durable cursor. The only shared open is re-bound to the live writer
-    // both by `open_manifest_authority_handle` and below.
+    // durable cursor. A retained no-delete authority is duplicated rather
+    // than reopened by pathname while it remains live.
     let location = resolve_journal_location_with_authority_policy(root, false, true, false)?;
     if location.generation != cursor.generation || location.manifest_hash != cursor.manifest_hash {
         return Err(corrupt(
@@ -2847,25 +2964,13 @@ pub fn verify_incremental_reader_authority(
         ));
     }
     #[cfg(windows)]
-    if let Some((manifest_hash, manifest_identity, shared_with_live_writer)) = retained_binding {
-        if manifest_hash != location.manifest_hash {
-            return Err(corrupt(
-                cursor.byte_offset,
-                "retained journal manifest authority changed before acknowledgement",
-            ));
-        }
-        if shared_with_live_writer
-            && !writer_owns_matching_manifest_authority(
-                root,
-                Some(&manifest_hash),
-                Some(&manifest_identity),
-            )?
-        {
-            return Err(corrupt(
-                cursor.byte_offset,
-                "live writer manifest authority retired before durable reader acknowledgement",
-            ));
-        }
+    if let Some((manifest_hash, _manifest_identity)) = retained_binding
+        && manifest_hash != location.manifest_hash
+    {
+        return Err(corrupt(
+            cursor.byte_offset,
+            "retained journal manifest authority changed before acknowledgement",
+        ));
     }
     Ok(())
 }
@@ -4538,10 +4643,9 @@ fn read_snapshot_bounded(path: &Path, event_limit: usize) -> Result<JournalSnaps
 fn read_snapshot_bounded_with_manifest_policy(
     path: &Path,
     event_limit: usize,
-    allow_shared_with_live_writer: bool,
+    allow_live_writer_handoff: bool,
 ) -> Result<JournalSnapshot, JournalError> {
-    let location =
-        resolve_journal_location_with_authority(path, false, allow_shared_with_live_writer)?;
+    let location = resolve_journal_location_with_authority(path, false, allow_live_writer_handoff)?;
     let Some(active_path) = location.active_path else {
         return read_snapshot_bounded_direct(&location.data_path, event_limit);
     };
@@ -5603,7 +5707,6 @@ fn replace_manifest_from_exact_handle(
         file,
         file_identity: source_identity,
         manifest_hash: expected_manifest_hash,
-        shared_with_live_writer: false,
     })
 }
 
@@ -6588,8 +6691,8 @@ mod tests {
         let mut writer = JournalWriter::open(&path, WORKER_ID, CHANNEL_ID).unwrap();
         // Force a writer-owned publication. Its retained source handle has
         // DELETE access (needed for FileRenameInfo) but intentionally omits
-        // DELETE sharing, so a concurrent reporter must take the explicit
-        // shared handoff path rather than independently locking the manifest.
+        // DELETE sharing, so a concurrent reporter must duplicate the writer
+        // authority rather than independently reopening the manifest.
         for sequence in 3..=515 {
             writer
                 .append(&event(
@@ -6614,14 +6717,13 @@ mod tests {
         );
         let report = read_journal_incremental(&path, None, 8, true).unwrap();
         assert_eq!(report.cursor.generation, published_generation);
-        // The reader's shared handoff is accepted only while the writer's
-        // sidecar still binds this exact manifest FileId/hash. It is checked
-        // again at the persistence boundary rather than trusting the initial
-        // sharing violation alone.
+        // The reader duplicates the writer's exact no-delete handle after
+        // checking the sidecar's FileId/hash. It remains authoritative across
+        // writer retirement through the persistence acknowledgement.
         verify_incremental_reader_authority(&path, &report.cursor).unwrap();
         schedule_writer_authority_retirement_interleaving(path.clone(), report.cursor.clone());
         let retiring = thread::spawn(move || drop(writer));
-        let (manifest_hash, manifest_identity, _) =
+        let (manifest_hash, manifest_identity) =
             retained_manifest_authority_binding(&path).expect("reporter holds manifest authority");
         for _ in 0..500 {
             if !writer_owns_matching_manifest_authority(
@@ -7521,6 +7623,85 @@ mod tests {
         let _ = std::fs::remove_file(barrier);
         let _ = std::fs::remove_file(release);
         let _ = std::fs::remove_file(worker_done);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn reporter_manifest_authority_survives_abrupt_writer_process_death() {
+        const WRITER: &str = "TOWNLIGHT_JOURNAL_ABRUPT_WRITER";
+        const JOURNAL: &str = "TOWNLIGHT_JOURNAL_ABRUPT_PATH";
+        const READY: &str = "TOWNLIGHT_JOURNAL_ABRUPT_READY";
+        if std::env::var_os(WRITER).is_some() {
+            let journal = PathBuf::from(std::env::var_os(JOURNAL).unwrap());
+            let ready = PathBuf::from(std::env::var_os(READY).unwrap());
+            let mut writer = JournalWriter::open(&journal, WORKER_ID, CHANNEL_ID).unwrap();
+            writer
+                .append(&event(1, WorkerEvent::Ready { graph_revision: 1 }))
+                .unwrap();
+            for sequence in 2..=514 {
+                writer
+                    .append(&event(
+                        sequence,
+                        WorkerEvent::Heartbeat {
+                            monotonic_milliseconds: sequence * 5_000,
+                            outputs: Vec::new(),
+                        },
+                    ))
+                    .unwrap();
+            }
+            assert!(generation_manifest_path(&journal).exists());
+            File::create(ready).unwrap();
+            loop {
+                thread::sleep(Duration::from_secs(1));
+            }
+        }
+
+        let path = test_path();
+        let ready = test_path();
+        let mut writer = Command::new(std::env::current_exe().unwrap())
+            .arg("--exact")
+            .arg("tests::reporter_manifest_authority_survives_abrupt_writer_process_death")
+            .env(WRITER, "1")
+            .env(JOURNAL, &path)
+            .env(READY, &ready)
+            .spawn()
+            .unwrap();
+        for _ in 0..500 {
+            if ready.exists() {
+                break;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(ready.exists(), "writer child did not publish its manifest");
+
+        // The reporter obtains a duplicate of the live writer's no-delete
+        // source handle. The final authority proof succeeds before the
+        // worker is terminated, exactly matching the verify-to-persist gap.
+        let report = read_journal_incremental(&path, None, 8, true).unwrap();
+        verify_incremental_reader_authority(&path, &report.cursor).unwrap();
+        writer.kill().unwrap();
+        let status = writer.wait().unwrap();
+        assert!(!status.success(), "the writer must terminate without Drop");
+
+        let replacement = path.with_extension("abrupt-writer-manifest-swap");
+        std::fs::write(&replacement, b"untrusted manifest replacement").unwrap();
+        // The source process is gone, so this is protected only by the
+        // reporter's duplicated no-delete authority. A separate process must
+        // still be unable to replace the manifest before durable commit/abort.
+        assert_manifest_replacement_is_blocked(&replacement, &generation_manifest_path(&path));
+
+        // A successful projection commit would acknowledge here. Once the
+        // reporter releases its duplicate, normal replacement is possible.
+        acknowledge_incremental_reader(&path);
+        std::fs::rename(&replacement, generation_manifest_path(&path)).unwrap();
+
+        let _ = std::fs::remove_file(generation_manifest_path(&path));
+        let _ = std::fs::remove_file(generation_path(&path, 1));
+        let _ = std::fs::remove_file(active_segment_path(&path, 1));
+        let _ = std::fs::remove_file(writer_lock_path(&path));
+        let _ = std::fs::remove_file(reader_lease_path(&path));
+        let _ = std::fs::remove_file(path);
+        let _ = std::fs::remove_file(ready);
     }
 
     #[test]

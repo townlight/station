@@ -10656,11 +10656,12 @@ fn asrun_page_path(path: &str) -> Option<(&str, Option<&str>, usize)> {
     for part in query.split('&') {
         let (key, value) = part.split_once('=')?;
         match key {
-            "cursor" if cursor.is_none()
-                && !value.is_empty()
-                && value
-                    .bytes()
-                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_')) =>
+            "cursor"
+                if cursor.is_none()
+                    && !value.is_empty()
+                    && value.bytes().all(|byte| {
+                        byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_')
+                    }) =>
             {
                 cursor = Some(value)
             }

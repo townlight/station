@@ -80,12 +80,11 @@ fn observe_projection_persist_boundary(_path: &Path) {}
 
 /// Owns the journal reader lease for exactly one projection transaction.
 ///
-/// A successful incremental read may retain a cross-process lease and, when
-/// it had to share a live writer's DELETE-bearing manifest handle, the writer
-/// retains its no-delete authority until this lease is released. Every error
-/// after a read must therefore retire the session rather than strand the
-/// writer in its graceful-retirement wait. Successful persistence explicitly
-/// acknowledges before this guard is disarmed.
+/// A successful incremental read retains a cross-process lease and exact
+/// no-delete manifest authority through its projection transaction, including
+/// if the writer process exits. Every error after a read must therefore retire
+/// the session rather than strand a later writer publication. Successful
+/// persistence explicitly acknowledges before this guard is disarmed.
 struct IncrementalReaderTransaction<'a> {
     journal_path: &'a Path,
     armed: bool,
@@ -471,10 +470,10 @@ pub fn project_durable_journal(
         checkpoint,
         window,
     )?;
-    // The read may have shared a live writer's DELETE-bearing manifest handle.
-    // Re-bind the exact cursor immediately before the output/checkpoint
-    // transaction, so a writer exit or manifest handoff cannot be
-    // acknowledged as projection authority.
+    // The read retains exact no-delete manifest authority through this
+    // transaction. Re-bind the exact cursor immediately before the
+    // output/checkpoint transaction, so an incompatible manifest handoff
+    // cannot be acknowledged as projection authority.
     verify_incremental_reader_authority(path, &acknowledgement_cursor).map_err(journal_error)?;
     observe_projection_persist_boundary(path);
     store
@@ -928,7 +927,9 @@ mod tests {
     use station_media_protocol::PROTOCOL_VERSION;
     use std::{
         ffi::OsString,
+        fs::File,
         path::PathBuf,
+        process::Command,
         sync::{
             atomic::{AtomicU64, Ordering},
             mpsc,
@@ -939,6 +940,8 @@ mod tests {
 
     const CHANNEL: &str = "00000000-0000-4000-8000-000000000001";
     static NEXT_TEST_PATH: AtomicU64 = AtomicU64::new(0);
+    const MANIFEST_SWAP_SOURCE: &str = "TOWNLIGHT_ASRUN_MANIFEST_SWAP_SOURCE";
+    const MANIFEST_SWAP_DESTINATION: &str = "TOWNLIGHT_ASRUN_MANIFEST_SWAP_DESTINATION";
 
     fn test_path(extension: &str) -> PathBuf {
         let nonce = SystemTime::now()
@@ -971,28 +974,92 @@ mod tests {
         }
     }
 
+    /// Verify the Windows share contract from a distinct process, rather than
+    /// relying on another handle in the reporter process.
+    fn assert_manifest_replacement_is_blocked(source: &Path, destination: &Path) {
+        let status = Command::new(std::env::current_exe().unwrap())
+            .arg("--exact")
+            .arg("asrun_journal_adapter::tests::persistence_failure_aborts_reporter_authority_after_writer_process_death")
+            .env(MANIFEST_SWAP_SOURCE, source)
+            .env(MANIFEST_SWAP_DESTINATION, destination)
+            .status()
+            .expect("manifest replacement child starts");
+        assert!(
+            status.success(),
+            "a separate process unexpectedly replaced a live reporter manifest authority"
+        );
+        assert!(
+            source.exists(),
+            "a rejected manifest replacement keeps its source"
+        );
+    }
+
     #[test]
-    fn persistence_failure_aborts_reader_lease_before_writer_releases_authority() {
+    fn persistence_failure_aborts_reporter_authority_after_writer_process_death() {
+        const ABRUPT_WRITER: &str = "TOWNLIGHT_ASRUN_ABORT_WRITER";
+        const WRITER_JOURNAL: &str = "TOWNLIGHT_ASRUN_ABORT_JOURNAL";
+        const WRITER_READY: &str = "TOWNLIGHT_ASRUN_ABORT_READY";
+        if let (Some(source), Some(destination)) = (
+            std::env::var_os(MANIFEST_SWAP_SOURCE),
+            std::env::var_os(MANIFEST_SWAP_DESTINATION),
+        ) {
+            let source = PathBuf::from(source);
+            let destination = PathBuf::from(destination);
+            let error = std::fs::rename(&source, &destination)
+                .expect_err("a live reporter manifest authority must reject replacement");
+            assert!(
+                error.kind() == std::io::ErrorKind::PermissionDenied
+                    || error.raw_os_error() == Some(32),
+                "manifest replacement failed for an unexpected reason: {error}"
+            );
+            assert!(source.exists(), "a rejected replacement keeps its source");
+            return;
+        }
+        if std::env::var_os(ABRUPT_WRITER).is_some() {
+            let journal = PathBuf::from(std::env::var_os(WRITER_JOURNAL).unwrap());
+            let ready = PathBuf::from(std::env::var_os(WRITER_READY).unwrap());
+            let mut writer =
+                JournalWriter::open(&journal, &format!("station-worker-{CHANNEL}"), CHANNEL)
+                    .unwrap();
+            writer
+                .append(&WorkerEventEnvelope {
+                    version: PROTOCOL_VERSION,
+                    worker_id: format!("station-worker-{CHANNEL}"),
+                    channel_id: CHANNEL.into(),
+                    sequence: 1,
+                    event: WorkerEvent::Ready { graph_revision: 1 },
+                })
+                .unwrap();
+            for sequence in 2..=514 {
+                writer.append(&heartbeat(sequence)).unwrap();
+            }
+            File::create(ready).unwrap();
+            loop {
+                thread::sleep(Duration::from_secs(1));
+            }
+        }
+
         let database = test_path("db");
         let journal = database.with_extension("tlj");
-        let mut writer =
-            JournalWriter::open(&journal, &format!("station-worker-{CHANNEL}"), CHANNEL).unwrap();
-        writer
-            .append(&WorkerEventEnvelope {
-                version: PROTOCOL_VERSION,
-                worker_id: format!("station-worker-{CHANNEL}"),
-                channel_id: CHANNEL.into(),
-                sequence: 1,
-                event: WorkerEvent::Ready { graph_revision: 1 },
-            })
+        let ready = test_path("writer-ready");
+        let mut writer = Command::new(std::env::current_exe().unwrap())
+            .arg("--exact")
+            .arg("asrun_journal_adapter::tests::persistence_failure_aborts_reporter_authority_after_writer_process_death")
+            .env(ABRUPT_WRITER, "1")
+            .env(WRITER_JOURNAL, &journal)
+            .env(WRITER_READY, &ready)
+            .spawn()
             .unwrap();
-        for sequence in 2..=514 {
-            writer.append(&heartbeat(sequence)).unwrap();
+        for _ in 0..500 {
+            if ready.exists() {
+                break;
+            }
+            thread::sleep(Duration::from_millis(10));
         }
         let manifest = sidecar_path(&journal, ".generation-manifest");
         assert!(
-            manifest.exists(),
-            "heartbeat compaction published a manifest"
+            ready.exists() && manifest.exists(),
+            "writer child did not publish the compacted manifest"
         );
 
         // Use the real persistence method's final state write as the failure
@@ -1031,19 +1098,16 @@ mod tests {
 
         let replacement = test_path("manifest-replacement");
         std::fs::write(&replacement, b"untrusted manifest replacement").unwrap();
-        let (retired_tx, retired_rx) = mpsc::channel();
-        let retiring = thread::spawn(move || {
-            drop(writer);
-            let _ = retired_tx.send(());
-        });
+        // Terminate the actual worker process after the reporter's final
+        // verify and before persistence. No `Drop` waits or source writer
+        // handle remain: replacement must be denied solely by the reporter's
+        // duplicated no-delete manifest authority.
+        writer.kill().unwrap();
         assert!(
-            retired_rx.recv_timeout(Duration::from_millis(100)).is_err(),
-            "writer retired before the verified reader transaction aborted"
+            !writer.wait().unwrap().success(),
+            "writer process must terminate without graceful Drop"
         );
-        assert!(
-            std::fs::rename(&replacement, &manifest).is_err(),
-            "writer released no-delete manifest authority before failed persistence aborted"
-        );
+        assert_manifest_replacement_is_blocked(&replacement, &manifest);
 
         resume_tx
             .send(())
@@ -1053,10 +1117,11 @@ mod tests {
             Err(AsRunJournalAdapterError::Storage(error))
                 if error.contains("injected projection persistence failure")
         ));
-        retired_rx
-            .recv_timeout(Duration::from_secs(2))
-            .expect("failed projection abort released the writer retirement wait");
-        retiring.join().expect("writer retirement thread joins");
+        // The error path's RAII guard releases the reporter authority only
+        // after the projection transaction has aborted; ordinary manifest
+        // replacement can then proceed without a stranded lease.
+        std::fs::rename(&replacement, &manifest)
+            .expect("failed projection abort released the reporter authority");
 
         for path in [
             database.clone(),
@@ -1067,6 +1132,115 @@ mod tests {
             sidecar_path(&journal, ".reader-lease"),
             sidecar_path(&journal, ".writer-lock"),
             replacement,
+            ready,
+        ] {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+
+    #[test]
+    fn successful_persistence_commits_before_releasing_reporter_authority_after_writer_process_death()
+     {
+        const ABRUPT_WRITER: &str = "TOWNLIGHT_ASRUN_COMMIT_WRITER";
+        const WRITER_JOURNAL: &str = "TOWNLIGHT_ASRUN_COMMIT_JOURNAL";
+        const WRITER_READY: &str = "TOWNLIGHT_ASRUN_COMMIT_READY";
+        if std::env::var_os(ABRUPT_WRITER).is_some() {
+            let journal = PathBuf::from(std::env::var_os(WRITER_JOURNAL).unwrap());
+            let ready = PathBuf::from(std::env::var_os(WRITER_READY).unwrap());
+            let mut writer =
+                JournalWriter::open(&journal, &format!("station-worker-{CHANNEL}"), CHANNEL)
+                    .unwrap();
+            writer
+                .append(&WorkerEventEnvelope {
+                    version: PROTOCOL_VERSION,
+                    worker_id: format!("station-worker-{CHANNEL}"),
+                    channel_id: CHANNEL.into(),
+                    sequence: 1,
+                    event: WorkerEvent::Ready { graph_revision: 1 },
+                })
+                .unwrap();
+            for sequence in 2..=514 {
+                writer.append(&heartbeat(sequence)).unwrap();
+            }
+            File::create(ready).unwrap();
+            loop {
+                thread::sleep(Duration::from_secs(1));
+            }
+        }
+
+        let database = test_path("db");
+        let journal = database.with_extension("tlj");
+        let ready = test_path("writer-ready");
+        let mut writer = Command::new(std::env::current_exe().unwrap())
+            .arg("--exact")
+            .arg("asrun_journal_adapter::tests::successful_persistence_commits_before_releasing_reporter_authority_after_writer_process_death")
+            .env(ABRUPT_WRITER, "1")
+            .env(WRITER_JOURNAL, &journal)
+            .env(WRITER_READY, &ready)
+            .spawn()
+            .unwrap();
+        for _ in 0..500 {
+            if ready.exists() {
+                break;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        let manifest = sidecar_path(&journal, ".generation-manifest");
+        assert!(
+            ready.exists() && manifest.exists(),
+            "writer child did not publish the compacted manifest"
+        );
+
+        let (verified_tx, verified_rx) = mpsc::channel();
+        let (resume_tx, resume_rx) = mpsc::channel();
+        schedule_projection_persist_boundary(journal.clone(), verified_tx, resume_rx);
+        let reporter_database = database.clone();
+        let reporter_journal = journal.clone();
+        let reporter = thread::spawn(move || {
+            let store = StationStore::open(&reporter_database).unwrap();
+            project_durable_journal(
+                &store,
+                &reporter_journal,
+                &format!("station-worker-{CHANNEL}"),
+                CHANNEL,
+                "America/Denver",
+                1_700_000_000_000,
+                true,
+            )
+        });
+        verified_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("reporter passed final authority verification");
+
+        let replacement = test_path("manifest-replacement");
+        std::fs::write(&replacement, b"untrusted manifest replacement").unwrap();
+        writer.kill().unwrap();
+        assert!(
+            !writer.wait().unwrap().success(),
+            "writer process must terminate without graceful Drop"
+        );
+        assert_manifest_replacement_is_blocked(&replacement, &manifest);
+
+        resume_tx
+            .send(())
+            .expect("reporter remains paused at persistence boundary");
+        reporter
+            .join()
+            .expect("reporter thread joins")
+            .expect("projection persistence commits before acknowledgement");
+        std::fs::rename(&replacement, &manifest)
+            .expect("successful projection commit released the reporter authority");
+
+        for path in [
+            database.clone(),
+            journal.clone(),
+            manifest,
+            sidecar_path(&journal, ".generation-1"),
+            sidecar_path(&journal, ".active-1"),
+            sidecar_path(&journal, ".reader-lease"),
+            sidecar_path(&journal, ".writer-lock"),
+            replacement,
+            ready,
         ] {
             let _ = std::fs::remove_file(path);
         }
