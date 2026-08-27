@@ -32,8 +32,14 @@ Assert-Contract ($inno -match 'NasPublisherPath' -and
 $knownFolderBootstrapEnd = $build.IndexOf('$expectedRuntimeHash', [StringComparison]::Ordinal)
 Assert-Contract ($knownFolderBootstrapEnd -gt 0) 'build script must retain a known-folder bootstrap boundary.'
 # Execute only the parameter/default/known-folder prefix. This proves the trusted
-# folder initialization itself is invocation-safe without starting a build.
-& ([scriptblock]::Create($build.Substring(0, $knownFolderBootstrapEnd)))
+# folder initialization itself is invocation-safe without starting a build. The extracted
+# prefix does not run as a script file, so its automatic PSScriptRoot is empty; bind that
+# harness-only value to the already resolved repository instead of passing an empty path to
+# Join-Path. The production invocation retains its real PSScriptRoot.
+$bootstrap = $build.Substring(0, $knownFolderBootstrapEnd)
+$bootstrapRoot = (Join-Path $repository 'installer').Replace("'", "''")
+$bootstrap = $bootstrap.Replace('$PSScriptRoot', "'$bootstrapRoot'")
+& ([scriptblock]::Create($bootstrap))
 Assert-Contract $true 'trusted known-folder bootstrap must execute without starting an installer build.'
 
 Assert-Contract ($build -match '\$expectedInnoHash\s*=\s*\x27[0-9a-f]{64}\x27' -and
