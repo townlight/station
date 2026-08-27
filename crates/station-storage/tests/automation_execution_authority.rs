@@ -5,6 +5,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
+use sha2::{Digest, Sha256};
 use station_automation_policy::{
     AdapterLocation, AutomationAdapterDescriptor, AutomationCandidateIdentity,
     AutomationConnectionTestEvidence, AutomationExecutionEngine, AutomationExecutionReceipt,
@@ -1094,6 +1095,7 @@ fn missing_parent_receipt_and_corrupt_failure_code_fail_closed() {
 
 fn exact_test_adapter() -> AutomationExecutionAdapter {
     let system_root = std::env::var_os("SystemRoot").expect("Windows system root exists");
+    let application_root = PathBuf::from(&system_root);
     let executable = PathBuf::from(system_root)
         .join("System32")
         .join("WindowsPowerShell")
@@ -1114,7 +1116,16 @@ fn exact_test_adapter() -> AutomationExecutionAdapter {
     );
     AutomationExecutionAdapter::new(
         ADAPTER_ID,
+        1,
+        application_root,
         executable,
+        sha256_file(
+            &PathBuf::from(std::env::var_os("SystemRoot").unwrap())
+                .join("System32")
+                .join("WindowsPowerShell")
+                .join("v1.0")
+                .join("powershell.exe"),
+        ),
         vec![
             "-NoLogo".into(),
             "-NoProfile".into(),
@@ -1128,13 +1139,18 @@ fn exact_test_adapter() -> AutomationExecutionAdapter {
 
 fn blocking_test_adapter() -> AutomationExecutionAdapter {
     let system_root = std::env::var_os("SystemRoot").expect("Windows system root exists");
+    let application_root = PathBuf::from(&system_root);
+    let executable = PathBuf::from(&system_root)
+        .join("System32")
+        .join("WindowsPowerShell")
+        .join("v1.0")
+        .join("powershell.exe");
     AutomationExecutionAdapter::new(
         ADAPTER_ID,
-        PathBuf::from(system_root)
-            .join("System32")
-            .join("WindowsPowerShell")
-            .join("v1.0")
-            .join("powershell.exe"),
+        1,
+        application_root,
+        &executable,
+        sha256_file(&executable),
         vec![
             "-NoLogo".into(),
             "-NoProfile".into(),
@@ -1144,6 +1160,40 @@ fn blocking_test_adapter() -> AutomationExecutionAdapter {
         ],
     )
     .expect("build blocking host-owned test worker")
+}
+
+fn descendant_holding_pipe_test_adapter() -> AutomationExecutionAdapter {
+    let system_root = std::env::var_os("SystemRoot").expect("Windows system root exists");
+    let application_root = PathBuf::from(&system_root);
+    let executable = PathBuf::from(&system_root)
+        .join("System32")
+        .join("WindowsPowerShell")
+        .join("v1.0")
+        .join("powershell.exe");
+    // This worker starts a child before sleeping. The controller must contain
+    // that descendant in the same Job Object and drain its inherited pipes
+    // while stopping the parent; otherwise this test would hang at teardown.
+    let script = "Start-Process -FilePath powershell.exe -ArgumentList '-NoLogo','-NoProfile','-NonInteractive','-Command','[Console]::Out.Write(\"held\"); Start-Sleep -Seconds 30'; Start-Sleep -Seconds 30";
+    AutomationExecutionAdapter::new(
+        ADAPTER_ID,
+        1,
+        application_root,
+        &executable,
+        sha256_file(&executable),
+        vec![
+            "-NoLogo".into(),
+            "-NoProfile".into(),
+            "-NonInteractive".into(),
+            "-Command".into(),
+            script.into(),
+        ],
+    )
+    .expect("build descendant worker")
+}
+
+fn sha256_file(path: &Path) -> String {
+    let bytes = std::fs::read(path).expect("read test worker");
+    format!("{:x}", Sha256::digest(bytes))
 }
 
 #[test]
@@ -1262,14 +1312,57 @@ fn host_owned_blocking_worker_is_terminated_on_stop_and_releases_its_claim_for_a
 }
 
 #[test]
-fn host_owned_blocking_worker_deadline_never_blocks_reclaim_of_its_expired_claim() {
+fn job_containment_reaps_an_early_descendant_holding_a_pipe() {
+    let (database, store) = configured_store("automation-execution-descendant-pipe");
+    store
+        .enqueue_automation_execution_job(&request(), &candidate(), 100)
+        .unwrap();
+    let adapter = descendant_holding_pipe_test_adapter();
+    let stop = AtomicBool::new(false);
+    let mut calls = 0_u8;
+    let mut times = [150_i64, 151, 152, 200].into_iter();
+
+    assert!(
+        run_automation_execution_controller_iteration_with_stop(
+            &store,
+            Some(&adapter),
+            &candidate(),
+            "stationd-test-controller",
+            &mut || {
+                calls += 1;
+                if calls == 3 {
+                    stop.store(true, Ordering::Release);
+                }
+                Ok(times.next().unwrap())
+            },
+            &stop,
+        )
+        .expect("contained descendant and both drain threads must be reaped")
+    );
+    let pending = store
+        .read_automation_execution_job(JOB_ID)
+        .unwrap()
+        .unwrap();
+    assert_eq!(pending.state, AutomationExecutionJobState::Pending);
+    assert_eq!(
+        pending.last_failure_code.as_deref(),
+        Some("adapter_timeout")
+    );
+    drop(store);
+    let _ = std::fs::remove_file(database);
+}
+
+#[test]
+fn action_deadline_is_absolute_even_after_a_live_lease_renewal() {
     let (database, store) = configured_store("automation-execution-deadline-containment");
     store
         .enqueue_automation_execution_job(&request(), &candidate(), 100)
         .unwrap();
     let adapter = blocking_test_adapter();
     let stop = AtomicBool::new(false);
-    let mut times = [150_i64, 151, 60_150, 60_151].into_iter();
+    // The third clock observation reaches the renewal lead, extending only
+    // durable ownership. The fourth reaches the immutable action deadline.
+    let mut times = [150_i64, 151, 30_150, 60_150, 60_151].into_iter();
 
     assert!(
         run_automation_execution_controller_iteration_with_stop(
@@ -1282,16 +1375,19 @@ fn host_owned_blocking_worker_deadline_never_blocks_reclaim_of_its_expired_claim
         )
         .expect("deadline teardown must not require a blocking worker callback")
     );
-    let reclaimed = store
-        .claim_next_automation_execution_job(
-            "stationd-test-controller",
-            &candidate(),
-            60_151,
-            1_000,
-        )
-        .expect("expired contained claim is reclaimable")
-        .expect("same job is reclaimed");
-    assert_eq!(reclaimed.attempt_count, 2);
+    let pending = store
+        .read_automation_execution_job(JOB_ID)
+        .expect("read terminated action")
+        .expect("job remains durable");
+    assert_eq!(pending.state, AutomationExecutionJobState::Pending);
+    assert_eq!(pending.attempt_count, 1);
+    assert_eq!(
+        pending.last_failure_code.as_deref(),
+        Some("adapter_timeout")
+    );
+    // Attempt one retains its normal durable backoff; a lease renewal cannot
+    // turn the action into an unbounded run or a hot retry.
+    assert_eq!(pending.next_attempt_at_unix_ms, 120_151);
     drop(store);
     let _ = std::fs::remove_file(database);
 }

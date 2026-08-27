@@ -47,10 +47,14 @@ job identity even when a corrupted parent pointer or parent row tries to hide th
 
 stationd now runs one bounded automation-execution queue controller under the same install-authority
 fence as the durable decision. It claims FIFO current work with a 60-second lease and accepts only a
-declarative installed worker program whose identity exactly matches the claimed request. The host creates
-a fresh Windows Job Object, assigns the exact child before supervising it, polls only `Child::try_wait`,
-renews the lease itself, and terminates that exact process tree on stop or deadline. Thus no adapter
-callback can synchronously hold stationd, the queue, or the install fence. An expired claim is left for
+declarative installed worker program whose adapter ID/revision matches the claimed request and whose
+regular executable is rooted under the trusted installed application tree, free of reparse points, and
+rehashes to the configured identity. The host starts the child suspended, assigns it to a fresh
+kill-on-close Windows Job Object before resuming its primary thread, drains bounded stdout and stderr
+concurrently, and checks both tree termination and reaping before parsing a receipt. A fixed 60-second
+action deadline starts at claim and is never extended by lease renewal; renewal preserves only durable
+ownership. Thus no adapter callback can synchronously hold stationd, the queue, or the install fence.
+An expired claim is left for
 the next durable claim transaction rather than allowing its old capability to write a late failure; renewal,
 retryable failure, and completion all require the random per-attempt claim identity as well as the stable
 worker identity. A returned receipt is not success until the storage completion transaction rechecks the live

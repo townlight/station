@@ -1,32 +1,48 @@
 use super::*;
+use sha2::{Digest, Sha256};
 use station_automation_policy::{AutomationExecutionReceipt, AutomationExecutionRequest};
 use station_domain::{AlertConditionKind, AlertEvent, AlertEventState, AlertSeverity};
 use station_maintenance::VerifiedInstallAuthority;
 use std::ffi::OsString;
 use std::io::Read;
+use std::os::windows::fs::OpenOptionsExt;
 use std::os::windows::io::AsRawHandle;
-use std::path::Path;
-use std::process::{Child, ChildStdout, Command, Stdio};
+use std::os::windows::process::CommandExt;
+use std::path::{Component, Path, PathBuf};
+use std::process::{Child, Command, Stdio};
 use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
 };
+use std::thread::JoinHandle;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE};
+use windows_sys::Win32::Storage::FileSystem::{FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_READ};
+use windows_sys::Win32::System::Diagnostics::ToolHelp::{
+    CreateToolhelp32Snapshot, TH32CS_SNAPTHREAD, THREADENTRY32, Thread32First, Thread32Next,
+};
 use windows_sys::Win32::System::JobObjects::{
     AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
     JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
     SetInformationJobObject, TerminateJobObject,
 };
+use windows_sys::Win32::System::Threading::{
+    CREATE_SUSPENDED, OpenThread, ResumeThread, THREAD_SUSPEND_RESUME,
+};
 
 const AUTOMATION_EXECUTION_WORKER_ID: &str = "stationd-automation-execution";
 const AUTOMATION_EXECUTION_LEASE_MS: i64 = 60_000;
+// A lease keeps one durable claimant exclusive; it must never become an
+// unbounded execution budget. Renewals can preserve ownership while a worker
+// is being observed, but this absolute action deadline always starts at claim.
+const AUTOMATION_EXECUTION_ACTION_MAX_MS: i64 = 60_000;
 const AUTOMATION_EXECUTION_RENEWAL_LEAD_MS: i64 = AUTOMATION_EXECUTION_LEASE_MS / 2;
 const AUTOMATION_EXECUTION_POLL_INTERVAL: Duration = Duration::from_millis(250);
 const AUTOMATION_EXECUTION_MAX_BACKOFF: Duration = Duration::from_secs(5);
 const AUTOMATION_EXECUTION_CHILD_POLL_INTERVAL: Duration = Duration::from_millis(10);
 const MAX_AUTOMATION_EXECUTION_STDOUT_BYTES: u64 = 1_048_576;
 const MAX_AUTOMATION_EXECUTION_REQUEST_ENV_BYTES: usize = 32_768;
+const MAX_AUTOMATION_EXECUTION_STDERR_BYTES: u64 = 65_536;
 static NEVER_STOP_AUTOMATION_EXECUTION: AtomicBool = AtomicBool::new(false);
 
 /// A typed adapter outcome deliberately carries only an approved categorical
@@ -64,19 +80,33 @@ impl AutomationExecutionAdapterFailure {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AutomationExecutionAdapter {
     adapter_id: String,
-    executable: std::path::PathBuf,
+    adapter_revision: u64,
+    application_root: PathBuf,
+    executable: PathBuf,
+    executable_sha256: String,
     arguments: Vec<OsString>,
 }
 
 impl AutomationExecutionAdapter {
     pub fn new(
         adapter_id: impl Into<String>,
+        adapter_revision: u64,
+        application_root: impl Into<PathBuf>,
         executable: impl Into<std::path::PathBuf>,
+        executable_sha256: impl Into<String>,
         arguments: Vec<OsString>,
     ) -> Result<Self, String> {
         let adapter_id = adapter_id.into();
+        let application_root = application_root.into();
         let executable = executable.into();
-        if !is_canonical_uuid(&adapter_id) || !executable.is_absolute() || arguments.len() > 64 {
+        let executable_sha256 = executable_sha256.into();
+        if !is_canonical_uuid(&adapter_id)
+            || adapter_revision == 0
+            || !application_root.is_absolute()
+            || !executable.is_absolute()
+            || !is_lowercase_sha256(&executable_sha256)
+            || arguments.len() > 64
+        {
             return Err(
                 "automation execution program specification is invalid or unbounded".into(),
             );
@@ -86,7 +116,10 @@ impl AutomationExecutionAdapter {
         }
         Ok(Self {
             adapter_id,
+            adapter_revision,
+            application_root,
             executable,
+            executable_sha256,
             arguments,
         })
     }
@@ -94,6 +127,146 @@ impl AutomationExecutionAdapter {
     pub fn adapter_id(&self) -> &str {
         &self.adapter_id
     }
+
+    fn verify_for_request(
+        &self,
+        request: &AutomationExecutionRequest,
+    ) -> Result<(), AutomationExecutionAdapterFailure> {
+        if self.adapter_id != request.adapter_id
+            || self.adapter_revision != request.adapter_revision
+        {
+            return Err(AutomationExecutionAdapterFailure::PermanentRejected);
+        }
+        let root = canonical_non_reparse_directory(&self.application_root)
+            .map_err(|_| AutomationExecutionAdapterFailure::RetryableUnavailable)?;
+        let relative = self
+            .executable
+            .strip_prefix(&self.application_root)
+            .map_err(|_| AutomationExecutionAdapterFailure::PermanentRejected)?;
+        if relative.as_os_str().is_empty()
+            || relative
+                .components()
+                .any(|component| !matches!(component, Component::Normal(_)))
+        {
+            return Err(AutomationExecutionAdapterFailure::PermanentRejected);
+        }
+        let executable = root.join(relative);
+        let metadata = verify_non_reparse_regular_file(&root, &executable)
+            .map_err(|_| AutomationExecutionAdapterFailure::PermanentRejected)?;
+        let actual = hash_non_reparse_regular_file(&executable, &metadata)
+            .map_err(|_| AutomationExecutionAdapterFailure::RetryableUnavailable)?;
+        if actual != self.executable_sha256 {
+            return Err(AutomationExecutionAdapterFailure::PermanentRejected);
+        }
+        Ok(())
+    }
+}
+
+fn is_lowercase_sha256(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+fn canonical_non_reparse_directory(path: &Path) -> Result<PathBuf, String> {
+    if !path.is_absolute() {
+        return Err("automation execution application root is not absolute".into());
+    }
+    let supplied = std::fs::symlink_metadata(path)
+        .map_err(|_| "automation execution application root is unavailable")?;
+    if !supplied.is_dir() || supplied.file_type().is_symlink() || is_reparse_metadata(&supplied) {
+        return Err("automation execution application root contains a reparse point".into());
+    }
+    let canonical = std::fs::canonicalize(path)
+        .map_err(|_| "automation execution application root is unavailable")?;
+    let metadata = std::fs::symlink_metadata(&canonical)
+        .map_err(|_| "automation execution application root is unavailable")?;
+    if !metadata.is_dir() || metadata.file_type().is_symlink() || is_reparse_metadata(&metadata) {
+        return Err("automation execution application root is not a directory".into());
+    }
+    Ok(canonical)
+}
+
+fn verify_non_reparse_regular_file(
+    canonical_root: &Path,
+    executable: &Path,
+) -> Result<std::fs::Metadata, String> {
+    let relative = executable
+        .strip_prefix(canonical_root)
+        .map_err(|_| "automation executable escapes its application root")?;
+    if relative.as_os_str().is_empty()
+        || relative
+            .components()
+            .any(|component| !matches!(component, Component::Normal(_)))
+    {
+        return Err("automation executable path is invalid".into());
+    }
+    let mut current = canonical_root.to_path_buf();
+    for component in relative.components() {
+        current.push(component.as_os_str());
+        let metadata = std::fs::symlink_metadata(&current)
+            .map_err(|_| "automation executable is unavailable")?;
+        if metadata.file_type().is_symlink() || is_reparse_metadata(&metadata) {
+            return Err("automation executable path contains a reparse point".into());
+        }
+        if current != executable && !metadata.is_dir() {
+            return Err("automation executable parent is not a directory".into());
+        }
+        if current == executable && !metadata.is_file() {
+            return Err("automation executable is not a regular file".into());
+        }
+    }
+    std::fs::symlink_metadata(executable).map_err(|_| "automation executable is unavailable".into())
+}
+
+fn hash_non_reparse_regular_file(
+    executable: &Path,
+    metadata: &std::fs::Metadata,
+) -> Result<String, String> {
+    if !metadata.is_file() || metadata.file_type().is_symlink() || is_reparse_metadata(metadata) {
+        return Err("automation executable is not a regular file".into());
+    }
+    // Open the leaf with the Windows no-follow flag and deny replacement
+    // writers while its bytes are hashed. This closes the leaf inspection/open
+    // race; every ancestor was independently checked above.
+    let mut file = std::fs::OpenOptions::new()
+        .read(true)
+        .share_mode(FILE_SHARE_READ)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(executable)
+        .map_err(|_| "automation executable is unavailable")?;
+    let opened = file
+        .metadata()
+        .map_err(|_| "automation executable is unavailable")?;
+    if !opened.is_file() || is_reparse_metadata(&opened) || opened.len() != metadata.len() {
+        return Err("automation executable changed during verification".into());
+    }
+    let mut digest = Sha256::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .map_err(|_| "automation executable could not be read")?;
+        if read == 0 {
+            break;
+        }
+        digest.update(&buffer[..read]);
+    }
+    Ok(format!("{:x}", digest.finalize()))
+}
+
+#[cfg(windows)]
+fn is_reparse_metadata(metadata: &std::fs::Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt;
+    metadata.file_attributes()
+        & windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT
+        != 0
+}
+
+#[cfg(not(windows))]
+fn is_reparse_metadata(_metadata: &std::fs::Metadata) -> bool {
+    false
 }
 
 struct WindowsProcessTree(HANDLE);
@@ -129,8 +302,11 @@ impl WindowsProcessTree {
         Ok(())
     }
 
-    fn terminate(&self) {
-        unsafe { TerminateJobObject(self.0, 1) };
+    fn terminate(&self) -> Result<(), AutomationExecutionAdapterFailure> {
+        if unsafe { TerminateJobObject(self.0, 1) } == 0 {
+            return Err(AutomationExecutionAdapterFailure::RetryableUnavailable);
+        }
+        Ok(())
     }
 }
 
@@ -140,13 +316,69 @@ impl Drop for WindowsProcessTree {
     }
 }
 
+fn resume_suspended_process_primary_thread(
+    process_id: u32,
+) -> Result<(), AutomationExecutionAdapterFailure> {
+    let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0) };
+    if snapshot == INVALID_HANDLE_VALUE {
+        return Err(AutomationExecutionAdapterFailure::RetryableUnavailable);
+    }
+    let result = (|| {
+        let mut entry = THREADENTRY32 {
+            dwSize: u32::try_from(std::mem::size_of::<THREADENTRY32>())
+                .expect("thread entry size fits u32"),
+            ..Default::default()
+        };
+        let mut found = unsafe { Thread32First(snapshot, &mut entry) } != 0;
+        while found {
+            if entry.th32OwnerProcessID == process_id {
+                let thread = unsafe { OpenThread(THREAD_SUSPEND_RESUME, 0, entry.th32ThreadID) };
+                if thread.is_null() || thread == INVALID_HANDLE_VALUE {
+                    return Err(AutomationExecutionAdapterFailure::RetryableUnavailable);
+                }
+                let resumed = unsafe { ResumeThread(thread) };
+                unsafe { CloseHandle(thread) };
+                if resumed == u32::MAX {
+                    return Err(AutomationExecutionAdapterFailure::RetryableUnavailable);
+                }
+                return Ok(());
+            }
+            entry.dwSize = u32::try_from(std::mem::size_of::<THREADENTRY32>())
+                .expect("thread entry size fits u32");
+            found = unsafe { Thread32Next(snapshot, &mut entry) } != 0;
+        }
+        Err(AutomationExecutionAdapterFailure::RetryableUnavailable)
+    })();
+    unsafe { CloseHandle(snapshot) };
+    result
+}
+
+fn spawn_bounded_pipe_drain<R: Read + Send + 'static>(
+    mut pipe: R,
+    limit: u64,
+) -> JoinHandle<Result<Vec<u8>, AutomationExecutionAdapterFailure>> {
+    std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        pipe.by_ref()
+            .take(limit + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|_| AutomationExecutionAdapterFailure::RetryableUnavailable)?;
+        if bytes.len() as u64 > limit {
+            return Err(AutomationExecutionAdapterFailure::PermanentInvalidResponse);
+        }
+        Ok(bytes)
+    })
+}
+
 /// The only execution resource the controller supervises.  It is created by
 /// the host after it has acquired the durable claim, placed in a fresh Windows
 /// Job Object immediately, and never exposes a blocking adapter callback.
 struct OwnedAutomationExecutionProcess {
     child: Child,
     job: WindowsProcessTree,
-    stdout: Option<ChildStdout>,
+    stdout: Option<JoinHandle<Result<Vec<u8>, AutomationExecutionAdapterFailure>>>,
+    stderr: Option<JoinHandle<Result<Vec<u8>, AutomationExecutionAdapterFailure>>>,
+    drained_stdout: Option<Vec<u8>>,
 }
 
 impl OwnedAutomationExecutionProcess {
@@ -156,6 +388,7 @@ impl OwnedAutomationExecutionProcess {
         claim_id: &str,
         deadline_unix_ms: i64,
     ) -> Result<Self, AutomationExecutionAdapterFailure> {
+        adapter.verify_for_request(request)?;
         let request_json = serde_json::to_string(request)
             .map_err(|_| AutomationExecutionAdapterFailure::PermanentInvalidResponse)?;
         if request_json.len() > MAX_AUTOMATION_EXECUTION_REQUEST_ENV_BYTES {
@@ -166,7 +399,11 @@ impl OwnedAutomationExecutionProcess {
             .args(&adapter.arguments)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
+            .stderr(Stdio::piped())
+            // The process cannot execute until it is assigned to the fresh
+            // kill-on-close Job Object below. A suspended process has no
+            // user-mode opportunity to create an escaping descendant.
+            .creation_flags(CREATE_SUSPENDED)
             .env("TOWNLIGHT_AUTOMATION_EXECUTION_REQUEST_JSON", request_json)
             .env("TOWNLIGHT_AUTOMATION_EXECUTION_CLAIM_ID", claim_id)
             .env(
@@ -176,7 +413,7 @@ impl OwnedAutomationExecutionProcess {
             .spawn()
             .map_err(|_| AutomationExecutionAdapterFailure::RetryableUnavailable)?;
         if let Err(error) = job.assign(&child) {
-            let _ = child.kill();
+            let _ = job.terminate();
             let _ = child.wait();
             return Err(error);
         }
@@ -184,11 +421,49 @@ impl OwnedAutomationExecutionProcess {
             .stdout
             .take()
             .ok_or(AutomationExecutionAdapterFailure::PermanentInvalidResponse)?;
+        let stderr = child
+            .stderr
+            .take()
+            .ok_or(AutomationExecutionAdapterFailure::PermanentInvalidResponse)?;
+        let stdout = spawn_bounded_pipe_drain(stdout, MAX_AUTOMATION_EXECUTION_STDOUT_BYTES);
+        let stderr = spawn_bounded_pipe_drain(stderr, MAX_AUTOMATION_EXECUTION_STDERR_BYTES);
+        if let Err(error) = resume_suspended_process_primary_thread(child.id()) {
+            let _ = job.terminate();
+            let _ = child.wait();
+            let _ = stdout.join();
+            let _ = stderr.join();
+            return Err(error);
+        }
         Ok(Self {
             child,
             job,
             stdout: Some(stdout),
+            stderr: Some(stderr),
+            drained_stdout: None,
         })
+    }
+
+    fn terminate_and_reap(&mut self) -> Result<(), AutomationExecutionAdapterFailure> {
+        self.job.terminate()?;
+        self.child
+            .wait()
+            .map_err(|_| AutomationExecutionAdapterFailure::RetryableUnavailable)?;
+        let stdout = self
+            .stdout
+            .take()
+            .ok_or(AutomationExecutionAdapterFailure::RetryableUnavailable)?
+            .join()
+            .map_err(|_| AutomationExecutionAdapterFailure::RetryableUnavailable)??;
+        let _stderr = self
+            .stderr
+            .take()
+            .ok_or(AutomationExecutionAdapterFailure::RetryableUnavailable)?
+            .join()
+            .map_err(|_| AutomationExecutionAdapterFailure::RetryableUnavailable)??;
+        // Retain only the success payload. stderr is concurrently drained so
+        // a child cannot deadlock on it, but it is never persisted or exposed.
+        self.drained_stdout = Some(stdout);
+        Ok(())
     }
 
     fn try_receipt(
@@ -201,36 +476,24 @@ impl OwnedAutomationExecutionProcess {
         else {
             return Ok(None);
         };
-        // The child has exited, but descendants might retain stdout.  They are
-        // all inside this exact Job Object, so revoke them before the bounded
-        // read; no unowned process is ever targeted.
-        self.job.terminate();
-        let _ = self.child.wait();
+        // The child may have exited while a descendant keeps either pipe open.
+        // First revoke the exact Job Object, then require both its process
+        // handle and the concurrent drains to finish before parsing output.
+        self.terminate_and_reap()?;
         if !status.success() {
             return Err(AutomationExecutionAdapterFailure::PermanentRejected);
         }
-        let mut stdout = self
-            .stdout
+        let bytes = self
+            .drained_stdout
             .take()
             .ok_or(AutomationExecutionAdapterFailure::PermanentInvalidResponse)?;
-        let mut bytes = Vec::new();
-        stdout
-            .by_ref()
-            .take(MAX_AUTOMATION_EXECUTION_STDOUT_BYTES + 1)
-            .read_to_end(&mut bytes)
-            .map_err(|_| AutomationExecutionAdapterFailure::RetryableUnavailable)?;
-        if bytes.len() as u64 > MAX_AUTOMATION_EXECUTION_STDOUT_BYTES {
-            return Err(AutomationExecutionAdapterFailure::PermanentInvalidResponse);
-        }
         let receipt = serde_json::from_slice(&bytes)
             .map_err(|_| AutomationExecutionAdapterFailure::PermanentInvalidResponse)?;
         Ok(Some(receipt))
     }
 
-    fn terminate(&mut self) {
-        self.job.terminate();
-        let _ = self.child.wait();
-        let _ = self.stdout.take();
+    fn terminate(&mut self) -> Result<(), AutomationExecutionAdapterFailure> {
+        self.terminate_and_reap()
     }
 }
 
@@ -273,9 +536,12 @@ pub fn run_automation_execution_controller_iteration_with_stop(
     else {
         return Ok(false);
     };
-    let mut deadline_unix_ms = claimed
+    let mut lease_deadline_unix_ms = claimed
         .lease_expires_at_unix_ms
         .ok_or_else(|| "claimed automation execution job lacks a deadline".to_string())?;
+    let action_deadline_unix_ms = claimed_at_unix_ms
+        .checked_add(AUTOMATION_EXECUTION_ACTION_MAX_MS)
+        .ok_or_else(|| "automation execution action deadline overflowed".to_string())?;
     let claim_id = claimed
         .claim_id
         .as_deref()
@@ -285,7 +551,8 @@ pub fn run_automation_execution_controller_iteration_with_stop(
     {
         Some(adapter) => {
             let action_started_at_unix_ms = clock()?;
-            if action_started_at_unix_ms >= deadline_unix_ms || stop.load(Ordering::Acquire) {
+            if action_started_at_unix_ms >= action_deadline_unix_ms || stop.load(Ordering::Acquire)
+            {
                 Err(AutomationExecutionAdapterFailure::RetryableTimeout)
             } else {
                 (|| -> Result<Result<AutomationExecutionReceipt, AutomationExecutionAdapterFailure>, String> {
@@ -293,22 +560,26 @@ pub fn run_automation_execution_controller_iteration_with_stop(
                         adapter,
                         &claimed.request,
                         claim_id,
-                        deadline_unix_ms,
+                        action_deadline_unix_ms,
                     ) {
                         Ok(process) => process,
                         Err(failure) => return Ok(Err(failure)),
                     };
-                    let mut renewal_at_unix_ms = deadline_unix_ms
+                    let mut renewal_at_unix_ms = lease_deadline_unix_ms
                         .checked_sub(AUTOMATION_EXECUTION_RENEWAL_LEAD_MS)
                         .ok_or_else(|| "automation execution renewal deadline overflowed".to_string())?;
                     loop {
                         if stop.load(Ordering::Acquire) {
-                            process.terminate();
+                            if process.terminate().is_err() {
+                                break Ok(Err(AutomationExecutionAdapterFailure::RetryableUnavailable));
+                            }
                             break Ok(Err(AutomationExecutionAdapterFailure::RetryableTimeout));
                         }
                         let now_unix_ms = clock()?;
-                        if now_unix_ms >= deadline_unix_ms {
-                            process.terminate();
+                        if now_unix_ms >= action_deadline_unix_ms {
+                            if process.terminate().is_err() {
+                                break Ok(Err(AutomationExecutionAdapterFailure::RetryableUnavailable));
+                            }
                             break Ok(Err(AutomationExecutionAdapterFailure::RetryableTimeout));
                         }
                         if now_unix_ms >= renewal_at_unix_ms {
@@ -320,10 +591,10 @@ pub fn run_automation_execution_controller_iteration_with_stop(
                                 now_unix_ms,
                                 AUTOMATION_EXECUTION_LEASE_MS,
                             )?;
-                            deadline_unix_ms = renewed.lease_expires_at_unix_ms.ok_or_else(
+                            lease_deadline_unix_ms = renewed.lease_expires_at_unix_ms.ok_or_else(
                                 || "renewed automation execution job lacks a deadline".to_string(),
                             )?;
-                            renewal_at_unix_ms = deadline_unix_ms
+                            renewal_at_unix_ms = lease_deadline_unix_ms
                                 .checked_sub(AUTOMATION_EXECUTION_RENEWAL_LEAD_MS)
                                 .ok_or_else(|| "automation execution renewal deadline overflowed".to_string())?;
                         }
@@ -340,7 +611,7 @@ pub fn run_automation_execution_controller_iteration_with_stop(
     };
 
     let finished_at_unix_ms = clock()?;
-    if finished_at_unix_ms >= deadline_unix_ms {
+    if finished_at_unix_ms >= lease_deadline_unix_ms {
         // The owned process tree was already terminated at the deadline.  Do
         // not let an expired C1 write a failure after another controller may
         // have reclaimed C2; the next durable claim transaction recovers it.
