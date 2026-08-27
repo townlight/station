@@ -9,6 +9,7 @@ use std::collections::HashSet;
 
 pub const MAX_PUBLIC_CATALOG_PAGE_SIZE: usize = 100;
 pub const MAX_PUBLIC_CATALOG_FILTERS: usize = 8;
+pub const MAX_PUBLIC_CATALOG_FACETS: usize = 128;
 const MAX_CANDIDATES: usize = 500;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -47,25 +48,29 @@ impl StationStore {
         &self,
         proposed: &MetadataSchema,
     ) -> Result<(), String> {
-        for existing in self.list_custom_metadata_schemas()? {
-            if existing.schema_id == proposed.schema_id {
-                continue;
-            }
-            for field in proposed
+        let mut keys = HashSet::new();
+        let mut count = 0usize;
+        for schema in self
+            .list_custom_metadata_schemas()?
+            .into_iter()
+            .filter(|schema| schema.schema_id != proposed.schema_id)
+            .chain(std::iter::once(proposed.clone()))
+        {
+            for field in schema
                 .fields
                 .iter()
                 .filter(|field| field.public && field.faceted)
             {
-                for other in existing
-                    .fields
-                    .iter()
-                    .filter(|other| other.public && other.faceted && other.key == field.key)
-                {
-                    if field_kind(&field.field_type) != field_kind(&other.field_type) {
-                        return Err("public facet key cannot be rebound to another type".into());
-                    }
+                count = count
+                    .checked_add(1)
+                    .ok_or("public facet capacity overflow")?;
+                if !keys.insert(field.key.clone()) {
+                    return Err("public facet keys must be globally unique across schemas".into());
                 }
             }
+        }
+        if count > MAX_PUBLIC_CATALOG_FACETS {
+            return Err("public facet authority cannot exceed 128 fields".into());
         }
         Ok(())
     }
@@ -264,24 +269,31 @@ CREATE TABLE IF NOT EXISTS public_catalog_generation_history(generation INTEGER 
         }
     }
     fn validate_public_projection_infrastructure(&self) -> Result<(), String> {
-        let q=self.prepare("SELECT (SELECT count(*) FROM catalog_assets),(SELECT count(*) FROM public_catalog_identities)")?;
-        match unsafe { sqlite3_step(q.raw) } {
-            SQLITE_ROW => {
-                let catalog = unsafe { sqlite3_column_int64(q.raw, 0) };
-                let mapped = unsafe { sqlite3_column_int64(q.raw, 1) };
-                if catalog < 0
-                    || catalog > catalog_authority::MAX_CATALOG_ASSETS as i64
-                    || catalog != mapped
-                {
-                    return Err(
-                        "public catalog mapping or generation triggers are corrupt or unbounded"
-                            .into(),
-                    );
+        let mappings = self.prepare("SELECT c.asset_sha256,COALESCE(p.public_id,'') FROM catalog_assets c LEFT JOIN public_catalog_identities p ON p.asset_sha256=c.asset_sha256 ORDER BY c.asset_sha256 LIMIT 100001")?;
+        let mut count = 0usize;
+        loop {
+            match unsafe { sqlite3_step(mappings.raw) } {
+                SQLITE_ROW => {
+                    count += 1;
+                    let asset = column_text(mappings.raw, 0)?;
+                    if column_text(mappings.raw, 1)? != public_id(&asset) {
+                        return Err("public catalog identity mapping is missing or corrupt".into());
+                    }
                 }
-                self.validate_public_generation_triggers()
+                SQLITE_DONE => break,
+                _ => return Err(sqlite_error(self.database)),
             }
-            _ => Err("public catalog infrastructure is unavailable".into()),
         }
+        if count > catalog_authority::MAX_CATALOG_ASSETS {
+            return Err("public catalog mapping is unbounded".into());
+        }
+        let orphans = self.prepare("SELECT count(*) FROM public_catalog_identities p LEFT JOIN catalog_assets c ON c.asset_sha256=p.asset_sha256 WHERE c.asset_sha256 IS NULL")?;
+        if unsafe { sqlite3_step(orphans.raw) } != SQLITE_ROW
+            || unsafe { sqlite3_column_int64(orphans.raw, 0) } != 0
+        {
+            return Err("public catalog identity mapping contains orphan rows".into());
+        }
+        self.validate_public_generation_triggers()
     }
     fn validate_public_generation_triggers(&self) -> Result<(), String> {
         const EXPECTED: &[(&str, &str, &str)] = &[
@@ -390,19 +402,32 @@ CREATE TABLE IF NOT EXISTS public_catalog_generation_history(generation INTEGER 
 fn validate_definitions(s: &StationStore, fs: &[PublicCatalogFilter]) -> Result<(), String> {
     let schemas = s.list_custom_metadata_schemas()?;
     let mut global = std::collections::HashMap::new();
+    let mut count = 0usize;
     for schema in &schemas {
+        let history =
+            s.list_custom_metadata_schema_history(&schema.schema_id, MAX_CUSTOM_METADATA_HISTORY)?;
+        if history.len()
+            != usize::try_from(schema.revision).map_err(|_| "schema revision overflow")?
+            || history.last().map(|entry| &entry.schema) != Some(schema)
+        {
+            return Err("current custom metadata schema disagrees with immutable history".into());
+        }
         for field in schema
             .fields
             .iter()
             .filter(|field| field.public && field.faceted)
         {
+            count += 1;
             if global
                 .insert(field.key.as_str(), field_kind(&field.field_type))
-                .is_some_and(|prior| prior != field_kind(&field.field_type))
+                .is_some()
             {
-                return Err("public facet key/type authority is ambiguous".into());
+                return Err("public facet key authority is duplicated across schemas".into());
             }
         }
+    }
+    if count > MAX_PUBLIC_CATALOG_FACETS {
+        return Err("public facet authority exceeds 128 fields".into());
     }
     for f in fs {
         let m = schemas

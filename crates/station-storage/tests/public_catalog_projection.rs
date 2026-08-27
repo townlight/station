@@ -4,7 +4,7 @@ use station_metadata::{
     MetadataFieldValue, MetadataProjectionValue, MetadataSchema,
 };
 use station_schedule::{AssetReadiness, MediaAsset};
-use station_storage::{PublicCatalogFilter, StationStore};
+use station_storage::{CustomMetadataSchemaWriteError, PublicCatalogFilter, StationStore};
 use std::ffi::{CString, c_char, c_int, c_void};
 use std::path::{Path, PathBuf};
 use std::ptr;
@@ -76,6 +76,52 @@ fn database() -> PathBuf {
             .as_nanos(),
         SEQUENCE.fetch_add(1, Ordering::Relaxed)
     ))
+}
+
+fn public_schema(schema_id: &str, start: usize, count: usize) -> MetadataSchema {
+    MetadataSchema {
+        schema_id: schema_id.into(),
+        revision: 1,
+        fields: (start..start + count)
+            .map(|index| MetadataFieldDefinition {
+                field_id: format!("00000000-0000-4000-8000-{index:012x}"),
+                key: format!("public_{index:03}"),
+                label: format!("Public {index}"),
+                description: None,
+                required: false,
+                public: true,
+                faceted: true,
+                field_type: MetadataFieldType::Boolean,
+            })
+            .collect(),
+    }
+}
+
+#[test]
+fn schema_writes_reject_global_public_facet_collisions_and_cardinality_overflow() {
+    let path = database();
+    let store = StationStore::open(&path).unwrap();
+    let first = public_schema("10000000-0000-4000-8000-000000000001", 0, 64);
+    store
+        .write_custom_metadata_schema(&first, None, "actor", 1)
+        .unwrap();
+
+    let mut collision = public_schema("10000000-0000-4000-8000-000000000002", 64, 1);
+    collision.fields[0].key = first.fields[0].key.clone();
+    assert!(matches!(
+        store.write_custom_metadata_schema(&collision, None, "actor", 2),
+        Err(CustomMetadataSchemaWriteError::Invalid(message)) if message.contains("public facet")
+    ));
+
+    let second = public_schema("10000000-0000-4000-8000-000000000003", 64, 64);
+    store
+        .write_custom_metadata_schema(&second, None, "actor", 3)
+        .unwrap();
+    let overflow = public_schema("10000000-0000-4000-8000-000000000004", 128, 1);
+    assert!(matches!(
+        store.write_custom_metadata_schema(&overflow, None, "actor", 4),
+        Err(CustomMetadataSchemaWriteError::Invalid(message)) if message.contains("128")
+    ));
 }
 
 #[test]
@@ -275,6 +321,27 @@ fn projects_only_published_ready_assets_with_exact_public_facets() {
             .len(),
         2
     );
+    drop(repaired);
+    let mapping_reader = StationStore::open(&path).unwrap();
+    raw_sql(
+        &path,
+        "DELETE FROM public_catalog_identities WHERE asset_sha256='bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb';INSERT INTO public_catalog_identities(asset_sha256,public_id) VALUES('cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc','dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd')",
+    );
+    let mapping_corrupt = mapping_reader
+        .read_public_catalog(None, 10, &[])
+        .unwrap_err();
+    assert!(mapping_corrupt.contains("public catalog"));
+    drop(mapping_reader);
+    raw_sql(
+        &path,
+        "DELETE FROM public_catalog_identities WHERE asset_sha256='cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc'",
+    );
+    let repaired = StationStore::open(&path).unwrap();
+    raw_sql(
+        &path,
+        "UPDATE custom_metadata_schemas SET record_json=replace(record_json,'Topic','Tampered') WHERE schema_id='11111111-2222-4333-8444-555555555555'",
+    );
+    assert!(repaired.read_public_catalog(None, 10, &[]).is_err());
     drop(repaired);
     raw_sql(
         &path,

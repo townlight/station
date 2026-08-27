@@ -6,6 +6,7 @@ export type PublicFacetValue =
   | { kind: "controlled_choice"; value: string };
 export interface PublicCatalogItem { asset_id: string; title: string; published_at_utc_ms: number; duration_ms: number; facets: { field_key: string; value: PublicFacetValue }[] }
 export interface PublicCatalogPage { items: PublicCatalogItem[]; next_cursor: string | null }
+export const MAX_PUBLIC_CATALOG_FACETS = 128;
 
 const exact = (value: Record<string, unknown>, keys: string[]) => Object.keys(value).length === keys.length && keys.every((key) => key in value);
 const object = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value);
@@ -21,7 +22,7 @@ export function parsePublicCatalogPage(value: unknown): PublicCatalogPage {
   if (!object(value) || !exact(value, ["items", "next_cursor"]) || !Array.isArray(value.items) || value.items.length > 100 || !(value.next_cursor === null || typeof value.next_cursor === "string" && value.next_cursor.length <= 240)) throw new Error("Public catalog response is malformed or unbounded.");
   const ids = new Set<string>();
   const items = value.items.map((candidate) => {
-    if (!object(candidate) || !exact(candidate, ["asset_id", "title", "published_at_utc_ms", "duration_ms", "facets"]) || typeof candidate.asset_id !== "string" || !/^[0-9a-f]{64}$/.test(candidate.asset_id) || ids.has(candidate.asset_id) || typeof candidate.title !== "string" || new TextEncoder().encode(candidate.title).length > 240 || !safeInteger(candidate.published_at_utc_ms) || candidate.published_at_utc_ms < 0 || !safeInteger(candidate.duration_ms) || candidate.duration_ms <= 0 || !Array.isArray(candidate.facets) || candidate.facets.length > 128) throw new Error("Public catalog item is malformed or unbounded.");
+    if (!object(candidate) || !exact(candidate, ["asset_id", "title", "published_at_utc_ms", "duration_ms", "facets"]) || typeof candidate.asset_id !== "string" || !/^[0-9a-f]{64}$/.test(candidate.asset_id) || ids.has(candidate.asset_id) || typeof candidate.title !== "string" || new TextEncoder().encode(candidate.title).length > 240 || !safeInteger(candidate.published_at_utc_ms) || candidate.published_at_utc_ms < 0 || !safeInteger(candidate.duration_ms) || candidate.duration_ms <= 0 || !Array.isArray(candidate.facets) || candidate.facets.length > MAX_PUBLIC_CATALOG_FACETS) throw new Error("Public catalog item is malformed or unbounded.");
     ids.add(candidate.asset_id);
     const keys = new Set<string>();
     const facets = candidate.facets.map((facet) => { if (!object(facet) || !exact(facet, ["field_key", "value"]) || typeof facet.field_key !== "string" || !/^[a-z0-9_-]{1,64}$/.test(facet.field_key) || keys.has(facet.field_key)) throw new Error("Public catalog facets are malformed."); keys.add(facet.field_key); return { field_key: facet.field_key, value: parseValue(facet.value) }; });
