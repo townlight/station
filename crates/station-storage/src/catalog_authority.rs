@@ -49,6 +49,68 @@ pub struct ScheduledRecordingFinalizationEvidence {
     pub recorded_at_unix_ms: i64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ScheduledRecordingCaptureEvidence {
+    pub recording_id: String,
+    pub worker_instance_id: String,
+    pub start_worker_sequence: u64,
+    pub graph_revision: u64,
+    pub output_index: u16,
+    pub sink_id: String,
+    pub artifact_relative_path: String,
+    pub duration_ms: u64,
+    pub max_bytes: u64,
+}
+
+impl ScheduledRecordingCaptureEvidence {
+    pub fn validate(&self) -> Result<(), String> {
+        if !is_canonical_uuid(&self.recording_id)
+            || !is_canonical_uuid(&self.sink_id)
+            || self.worker_instance_id.trim().is_empty()
+            || self.worker_instance_id.len() > 200
+            || self.worker_instance_id.chars().any(char::is_control)
+            || self.start_worker_sequence == 0
+            || self.graph_revision == 0
+            || self.artifact_relative_path != format!("{}.ts", self.recording_id)
+            || !(station_media_protocol::MIN_SCHEDULED_RECORDING_DURATION_MS
+                ..=station_media_protocol::MAX_SCHEDULED_RECORDING_DURATION_MS)
+                .contains(&self.duration_ms)
+            || !(1..=station_media_protocol::MAX_SCHEDULED_RECORDING_BYTES)
+                .contains(&self.max_bytes)
+        {
+            return Err("scheduled recording capture evidence is invalid".into());
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ScheduledRecordingReadyEvidence {
+    pub capture: ScheduledRecordingCaptureEvidence,
+    pub terminal_worker_sequence: u64,
+    pub capture_bytes: u64,
+    pub capture_sha256: String,
+    pub captured_duration_ms: u64,
+}
+
+impl ScheduledRecordingReadyEvidence {
+    pub fn validate(&self) -> Result<(), String> {
+        self.capture.validate()?;
+        if self.terminal_worker_sequence <= self.capture.start_worker_sequence
+            || self.capture_bytes == 0
+            || self.capture_bytes > self.capture.max_bytes
+            || self.captured_duration_ms == 0
+            || self.captured_duration_ms > self.capture.duration_ms
+            || validate_asset_identity(&self.capture_sha256).is_err()
+        {
+            return Err("scheduled recording ready evidence is invalid".into());
+        }
+        Ok(())
+    }
+}
+
 impl ScheduledRecordingFinalizationEvidence {
     pub fn validate(&self) -> Result<(), String> {
         if !is_canonical_uuid(&self.recording_id)
@@ -304,6 +366,266 @@ impl StationStore {
         finish_catalog_write(self, outcome)
     }
 
+    /// Atomically advances an armed recording to Capturing and persists the
+    /// exact worker acknowledgement that caused the transition. The evidence
+    /// is immutable and is the sole restart authority for later Ready facts.
+    pub fn start_scheduled_recording_capture(
+        &self,
+        recording: &ScheduledRecording,
+        receipt: &RecordingTransitionReceipt,
+        evidence: &ScheduledRecordingCaptureEvidence,
+    ) -> Result<(), String> {
+        recording.validate()?;
+        validate_scheduled_recording_transition_receipt(recording, receipt)?;
+        evidence.validate()?;
+        if receipt.kind != RecordingTransitionKind::StartCapture
+            || !matches!(recording.lifecycle, RecordingLifecycle::Capturing { .. })
+            || evidence.recording_id != recording.definition.recording_id
+        {
+            return Err("scheduled recording start evidence does not bind its transition".into());
+        }
+        self.execute("BEGIN IMMEDIATE")?;
+        let outcome = (|| {
+            let current = self
+                .read_scheduled_recording(&recording.definition.recording_id)?
+                .ok_or_else(|| "scheduled recording does not exist".to_string())?;
+            if current == *recording {
+                if self.read_scheduled_recording_capture(&evidence.recording_id)?
+                    != Some(evidence.clone())
+                {
+                    return Err("scheduled recording start retry disagrees with authority".into());
+                }
+                return Ok(());
+            }
+            self.write_scheduled_recording_transition_rows(recording, receipt, true)?;
+            let start_json = serde_json::to_string(evidence)
+                .map_err(|error| format!("serialize recording start evidence: {error}"))?;
+            let statement = self.prepare(
+                "INSERT INTO scheduled_recording_captures(recording_id,worker_instance_id,start_worker_sequence,graph_revision,output_index,sink_id,artifact_relative_path,duration_ms,max_bytes,terminal_worker_sequence,capture_bytes,capture_sha256,captured_duration_ms,start_json,ready_json) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,0,0,'',0,?10,'')",
+            )?;
+            let values = [
+                c_string(&evidence.recording_id, "recording capture identity")?,
+                c_string(&evidence.worker_instance_id, "recording worker instance")?,
+                c_string(&evidence.sink_id, "recording capture sink")?,
+                c_string(&evidence.artifact_relative_path, "recording capture path")?,
+                c_string(&start_json, "recording start evidence JSON")?,
+            ];
+            bind_text(self.database, statement.raw, 1, &values[0])?;
+            bind_text(self.database, statement.raw, 2, &values[1])?;
+            bind_i64(
+                self.database,
+                statement.raw,
+                3,
+                checked_i64(evidence.start_worker_sequence, "recording start sequence")?,
+            )?;
+            bind_i64(
+                self.database,
+                statement.raw,
+                4,
+                checked_i64(evidence.graph_revision, "recording graph revision")?,
+            )?;
+            bind_i64(
+                self.database,
+                statement.raw,
+                5,
+                i64::from(evidence.output_index),
+            )?;
+            bind_text(self.database, statement.raw, 6, &values[2])?;
+            bind_text(self.database, statement.raw, 7, &values[3])?;
+            bind_i64(
+                self.database,
+                statement.raw,
+                8,
+                checked_i64(evidence.duration_ms, "recording duration")?,
+            )?;
+            bind_i64(
+                self.database,
+                statement.raw,
+                9,
+                checked_i64(evidence.max_bytes, "recording byte limit")?,
+            )?;
+            bind_text(self.database, statement.raw, 10, &values[4])?;
+            expect_done(self.database, statement.raw)
+        })();
+        self.finish_transaction(outcome)
+    }
+
+    /// Atomically advances Capturing to Finalizing while binding the terminal
+    /// Ready facts to the immutable start acknowledgement.
+    pub fn ready_scheduled_recording_for_finalization(
+        &self,
+        recording: &ScheduledRecording,
+        receipt: &RecordingTransitionReceipt,
+        evidence: &ScheduledRecordingReadyEvidence,
+    ) -> Result<(), String> {
+        recording.validate()?;
+        validate_scheduled_recording_transition_receipt(recording, receipt)?;
+        evidence.validate()?;
+        if receipt.kind != RecordingTransitionKind::BeginFinalization
+            || !matches!(recording.lifecycle, RecordingLifecycle::Finalizing { .. })
+            || evidence.capture.recording_id != recording.definition.recording_id
+        {
+            return Err("scheduled recording ready evidence does not bind its transition".into());
+        }
+        self.execute("BEGIN IMMEDIATE")?;
+        let outcome = (|| {
+            let current = self
+                .read_scheduled_recording(&recording.definition.recording_id)?
+                .ok_or_else(|| "scheduled recording does not exist".to_string())?;
+            if current == *recording {
+                if self.read_scheduled_recording_ready(&evidence.capture.recording_id)?
+                    != Some(evidence.clone())
+                {
+                    return Err("scheduled recording Ready retry disagrees with authority".into());
+                }
+                return Ok(());
+            }
+            if self.read_scheduled_recording_capture(&evidence.capture.recording_id)?
+                != Some(evidence.capture.clone())
+            {
+                return Err(
+                    "scheduled recording Ready event is not bound to its start evidence".into(),
+                );
+            }
+            self.write_scheduled_recording_transition_rows(recording, receipt, true)?;
+            let ready_json = serde_json::to_string(evidence)
+                .map_err(|error| format!("serialize recording Ready evidence: {error}"))?;
+            let statement = self.prepare(
+                "UPDATE scheduled_recording_captures SET terminal_worker_sequence=?1,capture_bytes=?2,capture_sha256=?3,captured_duration_ms=?4,ready_json=?5 WHERE recording_id=?6 AND ready_json=''",
+            )?;
+            let digest = c_string(&evidence.capture_sha256, "recording capture hash")?;
+            let ready_json = c_string(&ready_json, "recording Ready evidence JSON")?;
+            let recording_id =
+                c_string(&evidence.capture.recording_id, "recording capture identity")?;
+            bind_i64(
+                self.database,
+                statement.raw,
+                1,
+                checked_i64(
+                    evidence.terminal_worker_sequence,
+                    "recording terminal sequence",
+                )?,
+            )?;
+            bind_i64(
+                self.database,
+                statement.raw,
+                2,
+                checked_i64(evidence.capture_bytes, "recording capture bytes")?,
+            )?;
+            bind_text(self.database, statement.raw, 3, &digest)?;
+            bind_i64(
+                self.database,
+                statement.raw,
+                4,
+                checked_i64(evidence.captured_duration_ms, "recording capture duration")?,
+            )?;
+            bind_text(self.database, statement.raw, 5, &ready_json)?;
+            bind_text(self.database, statement.raw, 6, &recording_id)?;
+            expect_done(self.database, statement.raw)?;
+            if self.changes() != 1 {
+                return Err("scheduled recording Ready evidence lost its authority race".into());
+            }
+            Ok(())
+        })();
+        self.finish_transaction(outcome)
+    }
+
+    pub fn read_scheduled_recording_capture(
+        &self,
+        recording_id: &str,
+    ) -> Result<Option<ScheduledRecordingCaptureEvidence>, String> {
+        if !is_canonical_uuid(recording_id) {
+            return Err("scheduled recording capture identity is invalid".into());
+        }
+        let statement = self.prepare(
+            "SELECT worker_instance_id,start_worker_sequence,graph_revision,output_index,sink_id,artifact_relative_path,duration_ms,max_bytes,start_json FROM scheduled_recording_captures WHERE recording_id=?1",
+        )?;
+        let identity = c_string(recording_id, "recording capture identity")?;
+        bind_text(self.database, statement.raw, 1, &identity)?;
+        match unsafe { sqlite3_step(statement.raw) } {
+            SQLITE_DONE => Ok(None),
+            SQLITE_ROW => {
+                let evidence: ScheduledRecordingCaptureEvidence =
+                    serde_json::from_str(&column_text(statement.raw, 8)?)
+                        .map_err(|error| format!("decode recording start evidence: {error}"))?;
+                evidence.validate()?;
+                let indexed = ScheduledRecordingCaptureEvidence {
+                    recording_id: recording_id.into(),
+                    worker_instance_id: column_text(statement.raw, 0)?,
+                    start_worker_sequence: column_u64(
+                        statement.raw,
+                        1,
+                        "recording start sequence",
+                    )?,
+                    graph_revision: column_u64(statement.raw, 2, "recording graph revision")?,
+                    output_index: u16::try_from(column_u64(
+                        statement.raw,
+                        3,
+                        "recording output index",
+                    )?)
+                    .map_err(|_| "database returned invalid recording output index".to_string())?,
+                    sink_id: column_text(statement.raw, 4)?,
+                    artifact_relative_path: column_text(statement.raw, 5)?,
+                    duration_ms: column_u64(statement.raw, 6, "recording duration")?,
+                    max_bytes: column_u64(statement.raw, 7, "recording byte limit")?,
+                };
+                if evidence != indexed {
+                    return Err("recording start indexed authority and JSON disagree".into());
+                }
+                Ok(Some(evidence))
+            }
+            _ => Err(sqlite_error(self.database)),
+        }
+    }
+
+    pub fn read_scheduled_recording_ready(
+        &self,
+        recording_id: &str,
+    ) -> Result<Option<ScheduledRecordingReadyEvidence>, String> {
+        let capture = match self.read_scheduled_recording_capture(recording_id)? {
+            Some(capture) => capture,
+            None => return Ok(None),
+        };
+        let statement = self.prepare(
+            "SELECT terminal_worker_sequence,capture_bytes,capture_sha256,captured_duration_ms,ready_json FROM scheduled_recording_captures WHERE recording_id=?1",
+        )?;
+        let identity = c_string(recording_id, "recording capture identity")?;
+        bind_text(self.database, statement.raw, 1, &identity)?;
+        match unsafe { sqlite3_step(statement.raw) } {
+            SQLITE_ROW => {
+                let ready_json = column_text(statement.raw, 4)?;
+                if ready_json.is_empty() {
+                    return Ok(None);
+                }
+                let evidence: ScheduledRecordingReadyEvidence =
+                    serde_json::from_str(&ready_json)
+                        .map_err(|error| format!("decode recording Ready evidence: {error}"))?;
+                evidence.validate()?;
+                let indexed = ScheduledRecordingReadyEvidence {
+                    capture,
+                    terminal_worker_sequence: column_u64(
+                        statement.raw,
+                        0,
+                        "recording terminal sequence",
+                    )?,
+                    capture_bytes: column_u64(statement.raw, 1, "recording capture bytes")?,
+                    capture_sha256: column_text(statement.raw, 2)?,
+                    captured_duration_ms: column_u64(
+                        statement.raw,
+                        3,
+                        "recording capture duration",
+                    )?,
+                };
+                if evidence != indexed {
+                    return Err("recording Ready indexed authority and JSON disagree".into());
+                }
+                Ok(Some(evidence))
+            }
+            SQLITE_DONE => Ok(None),
+            _ => Err(sqlite_error(self.database)),
+        }
+    }
+
     /// Atomically publishes one already-sealed capture into media/catalog
     /// authority and completes its recording lifecycle. Filesystem publication
     /// occurs before this call; every database fact either commits together or
@@ -352,6 +674,25 @@ impl StationStore {
         }
         self.execute("BEGIN IMMEDIATE")?;
         let outcome = (|| {
+            let ready = self
+                .read_scheduled_recording_ready(&recording.definition.recording_id)?
+                .ok_or_else(|| {
+                    "scheduled recording completion has no durable Ready evidence".to_string()
+                })?;
+            if ready.capture.worker_instance_id != evidence.worker_instance_id
+                || ready.terminal_worker_sequence != evidence.worker_sequence
+                || ready.capture.graph_revision != evidence.graph_revision
+                || ready.capture.output_index != evidence.output_index
+                || ready.capture.sink_id != evidence.sink_id
+                || ready.capture.artifact_relative_path != evidence.artifact_relative_path
+                || ready.capture_bytes != evidence.capture_bytes
+                || ready.capture_sha256 != evidence.capture_sha256
+                || ready.captured_duration_ms != evidence.captured_duration_ms
+            {
+                return Err(
+                    "scheduled recording completion disagrees with durable Ready evidence".into(),
+                );
+            }
             let current_configuration =
                 self.current_channel_output_configuration_hash(&recording.definition.channel_id)?;
             if current_configuration != execution.channel_configuration_hash {

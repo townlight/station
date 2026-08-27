@@ -10,7 +10,10 @@ use station_schedule::{
     AssetReadiness, ChannelConfiguration, MediaAsset, OutputProfileId, OutputSinkConfiguration,
     ScheduleItem, ScheduleState,
 };
-use station_storage::{ScheduleItemWrite, ScheduledRecordingFinalizationEvidence, StationStore};
+use station_storage::{
+    ScheduleItemWrite, ScheduledRecordingCaptureEvidence, ScheduledRecordingFinalizationEvidence,
+    ScheduledRecordingReadyEvidence, StationStore,
+};
 
 const CHANNEL_ID: &str = "11111111-1111-4111-8111-111111111111";
 const SINK_ID: &str = "22222222-2222-4222-8222-222222222222";
@@ -134,25 +137,86 @@ fn finalization_atomically_commits_media_catalog_evidence_and_lifecycle() {
         Some(execution.clone()),
         RecordingEvent::Arm,
     );
-    let capturing = transition(
-        &store,
-        &armed,
-        worker.clone(),
-        10_000,
-        Some(execution.clone()),
-        RecordingEvent::StartCapture,
-    );
-    let finalizing = transition(
-        &store,
-        &capturing,
-        worker.clone(),
-        70_000,
-        Some(execution.clone()),
-        RecordingEvent::BeginFinalization,
-    );
-    let completed = finalizing
+    let capturing = armed
         .transition(RecordingTransitionRequest {
-            expected_revision: finalizing.revision,
+            expected_revision: armed.revision,
+            actor: worker.clone(),
+            occurred_at_unix_ms: 10_000,
+            execution: Some(execution.clone()),
+            event: RecordingEvent::StartCapture,
+        })
+        .unwrap();
+    let capture_evidence = ScheduledRecordingCaptureEvidence {
+        recording_id: RECORDING_ID.into(),
+        worker_instance_id: "worker-boot-one".into(),
+        start_worker_sequence: 18,
+        graph_revision: 3,
+        output_index: 0,
+        sink_id: SINK_ID.into(),
+        artifact_relative_path: format!("{RECORDING_ID}.ts"),
+        duration_ms: 60_000,
+        max_bytes: 1_000_000,
+    };
+    store
+        .start_scheduled_recording_capture(
+            &capturing.recording,
+            &capturing.receipt,
+            &capture_evidence,
+        )
+        .unwrap();
+    store
+        .start_scheduled_recording_capture(
+            &capturing.recording,
+            &capturing.receipt,
+            &capture_evidence,
+        )
+        .unwrap();
+    let mut rebound_start = capture_evidence.clone();
+    rebound_start.worker_instance_id = "worker-boot-two".into();
+    assert!(
+        store
+            .start_scheduled_recording_capture(
+                &capturing.recording,
+                &capturing.receipt,
+                &rebound_start,
+            )
+            .is_err()
+    );
+    let finalizing = capturing
+        .recording
+        .transition(RecordingTransitionRequest {
+            expected_revision: capturing.recording.revision,
+            actor: worker.clone(),
+            occurred_at_unix_ms: 70_000,
+            execution: Some(execution.clone()),
+            event: RecordingEvent::BeginFinalization,
+        })
+        .unwrap();
+    let ready_evidence = ScheduledRecordingReadyEvidence {
+        capture: capture_evidence.clone(),
+        terminal_worker_sequence: 19,
+        capture_bytes: 22,
+        capture_sha256: "c".repeat(64),
+        captured_duration_ms: 60_000,
+    };
+    store
+        .ready_scheduled_recording_for_finalization(
+            &finalizing.recording,
+            &finalizing.receipt,
+            &ready_evidence,
+        )
+        .unwrap();
+    store
+        .ready_scheduled_recording_for_finalization(
+            &finalizing.recording,
+            &finalizing.receipt,
+            &ready_evidence,
+        )
+        .unwrap();
+    let completed = finalizing
+        .recording
+        .transition(RecordingTransitionRequest {
+            expected_revision: finalizing.recording.revision,
             actor: worker,
             occurred_at_unix_ms: 70_100,
             execution: Some(execution),
@@ -190,6 +254,38 @@ fn finalization_atomically_commits_media_catalog_evidence_and_lifecycle() {
         final_media_path: asset.media_path.clone(),
         recorded_at_unix_ms: 70_100,
     };
+    let mut rebound_finalization = evidence.clone();
+    rebound_finalization.worker_sequence += 1;
+    assert!(
+        store
+            .finalize_scheduled_recording(
+                &completed.recording,
+                &completed.receipt,
+                &rebound_finalization,
+                &asset,
+                &catalog,
+            )
+            .is_err()
+    );
+    assert!(matches!(
+        store
+            .read_scheduled_recording(RECORDING_ID)
+            .unwrap()
+            .unwrap()
+            .lifecycle,
+        RecordingLifecycle::Finalizing { .. }
+    ));
+    assert_eq!(store.read_media_asset(&asset.asset_id).unwrap(), None);
+    assert_eq!(
+        store
+            .read_scheduled_recording_capture(RECORDING_ID)
+            .unwrap(),
+        Some(capture_evidence)
+    );
+    assert_eq!(
+        store.read_scheduled_recording_ready(RECORDING_ID).unwrap(),
+        Some(ready_evidence)
+    );
     store
         .finalize_scheduled_recording(
             &completed.recording,

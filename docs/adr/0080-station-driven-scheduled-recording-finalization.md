@@ -2,8 +2,8 @@
 
 ## Status
 
-Proposed. This decision describes the next S21 implementation slice. It does
-not claim that stationd currently starts, recovers, or finalizes recordings.
+Accepted for the source implementation. Installed-candidate and field proof
+remain outstanding, so this ADR does not claim operational completion.
 
 ## Decision
 
@@ -49,7 +49,11 @@ the recording in a nonterminal state. Start and successful finalization still
 require every current dependency to match inside the same SQLite write
 transaction.
 
-Ready bytes are not accepted by pathname trust. The finalizer resolves the
+Ready bytes are not accepted by pathname trust. One controller-owned background
+finalizer performs all potentially long-running file and media work, while the
+station-critical reconciliation loop only polls a bounded result channel. No
+second finalization task can start for that channel until the first returns.
+The finalizer resolves the
 worker-owned relative path only beneath the managed recording root, rejects
 reparse points and unexpected file types, retains a no-delete handle, and
 rehashes and recounts the exact opened object against the terminal event. It
@@ -78,19 +82,24 @@ The controller does not claim to resume an interrupted continuous capture.
 
 - `Armed` before its start remains eligible for the normal start.
 - `Armed` after the start deadline becomes Failed.
-- `Capturing` after a controller restart is reconciled from the CRC-protected
-  worker journal and the execution ledger. A durable exact Ready event proceeds
-  to idempotent finalization; a durable Failed event becomes Failed.
-- `Capturing` with no exact terminal event after the worker instance is lost
-  becomes Failed. A stale `.part` file is never promoted.
+- `Capturing` after a controller restart has immutable start evidence, but the
+  lost worker session cannot be resumed and therefore becomes Failed. A stale
+  `.part` file is never promoted.
+- Worker Ready facts and the `Capturing -> Finalizing` transition commit in one
+  SQLite transaction. Thus a restart observes either Capturing with no accepted
+  Ready authority, or Finalizing with the exact durable Ready evidence needed
+  for publication; it never searches unbounded journal history to guess.
 - `Finalizing` reruns handle-based verification and content-addressed
   publication. It does not invent a new capture or change the recorded worker
   facts.
 - A sealed Ready capture survives a stationd restart. An unsealed or ambiguous
   capture does not.
 
-The worker journal is recovery evidence, not a second database writer. The
-single SQLite writer remains authoritative for lifecycle and catalog state.
+The worker journal durably precedes each emitted worker event. The exact emitted
+start and Ready envelopes are then copied into the SQLite execution ledger at
+their lifecycle boundaries. SQLite remains the sole recovery authority for
+recording lifecycle and catalog state; the controller does not perform an
+unbounded journal replay inside its critical loop.
 
 ## Boundaries and proof
 

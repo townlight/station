@@ -80,17 +80,18 @@ impl ActiveRecordingCapture {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ScheduledRecordingStartPlan {
+    pub output_index: u16,
+    pub sink_id: String,
+    pub duration_ms: u64,
+    pub max_bytes: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ArmedRecordingPlan {
     Wait,
-    Start {
-        output_index: u16,
-        sink_id: String,
-        duration_ms: u64,
-        max_bytes: u64,
-    },
-    Fail {
-        reason: &'static str,
-    },
+    Start(ScheduledRecordingStartPlan),
+    Fail { reason: &'static str },
 }
 
 pub(crate) fn plan_armed_recording(
@@ -171,12 +172,12 @@ pub(crate) fn plan_armed_recording(
         .unwrap_or(MAX_SCHEDULED_RECORDING_BYTES)
         .clamp(1, MAX_SCHEDULED_RECORDING_BYTES);
 
-    Ok(ArmedRecordingPlan::Start {
+    Ok(ArmedRecordingPlan::Start(ScheduledRecordingStartPlan {
         output_index,
         sink_id,
         duration_ms,
         max_bytes,
-    })
+    }))
 }
 
 #[cfg(test)]
@@ -256,12 +257,12 @@ mod tests {
         );
         assert_eq!(
             plan_armed_recording(&recording, &channel, 10_025).unwrap(),
-            ArmedRecordingPlan::Start {
+            ArmedRecordingPlan::Start(ScheduledRecordingStartPlan {
                 output_index: 1,
                 sink_id: REQUIRED_SINK_ID.into(),
                 duration_ms: 3_599_975,
                 max_bytes: 4_499_968_750,
-            }
+            })
         );
     }
 
@@ -283,7 +284,7 @@ mod tests {
         let mut recording = armed_recording();
         recording.definition.scheduled_end_unix_ms =
             recording.definition.scheduled_start_unix_ms + 86_400_000;
-        let ArmedRecordingPlan::Start { max_bytes, .. } =
+        let ArmedRecordingPlan::Start(ScheduledRecordingStartPlan { max_bytes, .. }) =
             plan_armed_recording(&recording, &channel(), 10_000).unwrap()
         else {
             panic!("recording should start at its exact scheduled time");

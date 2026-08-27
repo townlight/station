@@ -114,7 +114,8 @@ pub use schedule_automation_authority::{
 mod catalog_authority;
 pub use catalog_authority::{
     CatalogAssetHistoryEntry, CatalogAssetPage, CatalogAssetWriteError,
-    ScheduledRecordingFinalizationEvidence,
+    ScheduledRecordingCaptureEvidence, ScheduledRecordingFinalizationEvidence,
+    ScheduledRecordingReadyEvidence,
 };
 mod publishing_authority;
 mod publishing_executor;
@@ -1642,6 +1643,43 @@ impl StationStore {
              CREATE TRIGGER IF NOT EXISTS scheduled_recording_history_no_delete \
                BEFORE DELETE ON scheduled_recording_history \
                BEGIN SELECT RAISE(ABORT, 'scheduled recording history is append-only'); END;\
+             CREATE TABLE IF NOT EXISTS scheduled_recording_captures (\
+               recording_id TEXT PRIMARY KEY,\
+               worker_instance_id TEXT NOT NULL,\
+               start_worker_sequence INTEGER NOT NULL CHECK (start_worker_sequence >= 1),\
+               graph_revision INTEGER NOT NULL CHECK (graph_revision >= 1),\
+               output_index INTEGER NOT NULL CHECK (output_index BETWEEN 0 AND 255),\
+               sink_id TEXT NOT NULL,\
+               artifact_relative_path TEXT NOT NULL,\
+               duration_ms INTEGER NOT NULL CHECK (duration_ms >= 1),\
+               max_bytes INTEGER NOT NULL CHECK (max_bytes >= 1),\
+               terminal_worker_sequence INTEGER NOT NULL CHECK (terminal_worker_sequence >= 0),\
+               capture_bytes INTEGER NOT NULL CHECK (capture_bytes >= 0),\
+               capture_sha256 TEXT NOT NULL,\
+               captured_duration_ms INTEGER NOT NULL CHECK (captured_duration_ms >= 0),\
+               start_json TEXT NOT NULL,\
+               ready_json TEXT NOT NULL,\
+               FOREIGN KEY(recording_id) REFERENCES scheduled_recordings(recording_id)\
+             );\
+             CREATE TRIGGER IF NOT EXISTS scheduled_recording_captures_start_immutable \
+               BEFORE UPDATE ON scheduled_recording_captures \
+               WHEN OLD.worker_instance_id != NEW.worker_instance_id \
+                 OR OLD.start_worker_sequence != NEW.start_worker_sequence \
+                 OR OLD.graph_revision != NEW.graph_revision \
+                 OR OLD.output_index != NEW.output_index \
+                 OR OLD.sink_id != NEW.sink_id \
+                 OR OLD.artifact_relative_path != NEW.artifact_relative_path \
+                 OR OLD.duration_ms != NEW.duration_ms \
+                 OR OLD.max_bytes != NEW.max_bytes \
+                 OR OLD.start_json != NEW.start_json \
+               BEGIN SELECT RAISE(ABORT, 'scheduled recording start evidence is immutable'); END;\
+             CREATE TRIGGER IF NOT EXISTS scheduled_recording_captures_ready_once \
+               BEFORE UPDATE ON scheduled_recording_captures \
+               WHEN OLD.ready_json != '' \
+               BEGIN SELECT RAISE(ABORT, 'scheduled recording ready evidence is immutable'); END;\
+             CREATE TRIGGER IF NOT EXISTS scheduled_recording_captures_no_delete \
+               BEFORE DELETE ON scheduled_recording_captures \
+               BEGIN SELECT RAISE(ABORT, 'scheduled recording capture evidence is immutable'); END;\
              CREATE TABLE IF NOT EXISTS scheduled_recording_finalizations (\
                recording_id TEXT PRIMARY KEY,\
                worker_instance_id TEXT NOT NULL,\
