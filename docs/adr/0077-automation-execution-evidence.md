@@ -65,9 +65,18 @@ install fence before using it; the current unavailable path
 claims and durably paces work without requiring the helper. Its
 length-framed stdin read is bounded by a helper-process watchdog and the request is schema-closed, binding exact job, claim, adapter,
 candidate, install generation, configuration, input digest/size, output name, and deadline. It has
-no prompt, credential, provider-response, or diagnostic field. It presently has no configured
-semantic adapter: it does not resolve or open request-named input/output paths, creates no output,
-and returns only categorical `adapter_unavailable`. A prior pathname-based managed-artifact
+no prompt, credential, provider-response, or diagnostic field. The legacy root-authority mode
+presently has no configured semantic adapter: it does not resolve or open request-named input/output
+paths, creates no output, and returns only categorical `adapter_unavailable`. The separate,
+unregistered `cloud_summary_v1` helper mode is schema-closed and accepts only three exact inherited
+handles (regular input, regular output, and a bounded framed credential pipe): no artifact pathname
+or root authority is accepted. Its first provider route is fixed to HTTPS
+`api.openai.com/v1/chat/completions`, with redirects disabled, a bounded request/response/deadline,
+`store:false`, non-streaming one-choice requests, and categorical redacted failures. It writes only
+validated plain-text draft output and returns its digest/bytes/word count plus digests of the provider
+request identifier and response; it never returns raw prompt, credential, or provider text. The
+controller does not yet construct the restricted Windows handle list or invoke this mode, so no
+production semantic adapter is elected and synthetic-only protocol coverage is not provider proof. A prior pathname-based managed-artifact
 prototype was removed after proving that a retained directory handle did not prevent rename followed
 by junction substitution before the later leaf open. A future adapter must instead use handle-relative
 opens or exact inherited input/output-parent handles with file-identity binding; managed-handle proof

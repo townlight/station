@@ -8,4 +8,7 @@ publish.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
+ureq.workspace = true
+url.workspace = true
 windows-sys.workspace = true
+zeroize.workspace = true
