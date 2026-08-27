@@ -1946,7 +1946,7 @@ impl StationStore {
     /// row is not upgraded by guesswork.
     fn backfill_completed_transport_proof_tables_digests(&self) -> Result<(), String> {
         let jobs = self.prepare(
-            "SELECT job_id,channel_id,sink_id,target_id,target_revision,candidate_version,source_commit,configuration_hash,max_capture_bytes,created_at_unix_ms,updated_at_unix_ms,lease_expires_at_unix_ms,capture_relative_path,capture_bytes,capture_sha256,capture_started_at_unix_ms,capture_ended_at_unix_ms,analyzer_output_sha256,completed_at_unix_ms,failed_at_unix_ms,failure_detail FROM transport_proof_jobs WHERE state='completed' AND tables_output_sha256=''",
+            "SELECT job_id,channel_id,sink_id,target_id,target_revision,candidate_version,source_commit,configuration_hash,requested_by,max_capture_bytes,created_at_unix_ms,updated_at_unix_ms,lease_expires_at_unix_ms,capture_relative_path,capture_bytes,capture_sha256,capture_started_at_unix_ms,capture_ended_at_unix_ms,analyzer_output_sha256,completed_at_unix_ms,failed_at_unix_ms,failure_detail,install_generation FROM transport_proof_jobs WHERE state='completed' AND tables_output_sha256=''",
         )?;
         loop {
             let step = unsafe { sqlite3_step(jobs.raw) };
@@ -1956,16 +1956,40 @@ impl StationStore {
             if step != SQLITE_ROW {
                 return Err(sqlite_error(self.database));
             }
-            let job_id = column_text(jobs.raw, 0)?;
-            let max_capture_bytes = column_u64(jobs.raw, 8, "transport proof capture limit")?;
-            let created_at_unix_ms = unsafe { sqlite3_column_int64(jobs.raw, 9) };
-            let updated_at_unix_ms = unsafe { sqlite3_column_int64(jobs.raw, 10) };
-            let lease_expires_at_unix_ms = unsafe { sqlite3_column_int64(jobs.raw, 11) };
-            let completed_at_unix_ms = unsafe { sqlite3_column_int64(jobs.raw, 18) };
-            let failed_at_unix_ms = unsafe { sqlite3_column_int64(jobs.raw, 19) };
-            let failure_detail = column_text(jobs.raw, 20)?;
-            if created_at_unix_ms < 0
-                || updated_at_unix_ms < created_at_unix_ms
+            let job = TransportProofJob {
+                job_id: column_text(jobs.raw, 0)?,
+                channel_id: column_text(jobs.raw, 1)?,
+                sink_id: column_text(jobs.raw, 2)?,
+                target_id: column_text(jobs.raw, 3)?,
+                target_revision: column_u64(jobs.raw, 4, "transport proof target revision")?,
+                candidate_version: column_text(jobs.raw, 5)?,
+                source_commit: column_text(jobs.raw, 6)?,
+                configuration_hash: column_text(jobs.raw, 7)?,
+                requested_by: column_text(jobs.raw, 8)?,
+                max_capture_bytes: column_u64(jobs.raw, 9, "transport proof capture limit")?,
+                created_at_unix_ms: unsafe { sqlite3_column_int64(jobs.raw, 10) },
+                install_generation: optional_nonnegative_i64(
+                    jobs.raw,
+                    22,
+                    "transport proof install generation",
+                )?
+                .map(|generation| {
+                    u64::try_from(generation)
+                        .map_err(|_| "transport proof install generation is invalid".to_string())
+                })
+                .transpose()?,
+            };
+            // This migration must validate the complete durable identity before
+            // considering its receipt or altering the row.  In particular,
+            // `requested_by`, the canonical UUIDs, and the global capture
+            // bound are not receipt facts and therefore cannot be inferred.
+            job.validate()?;
+            let updated_at_unix_ms = unsafe { sqlite3_column_int64(jobs.raw, 11) };
+            let lease_expires_at_unix_ms = unsafe { sqlite3_column_int64(jobs.raw, 12) };
+            let completed_at_unix_ms = unsafe { sqlite3_column_int64(jobs.raw, 19) };
+            let failed_at_unix_ms = unsafe { sqlite3_column_int64(jobs.raw, 20) };
+            let failure_detail = column_text(jobs.raw, 21)?;
+            if updated_at_unix_ms < job.created_at_unix_ms
                 || lease_expires_at_unix_ms != -1
                 || completed_at_unix_ms < 0
                 || failed_at_unix_ms != -1
@@ -1976,14 +2000,14 @@ impl StationStore {
                 );
             }
             let capture = TransportProofCaptureFacts {
-                artifact_relative_path: column_text(jobs.raw, 12)?,
-                capture_bytes: column_u64(jobs.raw, 13, "transport capture bytes")?,
-                capture_sha256: column_text(jobs.raw, 14)?,
-                started_at_unix_ms: unsafe { sqlite3_column_int64(jobs.raw, 15) },
-                ended_at_unix_ms: unsafe { sqlite3_column_int64(jobs.raw, 16) },
+                artifact_relative_path: column_text(jobs.raw, 13)?,
+                capture_bytes: column_u64(jobs.raw, 14, "transport capture bytes")?,
+                capture_sha256: column_text(jobs.raw, 15)?,
+                started_at_unix_ms: unsafe { sqlite3_column_int64(jobs.raw, 16) },
+                ended_at_unix_ms: unsafe { sqlite3_column_int64(jobs.raw, 17) },
             };
-            capture.validate(max_capture_bytes)?;
-            let analyzer_output_sha256 = column_text(jobs.raw, 17)?;
+            capture.validate(job.max_capture_bytes)?;
+            let analyzer_output_sha256 = column_text(jobs.raw, 18)?;
             if !is_sha256_identity(&analyzer_output_sha256) {
                 return Err("legacy completed transport proof analyzer digest is invalid".into());
             }
@@ -1995,7 +2019,7 @@ impl StationStore {
                 self.database,
                 receipt_row.raw,
                 1,
-                &c_string(&job_id, "transport proof job identity")?,
+                &c_string(&job.job_id, "transport proof job identity")?,
             )?;
             if unsafe { sqlite3_step(receipt_row.raw) } != SQLITE_ROW {
                 return Err(
@@ -2020,15 +2044,14 @@ impl StationStore {
                 return Err("legacy completed transport proof receipt lookup is ambiguous".into());
             }
             receipt.validate()?;
-            if receipt.proof_id != job_id
-                || receipt.channel_id != column_text(jobs.raw, 1)?
-                || receipt.sink_id != column_text(jobs.raw, 2)?
-                || receipt.target_id != column_text(jobs.raw, 3)?
-                || receipt.target_revision
-                    != column_u64(jobs.raw, 4, "transport proof target revision")?
-                || receipt.candidate_version != column_text(jobs.raw, 5)?
-                || receipt.source_commit != column_text(jobs.raw, 6)?
-                || receipt.configuration_hash != column_text(jobs.raw, 7)?
+            if receipt.proof_id != job.job_id
+                || receipt.channel_id != job.channel_id
+                || receipt.sink_id != job.sink_id
+                || receipt.target_id != job.target_id
+                || receipt.target_revision != job.target_revision
+                || receipt.candidate_version != job.candidate_version
+                || receipt.source_commit != job.source_commit
+                || receipt.configuration_hash != job.configuration_hash
                 || receipt.outcome != ProofOutcome::Pass
                 || receipt.capture_bytes != capture.capture_bytes
                 || receipt.capture_sha256 != capture.capture_sha256
@@ -2071,7 +2094,7 @@ impl StationStore {
                 self.database,
                 update.raw,
                 2,
-                &c_string(&job_id, "transport proof job identity")?,
+                &c_string(&job.job_id, "transport proof job identity")?,
             )?;
             expect_done(self.database, update.raw)?;
             if self.changes() != 1 {
@@ -23453,6 +23476,121 @@ mod tests {
             Some(tables_digest.as_str())
         );
         drop(reopened);
+        for candidate in [
+            database.clone(),
+            PathBuf::from(format!("{}-wal", database.display())),
+            PathBuf::from(format!("{}-shm", database.display())),
+        ] {
+            let _ = std::fs::remove_file(candidate);
+        }
+    }
+
+    #[test]
+    fn migration_rejects_invalid_completed_transport_job_identity_and_rolls_back_backfill() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let database = std::env::temp_dir().join(format!(
+            "townlight-transport-tables-backfill-invalid-identity-{nonce}.db"
+        ));
+        let valid_job_id = "33333333-4444-4555-8666-777777777777";
+        let store = StationStore::open(&database).unwrap();
+        store
+            .execute(&format!(
+                "DROP TABLE transport_proof_jobs;\
+                 CREATE TABLE transport_proof_jobs (\
+                   job_id TEXT PRIMARY KEY,channel_id TEXT NOT NULL,sink_id TEXT NOT NULL,target_id TEXT NOT NULL,\
+                   target_revision INTEGER NOT NULL,candidate_version TEXT NOT NULL,source_commit TEXT NOT NULL,\
+                   configuration_hash TEXT NOT NULL,requested_by TEXT NOT NULL,max_capture_bytes INTEGER NOT NULL,\
+                   state TEXT NOT NULL,created_at_unix_ms INTEGER NOT NULL,updated_at_unix_ms INTEGER NOT NULL,\
+                   lease_expires_at_unix_ms INTEGER NOT NULL,capture_relative_path TEXT NOT NULL,capture_bytes INTEGER NOT NULL,\
+                   capture_sha256 TEXT NOT NULL,capture_started_at_unix_ms INTEGER NOT NULL,capture_ended_at_unix_ms INTEGER NOT NULL,\
+                   analyzer_output_sha256 TEXT NOT NULL,completed_at_unix_ms INTEGER NOT NULL,failed_at_unix_ms INTEGER NOT NULL,\
+                   failure_detail TEXT NOT NULL,install_generation INTEGER NOT NULL,execution_capability_sha256 TEXT NOT NULL);\
+                 INSERT INTO transport_proof_jobs VALUES(\
+                   'not-a-canonical-uuid','11111111-2222-4333-8444-555555555555','22222222-3333-4444-8555-666666666666','receiver-1',\
+                   1,'0.2.0','{}','{}','setup-admin',188000,'completed',1,600002,-1,'{valid_job_id}/capture.ts',188000,'{}',1,600001,\
+                   '{}',600002,-1,'',7,'');",
+                "a".repeat(40),
+                "b".repeat(64),
+                "d".repeat(64),
+                "c".repeat(64),
+            ))
+            .unwrap();
+
+        let assert_rejected_and_rolled_back = |store: &StationStore| {
+            assert!(
+                store.migrate_transport_proof_schema().is_err(),
+                "a malformed completed legacy identity must fail before any digest backfill"
+            );
+            assert!(
+                !store
+                    .sqlite_table_has_column("transport_proof_jobs", "tables_output_sha256")
+                    .unwrap(),
+                "the failed migration must roll back its added digest column and every write"
+            );
+        };
+
+        assert_rejected_and_rolled_back(&store);
+        assert_eq!(
+            row_count(
+                &store,
+                "SELECT COUNT(*) FROM transport_proof_jobs WHERE job_id='not-a-canonical-uuid'"
+            ),
+            1
+        );
+
+        store
+            .execute(&format!(
+                "UPDATE transport_proof_jobs SET job_id='{valid_job_id}',requested_by=''"
+            ))
+            .unwrap();
+        assert_rejected_and_rolled_back(&store);
+        assert_eq!(
+            row_count(
+                &store,
+                "SELECT COUNT(*) FROM transport_proof_jobs WHERE requested_by=''"
+            ),
+            1,
+            "the rejected actor binding must remain unchanged"
+        );
+
+        store
+            .execute(&format!(
+                "UPDATE transport_proof_jobs SET requested_by='setup-admin',max_capture_bytes={} ",
+                station_transport_proof::MAX_PROOF_CAPTURE_BYTES + 1,
+            ))
+            .unwrap();
+        assert_rejected_and_rolled_back(&store);
+        assert_eq!(
+            row_count(
+                &store,
+                &format!(
+                    "SELECT COUNT(*) FROM transport_proof_jobs WHERE max_capture_bytes={}",
+                    station_transport_proof::MAX_PROOF_CAPTURE_BYTES + 1
+                )
+            ),
+            1,
+            "the rejected global capture bound must remain unchanged"
+        );
+
+        store
+            .execute(
+                "UPDATE transport_proof_jobs SET max_capture_bytes=188000,install_generation=-2",
+            )
+            .unwrap();
+        assert_rejected_and_rolled_back(&store);
+        assert_eq!(
+            row_count(
+                &store,
+                "SELECT COUNT(*) FROM transport_proof_jobs WHERE install_generation=-2"
+            ),
+            1,
+            "the rejected install generation must remain unchanged"
+        );
+
+        drop(store);
         for candidate in [
             database.clone(),
             PathBuf::from(format!("{}-wal", database.display())),
