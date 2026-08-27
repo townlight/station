@@ -390,6 +390,7 @@ form { display:grid; gap:16px; margin-top:20px; }label { display:grid; gap:7px; 
 .agenda-controls { display:grid; grid-template-columns:minmax(220px,1fr) auto; gap:10px; align-items:end; }
 .agenda-controls label,.agenda-panel > label { display:grid; gap:5px; color:var(--ink); font-size:10px; font-weight:700; }
 .agenda-controls input,.agenda-panel > label input { width:100%; }
+.agenda-panel .field-error { color:var(--red); font-weight:600; line-height:1.45; }
 .agenda-state { display:grid; gap:4px; padding:16px 3px; color:var(--muted); font-size:11px; }
 .agenda-state strong { color:var(--ink); }
 .agenda-history { border-top:1px solid #e2ebe4; padding-top:10px; }
