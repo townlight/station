@@ -7,6 +7,11 @@ mod transport_executor;
 pub use automation_execution_authority::{
     AutomationExecutionJobRecord, AutomationExecutionJobState,
 };
+mod automation_execution_controller;
+pub use automation_execution_controller::{
+    AutomationExecutionAdapter, AutomationExecutionAdapterFailure,
+    run_automation_execution_controller_iteration, run_automation_execution_queue_controller,
+};
 use std::ffi::{CStr, CString, c_char, c_int, c_longlong, c_void};
 use std::os::windows::fs::MetadataExt;
 use std::path::{Component, Path, PathBuf};

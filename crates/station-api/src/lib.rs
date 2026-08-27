@@ -22,7 +22,8 @@ use station_alerting::probe_system_resources;
 use station_auth::{OperatorAccount, SecretToken, digest_secret};
 use station_automation_policy::{
     AdaptiveDefaultHint, AutomationCandidateIdentity, AutomationConnectionTestEvidence,
-    AutomationFeature, AutomationFeaturePolicy, ConnectionTestOutcome, FeatureAutomationStatus,
+    AutomationExecutionReceipt, AutomationExecutionRequest, AutomationFeature,
+    AutomationFeaturePolicy, ConnectionTestOutcome, FeatureAutomationStatus,
     derive_automation_readiness, derive_feature_automation_status,
 };
 use station_captions::{
@@ -91,9 +92,10 @@ use station_source_evidence::{
     CanonicalProjectionSha256, EvidenceScopeSha256, StationSourceEvidenceAuthority,
 };
 use station_storage::{
-    AlertChannelSecret, AssetMetadataWriteError, CableTransportValidationSnapshot,
-    CaptionPolicyWriteError, CatalogAssetWriteError, CgSnapshotReadError, CgWriteError,
-    ChannelCaptionMode, ChannelCaptionPolicy, ChannelCaptionPolicyAuditEvent, ChannelFallbackSlate,
+    AlertChannelSecret, AssetMetadataWriteError, AutomationExecutionJobRecord,
+    AutomationExecutionJobState, CableTransportValidationSnapshot, CaptionPolicyWriteError,
+    CatalogAssetWriteError, CgSnapshotReadError, CgWriteError, ChannelCaptionMode,
+    ChannelCaptionPolicy, ChannelCaptionPolicyAuditEvent, ChannelFallbackSlate,
     ChannelFallbackSlateAuditEvent, ChannelWriteError, CommissioningSupportBundleReceipt,
     CommitWriteError, CustomMetadataSchemaWriteError, ExistingScheduleSnapshot,
     ExternalReceiverAcceptanceReceipt, FallbackSlateWriteError, HeadendProfileWriteError,
@@ -870,6 +872,18 @@ struct AutomationFeaturePolicyHistoryResponse {
     policy: AutomationFeaturePolicy,
     changed_by: String,
     occurred_at_unix_ms: i64,
+}
+
+#[derive(Debug, Serialize)]
+struct AutomationExecutionJobStatusResponse<'a> {
+    request: &'a AutomationExecutionRequest,
+    state: &'static str,
+    attempt_count: u32,
+    lease_expires_at_unix_ms: Option<i64>,
+    receipt: Option<&'a AutomationExecutionReceipt>,
+    last_failure_code: Option<&'a str>,
+    created_at_unix_ms: i64,
+    completed_at_unix_ms: Option<i64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -2027,6 +2041,9 @@ impl Api {
             ("GET", "/api/v1/station-box-profile/readiness") => self.station_box_profile(true),
             ("GET", "/api/v1/automation/adapters") => self.list_automation_adapters(actor),
             ("GET", "/api/v1/automation/policies") => self.list_automation_policies(actor),
+            ("GET", path) if automation_execution_job_path(path).is_some() => {
+                self.read_automation_execution_job(path, actor)
+            }
             ("GET", path) if asrun_page_path(path).is_some() => self.read_asrun_page(path, actor),
             ("GET", path) if asrun_export_path(path).is_some() => self.export_asrun(path, actor),
             ("GET", path) if path.starts_with("/api/v1/reporting/as-run/") => error_response(
@@ -2798,6 +2815,40 @@ impl Api {
             Ok(policies) => json_response(
                 200,
                 serde_json::to_vec(&policies).expect("serializing automation policies cannot fail"),
+            ),
+            Err(message) => error_response(500, "storage_error", &message),
+        }
+    }
+
+    fn read_automation_execution_job(
+        &self,
+        path: &str,
+        actor: Option<&OperatorAccount>,
+    ) -> ApiResponse {
+        if !is_automation_reader(actor) {
+            return error_response(
+                403,
+                "operator_required",
+                "Reading automation execution status requires an enabled operator account.",
+            );
+        }
+        let Some(job_id) = automation_execution_job_path(path) else {
+            return error_response(
+                400,
+                "invalid_path",
+                "The automation execution job identity is invalid.",
+            );
+        };
+        match self.storage.read_automation_execution_job(job_id) {
+            Ok(Some(record)) => json_response(
+                200,
+                serde_json::to_vec(&automation_execution_job_status_response(&record))
+                    .expect("serializing automation execution status cannot fail"),
+            ),
+            Ok(None) => error_response(
+                404,
+                "automation_execution_job_not_found",
+                "The automation execution job does not exist.",
             ),
             Err(message) => error_response(500, "storage_error", &message),
         }
@@ -10584,6 +10635,27 @@ fn is_automation_reader(actor: Option<&OperatorAccount>) -> bool {
     })
 }
 
+fn automation_execution_job_status_response(
+    record: &AutomationExecutionJobRecord,
+) -> AutomationExecutionJobStatusResponse<'_> {
+    let state = match record.state {
+        AutomationExecutionJobState::Pending => "pending",
+        AutomationExecutionJobState::Claimed => "claimed",
+        AutomationExecutionJobState::Completed => "completed",
+        AutomationExecutionJobState::Failed => "failed",
+    };
+    AutomationExecutionJobStatusResponse {
+        request: &record.request,
+        state,
+        attempt_count: record.attempt_count,
+        lease_expires_at_unix_ms: record.lease_expires_at_unix_ms,
+        receipt: record.receipt.as_ref(),
+        last_failure_code: record.last_failure_code.as_deref(),
+        created_at_unix_ms: record.created_at_unix_ms,
+        completed_at_unix_ms: record.completed_at_unix_ms,
+    }
+}
+
 fn is_publishing_reader(actor: Option<&OperatorAccount>) -> bool {
     is_automation_reader(actor)
 }
@@ -11436,6 +11508,11 @@ fn asrun_export_path(path: &str) -> Option<(&str, &'static str)> {
 
 fn automation_policy_path(path: &str) -> Option<&str> {
     path_identity(path, "/api/v1/automation/policies/", "")
+        .filter(|identity| is_canonical_api_uuid(identity))
+}
+
+fn automation_execution_job_path(path: &str) -> Option<&str> {
+    path_identity(path, "/api/v1/automation/jobs/", "")
         .filter(|identity| is_canonical_api_uuid(identity))
 }
 
@@ -17780,6 +17857,139 @@ mod tests {
         drop(api);
         let _ = std::fs::remove_file(database);
         let _ = std::fs::remove_dir_all(application);
+    }
+
+    #[test]
+    fn automation_execution_status_requires_an_authenticated_automation_reader() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let database =
+            std::env::temp_dir().join(format!("townlight-automation-execution-api-{nonce}.db"));
+        let application = database.with_extension("application");
+        std::fs::create_dir_all(&application).unwrap();
+        let api =
+            Api::open_with_station_box_probe(&database, &application, station_box_probe()).unwrap();
+
+        let response = api.handle_in_process(
+            "GET",
+            "/api/v1/automation/jobs/33333333-2222-4333-8444-555555555555",
+            None,
+        );
+        assert_eq!(response.status, 403);
+
+        drop(api);
+        let _ = std::fs::remove_file(database);
+        let _ = std::fs::remove_dir_all(application);
+    }
+
+    #[test]
+    fn automation_execution_status_returns_durable_truth_without_live_claim_identity() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("townlight-automation-status-api-{nonce}"));
+        let database = root.join("station.db");
+        let application = root.join("application");
+        std::fs::create_dir_all(&application).unwrap();
+        install_transport_candidate(&root, &application);
+        let api =
+            Api::open_with_station_box_probe(&database, &application, station_box_probe()).unwrap();
+        let adapter_id = "11111111-2222-4333-8444-555555555555";
+        let policy_id = "22222222-2222-4333-8444-555555555555";
+        let job_id = "33333333-2222-4333-8444-555555555555";
+        let configuration_hash = "b".repeat(64);
+        let candidate = read_verified_install_authority(&root, &application).unwrap();
+        let candidate_identity = AutomationCandidateIdentity {
+            version: candidate.version().into(),
+            source_commit: candidate.source_commit().into(),
+        };
+        let adapter = station_automation_policy::AutomationAdapterDescriptor {
+            adapter_id: adapter_id.into(),
+            location: station_automation_policy::AdapterLocation::Local,
+            model_key: "test-summary-adapter".into(),
+            model_identifier: "test/model-v1".into(),
+            supported_features: vec![AutomationFeature::Summaries],
+            credential_availability: station_automation_policy::CredentialAvailability::NotRequired,
+            revision: 1,
+        };
+        let policy = AutomationFeaturePolicy {
+            policy_id: policy_id.into(),
+            feature: AutomationFeature::Summaries,
+            operator_selected_adapter_id: Some(adapter_id.into()),
+            adaptive_default: None,
+            configuration_hash: configuration_hash.clone(),
+            revision: 1,
+        };
+        api.storage
+            .write_automation_adapter_descriptor(&adapter, None, "setup-admin", 10)
+            .unwrap();
+        api.storage
+            .write_automation_feature_policy(&policy, None, "setup-admin", 20)
+            .unwrap();
+        api.storage
+            .append_automation_connection_test_evidence(
+                &AutomationConnectionTestEvidence {
+                    evidence_id: "44444444-2222-4333-8444-555555555555".into(),
+                    policy_id: policy_id.into(),
+                    adapter_id: adapter_id.into(),
+                    policy_revision: 1,
+                    adapter_revision: 1,
+                    configuration_hash: configuration_hash.clone(),
+                    candidate: candidate_identity.clone(),
+                    outcome: ConnectionTestOutcome::Passed,
+                    tested_at_unix_ms: 50,
+                    expires_at_unix_ms: 10_000,
+                    detail: "trusted test passed".into(),
+                },
+                &candidate_identity,
+                50,
+            )
+            .unwrap();
+        api.storage
+            .enqueue_automation_execution_job(
+                &AutomationExecutionRequest {
+                    job_id: job_id.into(),
+                    feature: AutomationFeature::Summaries,
+                    policy_id: policy_id.into(),
+                    policy_revision: 1,
+                    adapter_id: adapter_id.into(),
+                    adapter_revision: 1,
+                    configuration_hash,
+                    candidate: candidate_identity,
+                    install_generation: candidate.install_generation(),
+                    input: station_automation_policy::AutomationInputArtifact {
+                        kind: station_automation_policy::AutomationInputKind::Transcript,
+                        artifact_sha256: "c".repeat(64),
+                        bytes: 4_096,
+                        media_type: "text/plain; charset=utf-8".into(),
+                        language: Some("en-US".into()),
+                    },
+                    requested_output_language: None,
+                    requested_at_unix_ms: 100,
+                },
+                &candidate,
+                100,
+            )
+            .unwrap();
+
+        let response = api.handle_authenticated(
+            "GET",
+            &format!("/api/v1/automation/jobs/{job_id}"),
+            None,
+            &test_actor(station_auth::OperatorRole::MeetingOperator),
+        );
+        assert_eq!(response.status, 200);
+        let body: serde_json::Value = serde_json::from_slice(&response.body).unwrap();
+        assert_eq!(body["request"]["job_id"], job_id);
+        assert_eq!(body["state"], "pending");
+        assert!(body.get("lease_owner").is_none());
+        assert!(body.get("claim_id").is_none());
+
+        drop(api);
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
