@@ -137,6 +137,17 @@ Assert-Contract ($cgProofSource -match '\[string\]\$DecoderPath' -and $cgProofSo
     $cgProofSource -match 'Assert-TownLightPinnedCaptionDecoder' -and
     $cgProofSource -notmatch '&\s+ffmpeg\.exe') `
     'CG pixel assertions must execute an explicit verified decoder when commissioning supplies one.'
+function Get-CgZonesCountUnderStrictMode([scriptblock]$Action) {
+    Set-StrictMode -Version Latest
+    $existingZones = @(& $Action)
+    $existingZones.Count
+}
+$oneCgZone = [pscustomobject]@{ zone_id = 'one' }
+Assert-Contract ((Get-CgZonesCountUnderStrictMode {}) -eq 0 -and
+    (Get-CgZonesCountUnderStrictMode { $oneCgZone }) -eq 1 -and
+    (Get-CgZonesCountUnderStrictMode { $oneCgZone; [pscustomobject]@{ zone_id = 'two' } }) -eq 2 -and
+    $cgProofSource -match '\$existingZones\s*=\s*@\(Invoke-Json' -and $cgProofSource -match '\$existingZones\.Count -gt 0') `
+    'CG proof must safely count empty, singleton, and nonempty zones responses under strict mode.'
 . $decoderPinPath
 function Test-ExpectedThrow([scriptblock]$Action) { try { & $Action; return $false } catch { return $true } }
 $decoderFixtureRoot = Join-Path ([IO.Path]::GetTempPath()) ('townlight-decoder-pin-' + [guid]::NewGuid().ToString('N'))

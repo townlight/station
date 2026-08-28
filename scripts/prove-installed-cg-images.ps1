@@ -244,7 +244,7 @@ try {
             $_.Exception.Message -notmatch 'HTTP 404') { throw }
     }
     try {
-        $existingZones = Invoke-Json 'Get' "/api/v1/cg/zones?board_id=$boardId" $null
+        $existingZones = @(Invoke-Json 'Get' "/api/v1/cg/zones?board_id=$boardId" $null)
         if ($existingZones.Count -gt 0) { throw "Refusing stale CG image proof zones for board $boardId." }
     } catch {
         if ($_.Exception.Message -like '*Refusing stale*' -or
