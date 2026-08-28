@@ -44,7 +44,8 @@ $clearCapture = Join-Path ([IO.Path]::GetTempPath()) "townlight-cg-clear-$PID.ts
 $clearPixel = Join-Path ([IO.Path]::GetTempPath()) "townlight-cg-clear-$PID.rgb"
 $baselineCapture = Join-Path ([IO.Path]::GetTempPath()) "townlight-cg-baseline-$PID.ts"
 $baselinePixel = Join-Path ([IO.Path]::GetTempPath()) "townlight-cg-baseline-$PID.rgb"
-$receiver = [Net.Sockets.UdpClient]::new($DestinationPort)
+$receiver = [Net.Sockets.UdpClient]::new([Net.IPEndPoint]::new([Net.IPAddress]::Loopback, $DestinationPort))
+$DestinationPort = ([Net.IPEndPoint]$receiver.Client.LocalEndPoint).Port
 $receiver.Client.ReceiveBufferSize = 8388608
 $originalChannel = $null
 $existingBoard = $null
@@ -111,11 +112,45 @@ function Upload-CgImage {
     [Text.Encoding]::UTF8.GetString($response) | ConvertFrom-Json
 }
 
+function Assert-CgStartupDatagram {
+    param(
+        [byte[]]$Datagram,
+        [string]$Phase
+    )
+    if ($Datagram.Length -eq 0 -or ($Datagram.Length % 188) -ne 0) {
+        throw "CG capture phase $Phase startup datagram is not packet-aligned MPEG-TS."
+    }
+    for ($offset = 0; $offset -lt $Datagram.Length; $offset += 188) {
+        if ($Datagram[$offset] -ne 0x47) {
+            throw "CG capture phase $Phase startup datagram lost MPEG-TS sync at byte $offset."
+        }
+    }
+}
+
 function Capture-Udp {
-    param([string]$Path)
+    param(
+        [string]$Path,
+        [string]$Phase,
+        [int]$StartupTimeoutSeconds = 30
+    )
+    $minimumCaptureBytes = 250000
     $memory = [IO.MemoryStream]::new()
     try {
         $remote = [Net.IPEndPoint]::new([Net.IPAddress]::Any, 0)
+        $startupDeadline = [DateTime]::UtcNow.AddSeconds($StartupTimeoutSeconds)
+        $receivedFirstDatagram = $false
+        do {
+            while ($receiver.Available -gt 0) {
+                $datagram = $receiver.Receive([ref]$remote)
+                Assert-CgStartupDatagram -Datagram $datagram -Phase $Phase
+                $receivedFirstDatagram = $true
+                break
+            }
+            if (-not $receivedFirstDatagram) { Start-Sleep -Milliseconds 25 }
+        } while (-not $receivedFirstDatagram -and [DateTime]::UtcNow -lt $startupDeadline)
+        if (-not $receivedFirstDatagram) {
+            throw "CG capture phase $Phase received 0 bytes before its $StartupTimeoutSeconds-second startup deadline."
+        }
         $clock = [Diagnostics.Stopwatch]::StartNew()
         while ($clock.Elapsed.TotalSeconds -lt $CaptureSeconds) {
             while ($receiver.Available -gt 0) {
@@ -125,7 +160,9 @@ function Capture-Udp {
             Start-Sleep -Milliseconds 2
         }
         [IO.File]::WriteAllBytes($Path, $memory.ToArray())
-        if ($memory.Length -lt 250000) { throw "CG capture $Path is unexpectedly short." }
+        if ($memory.Length -lt $minimumCaptureBytes) {
+            throw "CG capture phase $Phase received $($memory.Length) bytes; expected at least $minimumCaptureBytes."
+        }
     }
     finally { $memory.Dispose() }
 }
@@ -181,6 +218,23 @@ function Assert-WorkerAlive {
     if ($workerPid -and -not (Get-Process -Id $workerPid -ErrorAction SilentlyContinue)) {
         throw "The proof channel worker PID $workerPid did not remain alive."
     }
+}
+
+function Wait-ProofChannelRuntimeReady {
+    $deadline = [DateTime]::UtcNow.AddSeconds(30)
+    do {
+        Assert-WorkerAlive
+        try {
+            $safeToAir = Invoke-Json 'Get' '/api/v1/runtime-safe-to-air' $null
+            $proofChannel = @($safeToAir.channels | Where-Object { $_.channel_id -eq $channelId })
+            if ($safeToAir.color -eq 'green' -and $proofChannel.Count -eq 1 -and
+                $proofChannel[0].state -in @('healthy_fallback', 'on_air')) {
+                return
+            }
+        } catch { }
+        Start-Sleep -Milliseconds 250
+    } while ([DateTime]::UtcNow -lt $deadline)
+    throw 'The proof channel did not reach an authoritative healthy runtime state within 30 seconds.'
 }
 
 function Wait-PreviewCleared {
@@ -275,9 +329,9 @@ try {
         if (-not $workerPid) { Start-Sleep -Milliseconds 100 }
     } while (-not $workerPid -and [DateTime]::UtcNow -lt $workerDeadline)
     if (-not $workerPid) { throw 'The dedicated installed CG proof worker did not start.' }
-    Start-Sleep -Seconds 3
+    Wait-ProofChannelRuntimeReady
     Clear-UdpBuffer
-    Capture-Udp $baselineCapture
+    Capture-Udp $baselineCapture -Phase 'baseline'
     Assert-WorkerAlive
     Assert-TsContinuity $baselineCapture | Out-Null
     $baselinePixelValue = Read-Pixel $decoderExecutable $baselineCapture $baselinePixel
@@ -321,7 +375,7 @@ try {
     Start-Sleep -Seconds 2
     Assert-WorkerAlive
     Clear-UdpBuffer
-    Capture-Udp $redCapture
+    Capture-Udp $redCapture -Phase 'red'
 
     $zone.content_source = [ordered]@{ kind = 'image'; asset_id = $green.asset_id }
     $zone.revision = 2
@@ -332,7 +386,7 @@ try {
     Start-Sleep -Seconds 2
     Assert-WorkerAlive
     Clear-UdpBuffer
-    Capture-Udp $greenCapture
+    Capture-Udp $greenCapture -Phase 'green'
 
     $redBytes = Assert-TsContinuity $redCapture
     $greenBytes = Assert-TsContinuity $greenCapture
@@ -354,7 +408,7 @@ try {
             Start-Sleep -Milliseconds 250
         } while ([DateTime]::UtcNow -lt $clearDeadline)
         Clear-UdpBuffer
-        Capture-Udp $clearCapture
+        Capture-Udp $clearCapture -Phase 'clear'
         Assert-TsContinuity $clearCapture | Out-Null
         $clearPixelValue = Read-Pixel $decoderExecutable $clearCapture $clearPixel
         for ($index = 0; $index -lt 3; $index++) {

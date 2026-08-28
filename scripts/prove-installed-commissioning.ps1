@@ -148,7 +148,7 @@ function Invoke-CgProof {
             throw "The existing CG proof script is missing: $script"
         }
         $output = & $script -Credential $Credential -BaseUri $serviceUri `
-            -DestinationPort (Get-FreeUdpPort) -ValidateClear -DecoderPath $DecoderPath `
+            -DestinationPort 0 -ValidateClear -DecoderPath $DecoderPath `
             -ExpectedDecoderSha256 $ExpectedDecoderSha256 -ExpectedDecoderSizeBytes $ExpectedDecoderSizeBytes `
             -PinnedDecoderStream $PinnedDecoderStream -PinnedDecoderDirectoryHandles $PinnedDecoderDirectoryHandles 2>&1
         $text = ($output | ForEach-Object { [string]$_ }) -join "`n"

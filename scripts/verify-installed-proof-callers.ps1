@@ -148,6 +148,60 @@ Assert-Contract ((Get-CgZonesCountUnderStrictMode {}) -eq 0 -and
     (Get-CgZonesCountUnderStrictMode { $oneCgZone; [pscustomobject]@{ zone_id = 'two' } }) -eq 2 -and
     $cgProofSource -match '\$existingZones\s*=\s*@\(Invoke-Json' -and $cgProofSource -match '\$existingZones\.Count -gt 0') `
     'CG proof must safely count empty, singleton, and nonempty zones responses under strict mode.'
+$cgCaptureTokens = $null
+$cgCaptureParseErrors = $null
+$cgCaptureAst = [Management.Automation.Language.Parser]::ParseInput($cgProofSource, [ref]$cgCaptureTokens, [ref]$cgCaptureParseErrors)
+$cgCaptureFunction = @($cgCaptureAst.FindAll({
+    param($node)
+    $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Capture-Udp'
+}, $true))
+$cgCaptureSource = if ($cgCaptureFunction.Count -eq 1) { $cgCaptureFunction[0].Extent.Text } else { '' }
+Assert-Contract ($cgCaptureParseErrors.Count -eq 0 -and $cgCaptureFunction.Count -eq 1 -and
+    $cgCaptureSource -match '\[string\]\$Phase' -and
+    $cgCaptureSource -match '\[int\]\$StartupTimeoutSeconds\s*=\s*30' -and
+    $cgCaptureSource -match '\$startupDeadline\s*=\s*\[DateTime\]::UtcNow\.AddSeconds\(\$StartupTimeoutSeconds\)' -and
+    $cgCaptureSource -match '\$receivedFirstDatagram\s*=\s*\$true' -and
+    $cgCaptureSource -match 'CG capture phase \$Phase received 0 bytes' -and
+    $cgCaptureSource -match 'CG capture phase \$Phase received \$\(\$memory\.Length\) bytes' -and
+    $cgProofSource -match 'function Assert-CgStartupDatagram' -and
+    $cgCaptureSource -match 'Assert-CgStartupDatagram -Datagram \$datagram -Phase \$Phase' -and
+    $cgProofSource -match 'Capture-Udp \$baselineCapture -Phase ''baseline''' -and
+    $cgProofSource -match 'Capture-Udp \$redCapture -Phase ''red''' -and
+    $cgProofSource -match 'Capture-Udp \$greenCapture -Phase ''green''' -and
+    $cgProofSource -match 'Capture-Udp \$clearCapture -Phase ''clear''') `
+    'CG proof must give a fresh worker a bounded actual-UDP startup window before rejecting a short capture.'
+$cgProofTokens = $null
+$cgProofParseErrors = $null
+$cgProofAst = [Management.Automation.Language.Parser]::ParseInput($cgProofSource, [ref]$cgProofTokens, [ref]$cgProofParseErrors)
+$cgRuntimeReadinessFunction = @($cgProofAst.FindAll({
+    param($node)
+    $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Wait-ProofChannelRuntimeReady'
+}, $true))
+$cgRuntimeReadinessSource = if ($cgRuntimeReadinessFunction.Count -eq 1) {
+    $cgRuntimeReadinessFunction[0].Extent.Text
+} else {
+    ''
+}
+$cgRuntimeReadyBeforeBaselineCapture = [bool]($cgProofSource -match
+    'Wait-ProofChannelRuntimeReady\s*\r?\n\s*Clear-UdpBuffer\s*\r?\n\s*Capture-Udp \$baselineCapture')
+Assert-Contract ($cgProofParseErrors.Count -eq 0 -and $cgRuntimeReadinessFunction.Count -eq 1) `
+    'CG proof must define one parseable proof-channel runtime readiness guard.'
+Assert-Contract ($cgRuntimeReadinessSource -match 'runtime-safe-to-air') `
+    'CG proof runtime readiness must read authoritative safe-to-air state.'
+Assert-Contract ($cgRuntimeReadinessSource -match '\$safeToAir\.color -eq ''green''') `
+    'CG proof runtime readiness must require green safe-to-air authority.'
+Assert-Contract ($cgRuntimeReadinessSource -match "state -in @\('healthy_fallback', 'on_air'\)") `
+    'CG proof runtime readiness must require a healthy or on-air proof channel.'
+Assert-Contract ($cgRuntimeReadinessSource -match 'Assert-WorkerAlive') `
+    'CG proof runtime readiness must keep the proof worker alive.'
+Assert-Contract $cgRuntimeReadyBeforeBaselineCapture `
+    'CG proof must wait for authoritative runtime readiness before its first UDP capture.'
+Assert-Contract ($cgProofSource -match '\[Net\.Sockets\.UdpClient\]::new\(\[Net\.IPEndPoint\]::new\(\[Net\.IPAddress\]::Loopback, \$DestinationPort\)\)' -and
+    $cgProofSource -match '\$DestinationPort\s*=\s*\(\[Net\.IPEndPoint\]\$receiver\.Client\.LocalEndPoint\)\.Port' -and
+    $commissioningSource -match 'function Get-FreeUdpPort' -and
+    $commissioningSource -match '\$port\s*=\s*Get-FreeUdpPort' -and
+    $commissioningSource -match '(?ms)function Invoke-CgProof \{.*?-DestinationPort 0.*?^\}') `
+    'Commissioning CG proof must retain its own port-zero UDP binding through channel configuration.'
 . $decoderPinPath
 function Test-ExpectedThrow([scriptblock]$Action) { try { & $Action; return $false } catch { return $true } }
 $decoderFixtureRoot = Join-Path ([IO.Path]::GetTempPath()) ('townlight-decoder-pin-' + [guid]::NewGuid().ToString('N'))
