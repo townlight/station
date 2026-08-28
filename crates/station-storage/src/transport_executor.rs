@@ -3092,6 +3092,7 @@ mod tests {
             completed.tables_output_sha256,
             Some(receipt.findings.tables_output_sha256)
         );
+        drop(_fence);
         drop(store);
         fs::remove_dir_all(base).unwrap();
     }

@@ -62,8 +62,10 @@ impl StationStore {
              CREATE TRIGGER IF NOT EXISTS underwriting_spot_history_no_delete BEFORE DELETE ON underwriting_spot_history BEGIN SELECT RAISE(ABORT,'underwriting spot history is append-only'); END;\
              CREATE TRIGGER IF NOT EXISTS underwriting_spots_no_delete BEFORE DELETE ON underwriting_spots BEGIN SELECT RAISE(ABORT,'underwriting spots cannot be deleted'); END;",
         )
-        .and_then(|_| self.execute(
-            "CREATE TABLE IF NOT EXISTS underwriting_flights(flight_id TEXT PRIMARY KEY,sponsor_id TEXT NOT NULL,spot_id TEXT NOT NULL,revision INTEGER NOT NULL,record_json TEXT NOT NULL);\
+        .and_then(|_| {
+            let result = self.execute(
+                "BEGIN IMMEDIATE;\
+             CREATE TABLE IF NOT EXISTS underwriting_flights(flight_id TEXT PRIMARY KEY,sponsor_id TEXT NOT NULL,spot_id TEXT NOT NULL,revision INTEGER NOT NULL,record_json TEXT NOT NULL);\
              CREATE TABLE IF NOT EXISTS underwriting_flight_history(flight_id TEXT NOT NULL,revision INTEGER NOT NULL,record_json TEXT NOT NULL,changed_by TEXT NOT NULL,occurred_at_unix_ms INTEGER NOT NULL,PRIMARY KEY(flight_id,revision));\
              CREATE INDEX IF NOT EXISTS underwriting_flights_spot ON underwriting_flights(spot_id,flight_id);\
              CREATE TRIGGER IF NOT EXISTS underwriting_flight_history_no_update BEFORE UPDATE ON underwriting_flight_history BEGIN SELECT RAISE(ABORT,'underwriting flight history is append-only'); END;\
@@ -71,11 +73,54 @@ impl StationStore {
              CREATE TABLE IF NOT EXISTS underwriting_placements(placement_id TEXT PRIMARY KEY,flight_id TEXT NOT NULL,channel_id TEXT NOT NULL,scheduled_at_unix_ms INTEGER NOT NULL,revision INTEGER NOT NULL,schedule_item_id TEXT NOT NULL,schedule_item_revision INTEGER NOT NULL,record_json TEXT NOT NULL);\
              CREATE TABLE IF NOT EXISTS underwriting_placement_history(placement_id TEXT NOT NULL,revision INTEGER NOT NULL,schedule_item_id TEXT NOT NULL,schedule_item_revision INTEGER NOT NULL,record_json TEXT NOT NULL,changed_by TEXT NOT NULL,occurred_at_unix_ms INTEGER NOT NULL,PRIMARY KEY(placement_id,revision));\
              CREATE INDEX IF NOT EXISTS underwriting_placements_flight_time ON underwriting_placements(flight_id,scheduled_at_unix_ms,placement_id);\
-             DROP INDEX IF EXISTS underwriting_placements_schedule;\
-             CREATE UNIQUE INDEX underwriting_placements_schedule ON underwriting_placements(schedule_item_id);\
              CREATE TRIGGER IF NOT EXISTS underwriting_placement_history_no_update BEFORE UPDATE ON underwriting_placement_history BEGIN SELECT RAISE(ABORT,'underwriting placement history is append-only'); END;\
-             CREATE TRIGGER IF NOT EXISTS underwriting_placement_history_no_delete BEFORE DELETE ON underwriting_placement_history BEGIN SELECT RAISE(ABORT,'underwriting placement history is append-only'); END;"
-        ))
+             CREATE TRIGGER IF NOT EXISTS underwriting_placement_history_no_delete BEFORE DELETE ON underwriting_placement_history BEGIN SELECT RAISE(ABORT,'underwriting placement history is append-only'); END;\
+             COMMIT;",
+            );
+            if result.is_err() {
+                let _ = self.execute("ROLLBACK");
+            }
+            result
+        })
+        .and_then(|_| {
+            if self.underwriting_schedule_index_is_canonical()? {
+                return Ok(());
+            }
+            let result = self.execute(
+                "BEGIN IMMEDIATE;\
+                 DROP INDEX IF EXISTS underwriting_placements_schedule;\
+                 CREATE UNIQUE INDEX underwriting_placements_schedule ON underwriting_placements(schedule_item_id);\
+                 COMMIT;",
+            );
+            if result.is_err() {
+                let _ = self.execute("ROLLBACK");
+            }
+            result
+        })
+    }
+
+    fn underwriting_schedule_index_is_canonical(&self) -> Result<bool, String> {
+        let statement = self.prepare(
+            "SELECT \
+               EXISTS(SELECT 1 FROM pragma_index_list('underwriting_placements') AS indexes \
+                 WHERE indexes.name='underwriting_placements_schedule' \
+                   AND indexes.[unique]=1 AND indexes.origin='c' AND indexes.partial=0) \
+               AND (SELECT COUNT(*) FROM pragma_index_info('underwriting_placements_schedule'))=1 \
+               AND EXISTS(SELECT 1 FROM pragma_index_info('underwriting_placements_schedule') AS columns \
+                 WHERE columns.seqno=0 AND columns.cid>=0 AND columns.name='schedule_item_id') \
+               AND EXISTS(SELECT 1 FROM sqlite_schema \
+                 WHERE type='index' AND name='underwriting_placements_schedule' \
+                   AND tbl_name='underwriting_placements' \
+                   AND sql='CREATE UNIQUE INDEX underwriting_placements_schedule ON underwriting_placements(schedule_item_id)')",
+        )?;
+        match unsafe { sqlite3_step(statement.raw) } {
+            SQLITE_ROW => Ok(unsafe { sqlite3_column_int64(statement.raw, 0) } == 1),
+            SQLITE_DONE => Err("underwriting schedule index inspection returned no row".into()),
+            _ => Err(format!(
+                "inspect underwriting schedule index: {}",
+                sqlite_error(self.database)
+            )),
+        }
     }
 
     pub fn read_underwriting_spot(

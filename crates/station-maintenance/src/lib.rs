@@ -11,12 +11,12 @@ use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
 use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
 use std::os::windows::io::AsRawHandle;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
 use windows_sys::Win32::Storage::FileSystem::{
     BY_HANDLE_FILE_INFORMATION, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
-    FILE_SHARE_READ, FILE_SHARE_WRITE, GetFileInformationByHandle, MOVEFILE_REPLACE_EXISTING,
-    MOVEFILE_WRITE_THROUGH, MoveFileExW,
+    FILE_ID_INFO, FILE_SHARE_READ, FILE_SHARE_WRITE, FileIdInfo, GetFileInformationByHandle,
+    GetFileInformationByHandleEx, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
 };
 use windows_sys::Win32::{
     Foundation::{CloseHandle, HANDLE, LocalFree, WAIT_ABANDONED, WAIT_OBJECT_0},
@@ -310,6 +310,121 @@ pub fn acquire_install_authority_fence(
     acquire_install_authority_fence_for(data_directory, INSTALL_AUTHORITY_FENCE_TIMEOUT)
 }
 
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct StationDatabaseIdentity {
+    volume_serial_number: u64,
+    file_id: [u8; 16],
+}
+
+impl StationDatabaseIdentity {
+    fn packed_bytes(self) -> [u8; 24] {
+        let mut packed = [0_u8; 24];
+        packed[..8].copy_from_slice(&self.volume_serial_number.to_le_bytes());
+        packed[8..].copy_from_slice(&self.file_id);
+        packed
+    }
+}
+
+pub struct PinnedStationDatabase {
+    canonical_path: PathBuf,
+    canonical_root: PathBuf,
+    identity: StationDatabaseIdentity,
+    _root_handle: File,
+    _database_handle: File,
+}
+
+impl PinnedStationDatabase {
+    pub fn canonical_path(&self) -> &Path {
+        &self.canonical_path
+    }
+
+    pub fn identity(&self) -> StationDatabaseIdentity {
+        self.identity
+    }
+}
+
+pub fn pin_station_database(
+    data_directory: &Path,
+    database_path: &Path,
+) -> Result<PinnedStationDatabase, String> {
+    if !data_directory.is_absolute() || !data_directory.is_dir() {
+        return Err("station database data directory is invalid".into());
+    }
+    let canonical_root = canonical_install_authority_root(data_directory)?;
+    let root_handle = open_authority_root(&canonical_root)?;
+    let supplied_parent = database_path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .map(Path::to_path_buf)
+        .unwrap_or(
+            std::env::current_dir()
+                .map_err(|error| format!("resolve station database parent: {error}"))?,
+        );
+    let supplied_parent = std::fs::canonicalize(&supplied_parent)
+        .map_err(|error| format!("canonicalize station database parent: {error}"))?;
+    if supplied_parent != canonical_root {
+        return Err("station database path is outside its canonical data root".into());
+    }
+    let leaf = database_path
+        .file_name()
+        .filter(|leaf| !leaf.is_empty())
+        .ok_or_else(|| "station database path has no valid file name".to_string())?;
+    let mut components = Path::new(leaf).components();
+    if !matches!(components.next(), Some(Component::Normal(_))) || components.next().is_some() {
+        return Err("station database file name is invalid".into());
+    }
+    let candidate = canonical_root.join(leaf);
+    let database_handle = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(&candidate)
+        .map_err(|error| format!("open pinned station database: {error}"))?;
+    let metadata = database_handle
+        .metadata()
+        .map_err(|error| format!("inspect pinned station database: {error}"))?;
+    if !metadata.is_file()
+        || metadata.file_attributes()
+            & windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT
+            != 0
+    {
+        return Err("station database is not a regular non-reparse file".into());
+    }
+    let identity = station_database_identity(&database_handle)?;
+    let canonical_path = std::fs::canonicalize(&candidate)
+        .map_err(|error| format!("canonicalize pinned station database: {error}"))?;
+    if canonical_path.parent() != Some(canonical_root.as_path()) {
+        return Err("station database canonical path escapes its data root".into());
+    }
+    Ok(PinnedStationDatabase {
+        canonical_path,
+        canonical_root,
+        identity,
+        _root_handle: root_handle,
+        _database_handle: database_handle,
+    })
+}
+
+/// Acquire the independently namespaced fence for SQLite schema initialization.
+/// The pinned database identity names the mutex while its canonical root and
+/// no-follow database handles remain retained by the caller.
+pub fn acquire_station_store_initialization_fence(
+    database: &PinnedStationDatabase,
+) -> Result<InstallAuthorityFence, String> {
+    let identity = database.identity;
+    acquire_authority_fence_for(
+        &database.canonical_root,
+        INSTALL_AUTHORITY_FENCE_TIMEOUT,
+        move |_| {
+            Ok(station_store_initialization_fence_name_for_database(
+                identity,
+            ))
+        },
+    )
+}
+
 pub fn acquire_install_authority_fence_for_application(
     data_directory: &Path,
     application_root: &Path,
@@ -323,13 +438,28 @@ fn acquire_install_authority_fence_for(
     data_directory: &Path,
     timeout: Duration,
 ) -> Result<InstallAuthorityFence, String> {
+    acquire_authority_fence_for(data_directory, timeout, |canonical_root| {
+        Ok(install_authority_fence_name_for_canonical_root(
+            canonical_root,
+        ))
+    })
+}
+
+fn acquire_authority_fence_for<F>(
+    data_directory: &Path,
+    timeout: Duration,
+    fence_name_for_canonical_root: F,
+) -> Result<InstallAuthorityFence, String>
+where
+    F: FnOnce(&Path) -> Result<String, String>,
+{
     if !data_directory.is_absolute() || !data_directory.is_dir() {
         return Err("installation authority data directory is invalid".into());
     }
     let authority_root = canonical_install_authority_root(data_directory)?;
     let authority_root_handle = open_authority_root(&authority_root)?;
     let authority_root_identity = authority_root_identity(&authority_root_handle)?;
-    let name = install_authority_fence_name_for_canonical_root(&authority_root);
+    let name = fence_name_for_canonical_root(&authority_root)?;
     // The updater may run as a service while a diagnostic/once invocation runs
     // in an interactive session. `Global` is therefore required; `Local`
     // would create independent per-session locks and reopen the replacement
@@ -340,7 +470,10 @@ fn acquire_install_authority_fence_for(
     let attributes = security.attributes();
     let handle = unsafe { CreateMutexW(&attributes, 0, wide.as_ptr()) };
     if handle.is_null() {
-        return Err("installation authority fence could not be created".into());
+        return Err(format!(
+            "installation authority fence could not be created: {}",
+            std::io::Error::last_os_error()
+        ));
     }
     if let Err(error) = verify_install_fence_security(handle, &security) {
         unsafe { CloseHandle(handle) };
@@ -385,6 +518,42 @@ fn canonical_install_authority_root(data_directory: &Path) -> Result<PathBuf, St
 fn install_authority_fence_name_for_canonical_root(canonical: &Path) -> String {
     let digest = sha256_lowercase(canonical.to_string_lossy().as_bytes());
     format!("Global\\TownLightStation.InstallAuthority.{digest}")
+}
+
+fn station_store_initialization_fence_name_for_database(
+    identity: StationDatabaseIdentity,
+) -> String {
+    let digest = sha256_lowercase(&identity.packed_bytes());
+    format!("Global\\TownLightStation.StoreInitialization.{digest}")
+}
+
+fn station_database_identity(file: &File) -> Result<StationDatabaseIdentity, String> {
+    let mut information = FILE_ID_INFO::default();
+    let information_size = u32::try_from(std::mem::size_of::<FILE_ID_INFO>())
+        .map_err(|_| "station database identity buffer is too large".to_string())?;
+    if unsafe {
+        GetFileInformationByHandleEx(
+            file.as_raw_handle(),
+            FileIdInfo,
+            (&mut information as *mut FILE_ID_INFO).cast(),
+            information_size,
+        )
+    } == 0
+    {
+        return Err(format!(
+            "identify pinned station database: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    if information.VolumeSerialNumber == 0
+        || information.FileId.Identifier.iter().all(|byte| *byte == 0)
+    {
+        return Err("station database identity is invalid".into());
+    }
+    Ok(StationDatabaseIdentity {
+        volume_serial_number: information.VolumeSerialNumber,
+        file_id: information.FileId.Identifier,
+    })
 }
 
 fn open_authority_root(path: &Path) -> Result<File, String> {
@@ -2786,6 +2955,39 @@ mod tests {
         assert!(blocked, "activation/evidence fence must serialize writers");
         drop(fence);
         acquire_install_authority_fence_for(&data, Duration::from_millis(25)).unwrap();
+        remove_tree(&root).unwrap();
+    }
+
+    #[test]
+    fn station_store_initialization_fence_is_independent_from_install_authority() {
+        let root = root("station-store-initialization-fence");
+        let data = root.join("data");
+        std::fs::create_dir_all(&data).unwrap();
+        let install = acquire_install_authority_fence_for(&data, Duration::from_secs(1)).unwrap();
+        let database = pin_station_database(&data, &data.join("station.db")).unwrap();
+        let initialization = acquire_station_store_initialization_fence(&database).unwrap();
+        assert!(!initialization.was_abandoned());
+        drop(initialization);
+        drop(install);
+        drop(database);
+        remove_tree(&root).unwrap();
+    }
+
+    #[test]
+    fn station_store_initialization_fences_are_database_specific_within_one_root() {
+        let root = root("station-store-database-fences");
+        let data = root.join("data");
+        std::fs::create_dir_all(&data).unwrap();
+        let first_database = pin_station_database(&data, &data.join("first.db")).unwrap();
+        let second_database = pin_station_database(&data, &data.join("second.db")).unwrap();
+        let first = acquire_station_store_initialization_fence(&first_database).unwrap();
+        let second = acquire_station_store_initialization_fence(&second_database).unwrap();
+        assert!(!first.was_abandoned());
+        assert!(!second.was_abandoned());
+        drop(second);
+        drop(first);
+        drop(second_database);
+        drop(first_database);
         remove_tree(&root).unwrap();
     }
 

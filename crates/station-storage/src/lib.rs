@@ -30,11 +30,15 @@ use std::ffi::{CStr, CString, c_char, c_int, c_longlong, c_void};
 use std::os::windows::fs::MetadataExt;
 use std::path::{Component, Path, PathBuf};
 use std::ptr;
+#[cfg(test)]
+use std::sync::Barrier;
+#[cfg(test)]
+use std::{ffi::OsString, os::windows::ffi::OsStringExt};
 use std::{
     fs,
     io::Write,
     sync::{
-        Mutex,
+        Arc, Mutex, OnceLock, Weak,
         atomic::{AtomicU64, Ordering},
     },
     time::{Instant, SystemTime},
@@ -1064,7 +1068,12 @@ impl StationStore {
         if cg_image_root.parent() != Some(data_root.as_path()) {
             return Err("CG image root escapes station data root".into());
         }
-        let filename = CString::new(database_path.to_string_lossy().as_bytes())
+        let pinned_database = station_maintenance::pin_station_database(&data_root, database_path)?;
+        let canonical_database_path = pinned_database
+            .canonical_path()
+            .to_str()
+            .ok_or_else(|| "database path is not valid Unicode".to_string())?;
+        let filename = CString::new(canonical_database_path.as_bytes())
             .map_err(|_| "database path contains a null byte".to_string())?;
         let mut database = ptr::null_mut();
         let flags = SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX;
@@ -1088,6 +1097,27 @@ impl StationStore {
             cg_image_verification_cache: Mutex::new(HashMap::new()),
             cg_image_verification_count: AtomicU64::new(0),
         };
+        wait_for_station_store_open_interleaving(database_path);
+        // A SYSTEM/Administrators-only Global mutex intentionally cannot be
+        // reopened by this unelevated process. Keep one audited named-fence
+        // acquisition in flight per database identity; the named fence
+        // continues to serialize the service/updater processes that have that
+        // authority without blocking unrelated databases in this process.
+        let process_initialization_lock =
+            station_store_initialization_process_lock(pinned_database.identity())?;
+        let _process_initialization_guard = process_initialization_lock
+            .lock()
+            .map_err(|_| "station-store initialization process lock is poisoned".to_string())?;
+        let initialization_fence =
+            station_maintenance::acquire_station_store_initialization_fence(&pinned_database)?;
+        if station_store_initialization_was_abandoned(
+            &initialization_fence,
+            pinned_database.identity(),
+        ) {
+            return Err(
+                "station-store initialization fence was abandoned; recovery is required".into(),
+            );
+        }
         store.execute("PRAGMA busy_timeout=5000;")?;
         store.execute(
             "PRAGMA journal_mode=WAL;\
@@ -17263,6 +17293,83 @@ fn station_data_root(database_path: &Path) -> Result<PathBuf, String> {
     }
 }
 
+fn station_store_initialization_process_lock(
+    identity: station_maintenance::StationDatabaseIdentity,
+) -> Result<Arc<Mutex<()>>, String> {
+    static LOCKS: OnceLock<
+        Mutex<HashMap<station_maintenance::StationDatabaseIdentity, Weak<Mutex<()>>>>,
+    > = OnceLock::new();
+    let mut locks = LOCKS
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .map_err(|_| "station-store initialization lock registry is poisoned".to_string())?;
+    if let Some(lock) = locks.get(&identity).and_then(Weak::upgrade) {
+        return Ok(lock);
+    }
+    locks.retain(|_, lock| lock.strong_count() != 0);
+    let lock = Arc::new(Mutex::new(()));
+    locks.insert(identity, Arc::downgrade(&lock));
+    Ok(lock)
+}
+
+fn station_store_initialization_was_abandoned(
+    fence: &station_maintenance::InstallAuthorityFence,
+    _identity: station_maintenance::StationDatabaseIdentity,
+) -> bool {
+    #[cfg(test)]
+    {
+        let mut abandoned = abandon_next_store_initialization()
+            .lock()
+            .expect("abandoned store-initialization test lock");
+        if abandoned.as_ref() == Some(&_identity) {
+            *abandoned = None;
+            return true;
+        }
+    }
+    fence.was_abandoned()
+}
+
+#[cfg(test)]
+fn abandon_next_store_initialization()
+-> &'static Mutex<Option<station_maintenance::StationDatabaseIdentity>> {
+    static ABANDONED: OnceLock<Mutex<Option<station_maintenance::StationDatabaseIdentity>>> =
+        OnceLock::new();
+    ABANDONED.get_or_init(|| Mutex::new(None))
+}
+
+#[cfg(test)]
+struct StationStoreOpenInterleaving {
+    database_paths: Vec<PathBuf>,
+    barrier: Arc<Barrier>,
+}
+
+#[cfg(test)]
+fn station_store_open_interleaving() -> &'static Mutex<Option<StationStoreOpenInterleaving>> {
+    static INTERLEAVING: OnceLock<Mutex<Option<StationStoreOpenInterleaving>>> = OnceLock::new();
+    INTERLEAVING.get_or_init(|| Mutex::new(None))
+}
+
+#[cfg(test)]
+fn wait_for_station_store_open_interleaving(database_path: &Path) {
+    let barrier = station_store_open_interleaving()
+        .lock()
+        .expect("station-store open interleaving lock")
+        .as_ref()
+        .filter(|interleaving| {
+            interleaving
+                .database_paths
+                .iter()
+                .any(|candidate| candidate == database_path)
+        })
+        .map(|interleaving| Arc::clone(&interleaving.barrier));
+    if let Some(barrier) = barrier {
+        barrier.wait();
+    }
+}
+
+#[cfg(not(test))]
+fn wait_for_station_store_open_interleaving(_: &Path) {}
+
 impl Drop for StationStore {
     fn drop(&mut self) {
         // SAFETY: `StationStore` owns this live handle and drops it exactly once.
@@ -20353,6 +20460,70 @@ mod tests {
         unsafe { sqlite3_column_int64(statement.raw, 0) }
     }
 
+    fn underwriting_schedule_index_is_unique(database: &Path) -> Option<bool> {
+        let filename = c_string(
+            &database.to_string_lossy(),
+            "underwriting schedule-index inspection database path",
+        )
+        .unwrap();
+        let mut handle = ptr::null_mut();
+        assert_eq!(
+            unsafe {
+                sqlite3_open_v2(
+                    filename.as_ptr(),
+                    &mut handle,
+                    SQLITE_OPEN_READWRITE,
+                    ptr::null(),
+                )
+            },
+            SQLITE_OK
+        );
+        let sql = c_string(
+            "SELECT [unique] FROM pragma_index_list('underwriting_placements') \
+             WHERE name='underwriting_placements_schedule'",
+            "underwriting schedule-index inspection query",
+        )
+        .unwrap();
+        let mut statement = ptr::null_mut();
+        assert_eq!(
+            unsafe {
+                sqlite3_prepare_v2(handle, sql.as_ptr(), -1, &mut statement, ptr::null_mut())
+            },
+            SQLITE_OK
+        );
+        let result = match unsafe { sqlite3_step(statement) } {
+            SQLITE_ROW => Some(unsafe { sqlite3_column_int64(statement, 0) } == 1),
+            SQLITE_DONE => None,
+            _ => panic!("underwriting schedule-index inspection must complete"),
+        };
+        assert_eq!(unsafe { sqlite3_finalize(statement) }, SQLITE_OK);
+        assert_eq!(unsafe { sqlite3_close(handle) }, SQLITE_OK);
+        result
+    }
+
+    fn replace_underwriting_schedule_index_with_legacy_shape(
+        store: &StationStore,
+        duplicate_schedule_item: bool,
+    ) {
+        store
+            .execute(
+                "DROP INDEX underwriting_placements_schedule;\
+                 CREATE INDEX underwriting_placements_schedule \
+                   ON underwriting_placements(schedule_item_id);\
+                 INSERT INTO underwriting_placements(placement_id,flight_id,channel_id,scheduled_at_unix_ms,revision,schedule_item_id,schedule_item_revision,record_json) \
+                   VALUES('placement-one','flight-one','channel-one',1,1,'schedule-one',1,'{}');",
+            )
+            .unwrap();
+        if duplicate_schedule_item {
+            store
+                .execute(
+                    "INSERT INTO underwriting_placements(placement_id,flight_id,channel_id,scheduled_at_unix_ms,revision,schedule_item_id,schedule_item_revision,record_json) \
+                       VALUES('placement-two','flight-two','channel-two',2,1,'schedule-one',1,'{}');",
+                )
+                .unwrap();
+        }
+    }
+
     fn insert_schedule_history_for_legacy_migration(
         store: &StationStore,
         item: &ScheduleItem,
@@ -22014,6 +22185,214 @@ mod tests {
         ] {
             let _ = std::fs::remove_file(candidate);
         }
+    }
+
+    #[test]
+    fn concurrent_store_opens_coordinate_per_database_identity() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let data_root = std::env::temp_dir().join(format!("townlight-concurrent-open-{nonce}"));
+        let database = data_root.join("station.db");
+        let run_contenders = |database_paths: Vec<PathBuf>| {
+            let barrier = Arc::new(Barrier::new(database_paths.len()));
+            {
+                let mut interleaving = station_store_open_interleaving()
+                    .lock()
+                    .expect("station-store open interleaving lock");
+                assert!(
+                    interleaving.is_none(),
+                    "open interleaving must be exclusive"
+                );
+                *interleaving = Some(StationStoreOpenInterleaving {
+                    database_paths: database_paths.clone(),
+                    barrier,
+                });
+            }
+            let outcomes = database_paths
+                .into_iter()
+                .map(|database| std::thread::spawn(move || StationStore::open(database).map(drop)))
+                .collect::<Vec<_>>()
+                .into_iter()
+                .map(|contender| contender.join().expect("open contender must not panic"))
+                .collect::<Vec<_>>();
+            *station_store_open_interleaving()
+                .lock()
+                .expect("station-store open interleaving lock") = None;
+            assert_eq!(
+                outcomes.iter().filter(|outcome| outcome.is_ok()).count(),
+                outcomes.len(),
+                "concurrent opens must complete: {outcomes:?}"
+            );
+        };
+
+        run_contenders(vec![database.clone(), database]);
+        run_contenders(vec![
+            data_root.join("first.db"),
+            data_root.join("second.db"),
+        ]);
+        std::fs::remove_dir_all(data_root).unwrap();
+    }
+
+    #[test]
+    fn store_initialization_key_converges_existing_database_aliases() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let data_root = std::env::temp_dir().join(format!("townlight-store-key-{nonce}"));
+        let database = data_root.join("station.db");
+        std::fs::create_dir_all(&data_root).unwrap();
+        let first = station_maintenance::pin_station_database(&data_root, &database).unwrap();
+        let alias = data_root.join("station-hardlink.db");
+        std::fs::hard_link(&database, &alias).unwrap();
+        let second = station_maintenance::pin_station_database(&data_root, &alias).unwrap();
+        assert_eq!(
+            first.identity(),
+            second.identity(),
+            "hardlink aliases must converge on one full database identity"
+        );
+        drop(second);
+        drop(first);
+        std::fs::remove_dir_all(data_root).unwrap();
+    }
+
+    #[test]
+    fn store_initialization_key_rejects_a_non_file_path() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let data_root = std::env::temp_dir().join(format!("townlight-store-key-invalid-{nonce}"));
+        std::fs::create_dir_all(&data_root).unwrap();
+        assert!(station_maintenance::pin_station_database(&data_root, &data_root).is_err());
+        std::fs::remove_dir_all(data_root).unwrap();
+    }
+
+    #[test]
+    fn opening_rejects_non_unicode_database_paths_without_creating_a_replacement() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let data_root =
+            std::env::temp_dir().join(format!("townlight-store-invalid-unicode-{nonce}"));
+        std::fs::create_dir_all(&data_root).unwrap();
+        let invalid_leaf = OsString::from_wide(&[
+            b's' as u16,
+            b't' as u16,
+            b'a' as u16,
+            b't' as u16,
+            b'i' as u16,
+            b'o' as u16,
+            b'n' as u16,
+            b'-' as u16,
+            0xd800,
+            b'.' as u16,
+            b'd' as u16,
+            b'b' as u16,
+        ]);
+        let invalid_database = data_root.join(&invalid_leaf);
+        assert!(StationStore::open(&invalid_database).is_err());
+        assert!(
+            !data_root.join("station-�.db").exists(),
+            "lossy UTF-8 conversion must not create a replacement-character database"
+        );
+        std::fs::remove_dir_all(data_root).unwrap();
+    }
+
+    #[test]
+    fn abandoned_store_initialization_fails_once_then_the_next_open_repairs() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let data_root = std::env::temp_dir().join(format!("townlight-store-abandoned-{nonce}"));
+        let database = data_root.join("station.db");
+        std::fs::create_dir_all(&data_root).unwrap();
+        let pinned = station_maintenance::pin_station_database(&data_root, &database).unwrap();
+        *abandon_next_store_initialization().lock().unwrap() = Some(pinned.identity());
+        drop(pinned);
+        assert!(
+            StationStore::open(&database).is_err(),
+            "the opener that observes abandonment must fail closed"
+        );
+        let repaired = StationStore::open(&database).unwrap();
+        assert_eq!(
+            row_count(
+                &repaired,
+                "SELECT COUNT(*) FROM sqlite_schema WHERE type='table' AND name='station_profile'",
+            ),
+            1,
+            "the next opener must rerun and complete schema initialization"
+        );
+        drop(repaired);
+        std::fs::remove_dir_all(data_root).unwrap();
+    }
+
+    #[test]
+    fn opening_upgrades_a_legacy_underwriting_schedule_index_to_unique() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let data_root = std::env::temp_dir().join(format!("townlight-underwriting-index-{nonce}"));
+        let database = data_root.join("station.db");
+        let store = StationStore::open(&database).unwrap();
+        replace_underwriting_schedule_index_with_legacy_shape(&store, false);
+        drop(store);
+
+        let reopened = StationStore::open(&database).unwrap();
+        drop(reopened);
+        assert_eq!(underwriting_schedule_index_is_unique(&database), Some(true));
+        std::fs::remove_dir_all(data_root).unwrap();
+    }
+
+    #[test]
+    fn opening_preserves_an_already_canonical_underwriting_schedule_index() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let data_root =
+            std::env::temp_dir().join(format!("townlight-underwriting-index-stable-{nonce}"));
+        let database = data_root.join("station.db");
+        let store = StationStore::open(&database).unwrap();
+        let before = row_count(&store, "PRAGMA schema_version");
+        store.initialize_underwriting_authority_schema().unwrap();
+        let after = row_count(&store, "PRAGMA schema_version");
+        assert_eq!(
+            after, before,
+            "an exact canonical index must not be dropped and rebuilt"
+        );
+        drop(store);
+        std::fs::remove_dir_all(data_root).unwrap();
+    }
+
+    #[test]
+    fn failed_underwriting_schedule_index_upgrade_rolls_back_legacy_index() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let data_root =
+            std::env::temp_dir().join(format!("townlight-underwriting-index-rollback-{nonce}"));
+        let database = data_root.join("station.db");
+        let store = StationStore::open(&database).unwrap();
+        replace_underwriting_schedule_index_with_legacy_shape(&store, true);
+        drop(store);
+
+        assert!(
+            StationStore::open(&database).is_err(),
+            "duplicate legacy schedule items must block a unique-index upgrade"
+        );
+        assert_eq!(
+            underwriting_schedule_index_is_unique(&database),
+            Some(false),
+            "failed migration must restore the legacy index rather than leave it absent"
+        );
+        std::fs::remove_dir_all(data_root).unwrap();
     }
 
     #[test]
