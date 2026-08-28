@@ -52,7 +52,7 @@ $requirements = [ordered]@{
     'guest creates a complete revision-one schedule item' = 'revision = 1'
     'guest requests final-sink proof' = '/caption-proof'
     'guest requires verified decode-back' = "outcome -ne 'verified'"
-    'guest shuts down itself' = 'shutdown.exe'
+    'guest shuts down itself through the exact Windows system path' = "Join-Path `$env:SystemRoot 'System32\shutdown.exe'"
     'host never kills Sandbox' = 'Wait for guest-authored caption evidence without terminating the Sandbox host'
 }
 foreach ($requirement in $requirements.GetEnumerator()) {
@@ -68,6 +68,12 @@ if ($verifierText.Contains("'C:\scripts'") -or $verifierText.Contains('$candidat
 }
 if (-not $guestText.Contains("-SharedScriptsRoot 'C:\TownLightShared'")) {
     throw 'Caption-proof guest must pass the exact read-only shared helper root.'
+}
+if ($guestText -notmatch 'caption_decoder\.path' -or $guestText -notmatch 'caption_decoder\.sha256' -or
+    $guestText -notmatch 'caption_decoder\.size_bytes' -or $guestText -notmatch 'cg\.decoder_path' -or
+    $guestText -notmatch 'cg\.decoder_sha256' -or $guestText -notmatch 'cg\.decoder_size_bytes' -or
+    $guestText -notmatch 'cg\.decoder_directory_handle_count') {
+    throw 'Caption-proof guest must require the commissioning CG evidence to bind the exact private decoder identity.'
 }
 if ($configurationText -match '(?i)<HostFolder>.*Claude.*</HostFolder>') {
     throw 'Caption-proof Sandbox configuration must never map a Claude-owned path.'

@@ -91,10 +91,10 @@ function Get-MappedPayloadManifestSha256 {
 }
 
 function Assert-SubstantiveCommissioningReceipt($Receipt) {
-    $e=$Receipt.evidence;$schedule=$e.schedule;$restart=$e.restart_recovery
+    $e=$Receipt.evidence;$schedule=$e.schedule;$restart=$e.restart_recovery;$decoder=$e.installed_identity.caption_decoder
     if([int]$Receipt.schema_version-ne1-or$Receipt.product-cne'TownLight Station'-or$Receipt.result_kind-cne'installed_commissioning'-or[string]$Receipt.run_id-cnotmatch'^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'-or
        [int64]$Receipt.finished_at_unix_ms-le[int64]$Receipt.started_at_unix_ms-or$e.services.station.state-ne'Running'-or$e.services.station.start_name-ne'LocalSystem'-or[int]$e.services.station.process_id-le0-or$e.services.updater.state-ne'Running'-or$e.services.updater.start_name-ne'LocalSystem'-or[int]$e.services.updater.process_id-le0-or
-       $e.health_before_restart.status-ne'ready'-or$e.health_before_restart.database-ne'ready'-or[string]::IsNullOrWhiteSpace([string]$e.station_profile_before_restart.station_id)-or$e.cg.clear_validated-ne$true-or[int64]$e.cg.red_capture_bytes-le0-or[int64]$e.cg.green_capture_bytes-le0-or
+       $e.health_before_restart.status-ne'ready'-or$e.health_before_restart.database-ne'ready'-or[string]::IsNullOrWhiteSpace([string]$e.station_profile_before_restart.station_id)-or$decoder.path-cne(Join-Path $env:ProgramFiles 'TownLight Station\runtime\caption-decoder\ffmpeg.exe')-or$decoder.sha256-cne[string]$script:manifest.caption_decoder_sha256-or[int64]$decoder.size_bytes-ne[int64]$script:manifest.caption_decoder_size_bytes-or$e.cg.decoder_path-cne$decoder.path-or$e.cg.decoder_sha256-cne$decoder.sha256-or[int64]$e.cg.decoder_size_bytes-ne[int64]$decoder.size_bytes-or[int]$e.cg.decoder_directory_handle_count-ne4-or$e.cg.clear_validated-ne$true-or[int64]$e.cg.red_capture_bytes-le0-or[int64]$e.cg.green_capture_bytes-le0-or
        $e.safe_to_air_before.color-ne'green'-or@($e.safe_to_air_before.channels|Where-Object{$_.channel_id-eq$schedule.draft.channel_id-and$_.state-in@('healthy_fallback','on_air')}).Count-ne1-or$e.media.ingest_job.status-ne'completed'-or[int]$e.media.ingest_job.progress_percent-ne100-or$e.media.readiness.readiness_state-ne'ready'-or$schedule.prepared.dry_run_passed-ne$true-or@($schedule.prepared.conflicts).Count-ne0-or$schedule.prepared.missing_media_detail-or
        $schedule.committed.report_id-cne$schedule.completed.report_id-or$schedule.committed.schedule_item_id-cne$schedule.draft.item_id-or$schedule.completed.schedule_item_id-cne$schedule.draft.item_id-or$schedule.completed.dispatch_status-cne'completed'-or((@($schedule.observed_statuses|Sort-Object -Unique)-join'|')-cne'acknowledged|completed|pending|queued')-or
        $restart.health.status-ne'ready'-or$restart.health.database-ne'ready'-or$restart.station_profile.station_id-cne$e.station_profile_before_restart.station_id-or$restart.safe_to_air.color-ne'green'-or@($restart.safe_to_air.channels|Where-Object{$_.channel_id-eq$schedule.draft.channel_id-and$_.state-in@('healthy_fallback','on_air')}).Count-ne1-or$restart.commit_report.report_id-cne$schedule.completed.report_id-or$restart.commit_report.dispatch_status-cne'completed') { throw 'Commissioning receipt lacks required substantive passed evidence.' }
@@ -309,7 +309,7 @@ function Invoke-CombinedBetaSoak {
     $installed=$commissioning.evidence.installed_identity
     if($commissioning.gate_status -ne 'passed' -or$commissioning.source_commit-cne[string]$script:manifest.source_commit-or$commissioning.candidate_manifest_sha256-cne$manifestSha-or$commissioning.installer_sha256-cne[string]$script:installerHash-or $installed.source_commit -cne [string]$script:manifest.source_commit -or $installed.installer_sha256 -cne [string]$script:installerHash -or
         $installed.stationd_sha256 -cne [string]$script:manifest.stationd_sha256 -or $installed.channel_worker_sha256 -cne [string]$script:manifest.channel_worker_sha256 -or
-        $installed.station_updater_sha256 -cne [string]$script:manifest.station_updater_sha256 -or $installed.media_runtime_sha256 -cne [string]$script:manifest.media_runtime_sha256 -or
+        $installed.station_updater_sha256 -cne [string]$script:manifest.station_updater_sha256 -or $installed.media_runtime_sha256 -cne [string]$script:manifest.media_runtime_sha256 -or $installed.caption_decoder.path -cne (Join-Path $env:ProgramFiles 'TownLight Station\runtime\caption-decoder\ffmpeg.exe') -or $installed.caption_decoder.sha256 -cne [string]$script:manifest.caption_decoder_sha256 -or [int64]$installed.caption_decoder.size_bytes -ne [int64]$script:manifest.caption_decoder_size_bytes -or
         $null -eq $commissioning.evidence.restart_recovery -or $commissioning.evidence.restart_recovery.status -eq 'skipped'){throw 'Real installed commissioning receipt failed or does not bind the exact candidate/restart evidence.'}
     Assert-SubstantiveCommissioningReceipt $commissioning
     $commissioningSha=$commissioningPin.sha256
@@ -669,7 +669,7 @@ finally {
     $json = ($result | ConvertTo-Json -Depth 16) + [Environment]::NewLine
     [IO.File]::WriteAllText($partPath, $json, [Text.UTF8Encoding]::new($false))
     Move-Item -LiteralPath $partPath -Destination $resultPath
-    & shutdown.exe /s /t 5 /d p:0:0 /c "TownLight installed caption proof completed"
+    & (Join-Path $env:SystemRoot 'System32\shutdown.exe') /s /t 5 /d p:0:0 /c "TownLight installed caption proof completed"
 }
 
 if ($result.status -ne 'passed') {

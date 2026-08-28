@@ -4,11 +4,17 @@ param(
     [string]$BaseUri = 'http://127.0.0.1:4070',
     [int]$DestinationPort = 5940,
     [int]$CaptureSeconds = 5,
-    [switch]$ValidateClear
+    [switch]$ValidateClear,
+    [string]$DecoderPath = '',
+    [string]$ExpectedDecoderSha256 = '',
+    [int64]$ExpectedDecoderSizeBytes = 0,
+    [IO.FileStream]$PinnedDecoderStream = $null,
+    [object[]]$PinnedDecoderDirectoryHandles = @()
 )
 
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'installed-proof-api.ps1')
+. (Join-Path $PSScriptRoot 'installed-caption-decoder-pin.ps1')
 $apiSession = New-TownLightProofSession -BaseUri $BaseUri -Credential $Credential
 
 function Invoke-InstalledProofApi {
@@ -142,10 +148,10 @@ function Assert-TsContinuity {
 }
 
 function Read-Pixel {
-    param([string]$InputPath, [string]$OutputPath)
+    param([string]$DecoderExecutable, [string]$InputPath, [string]$OutputPath)
     # Crop an even 2x2 region because the MPEG-TS proof profile decodes to chroma-subsampled video;
     # a 1x1 crop is rounded to zero by FFmpeg before conversion to RGB.
-    & ffmpeg.exe -hide_banner -loglevel error -i $InputPath -vf 'crop=2:2:560:120,format=rgb24' `
+    & $DecoderExecutable -hide_banner -loglevel error -i $InputPath -vf 'crop=2:2:560:120,format=rgb24' `
         -frames:v 1 -an -f rawvideo -pix_fmt rgb24 -y $OutputPath
     if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $OutputPath)) {
         throw "ffmpeg could not decode a CG proof pixel from $InputPath."
@@ -194,8 +200,26 @@ function Wait-PreviewCleared {
 }
 
 try {
-    if (-not (Get-Command ffmpeg.exe -ErrorAction SilentlyContinue)) {
-        throw 'ffmpeg.exe is required on PATH for installed CG pixel assertions.'
+    $decoderExecutable = 'ffmpeg.exe'
+    $explicitDecoderRequested = -not [string]::IsNullOrWhiteSpace($DecoderPath)
+    $decoderIdentitySupplied = -not [string]::IsNullOrWhiteSpace($ExpectedDecoderSha256) -or $ExpectedDecoderSizeBytes -ne 0
+    if ($explicitDecoderRequested -or $decoderIdentitySupplied) {
+        if (-not $explicitDecoderRequested -or [string]::IsNullOrWhiteSpace($ExpectedDecoderSha256) -or
+            $ExpectedDecoderSha256 -cnotmatch '^[0-9a-f]{64}$' -or $ExpectedDecoderSizeBytes -le 0 -or
+            $null -eq $PinnedDecoderStream) {
+            throw 'Explicit CG decoder requires a retained regular path and exact lowercase SHA-256/size identity.'
+        }
+        Assert-TownLightPinnedCaptionDecoder -Stream $PinnedDecoderStream -ExpectedPath $DecoderPath `
+            -ExpectedSha256 $ExpectedDecoderSha256 -ExpectedSizeBytes $ExpectedDecoderSizeBytes
+        if (@($PinnedDecoderDirectoryHandles).Count -ne 4 -or @($PinnedDecoderDirectoryHandles | Where-Object {
+            $null -eq $_ -or $_.IsInvalid -or $_.IsClosed
+        }).Count -ne 0) {
+            throw 'Explicit CG decoder directory chain is not retained through pixel assertions.'
+        }
+        $decoderExecutable = [IO.Path]::GetFullPath($DecoderPath)
+    }
+    elseif (-not (Get-Command ffmpeg.exe -ErrorAction SilentlyContinue)) {
+        throw 'ffmpeg.exe is required on PATH for standalone CG pixel assertions.'
     }
     $channelResponse = Invoke-Json 'Get' '/api/v1/channels' $null
     $channels = @($channelResponse)
@@ -256,7 +280,7 @@ try {
     Capture-Udp $baselineCapture
     Assert-WorkerAlive
     Assert-TsContinuity $baselineCapture | Out-Null
-    $baselinePixelValue = Read-Pixel $baselineCapture $baselinePixel
+    $baselinePixelValue = Read-Pixel $decoderExecutable $baselineCapture $baselinePixel
 
     $red = Upload-CgImage (New-ImageBytes 220 20 20)
     $green = Upload-CgImage (New-ImageBytes 20 220 20)
@@ -312,8 +336,8 @@ try {
 
     $redBytes = Assert-TsContinuity $redCapture
     $greenBytes = Assert-TsContinuity $greenCapture
-    $redPixelValue = Read-Pixel $redCapture $redPixel
-    $greenPixelValue = Read-Pixel $greenCapture $greenPixel
+    $redPixelValue = Read-Pixel $decoderExecutable $redCapture $redPixel
+    $greenPixelValue = Read-Pixel $decoderExecutable $greenCapture $greenPixel
     if ($redPixelValue[0] -le $redPixelValue[1] + 30) { throw "Red CG image was not visible: RGB $($redPixelValue -join ',')." }
     if ($greenPixelValue[1] -le $greenPixelValue[0] + 30) { throw "Green CG image was not visible: RGB $($greenPixelValue -join ',')." }
 
@@ -332,7 +356,7 @@ try {
         Clear-UdpBuffer
         Capture-Udp $clearCapture
         Assert-TsContinuity $clearCapture | Out-Null
-        $clearPixelValue = Read-Pixel $clearCapture $clearPixel
+        $clearPixelValue = Read-Pixel $decoderExecutable $clearCapture $clearPixel
         for ($index = 0; $index -lt 3; $index++) {
             if ([Math]::Abs([int]$clearPixelValue[$index] - [int]$baselinePixelValue[$index]) -gt 20) {
                 throw "CG clear did not return to the baseline pixel: baseline $($baselinePixelValue -join ','), clear $($clearPixelValue -join ',')."
@@ -346,6 +370,10 @@ try {
         green_asset_id = $green.asset_id; red_capture_bytes = $redBytes
         green_capture_bytes = $greenBytes; red_pixel = @($redPixelValue[0..2])
         green_pixel = @($greenPixelValue[0..2]); clear_validated = $clearValidated
+        decoder_path = if ($explicitDecoderRequested) { $decoderExecutable } else { $null }
+        decoder_sha256 = if ($explicitDecoderRequested) { Get-TownLightSha256FromStream -Stream $PinnedDecoderStream } else { $null }
+        decoder_size_bytes = if ($explicitDecoderRequested) { $ExpectedDecoderSizeBytes } else { $null }
+        decoder_directory_handle_count = if ($explicitDecoderRequested) { @($PinnedDecoderDirectoryHandles).Count } else { $null }
     } | ConvertTo-Json -Depth 5
 }
 finally {

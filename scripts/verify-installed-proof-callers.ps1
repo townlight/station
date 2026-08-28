@@ -113,6 +113,66 @@ foreach ($relative in $tracked | Where-Object { $_ -like '*.md' }) {
 
 $commissioningSource = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'prove-installed-commissioning.ps1') -Raw
 Assert-Contract ($commissioningSource -match '(?ms)&\s*\$script\s+-Credential\s+\$Credential\b') 'Commissioning must pass its in-memory PSCredential to the in-process CG proof.'
+$decoderPinPath = Join-Path $PSScriptRoot 'installed-caption-decoder-pin.ps1'
+Assert-Contract (Test-Path -LiteralPath $decoderPinPath -PathType Leaf) 'Commissioning caption decoder pin helper is missing.'
+$decoderPinSource = Get-Content -LiteralPath $decoderPinPath -Raw
+Assert-Contract ($commissioningSource -match 'installed-caption-decoder-pin\.ps1' -and
+    $commissioningSource -match 'caption_decoder_sha256' -and $commissioningSource -match 'caption_decoder_size_bytes' -and
+    $commissioningSource -match 'Open-TownLightPinnedCaptionDecoder' -and
+    $commissioningSource -match '-DecoderPath\s+\$captionDecoderPin\.path' -and
+    $commissioningSource -match '-ExpectedDecoderSha256\s+\$captionDecoderPin\.sha256' -and
+    $commissioningSource -match '-ExpectedDecoderSizeBytes\s+\(\[int64\]\$captionDecoderPin\.size_bytes\)' -and
+    $commissioningSource -match '-PinnedDecoderStream\s+\$captionDecoderPin\.stream' -and
+    $commissioningSource -match 'PinnedDecoderDirectoryHandles' -and
+    $commissioningSource -match '\$captionDecoderPin\.stream\.Dispose\(\)' -and
+    $commissioningSource -match '(?s)directory_handles.*Dispose' -and
+    $decoderPinSource -match 'runtime\\caption-decoder\\ffmpeg\.exe' -and
+    $decoderPinSource -match '\[IO\.File\]::Open\(.+\[IO\.FileShare\]::Read' -and
+    $decoderPinSource -match 'FILE_FLAG_BACKUP_SEMANTICS \| FILE_FLAG_OPEN_REPARSE_POINT' -and
+    $decoderPinSource -match 'Open-TownLightNoDeleteDirectoryHandle') `
+    'Commissioning must execute the manifest-bound private caption decoder by exact path, hash, and size.'
+$cgProofSource = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'prove-installed-cg-images.ps1') -Raw
+Assert-Contract ($cgProofSource -match '\[string\]\$DecoderPath' -and $cgProofSource -match '&\s+\$DecoderExecutable' -and
+    $cgProofSource -match '\[IO\.FileStream\]\$PinnedDecoderStream' -and
+    $cgProofSource -match 'Assert-TownLightPinnedCaptionDecoder' -and
+    $cgProofSource -notmatch '&\s+ffmpeg\.exe') `
+    'CG pixel assertions must execute an explicit verified decoder when commissioning supplies one.'
+. $decoderPinPath
+function Test-ExpectedThrow([scriptblock]$Action) { try { & $Action; return $false } catch { return $true } }
+$decoderFixtureRoot = Join-Path ([IO.Path]::GetTempPath()) ('townlight-decoder-pin-' + [guid]::NewGuid().ToString('N'))
+try {
+    $programFilesFixture = Join-Path $decoderFixtureRoot 'Program Files'
+    $applicationFixture = Join-Path $programFilesFixture 'TownLight Station'
+    $decoderFixture = Join-Path $applicationFixture 'runtime\caption-decoder\ffmpeg.exe'
+    [void][IO.Directory]::CreateDirectory((Split-Path $decoderFixture -Parent))
+    [IO.File]::WriteAllBytes($decoderFixture, [Text.Encoding]::UTF8.GetBytes('TownLight pinned decoder fixture'))
+    $decoderFixtureHash = (Get-FileHash -LiteralPath $decoderFixture -Algorithm SHA256).Hash.ToLowerInvariant()
+    $decoderFixtureSize = [int64](Get-Item -LiteralPath $decoderFixture).Length
+    Assert-Contract (Test-ExpectedThrow { Open-TownLightPinnedCaptionDecoder -ProgramFilesRoot $programFilesFixture -ExpectedSha256 ('0' * 64) -ExpectedSizeBytes $decoderFixtureSize }) 'Caption decoder pin must reject a wrong manifest hash.'
+    Assert-Contract (Test-ExpectedThrow { Open-TownLightPinnedCaptionDecoder -ProgramFilesRoot (Join-Path $decoderFixtureRoot 'missing-program-files') -ExpectedSha256 $decoderFixtureHash -ExpectedSizeBytes $decoderFixtureSize }) 'Caption decoder pin must reject a missing private decoder.'
+    $pin = Open-TownLightPinnedCaptionDecoder -ProgramFilesRoot $programFilesFixture -ExpectedSha256 $decoderFixtureHash -ExpectedSizeBytes $decoderFixtureSize
+    try {
+        Assert-Contract (@($pin.directory_handles).Count -eq 4 -and @($pin.directory_handles | Where-Object { $_.IsInvalid -or $_.IsClosed }).Count -eq 0) 'Caption decoder pin must retain four healthy no-delete directory handles.'
+        Assert-Contract (Test-ExpectedThrow { [IO.File]::Open($decoderFixture, [IO.FileMode]::Open, [IO.FileAccess]::Write, [IO.FileShare]::Read).Dispose() }) 'Caption decoder pin must deny a concurrent write open.'
+        Assert-Contract (Test-ExpectedThrow { Remove-Item -LiteralPath $decoderFixture -Force -ErrorAction Stop }) 'Caption decoder pin must deny a concurrent delete.'
+        Assert-Contract (Test-ExpectedThrow { Move-Item -LiteralPath $applicationFixture -Destination "$applicationFixture-moved" -ErrorAction Stop }) 'Caption decoder directory pins must deny a parent rename.'
+        Assert-TownLightPinnedCaptionDecoder -Stream $pin.stream -ExpectedPath $pin.path -ExpectedSha256 $decoderFixtureHash -ExpectedSizeBytes $decoderFixtureSize
+        Assert-Contract $true 'Caption decoder pin must retain its expected stream identity.'
+    }
+    finally { $pin.stream.Dispose() }
+    $reparseTarget = Join-Path $decoderFixtureRoot 'reparse-target'
+    [void][IO.Directory]::CreateDirectory((Join-Path $reparseTarget 'TownLight Station\runtime\caption-decoder'))
+    [IO.File]::WriteAllBytes((Join-Path $reparseTarget 'TownLight Station\runtime\caption-decoder\ffmpeg.exe'), [byte[]](1,2,3))
+    $reparseProgramFiles = Join-Path $decoderFixtureRoot 'reparse-program-files'
+    New-Item -ItemType Junction -Path $reparseProgramFiles -Target $reparseTarget -ErrorAction Stop | Out-Null
+    try {
+        Assert-Contract (Test-ExpectedThrow { Open-TownLightPinnedCaptionDecoder -ProgramFilesRoot $reparseProgramFiles -ExpectedSha256 $decoderFixtureHash -ExpectedSizeBytes $decoderFixtureSize }) 'Caption decoder pin must reject a reparse-point ancestor.'
+    }
+    finally { if (Test-Path -LiteralPath $reparseProgramFiles) { [IO.Directory]::Delete($reparseProgramFiles) } }
+}
+finally {
+    if (Test-Path -LiteralPath $decoderFixtureRoot) { Remove-Item -LiteralPath $decoderFixtureRoot -Recurse -Force }
+}
 $automaticProofSource = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'prove-installed-automatic-materialization.ps1') -Raw
 Assert-Contract ($automaticProofSource -match 'EnableServiceRestartProof' -and
     $automaticProofSource -match 'fixture_not_ready' -and

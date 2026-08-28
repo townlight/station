@@ -70,7 +70,7 @@ finally {
     $json = ($result | ConvertTo-Json -Depth 8) + [Environment]::NewLine
     [IO.File]::WriteAllText($partPath, $json, [Text.UTF8Encoding]::new($false))
     Move-Item -LiteralPath $partPath -Destination $resultPath
-    & shutdown.exe /s /t 5 /d p:0:0 /c "TownLight clean-install harness completed"
+    & (Join-Path $env:SystemRoot 'System32\shutdown.exe') /s /t 5 /d p:0:0 /c "TownLight clean-install harness completed"
 }
 
 if ($result.status -ne 'passed') {

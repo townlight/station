@@ -32,6 +32,7 @@ param(
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'candidate-pair-verifier.ps1')
 . (Join-Path $PSScriptRoot 'installed-proof-api.ps1')
+. (Join-Path $PSScriptRoot 'installed-caption-decoder-pin.ps1')
 $apiSession = New-TownLightProofSession -BaseUri $BaseUri -Credential $Credential
 
 function Invoke-InstalledProofApi {
@@ -59,6 +60,7 @@ $scheduleItemId = [guid]::NewGuid().ToString()
 $planId = "commissioning-$runId"
 $reportId = "commissioning-$runId"
 $proofChannel = $null
+$captionDecoderPin = $null
 $result = [ordered]@{
     schema_version = 1
     product = 'TownLight Station'
@@ -129,6 +131,13 @@ function Get-FreeUdpPort {
 }
 
 function Invoke-CgProof {
+    param(
+        [string]$DecoderPath,
+        [string]$ExpectedDecoderSha256,
+        [int64]$ExpectedDecoderSizeBytes,
+        [IO.FileStream]$PinnedDecoderStream,
+        [object[]]$PinnedDecoderDirectoryHandles
+    )
     $mutex = [Threading.Mutex]::new($false, 'Global\TownLightStationInstalledCgProof')
     $acquired = $false
     try {
@@ -139,7 +148,9 @@ function Invoke-CgProof {
             throw "The existing CG proof script is missing: $script"
         }
         $output = & $script -Credential $Credential -BaseUri $serviceUri `
-            -DestinationPort (Get-FreeUdpPort) -ValidateClear 2>&1
+            -DestinationPort (Get-FreeUdpPort) -ValidateClear -DecoderPath $DecoderPath `
+            -ExpectedDecoderSha256 $ExpectedDecoderSha256 -ExpectedDecoderSizeBytes $ExpectedDecoderSizeBytes `
+            -PinnedDecoderStream $PinnedDecoderStream -PinnedDecoderDirectoryHandles $PinnedDecoderDirectoryHandles 2>&1
         $text = ($output | ForEach-Object { [string]$_ }) -join "`n"
         $firstBrace = $text.IndexOf('{')
         $lastBrace = $text.LastIndexOf('}')
@@ -187,10 +198,15 @@ try {
         $manifest.media_runtime_sha256 -ne $receipt.media_runtime_sha256) {
         throw 'The candidate manifest does not match the installed receipt.'
     }
-    $applicationPath = Join-Path $env:ProgramFiles 'TownLight Station'
+    $programFiles = [Environment]::GetFolderPath([Environment+SpecialFolder]::ProgramFiles)
+    if ([string]::IsNullOrWhiteSpace($programFiles)) { throw 'Trusted Program Files location is unavailable.' }
+    $applicationPath = [IO.Path]::GetFullPath((Join-Path $programFiles 'TownLight Station'))
     $stationdHash = (Get-FileHash -LiteralPath (Join-Path $applicationPath 'stationd.exe') -Algorithm SHA256).Hash.ToLowerInvariant()
     $workerHash = (Get-FileHash -LiteralPath (Join-Path $applicationPath 'channel-worker.exe') -Algorithm SHA256).Hash.ToLowerInvariant()
     $updaterHash = (Get-FileHash -LiteralPath (Join-Path $applicationPath 'station-updater.exe') -Algorithm SHA256).Hash.ToLowerInvariant()
+    $captionDecoderPin = Open-TownLightPinnedCaptionDecoder -ProgramFilesRoot $programFiles `
+        -ExpectedSha256 ([string]$manifest.caption_decoder_sha256) `
+        -ExpectedSizeBytes ([int64]$manifest.caption_decoder_size_bytes)
     if ($stationdHash -ne $manifest.stationd_sha256 -or
         $workerHash -ne $manifest.channel_worker_sha256 -or
         $updaterHash -ne $manifest.station_updater_sha256) {
@@ -204,6 +220,11 @@ try {
         channel_worker_sha256 = $workerHash
         station_updater_sha256 = $updaterHash
         media_runtime_sha256 = $receipt.media_runtime_sha256
+        caption_decoder = [ordered]@{
+            path = $captionDecoderPin.path
+            sha256 = $captionDecoderPin.sha256
+            size_bytes = [int64]$captionDecoderPin.size_bytes
+        }
         receipt_path = $receiptPath
         candidate_manifest_path = $manifestPath.Path
     }
@@ -220,7 +241,9 @@ try {
     $result.evidence.station_profile_before_restart = $profileBefore
 
     if (-not $SkipCgProof) {
-        $result.evidence.cg = Invoke-CgProof
+        $result.evidence.cg = Invoke-CgProof -DecoderPath $captionDecoderPin.path `
+            -ExpectedDecoderSha256 $captionDecoderPin.sha256 -ExpectedDecoderSizeBytes ([int64]$captionDecoderPin.size_bytes) `
+            -PinnedDecoderStream $captionDecoderPin.stream -PinnedDecoderDirectoryHandles $captionDecoderPin.directory_handles
     }
     else {
         $result.evidence.cg = [ordered]@{ status = 'skipped'; reason = 'SkipCgProof was supplied.' }
@@ -359,6 +382,12 @@ catch {
     throw
 }
 finally {
+    if ($captionDecoderPin -and $captionDecoderPin.stream) {
+        $captionDecoderPin.stream.Dispose()
+    }
+    if ($captionDecoderPin -and $captionDecoderPin.directory_handles) {
+        foreach ($directoryHandle in $captionDecoderPin.directory_handles) { $directoryHandle.Dispose() }
+    }
     if ($proofChannel) {
         $proofChannel.enabled = $false
         try { Invoke-Api 'Put' '/channels' $proofChannel | Out-Null } catch { }

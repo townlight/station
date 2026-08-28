@@ -35,7 +35,7 @@ $requirements = [ordered]@{
     'installed verifier loads candidate helper through resolver' = ". (Resolve-TownLightSharedScript 'candidate-pair-verifier.ps1' `$sharedScriptsRoot)"
     'installed verifier loads private-runtime helper through resolver' = ". (Resolve-TownLightSharedScript 'installed-private-runtime-verifier.ps1' `$sharedScriptsRoot)"
     'guest records the candidate commit' = 'source_commit'
-    'guest shuts down itself' = 'shutdown.exe'
+    'guest shuts down itself through the exact Windows system path' = "Join-Path `$env:SystemRoot 'System32\shutdown.exe'"
     'host uses only the ownership guard' = 'invoke-owned-windows-sandbox.ps1'
     'host never kills a Sandbox process' = 'Wait for the guest-authored evidence instead of terminating the Sandbox host'
 }
