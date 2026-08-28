@@ -60,6 +60,9 @@ $planId = "commissioning-$runId"
 $reportId = "commissioning-$runId"
 $proofChannel = $null
 $result = [ordered]@{
+    schema_version = 1
+    product = 'TownLight Station'
+    result_kind = 'installed_commissioning'
     run_id = $runId
     started_at_unix_ms = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
     gate_status = 'not_run'
@@ -174,6 +177,9 @@ try {
     $manifestPath = Resolve-Path -LiteralPath $CandidateManifestPath -ErrorAction Stop
     $candidatePair = Get-TownLightCandidateIdentity -ManifestPath $manifestPath.Path -ExpectedSourceCommit $receipt.source_commit
     $manifest = $candidatePair.manifest
+    $result.source_commit = [string]$manifest.source_commit
+    $result.candidate_manifest_sha256 = (Get-FileHash -LiteralPath $manifestPath.Path -Algorithm SHA256).Hash.ToLowerInvariant()
+    $result.installer_sha256 = [string]$manifest.installer_sha256
     if ($ExpectedSourceCommit -and $receipt.source_commit -ne $ExpectedSourceCommit) {
         throw "Installed source identity does not match ExpectedSourceCommit."
     }
@@ -182,9 +188,9 @@ try {
         throw 'The candidate manifest does not match the installed receipt.'
     }
     $applicationPath = Join-Path $env:ProgramFiles 'TownLight Station'
-    $stationdHash = (Get-FileHash -LiteralPath (Join-Path $applicationPath 'stationd.exe') -Algorithm SHA256).Hash
-    $workerHash = (Get-FileHash -LiteralPath (Join-Path $applicationPath 'channel-worker.exe') -Algorithm SHA256).Hash
-    $updaterHash = (Get-FileHash -LiteralPath (Join-Path $applicationPath 'station-updater.exe') -Algorithm SHA256).Hash
+    $stationdHash = (Get-FileHash -LiteralPath (Join-Path $applicationPath 'stationd.exe') -Algorithm SHA256).Hash.ToLowerInvariant()
+    $workerHash = (Get-FileHash -LiteralPath (Join-Path $applicationPath 'channel-worker.exe') -Algorithm SHA256).Hash.ToLowerInvariant()
+    $updaterHash = (Get-FileHash -LiteralPath (Join-Path $applicationPath 'station-updater.exe') -Algorithm SHA256).Hash.ToLowerInvariant()
     if ($stationdHash -ne $manifest.stationd_sha256 -or
         $workerHash -ne $manifest.channel_worker_sha256 -or
         $updaterHash -ne $manifest.station_updater_sha256) {
@@ -361,6 +367,6 @@ finally {
     if ($ResultPath) {
         $parent = Split-Path -Parent $ResultPath
         if ($parent -and -not (Test-Path -LiteralPath $parent)) { New-Item -ItemType Directory -Path $parent -Force | Out-Null }
-        $result | ConvertTo-Json -Depth 30 | Set-Content -LiteralPath $ResultPath -Encoding utf8
+        [IO.File]::WriteAllText($ResultPath,(($result | ConvertTo-Json -Depth 30)+[Environment]::NewLine),[Text.UTF8Encoding]::new($false))
     }
 }

@@ -1,4 +1,8 @@
-param()
+[CmdletBinding()]
+param(
+    [ValidateSet('Caption','BetaSoak')][string]$Mode='Caption',
+    [ValidateRange(4,8)][double]$DurationHours=4
+)
 
 $ErrorActionPreference = 'Stop'
 . 'C:\TownLightShared\candidate-pair-verifier.ps1'
@@ -38,6 +42,62 @@ $result = [ordered]@{
     caption_job = $null
     caption_proof = $null
     error = $null
+}
+
+function Write-NewAtomicEvidence([string]$Path,$Value,[int]$Depth=24) {
+    $temporary="$Path.part-$([guid]::NewGuid().ToString('N'))"
+    $bytes=[Text.UTF8Encoding]::new($false).GetBytes((($Value|ConvertTo-Json -Depth $Depth)+[Environment]::NewLine))
+    $stream=[IO.File]::Open($temporary,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::Read)
+    try{$stream.Write($bytes,0,$bytes.Length);$stream.Flush($true)}finally{$stream.Dispose()}
+    Move-Item -LiteralPath $temporary -Destination $Path -ErrorAction Stop
+}
+
+function Copy-NewBoundedEvidence([string]$Source,[string]$Destination,[int64]$MaximumBytes=16777216) {
+    $item=Get-Item -LiteralPath $Source -Force -ErrorAction Stop
+    if($item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or $item.Length -lt 0 -or $item.Length -gt $MaximumBytes){throw 'Beta-soak artifact is missing, unsafe, or unbounded.'}
+    $input=[IO.File]::Open($item.FullName,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::Read)
+    $output=[IO.File]::Open($Destination,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::Read)
+    try{$input.CopyTo($output);$output.Flush($true)}finally{$output.Dispose();$input.Dispose()}
+    [ordered]@{name=[IO.Path]::GetFileName($Destination);size_bytes=[int64](Get-Item $Destination).Length;sha256=(Get-FileHash -LiteralPath $Destination -Algorithm SHA256).Hash.ToLowerInvariant()}
+}
+
+function Get-RedactedError([string]$Message){
+    $value=($Message -replace '[\u0000-\u001f\u007f-\u009f]',' ') -replace '(?i)\b(?:https?://)\S+','[uri-redacted]' -replace '(?i)\b[A-Z]:\\[^\r\n]+','[path-redacted]' -replace '(?i)\b(password|capability|cookie|csrf|session)\s*[:=]\s*\S+','$1=[redacted]'
+    $value=$value.Trim();if($value.Length -gt 1024){$value=$value.Substring(0,1024)};$value
+}
+
+function Open-FrozenJson([string]$Path,[int64]$MaximumBytes=1048576){
+    $stream=[IO.File]::Open($Path,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::Read)
+    if($stream.Length -le 0 -or $stream.Length -gt $MaximumBytes){$stream.Dispose();throw 'Frozen JSON input is empty or unbounded.'}
+    $bytes=[byte[]]::new([int]$stream.Length);if($stream.Read($bytes,0,$bytes.Length)-ne$bytes.Length){$stream.Dispose();throw 'Frozen JSON input could not be read exactly.'};$stream.Position=0
+    $sha=[Security.Cryptography.SHA256]::Create();try{$hash=([BitConverter]::ToString($sha.ComputeHash($bytes))).Replace('-','').ToLowerInvariant()}finally{$sha.Dispose()}
+    [pscustomobject]@{stream=$stream;sha256=$hash;document=([Text.UTF8Encoding]::new($false,$true).GetString($bytes)|ConvertFrom-Json)}
+}
+
+function Get-MappedPayloadManifestSha256 {
+    $entries=[Collections.Generic.List[object]]::new()
+    foreach($mapping in @([ordered]@{root='C:\TownLightCandidate';name='C:\TownLightCandidate'},[ordered]@{root='C:\TownLightVerifier';name='C:\TownLightVerifier'},[ordered]@{root='C:\TownLightInputs';name='C:\TownLightInputs'},[ordered]@{root='C:\TownLightHarness';name='C:\TownLightHarness'},[ordered]@{root='C:\TownLightShared';name='C:\TownLightShared'})){
+        $files=@(Get-ChildItem -LiteralPath $mapping.root -File -Recurse -Force -ErrorAction Stop|Sort-Object FullName)
+        foreach($file in $files){
+            if(($file.Attributes-band[IO.FileAttributes]::ReparsePoint)-ne0){throw 'Mapped payload contains a reparse leaf.'}
+            $relative=$file.FullName.Substring($mapping.root.Length).TrimStart('\').Replace('\','/')
+            if($mapping.name-ceq'C:\TownLightInputs'-and$relative-ceq'beta-soak-request.json'){continue}
+            $entries.Add([ordered]@{mapping=$mapping.name;relative_path=$relative;size_bytes=[int64]$file.Length;sha256=(Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash.ToLowerInvariant()})
+            if($entries.Count-gt4096){throw 'Mapped payload file count is unbounded.'}
+        }
+    }
+    $bytes=[Text.UTF8Encoding]::new($false).GetBytes((@($entries)|ConvertTo-Json -Depth 5 -Compress))
+    $sha=[Security.Cryptography.SHA256]::Create();try{([BitConverter]::ToString($sha.ComputeHash($bytes))).Replace('-','').ToLowerInvariant()}finally{$sha.Dispose()}
+}
+
+function Assert-SubstantiveCommissioningReceipt($Receipt) {
+    $e=$Receipt.evidence;$schedule=$e.schedule;$restart=$e.restart_recovery
+    if([int]$Receipt.schema_version-ne1-or$Receipt.product-cne'TownLight Station'-or$Receipt.result_kind-cne'installed_commissioning'-or[string]$Receipt.run_id-cnotmatch'^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'-or
+       [int64]$Receipt.finished_at_unix_ms-le[int64]$Receipt.started_at_unix_ms-or$e.services.station.state-ne'Running'-or$e.services.station.start_name-ne'LocalSystem'-or[int]$e.services.station.process_id-le0-or$e.services.updater.state-ne'Running'-or$e.services.updater.start_name-ne'LocalSystem'-or[int]$e.services.updater.process_id-le0-or
+       $e.health_before_restart.status-ne'ready'-or$e.health_before_restart.database-ne'ready'-or[string]::IsNullOrWhiteSpace([string]$e.station_profile_before_restart.station_id)-or$e.cg.clear_validated-ne$true-or[int64]$e.cg.red_capture_bytes-le0-or[int64]$e.cg.green_capture_bytes-le0-or
+       $e.safe_to_air_before.color-ne'green'-or@($e.safe_to_air_before.channels|Where-Object{$_.channel_id-eq$schedule.draft.channel_id-and$_.state-in@('healthy_fallback','on_air')}).Count-ne1-or$e.media.ingest_job.status-ne'completed'-or[int]$e.media.ingest_job.progress_percent-ne100-or$e.media.readiness.readiness_state-ne'ready'-or$schedule.prepared.dry_run_passed-ne$true-or@($schedule.prepared.conflicts).Count-ne0-or$schedule.prepared.missing_media_detail-or
+       $schedule.committed.report_id-cne$schedule.completed.report_id-or$schedule.committed.schedule_item_id-cne$schedule.draft.item_id-or$schedule.completed.schedule_item_id-cne$schedule.draft.item_id-or$schedule.completed.dispatch_status-cne'completed'-or((@($schedule.observed_statuses|Sort-Object -Unique)-join'|')-cne'acknowledged|completed|pending|queued')-or
+       $restart.health.status-ne'ready'-or$restart.health.database-ne'ready'-or$restart.station_profile.station_id-cne$e.station_profile_before_restart.station_id-or$restart.safe_to_air.color-ne'green'-or@($restart.safe_to_air.channels|Where-Object{$_.channel_id-eq$schedule.draft.channel_id-and$_.state-in@('healthy_fallback','on_air')}).Count-ne1-or$restart.commit_report.report_id-cne$schedule.completed.report_id-or$restart.commit_report.dispatch_status-cne'completed') { throw 'Commissioning receipt lacks required substantive passed evidence.' }
 }
 
 function Get-StationServiceIdentity {
@@ -224,6 +284,91 @@ function New-RandomProofCredential {
     }
 }
 
+function Invoke-CombinedBetaSoak {
+    Wait-For -Action { Invoke-Api 'Get' '/runtime-safe-to-air' } -Predicate {
+        param($value)
+        $selected=@($value.channels|Where-Object{$_.channel_id -eq $script:channelId})
+        $value.color -eq 'green' -and $selected.Count -eq 1 -and $selected[0].state -eq 'healthy_fallback'
+    } -Description 'configured channel stable healthy fallback before beta soak' -Seconds 180 | Out-Null
+
+    $manifestSha=(Get-FileHash -LiteralPath $script:manifestPath -Algorithm SHA256).Hash.ToLowerInvariant()
+    $receiptRoot='C:\ProgramData\TownLight Station\proof-inputs'
+    [void][IO.Directory]::CreateDirectory($receiptRoot)
+    $commissioningPath=Join-Path $receiptRoot "beta-soak-commissioning-$script:runId.json"
+    $configurationPath=Join-Path $receiptRoot "beta-soak-configuration-$script:runId.json"
+    $localFixture=Get-Item -LiteralPath $script:fixturePath -Force -ErrorAction Stop
+    if($localFixture.PSIsContainer -or ($localFixture.Attributes-band[IO.FileAttributes]::ReparsePoint)-ne 0 -or (Get-FileHash $localFixture.FullName -Algorithm SHA256).Hash.ToLowerInvariant() -cne $script:fixtureSha256){throw 'Guest-local commissioning fixture is not the verified frozen caption input.'}
+    $commissioningScript='C:\TownLightShared\prove-installed-commissioning.ps1'
+    if(-not(Test-Path -LiteralPath $commissioningScript -PathType Leaf)){throw 'Installed commissioning proof script is missing.'}
+    $localFixturePin=[IO.File]::Open($localFixture.FullName,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::Read)
+    try{& $commissioningScript -Credential $script:proofCredential.Credential -FixturePath $localFixture.FullName -ExpectedSourceCommit ([string]$script:manifest.source_commit) -CandidateManifestPath $script:manifestPath -BaseUri ([string]$script:baseUri) -ResultPath $commissioningPath}
+    finally{$localFixturePin.Dispose()}
+    if($LASTEXITCODE -ne 0){throw 'Installed commissioning proof returned nonzero.'}
+    $commissioningPin=Open-FrozenJson $commissioningPath
+    $commissioning=$commissioningPin.document
+    $installed=$commissioning.evidence.installed_identity
+    if($commissioning.gate_status -ne 'passed' -or$commissioning.source_commit-cne[string]$script:manifest.source_commit-or$commissioning.candidate_manifest_sha256-cne$manifestSha-or$commissioning.installer_sha256-cne[string]$script:installerHash-or $installed.source_commit -cne [string]$script:manifest.source_commit -or $installed.installer_sha256 -cne [string]$script:installerHash -or
+        $installed.stationd_sha256 -cne [string]$script:manifest.stationd_sha256 -or $installed.channel_worker_sha256 -cne [string]$script:manifest.channel_worker_sha256 -or
+        $installed.station_updater_sha256 -cne [string]$script:manifest.station_updater_sha256 -or $installed.media_runtime_sha256 -cne [string]$script:manifest.media_runtime_sha256 -or
+        $null -eq $commissioning.evidence.restart_recovery -or $commissioning.evidence.restart_recovery.status -eq 'skipped'){throw 'Real installed commissioning receipt failed or does not bind the exact candidate/restart evidence.'}
+    Assert-SubstantiveCommissioningReceipt $commissioning
+    $commissioningSha=$commissioningPin.sha256
+    Wait-For -Action { Invoke-Api 'Get' '/runtime-safe-to-air' } -Predicate {param($value)$selected=@($value.channels|Where-Object{$_.channel_id -eq $script:channelId});$value.color -eq 'green' -and $selected.Count -eq 1 -and $selected[0].state -eq 'healthy_fallback'} -Description 'original caption channel recovery after real commissioning' -Seconds 180|Out-Null
+    $station=Invoke-Api 'Get' '/station';$channels=@(Invoke-Api 'Get' '/channels');$selected=@($channels|Where-Object{$_.channel_id -eq $script:channelId})
+    if($selected.Count -ne 1 -or [uint64]$station.revision -lt 1){throw 'Beta-soak configuration authority is unavailable.'}
+    $configuration=[ordered]@{
+        schema_version=1;product='TownLight Station';result_kind='fresh_configuration_run';gate_status='passed'
+        run_id=$script:runId;finished_at_unix_ms=[DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+        station_id=[string]$station.station_id;station_revision=[uint64]$station.revision
+        channel_id=[string]$script:channelId;expected_state='healthy_fallback'
+        source_commit=[string]$script:manifest.source_commit;candidate_manifest_sha256=$manifestSha
+        installer_sha256=[string]$script:installerHash;payload_manifest_sha256=$script:payloadManifestSha256
+        commissioning_run_id=[string]$commissioning.run_id;commissioning_result_sha256=$commissioningSha
+    }
+    Write-NewAtomicEvidence $configurationPath $configuration
+
+    $proofRoot='C:\ProgramData\TownLight Station\proofs\beta-soak'
+    $before=[Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    if(Test-Path -LiteralPath $proofRoot -PathType Container){Get-ChildItem -LiteralPath $proofRoot -Directory|ForEach-Object{[void]$before.Add($_.FullName)}}
+    $proofScript='C:\TownLightShared\prove-installed-beta-soak.ps1'
+    if(-not(Test-Path -LiteralPath $proofScript -PathType Leaf)){throw 'Installed beta-soak proof script is missing.'}
+    $proofOutput=& $proofScript -Credential $script:proofCredential.Credential -CommissioningResultPath $commissioningPath `
+        -ConfigurationResultPath $configurationPath -ExpectedStationId ([string]$station.station_id) `
+        -ExpectedStationRevision ([uint64]$station.revision) -ExpectedChannelId ([string]$script:channelId) `
+        -ExpectedChannelState healthy_fallback -DurationHours $DurationHours -ExpectedSourceCommit ([string]$script:manifest.source_commit) `
+        -CandidateManifestPath $script:manifestPath -BaseUri $script:baseUri
+    if($LASTEXITCODE -ne 0){throw 'Installed beta-soak proof returned nonzero.'}
+    $proofDocument=($proofOutput|Out-String)|ConvertFrom-Json
+    $runDirectories=@(Get-ChildItem -LiteralPath $proofRoot -Directory|Where-Object{-not $before.Contains($_.FullName)})
+    if($runDirectories.Count -ne 1){throw 'Installed beta-soak proof did not create exactly one new run directory.'}
+    $runDirectory=$runDirectories[0].FullName
+    $summaryPath=Join-Path $runDirectory 'final-summary.json'
+    $summary=Get-Content -LiteralPath $summaryPath -Raw -ErrorAction Stop|ConvertFrom-Json
+    if($proofDocument.status -ne 'passed' -or $summary.status -ne 'passed' -or [double]$summary.duration_hours -lt $DurationHours -or
+        [int]$summary.restart_count -ne 1 -or [double]$summary.coverage_ratio -lt 0.98 -or [int]$summary.actual_observations -lt [int]$summary.minimum_required_observations){throw 'Installed beta-soak final summary did not pass the selected duration and coverage contract.'}
+
+    $observationsPath=Join-Path $runDirectory 'observations.ndjson'
+    $restartRecords=@(Get-Content -LiteralPath $observationsPath|ForEach-Object{$_|ConvertFrom-Json}|Where-Object{$_.kind -eq 'planned_restart'})
+    if($restartRecords.Count -ne 1){throw 'Installed beta-soak observations did not contain exactly one restart record.'}
+    $restartPath=Join-Path $receiptRoot "beta-soak-restart-$script:runId.json"
+    Write-NewAtomicEvidence $restartPath $restartRecords[0]
+
+    $prefix="beta-soak-$script:runId"
+    $artifacts=[Collections.Generic.List[object]]::new()
+    foreach($binding in @(
+        @($commissioningPath,"$prefix-commissioning.json",1048576),@($configurationPath,"$prefix-configuration.json",1048576),
+        @((Join-Path $runDirectory 'run-state.json'),"$prefix-run-state.json",1048576),@($observationsPath,"$prefix-observations.ndjson",16777216),
+        @($restartPath,"$prefix-restart.json",1048576),@($summaryPath,"$prefix-final-summary.json",1048576)
+    )){$artifacts.Add((Copy-NewBoundedEvidence $binding[0] (Join-Path $script:evidenceRoot $binding[1]) ([int64]$binding[2])))}
+    $failurePath=Join-Path $runDirectory 'failure.json'
+    if(Test-Path -LiteralPath $failurePath -PathType Leaf){throw 'A passed beta-soak run must not contain failure evidence.'}
+    $indexPath=Join-Path $script:evidenceRoot "$prefix-index.json"
+    $index=[ordered]@{schema_version=1;result_kind='combined_fresh_beta_soak';run_id=$script:runId;status='passed';source_commit=[string]$script:manifest.source_commit;candidate_manifest_sha256=$manifestSha;installer_sha256=[string]$script:installerHash;payload_manifest_sha256=$script:payloadManifestSha256;commissioning_run_id=[string]$commissioning.run_id;commissioning_result_sha256=$commissioningSha;duration_hours=$DurationHours;artifacts=@($artifacts)}
+    Write-NewAtomicEvidence $indexPath $index
+    $script:result['beta_soak']=[ordered]@{index_name=[IO.Path]::GetFileName($indexPath);index_sha256=(Get-FileHash $indexPath -Algorithm SHA256).Hash.ToLowerInvariant();payload_manifest_sha256=$script:payloadManifestSha256;commissioning_run_id=[string]$commissioning.run_id;commissioning_result_sha256=$commissioningSha;summary=$summary}
+    $commissioningPin.stream.Dispose()
+}
+
 function Get-ExactResponseCookie {
     param([string[]]$ResponseHeaders, [string]$Name)
     $matches = @($ResponseHeaders | ForEach-Object {
@@ -256,6 +401,16 @@ try {
     $result.source_commit = $manifest.source_commit
     $result.installer_sha256 = $installerHash
     $result.fixture_sha256 = $observedFixtureHash
+    if($Mode -eq 'BetaSoak'){
+        $request=Get-Content -LiteralPath 'C:\TownLightInputs\beta-soak-request.json' -Raw -ErrorAction Stop|ConvertFrom-Json
+        $properties=@($request.PSObject.Properties.Name|Sort-Object)
+        if(($properties -join '|') -cne 'candidate_manifest_sha256|duration_hours|installer_sha256|payload_manifest_sha256|schema_version|source_commit' -or [int]$request.schema_version -ne 1 -or
+            [double]$request.duration_hours -lt 4 -or [double]$request.duration_hours -gt 8 -or [string]$request.source_commit -cne [string]$manifest.source_commit -or
+            [string]$request.candidate_manifest_sha256 -cne (Get-FileHash -LiteralPath $manifestPath -Algorithm SHA256).Hash.ToLowerInvariant() -or [string]$request.installer_sha256 -cne $installerHash -or
+            [string]$request.payload_manifest_sha256 -cne (Get-MappedPayloadManifestSha256)){throw 'Beta-soak host request is invalid or does not bind the exact mapped payload.'}
+        $script:payloadManifestSha256=[string]$request.payload_manifest_sha256
+        $DurationHours=[double]$request.duration_hours
+    }
 
     $installer = Start-Process -FilePath $installerPath -ArgumentList @(
         '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', "/LOG=$installerLog"
@@ -496,12 +651,16 @@ try {
     }
     $result.caption_job = $completedJob
     $result.caption_proof = $proof
+    if($Mode -eq 'BetaSoak'){Invoke-CombinedBetaSoak}
     $result.status = 'passed'
 }
 catch {
-    $result.error = $_.Exception.Message
+    $result.error = if($Mode -eq 'BetaSoak'){Get-RedactedError $_.Exception.Message}else{$_.Exception.Message}
     try { $result.auth_diagnostics.after_failure = Get-StationServiceIdentity }
     catch { $result.auth_diagnostics.after_failure = [ordered]@{ unavailable = $true } }
+    if($Mode -eq 'BetaSoak'){
+        try{Write-NewAtomicEvidence (Join-Path $evidenceRoot "beta-soak-$runId-combined-failure.json") ([ordered]@{schema_version=1;result_kind='combined_fresh_beta_soak';run_id=$runId;status='failed';failed_at_utc=[datetime]::UtcNow.ToString('o');source_commit=$result.source_commit;installer_sha256=$result.installer_sha256;payload_manifest_sha256=$script:payloadManifestSha256;error=$result.error})}catch{}
+    }
 }
 finally {
     $apiCookieHeader = $null
