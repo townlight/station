@@ -64,5 +64,5 @@ StationBox status is now one typed authority that S2 headend checks and S3 commi
 without inventing new readiness vocabularies. The current machine will correctly remain yellow or
 red for unavailable or excessive-offset clock evidence, unproved arbitrary/SRT/headend/receiver
 delivery, interlaced output, SDI, and NDI. That is an implementation result, not field evidence:
-clean-machine, headend, one-station-week, and three-station-week gates remain external and false until
+clean-machine, headend, and exact-candidate four-to-eight-hour beta-soak gates remain external and false until
 their evidence is captured.

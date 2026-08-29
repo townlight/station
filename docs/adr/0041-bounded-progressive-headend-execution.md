@@ -54,7 +54,7 @@ proves local execution by an installed candidate on this station only when its e
 completed. None of these facts proves that a cable headend decoded or accepted the signal.
 
 External receiver acceptance, clean-machine installation, MPEG-2/AC-3, interlaced output,
-file-drop delivery, and the required one-station and three-station field weeks remain independent
+file-drop delivery, and the exact-candidate four-to-eight-hour beta soak remain independent
 gates.
 
 ## Consequences

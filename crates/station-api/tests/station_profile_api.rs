@@ -228,8 +228,7 @@ fn commissioning_report_is_ordered_and_does_not_claim_field_proof() {
             "first_broadcast_report",
             "external_receiver_proof",
             "clean_machine_install_proof",
-            "one_station_week_proof",
-            "three_station_week_proof",
+            "beta_soak_proof",
         ]
     );
     let account = checks
@@ -245,7 +244,7 @@ fn commissioning_report_is_ordered_and_does_not_claim_field_proof() {
         .find(|check| check["id"] == "headend_output_setup")
         .expect("commissioning must include the authoritative headend gate");
     assert_eq!(headend["status"], "blocked");
-    assert_eq!(checks.last().unwrap()["id"], "three_station_week_proof");
+    assert_eq!(checks.last().unwrap()["id"], "beta_soak_proof");
     assert_eq!(checks.last().unwrap()["status"], "not_verified");
     assert_eq!(checks.last().unwrap()["blocking"], false);
     assert_eq!(checks.last().unwrap()["required"], false);

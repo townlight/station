@@ -85,7 +85,7 @@ test("the 11-screen wizard covers every schema-v2 authoritative check exactly on
     "channel_watch_folder", "fallback_slate", "cea708_captions", "publish_targets", "automation_model_policy",
     "headend_output_setup", "cable_transport_validation", "guided_ingest", "guided_schedule", "guided_air_proof",
     "selected_sink_ten_minute_proof", "support_bundle", "first_broadcast_report", "external_receiver_proof",
-    "clean_machine_install_proof", "one_station_week_proof", "three_station_week_proof",
+    "clean_machine_install_proof", "beta_soak_proof",
   ];
   const report = {
     schema_version: 2,

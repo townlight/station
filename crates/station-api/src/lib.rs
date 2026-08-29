@@ -10265,14 +10265,9 @@ impl Api {
                 "No clean-machine installation receipt is authoritative in this station database.",
             ),
             (
-                "one_station_week_proof",
-                "One-station one-week field proof",
-                "The required one-station week of field operation is not verified by this control plane.",
-            ),
-            (
-                "three_station_week_proof",
-                "Three-station one-week field proof",
-                "The required three-station week of field operation is not verified by this control plane.",
+                "beta_soak_proof",
+                "Four-to-eight-hour beta soak proof",
+                "The exact-candidate fresh-install, configure, run, restart, and four-to-eight-hour beta soak is not verified by this control plane.",
             ),
         ] {
             checks.push(commissioning_check(

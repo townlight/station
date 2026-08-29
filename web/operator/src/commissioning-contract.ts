@@ -74,7 +74,7 @@ export function isExternalCommissioningCheck(check: AuthoritativeCommissioningCh
   return check.boundary === "external"
     || check.boundary === "external_evidence"
     || check.phase === "external_proof"
-    || ["external_receiver_proof", "installed_field_proof", "clean_machine_install_proof", "one_station_week_proof", "three_station_week_proof"].includes(check.id);
+    || ["external_receiver_proof", "installed_field_proof", "clean_machine_install_proof", "beta_soak_proof"].includes(check.id);
 }
 
 const PHASE_LABELS: Record<CommissioningPhase, string> = {
@@ -82,7 +82,7 @@ const PHASE_LABELS: Record<CommissioningPhase, string> = {
   station_box: "StationBox & resilience",
   sources_outputs: "Sources & outputs",
   guided_air_proof: "Guided first-air proof",
-  external_proof: "External acceptance & field proof",
+  external_proof: "External acceptance & beta proof",
 };
 
 export interface CommissioningGroup {
@@ -130,7 +130,7 @@ export const COMMISSIONING_WIZARD_STEPS: readonly CommissioningWizardStepDefinit
   { id: "cable_checks", number: 8, title: "First-run cable checks", purpose: "Require current-candidate transport analysis and target-device reachability evidence.", checkIds: ["cable_transport_validation"] },
   { id: "channel_output", number: 9, title: "Channel output setup", purpose: "Configure ingest, fallback, captions, and the named required headend output.", checkIds: ["channel_watch_folder", "fallback_slate", "cea708_captions", "headend_output_setup"] },
   { id: "output_proof", number: 10, title: "Output proof", purpose: "Carry real managed media through schedule, worker acknowledgement, selected-sink capture, and receiver acceptance.", checkIds: ["guided_ingest", "guided_schedule", "guided_air_proof", "selected_sink_ten_minute_proof", "external_receiver_proof"] },
-  { id: "commissioning_report", number: 11, title: "Commissioning report", purpose: "Preserve the support bundle, first-broadcast receipt, clean install proof, and one- then three-station field gates.", checkIds: ["support_bundle", "first_broadcast_report", "clean_machine_install_proof", "one_station_week_proof", "three_station_week_proof"] },
+  { id: "commissioning_report", number: 11, title: "Commissioning report", purpose: "Preserve the support bundle, first-broadcast receipt, clean-install evidence, and exact-candidate four-to-eight-hour beta-soak gate.", checkIds: ["support_bundle", "first_broadcast_report", "clean_machine_install_proof", "beta_soak_proof"] },
 ] as const;
 
 function wizardStepStatus(checks: AuthoritativeCommissioningCheck[], expectedCount: number): CommissioningStatus {

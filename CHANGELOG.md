@@ -6,9 +6,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Changed
+
+- Replaced the withdrawn one-station-week/three-station-week commissioning checks with the current
+  exact-candidate fresh-install, configure, run, restart, and four-to-eight-hour beta-soak evidence
+  boundary. Added an honest public project-status report and marked historical proof language as
+  superseded without changing the candidate-specific records.
+
 ### Added
 
-- Commissioning now uses the canonical 11-screen operator workflow over the server's 23 ordered
+- Commissioning now uses the canonical 11-screen operator workflow over the server's 22 ordered
   authority checks. Every current check is assigned exactly once; missing, unknown, or duplicated
   authority remains visibly blocked with its evidence, and an unmapped server-selected current step
   overrides stale browser navigation instead of falling back to a different screen. Publishing and
