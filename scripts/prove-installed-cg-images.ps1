@@ -143,6 +143,7 @@ function Capture-Udp {
             while ($receiver.Available -gt 0) {
                 $datagram = $receiver.Receive([ref]$remote)
                 Assert-CgStartupDatagram -Datagram $datagram -Phase $Phase
+                $memory.Write($datagram, 0, $datagram.Length)
                 $receivedFirstDatagram = $true
                 break
             }
@@ -188,14 +189,29 @@ function Read-Pixel {
     param([string]$DecoderExecutable, [string]$InputPath, [string]$OutputPath)
     # Crop an even 2x2 region because the MPEG-TS proof profile decodes to chroma-subsampled video;
     # a 1x1 crop is rounded to zero by FFmpeg before conversion to RGB.
-    & $DecoderExecutable -hide_banner -loglevel error -i $InputPath -vf 'crop=2:2:560:120,format=rgb24' `
-        -frames:v 1 -an -f rawvideo -pix_fmt rgb24 -y $OutputPath
-    if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $OutputPath)) {
-        throw "ffmpeg could not decode a CG proof pixel from $InputPath."
+    $decoderErrorPath = "$OutputPath.stderr-$([guid]::NewGuid().ToString('N')).txt"
+    try {
+        $priorErrorActionPreference = $ErrorActionPreference
+        try {
+            # A bounded capture may begin between keyframes. FFmpeg can report
+            # missing pre-capture parameter sets before the repeated SPS/PPS and
+            # next IDR arrive, then exit successfully with the requested pixel.
+            # Keep that recoverable native stderr out of the commissioning
+            # evidence pipeline; the exact exit status and output bytes decide.
+            $ErrorActionPreference = 'Continue'
+            & $DecoderExecutable -hide_banner -loglevel error -i $InputPath -vf 'crop=2:2:560:120,format=rgb24' `
+                -frames:v 1 -an -f rawvideo -pix_fmt rgb24 -y $OutputPath 2> $decoderErrorPath
+            $decoderExitCode = $LASTEXITCODE
+        }
+        finally { $ErrorActionPreference = $priorErrorActionPreference }
+        if ($decoderExitCode -ne 0 -or -not (Test-Path -LiteralPath $OutputPath)) {
+            throw "ffmpeg could not decode a CG proof pixel from $InputPath."
+        }
+        $pixel = [IO.File]::ReadAllBytes($OutputPath)
+        if ($pixel.Length -lt 3) { throw "Decoded CG pixel is incomplete: $InputPath" }
+        return $pixel
     }
-    $pixel = [IO.File]::ReadAllBytes($OutputPath)
-    if ($pixel.Length -lt 3) { throw "Decoded CG pixel is incomplete: $InputPath" }
-    return $pixel
+    finally { Remove-Item -LiteralPath $decoderErrorPath -Force -ErrorAction SilentlyContinue }
 }
 
 function Wait-PreviewAsset {

@@ -135,8 +135,12 @@ $cgProofSource = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'prove-instal
 Assert-Contract ($cgProofSource -match '\[string\]\$DecoderPath' -and $cgProofSource -match '&\s+\$DecoderExecutable' -and
     $cgProofSource -match '\[IO\.FileStream\]\$PinnedDecoderStream' -and
     $cgProofSource -match 'Assert-TownLightPinnedCaptionDecoder' -and
+    $cgProofSource -match '2>\s*\$decoderErrorPath' -and
+    $cgProofSource -match '\$decoderExitCode\s*=\s*\$LASTEXITCODE' -and
+    $cgProofSource -match '\$decoderExitCode\s*-ne\s*0' -and
+    $cgProofSource -match 'Remove-Item -LiteralPath \$decoderErrorPath' -and
     $cgProofSource -notmatch '&\s+ffmpeg\.exe') `
-    'CG pixel assertions must execute an explicit verified decoder when commissioning supplies one.'
+    'CG pixel assertions must execute an explicit verified decoder and judge bounded decode by exit status/output rather than recoverable native stderr.'
 function Get-CgZonesCountUnderStrictMode([scriptblock]$Action) {
     Set-StrictMode -Version Latest
     $existingZones = @(& $Action)
@@ -165,11 +169,12 @@ Assert-Contract ($cgCaptureParseErrors.Count -eq 0 -and $cgCaptureFunction.Count
     $cgCaptureSource -match 'CG capture phase \$Phase received \$\(\$memory\.Length\) bytes' -and
     $cgProofSource -match 'function Assert-CgStartupDatagram' -and
     $cgCaptureSource -match 'Assert-CgStartupDatagram -Datagram \$datagram -Phase \$Phase' -and
+    $cgCaptureSource -match '(?s)Assert-CgStartupDatagram -Datagram \$datagram -Phase \$Phase.*?\$memory\.Write\(\$datagram, 0, \$datagram\.Length\).*?\$receivedFirstDatagram\s*=\s*\$true' -and
     $cgProofSource -match 'Capture-Udp \$baselineCapture -Phase ''baseline''' -and
     $cgProofSource -match 'Capture-Udp \$redCapture -Phase ''red''' -and
     $cgProofSource -match 'Capture-Udp \$greenCapture -Phase ''green''' -and
     $cgProofSource -match 'Capture-Udp \$clearCapture -Phase ''clear''') `
-    'CG proof must give a fresh worker a bounded actual-UDP startup window before rejecting a short capture.'
+    'CG proof must retain its validated startup datagram and give a fresh worker a bounded actual-UDP startup window before rejecting a short capture.'
 $cgProofTokens = $null
 $cgProofParseErrors = $null
 $cgProofAst = [Management.Automation.Language.Parser]::ParseInput($cgProofSource, [ref]$cgProofTokens, [ref]$cgProofParseErrors)
