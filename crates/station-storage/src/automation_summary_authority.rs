@@ -1421,12 +1421,11 @@ mod tests {
         let hash = store
             .write_cloud_summary_provider_config(&config(), None, "setup-admin", 10)
             .unwrap();
-        assert_eq!(
-            store
+        assert!(
+            !store
                 .cloud_summary_credential_status(&config().config_id, 1)
                 .unwrap()
-                .configured,
-            false
+                .configured
         );
         assert!(
             store

@@ -1267,12 +1267,12 @@ fn write_cloud_summary_frame(
     framed.extend_from_slice(body);
     let (sender, receiver) = std::sync::mpsc::sync_channel(1);
     std::thread::spawn(move || {
-        let result = (|| {
+        let result = {
             let mut write = write;
             write
                 .write_all(&framed)
                 .map_err(|_| AutomationExecutionAdapterFailure::RetryableUnavailable)
-        })();
+        };
         let _ = sender.send(result);
     });
     receiver
