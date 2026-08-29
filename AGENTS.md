@@ -27,3 +27,9 @@
   Windows Cargo command form is `powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass
   -File scripts\invoke-cargo.ps1 ...`. If that wrapper cannot run, report the test as blocked; do not
   substitute another launcher.
+- After a successful non-clean Cargo command, that wrapper independently deploys the complete
+  GStreamer DLL closure beside the supported debug/release artifact directories. Those are copies,
+  never hard links: build output is writable and must not alias the installed runtime. The automated
+  harness proves deployment integrity, not Windows loader closure. A real direct-artifact loader
+  proof requires a separately controlled manual gate, exact adjacent hashes, and before/after Windows
+  popup-log checks; ordinary agents and tests remain prohibited from direct artifact launches.
