@@ -2110,6 +2110,7 @@ dependencies = [
  "station-transport-proof",
  "station-underwriting",
  "station-update",
+ "station-windows-ipc",
  "subtle",
  "ureq",
  "windows-sys 0.61.2",

@@ -37,6 +37,8 @@ const PIPE_CONNECT_TIMEOUT_MILLISECONDS: Dword = 5_000;
 const PIPE_SDDL: &str = "D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;OW)";
 const JOB_OBJECT_EXTENDED_LIMIT_INFORMATION: i32 = 9;
 const JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE: Dword = 0x0000_2000;
+const JOB_OBJECT_LIMIT_ACTIVE_PROCESS: Dword = 0x0000_0008;
+const JOB_OBJECT_LIMIT_JOB_MEMORY: Dword = 0x0000_0200;
 const CREATE_SUSPENDED: Dword = 0x0000_0004;
 const EXTENDED_STARTUPINFO_PRESENT: Dword = 0x0008_0000;
 const STARTF_USESTDHANDLES: Dword = 0x0000_0100;
@@ -192,6 +194,7 @@ unsafe extern "system" {
     fn GetExitCodeProcess(process: Handle, exit_code: *mut Dword) -> Bool;
     fn WaitForSingleObject(handle: Handle, milliseconds: Dword) -> Dword;
     fn SetHandleInformation(handle: Handle, mask: Dword, flags: Dword) -> Bool;
+    fn GetHandleInformation(handle: Handle, flags: *mut Dword) -> Bool;
     fn InitializeProcThreadAttributeList(
         attribute_list: *mut c_void,
         attribute_count: Dword,
@@ -365,6 +368,85 @@ pub fn launch_contained_process(
     Ok((suspended.into_process(), containment))
 }
 
+/// Launches a fixed executable suspended with an exact inherited handle list,
+/// assigns it to a kill-on-close Job Object, and then resumes it. Callers keep
+/// ownership of every supplied handle for the lifetime of the child. The
+/// `verify_suspended_image` callback runs before Job assignment and resume,
+/// while no child instruction can yet execute.
+///
+/// This is for narrowly-scoped helpers whose framed control, output, and
+/// credential handles are intentionally not standard NUL streams. It rejects
+/// duplicate/null/invalid handles and temporarily enables inheritance only for
+/// the supplied list; `PROC_THREAD_ATTRIBUTE_HANDLE_LIST` prevents all other
+/// parent handles from crossing the process boundary.
+pub fn launch_contained_process_with_inherited_handles(
+    executable: &Path,
+    arguments: &[&str],
+    standard_handles: [RawHandle; 3],
+    additional_handles: &[RawHandle],
+    verify_suspended_image: impl FnOnce(RawHandle) -> Result<(), IpcError>,
+) -> Result<(ContainedProcess, ProcessContainment), IpcError> {
+    launch_contained_process_with_inherited_handles_and_limits(
+        executable,
+        arguments,
+        standard_handles,
+        additional_handles,
+        None,
+        verify_suspended_image,
+    )
+}
+
+/// The same exact-handle launch contract with optional finite job limits.
+/// `None` preserves the base kill-on-close-only containment contract.
+pub fn launch_contained_process_with_inherited_handles_and_limits(
+    executable: &Path,
+    arguments: &[&str],
+    standard_handles: [RawHandle; 3],
+    additional_handles: &[RawHandle],
+    limits: Option<ProcessContainmentLimits>,
+    verify_suspended_image: impl FnOnce(RawHandle) -> Result<(), IpcError>,
+) -> Result<(ContainedProcess, ProcessContainment), IpcError> {
+    let mut handles = standard_handles
+        .into_iter()
+        .chain(additional_handles.iter().copied())
+        .map(|handle| handle as Handle)
+        .collect::<Vec<_>>();
+    if handles.len() > 16
+        || handles
+            .iter()
+            .any(|handle| handle.is_null() || *handle == INVALID_HANDLE_VALUE)
+        || {
+            handles.sort_unstable_by_key(|handle| *handle as usize);
+            handles.windows(2).any(|pair| pair[0] == pair[1])
+        }
+    {
+        return Err(IpcError::InvalidName);
+    }
+    let inheritance = TemporarilyInheritableHandles::new(&handles)?;
+    let containment = ProcessContainment::with_limits(limits)?;
+    let mut suspended = SuspendedProcess::create_with_handles(
+        executable,
+        arguments,
+        standard_handles.map(|handle| handle as Handle),
+        &handles,
+    )?;
+    if let Err(error) = verify_suspended_image(suspended.process_handle()) {
+        suspended.abort();
+        return Err(error);
+    }
+    if let Err(error) = containment.assign_process(suspended.process_handle()) {
+        suspended.abort();
+        return Err(error);
+    }
+    if let Err(error) = suspended.resume() {
+        drop(containment);
+        suspended.abort();
+        return Err(error);
+    }
+    drop(inheritance);
+    Ok((suspended.into_process(), containment))
+}
+
 struct SuspendedProcess {
     process: Option<Handle>,
     primary_thread: Option<Handle>,
@@ -382,14 +464,33 @@ impl SuspendedProcess {
         {
             return Err(IpcError::InvalidName);
         }
+        let stdio = NullStandardHandles::open()?;
+        let handles = [stdio.stdin, stdio.stdout, stdio.stderr];
+        Self::create_with_handles(executable, arguments, handles, &handles)
+    }
+
+    fn create_with_handles(
+        executable: &Path,
+        arguments: &[&str],
+        standard_handles: [Handle; 3],
+        inherited_handles: &[Handle],
+    ) -> Result<Self, IpcError> {
+        if executable.as_os_str().is_empty() {
+            return Err(IpcError::InvalidName);
+        }
+        if executable.as_os_str().encode_wide().any(|unit| unit == 0)
+            || arguments
+                .iter()
+                .any(|argument| argument.encode_utf16().any(|unit| unit == 0))
+        {
+            return Err(IpcError::InvalidName);
+        }
         // A full application name avoids ambiguous path lookup in production.
         // Bare names (used by focused Windows tests and supported by Command)
         // must instead be resolved from the command line by CreateProcessW.
         let application_name = executable.is_absolute().then(|| wide_path(executable));
         let mut command_line = windows_command_line(executable, arguments);
-        let stdio = NullStandardHandles::open()?;
-        let handles = [stdio.stdin, stdio.stdout, stdio.stderr];
-        let mut attributes = ThreadAttributeList::for_inherited_handles(&handles)?;
+        let mut attributes = ThreadAttributeList::for_inherited_handles(inherited_handles)?;
         let mut startup = StartupInfoExW {
             startup_info: StartupInfoW {
                 cb: std::mem::size_of::<StartupInfoExW>() as Dword,
@@ -407,16 +508,16 @@ impl SuspendedProcess {
                 show_window: 0,
                 reserved2_count: 0,
                 reserved2: ptr::null_mut(),
-                std_input: stdio.stdin,
-                std_output: stdio.stdout,
-                std_error: stdio.stderr,
+                std_input: standard_handles[0],
+                std_output: standard_handles[1],
+                std_error: standard_handles[2],
             },
             attribute_list: attributes.as_mut_ptr(),
         };
         let mut information: ProcessInformation = unsafe { std::mem::zeroed() };
         // SAFETY: application and command-line UTF-16 buffers remain live and
-        // mutable for the call. The attribute list admits exactly the three
-        // inheritable NUL standard handles; the process begins suspended.
+        // mutable for the call. The attribute list admits exactly the supplied
+        // inheritable handles; the process begins suspended.
         let created = unsafe {
             CreateProcessW(
                 application_name
@@ -434,7 +535,6 @@ impl SuspendedProcess {
             )
         };
         drop(attributes);
-        drop(stdio);
         if created == 0 {
             return Err(last_error("CreateProcessW"));
         }
@@ -504,6 +604,47 @@ impl SuspendedProcess {
             .take()
             .expect("a successfully resumed process owns its child");
         ContainedProcess { process }
+    }
+}
+
+struct TemporarilyInheritableHandles {
+    handles: Vec<(Handle, Dword)>,
+}
+
+impl TemporarilyInheritableHandles {
+    fn new(handles: &[Handle]) -> Result<Self, IpcError> {
+        let mut original = Vec::with_capacity(handles.len());
+        for handle in handles {
+            let mut flags = 0;
+            // SAFETY: handles were validated by the public caller boundary and
+            // remain borrowed only for this synchronous launch sequence.
+            if unsafe { GetHandleInformation(*handle, &mut flags) } == 0 {
+                return Err(last_error("GetHandleInformation inherited handle"));
+            }
+            if unsafe { SetHandleInformation(*handle, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT) }
+                == 0
+            {
+                return Err(last_error("SetHandleInformation inherited handle"));
+            }
+            original.push((*handle, flags));
+        }
+        Ok(Self { handles: original })
+    }
+}
+
+impl Drop for TemporarilyInheritableHandles {
+    fn drop(&mut self) {
+        for (handle, original) in &self.handles {
+            // SAFETY: launch completed or failed synchronously; restoring the
+            // captured inherit bit cannot grant a child new authority.
+            unsafe {
+                SetHandleInformation(
+                    *handle,
+                    HANDLE_FLAG_INHERIT,
+                    *original & HANDLE_FLAG_INHERIT,
+                );
+            }
+        }
     }
 }
 
@@ -758,11 +899,21 @@ pub struct ProcessContainment {
     job: Handle,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProcessContainmentLimits {
+    pub max_active_processes: u32,
+    pub max_job_memory_bytes: usize,
+}
+
 impl ProcessContainment {
     /// Creates an empty dedicated kill-on-close job. It is created before the
     /// worker process so the suspended-launch contract can assign before any
     /// child instruction is allowed to run.
     pub fn new() -> Result<Self, IpcError> {
+        Self::with_limits(None)
+    }
+
+    fn with_limits(configured_limits: Option<ProcessContainmentLimits>) -> Result<Self, IpcError> {
         // SAFETY: null attributes/name request a private unnamed job object.
         let job = unsafe { CreateJobObjectW(ptr::null_mut(), ptr::null()) };
         if job.is_null() || job == INVALID_HANDLE_VALUE {
@@ -770,6 +921,16 @@ impl ProcessContainment {
         }
         let mut limits: JobObjectExtendedLimitInformation = unsafe { std::mem::zeroed() };
         limits.basic_limit_information.limit_flags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        if let Some(configured) = configured_limits {
+            if configured.max_active_processes == 0 || configured.max_job_memory_bytes == 0 {
+                unsafe { CloseHandle(job) };
+                return Err(IpcError::InvalidByteCount);
+            }
+            limits.basic_limit_information.limit_flags |=
+                JOB_OBJECT_LIMIT_ACTIVE_PROCESS | JOB_OBJECT_LIMIT_JOB_MEMORY;
+            limits.basic_limit_information.active_process_limit = configured.max_active_processes;
+            limits.job_memory_limit = configured.max_job_memory_bytes;
+        }
         // SAFETY: `job` is a newly-created live job handle and `limits` is a
         // correctly sized, initialized ABI structure for this information class.
         if unsafe {
@@ -1265,5 +1426,54 @@ mod containment_tests {
         );
         let _ = fs::remove_file(child_pid);
         let _ = fs::remove_file(descendant_marker);
+    }
+
+    #[test]
+    fn exact_handle_launcher_rejects_duplicate_handles_and_runs_only_after_verification() {
+        let stdio = NullStandardHandles::open().expect("open inherited test stdio");
+        let extra = open_inheritable_null(GENERIC_READ).expect("open exact extra handle");
+        let standard = [
+            stdio.stdin as RawHandle,
+            stdio.stdout as RawHandle,
+            stdio.stderr as RawHandle,
+        ];
+        assert!(matches!(
+            launch_contained_process_with_inherited_handles(
+                Path::new("cmd.exe"),
+                &["/d", "/c", "exit", "0"],
+                standard,
+                &[stdio.stdin as RawHandle],
+                |_| Ok(())
+            ),
+            Err(IpcError::InvalidName)
+        ));
+        let (child, containment) = launch_contained_process_with_inherited_handles_and_limits(
+            Path::new("cmd.exe"),
+            &["/d", "/c", "exit", "0"],
+            standard,
+            &[extra as RawHandle],
+            Some(ProcessContainmentLimits {
+                max_active_processes: 1,
+                max_job_memory_bytes: 64 * 1024 * 1024,
+            }),
+            |process| {
+                (!process.is_null())
+                    .then_some(())
+                    .ok_or(IpcError::InvalidName)
+            },
+        )
+        .expect("launch through exact handle list");
+        let started = Instant::now();
+        while child
+            .try_wait()
+            .expect("wait contained exact-list child")
+            .is_none()
+            && started.elapsed() < Duration::from_secs(3)
+        {
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(child.try_wait().unwrap(), Some(0));
+        drop(containment);
+        unsafe { CloseHandle(extra) };
     }
 }
