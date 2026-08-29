@@ -39,6 +39,7 @@ $result = [ordered]@{
         after_bootstrap = $null
         after_failure = $null
     }
+    service_failure_diagnostics = $null
     caption_job = $null
     caption_proof = $null
     error = $null
@@ -109,6 +110,72 @@ function Get-StationServiceIdentity {
     [ordered]@{
         process_id = [uint32]$service.ProcessId
         process_start_utc = $process.StartTime.ToUniversalTime().ToString('o')
+    }
+}
+
+function Read-BoundedFailureReceipt {
+    param([string]$Name)
+    if ([string]::IsNullOrWhiteSpace($Name) -or
+        -not [string]::Equals([IO.Path]::GetFileName($Name), $Name, [StringComparison]::Ordinal)) {
+        throw 'Diagnostic receipt name is invalid.'
+    }
+    $path = Join-Path 'C:\ProgramData\TownLight Station' $Name
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { return $null }
+    $item = Get-Item -LiteralPath $path -Force
+    if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or $item.Length -gt 65536) {
+        return [ordered]@{ state = 'unsafe_or_oversized'; bytes = [int64]$item.Length }
+    }
+    $text = [IO.File]::ReadAllText($path, [Text.UTF8Encoding]::new($false, $true))
+    [ordered]@{ state = 'present'; bytes = [int64]$item.Length; text = $text }
+}
+
+function Get-ServiceFailureDiagnostics {
+    $service = Get-CimInstance -ClassName Win32_Service -Filter "Name='TownLightStation'" -ErrorAction SilentlyContinue
+    $updater = Get-CimInstance -ClassName Win32_Service -Filter "Name='TownLightStationUpdater'" -ErrorAction SilentlyContinue
+    $receipts = [ordered]@{}
+    foreach ($name in @(
+        'stationd-startup-error.txt',
+        'orchestration-error.txt',
+        'feed-fetch-error.txt',
+        'automatic-materialization-error.txt',
+        'ingest-error.txt',
+        'alerting-error.txt',
+        'update-monitor-error.txt'
+    )) {
+        $value = Read-BoundedFailureReceipt -Name $name
+        if ($null -ne $value) { $receipts[$name] = $value }
+    }
+    $events = @(Get-WinEvent -FilterHashtable @{
+        LogName = 'System'
+        ProviderName = 'Service Control Manager'
+        StartTime = $script:startedAt.AddMinutes(-1)
+    } -ErrorAction SilentlyContinue | Where-Object {
+        $_.Message -match '(?i)TownLightStation'
+    } | Select-Object -First 64 | ForEach-Object {
+        [ordered]@{
+            time_utc = $_.TimeCreated.ToUniversalTime().ToString('o')
+            event_id = [int]$_.Id
+            level = [string]$_.LevelDisplayName
+            message = if ($_.Message.Length -le 4096) { [string]$_.Message } else { [string]$_.Message.Substring(0, 4096) }
+        }
+    })
+    [ordered]@{
+        station_service = if ($null -eq $service) { $null } else { [ordered]@{
+            state = [string]$service.State
+            process_id = [uint32]$service.ProcessId
+            exit_code = [uint32]$service.ExitCode
+            service_specific_exit_code = [uint32]$service.ServiceSpecificExitCode
+            started = [bool]$service.Started
+        } }
+        updater_service = if ($null -eq $updater) { $null } else { [ordered]@{
+            state = [string]$updater.State
+            process_id = [uint32]$updater.ProcessId
+            exit_code = [uint32]$updater.ExitCode
+            service_specific_exit_code = [uint32]$updater.ServiceSpecificExitCode
+            started = [bool]$updater.Started
+        } }
+        bounded_receipts = $receipts
+        service_control_events = $events
     }
 }
 
@@ -661,6 +728,8 @@ catch {
     if($Mode -eq 'BetaSoak'){
         try{Write-NewAtomicEvidence (Join-Path $evidenceRoot "beta-soak-$runId-combined-failure.json") ([ordered]@{schema_version=1;result_kind='combined_fresh_beta_soak';run_id=$runId;status='failed';failed_at_utc=[datetime]::UtcNow.ToString('o');source_commit=$result.source_commit;installer_sha256=$result.installer_sha256;payload_manifest_sha256=$script:payloadManifestSha256;error=$result.error})}catch{}
     }
+    try { $result.service_failure_diagnostics = Get-ServiceFailureDiagnostics }
+    catch { $result.service_failure_diagnostics = [ordered]@{ diagnostic_collection_failed = $true } }
 }
 finally {
     $apiCookieHeader = $null
