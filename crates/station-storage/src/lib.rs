@@ -4,6 +4,7 @@ extern crate self as station_storage;
 
 mod agenda_authority;
 mod automation_execution_authority;
+mod automation_summary_authority;
 pub use agenda_authority::{AgendaHistoryEntry, AgendaWriteError};
 #[cfg(test)]
 mod automation_execution_authority_tests;
@@ -12,6 +13,11 @@ mod ott_authority;
 mod transport_executor;
 pub use automation_execution_authority::{
     AutomationExecutionJobRecord, AutomationExecutionJobState,
+};
+pub use automation_summary_authority::{
+    AutomationSummaryCompletion, AutomationSummaryCredentialStatus, AutomationSummaryJobRecord,
+    AutomationSummaryJobRequest, AutomationSummaryJobState, AutomationSummaryOutput,
+    AutomationSummaryTranscript, CloudSummaryProviderConfigHistory, cloud_summary_authority_digest,
 };
 pub use media_lifecycle_authority::{AssetRetentionHistoryEntry, MediaLifecycleScanResult};
 pub use ott_authority::{
@@ -1471,6 +1477,7 @@ impl StationStore {
         store.initialize_caption_egress_job_schema()?;
         store.initialize_automation_policy_schema()?;
         store.initialize_automation_execution_schema()?;
+        store.initialize_automation_summary_schema()?;
         store.initialize_publishing_authority_schema()?;
         store.initialize_publishing_executor_schema()?;
         store.initialize_custom_metadata_schema()?;

@@ -202,6 +202,62 @@ pub struct AutomationExecutionReceipt {
     pub completed_at_unix_ms: i64,
 }
 
+/// Non-secret, provider-neutral configuration for an OpenAI-compatible summary
+/// endpoint.  Credentials are deliberately not part of this value.  The
+/// storage authority derives the canonical digest from this exact structure and
+/// records the revision in every summary job binding.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CloudSummaryProviderConfig {
+    pub config_id: String,
+    pub revision: u64,
+    pub endpoint: String,
+    pub model: String,
+    pub prompt_revision: u64,
+    pub max_input_bytes: u64,
+    pub max_output_tokens: u32,
+    pub temperature_milli: u16,
+    pub external_processing_acknowledged: bool,
+}
+
+impl CloudSummaryProviderConfig {
+    pub fn validate(&self) -> Result<(), String> {
+        validate_uuid(&self.config_id, "cloud summary configuration identity")?;
+        if self.revision == 0 || self.prompt_revision == 0 {
+            return Err("cloud summary configuration revisions must be nonzero".into());
+        }
+        if !(1..=4 * 1024 * 1024).contains(&self.max_input_bytes)
+            || !(1..=32_768).contains(&self.max_output_tokens)
+            || self.temperature_milli > 2_000
+        {
+            return Err("cloud summary configuration limits are invalid or unbounded".into());
+        }
+        let endpoint = self.endpoint.as_str();
+        if !endpoint.starts_with("https://")
+            || endpoint.len() > MAX_TEXT
+            || endpoint.chars().any(char::is_control)
+            || endpoint.contains(['?', '#', '@', ' '])
+            || endpoint.trim_end_matches('/').len() <= "https://".len()
+        {
+            return Err("cloud summary endpoint must be a bounded HTTPS URL without credentials or query data".into());
+        }
+        if !bounded_model_text(&self.model) {
+            return Err("cloud summary model is invalid or unbounded".into());
+        }
+        if !self.external_processing_acknowledged {
+            return Err("cloud summary external-processing acknowledgement is required".into());
+        }
+        Ok(())
+    }
+}
+
+fn bounded_model_text(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= MAX_MODEL_TEXT
+        && value.trim() == value
+        && !value.chars().any(char::is_control)
+}
+
 impl AutomationInputArtifact {
     pub fn validate(&self) -> Result<(), String> {
         validate_artifact(
