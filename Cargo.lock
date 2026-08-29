@@ -1782,7 +1782,10 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "ureq",
+ "url",
  "windows-sys 0.61.2",
+ "zeroize",
 ]
 
 [[package]]
@@ -2107,6 +2110,7 @@ dependencies = [
  "station-transport-proof",
  "station-underwriting",
  "station-update",
+ "station-windows-ipc",
  "subtle",
  "ureq",
  "windows-sys 0.61.2",

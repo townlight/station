@@ -1,13 +1,18 @@
 use super::*;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use station_automation_policy::{AutomationExecutionReceipt, AutomationExecutionRequest};
+use station_automation_policy::{
+    AutomationExecutionReceipt, AutomationExecutionRequest, AutomationFeature,
+};
 use station_domain::{AlertConditionKind, AlertEvent, AlertEventState, AlertSeverity};
-use station_maintenance::{VerifiedAutomationLaunchHelper, VerifiedInstallAuthority};
+use station_maintenance::{
+    InstallAuthorityFence, VerifiedAutomationLaunchHelper, VerifiedInstallAuthority,
+};
 use std::ffi::OsString;
-use std::io::Read;
+use std::io::{Read, Seek, Write};
 use std::os::windows::ffi::OsStringExt;
 use std::os::windows::fs::OpenOptionsExt;
-use std::os::windows::io::AsRawHandle;
+use std::os::windows::io::{AsRawHandle, FromRawHandle, RawHandle};
 use std::os::windows::process::CommandExt;
 use std::path::{Component, Path, PathBuf};
 use std::process::{Child, ChildStderr, ChildStdout, Command, Stdio};
@@ -17,6 +22,7 @@ use std::sync::{
 };
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE};
+use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
 use windows_sys::Win32::Storage::FileSystem::{
     BY_HANDLE_FILE_INFORMATION, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
     FILE_SHARE_READ, FILE_SHARE_WRITE, GetFileInformationByHandle,
@@ -33,6 +39,16 @@ use windows_sys::Win32::System::JobObjects::{
 use windows_sys::Win32::System::Threading::{
     CREATE_SUSPENDED, OpenThread, QueryFullProcessImageNameW, ResumeThread, THREAD_SUSPEND_RESUME,
 };
+
+#[link(name = "kernel32")]
+unsafe extern "system" {
+    fn CreatePipe(
+        read_pipe: *mut HANDLE,
+        write_pipe: *mut HANDLE,
+        attributes: *const SECURITY_ATTRIBUTES,
+        size: u32,
+    ) -> i32;
+}
 
 #[link(name = "kernel32")]
 unsafe extern "system" {
@@ -62,6 +78,20 @@ const MAX_AUTOMATION_EXECUTION_REQUEST_ENV_BYTES: usize = 32_768;
 const MAX_AUTOMATION_EXECUTION_STDERR_BYTES: u64 = 65_536;
 const MAX_AUTOMATION_EXECUTION_ACTIVE_PROCESSES: u32 = 8;
 const MAX_AUTOMATION_EXECUTION_JOB_MEMORY_BYTES: usize = 1_073_741_824;
+#[allow(dead_code)]
+const MAX_CLOUD_SUMMARY_INPUT_BYTES: u64 = 8 * 1024 * 1024;
+#[allow(dead_code)]
+const MAX_CLOUD_SUMMARY_OUTPUT_BYTES: u64 = 1024 * 1024;
+#[allow(dead_code)]
+const MAX_CLOUD_SUMMARY_CONTROL_BYTES: usize = 64 * 1024;
+#[allow(dead_code)]
+const MAX_CLOUD_SUMMARY_CREDENTIAL_BYTES: u64 = 16 * 1024;
+#[allow(dead_code)]
+const CLOUD_SUMMARY_CONTROL_WRITE_DEADLINE: Duration = Duration::from_secs(5);
+#[allow(dead_code)]
+const CLOUD_SUMMARY_ENDPOINT: &str = "https://api.openai.com/v1/chat/completions";
+#[allow(dead_code)]
+const CLOUD_SUMMARY_OUTPUT_MEDIA_TYPE: &str = "text/plain; charset=utf-8";
 static NEVER_STOP_AUTOMATION_EXECUTION: AtomicBool = AtomicBool::new(false);
 
 #[doc(hidden)]
@@ -96,6 +126,110 @@ impl AutomationExecutionAdapterFailure {
     fn retryable(self) -> bool {
         matches!(self, Self::RetryableTimeout | Self::RetryableUnavailable)
     }
+}
+
+/// Narrow seam for the durable S13 authority lane. It deliberately does not
+/// define storage tables: the future authority implementation must establish
+/// the current summary policy, configuration, operator-selected cloud adapter,
+/// credential availability, and immutable document handle before returning
+/// this capability. Any missing or stale authority is unavailable work, never
+/// an invitation to launch a helper with caller-shaped paths or secrets.
+#[allow(dead_code)]
+pub trait CloudSummaryExecutionAuthority {
+    fn acquire_current_cloud_summary_material(
+        &mut self,
+        request: &AutomationExecutionRequest,
+        claim_id: &str,
+        hard_deadline: Instant,
+    ) -> Result<CloudSummaryExecutionMaterial, AutomationExecutionAdapterFailure>;
+}
+
+/// Opaque execution material returned by `CloudSummaryExecutionAuthority`.
+/// The constructor is crate-private so no API caller can turn paths or a raw
+/// credential string into a production launch capability.
+#[allow(dead_code)]
+pub struct CloudSummaryExecutionMaterial {
+    input: std::fs::File,
+    output: std::fs::File,
+    credential: std::fs::File,
+    model: String,
+}
+
+#[allow(dead_code)]
+impl CloudSummaryExecutionMaterial {
+    #[allow(clippy::missing_const_for_fn)]
+    pub(crate) fn from_verified_handles(
+        input: std::fs::File,
+        output: std::fs::File,
+        credential: std::fs::File,
+        model: String,
+    ) -> Self {
+        Self {
+            input,
+            output,
+            credential,
+            model,
+        }
+    }
+
+    fn validate_against_request(
+        &mut self,
+        request: &AutomationExecutionRequest,
+    ) -> Result<(), AutomationExecutionAdapterFailure> {
+        if request.feature != AutomationFeature::Summaries
+            || request.input.bytes == 0
+            || request.input.bytes > MAX_CLOUD_SUMMARY_INPUT_BYTES
+            || request.input.media_type != CLOUD_SUMMARY_OUTPUT_MEDIA_TYPE
+            || !is_bounded_cloud_model(&self.model)
+        {
+            return Err(AutomationExecutionAdapterFailure::PermanentRejected);
+        }
+        let input = self
+            .input
+            .metadata()
+            .map_err(|_| AutomationExecutionAdapterFailure::RetryableUnavailable)?;
+        let output = self
+            .output
+            .metadata()
+            .map_err(|_| AutomationExecutionAdapterFailure::RetryableUnavailable)?;
+        if !input.is_file()
+            || !output.is_file()
+            || input.len() != request.input.bytes
+            || output.len() != 0
+            || same_windows_file_identity(&self.input, &self.output)?
+        {
+            return Err(AutomationExecutionAdapterFailure::PermanentRejected);
+        }
+        self.input
+            .seek(std::io::SeekFrom::Start(0))
+            .map_err(|_| AutomationExecutionAdapterFailure::RetryableUnavailable)?;
+        let actual = hash_open_file(&mut self.input, Instant::now() + Duration::from_secs(5))
+            .map_err(|_| AutomationExecutionAdapterFailure::RetryableUnavailable)?;
+        if actual != request.input.artifact_sha256 {
+            return Err(AutomationExecutionAdapterFailure::PermanentRejected);
+        }
+        let credential = self
+            .credential
+            .metadata()
+            .map_err(|_| AutomationExecutionAdapterFailure::RetryableUnavailable)?;
+        if credential.is_dir() || credential.len() > MAX_CLOUD_SUMMARY_CREDENTIAL_BYTES + 4 {
+            return Err(AutomationExecutionAdapterFailure::PermanentRejected);
+        }
+        Ok(())
+    }
+}
+
+/// The only non-durable result the controller may receive from the helper.
+/// The durable storage lane must still bind it to the live claim/policy before
+/// manufacturing an `AutomationExecutionReceipt`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(dead_code)]
+pub struct CloudSummaryHelperResult {
+    pub output_sha256: String,
+    pub output_bytes: u64,
+    pub output_word_count: u64,
+    pub provider_request_id_sha256: String,
+    pub provider_response_sha256: String,
 }
 
 /// A declarative, installed worker program.  This is intentionally data, not
@@ -534,6 +668,11 @@ impl PipeRead for ChildStderr {
         self.as_raw_handle() as HANDLE
     }
 }
+impl PipeRead for std::fs::File {
+    fn pipe_handle(&self) -> HANDLE {
+        self.as_raw_handle() as HANDLE
+    }
+}
 
 struct BoundedPipeDrain {
     pipe: Box<dyn PipeRead>,
@@ -759,16 +898,17 @@ fn verify_spawned_image_identity(
     child: &Child,
     expected: (u32, u64),
 ) -> Result<(), AutomationExecutionAdapterFailure> {
+    verify_spawned_image_identity_handle(child.as_raw_handle(), expected)
+}
+
+fn verify_spawned_image_identity_handle(
+    process: RawHandle,
+    expected: (u32, u64),
+) -> Result<(), AutomationExecutionAdapterFailure> {
     let mut buffer = vec![0_u16; 32_768];
     let mut length = u32::try_from(buffer.len()).unwrap();
-    if unsafe {
-        QueryFullProcessImageNameW(
-            child.as_raw_handle() as HANDLE,
-            0,
-            buffer.as_mut_ptr(),
-            &mut length,
-        )
-    } == 0
+    if unsafe { QueryFullProcessImageNameW(process as HANDLE, 0, buffer.as_mut_ptr(), &mut length) }
+        == 0
     {
         return Err(AutomationExecutionAdapterFailure::RetryableUnavailable);
     }
@@ -793,6 +933,383 @@ fn windows_file_identity(
         info.dwVolumeSerialNumber,
         (u64::from(info.nFileIndexHigh) << 32) | u64::from(info.nFileIndexLow),
     ))
+}
+
+#[allow(dead_code)]
+fn same_windows_file_identity(
+    first: &std::fs::File,
+    second: &std::fs::File,
+) -> Result<bool, AutomationExecutionAdapterFailure> {
+    Ok(windows_file_identity(first)? == windows_file_identity(second)?)
+}
+
+#[allow(dead_code)]
+fn is_bounded_cloud_model(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && value.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_' | b':' | b'/')
+        })
+}
+
+#[derive(Serialize)]
+#[serde(deny_unknown_fields)]
+#[allow(dead_code)]
+struct CloudSummaryHelperControl<'a> {
+    mode: &'static str,
+    job_id: &'a str,
+    claim_id: &'a str,
+    adapter_id: &'a str,
+    adapter_revision: u64,
+    candidate_version: &'a str,
+    candidate_commit: &'a str,
+    install_generation: u64,
+    configuration_sha256: &'a str,
+    endpoint: &'static str,
+    model: &'a str,
+    input_sha256: &'a str,
+    input_bytes: u64,
+    output_media_type: &'static str,
+    action_timeout_ms: u64,
+    max_output_bytes: u64,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+#[allow(dead_code)]
+struct CloudSummaryHelperWireResponse {
+    status: String,
+    code: String,
+    output_sha256: Option<String>,
+    output_bytes: Option<u64>,
+    output_word_count: Option<u64>,
+    provider_request_id_sha256: Option<String>,
+    provider_response_sha256: Option<String>,
+}
+
+/// Acquires the current durable authority through the supplied narrow trait,
+/// independently rebinds the active installed helper under the existing
+/// install fence, and starts only the exact `cloud_summary_v1` mode. The
+/// durable queue intentionally does not call this yet: it has no document and
+/// credential authority implementation, so its existing unavailable pacing is
+/// preserved.
+#[allow(dead_code)]
+pub fn launch_current_cloud_summary_v1(
+    authority: &mut dyn CloudSummaryExecutionAuthority,
+    request: &AutomationExecutionRequest,
+    claim_id: &str,
+    fence: &InstallAuthorityFence,
+    data_directory: &Path,
+    application_root: &Path,
+    hard_deadline: Instant,
+) -> Result<OwnedCloudSummaryHelperProcess, AutomationExecutionAdapterFailure> {
+    if Instant::now() >= hard_deadline || request.feature != AutomationFeature::Summaries {
+        return Err(AutomationExecutionAdapterFailure::PermanentRejected);
+    }
+    let mut material =
+        authority.acquire_current_cloud_summary_material(request, claim_id, hard_deadline)?;
+    material.validate_against_request(request)?;
+    let helper = station_maintenance::read_verified_automation_launch_helper(
+        fence,
+        data_directory,
+        application_root,
+    )
+    .map_err(|_| AutomationExecutionAdapterFailure::RetryableUnavailable)?;
+    OwnedCloudSummaryHelperProcess::spawn(helper, request, claim_id, material, hard_deadline)
+}
+
+/// An owned live helper and its containment. It retains the output handle for
+/// post-exit rehashing; input/credential capabilities were inherited only by
+/// the helper's exact Windows handle list and cannot be rediscovered by path.
+#[allow(dead_code)]
+pub struct OwnedCloudSummaryHelperProcess {
+    child: station_windows_ipc::ContainedProcess,
+    containment: Option<station_windows_ipc::ProcessContainment>,
+    output: std::fs::File,
+    stdout: Option<BoundedPipeDrain>,
+    stderr: Option<BoundedPipeDrain>,
+}
+
+#[allow(dead_code)]
+impl OwnedCloudSummaryHelperProcess {
+    fn spawn(
+        helper: VerifiedAutomationLaunchHelper,
+        request: &AutomationExecutionRequest,
+        claim_id: &str,
+        material: CloudSummaryExecutionMaterial,
+        hard_deadline: Instant,
+    ) -> Result<Self, AutomationExecutionAdapterFailure> {
+        if Instant::now() >= hard_deadline {
+            return Err(AutomationExecutionAdapterFailure::RetryableTimeout);
+        }
+        let CloudSummaryExecutionMaterial {
+            input,
+            output,
+            credential,
+            model,
+        } = material;
+        let (control_read, control_write) = create_cloud_summary_pipe()?;
+        let (response_read, response_write) = create_cloud_summary_pipe()?;
+        let (stderr_read, stderr_write) = create_cloud_summary_pipe()?;
+        let arguments = vec![
+            OsString::from("--cloud-summary-v1"),
+            OsString::from("--input-handle"),
+            OsString::from((input.as_raw_handle() as usize).to_string()),
+            OsString::from("--output-handle"),
+            OsString::from((output.as_raw_handle() as usize).to_string()),
+            OsString::from("--credential-handle"),
+            OsString::from((credential.as_raw_handle() as usize).to_string()),
+        ];
+        let adapter = AutomationExecutionAdapter::from_verified_launch_helper(
+            request.adapter_id.clone(),
+            request.adapter_revision,
+            helper,
+            arguments,
+        )
+        .map_err(|_| AutomationExecutionAdapterFailure::PermanentRejected)?;
+        let pinned = adapter.pin_for_request(request, hard_deadline)?;
+        let argument_text = adapter
+            .arguments
+            .iter()
+            .map(|argument| {
+                argument
+                    .to_str()
+                    .ok_or(AutomationExecutionAdapterFailure::PermanentRejected)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let expected_identity = pinned.file_identity;
+        let standard = [
+            control_read.as_raw_handle(),
+            response_write.as_raw_handle(),
+            stderr_write.as_raw_handle(),
+        ];
+        let additional = [
+            input.as_raw_handle(),
+            output.as_raw_handle(),
+            credential.as_raw_handle(),
+        ];
+        let (child, containment) =
+            station_windows_ipc::launch_contained_process_with_inherited_handles_and_limits(
+                &pinned.executable,
+                &argument_text,
+                standard,
+                &additional,
+                Some(station_windows_ipc::ProcessContainmentLimits {
+                    max_active_processes: MAX_AUTOMATION_EXECUTION_ACTIVE_PROCESSES,
+                    max_job_memory_bytes: MAX_AUTOMATION_EXECUTION_JOB_MEMORY_BYTES,
+                }),
+                |process| {
+                    verify_spawned_image_identity_handle(process, expected_identity)
+                        .map_err(|_| station_windows_ipc::IpcError::InvalidName)
+                },
+            )
+            .map_err(|_| AutomationExecutionAdapterFailure::RetryableUnavailable)?;
+        drop(control_read);
+        drop(response_write);
+        drop(stderr_write);
+        let control = CloudSummaryHelperControl {
+            mode: "cloud_summary_v1",
+            job_id: &request.job_id,
+            claim_id,
+            adapter_id: &request.adapter_id,
+            adapter_revision: request.adapter_revision,
+            candidate_version: &request.candidate.version,
+            candidate_commit: &request.candidate.source_commit,
+            install_generation: request.install_generation,
+            configuration_sha256: &request.configuration_hash,
+            endpoint: CLOUD_SUMMARY_ENDPOINT,
+            model: &model,
+            input_sha256: &request.input.artifact_sha256,
+            input_bytes: request.input.bytes,
+            output_media_type: CLOUD_SUMMARY_OUTPUT_MEDIA_TYPE,
+            action_timeout_ms: u64::try_from(
+                hard_deadline
+                    .checked_duration_since(Instant::now())
+                    .unwrap_or_default()
+                    .as_millis(),
+            )
+            .unwrap_or(0)
+            .min(AUTOMATION_EXECUTION_ACTION_MAX_MS as u64),
+            max_output_bytes: MAX_CLOUD_SUMMARY_OUTPUT_BYTES,
+        };
+        let bytes = serde_json::to_vec(&control)
+            .map_err(|_| AutomationExecutionAdapterFailure::PermanentInvalidResponse)?;
+        if bytes.is_empty() || bytes.len() > MAX_CLOUD_SUMMARY_CONTROL_BYTES {
+            drop(containment);
+            return Err(AutomationExecutionAdapterFailure::PermanentInvalidResponse);
+        }
+        if let Err(error) = write_cloud_summary_frame(control_write, &bytes) {
+            drop(containment);
+            return Err(error);
+        }
+        Ok(Self {
+            child,
+            containment: Some(containment),
+            output,
+            stdout: Some(BoundedPipeDrain::new(
+                response_read,
+                MAX_AUTOMATION_EXECUTION_STDOUT_BYTES,
+            )),
+            stderr: Some(BoundedPipeDrain::new(
+                stderr_read,
+                MAX_AUTOMATION_EXECUTION_STDERR_BYTES,
+            )),
+        })
+    }
+
+    pub fn try_result(
+        &mut self,
+        hard_deadline: Instant,
+    ) -> Result<Option<CloudSummaryHelperResult>, AutomationExecutionAdapterFailure> {
+        if Instant::now() >= hard_deadline {
+            self.terminate();
+            return Err(AutomationExecutionAdapterFailure::RetryableTimeout);
+        }
+        self.stdout
+            .as_mut()
+            .ok_or(AutomationExecutionAdapterFailure::RetryableUnavailable)?
+            .poll()?;
+        self.stderr
+            .as_mut()
+            .ok_or(AutomationExecutionAdapterFailure::RetryableUnavailable)?
+            .poll()?;
+        let Some(exit) = self
+            .child
+            .try_wait()
+            .map_err(|_| AutomationExecutionAdapterFailure::RetryableUnavailable)?
+        else {
+            return Ok(None);
+        };
+        drop(self.containment.take());
+        if exit != 0 {
+            return Err(AutomationExecutionAdapterFailure::PermanentRejected);
+        }
+        let stdout = self
+            .stdout
+            .take()
+            .ok_or(AutomationExecutionAdapterFailure::RetryableUnavailable)?
+            .finish()?;
+        let _stderr = self
+            .stderr
+            .take()
+            .ok_or(AutomationExecutionAdapterFailure::RetryableUnavailable)?
+            .finish()?;
+        let wire: CloudSummaryHelperWireResponse = serde_json::from_slice(&stdout)
+            .map_err(|_| AutomationExecutionAdapterFailure::PermanentInvalidResponse)?;
+        if wire.status != "completed" || wire.code != "completed" {
+            return Err(match wire.code.as_str() {
+                "provider_unavailable" => AutomationExecutionAdapterFailure::RetryableUnavailable,
+                "launch_rejected"
+                | "input_binding_failed"
+                | "credential_rejected"
+                | "provider_denied" => AutomationExecutionAdapterFailure::PermanentRejected,
+                _ => AutomationExecutionAdapterFailure::PermanentInvalidResponse,
+            });
+        }
+        let result = CloudSummaryHelperResult {
+            output_sha256: wire
+                .output_sha256
+                .ok_or(AutomationExecutionAdapterFailure::PermanentInvalidResponse)?,
+            output_bytes: wire
+                .output_bytes
+                .ok_or(AutomationExecutionAdapterFailure::PermanentInvalidResponse)?,
+            output_word_count: wire
+                .output_word_count
+                .ok_or(AutomationExecutionAdapterFailure::PermanentInvalidResponse)?,
+            provider_request_id_sha256: wire
+                .provider_request_id_sha256
+                .ok_or(AutomationExecutionAdapterFailure::PermanentInvalidResponse)?,
+            provider_response_sha256: wire
+                .provider_response_sha256
+                .ok_or(AutomationExecutionAdapterFailure::PermanentInvalidResponse)?,
+        };
+        validate_cloud_summary_output(&mut self.output, &result, hard_deadline)?;
+        Ok(Some(result))
+    }
+
+    pub fn terminate(&mut self) {
+        drop(self.containment.take());
+    }
+}
+
+#[allow(dead_code)]
+fn create_cloud_summary_pipe()
+-> Result<(std::fs::File, std::fs::File), AutomationExecutionAdapterFailure> {
+    let mut read = std::ptr::null_mut();
+    let mut write = std::ptr::null_mut();
+    let attributes = SECURITY_ATTRIBUTES {
+        nLength: u32::try_from(std::mem::size_of::<SECURITY_ATTRIBUTES>())
+            .expect("security attributes size fits u32"),
+        lpSecurityDescriptor: std::ptr::null_mut(),
+        bInheritHandle: 1,
+    };
+    if unsafe { CreatePipe(&mut read, &mut write, &attributes, 0) } == 0 {
+        return Err(AutomationExecutionAdapterFailure::RetryableUnavailable);
+    }
+    // SAFETY: CreatePipe returned two unique owned handles. File takes exact
+    // ownership and closes them on every return path.
+    let read = unsafe { std::fs::File::from_raw_handle(read as RawHandle) };
+    let write = unsafe { std::fs::File::from_raw_handle(write as RawHandle) };
+    Ok((read, write))
+}
+
+#[allow(dead_code)]
+fn write_cloud_summary_frame(
+    write: std::fs::File,
+    body: &[u8],
+) -> Result<(), AutomationExecutionAdapterFailure> {
+    let mut framed = Vec::with_capacity(body.len() + 4);
+    framed.extend_from_slice(
+        &u32::try_from(body.len())
+            .map_err(|_| AutomationExecutionAdapterFailure::PermanentInvalidResponse)?
+            .to_le_bytes(),
+    );
+    framed.extend_from_slice(body);
+    let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+    std::thread::spawn(move || {
+        let result = (|| {
+            let mut write = write;
+            write
+                .write_all(&framed)
+                .map_err(|_| AutomationExecutionAdapterFailure::RetryableUnavailable)
+        })();
+        let _ = sender.send(result);
+    });
+    receiver
+        .recv_timeout(CLOUD_SUMMARY_CONTROL_WRITE_DEADLINE)
+        .map_err(|_| AutomationExecutionAdapterFailure::RetryableTimeout)?
+}
+
+#[allow(dead_code)]
+fn validate_cloud_summary_output(
+    output: &mut std::fs::File,
+    result: &CloudSummaryHelperResult,
+    hard_deadline: Instant,
+) -> Result<(), AutomationExecutionAdapterFailure> {
+    if !is_lowercase_sha256(&result.output_sha256)
+        || !is_lowercase_sha256(&result.provider_request_id_sha256)
+        || !is_lowercase_sha256(&result.provider_response_sha256)
+        || result.output_bytes == 0
+        || result.output_bytes > MAX_CLOUD_SUMMARY_OUTPUT_BYTES
+        || result.output_word_count == 0
+    {
+        return Err(AutomationExecutionAdapterFailure::PermanentInvalidResponse);
+    }
+    let metadata = output
+        .metadata()
+        .map_err(|_| AutomationExecutionAdapterFailure::RetryableUnavailable)?;
+    if !metadata.is_file() || metadata.len() != result.output_bytes {
+        return Err(AutomationExecutionAdapterFailure::PermanentInvalidResponse);
+    }
+    output
+        .seek(std::io::SeekFrom::Start(0))
+        .map_err(|_| AutomationExecutionAdapterFailure::RetryableUnavailable)?;
+    let actual = hash_open_file(output, hard_deadline)
+        .map_err(|_| AutomationExecutionAdapterFailure::RetryableUnavailable)?;
+    if actual != result.output_sha256 {
+        return Err(AutomationExecutionAdapterFailure::PermanentInvalidResponse);
+    }
+    Ok(())
 }
 
 fn bounded_reap_child(child: &mut Child) -> Result<(), AutomationExecutionAdapterFailure> {
@@ -1121,9 +1638,45 @@ fn unix_time_millis() -> Result<i64, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use station_automation_policy::{
+        AutomationCandidateIdentity, AutomationInputArtifact, AutomationInputKind,
+    };
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static TEST_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+    fn summary_request(input: &[u8]) -> AutomationExecutionRequest {
+        AutomationExecutionRequest {
+            job_id: "33333333-2222-4333-8444-555555555555".into(),
+            feature: AutomationFeature::Summaries,
+            policy_id: "44444444-2222-4333-8444-555555555555".into(),
+            policy_revision: 1,
+            adapter_id: "11111111-2222-4333-8444-555555555555".into(),
+            adapter_revision: 1,
+            configuration_hash: "a".repeat(64),
+            candidate: AutomationCandidateIdentity {
+                version: "0.1.0".into(),
+                source_commit: "b".repeat(40),
+            },
+            install_generation: 1,
+            input: AutomationInputArtifact {
+                kind: AutomationInputKind::Transcript,
+                artifact_sha256: format!("{:x}", Sha256::digest(input)),
+                bytes: input.len() as u64,
+                media_type: CLOUD_SUMMARY_OUTPUT_MEDIA_TYPE.into(),
+                language: Some("en-US".into()),
+            },
+            requested_output_language: None,
+            requested_at_unix_ms: 1,
+        }
+    }
+
+    fn cloud_fixture_root(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "townlight-cloud-summary-controller-{name}-{}",
+            TEST_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        ))
+    }
 
     #[test]
     fn controller_authority_failure_alert_is_durable_and_resolves() {
@@ -1164,5 +1717,114 @@ mod tests {
         );
         drop(reopened);
         let _ = std::fs::remove_file(database);
+    }
+
+    #[test]
+    fn cloud_summary_material_rejects_handle_alias_and_input_rebinding() {
+        let root = cloud_fixture_root("alias");
+        std::fs::create_dir_all(&root).unwrap();
+        let input_bytes = b"meeting transcript";
+        let input_path = root.join("input.txt");
+        let credential_path = root.join("credential.bin");
+        std::fs::write(&input_path, input_bytes).unwrap();
+        std::fs::write(&credential_path, [1_u8, 0, 0, 0, b'x']).unwrap();
+        let input = std::fs::OpenOptions::new()
+            .read(true)
+            .open(&input_path)
+            .unwrap();
+        let output_alias = input.try_clone().unwrap();
+        let credential = std::fs::OpenOptions::new()
+            .read(true)
+            .open(&credential_path)
+            .unwrap();
+        let mut material = CloudSummaryExecutionMaterial::from_verified_handles(
+            input,
+            output_alias,
+            credential,
+            "gpt-4o-mini".into(),
+        );
+        assert!(matches!(
+            material.validate_against_request(&summary_request(input_bytes)),
+            Err(AutomationExecutionAdapterFailure::PermanentRejected)
+        ));
+        drop(material);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn cloud_summary_control_is_framed_without_paths_or_credentials() {
+        let input = b"meeting transcript";
+        let request = summary_request(input);
+        let control = CloudSummaryHelperControl {
+            mode: "cloud_summary_v1",
+            job_id: &request.job_id,
+            claim_id: "77777777-2222-4333-8444-555555555555",
+            adapter_id: &request.adapter_id,
+            adapter_revision: request.adapter_revision,
+            candidate_version: &request.candidate.version,
+            candidate_commit: &request.candidate.source_commit,
+            install_generation: request.install_generation,
+            configuration_sha256: &request.configuration_hash,
+            endpoint: CLOUD_SUMMARY_ENDPOINT,
+            model: "gpt-4o-mini",
+            input_sha256: &request.input.artifact_sha256,
+            input_bytes: request.input.bytes,
+            output_media_type: CLOUD_SUMMARY_OUTPUT_MEDIA_TYPE,
+            action_timeout_ms: 5_000,
+            max_output_bytes: MAX_CLOUD_SUMMARY_OUTPUT_BYTES,
+        };
+        let serialized = serde_json::to_string(&control).unwrap();
+        assert!(!serialized.contains("path"));
+        assert!(!serialized.contains("credential"));
+        assert!(!serialized.contains("secret"));
+        let (mut read, write) = create_cloud_summary_pipe().unwrap();
+        write_cloud_summary_frame(write, serialized.as_bytes()).unwrap();
+        let mut header = [0_u8; 4];
+        read.read_exact(&mut header).unwrap();
+        assert_eq!(u32::from_le_bytes(header) as usize, serialized.len());
+        let mut body = vec![0_u8; serialized.len()];
+        read.read_exact(&mut body).unwrap();
+        assert_eq!(body, serialized.as_bytes());
+    }
+
+    #[test]
+    fn cloud_summary_result_requires_retained_output_hash_and_bounds() {
+        let root = cloud_fixture_root("output");
+        std::fs::create_dir_all(&root).unwrap();
+        let output_path = root.join("output.txt");
+        let output_bytes = b"Short verified summary.";
+        std::fs::write(&output_path, output_bytes).unwrap();
+        let mut output = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&output_path)
+            .unwrap();
+        let result = CloudSummaryHelperResult {
+            output_sha256: format!("{:x}", Sha256::digest(output_bytes)),
+            output_bytes: output_bytes.len() as u64,
+            output_word_count: 3,
+            provider_request_id_sha256: "c".repeat(64),
+            provider_response_sha256: "d".repeat(64),
+        };
+        assert!(
+            validate_cloud_summary_output(
+                &mut output,
+                &result,
+                Instant::now() + Duration::from_secs(1)
+            )
+            .is_ok()
+        );
+        let mut forged = result;
+        forged.output_sha256 = "e".repeat(64);
+        assert!(matches!(
+            validate_cloud_summary_output(
+                &mut output,
+                &forged,
+                Instant::now() + Duration::from_secs(1)
+            ),
+            Err(AutomationExecutionAdapterFailure::PermanentInvalidResponse)
+        ));
+        drop(output);
+        std::fs::remove_dir_all(root).unwrap();
     }
 }
