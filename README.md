@@ -233,3 +233,8 @@ scripts\invoke-cargo.ps1 test --offline --workspace
 The external MPEG-TS live-input regressions also require `ffmpeg.exe` on `PATH`. The worker-level gate that reproduces an already-running feed can be run with `scripts\invoke-cargo.ps1 test -p channel-worker --test process_contract spawned_worker_live_takeover_preserves_audible_audio -- --exact --test-threads=1`.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the proof-first workflow and [LICENSE](LICENSE) for terms.
+
+## License
+
+Code: AGPL-3.0-only, with the TownLight Public Institution Exception for qualifying deployments. See [LICENSE](LICENSE) and [LICENSE-EXCEPTION.md](LICENSE-EXCEPTION.md).
+Documentation: CC BY 4.0 ([LICENSE-DOCS](LICENSE-DOCS)).
