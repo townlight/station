@@ -1,6 +1,6 @@
 # Architecture overview
 
-TownLight Station is a Windows appliance with local authority. Internet services may extend it, but loss of the Internet cannot take a commissioned channel off air or destroy its operating record.
+Townlight Station is a Windows appliance with local authority. Internet services may extend it, but loss of the Internet cannot take a commissioned channel off air or destroy its operating record.
 
 ## Runtime boundaries
 

@@ -444,6 +444,6 @@ fn sanitize(value: &str) -> String {
 }
 
 fn fatal(message: &str) -> ! {
-    eprintln!("TownLight Station updater failed: {message}");
+    eprintln!("Townlight Station updater failed: {message}");
     std::process::exit(2)
 }

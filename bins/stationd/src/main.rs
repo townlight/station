@@ -360,7 +360,7 @@ fn run_console(config: DaemonConfig) -> Result<(), String> {
         station_update_coordinator::run_until(&update_database, &update_application, update_stop)
     });
     println!(
-        "TownLight Station is listening on http://{}",
+        "Townlight Station is listening on http://{}",
         config.address
     );
     let result = station_api::serve_until_with_application_directory_and_health_and_source_evidence_authority(
@@ -1197,12 +1197,12 @@ fn bind(config: &DaemonConfig) -> Result<TcpListener, String> {
         && !parent.as_os_str().is_empty()
     {
         std::fs::create_dir_all(parent).map_err(|error| {
-            format!("TownLight Station could not create its data directory: {error}")
+            format!("Townlight Station could not create its data directory: {error}")
         })?;
     }
     TcpListener::bind(config.address).map_err(|error| {
         format!(
-            "TownLight Station could not listen on {}: {error}",
+            "Townlight Station could not listen on {}: {error}",
             config.address
         )
     })
@@ -1227,7 +1227,7 @@ fn service_status(
 }
 
 fn fatal(message: &str) -> ! {
-    eprintln!("TownLight Station stopped: {message}");
+    eprintln!("Townlight Station stopped: {message}");
     std::process::exit(1);
 }
 

@@ -76,7 +76,7 @@ if ($receipt.source_commit -ne $ExpectedSourceCommit) {
 }
 $service = Get-CimInstance Win32_Service -Filter "Name='TownLightStation'"
 if (-not $service -or $service.State -ne 'Running' -or $service.StartName -ne 'LocalSystem') {
-    throw 'The installed TownLight Station service is not running as LocalSystem.'
+    throw 'The installed Townlight Station service is not running as LocalSystem.'
 }
 if (-not (Test-Path -LiteralPath $feedPath -PathType Leaf) -or
     -not (Test-Path -LiteralPath $fixturePackagePath -PathType Leaf) -or

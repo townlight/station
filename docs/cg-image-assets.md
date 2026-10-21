@@ -1,6 +1,6 @@
 # Managed CG image assets
 
-TownLight Station treats a CG image as an immutable, content-addressed asset. The asset identity is the lowercase SHA-256 digest of the complete PNG or JPEG byte stream. Admission is bounded to 8 MiB and 4096×4096 pixels, and the pure-Rust decoder must decode the image to completion before it can become `ready`; malformed, animated PNG, unsupported, or mismatched content is rejected.
+Townlight Station treats a CG image as an immutable, content-addressed asset. The asset identity is the lowercase SHA-256 digest of the complete PNG or JPEG byte stream. Admission is bounded to 8 MiB and 4096×4096 pixels, and the pure-Rust decoder must decode the image to completion before it can become `ready`; malformed, animated PNG, unsupported, or mismatched content is rejected.
 
 The managed path is derived from the exact canonical CG image root owned by `StationStore`:
 

@@ -30,18 +30,18 @@ function Resolve-TownLightSharedRoot([string]$RequestedRoot) {
     $expectedRoot = if ([string]::IsNullOrWhiteSpace($RequestedRoot)) { $repositoryScripts } else { [IO.Path]::GetFullPath($RequestedRoot).TrimEnd('\') }
     $allowedRoots = @($repositoryScripts, 'C:\TownLightShared')
     if (-not (@($allowedRoots | Where-Object { [string]::Equals($_, $expectedRoot, [StringComparison]::OrdinalIgnoreCase) }).Count -eq 1)) {
-        throw "TownLight shared helper root is not an allowed canonical root: $RequestedRoot"
+        throw "Townlight shared helper root is not an allowed canonical root: $RequestedRoot"
     }
     try { $rootItem = Get-Item -LiteralPath $expectedRoot -Force -ErrorAction Stop }
-    catch { throw "TownLight shared helper root is missing: $expectedRoot" }
+    catch { throw "Townlight shared helper root is missing: $expectedRoot" }
     if (-not $rootItem.PSIsContainer -or ($rootItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or
         -not [string]::Equals($rootItem.FullName.TrimEnd('\'), $expectedRoot, [StringComparison]::OrdinalIgnoreCase)) {
-        throw "TownLight shared helper root drifted or is a reparse point: $expectedRoot"
+        throw "Townlight shared helper root drifted or is a reparse point: $expectedRoot"
     }
     $parent = $rootItem.Parent
     while ($null -ne $parent) {
         if (($parent.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
-            throw "TownLight shared helper root parent is a reparse point: $($parent.FullName)"
+            throw "Townlight shared helper root parent is a reparse point: $($parent.FullName)"
         }
         $next = $parent.Parent
         if ($null -eq $next -or $next.FullName -ieq $parent.FullName) { break }
@@ -52,15 +52,15 @@ function Resolve-TownLightSharedRoot([string]$RequestedRoot) {
 
 function Resolve-TownLightSharedScript([string]$Name, [string]$Root) {
     if ([string]::IsNullOrWhiteSpace($Name) -or -not [string]::Equals([IO.Path]::GetFileName($Name), $Name, [StringComparison]::Ordinal)) {
-        throw 'TownLight shared script name is invalid.'
+        throw 'Townlight shared script name is invalid.'
     }
     $path = Join-Path $Root $Name
     try { $item = Get-Item -LiteralPath $path -Force -ErrorAction Stop }
-    catch { throw "TownLight shared script is missing: $path" }
+    catch { throw "Townlight shared script is missing: $path" }
     if ($item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or
         -not [string]::Equals($item.Directory.FullName.TrimEnd('\'), $Root.TrimEnd('\'), [StringComparison]::OrdinalIgnoreCase) -or
         -not [string]::Equals([IO.Path]::GetFileName($item.Name), $Name, [StringComparison]::Ordinal)) {
-        throw "TownLight shared script drifted or is not a regular non-reparse file: $path"
+        throw "Townlight shared script drifted or is not a regular non-reparse file: $path"
     }
     return $item.FullName
 }

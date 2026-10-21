@@ -232,7 +232,7 @@ $challengeSha256 = (Get-FileHash -LiteralPath $challengePath -Algorithm SHA256).
 
 $launch = & $guard -ConfigurationPath $configuration
 if ($launch.status -ne 'launched' -or $launch.owner_namespace -ne 'townlight-station-codex') {
-    throw 'The shared ownership guard did not return exact TownLight launch authority.'
+    throw 'The shared ownership guard did not return exact Townlight launch authority.'
 }
 
 # Wait for guest-authored provisional evidence without terminating the Sandbox host.
@@ -397,4 +397,4 @@ do {
     Start-Sleep -Milliseconds 500
 } while ([datetime]::UtcNow -lt $deadline)
 
-throw "Timed out waiting for TownLight-owned automatic-materialization provisional evidence after $TimeoutSeconds seconds; the Sandbox host was left untouched."
+throw "Timed out waiting for Townlight-owned automatic-materialization provisional evidence after $TimeoutSeconds seconds; the Sandbox host was left untouched."

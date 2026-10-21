@@ -14,18 +14,18 @@ function Assert-TownLightInstalledPrivateRuntime {
     )
 
     if (-not (Test-Path -LiteralPath $RuntimeRoot -PathType Container)) {
-        throw 'TownLight private runtime verification failed: private_runtime_missing'
+        throw 'Townlight private runtime verification failed: private_runtime_missing'
     }
     $runtimeRootPath = [IO.Path]::GetFullPath($RuntimeRoot).TrimEnd('\')
     $runtimePrefix = $runtimeRootPath + '\'
     $runtimeRootItem = Get-Item -LiteralPath $runtimeRootPath -Force -ErrorAction Stop
     if (($runtimeRootItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
-        throw 'TownLight private runtime verification failed: private_runtime_reparse_point'
+        throw 'Townlight private runtime verification failed: private_runtime_reparse_point'
     }
 
     $manifestFiles = @($RuntimeManifest.files)
     if ($manifestFiles.Count -eq 0 -or $manifestFiles.Count -gt $MaximumManifestFiles) {
-        throw 'TownLight private runtime verification failed: runtime_manifest_file_capacity'
+        throw 'Townlight private runtime verification failed: runtime_manifest_file_capacity'
     }
     $expectedRuntimeFiles = [Collections.Generic.Dictionary[string,object]]::new(
         [StringComparer]::OrdinalIgnoreCase)
@@ -36,7 +36,7 @@ function Assert-TownLightInstalledPrivateRuntime {
             $propertyNames -notcontains 'sha256' -or $file.path -isnot [string] -or
             ($sizeBytes -isnot [int32] -and $sizeBytes -isnot [int64]) -or
             $file.sha256 -isnot [string]) {
-            throw 'TownLight private runtime verification failed: runtime_manifest_file_invalid'
+            throw 'Townlight private runtime verification failed: runtime_manifest_file_invalid'
         }
         $relative = [string]$file.path
         $segments = @($relative -split '/')
@@ -46,11 +46,11 @@ function Assert-TownLightInstalledPrivateRuntime {
             $segments -contains '..' -or [int64]$sizeBytes -lt 0 -or
             [string]$file.sha256 -cnotmatch '^[0-9a-f]{64}$' -or
             $expectedRuntimeFiles.ContainsKey($relative)) {
-            throw 'TownLight private runtime verification failed: runtime_manifest_file_invalid'
+            throw 'Townlight private runtime verification failed: runtime_manifest_file_invalid'
         }
         $resolved = [IO.Path]::GetFullPath((Join-Path $runtimeRootPath $relative.Replace('/', '\')))
         if (-not $resolved.StartsWith($runtimePrefix, [StringComparison]::OrdinalIgnoreCase)) {
-            throw 'TownLight private runtime verification failed: runtime_manifest_file_escaped_root'
+            throw 'Townlight private runtime verification failed: runtime_manifest_file_escaped_root'
         }
         $expectedRuntimeFiles.Add($relative, $file)
     }
@@ -68,12 +68,12 @@ function Assert-TownLightInstalledPrivateRuntime {
         foreach ($entry in @(Get-ChildItem -LiteralPath $directory.FullName -Force -ErrorAction Stop)) {
             $entryCount++
             if ($entryCount -gt $MaximumEntries) {
-                throw 'TownLight private runtime verification failed: private_runtime_entry_capacity'
+                throw 'Townlight private runtime verification failed: private_runtime_entry_capacity'
             }
             $entryPath = [IO.Path]::GetFullPath($entry.FullName)
             if (-not $entryPath.StartsWith($runtimePrefix, [StringComparison]::OrdinalIgnoreCase) -or
                 ($entry.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
-                throw 'TownLight private runtime verification failed: private_runtime_reparse_point'
+                throw 'Townlight private runtime verification failed: private_runtime_reparse_point'
             }
             if ($entry.PSIsContainer) {
                 $pendingDirectories.Push([IO.DirectoryInfo]$entry)
@@ -84,7 +84,7 @@ function Assert-TownLightInstalledPrivateRuntime {
     }
 
     if ($actualRuntimeFiles.Count -ne $expectedRuntimeFiles.Count) {
-        throw 'TownLight private runtime verification failed: private_runtime_file_set_mismatch'
+        throw 'Townlight private runtime verification failed: private_runtime_file_set_mismatch'
     }
     foreach ($actual in $actualRuntimeFiles) {
         $relative = $actual.FullName.Substring($runtimePrefix.Length).Replace('\', '/')
@@ -93,7 +93,7 @@ function Assert-TownLightInstalledPrivateRuntime {
             $actual.Length -ne [int64]$specification.size_bytes -or
             (Get-FileHash -LiteralPath $actual.FullName -Algorithm SHA256).Hash.ToLowerInvariant() -cne
                 [string]$specification.sha256) {
-            throw 'TownLight private runtime verification failed: private_runtime_file_mismatch'
+            throw 'Townlight private runtime verification failed: private_runtime_file_mismatch'
         }
     }
 

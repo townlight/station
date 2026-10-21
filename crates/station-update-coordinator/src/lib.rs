@@ -71,7 +71,7 @@ impl std::fmt::Display for CoordinatorError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::NotConfigured => formatter.write_str(
-                "No signed TownLight Station release source is installed on this station.",
+                "No signed Townlight Station release source is installed on this station.",
             ),
             Self::NoAvailableRelease => formatter
                 .write_str("No current verified release is available to stage on this station."),
@@ -499,7 +499,7 @@ fn synchronize_update_alerts(
             let (summary, detail) = if current.outcome == UpdateCheckOutcome::UpdaterTooOld {
                 (
                     format!(
-                        "TownLight Station {} requires a full installer",
+                        "Townlight Station {} requires a full installer",
                         release.version
                     ),
                     format!(
@@ -509,7 +509,7 @@ fn synchronize_update_alerts(
                 )
             } else {
                 (
-                    format!("TownLight Station {} is available", release.version),
+                    format!("Townlight Station {} is available", release.version),
                     "Review the signed release notes. Download and installation require explicit operator action and a maintenance window."
                         .into(),
                 )

@@ -6,11 +6,11 @@ function Get-TownLightProofApiCoordinates {
 
     if (-not $BaseUri.IsAbsoluteUri -or $BaseUri.Scheme -ne 'http' -or
         -not $BaseUri.IsLoopback -or $BaseUri.UserInfo -or $BaseUri.Query -or $BaseUri.Fragment) {
-        throw 'TownLight installed proofs require an absolute, credential-free HTTP loopback URI.'
+        throw 'Townlight installed proofs require an absolute, credential-free HTTP loopback URI.'
     }
     $path = $BaseUri.AbsolutePath.TrimEnd('/')
     if ($path -and $path -ne '/api/v1') {
-        throw 'TownLight installed proof BaseUri must end at the service origin or /api/v1.'
+        throw 'Townlight installed proof BaseUri must end at the service origin or /api/v1.'
     }
 
     $origin = $BaseUri.GetLeftPart([UriPartial]::Authority)
@@ -66,7 +66,7 @@ function Get-TownLightProofCsrfToken {
         $_.Name -ceq 'townlight_csrf_v1'
     })
     if ($matches.Count -ne 1 -or [string]::IsNullOrWhiteSpace($matches[0].Value)) {
-        throw 'TownLight proof session has no usable CSRF cookie; reconnect explicitly before an unsafe request.'
+        throw 'Townlight proof session has no usable CSRF cookie; reconnect explicitly before an unsafe request.'
     }
     [string]$matches[0].Value
 }
@@ -81,7 +81,7 @@ function Assert-TownLightProofSession {
         [string]::IsNullOrWhiteSpace([string]$Session.Origin) -or
         [string]::IsNullOrWhiteSpace([string]$Session.ApiRoot) -or
         $null -eq $Session.WebSession) {
-        throw 'A connected TownLight installed-proof session is required.'
+        throw 'A connected Townlight installed-proof session is required.'
     }
 }
 
@@ -96,7 +96,7 @@ function Get-TownLightProofRequestUri {
     if ([string]::IsNullOrWhiteSpace($Path) -or -not $Path.StartsWith('/') -or
         $Path.StartsWith('//') -or $Path.Contains('://') -or $Path.Contains('#') -or
         $Path.Contains('..')) {
-        throw 'TownLight proof API paths must be bounded root-relative paths without fragments or traversal.'
+        throw 'Townlight proof API paths must be bounded root-relative paths without fragments or traversal.'
     }
     [uri]($Session.ApiRoot.TrimEnd('/') + $Path)
 }
@@ -113,10 +113,10 @@ function Connect-TownLightProofSession {
     )
 
     if ($Session.PSObject.TypeNames -notcontains 'TownLight.InstalledProofSession') {
-        throw 'Connect-TownLightProofSession requires a TownLight installed-proof session.'
+        throw 'Connect-TownLightProofSession requires a Townlight installed-proof session.'
     }
     if ([string]::IsNullOrWhiteSpace($Credential.UserName)) {
-        throw 'TownLight proof credential username is required.'
+        throw 'Townlight proof credential username is required.'
     }
 
     # A boot change invalidates every prior session. Replace the entire jar before
@@ -154,7 +154,7 @@ function Connect-TownLightProofSession {
         $failure = Get-TownLightProofFailure -ErrorRecord $_
         $status = if ($failure.StatusCode) { "HTTP $($failure.StatusCode)" } else { 'transport failure' }
         $code = if ($failure.Code) { ", $($failure.Code)" } else { '' }
-        throw "TownLight operator login failed ($status$code); no credential or response detail was recorded."
+        throw "Townlight operator login failed ($status$code); no credential or response detail was recorded."
     }
     finally {
         $loginJson = $null
@@ -179,7 +179,7 @@ function Connect-TownLightProofSession {
         $code = if ($failure.Code) { ", $($failure.Code)" } else { '' }
         $Session.WebSession = [Microsoft.PowerShell.Commands.WebRequestSession]::new()
         $Session.Identity = $null
-        throw "TownLight operator session confirmation failed ($status$code); reconnect is required."
+        throw "Townlight operator session confirmation failed ($status$code); reconnect is required."
     }
 }
 
@@ -229,10 +229,10 @@ function Invoke-TownLightProofApi {
     $requestUri = Get-TownLightProofRequestUri -Session $Session -Path $Path
     $safe = $Method -in @('Get', 'Head', 'Options')
     if ($ResponseMode -eq 'Download' -and [string]::IsNullOrWhiteSpace($OutFile)) {
-        throw 'TownLight proof download mode requires an explicit OutFile.'
+        throw 'Townlight proof download mode requires an explicit OutFile.'
     }
     if ($ResponseMode -ne 'Download' -and $OutFile) {
-        throw 'TownLight proof OutFile is valid only in download mode.'
+        throw 'Townlight proof OutFile is valid only in download mode.'
     }
 
     $headers = @{}
@@ -253,7 +253,7 @@ function Invoke-TownLightProofApi {
     }
     if ($null -ne $Body) {
         if ([string]::IsNullOrWhiteSpace($ContentType)) {
-            throw 'TownLight proof requests with a body require an explicit content type.'
+            throw 'Townlight proof requests with a body require an explicit content type.'
         }
         $parameters.ContentType = $ContentType
         if ($ContentType -match '^application/json(?:;|$)' -and $Body -isnot [string]) {
@@ -284,14 +284,14 @@ function Invoke-TownLightProofApi {
         } else {
             'The unsafe request was not replayed; reconnect explicitly before trying again.'
         }
-        throw "TownLight API $Method $pathLabel failed ($status$code). $replay"
+        throw "Townlight API $Method $pathLabel failed ($status$code). $replay"
     }
 
     switch ($ResponseMode) {
         'Json' {
             if ([string]::IsNullOrWhiteSpace([string]$response.Content)) { return $null }
             try { return ($response.Content | ConvertFrom-Json -ErrorAction Stop) }
-            catch { throw "TownLight API $Method $Path returned invalid JSON; response content was not recorded." }
+            catch { throw "Townlight API $Method $Path returned invalid JSON; response content was not recorded." }
         }
         'Text' { return [string]$response.Content }
         'Raw' {
