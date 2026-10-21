@@ -1,4 +1,4 @@
-# TownLight Station engineering rules
+# Townlight Station engineering rules
 
 - Build the complete station product; do not redefine acceptance by shrinking capability scope.
 - Keep the active repository free of historical product names, code layouts, runtime assumptions, and repository history.
@@ -15,7 +15,7 @@
   concurrent launch decision fails closed. Never terminate a sandbox process by name or broad
   search. Cleanup is permitted only for an exact PID, creation identity, and executable recorded by
   the harness that launched it. All Claude-owned or Claude-created local processes and files are
-  inside a no-touch fence, always outside TownLight's ownership boundary, and must not be inspected
+  inside a no-touch fence, always outside Townlight's ownership boundary, and must not be inspected
   beyond the minimum identity needed to detect occupancy, changed, moved, deleted, or used as
   cleanup targets.
 - Run Cargo commands from the workspace root. On Windows, invoke Cargo only through

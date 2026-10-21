@@ -1,4 +1,4 @@
-# TownLight Station project status
+# Townlight Station project status
 
 **Status date:** 2026-08-29  
 **Release verdict:** not a beta release; not a complete PEG/Cablecast-equivalent product  
@@ -6,7 +6,7 @@
 
 ## Bottom line
 
-TownLight Station is a substantial, test-heavy Windows station kernel and control-plane vertical
+Townlight Station is a substantial, test-heavy Windows station kernel and control-plane vertical
 slice. Its strongest areas are process isolation, persistent GStreamer playout, durable authority,
 failure handling, exact artifact identity, transactional update/rollback, and evidence that refuses
 to turn partial results green.
@@ -158,7 +158,7 @@ is not recommended without a new product decision.
 
 ## Recommended takeover order
 
-1. Decide whether TownLight is a narrow station kernel or a funded full replacement program. Do not
+1. Decide whether Townlight is a narrow station kernel or a funded full replacement program. Do not
    use one schedule or status label for both.
 2. If pursuing the narrow beta, freeze one clean commit, make installer production reproducible,
    sign it, and run the exact gate above. Do not add another domain before that receipt passes.

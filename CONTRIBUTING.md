@@ -1,6 +1,6 @@
 # Contributing
 
-TownLight Station is developed in small, executable vertical slices.
+Townlight Station is developed in small, executable vertical slices.
 
 ## Setup
 

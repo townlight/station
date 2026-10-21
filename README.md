@@ -1,10 +1,10 @@
-# TownLight Station
+# Townlight Station
 
 > **Current status:** This is a substantial station-kernel vertical slice, not a complete PEG station
 > product and not a beta release. Read [PROJECT_STATUS.md](PROJECT_STATUS.md) before building,
 > evaluating, or making parity/release claims.
 
-TownLight Station is a locally installed Windows broadcast appliance for LPM and PEG operations. It is being built as one traceable product: station control, deterministic media execution, operator workflows, installation, recovery, distribution, and proof will all ship from this repository.
+Townlight Station is a locally installed Windows broadcast appliance for LPM and PEG operations. It is being built as one traceable product: station control, deterministic media execution, operator workflows, installation, recovery, distribution, and proof will all ship from this repository.
 
 The current foundation provides a versioned station-profile API, strict commissioning validation, an authoritative commissioning report and guided operator workflow, SQLite persistence in WAL mode, a native Windows service, an installed same-origin operator console, durable runtime health/incident authority, authenticated per-channel fallback-slate selection, encrypted email/SMS/webhook operator alert delivery, editable re-alert policy, service-owned Windows resource sampling, scheduled evidence-bearing self-tests, redacted manifested support-bundle export with completed-broadcast receipt binding, and a signed immutable update lifecycle with out-of-process activation, post-update proof, and automatic rollback. It is a working vertical slice of the station control plane, not a feature-complete release.
 
@@ -103,7 +103,7 @@ needed; the runner never accepts a DLL found only through ambient `PATH`.
 
 Installation is health-gated before Inno Setup commits the product registration: the installer stages immutable binaries, installs the private runtime, registers an immediate automatic LocalSystem service with restart recovery, starts it, receives the local readiness response, and writes a candidate receipt. Immediate startup is deliberate: a station must begin channel recovery during boot rather than wait for Windows' delayed-start window. Any failure before formal installation removes the staged service, runtime, and binaries and returns nonzero. Uninstall removes application/runtime files and the service but deliberately preserves station data beneath `%ProgramData%\TownLight Station`.
 
-The full setup executable is deliberately **clean-install/reinstall only**. Before `ssInstall`, it refuses to run when the TownLight application directory, either TownLight service, or this AppId's 64-bit uninstall registration exists, so it cannot overwrite a working installation and later attempt a speculative rollback. It then atomically claims an empty application directory, stages files with no-overwrite copies, and refuses a pre-existing private runtime. Use the installed signed maintenance updater for in-place `.tlu` upgrades. A reinstall after proper uninstall remains supported: Inno removes its uninstall registration while preserved ProgramData, the database, receipts, and manifests alone do not trigger the rejection.
+The full setup executable is deliberately **clean-install/reinstall only**. Before `ssInstall`, it refuses to run when the Townlight application directory, either Townlight service, or this AppId's 64-bit uninstall registration exists, so it cannot overwrite a working installation and later attempt a speculative rollback. It then atomically claims an empty application directory, stages files with no-overwrite copies, and refuses a pre-existing private runtime. Use the installed signed maintenance updater for in-place `.tlu` upgrades. A reinstall after proper uninstall remains supported: Inno removes its uninstall registration while preserved ProgramData, the database, receipts, and manifests alone do not trigger the rejection.
 
 Run `installer\verify-installed.ps1` after installation to rehash the manifest-named candidate installer, compare installed hashes and receipts with that authenticated candidate, and prove the exact canonical service command lines, health endpoint, and required media factories. It resolves the native x64 Program Files known folder, so the expected service paths remain correct even under 32-bit PowerShell. Development candidates are not code-signed; a trusted Windows signing identity and timestamp are mandatory release gates before external distribution.
 
@@ -196,16 +196,16 @@ clean-machine acceptance, and field gates are not done.
 
 ### Shared Windows Sandbox ownership
 
-Windows Sandbox is a shared host resource because independent TownLight and Claude work may use it.
+Windows Sandbox is a shared host resource because independent Townlight and Claude work may use it.
 No harness may assume that it is free or infer ownership from an idle-looking desktop, Hyper-V
-service state, a process name, or an old file. Before any TownLight sandbox launch, run
+service state, a process name, or an old file. Before any Townlight sandbox launch, run
 `scripts\invoke-owned-windows-sandbox.ps1 -CheckOnly`, then launch only through the same script with
-a committed TownLight-owned `.wsb` configuration beneath `harness\windows-sandbox\configs`.
+a committed Townlight-owned `.wsb` configuration beneath `harness\windows-sandbox\configs`.
 
 The launcher serializes the check-and-launch boundary with the machine-global
 `Global\Scott.SharedWindowsSandbox.Launch.v1` mutex. Check-only mode reports
 `no_active_sandbox_detected`, `townlight_harness`, or `external_or_unclaimed`; it never reports the
-resource as free. Every detected process blocks launch. TownLight attribution requires an exact
+resource as free. Every detected process blocks launch. Townlight attribution requires an exact
 PID, creation identity, executable, owner namespace, and run-ID match against immutable records
 beneath `%ProgramData%\Scott Shared Harness\WindowsSandbox\ownership-v1`. It never stops a process,
 removes an ownership record, or overwrites evidence. A future cleanup tool may act only when its own

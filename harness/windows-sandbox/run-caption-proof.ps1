@@ -104,7 +104,7 @@ function Assert-SubstantiveCommissioningReceipt($Receipt) {
 function Get-StationServiceIdentity {
     $service = Get-CimInstance -ClassName Win32_Service -Filter "Name='TownLightStation'"
     if ($null -eq $service -or $service.State -ne 'Running' -or [uint32]$service.ProcessId -eq 0) {
-        throw 'TownLight station service identity is unavailable during authentication proof.'
+        throw 'Townlight station service identity is unavailable during authentication proof.'
     }
     $process = Get-Process -Id ([uint32]$service.ProcessId) -ErrorAction Stop
     [ordered]@{
@@ -521,7 +521,7 @@ try {
             $result.auth_diagnostics.before_bootstrap.process_id -or
             $result.auth_diagnostics.after_bootstrap.process_start_utc -ne
             $result.auth_diagnostics.before_bootstrap.process_start_utc) {
-            throw 'TownLight station service restarted while issuing bootstrap authority.'
+            throw 'Townlight station service restarted while issuing bootstrap authority.'
         }
         if ($bootstrapDocument.session.username -ne $proofCredential.Credential.UserName -or
             @($bootstrapDocument.session.roles | Where-Object { $_ -eq 'setup_admin' }).Count -ne 1) {

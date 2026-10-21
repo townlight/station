@@ -68,7 +68,7 @@ if ($configurationText -notmatch '(?s)<HostFolder>.*townlight-station\\scripts</
     throw 'Clean-install Sandbox shared-verifier mapping is not explicitly read-only.'
 }
 if ($configurationText -notmatch '(?s)<HostFolder>C:\\ProgramData\\TownLight Station\\SandboxEvidence</HostFolder>\s*<SandboxFolder>C:\\TownLightEvidence</SandboxFolder>\s*<ReadOnly>false</ReadOnly>') {
-    throw 'Clean-install Sandbox evidence mapping is not the dedicated TownLight-owned writable boundary.'
+    throw 'Clean-install Sandbox evidence mapping is not the dedicated Townlight-owned writable boundary.'
 }
 if ($configurationText -match '(?i)<HostFolder>.*Claude.*</HostFolder>') {
     throw 'Clean-install Sandbox configuration must never map a Claude-owned path.'

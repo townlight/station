@@ -27,7 +27,7 @@ if ($TimeoutSeconds -lt 300 -or $TimeoutSeconds -gt 3600) {
 $fixture = Get-Item -LiteralPath $fixturePath
 $observedFixtureHash = (Get-FileHash -LiteralPath $fixturePath -Algorithm SHA256).Hash.ToLowerInvariant()
 if ($fixture.Length -ne $fixtureSize -or $observedFixtureHash -ne $fixtureSha256) {
-    throw 'Owned caption proof fixture does not match the exact retained TownLight media input.'
+    throw 'Owned caption proof fixture does not match the exact retained Townlight media input.'
 }
 
 $head = (& git -C $repository rev-parse HEAD).Trim()
@@ -46,7 +46,7 @@ Get-ChildItem -LiteralPath $evidenceRoot -Filter 'caption-proof-*.json' -File -E
 
 $launch = & $guard -ConfigurationPath $configuration
 if ($launch.status -ne 'launched' -or $launch.owner_namespace -ne 'townlight-station-codex') {
-    throw 'The shared ownership guard did not return exact TownLight launch authority.'
+    throw 'The shared ownership guard did not return exact Townlight launch authority.'
 }
 
 # Wait for guest-authored caption evidence without terminating the Sandbox host.
@@ -82,4 +82,4 @@ do {
     Start-Sleep -Milliseconds 500
 } while ([datetime]::UtcNow -lt $deadline)
 
-throw "Timed out waiting for TownLight-owned caption proof evidence after $TimeoutSeconds seconds; the Sandbox host was left untouched."
+throw "Timed out waiting for Townlight-owned caption proof evidence after $TimeoutSeconds seconds; the Sandbox host was left untouched."

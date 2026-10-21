@@ -37,7 +37,7 @@ Get-ChildItem -LiteralPath $evidenceRoot -Filter 'clean-install-*.json' -File -E
 
 $launch = & $guard -ConfigurationPath $configuration
 if ($launch.status -ne 'launched' -or $launch.owner_namespace -ne 'townlight-station-codex') {
-    throw 'The shared ownership guard did not return exact TownLight launch authority.'
+    throw 'The shared ownership guard did not return exact Townlight launch authority.'
 }
 
 # Wait for the guest-authored evidence instead of terminating the Sandbox host.
@@ -67,4 +67,4 @@ do {
     Start-Sleep -Milliseconds 500
 } while ([datetime]::UtcNow -lt $deadline)
 
-throw "Timed out waiting for TownLight-owned clean-install evidence after $TimeoutSeconds seconds; the Sandbox host was left untouched."
+throw "Timed out waiting for Townlight-owned clean-install evidence after $TimeoutSeconds seconds; the Sandbox host was left untouched."

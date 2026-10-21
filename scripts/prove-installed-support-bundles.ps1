@@ -98,7 +98,7 @@ if ($receipt.source_commit -ne $candidate.source_commit) {
 }
 $service = Get-CimInstance Win32_Service -Filter "Name='TownLightStation'"
 if (-not $service -or $service.State -ne 'Running' -or $service.StartName -ne 'LocalSystem') {
-    throw 'The installed TownLight Station service is not running as LocalSystem.'
+    throw 'The installed Townlight Station service is not running as LocalSystem.'
 }
 
 $configured = $false

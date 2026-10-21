@@ -35,7 +35,7 @@ function Open-TownLightNoDeleteDirectoryHandle {
         $Path, 0x00000080, 0x00000001, [IntPtr]::Zero, 3, 0x02200000, [IntPtr]::Zero)
     if ($null -eq $handle -or $handle.IsInvalid) {
         if ($null -ne $handle) { $handle.Dispose() }
-        throw 'TownLight private caption decoder directory could not be retained without write/delete sharing.'
+        throw 'Townlight private caption decoder directory could not be retained without write/delete sharing.'
     }
     return $handle
 }
@@ -48,7 +48,7 @@ function Get-TownLightSha256FromStream {
     )
 
     if (-not $Stream.CanRead -or -not $Stream.CanSeek) {
-        throw 'TownLight caption decoder pin is not a readable seekable file stream.'
+        throw 'Townlight caption decoder pin is not a readable seekable file stream.'
     }
     $Stream.Position = 0
     $sha256 = [Security.Cryptography.SHA256]::Create()
@@ -76,7 +76,7 @@ function Assert-TownLightCaptionDecoderPath {
         (Join-Path $applicationRootPath 'runtime\caption-decoder\ffmpeg.exe'))
     $decoderPath = [IO.Path]::GetFullPath($DecoderPath)
     if (-not [string]::Equals($decoderPath, $expectedDecoderPath, [StringComparison]::OrdinalIgnoreCase)) {
-        throw 'TownLight caption decoder path is outside the trusted installed runtime location.'
+        throw 'Townlight caption decoder path is outside the trusted installed runtime location.'
     }
 
     # File.GetAttributes reads link metadata for the named path. Walk from the
@@ -86,17 +86,17 @@ function Assert-TownLightCaptionDecoderPath {
     $cursor = $decoderPath
     while ($true) {
         if (-not (Test-Path -LiteralPath $cursor)) {
-            throw 'TownLight private caption decoder payload is missing.'
+            throw 'Townlight private caption decoder payload is missing.'
         }
         if (([IO.File]::GetAttributes($cursor) -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
-            throw 'TownLight private caption decoder path contains a reparse point.'
+            throw 'Townlight private caption decoder path contains a reparse point.'
         }
         if ([string]::Equals($cursor, $programFilesRootPath, [StringComparison]::OrdinalIgnoreCase)) {
             break
         }
         $parent = [IO.Directory]::GetParent($cursor)
         if ($null -eq $parent -or [string]::IsNullOrWhiteSpace($parent.FullName)) {
-            throw 'TownLight caption decoder path escaped the trusted application root.'
+            throw 'Townlight caption decoder path escaped the trusted application root.'
         }
         $cursor = [IO.Path]::GetFullPath($parent.FullName).TrimEnd('\')
     }
@@ -104,7 +104,7 @@ function Assert-TownLightCaptionDecoderPath {
     $decoder = Get-Item -LiteralPath $decoderPath -Force -ErrorAction Stop
     if ($decoder.PSIsContainer -or $decoder.Name -cne 'ffmpeg.exe' -or
         ($decoder.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
-        throw 'TownLight private caption decoder is not a regular non-reparse ffmpeg.exe payload.'
+        throw 'Townlight private caption decoder is not a regular non-reparse ffmpeg.exe payload.'
     }
     return [IO.FileInfo]$decoder
 }
@@ -121,7 +121,7 @@ function Open-TownLightPinnedCaptionDecoder {
     )
 
     if ($ExpectedSha256 -cnotmatch '^[0-9a-f]{64}$' -or $ExpectedSizeBytes -le 0) {
-        throw 'TownLight caption decoder manifest identity is invalid.'
+        throw 'Townlight caption decoder manifest identity is invalid.'
     }
     $programFilesRootPath = [IO.Path]::GetFullPath($ProgramFilesRoot).TrimEnd('\')
     $applicationRoot = [IO.Path]::GetFullPath((Join-Path $programFilesRootPath 'TownLight Station'))
@@ -147,7 +147,7 @@ function Open-TownLightPinnedCaptionDecoder {
         $actualSha256 = Get-TownLightSha256FromStream -Stream $stream
         if ($stream.Name -cne $decoder.FullName -or $stream.Length -ne $ExpectedSizeBytes -or
             $afterPin.Length -ne $ExpectedSizeBytes -or $actualSha256 -cne $ExpectedSha256) {
-            throw 'TownLight private caption decoder does not match the candidate manifest.'
+            throw 'Townlight private caption decoder does not match the candidate manifest.'
         }
         return [pscustomobject]@{
             path = $decoder.FullName

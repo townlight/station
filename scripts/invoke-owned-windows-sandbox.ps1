@@ -241,11 +241,11 @@ try {
         $configurationPrefix,
         [StringComparison]::OrdinalIgnoreCase
     )) {
-        throw "The sandbox configuration must be a TownLight-owned file beneath '$configurationRoot'."
+        throw "The sandbox configuration must be a Townlight-owned file beneath '$configurationRoot'."
     }
     if ([IO.Path]::GetExtension($resolvedConfiguration) -ine '.wsb' -or
         -not (Test-Path -LiteralPath $resolvedConfiguration -PathType Leaf)) {
-        throw 'The TownLight-owned Windows Sandbox configuration must be an existing .wsb file.'
+        throw 'The Townlight-owned Windows Sandbox configuration must be an existing .wsb file.'
     }
 
     $sandboxExecutable = Join-Path $env:WINDIR 'System32\WindowsSandbox.exe'

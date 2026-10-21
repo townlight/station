@@ -54,7 +54,7 @@ function Wait-ForTownLightHealth {
         } catch {}
         Start-Sleep -Milliseconds 250
     }
-    throw 'TownLight Station did not return ready health after its service restart.'
+    throw 'Townlight Station did not return ready health after its service restart.'
 }
 
 function Get-BoundedFiles {
@@ -281,7 +281,7 @@ try {
         $completed = Wait-Job -Job $restartJob -Timeout 30
         Assert-Proof ($null -ne $completed) 'TownLight Station did not complete its bounded service restart.'
         try { Receive-Job -Job $restartJob -ErrorAction Stop | Out-Null }
-        catch { throw 'TownLight Station failed its bounded service restart.' }
+        catch { throw 'Townlight Station failed its bounded service restart.' }
     } finally {
         Stop-Job -Job $restartJob -ErrorAction SilentlyContinue
         Remove-Job -Job $restartJob -Force -ErrorAction SilentlyContinue
