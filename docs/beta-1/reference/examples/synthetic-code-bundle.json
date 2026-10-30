@@ -1,0 +1,64 @@
+{
+  "job_id": "job_synthetic_manual",
+  "connector_type": "official_html_extract",
+  "source": {
+    "source_id": "syn-code-source",
+    "name": "Synthetic City Municipal Code",
+    "publisher": "Synthetic City",
+    "source_type": "general_code",
+    "source_category": "municipal_code",
+    "source_url": "https://synthetic.example.gov/code",
+    "file_reference": "synthetic-code.html",
+    "retrieved_at": "2026-01-05",
+    "retrieval_method": "official_html_extract",
+    "checksum": "1856ba859450240a19bff0c18fe2aedd4f6e9e49e8ab55247367e374aa883d49",
+    "source_owner": "Synthetic City Clerk",
+    "is_official": true,
+    "status": "active"
+  },
+  "titles": [
+    {
+      "title_id": "title_18",
+      "title_number": "18",
+      "title_name": "Zoning"
+    }
+  ],
+  "chapters": [
+    {
+      "chapter_id": "chapter_18_20",
+      "title_id": "title_18",
+      "chapter_number": "18.20",
+      "chapter_name": "Dimensional Standards"
+    }
+  ],
+  "sections": [
+    {
+      "section_id": "section_18_20_050",
+      "chapter_id": "chapter_18_20",
+      "section_number": "18.20.050",
+      "section_heading": "Front setback",
+      "administrative_regulation_refs": [],
+      "resolution_refs": [],
+      "policy_refs": [],
+      "approved_summary_refs": []
+    }
+  ],
+  "versions": [
+    {
+      "version_id": "version_18_20_050_current",
+      "section_id": "section_18_20_050",
+      "source_id": "syn-code-source",
+      "version_label": "current",
+      "body": "Synthetic Zoning Code 18.20.050(A): In the R-2 district, the minimum front setback is 20 feet.",
+      "effective_start": "2026-01-01",
+      "effective_end": null,
+      "status": "adopted",
+      "is_current": true,
+      "adoption_event_id": "ord_2026_01"
+    }
+  ],
+  "provenance": {
+    "fixture_name": "synthetic-code.html",
+    "retrieval_method": "official_html_extract"
+  }
+}

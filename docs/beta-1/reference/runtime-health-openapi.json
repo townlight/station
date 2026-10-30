@@ -1,0 +1,57 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Townlight local runtime",
+    "version": "0.1.0"
+  },
+  "paths": {
+    "/modules": {
+      "get": {
+        "summary": "Runtime Health",
+        "operationId": "runtime_health_modules_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/health": {
+      "get": {
+        "summary": "Runtime Health",
+        "operationId": "runtime_health_health_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ready": {
+      "get": {
+        "summary": "Domain Ready",
+        "operationId": "domain_ready_ready_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

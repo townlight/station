@@ -1,0 +1,119 @@
+{
+  "jurisdiction": "Synthetic City",
+  "source_id": "syn-zoning-map",
+  "version": "2026.1",
+  "source_date": "2026-01-05",
+  "crs": "EPSG:4326",
+  "boundary": {
+    "type": "Polygon",
+    "coordinates": [
+      [
+        [
+          -105.27,
+          40.16
+        ],
+        [
+          -105.269,
+          40.16
+        ],
+        [
+          -105.269,
+          40.161
+        ],
+        [
+          -105.27,
+          40.161
+        ],
+        [
+          -105.27,
+          40.16
+        ]
+      ]
+    ]
+  },
+  "zones": {
+    "type": "FeatureCollection",
+    "features": [
+      {
+        "type": "Feature",
+        "id": "zone-r2",
+        "geometry": {
+          "type": "Polygon",
+          "coordinates": [
+            [
+              [
+                -105.27,
+                40.16
+              ],
+              [
+                -105.269,
+                40.16
+              ],
+              [
+                -105.269,
+                40.161
+              ],
+              [
+                -105.27,
+                40.161
+              ],
+              [
+                -105.27,
+                40.16
+              ]
+            ]
+          ]
+        },
+        "properties": {
+          "code": "R-2",
+          "name": "Residential Two",
+          "section_number": "18.20.050"
+        }
+      }
+    ]
+  },
+  "parcels": {
+    "type": "FeatureCollection",
+    "features": [
+      {
+        "type": "Feature",
+        "id": "parcel-syn-1",
+        "geometry": {
+          "type": "Polygon",
+          "coordinates": [
+            [
+              [
+                -105.27,
+                40.16
+              ],
+              [
+                -105.269,
+                40.16
+              ],
+              [
+                -105.269,
+                40.161
+              ],
+              [
+                -105.27,
+                40.161
+              ],
+              [
+                -105.27,
+                40.16
+              ]
+            ]
+          ]
+        },
+        "properties": {
+          "parcel_number": "SYN-0001",
+          "address": "100 Synthetic Way"
+        }
+      }
+    ]
+  },
+  "overlays": {
+    "type": "FeatureCollection",
+    "features": []
+  }
+}

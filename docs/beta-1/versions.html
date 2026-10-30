@@ -1,0 +1,135 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="description" content=""><title>Versions
+and Candidate Identity | Townlight Beta 1</title><style>
+:root{--ink:#182f3a;--muted:#526775;--accent:#006b64;--paper:#fff;--wash:#f1f6f5;--line:#cfdddf;--warm:#dceab2}
+*{box-sizing:border-box}html{scroll-behavior:smooth}body{margin:0;background:var(--paper);color:var(--ink);font:17px/1.65 "Segoe UI",Arial,sans-serif}a{color:#006b64;text-underline-offset:3px}a:hover{text-decoration-thickness:2px}a:focus-visible,button:focus-visible,input:focus-visible{outline:3px solid #a25900;outline-offset:4px}.skip{position:absolute;left:-9999px}.skip:focus{left:1rem;top:1rem;background:white;padding:1rem;z-index:20}header{border-bottom:1px solid var(--line);padding:1.1rem 5vw;display:flex;align-items:center;gap:1.5rem;flex-wrap:wrap}header .brand{font-size:1.3rem;font-weight:750;letter-spacing:-.04em;text-decoration:none;color:var(--ink)}header nav{margin-left:auto;display:flex;gap:1.25rem;flex-wrap:wrap;font-size:.88rem}.edition{font:700 .72rem/1.5 "Segoe UI",sans-serif;letter-spacing:.12em;text-transform:uppercase;color:var(--accent)}.wrap{max-width:1240px;margin:auto;padding:0 4vw}.hero{padding:5rem 0 3.2rem;max-width:950px}.hero h1{font-size:clamp(2.5rem,5vw,4.7rem);line-height:1.08;letter-spacing:-.045em;margin:1rem 0 1.5rem;font-weight:650}.hero .lead{font-size:1.26rem;max-width:780px;color:var(--muted)}.actions{display:flex;gap:.8rem;flex-wrap:wrap;margin:1.8rem 0}.button{display:inline-block;padding:.7rem 1.15rem;border:1px solid var(--accent);border-radius:4px;text-decoration:none;font-weight:650}.button.primary{background:var(--accent);color:#fff}.facts{display:flex;gap:1.5rem;flex-wrap:wrap;font-size:.85rem;color:var(--muted)}.section{padding:3rem 0;border-top:1px solid var(--line)}h2{font-size:1.8rem;line-height:1.3;letter-spacing:-.025em;margin:2.5rem 0 1rem}h3{font-size:1.18rem;line-height:1.45;margin:1.8rem 0 .7rem}h4{font-size:1rem;margin:1.3rem 0 .6rem}p{margin:.85rem 0 1rem}ul,ol{padding-left:1.6rem}li{margin:.4rem 0}strong{font-weight:650}.grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:1.6rem}.product{border-top:3px solid var(--accent);padding:1.4rem 0}.product h3{font-size:1.65rem;margin:.4rem 0}.product p{color:var(--muted)}.number{font-size:.76rem;letter-spacing:.1em}.split{display:grid;grid-template-columns:1fr 1fr;gap:3rem}.flow{width:100%;height:auto;display:block;margin:1.8rem 0}.caption{font-size:.85rem;color:var(--muted)}.reading{max-width:860px}.doclayout{display:grid;grid-template-columns:245px minmax(0,1fr);gap:3rem;max-width:1320px;margin:auto;padding:2rem 4vw}.toc{font-size:.84rem;align-self:start;position:sticky;top:1rem;max-height:90vh;overflow:auto;padding-right:.8rem}.toc ul{list-style:none;padding:0}.toc li{margin:.5rem 0}.toc li li{padding-left:.8rem}.toc a{text-decoration:none}.docbody{min-width:0}.docbody h1{font-size:2.7rem;line-height:1.1;letter-spacing:-.04em}.docbody h2{border-top:1px solid var(--line);padding-top:1.8rem}.docbody img{max-width:100%;height:auto}.docmeta{color:var(--muted);font-size:.9rem}.docbody section{scroll-margin-top:1rem}table{width:100%;border-collapse:collapse;font-size:.87rem;line-height:1.5;margin:1.3rem 0;table-layout:auto}th{text-align:left;background:var(--wash);font-weight:650}th,td{padding:.65rem .7rem;border-bottom:1px solid var(--line);vertical-align:top;overflow-wrap:anywhere}thead{display:table-header-group}pre{background:#f2f5f6;padding:1rem;border:1px solid #dfe7e8;white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word;font:13px/1.6 Consolas,monospace}code{font: .85em/1.6 Consolas,monospace;overflow-wrap:anywhere}pre code{font-size:inherit}blockquote{border-left:3px solid var(--accent);padding-left:1rem;margin-left:0;color:var(--muted)}.search{padding:.65rem;border:1px solid #789399;border-radius:4px;width:100%;font:inherit}.search-status{font-size:.8rem;color:var(--muted)}footer{border-top:1px solid var(--line);padding:2rem 5vw;margin-top:3rem;font-size:.85rem;color:var(--muted);display:flex;gap:2rem;justify-content:space-between;flex-wrap:wrap}.small{font-size:.9rem;color:var(--muted)}.api-entry{padding:1.2rem 0;border-top:1px solid var(--line)}.api-entry h3{overflow-wrap:anywhere}.method{font-size:.76rem;font-weight:750;color:var(--accent)}details{margin:1rem 0}summary{cursor:pointer;font-weight:650}.index-columns{columns:2;column-gap:2rem}.index-columns li{break-inside:avoid}
+@media(max-width:850px){.grid{grid-template-columns:1fr 1fr}.split{grid-template-columns:1fr}.doclayout{grid-template-columns:1fr;gap:1rem}.toc{position:static;max-height:none}.hero{padding-top:3rem}header nav{margin-left:0}.docbody h1{font-size:2.2rem}}
+@media(max-width:520px){.grid{grid-template-columns:1fr}.wrap{padding:0 6vw}header{padding:1rem 6vw}.hero h1{font-size:2.6rem}.index-columns{columns:1}table{font-size:.78rem}th,td{padding:.45rem}.doclayout{padding:1rem 6vw}.facts{gap:.5rem}}
+main,.toc a,.hero h1{overflow-wrap:anywhere}
+@page{size:Letter;margin:.7in .65in .75in}
+@media print{html{scroll-behavior:auto}body{font:10.5pt/1.45 Arial,sans-serif;color:#172f39}header,footer,.search-area,.screen-only{display:none}.doclayout{display:block;padding:0;max-width:none}.toc{position:static;max-height:none;overflow:visible;font-size:10pt;break-after:page}.toc>h2{border:0}.toc ul{columns:2;column-gap:.3in}.toc li{break-inside:avoid}.docbody h1{font-size:30pt}.docbody h2{font-size:19pt;break-after:avoid;padding-top:.15in;margin-top:.35in}.docbody h3{font-size:12pt;break-after:avoid}.docbody h4{break-after:avoid}p{orphans:3;widows:3}pre{font-size:8.2pt;line-height:1.4;padding:.1in;break-inside:auto}table{font-size:8.4pt;line-height:1.35}th,td{padding:.06in .07in}tr{break-inside:avoid}.flow{max-height:6in;object-fit:contain;break-inside:avoid}a{color:#172f39;text-decoration:underline}.cover{break-after:page;padding-top:1in}.cover .edition{font-size:11pt}.cover h1{font-size:32pt}.cover .lead{font-size:14pt}.api-entry{break-inside:auto}.api-entry h3{break-after:avoid}.index-columns{columns:2}}
+</style></head><body><a class="skip" href="#main">Skip to content</a><header><a class="brand" href="./index.html">townlight<span aria-hidden="true"> ·</span></a><span class="edition">Townlight Beta 1</span><nav aria-label="Main"><a href="./index.html">Products</a><span>Suite manual in companion</span><a href="./reference/index.html">Technical reference</a><a href="./terms.html">Terms and license</a></nav></header>
+<main id="main"><div class="cover wrap"><div class="hero"><div class="edition">Townlight Beta 1</div><h1>Versions
+and Candidate
+Identity</h1><p class="lead">Staff guide and technical reference</p><p class="docmeta">Documentation edition 30 October 2026<br>Existing component versions retained<br>Signed suite installer 1.6.0.1<br>Private beta documentation companion</p></div></div><div class="doclayout"><aside class="toc" aria-label="Table of contents"><h2>Contents</h2><div class="search-area"><label for="find-section">Find a section</label><input class="search" id="find-section" type="search" placeholder="Type a heading"><p class="search-status" aria-live="polite"></p></div><ul>
+<li><a href="#candidate-identity" id="toc-candidate-identity">Candidate
+identity</a></li>
+<li><a href="#existing-component-versions"
+id="toc-existing-component-versions">Existing component
+versions</a></li>
+<li><a href="#versioning-policy" id="toc-versioning-policy">Versioning
+policy</a></li>
+</ul></aside><article class="docbody"><h2
+id="candidate-identity">Candidate identity</h2>
+<table>
+<colgroup>
+<col style="width: 50%" />
+<col style="width: 50%" />
+</colgroup>
+<thead>
+<tr>
+<th>Identity</th>
+<th>Value</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Public documentation identity</td>
+<td>Townlight Beta 1</td>
+</tr>
+<tr>
+<td>Installer version</td>
+<td>1.6.0.1</td>
+</tr>
+<tr>
+<td>Native desktop source version</td>
+<td>1.6.0-1</td>
+</tr>
+<tr>
+<td>Candidate MSI SHA256</td>
+<td><code>98bcdef11ebdf5c767f620c904ff49f85115fde3b5c23f62703b111e645aaf86</code></td>
+</tr>
+<tr>
+<td>Corresponding-source SHA256</td>
+<td><code>84a23e1297e42d17b16cfc9e51b2dd78bc46414c0de8ad7ebd2466c1a409d06b</code></td>
+</tr>
+<tr>
+<td>Current owned software license</td>
+<td>AGPL-3.0-only</td>
+</tr>
+<tr>
+<td>Supported acceptance profile</td>
+<td>Windows x64 fresh install; inspections-preview; separate Station
+configuration</td>
+</tr>
+</tbody>
+</table>
+<p>“Townlight Beta 1” identifies this coordinated beta delivery. It does
+not renumber the installer, native binary, Python packages or historical
+receipts. Component versions may differ. This documentation is a later
+companion to unchanged signed bytes, not a rebuilt installer. Historical
+release pages and manuals describe their own versions and are not the
+download instructions for this private candidate.</p>
+<h2 id="existing-component-versions">Existing component versions</h2>
+<table>
+<thead>
+<tr>
+<th>Product</th>
+<th>Package</th>
+<th>Version</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Core</td>
+<td>civiccore</td>
+<td>1.3.0.dev1</td>
+</tr>
+<tr>
+<td>Records</td>
+<td>civicrecords-ai</td>
+<td>1.8.0.dev1</td>
+</tr>
+<tr>
+<td>Meetings</td>
+<td>civicclerk</td>
+<td>1.0.4</td>
+</tr>
+<tr>
+<td>Code</td>
+<td>civiccode</td>
+<td>1.0.8</td>
+</tr>
+<tr>
+<td>Zoning</td>
+<td>civiczone</td>
+<td>0.2.2</td>
+</tr>
+<tr>
+<td>Planning</td>
+<td>civicplan</td>
+<td>0.4.0.dev1</td>
+</tr>
+<tr>
+<td>Permitting</td>
+<td>civicpermit</td>
+<td>0.3.0+dev.1</td>
+</tr>
+<tr>
+<td>Inspections</td>
+<td>civicinspect</td>
+<td>0.3.0+dev.1</td>
+</tr>
+<tr>
+<td>Station</td>
+<td>townlight-station</td>
+<td>0.3.0</td>
+</tr>
+</tbody>
+</table>
+<h2 id="versioning-policy">Versioning policy</h2>
+<p>Use Townlight Beta 1 as the coordinated documentation label. Keep
+existing package, binary and installer versions. Advance technical
+versions only with an actual software change and its packaging decision.
+Never rewrite historical receipts to make their versions match a display
+label.</p></article></div></main><footer><span>Townlight Beta 1 · Local private-beta documentation · AGPL-3.0-only</span><span><a href="./versions.html">Exact versions and candidate</a> · CivicCast remains separate</span></footer>
+<script>const search=document.getElementById('find-section');if(search)search.addEventListener('input',()=>{const q=search.value.toLowerCase();let n=0;document.querySelectorAll('.toc li').forEach(li=>{const match=li.textContent.toLowerCase().includes(q);li.hidden=!match;if(match)n++;});document.querySelector('.search-status').textContent=q?n+' matching entries':'';});</script></body></html>

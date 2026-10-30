@@ -1,0 +1,62 @@
+[
+  {
+    "name": "list_sources",
+    "signature": "",
+    "doc": "List the media platforms and input kinds textflowkit can transcribe.\n\nReturns recognised platform names plus 'local' (filesystem paths) and\n'direct' (direct media URLs).",
+    "line": 241
+  },
+  {
+    "name": "transcribe_media",
+    "signature": "source: str, language: str | None=None, formats: str='json,srt,txt', output_dir: str | None=None, model: str | None=None, device: str | None=None, cookies_from_browser: str | None=None, diarize: bool=False, translate_to: str | None=None, engine: str=DEFAULT_ENGINE",
+    "doc": "Start transcribing a media URL or local file. Returns immediately with a job id.\n\nThe work runs in the background; poll get_job_status until the job reaches a\nterminal state - 'done', 'error', or 'cancelled' - rather than polling only\nfor 'done'. State 'done' then reads with get_transcript; 'error' and\n'cancelled' are terminal and stop the poll, and each response's `next` field\nsays what to do. Do not expect a transcript in this response.\n\nArgs:\n    source: A media URL (YouTube, TikTok, Facebook, Instagram, Vimeo,\n        Twitch, Bilibili, Rumble, Kick, Zoom, Medal, Loom, Dropbox, or a\n        direct media link) or a path to a local file.\n    language: Optional ISO language code (e.g. 'en'). Auto-detected if omitted.\n    formats: Comma-separated outputs to write when output_dir is set.\n        Available: txt, srt, vtt, md, json, docx, pdf. The binary formats\n        (docx, pdf) are written to disk and require the export extra.\n    output_dir: Directory to write rendered files into. Omit to keep the\n        transcript in memory only.\n    model: Model name. When omitted it resolves to the selected engine's own\n        default: 'whistle' for the Whistle engine (the default), or a\n        Whisper size ('tiny', 'base', 'small', 'medium', 'large') when\n        'whisper' or 'faster-whisper' is selected.\n    device: Torch device ('cuda' or 'cpu'). Auto-detected when omitted. This\n        applies to the Whisper-family engines; Whistle is CPU-only and a\n        non-CPU device is refused rather than quietly ignored.\n    cookies_from_browser: Pass cookies to yt-dlp from a browser, e.g.\n        'firefox'. Only for media you are authorised to access.\n    diarize: Label speakers. Requires the optional diarize extra and a gated\n        Hugging Face model; the job fails with a clear error if unavailable\n        rather than returning empty speakers.\n    translate_to: Target language code (e.g. 'es'). Translates the transcript\n        with the configured backend; fails loudly if it is unreachable.\n    engine: Speech engine. 'whistle' (the default: a CPU-only native engine\n        that needs no torch) or 'whisper' (openai-whisper on the torch stack\n        - ROCm on AMD, CUDA on NVIDIA, CPU otherwise; needs the whisper\n        extra), or the opt-in 'faster-whisper', a CTranslate2 engine for CPU\n        and Apple Silicon that needs the faster-whisper extra. No speed or\n        accuracy comparison is claimed here.",
+    "line": 255
+  },
+  {
+    "name": "submit_batch_media",
+    "signature": "sources: list[Any], language: str | None=None, formats: str='json,srt,txt', output_dir: str | None=None, model: str | None=None, device: str | None=None, cookies_from_browser: str | None=None, diarize: bool=False, translate_to: str | None=None, resume: bool=False, engine: str=DEFAULT_ENGINE",
+    "doc": "Queue multiple independent media jobs and return each job handle.\n\n`sources` is a list; a top-level value that is not a list at all is refused\nby the tool schema before this function runs. Each *entry* gets its own job,\nso one bad source cannot hide the others: a source that cannot be admitted (a\nnon-object entry, or a non-string/empty source) is reported as its own item\nerror, identified by its zero-based `index`, and the remaining sources are\nstill queued. Poll each returned job_id with get_job_status.\n\nArgs:\n    sources: Media URLs or local file paths; one job per source.\n    language: Optional ISO language code (e.g. 'en') applied to every job.\n    formats: Comma-separated outputs to write when output_dir is set.\n        Available: txt, srt, vtt, md, json, docx, pdf. The binary formats\n        (docx, pdf) require the export extra.\n    output_dir: Directory to write rendered files into.\n    model: Model name. When omitted it resolves to the selected engine's own\n        default: 'whistle' for the Whistle engine (the default), or a\n        Whisper size when 'whisper'/'faster-whisper' is selected.\n    device: Torch device ('cuda' or 'cpu'). Auto-detected when omitted.\n        Applies to the Whisper-family engines; Whistle is CPU-only.\n    cookies_from_browser: Pass cookies to yt-dlp from a browser, e.g.\n        'firefox'. Only for media you are authorised to access.\n    diarize: Label speakers (needs the diarize extra and a gated model).\n    translate_to: Target language code; fails loudly if unreachable.\n    resume: Reuse matching saved checkpoints and completed transcripts.\n    engine: Speech engine, applied to every job. 'whistle' (the default: a\n        CPU-only native engine that needs no torch), 'whisper' (openai-whisper\n        on the torch stack; needs the whisper extra), or the opt-in\n        'faster-whisper' (CPU/Mac; needs the faster-whisper extra). This one\n        engine is shared in every item's request, so an unusable engine (e.g.\n        the optional extra is absent) fails every item at admission; the\n        per-item errors carry each item's index and source.",
+    "line": 343
+  },
+  {
+    "name": "resume_job",
+    "signature": "job_id: str",
+    "doc": "Resume an interrupted job using its saved request and transcript checkpoint.\n\nThe *current* input root and service work root are applied, exactly as on the\nHTTP surface: a source that falls outside a root the operator has since\ntightened is refused rather than resumed using the wider root saved with the\noriginal request, and any scratch tree is created under the configured work\nroot rather than a root saved before the operator last changed it.",
+    "line": 432
+  },
+  {
+    "name": "get_job_status",
+    "signature": "job_id: str",
+    "doc": "Check the state of a transcription job.\n\nArgs:\n    job_id: The id returned by transcribe_media.",
+    "line": 456
+  },
+  {
+    "name": "get_transcript",
+    "signature": "job_id: str, fmt: str='txt', offset: int=0, limit: int | None=None, start: float | None=None, end: float | None=None, include_words: bool=False",
+    "doc": "Read the transcript for a completed job, optionally a slice of it.\n\nFor long transcripts do not request everything: page with offset/limit, or\nask for a time range with start/end (seconds). The response reports\ntotal_segments and has_more so you know whether to continue.\n\nArgs:\n    job_id: The id returned by transcribe_media.\n    fmt: How to render the text - txt, srt, vtt, md, or json.\n    offset: Skip this many segments within the selected range.\n    limit: Return at most this many segments.\n    start: Only segments ending at or after this time (seconds).\n    end: Only segments starting at or before this time (seconds).\n    include_words: Include source-language word timings in JSON output.\n        Defaults to false to keep model context small; translated text\n        does not produce translated word timings.",
+    "line": 518
+  },
+  {
+    "name": "search_transcript",
+    "signature": "job_id: str, query: str, limit: int=20, context: int=1, case_sensitive: bool=False",
+    "doc": "Search a completed transcript for a phrase.\n\nReturns matching segments with their timestamps, in the order they appear in\nthe transcript - not sorted by relevance or recency. Use this instead of\npaging through a long transcript looking for a topic.\n\nArgs:\n    job_id: The id returned by transcribe_media.\n    query: Substring to find (not fuzzy).\n    limit: Maximum number of matches to return.\n    context: How many neighbouring segments to include either side.\n    case_sensitive: Match case-sensitively (default false).",
+    "line": 600
+  },
+  {
+    "name": "export_transcript",
+    "signature": "job_id: str, output_dir: str, formats: str='srt,vtt,txt,json'",
+    "doc": "Write a completed transcript to files on disk.\n\nArgs:\n    job_id: The id returned by transcribe_media.\n    output_dir: Directory to write into. Created if missing.\n    formats: Comma-separated formats to write - txt, srt, vtt, md, json,\n        docx, pdf. The binary formats (docx, pdf) require the export extra.",
+    "line": 660
+  },
+  {
+    "name": "list_jobs",
+    "signature": "limit: int=20, state: str | None=None",
+    "doc": "List recent transcription jobs, newest first.\n\nArgs:\n    limit: Maximum number of jobs to return.\n    state: Optional filter - pending, running, done, error, or cancelled.",
+    "line": 711
+  },
+  {
+    "name": "cancel_job",
+    "signature": "job_id: str",
+    "doc": "Request cancellation of a pending or running job.\n\nA queued job is cancelled immediately and never starts. A running job stops\nat its next stage boundary, so it stays 'running' with cancel_requested set\nuntil the boundary is reached. Poll get_job_status until state is\n'cancelled'.\n\nArgs:\n    job_id: The id returned by transcribe_media.",
+    "line": 737
+  }
+]

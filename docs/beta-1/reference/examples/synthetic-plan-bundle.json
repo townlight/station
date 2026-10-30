@@ -1,0 +1,48 @@
+{
+  "plan_id": "syn-plan",
+  "plan_type": "comprehensive",
+  "title": "Synthetic Comprehensive Plan",
+  "jurisdiction": "Synthetic City",
+  "dataset_kind": "municipal",
+  "status": "adopted",
+  "visibility": "public",
+  "source_date": "2026-01-01",
+  "adopted_on": "2026-01-02",
+  "effective_on": "2026-01-03",
+  "reviewer_label": "synthetic-reviewer",
+  "change_note": "Synthetic acceptance import (worker 49).",
+  "documents": [
+    {
+      "document_id": "doc-1",
+      "filename": "plan.md",
+      "media_type": "text/markdown",
+      "content_base64": "IyBTeW50aGV0aWMgYWRvcHRlZCBwbGFuCgpHb2FsOiBTYWZlIHN0cmVldHMKVG9waWM6IHNpZGV3YWxrcwoKU3ludGhldGljIFBsYW4gMy4xOiBLZWVwIHRoZSBwZWRlc3RyaWFuIG5ldHdvcmsgY29udGludW91cy4K",
+      "sha256": "4020cef760522ac096ef6ca6422753115e2c9b5862fe966e92ff7f3e433bc2b1"
+    }
+  ],
+  "policies": [
+    {
+      "policy_id": "p-1",
+      "document_id": "doc-1",
+      "title": "Sidewalk continuity",
+      "goal": "Safe streets",
+      "objective": "Keep walks clear",
+      "topic_key": "sidewalks",
+      "citation": "Synthetic Plan 3.1",
+      "excerpt": "Keep the pedestrian network continuous.",
+      "anchor": "sec-3-1",
+      "relevance": "Cited public policy for sidewalk continuity.",
+      "staff_verified": true,
+      "neighborhoods": [
+        "Northbank"
+      ]
+    }
+  ],
+  "adoption_evidence": [
+    {
+      "kind": "manual-record",
+      "reference": "Synthetic adoption minute 2026-01-02",
+      "note": "Synthetic acceptance evidence; not a real record."
+    }
+  ]
+}

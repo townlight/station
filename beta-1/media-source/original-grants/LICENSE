@@ -1,0 +1,40 @@
+# CivicCast License Notice
+
+CivicCast is a dual-licensed open-source project. Different parts of this repository are released under different licenses, each chosen for the kind of artifact it covers.
+
+## Code
+
+All source code in this repository — Python modules, JavaScript / TypeScript modules, build scripts, configuration files, and CI workflows — is licensed under the **Apache License, Version 2.0**.
+
+The full text is in [LICENSE-CODE](LICENSE-CODE).
+
+Every source file carries the SPDX header:
+
+```
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) The CivicCast Authors
+```
+
+## Documentation
+
+All documentation in this repository — Markdown files in `docs/`, the README, CONTRIBUTING, SECURITY, SUPPORT, CODE_OF_CONDUCT, CHANGELOG, ADRs, the spec, the release plan, templates, and any prose-format files outside source code — is licensed under the **Creative Commons Attribution 4.0 International License (CC BY 4.0)**.
+
+The full text is in [LICENSE-DOCS](LICENSE-DOCS).
+
+## Why dual-licensed
+
+Apache 2.0 is the right license for the executable artifact: it is permissive, patent-protective, widely accepted by municipal procurement and nonprofit governance, and compatible with redistribution by downstream packagers.
+
+CC BY 4.0 is the right license for the documentation: it explicitly contemplates non-software content, encourages reuse with attribution, and is the standard choice for public-good documentation that operators may need to fork into their own internal docs, training materials, or board-meeting handouts.
+
+## Contributions
+
+Contributions are accepted under the [Developer Certificate of Origin](https://developercertificate.org/) — see [CONTRIBUTING.md](CONTRIBUTING.md). By signing off on a commit, you agree your code is licensed under Apache 2.0 and your documentation under CC BY 4.0.
+
+## Trademark
+
+"CivicCast" is the project name. Trademark policy will be added before the public 1.0 release. Until then, please attribute clearly when using the name in derived works.
+
+## Third-party components
+
+Third-party components included in this repository (or required at install time) retain their own licenses. See the [`pyproject.toml`](pyproject.toml) and the per-module dependency lists for the canonical inventory once Sprint 0.1 establishes the dependency graph.
