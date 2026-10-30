@@ -1,0 +1,195 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="description" content=""><title>MCP
+and Transcription Source Reference | Townlight Beta 1</title><style>
+:root{--ink:#182f3a;--muted:#526775;--accent:#006b64;--paper:#fff;--wash:#f1f6f5;--line:#cfdddf;--warm:#dceab2}
+*{box-sizing:border-box}html{scroll-behavior:smooth}body{margin:0;background:var(--paper);color:var(--ink);font:17px/1.65 "Segoe UI",Arial,sans-serif}a{color:#006b64;text-underline-offset:3px}a:hover{text-decoration-thickness:2px}a:focus-visible,button:focus-visible,input:focus-visible{outline:3px solid #a25900;outline-offset:4px}.skip{position:absolute;left:-9999px}.skip:focus{left:1rem;top:1rem;background:white;padding:1rem;z-index:20}header{border-bottom:1px solid var(--line);padding:1.1rem 5vw;display:flex;align-items:center;gap:1.5rem;flex-wrap:wrap}header .brand{font-size:1.3rem;font-weight:750;letter-spacing:-.04em;text-decoration:none;color:var(--ink)}header nav{margin-left:auto;display:flex;gap:1.25rem;flex-wrap:wrap;font-size:.88rem}.edition{font:700 .72rem/1.5 "Segoe UI",sans-serif;letter-spacing:.12em;text-transform:uppercase;color:var(--accent)}.wrap{max-width:1240px;margin:auto;padding:0 4vw}.hero{padding:5rem 0 3.2rem;max-width:950px}.hero h1{font-size:clamp(2.5rem,5vw,4.7rem);line-height:1.08;letter-spacing:-.045em;margin:1rem 0 1.5rem;font-weight:650}.hero .lead{font-size:1.26rem;max-width:780px;color:var(--muted)}.actions{display:flex;gap:.8rem;flex-wrap:wrap;margin:1.8rem 0}.button{display:inline-block;padding:.7rem 1.15rem;border:1px solid var(--accent);border-radius:4px;text-decoration:none;font-weight:650}.button.primary{background:var(--accent);color:#fff}.facts{display:flex;gap:1.5rem;flex-wrap:wrap;font-size:.85rem;color:var(--muted)}.section{padding:3rem 0;border-top:1px solid var(--line)}h2{font-size:1.8rem;line-height:1.3;letter-spacing:-.025em;margin:2.5rem 0 1rem}h3{font-size:1.18rem;line-height:1.45;margin:1.8rem 0 .7rem}h4{font-size:1rem;margin:1.3rem 0 .6rem}p{margin:.85rem 0 1rem}ul,ol{padding-left:1.6rem}li{margin:.4rem 0}strong{font-weight:650}.grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:1.6rem}.product{border-top:3px solid var(--accent);padding:1.4rem 0}.product h3{font-size:1.65rem;margin:.4rem 0}.product p{color:var(--muted)}.number{font-size:.76rem;letter-spacing:.1em}.split{display:grid;grid-template-columns:1fr 1fr;gap:3rem}.flow{width:100%;height:auto;display:block;margin:1.8rem 0}.caption{font-size:.85rem;color:var(--muted)}.reading{max-width:860px}.doclayout{display:grid;grid-template-columns:245px minmax(0,1fr);gap:3rem;max-width:1320px;margin:auto;padding:2rem 4vw}.toc{font-size:.84rem;align-self:start;position:sticky;top:1rem;max-height:90vh;overflow:auto;padding-right:.8rem}.toc ul{list-style:none;padding:0}.toc li{margin:.5rem 0}.toc li li{padding-left:.8rem}.toc a{text-decoration:none}.docbody{min-width:0}.docbody h1{font-size:2.7rem;line-height:1.1;letter-spacing:-.04em}.docbody h2{border-top:1px solid var(--line);padding-top:1.8rem}.docbody img{max-width:100%;height:auto}.docmeta{color:var(--muted);font-size:.9rem}.docbody section{scroll-margin-top:1rem}table{width:100%;border-collapse:collapse;font-size:.87rem;line-height:1.5;margin:1.3rem 0;table-layout:auto}th{text-align:left;background:var(--wash);font-weight:650}th,td{padding:.65rem .7rem;border-bottom:1px solid var(--line);vertical-align:top;overflow-wrap:anywhere}thead{display:table-header-group}pre{background:#f2f5f6;padding:1rem;border:1px solid #dfe7e8;white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word;font:13px/1.6 Consolas,monospace}code{font: .85em/1.6 Consolas,monospace;overflow-wrap:anywhere}pre code{font-size:inherit}blockquote{border-left:3px solid var(--accent);padding-left:1rem;margin-left:0;color:var(--muted)}.search{padding:.65rem;border:1px solid #789399;border-radius:4px;width:100%;font:inherit}.search-status{font-size:.8rem;color:var(--muted)}footer{border-top:1px solid var(--line);padding:2rem 5vw;margin-top:3rem;font-size:.85rem;color:var(--muted);display:flex;gap:2rem;justify-content:space-between;flex-wrap:wrap}.small{font-size:.9rem;color:var(--muted)}.api-entry{padding:1.2rem 0;border-top:1px solid var(--line)}.api-entry h3{overflow-wrap:anywhere}.method{font-size:.76rem;font-weight:750;color:var(--accent)}details{margin:1rem 0}summary{cursor:pointer;font-weight:650}.index-columns{columns:2;column-gap:2rem}.index-columns li{break-inside:avoid}
+@media(max-width:850px){.grid{grid-template-columns:1fr 1fr}.split{grid-template-columns:1fr}.doclayout{grid-template-columns:1fr;gap:1rem}.toc{position:static;max-height:none}.hero{padding-top:3rem}header nav{margin-left:0}.docbody h1{font-size:2.2rem}}
+@media(max-width:520px){.grid{grid-template-columns:1fr}.wrap{padding:0 6vw}header{padding:1rem 6vw}.hero h1{font-size:2.6rem}.index-columns{columns:1}table{font-size:.78rem}th,td{padding:.45rem}.doclayout{padding:1rem 6vw}.facts{gap:.5rem}}
+main,.toc a,.hero h1{overflow-wrap:anywhere}
+@page{size:Letter;margin:.7in .65in .75in}
+@media print{html{scroll-behavior:auto}body{font:10.5pt/1.45 Arial,sans-serif;color:#172f39}header,footer,.search-area,.screen-only{display:none}.doclayout{display:block;padding:0;max-width:none}.toc{position:static;max-height:none;overflow:visible;font-size:10pt;break-after:page}.toc>h2{border:0}.toc ul{columns:2;column-gap:.3in}.toc li{break-inside:avoid}.docbody h1{font-size:30pt}.docbody h2{font-size:19pt;break-after:avoid;padding-top:.15in;margin-top:.35in}.docbody h3{font-size:12pt;break-after:avoid}.docbody h4{break-after:avoid}p{orphans:3;widows:3}pre{font-size:8.2pt;line-height:1.4;padding:.1in;break-inside:auto}table{font-size:8.4pt;line-height:1.35}th,td{padding:.06in .07in}tr{break-inside:avoid}.flow{max-height:6in;object-fit:contain;break-inside:avoid}a{color:#172f39;text-decoration:underline}.cover{break-after:page;padding-top:1in}.cover .edition{font-size:11pt}.cover h1{font-size:32pt}.cover .lead{font-size:14pt}.api-entry{break-inside:auto}.api-entry h3{break-after:avoid}.index-columns{columns:2}}
+</style></head><body><a class="skip" href="#main">Skip to content</a><header><a class="brand" href="../index.html">townlight<span aria-hidden="true"> ·</span></a><span class="edition">Townlight Beta 1</span><nav aria-label="Main"><a href="../index.html">Products</a><span>Suite manual in companion</span><a href="../reference/index.html">Technical reference</a><a href="../terms.html">Terms and license</a></nav></header>
+<main id="main"><div class="cover wrap"><div class="hero"><div class="edition">Townlight Beta 1</div><h1>MCP
+and Transcription Source
+Reference</h1><p class="lead">Staff guide and technical reference</p><p class="docmeta">Documentation edition 30 October 2026<br>Existing component versions retained<br>Signed suite installer 1.6.0.1<br>Private beta documentation companion</p></div></div><div class="doclayout"><aside class="toc" aria-label="Table of contents"><h2>Contents</h2><div class="search-area"><label for="find-section">Find a section</label><input class="search" id="find-section" type="search" placeholder="Type a heading"><p class="search-status" aria-live="polite"></p></div><ul>
+<li><a href="#mcp-deployment-status" id="toc-mcp-deployment-status">MCP
+deployment status</a></li>
+<li><a href="#exact-optional-transcription-tool-signatures"
+id="toc-exact-optional-transcription-tool-signatures">Exact optional
+transcription tool signatures</a></li>
+</ul></aside><article class="docbody"><h2 id="mcp-deployment-status">MCP
+deployment status</h2>
+<p>No direct product MCP server is exposed by the accepted Townlight
+desktop or Station boundary. Do not configure an invented
+<code>townlight mcp</code> command or assume an AI client has staff
+permissions. The integration surfaces for this beta are native IPC, the
+documented HTTP APIs, source bundle imports, exact exports and the
+existing Station CLI.</p>
+<p>The bundled transcription code includes a <strong>TextFlowKit MCP
+adapter</strong> as a separate source capability. It offers job-based
+<code>transcribe_media</code>, <code>get_transcript</code>,
+<code>list_jobs</code>, <code>get_job_status</code> and
+<code>export_transcript</code>, and additional tools declared in that
+adapter. It uses stdio first and optional Streamable HTTP, with the MCP
+SDK as an optional extra. It is not automatically launched,
+authenticated as Townlight staff or accepted as a Townlight product MCP
+deployment. This documentation does not add such a service.</p>
+<p>For a transcription client already provisioned separately, an
+illustrative tool call is:</p>
+<div class="sourceCode" id="cb1"><pre
+class="sourceCode json"><code class="sourceCode json"><span id="cb1-1"><a href="#cb1-1" aria-hidden="true" tabindex="-1"></a><span class="fu">{</span><span class="dt">&quot;name&quot;</span><span class="fu">:</span><span class="st">&quot;get_job_status&quot;</span><span class="fu">,</span><span class="dt">&quot;arguments&quot;</span><span class="fu">:{</span><span class="dt">&quot;job_id&quot;</span><span class="fu">:</span><span class="st">&quot;synthetic-existing-job-id&quot;</span><span class="fu">}}</span></span></code></pre></div>
+<p>Use a job ID returned by that transcription service. This example
+does not create a Townlight record or bypass its review/Records handoff.
+The exact optional adapter tool signatures are supplied in the <a
+href="../reference/mcp.html">MCP source reference</a>. Station meeting
+capture does not become live speech recognition because this optional
+donor adapter exists.</p>
+<h2 id="exact-optional-transcription-tool-signatures">Exact optional
+transcription tool signatures</h2>
+<p>Extracted from the candidate’s separate TextFlowKit adapter; not an
+enabled Townlight product server.</p>
+<h3 id="list_sources">list_sources</h3>
+<div class="sourceCode" id="cb2"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb2-1"><a href="#cb2-1" aria-hidden="true" tabindex="-1"></a>list_sources()</span></code></pre></div>
+<p>List the media platforms and input kinds textflowkit can
+transcribe.</p>
+<p>Returns recognised platform names plus ‘local’ (filesystem paths) and
+‘direct’ (direct media URLs).</p>
+<h3 id="transcribe_media">transcribe_media</h3>
+<div class="sourceCode" id="cb3"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb3-1"><a href="#cb3-1" aria-hidden="true" tabindex="-1"></a>transcribe_media(source: <span class="bu">str</span>, language: <span class="bu">str</span> <span class="op">|</span> <span class="va">None</span><span class="op">=</span><span class="va">None</span>, formats: <span class="bu">str</span><span class="op">=</span><span class="st">&#39;json,srt,txt&#39;</span>, output_dir: <span class="bu">str</span> <span class="op">|</span> <span class="va">None</span><span class="op">=</span><span class="va">None</span>, model: <span class="bu">str</span> <span class="op">|</span> <span class="va">None</span><span class="op">=</span><span class="va">None</span>, device: <span class="bu">str</span> <span class="op">|</span> <span class="va">None</span><span class="op">=</span><span class="va">None</span>, cookies_from_browser: <span class="bu">str</span> <span class="op">|</span> <span class="va">None</span><span class="op">=</span><span class="va">None</span>, diarize: <span class="bu">bool</span><span class="op">=</span><span class="va">False</span>, translate_to: <span class="bu">str</span> <span class="op">|</span> <span class="va">None</span><span class="op">=</span><span class="va">None</span>, engine: <span class="bu">str</span><span class="op">=</span>DEFAULT_ENGINE)</span></code></pre></div>
+<p>Start transcribing a media URL or local file. Returns immediately
+with a job id.</p>
+<p>The work runs in the background; poll get_job_status until the job
+reaches a terminal state - ‘done’, ‘error’, or ‘cancelled’ - rather than
+polling only for ‘done’. State ‘done’ then reads with get_transcript;
+‘error’ and ‘cancelled’ are terminal and stop the poll, and each
+response’s <code>next</code> field says what to do. Do not expect a
+transcript in this response.</p>
+<p>Args: source: A media URL (YouTube, TikTok, Facebook, Instagram,
+Vimeo, Twitch, Bilibili, Rumble, Kick, Zoom, Medal, Loom, Dropbox, or a
+direct media link) or a path to a local file. language: Optional ISO
+language code (e.g. ‘en’). Auto-detected if omitted. formats:
+Comma-separated outputs to write when output_dir is set. Available: txt,
+srt, vtt, md, json, docx, pdf. The binary formats (docx, pdf) are
+written to disk and require the export extra. output_dir: Directory to
+write rendered files into. Omit to keep the transcript in memory only.
+model: Model name. When omitted it resolves to the selected engine’s own
+default: ‘whistle’ for the Whistle engine (the default), or a Whisper
+size (‘tiny’, ‘base’, ‘small’, ‘medium’, ‘large’) when ‘whisper’ or
+‘faster-whisper’ is selected. device: Torch device (‘cuda’ or ‘cpu’).
+Auto-detected when omitted. This applies to the Whisper-family engines;
+Whistle is CPU-only and a non-CPU device is refused rather than quietly
+ignored. cookies_from_browser: Pass cookies to yt-dlp from a browser,
+e.g. ‘firefox’. Only for media you are authorised to access. diarize:
+Label speakers. Requires the optional diarize extra and a gated Hugging
+Face model; the job fails with a clear error if unavailable rather than
+returning empty speakers. translate_to: Target language code
+(e.g. ‘es’). Translates the transcript with the configured backend;
+fails loudly if it is unreachable. engine: Speech engine. ‘whistle’ (the
+default: a CPU-only native engine that needs no torch) or ‘whisper’
+(openai-whisper on the torch stack - ROCm on AMD, CUDA on NVIDIA, CPU
+otherwise; needs the whisper extra), or the opt-in ‘faster-whisper’, a
+CTranslate2 engine for CPU and Apple Silicon that needs the
+faster-whisper extra. No speed or accuracy comparison is claimed
+here.</p>
+<h3 id="submit_batch_media">submit_batch_media</h3>
+<div class="sourceCode" id="cb4"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb4-1"><a href="#cb4-1" aria-hidden="true" tabindex="-1"></a>submit_batch_media(sources: <span class="bu">list</span>[Any], language: <span class="bu">str</span> <span class="op">|</span> <span class="va">None</span><span class="op">=</span><span class="va">None</span>, formats: <span class="bu">str</span><span class="op">=</span><span class="st">&#39;json,srt,txt&#39;</span>, output_dir: <span class="bu">str</span> <span class="op">|</span> <span class="va">None</span><span class="op">=</span><span class="va">None</span>, model: <span class="bu">str</span> <span class="op">|</span> <span class="va">None</span><span class="op">=</span><span class="va">None</span>, device: <span class="bu">str</span> <span class="op">|</span> <span class="va">None</span><span class="op">=</span><span class="va">None</span>, cookies_from_browser: <span class="bu">str</span> <span class="op">|</span> <span class="va">None</span><span class="op">=</span><span class="va">None</span>, diarize: <span class="bu">bool</span><span class="op">=</span><span class="va">False</span>, translate_to: <span class="bu">str</span> <span class="op">|</span> <span class="va">None</span><span class="op">=</span><span class="va">None</span>, resume: <span class="bu">bool</span><span class="op">=</span><span class="va">False</span>, engine: <span class="bu">str</span><span class="op">=</span>DEFAULT_ENGINE)</span></code></pre></div>
+<p>Queue multiple independent media jobs and return each job handle.</p>
+<p><code>sources</code> is a list; a top-level value that is not a list
+at all is refused by the tool schema before this function runs. Each
+<em>entry</em> gets its own job, so one bad source cannot hide the
+others: a source that cannot be admitted (a non-object entry, or a
+non-string/empty source) is reported as its own item error, identified
+by its zero-based <code>index</code>, and the remaining sources are
+still queued. Poll each returned job_id with get_job_status.</p>
+<p>Args: sources: Media URLs or local file paths; one job per source.
+language: Optional ISO language code (e.g. ‘en’) applied to every job.
+formats: Comma-separated outputs to write when output_dir is set.
+Available: txt, srt, vtt, md, json, docx, pdf. The binary formats (docx,
+pdf) require the export extra. output_dir: Directory to write rendered
+files into. model: Model name. When omitted it resolves to the selected
+engine’s own default: ‘whistle’ for the Whistle engine (the default), or
+a Whisper size when ‘whisper’/‘faster-whisper’ is selected. device:
+Torch device (‘cuda’ or ‘cpu’). Auto-detected when omitted. Applies to
+the Whisper-family engines; Whistle is CPU-only. cookies_from_browser:
+Pass cookies to yt-dlp from a browser, e.g. ‘firefox’. Only for media
+you are authorised to access. diarize: Label speakers (needs the diarize
+extra and a gated model). translate_to: Target language code; fails
+loudly if unreachable. resume: Reuse matching saved checkpoints and
+completed transcripts. engine: Speech engine, applied to every job.
+‘whistle’ (the default: a CPU-only native engine that needs no torch),
+‘whisper’ (openai-whisper on the torch stack; needs the whisper extra),
+or the opt-in ‘faster-whisper’ (CPU/Mac; needs the faster-whisper
+extra). This one engine is shared in every item’s request, so an
+unusable engine (e.g. the optional extra is absent) fails every item at
+admission; the per-item errors carry each item’s index and source.</p>
+<h3 id="resume_job">resume_job</h3>
+<div class="sourceCode" id="cb5"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb5-1"><a href="#cb5-1" aria-hidden="true" tabindex="-1"></a>resume_job(job_id: <span class="bu">str</span>)</span></code></pre></div>
+<p>Resume an interrupted job using its saved request and transcript
+checkpoint.</p>
+<p>The <em>current</em> input root and service work root are applied,
+exactly as on the HTTP surface: a source that falls outside a root the
+operator has since tightened is refused rather than resumed using the
+wider root saved with the original request, and any scratch tree is
+created under the configured work root rather than a root saved before
+the operator last changed it.</p>
+<h3 id="get_job_status">get_job_status</h3>
+<div class="sourceCode" id="cb6"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb6-1"><a href="#cb6-1" aria-hidden="true" tabindex="-1"></a>get_job_status(job_id: <span class="bu">str</span>)</span></code></pre></div>
+<p>Check the state of a transcription job.</p>
+<p>Args: job_id: The id returned by transcribe_media.</p>
+<h3 id="get_transcript">get_transcript</h3>
+<div class="sourceCode" id="cb7"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb7-1"><a href="#cb7-1" aria-hidden="true" tabindex="-1"></a>get_transcript(job_id: <span class="bu">str</span>, fmt: <span class="bu">str</span><span class="op">=</span><span class="st">&#39;txt&#39;</span>, offset: <span class="bu">int</span><span class="op">=</span><span class="dv">0</span>, limit: <span class="bu">int</span> <span class="op">|</span> <span class="va">None</span><span class="op">=</span><span class="va">None</span>, start: <span class="bu">float</span> <span class="op">|</span> <span class="va">None</span><span class="op">=</span><span class="va">None</span>, end: <span class="bu">float</span> <span class="op">|</span> <span class="va">None</span><span class="op">=</span><span class="va">None</span>, include_words: <span class="bu">bool</span><span class="op">=</span><span class="va">False</span>)</span></code></pre></div>
+<p>Read the transcript for a completed job, optionally a slice of
+it.</p>
+<p>For long transcripts do not request everything: page with
+offset/limit, or ask for a time range with start/end (seconds). The
+response reports total_segments and has_more so you know whether to
+continue.</p>
+<p>Args: job_id: The id returned by transcribe_media. fmt: How to render
+the text - txt, srt, vtt, md, or json. offset: Skip this many segments
+within the selected range. limit: Return at most this many segments.
+start: Only segments ending at or after this time (seconds). end: Only
+segments starting at or before this time (seconds). include_words:
+Include source-language word timings in JSON output. Defaults to false
+to keep model context small; translated text does not produce translated
+word timings.</p>
+<h3 id="search_transcript">search_transcript</h3>
+<div class="sourceCode" id="cb8"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb8-1"><a href="#cb8-1" aria-hidden="true" tabindex="-1"></a>search_transcript(job_id: <span class="bu">str</span>, query: <span class="bu">str</span>, limit: <span class="bu">int</span><span class="op">=</span><span class="dv">20</span>, context: <span class="bu">int</span><span class="op">=</span><span class="dv">1</span>, case_sensitive: <span class="bu">bool</span><span class="op">=</span><span class="va">False</span>)</span></code></pre></div>
+<p>Search a completed transcript for a phrase.</p>
+<p>Returns matching segments with their timestamps, in the order they
+appear in the transcript - not sorted by relevance or recency. Use this
+instead of paging through a long transcript looking for a topic.</p>
+<p>Args: job_id: The id returned by transcribe_media. query: Substring
+to find (not fuzzy). limit: Maximum number of matches to return.
+context: How many neighbouring segments to include either side.
+case_sensitive: Match case-sensitively (default false).</p>
+<h3 id="export_transcript">export_transcript</h3>
+<div class="sourceCode" id="cb9"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb9-1"><a href="#cb9-1" aria-hidden="true" tabindex="-1"></a>export_transcript(job_id: <span class="bu">str</span>, output_dir: <span class="bu">str</span>, formats: <span class="bu">str</span><span class="op">=</span><span class="st">&#39;srt,vtt,txt,json&#39;</span>)</span></code></pre></div>
+<p>Write a completed transcript to files on disk.</p>
+<p>Args: job_id: The id returned by transcribe_media. output_dir:
+Directory to write into. Created if missing. formats: Comma-separated
+formats to write - txt, srt, vtt, md, json, docx, pdf. The binary
+formats (docx, pdf) require the export extra.</p>
+<h3 id="list_jobs">list_jobs</h3>
+<div class="sourceCode" id="cb10"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb10-1"><a href="#cb10-1" aria-hidden="true" tabindex="-1"></a>list_jobs(limit: <span class="bu">int</span><span class="op">=</span><span class="dv">20</span>, state: <span class="bu">str</span> <span class="op">|</span> <span class="va">None</span><span class="op">=</span><span class="va">None</span>)</span></code></pre></div>
+<p>List recent transcription jobs, newest first.</p>
+<p>Args: limit: Maximum number of jobs to return. state: Optional filter
+- pending, running, done, error, or cancelled.</p>
+<h3 id="cancel_job">cancel_job</h3>
+<div class="sourceCode" id="cb11"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb11-1"><a href="#cb11-1" aria-hidden="true" tabindex="-1"></a>cancel_job(job_id: <span class="bu">str</span>)</span></code></pre></div>
+<p>Request cancellation of a pending or running job.</p>
+<p>A queued job is cancelled immediately and never starts. A running job
+stops at its next stage boundary, so it stays ‘running’ with
+cancel_requested set until the boundary is reached. Poll get_job_status
+until state is ‘cancelled’.</p>
+<p>Args: job_id: The id returned by
+transcribe_media.</p></article></div></main><footer><span>Townlight Beta 1 · Local private-beta documentation · AGPL-3.0-only</span><span><a href="../versions.html">Exact versions and candidate</a> · CivicCast remains separate</span></footer>
+<script>const search=document.getElementById('find-section');if(search)search.addEventListener('input',()=>{const q=search.value.toLowerCase();let n=0;document.querySelectorAll('.toc li').forEach(li=>{const match=li.textContent.toLowerCase().includes(q);li.hidden=!match;if(match)n++;});document.querySelector('.search-status').textContent=q?n+' matching entries':'';});</script></body></html>

@@ -1,0 +1,830 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="description" content=""><title>Townlight
+Station README | Townlight Beta 1</title><style>
+:root{--ink:#182f3a;--muted:#526775;--accent:#006b64;--paper:#fff;--wash:#f1f6f5;--line:#cfdddf;--warm:#dceab2}
+*{box-sizing:border-box}html{scroll-behavior:smooth}body{margin:0;background:var(--paper);color:var(--ink);font:17px/1.65 "Segoe UI",Arial,sans-serif}a{color:#006b64;text-underline-offset:3px}a:hover{text-decoration-thickness:2px}a:focus-visible,button:focus-visible,input:focus-visible{outline:3px solid #a25900;outline-offset:4px}.skip{position:absolute;left:-9999px}.skip:focus{left:1rem;top:1rem;background:white;padding:1rem;z-index:20}header{border-bottom:1px solid var(--line);padding:1.1rem 5vw;display:flex;align-items:center;gap:1.5rem;flex-wrap:wrap}header .brand{font-size:1.3rem;font-weight:750;letter-spacing:-.04em;text-decoration:none;color:var(--ink)}header nav{margin-left:auto;display:flex;gap:1.25rem;flex-wrap:wrap;font-size:.88rem}.edition{font:700 .72rem/1.5 "Segoe UI",sans-serif;letter-spacing:.12em;text-transform:uppercase;color:var(--accent)}.wrap{max-width:1240px;margin:auto;padding:0 4vw}.hero{padding:5rem 0 3.2rem;max-width:950px}.hero h1{font-size:clamp(2.5rem,5vw,4.7rem);line-height:1.08;letter-spacing:-.045em;margin:1rem 0 1.5rem;font-weight:650}.hero .lead{font-size:1.26rem;max-width:780px;color:var(--muted)}.actions{display:flex;gap:.8rem;flex-wrap:wrap;margin:1.8rem 0}.button{display:inline-block;padding:.7rem 1.15rem;border:1px solid var(--accent);border-radius:4px;text-decoration:none;font-weight:650}.button.primary{background:var(--accent);color:#fff}.facts{display:flex;gap:1.5rem;flex-wrap:wrap;font-size:.85rem;color:var(--muted)}.section{padding:3rem 0;border-top:1px solid var(--line)}h2{font-size:1.8rem;line-height:1.3;letter-spacing:-.025em;margin:2.5rem 0 1rem}h3{font-size:1.18rem;line-height:1.45;margin:1.8rem 0 .7rem}h4{font-size:1rem;margin:1.3rem 0 .6rem}p{margin:.85rem 0 1rem}ul,ol{padding-left:1.6rem}li{margin:.4rem 0}strong{font-weight:650}.grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:1.6rem}.product{border-top:3px solid var(--accent);padding:1.4rem 0}.product h3{font-size:1.65rem;margin:.4rem 0}.product p{color:var(--muted)}.number{font-size:.76rem;letter-spacing:.1em}.split{display:grid;grid-template-columns:1fr 1fr;gap:3rem}.flow{width:100%;height:auto;display:block;margin:1.8rem 0}.caption{font-size:.85rem;color:var(--muted)}.reading{max-width:860px}.doclayout{display:grid;grid-template-columns:245px minmax(0,1fr);gap:3rem;max-width:1320px;margin:auto;padding:2rem 4vw}.toc{font-size:.84rem;align-self:start;position:sticky;top:1rem;max-height:90vh;overflow:auto;padding-right:.8rem}.toc ul{list-style:none;padding:0}.toc li{margin:.5rem 0}.toc li li{padding-left:.8rem}.toc a{text-decoration:none}.docbody{min-width:0}.docbody h1{font-size:2.7rem;line-height:1.1;letter-spacing:-.04em}.docbody h2{border-top:1px solid var(--line);padding-top:1.8rem}.docbody img{max-width:100%;height:auto}.docmeta{color:var(--muted);font-size:.9rem}.docbody section{scroll-margin-top:1rem}table{width:100%;border-collapse:collapse;font-size:.87rem;line-height:1.5;margin:1.3rem 0;table-layout:auto}th{text-align:left;background:var(--wash);font-weight:650}th,td{padding:.65rem .7rem;border-bottom:1px solid var(--line);vertical-align:top;overflow-wrap:anywhere}thead{display:table-header-group}pre{background:#f2f5f6;padding:1rem;border:1px solid #dfe7e8;white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word;font:13px/1.6 Consolas,monospace}code{font: .85em/1.6 Consolas,monospace;overflow-wrap:anywhere}pre code{font-size:inherit}blockquote{border-left:3px solid var(--accent);padding-left:1rem;margin-left:0;color:var(--muted)}.search{padding:.65rem;border:1px solid #789399;border-radius:4px;width:100%;font:inherit}.search-status{font-size:.8rem;color:var(--muted)}footer{border-top:1px solid var(--line);padding:2rem 5vw;margin-top:3rem;font-size:.85rem;color:var(--muted);display:flex;gap:2rem;justify-content:space-between;flex-wrap:wrap}.small{font-size:.9rem;color:var(--muted)}.api-entry{padding:1.2rem 0;border-top:1px solid var(--line)}.api-entry h3{overflow-wrap:anywhere}.method{font-size:.76rem;font-weight:750;color:var(--accent)}details{margin:1rem 0}summary{cursor:pointer;font-weight:650}.index-columns{columns:2;column-gap:2rem}.index-columns li{break-inside:avoid}
+@media(max-width:850px){.grid{grid-template-columns:1fr 1fr}.split{grid-template-columns:1fr}.doclayout{grid-template-columns:1fr;gap:1rem}.toc{position:static;max-height:none}.hero{padding-top:3rem}header nav{margin-left:0}.docbody h1{font-size:2.2rem}}
+@media(max-width:520px){.grid{grid-template-columns:1fr}.wrap{padding:0 6vw}header{padding:1rem 6vw}.hero h1{font-size:2.6rem}.index-columns{columns:1}table{font-size:.78rem}th,td{padding:.45rem}.doclayout{padding:1rem 6vw}.facts{gap:.5rem}}
+main,.toc a,.hero h1{overflow-wrap:anywhere}
+@page{size:Letter;margin:.7in .65in .75in}
+@media print{html{scroll-behavior:auto}body{font:10.5pt/1.45 Arial,sans-serif;color:#172f39}header,footer,.search-area,.screen-only{display:none}.doclayout{display:block;padding:0;max-width:none}.toc{position:static;max-height:none;overflow:visible;font-size:10pt;break-after:page}.toc>h2{border:0}.toc ul{columns:2;column-gap:.3in}.toc li{break-inside:avoid}.docbody h1{font-size:30pt}.docbody h2{font-size:19pt;break-after:avoid;padding-top:.15in;margin-top:.35in}.docbody h3{font-size:12pt;break-after:avoid}.docbody h4{break-after:avoid}p{orphans:3;widows:3}pre{font-size:8.2pt;line-height:1.4;padding:.1in;break-inside:auto}table{font-size:8.4pt;line-height:1.35}th,td{padding:.06in .07in}tr{break-inside:avoid}.flow{max-height:6in;object-fit:contain;break-inside:avoid}a{color:#172f39;text-decoration:underline}.cover{break-after:page;padding-top:1in}.cover .edition{font-size:11pt}.cover h1{font-size:32pt}.cover .lead{font-size:14pt}.api-entry{break-inside:auto}.api-entry h3{break-after:avoid}.index-columns{columns:2}}
+</style></head><body><a class="skip" href="#main">Skip to content</a><header><a class="brand" href="../index.html">townlight<span aria-hidden="true"> ·</span></a><span class="edition">Townlight Beta 1</span><nav aria-label="Main"><a href="../index.html">Products</a><span>Suite manual in companion</span><a href="../reference/index.html">Technical reference</a><a href="../terms.html">Terms and license</a></nav></header>
+<main id="main"><div class="cover wrap"><div class="hero"><div class="edition">Townlight Beta 1</div><h1>Townlight
+Station
+README</h1><p class="lead">Staff guide and technical reference</p><p class="docmeta">Documentation edition 30 October 2026<br>Existing component versions retained<br>Signed suite installer 1.6.0.1<br>Private beta documentation companion</p></div></div><div class="doclayout"><aside class="toc" aria-label="Table of contents"><h2>Contents</h2><div class="search-area"><label for="find-section">Find a section</label><input class="search" id="find-section" type="search" placeholder="Type a heading"><p class="search-status" aria-live="polite"></p></div><ul>
+<li><a href="#start-here" id="toc-start-here">Start here</a></li>
+<li><a href="#exact-version-and-candidate"
+id="toc-exact-version-and-candidate">Exact version and
+candidate</a></li>
+<li><a href="#what-staff-can-do" id="toc-what-staff-can-do">What staff
+can do</a></li>
+<li><a href="#operating-procedures-and-examples"
+id="toc-operating-procedures-and-examples">Operating procedures and
+examples</a></li>
+<li><a href="#architecture-and-data"
+id="toc-architecture-and-data">Architecture and data</a></li>
+<li><a href="#setup-and-operation" id="toc-setup-and-operation">Setup
+and operation</a></li>
+<li><a href="#configuration"
+id="toc-configuration">Configuration</a></li>
+<li><a href="#api-usage" id="toc-api-usage">API usage</a></li>
+<li><a href="#mcp-status" id="toc-mcp-status">MCP status</a></li>
+<li><a href="#verification-and-known-limits"
+id="toc-verification-and-known-limits">Verification and known
+limits</a></li>
+<li><a href="#development-and-repository-map"
+id="toc-development-and-repository-map">Development and repository
+map</a></li>
+<li><a href="#recovery-and-support"
+id="toc-recovery-and-support">Recovery and support</a></li>
+<li><a href="#license-and-responsible-use"
+id="toc-license-and-responsible-use">License and responsible
+use</a></li>
+</ul></aside><article class="docbody"><p><strong>Townlight Beta
+1</strong> · Existing component versions retained · AGPL-3.0-only</p>
+<p>Station adapts a pinned CivicCast media implementation into an
+independent Townlight boundary. It captures managed files or configured
+live UDP MPEG-TS, retains canonical meeting/agenda context, and hands
+verified recording evidence to Records. Scheduling, playout, approval
+and local playback have distinct controls.</p>
+<h2 id="start-here">Start here</h2>
+<p>Staff should use the operating manual. Administrators should read
+first-run, configuration and recovery before changing a deployment.
+Developers should read the exact API/schema reference and matching
+source companion. This is a private candidate documentation update; it
+neither changes public downloads nor publishes a release.</p>
+<ul>
+<li><a href="../manuals/station.html">Operating manual</a> · <a
+href="../pdf/Townlight-Station-Manual-Beta-1.pdf">Printable PDF</a> · <a
+href="../docx/Townlight-Station-Manual-Beta-1.docx">Editable Word
+manual</a></li>
+<li><a href="../api/station.html">API and data dictionary</a> · <a
+href="../api/station-openapi.json">OpenAPI JSON</a></li>
+<li><a href="../index.html">Product and suite directory</a> · <a
+href="../terms.html">Terms and full license</a></li>
+</ul>
+<h2 id="exact-version-and-candidate">Exact version and candidate</h2>
+<table>
+<colgroup>
+<col style="width: 50%" />
+<col style="width: 50%" />
+</colgroup>
+<thead>
+<tr>
+<th>Identity</th>
+<th>Value</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Public documentation identity</td>
+<td>Townlight Beta 1</td>
+</tr>
+<tr>
+<td>Installer version</td>
+<td>1.6.0.1</td>
+</tr>
+<tr>
+<td>Product component</td>
+<td>townlight-station 0.3.0</td>
+</tr>
+<tr>
+<td>Native desktop source version</td>
+<td>1.6.0-1</td>
+</tr>
+<tr>
+<td>Candidate MSI SHA256</td>
+<td><code>98bcdef11ebdf5c767f620c904ff49f85115fde3b5c23f62703b111e645aaf86</code></td>
+</tr>
+<tr>
+<td>Corresponding-source SHA256</td>
+<td><code>84a23e1297e42d17b16cfc9e51b2dd78bc46414c0de8ad7ebd2466c1a409d06b</code></td>
+</tr>
+<tr>
+<td>Current owned software license</td>
+<td>AGPL-3.0-only</td>
+</tr>
+<tr>
+<td>Supported acceptance profile</td>
+<td>Windows x64 fresh install; inspections-preview; separate Station
+configuration</td>
+</tr>
+</tbody>
+</table>
+<p>“Townlight Beta 1” identifies this coordinated beta delivery. It does
+not renumber the installer, native binary, Python packages or historical
+receipts. Component versions may differ. This documentation is a later
+companion to unchanged signed bytes, not a rebuilt installer. Historical
+release pages and manuals describe their own versions and are not the
+download instructions for this private candidate.</p>
+<h2 id="what-staff-can-do">What staff can do</h2>
+<ul>
+<li><strong>Prepare meeting context:</strong> Create and save the actual
+meeting and agenda in Meetings. Assign each selected agenda item to that
+meeting. A recording request cannot substitute an editable meeting label
+for the canonical records.</li>
+<li><strong>Open the operator:</strong> Sign in as authorized staff. Use
+the configured local operator command with the explicit native profile
+root. It obtains a short-lived one-use browser ticket; the native proof
+is not placed in the URL.</li>
+<li><strong>Choose the input:</strong> Select the meeting, assigned
+agenda and administrator-configured live-source ID. For recorded-file
+work, place the source in the managed ingest directory and optionally
+supply an SRT sidecar. Callers cannot submit arbitrary pipelines or
+filesystem paths.</li>
+<li><strong>Capture and stop:</strong> Start capture and distinguish
+waiting for a signal from active recording. Stop requests pipeline
+drain. Wait for completed status and validated output; a partial, failed
+or interrupted attempt is not a completed recording.</li>
+<li><strong>Review recording evidence:</strong> Inspect the media and
+retained context/hash. Retry is explicit for failed/interrupted
+recorded-file jobs. A lost live signal cannot be reconstructed: begin a
+new live recording and preserve the failed attempt.</li>
+<li><strong>Hand off to Records:</strong> Choose an existing Records
+request and attach the reviewed recording. The receiver checks
+bytes/hash and retains a locked private original. Repeating the same
+handoff retains one canonical document.</li>
+<li><strong>Use playout deliberately:</strong> Scheduling,
+dry-run/commit playout, staff approval and local publication are
+distinct API operations. Public playback only serves the separately
+approved packaged output. Nothing in capture or Records handoff
+automatically publishes it.</li>
+<li><strong>Close and recover:</strong> Sign out of the operator. Back
+up Station’s database and media evidence together, separately from
+Core’s native profile backup. Restart interrupted work deliberately; do
+not automatically re-air a lost signal.</li>
+</ul>
+<h2 id="operating-procedures-and-examples">Operating procedures and
+examples</h2>
+<p>The operating manual now includes these existing procedures, with
+synthetic inputs, readback and limits. Follow the actual app boundary
+identified there; a standalone source capability is not automatically a
+desktop screen.</p>
+<ul>
+<li><a
+href="../manuals/station.html#scheduling-playout-and-recovery">Scheduling
+playout and recovery</a>.</li>
+<li><a
+href="../manuals/station.html#schedule-a-recording-and-interpret-its-state">Schedule
+a recording and interpret its state</a>.</li>
+<li><a href="../manuals/station.html#apply-the-caption-profile">Apply
+the caption profile</a>.</li>
+<li><a
+href="../manuals/station.html#check-playout-and-commit-deliberately">Check
+playout and commit deliberately</a>.</li>
+<li><a
+href="../manuals/station.html#take-a-live-override-and-return">Take a
+live override and return</a>.</li>
+<li><a
+href="../manuals/station.html#approve-and-publish-local-playback">Approve
+and publish local playback</a>.</li>
+<li><a
+href="../manuals/station.html#recover-without-replaying-unknown-work">Recover
+without replaying unknown work</a>.</li>
+<li><a
+href="../manuals/station.html#prepare-the-normally-activated-synthetic-profile">Prepare
+the normally activated synthetic profile</a>.</li>
+<li><a
+href="../manuals/station.html#store-the-independent-test-configuration">Store
+the independent test configuration</a>.</li>
+<li><a
+href="../manuals/station.html#provision-the-station-database-once">Provision
+the Station database once</a>.</li>
+<li><a
+href="../manuals/station.html#start-and-check-the-paired-processes">Start
+and check the paired processes</a>.</li>
+<li><a
+href="../manuals/station.html#configure-a-live-input-and-open-the-operator">Configure
+a live input and open the operator</a>.</li>
+<li><a href="../manuals/station.html#bounds-and-shutdown">Bounds and
+shutdown</a>.</li>
+</ul>
+<h2 id="architecture-and-data">Architecture and data</h2>
+<h3 id="runtime-and-storage">Runtime and storage</h3>
+<p>The accepted package targets <strong>Windows x64 fresh
+installation</strong>. Its native shell uses <strong>Rust 2021, Tauri 2
+and Microsoft WebView2</strong>; browser assets are JavaScript built
+with <strong>Vite 8.1.6</strong>. This describes the native desktop
+frontend; Station has a separate React operator, specified below or in
+its product manual. Canonical business workflows use bundled
+<strong>CPython 3.13.5, FastAPI, Pydantic, SQLAlchemy and
+Alembic</strong>, with <strong>PostgreSQL 17 / PostGIS</strong> and
+managed original files. The installed runtime tested here contains
+FastAPI 0.162.0. Package minimum Python requirements can differ from the
+bundled executable; the metadata reference preserves both. No stack
+rewrite is implied by the beta label.</p>
+<p>The native transport is fixed to loopback
+<code>127.0.0.1:15480</code>; PostgreSQL uses the configured local
+runtime port (default <code>15432</code>). Optional local model service
+defaults to <code>127.0.0.1:15434</code>. Those are deployment defaults,
+not internet endpoints. The runtime has health, module and readiness
+endpoints; readiness is stronger than process existence. The task queue
+is the existing local Core task infrastructure, not an assertion that a
+separate Redis service is required for this desktop composition.</p>
+<p>The default native profile is <code>%LOCALAPPDATA%\CivicSuite</code>;
+the historical directory name remains part of compatibility. Do not
+rename it to Townlight. A configured <code>TOWNLIGHT_PROFILE_ROOT</code>
+must be absolute. Local configuration and secrets live under that
+profile; protected managed files and database state must be backed up
+coherently. Source/runtime identity is distinct from a product’s display
+label.</p>
+<h3 id="data-and-consistency">Data and consistency</h3>
+<p>Configured live-source IDs; canonical meeting/agenda snapshots;
+queued recordings and immutable attempts; input/output hashes;
+schedules; playout jobs and approvals; durable on-air state; publication
+packages; Records attachment provenance.</p>
+<p>Versioned saves use expected prior revision identifiers where
+defined. Reopen and reconcile on conflict. Exact exports and handoffs
+use source IDs, current visibility, revision and SHA256. Review belongs
+to the saved revision and does not transfer silently to edited text.
+Database changes use the owning product’s migrations; a request or
+readiness check is not an authorization to mutate schema.</p>
+<h3 id="capacity-and-platform-statements">Capacity and platform
+statements</h3>
+<p>This beta has synthetic single-profile workflow evidence. It does not
+have a published benchmark for concurrent staff capacity, minimum
+RAM/CPU, large-source limits or a field SLA. Do not turn a developer
+machine’s specification into a supported minimum. Installer size is
+2,092,122,112 bytes before installation; allow additional disk for
+extracted runtime, database, originals, exports, media and backups.
+Select equipment/storage after sizing those actual workloads.</p>
+<p>The exact <a href="../reference/runtime-payload-lock.json">runtime
+payload lock</a> records pinned files, sizes and hashes. The <a
+href="../reference/component-metadata.json">component metadata</a>
+records shipped dependency declarations. These references are more
+precise than a manually copied dependency list. Third-party and
+historical license notices must accompany their matching payloads.</p>
+<h3 id="station-operator-and-media-components">Station operator and
+media components</h3>
+<p>The native desktop frontend above is distinct from Station’s browser
+operator. The pinned operator package
+<code>townlight-station-operator</code> is version
+<strong>0.1.0</strong>, using <strong>React/react-dom 19.1.1</strong>,
+<strong>TypeScript 5.9.2</strong>, <strong>Vite 7.3.7</strong> and the
+React Vite plugin 5.0.2. Station serves its built assets through its own
+operator API. Its Python control/API package remains
+<strong>townlight-station 0.3.0</strong>, while its retained storage
+identity remains <strong>0.1.0</strong>. These identities have different
+purposes and are not renumbered.</p>
+<p>The separate pinned CivicCast-derived media engine uses Python/native
+GStreamer processing and bounded media children. It is not the
+standalone CivicCast application. Station’s control database, data root,
+service/configuration and update identity remain independent. This
+describes the current mixed stack; no runtime rewrite or CivicCast
+migration is implied.</p>
+<h3 id="station-media-and-lifecycle-contract">Station media and
+lifecycle contract</h3>
+<p>The package/API version is <code>0.3.0</code>. Its retained storage
+identity has version <code>0.1.0</code>; that is a separate storage
+marker and must not be rewritten to match the package. Product/app IDs
+are <code>townlight-station</code> and
+<code>org.townlight.station</code>; service identity is
+<code>TownlightStation</code>, virtual account
+<code>NT SERVICE\TownlightStation</code>, credential namespace
+<code>townlight.station</code>, database schema <code>station</code>,
+and update-channel identity <code>townlight-station</code>. An identity
+name or SCM entry point does not establish that a Windows service was
+registered.</p>
+<p>The control service is Python; its separate pinned CivicCast-derived
+engine uses native GStreamer media processing. There is no launch of the
+standalone CivicCast application. Default encoding is 1920×1080, 30 fps
+and 6000 kbps; explicit validated configuration may change it. The
+source lock is verified before use. Media children are isolated and
+bounded; unfinished attempts become interrupted on recovery.</p>
+<p>Recorded-file requests accept a managed ingest filename, optional SRT
+sidecar and idempotency key. Live requests accept a configured source
+ID, not a path. Select exactly one file or live source; live capture
+cannot also supply a sidecar. Inputs are bounded by the configured
+two-hour default timeout and a 2,147,483,647-byte file limit. Supplied
+SRT sidecars are bounded to 5,000,000 bytes. The queue admits at most
+100 pending/running jobs; live admission is further serialized. A
+repeated idempotency key must identify the same source bytes, canonical
+meeting context and encoding profile.</p>
+<p><code>queued</code> and <code>running</code> do not make content
+available as completed. Completion requires the worker’s clean media
+teardown and stream validation. Failed/interrupted file jobs may be
+explicitly retried; a live gap requires a new capture. Records receives
+verified bytes and canonical provenance as a locked private original.
+Local publication is an explicit later operation on separately approved
+playout; its MP4/WebVTT package is distinct from the retained recording
+and from a Records release.</p>
+<table>
+<colgroup>
+<col style="width: 50%" />
+<col style="width: 50%" />
+</colgroup>
+<thead>
+<tr>
+<th>Data contract</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Input</td>
+<td>A real Townlight staff session, saved Meetings records, a dedicated
+Station database/data root, a managed ingest filename or configured
+live-source ID, and optional supplied SRT captions for recorded-file
+input.</td>
+</tr>
+<tr>
+<td>Retained records</td>
+<td>Configured live-source IDs; canonical meeting/agenda snapshots;
+queued recordings and immutable attempts; input/output hashes;
+schedules; playout jobs and approvals; durable on-air state; publication
+packages; Records attachment provenance.</td>
+</tr>
+<tr>
+<td>Output</td>
+<td>Completed verified recording derivatives, retained original
+inputs/provenance, separately approved local playback packages and
+locked private Records evidence.</td>
+</tr>
+<tr>
+<td>Connections</td>
+<td>Meetings → Station → Records is the accepted recording workflow.
+Townlight owns current session authority; Station owns its database,
+storage and media children. Standalone CivicCast remains separate, with
+no shared configuration, service, data directory or automatic updater
+fallback.</td>
+</tr>
+</tbody>
+</table>
+<h2 id="setup-and-operation">Setup and operation</h2>
+<ol type="1">
+<li>Obtain the identified signed private candidate and its
+corresponding-source companion from the beta coordinator. The landing
+pages in this documentation are not an installer download service.</li>
+<li>On the intended fresh Windows test installation, verify the MSI hash
+and publisher signature before installing. Preserve unrelated profiles
+and recovery material. This candidate has fresh-install acceptance;
+historical in-place upgrades are unverified.</li>
+<li>Launch Townlight under the intended named Windows account. Choose
+the storage folders. Select <strong>Townlight Inspections
+candidate</strong> (<code>inspections-preview</code>) for all eight
+desktop products. A narrower default selection will not expose all
+workspaces.</li>
+<li>Enter the city profile, time zone and contacts. Create the first
+named local administrator, sign in and choose protected backup storage.
+<strong>Continue without local AI</strong> is valid for the
+deterministic workflows.</li>
+<li>Run Health Check and wait for readiness. Open Townlight. In System
+Health select <strong>Finish Records Migration</strong> to activate the
+canonical Python/PostgreSQL runtime. Do not fabricate migration receipts
+or seed accounts.</li>
+<li>Create named staff through Settings. Import authorized sources using
+each product’s source library. All examples in this package are
+synthetic; they are not municipal authority.</li>
+<li>Provision Station separately if it is part of the beta exercise.
+Selecting the desktop composition does not start or configure Station.
+Configure vision explicitly only if automatic photo drafting is
+selected.</li>
+</ol>
+<h2 id="configuration">Configuration</h2>
+<h3 id="prepare-the-normally-activated-synthetic-profile">Prepare the
+normally activated synthetic profile</h3>
+<p>This procedure describes a future isolated beta installation.
+Documentation generation does not execute it. Complete normal Townlight
+Setup under the intended Windows account, select
+<code>inspections-preview</code>, sign in, and use <strong>Finish
+Records Migration</strong>. Keep the native database running and confirm
+the canonical runtime is ready. Use that account’s actual profile path;
+the default is <code>%LOCALAPPDATA%\CivicSuite</code>. Do not create
+session files, seed accounts or force
+<code>domain_enabled=True</code>.</p>
+<p>Station needs its own database and initially empty absolute data
+directory. It uses the same named Townlight staff authority through an
+additional configured loopback suite process. It does not launch or
+modify CivicCast. No SCM installation, registry edit or replacement of
+the desktop’s fixed-origin service is needed.</p>
+<p>The examples reserve suite port <strong>15481</strong>, Station port
+<strong>8756</strong> and synthetic UDP input port
+<strong>19000</strong>. Choose unused ports and change both configured
+origins together if needed. Never point these instructions at a city’s
+live profile or data. Use the actual installation directory if Townlight
+was installed elsewhere.</p>
+<h3 id="store-the-independent-test-configuration">Store the independent
+test configuration</h3>
+<p>Run the following in a deployment PowerShell session under the same
+Windows user. Keep this session for startup and shutdown. The dedicated
+parent holds configuration/logs; its <code>data</code> child is
+Station’s initially empty managed store.</p>
+<div class="sourceCode" id="cb1"><pre
+class="sourceCode powershell"><code class="sourceCode powershell"><span id="cb1-1"><a href="#cb1-1" aria-hidden="true" tabindex="-1"></a><span class="va">$profilePath</span> <span class="op">=</span> <span class="fu">Join-Path</span> <span class="va">$env</span><span class="op">:</span><span class="va">LOCALAPPDATA</span> <span class="st">&#39;CivicSuite&#39;</span></span>
+<span id="cb1-2"><a href="#cb1-2" aria-hidden="true" tabindex="-1"></a><span class="va">$control</span> <span class="op">=</span> <span class="fu">Join-Path</span> <span class="va">$profilePath</span> <span class="st">&#39;runtime\python\python.exe&#39;</span></span>
+<span id="cb1-3"><a href="#cb1-3" aria-hidden="true" tabindex="-1"></a><span class="va">$payload</span> <span class="op">=</span> <span class="st">&#39;C:\Program Files\Townlight\_up_\runtime\payload\station&#39;</span></span>
+<span id="cb1-4"><a href="#cb1-4" aria-hidden="true" tabindex="-1"></a><span class="va">$stationRoot</span> <span class="op">=</span> <span class="fu">Join-Path</span> <span class="va">$env</span><span class="op">:</span><span class="va">LOCALAPPDATA</span> <span class="st">&#39;TownlightStation-Synthetic&#39;</span></span>
+<span id="cb1-5"><a href="#cb1-5" aria-hidden="true" tabindex="-1"></a><span class="cf">if</span> <span class="op">(-not</span> <span class="op">(</span><span class="fu">Test-Path</span> <span class="op">-</span>LiteralPath <span class="va">$control</span><span class="op">))</span> <span class="op">{</span> <span class="cf">throw</span> <span class="st">&#39;Complete normal Townlight setup first.&#39;</span> <span class="op">}</span></span>
+<span id="cb1-6"><a href="#cb1-6" aria-hidden="true" tabindex="-1"></a><span class="cf">if</span> <span class="op">(</span><span class="fu">Test-Path</span> <span class="op">-</span>LiteralPath <span class="va">$stationRoot</span><span class="op">)</span> <span class="op">{</span> <span class="cf">throw</span> <span class="st">&#39;Existing Station directory: inspect it; do not overwrite.&#39;</span> <span class="op">}</span></span>
+<span id="cb1-7"><a href="#cb1-7" aria-hidden="true" tabindex="-1"></a><span class="fu">New-Item</span> <span class="op">-</span>ItemType Directory <span class="op">-</span>Path <span class="va">$stationRoot</span> <span class="op">|</span> <span class="fu">Out-Null</span></span>
+<span id="cb1-8"><a href="#cb1-8" aria-hidden="true" tabindex="-1"></a><span class="va">$account</span> <span class="op">=</span> <span class="op">[</span>System<span class="op">.</span><span class="fu">Security</span><span class="op">.</span><span class="fu">Principal</span><span class="op">.</span><span class="fu">WindowsIdentity</span><span class="op">]::</span>GetCurrent<span class="op">().</span><span class="fu">Name</span></span>
+<span id="cb1-9"><a href="#cb1-9" aria-hidden="true" tabindex="-1"></a><span class="op">&amp;</span> icacls<span class="op">.</span><span class="fu">exe</span> <span class="va">$stationRoot</span> <span class="op">/</span>inheritance<span class="op">:</span>r <span class="op">/</span>grant<span class="op">:</span>r <span class="st">&quot;</span><span class="pp">${</span><span class="va">account</span><span class="pp">}</span><span class="st">:(OI)(CI)F&quot;</span> <span class="st">&#39;*S-1-5-18:(OI)(CI)F&#39;</span> <span class="op">|</span> <span class="fu">Out-Null</span></span>
+<span id="cb1-10"><a href="#cb1-10" aria-hidden="true" tabindex="-1"></a><span class="cf">if</span> <span class="op">(</span><span class="va">$LASTEXITCODE</span> <span class="op">-ne</span> <span class="dv">0</span><span class="op">)</span> <span class="op">{</span> <span class="cf">throw</span> <span class="st">&#39;Cannot protect Station configuration directory.&#39;</span> <span class="op">}</span></span>
+<span id="cb1-11"><a href="#cb1-11" aria-hidden="true" tabindex="-1"></a><span class="fu">New-Item</span> <span class="op">-</span>ItemType Directory <span class="op">-</span>Path <span class="op">(</span><span class="fu">Join-Path</span> <span class="va">$stationRoot</span> <span class="st">&#39;data&#39;</span><span class="op">),(</span><span class="fu">Join-Path</span> <span class="va">$stationRoot</span> <span class="st">&#39;logs&#39;</span><span class="op">)</span> <span class="op">|</span> <span class="fu">Out-Null</span></span>
+<span id="cb1-12"><a href="#cb1-12" aria-hidden="true" tabindex="-1"></a><span class="va">$rng</span> <span class="op">=</span> <span class="op">[</span>System<span class="op">.</span><span class="fu">Security</span><span class="op">.</span><span class="fu">Cryptography</span><span class="op">.</span><span class="fu">RandomNumberGenerator</span><span class="op">]::</span>Create<span class="op">()</span></span>
+<span id="cb1-13"><a href="#cb1-13" aria-hidden="true" tabindex="-1"></a><span class="va">$randomBytes</span> <span class="op">=</span> <span class="fu">New-Object</span> byte<span class="op">[]</span> <span class="dv">32</span></span>
+<span id="cb1-14"><a href="#cb1-14" aria-hidden="true" tabindex="-1"></a><span class="va">$rng</span><span class="op">.</span><span class="fu">GetBytes</span><span class="op">(</span><span class="va">$randomBytes</span><span class="op">)</span></span>
+<span id="cb1-15"><a href="#cb1-15" aria-hidden="true" tabindex="-1"></a><span class="va">$rng</span><span class="op">.</span><span class="fu">Dispose</span><span class="op">()</span></span>
+<span id="cb1-16"><a href="#cb1-16" aria-hidden="true" tabindex="-1"></a><span class="va">$stationPassword</span> <span class="op">=</span> <span class="op">-join</span> <span class="op">(</span><span class="va">$randomBytes</span> <span class="op">|</span> <span class="fu">ForEach-Object</span> <span class="op">{</span> <span class="va">$_</span><span class="op">.</span><span class="fu">ToString</span><span class="op">(</span><span class="st">&#39;x2&#39;</span><span class="op">)</span> <span class="op">})</span></span>
+<span id="cb1-17"><a href="#cb1-17" aria-hidden="true" tabindex="-1"></a><span class="va">$stationPassword</span> <span class="op">|</span> <span class="fu">ConvertTo-SecureString</span> <span class="op">-</span>AsPlainText <span class="op">-</span>Force <span class="op">|</span> <span class="fu">ConvertFrom-SecureString</span> <span class="op">|</span></span>
+<span id="cb1-18"><a href="#cb1-18" aria-hidden="true" tabindex="-1"></a>  <span class="fu">Set-Content</span> <span class="op">-</span>LiteralPath <span class="op">(</span><span class="fu">Join-Path</span> <span class="va">$stationRoot</span> <span class="st">&#39;station-password.dpapi&#39;</span><span class="op">)</span></span>
+<span id="cb1-19"><a href="#cb1-19" aria-hidden="true" tabindex="-1"></a><span class="fu">Remove-Variable</span> stationPassword<span class="op">,</span>randomBytes</span></code></pre></div>
+<p>The password file uses the current Windows user’s DPAPI protection.
+It is not portable to a different user or machine without an explicit
+credential/recovery decision. Keep it out of source control, support
+bundles and public documentation. Reuse this protected configuration on
+restart rather than creating another database or password.</p>
+<p>In the same session, establish the exact process environment. On a
+later restart, set <code>$profilePath</code>, <code>$control</code>,
+<code>$payload</code> and <code>$stationRoot</code> to these same
+existing locations, then repeat this environment/start section,
+<strong>not</strong> the first-time provisioning section.</p>
+<div class="sourceCode" id="cb2"><pre
+class="sourceCode powershell"><code class="sourceCode powershell"><span id="cb2-1"><a href="#cb2-1" aria-hidden="true" tabindex="-1"></a><span class="va">$secret</span> <span class="op">=</span> <span class="fu">Get-Content</span> <span class="op">-</span>LiteralPath <span class="op">(</span><span class="fu">Join-Path</span> <span class="va">$stationRoot</span> <span class="st">&#39;station-password.dpapi&#39;</span><span class="op">)</span> <span class="op">-</span>Raw <span class="op">|</span></span>
+<span id="cb2-2"><a href="#cb2-2" aria-hidden="true" tabindex="-1"></a>  <span class="fu">ConvertTo-SecureString</span></span>
+<span id="cb2-3"><a href="#cb2-3" aria-hidden="true" tabindex="-1"></a><span class="va">$stationPassword</span> <span class="op">=</span> <span class="op">[</span>System<span class="op">.</span><span class="fu">Net</span><span class="op">.</span><span class="fu">NetworkCredential</span><span class="op">]::</span>new<span class="op">(</span><span class="st">&#39;&#39;</span><span class="op">,</span> <span class="va">$secret</span><span class="op">).</span><span class="fu">Password</span></span>
+<span id="cb2-4"><a href="#cb2-4" aria-hidden="true" tabindex="-1"></a><span class="va">$nativePassword</span> <span class="op">=</span> <span class="op">(</span><span class="fu">Get-Content</span> <span class="op">-</span>LiteralPath <span class="op">(</span><span class="fu">Join-Path</span> <span class="va">$profilePath</span> <span class="st">&#39;config\secrets\postgres-password.txt&#39;</span><span class="op">)</span> <span class="op">-</span>Raw<span class="op">).</span><span class="fu">Trim</span><span class="op">()</span></span>
+<span id="cb2-5"><a href="#cb2-5" aria-hidden="true" tabindex="-1"></a><span class="va">$encodedNative</span> <span class="op">=</span> <span class="op">[</span>uri<span class="op">]::</span>EscapeDataString<span class="op">(</span><span class="va">$nativePassword</span><span class="op">)</span></span>
+<span id="cb2-6"><a href="#cb2-6" aria-hidden="true" tabindex="-1"></a><span class="va">$env</span><span class="op">:</span><span class="va">TOWNLIGHT_PROFILE_ROOT</span> <span class="op">=</span> <span class="va">$profilePath</span></span>
+<span id="cb2-7"><a href="#cb2-7" aria-hidden="true" tabindex="-1"></a><span class="va">$env</span><span class="op">:</span><span class="va">CIVICSUITE_DATA_DIR</span> <span class="op">=</span> <span class="fu">Join-Path</span> <span class="va">$profilePath</span> <span class="st">&#39;Data&#39;</span></span>
+<span id="cb2-8"><a href="#cb2-8" aria-hidden="true" tabindex="-1"></a><span class="va">$env</span><span class="op">:</span><span class="va">CIVICSUITE_FILE_STORAGE_DIR</span> <span class="op">=</span> <span class="fu">Join-Path</span> <span class="va">$profilePath</span> <span class="st">&#39;Data\files&#39;</span></span>
+<span id="cb2-9"><a href="#cb2-9" aria-hidden="true" tabindex="-1"></a><span class="va">$env</span><span class="op">:</span><span class="va">DATABASE_URL</span> <span class="op">=</span> <span class="st">&quot;postgresql+asyncpg://civicsuite:</span><span class="pp">${</span><span class="va">encodedNative</span><span class="pp">}</span><span class="st">@127.0.0.1:15432/civicsuite&quot;</span></span>
+<span id="cb2-10"><a href="#cb2-10" aria-hidden="true" tabindex="-1"></a><span class="va">$env</span><span class="op">:</span><span class="va">TOWNLIGHT_PRODUCT_PROFILE</span> <span class="op">=</span> <span class="st">&#39;inspections-preview&#39;</span></span>
+<span id="cb2-11"><a href="#cb2-11" aria-hidden="true" tabindex="-1"></a><span class="va">$env</span><span class="op">:</span><span class="va">PORTAL_MODE</span> <span class="op">=</span> <span class="st">&#39;private&#39;</span></span>
+<span id="cb2-12"><a href="#cb2-12" aria-hidden="true" tabindex="-1"></a><span class="va">$env</span><span class="op">:</span><span class="va">CIVICSUITE_RUNTIME_HOST</span> <span class="op">=</span> <span class="st">&#39;127.0.0.1&#39;</span></span>
+<span id="cb2-13"><a href="#cb2-13" aria-hidden="true" tabindex="-1"></a><span class="va">$env</span><span class="op">:</span><span class="va">CIVICSUITE_RUNTIME_PORT</span> <span class="op">=</span> <span class="st">&#39;15481&#39;</span></span>
+<span id="cb2-14"><a href="#cb2-14" aria-hidden="true" tabindex="-1"></a><span class="va">$env</span><span class="op">:</span><span class="va">TOWNLIGHT_STATION_URL</span> <span class="op">=</span> <span class="st">&#39;http://127.0.0.1:8756&#39;</span></span>
+<span id="cb2-15"><a href="#cb2-15" aria-hidden="true" tabindex="-1"></a><span class="va">$env</span><span class="op">:</span><span class="va">TOWNLIGHT_STATION_SUITE_URL</span> <span class="op">=</span> <span class="st">&#39;http://127.0.0.1:15481&#39;</span></span>
+<span id="cb2-16"><a href="#cb2-16" aria-hidden="true" tabindex="-1"></a><span class="va">$env</span><span class="op">:</span><span class="va">TOWNLIGHT_STATION_DATA_ROOT</span> <span class="op">=</span> <span class="fu">Join-Path</span> <span class="va">$stationRoot</span> <span class="st">&#39;data&#39;</span></span>
+<span id="cb2-17"><a href="#cb2-17" aria-hidden="true" tabindex="-1"></a><span class="va">$env</span><span class="op">:</span><span class="va">TOWNLIGHT_STATION_DATABASE_URL</span> <span class="op">=</span> <span class="st">&quot;postgresql+psycopg2://townlight_beta_station_app:</span><span class="pp">${</span><span class="va">stationPassword</span><span class="pp">}</span><span class="st">@127.0.0.1:15432/townlight_beta_station&quot;</span></span>
+<span id="cb2-18"><a href="#cb2-18" aria-hidden="true" tabindex="-1"></a><span class="va">$env</span><span class="op">:</span><span class="va">TOWNLIGHT_STATION_MEDIA_SOURCE</span> <span class="op">=</span> <span class="fu">Join-Path</span> <span class="va">$payload</span> <span class="st">&#39;media-source&#39;</span></span>
+<span id="cb2-19"><a href="#cb2-19" aria-hidden="true" tabindex="-1"></a><span class="va">$env</span><span class="op">:</span><span class="va">TOWNLIGHT_STATION_MEDIA_PYTHON</span> <span class="op">=</span> <span class="fu">Join-Path</span> <span class="va">$payload</span> <span class="st">&#39;runtime\python.exe&#39;</span></span>
+<span id="cb2-20"><a href="#cb2-20" aria-hidden="true" tabindex="-1"></a><span class="va">$env</span><span class="op">:</span><span class="va">TOWNLIGHT_STATION_MEDIA_RUNTIME</span> <span class="op">=</span> <span class="fu">Join-Path</span> <span class="va">$payload</span> <span class="st">&#39;runtime&#39;</span></span>
+<span id="cb2-21"><a href="#cb2-21" aria-hidden="true" tabindex="-1"></a><span class="va">$env</span><span class="op">:</span><span class="va">TOWNLIGHT_STATION_FFPROBE</span> <span class="op">=</span> <span class="fu">Join-Path</span> <span class="va">$payload</span> <span class="st">&#39;bin\ffprobe.exe&#39;</span></span>
+<span id="cb2-22"><a href="#cb2-22" aria-hidden="true" tabindex="-1"></a><span class="va">$env</span><span class="op">:</span><span class="va">PYTHONNOUSERSITE</span> <span class="op">=</span> <span class="st">&#39;1&#39;</span></span>
+<span id="cb2-23"><a href="#cb2-23" aria-hidden="true" tabindex="-1"></a><span class="va">$env</span><span class="op">:</span><span class="va">PYTHONDONTWRITEBYTECODE</span> <span class="op">=</span> <span class="st">&#39;1&#39;</span></span>
+<span id="cb2-24"><a href="#cb2-24" aria-hidden="true" tabindex="-1"></a><span class="fu">Remove-Item</span> Env<span class="op">:</span>PYTHONPATH <span class="op">-</span>ErrorAction SilentlyContinue</span>
+<span id="cb2-25"><a href="#cb2-25" aria-hidden="true" tabindex="-1"></a><span class="fu">Remove-Variable</span> nativePassword<span class="op">,</span>encodedNative<span class="op">,</span>stationPassword<span class="op">,</span>secret</span></code></pre></div>
+<p>Use the actual native PostgreSQL port/database/user if the deployment
+differs from the accepted defaults. Environment changes here apply to
+children of this shell, not the already running native supervisor. Keep
+secrets out of command arguments and output. The paired runtime
+deliberately uses normal <code>verify_activation</code> through its
+standard module entry point.</p>
+<h3 id="provision-the-station-database-once">Provision the Station
+database once</h3>
+<p>This first-time step creates only the dedicated synthetic
+role/database. Its role owns that database and its Station schema, with
+no superuser/global administration grant. It connects to the normally
+provisioned local database using the current profile’s protected
+credential. Existing role/database names cause a refusal before
+creation; do not drop or repurpose them automatically.</p>
+<div class="sourceCode" id="cb3"><pre
+class="sourceCode powershell"><code class="sourceCode powershell"><span id="cb3-1"><a href="#cb3-1" aria-hidden="true" tabindex="-1"></a><span class="vs">@&#39;</span></span>
+<span id="cb3-2"><a href="#cb3-2" aria-hidden="true" tabindex="-1"></a><span class="vs">import os</span></span>
+<span id="cb3-3"><a href="#cb3-3" aria-hidden="true" tabindex="-1"></a><span class="vs">from pathlib import Path</span></span>
+<span id="cb3-4"><a href="#cb3-4" aria-hidden="true" tabindex="-1"></a><span class="vs">import psycopg2</span></span>
+<span id="cb3-5"><a href="#cb3-5" aria-hidden="true" tabindex="-1"></a><span class="vs">from psycopg2 import sql</span></span>
+<span id="cb3-6"><a href="#cb3-6" aria-hidden="true" tabindex="-1"></a><span class="vs">from sqlalchemy.engine import make_url</span></span>
+<span id="cb3-7"><a href="#cb3-7" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-8"><a href="#cb3-8" aria-hidden="true" tabindex="-1"></a><span class="vs">url = make_url(os.environ[&#39;TOWNLIGHT_STATION_DATABASE_URL&#39;])</span></span>
+<span id="cb3-9"><a href="#cb3-9" aria-hidden="true" tabindex="-1"></a><span class="vs">profile = Path(os.environ[&#39;TOWNLIGHT_PROFILE_ROOT&#39;])</span></span>
+<span id="cb3-10"><a href="#cb3-10" aria-hidden="true" tabindex="-1"></a><span class="vs">password = (profile/&#39;config/secrets/postgres-password.txt&#39;).read_text().strip()</span></span>
+<span id="cb3-11"><a href="#cb3-11" aria-hidden="true" tabindex="-1"></a><span class="vs">conn = psycopg2.connect(host=&#39;127.0.0.1&#39;, port=15432, user=&#39;civicsuite&#39;,</span></span>
+<span id="cb3-12"><a href="#cb3-12" aria-hidden="true" tabindex="-1"></a><span class="vs">                        password=password, dbname=&#39;postgres&#39;)</span></span>
+<span id="cb3-13"><a href="#cb3-13" aria-hidden="true" tabindex="-1"></a><span class="vs">conn.autocommit = True</span></span>
+<span id="cb3-14"><a href="#cb3-14" aria-hidden="true" tabindex="-1"></a><span class="vs">try:</span></span>
+<span id="cb3-15"><a href="#cb3-15" aria-hidden="true" tabindex="-1"></a><span class="vs">    with conn.cursor() as cur:</span></span>
+<span id="cb3-16"><a href="#cb3-16" aria-hidden="true" tabindex="-1"></a><span class="vs">        cur.execute(&#39;SELECT 1 FROM pg_roles WHERE rolname=%s&#39;, (url.username,))</span></span>
+<span id="cb3-17"><a href="#cb3-17" aria-hidden="true" tabindex="-1"></a><span class="vs">        role_exists = cur.fetchone() is not None</span></span>
+<span id="cb3-18"><a href="#cb3-18" aria-hidden="true" tabindex="-1"></a><span class="vs">        cur.execute(&#39;SELECT 1 FROM pg_database WHERE datname=%s&#39;, (url.database,))</span></span>
+<span id="cb3-19"><a href="#cb3-19" aria-hidden="true" tabindex="-1"></a><span class="vs">        if role_exists or cur.fetchone() is not None:</span></span>
+<span id="cb3-20"><a href="#cb3-20" aria-hidden="true" tabindex="-1"></a><span class="vs">            raise RuntimeError(&#39;Dedicated role/database already exists; inspect before continuing&#39;)</span></span>
+<span id="cb3-21"><a href="#cb3-21" aria-hidden="true" tabindex="-1"></a><span class="vs">        cur.execute(sql.SQL(&#39;CREATE ROLE {} LOGIN PASSWORD %s&#39;).format(</span></span>
+<span id="cb3-22"><a href="#cb3-22" aria-hidden="true" tabindex="-1"></a><span class="vs">            sql.Identifier(url.username)), (url.password,))</span></span>
+<span id="cb3-23"><a href="#cb3-23" aria-hidden="true" tabindex="-1"></a><span class="vs">        cur.execute(sql.SQL(&#39;CREATE DATABASE {} OWNER {}&#39;).format(</span></span>
+<span id="cb3-24"><a href="#cb3-24" aria-hidden="true" tabindex="-1"></a><span class="vs">            sql.Identifier(url.database), sql.Identifier(url.username)))</span></span>
+<span id="cb3-25"><a href="#cb3-25" aria-hidden="true" tabindex="-1"></a><span class="vs">finally:</span></span>
+<span id="cb3-26"><a href="#cb3-26" aria-hidden="true" tabindex="-1"></a><span class="vs">    conn.close()</span></span>
+<span id="cb3-27"><a href="#cb3-27" aria-hidden="true" tabindex="-1"></a><span class="vs">&#39;@</span> <span class="op">|</span> <span class="op">&amp;</span> <span class="va">$control</span> <span class="op">-</span>B <span class="op">-</span></span>
+<span id="cb3-28"><a href="#cb3-28" aria-hidden="true" tabindex="-1"></a><span class="cf">if</span> <span class="op">(</span><span class="va">$LASTEXITCODE</span> <span class="op">-ne</span> <span class="dv">0</span><span class="op">)</span> <span class="op">{</span> <span class="cf">throw</span> <span class="st">&#39;Station database provisioning did not complete; inspect before retrying.&#39;</span> <span class="op">}</span></span>
+<span id="cb3-29"><a href="#cb3-29" aria-hidden="true" tabindex="-1"></a><span class="op">&amp;</span> <span class="va">$control</span> <span class="op">-</span>B <span class="op">-</span>m townlight_station<span class="op">.</span><span class="fu">cli</span> migrate</span>
+<span id="cb3-30"><a href="#cb3-30" aria-hidden="true" tabindex="-1"></a><span class="cf">if</span> <span class="op">(</span><span class="va">$LASTEXITCODE</span> <span class="op">-ne</span> <span class="dv">0</span><span class="op">)</span> <span class="op">{</span> <span class="cf">throw</span> <span class="st">&#39;Station migration failed; retain logs and inspect the dedicated schema.&#39;</span> <span class="op">}</span></span></code></pre></div>
+<p>If database creation fails after the role was created, the operation
+is partially complete: inspect that exact owned role/database before
+resuming. Do not rerun against guessed names or remove unrelated
+objects. On normal restarts, the database already exists; skip creation
+and use the existing identity. <code>migrate</code> is explicit; API
+requests do not substitute for schema migration.</p>
+<h3 id="start-and-check-the-paired-processes">Start and check the paired
+processes</h3>
+<p>Use the same configured session. The standard suite entry point
+verifies the existing native activation. Check readiness of that exact
+paired origin, not only the desktop’s canonical port. Startup below
+creates hidden children with private log files and records their
+identities; it does not focus windows or install services.</p>
+<div class="sourceCode" id="cb4"><pre
+class="sourceCode powershell"><code class="sourceCode powershell"><span id="cb4-1"><a href="#cb4-1" aria-hidden="true" tabindex="-1"></a><span class="va">$owned</span> <span class="op">=</span> <span class="op">@()</span></span>
+<span id="cb4-2"><a href="#cb4-2" aria-hidden="true" tabindex="-1"></a><span class="kw">function</span> Start-StationRole<span class="op">([</span><span class="dt">string</span><span class="op">]</span><span class="va">$name</span><span class="op">,</span> <span class="op">[</span><span class="dt">string</span><span class="op">[]]</span><span class="va">$arguments</span><span class="op">)</span> <span class="op">{</span></span>
+<span id="cb4-3"><a href="#cb4-3" aria-hidden="true" tabindex="-1"></a>  <span class="va">$p</span> <span class="op">=</span> <span class="fu">Start-Process</span> <span class="op">-</span>FilePath <span class="va">$control</span> <span class="op">-</span>ArgumentList <span class="va">$arguments</span> <span class="op">-</span>WindowStyle Hidden <span class="op">-</span>PassThru `</span>
+<span id="cb4-4"><a href="#cb4-4" aria-hidden="true" tabindex="-1"></a>    <span class="op">-</span>RedirectStandardOutput <span class="op">(</span><span class="fu">Join-Path</span> <span class="va">$stationRoot</span> <span class="st">&quot;logs\</span><span class="va">$name</span><span class="st">.out.log&quot;</span><span class="op">)</span> `</span>
+<span id="cb4-5"><a href="#cb4-5" aria-hidden="true" tabindex="-1"></a>    <span class="op">-</span>RedirectStandardError <span class="op">(</span><span class="fu">Join-Path</span> <span class="va">$stationRoot</span> <span class="st">&quot;logs\</span><span class="va">$name</span><span class="st">.err.log&quot;</span><span class="op">)</span></span>
+<span id="cb4-6"><a href="#cb4-6" aria-hidden="true" tabindex="-1"></a>  <span class="va">$script</span><span class="op">:</span><span class="va">owned</span> <span class="op">+=</span> <span class="op">[</span>pscustomobject<span class="op">]</span>@<span class="op">{</span> Name<span class="op">=</span><span class="va">$name</span><span class="op">;</span> Id<span class="op">=</span><span class="va">$p</span><span class="op">.</span><span class="fu">Id</span><span class="op">;</span> StartTime<span class="op">=</span><span class="va">$p</span><span class="op">.</span><span class="fu">StartTime</span><span class="op">;</span> Path<span class="op">=</span><span class="va">$p</span><span class="op">.</span><span class="fu">Path</span> <span class="op">}</span></span>
+<span id="cb4-7"><a href="#cb4-7" aria-hidden="true" tabindex="-1"></a>  <span class="va">$script</span><span class="op">:</span><span class="va">owned</span> <span class="op">|</span> <span class="fu">ConvertTo-Json</span> <span class="op">|</span> <span class="fu">Set-Content</span> <span class="op">-</span>LiteralPath <span class="op">(</span><span class="fu">Join-Path</span> <span class="va">$stationRoot</span> <span class="st">&#39;owned-processes.json&#39;</span><span class="op">)</span></span>
+<span id="cb4-8"><a href="#cb4-8" aria-hidden="true" tabindex="-1"></a>  <span class="cf">return</span> <span class="va">$p</span></span>
+<span id="cb4-9"><a href="#cb4-9" aria-hidden="true" tabindex="-1"></a><span class="op">}</span></span>
+<span id="cb4-10"><a href="#cb4-10" aria-hidden="true" tabindex="-1"></a><span class="kw">function</span> Wait-StationReady<span class="op">([</span><span class="dt">string</span><span class="op">]</span><span class="va">$url</span><span class="op">,</span> <span class="va">$process</span><span class="op">)</span> <span class="op">{</span></span>
+<span id="cb4-11"><a href="#cb4-11" aria-hidden="true" tabindex="-1"></a>  <span class="cf">for</span> <span class="op">(</span><span class="va">$attempt</span><span class="op">=</span><span class="dv">0</span><span class="op">;</span> <span class="va">$attempt</span> <span class="op">-lt</span> <span class="dv">40</span><span class="op">;</span> <span class="va">$attempt</span><span class="op">++)</span> <span class="op">{</span></span>
+<span id="cb4-12"><a href="#cb4-12" aria-hidden="true" tabindex="-1"></a>    <span class="cf">if</span> <span class="op">(</span><span class="va">$process</span><span class="op">.</span><span class="fu">HasExited</span><span class="op">)</span> <span class="op">{</span> <span class="cf">throw</span> <span class="st">&quot;Owned process exited; inspect logs for </span><span class="va">$url</span><span class="st">&quot;</span> <span class="op">}</span></span>
+<span id="cb4-13"><a href="#cb4-13" aria-hidden="true" tabindex="-1"></a>    <span class="cf">try</span> <span class="op">{</span></span>
+<span id="cb4-14"><a href="#cb4-14" aria-hidden="true" tabindex="-1"></a>      <span class="va">$response</span> <span class="op">=</span> <span class="fu">Invoke-WebRequest</span> <span class="op">-</span>Uri <span class="va">$url</span> <span class="op">-</span>UseBasicParsing <span class="op">-</span>TimeoutSec <span class="dv">2</span></span>
+<span id="cb4-15"><a href="#cb4-15" aria-hidden="true" tabindex="-1"></a>      <span class="cf">if</span> <span class="op">(</span><span class="va">$response</span><span class="op">.</span><span class="fu">StatusCode</span> <span class="op">-eq</span> <span class="dv">200</span><span class="op">)</span> <span class="op">{</span> <span class="cf">return</span> <span class="op">}</span></span>
+<span id="cb4-16"><a href="#cb4-16" aria-hidden="true" tabindex="-1"></a>    <span class="op">}</span> <span class="cf">catch</span> <span class="op">{</span> <span class="op">}</span></span>
+<span id="cb4-17"><a href="#cb4-17" aria-hidden="true" tabindex="-1"></a>    <span class="fu">Start-Sleep</span> <span class="op">-</span>Milliseconds <span class="dv">250</span></span>
+<span id="cb4-18"><a href="#cb4-18" aria-hidden="true" tabindex="-1"></a>  <span class="op">}</span></span>
+<span id="cb4-19"><a href="#cb4-19" aria-hidden="true" tabindex="-1"></a>  <span class="cf">throw</span> <span class="st">&quot;Readiness not established: </span><span class="va">$url</span><span class="st">; inspect the owned logs&quot;</span></span>
+<span id="cb4-20"><a href="#cb4-20" aria-hidden="true" tabindex="-1"></a><span class="op">}</span></span>
+<span id="cb4-21"><a href="#cb4-21" aria-hidden="true" tabindex="-1"></a><span class="va">$suite</span> <span class="op">=</span> Start-StationRole <span class="st">&#39;paired-suite&#39;</span> <span class="op">@(</span><span class="st">&#39;-B&#39;</span><span class="op">,</span><span class="st">&#39;-m&#39;</span><span class="op">,</span><span class="st">&#39;civicsuite_runtime.services&#39;</span><span class="op">)</span></span>
+<span id="cb4-22"><a href="#cb4-22" aria-hidden="true" tabindex="-1"></a>Wait-StationReady <span class="st">&#39;http://127.0.0.1:15481/ready&#39;</span> <span class="va">$suite</span></span>
+<span id="cb4-23"><a href="#cb4-23" aria-hidden="true" tabindex="-1"></a><span class="va">$api</span> <span class="op">=</span> Start-StationRole <span class="st">&#39;station-api&#39;</span> <span class="op">@(</span><span class="st">&#39;-B&#39;</span><span class="op">,</span><span class="st">&#39;-m&#39;</span><span class="op">,</span><span class="st">&#39;townlight_station.cli&#39;</span><span class="op">,</span><span class="st">&#39;serve&#39;</span><span class="op">,</span><span class="st">&#39;--port&#39;</span><span class="op">,</span><span class="st">&#39;8756&#39;</span><span class="op">)</span></span>
+<span id="cb4-24"><a href="#cb4-24" aria-hidden="true" tabindex="-1"></a>Wait-StationReady <span class="st">&#39;http://127.0.0.1:8756/health&#39;</span> <span class="va">$api</span></span>
+<span id="cb4-25"><a href="#cb4-25" aria-hidden="true" tabindex="-1"></a><span class="va">$worker</span> <span class="op">=</span> Start-StationRole <span class="st">&#39;station-worker&#39;</span> <span class="op">@(</span><span class="st">&#39;-B&#39;</span><span class="op">,</span><span class="st">&#39;-m&#39;</span><span class="op">,</span><span class="st">&#39;townlight_station.cli&#39;</span><span class="op">,</span><span class="st">&#39;worker&#39;</span><span class="op">)</span></span>
+<span id="cb4-26"><a href="#cb4-26" aria-hidden="true" tabindex="-1"></a><span class="co"># Only for the on-air profile:</span></span>
+<span id="cb4-27"><a href="#cb4-27" aria-hidden="true" tabindex="-1"></a><span class="va">$air</span> <span class="op">=</span> Start-StationRole <span class="st">&#39;station-air&#39;</span> <span class="op">@(</span><span class="st">&#39;-B&#39;</span><span class="op">,</span><span class="st">&#39;-m&#39;</span><span class="op">,</span><span class="st">&#39;townlight_station.cli&#39;</span><span class="op">,</span><span class="st">&#39;air&#39;</span><span class="op">)</span></span>
+<span id="cb4-28"><a href="#cb4-28" aria-hidden="true" tabindex="-1"></a><span class="va">$owned</span> <span class="op">|</span> <span class="fu">ConvertTo-Json</span> <span class="op">|</span> <span class="fu">Set-Content</span> <span class="op">-</span>LiteralPath <span class="op">(</span><span class="fu">Join-Path</span> <span class="va">$stationRoot</span> <span class="st">&#39;owned-processes.json&#39;</span><span class="op">)</span></span></code></pre></div>
+<p>Before launching, confirm ports 15481 and 8756 are unused. If
+readiness fails, inspect the relevant logs and retained profile/schema
+state; do not start another copy. A port that answers belongs to the
+intended process only when its ownership is established. A single worker
+owns a database. <code>worker --once</code> performs a bounded pass; it
+is not the normal continuous worker. The <code>air</code> role follows
+durable on-air state and emits the local program; it does not commission
+a physical transmitter or CDN. Its currently configured local output is
+under Station’s <code>air</code> directory. Back up the dedicated
+database and media together; Core’s native backup does not cover
+them.</p>
+<h3 id="configure-a-live-input-and-open-the-operator">Configure a live
+input and open the operator</h3>
+<p>Create <code>live-sources.json</code> under the Station
+<strong>data</strong> directory with the following fictional input. An
+actual sender must supply UDP MPEG-TS to that receiver; this
+configuration alone does not generate a signal.</p>
+<div class="sourceCode" id="cb5"><pre
+class="sourceCode json"><code class="sourceCode json"><span id="cb5-1"><a href="#cb5-1" aria-hidden="true" tabindex="-1"></a><span class="ot">[</span><span class="fu">{</span><span class="dt">&quot;id&quot;</span><span class="fu">:</span><span class="st">&quot;synthetic-chamber&quot;</span><span class="fu">,</span><span class="dt">&quot;label&quot;</span><span class="fu">:</span><span class="st">&quot;Synthetic chamber feed&quot;</span><span class="fu">,</span><span class="dt">&quot;kind&quot;</span><span class="fu">:</span><span class="st">&quot;udp-mpegts&quot;</span><span class="fu">,</span><span class="dt">&quot;address&quot;</span><span class="fu">:</span><span class="st">&quot;127.0.0.1&quot;</span><span class="fu">,</span><span class="dt">&quot;port&quot;</span><span class="fu">:</span><span class="dv">19000</span><span class="fu">}</span><span class="ot">]</span></span></code></pre></div>
+<p>At most 32 rows are accepted. IDs are unique 1–64
+letters/digits/underscore/hyphen; labels have 1–100 characters; IPv4 and
+ports 1024–65535 are validated. Each row has exactly the five shown
+keys. Protect the source network; UDP is not authenticated. Then, under
+the same signed-in native account:</p>
+<div class="sourceCode" id="cb6"><pre
+class="sourceCode powershell"><code class="sourceCode powershell"><span id="cb6-1"><a href="#cb6-1" aria-hidden="true" tabindex="-1"></a><span class="op">&amp;</span> <span class="va">$control</span> <span class="op">-</span>B <span class="op">-</span>m townlight_station<span class="op">.</span><span class="fu">cli</span> operator <span class="op">--</span>profile-root <span class="va">$profilePath</span> <span class="op">--</span>port <span class="dv">8756</span></span></code></pre></div>
+<p>This normal operator command opens the operator for a future staff
+exercise. It reads the native session and exchanges a one-use launch
+ticket; it does not seed authority or put the native proof in a URL.
+Ticket expiry is 60 seconds, operator cookie lifetime 900 seconds, with
+at most 256 outstanding tickets/sessions each. Reopen normally after
+expiration, API restart or sign-out. Changing database/configuration
+identities does not repair a staff permission refusal.</p>
+<h3 id="bounds-and-shutdown">Bounds and shutdown</h3>
+<p>Default encoding is 1920×1080, 30 fps, 6000 kbps. Optional Station
+variables permit <code>MAX_SECONDS</code> 10–86400 (default 7200), even
+<code>WIDTH</code> 320–3840 and <code>HEIGHT</code> 180–2160,
+<code>FPS</code> 1–60 and <code>BITRATE_KBPS</code> 128–50000; each is
+prefixed <code>TOWNLIGHT_STATION_</code>. The media source lock and
+exclusive data identity are verified before use. The dedicated database
+name must end in <code>_station</code>; unowned nonempty storage and
+escaping/reparse paths are refused. The existing SCM entry point is not
+a claim of installed service acceptance.</p>
+<p>To finish an exercise, stop live capture from the operator and wait
+for its completed or failed terminal state, cancel unwanted future
+schedules, sign out and preserve the evidence/logs. Stop only the
+children you started, checking identity before using a saved PID:</p>
+<div class="sourceCode" id="cb7"><pre
+class="sourceCode powershell"><code class="sourceCode powershell"><span id="cb7-1"><a href="#cb7-1" aria-hidden="true" tabindex="-1"></a><span class="cf">foreach</span> <span class="op">(</span><span class="va">$entry</span> <span class="kw">in</span> <span class="op">@(</span><span class="va">$owned</span> <span class="op">|</span> <span class="fu">Sort-Object</span> StartTime <span class="op">-</span>Descending<span class="op">))</span> <span class="op">{</span></span>
+<span id="cb7-2"><a href="#cb7-2" aria-hidden="true" tabindex="-1"></a>  <span class="va">$process</span> <span class="op">=</span> <span class="fu">Get-Process</span> <span class="op">-</span>Id <span class="va">$entry</span><span class="op">.</span><span class="fu">Id</span> <span class="op">-</span>ErrorAction SilentlyContinue</span>
+<span id="cb7-3"><a href="#cb7-3" aria-hidden="true" tabindex="-1"></a>  <span class="cf">if</span> <span class="op">(</span><span class="va">$process</span> <span class="op">-and</span> <span class="va">$process</span><span class="op">.</span><span class="fu">StartTime</span> <span class="op">-eq</span> <span class="va">$entry</span><span class="op">.</span><span class="fu">StartTime</span> <span class="op">-and</span> <span class="va">$process</span><span class="op">.</span><span class="fu">Path</span> <span class="op">-eq</span> <span class="va">$entry</span><span class="op">.</span><span class="fu">Path</span><span class="op">)</span> <span class="op">{</span></span>
+<span id="cb7-4"><a href="#cb7-4" aria-hidden="true" tabindex="-1"></a>    <span class="fu">Stop-Process</span> <span class="op">-</span>Id <span class="va">$process</span><span class="op">.</span><span class="fu">Id</span></span>
+<span id="cb7-5"><a href="#cb7-5" aria-hidden="true" tabindex="-1"></a>    <span class="va">$process</span><span class="op">.</span><span class="fu">WaitForExit</span><span class="op">()</span></span>
+<span id="cb7-6"><a href="#cb7-6" aria-hidden="true" tabindex="-1"></a>  <span class="op">}</span></span>
+<span id="cb7-7"><a href="#cb7-7" aria-hidden="true" tabindex="-1"></a><span class="op">}</span></span></code></pre></div>
+<p>Retain the ownership file if the shell must close; parse and verify
+its actual process paths/start times before acting. Do not terminate the
+native database/supervisor or CivicCast. Interrupting a worker during a
+job preserves an interrupted attempt, not completed media; recovery is
+described in the Station operating procedure. Clear secret-bearing
+environment values when closing the dedicated deployment shell. Do not
+delete the database/data root to “reset” an uncertain result.</p>
+<h2 id="api-usage">API usage</h2>
+<h3 id="native-command-example">Native command example</h3>
+<p>The following JavaScript belongs in the existing trusted Townlight
+frontend/development environment with <code>invoke</code> imported from
+<code>@tauri-apps/api/core</code>. It is not a command for an arbitrary
+web page or an instruction for nontechnical staff. IDs must come from
+records created in an isolated synthetic exercise.</p>
+<div class="sourceCode" id="cb8"><pre
+class="sourceCode javascript"><code class="sourceCode javascript"><span id="cb8-1"><a href="#cb8-1" aria-hidden="true" tabindex="-1"></a><span class="im">import</span> { invoke } <span class="im">from</span> <span class="st">&#39;@tauri-apps/api/core&#39;</span><span class="op">;</span></span>
+<span id="cb8-2"><a href="#cb8-2" aria-hidden="true" tabindex="-1"></a><span class="kw">const</span> result <span class="op">=</span> <span class="cf">await</span> <span class="fu">invoke</span>(<span class="st">&#39;meetings_domain_request&#39;</span><span class="op">,</span> {<span class="dt">request</span><span class="op">:</span> {<span class="dt">operation</span><span class="op">:</span> <span class="st">&#39;get-meeting&#39;</span><span class="op">,</span> <span class="dt">id</span><span class="op">:</span> meetingId}})<span class="op">;</span></span>
+<span id="cb8-3"><a href="#cb8-3" aria-hidden="true" tabindex="-1"></a><span class="bu">console</span><span class="op">.</span><span class="fu">log</span>(result)<span class="op">;</span></span></code></pre></div>
+<h3 id="trusted-local-http-example">Trusted local HTTP example</h3>
+<p>An administrator/developer can inspect an already-configured isolated
+runtime from a trusted local process. This PowerShell example reads the
+signed-in synthetic profile’s existing proof into memory; it does not
+create a user, seed a session, reveal the proof in output or bypass a
+permission check. Do not use real city data in development examples. A
+read response does not prove approval or publication.</p>
+<div class="sourceCode" id="cb9"><pre
+class="sourceCode powershell"><code class="sourceCode powershell"><span id="cb9-1"><a href="#cb9-1" aria-hidden="true" tabindex="-1"></a><span class="fu">Invoke-RestMethod</span> <span class="op">-</span>Uri <span class="st">&#39;http://127.0.0.1:8756/health&#39;</span></span>
+<span id="cb9-2"><a href="#cb9-2" aria-hidden="true" tabindex="-1"></a><span class="co"># Authenticated recording operations additionally require current native proof.</span></span></code></pre></div>
+<h3 id="a-synthetic-write-with-subsequent-readback">A synthetic write
+with subsequent readback</h3>
+<p>This example demonstrates the existing Meetings HTTP contract in an
+isolated exercise. It is intentionally fictional. It does not start a
+service. Its authentication setup is included so it can be run
+independently under the signed-in synthetic account. If a write times
+out, inspect current records before repeating it.</p>
+<div class="sourceCode" id="cb10"><pre
+class="sourceCode powershell"><code class="sourceCode powershell"><span id="cb10-1"><a href="#cb10-1" aria-hidden="true" tabindex="-1"></a><span class="va">$profilePath</span> <span class="op">=</span> <span class="fu">Join-Path</span> <span class="va">$env</span><span class="op">:</span><span class="va">LOCALAPPDATA</span> <span class="st">&#39;CivicSuite&#39;</span></span>
+<span id="cb10-2"><a href="#cb10-2" aria-hidden="true" tabindex="-1"></a><span class="va">$sessionPath</span> <span class="op">=</span> <span class="fu">Join-Path</span> <span class="va">$profilePath</span> <span class="st">&#39;config/local-session.json&#39;</span></span>
+<span id="cb10-3"><a href="#cb10-3" aria-hidden="true" tabindex="-1"></a><span class="va">$session</span> <span class="op">=</span> <span class="fu">Get-Content</span> <span class="op">-</span>LiteralPath <span class="va">$sessionPath</span> <span class="op">-</span>Raw <span class="op">|</span> <span class="fu">ConvertFrom-Json</span></span>
+<span id="cb10-4"><a href="#cb10-4" aria-hidden="true" tabindex="-1"></a><span class="va">$headers</span> <span class="op">=</span> @<span class="op">{</span> <span class="st">&#39;X-Townlight-Session&#39;</span> <span class="op">=</span> <span class="va">$session</span><span class="op">.</span><span class="fu">session_hash</span> <span class="op">}</span></span>
+<span id="cb10-5"><a href="#cb10-5" aria-hidden="true" tabindex="-1"></a><span class="va">$body</span> <span class="op">=</span> @<span class="op">{</span></span>
+<span id="cb10-6"><a href="#cb10-6" aria-hidden="true" tabindex="-1"></a>  title <span class="op">=</span> <span class="st">&#39;Synthetic documentation exercise&#39;</span></span>
+<span id="cb10-7"><a href="#cb10-7" aria-hidden="true" tabindex="-1"></a>  scheduled_start <span class="op">=</span> <span class="st">&#39;2026-11-05T18:00:00-07:00&#39;</span></span>
+<span id="cb10-8"><a href="#cb10-8" aria-hidden="true" tabindex="-1"></a>  location <span class="op">=</span> <span class="st">&#39;Synthetic room&#39;</span></span>
+<span id="cb10-9"><a href="#cb10-9" aria-hidden="true" tabindex="-1"></a>  meeting_type <span class="op">=</span> <span class="st">&#39;regular&#39;</span></span>
+<span id="cb10-10"><a href="#cb10-10" aria-hidden="true" tabindex="-1"></a><span class="op">}</span> <span class="op">|</span> <span class="fu">ConvertTo-Json</span></span>
+<span id="cb10-11"><a href="#cb10-11" aria-hidden="true" tabindex="-1"></a><span class="va">$meeting</span> <span class="op">=</span> <span class="fu">Invoke-RestMethod</span> <span class="op">-</span>Method Post `</span>
+<span id="cb10-12"><a href="#cb10-12" aria-hidden="true" tabindex="-1"></a>  <span class="op">-</span>Uri <span class="st">&#39;http://127.0.0.1:15480/desktop/v1/meetings/meetings&#39;</span> `</span>
+<span id="cb10-13"><a href="#cb10-13" aria-hidden="true" tabindex="-1"></a>  <span class="op">-</span>Headers <span class="va">$headers</span> <span class="op">-</span>ContentType <span class="st">&#39;application/json&#39;</span> <span class="op">-</span>Body <span class="va">$body</span></span>
+<span id="cb10-14"><a href="#cb10-14" aria-hidden="true" tabindex="-1"></a><span class="fu">Invoke-RestMethod</span> `</span>
+<span id="cb10-15"><a href="#cb10-15" aria-hidden="true" tabindex="-1"></a>  <span class="op">-</span>Uri <span class="op">(</span><span class="st">&#39;http://127.0.0.1:15480/desktop/v1/meetings/meetings/&#39;</span> <span class="op">+</span> <span class="va">$meeting</span><span class="op">.</span><span class="fu">id</span><span class="op">)</span> `</span>
+<span id="cb10-16"><a href="#cb10-16" aria-hidden="true" tabindex="-1"></a>  <span class="op">-</span>Headers <span class="va">$headers</span></span>
+<span id="cb10-17"><a href="#cb10-17" aria-hidden="true" tabindex="-1"></a><span class="fu">Remove-Variable</span> session<span class="op">,</span> headers</span></code></pre></div>
+<p>This write requires Meetings to be enabled and the signed-in staff
+role to permit it. It is a cross-suite integration example; for this
+product’s request models, use the complete technical reference
+below.</p>
+<h3 id="recording-and-records-handoff-example">Recording and Records
+handoff example</h3>
+<p>An authenticated local client sends
+<code>POST http://127.0.0.1:8756/v1/recordings</code> with
+<code>X-Townlight-Session</code> and this JSON, replacing the synthetic
+UUIDs with saved synthetic meeting/agenda IDs. Configure
+<code>synthetic-chamber</code> first.</p>
+<div class="sourceCode" id="cb11"><pre
+class="sourceCode json"><code class="sourceCode json"><span id="cb11-1"><a href="#cb11-1" aria-hidden="true" tabindex="-1"></a><span class="fu">{</span></span>
+<span id="cb11-2"><a href="#cb11-2" aria-hidden="true" tabindex="-1"></a>  <span class="dt">&quot;meeting_id&quot;</span><span class="fu">:</span> <span class="st">&quot;11111111-1111-4111-8111-111111111111&quot;</span><span class="fu">,</span></span>
+<span id="cb11-3"><a href="#cb11-3" aria-hidden="true" tabindex="-1"></a>  <span class="dt">&quot;agenda_ids&quot;</span><span class="fu">:</span> <span class="ot">[</span><span class="st">&quot;22222222-2222-4222-8222-222222222222&quot;</span><span class="ot">]</span><span class="fu">,</span></span>
+<span id="cb11-4"><a href="#cb11-4" aria-hidden="true" tabindex="-1"></a>  <span class="dt">&quot;live_source_id&quot;</span><span class="fu">:</span> <span class="st">&quot;synthetic-chamber&quot;</span><span class="fu">,</span></span>
+<span id="cb11-5"><a href="#cb11-5" aria-hidden="true" tabindex="-1"></a>  <span class="dt">&quot;idempotency_key&quot;</span><span class="fu">:</span> <span class="st">&quot;synthetic-docs-capture-001&quot;</span></span>
+<span id="cb11-6"><a href="#cb11-6" aria-hidden="true" tabindex="-1"></a><span class="fu">}</span></span></code></pre></div>
+<p>The initial response is <code>202</code> with a queued/running
+identity rather than completed media. Read
+<code>/v1/recordings/{identity}</code>, explicitly stop live capture
+through <code>/v1/recordings/{identity}/stop</code>, and wait for
+completed status before reading <code>/content</code>. Then the
+authorized Records client calls
+<code>POST /desktop/v1/requests/{request_id}/station-recordings</code>
+on the paired Suite runtime with:</p>
+<div class="sourceCode" id="cb12"><pre
+class="sourceCode json"><code class="sourceCode json"><span id="cb12-1"><a href="#cb12-1" aria-hidden="true" tabindex="-1"></a><span class="fu">{</span></span>
+<span id="cb12-2"><a href="#cb12-2" aria-hidden="true" tabindex="-1"></a>  <span class="dt">&quot;recording_id&quot;</span><span class="fu">:</span> <span class="st">&quot;33333333-3333-4333-8333-333333333333&quot;</span><span class="fu">,</span></span>
+<span id="cb12-3"><a href="#cb12-3" aria-hidden="true" tabindex="-1"></a>  <span class="dt">&quot;expected_sha256&quot;</span><span class="fu">:</span> <span class="st">&quot;aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa&quot;</span></span>
+<span id="cb12-4"><a href="#cb12-4" aria-hidden="true" tabindex="-1"></a><span class="fu">}</span></span></code></pre></div>
+<p>The shown hash is deliberately a placeholder. Use the actual
+completed recording’s hash. A mismatched hash must fail. Repeating the
+identical completed handoff is idempotent; it does not create a release
+copy or fulfill a request.</p>
+<h2 id="mcp-status">MCP status</h2>
+<p>No direct product MCP server is exposed by the accepted Townlight
+desktop or Station boundary. Do not configure an invented
+<code>townlight mcp</code> command or assume an AI client has staff
+permissions. The integration surfaces for this beta are native IPC, the
+documented HTTP APIs, source bundle imports, exact exports and the
+existing Station CLI.</p>
+<p>The bundled transcription code includes a <strong>TextFlowKit MCP
+adapter</strong> as a separate source capability. It offers job-based
+<code>transcribe_media</code>, <code>get_transcript</code>,
+<code>list_jobs</code>, <code>get_job_status</code> and
+<code>export_transcript</code>, and additional tools declared in that
+adapter. It uses stdio first and optional Streamable HTTP, with the MCP
+SDK as an optional extra. It is not automatically launched,
+authenticated as Townlight staff or accepted as a Townlight product MCP
+deployment. This documentation does not add such a service.</p>
+<p>For a transcription client already provisioned separately, an
+illustrative tool call is:</p>
+<div class="sourceCode" id="cb13"><pre
+class="sourceCode json"><code class="sourceCode json"><span id="cb13-1"><a href="#cb13-1" aria-hidden="true" tabindex="-1"></a><span class="fu">{</span><span class="dt">&quot;name&quot;</span><span class="fu">:</span><span class="st">&quot;get_job_status&quot;</span><span class="fu">,</span><span class="dt">&quot;arguments&quot;</span><span class="fu">:{</span><span class="dt">&quot;job_id&quot;</span><span class="fu">:</span><span class="st">&quot;synthetic-existing-job-id&quot;</span><span class="fu">}}</span></span></code></pre></div>
+<p>Use a job ID returned by that transcription service. This example
+does not create a Townlight record or bypass its review/Records handoff.
+The exact optional adapter tool signatures are supplied in the <a
+href="../reference/mcp.html">MCP source reference</a>. Station meeting
+capture does not become live speech recognition because this optional
+donor adapter exists.</p>
+<h2 id="verification-and-known-limits">Verification and known
+limits</h2>
+<table>
+<colgroup>
+<col style="width: 33%" />
+<col style="width: 33%" />
+<col style="width: 33%" />
+</colgroup>
+<thead>
+<tr>
+<th>Product</th>
+<th>Recorded result</th>
+<th>Precisely exercised</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Station</td>
+<td>PASS</td>
+<td>Actual native staff session and normally created meeting; headless
+operator live start/stop, decoded generated audio/video, served hash,
+private Records readback, idempotent locked original and logout.</td>
+</tr>
+</tbody>
+</table>
+<p>These results come from the identified signed candidate’s fresh
+normal-profile Sandbox exercise: real native IPC/HTTP/PostgreSQL and
+selected headless controls. All accounts, source bundles and media were
+synthetic. The guest install/uninstall and recovery passed, and the
+owned Sandbox stopped. No host installed application or standalone
+CivicCast was changed. This documentation task reuses those receipts; it
+does not claim a new software acceptance run.</p>
+<p>The <a href="../reference/workflow-matrix.json">workflow matrix</a>
+identifies raw receipt filenames. The <a
+href="../reference/sandbox-evidence-index.json">evidence index</a>
+retains their original hashes; raw receipts remain in the private beta
+handoff rather than being silently republished with the documentation
+site.</p>
+<p>The limits remain: actual city field acceptance and equipment/network
+commissioning; Station automatic provisioning/SCM commissioning; every
+UI/role combination; field recognition accuracy; and historical in-place
+upgrades are not certified. They are not five invented feature
+requirements. Fresh-install controlled beta handoff remains the accepted
+scope. This package makes no city-deployment, publication or
+general-availability claim.</p>
+<p>There is no Station first-run wizard or automatic activation by the
+desktop composition. The accepted normal-profile path uses an explicitly
+configured paired Townlight HTTP process. Physical encoder/network,
+remote identity, SCM commissioning, CDN delivery and long-duration field
+quality are not certified. Station does not perform automatic meeting
+speech recognition.</p>
+<h2 id="development-and-repository-map">Development and repository
+map</h2>
+<p>Use the corresponding source for the candidate rather than assuming
+the public default branch matches it. The source companion contains
+<code>installed-owned-source</code>, product build inputs, desktop
+Rust/browser sources, locks and <code>BUILD.md</code>. It excludes
+credentials and third-party binary/model payloads. Use the recorded
+runtime lock when reproducing packaging.</p>
+<p>Relevant source contracts:</p>
+<ul>
+<li><code>townlight_station/api.py</code></li>
+<li><code>townlight_station/boundary.py</code></li>
+<li><code>townlight_station/operations.py</code></li>
+<li><code>townlight_station/operator.py</code></li>
+<li><code>townlight_station/worker.py</code></li>
+<li><code>townlight_station/airplay.py</code></li>
+</ul>
+<p>The desktop package defines <code>npm run build</code>,
+<code>npm test</code>, <code>npm run test:browser</code> and its Tauri
+command. Python products retain their own <code>pyproject.toml</code>,
+tests and migrations; use the matching checkout’s declared dependencies
+and test configuration. Do not run a sample server against a production
+profile. This documentation build validates documentation only and
+reuses the separately identified installed acceptance; it does not claim
+a new complete application CI run.</p>
+<h2 id="recovery-and-support">Recovery and support</h2>
+<p>Save work and use Core’s canonical <strong>Backup Now</strong> before
+maintenance. That operation stops writers. Preserve the coherent
+profile/database/document backup and its receipt, then use
+<strong>Start</strong> to resume. A source export is not a full
+backup.</p>
+<p>Use <strong>Restore Latest Backup</strong> through the supported
+controls. If the result says <strong>Restore needs service
+start</strong>, use <strong>Start</strong>, then <strong>Check</strong>,
+and reopen a known record. Do not repeat restore merely because services
+need to start. The fresh-profile acceptance verified that a fulfilled
+request survived restore and a post-backup marker did not.</p>
+<p>Keep Station’s dedicated database and media evidence together in its
+own backup. Core’s native-profile backup must not be assumed to include
+an external Station data directory. Stop writers during a coordinated
+backup. Preserve failed media attempts and logs.</p>
+<p>On failure, record the time, selected composition,
+component/installer versions and exact message. Check System Health for
+stopped, starting, ready or failed dependencies. Use the existing Retry
+control after readiness; do not create duplicate business records to
+refresh a stale view. Share only a redacted diagnostic bundle. Preserve
+secrets, original evidence, recovery material and unrelated
+installations.</p>
+<h2 id="license-and-responsible-use">License and responsible use</h2>
+<p>Current owned code is AGPL-3.0-only. Preserve full license, matching
+corresponding source, dependency notices and historical grants. Terms of
+use do not remove license rights. Source imports do not confer
+permission to publish third-party material. Review all automatic drafts
+and use the separate owning-product decision before official action.
+CivicCast remains
+independent.</p></article></div></main><footer><span>Townlight Beta 1 · Local private-beta documentation · AGPL-3.0-only</span><span><a href="../versions.html">Exact versions and candidate</a> · CivicCast remains separate</span></footer>
+<script>const search=document.getElementById('find-section');if(search)search.addEventListener('input',()=>{const q=search.value.toLowerCase();let n=0;document.querySelectorAll('.toc li').forEach(li=>{const match=li.textContent.toLowerCase().includes(q);li.hidden=!match;if(match)n++;});document.querySelector('.search-status').textContent=q?n+' matching entries':'';});</script></body></html>

@@ -1,0 +1,28 @@
+{
+  "requirement_id": "beta-adu",
+  "title": "Synthetic ADU intake",
+  "jurisdiction": "Synthetic City",
+  "project_type": "adu",
+  "source_reference": "Synthetic Intake 1",
+  "source_date": "2026-01-01",
+  "effective_on": "2026-01-01",
+  "dataset_kind": "fictional",
+  "filename": "requirements.txt",
+  "content_base64": "U3ludGhldGljIGludGFrZSBvbmx5LiBQbGFubmluZyBpbnRha2UgZm9sbG93ZWQgYnkgYnVpbGRpbmcgcmV2aWV3LiA3IGJ1c2luZXNzIGRheXMuIEEgZGltZW5zaW9uZWQgc2l0ZSBwbGFuLg==",
+  "sha256": "ea68a17b1b5b5abe55495ef415d98e012fc9faa9ed898dfa436292e23a06a9fc",
+  "materials": [
+    {
+      "material_id": "site",
+      "description": "A dimensioned site plan.",
+      "citation": "Synthetic Intake 1"
+    }
+  ],
+  "pathway": [
+    {
+      "step": "Planning intake followed by building review.",
+      "typical_time": "7 business days",
+      "citation": "Synthetic Intake 1"
+    }
+  ],
+  "change_note": "Synthetic normal staff acceptance"
+}

@@ -1,0 +1,537 @@
+{
+  "schema_version": 1,
+  "profile": "windows-local-1.0",
+  "product_profile": "inspections-preview",
+  "private_candidate": {
+    "kind": "private-working-tree-candidate",
+    "publication_allowed": false,
+    "wheels": [
+      {
+        "name": "civicinspect-0.3.0+dev.1-py3-none-any.whl",
+        "sha256": "cf48a2a7efd4ee5f4fe1d2ee91314733be259af7c3dcd3cddeffba1247c2558d"
+      },
+      {
+        "name": "civicpermit-0.3.0+dev.1-py3-none-any.whl",
+        "sha256": "306d09973488d9c3343ee291a9b6a1a11c95fafb2dc25cbddd6eb6736b4be903"
+      },
+      {
+        "name": "civicplan-0.4.0.dev1-py3-none-any.whl",
+        "sha256": "4090e4c9fa80a976f0838ab8c98deefb2bd278598ca79bec634bb71bbbfb66f4"
+      },
+      {
+        "name": "civicrecords_ai-1.8.0.dev1-py3-none-any.whl",
+        "sha256": "6015e6905d9bd6f817fe7e31a3e7a66d9fda332648e7590e757432c86df44e93"
+      },
+      {
+        "name": "civicsuite_runtime-0.1.0-py3-none-any.whl",
+        "sha256": "9e069be6f1683871c262ce3010c84157f9f4a1f797b9c967bbb772286e6c7c1e"
+      },
+      {
+        "name": "civiczone-0.2.2-py3-none-any.whl",
+        "sha256": "e6c3af637ce7e00d1e7cbaaf5fe2259d243eb003fb1540903e5c3f6f6ec865f4"
+      },
+      {
+        "name": "townlight_station-0.3.0-py3-none-any.whl",
+        "sha256": "13350c0e7f86658989d9fc5005cc80de4e6727a090a68feedf8f5fcb61c43435"
+      },
+      {
+        "name": "pywin32-312-cp313-cp313-win_amd64.whl",
+        "sha256": "c53e878d15a1c44788082bfe712a905433473aa38f86375b7cf8b45e3acbaaf9"
+      }
+    ],
+    "core_wheel_sha256": "f905d4f40477d8299b8d72161e94263eeb54f561f6647bc5b6b040ef539c14e6",
+    "station_pinned_files_verified": 730,
+    "native_signing": {
+      "workflow_run": "40839675353",
+      "intake_sha256": "19f81d989ebfb9d722396b625a9f8537c8d56ccf6ad7457c2064d4c2e7d3f20d",
+      "receipt_sha256": "b0a3aeefa5c8e351d9cdd4cdec34acf4d4198f973b4660904101a9eda410c527",
+      "verified_unique_files": 636
+    },
+    "pywin32_signing": {
+      "workflow_run": "40904472171",
+      "intake_sha256": "060a7d983d14b9e9f3b6f469cc46ab25e7d50c5f0256d240288bdc7a715895c0",
+      "receipt_sha256": "f66f423c3bf72e25b1547580ccfe958e0712ccaab1ec859e2f27a2eb66af4c7c",
+      "verified_unique_files": 57
+    },
+    "beta_corrections": {
+      "scope": "B1-B5 only",
+      "publication_allowed": false,
+      "wheels": [
+        {
+          "name": "civicaccess-0.4.0-py3-none-any.whl",
+          "sha256": "62a8518c418e9cd0c96a5901a0ce715e81b4769ca7d1e356cccc005e3ded92cb"
+        },
+        {
+          "name": "civicclerk-1.0.4-py3-none-any.whl",
+          "sha256": "9fc95292ab3e6d798c1c3832e5179ccdddcb79b910b184d05894ce0ff62cbca5"
+        },
+        {
+          "name": "civiccode-1.0.8-py3-none-any.whl",
+          "sha256": "fa2af4d1a456f2ed4377b422030de3f93ed0bd393bbe2ec5c334217ef56f287a"
+        },
+        {
+          "name": "civicinspect-0.3.0+dev.1-py3-none-any.whl",
+          "sha256": "c5fc1cbea4b2a98c5ab2b5b967b7c6f51f54e6a2c962e0f1da104905cd022d6d"
+        },
+        {
+          "name": "civicnotice-0.2.0-py3-none-any.whl",
+          "sha256": "7406bad6529f29c839d14998c5fed0519b60873cec7116fe260d1cbb2210d412"
+        },
+        {
+          "name": "civicpermit-0.3.0+dev.1-py3-none-any.whl",
+          "sha256": "3c629ed12b5195d937ccff5b72fe02c6f0993a129e208de9599bdbd45d44a994"
+        },
+        {
+          "name": "civicplan-0.4.0.dev1-py3-none-any.whl",
+          "sha256": "bdcb7b695bb0df442c6efae1b89218174583f73ecadd0a816914934dd951cbb0"
+        },
+        {
+          "name": "civicsuite_runtime-0.1.0-py3-none-any.whl",
+          "sha256": "4b917583fa236a080fb6789a2d69b14805d5398bba6fa6456fc15960b8748907"
+        },
+        {
+          "name": "civiczone-0.2.2-py3-none-any.whl",
+          "sha256": "4b08068ce55d5c85ab712778fd425d68af31bcc449b014e67b6c84b01a0403e8"
+        },
+        {
+          "name": "townlight_inspection_transcriber-0.1.19-py3-none-any.whl",
+          "sha256": "eaca37bea7bfb758cb43cdc2fe4e156f2ff1fa89b5e9def867a7c0dd526a07cd"
+        }
+      ],
+      "binary_signing": {
+        "intake_sha256": "8d06c2b7a97fc38622c52c3b609b308980323b1328a650285a50e9455bade101",
+        "workflow_run": "40949427399",
+        "files": [
+          {
+            "name": "154ccbc850cba4468634a7481e0f8d30c709a0f0b45a91a4306e9f5c97e3c2e1.exe",
+            "sha256": "4e4cb4994ac2e67b89e341f6bba5f937c500b010ef0c09168badeab93f2233fc",
+            "bytes": 16227600,
+            "status": "Valid",
+            "publisher": "CN=Scott Converse, O=Scott Converse, L=Longmont, S=co, C=US",
+            "timestamp": "CN=Microsoft Public RSA Time Stamping Authority, OU=nShield TSS ESN:A500-05E0-D947, OU=Microsoft America Operations, O=Microsoft Corporation, L=Redmond, S=Washington, C=US"
+          },
+          {
+            "name": "e8863ca0c06a47d406777077f1ba728b58e57d77fedff252dbe6827d588acc8c.exe",
+            "sha256": "298d76c6ae944611369b3f04e5873b03f69f0d1d8d62c1363a535331d5efc76a",
+            "bytes": 1578768,
+            "status": "Valid",
+            "publisher": "CN=Scott Converse, O=Scott Converse, L=Longmont, S=co, C=US",
+            "timestamp": "CN=Microsoft Public RSA Time Stamping Authority, OU=nShield TSS ESN:A500-05E0-D947, OU=Microsoft America Operations, O=Microsoft Corporation, L=Redmond, S=Washington, C=US"
+          }
+        ]
+      },
+      "helper_signing": {
+        "files": [
+          {
+            "name": "84a563e2201677958fff8d0dde7236ad2a464cdc9e09e3353e3bb2227d63eb19.exe",
+            "sha256": "63cad4d60c36f8f80133e6218040c452a1c3eac8a7e3508d16b9c16eedbfb28d",
+            "bytes": 123992,
+            "status": "Valid",
+            "publisher": "CN=Scott Converse, O=Scott Converse, L=Longmont, S=co, C=US",
+            "timestamp": "CN=Microsoft Public RSA Time Stamping Authority, OU=nShield TSS ESN:7A00-05E0-D947, OU=Microsoft America Operations, O=Microsoft Corporation, L=Redmond, S=Washington, C=US"
+          },
+          {
+            "name": "640f8583b4650062a10854178f0861f670e93882046586ec1fcb7232866365fd.exe",
+            "sha256": "0b157cc96ad4552c7701bb4bcf620b5a3f9f6923cf4782997ff3234899716a4c",
+            "bytes": 123984,
+            "status": "Valid",
+            "publisher": "CN=Scott Converse, O=Scott Converse, L=Longmont, S=co, C=US",
+            "timestamp": "CN=Microsoft Public RSA Time Stamping Authority, OU=nShield TSS ESN:7D00-05E0-D947, OU=Microsoft America Operations, O=Microsoft Corporation, L=Redmond, S=Washington, C=US"
+          }
+        ],
+        "intake_sha256": "2ecb2df54e4e0c24c35ebb53834e643c1e327192e7b55399b912a137143dcab5",
+        "workflow_run": "40952467161"
+      }
+    }
+  },
+  "payloads": [
+    {
+      "id": "postgres-17-pgvector",
+      "source_dir": "postgres",
+      "required_files": [
+        {
+          "path": "bin/initdb.exe",
+          "size_bytes": 260368,
+          "sha256": "7d1a5d5972b93e8c9d7c1f16f545fa6c352cd86de249a71933657a3fbdabd0fe"
+        },
+        {
+          "path": "bin/msvcp140.dll",
+          "size_bytes": 643512,
+          "sha256": "7c26614e1d733892c2deac7e245ce115504b1d80592dd0a01b08e3e5a55f89ca"
+        },
+        {
+          "path": "bin/pg_controldata.exe",
+          "size_bytes": 123152,
+          "sha256": "b2f67d86eb198cb81d83f65e255aedf3f2486281fb98efdfb872c7969237dbdf"
+        },
+        {
+          "path": "bin/pg_ctl.exe",
+          "size_bytes": 147728,
+          "sha256": "6650f51db462669dcad93437399d00c02f6e8c9f0044ef88f45eb982f77d5006"
+        },
+        {
+          "path": "bin/postgres.exe",
+          "size_bytes": 9934096,
+          "sha256": "f3a31d1132b219c1f61a1fedbc10b1f765b2c0a7e0d53b69f5d4c8834b4b902a"
+        },
+        {
+          "path": "bin/vcruntime140.dll",
+          "size_bytes": 178616,
+          "sha256": "d1f4225df2cd877dbf130d5668a021dce3f94118455ff5ec952061c30afc9ce7"
+        },
+        {
+          "path": "bin/vcruntime140_1.dll",
+          "size_bytes": 50112,
+          "sha256": "a7146c08f89fe5b04541ab507cdb59ff7b44534d4ba3c668a426c6450a03434e"
+        },
+        {
+          "path": "bin/zlib1.dll",
+          "size_bytes": 153360,
+          "sha256": "69a28bf8937890e33bc6f3641893be2e6920bfd170380593a64e9ad59822f2c6"
+        },
+        {
+          "path": "lib/postgis-3.dll",
+          "size_bytes": 1793808,
+          "sha256": "70aa933675ad1e28d45938f32b8a46e1b9cb881f0aac894bd4af26b250851763"
+        },
+        {
+          "path": "lib/vector.dll",
+          "size_bytes": 292624,
+          "sha256": "afb34ba17143ba1ddfca70bbc644a7f103f899bbc32faeeb495289a4c6451429"
+        },
+        {
+          "path": "share/extension/postgis.control",
+          "size_bytes": 175,
+          "sha256": "2802c2bb571cf648daafb834a452a7dc884ef359116a1b17ab4c4acd6155e699"
+        },
+        {
+          "path": "share/extension/vector.control",
+          "size_bytes": 149,
+          "sha256": "52c583fb0c22c616b21762c7b9d3079c02655b78b96d5689cd1e64449b9a575e"
+        }
+      ]
+    },
+    {
+      "id": "cpython-services",
+      "source_dir": "python",
+      "required_files": [
+        {
+          "path": "Lib/site-packages/app/auth/native_identity.py",
+          "size_bytes": 2123,
+          "sha256": "3d2536b13f38c52d93c4ab54887bf232a3b9181fe1b485165e1fd6a81fe687d0"
+        },
+        {
+          "path": "Lib/site-packages/app/desktop_bridge/router.py",
+          "size_bytes": 32876,
+          "sha256": "7c02e0a222c36aecb84b105a918309a811f40249c3f55756d87cfa2646c4ef1b"
+        },
+        {
+          "path": "Lib/site-packages/app/main.py",
+          "size_bytes": 11141,
+          "sha256": "abb959c23054e8fdd12fb4918ea6c1149ef3cc7b1fee268697baf36f07af9fc2"
+        },
+        {
+          "path": "Lib/site-packages/app/requests/artifacts.py",
+          "size_bytes": 11715,
+          "sha256": "e557ecc8cfd265bfcb76b4b06de38fcaf6eb75ed3dbba6d21fe65f481bbbf8a1"
+        },
+        {
+          "path": "Lib/site-packages/app/requests/meeting_sources.py",
+          "size_bytes": 2509,
+          "sha256": "5694a2e0b345cf684261ef54cc205e5ec1aaeb0125c2c77c0c4a1cf2899feb79"
+        },
+        {
+          "path": "Lib/site-packages/app/requests/planning_sources.py",
+          "size_bytes": 1849,
+          "sha256": "b62831d83e129a974bec04ee10fd71cfd15c8940f5c5c4dd11794b8f51cbd8d8"
+        },
+        {
+          "path": "Lib/site-packages/civicaccess/main.py",
+          "size_bytes": 17450,
+          "sha256": "379d3c880dd949db3325fa055b8822cf5f59a20b8d7c4da3a84a8f12989134ab"
+        },
+        {
+          "path": "Lib/site-packages/civicclerk/desktop_delivery.py",
+          "size_bytes": 5096,
+          "sha256": "cbb7f44aee90b9ea16c60c1f64efffa8bb7204765d49a5ce80fe52e2670d384e"
+        },
+        {
+          "path": "Lib/site-packages/civicclerk/main.py",
+          "size_bytes": 147419,
+          "sha256": "d224d17b9869739b6faaddcd7213e202f8b710f72cda402479c0c6a84e737285"
+        },
+        {
+          "path": "Lib/site-packages/civicclerk/migrations/versions/civicclerk_0017_meeting_authority.py",
+          "size_bytes": 2306,
+          "sha256": "73c6266df0dd33b74223133a2a00d045112a1996ffc38025d3aa8ba7831f1082"
+        },
+        {
+          "path": "Lib/site-packages/civicclerk/migrations/versions/civicclerk_0018_agenda_authority.py",
+          "size_bytes": 1675,
+          "sha256": "7dc3993bf51db8239270fd53a651b98ebbff0dbfce56ccbb73414ac9bbac2464"
+        },
+        {
+          "path": "Lib/site-packages/civicclerk/migrations/versions/civicclerk_0019_minutes_decisions.py",
+          "size_bytes": 541,
+          "sha256": "5f088e0026bef9f492cac6a4c4a6c16ee81409d6447b1ab1ee19c037cd56d9cc"
+        },
+        {
+          "path": "Lib/site-packages/civicclerk/migrations/versions/civicclerk_0020_delivery_history.py",
+          "size_bytes": 762,
+          "sha256": "92a6779b59cb3228b3bbd963a9c4cef921163cbd07473381f015dbf474ba4005"
+        },
+        {
+          "path": "Lib/site-packages/civicclerk/migrations/versions/civicclerk_0021_sources_archive.py",
+          "size_bytes": 892,
+          "sha256": "3220a0e7992d865b5a1f5a9bb71cb85722336f276fc974c13939d81fbfc1b29c"
+        },
+        {
+          "path": "Lib/site-packages/civicclerk/records_sources.py",
+          "size_bytes": 1843,
+          "sha256": "843b4808e4a335ab05a7801a33a3a5750dc49ce84d7e71961841e91e7532598f"
+        },
+        {
+          "path": "Lib/site-packages/civicclerk/transcripts.py",
+          "size_bytes": 3334,
+          "sha256": "33d5b6f97ce58b6f645e0c236a53a855c358d01db06ee048ec9c90100474bc98"
+        },
+        {
+          "path": "Lib/site-packages/civiccode/main.py",
+          "size_bytes": 84536,
+          "sha256": "930e05298b82f10ec0338040770d8af83aa56a9d43016908931ab8f796e63f48"
+        },
+        {
+          "path": "Lib/site-packages/civiccore/__init__.py",
+          "size_bytes": 10775,
+          "sha256": "22823aa2e5f34ff62c57276cc877fc52fb6c654877b5e3756d6dccdb40f7dc15"
+        },
+        {
+          "path": "Lib/site-packages/civiccore/migrations/alembic.ini",
+          "size_bytes": 82,
+          "sha256": "d519dafe29ef2eb3cd77de8f8fd769746a45275439a6b3c5f5e34d990cc61092"
+        },
+        {
+          "path": "Lib/site-packages/civiccore/migrations/versions/civiccore_0003_local_task_queue.py",
+          "size_bytes": 1832,
+          "sha256": "51276a0dc2737fd1fc2615f26d66d942c1df3be2ef40f1513436cd4579b1ecf0"
+        },
+        {
+          "path": "Lib/site-packages/civicinspect/migrations/versions/civicinspect_0001_connected.py",
+          "size_bytes": 1305,
+          "sha256": "0e71ed311993f45634eb42ba22f5c2b2c4a3854639b221857af76f826d1b68de"
+        },
+        {
+          "path": "Lib/site-packages/civicinspect/workflow_store.py",
+          "size_bytes": 17443,
+          "sha256": "df4ff48879d5f8fe31d71a410a99ed8c359676ab05a267db65e1468cb4764146"
+        },
+        {
+          "path": "Lib/site-packages/civicnotice/main.py",
+          "size_bytes": 23033,
+          "sha256": "3aec4b0007a662276afbb8527fab22fe796e4d64c3568fe688ac97dc63bc69bc"
+        },
+        {
+          "path": "Lib/site-packages/civicpermit/migrations/versions/civicpermit_0001_connected.py",
+          "size_bytes": 1272,
+          "sha256": "e3fc90959836887334b429888407537140fa2d119c202886b63c538feb4e9360"
+        },
+        {
+          "path": "Lib/site-packages/civicpermit/workflow_store.py",
+          "size_bytes": 15222,
+          "sha256": "c3415dd94aaed609a593d28b60d0719f2dc1a504a5f15391d9708714038ea259"
+        },
+        {
+          "path": "Lib/site-packages/civicplan/migrations/__init__.py",
+          "size_bytes": 2111,
+          "sha256": "daf5e64cefda400a5db1023d952e41bef6f7954db19406d63ea84770c82dccd9"
+        },
+        {
+          "path": "Lib/site-packages/civicplan/migrations/versions/civicplan_0002_workflows.py",
+          "size_bytes": 1023,
+          "sha256": "7c6fcdfe4a1fa33c9289cef975a25f4b0f6746471c380226c14520f8a5f09dbf"
+        },
+        {
+          "path": "Lib/site-packages/civicplan/migrations/versions/civicplan_0004_neighborhoods.py",
+          "size_bytes": 806,
+          "sha256": "006f8f8f9859da76189efee9035d1f89c65e0b27172b5df9e316e1aa173434f8"
+        },
+        {
+          "path": "Lib/site-packages/civicplan/source_bundle.py",
+          "size_bytes": 6466,
+          "sha256": "f6547516067e27697dfcd6ba80de6e2ca03d1473370209aa354a5bf95b7db98a"
+        },
+        {
+          "path": "Lib/site-packages/civicplan/workflow_store.py",
+          "size_bytes": 16971,
+          "sha256": "4d4fec6d6c876997726ff1d8f2ff39302f44228fae748edc013739267d210741"
+        },
+        {
+          "path": "Lib/site-packages/civicsuite_runtime/__init__.py",
+          "size_bytes": 118,
+          "sha256": "b68059cf70d9999804385a093caa3d7520c96d92f705ba9ee05fbc7d2c2b1f1d"
+        },
+        {
+          "path": "Lib/site-packages/civicsuite_runtime/civicrecords_alembic/alembic.ini",
+          "size_bytes": 524,
+          "sha256": "60e69c28e3c87e101995977223073125b196202555e1fc18902feed2afdc7e7e"
+        },
+        {
+          "path": "Lib/site-packages/civicsuite_runtime/civicrecords_alembic/alembic/env.py",
+          "size_bytes": 2784,
+          "sha256": "72f25d2ff59a9fdc6b5282e9d995c8c475146068c2e37b334236c690748ba637"
+        },
+        {
+          "path": "Lib/site-packages/civicsuite_runtime/civicrecords_alembic/alembic/versions/027_import_artifact_order.py",
+          "size_bytes": 430,
+          "sha256": "9ef98e386a1dc848a1fab6893b009198d70556020482df207618519a3301faf8"
+        },
+        {
+          "path": "Lib/site-packages/civicsuite_runtime/fixtures/redstone-valley-records-demo-v1.json",
+          "size_bytes": 6140,
+          "sha256": "2039eca2587b4ace6937ca73e21d0a936835420f8534292247458a1a67516553"
+        },
+        {
+          "path": "Lib/site-packages/civicsuite_runtime/inspections_bridge.py",
+          "size_bytes": 9755,
+          "sha256": "b7429c3ab988005a198795d6f1dfc3f785c7f96f61410903f8cb0ad38c6f512c"
+        },
+        {
+          "path": "Lib/site-packages/civicsuite_runtime/meetings_bridge.py",
+          "size_bytes": 28863,
+          "sha256": "37ea43e633b55e9428e928143e5da0d41a7a5906673b8cc54b40fa4d1748fa52"
+        },
+        {
+          "path": "Lib/site-packages/civicsuite_runtime/migrate.py",
+          "size_bytes": 5667,
+          "sha256": "cf632a6c00a1c6e3bdea08edf841510a194665c0ce97705dbc4e16f964bb6145"
+        },
+        {
+          "path": "Lib/site-packages/civicsuite_runtime/native_accounts.py",
+          "size_bytes": 4077,
+          "sha256": "e54d1dcfbbf5aecb2c61d7235884e787de05b8f48547f9c68348ba45a8ff9039"
+        },
+        {
+          "path": "Lib/site-packages/civicsuite_runtime/permitting_bridge.py",
+          "size_bytes": 8765,
+          "sha256": "786abd0dfc18ed0ce7ada70fcd120f96795d8e1ee46f38ca0770a8217b4d6e1d"
+        },
+        {
+          "path": "Lib/site-packages/civicsuite_runtime/planning_bridge.py",
+          "size_bytes": 14108,
+          "sha256": "74a855b995b7f323873b9c788cd15bd4b0ebe3fc1c53879596e1b5043c2825bb"
+        },
+        {
+          "path": "Lib/site-packages/civicsuite_runtime/planning_connections.py",
+          "size_bytes": 2406,
+          "sha256": "9991e58a4b168fbbdf5f00334e8515061a09ab06ce593a7625ae007e2fd840f9"
+        },
+        {
+          "path": "Lib/site-packages/civicsuite_runtime/records_cutover.py",
+          "size_bytes": 4627,
+          "sha256": "62b93909757ce822fc1f235b6c602d081a669d68e20bca63719b7c773940abde"
+        },
+        {
+          "path": "Lib/site-packages/civicsuite_runtime/records_demo.py",
+          "size_bytes": 7278,
+          "sha256": "c1c4ef3dd1ffbca62ffaa84cef21a66ecfa57b9f0909a75c5e34bde068b2d4c5"
+        },
+        {
+          "path": "Lib/site-packages/civicsuite_runtime/records_import.py",
+          "size_bytes": 8585,
+          "sha256": "ba8a017e2e83f7b08707b1c1dfe701fb9540d130aebf5aacd29e2c9699ddc8b3"
+        },
+        {
+          "path": "Lib/site-packages/civicsuite_runtime/records_import_access.py",
+          "size_bytes": 3194,
+          "sha256": "c8d4052358b5679e64f1fd97097d5d6498b9fbcb4a71a4af3b688a766d5f3fb2"
+        },
+        {
+          "path": "Lib/site-packages/civicsuite_runtime/records_import_store.py",
+          "size_bytes": 16716,
+          "sha256": "fe1acc8792fb8a2992d554568705663d2440d044616511891b98fff0e5eb35f7"
+        },
+        {
+          "path": "Lib/site-packages/civicsuite_runtime/records_snapshot.py",
+          "size_bytes": 7066,
+          "sha256": "800377214a5e0b52cd4f402aae015f9eb832d7d29a003cd4cc3b84316cd4a735"
+        },
+        {
+          "path": "Lib/site-packages/civicsuite_runtime/zoning_bridge.py",
+          "size_bytes": 14635,
+          "sha256": "eb80d79ffc4fc736789aab4f3d3b75a4d9d01101d6414a69a29053c7d5f90505"
+        },
+        {
+          "path": "Lib/site-packages/civicsuite_runtime/zoning_records.py",
+          "size_bytes": 1694,
+          "sha256": "045718aaa5f1f42876dbb493e4649e721a94187375d96bc8d7a34512e9ce9806"
+        },
+        {
+          "path": "Lib/site-packages/civiczone/connected_sources.py",
+          "size_bytes": 10879,
+          "sha256": "68ad55c71b897eca689a6d028f4aee115dc5ca4b5ef005613385f9588387715b"
+        },
+        {
+          "path": "Lib/site-packages/civiczone/geo_import.py",
+          "size_bytes": 13239,
+          "sha256": "e49824301593f8c06dd6bc64832542721d7b1763d745deb7ba531f7b894cc4a0"
+        },
+        {
+          "path": "Lib/site-packages/civiczone/migrations/versions/civiczone_0006_cited_questions.py",
+          "size_bytes": 2262,
+          "sha256": "65b8c591b5adf3f0022720a2c4e780c818f0f4b5b51db83b81cab78edb2a1f9d"
+        },
+        {
+          "path": "Lib/site-packages/textflowkit/core/whistle.py",
+          "size_bytes": 61157,
+          "sha256": "5ea2fb20699ee46e941e783d67448db310bc01a561edfbaf95dc95d9e4396199"
+        },
+        {
+          "path": "inspections-candidate-provenance.json",
+          "size_bytes": 1334,
+          "sha256": "f48a4a44c6afb37ddc1ef3f920fb1f2dadaebe6ac149317679f0a3b6c96f92a5"
+        },
+        {
+          "path": "inspections/reuse-manifest.json",
+          "size_bytes": 956,
+          "sha256": "5f1e2c95b0e77c5c9be4f9e50177e5062567c996aa56a4b54feb2969a11cb20a"
+        },
+        {
+          "path": "inspections/whistle/whistle.cact",
+          "size_bytes": 16919407,
+          "sha256": "b6e02f048568ac5d01a2042556c658061e699acbc0aa2a1439f52f3d461dffeb"
+        },
+        {
+          "path": "inspections/whistle/windows-x86_64/needle.exe",
+          "size_bytes": 1578768,
+          "sha256": "298d76c6ae944611369b3f04e5873b03f69f0d1d8d62c1363a535331d5efc76a"
+        },
+        {
+          "path": "permitting-candidate-provenance.json",
+          "size_bytes": 1334,
+          "sha256": "f48a4a44c6afb37ddc1ef3f920fb1f2dadaebe6ac149317679f0a3b6c96f92a5"
+        },
+        {
+          "path": "planning-candidate-provenance.json",
+          "size_bytes": 1334,
+          "sha256": "f48a4a44c6afb37ddc1ef3f920fb1f2dadaebe6ac149317679f0a3b6c96f92a5"
+        },
+        {
+          "path": "python.exe",
+          "size_bytes": 105816,
+          "sha256": "5341746f92483a93e44c313de830f2fba2956f0759094404a16b2fed06c9a2ed"
+        }
+      ]
+    },
+    {
+      "id": "ollama-runtime",
+      "source_dir": "ollama",
+      "required_files": [
+        {
+          "path": "ollama.exe",
+          "size_bytes": 35691912,
+          "sha256": "e44b55b3f10310663ac058d82d0ee18eb2bee6b20ccd0e8d992b48095961d225"
+        }
+      ]
+    }
+  ]
+}

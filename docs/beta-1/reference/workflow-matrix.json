@@ -1,0 +1,105 @@
+{
+  "candidate_sha256": "98bcdef11ebdf5c767f620c904ff49f85115fde3b5c23f62703b111e645aaf86",
+  "scope": "Selected existing first-run/staff workflows, not an exhaustive new requirement audit",
+  "evidence_tier": "Fresh installed normal native profile, real IPC/HTTP/PostgreSQL and selected headless UI controls",
+  "products": [
+    {
+      "product": "Core",
+      "status": "PASS",
+      "verified": "Normal empty-profile setup; canonical activation; UI-created staff and sign-in; staff denied user administration; coherent backup, mutation, restore, Start/Check and retained/absent record readback.",
+      "receipts": [
+        "first-run-03-result.json",
+        "normal-first-run-state.json",
+        "core-01-result.json",
+        "normal-core-receipts.json",
+        "normal-recovery-receipts.json",
+        "recovery-finish-02-result.json",
+        "normal-recovery-finish-receipts.json"
+      ]
+    },
+    {
+      "product": "Records",
+      "status": "PASS",
+      "verified": "Intake, note, original attachment/readback, separate release copy, explicit release decision, draft/approval, approved response and release package exports, fulfillment/readback and native workspace.",
+      "receipts": [
+        "normal-staff-receipts.json",
+        "normal-staff-followup-receipts.json",
+        "records-final-01-result.json",
+        "normal-records-final-receipts.json"
+      ]
+    },
+    {
+      "product": "Meetings",
+      "status": "PASS",
+      "verified": "Meeting/agenda, packet assembly, motion/vote, supplied transcript, reviewed/adopted minutes, restricted local archive and proceedings readback; Code decision integration.",
+      "receipts": [
+        "normal-staff-receipts.json",
+        "normal-staff-followup-results.json",
+        "normal-staff-followup-receipts.json",
+        "normal-code-meetings-receipts.json"
+      ]
+    },
+    {
+      "product": "Code",
+      "status": "PASS",
+      "verified": "Synthetic official source import, exact citation/history/export; proposal into Meetings, recorded adoption and separately codified version; native connection readback.",
+      "receipts": [
+        "normal-staff-results.json",
+        "normal-staff-receipts.json",
+        "code-adoption-01-result.json",
+        "normal-code-meetings-receipts.json"
+      ]
+    },
+    {
+      "product": "Zoning",
+      "status": "PASS",
+      "verified": "GeoJSON/PostGIS import, cited dimensional rule, parcel answer, staff review/history/snapshot and native workspace.",
+      "receipts": [
+        "normal-staff-results.json",
+        "normal-staff-receipts.json"
+      ]
+    },
+    {
+      "product": "Planning",
+      "status": "PASS",
+      "verified": "Adopted source import with neighborhood, saved/reviewed analysis and snapshot, persisted initiative/history and draft amendment, public explorer neighborhood readback and native workspace.",
+      "receipts": [
+        "normal-staff-followup-results.json",
+        "normal-staff-receipts.json",
+        "normal-staff-followup-receipts.json"
+      ]
+    },
+    {
+      "product": "Permitting",
+      "status": "PASS",
+      "verified": "Retained requirement import, source-grounded materials/pathway/timing, saved intake/review, separate hash-checked Records copy and private handoff; contact exclusion; native workspace.",
+      "receipts": [
+        "normal-staff-results.json",
+        "normal-staff-receipts.json"
+      ]
+    },
+    {
+      "product": "Inspections",
+      "status": "PASS",
+      "verified": "Retained original/hash, supplied observations and voice summary, saved/reviewed case/readback, separate exact Records copy and private handoff; address exclusion; native workspace.",
+      "receipts": [
+        "normal-staff-results.json",
+        "normal-staff-receipts.json"
+      ]
+    },
+    {
+      "product": "Station",
+      "status": "PASS",
+      "verified": "Actual native staff session and normally created meeting; headless operator live start/stop, decoded generated audio/video, served hash, private Records readback, idempotent locked original and logout.",
+      "receipts": [
+        "station-01-result.json",
+        "normal-station-result.json",
+        "station-normal-receipts/operator-result.json",
+        "station-normal-receipts/browser-recording.json",
+        "station-normal-receipts/records-handoff.json"
+      ]
+    }
+  ],
+  "remaining_product_failures_in_this_pass": [],
+  "earlier_unchanged_evidence": "../beta-corrections-2026-10-29/REPORT.md"
+}

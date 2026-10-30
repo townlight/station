@@ -1,0 +1,989 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Townlight Records",
+    "description": "Townlight Beta 1 documentation view of the installed desktop domain schema. Component API version is unchanged. Exported without lifespan or database access; schema generation is not endpoint acceptance.",
+    "version": "1.8.0.dev1"
+  },
+  "paths": {
+    "/desktop/v1/station/context": {
+      "get": {
+        "tags": [
+          "native-desktop",
+          "station-integration"
+        ],
+        "summary": "Context",
+        "operationId": "context_desktop_v1_station_context_get",
+        "parameters": [
+          {
+            "name": "capability",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "enum": [
+                "capture",
+                "read"
+              ],
+              "type": "string",
+              "title": "Capability"
+            }
+          },
+          {
+            "name": "X-Townlight-Session",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Townlight-Session"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/desktop/v1/requests/{request_id}/station-recordings": {
+      "post": {
+        "tags": [
+          "native-desktop",
+          "station-integration"
+        ],
+        "summary": "Attach",
+        "operationId": "attach_desktop_v1_requests__request_id__station_recordings_post",
+        "parameters": [
+          {
+            "name": "request_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Request Id"
+            }
+          },
+          {
+            "name": "X-Townlight-Session",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Townlight-Session"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Selection"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RecordsOperationRead"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/desktop/v1/meetings/station/catalog": {
+      "get": {
+        "tags": [
+          "native-meetings"
+        ],
+        "summary": "Station Catalog",
+        "description": "Authorized name-based operator selection from canonical Meetings data.",
+        "operationId": "station_catalog_desktop_v1_meetings_station_catalog_get",
+        "parameters": [
+          {
+            "name": "X-Townlight-Session",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Townlight-Session"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "ExemptionDecisionView": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "source": {
+            "type": "string",
+            "title": "Source"
+          },
+          "kind": {
+            "type": "string",
+            "title": "Kind"
+          },
+          "finding": {
+            "type": "string",
+            "title": "Finding"
+          },
+          "decision": {
+            "type": "string",
+            "enum": [
+              "release",
+              "redact",
+              "exempt"
+            ],
+            "title": "Decision"
+          },
+          "basis": {
+            "type": "string",
+            "title": "Basis"
+          },
+          "reviewer": {
+            "type": "string",
+            "title": "Reviewer"
+          },
+          "created_at_unix_seconds": {
+            "type": "integer",
+            "title": "Created At Unix Seconds"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "id",
+          "source",
+          "kind",
+          "finding",
+          "decision",
+          "basis",
+          "reviewer",
+          "created_at_unix_seconds"
+        ],
+        "title": "ExemptionDecisionView"
+      },
+      "FeeLineView": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "description": {
+            "type": "string",
+            "title": "Description"
+          },
+          "schedule_basis": {
+            "type": "string",
+            "title": "Schedule Basis"
+          },
+          "amount_cents": {
+            "type": "integer",
+            "title": "Amount Cents"
+          },
+          "created_at_unix_seconds": {
+            "type": "integer",
+            "title": "Created At Unix Seconds"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "id",
+          "description",
+          "schedule_basis",
+          "amount_cents",
+          "created_at_unix_seconds"
+        ],
+        "title": "FeeLineView"
+      },
+      "HTTPValidationError": {
+        "properties": {
+          "detail": {
+            "items": {
+              "$ref": "#/components/schemas/ValidationError"
+            },
+            "type": "array",
+            "title": "Detail"
+          }
+        },
+        "type": "object",
+        "title": "HTTPValidationError"
+      },
+      "MessageView": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "author": {
+            "type": "string",
+            "title": "Author"
+          },
+          "author_role": {
+            "type": "string",
+            "title": "Author Role"
+          },
+          "body": {
+            "type": "string",
+            "title": "Body"
+          },
+          "visibility": {
+            "type": "string",
+            "title": "Visibility"
+          },
+          "created_at_unix_seconds": {
+            "type": "integer",
+            "title": "Created At Unix Seconds"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "id",
+          "author",
+          "author_role",
+          "body",
+          "visibility",
+          "created_at_unix_seconds"
+        ],
+        "title": "MessageView"
+      },
+      "PublicStatusView": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "label": {
+            "type": "string",
+            "title": "Label"
+          },
+          "summary": {
+            "type": "string",
+            "title": "Summary"
+          },
+          "status": {
+            "type": "string",
+            "title": "Status"
+          },
+          "created_at_unix_seconds": {
+            "type": "integer",
+            "title": "Created At Unix Seconds"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "id",
+          "label",
+          "summary",
+          "status",
+          "created_at_unix_seconds"
+        ],
+        "title": "PublicStatusView"
+      },
+      "RecordsDocumentView": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "attachment_id": {
+            "type": "string",
+            "title": "Attachment Id"
+          },
+          "title": {
+            "type": "string",
+            "title": "Title"
+          },
+          "original_path": {
+            "type": "string",
+            "title": "Original Path"
+          },
+          "stored_path": {
+            "type": "string",
+            "title": "Stored Path"
+          },
+          "citation": {
+            "type": "string",
+            "title": "Citation"
+          },
+          "sha256": {
+            "type": "string",
+            "title": "Sha256"
+          },
+          "size_bytes": {
+            "type": "integer",
+            "title": "Size Bytes"
+          },
+          "status": {
+            "type": "string",
+            "title": "Status"
+          },
+          "added_by": {
+            "type": "string",
+            "title": "Added By"
+          },
+          "created_at_unix_seconds": {
+            "type": "integer",
+            "title": "Created At Unix Seconds"
+          },
+          "release_original_path": {
+            "type": "string",
+            "title": "Release Original Path",
+            "default": ""
+          },
+          "release_stored_path": {
+            "type": "string",
+            "title": "Release Stored Path",
+            "default": ""
+          },
+          "release_file_name": {
+            "type": "string",
+            "title": "Release File Name",
+            "default": ""
+          },
+          "release_sha256": {
+            "type": "string",
+            "title": "Release Sha256",
+            "default": ""
+          },
+          "release_size_bytes": {
+            "type": "integer",
+            "title": "Release Size Bytes",
+            "default": 0
+          },
+          "release_status": {
+            "type": "string",
+            "title": "Release Status",
+            "default": ""
+          },
+          "release_note": {
+            "type": "string",
+            "title": "Release Note",
+            "default": ""
+          },
+          "release_added_by": {
+            "type": "string",
+            "title": "Release Added By",
+            "default": ""
+          },
+          "release_added_at_unix_seconds": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Release Added At Unix Seconds"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "id",
+          "attachment_id",
+          "title",
+          "original_path",
+          "stored_path",
+          "citation",
+          "sha256",
+          "size_bytes",
+          "status",
+          "added_by",
+          "created_at_unix_seconds"
+        ],
+        "title": "RecordsDocumentView"
+      },
+      "RecordsOperationRead": {
+        "properties": {
+          "action": {
+            "type": "string",
+            "title": "Action"
+          },
+          "message": {
+            "type": "string",
+            "title": "Message"
+          },
+          "request": {
+            "$ref": "#/components/schemas/RecordsView"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "action",
+          "message",
+          "request"
+        ],
+        "title": "RecordsOperationRead"
+      },
+      "RecordsView": {
+        "properties": {
+          "request_id": {
+            "type": "string",
+            "title": "Request Id"
+          },
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "public_tracking_number": {
+            "type": "string",
+            "title": "Public Tracking Number"
+          },
+          "requester": {
+            "type": "string",
+            "title": "Requester"
+          },
+          "requester_contact": {
+            "type": "string",
+            "title": "Requester Contact"
+          },
+          "submitted_via": {
+            "type": "string",
+            "title": "Submitted Via"
+          },
+          "summary": {
+            "type": "string",
+            "title": "Summary"
+          },
+          "deadline": {
+            "type": "string",
+            "title": "Deadline"
+          },
+          "deadline_basis": {
+            "type": "string",
+            "title": "Deadline Basis"
+          },
+          "status": {
+            "type": "string",
+            "title": "Status"
+          },
+          "assigned_to": {
+            "type": "string",
+            "title": "Assigned To"
+          },
+          "clarification_notes": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Clarification Notes"
+          },
+          "search_notes": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Search Notes"
+          },
+          "search_sessions": {
+            "items": {
+              "$ref": "#/components/schemas/SearchReceiptView"
+            },
+            "type": "array",
+            "title": "Search Sessions"
+          },
+          "exemption_reviews": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Exemption Reviews"
+          },
+          "exemption_decisions": {
+            "items": {
+              "$ref": "#/components/schemas/ExemptionDecisionView"
+            },
+            "type": "array",
+            "title": "Exemption Decisions"
+          },
+          "fee_estimate": {
+            "type": "string",
+            "title": "Fee Estimate"
+          },
+          "fee_line_items": {
+            "items": {
+              "$ref": "#/components/schemas/FeeLineView"
+            },
+            "type": "array",
+            "title": "Fee Line Items"
+          },
+          "fee_waiver_reason": {
+            "type": "string",
+            "title": "Fee Waiver Reason"
+          },
+          "citations": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Citations"
+          },
+          "response_draft": {
+            "type": "string",
+            "title": "Response Draft"
+          },
+          "approval_notes": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Approval Notes"
+          },
+          "exports": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Exports"
+          },
+          "documents": {
+            "items": {
+              "$ref": "#/components/schemas/RecordsDocumentView"
+            },
+            "type": "array",
+            "title": "Documents"
+          },
+          "release_packages": {
+            "items": {
+              "$ref": "#/components/schemas/ReleasePackageView"
+            },
+            "type": "array",
+            "title": "Release Packages"
+          },
+          "timeline": {
+            "items": {
+              "$ref": "#/components/schemas/TimelineView"
+            },
+            "type": "array",
+            "title": "Timeline"
+          },
+          "public_status_events": {
+            "items": {
+              "$ref": "#/components/schemas/PublicStatusView"
+            },
+            "type": "array",
+            "title": "Public Status Events"
+          },
+          "messages": {
+            "items": {
+              "$ref": "#/components/schemas/MessageView"
+            },
+            "type": "array",
+            "title": "Messages"
+          },
+          "deadline_reviewed_at_unix_seconds": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Deadline Reviewed At Unix Seconds"
+          },
+          "approved_at_unix_seconds": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Approved At Unix Seconds"
+          },
+          "fulfilled_at_unix_seconds": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Fulfilled At Unix Seconds"
+          },
+          "closed_at_unix_seconds": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Closed At Unix Seconds"
+          },
+          "created_at_unix_seconds": {
+            "type": "integer",
+            "title": "Created At Unix Seconds"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "request_id",
+          "id",
+          "public_tracking_number",
+          "requester",
+          "requester_contact",
+          "submitted_via",
+          "summary",
+          "deadline",
+          "deadline_basis",
+          "status",
+          "assigned_to",
+          "clarification_notes",
+          "search_notes",
+          "search_sessions",
+          "exemption_reviews",
+          "exemption_decisions",
+          "fee_estimate",
+          "fee_line_items",
+          "fee_waiver_reason",
+          "citations",
+          "response_draft",
+          "approval_notes",
+          "exports",
+          "timeline",
+          "public_status_events",
+          "messages",
+          "deadline_reviewed_at_unix_seconds",
+          "approved_at_unix_seconds",
+          "fulfilled_at_unix_seconds",
+          "closed_at_unix_seconds",
+          "created_at_unix_seconds"
+        ],
+        "title": "RecordsView"
+      },
+      "ReleasePackageView": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "export_path": {
+            "type": "string",
+            "title": "Export Path"
+          },
+          "package_hash": {
+            "type": "string",
+            "title": "Package Hash"
+          },
+          "document_count": {
+            "type": "integer",
+            "title": "Document Count"
+          },
+          "release_artifact_count": {
+            "type": "integer",
+            "title": "Release Artifact Count"
+          },
+          "search_session_count": {
+            "type": "integer",
+            "title": "Search Session Count"
+          },
+          "release_count": {
+            "type": "integer",
+            "title": "Release Count"
+          },
+          "redacted_count": {
+            "type": "integer",
+            "title": "Redacted Count"
+          },
+          "exempt_count": {
+            "type": "integer",
+            "title": "Exempt Count"
+          },
+          "created_at_unix_seconds": {
+            "type": "integer",
+            "title": "Created At Unix Seconds"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "id",
+          "export_path",
+          "package_hash",
+          "document_count",
+          "release_artifact_count",
+          "search_session_count",
+          "release_count",
+          "redacted_count",
+          "exempt_count",
+          "created_at_unix_seconds"
+        ],
+        "title": "ReleasePackageView"
+      },
+      "SearchReceiptView": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "query": {
+            "type": "string",
+            "title": "Query"
+          },
+          "locations": {
+            "type": "string",
+            "title": "Locations"
+          },
+          "reviewer": {
+            "type": "string",
+            "title": "Reviewer"
+          },
+          "results": {
+            "items": {
+              "$ref": "#/components/schemas/SearchResultView"
+            },
+            "type": "array",
+            "title": "Results"
+          },
+          "created_at_unix_seconds": {
+            "type": "integer",
+            "title": "Created At Unix Seconds"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "id",
+          "query",
+          "locations",
+          "reviewer",
+          "results",
+          "created_at_unix_seconds"
+        ],
+        "title": "SearchReceiptView"
+      },
+      "SearchResultView": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "title": {
+            "type": "string",
+            "title": "Title"
+          },
+          "citation": {
+            "type": "string",
+            "title": "Citation"
+          },
+          "summary": {
+            "type": "string",
+            "title": "Summary"
+          },
+          "status": {
+            "type": "string",
+            "title": "Status"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "id",
+          "title",
+          "citation",
+          "summary",
+          "status"
+        ],
+        "title": "SearchResultView"
+      },
+      "Selection": {
+        "properties": {
+          "recording_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Recording Id"
+          },
+          "expected_sha256": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Expected Sha256"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "recording_id",
+          "expected_sha256"
+        ],
+        "title": "Selection"
+      },
+      "TimelineView": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "action": {
+            "type": "string",
+            "title": "Action"
+          },
+          "actor": {
+            "type": "string",
+            "title": "Actor"
+          },
+          "note": {
+            "type": "string",
+            "title": "Note"
+          },
+          "created_at_unix_seconds": {
+            "type": "integer",
+            "title": "Created At Unix Seconds"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "id",
+          "action",
+          "actor",
+          "note",
+          "created_at_unix_seconds"
+        ],
+        "title": "TimelineView"
+      },
+      "ValidationError": {
+        "properties": {
+          "loc": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ]
+            },
+            "type": "array",
+            "title": "Location"
+          },
+          "msg": {
+            "type": "string",
+            "title": "Message"
+          },
+          "type": {
+            "type": "string",
+            "title": "Error Type"
+          },
+          "input": {
+            "title": "Input"
+          },
+          "ctx": {
+            "type": "object",
+            "title": "Context"
+          }
+        },
+        "type": "object",
+        "required": [
+          "loc",
+          "msg",
+          "type"
+        ],
+        "title": "ValidationError"
+      }
+    },
+    "securitySchemes": {
+      "OAuth2PasswordBearer": {
+        "type": "oauth2",
+        "flows": {
+          "password": {
+            "scopes": {},
+            "tokenUrl": "auth/jwt/login"
+          }
+        }
+      }
+    }
+  },
+  "x-townlight-boundary": "Suite-side Station integration only; separate Station service /v1 routes are documented in the source supplement"
+}

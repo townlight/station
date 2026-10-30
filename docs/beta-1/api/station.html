@@ -1,0 +1,1835 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="description" content=""><title>Townlight
+Station API Reference | Townlight Beta 1</title><style>
+:root{--ink:#182f3a;--muted:#526775;--accent:#006b64;--paper:#fff;--wash:#f1f6f5;--line:#cfdddf;--warm:#dceab2}
+*{box-sizing:border-box}html{scroll-behavior:smooth}body{margin:0;background:var(--paper);color:var(--ink);font:17px/1.65 "Segoe UI",Arial,sans-serif}a{color:#006b64;text-underline-offset:3px}a:hover{text-decoration-thickness:2px}a:focus-visible,button:focus-visible,input:focus-visible{outline:3px solid #a25900;outline-offset:4px}.skip{position:absolute;left:-9999px}.skip:focus{left:1rem;top:1rem;background:white;padding:1rem;z-index:20}header{border-bottom:1px solid var(--line);padding:1.1rem 5vw;display:flex;align-items:center;gap:1.5rem;flex-wrap:wrap}header .brand{font-size:1.3rem;font-weight:750;letter-spacing:-.04em;text-decoration:none;color:var(--ink)}header nav{margin-left:auto;display:flex;gap:1.25rem;flex-wrap:wrap;font-size:.88rem}.edition{font:700 .72rem/1.5 "Segoe UI",sans-serif;letter-spacing:.12em;text-transform:uppercase;color:var(--accent)}.wrap{max-width:1240px;margin:auto;padding:0 4vw}.hero{padding:5rem 0 3.2rem;max-width:950px}.hero h1{font-size:clamp(2.5rem,5vw,4.7rem);line-height:1.08;letter-spacing:-.045em;margin:1rem 0 1.5rem;font-weight:650}.hero .lead{font-size:1.26rem;max-width:780px;color:var(--muted)}.actions{display:flex;gap:.8rem;flex-wrap:wrap;margin:1.8rem 0}.button{display:inline-block;padding:.7rem 1.15rem;border:1px solid var(--accent);border-radius:4px;text-decoration:none;font-weight:650}.button.primary{background:var(--accent);color:#fff}.facts{display:flex;gap:1.5rem;flex-wrap:wrap;font-size:.85rem;color:var(--muted)}.section{padding:3rem 0;border-top:1px solid var(--line)}h2{font-size:1.8rem;line-height:1.3;letter-spacing:-.025em;margin:2.5rem 0 1rem}h3{font-size:1.18rem;line-height:1.45;margin:1.8rem 0 .7rem}h4{font-size:1rem;margin:1.3rem 0 .6rem}p{margin:.85rem 0 1rem}ul,ol{padding-left:1.6rem}li{margin:.4rem 0}strong{font-weight:650}.grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:1.6rem}.product{border-top:3px solid var(--accent);padding:1.4rem 0}.product h3{font-size:1.65rem;margin:.4rem 0}.product p{color:var(--muted)}.number{font-size:.76rem;letter-spacing:.1em}.split{display:grid;grid-template-columns:1fr 1fr;gap:3rem}.flow{width:100%;height:auto;display:block;margin:1.8rem 0}.caption{font-size:.85rem;color:var(--muted)}.reading{max-width:860px}.doclayout{display:grid;grid-template-columns:245px minmax(0,1fr);gap:3rem;max-width:1320px;margin:auto;padding:2rem 4vw}.toc{font-size:.84rem;align-self:start;position:sticky;top:1rem;max-height:90vh;overflow:auto;padding-right:.8rem}.toc ul{list-style:none;padding:0}.toc li{margin:.5rem 0}.toc li li{padding-left:.8rem}.toc a{text-decoration:none}.docbody{min-width:0}.docbody h1{font-size:2.7rem;line-height:1.1;letter-spacing:-.04em}.docbody h2{border-top:1px solid var(--line);padding-top:1.8rem}.docbody img{max-width:100%;height:auto}.docmeta{color:var(--muted);font-size:.9rem}.docbody section{scroll-margin-top:1rem}table{width:100%;border-collapse:collapse;font-size:.87rem;line-height:1.5;margin:1.3rem 0;table-layout:auto}th{text-align:left;background:var(--wash);font-weight:650}th,td{padding:.65rem .7rem;border-bottom:1px solid var(--line);vertical-align:top;overflow-wrap:anywhere}thead{display:table-header-group}pre{background:#f2f5f6;padding:1rem;border:1px solid #dfe7e8;white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word;font:13px/1.6 Consolas,monospace}code{font: .85em/1.6 Consolas,monospace;overflow-wrap:anywhere}pre code{font-size:inherit}blockquote{border-left:3px solid var(--accent);padding-left:1rem;margin-left:0;color:var(--muted)}.search{padding:.65rem;border:1px solid #789399;border-radius:4px;width:100%;font:inherit}.search-status{font-size:.8rem;color:var(--muted)}footer{border-top:1px solid var(--line);padding:2rem 5vw;margin-top:3rem;font-size:.85rem;color:var(--muted);display:flex;gap:2rem;justify-content:space-between;flex-wrap:wrap}.small{font-size:.9rem;color:var(--muted)}.api-entry{padding:1.2rem 0;border-top:1px solid var(--line)}.api-entry h3{overflow-wrap:anywhere}.method{font-size:.76rem;font-weight:750;color:var(--accent)}details{margin:1rem 0}summary{cursor:pointer;font-weight:650}.index-columns{columns:2;column-gap:2rem}.index-columns li{break-inside:avoid}
+@media(max-width:850px){.grid{grid-template-columns:1fr 1fr}.split{grid-template-columns:1fr}.doclayout{grid-template-columns:1fr;gap:1rem}.toc{position:static;max-height:none}.hero{padding-top:3rem}header nav{margin-left:0}.docbody h1{font-size:2.2rem}}
+@media(max-width:520px){.grid{grid-template-columns:1fr}.wrap{padding:0 6vw}header{padding:1rem 6vw}.hero h1{font-size:2.6rem}.index-columns{columns:1}table{font-size:.78rem}th,td{padding:.45rem}.doclayout{padding:1rem 6vw}.facts{gap:.5rem}}
+main,.toc a,.hero h1{overflow-wrap:anywhere}
+@page{size:Letter;margin:.7in .65in .75in}
+@media print{html{scroll-behavior:auto}body{font:10.5pt/1.45 Arial,sans-serif;color:#172f39}header,footer,.search-area,.screen-only{display:none}.doclayout{display:block;padding:0;max-width:none}.toc{position:static;max-height:none;overflow:visible;font-size:10pt;break-after:page}.toc>h2{border:0}.toc ul{columns:2;column-gap:.3in}.toc li{break-inside:avoid}.docbody h1{font-size:30pt}.docbody h2{font-size:19pt;break-after:avoid;padding-top:.15in;margin-top:.35in}.docbody h3{font-size:12pt;break-after:avoid}.docbody h4{break-after:avoid}p{orphans:3;widows:3}pre{font-size:8.2pt;line-height:1.4;padding:.1in;break-inside:auto}table{font-size:8.4pt;line-height:1.35}th,td{padding:.06in .07in}tr{break-inside:avoid}.flow{max-height:6in;object-fit:contain;break-inside:avoid}a{color:#172f39;text-decoration:underline}.cover{break-after:page;padding-top:1in}.cover .edition{font-size:11pt}.cover h1{font-size:32pt}.cover .lead{font-size:14pt}.api-entry{break-inside:auto}.api-entry h3{break-after:avoid}.index-columns{columns:2}}
+</style></head><body><a class="skip" href="#main">Skip to content</a><header><a class="brand" href="../index.html">townlight<span aria-hidden="true"> ·</span></a><span class="edition">Townlight Beta 1</span><nav aria-label="Main"><a href="../index.html">Products</a><span>Suite manual in companion</span><a href="../reference/index.html">Technical reference</a><a href="../terms.html">Terms and license</a></nav></header>
+<main id="main"><div class="cover wrap"><div class="hero"><div class="edition">Townlight Beta 1</div><h1>Townlight
+Station API
+Reference</h1><p class="lead">Staff guide and technical reference</p><p class="docmeta">Documentation edition 30 October 2026<br>Existing component versions retained<br>Signed suite installer 1.6.0.1<br>Private beta documentation companion</p></div></div><div class="doclayout"><aside class="toc" aria-label="Table of contents"><h2>Contents</h2><div class="search-area"><label for="find-section">Find a section</label><input class="search" id="find-section" type="search" placeholder="Type a heading"><p class="search-status" aria-live="polite"></p></div><ul>
+<li><a href="#api-reference-scope" id="toc-api-reference-scope">API
+reference scope</a></li>
+<li><a href="#installed-desktop-http-operations"
+id="toc-installed-desktop-http-operations">Installed desktop HTTP
+operations</a></li>
+<li><a href="#request-and-response-data-dictionary"
+id="toc-request-and-response-data-dictionary">Request and response data
+dictionary</a></li>
+<li><a href="#source-route-and-validation-supplement"
+id="toc-source-route-and-validation-supplement">Source route and
+validation supplement</a></li>
+<li><a href="#station-service-request-models"
+id="toc-station-service-request-models">Station service request
+models</a></li>
+<li><a href="#alphabetical-contract-index"
+id="toc-alphabetical-contract-index">Alphabetical contract
+index</a></li>
+</ul></aside><article class="docbody"><h2 id="api-reference-scope">API
+reference scope</h2>
+<p>This is the <strong>Townlight Beta 1</strong> technical contract for
+Station. The desktop-domain entries below come from the installed
+candidate’s generated OpenAPI schema. Export did not start a server,
+enter application lifespan, run migrations or contact a database. It is
+schema evidence, not proof of every endpoint’s runtime behavior. The
+acceptance section of the operating manual identifies exercised
+paths.</p>
+<p>The complete filtered <a href="station-openapi.json">OpenAPI JSON</a>
+preserves request bodies, parameters, response declarations, constraints
+and referenced schemas. An empty response schema means that this
+application did not declare a structured response model; do not infer a
+stronger contract from a green HTTP status. HTTP authorization enforced
+inside dependencies is still required when an automatically generated
+header parameter says optional.</p>
+<h3 id="origins-and-authentication">Origins and authentication</h3>
+<p>The canonical native domain transport uses
+<code>http://127.0.0.1:15480</code>. The native shell supplies
+<code>X-Townlight-Session</code> and maps it to a persisted SQL
+identity; browser code must not invent an actor or role. A trusted local
+integration must protect that proof as a credential and revalidate
+current authority. Standalone <code>/auth/jwt/login</code> uses the
+existing bearer-token flow; that token is not interchangeable with
+native proof. Public routes have their own permission and deployment
+gates. Do not bind the native domain runtime to a non-loopback
+interface.</p>
+<p>Station defaults to explicit loopback port <code>8756</code>. Its
+service revalidates Townlight authority. Its browser exchanges a one-use
+60-second ticket for a 900-second HttpOnly SameSite Strict operator
+cookie. Browser mutations require the exact Origin and
+<code>X-Station-UI: 1</code>. Native session proof must not be put in a
+URL or shipped to an MCP client.</p>
+<h3 id="failure-and-retry-contract">Failure and retry contract</h3>
+<p><code>401</code> means missing/expired identity; <code>403</code>
+means permission or origin denial; <code>404</code> means a missing or
+unavailable resource; <code>409</code> commonly means revision,
+source-hash, lifecycle or idempotency conflict; <code>422</code> means
+invalid input; <code>429</code> means a bounded rate/capacity refusal;
+<code>503</code> means an unavailable dependency, configuration or
+schema. Individual routes may use only a subset and source-derived
+checks can add errors absent from generated response declarations.
+Preserve edits, read the detail and inspect current state before
+retrying a write. Neither a retry nor an idempotency key authorizes a
+changed payload.</p>
+<h3 id="effective-installed-runtime-contract">Effective installed
+runtime contract</h3>
+<p>The inner domain export in
+<code>reference/desktop-domain-openapi.json</code> has 243 paths and 245
+schemas. The installed host is a second FastAPI application: it
+registers <strong>GET /health</strong>, <strong>GET /modules</strong>
+and <strong>GET /ready</strong> before mounting that domain application
+at <code>/</code>. Its <code>/health</code> therefore
+<strong>overrides</strong> the inner <code>app.main.health</code> at the
+installed origin. The effective composition has 245 unique URI paths.
+The filtered downloads for Suite, Core and Records compose those real
+outer routes over their inner-domain selection; the original inner and
+outer exports remain separate evidence files.</p>
+<table>
+<colgroup>
+<col style="width: 50%" />
+<col style="width: 50%" />
+</colgroup>
+<thead>
+<tr>
+<th>Outer operation</th>
+<th>Actual response and use</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>GET /health</code></td>
+<td>Runtime <code>status</code> (<code>ok</code> or
+<code>degraded</code>), service/version, product profile, module checks,
+database check and <code>local_only</code>. HTTP 200 when healthy,
+otherwise 503. This is not the inner app’s simple status/version
+handler.</td>
+</tr>
+<tr>
+<td><code>GET /modules</code></td>
+<td>The same runtime health payload and HTTP status as
+<code>/health</code>; not a second independent readiness proof.</td>
+</tr>
+<tr>
+<td><code>GET /ready</code></td>
+<td><code>status</code> (<code>ready</code> or <code>not-ready</code>)
+and <code>reason</code>; HTTP 200/503 after the applicable activation,
+schema and provider checks. Use this for domain readiness.</td>
+</tr>
+</tbody>
+</table>
+<p>For example, a ready result has shape
+<code>{"status":"ready","reason":"&lt;actual profile-specific readiness reason&gt;"}</code>;
+an inactive domain returns
+<code>{"status":"not-ready","reason":"domain-inactive"}</code> with 503.
+These are source-derived shapes, not new execution receipts. Read the
+actual reason rather than treating a listening process or
+<code>/health</code> alone as canonical readiness.</p>
+<p>The native origin remains <code>http://127.0.0.1:15480</code>.
+Station’s separately paired suite process can use another explicitly
+configured loopback port; its Station origin and the Station service’s
+suite origin must agree. The Station operating guide supplies that setup
+without disabling normal activation.</p>
+<h3 id="separate-station-service-contract">Separate Station service
+contract</h3>
+<p><strong>The Station OpenAPI download on this page describes only the
+three suite-side Station routes. It is not an export of the separate
+Station <code>/v1</code> service.</strong> The standalone service’s
+source route supplement, typed request dictionary and operating
+procedure together describe that second boundary. Creating that service
+requires explicit storage/media/schema configuration; no fabricated
+running-service export is supplied.</p>
+<p>Service origin defaults to <code>http://127.0.0.1:8756</code>. Direct
+trusted clients present the real <code>X-Townlight-Session</code>; the
+operator uses its ticket/cookie/exact-origin boundary. The normal suite
+command and the separate Station operator are different browser
+surfaces.</p>
+<table>
+<colgroup>
+<col style="width: 50%" />
+<col style="width: 50%" />
+</colgroup>
+<thead>
+<tr>
+<th>Operation group</th>
+<th>Request and readback</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>/v1/recordings</code></td>
+<td>POST takes the <code>Capture</code> request; retain the returned
+ID/status, read that ID until terminal, and use <code>/stop</code> for
+live capture. <code>/content</code> serves only validated completed
+bytes. Failed/interrupted recordings are not downloadable completed
+evidence.</td>
+</tr>
+<tr>
+<td><code>/v1/schedules</code></td>
+<td>POST takes <code>ScheduleRequest</code>; initial response contains
+<code>id</code>, <code>status: scheduled</code>, <code>start_at</code>.
+GET lists durable schedules; <code>/{id}/cancel</code> can cancel
+scheduled intent. Dispatch and recording completion are distinct.</td>
+</tr>
+<tr>
+<td><code>/v1/playouts</code></td>
+<td>POST takes <code>PlayoutRequest</code> (<code>dry-run</code> or
+<code>commit</code>); GET/ID readback includes mode, status,
+approval/publication and error context. <code>/{id}/approve</code>
+requires rendered completion and an approval note.
+<code>/{id}/publish</code> requires explicit approval.</td>
+</tr>
+<tr>
+<td><code>/v1/on-air</code></td>
+<td>GET reports current mode plus the verified program/air context. POST
+<code>/live</code> names a configured source and reason. POST
+<code>/return-to-schedule</code> returns to scheduled program; it does
+not create one.</td>
+</tr>
+<tr>
+<td><code>/v1/public/playback/{id}</code></td>
+<td>Serves the separately published MP4; <code>/captions</code> serves
+an available WebVTT track. Unpublished content is unavailable through
+this public route.</td>
+</tr>
+</tbody>
+</table>
+<p>A new capture normally returns this complete initial response shape
+with HTTP 202 (identities here are fictional):</p>
+<div class="sourceCode" id="cb1"><pre
+class="sourceCode json"><code class="sourceCode json"><span id="cb1-1"><a href="#cb1-1" aria-hidden="true" tabindex="-1"></a><span class="fu">{</span><span class="dt">&quot;id&quot;</span><span class="fu">:</span><span class="st">&quot;33333333-3333-4333-8333-333333333333&quot;</span><span class="fu">,</span><span class="dt">&quot;status&quot;</span><span class="fu">:</span><span class="st">&quot;queued&quot;</span><span class="fu">}</span></span></code></pre></div>
+<p>The queued playout view has the following source-derived example
+shape before rendering adds output/approval/publication:</p>
+<div class="sourceCode" id="cb2"><pre
+class="sourceCode json"><code class="sourceCode json"><span id="cb2-1"><a href="#cb2-1" aria-hidden="true" tabindex="-1"></a><span class="fu">{</span><span class="dt">&quot;id&quot;</span><span class="fu">:</span><span class="st">&quot;44444444-4444-4444-8444-444444444444&quot;</span><span class="fu">,</span><span class="dt">&quot;status&quot;</span><span class="fu">:</span><span class="st">&quot;queued&quot;</span><span class="fu">,</span><span class="dt">&quot;recording_id&quot;</span><span class="fu">:</span><span class="st">&quot;33333333-3333-4333-8333-333333333333&quot;</span><span class="fu">,</span><span class="dt">&quot;mode&quot;</span><span class="fu">:</span><span class="st">&quot;dry-run&quot;</span><span class="fu">,</span><span class="dt">&quot;approved&quot;</span><span class="fu">:</span><span class="kw">null</span><span class="fu">,</span><span class="dt">&quot;published&quot;</span><span class="fu">:</span><span class="kw">null</span><span class="fu">,</span><span class="dt">&quot;output&quot;</span><span class="fu">:</span><span class="kw">null</span><span class="fu">,</span><span class="dt">&quot;sha256&quot;</span><span class="fu">:</span><span class="kw">null</span><span class="fu">,</span><span class="dt">&quot;duration_seconds&quot;</span><span class="fu">:</span><span class="kw">null</span><span class="fu">,</span><span class="dt">&quot;on_air&quot;</span><span class="fu">:</span><span class="kw">false</span><span class="fu">,</span><span class="dt">&quot;attempts&quot;</span><span class="fu">:</span><span class="ot">[]</span><span class="fu">,</span><span class="dt">&quot;caption_policy&quot;</span><span class="fu">:</span><span class="kw">null</span><span class="fu">,</span><span class="dt">&quot;error&quot;</span><span class="fu">:</span><span class="kw">null</span><span class="fu">,</span><span class="dt">&quot;packaged&quot;</span><span class="fu">:</span><span class="kw">false</span><span class="fu">,</span><span class="dt">&quot;playback_ready&quot;</span><span class="fu">:</span><span class="kw">false</span><span class="fu">}</span></span></code></pre></div>
+<p>Responses include implementation-owned metadata beyond these selected
+fields. Where no response model is declared, the source supplement and
+actual retained readback govern; this table is not a new strict JSON
+schema. The manual contains synthetic capture/handoff and
+schedule/playout requests, time/late rules, caption behavior, on-air
+controls, approval/publication and recovery steps. Read completion and
+<code>details</code>/approval/publication state, not merely HTTP
+202.</p>
+<h2 id="installed-desktop-http-operations">Installed desktop HTTP
+operations</h2>
+<h3 id="get-desktopv1stationcontext">GET
+/desktop/v1/station/context</h3>
+<p>Context</p>
+<p>Operation ID: <code>context_desktop_v1_station_context_get</code>.
+Tags: native-desktop, station-integration.</p>
+<table>
+<thead>
+<tr>
+<th>Parameter</th>
+<th>Location</th>
+<th>Required</th>
+<th>Type and constraints</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>capability</code></td>
+<td>query</td>
+<td>yes</td>
+<td>string; values capture, read</td>
+</tr>
+<tr>
+<td><code>X-Townlight-Session</code></td>
+<td>header</td>
+<td>no at schema level</td>
+<td>string or null</td>
+</tr>
+</tbody>
+</table>
+<table>
+<thead>
+<tr>
+<th>Declared status</th>
+<th>Description</th>
+<th>Response model</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>200</td>
+<td>Successful Response</td>
+<td>application/json: Unspecified JSON shape</td>
+</tr>
+<tr>
+<td>422</td>
+<td>Validation Error</td>
+<td>application/json: HTTPValidationError</td>
+</tr>
+</tbody>
+</table>
+<h3 id="post-desktopv1requestsrequest_idstation-recordings">POST
+/desktop/v1/requests/{request_id}/station-recordings</h3>
+<p>Attach</p>
+<p>Operation ID:
+<code>attach_desktop_v1_requests__request_id__station_recordings_post</code>.
+Tags: native-desktop, station-integration.</p>
+<table>
+<thead>
+<tr>
+<th>Parameter</th>
+<th>Location</th>
+<th>Required</th>
+<th>Type and constraints</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>request_id</code></td>
+<td>path</td>
+<td>yes</td>
+<td>string; format=uuid</td>
+</tr>
+<tr>
+<td><code>X-Townlight-Session</code></td>
+<td>header</td>
+<td>no at schema level</td>
+<td>string or null</td>
+</tr>
+</tbody>
+</table>
+<p>Request body: <code>application/json</code>; required. Model:
+<code>Selection</code>.</p>
+<table>
+<thead>
+<tr>
+<th>Declared status</th>
+<th>Description</th>
+<th>Response model</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>200</td>
+<td>Successful Response</td>
+<td>application/json: RecordsOperationRead</td>
+</tr>
+<tr>
+<td>422</td>
+<td>Validation Error</td>
+<td>application/json: HTTPValidationError</td>
+</tr>
+</tbody>
+</table>
+<h3 id="get-desktopv1meetingsstationcatalog">GET
+/desktop/v1/meetings/station/catalog</h3>
+<p>Station Catalog</p>
+<p>Authorized name-based operator selection from canonical Meetings
+data.</p>
+<p>Operation ID:
+<code>station_catalog_desktop_v1_meetings_station_catalog_get</code>.
+Tags: native-meetings.</p>
+<table>
+<thead>
+<tr>
+<th>Parameter</th>
+<th>Location</th>
+<th>Required</th>
+<th>Type and constraints</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>X-Townlight-Session</code></td>
+<td>header</td>
+<td>no at schema level</td>
+<td>string or null</td>
+</tr>
+</tbody>
+</table>
+<table>
+<thead>
+<tr>
+<th>Declared status</th>
+<th>Description</th>
+<th>Response model</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>200</td>
+<td>Successful Response</td>
+<td>application/json: Unspecified JSON shape</td>
+</tr>
+<tr>
+<td>422</td>
+<td>Validation Error</td>
+<td>application/json: HTTPValidationError</td>
+</tr>
+</tbody>
+</table>
+<h2 id="request-and-response-data-dictionary">Request and response data
+dictionary</h2>
+<p>Fields below retain the actual schema requirements and constraints.
+<code>null</code> and omitted are distinct where a model distinguishes
+them. Additional-property rules apply per schema. Full discriminators,
+nested definitions and defaults are retained in the JSON.</p>
+<h3 id="exemptiondecisionview">ExemptionDecisionView</h3>
+<p>Additional properties: false.</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Required</th>
+<th>Type and constraints</th>
+<th>Default or description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>id</code></td>
+<td>yes</td>
+<td>string</td>
+<td></td>
+</tr>
+<tr>
+<td><code>source</code></td>
+<td>yes</td>
+<td>string</td>
+<td></td>
+</tr>
+<tr>
+<td><code>kind</code></td>
+<td>yes</td>
+<td>string</td>
+<td></td>
+</tr>
+<tr>
+<td><code>finding</code></td>
+<td>yes</td>
+<td>string</td>
+<td></td>
+</tr>
+<tr>
+<td><code>decision</code></td>
+<td>yes</td>
+<td>string; values release, redact, exempt</td>
+<td></td>
+</tr>
+<tr>
+<td><code>basis</code></td>
+<td>yes</td>
+<td>string</td>
+<td></td>
+</tr>
+<tr>
+<td><code>reviewer</code></td>
+<td>yes</td>
+<td>string</td>
+<td></td>
+</tr>
+<tr>
+<td><code>created_at_unix_seconds</code></td>
+<td>yes</td>
+<td>integer</td>
+<td></td>
+</tr>
+</tbody>
+</table>
+<h3 id="feelineview">FeeLineView</h3>
+<p>Additional properties: false.</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Required</th>
+<th>Type and constraints</th>
+<th>Default or description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>id</code></td>
+<td>yes</td>
+<td>string</td>
+<td></td>
+</tr>
+<tr>
+<td><code>description</code></td>
+<td>yes</td>
+<td>string</td>
+<td></td>
+</tr>
+<tr>
+<td><code>schedule_basis</code></td>
+<td>yes</td>
+<td>string</td>
+<td></td>
+</tr>
+<tr>
+<td><code>amount_cents</code></td>
+<td>yes</td>
+<td>integer</td>
+<td></td>
+</tr>
+<tr>
+<td><code>created_at_unix_seconds</code></td>
+<td>yes</td>
+<td>integer</td>
+<td></td>
+</tr>
+</tbody>
+</table>
+<h3 id="httpvalidationerror">HTTPValidationError</h3>
+<p>Additional properties: not explicitly declared.</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Required</th>
+<th>Type and constraints</th>
+<th>Default or description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>detail</code></td>
+<td>no</td>
+<td>array of ValidationError</td>
+<td></td>
+</tr>
+</tbody>
+</table>
+<h3 id="messageview">MessageView</h3>
+<p>Additional properties: false.</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Required</th>
+<th>Type and constraints</th>
+<th>Default or description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>id</code></td>
+<td>yes</td>
+<td>string</td>
+<td></td>
+</tr>
+<tr>
+<td><code>author</code></td>
+<td>yes</td>
+<td>string</td>
+<td></td>
+</tr>
+<tr>
+<td><code>author_role</code></td>
+<td>yes</td>
+<td>string</td>
+<td></td>
+</tr>
+<tr>
+<td><code>body</code></td>
+<td>yes</td>
+<td>string</td>
+<td></td>
+</tr>
+<tr>
+<td><code>visibility</code></td>
+<td>yes</td>
+<td>string</td>
+<td></td>
+</tr>
+<tr>
+<td><code>created_at_unix_seconds</code></td>
+<td>yes</td>
+<td>integer</td>
+<td></td>
+</tr>
+</tbody>
+</table>
+<h3 id="publicstatusview">PublicStatusView</h3>
+<p>Additional properties: false.</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Required</th>
+<th>Type and constraints</th>
+<th>Default or description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>id</code></td>
+<td>yes</td>
+<td>string</td>
+<td></td>
+</tr>
+<tr>
+<td><code>label</code></td>
+<td>yes</td>
+<td>string</td>
+<td></td>
+</tr>
+<tr>
+<td><code>summary</code></td>
+<td>yes</td>
+<td>string</td>
+<td></td>
+</tr>
+<tr>
+<td><code>status</code></td>
+<td>yes</td>
+<td>string</td>
+<td></td>
+</tr>
+<tr>
+<td><code>created_at_unix_seconds</code></td>
+<td>yes</td>
+<td>integer</td>
+<td></td>
+</tr>
+</tbody>
+</table>
+<h3 id="recordsdocumentview">RecordsDocumentView</h3>
+<p>Additional properties: false.</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Required</th>
+<th>Type and constraints</th>
+<th>Default or description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>id</code></td>
+<td>yes</td>
+<td>string</td>
+<td></td>
+</tr>
+<tr>
+<td><code>attachment_id</code></td>
+<td>yes</td>
+<td>string</td>
+<td></td>
+</tr>
+<tr>
+<td><code>title</code></td>
+<td>yes</td>
+<td>string</td>
+<td></td>
+</tr>
+<tr>
+<td><code>original_path</code></td>
+<td>yes</td>
+<td>string</td>
+<td></td>
+</tr>
+<tr>
+<td><code>stored_path</code></td>
+<td>yes</td>
+<td>string</td>
+<td></td>
+</tr>
+<tr>
+<td><code>citation</code></td>
+<td>yes</td>
+<td>string</td>
+<td></td>
+</tr>
+<tr>
+<td><code>sha256</code></td>
+<td>yes</td>
+<td>string</td>
+<td></td>
+</tr>
+<tr>
+<td><code>size_bytes</code></td>
+<td>yes</td>
+<td>integer</td>
+<td></td>
+</tr>
+<tr>
+<td><code>status</code></td>
+<td>yes</td>
+<td>string</td>
+<td></td>
+</tr>
+<tr>
+<td><code>added_by</code></td>
+<td>yes</td>
+<td>string</td>
+<td></td>
+</tr>
+<tr>
+<td><code>created_at_unix_seconds</code></td>
+<td>yes</td>
+<td>integer</td>
+<td></td>
+</tr>
+<tr>
+<td><code>release_original_path</code></td>
+<td>no</td>
+<td>string</td>
+<td>default ““.</td>
+</tr>
+<tr>
+<td><code>release_stored_path</code></td>
+<td>no</td>
+<td>string</td>
+<td>default ““.</td>
+</tr>
+<tr>
+<td><code>release_file_name</code></td>
+<td>no</td>
+<td>string</td>
+<td>default ““.</td>
+</tr>
+<tr>
+<td><code>release_sha256</code></td>
+<td>no</td>
+<td>string</td>
+<td>default ““.</td>
+</tr>
+<tr>
+<td><code>release_size_bytes</code></td>
+<td>no</td>
+<td>integer</td>
+<td>default 0.</td>
+</tr>
+<tr>
+<td><code>release_status</code></td>
+<td>no</td>
+<td>string</td>
+<td>default ““.</td>
+</tr>
+<tr>
+<td><code>release_note</code></td>
+<td>no</td>
+<td>string</td>
+<td>default ““.</td>
+</tr>
+<tr>
+<td><code>release_added_by</code></td>
+<td>no</td>
+<td>string</td>
+<td>default ““.</td>
+</tr>
+<tr>
+<td><code>release_added_at_unix_seconds</code></td>
+<td>no</td>
+<td>integer or null</td>
+<td></td>
+</tr>
+</tbody>
+</table>
+<h3 id="recordsoperationread">RecordsOperationRead</h3>
+<p>Additional properties: false.</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Required</th>
+<th>Type and constraints</th>
+<th>Default or description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>action</code></td>
+<td>yes</td>
+<td>string</td>
+<td></td>
+</tr>
+<tr>
+<td><code>message</code></td>
+<td>yes</td>
+<td>string</td>
+<td></td>
+</tr>
+<tr>
+<td><code>request</code></td>
+<td>yes</td>
+<td>RecordsView</td>
+<td></td>
+</tr>
+</tbody>
+</table>
+<h3 id="recordsview">RecordsView</h3>
+<p>Additional properties: false.</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Required</th>
+<th>Type and constraints</th>
+<th>Default or description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>request_id</code></td>
+<td>yes</td>
+<td>string</td>
+<td></td>
+</tr>
+<tr>
+<td><code>id</code></td>
+<td>yes</td>
+<td>string</td>
+<td></td>
+</tr>
+<tr>
+<td><code>public_tracking_number</code></td>
+<td>yes</td>
+<td>string</td>
+<td></td>
+</tr>
+<tr>
+<td><code>requester</code></td>
+<td>yes</td>
+<td>string</td>
+<td></td>
+</tr>
+<tr>
+<td><code>requester_contact</code></td>
+<td>yes</td>
+<td>string</td>
+<td></td>
+</tr>
+<tr>
+<td><code>submitted_via</code></td>
+<td>yes</td>
+<td>string</td>
+<td></td>
+</tr>
+<tr>
+<td><code>summary</code></td>
+<td>yes</td>
+<td>string</td>
+<td></td>
+</tr>
+<tr>
+<td><code>deadline</code></td>
+<td>yes</td>
+<td>string</td>
+<td></td>
+</tr>
+<tr>
+<td><code>deadline_basis</code></td>
+<td>yes</td>
+<td>string</td>
+<td></td>
+</tr>
+<tr>
+<td><code>status</code></td>
+<td>yes</td>
+<td>string</td>
+<td></td>
+</tr>
+<tr>
+<td><code>assigned_to</code></td>
+<td>yes</td>
+<td>string</td>
+<td></td>
+</tr>
+<tr>
+<td><code>clarification_notes</code></td>
+<td>yes</td>
+<td>array of string</td>
+<td></td>
+</tr>
+<tr>
+<td><code>search_notes</code></td>
+<td>yes</td>
+<td>array of string</td>
+<td></td>
+</tr>
+<tr>
+<td><code>search_sessions</code></td>
+<td>yes</td>
+<td>array of SearchReceiptView</td>
+<td></td>
+</tr>
+<tr>
+<td><code>exemption_reviews</code></td>
+<td>yes</td>
+<td>array of string</td>
+<td></td>
+</tr>
+<tr>
+<td><code>exemption_decisions</code></td>
+<td>yes</td>
+<td>array of ExemptionDecisionView</td>
+<td></td>
+</tr>
+<tr>
+<td><code>fee_estimate</code></td>
+<td>yes</td>
+<td>string</td>
+<td></td>
+</tr>
+<tr>
+<td><code>fee_line_items</code></td>
+<td>yes</td>
+<td>array of FeeLineView</td>
+<td></td>
+</tr>
+<tr>
+<td><code>fee_waiver_reason</code></td>
+<td>yes</td>
+<td>string</td>
+<td></td>
+</tr>
+<tr>
+<td><code>citations</code></td>
+<td>yes</td>
+<td>array of string</td>
+<td></td>
+</tr>
+<tr>
+<td><code>response_draft</code></td>
+<td>yes</td>
+<td>string</td>
+<td></td>
+</tr>
+<tr>
+<td><code>approval_notes</code></td>
+<td>yes</td>
+<td>array of string</td>
+<td></td>
+</tr>
+<tr>
+<td><code>exports</code></td>
+<td>yes</td>
+<td>array of string</td>
+<td></td>
+</tr>
+<tr>
+<td><code>documents</code></td>
+<td>no</td>
+<td>array of RecordsDocumentView</td>
+<td></td>
+</tr>
+<tr>
+<td><code>release_packages</code></td>
+<td>no</td>
+<td>array of ReleasePackageView</td>
+<td></td>
+</tr>
+<tr>
+<td><code>timeline</code></td>
+<td>yes</td>
+<td>array of TimelineView</td>
+<td></td>
+</tr>
+<tr>
+<td><code>public_status_events</code></td>
+<td>yes</td>
+<td>array of PublicStatusView</td>
+<td></td>
+</tr>
+<tr>
+<td><code>messages</code></td>
+<td>yes</td>
+<td>array of MessageView</td>
+<td></td>
+</tr>
+<tr>
+<td><code>deadline_reviewed_at_unix_seconds</code></td>
+<td>yes</td>
+<td>integer or null</td>
+<td></td>
+</tr>
+<tr>
+<td><code>approved_at_unix_seconds</code></td>
+<td>yes</td>
+<td>integer or null</td>
+<td></td>
+</tr>
+<tr>
+<td><code>fulfilled_at_unix_seconds</code></td>
+<td>yes</td>
+<td>integer or null</td>
+<td></td>
+</tr>
+<tr>
+<td><code>closed_at_unix_seconds</code></td>
+<td>yes</td>
+<td>integer or null</td>
+<td></td>
+</tr>
+<tr>
+<td><code>created_at_unix_seconds</code></td>
+<td>yes</td>
+<td>integer</td>
+<td></td>
+</tr>
+</tbody>
+</table>
+<h3 id="releasepackageview">ReleasePackageView</h3>
+<p>Additional properties: false.</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Required</th>
+<th>Type and constraints</th>
+<th>Default or description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>id</code></td>
+<td>yes</td>
+<td>string</td>
+<td></td>
+</tr>
+<tr>
+<td><code>export_path</code></td>
+<td>yes</td>
+<td>string</td>
+<td></td>
+</tr>
+<tr>
+<td><code>package_hash</code></td>
+<td>yes</td>
+<td>string</td>
+<td></td>
+</tr>
+<tr>
+<td><code>document_count</code></td>
+<td>yes</td>
+<td>integer</td>
+<td></td>
+</tr>
+<tr>
+<td><code>release_artifact_count</code></td>
+<td>yes</td>
+<td>integer</td>
+<td></td>
+</tr>
+<tr>
+<td><code>search_session_count</code></td>
+<td>yes</td>
+<td>integer</td>
+<td></td>
+</tr>
+<tr>
+<td><code>release_count</code></td>
+<td>yes</td>
+<td>integer</td>
+<td></td>
+</tr>
+<tr>
+<td><code>redacted_count</code></td>
+<td>yes</td>
+<td>integer</td>
+<td></td>
+</tr>
+<tr>
+<td><code>exempt_count</code></td>
+<td>yes</td>
+<td>integer</td>
+<td></td>
+</tr>
+<tr>
+<td><code>created_at_unix_seconds</code></td>
+<td>yes</td>
+<td>integer</td>
+<td></td>
+</tr>
+</tbody>
+</table>
+<h3 id="searchreceiptview">SearchReceiptView</h3>
+<p>Additional properties: false.</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Required</th>
+<th>Type and constraints</th>
+<th>Default or description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>id</code></td>
+<td>yes</td>
+<td>string</td>
+<td></td>
+</tr>
+<tr>
+<td><code>query</code></td>
+<td>yes</td>
+<td>string</td>
+<td></td>
+</tr>
+<tr>
+<td><code>locations</code></td>
+<td>yes</td>
+<td>string</td>
+<td></td>
+</tr>
+<tr>
+<td><code>reviewer</code></td>
+<td>yes</td>
+<td>string</td>
+<td></td>
+</tr>
+<tr>
+<td><code>results</code></td>
+<td>yes</td>
+<td>array of SearchResultView</td>
+<td></td>
+</tr>
+<tr>
+<td><code>created_at_unix_seconds</code></td>
+<td>yes</td>
+<td>integer</td>
+<td></td>
+</tr>
+</tbody>
+</table>
+<h3 id="searchresultview">SearchResultView</h3>
+<p>Additional properties: false.</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Required</th>
+<th>Type and constraints</th>
+<th>Default or description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>id</code></td>
+<td>yes</td>
+<td>string</td>
+<td></td>
+</tr>
+<tr>
+<td><code>title</code></td>
+<td>yes</td>
+<td>string</td>
+<td></td>
+</tr>
+<tr>
+<td><code>citation</code></td>
+<td>yes</td>
+<td>string</td>
+<td></td>
+</tr>
+<tr>
+<td><code>summary</code></td>
+<td>yes</td>
+<td>string</td>
+<td></td>
+</tr>
+<tr>
+<td><code>status</code></td>
+<td>yes</td>
+<td>string</td>
+<td></td>
+</tr>
+</tbody>
+</table>
+<h3 id="selection">Selection</h3>
+<p>Additional properties: false.</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Required</th>
+<th>Type and constraints</th>
+<th>Default or description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>recording_id</code></td>
+<td>yes</td>
+<td>string; format=uuid</td>
+<td></td>
+</tr>
+<tr>
+<td><code>expected_sha256</code></td>
+<td>yes</td>
+<td>string; pattern=<a href="#fn1" class="footnote-ref" id="fnref1"
+role="doc-noteref"><sup>1</sup></a>{64}$</td>
+<td></td>
+</tr>
+</tbody>
+</table>
+<h3 id="timelineview">TimelineView</h3>
+<p>Additional properties: false.</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Required</th>
+<th>Type and constraints</th>
+<th>Default or description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>id</code></td>
+<td>yes</td>
+<td>string</td>
+<td></td>
+</tr>
+<tr>
+<td><code>action</code></td>
+<td>yes</td>
+<td>string</td>
+<td></td>
+</tr>
+<tr>
+<td><code>actor</code></td>
+<td>yes</td>
+<td>string</td>
+<td></td>
+</tr>
+<tr>
+<td><code>note</code></td>
+<td>yes</td>
+<td>string</td>
+<td></td>
+</tr>
+<tr>
+<td><code>created_at_unix_seconds</code></td>
+<td>yes</td>
+<td>integer</td>
+<td></td>
+</tr>
+</tbody>
+</table>
+<h3 id="validationerror">ValidationError</h3>
+<p>Additional properties: not explicitly declared.</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Required</th>
+<th>Type and constraints</th>
+<th>Default or description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>loc</code></td>
+<td>yes</td>
+<td>array of string or integer</td>
+<td></td>
+</tr>
+<tr>
+<td><code>msg</code></td>
+<td>yes</td>
+<td>string</td>
+<td></td>
+</tr>
+<tr>
+<td><code>type</code></td>
+<td>yes</td>
+<td>string</td>
+<td></td>
+</tr>
+<tr>
+<td><code>input</code></td>
+<td>no</td>
+<td>object</td>
+<td></td>
+</tr>
+<tr>
+<td><code>ctx</code></td>
+<td>no</td>
+<td>object</td>
+<td></td>
+</tr>
+</tbody>
+</table>
+<h2 id="source-route-and-validation-supplement">Source route and
+validation supplement</h2>
+<p>These declarations are extracted from the immutable candidate source.
+Package standalone routes are <strong>a different deployment
+surface</strong> from the mounted installed domain. They are listed to
+document existing code, not to claim they all have installed or city
+acceptance. A source declaration without a resolved include-router mount
+is identified as such. Full signatures, direct HTTP refusals and schema
+fields are retained in the <a
+href="../reference/source-inventory.json">source inventory</a>.</p>
+<h3 id="api.py">api.py</h3>
+<p>Candidate source:
+<code>installed-owned-source/townlight_station/api.py</code>.</p>
+<p><strong>GET <code>/health</code></strong> — handler
+<code>health</code>, line 79. Declared router prefix included.</p>
+<div class="sourceCode" id="cb3"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb3-1"><a href="#cb3-1" aria-hidden="true" tabindex="-1"></a>health()</span></code></pre></div>
+<p><strong>GET <code>/v1/identity</code></strong> — handler
+<code>identity</code>, line 84. Declared router prefix included.</p>
+<div class="sourceCode" id="cb4"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb4-1"><a href="#cb4-1" aria-hidden="true" tabindex="-1"></a>identity(proof: <span class="bu">str</span> <span class="op">|</span> <span class="va">None</span><span class="op">=</span>Header(default<span class="op">=</span><span class="va">None</span>, alias<span class="op">=</span><span class="st">&#39;X-Townlight-Session&#39;</span>))</span></code></pre></div>
+<p><strong>POST <code>/v1/recordings</code></strong> — handler
+<code>capture</code>, line 89. Declared router prefix included.</p>
+<div class="sourceCode" id="cb5"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb5-1"><a href="#cb5-1" aria-hidden="true" tabindex="-1"></a>capture(data: Capture, proof: <span class="bu">str</span> <span class="op">|</span> <span class="va">None</span><span class="op">=</span>Header(default<span class="op">=</span><span class="va">None</span>, alias<span class="op">=</span><span class="st">&#39;X-Townlight-Session&#39;</span>))</span></code></pre></div>
+<p>Direct handler refusals:
+<code>HTTPException(422, 'Select one recorded file or live input; live input preserves embedded captions')</code>;
+<code>HTTPException(422, 'Configured live input not found')</code>;
+<code>HTTPException(422, 'Source file missing or exceeds configured limit')</code>;
+<code>HTTPException(422, 'Caption sidecar missing or too large')</code>;
+<code>HTTPException(409, 'Agenda item does not belong to this meeting')</code>;
+<code>HTTPException(409, 'Station is busy; live recording must start immediately')</code>;
+<code>HTTPException(429, 'Station queue is full; no capture accepted')</code>;
+<code>HTTPException(409, 'Idempotency key already describes different source evidence')</code>.</p>
+<p><strong>GET <code>/v1/recordings/{identity}</code></strong> — handler
+<code>get_record</code>, line 187. Declared router prefix included.</p>
+<div class="sourceCode" id="cb6"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb6-1"><a href="#cb6-1" aria-hidden="true" tabindex="-1"></a>get_record(identity: UUID, proof: <span class="bu">str</span> <span class="op">|</span> <span class="va">None</span><span class="op">=</span>Header(default<span class="op">=</span><span class="va">None</span>, alias<span class="op">=</span><span class="st">&#39;X-Townlight-Session&#39;</span>))</span></code></pre></div>
+<p><strong>GET <code>/v1/recordings/{identity}/content</code></strong> —
+handler <code>content</code>, line 191. Declared router prefix
+included.</p>
+<div class="sourceCode" id="cb7"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb7-1"><a href="#cb7-1" aria-hidden="true" tabindex="-1"></a>content(identity: UUID, proof: <span class="bu">str</span> <span class="op">|</span> <span class="va">None</span><span class="op">=</span>Header(default<span class="op">=</span><span class="va">None</span>, alias<span class="op">=</span><span class="st">&#39;X-Townlight-Session&#39;</span>))</span></code></pre></div>
+<p>Direct handler refusals:
+<code>HTTPException(409, 'Recording is not complete')</code>;
+<code>HTTPException(409, 'Recording integrity failure')</code>.</p>
+<p><strong>POST <code>/v1/recordings/{identity}/retry</code></strong> —
+handler <code>retry</code>, line 202. Declared router prefix
+included.</p>
+<div class="sourceCode" id="cb8"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb8-1"><a href="#cb8-1" aria-hidden="true" tabindex="-1"></a>retry(identity: UUID, proof: <span class="bu">str</span> <span class="op">|</span> <span class="va">None</span><span class="op">=</span>Header(default<span class="op">=</span><span class="va">None</span>, alias<span class="op">=</span><span class="st">&#39;X-Townlight-Session&#39;</span>))</span></code></pre></div>
+<p>Direct handler refusals:
+<code>HTTPException(404, 'Recording not found')</code>;
+<code>HTTPException(409, 'Only failed/interrupted recordings can be retried')</code>;
+<code>HTTPException(409, 'A live gap cannot be retried; start a new recording')</code>.</p>
+<p><strong>GET <code>/v1/live-sources</code></strong> — handler
+<code>live_sources</code>, line 215. Declared router prefix
+included.</p>
+<div class="sourceCode" id="cb9"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb9-1"><a href="#cb9-1" aria-hidden="true" tabindex="-1"></a>live_sources(proof: <span class="bu">str</span> <span class="op">|</span> <span class="va">None</span><span class="op">=</span>Header(default<span class="op">=</span><span class="va">None</span>, alias<span class="op">=</span><span class="st">&#39;X-Townlight-Session&#39;</span>))</span></code></pre></div>
+<p><strong>GET <code>/v1/recordings</code></strong> — handler
+<code>list_records</code>, line 220. Declared router prefix
+included.</p>
+<div class="sourceCode" id="cb10"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb10-1"><a href="#cb10-1" aria-hidden="true" tabindex="-1"></a>list_records(proof: <span class="bu">str</span> <span class="op">|</span> <span class="va">None</span><span class="op">=</span>Header(default<span class="op">=</span><span class="va">None</span>, alias<span class="op">=</span><span class="st">&#39;X-Townlight-Session&#39;</span>))</span></code></pre></div>
+<p><strong>POST <code>/v1/recordings/{identity}/stop</code></strong> —
+handler <code>stop_live</code>, line 226. Declared router prefix
+included.</p>
+<div class="sourceCode" id="cb11"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb11-1"><a href="#cb11-1" aria-hidden="true" tabindex="-1"></a>stop_live(identity: UUID, proof: <span class="bu">str</span> <span class="op">|</span> <span class="va">None</span><span class="op">=</span>Header(default<span class="op">=</span><span class="va">None</span>, alias<span class="op">=</span><span class="st">&#39;X-Townlight-Session&#39;</span>))</span></code></pre></div>
+<p>Direct handler refusals:
+<code>HTTPException(404, 'Recording not found')</code>;
+<code>HTTPException(409, 'This recording is not live')</code>;
+<code>HTTPException(409, 'Recording already ended')</code>.</p>
+<h3 id="operations.py">operations.py</h3>
+<p>Candidate source:
+<code>installed-owned-source/townlight_station/operations.py</code>.</p>
+<p><strong>POST <code>/v1/schedules</code></strong> — handler
+<code>create_schedule</code>, line 106. Declared router prefix
+included.</p>
+<div class="sourceCode" id="cb12"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb12-1"><a href="#cb12-1" aria-hidden="true" tabindex="-1"></a>create_schedule(data: ScheduleRequest, proof: <span class="bu">str</span> <span class="op">|</span> <span class="va">None</span><span class="op">=</span>Header(default<span class="op">=</span><span class="va">None</span>, alias<span class="op">=</span><span class="st">&#39;X-Townlight-Session&#39;</span>))</span></code></pre></div>
+<p>Direct handler refusals:
+<code>HTTPException(422, 'Select one recorded file or live input; live input preserves embedded captions')</code>;
+<code>HTTPException(422, 'Configured live input not found')</code>;
+<code>HTTPException(422, 'Source file missing from managed ingest')</code>;
+<code>HTTPException(422, 'Caption sidecar missing from managed ingest')</code>;
+<code>HTTPException(409, 'Agenda item does not belong to this meeting')</code>.</p>
+<p><strong>GET <code>/v1/schedules</code></strong> — handler
+<code>list_schedules</code>, line 143. Declared router prefix
+included.</p>
+<div class="sourceCode" id="cb13"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb13-1"><a href="#cb13-1" aria-hidden="true" tabindex="-1"></a>list_schedules(proof: <span class="bu">str</span> <span class="op">|</span> <span class="va">None</span><span class="op">=</span>Header(default<span class="op">=</span><span class="va">None</span>, alias<span class="op">=</span><span class="st">&#39;X-Townlight-Session&#39;</span>))</span></code></pre></div>
+<p><strong>POST <code>/v1/schedules/{identity}/cancel</code></strong> —
+handler <code>cancel_schedule</code>, line 151. Declared router prefix
+included.</p>
+<div class="sourceCode" id="cb14"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb14-1"><a href="#cb14-1" aria-hidden="true" tabindex="-1"></a>cancel_schedule(identity: UUID, proof: <span class="bu">str</span> <span class="op">|</span> <span class="va">None</span><span class="op">=</span>Header(default<span class="op">=</span><span class="va">None</span>, alias<span class="op">=</span><span class="st">&#39;X-Townlight-Session&#39;</span>))</span></code></pre></div>
+<p>Direct handler refusals:
+<code>HTTPException(409, 'Only a schedule that has not started can be cancelled')</code>.</p>
+<p><strong>POST <code>/v1/playouts</code></strong> — handler
+<code>create_playout</code>, line 163. Declared router prefix
+included.</p>
+<div class="sourceCode" id="cb15"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb15-1"><a href="#cb15-1" aria-hidden="true" tabindex="-1"></a>create_playout(data: PlayoutRequest, proof: <span class="bu">str</span> <span class="op">|</span> <span class="va">None</span><span class="op">=</span>Header(default<span class="op">=</span><span class="va">None</span>, alias<span class="op">=</span><span class="st">&#39;X-Townlight-Session&#39;</span>))</span></code></pre></div>
+<p>Direct handler refusals:
+<code>HTTPException(404, 'Recording not found')</code>;
+<code>HTTPException(409, 'Only a complete, verified recording can be committed to air')</code>.</p>
+<p><strong>GET <code>/v1/playouts</code></strong> — handler
+<code>list_playouts</code>, line 187. Declared router prefix
+included.</p>
+<div class="sourceCode" id="cb16"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb16-1"><a href="#cb16-1" aria-hidden="true" tabindex="-1"></a>list_playouts(proof: <span class="bu">str</span> <span class="op">|</span> <span class="va">None</span><span class="op">=</span>Header(default<span class="op">=</span><span class="va">None</span>, alias<span class="op">=</span><span class="st">&#39;X-Townlight-Session&#39;</span>))</span></code></pre></div>
+<p><strong>GET <code>/v1/playouts/{identity}</code></strong> — handler
+<code>get_playout</code>, line 194. Declared router prefix included.</p>
+<div class="sourceCode" id="cb17"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb17-1"><a href="#cb17-1" aria-hidden="true" tabindex="-1"></a>get_playout(identity: UUID, proof: <span class="bu">str</span> <span class="op">|</span> <span class="va">None</span><span class="op">=</span>Header(default<span class="op">=</span><span class="va">None</span>, alias<span class="op">=</span><span class="st">&#39;X-Townlight-Session&#39;</span>))</span></code></pre></div>
+<p>Direct handler refusals:
+<code>HTTPException(404, 'Playout not found')</code>.</p>
+<p><strong>GET <code>/v1/on-air</code></strong> — handler
+<code>on_air</code>, line 203. Declared router prefix included.</p>
+<div class="sourceCode" id="cb18"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb18-1"><a href="#cb18-1" aria-hidden="true" tabindex="-1"></a>on_air(proof: <span class="bu">str</span> <span class="op">|</span> <span class="va">None</span><span class="op">=</span>Header(default<span class="op">=</span><span class="va">None</span>, alias<span class="op">=</span><span class="st">&#39;X-Townlight-Session&#39;</span>))</span></code></pre></div>
+<p><strong>POST <code>/v1/on-air/live</code></strong> — handler
+<code>live_override</code>, line 215. Declared router prefix
+included.</p>
+<div class="sourceCode" id="cb19"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb19-1"><a href="#cb19-1" aria-hidden="true" tabindex="-1"></a>live_override(data: LiveOverrideRequest, proof: <span class="bu">str</span> <span class="op">|</span> <span class="va">None</span><span class="op">=</span>Header(default<span class="op">=</span><span class="va">None</span>, alias<span class="op">=</span><span class="st">&#39;X-Townlight-Session&#39;</span>))</span></code></pre></div>
+<p>Direct handler refusals:
+<code>HTTPException(422, 'Configured live input not found')</code>.</p>
+<p><strong>POST <code>/v1/on-air/return-to-schedule</code></strong> —
+handler <code>return_to_schedule</code>, line 232. Declared router
+prefix included.</p>
+<div class="sourceCode" id="cb20"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb20-1"><a href="#cb20-1" aria-hidden="true" tabindex="-1"></a>return_to_schedule(proof: <span class="bu">str</span> <span class="op">|</span> <span class="va">None</span><span class="op">=</span>Header(default<span class="op">=</span><span class="va">None</span>, alias<span class="op">=</span><span class="st">&#39;X-Townlight-Session&#39;</span>))</span></code></pre></div>
+<p><strong>POST <code>/v1/playouts/{identity}/approve</code></strong> —
+handler <code>approve</code>, line 243. Declared router prefix
+included.</p>
+<div class="sourceCode" id="cb21"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb21-1"><a href="#cb21-1" aria-hidden="true" tabindex="-1"></a>approve(identity: UUID, data: ApprovalRequest, proof: <span class="bu">str</span> <span class="op">|</span> <span class="va">None</span><span class="op">=</span>Header(default<span class="op">=</span><span class="va">None</span>, alias<span class="op">=</span><span class="st">&#39;X-Townlight-Session&#39;</span>))</span></code></pre></div>
+<p>Direct handler refusals:
+<code>HTTPException(409, 'Only a rendered playout can be approved for public playback')</code>.</p>
+<p><strong>POST <code>/v1/playouts/{identity}/publish</code></strong> —
+handler <code>publish</code>, line 256. Declared router prefix
+included.</p>
+<div class="sourceCode" id="cb22"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb22-1"><a href="#cb22-1" aria-hidden="true" tabindex="-1"></a>publish(identity: UUID, proof: <span class="bu">str</span> <span class="op">|</span> <span class="va">None</span><span class="op">=</span>Header(default<span class="op">=</span><span class="va">None</span>, alias<span class="op">=</span><span class="st">&#39;X-Townlight-Session&#39;</span>))</span></code></pre></div>
+<p>Direct handler refusals:
+<code>HTTPException(404, 'Playout not found')</code>;
+<code>HTTPException(409, 'Explicit staff approval is required before public playback')</code>.</p>
+<p><strong>GET <code>/v1/public/playback/{identity}</code></strong> —
+handler <code>public_playback</code>, line 285. Declared router prefix
+included.</p>
+<div class="sourceCode" id="cb23"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb23-1"><a href="#cb23-1" aria-hidden="true" tabindex="-1"></a>public_playback(identity: UUID)</span></code></pre></div>
+<p>Direct handler refusals:
+<code>HTTPException(404, 'Playback not found')</code>;
+<code>HTTPException(409, 'Playback integrity failure')</code>.</p>
+<p><strong>GET
+<code>/v1/public/playback/{identity}/captions</code></strong> — handler
+<code>public_captions</code>, line 301. Declared router prefix
+included.</p>
+<div class="sourceCode" id="cb24"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb24-1"><a href="#cb24-1" aria-hidden="true" tabindex="-1"></a>public_captions(identity: UUID)</span></code></pre></div>
+<p>Direct handler refusals:
+<code>HTTPException(404, 'Captions not found')</code>;
+<code>HTTPException(409, 'Caption integrity failure')</code>.</p>
+<p><strong>GET
+<code>/v1/public/playback/{identity}/program</code></strong> — handler
+<code>public_program</code>, line 315. Declared router prefix
+included.</p>
+<div class="sourceCode" id="cb25"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb25-1"><a href="#cb25-1" aria-hidden="true" tabindex="-1"></a>public_program(identity: UUID)</span></code></pre></div>
+<p>Direct handler refusals:
+<code>HTTPException(404, 'Playback not found')</code>;
+<code>HTTPException(409, 'Playback integrity failure')</code>.</p>
+<h3 id="operator.py">operator.py</h3>
+<p>Candidate source:
+<code>installed-owned-source/townlight_station/operator.py</code>.</p>
+<p><strong>POST <code>/v1/operator-ticket</code></strong> — handler
+<code>issue</code>, line 51. Declared router prefix included.</p>
+<div class="sourceCode" id="cb26"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb26-1"><a href="#cb26-1" aria-hidden="true" tabindex="-1"></a>issue(proof: <span class="bu">str</span> <span class="op">|</span> <span class="va">None</span><span class="op">=</span>Header(default<span class="op">=</span><span class="va">None</span>, alias<span class="op">=</span><span class="st">&#39;X-Townlight-Session&#39;</span>))</span></code></pre></div>
+<p>Direct handler refusals:
+<code>HTTPException(429, 'Too many outstanding operator launches')</code>.</p>
+<p><strong>POST <code>/operator/session</code></strong> — handler
+<code>exchange</code>, line 60. Declared router prefix included.</p>
+<div class="sourceCode" id="cb27"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb27-1"><a href="#cb27-1" aria-hidden="true" tabindex="-1"></a>exchange(data: Ticket, request: Request)</span></code></pre></div>
+<p>Direct handler refusals:
+<code>HTTPException(401, 'Launch link expired or already used; reopen Station from the signed-in staff session')</code>;
+<code>HTTPException(429, 'Operator session capacity reached')</code>.</p>
+<p><strong>POST <code>/operator/logout</code></strong> — handler
+<code>logout</code>, line 75. Declared router prefix included.</p>
+<div class="sourceCode" id="cb28"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb28-1"><a href="#cb28-1" aria-hidden="true" tabindex="-1"></a>logout(request: Request)</span></code></pre></div>
+<p><strong>GET <code>/operator/catalog</code></strong> — handler
+<code>catalog</code>, line 82. Declared router prefix included.</p>
+<div class="sourceCode" id="cb29"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb29-1"><a href="#cb29-1" aria-hidden="true" tabindex="-1"></a>catalog(proof: <span class="bu">str</span> <span class="op">|</span> <span class="va">None</span><span class="op">=</span>Header(default<span class="op">=</span><span class="va">None</span>, alias<span class="op">=</span><span class="st">&#39;X-Townlight-Session&#39;</span>))</span></code></pre></div>
+<p><strong>GET <code>/operator/meeting/{identity}</code></strong> —
+handler <code>meeting</code>, line 102. Declared router prefix
+included.</p>
+<div class="sourceCode" id="cb30"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb30-1"><a href="#cb30-1" aria-hidden="true" tabindex="-1"></a>meeting(identity: UUID, proof: <span class="bu">str</span> <span class="op">|</span> <span class="va">None</span><span class="op">=</span>Header(default<span class="op">=</span><span class="va">None</span>, alias<span class="op">=</span><span class="st">&#39;X-Townlight-Session&#39;</span>))</span></code></pre></div>
+<p><strong>POST <code>/operator/handoff</code></strong> — handler
+<code>handoff</code>, line 106. Declared router prefix included.</p>
+<div class="sourceCode" id="cb31"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb31-1"><a href="#cb31-1" aria-hidden="true" tabindex="-1"></a>handoff(data: Handoff, proof: <span class="bu">str</span> <span class="op">|</span> <span class="va">None</span><span class="op">=</span>Header(default<span class="op">=</span><span class="va">None</span>, alias<span class="op">=</span><span class="st">&#39;X-Townlight-Session&#39;</span>))</span></code></pre></div>
+<p>Direct handler refusals:
+<code>HTTPException(result.status_code if result.status_code in (401, 403, 404, 409, 422) else 503, 'Records did not accept the recording. Check your Records role and request, then retry.')</code>;
+<code>HTTPException(503, 'Records unavailable. Retry safely; existing attachments are preserved.')</code>.</p>
+<p><strong>GET <code>/</code></strong> — handler <code>page</code>, line
+124. Declared router prefix included.</p>
+<div class="sourceCode" id="cb32"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb32-1"><a href="#cb32-1" aria-hidden="true" tabindex="-1"></a>page()</span></code></pre></div>
+<p><strong>GET <code>/operator.js</code></strong> — handler
+<code>script</code>, line 128. Declared router prefix included.</p>
+<div class="sourceCode" id="cb33"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb33-1"><a href="#cb33-1" aria-hidden="true" tabindex="-1"></a>script()</span></code></pre></div>
+<p><strong>GET <code>/operator.css</code></strong> — handler
+<code>style</code>, line 132. Declared router prefix included.</p>
+<div class="sourceCode" id="cb34"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb34-1"><a href="#cb34-1" aria-hidden="true" tabindex="-1"></a>style()</span></code></pre></div>
+<h2 id="station-service-request-models">Station service request
+models</h2>
+<p>Station’s standalone service declarations are read from source
+because creating its application requires explicit storage/media/schema
+readiness. These are not a fabricated running-service OpenAPI
+export.</p>
+<h3 id="capture">Capture</h3>
+<p>Source
+<code>installed-owned-source/townlight_station/api.py:34</code>.</p>
+<table>
+<colgroup>
+<col style="width: 33%" />
+<col style="width: 33%" />
+<col style="width: 33%" />
+</colgroup>
+<thead>
+<tr>
+<th>Field</th>
+<th>Annotation</th>
+<th>Default and validation</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>meeting_id</code></td>
+<td>UUID</td>
+<td>Required</td>
+</tr>
+<tr>
+<td><code>agenda_ids</code></td>
+<td>list[UUID]</td>
+<td>Field(default_factory=list, max_length=100)</td>
+</tr>
+<tr>
+<td><code>source_file</code></td>
+<td>str | None</td>
+<td>Field(default=None, pattern=‘^[A-Za-z0-9][A-Za-z0-9_.-]{0,180}<span
+class="math inline">$') |
+| `live_source_id` | str \| None | Field(default=None,
+pattern='^[A-Za-z0-9_-]{1,64}$</span>’)</td>
+</tr>
+<tr>
+<td><code>captions_file</code></td>
+<td>str | None</td>
+<td>Field(default=None,
+pattern=‘^[A-Za-z0-9][A-Za-z0-9_.-]{0,180}\.srt$’)</td>
+</tr>
+<tr>
+<td><code>idempotency_key</code></td>
+<td>str</td>
+<td>Field(min_length=1, max_length=100)</td>
+</tr>
+</tbody>
+</table>
+<h3 id="settings">Settings</h3>
+<p>Source
+<code>installed-owned-source/townlight_station/boundary.py:45</code>.</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Annotation</th>
+<th>Default and validation</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>data</code></td>
+<td>Path</td>
+<td>Required</td>
+</tr>
+<tr>
+<td><code>database_url</code></td>
+<td>str</td>
+<td>Required</td>
+</tr>
+<tr>
+<td><code>suite_url</code></td>
+<td>str</td>
+<td>Required</td>
+</tr>
+<tr>
+<td><code>media_source</code></td>
+<td>Path</td>
+<td>Required</td>
+</tr>
+<tr>
+<td><code>media_python</code></td>
+<td>Path</td>
+<td>Required</td>
+</tr>
+<tr>
+<td><code>media_runtime</code></td>
+<td>Path</td>
+<td>Required</td>
+</tr>
+<tr>
+<td><code>ffprobe</code></td>
+<td>Path</td>
+<td>Required</td>
+</tr>
+<tr>
+<td><code>max_seconds</code></td>
+<td>int</td>
+<td>7200</td>
+</tr>
+<tr>
+<td><code>max_bytes</code></td>
+<td>int</td>
+<td>2147483647</td>
+</tr>
+<tr>
+<td><code>width</code></td>
+<td>int</td>
+<td>1920</td>
+</tr>
+<tr>
+<td><code>height</code></td>
+<td>int</td>
+<td>1080</td>
+</tr>
+<tr>
+<td><code>fps</code></td>
+<td>int</td>
+<td>30</td>
+</tr>
+<tr>
+<td><code>bitrate_kbps</code></td>
+<td>int</td>
+<td>6000</td>
+</tr>
+</tbody>
+</table>
+<h3 id="schedulerequest">ScheduleRequest</h3>
+<p>Source
+<code>installed-owned-source/townlight_station/operations.py:58</code>.</p>
+<table>
+<colgroup>
+<col style="width: 33%" />
+<col style="width: 33%" />
+<col style="width: 33%" />
+</colgroup>
+<thead>
+<tr>
+<th>Field</th>
+<th>Annotation</th>
+<th>Default and validation</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>meeting_id</code></td>
+<td>UUID</td>
+<td>Required</td>
+</tr>
+<tr>
+<td><code>agenda_ids</code></td>
+<td>list[UUID]</td>
+<td>Field(default_factory=list, max_length=100)</td>
+</tr>
+<tr>
+<td><code>source_file</code></td>
+<td>str | None</td>
+<td>Field(default=None, pattern=‘^[A-Za-z0-9][A-Za-z0-9_.-]{0,180}<span
+class="math inline">$') |
+| `live_source_id` | str \| None | Field(default=None,
+pattern='^[A-Za-z0-9_-]{1,64}$</span>’)</td>
+</tr>
+<tr>
+<td><code>captions_file</code></td>
+<td>str | None</td>
+<td>Field(default=None,
+pattern=‘^[A-Za-z0-9][A-Za-z0-9_.-]{0,180}\.srt$’)</td>
+</tr>
+<tr>
+<td><code>start_at</code></td>
+<td>datetime</td>
+<td>Required</td>
+</tr>
+<tr>
+<td><code>idempotency_key</code></td>
+<td>str</td>
+<td>Field(min_length=1, max_length=100)</td>
+</tr>
+</tbody>
+</table>
+<h3 id="playoutrequest">PlayoutRequest</h3>
+<p>Source
+<code>installed-owned-source/townlight_station/operations.py:69</code>.</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Annotation</th>
+<th>Default and validation</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>recording_id</code></td>
+<td>UUID</td>
+<td>Required</td>
+</tr>
+<tr>
+<td><code>mode</code></td>
+<td>str</td>
+<td>Field(pattern=‘^(dry-run|commit)$’)</td>
+</tr>
+<tr>
+<td><code>idempotency_key</code></td>
+<td>str</td>
+<td>Field(min_length=1, max_length=100)</td>
+</tr>
+</tbody>
+</table>
+<h3 id="approvalrequest">ApprovalRequest</h3>
+<p>Source
+<code>installed-owned-source/townlight_station/operations.py:76</code>.</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Annotation</th>
+<th>Default and validation</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>note</code></td>
+<td>str</td>
+<td>Field(min_length=3, max_length=500)</td>
+</tr>
+</tbody>
+</table>
+<h3 id="liveoverriderequest">LiveOverrideRequest</h3>
+<p>Source
+<code>installed-owned-source/townlight_station/operations.py:81</code>.</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Annotation</th>
+<th>Default and validation</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>live_source_id</code></td>
+<td>str</td>
+<td>Field(pattern=‘<a href="#fn2" class="footnote-ref" id="fnref2"
+role="doc-noteref"><sup>2</sup></a>{1,64}$’)</td>
+</tr>
+<tr>
+<td><code>reason</code></td>
+<td>str</td>
+<td>Field(min_length=3, max_length=200)</td>
+</tr>
+</tbody>
+</table>
+<h3 id="ticket">Ticket</h3>
+<p>Source
+<code>installed-owned-source/townlight_station/operator.py:13</code>.</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Annotation</th>
+<th>Default and validation</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>ticket</code></td>
+<td>str</td>
+<td>Field(min_length=32, max_length=128)</td>
+</tr>
+</tbody>
+</table>
+<h3 id="handoff">Handoff</h3>
+<p>Source
+<code>installed-owned-source/townlight_station/operator.py:18</code>.</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Annotation</th>
+<th>Default and validation</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>request_id</code></td>
+<td>UUID</td>
+<td>Required</td>
+</tr>
+<tr>
+<td><code>recording_id</code></td>
+<td>UUID</td>
+<td>Required</td>
+</tr>
+<tr>
+<td><code>expected_sha256</code></td>
+<td>str</td>
+<td>Field(pattern=‘<a href="#fn3" class="footnote-ref" id="fnref3"
+role="doc-noteref"><sup>3</sup></a>{64}$’)</td>
+</tr>
+</tbody>
+</table>
+<h2 id="alphabetical-contract-index">Alphabetical contract index</h2>
+<ul>
+<li><p><strong>ExemptionDecisionView</strong> — request/response data
+dictionary.</p></li>
+<li><p><strong>FeeLineView</strong> — request/response data
+dictionary.</p></li>
+<li><p><strong>HTTPValidationError</strong> — request/response data
+dictionary.</p></li>
+<li><p><strong>MessageView</strong> — request/response data
+dictionary.</p></li>
+<li><p><strong>PublicStatusView</strong> — request/response data
+dictionary.</p></li>
+<li><p><strong>RecordsDocumentView</strong> — request/response data
+dictionary.</p></li>
+<li><p><strong>RecordsOperationRead</strong> — request/response data
+dictionary.</p></li>
+<li><p><strong>RecordsView</strong> — request/response data
+dictionary.</p></li>
+<li><p><strong>ReleasePackageView</strong> — request/response data
+dictionary.</p></li>
+<li><p><strong>SearchReceiptView</strong> — request/response data
+dictionary.</p></li>
+<li><p><strong>SearchResultView</strong> — request/response data
+dictionary.</p></li>
+<li><p><strong>Selection</strong> — request/response data
+dictionary.</p></li>
+<li><p><strong>TimelineView</strong> — request/response data
+dictionary.</p></li>
+<li><p><strong>ValidationError</strong> — request/response data
+dictionary.</p></li>
+<li><p>Authentication: Origins and authentication.</p></li>
+<li><p>Conflicts and retry: Failure and retry contract.</p></li>
+<li><p>Fields and validation: Request and response data
+dictionary.</p></li>
+<li><p>HTTP operations: Installed desktop HTTP operations.</p></li>
+<li><p>Standalone boundaries: Source route and validation
+supplement.</p></li>
+</ul>
+<section id="footnotes" class="footnotes footnotes-end-of-document"
+role="doc-endnotes">
+<hr />
+<ol>
+<li id="fn1"><p>0-9a-f<a href="#fnref1" class="footnote-back"
+role="doc-backlink">↩︎</a></p></li>
+<li id="fn2"><p>A-Za-z0-9_-<a href="#fnref2" class="footnote-back"
+role="doc-backlink">↩︎</a></p></li>
+<li id="fn3"><p>0-9a-f<a href="#fnref3" class="footnote-back"
+role="doc-backlink">↩︎</a></p></li>
+</ol>
+</section></article></div></main><footer><span>Townlight Beta 1 · Local private-beta documentation · AGPL-3.0-only</span><span><a href="../versions.html">Exact versions and candidate</a> · CivicCast remains separate</span></footer>
+<script>const search=document.getElementById('find-section');if(search)search.addEventListener('input',()=>{const q=search.value.toLowerCase();let n=0;document.querySelectorAll('.toc li').forEach(li=>{const match=li.textContent.toLowerCase().includes(q);li.hidden=!match;if(match)n++;});document.querySelector('.search-status').textContent=q?n+' matching entries':'';});</script></body></html>

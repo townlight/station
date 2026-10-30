@@ -1,0 +1,3 @@
+# Townlight Beta 1
+
+[Download the signed suite installer and exact source/documentation](https://github.com/townlight/townlight/releases/tag/townlight-beta-1). Use the suite MSI for the verified fresh-install path. Independent development installs are not the installed acceptance candidate. The provenance manifest maps the original accepted archive to this repository. Application source bytes are retained; original line endings are recorded in the archive. Current owned code and documentation are AGPL-3.0-only; historical grants and vendor notices remain applicable to their respective material.
